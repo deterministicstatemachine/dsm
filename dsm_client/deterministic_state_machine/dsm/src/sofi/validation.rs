@@ -538,22 +538,28 @@ pub fn vault_post_states(
     }
     Ok(out)
 }
-
-/// The trader's leaves after the operation, for the keys `T°` touches — the
-/// post STATE behind each post value the core states, so a verifier that
-/// installs `P.R_realize` (stage 10 of §31, R13) also holds the leaves that
-/// form it. Each state is recomputed from the pre state the evidence holds
-/// and the movement the settlement commits, then bound to the value the core
-/// states: a mismatch is the refusal `validate` gives for it. `None` is a leaf
-/// absent after the operation (a zero balance). Keys the core does not touch
-/// are unchanged and not listed.
-pub fn trader_post_states(
-    precommit: &TraderPrecommitBody,
+/// What a settlement MOVES in the trader's own balances: `(token, credit,
+/// debit)` per endpoint.
+///
+/// ONE derivation, shared by [`trader_post_states`] and by the adoption gate
+/// in `sofi::lineage::advance_resolved`. They must not compute this
+/// separately: a gate that disagreed with the transition about which tokens
+/// are being received would be checking a different operation from the one
+/// about to be installed.
+///
+/// ENDPOINTS ONLY, and that is what settles the multi-hop case. A route
+/// `A -> B -> C` moves the trader's `A` and `C`; the intermediate `B` exists
+/// only BETWEEN hops (`RouteValidation` requires `hops[i].token_out ==
+/// hops[i+1].token_in`, and the route's ends to be the intent's), and it is
+/// held by the DLVs across the hop rather than by the trader. So `B` never
+/// becomes a trader balance leaf, and no rule about the trader's tokens
+/// reaches it. A close is different: BOTH of the vault's reserve assets are
+/// credited back to the owner.
+pub fn trader_movements(
     preimage: &SettlementPreimage,
     evidence: &Evidence,
-) -> Result<Vec<(D32, Option<EconomicLeafState>)>, Refusal> {
-    let e = *precommit.external_commitment();
-    let movements: Vec<(D32, u64, u64)> = match preimage.settlement() {
+) -> Result<Vec<(D32, u64, u64)>, Refusal> {
+    Ok(match preimage.settlement() {
         SettlementBody::Swap {
             token_in,
             amount_in,
@@ -574,7 +580,40 @@ pub fn trader_post_states(
                 (*policies.market.token_b(), *reserve_b, 0),
             ]
         }
-    };
+    })
+}
+
+/// The tokens a settlement CREDITS to the trader — what actually arrives.
+///
+/// A debited token is not here: you cannot be handed a token by spending it,
+/// and a balance you already hold was adopted before it arrived. Neither is a
+/// zero credit, which writes no leaf.
+pub fn trader_credits(
+    preimage: &SettlementPreimage,
+    evidence: &Evidence,
+) -> Result<Vec<D32>, Refusal> {
+    Ok(trader_movements(preimage, evidence)?
+        .into_iter()
+        .filter(|(_, credit, _)| *credit > 0)
+        .map(|(token, _, _)| token)
+        .collect())
+}
+
+/// The trader's leaves after the operation, for the keys `T°` touches — the
+/// post STATE behind each post value the core states, so a verifier that
+/// installs `P.R_realize` (stage 10 of §31, R13) also holds the leaves that
+/// form it. Each state is recomputed from the pre state the evidence holds
+/// and the movement the settlement commits, then bound to the value the core
+/// states: a mismatch is the refusal `validate` gives for it. `None` is a leaf
+/// absent after the operation (a zero balance). Keys the core does not touch
+/// are unchanged and not listed.
+pub fn trader_post_states(
+    precommit: &TraderPrecommitBody,
+    preimage: &SettlementPreimage,
+    evidence: &Evidence,
+) -> Result<Vec<(D32, Option<EconomicLeafState>)>, Refusal> {
+    let e = *precommit.external_commitment();
+    let movements = trader_movements(preimage, evidence)?;
     let core = preimage.trader_core();
     let mut out = Vec::with_capacity(core.entries().len());
     for entry in core.entries() {

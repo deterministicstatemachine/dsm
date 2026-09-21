@@ -1317,6 +1317,87 @@ theorem an_empty_chain_refutes_nothing (g claimed : Nat) :
     VaultChain.statusOf (fun _ => none) g claimed = ParentStatus.unavailable := by
   simp [VaultChain.statusOf, parentStatusOf]
 
+/-! ### R14: the ADOPTION INVARIANT on the resolved SoFi seam
+
+Ordinary DSM already carries this rule: `DeviceState::advance` refuses to
+credit a non-builtin token unless the PRE-state already commits that token's
+adoption leaf. The resolved SoFi path did not pass through `advance` — it
+recomputes the post states, recomputes the economic root and admits the
+position directly — so the rule was simply absent there, and a realized route
+could land a token the receiver never adopted.
+
+Nobody adopts on the receiver's behalf. A token's policy is anchored to ITS
+CREATOR's chain, a different anchor from the DLV policy's owner and usually a
+different party, so a vault naming a token in its market policy establishes
+nothing about the receiver having adopted it. -/
+
+/-- A token, by its policy commitment. -/
+abbrev Token := Nat
+
+/-- What a settlement moves in the trader's OWN balances at one endpoint. -/
+structure Movement where
+  token : Token
+  credit : Nat
+  debit : Nat
+  deriving DecidableEq, Repr
+
+/-- Rust `sofi::validation::trader_credits`: what actually ARRIVES. -/
+def credits (ms : List Movement) : List Token :=
+  (ms.filter (fun m => 0 < m.credit)).map Movement.token
+
+/-- Rust `sofi::lineage::adoption_admits`. -/
+def adoptionAdmits (adopted : Token → Bool) (ms : List Movement) : Bool :=
+  (credits ms).all adopted
+
+/-- THE INVARIANT: a realized position that is admitted credits nothing the
+receiver had not already adopted. -/
+theorem admitted_credits_were_adopted
+    (adopted : Token → Bool) (ms : List Movement) (t : Token)
+    (h : adoptionAdmits adopted ms = true) (ht : t ∈ credits ms) :
+    adopted t = true :=
+  List.all_eq_true.mp h t ht
+
+/-- A settlement crediting an UNADOPTED token is not admitted. The
+contrapositive, stated because it is the case that must be refused. -/
+theorem an_unadopted_credit_is_not_admitted
+    (adopted : Token → Bool) (ms : List Movement) (t : Token)
+    (ht : t ∈ credits ms) (hna : adopted t = false) :
+    adoptionAdmits adopted ms = false := by
+  cases h : adoptionAdmits adopted ms with
+  | false => rfl
+  | true =>
+    rw [admitted_credits_were_adopted adopted ms t h ht] at hna
+    exact Bool.noConfusion hna
+
+/-- The trader's movements for a route: its ENDS only. A hop chain
+`A -> B -> C` moves `A` and `C`; `B` is held by the DLVs across the hop. -/
+def routeMovements (tin tout : Token) (amtIn amtOut : Nat) : List Movement :=
+  [⟨tout, amtOut, 0⟩, ⟨tin, 0, amtIn⟩]
+
+/-- A route credits its OUTPUT and nothing else: the input is spent, not
+received. -/
+theorem a_route_credits_only_its_output
+    (tin tout : Token) (amtIn amtOut : Nat) (h : 0 < amtOut) :
+    credits (routeMovements tin tout amtIn amtOut) = [tout] := by
+  simp [credits, routeMovements, h]
+
+/-- THE MULTI-HOP CASE. Any token that is not the route's output — the
+intermediate `B` of `A -> B -> C` among them — is never credited to the
+trader, so the invariant never demands its adoption. A rule that gated it
+would refuse a route over an asset the trader never receives. -/
+theorem a_pass_through_token_is_never_credited
+    (tin tout b : Token) (amtIn amtOut : Nat) (h : 0 < amtOut) (hb : b ≠ tout) :
+    b ∉ credits (routeMovements tin tout amtIn amtOut) := by
+  rw [a_route_credits_only_its_output tin tout amtIn amtOut h]
+  simpa using hb
+
+/-- And therefore an unadopted pass-through does not block admission. -/
+theorem an_unadopted_pass_through_still_admits
+    (tin tout : Token) (amtIn amtOut : Nat) (h : 0 < amtOut)
+    (adopted : Token → Bool) (hout : adopted tout = true) :
+    adoptionAdmits adopted (routeMovements tin tout amtIn amtOut) = true := by
+  simp [adoptionAdmits, a_route_credits_only_its_output tin tout amtIn amtOut h, hout]
+
 /-- A concrete position whose every leg names a parent the verifier has NOT
 established: registered, conforming, statically valid, every cell final on
 this `E`, nothing lost — and still Pending. `unavailable` is not `canonical`,
@@ -2827,5 +2908,10 @@ theorem unread_storage_is_unavailable_never_invalid (hm : HashModel) {sh : Nat �
 #print axioms named_root_is_canonical
 #print axioms refutes_iff_a_different_root_at_that_generation
 #print axioms an_empty_chain_refutes_nothing
+#print axioms admitted_credits_were_adopted
+#print axioms an_unadopted_credit_is_not_admitted
+#print axioms a_route_credits_only_its_output
+#print axioms a_pass_through_token_is_never_credited
+#print axioms an_unadopted_pass_through_still_admits
 
 end DSMSofiAtomicity
