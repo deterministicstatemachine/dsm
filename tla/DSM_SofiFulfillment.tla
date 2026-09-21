@@ -58,6 +58,7 @@ CONSTANTS
     ProducerFailsClosed,               \* [TRUE] a producer signs F at attempt a > 0 only once K^(a-1) is permanently resolved (R6)
     SetupValidRemoved,                 \* [FALSE] RouteValidation without SetupValid
     ConformanceDropped,                \* [FALSE] ConsumedRoute without FulfillmentConformance
+    LostPositionDropped,               \* [FALSE] arm (v) removed: an exercise whose F can never register is never skipped
     RegistrationIsConformance,         \* [FALSE] a registered F is taken as conforming
     OccupancyIsConsumption,            \* [FALSE] final legs consume with no Core predicate
     PrecommitAsExercise,               \* [FALSE] storing P occupies the position
@@ -211,8 +212,9 @@ RouteRejectedAtRA0 ==
 \* of the same trader (naming another attempt) or an ordinary transition. Its
 \* route is impossible at k. This arm reads no evidence.
 LostPosition(k, tr) ==
-    \/ slot[tr] = SlotS
-    \/ Registered(tr) /\ k \notin FKeys(tr)
+    /\ ~LostPositionDropped
+    /\ \/ slot[tr] = SlotS
+       \/ Registered(tr) /\ k \notin FKeys(tr)
 
 \* The attempt-0 key at RA, which every later attempt at RA depends on. A key
 \* is skipped only on a FINAL value of an impossible operation; a held value
