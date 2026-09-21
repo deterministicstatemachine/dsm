@@ -755,7 +755,7 @@ fn read_var_bytes(c: &mut Cursor<'_>, max: usize) -> Result<Vec<u8>, DecodeError
 /// One typed validation reference. Each variant has exactly one fetch and
 /// verification rule, and randomized signature envelopes are never
 /// content-bound.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ValidationRef {
     /// Immutable bytes re-hashed under the class's own addressing rule.
     ContentAddr { object_class: u16, addr: D32 },
@@ -1755,6 +1755,14 @@ impl SettlementBody {
         match self {
             Self::Swap { hops, .. } => hops.len(),
             Self::Close { .. } => 1,
+        }
+    }
+
+    /// `𝒞_E^pre` — the E-independent validation references this branch
+    /// commits, whatever the branch.
+    pub fn closure(&self) -> &PreEClosureIndex {
+        match self {
+            Self::Swap { closure, .. } | Self::Close { closure, .. } => closure,
         }
     }
 

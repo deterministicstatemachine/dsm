@@ -1316,34 +1316,37 @@ fn validate_close(
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods)] // test asserts; a failure here is the signal
-mod tests {
+#[allow(clippy::disallowed_methods)] // fixtures; a failure here is the signal
+pub(crate) mod fixtures {
+    //! The swap fixture the validation tests are built on, shared with the
+    //! conformance tests (R7): a real `P(E)`, its `E`, a precommit whose legs
+    //! derive from it, and the acquired evidence.
     use super::*;
-    use crate::economic::tree::{EconomicSmt, ECONOMIC_SMT_HEIGHT};
+    use crate::economic::tree::EconomicSmt;
     use crate::sofi::wire::{PreEClosureIndex, PrecommitLeg};
 
-    const G: D32 = [0x11; 32];
-    const DEV: D32 = [0x22; 32];
-    const P_POS: u64 = 5;
-    const P_CREATE: u64 = 7;
-    const FEE_BPS: u32 = 30;
-    const RESERVE_A: u64 = 10_000;
-    const RESERVE_B: u64 = 20_000;
-    const AMOUNT_IN: u64 = 1_000;
-    const SIG_ALG: u16 = 0x0001;
+    pub(crate) const G: D32 = [0x11; 32];
+    pub(crate) const DEV: D32 = [0x22; 32];
+    pub(crate) const P_POS: u64 = 5;
+    pub(crate) const P_CREATE: u64 = 7;
+    pub(crate) const FEE_BPS: u32 = 30;
+    pub(crate) const RESERVE_A: u64 = 10_000;
+    pub(crate) const RESERVE_B: u64 = 20_000;
+    pub(crate) const AMOUNT_IN: u64 = 1_000;
+    pub(crate) const SIG_ALG: u16 = 0x0001;
 
-    fn token(byte: u8) -> D32 {
+    pub(crate) fn token(byte: u8) -> D32 {
         [byte; 32]
     }
 
     /// Vault `j` trades the pair `(token(j), token(j+1))`, strictly ordered as
     /// the market policy requires, so an N-hop route walks t0 → t1 → … → tN
     /// and never trades a token against itself.
-    fn pair(j: usize) -> (D32, D32) {
+    pub(crate) fn pair(j: usize) -> (D32, D32) {
         (token(0x40 + j as u8), token(0x41 + j as u8))
     }
 
-    fn policies(j: usize) -> (MarketPolicy, FeePolicy, ReleasePolicy) {
+    pub(crate) fn policies(j: usize) -> (MarketPolicy, FeePolicy, ReleasePolicy) {
         let (a, b) = pair(j);
         (
             MarketPolicy::beta_constant_product(a, b).unwrap(),
@@ -1354,15 +1357,20 @@ mod tests {
 
     /// The address a vault state names a policy by: the class's own
     /// content-addressing rule, which the validator re-derives.
-    fn policy_addr(class: u16, bytes: &[u8]) -> D32 {
+    pub(crate) fn policy_addr(class: u16, bytes: &[u8]) -> D32 {
         crate::ccb::decode::policy_object_address(class, bytes).expect("a policy class")
     }
 
-    fn vault_id_of(j: usize) -> D32 {
+    pub(crate) fn vault_id_of(j: usize) -> D32 {
         derive::vault_id(&G, &DEV, P_CREATE + j as u64)
     }
 
-    fn vault_state(j: usize, reserve_a: u64, reserve_b: u64, status: u16) -> VaultStateLeaf {
+    pub(crate) fn vault_state(
+        j: usize,
+        reserve_a: u64,
+        reserve_b: u64,
+        status: u16,
+    ) -> VaultStateLeaf {
         let (market, fee, release) = policies(j);
         VaultStateLeaf {
             owner_genesis: G,
@@ -1379,7 +1387,7 @@ mod tests {
         }
     }
 
-    fn policy_objects(hops: usize) -> BTreeMap<D32, Vec<u8>> {
+    pub(crate) fn policy_objects(hops: usize) -> BTreeMap<D32, Vec<u8>> {
         let mut objects = BTreeMap::new();
         for j in 0..hops.max(1) {
             let (market, fee, release) = policies(j);
@@ -1394,48 +1402,48 @@ mod tests {
         objects
     }
 
-    fn path_of(tree: &EconomicSmt, key: &D32) -> Vec<D32> {
+    pub(crate) fn path_of(tree: &EconomicSmt, key: &D32) -> Vec<D32> {
         tree.siblings(key).to_vec()
     }
 
-    fn balance(policy_commit: D32, amount: u64) -> EconomicBalanceState {
+    pub(crate) fn balance(policy_commit: D32, amount: u64) -> EconomicBalanceState {
         EconomicBalanceState {
             policy_commit,
             amount,
         }
     }
 
-    fn balance_leaf_value(policy_commit: D32, amount: u64) -> D32 {
+    pub(crate) fn balance_leaf_value(policy_commit: D32, amount: u64) -> D32 {
         EconomicLeafState::Balance(balance(policy_commit, amount))
             .leaf_value()
             .unwrap()
     }
 
-    fn base_of(j: usize) -> D32 {
+    pub(crate) fn base_of(j: usize) -> D32 {
         derive::relationship_leaf_genesis(&derive::setup_id(&G, &DEV, P_POS, &vault_id_of(j)))
     }
 
     /// A whole operation, built the way a trader builds one: the trees first,
     /// then the cores against them, then E, then the roots E fixes.
-    struct Fixture {
-        precommit: TraderPrecommitBody,
-        preimage: SettlementPreimage,
-        evidence: Evidence,
+    pub(crate) struct Fixture {
+        pub(crate) precommit: TraderPrecommitBody,
+        pub(crate) preimage: SettlementPreimage,
+        pub(crate) evidence: Evidence,
     }
 
     /// One vault's worth of a swap: its tree, its core, and the hop it prices.
-    struct VaultParts {
-        vault_id: D32,
-        core: DlvCore,
-        hop: SwapHop,
-        parent_root: D32,
-        state: VaultStateLeaf,
-        relationship: VaultRelationshipLeaf,
-        state_key: D32,
-        rel_key: D32,
+    pub(crate) struct VaultParts {
+        pub(crate) vault_id: D32,
+        pub(crate) core: DlvCore,
+        pub(crate) hop: SwapHop,
+        pub(crate) parent_root: D32,
+        pub(crate) state: VaultStateLeaf,
+        pub(crate) relationship: VaultRelationshipLeaf,
+        pub(crate) state_key: D32,
+        pub(crate) rel_key: D32,
     }
 
-    fn swap_vault_parts(j: usize, amount_in: u64) -> VaultParts {
+    pub(crate) fn swap_vault_parts(j: usize, amount_in: u64, setup_ref: D32) -> VaultParts {
         let (token_in, token_out) = pair(j);
         let vault_id = vault_id_of(j);
         let rel_key = derive::relationship_key(&G, &DEV, &vault_id);
@@ -1484,7 +1492,7 @@ mod tests {
             hop: SwapHop {
                 vault_id,
                 parent_root: tree.root(),
-                setup_ref: token(0x55 + j as u8),
+                setup_ref,
                 token_in,
                 amount_in,
                 token_out,
@@ -1498,11 +1506,33 @@ mod tests {
         }
     }
 
-    fn swap_fixture_n(hops: usize) -> Fixture {
+    /// The setup reference the default fixtures give hop `j`: an opaque
+    /// digest, because RouteValidation reads `ρ` only through `E`.
+    pub(crate) fn default_setup_ref(j: usize) -> D32 {
+        token(0x55 + j as u8)
+    }
+
+    pub(crate) fn swap_fixture_n(hops: usize) -> Fixture {
+        swap_fixture_with(
+            hops,
+            &default_setup_ref,
+            PreEClosureIndex::new(Vec::new()).unwrap(),
+        )
+    }
+
+    /// A swap over `hops` vaults whose leg `j` carries `setup_ref_of(j)` and
+    /// whose `B°` commits `closure` — for the conformance tests, which need
+    /// `ρ_j` to be the reference of a real setup body and `𝒞_E^pre` to name
+    /// real objects.
+    pub(crate) fn swap_fixture_with(
+        hops: usize,
+        setup_ref_of: &dyn Fn(usize) -> D32,
+        closure: PreEClosureIndex,
+    ) -> Fixture {
         let mut parts: Vec<VaultParts> = Vec::new();
         let mut amount = AMOUNT_IN;
         for j in 0..hops {
-            let part = swap_vault_parts(j, amount);
+            let part = swap_vault_parts(j, amount, setup_ref_of(j));
             amount = part.hop.amount_out;
             parts.push(part);
         }
@@ -1571,7 +1601,7 @@ mod tests {
             hops: parts.iter().map(|p| p.hop).collect(),
             trader_core: derive::trader_core_digest(&trader_core.encode().unwrap()),
             dlv_cores: core_ids,
-            closure: PreEClosureIndex::new(Vec::new()).unwrap(),
+            closure,
         };
         let preimage = SettlementPreimage::new(settlement, trader_core.clone(), cores).unwrap();
         let e = derive::recompute_e(&preimage).unwrap();
@@ -1638,9 +1668,18 @@ mod tests {
         }
     }
 
-    fn swap_fixture() -> Fixture {
+    pub(crate) fn swap_fixture() -> Fixture {
         swap_fixture_n(1)
     }
+}
+
+#[cfg(test)]
+#[allow(clippy::disallowed_methods)] // test asserts; a failure here is the signal
+mod tests {
+    use super::fixtures::*;
+    use super::*;
+    use crate::economic::tree::{EconomicSmt, ECONOMIC_SMT_HEIGHT};
+    use crate::sofi::wire::{PreEClosureIndex, PrecommitLeg};
 
     #[test]
     fn a_well_formed_swap_is_valid() {
