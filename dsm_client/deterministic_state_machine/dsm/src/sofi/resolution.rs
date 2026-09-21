@@ -101,19 +101,45 @@ pub fn effect_of(resolution: Resolution) -> PositionEffect {
     }
 }
 
+/// What a verifier has established about the parent `(v, g, R)` a leg names,
+/// against `R*_g` — the validated canonical root of that vault at that
+/// generation (owner ruling, Section 44.4).
+///
+/// THREE VALUED, AND "UNKNOWN" IS NOT `false`. This replaced a pair of
+/// booleans, `canonical_parent` and `parent_orphaned`, whose false-false
+/// corner said two different things at once: a parent the verifier has not
+/// walked to, and a parent it has walked past. The first must keep the
+/// position Pending and the second must defeat it, so a verifier with no
+/// producer for the second wrote `false` and silently meant the first.
+///
+/// The exclusion the ladder needs is now the type. `Coherent`'s assumption
+/// that an orphaned parent is never canonical is not an assumption any more:
+/// there is no value that is both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParentStatus {
+    /// `R = R*_g`. The leg names the root that vault's lineage took.
+    Canonical,
+    /// `R ≠ R*_g`. That generation went to another root, so this parent is
+    /// permanently refuted and no later evidence restores it.
+    Orphaned,
+    /// `R*_g` has not been established. A parent the verifier has not reached
+    /// is not thereby refuted, and nothing here is a reason to decide.
+    Unavailable,
+}
+
 /// The facts about one DLV leg of a registered fulfillment, at the attempt key
 /// that fulfillment fixed for it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LegFacts {
     /// The storage resolution of `K^(a_j)`.
     pub cell: CellResolution,
-    /// The named parent `R_j` is this vault's canonical ancestry.
-    pub canonical_parent: bool,
+    /// The named parent `R_j` against this vault's validated canonical root
+    /// at that generation.
+    pub parent: ParentStatus,
     /// `∀ b < a_j. Skipped(K^(b))`.
     pub attempt_live: bool,
-    /// The named parent is permanently orphaned.
-    pub parent_orphaned: bool,
-    /// The named parent was consumed by some `X ≠ E`.
+    /// The named parent was consumed by some `X ≠ E`. A parent that really
+    /// was canonical and was then taken is THIS, never orphaning.
     pub parent_consumed_elsewhere: bool,
 }
 
@@ -191,7 +217,7 @@ impl RouteFacts<'_> {
     fn a_parent_is_lost(&self) -> bool {
         self.legs
             .iter()
-            .any(|l| l.parent_orphaned || l.parent_consumed_elsewhere)
+            .any(|l| l.parent == ParentStatus::Orphaned || l.parent_consumed_elsewhere)
     }
 }
 
@@ -237,10 +263,11 @@ pub fn consumed_route(facts: &RouteFacts<'_>) -> bool {
         && facts.validation == Validation::Valid
         && trader_parent_compatible(&facts.parent, &facts.parent_pre_root)
         && !facts.legs.is_empty()
-        && facts
-            .legs
-            .iter()
-            .all(|l| l.canonical_parent && l.attempt_live && l.final_on(&facts.external_commitment))
+        && facts.legs.iter().all(|l| {
+            l.parent == ParentStatus::Canonical
+                && l.attempt_live
+                && l.final_on(&facts.external_commitment)
+        })
 }
 
 /// Which arm of `RouteImpossible(P, E)` holds, if any. The arms are stated
@@ -279,7 +306,11 @@ pub fn route_impossible(facts: &RouteFacts<'_>) -> Option<ImpossibleArm> {
     if facts.validation == Validation::Invalid {
         return Some(ImpossibleArm::ValidationInvalid);
     }
-    if facts.legs.iter().any(|l| l.parent_orphaned) {
+    if facts
+        .legs
+        .iter()
+        .any(|l| l.parent == ParentStatus::Orphaned)
+    {
         return Some(ImpossibleArm::ParentOrphaned);
     }
     if facts.legs.iter().any(|l| l.parent_consumed_elsewhere) {
@@ -477,9 +508,8 @@ mod tests {
     fn good_leg() -> LegFacts {
         LegFacts {
             cell: CellResolution::Final(E),
-            canonical_parent: true,
+            parent: ParentStatus::Canonical,
             attempt_live: true,
-            parent_orphaned: false,
             parent_consumed_elsewhere: false,
         }
     }
@@ -684,9 +714,9 @@ mod tests {
     /// consumption question, so a non-canonical parent cannot realize even
     /// though validation says Valid.
     #[test]
-    fn a_non_canonical_parent_never_consumes() {
+    fn a_parent_the_verifier_has_not_established_never_consumes() {
         let legs = [LegFacts {
-            canonical_parent: false,
+            parent: ParentStatus::Unavailable,
             ..good_leg()
         }];
         let facts = realized(&legs);
@@ -704,6 +734,91 @@ mod tests {
         }];
         let facts = realized(&legs);
         assert!(!consumed_route(&facts));
+    }
+
+    /// THE THIRD VALUE IS NOT THE SECOND. A parent the verifier has not
+    /// established keeps the position Pending; one it has established as
+    /// another root defeats it. Under the pair of booleans this change
+    /// replaced, both were `false` on both fields and the ladder could not
+    /// tell them apart — so the verifier that had no producer for orphaning
+    /// wrote the value that silently meant "not refuted" and hoped.
+    #[test]
+    fn an_unestablished_parent_waits_and_an_orphaned_one_defeats() {
+        for (status, expected, arm) in [
+            (ParentStatus::Unavailable, Resolution::Pending, None),
+            (
+                ParentStatus::Orphaned,
+                Resolution::Void,
+                Some(ImpossibleArm::ParentOrphaned),
+            ),
+            (ParentStatus::Canonical, Resolution::Realized, None),
+        ] {
+            let legs = [LegFacts {
+                parent: status,
+                ..good_leg()
+            }];
+            let facts = realized(&legs);
+            assert_eq!(facts.validation, Valid, "the route itself is sound");
+            assert_eq!(
+                resolve_position(&facts),
+                expected,
+                "{status:?} must resolve {expected:?}"
+            );
+            assert_eq!(route_impossible(&facts), arm, "{status:?}");
+        }
+    }
+
+    /// Orphaning is a `RouteImpossible` condition, so a valid and conforming
+    /// route that it defeats goes to Void — never Invalid, which would say
+    /// the operation never satisfied the rules (owner ruling §44.4).
+    #[test]
+    fn an_orphaned_parent_voids_a_valid_route_and_never_invalidates_it() {
+        let legs = [LegFacts {
+            parent: ParentStatus::Orphaned,
+            ..good_leg()
+        }];
+        let facts = realized(&legs);
+        assert_eq!(resolve_position(&facts), Resolution::Void);
+        assert_eq!(
+            effect_of(Resolution::Void),
+            PositionEffect::InstallPreviousRoot,
+            "a Void moves nothing; the lineage continues where it was"
+        );
+        // Only a static refusal makes it Invalid, and that is a different fact.
+        assert_eq!(
+            resolve_position(&RouteFacts {
+                validation: Invalid,
+                ..facts
+            }),
+            Resolution::Invalid
+        );
+    }
+
+    /// A parent that really was canonical and was then taken by another
+    /// route is `parent_consumed_elsewhere`, not orphaned. The two are
+    /// different facts with the same terminal answer, and keeping them apart
+    /// is what lets a skip be attributed (owner ruling §44.4).
+    ///
+    /// The leg's own key is open: a cell final on THIS operation's `E` would
+    /// say we consumed the parent ourselves, which is not a route another
+    /// operation took. The first draft of this test asserted both at once and
+    /// the ladder answered `Realized`, which was the test's error and not the
+    /// ladder's.
+    #[test]
+    fn a_canonical_parent_taken_by_another_route_is_consumed_not_orphaned() {
+        let legs = [LegFacts {
+            cell: CellResolution::Unresolved,
+            parent: ParentStatus::Canonical,
+            parent_consumed_elsewhere: true,
+            ..good_leg()
+        }];
+        let facts = realized(&legs);
+        assert_eq!(resolve_position(&facts), Resolution::Void);
+        assert_eq!(
+            route_impossible(&facts),
+            Some(ImpossibleArm::ParentConsumedElsewhere),
+            "the arm names which fact defeated it"
+        );
     }
 
     // ── step 4: static invalidity ──────────────────────────────────────────
@@ -794,7 +909,7 @@ mod tests {
     #[test]
     fn void_requires_storage_resolution() {
         let legs = [LegFacts {
-            parent_orphaned: true,
+            parent: ParentStatus::Orphaned,
             cell: CellResolution::Unresolved,
             ..good_leg()
         }];
@@ -1034,7 +1149,7 @@ mod tests {
     #[test]
     fn the_orphan_and_consumed_elsewhere_arms_need_no_evidence() {
         let orphaned = [LegFacts {
-            parent_orphaned: true,
+            parent: ParentStatus::Orphaned,
             ..good_leg()
         }];
         let facts = RouteFacts {
@@ -1074,7 +1189,7 @@ mod tests {
         };
         let lost = [
             LegFacts {
-                parent_orphaned: true,
+                parent: ParentStatus::Orphaned,
                 ..pending_leg()
             },
             good_leg(),
