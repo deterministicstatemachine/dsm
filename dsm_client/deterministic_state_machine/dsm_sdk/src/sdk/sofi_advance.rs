@@ -385,8 +385,15 @@ async fn pending_objects(
 
 /// Stages 7 and 8 for the pending position, from what storage holds: a
 /// device that crashed after its transition finishes its own install and
-/// exercise here, and any device may run it again — the members keep what
-/// they are given, and Core decides what counts.
+/// exercise here.
+///
+/// OWNER LOCAL, and the signature says so: it reads this device's head and
+/// the admission on it, and it builds the exercise from the trader's OWN
+/// closure objects. It is not the relay, whatever a passing device might
+/// want — only the owning device may touch its own admission, fence, lineage
+/// and leaf cache (owner ruling, §44.4). What any device may do is carry
+/// already-signed material to storage: `sofi_relay::{relay_fulfillment,
+/// relay_position_pair}`, which hold no `CoreSDK` and write nothing local.
 pub async fn complete_pending_fulfillment(
     core: &CoreSDK,
     set: &StorageSet,
@@ -705,7 +712,10 @@ mod tests {
         all_policies, block_on, d, five, fold_under, produced_setup, token, RouteFixture,
         OWNER_DEV, OWNER_G, P_CREATE, P_POS, SIG_ALG,
     };
+    use crate::sdk::sofi_relay::relay_fulfillment;
     use crate::sdk::storage_io::{fake_fleet, fake_registers};
+    use dsm::common::domain_tags::TAG_DSM_SOFI_SUCC_CELL_V2;
+    use dsm::sofi::arith::CellResolution;
     use crate::storage::client_db;
 
     /// A device at position `P_POS`: its own identity and signing key, the
@@ -1000,6 +1010,138 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("no pending admission"));
+    }
+
+    /// DEVICE SCENARIO 4 (§44.1): `F` registered, the trader offline, a
+    /// relayer completes the cells and the position resolves.
+    ///
+    /// The relay holds no `CoreSDK` and writes nothing local — it takes a
+    /// fulfillment id and a committed set and carries bytes that already
+    /// exist (owner ruling, §44.4). Device A's own completion is stopped at
+    /// the second leg by a fleet that refuses that cell, which is what an
+    /// offline trader looks like from storage; the members are healed, a
+    /// party with no device state relays, and only then does A resolve from
+    /// its own durable admission.
+    #[test]
+    #[serial]
+    fn a_relayer_completes_the_cells_and_the_owner_later_resolves_from_its_admission() {
+        let r = rig(0xD3);
+        let b = build(&r, r.parent_claim);
+        let own = BTreeMap::new();
+        let req = request(&b, &own);
+        block_on(fulfill(&r.core, &r.set, &req)).unwrap();
+
+        // The second leg's cell refuses every member: A gets the first leg
+        // written and nothing else.
+        let legs = b.precommit.legs();
+        let stranded = &legs[1];
+        let stranded_key =
+            derive::successor_attempt_key(&stranded.vault_id, &stranded.parent_root, 0);
+        let ns = TAG_DSM_SOFI_SUCC_CELL_V2.source_bytes();
+        for m in r.set.members() {
+            fake_registers::fail_cell(&m.member_id, ns, &stranded_key);
+        }
+        let completed = block_on(complete_pending_fulfillment(&r.core, &r.set)).unwrap();
+        let stranded_write = completed
+            .exercise
+            .iter()
+            .find(|w| w.vault_id == stranded.vault_id)
+            .unwrap();
+        assert!(!stranded_write.leader_reached && stranded_write.copies == 0);
+        assert_eq!(
+            block_on(read_attempt_cell(
+                &r.set,
+                &stranded.vault_id,
+                &stranded.parent_root,
+                0
+            ))
+            .unwrap()
+            .0,
+            CellResolution::Unresolved,
+            "one leg is stranded, so the route cannot be consumed"
+        );
+        assert_eq!(
+            block_on(resolve_pending_position(&r.core, &r.set)).unwrap(),
+            Advanced::Pending {
+                position: P_POS + 1,
+                registered: true
+            }
+        );
+
+        // The members are back. A RELAYER — no CoreSDK, no head, no local
+        // state — carries the exercise it finds at the first leg to the key
+        // that lacks it.
+        for m in r.set.members() {
+            fake_registers::heal_cell(&m.member_id, ns, &stranded_key);
+        }
+        let fid = derive::fulfillment_id(&b.fulfillment);
+        let relayed = block_on(relay_fulfillment(&r.set, &fid)).unwrap();
+        assert_eq!(relayed.fulfillment_id, fid);
+        assert_eq!(relayed.legs.len(), legs.len(), "every leg key the F names");
+        for w in &relayed.legs {
+            assert!(w.leader_reached);
+        }
+        let e = *b.precommit.external_commitment();
+        for leg in legs {
+            assert_eq!(
+                block_on(read_attempt_cell(
+                    &r.set,
+                    &leg.vault_id,
+                    &leg.parent_root,
+                    0
+                ))
+                .unwrap()
+                .0,
+                CellResolution::Final(e),
+                "the relayed bytes count at every key their F names"
+            );
+        }
+
+        // Only now, and only the owning device, advances its own lineage.
+        let advanced = block_on(resolve_pending_position(&r.core, &r.set)).unwrap();
+        let Advanced::Installed { resolution, .. } = advanced else {
+            panic!("every leg is final: {advanced:?}")
+        };
+        assert_eq!(resolution, Resolution::Realized);
+        assert!(r
+            .core
+            .device_head()
+            .unwrap()
+            .pending_economic_admission()
+            .is_none());
+    }
+
+    /// A relayer cannot BUILD an exercise, and says so rather than papering
+    /// over it: building one needs the trader's own closure objects. It
+    /// still carries the position pair, which is already-signed material.
+    #[test]
+    #[serial]
+    fn a_relay_carries_the_pair_but_never_invents_an_exercise() {
+        let r = rig(0xD4);
+        let b = build(&r, r.parent_claim);
+        let own = BTreeMap::new();
+        let req = request(&b, &own);
+        block_on(fulfill(&r.core, &r.set, &req)).unwrap();
+        let fid = derive::fulfillment_id(&b.fulfillment);
+        let relayed = block_on(relay_fulfillment(&r.set, &fid)).unwrap();
+        assert!(relayed.pair_leader_reached);
+        assert_eq!(relayed.position, P_POS + 1);
+        assert!(
+            relayed.legs.is_empty(),
+            "no cell holds an exercise yet, so there is nothing to carry"
+        );
+        let leg = &b.precommit.legs()[0];
+        assert_eq!(
+            block_on(read_attempt_cell(
+                &r.set,
+                &leg.vault_id,
+                &leg.parent_root,
+                0
+            ))
+            .unwrap()
+            .0,
+            CellResolution::Unresolved
+        );
     }
 
     /// `advance_resolved`'s parent-claim conjunct at the seam: a P naming a
