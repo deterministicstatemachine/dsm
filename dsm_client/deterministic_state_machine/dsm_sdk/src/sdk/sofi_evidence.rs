@@ -198,315 +198,17 @@ mod tests {
     //! object that is wrong is refused by Core with its own `Invalid`.
 
     use super::*;
-    use dsm::ccb::state::{FeePolicy, MarketPolicy, ReleasePolicy};
-    use dsm::common::domain_tags::{
-        TAG_DSM_FEE_POLICY_OBJECT, TAG_DSM_MARKET_POLICY_OBJECT, TAG_DSM_RELEASE_POLICY_OBJECT,
-    };
-    use dsm::dlv::route_commit::constant_product_output_classified;
+    use dsm::common::domain_tags::TAG_DSM_MARKET_POLICY_OBJECT;
     use dsm::economic::keys::balance_key;
     use dsm::economic::state::EconomicBalanceState;
-    use dsm::economic::tree::{ABSENT_LEAF, ECONOMIC_SMT_HEIGHT};
-    use dsm::sofi::smt::{batch_fold, FoldEntry};
     use dsm::sofi::validation::{validate, Invalid, Missing, Refusal};
-    use dsm::sofi::wire::{
-        CoreEntry, DlvCore, ParentClaimRef, PreEClosureIndex, PrecommitLeg, SettlementBody,
-        SwapHop, TraderCore, TraderPrecommitBody, TraderRelationshipLeaf, VaultStateLeaf,
-        VAULT_STATUS_ACTIVE,
-    };
     use serial_test::serial;
 
+    use crate::sdk::sofi_test_fixtures::{
+        all_policies, d, five, token, RouteFixture, VaultAtGenesis, DEV, G, OWNER_DEV, OWNER_G,
+        P_CREATE,
+    };
     use crate::sdk::storage_io::fake_fleet;
-    use crate::sdk::storage_set::{StorageMember, StorageSet};
-
-    const G: D32 = [0x11; 32];
-    const DEV: D32 = [0x22; 32];
-    const OWNER_G: D32 = [0x91; 32];
-    const OWNER_DEV: D32 = [0x92; 32];
-    const P_POS: u64 = 5;
-    const P_CREATE: u64 = 7;
-    const FEE_BPS: u32 = 30;
-    const RESERVE_A: u64 = 10_000;
-    const RESERVE_B: u64 = 20_000;
-    const AMOUNT_IN: u64 = 1_000;
-    const SIG_ALG: u16 = 0x0001;
-
-    fn d(byte: u8) -> D32 {
-        [byte; 32]
-    }
-
-    fn five() -> StorageSet {
-        StorageSet::new(
-            (1..=5)
-                .map(|i| StorageMember {
-                    member_id: format!("m{i}"),
-                    register_incarnation_id: [i as u8; 32],
-                    endpoint: format!("http://m{i}.example"),
-                })
-                .collect(),
-        )
-        .expect("five members")
-    }
-
-    fn policy_addr(class: u16, bytes: &[u8]) -> D32 {
-        dsm::ccb::decode::policy_object_address(class, bytes).expect("a policy class")
-    }
-
-    /// One vault at its genesis, trading `(a, b)`, and everything a trader
-    /// needs to draft a first swap against it.
-    struct Fixture {
-        vault_id: D32,
-        genesis: VaultGenesisPreimage,
-        policies: [(u16, Vec<u8>); 3],
-        precommit: TraderPrecommitBody,
-        preimage: SettlementPreimage,
-        local: LocalLeaves,
-    }
-
-    fn fixture(pair: (D32, D32)) -> Fixture {
-        fixture_with(pair, P_CREATE)
-    }
-
-    /// The same, for a vault born at `create_position` — a different vault.
-    fn fixture_with(pair: (D32, D32), create_position: u64) -> Fixture {
-        let (a, b) = pair;
-        let market = MarketPolicy::beta_constant_product(a, b).unwrap().encode();
-        let fee = FeePolicy::new(FEE_BPS).unwrap().encode();
-        let release = ReleasePolicy::beta_owner_local_full_close().encode();
-        let set = five();
-        let state = VaultStateLeaf {
-            owner_genesis: OWNER_G,
-            owner_device_id: OWNER_DEV,
-            create_position,
-            market_policy: policy_addr(dsm::ccb::class::MARKET_POLICY, &market),
-            fee_policy: policy_addr(dsm::ccb::class::FEE_POLICY, &fee),
-            release_policy: policy_addr(dsm::ccb::class::RELEASE_POLICY, &release),
-            storage_set_id: set.id(),
-            generation: 0,
-            reserve_a: RESERVE_A,
-            reserve_b: RESERVE_B,
-            status: VAULT_STATUS_ACTIVE,
-        };
-        let genesis = VaultGenesisPreimage {
-            owner_genesis: OWNER_G,
-            owner_device_id: OWNER_DEV,
-            create_position,
-            state: state.clone(),
-        };
-        let vault_id = genesis.vault_id();
-
-        // The vault's tree at R_0: its state leaf and nothing else.
-        let state_key = derive::vault_state_key(&vault_id);
-        let rel_key = derive::relationship_key(&G, &DEV, &vault_id);
-        let mut vault_tree = EconomicSmt::new();
-        vault_tree.insert(state_key, derive::vault_state_leaf_value(&state).unwrap());
-        let parent_root = vault_tree.root();
-        assert_eq!(parent_root, genesis_root(&vault_id, &state).unwrap());
-
-        // The trade the hop prices against the genesis reserves.
-        let (token_in, token_out) = (d(0x40), d(0x41));
-        let amount_out =
-            constant_product_output_classified(AMOUNT_IN, RESERVE_A, RESERVE_B, FEE_BPS).unwrap();
-        let base = derive::relationship_leaf_genesis(&derive::setup_id(&G, &DEV, P_POS, &vault_id));
-        let post_state = VaultStateLeaf {
-            generation: 1,
-            reserve_a: RESERVE_A + AMOUNT_IN,
-            reserve_b: RESERVE_B - amount_out,
-            ..state.clone()
-        };
-        let mut vault_entries = vec![
-            CoreEntry::Mutation {
-                key: state_key,
-                pre: derive::vault_state_leaf_value(&state).unwrap(),
-                post: derive::vault_state_leaf_value(&post_state).unwrap(),
-                path: vault_tree.siblings(&state_key).to_vec(),
-            },
-            CoreEntry::Relationship {
-                genesis: G,
-                device_id: DEV,
-                vault_id,
-                base,
-                path: vault_tree.siblings(&rel_key).to_vec(),
-            },
-        ];
-        vault_entries.sort_by_key(|e| e.key());
-        let core = DlvCore::new(vault_id, parent_root, G, DEV, base, vault_entries).unwrap();
-
-        // The trader's own tree: the token spent, and the relationship its
-        // setup installed.
-        let in_key = balance_key(&G, &DEV, &token_in);
-        let out_key = balance_key(&G, &DEV, &token_out);
-        let in_balance = EconomicBalanceState {
-            policy_commit: token_in,
-            amount: 50_000,
-        };
-        let rel_leaf = TraderRelationshipLeaf {
-            vault_id,
-            leaf: base,
-        };
-        let leaves = vec![
-            (in_key, EconomicLeafState::Balance(in_balance.clone())),
-            (rel_key, EconomicLeafState::Relationship(rel_leaf)),
-        ];
-        let mut trader_tree = EconomicSmt::new();
-        for (key, state) in &leaves {
-            trader_tree.insert(*key, state.leaf_value().unwrap());
-        }
-        let local = LocalLeaves::checked(trader_tree.root(), leaves).unwrap();
-        let out_balance = EconomicBalanceState {
-            policy_commit: token_out,
-            amount: amount_out,
-        };
-        let in_after = EconomicBalanceState {
-            policy_commit: token_in,
-            amount: 50_000 - AMOUNT_IN,
-        };
-        let mut trader_entries = vec![
-            CoreEntry::Mutation {
-                key: in_key,
-                pre: EconomicLeafState::Balance(in_balance).leaf_value().unwrap(),
-                post: EconomicLeafState::Balance(in_after).leaf_value().unwrap(),
-                path: trader_tree.siblings(&in_key).to_vec(),
-            },
-            CoreEntry::Mutation {
-                key: out_key,
-                pre: ABSENT_LEAF,
-                post: EconomicLeafState::Balance(out_balance)
-                    .leaf_value()
-                    .unwrap(),
-                path: trader_tree.siblings(&out_key).to_vec(),
-            },
-            CoreEntry::Relationship {
-                genesis: G,
-                device_id: DEV,
-                vault_id,
-                base,
-                path: trader_tree.siblings(&rel_key).to_vec(),
-            },
-        ];
-        trader_entries.sort_by_key(|e| e.key());
-        let trader_core =
-            TraderCore::new(G, DEV, P_POS + 1, trader_tree.root(), trader_entries).unwrap();
-
-        let hop = SwapHop {
-            vault_id,
-            parent_root,
-            setup_ref: d(0x55),
-            token_in,
-            amount_in: AMOUNT_IN,
-            token_out,
-            amount_out,
-        };
-        let settlement = SettlementBody::Swap {
-            token_in,
-            amount_in: AMOUNT_IN,
-            token_out,
-            exact_out: amount_out,
-            hops: vec![hop],
-            trader_core: derive::trader_core_digest(&trader_core.encode().unwrap()),
-            dlv_cores: vec![derive::dlv_core_digest(&core.encode().unwrap())],
-            closure: PreEClosureIndex::new(Vec::new()).unwrap(),
-        };
-        let preimage =
-            SettlementPreimage::new(settlement, trader_core.clone(), vec![core]).unwrap();
-        let e = derive::recompute_e(&preimage).unwrap();
-
-        // The realize root is what T° folds to UNDER E.
-        let fold_entries: Vec<FoldEntry> = trader_core
-            .entries()
-            .iter()
-            .map(|entry| {
-                let path: [D32; ECONOMIC_SMT_HEIGHT] = entry.path().try_into().unwrap();
-                let (pre, post) = match entry {
-                    CoreEntry::Mutation { pre, post, .. } => (
-                        (*pre != ABSENT_LEAF).then_some(*pre),
-                        (*post != ABSENT_LEAF).then_some(*post),
-                    ),
-                    CoreEntry::Relationship { base, vault_id, .. } => (
-                        Some(derive::trader_relationship_leaf_value(&rel_leaf)),
-                        Some(derive::trader_relationship_leaf_value(
-                            &TraderRelationshipLeaf {
-                                vault_id: *vault_id,
-                                leaf: derive::relationship_leaf_next(base, &e),
-                            },
-                        )),
-                    ),
-                    CoreEntry::Read { .. } => unreachable!("no reads in this fixture"),
-                };
-                FoldEntry {
-                    key: entry.key(),
-                    pre,
-                    post,
-                    path: Box::new(path),
-                }
-            })
-            .collect();
-        let realize_root = batch_fold(&fold_entries).unwrap().post_root;
-
-        let precommit = TraderPrecommitBody::new(
-            G,
-            DEV,
-            P_POS,
-            ParentClaimRef::SingleRoot { claim_ref: d(0x66) },
-            e,
-            vec![PrecommitLeg {
-                vault_id,
-                parent_root,
-                setup_ref: d(0x55),
-            }],
-            realize_root,
-            trader_tree.root(),
-            set.id(),
-            SIG_ALG,
-            &[0x01; 64],
-        )
-        .unwrap();
-        Fixture {
-            vault_id,
-            genesis,
-            policies: [
-                (dsm::ccb::class::MARKET_POLICY, market),
-                (dsm::ccb::class::FEE_POLICY, fee),
-                (dsm::ccb::class::RELEASE_POLICY, release),
-            ],
-            precommit,
-            preimage,
-            local,
-        }
-    }
-
-    fn namespace_of(class: u16) -> dsm::crypto::domain::TaggedHashDomain<'static> {
-        match class {
-            dsm::ccb::class::MARKET_POLICY => TAG_DSM_MARKET_POLICY_OBJECT,
-            dsm::ccb::class::FEE_POLICY => TAG_DSM_FEE_POLICY_OBJECT,
-            _ => TAG_DSM_RELEASE_POLICY_OBJECT,
-        }
-    }
-
-    /// Publish the genesis and the policies to every member and index the
-    /// genesis under its locator — what rebuild step R8's producer will do.
-    fn publish(set: &StorageSet, f: &Fixture, policies: &[u16]) {
-        let bytes = f.genesis.encode().unwrap();
-        let addr = fake_fleet::put_object(set, TAG_DSM_SOFI_VAULT_GENESIS_OBJECT, &bytes);
-        fake_fleet::append_index(
-            set,
-            TAG_DSM_SOFI_VAULT_GENESIS_LOCATOR.source_bytes(),
-            &derive::vault_genesis_locator(&f.vault_id),
-            &addr,
-        );
-        for (class, bytes) in &f.policies {
-            if policies.contains(class) {
-                fake_fleet::put_object(set, namespace_of(*class), bytes);
-            }
-        }
-    }
-
-    fn all_policies() -> [u16; 3] {
-        [
-            dsm::ccb::class::MARKET_POLICY,
-            dsm::ccb::class::FEE_POLICY,
-            dsm::ccb::class::RELEASE_POLICY,
-        ]
-    }
 
     fn block_on<T>(fut: impl std::future::Future<Output = T>) -> T {
         crate::runtime::get_runtime().block_on(fut)
@@ -520,9 +222,9 @@ mod tests {
     fn acquired_evidence_validates_a_first_trade_at_vault_genesis() {
         fake_fleet::reset();
         let set = five();
-        let f = fixture((d(0x40), d(0x41)));
-        publish(&set, &f, &all_policies());
-        let evidence = block_on(acquire_evidence(&set, &f.preimage, &f.local)).unwrap();
+        let f = RouteFixture::swap(1, set.id());
+        f.publish(&set, &all_policies());
+        let evidence = f.acquire(&set);
         assert_eq!(
             evidence.objects.len(),
             3,
@@ -549,16 +251,16 @@ mod tests {
     fn acquired_bytes_are_stored() {
         fake_fleet::reset();
         let set = five();
-        let f = fixture((d(0x40), d(0x41)));
-        publish(&set, &f, &all_policies());
-        let evidence = block_on(acquire_evidence(&set, &f.preimage, &f.local)).unwrap();
+        let f = RouteFixture::swap(1, set.id());
+        f.publish(&set, &all_policies());
+        let evidence = f.acquire(&set);
         let needs = EvidenceNeeds::of(&f.preimage);
-        for (class, bytes) in &f.policies {
-            let addr = policy_addr(*class, bytes);
-            assert_eq!(evidence.objects.get(&addr), Some(bytes));
+        for class in all_policies() {
+            let (addr, bytes) = f.vaults[0].policy(class);
+            assert_eq!(evidence.objects.get(&addr).map(Vec::as_slice), Some(bytes));
             assert_eq!(
                 block_on(crate::sdk::storage_io::read_stored_bytes(&set, &addr)).unwrap(),
-                Some(bytes.clone())
+                Some(bytes.to_vec())
             );
         }
         assert_eq!(
@@ -571,7 +273,7 @@ mod tests {
                 .keys()
                 .map(|(_, k)| *k)
                 .collect::<Vec<_>>(),
-            needs.vaults[&f.vault_id]
+            needs.vaults[&f.vaults[0].vault_id]
                 .iter()
                 .copied()
                 .collect::<Vec<_>>()
@@ -588,8 +290,8 @@ mod tests {
     fn nothing_is_defaulted() {
         fake_fleet::reset();
         let set = five();
-        let f = fixture((d(0x40), d(0x41)));
-        let evidence = block_on(acquire_evidence(&set, &f.preimage, &f.local)).unwrap();
+        let f = RouteFixture::swap(1, set.id());
+        let evidence = f.acquire(&set);
         assert!(evidence.objects.is_empty());
         assert!(evidence.vault_leaves.is_empty());
         assert!(matches!(
@@ -608,15 +310,14 @@ mod tests {
         for withheld in all_policies() {
             fake_fleet::reset();
             let set = five();
-            let f = fixture((d(0x40), d(0x41)));
+            let f = RouteFixture::swap(1, set.id());
             let published: Vec<u16> = all_policies()
                 .into_iter()
                 .filter(|c| *c != withheld)
                 .collect();
-            publish(&set, &f, &published);
-            let evidence = block_on(acquire_evidence(&set, &f.preimage, &f.local)).unwrap();
-            let (_, bytes) = f.policies.iter().find(|(c, _)| *c == withheld).unwrap();
-            let addr = policy_addr(withheld, bytes);
+            f.publish(&set, &published);
+            let evidence = f.acquire(&set);
+            let (addr, _) = f.vaults[0].policy(withheld);
             assert!(!evidence.objects.contains_key(&addr));
             assert_eq!(
                 validate(&f.precommit, &f.preimage, &evidence),
@@ -633,14 +334,12 @@ mod tests {
     fn bytes_that_do_not_authenticate_to_their_address_are_never_acquired() {
         fake_fleet::reset();
         let set = five();
-        let f = fixture((d(0x40), d(0x41)));
-        publish(
+        let f = RouteFixture::swap(1, set.id());
+        f.publish(
             &set,
-            &f,
             &[dsm::ccb::class::FEE_POLICY, dsm::ccb::class::RELEASE_POLICY],
         );
-        let (_, market) = &f.policies[0];
-        let addr = policy_addr(dsm::ccb::class::MARKET_POLICY, market);
+        let (addr, _) = f.vaults[0].policy(dsm::ccb::class::MARKET_POLICY);
         for m in set.members() {
             fake_fleet::hold_bytes(
                 &m.member_id,
@@ -649,7 +348,7 @@ mod tests {
                 b"not the market policy",
             );
         }
-        let evidence = block_on(acquire_evidence(&set, &f.preimage, &f.local)).unwrap();
+        let evidence = f.acquire(&set);
         assert!(!evidence.objects.contains_key(&addr));
         assert_eq!(
             validate(&f.precommit, &f.preimage, &evidence),
@@ -668,9 +367,9 @@ mod tests {
         fake_fleet::reset();
         let set = five();
         // The hop prices t0 -> t1 against a vault whose market is (t2, t3).
-        let f = fixture((d(0x42), d(0x43)));
-        publish(&set, &f, &all_policies());
-        let evidence = block_on(acquire_evidence(&set, &f.preimage, &f.local)).unwrap();
+        let f = RouteFixture::swap_with(1, set.id(), |_| (token(2), token(3)));
+        f.publish(&set, &all_policies());
+        let evidence = f.acquire(&set);
         assert_eq!(evidence.objects.len(), 3, "acquired exactly as published");
         match validate(&f.precommit, &f.preimage, &evidence) {
             Err(Refusal::Invalid(reason)) => {
@@ -684,15 +383,15 @@ mod tests {
     }
 
     /// A vault past its genesis: the core names a parent root the genesis
-    /// does not produce, so its leaves stay unfetched (the successor walk is
+    /// does not produce, so its leaves stay unfetched (the successor walk of
     /// rebuild step R12) and the verdict is Unavailable, not a state made up.
     #[test]
     #[serial]
     fn a_vault_past_genesis_is_unavailable_until_the_walk() {
         fake_fleet::reset();
         let set = five();
-        let f = fixture((d(0x40), d(0x41)));
-        let mut advanced = f.genesis.clone();
+        let f = RouteFixture::swap(1, set.id());
+        let mut advanced = f.vaults[0].genesis.clone();
         advanced.state.generation = 3;
         advanced.state.reserve_a += 1;
         let bytes = advanced.encode().unwrap();
@@ -700,10 +399,10 @@ mod tests {
         fake_fleet::append_index(
             &set,
             TAG_DSM_SOFI_VAULT_GENESIS_LOCATOR.source_bytes(),
-            &derive::vault_genesis_locator(&f.vault_id),
+            &derive::vault_genesis_locator(&f.vaults[0].vault_id),
             &addr,
         );
-        let evidence = block_on(acquire_evidence(&set, &f.preimage, &f.local)).unwrap();
+        let evidence = f.acquire(&set);
         assert!(evidence.vault_leaves.is_empty());
         assert!(matches!(
             validate(&f.precommit, &f.preimage, &evidence),
@@ -718,18 +417,24 @@ mod tests {
     fn a_genesis_of_another_vault_under_the_locator_is_never_kept() {
         fake_fleet::reset();
         let set = five();
-        let f = fixture((d(0x40), d(0x41)));
-        let other = fixture_with((d(0x40), d(0x41)), P_CREATE + 1);
-        assert_ne!(other.vault_id, f.vault_id);
+        let f = RouteFixture::swap(1, set.id());
+        let other = VaultAtGenesis::new(
+            OWNER_G,
+            OWNER_DEV,
+            P_CREATE + 9,
+            (token(0), token(1)),
+            set.id(),
+        );
+        assert_ne!(other.vault_id, f.vaults[0].vault_id);
         let bytes = other.genesis.encode().unwrap();
         let addr = fake_fleet::put_object(&set, TAG_DSM_SOFI_VAULT_GENESIS_OBJECT, &bytes);
         fake_fleet::append_index(
             &set,
             TAG_DSM_SOFI_VAULT_GENESIS_LOCATOR.source_bytes(),
-            &derive::vault_genesis_locator(&f.vault_id),
+            &derive::vault_genesis_locator(&f.vaults[0].vault_id),
             &addr,
         );
-        assert!(block_on(fetch_vault_genesis(&set, &f.vault_id))
+        assert!(block_on(fetch_vault_genesis(&set, &f.vaults[0].vault_id))
             .unwrap()
             .is_none());
         assert!(block_on(fetch_vault_genesis(&set, &other.vault_id))
@@ -757,9 +462,8 @@ mod tests {
     /// it is another root, and refused. The Core twin is
     /// `missing_evidence_is_unavailable_never_invalid`.
     #[test]
-    #[serial]
     fn a_trader_leaf_cannot_be_withheld_from_the_verifiers_own_root() {
-        let f = fixture((d(0x40), d(0x41)));
+        let f = RouteFixture::swap(1, [0x77; 32]);
         assert!(LocalLeaves::checked(f.local.root(), Vec::new()).is_err());
     }
 }

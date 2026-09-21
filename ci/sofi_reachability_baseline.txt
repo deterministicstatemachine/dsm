@@ -2,7 +2,6 @@
 # rebuild has not wired into production yet. One line per function, with the
 # rebuild step expected to wire it. A step that wires one DELETES its line;
 # this file only shrinks; R14 deletes it and G1 passes with no exceptions.
-dsm_client/deterministic_state_machine/dsm/src/sofi/admission.rs preimage_admissible  # R6
 dsm_client/deterministic_state_machine/dsm/src/sofi/derive.rs relationship_index_key  # R8
 dsm_client/deterministic_state_machine/dsm/src/sofi/derive.rs setup_ref  # R8
 dsm_client/deterministic_state_machine/dsm/src/sofi/derive.rs policy_fulfillment_id  # R8
@@ -17,6 +16,6 @@ dsm_client/deterministic_state_machine/dsm/src/sofi/resolution.rs walk  # R12
 dsm_client/deterministic_state_machine/dsm/src/sofi/smt/fold.rs verify_batch  # R13
 dsm_client/deterministic_state_machine/dsm/src/sofi/smt/tree.rs commit_shadow  # R13
 dsm_client/deterministic_state_machine/dsm/src/sofi/smt/tree.rs prove  # R13
-dsm_client/deterministic_state_machine/dsm/src/sofi/validation.rs route_validation  # R6
+dsm_client/deterministic_state_machine/dsm/src/sofi/validation.rs route_validation  # R12: the verdict wrapper the resolution ladder consumes; the producer takes the reason from `validate`
 dsm_client/deterministic_state_machine/dsm/src/sofi/wire/mod.rs next_attempt  # R11
 dsm_client/deterministic_state_machine/dsm/src/sofi/wire/mod.rs next_generation  # R11
