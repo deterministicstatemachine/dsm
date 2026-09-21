@@ -316,6 +316,50 @@ impl CoreSDK {
             DsmError,
         >,
         storage_set_id: &[u8; 32],
+        in_tx_extra: Option<
+            &dyn Fn(
+                &rusqlite::Transaction<'_>,
+                &dsm::types::device_state::AdvanceOutcome,
+            ) -> Result<(), DsmError>,
+        >,
+    ) -> Result<
+        (
+            dsm::types::device_state::AdvanceOutcome,
+            dsm::economic::admission::PendingEconomicAdmission,
+        ),
+        DsmError,
+    > {
+        self.admitted_advance(
+            operation,
+            std::slice::from_ref(delta),
+            prepared,
+            build,
+            storage_set_id,
+            in_tx_extra,
+        )
+    }
+
+    /// The generalized admission seam: a self-loop advance carrying a
+    /// pending admission, with whatever balance deltas the operation's
+    /// conservation rule takes — one credit for a faucet claim, one debit for
+    /// a burn, NONE for a SoFi fulfillment, which moves no online balance at
+    /// its transition (the claim it installs is conditional; the root a
+    /// resolution selects enters through `advance_resolved`, R13).
+    pub(crate) fn admitted_advance(
+        &self,
+        operation: dsm::types::operations::Operation,
+        deltas: &[dsm::types::device_state::BalanceDelta],
+        prepared: dsm::economic::admission::PendingEconomicAdmission,
+        build: impl FnOnce(
+            &dsm::types::device_state::RelationshipChainState,
+        ) -> Result<
+            (
+                dsm::economic::admission::AcceptedAdmissionCoords,
+                Vec<(String, Vec<u8>, &'static str)>,
+            ),
+            DsmError,
+        >,
+        storage_set_id: &[u8; 32],
         // Additional same-transaction writer (e.g. the token-registry row),
         // composed AFTER the admission's pending row + artifact freeze.
         in_tx_extra: Option<
@@ -349,7 +393,7 @@ impl CoreSDK {
             rel_key,
             dev_id,
             operation,
-            std::slice::from_ref(delta),
+            deltas,
             Some(init_tip),
             None,
             None,
@@ -396,14 +440,31 @@ impl CoreSDK {
     /// "admitted" and "no longer pending" cannot disagree.
     pub(crate) fn admit_economic_position(
         &self,
-        economic_position: u64,
+        admitted: dsm::economic::lineage::AdmittedEconomicPosition,
         operation_digest: &[u8; 32],
-        economic_root: &[u8; 32],
         leaves: &[([u8; 32], [u8; 32], Vec<u8>)],
         storage_set_id: &[u8; 32],
         post_admit_artifacts: &[(String, Vec<u8>, &'static str)],
     ) -> Result<(), DsmError> {
         use crate::storage::client_db::{get_connection, update_bcr_device_head_with_conn};
+        let economic_position = admitted.economic_position();
+        // The root the position holds, which the post-admit artifacts bind
+        // to. A conditional position that has selected none is not terminal
+        // and is never admitted through this transaction.
+        let economic_root = match &admitted {
+            dsm::economic::lineage::AdmittedEconomicPosition::SingleRoot {
+                economic_root, ..
+            } => economic_root,
+            dsm::economic::lineage::AdmittedEconomicPosition::ResolvedSofi {
+                selected_root,
+                ..
+            } => selected_root,
+            dsm::economic::lineage::AdmittedEconomicPosition::UnresolvedSofi { .. } => {
+                return Err(DsmError::invalid_operation(
+                    "admit: a conditional position that has selected no root is not terminal",
+                ))
+            }
+        };
         let devid = self.device_info.device_id;
         let now = crate::util::deterministic_time::tick() as i64;
         let mut sm = self.state_machine.lock();
@@ -436,11 +497,7 @@ impl CoreSDK {
                 .transaction()
                 .map_err(|e| DsmError::storage(format!("admit tx: {e}"), None::<std::io::Error>))?;
             crate::storage::client_db::economic_lineage::record_admitted_with_conn(
-                &tx,
-                economic_position,
-                economic_root,
-                leaves,
-                now,
+                &tx, &admitted, leaves, now,
             )
             .map_err(|e| DsmError::storage(format!("admit record: {e}"), None::<std::io::Error>))?;
             crate::storage::client_db::economic_admission::clear_pending_admission_with_conn(
@@ -5492,7 +5549,16 @@ mod tests {
         let admitted_before =
             crate::storage::client_db::economic_lineage::get_admitted().expect("admitted read");
 
-        let stale = sdk.admit_economic_position(1, &[0x12; 32], &[0x11; 32], &[], &[0x13; 32], &[]);
+        let stale = sdk.admit_economic_position(
+            dsm::economic::lineage::AdmittedEconomicPosition::SingleRoot {
+                economic_position: 1,
+                economic_root: [0x11; 32],
+            },
+            &[0x12; 32],
+            &[],
+            &[0x13; 32],
+            &[],
+        );
         assert!(stale.is_err(), "a stale admit must refuse");
 
         let kept = sdk

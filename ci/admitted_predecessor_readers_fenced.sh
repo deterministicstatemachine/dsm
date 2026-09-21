@@ -25,6 +25,7 @@ reader='rehydrate_from_admitted_store'
 # Readers that create the next economic position. Each MUST cross the fence.
 FENCED_READERS=(
   "$core/dsm_sdk/src/sdk/core_sdk.rs"
+  "$core/dsm_sdk/src/sdk/sofi_advance.rs"
 )
 
 # Readers that legitimately do NOT create a descendant, with the reason each

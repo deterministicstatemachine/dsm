@@ -176,6 +176,16 @@ impl Resolver<'_> {
         let recognized = recognize_exercise(&exercise.encode()).ok_or_else(|| {
             DsmError::verification("resolve: the bytes are not one operation's exercise")
         })?;
+        self.resolve_recognized(recognized).await
+    }
+
+    /// The same, over an exercise already recognized — the one read back from
+    /// a leg's cell (`read_attempt_cell`), which is how the device finds its
+    /// own exercise again after a restart (R13).
+    pub async fn resolve_recognized(
+        &self,
+        recognized: RecognizedExercise,
+    ) -> Result<Resolved, DsmError> {
         let fetched = self.facts_of(recognized, None, CHAIN_DEPTH).await?;
         let resolution = resolve_position(&fetched.facts());
         Ok(Resolved {

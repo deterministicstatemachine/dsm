@@ -208,6 +208,9 @@ pub struct RouteFixture {
     pub realize_root: D32,
     pub void_root: D32,
     pub local: LocalLeaves,
+    /// The trader's leaves at `R_p`, as states: what a device's leaf cache
+    /// holds for the position the operation is built on.
+    pub leaves: Vec<(D32, EconomicLeafState)>,
     pub storage_set_id: D32,
     /// The trader's identity for the context: the trader for a swap, the
     /// owner for a close.
@@ -239,6 +242,20 @@ impl RouteFixture {
         market_of: impl Fn(usize) -> (D32, D32),
         setup_ref_of: impl Fn(usize, &D32) -> D32,
     ) -> Self {
+        Self::swap_for_trader(n, storage_set_id, (G, DEV), market_of, setup_ref_of)
+    }
+
+    /// `swap_with_setups` for the trader `(genesis, device_id)` — a device's
+    /// own identity, for the seam tests (R13), whose P must name the device
+    /// whose head advances and whose leaves are that device's leaf cache.
+    pub fn swap_for_trader(
+        n: usize,
+        storage_set_id: D32,
+        trader: (D32, D32),
+        market_of: impl Fn(usize) -> (D32, D32),
+        setup_ref_of: impl Fn(usize, &D32) -> D32,
+    ) -> Self {
+        let (genesis, device_id) = trader;
         let vaults: Vec<VaultAtGenesis> = (0..n)
             .map(|j| {
                 VaultAtGenesis::new(
@@ -261,8 +278,8 @@ impl RouteFixture {
             let amount_out =
                 constant_product_output_classified(amount, RESERVE_A, RESERVE_B, FEE_BPS).unwrap();
             let base = derive::relationship_leaf_genesis(&derive::setup_id(
-                &G,
-                &DEV,
+                &genesis,
+                &device_id,
                 P_POS,
                 &vault.vault_id,
             ));
@@ -274,7 +291,7 @@ impl RouteFixture {
                 reserve_b: RESERVE_B - amount_out,
                 ..state.clone()
             };
-            cores.push(vault_core(vault, &post_state, base));
+            cores.push(vault_core(vault, &post_state, base, trader));
             hops.push(SwapHop {
                 vault_id: vault.vault_id,
                 parent_root: vault.parent_root,
@@ -292,8 +309,8 @@ impl RouteFixture {
 
         // The trader's own tree: the token spent, and one relationship its
         // setup installed per vault.
-        let in_key = balance_key(&G, &DEV, &intent_in);
-        let out_key = balance_key(&G, &DEV, &intent_out);
+        let in_key = balance_key(&genesis, &device_id, &intent_in);
+        let out_key = balance_key(&genesis, &device_id, &intent_out);
         let in_balance = EconomicBalanceState {
             policy_commit: intent_in,
             amount: 50_000,
@@ -301,7 +318,7 @@ impl RouteFixture {
         let mut leaves = vec![(in_key, EconomicLeafState::Balance(in_balance.clone()))];
         for (vault, base) in vaults.iter().zip(&bases) {
             leaves.push((
-                derive::relationship_key(&G, &DEV, &vault.vault_id),
+                derive::relationship_key(&genesis, &device_id, &vault.vault_id),
                 EconomicLeafState::Relationship(TraderRelationshipLeaf {
                     vault_id: vault.vault_id,
                     leaf: *base,
@@ -335,18 +352,24 @@ impl RouteFixture {
             },
         ];
         for (vault, base) in vaults.iter().zip(&bases) {
-            let rel_key = derive::relationship_key(&G, &DEV, &vault.vault_id);
+            let rel_key = derive::relationship_key(&genesis, &device_id, &vault.vault_id);
             trader_entries.push(CoreEntry::Relationship {
-                genesis: G,
-                device_id: DEV,
+                genesis,
+                device_id,
                 vault_id: vault.vault_id,
                 base: *base,
                 path: trader_tree.siblings(&rel_key).to_vec(),
             });
         }
         trader_entries.sort_by_key(|e| e.key());
-        let trader_core =
-            TraderCore::new(G, DEV, P_POS + 1, trader_tree.root(), trader_entries).unwrap();
+        let trader_core = TraderCore::new(
+            genesis,
+            device_id,
+            P_POS + 1,
+            trader_tree.root(),
+            trader_entries,
+        )
+        .unwrap();
 
         let mut sorted_cores = cores.clone();
         sorted_cores.sort_by_key(|c| *c.vault_id());
@@ -372,7 +395,7 @@ impl RouteFixture {
             &leaves,
             local,
             storage_set_id,
-            (G, DEV),
+            (genesis, device_id),
         )
     }
 
@@ -390,7 +413,7 @@ impl RouteFixture {
             status: VAULT_STATUS_RETIRED,
             ..state.clone()
         };
-        let core = vault_core(&vault, &retired, base);
+        let core = vault_core(&vault, &retired, base, (G, DEV));
 
         let rel_key = derive::relationship_key(&G, &DEV, &vault.vault_id);
         let leaves = vec![(
@@ -515,6 +538,7 @@ impl RouteFixture {
             realize_root,
             void_root,
             local,
+            leaves: leaves.to_vec(),
             storage_set_id,
             trader,
         }
@@ -538,11 +562,24 @@ impl RouteFixture {
     /// The context a producer takes, with `claimant_public_key` borrowed
     /// from the caller.
     pub fn ctx<'a>(&self, claimant_public_key: &'a [u8]) -> TraderContext<'a> {
+        self.ctx_with(
+            ParentClaimRef::SingleRoot { claim_ref: d(0x66) },
+            claimant_public_key,
+        )
+    }
+
+    /// The context with the parent claim `P` names: the claim registered at
+    /// `K_root(p)`, in the form `advance_resolved` checks it against (R13).
+    pub fn ctx_with<'a>(
+        &self,
+        parent_claim: ParentClaimRef,
+        claimant_public_key: &'a [u8],
+    ) -> TraderContext<'a> {
         TraderContext {
             genesis: self.trader.0,
             device_id: self.trader.1,
             position: P_POS,
-            parent_claim: ParentClaimRef::SingleRoot { claim_ref: d(0x66) },
+            parent_claim,
             storage_set_id: self.storage_set_id,
             signature_alg: SIG_ALG,
             claimant_public_key,
@@ -558,10 +595,16 @@ impl RouteFixture {
 
 /// `V°`: the state mutation to `post_state` and the trader's relationship
 /// advancement, against the vault's genesis tree.
-fn vault_core(vault: &VaultAtGenesis, post_state: &VaultStateLeaf, base: D32) -> DlvCore {
+fn vault_core(
+    vault: &VaultAtGenesis,
+    post_state: &VaultStateLeaf,
+    base: D32,
+    trader: (D32, D32),
+) -> DlvCore {
+    let (genesis, device_id) = trader;
     let tree = vault.tree();
     let state_key = derive::vault_state_key(&vault.vault_id);
-    let rel_key = derive::relationship_key(&G, &DEV, &vault.vault_id);
+    let rel_key = derive::relationship_key(&genesis, &device_id, &vault.vault_id);
     let mut entries = vec![
         CoreEntry::Mutation {
             key: state_key,
@@ -570,15 +613,23 @@ fn vault_core(vault: &VaultAtGenesis, post_state: &VaultStateLeaf, base: D32) ->
             path: tree.siblings(&state_key).to_vec(),
         },
         CoreEntry::Relationship {
-            genesis: G,
-            device_id: DEV,
+            genesis,
+            device_id,
             vault_id: vault.vault_id,
             base,
             path: tree.siblings(&rel_key).to_vec(),
         },
     ];
     entries.sort_by_key(|e| e.key());
-    DlvCore::new(vault.vault_id, vault.parent_root, G, DEV, base, entries).unwrap()
+    DlvCore::new(
+        vault.vault_id,
+        vault.parent_root,
+        genesis,
+        device_id,
+        base,
+        entries,
+    )
+    .unwrap()
 }
 
 fn tree_of(leaves: &[(D32, EconomicLeafState)]) -> EconomicSmt {
@@ -591,7 +642,7 @@ fn tree_of(leaves: &[(D32, EconomicLeafState)]) -> EconomicSmt {
 
 /// `Fold(T°, E)`: what the trader core folds to under `E`, with each
 /// relationship post from `relationship_leaf_next`.
-fn fold_under(trader_core: &TraderCore, leaves: &[(D32, EconomicLeafState)], e: &D32) -> D32 {
+pub fn fold_under(trader_core: &TraderCore, leaves: &[(D32, EconomicLeafState)], e: &D32) -> D32 {
     let entries: Vec<FoldEntry> = trader_core
         .entries()
         .iter()

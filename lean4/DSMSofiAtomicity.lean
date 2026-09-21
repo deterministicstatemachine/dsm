@@ -144,6 +144,8 @@
     36. an unfetched setup read as Invalid (R7) -> `unread_storage_is_unavailable_never_invalid`,
                                                   `more_evidence_only_refines`
     37. `fulfillStep` writes K_ful only (R9)   -> `position_pair_atomic`
+    38. (R13) Pending counted as validated     -> `an_undecided_or_terminal_position_extends_nothing`,
+        ancestry                                  `descendant_requires_resolved_predecessor`
 
   `p_g_f_hash_order_acyclic` is not a mutation target: acyclicity follows from the
   hash order itself, so admitting a current-E class cannot falsify it. The design
@@ -1886,6 +1888,26 @@ theorem descendant_requires_resolved_predecessor {res : Nat → Resolution} {q :
     (h : ValidatedThrough res (q + 1)) (P : PBody) : selectedRoot (res q) P ≠ none := by
   rcases h q (Nat.lt_succ_self q) with h' | h' <;> rw [h'] <;> simp [selectedRoot]
 
+/-- ADVANCE EXTENDS THE VALIDATED LINEAGE, R13 (`advance_resolved`, stage 10):
+a position resolved Realized or Void -- the two answers that select a root --
+extends validated ancestry by exactly one position. -/
+theorem advance_extends_validated_lineage {res : Nat → Resolution} {q : Nat}
+    (h : ValidatedThrough res q) (hq : res q = .realized ∨ res q = .void) :
+    ValidatedThrough res (q + 1) := by
+  intro q' hlt
+  rcases Nat.lt_or_eq_of_le (Nat.le_of_lt_succ hlt) with hl | he
+  · exact h q' hl
+  · subst he; exact hq
+
+/-- Nothing follows an undecided or terminal position: neither Pending nor
+Invalid selects a root, so no validated ancestry reaches past it. Mutation:
+let `ValidatedThrough` count `.pending` as validated -- red (with
+`descendant_requires_resolved_predecessor`). -/
+theorem an_undecided_or_terminal_position_extends_nothing {res : Nat → Resolution} {q : Nat}
+    (hq : res q = .pending ∨ res q = .invalid) : ¬ ValidatedThrough res (q + 1) := by
+  intro hv
+  rcases hv q (Nat.lt_succ_self q) with h | h <;> rcases hq with hq | hq <;> rw [hq] at h <;> cases h
+
 inductive Kind where
   | single
   | conditional
@@ -2638,6 +2660,8 @@ theorem unread_storage_is_unavailable_never_invalid (hm : HashModel) {sh : Nat �
 #print axioms without_evidence_a_registered_fulfillment_stays_pending
 #print axioms invalid_terminates_lineage
 #print axioms descendant_requires_resolved_predecessor
+#print axioms advance_extends_validated_lineage
+#print axioms an_undecided_or_terminal_position_extends_nothing
 #print axioms FenceInv.step
 #print axioms FenceInv.reach
 #print axioms fenceInv_empty
