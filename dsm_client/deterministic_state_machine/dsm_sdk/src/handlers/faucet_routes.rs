@@ -3,17 +3,17 @@
 //! Faucet routes — orchestration ONLY.
 //!
 //! `faucet.claim` drives the deterministic claim flow in
-//! [`crate::sdk::faucet_claim_flow`]: win one single-use ticket of the
-//! network's finite bootstrap allocation, advance the fence-coupled
-//! `FaucetClaim` operation, publish the admission evidence, register the
-//! economic root, and verify the result with the SAME predicate any foreign
-//! device runs. Validity lives in Rust core and the economic verifier — this
+//! [`crate::sdk::faucet_claim_flow`]: win one generation of the network's
+//! native ERA reserve with a release naming this device, advance the
+//! fence-coupled `FaucetClaim` operation, publish the admission evidence,
+//! register the economic root, and verify the result with the SAME predicate
+//! any foreign device runs. Validity lives in Rust core and the economic verifier — this
 //! file decodes a request and reports an outcome, nothing more.
 //!
 //! There is deliberately NO cooldown, NO per-identity quota, NO rate limiter
 //! and NO claim history here. V1 has none of those policies, and machinery
-//! for a policy V1 does not have would define it by accident. Repeated claims
-//! by one identity are allowed while tickets remain.
+//! for a policy the beta does not have would define it by accident. Repeated
+//! claims by one identity are allowed while the reserve holds units.
 
 use dsm::types::proto as generated;
 use prost::Message;
@@ -23,9 +23,9 @@ use super::response_helpers::{err, pack_envelope_ok};
 use crate::bridge::{AppInvoke, AppQuery, AppResult};
 
 impl AppRouterImpl {
-    /// `faucet.check_nearby`: whether a claim is currently possible. With the
-    /// ticket model there is no "nearby" and no cooldown — availability is
-    /// "the flow is wired and the device has an identity".
+    /// `faucet.check_nearby`: whether a claim is currently possible. There is
+    /// no "nearby" and no cooldown — availability is "the flow is wired and
+    /// the device has an identity".
     pub(crate) async fn handle_faucet_query(&self, q: AppQuery) -> AppResult {
         match q.path.as_str() {
             "faucet.check_nearby" => {
@@ -48,9 +48,9 @@ impl AppRouterImpl {
                     tokens_received: 0,
                     next_available_index: 0,
                     message: format!(
-                        "ERA faucet available: {} per claim from the network's finite ticket \
-                         allocation",
-                        dsm::economic::faucet::ERA_FAUCET_PAYOUT
+                        "ERA faucet available: {} per claim, released from the network's native \
+                         reserve",
+                        dsm::economic::native_reserve::ERA_FAUCET_PAYOUT
                     ),
                 };
                 pack_envelope_ok(generated::envelope::Payload::FaucetClaimResponse(resp))

@@ -296,27 +296,22 @@ pub enum Operation {
         /// [`AuthorityPolicy`].
         authority_policy: Option<AuthorityPolicy>,
     },
-    /// Consume ONE single-use ERA faucet ticket, crediting the fixed payout.
+    /// The beta faucet: one credit of the beta payout of builtin ERA, funded
+    /// by ONE release of the network's native reserve (Part IX §51).
     ///
     /// MINIMAL by design: no token id, no policy commit, no amount, no nonce.
-    /// The economics are DERIVED in Rust (builtin ERA, `ERA_FAUCET_PAYOUT`),
-    /// so "no caller-supplied amount anywhere" is literally true, and the
-    /// operation is completely reconstructible from the retained claim
-    /// envelope — which closes the crash window between winning the ticket
-    /// and committing the advance. Canonical tag 31, mode Unilateral (there
-    /// is no counterparty; the ticket register is the other party).
-    ///
-    /// This is NOT a mint. The units come from the network's finite bootstrap
-    /// allocation (800M tickets × 100 ERA); consuming the ticket is the
-    /// source depletion, and the accepting transition refuses this operation
-    /// unless a matching economic admission is already pending — see
-    /// `DeviceState::advance`.
+    /// The asset and the amount are the claim policy's, the release names
+    /// this device as its recipient and binds this operation's digest, and
+    /// the reserve's own state moves by exactly the amount released. This is
+    /// NOT a mint: the units leave the fixed genesis supply, and the accepting
+    /// transition refuses this operation unless a matching economic admission
+    /// is already pending — see `DeviceState::advance`.
     FaucetClaim {
-        /// The canonical network-scoped faucet identity,
-        /// `era_faucet_id(network_id)`.
-        faucet_id: [u8; 32],
-        /// Which ticket. Must be `< ERA_FAUCET_TICKET_COUNT`.
-        ticket_index: u64,
+        /// The canonical network-scoped reserve identity,
+        /// `era_reserve_id(network_id)`.
+        reserve_id: [u8; 32],
+        /// The reserve generation this claim's release installs (`≥ 1`).
+        generation: u64,
     },
     /// Mint new tokens into existence.
     ///
@@ -1045,14 +1040,14 @@ impl Operation {
                 put_u8(&mut out, 0);
             }
             FaucetClaim {
-                faucet_id,
-                ticket_index,
+                reserve_id,
+                generation,
             } => {
                 // Canonical tag 31. Tags 26, 28, 29, 30 and 33 were the old
                 // market's operations and are burned: retired, never reassigned.
                 put_u8(&mut out, 31);
-                put_bytes(&mut out, faucet_id.as_slice());
-                put_u64(&mut out, *ticket_index);
+                put_bytes(&mut out, reserve_id.as_slice());
+                put_u64(&mut out, *generation);
             }
             Create {
                 message,
@@ -2187,19 +2182,19 @@ impl Operation {
             }
             31 => {
                 // FaucetClaim mirrors its encoder exactly: length-prefixed
-                // 32-byte faucet_id, then the u64 ticket index. This arm was
+                // 32-byte reserve_id, then the u64 generation. This arm was
                 // MISSING from B1 — `to_bytes` existed without its inverse,
                 // and nothing crossed the decode until the successor-evidence
                 // replay path did. Recovery and foreign replay both decode
                 // the exact frozen operation bytes through here.
-                let faucet_id_bytes = get_len_bytes(&mut input)?;
-                let faucet_id: [u8; 32] = faucet_id_bytes.try_into().map_err(|_| {
-                    DsmError::invalid_operation("faucet claim: faucet_id is not 32 bytes")
+                let reserve_id_bytes = get_len_bytes(&mut input)?;
+                let reserve_id: [u8; 32] = reserve_id_bytes.try_into().map_err(|_| {
+                    DsmError::invalid_operation("faucet claim: reserve_id is not 32 bytes")
                 })?;
-                let ticket_index = get_u64(&mut input)?;
+                let generation = get_u64(&mut input)?;
                 FaucetClaim {
-                    faucet_id,
-                    ticket_index,
+                    reserve_id,
+                    generation,
                 }
             }
             // SOFI v8, TAGS 34-36. The SAME defect tag 31 records above, in

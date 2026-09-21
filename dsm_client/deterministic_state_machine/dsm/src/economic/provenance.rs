@@ -325,11 +325,16 @@ pub struct ProvenanceContext<'a> {
     pub verified_operation: Option<&'a crate::types::operations::Operation>,
 }
 
-/// The live-quorum answer for one faucet ticket cell: the exact envelope
-/// bytes a quorum of the canonical set holds as the winner.
+/// The release that installed one generation of the native reserve: the
+/// exact envelope bytes a walk of the reserve lineage established as FINAL at
+/// that generation's cell (Part II §13), with the reserve state it succeeded.
+/// The verifier re-runs the construction predicate over both; nothing here is
+/// believed because a member returned it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FaucetTicketWin {
+pub struct ReserveReleaseWin {
     pub envelope_bytes: Vec<u8>,
+    /// `R_{generation − 1}`, validated by the walk from `R_0`.
+    pub parent: crate::economic::native_reserve::NativeReserveState,
 }
 
 /// Why a peer's lineage could not be resolved to a validated transition.
@@ -384,16 +389,17 @@ pub trait ProvenanceResolver {
         peer_economic_position: u64,
     ) -> Result<ValidatedPeerTransition, PeerLineageFailure>;
 
-    /// The winning claim for one faucet ticket, from a LIVE quorum read
-    /// against the CANONICAL set — q members returning byte-identical winner
-    /// bytes. `None` when no quorum-agreed winner exists, and the verifier
-    /// fails closed on it: a credit is not funded by a ticket nobody can
-    /// show was won.
-    fn winning_faucet_ticket(
+    /// The release that installed `generation` of the native reserve
+    /// `reserve_id`, FINAL at its cell (the leader's first recognized object,
+    /// held by two other members of the committed set) on a walk from the
+    /// reserve's genesis state. `None` while the lineage has not reached that
+    /// generation, and the verifier fails closed on it: a credit is not
+    /// funded by a release nobody can show was final.
+    fn native_reserve_release(
         &self,
-        faucet_id: &[u8; 32],
-        ticket_index: u64,
-    ) -> Option<FaucetTicketWin>;
+        reserve_id: &[u8; 32],
+        generation: u64,
+    ) -> Option<ReserveReleaseWin>;
 
     /// The network's root-register set as the local catalog resolves it.
     ///
@@ -498,32 +504,36 @@ pub enum ProvenanceError {
     ConsumedByAnotherOperation,
     /// The source is defined but its semantics land in a later cut.
     NotYetImplemented { class: u16 },
-    /// The descriptor names a faucet other than THE canonical one for the
+    /// The descriptor names a reserve other than THE canonical one for the
     /// claimant's authenticated network. The stop-the-line check: without it,
-    /// an invented faucet id is a fresh 800M-ticket universe.
-    NotTheCanonicalFaucet {
+    /// an invented reserve id is a second genesis supply.
+    NotTheCanonicalReserve {
         named: [u8; 32],
         canonical: [u8; 32],
     },
-    /// A ticket coordinate that does not exist in the protocol.
-    TicketIndexOutOfRange { index: u64 },
-    /// No quorum-agreed winner for this ticket. Fails closed.
-    FaucetTicketNotEstablished { ticket_index: u64 },
-    /// The winning envelope is not a valid claim, or names different
-    /// coordinates than the descriptor.
-    FaucetWinnerInvalid(&'static str),
-    /// The winner's claimant is not the identity under validation, or its
-    /// key is not the P0–P6-proven AK.
-    FaucetClaimantMismatch,
-    /// The winner binds a different economic position or operation digest
+    /// A release is never the genesis generation.
+    GenerationIsGenesis,
+    /// The reserve lineage has not reached this generation with a final
+    /// release. Fails closed.
+    ReleaseNotEstablished { generation: u64 },
+    /// The established envelope is not a valid release, is not the successor
+    /// of the state the walk validated, or names different coordinates than
+    /// the descriptor.
+    ReleaseInvalid(&'static str),
+    /// The release's recipient is not the identity under validation, or the
+    /// claimant key is not the P0–P6-proven AK.
+    ReleaseRecipientMismatch,
+    /// The release binds a different economic position or operation digest
     /// than the transition under validation. Position + digest binding IS the
     /// non-reuse mechanism.
-    FaucetBindingMismatch,
-    /// The winner names a storage set other than the canonical one for the
-    /// claimant's network — a claim from a foreign register masquerading.
-    FaucetForeignSet,
-    /// The winner's bytes do not hash to the descriptor's evidence address.
-    FaucetEvidenceAddrMismatch,
+    ReleaseBindingMismatch,
+    /// The release names a storage set other than the canonical one for the
+    /// claimant's network — a release from a foreign register masquerading.
+    ReleaseForeignSet,
+    /// The release's bytes do not hash to the descriptor's evidence address.
+    ReleaseEvidenceAddrMismatch,
+    /// The claimant's network has no resolvable pinned register.
+    RegisterNotResolvable(&'static str),
 }
 
 impl core::fmt::Display for ProvenanceError {
@@ -608,49 +618,55 @@ impl core::fmt::Display for ProvenanceError {
                 f,
                 "credit provenance: source class {class:#06x} has no acceptance semantics yet"
             ),
-            Self::NotTheCanonicalFaucet { .. } => write!(
+            Self::NotTheCanonicalReserve { .. } => write!(
                 f,
-                "credit provenance: not THE canonical ERA faucet for the claimant's \
-                 authenticated network — an invented faucet id would be a fresh 800M-ticket \
-                 universe, and the descriptor agreeing with the winner proves nothing"
+                "credit provenance: not THE canonical native ERA reserve for the claimant's \
+                 authenticated network — an invented reserve id would be a second genesis \
+                 supply, and the descriptor agreeing with the release proves nothing"
             ),
-            Self::TicketIndexOutOfRange { index } => write!(
+            Self::GenerationIsGenesis => write!(
                 f,
-                "credit provenance: ticket {index} is not a coordinate that exists"
+                "credit provenance: generation 0 is the reserve's genesis state, never a release"
             ),
-            Self::FaucetTicketNotEstablished { ticket_index } => write!(
+            Self::ReleaseNotEstablished { generation } => write!(
                 f,
-                "credit provenance: no quorum-agreed winner for ticket {ticket_index} — fail \
-                 closed; a credit is not funded by a ticket nobody can show was won"
+                "credit provenance: no final release at reserve generation {generation} — fail \
+                 closed; a credit is not funded by a release nobody can show was final"
             ),
-            Self::FaucetWinnerInvalid(why) => {
-                write!(f, "credit provenance: faucet winner invalid: {why}")
+            Self::ReleaseInvalid(why) => {
+                write!(f, "credit provenance: reserve release invalid: {why}")
             }
-            Self::FaucetClaimantMismatch => write!(
+            Self::ReleaseRecipientMismatch => write!(
                 f,
-                "credit provenance: the winning claim's claimant is not the identity under \
-                 validation (or its key is not the P0–P6-proven AK — storage-node bearer \
+                "credit provenance: the release's recipient is not the identity under \
+                 validation (or the claimant key is not the P0–P6-proven AK — storage \
                  attribution is not this binding)"
             ),
-            Self::FaucetBindingMismatch => write!(
+            Self::ReleaseBindingMismatch => write!(
                 f,
-                "credit provenance: the winning claim binds a different economic position or \
+                "credit provenance: the release binds a different economic position or \
                  operation digest than this transition — position + digest binding is the \
-                 non-reuse mechanism, so a mismatch is a reuse attempt or a stale claim"
+                 non-reuse mechanism, so a mismatch is a reuse attempt or a stale release"
             ),
-            Self::FaucetForeignSet => write!(
+            Self::ReleaseForeignSet => write!(
                 f,
-                "credit provenance: the winning claim names a storage set other than the \
-                 canonical one for the claimant's network"
+                "credit provenance: the release names a storage set other than the canonical \
+                 one for the claimant's network"
             ),
             Self::OwnerLineage(e) => {
                 write!(f, "credit provenance: owner lineage: {e}")
             }
-            Self::FaucetEvidenceAddrMismatch => write!(
+            Self::ReleaseEvidenceAddrMismatch => write!(
                 f,
-                "credit provenance: the winner's bytes do not hash to the descriptor's \
+                "credit provenance: the release's bytes do not hash to the descriptor's \
                  evidence address"
             ),
+            Self::RegisterNotResolvable(why) => {
+                write!(
+                    f,
+                    "credit provenance: the network's register is not resolvable: {why}"
+                )
+            }
         }
     }
 }
@@ -1116,78 +1132,85 @@ pub fn verify_credit_source(
             return Err(ProvenanceError::NotYetImplemented { class: 0x0028 })
         }
 
-        CreditSource::ValidatedFaucetDistribution(d) => {
-            use crate::economic::faucet;
+        CreditSource::NativeReserveRelease(d) => {
+            use crate::economic::native_reserve::{self, ReleaseSource};
 
             // 1. THE CANONICAL-ID RULE, first and unconditionally. The
             //    canonical id is DERIVED from the claimant's authenticated
-            //    network; comparing descriptor to winner proves nothing.
-            let canonical = faucet::era_faucet_id(ctx.network_id);
-            if d.faucet_id != canonical {
-                return Err(ProvenanceError::NotTheCanonicalFaucet {
-                    named: d.faucet_id,
+            //    network; comparing descriptor to release proves nothing.
+            let canonical = native_reserve::era_reserve_id(ctx.network_id);
+            if d.reserve_id != canonical {
+                return Err(ProvenanceError::NotTheCanonicalReserve {
+                    named: d.reserve_id,
                     canonical,
                 });
             }
-            // 2. The coordinate must exist.
-            if d.ticket_index >= faucet::ERA_FAUCET_TICKET_COUNT {
-                return Err(ProvenanceError::TicketIndexOutOfRange {
-                    index: d.ticket_index,
-                });
+            // 2. A release is never the genesis state.
+            if d.generation == 0 {
+                return Err(ProvenanceError::GenerationIsGenesis);
             }
-            // 3. A quorum-agreed winner, live, from the canonical set.
+            // 3. The final release at that generation, on a walk of the ONE
+            //    reserve lineage from R_0 — leader first over the committed
+            //    set, nothing counted.
             let win = resolver
-                .winning_faucet_ticket(&d.faucet_id, d.ticket_index)
-                .ok_or(ProvenanceError::FaucetTicketNotEstablished {
-                    ticket_index: d.ticket_index,
+                .native_reserve_release(&d.reserve_id, d.generation)
+                .ok_or(ProvenanceError::ReleaseNotEstablished {
+                    generation: d.generation,
                 })?;
-            // 4. The winner is a strictly valid claim for THESE coordinates.
-            let claim = faucet::decode_and_verify_faucet_ticket_claim(&win.envelope_bytes)
-                .map_err(|_| ProvenanceError::FaucetWinnerInvalid("does not verify"))?;
-            if claim.body.faucet_id != d.faucet_id || claim.body.ticket_index != d.ticket_index {
-                return Err(ProvenanceError::FaucetWinnerInvalid(
-                    "winner names different coordinates than the descriptor",
+            // 4. The release verifies and IS the successor of the state the
+            //    walk validated: `remaining' = remaining − amount`, so the
+            //    amount below cannot exceed what the reserve held.
+            let release = native_reserve::decode_and_verify_release(&win.envelope_bytes)
+                .map_err(|_| ProvenanceError::ReleaseInvalid("does not verify"))?;
+            native_reserve::release_constructible(&win.parent, &release).map_err(|_| {
+                ProvenanceError::ReleaseInvalid("is not the successor of its parent")
+            })?;
+            if release.body.reserve_id != d.reserve_id || release.body.generation != d.generation {
+                return Err(ProvenanceError::ReleaseInvalid(
+                    "release names different coordinates than the descriptor",
                 ));
             }
-            // 5. The winner's claimant IS the identity under validation, and
-            //    its key IS the P0–P6-proven AK.
-            if claim.body.claimant_genesis != *ctx.genesis
-                || claim.body.claimant_devid != *ctx.device_id
-                || claim.body.claimant_public_key != ctx.proven_ak
+            // 5. THE RECIPIENT IS THE CLAIMANT: the release names the identity
+            //    under validation, and the claimant key that signed it IS the
+            //    P0–P6-proven AK. `FaucetClaim(A, x) ⇒ recipient = A`.
+            let ReleaseSource::FaucetClaimant {
+                claimant_public_key,
+            } = &release.body.source;
+            if release.body.recipient_genesis != *ctx.genesis
+                || release.body.recipient_devid != *ctx.device_id
+                || claimant_public_key != ctx.proven_ak
             {
-                return Err(ProvenanceError::FaucetClaimantMismatch);
+                return Err(ProvenanceError::ReleaseRecipientMismatch);
             }
-            // 6. NON-REUSE: the envelope commits ONE target position (whose
-            //    register cell is itself write-once) and ONE exact operation.
+            // 6. NON-REUSE: the release commits ONE target position (whose
+            //    register cell is itself final once) and ONE exact operation.
             //    Digest alone would be circular for a minimal no-nonce
             //    operation — two claims' bytes can be identical — so the
             //    position is what makes it sound; the digest pins WHICH
             //    transition.
-            if claim.body.claimant_economic_position != ctx.economic_position
-                || claim.body.recipient_operation_digest != witness.operation_digest
+            if release.body.recipient_economic_position != ctx.economic_position
+                || release.body.recipient_operation_digest != witness.operation_digest
             {
-                return Err(ProvenanceError::FaucetBindingMismatch);
+                return Err(ProvenanceError::ReleaseBindingMismatch);
             }
-            // 7. The claim was won in the CANONICAL set for this network —
-            //    accepting whatever set the winner names would let a foreign
-            //    register masquerade.
-            if claim.body.storage_set_id != ctx.canonical_storage_set_id {
-                return Err(ProvenanceError::FaucetForeignSet);
+            // 7. The release was won in the CANONICAL set for this network —
+            //    accepting whatever set it names would let a foreign register
+            //    masquerade.
+            if release.body.storage_set_id != ctx.canonical_storage_set_id {
+                return Err(ProvenanceError::ReleaseForeignSet);
             }
-            // 8. The bytes the quorum holds are the bytes the DAG addresses.
-            if faucet::faucet_claim_evidence_addr(&win.envelope_bytes)
-                != d.faucet_claim_evidence_addr
+            // 8. The bytes the members hold are the bytes the DAG addresses.
+            if native_reserve::release_evidence_addr(&win.envelope_bytes) != d.release_evidence_addr
             {
-                return Err(ProvenanceError::FaucetEvidenceAddrMismatch);
+                return Err(ProvenanceError::ReleaseEvidenceAddrMismatch);
             }
-            // The derived funding: exactly the fixed payout of builtin ERA.
-            // The generic asset/amount equality below then forces the credit
-            // mutation to be exactly +100 ERA.
-            let era = crate::core::token::token_state_manager::era_policy_commit();
+            // The derived funding: exactly what the reserve released, of the
+            // reserve's own asset. The generic asset/amount equality below
+            // then forces the credit mutation to be exactly that.
             FundedCredit {
-                source_id: faucet::faucet_ticket_source_id(&d.faucet_id, d.ticket_index),
-                policy_commit: era,
-                amount: faucet::ERA_FAUCET_PAYOUT,
+                source_id: native_reserve::release_source_id(&d.reserve_id, d.generation),
+                policy_commit: win.parent.policy_commit,
+                amount: release.body.amount,
             }
         }
     };
@@ -1215,10 +1238,11 @@ pub fn verify_credit_source(
 /// it is consumed by construction and could never be presented again. The
 /// external arms can, so their consumption has to be written down.
 fn requires_consumed_source_record(source: &CreditSource) -> bool {
-    // ValidatedFaucetDistribution deliberately does NOT require one: non-reuse
-    // is the envelope's position + digest binding (the ticket commits ONE
-    // target position, itself a write-once register cell, and ONE exact
-    // operation), so a consumed-source leaf would be bookkeeping for an
+    // NativeReserveRelease deliberately does NOT require one: non-reuse is
+    // the release's position + digest binding (the release commits ONE
+    // target position, itself a register cell that is final once, and ONE
+    // exact operation), and one generation of the reserve is final exactly
+    // once — so a consumed-source leaf would be bookkeeping for an
     // impossibility.
     // EXHAUSTIVE ON PURPOSE. As a `matches!` allowlist this defaulted a new
     // arm to `false` — no consumed-source leaf, so the source stays
@@ -1227,7 +1251,7 @@ fn requires_consumed_source_record(source: &CreditSource) -> bool {
     // and the permissive answer has to be written down to be chosen.
     match source {
         CreditSource::ValidatedPeerDebit(_) | CreditSource::VerifiedOfflineReentry(_) => true,
-        CreditSource::ValidatedFaucetDistribution(_) => false,
+        CreditSource::NativeReserveRelease(_) => false,
         // The remaining arms answer `false`, exactly as the allowlist did.
         // Each is bound to a coordinate that cannot be replayed: a
         // same-transition move is internal to the witness being verified, and

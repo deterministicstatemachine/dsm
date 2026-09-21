@@ -53,18 +53,17 @@
 
 pub mod admission;
 pub mod authority_evidence;
-pub mod cell_observation;
 pub mod claim;
 pub mod claim_envelope;
 pub mod classifier;
 pub mod credit;
 pub mod decode;
-pub mod faucet;
 pub mod issuance;
 pub mod issuance_authorization_evidence;
 pub mod keys;
 pub mod lineage;
 pub mod mutation;
+pub mod native_reserve;
 pub mod peer_acceptance;
 pub mod peer_lineage;
 pub mod provenance;

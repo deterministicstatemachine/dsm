@@ -809,7 +809,7 @@ mod tests {
                 dsm::economic::admission::PendingAdmissionKind::DsmBacked,
                 1,
                 [0u8; 32],
-                dsm::economic::faucet::dsm_operation_digest(&op.to_bytes()),
+                dsm::economic::admission::dsm_operation_digest(&op.to_bytes()),
             ),
         ))
     }
@@ -904,7 +904,7 @@ mod tests {
                 dsm::economic::admission::PendingAdmissionKind::DsmBacked,
                 1,
                 [0u8; 32],
-                dsm::economic::faucet::dsm_operation_digest(&op.to_bytes()),
+                dsm::economic::admission::dsm_operation_digest(&op.to_bytes()),
             ),
         ));
         let outcome = device

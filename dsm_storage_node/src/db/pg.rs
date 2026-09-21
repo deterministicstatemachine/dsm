@@ -324,7 +324,7 @@ mod durable_posture_tests {
     /// already `on` would prove nothing.
     #[tokio::test]
     async fn a_claim_transaction_sets_its_own_durability_rather_than_inheriting_it() {
-        let pool = crate::db::write_once_properties::test_pool();
+        let pool = crate::db::cell_properties::test_pool();
         let mut client = pool.get().await.expect("client");
         client
             .batch_execute("SET synchronous_commit = off")
@@ -701,23 +701,6 @@ pub async fn init_db(pool: &Pool) -> Result<()> {
                     first_written_tick BIGINT NOT NULL
                 );
 
-                -- ERA faucet ticket register: one row per CONSUMED ticket of
-                -- the network's finite bootstrap allocation (800M x 100 ERA).
-                -- Unused tickets are implicit. First-write-wins per
-                -- (faucet_id, ticket_index); a poisoned ticket affects only
-                -- itself — no shared faucet head to brick. The PK is the ONLY
-                -- access path; at ticket scale a secondary index is a
-                -- liability. Never UPDATEd, never DELETEd.
-                CREATE TABLE IF NOT EXISTS faucet_ticket_claims (
-                    faucet_id           BYTEA NOT NULL,
-                    ticket_index        BIGINT NOT NULL,
-                    claim_bytes         BYTEA NOT NULL,
-                    claim_digest        BYTEA NOT NULL,
-                    claimant_public_key BYTEA NOT NULL,
-                    storage_set_id      BYTEA NOT NULL,
-                    PRIMARY KEY (faucet_id, ticket_index)
-                );
-
                 -- Append-only Per-Device SMT head chain (spec §0.5 gap 13, R4
                 -- layer 1). One row per (device, head_number); a head is accepted
                 -- only if it links the current tip. No overwrite, no fork. Full
@@ -1014,93 +997,6 @@ async fn begin_durable_write(
     tx.batch_execute("SET LOCAL synchronous_commit = on")
         .await?;
     Ok(tx)
-}
-
-/// Outcome of one write-once attempt on a one-shot register cell. Shared by
-/// the faucet-ticket and economic-root registers.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum OneShotOutcome {
-    Accepted,
-    AlreadyHeldIdentical,
-    Refused { held_digest: Vec<u8> },
-}
-
-/// Write-once acceptance for one faucet ticket — settlement-register
-/// discipline: insert-if-absent, same-tx read-back. Commits durably — see
-/// [`begin_durable_write`].
-pub async fn claim_faucet_ticket(
-    pool: &Pool,
-    faucet_id: &[u8],
-    ticket_index: u64,
-    claim_bytes: &[u8],
-    claim_digest: &[u8],
-    claimant_public_key: &[u8],
-    storage_set_id: &[u8],
-) -> Result<OneShotOutcome> {
-    let idx_i64 = i64::try_from(ticket_index)
-        .map_err(|_| anyhow::anyhow!("ticket_index {ticket_index} does not fit in i64"))?;
-    let mut client = pool.get().await?;
-    let tx = begin_durable_write(&mut client).await?;
-    let stmt = tx
-        .prepare_cached(
-            "INSERT INTO faucet_ticket_claims
-               (faucet_id, ticket_index, claim_bytes, claim_digest, claimant_public_key,
-                storage_set_id)
-             VALUES ($1, $2, $3, $4, $5, $6)
-             ON CONFLICT (faucet_id, ticket_index) DO NOTHING",
-        )
-        .await?;
-    let inserted = tx
-        .execute(
-            &stmt,
-            &[
-                &faucet_id,
-                &idx_i64,
-                &claim_bytes,
-                &claim_digest,
-                &claimant_public_key,
-                &storage_set_id,
-            ],
-        )
-        .await?;
-    let outcome = if inserted == 1 {
-        OneShotOutcome::Accepted
-    } else {
-        let row = tx
-            .query_one(
-                "SELECT claim_digest FROM faucet_ticket_claims
-                  WHERE faucet_id = $1 AND ticket_index = $2",
-                &[&faucet_id, &idx_i64],
-            )
-            .await?;
-        let held: Vec<u8> = row.get(0);
-        if held == claim_digest {
-            OneShotOutcome::AlreadyHeldIdentical
-        } else {
-            OneShotOutcome::Refused { held_digest: held }
-        }
-    };
-    tx.commit().await?;
-    Ok(outcome)
-}
-
-/// The winning claim this node holds for one ticket.
-pub async fn get_faucet_ticket_claim(
-    pool: &Pool,
-    faucet_id: &[u8],
-    ticket_index: u64,
-) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
-    let idx_i64 = i64::try_from(ticket_index)
-        .map_err(|_| anyhow::anyhow!("ticket_index {ticket_index} does not fit in i64"))?;
-    let client = pool.get().await?;
-    let row = client
-        .query_opt(
-            "SELECT claim_bytes, claim_digest FROM faucet_ticket_claims
-              WHERE faucet_id = $1 AND ticket_index = $2",
-            &[&faucet_id, &idx_i64],
-        )
-        .await?;
-    Ok(row.map(|r| (r.get(0), r.get(1))))
 }
 
 /// Outcome of [`insert_recovery_authority_anchor_if_absent`].

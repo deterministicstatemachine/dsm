@@ -14,7 +14,7 @@ use dsm::economic::credit::{
 use dsm::economic::mutation::EconomicLeafMutation;
 use dsm::economic::provenance::{
     validated_peer_debit_source_id, verify_credit_source, verify_transition_provenance,
-    FaucetTicketWin, ProvenanceContext, ProvenanceError, PeerLineageFailure, ProvenanceResolver,
+    ReserveReleaseWin, ProvenanceContext, ProvenanceError, PeerLineageFailure, ProvenanceResolver,
     ValidatedPeerTransition,
 };
 use dsm::economic::state::{EconomicBalanceState, EconomicConsumedSourceState, EconomicLeafState};
@@ -45,7 +45,7 @@ impl ProvenanceResolver for NoPeers {
             "no peer store in this fixture".into(),
         ))
     }
-    fn winning_faucet_ticket(&self, _f: &[u8; 32], _i: u64) -> Option<FaucetTicketWin> {
+    fn native_reserve_release(&self, _r: &[u8; 32], _g: u64) -> Option<ReserveReleaseWin> {
         None
     }
 

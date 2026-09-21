@@ -543,16 +543,19 @@ impl B0xSDK {
         // used to live here; it agreed with the 5/3 pin by coincidence and
         // silently diverged from the 3/2 one (#867). No profile, no fan-out:
         // a device that cannot resolve its register has nothing to deliver to.
-        let quorum_k = dsm::economic::register::resolve_root_register_profile(
-            dsm::economic::register::BETA_NETWORK_ID,
-        )
-        .map_err(|e| {
-            DsmError::internal(
-                format!("B0xSDK::new: root register profile unresolved: {e}"),
-                None::<std::io::Error>,
+        let quorum_k = crate::storage::client_db::publication::quorum_for(
+            dsm::economic::register::resolve_root_register_profile(
+                dsm::economic::register::BETA_NETWORK_ID,
             )
-        })?
-        .quorum as usize;
+            .map_err(|e| {
+                DsmError::internal(
+                    format!("B0xSDK::new: root register profile unresolved: {e}"),
+                    None::<std::io::Error>,
+                )
+            })?
+            .members
+            .len(),
+        ) as usize;
 
         let sdk = Self {
             device_id: device_id_b32,
@@ -4929,7 +4932,7 @@ mod tests {
             dsm::economic::register::BETA_NETWORK_ID,
         )
         .expect("beta profile");
-        let k = profile.quorum as usize;
+        let k = crate::storage::client_db::publication::quorum_for(profile.members.len()) as usize;
         let hits = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         // Strictly more members than K, so "reached K" and "reached all" differ.
         let endpoints: Vec<String> = (0..k + 2)

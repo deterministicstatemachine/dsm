@@ -36,7 +36,26 @@ pub(crate) const ARTIFACT_REPUBLISH_ROWS_PER_POLL: u32 = 8;
 pub(crate) async fn republish_unpublished_artifacts() -> Result<u32, String> {
     let rows = fpa::list_unpublished_artifacts(ARTIFACT_REPUBLISH_ROWS_PER_POLL)
         .map_err(|e| format!("list unpublished artifacts: {e}"))?;
-    republish_rows(rows).await
+    let published = republish_rows(rows).await?;
+    carry_reserve_successors().await;
+    Ok(published)
+}
+
+/// The all-member carry of the native reserve's successors this device wrote
+/// (owner ruling: replication continues asynchronously until every active
+/// member holds the successor). Best effort on every pass; never a condition
+/// of anything above.
+async fn carry_reserve_successors() {
+    let Ok(set) = crate::sdk::economic_admission_flow::canonical_set(
+        dsm::economic::register::BETA_NETWORK_ID,
+    ) else {
+        return;
+    };
+    match crate::sdk::native_reserve::carry_pending_releases(&set).await {
+        Ok(0) => {}
+        Ok(n) => log::info!("[reserve carry] {n} successor(s) now held by every member"),
+        Err(e) => log::warn!("[reserve carry] deferred: {e}"),
+    }
 }
 
 /// The pass proper, over an already-selected batch.

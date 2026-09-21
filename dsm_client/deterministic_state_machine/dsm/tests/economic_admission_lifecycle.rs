@@ -23,7 +23,7 @@ use dsm::economic::lineage::{
 use dsm::economic::mutation::EconomicLeafMutation;
 use dsm::economic::register::RegisteredEconomicRoot;
 use dsm::economic::provenance::{
-    FaucetTicketWin, PeerLineageFailure, ProvenanceResolver, ValidatedPeerTransition,
+    PeerLineageFailure, ProvenanceResolver, ReserveReleaseWin, ValidatedPeerTransition,
 };
 use dsm::economic::state::{EconomicBalanceState, EconomicConsumedSourceState, EconomicLeafState};
 use dsm::economic::tree::EconomicSmt;
@@ -228,30 +228,41 @@ struct FaucetFixture {
     post_root: [u8; 32],
 }
 
+/// The reserve state the fixture's release succeeds: `R_0`.
+fn reserve_genesis() -> dsm::economic::native_reserve::NativeReserveState {
+    dsm::economic::native_reserve::NativeReserveState::genesis(b"dsm-testnet", canonical_set_id())
+}
+
 fn faucet_fixture(position: u64) -> FaucetFixture {
-    use dsm::economic::credit::CreditSourceValidatedFaucetDistribution;
-    use dsm::economic::faucet::{
-        dsm_economic_operation_id, dsm_operation_digest, era_faucet_id, faucet_claim_evidence_addr,
-        sign_faucet_ticket_claim, FaucetTicketClaimBody, ERA_FAUCET_PAYOUT,
+    use dsm::economic::admission::{dsm_economic_operation_id, dsm_operation_digest};
+    use dsm::economic::credit::CreditSourceNativeReserveRelease;
+    use dsm::economic::native_reserve::{
+        release_evidence_addr, sign_release, NativeReserveReleaseBody, ReleaseSource,
+        ERA_FAUCET_PAYOUT,
     };
     let (pk, sk) = dsm::crypto::sphincs::generate_sphincs_keypair().expect("keypair");
-    let faucet_id = era_faucet_id(b"dsm-testnet");
-    let ticket_index = 42u64;
+    let parent = reserve_genesis();
+    let reserve_id = parent.reserve_id;
+    let generation = 1u64;
     let op = Operation::FaucetClaim {
-        faucet_id,
-        ticket_index,
+        reserve_id,
+        generation,
     };
     let op_digest = dsm_operation_digest(&op.to_bytes());
-    let envelope = sign_faucet_ticket_claim(
-        &FaucetTicketClaimBody {
-            faucet_id,
-            ticket_index,
-            claimant_genesis: G,
-            claimant_devid: DEV,
-            claimant_economic_position: position,
+    let envelope = sign_release(
+        &NativeReserveReleaseBody {
+            reserve_id,
+            parent_root: parent.root(),
+            generation,
+            amount: ERA_FAUCET_PAYOUT,
+            recipient_genesis: G,
+            recipient_devid: DEV,
+            recipient_economic_position: position,
             recipient_operation_digest: op_digest,
-            claimant_public_key: pk.clone(),
             storage_set_id: canonical_set_id(),
+            source: ReleaseSource::FaucetClaimant {
+                claimant_public_key: pk.clone(),
+            },
         },
         &sk,
     )
@@ -274,12 +285,12 @@ fn faucet_fixture(position: u64) -> FaucetFixture {
         dsm_economic_operation_id(&G, &DEV, &C_DSM_PLUS),
         op_digest,
         vec![mutation],
-        vec![CreditSource::ValidatedFaucetDistribution(
-            CreditSourceValidatedFaucetDistribution {
+        vec![CreditSource::NativeReserveRelease(
+            CreditSourceNativeReserveRelease {
                 credit_mutation_index: 0,
-                faucet_id,
-                ticket_index,
-                faucet_claim_evidence_addr: faucet_claim_evidence_addr(&envelope),
+                reserve_id,
+                generation,
+                release_evidence_addr: release_evidence_addr(&envelope),
             },
         )],
     )
@@ -293,7 +304,8 @@ fn faucet_fixture(position: u64) -> FaucetFixture {
     }
 }
 
-/// A resolver holding exactly one quorum-winning envelope.
+/// A resolver whose walk established exactly one final release, at
+/// generation 1 of `R_0`.
 struct OneTicket {
     envelope: Vec<u8>,
 }
@@ -315,9 +327,10 @@ impl ProvenanceResolver for OneTicket {
             "no peer store in this fixture".into(),
         ))
     }
-    fn winning_faucet_ticket(&self, _f: &[u8; 32], _i: u64) -> Option<FaucetTicketWin> {
-        Some(FaucetTicketWin {
+    fn native_reserve_release(&self, _r: &[u8; 32], _g: u64) -> Option<ReserveReleaseWin> {
+        Some(ReserveReleaseWin {
             envelope_bytes: self.envelope.clone(),
+            parent: reserve_genesis(),
         })
     }
 
@@ -473,7 +486,7 @@ fn a_witness_that_is_not_the_operations_exact_effect_is_refused() {
     let forged = EconomicTransitionWitness::new(
         pre_root,
         tree.root(),
-        dsm::economic::faucet::dsm_economic_operation_id(&G, &DEV, &C_DSM_PLUS),
+        dsm::economic::admission::dsm_economic_operation_id(&G, &DEV, &C_DSM_PLUS),
         fx.witness.operation_digest,
         vec![mutation],
         Vec::new(),
@@ -522,8 +535,8 @@ fn issuance_requires_its_predicate_to_be_satisfied_not_merely_defined() {
     let witness = EconomicTransitionWitness::new(
         witness.pre_economic_root,
         witness.post_economic_root,
-        dsm::economic::faucet::dsm_economic_operation_id(&G, &DEV, &C_DSM_PLUS),
-        dsm::economic::faucet::dsm_operation_digest(&mint.to_bytes()),
+        dsm::economic::admission::dsm_economic_operation_id(&G, &DEV, &C_DSM_PLUS),
+        dsm::economic::admission::dsm_operation_digest(&mint.to_bytes()),
         witness.mutations,
         witness.credit_sources,
     )
@@ -562,8 +575,8 @@ fn a_successor_paired_with_a_different_operation_is_refused() {
     let manifest = manifest_for(&fx.witness);
     let registered = registered_for(&manifest, 1, fx.post_root);
     let other_op = Operation::FaucetClaim {
-        faucet_id: dsm::economic::faucet::era_faucet_id(b"dsm-testnet"),
-        ticket_index: 43,
+        reserve_id: dsm::economic::native_reserve::era_reserve_id(b"dsm-testnet"),
+        generation: 43,
     };
     let wrong = accepted_for(&other_op);
     match run(&fx, &registered, &manifest, &fx.witness, &wrong) {
@@ -788,7 +801,7 @@ fn a_setup_transition_binds_its_position_and_its_derived_root() {
             &op,
             &G,
             &DEV,
-            &dsm::economic::faucet::dsm_economic_operation_id(&G, &DEV, &C_DSM_PLUS),
+            &dsm::economic::admission::dsm_economic_operation_id(&G, &DEV, &C_DSM_PLUS),
             &dsm::economic::write_set::EconomicPreState::new(&std::collections::BTreeMap::new()),
             &mut build_tree,
             &dsm::economic::write_set::CreditSourceFacts::None,
@@ -802,8 +815,8 @@ fn a_setup_transition_binds_its_position_and_its_derived_root() {
         let witness = EconomicTransitionWitness::new(
             pre_root,
             built.post_root,
-            dsm::economic::faucet::dsm_economic_operation_id(&G, &DEV, &C_DSM_PLUS),
-            dsm::economic::faucet::dsm_operation_digest(&op.to_bytes()),
+            dsm::economic::admission::dsm_economic_operation_id(&G, &DEV, &C_DSM_PLUS),
+            dsm::economic::admission::dsm_operation_digest(&op.to_bytes()),
             built.mutations,
             built.credit_sources,
         )

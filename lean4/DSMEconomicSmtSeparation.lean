@@ -15,7 +15,6 @@
     4. ABSENT_LEAF is not a populated leaf commitment.
     5. Independently keyed economic leaves do not interfere, at map, tree and
        root level, with anti-vacuity witnesses.
-    6. Qualifying quorums intersect when 2q > n, and canonical_quorum(5) = 3.
 
   ── ON NAMING: THIS IS NOT "PREFIX-FREEDOM" ─────────────────────────────────
   The delimiter gives INJECTIVITY IN (tag, message) and hence DISJOINT PREIMAGE
@@ -31,7 +30,7 @@
   §1-§2 are theorems about REAL byte lists and REAL tag literals. They assume
   nothing.
 
-  §3-§10 are theorems about a SYMBOLIC model: `Digest` is the free term algebra
+  §3-§9 are theorems about a SYMBOLIC model: `Digest` is the free term algebra
   over the tagged encoder, so distinct preimages give distinct digests BY
   CONSTRUCTION. That is the abstraction ruling G explicitly asks for — "stated
   under the symbolic abstraction, not as theorems about BLAKE3" — and it is the
@@ -97,8 +96,6 @@
     - root_from_path                     economic/tree.rs:104-119
     - economic_leaf_value                economic/state.rs:271-277
     - K_root                             economic/register.rs:76-86
-    - canonical_quorum                   economic/cell_observation.rs:70-75
-    - SOFI_BETA_MEMBERS / _QUORUM        dlv/beta_storage_profile.rs:54-57
 
   A source-tree note. `economic/tree.rs:29` states "Since every present leaf is
   a BLAKE3 output, all-zero is unreachable as a present value." The conclusion
@@ -551,106 +548,6 @@ theorem update_frame_needs_key_distinctness :
   · intro hc
     exact Option.noConfusion hc
 
--- §10 OBLIGATION 7: QUORUM INTERSECTION
-theorem count_inclusion_exclusion {α : Type} (l : List α) (A B : α → Bool) :
-    (l.filter (fun x => A x && B x)).length + (l.filter (fun x => A x || B x)).length
-      = (l.filter A).length + (l.filter B).length := by
-  induction l with
-  | nil => rfl
-  | cons a t ih => cases hA : A a <;> cases hB : B a <;> simp [hA, hB] <;> omega
-
-/-- The positional pigeonhole. `A` and `B` are PREDICATES over the member
-    universe, not independently chosen sublists, so neither can inflate its own
-    cardinality and the proof needs no `Nodup`.
-
-    `_hnodup` is `_`-prefixed by the house convention for a hypothesis that is
-    not load-bearing IN THE PROOF — and it is carried anyway, because it is what
-    licenses reading `S.length` as *the number of distinct storage members*.
-    Without it the lemma stays true and `n` stops denoting membership, which is
-    the quantity obligation 7 is about. -/
-theorem quorum_intersection {α : Type} (members : List α) (A B : α → Bool)
-    (_hnodup : members.Nodup)
-    (h : members.length < (members.filter A).length + (members.filter B).length) :
-    ∃ x, x ∈ members ∧ A x = true ∧ B x = true := by
-  have hie := count_inclusion_exclusion members A B
-  have hub := List.length_filter_le (fun x => A x || B x) members
-  have hpos : 0 < (members.filter (fun x => A x && B x)).length := by omega
-  obtain ⟨x, hx⟩ := List.exists_mem_of_length_pos hpos
-  rw [List.mem_filter] at hx
-  exact ⟨x, hx.1, by simpa using hx.2⟩
-
-/-- THE OBLIGATION, over QUALIFYING quorums: response sets satisfying AT LEAST
-    `q`, which is what the protocol actually deals with. -/
-theorem qualifying_quorums_intersect {α : Type}
-    (members : List α) (n q : Nat) (A B : α → Bool)
-    (hnodup : members.Nodup)
-    (hn : members.length = n)
-    (hA : q ≤ (members.filter A).length)
-    (hB : q ≤ (members.filter B).length)
-    (h2q : n < 2 * q) :
-    ∃ x, x ∈ members ∧ A x = true ∧ B x = true := by
-  refine quorum_intersection members A B hnodup ?_
-  omega
-
-/-- The exact-`q` form, kept as the underlying lemma. -/
-theorem quorum_intersection_of_two_q {α : Type}
-    (members : List α) (n q : Nat) (A B : α → Bool)
-    (hnodup : members.Nodup)
-    (hn : members.length = n)
-    (hA : (members.filter A).length = q)
-    (hB : (members.filter B).length = q)
-    (h2q : n < 2 * q) :
-    ∃ x, x ∈ members ∧ A x = true ∧ B x = true :=
-  qualifying_quorums_intersect members n q A B hnodup hn (by omega) (by omega) h2q
-
-/-- `canonical_quorum(n) = n/2 + 1` — economic/cell_observation.rs:70-75.
-    DERIVED, never chosen. -/
-def canonicalQuorum (n : Nat) : Nat := n / 2 + 1
-
-theorem canonical_quorum_intersects (n : Nat) : n < 2 * canonicalQuorum n := by
-  unfold canonicalQuorum; omega
-
-/-- ...and it is the SMALLEST such threshold, which is why
-    `require_canonical_quorum` demands exact equality in both directions. -/
-theorem canonical_quorum_is_minimal (n q : Nat) (h : n < 2 * q) : canonicalQuorum n ≤ q := by
-  unfold canonicalQuorum; omega
-
-/-- THE BETA COROLLARY. `SOFI_BETA_QUORUM = 3` over `SOFI_BETA_MEMBERS = 5` is
-    exactly `canonical_quorum(5)` — an identity, not an arithmetic coincidence.
-    Mirrors dlv/beta_storage_profile.rs:160-168. -/
-theorem beta_quorum_is_canonical : canonicalQuorum 5 = 3 := rfl
-
-theorem beta_quorums_intersect {α : Type} (members : List α) (A B : α → Bool)
-    (hnodup : members.Nodup)
-    (hn : members.length = 5)
-    (hA : 3 ≤ (members.filter A).length)
-    (hB : 3 ≤ (members.filter B).length) :
-    ∃ x, x ∈ members ∧ A x = true ∧ B x = true :=
-  qualifying_quorums_intersect members 5 3 A B hnodup hn hA hB (by decide)
-
-/-- TEETH: a sub-canonical `q` admits two DISJOINT quorums and therefore two
-    winners. n = 4, q = 2 (canonical is 3). The safety failure
-    `require_canonical_quorum` exists to refuse. -/
-theorem subcanonical_quorum_admits_disjoint_quorums :
-    ∃ (members : List Nat) (A B : Nat → Bool) (n q : Nat),
-      members.Nodup ∧ members.length = n ∧ (members.filter A).length = q ∧
-      (members.filter B).length = q ∧ q < canonicalQuorum n ∧
-      ¬ ∃ x, x ∈ members ∧ A x = true ∧ B x = true := by
-  refine ⟨[0, 1, 2, 3], (fun x => decide (x < 2)), (fun x => decide (2 ≤ x)), 4, 2, ?_⟩
-  refine ⟨by decide, by decide, by decide, by decide, by decide, by decide⟩
-
-/-- TEETH: a zero threshold carries no intersection at all. Reachable, because
-    `canonical_quorum(0) = 0` in the Rust and `quorum_for(0) == 0` — the
-    "emptiness manufactured from no members at all" the amendment requires
-    `observe_cell` to refuse. -/
-theorem zero_threshold_carries_no_intersection :
-    ¬ ∀ (members : List Nat) (A B : Nat → Bool),
-        0 ≤ (members.filter A).length → 0 ≤ (members.filter B).length →
-        ∃ x, x ∈ members ∧ A x = true ∧ B x = true := by
-  intro h
-  obtain ⟨x, hx, _, _⟩ := h [] (fun _ => true) (fun _ => true) (by omega) (by omega)
-  exact absurd hx (by simp)
-
 -- §11 ADEQUACY BRIDGE — the only place cryptography appears
 def encodeDigs (bytesOf : Digest → List UInt8) : List Digest → List UInt8
   | []      => []
@@ -805,15 +702,6 @@ theorem adequacy_needs_field_injectivity :
       stores on BOTH sides — the failure mode of DSMNonInterference.lean's old
       `operation_locality`, repaired separately, is structurally excluded here.
 
-   7  quorum intersection (owner-added)
-      -> quorum_intersection, qualifying_quorums_intersect,
-         quorum_intersection_of_two_q, canonical_quorum_intersects,
-         canonical_quorum_is_minimal, beta_quorum_is_canonical,
-         beta_quorums_intersect
-      PROVED, zero assumptions, zero Mathlib. Stated over QUALIFYING quorums
-      (at least q), which is what the protocol deals with; the exact-q form is
-      kept as the underlying lemma.
-
   Non-vacuity witnesses:
     econ_domain_count, econ_domain_table_complete, update_inhabited,
     fold_path_inhabited, distinct_leaves_give_distinct_roots
@@ -823,16 +711,13 @@ theorem adequacy_needs_field_injectivity :
     update_frame_needs_key_distinctness
     econ_node_argument_order_matters
     econ_leaf_binds_key_and_value
-    subcanonical_quorum_admits_disjoint_quorums
-    zero_threshold_carries_no_intersection
     global_injectivity_would_smuggle_in_the_zero_claim
     adequacy_needs_field_injectivity
 
   Axioms used: NONE. This module declares no `axiom` and no `opaque`.
   `#print axioms` on every headline theorem reports only Lean's own logical
-  axioms — `propext`, and `Quot.sound` for the quorum results — because the two
-  cryptographic assumptions are carried as HYPOTHESES in §11 signatures rather
-  than as file-global axioms. `beta_quorum_is_canonical` depends on none at all.
+  axioms — `propext` — because the two cryptographic assumptions are carried
+  as HYPOTHESES in §11 signatures rather than as file-global axioms.
 
   DO NOT report this module as "axiom-free" without that qualification: the
   quorum results are, and the economic hash / non-aliasing results rest on the

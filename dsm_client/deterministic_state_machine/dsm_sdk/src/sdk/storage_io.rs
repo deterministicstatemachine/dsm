@@ -252,48 +252,6 @@ pub(crate) async fn fetch_immutable_payload(
     }
 }
 
-/// Submit one frozen settlement-slot claim envelope to every member of `set`,
-/// each authenticated with its OWN per-node token (lazily back-filled like
-/// [`put_bytes`]). Never decides quorum; never retries — the caller replays the
-/// same bytes if it must.
-/// Economic-register seams. Same cfg discipline as the settlement claim:
-/// tests drive the fake fleet; production fans out over the set's members
-/// with per-member auth.
-///
-/// `network_id` is the network the members of `set` serve. A live member
-/// knows its own network and gates the canonical faucet identity on it; the
-/// in-process double must be told, so that it refuses a claim for another
-/// network's faucet exactly as a live member would.
-pub(crate) async fn submit_faucet_ticket_claim(
-    set: &crate::sdk::storage_set::StorageSet,
-    network_id: &[u8],
-    envelope: &[u8],
-) -> Result<crate::sdk::storage_node_sdk::ClaimFanout, DsmError> {
-    #[cfg(any(test, feature = "test-utils"))]
-    {
-        Ok(fake_registers::claim(
-            set,
-            fake_registers::RegisterKind::FaucetTicket,
-            envelope,
-            fake_registers::process_caller().as_ref(),
-            Some(network_id),
-        ))
-    }
-    #[cfg(not(any(test, feature = "test-utils")))]
-    {
-        let _ = network_id;
-        let sdk = member_sdk_with_auth(set).await?;
-        Ok(sdk
-            .submit_one_shot_claim(
-                set,
-                "/api/v2/faucet-ticket/claim",
-                "x-dsm-faucet-ticket",
-                envelope,
-            )
-            .await)
-    }
-}
-
 /// Outcome of a leader-first cell write (Part II §8).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CellWrite {
@@ -378,6 +336,31 @@ pub(crate) async fn write_cell_leader_first(
             leader_reached: fanout.leader_reached,
             copies: fanout.copies,
         })
+    }
+}
+
+/// Part II §8 step 5: carry `value` at `key` under `namespace` to one member
+/// of `set`, by index. Any party may carry the bytes to a member not reached
+/// at write time; a member keeps what it is given.
+pub(crate) async fn put_cell_to_member(
+    set: &crate::sdk::storage_set::StorageSet,
+    member: usize,
+    namespace: &[u8],
+    key: &[u8; 32],
+    value: &[u8],
+) -> Result<(), DsmError> {
+    #[cfg(any(test, feature = "test-utils"))]
+    {
+        fake_registers::put_cell_to_member(set, member, namespace, key, value)
+            .map_err(|e| DsmError::storage(e, None::<std::io::Error>))
+    }
+    #[cfg(not(any(test, feature = "test-utils")))]
+    {
+        let sdk = member_sdk_with_auth(set).await?;
+        let key_b32 = crate::util::text_id::encode_base32_crockford(key);
+        sdk.put_cell_to_member(set, member, namespace, &key_b32, value)
+            .await
+            .map_err(|e| DsmError::storage(e, None::<std::io::Error>))
     }
 }
 
@@ -527,53 +510,11 @@ async fn read_index_raw(
     }
 }
 
-pub(crate) async fn read_faucet_ticket_cell(
-    set: &crate::sdk::storage_set::StorageSet,
-    faucet_id: &[u8; 32],
-    ticket_index: u64,
-) -> Result<Vec<dsm::economic::cell_observation::MemberCellRead>, DsmError> {
-    #[cfg(any(test, feature = "test-utils"))]
-    {
-        Ok(fake_registers::read(
-            set,
-            fake_registers::RegisterKind::FaucetTicket,
-            &fake_registers::ticket_key(faucet_id, ticket_index),
-        ))
-    }
-    #[cfg(not(any(test, feature = "test-utils")))]
-    {
-        let sdk = member_sdk_with_auth(set).await?;
-        let path = crate::sdk::economic_registers::faucet_ticket_path(faucet_id, ticket_index);
-        Ok(sdk.read_register_cell(set, &path).await)
-    }
-}
-
-/// TEST-ONLY in-process economic registers: one write-once cell map per
-/// member per register kind, with the same injectable echo/failure seams the
-/// settlement fake fleet has. Envelope digests use the REAL protocol digests,
-/// so the counting logic under test sees production shapes.
-///
-/// The in-process double for the storage node's write-once ECONOMIC
-/// registers (faucet tickets, economic roots).
-///
-/// Protocol-faithful by construction, not by resemblance: every check a
-/// live member performs before touching its cell is the SAME shared
-/// function the node's handler calls (`decode_and_verify_*`,
-/// `verify_claim_attribution`, `verify_faucet_claim_attribution`,
-/// `MAX_CLAIM_BYTES`), applied in the node's order, and every refusal is
-/// expressed as the node's `(status, outcome)` pair and handed to the ONE
-/// client-side classifier the live path uses. The double therefore never
-/// constructs a client result of its own; it reproduces what a member
-/// would have answered. Its equivalence with the real endpoint is proven
-/// by `dsm_storage_node/tests/economic_register_conformance.rs`, which
-/// drives identical vectors through both.
-///
-/// What it does NOT model, stated rather than hidden: the transport-layer
-/// refusals a real member's `device_auth` can emit for a caller it does
-/// know (revoked, bad token, replayed message id, oversize body), and the
-/// per-member independence of a real fleet under concurrent claims — the
-/// double serialises a whole fan-out, so every member agrees on one
-/// winner, where real members decide independently and can split.
+/// TEST-ONLY in-process keyed cells (Part II §12): everything each member
+/// was given at a `(namespace, key)`, in arrival order, with an injectable
+/// per-member outage. Nothing is refused, replaced or compared — a member
+/// holds bytes and decides nothing — so the leader-first facts a test
+/// observes are exactly what Core derives from a live fleet's raw reads.
 // Widened from `cfg(test)` to include `test-utils`: the LEGITIMATE funding
 // path must be reachable from integration tests in `tests/*.rs`, which are
 // external consumers a `cfg(test)` gate is invisible to. That invisibility is
@@ -585,35 +526,14 @@ pub mod fake_registers {
     use std::collections::{HashMap, HashSet};
     use std::sync::Mutex;
 
-    use dsm::economic::register::AuthenticatedCaller;
-
-    use crate::sdk::storage_node_sdk::{
-        classify_one_shot_response, ClaimFanout, MemberClaimOutcome, MemberClaimResult,
-    };
     use crate::sdk::storage_set::StorageSet;
-
-    /// Which write-once register a claim targets. A type rather than a name:
-    /// a member routes on the endpoint it was asked, never on a string that
-    /// could fall through to a default.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-    pub enum RegisterKind {
-        FaucetTicket,
-    }
 
     #[derive(Default)]
     struct State {
-        /// (member_id, register) -> (cell key -> (bytes, digest))
-        cells: HashMap<(String, RegisterKind), HashMap<Vec<u8>, (Vec<u8>, [u8; 32])>>,
         /// Part II §12 cells: everything each member was given at a
-        /// `(namespace, key)`, in arrival order. Nothing is refused, replaced
-        /// or compared.
+        /// `(namespace, key)`, in arrival order.
         keyed: HashMap<String, HashMap<(Vec<u8>, [u8; 32]), Vec<Vec<u8>>>>,
         failing: HashSet<String>,
-        echo_override: HashMap<String, Option<String>>,
-        /// What a member echoes as its REGISTER INCARNATION, when it is not
-        /// the one the set committed. `None` models a member that answers
-        /// without saying which register it is serving.
-        incarnation_override: HashMap<String, Option<[u8; 32]>>,
     }
 
     static STATE: Mutex<Option<State>> = Mutex::new(None);
@@ -629,9 +549,8 @@ pub mod fake_registers {
     }
 
     /// Take a member down (or bring it back). A down member answers nothing:
-    /// its claim outcome is an unattributed `Unavailable`, and its read row is
-    /// an unattributed empty — exactly the shape the live client produces for
-    /// a transport failure, and never the attributed empty of a member that is
+    /// its read row is `None` — exactly the shape the live client produces
+    /// for a transport failure, and never the empty list of a member that is
     /// up and holds nothing.
     pub fn fail_member(member_id: &str, failing: bool) {
         with_state(|s| {
@@ -643,190 +562,6 @@ pub mod fake_registers {
         })
     }
 
-    pub fn set_echo(member_id: &str, echo: Option<String>) {
-        with_state(|s| {
-            s.echo_override.insert(member_id.to_string(), echo);
-        })
-    }
-
-    /// Model a member that is no longer serving the register the set
-    /// committed — a lost-and-rebuilt database, or a restore from a snapshot.
-    ///
-    /// The member keeps its id and answers perfectly honestly; what changed is
-    /// which durable register history is answering. `None` models a member
-    /// that will not say which register it is serving at all.
-    pub fn set_register_incarnation(member_id: &str, incarnation: Option<[u8; 32]>) {
-        with_state(|s| {
-            s.incarnation_override
-                .insert(member_id.to_string(), incarnation);
-        })
-    }
-
-    pub fn ticket_key(faucet_id: &[u8; 32], ticket_index: u64) -> Vec<u8> {
-        let mut k = faucet_id.to_vec();
-        k.extend_from_slice(&ticket_index.to_be_bytes());
-        k
-    }
-
-    /// The identity a live member would have authenticated for THIS process:
-    /// the device id and signing key the process registered with its storage
-    /// nodes — the same `AppState` fields `resolve_storage_auth` reads. `None`
-    /// when no identity is installed, which a member answers as an
-    /// unauthenticated request.
-    pub fn process_caller() -> Option<AuthenticatedCaller> {
-        let device_id = crate::sdk::app_state::AppState::get_device_id()?;
-        let public_key = crate::sdk::app_state::AppState::get_public_key()?;
-        let device_id: [u8; 32] = device_id.as_slice().try_into().ok()?;
-        Some(AuthenticatedCaller {
-            public_key,
-            device_id,
-        })
-    }
-
-    fn digest_for(kind: RegisterKind, envelope: &[u8]) -> [u8; 32] {
-        match kind {
-            RegisterKind::FaucetTicket => {
-                dsm::economic::faucet::faucet_claim_evidence_addr(envelope)
-            }
-        }
-    }
-
-    /// Everything a member decides BEFORE it touches its cell, in the node's
-    /// order, as the node's answer: `Ok(cell key)` or the `(status, outcome)`
-    /// pair the node's handler (or its `device_auth` layer) would return.
-    fn precheck(
-        kind: RegisterKind,
-        envelope: &[u8],
-        caller: Option<&AuthenticatedCaller>,
-        configured_set_id: &[u8; 32],
-        network_id: Option<&[u8]>,
-    ) -> Result<Vec<u8>, (u16, &'static str)> {
-        // device_auth: no authenticated device -> 401, no outcome header.
-        let Some(caller) = caller else {
-            return Err((401, ""));
-        };
-        if envelope.is_empty() || envelope.len() > dsm::economic::register::MAX_CLAIM_BYTES {
-            return Err((400, "malformed"));
-        }
-        match kind {
-            RegisterKind::FaucetTicket => {
-                use dsm::economic::faucet::{
-                    decode_and_verify_faucet_ticket_claim, verify_faucet_claim_attribution,
-                    FaucetAttributionError, FaucetClaimError,
-                };
-                let verified = match decode_and_verify_faucet_ticket_claim(envelope) {
-                    Ok(v) => v,
-                    Err(FaucetClaimError::SignatureInvalid) => {
-                        return Err((403, "signature-invalid"))
-                    }
-                    Err(_) => return Err((400, "malformed")),
-                };
-                match verify_faucet_claim_attribution(
-                    &verified,
-                    caller,
-                    Some(configured_set_id),
-                    network_id,
-                ) {
-                    Ok(()) => {}
-                    Err(FaucetAttributionError::ClaimantIsNotCaller) => {
-                        return Err((403, "claimant-not-caller"))
-                    }
-                    Err(FaucetAttributionError::DeviceIsNotCaller) => {
-                        return Err((403, "device-not-caller"))
-                    }
-                    Err(FaucetAttributionError::StorageSetUnconfigured) => {
-                        return Err((503, "no-storage-set"))
-                    }
-                    Err(FaucetAttributionError::WrongStorageSet { .. }) => {
-                        return Err((422, "foreign-set"))
-                    }
-                    Err(FaucetAttributionError::NetworkUnconfigured) => {
-                        return Err((503, "no-network"))
-                    }
-                    Err(FaucetAttributionError::NoncanonicalFaucet) => {
-                        return Err((422, "noncanonical-faucet"))
-                    }
-                    Err(FaucetAttributionError::TicketOutOfRange) => {
-                        return Err((422, "ticket-out-of-range"))
-                    }
-                }
-                Ok(ticket_key(
-                    &verified.body.faucet_id,
-                    verified.body.ticket_index,
-                ))
-            }
-        }
-    }
-
-    /// Submit `envelope` to every member of `set` as `caller`, on members
-    /// configured for `set` and (faucet register only) for `network_id`.
-    /// First-write-wins per member, exactly like the node; every refusal is
-    /// the node's own `(status, outcome)` through the shared classifier.
-    pub fn claim(
-        set: &StorageSet,
-        kind: RegisterKind,
-        envelope: &[u8],
-        caller: Option<&AuthenticatedCaller>,
-        network_id: Option<&[u8]>,
-    ) -> ClaimFanout {
-        let configured_set_id = set.id();
-        let decision = precheck(kind, envelope, caller, &configured_set_id, network_id);
-        let digest = digest_for(kind, envelope);
-        let mut outcomes = Vec::new();
-        with_state(|s| {
-            for member in set.members() {
-                let echoed = s
-                    .echo_override
-                    .get(&member.member_id)
-                    .cloned()
-                    .unwrap_or_else(|| Some(member.member_id.clone()));
-                if s.failing.contains(&member.member_id) {
-                    outcomes.push(MemberClaimOutcome {
-                        member_id: member.member_id.clone(),
-                        endpoint: member.endpoint.clone(),
-                        result: MemberClaimResult::Unavailable("injected".into()),
-                        echoed_node_id: None,
-                    });
-                    continue;
-                }
-                let result = match &decision {
-                    Err((status, outcome)) => classify_one_shot_response(*status, outcome, None),
-                    Ok(key) => {
-                        let cells = s.cells.entry((member.member_id.clone(), kind)).or_default();
-                        match cells.get(key) {
-                            None => {
-                                cells.insert(key.clone(), (envelope.to_vec(), digest));
-                                classify_one_shot_response(200, "accepted", None)
-                            }
-                            Some((_, held)) if *held == digest => {
-                                classify_one_shot_response(200, "held-identical", None)
-                            }
-                            Some((_, held)) => classify_one_shot_response(
-                                409,
-                                "refused",
-                                Some(&crate::util::text_id::encode_base32_crockford(held)),
-                            ),
-                        }
-                    }
-                };
-                outcomes.push(MemberClaimOutcome {
-                    member_id: member.member_id.clone(),
-                    endpoint: member.endpoint.clone(),
-                    result,
-                    echoed_node_id: echoed,
-                });
-            }
-        });
-        ClaimFanout {
-            outcomes,
-            total: set.len() as u32,
-        }
-    }
-
-    /// Member-attributed read of one cell: `(member_id, echoed node id,
-    /// winner bytes)` per member. A down member yields `(id, None, None)` —
-    /// the live client's row for a transport failure — so silence can never
-    /// count as an attributed empty.
     /// Part II §8 at a fake member: append at the leader first, then at the
     /// others. A failing member simply does not hold the bytes.
     pub fn put_cell(
@@ -839,26 +574,39 @@ pub mod fake_registers {
         let mut order: Vec<usize> = (0..set.len()).filter(|i| *i != leader).collect();
         order.insert(0, leader);
         let mut write = super::CellWrite::default();
-        with_state(|s| {
-            for i in order {
-                let member = &set.members()[i];
-                if s.failing.contains(&member.member_id) {
-                    continue;
-                }
-                s.keyed
-                    .entry(member.member_id.clone())
-                    .or_default()
-                    .entry((namespace.to_vec(), *key))
-                    .or_default()
-                    .push(value.to_vec());
+        for i in order {
+            if put_cell_to_member(set, i, namespace, key, value).is_ok() {
                 if i == leader {
                     write.leader_reached = true;
                 } else {
                     write.copies += 1;
                 }
             }
-        });
+        }
         write
+    }
+
+    /// Part II §8 step 5 at a fake member: carry the bytes to one member.
+    pub fn put_cell_to_member(
+        set: &StorageSet,
+        member: usize,
+        namespace: &[u8],
+        key: &[u8; 32],
+        value: &[u8],
+    ) -> Result<(), String> {
+        let member = &set.members()[member];
+        with_state(|s| {
+            if s.failing.contains(&member.member_id) {
+                return Err("injected outage".to_string());
+            }
+            s.keyed
+                .entry(member.member_id.clone())
+                .or_default()
+                .entry((namespace.to_vec(), *key))
+                .or_default()
+                .push(value.to_vec());
+            Ok(())
+        })
     }
 
     /// Part II §12 get at every fake member, in set order.
@@ -886,52 +634,25 @@ pub mod fake_registers {
         })
     }
 
-    pub fn read(
+    /// Which members hold `value` at the cell — what a test checks when it
+    /// asserts that a carry reached everyone.
+    pub fn holders(
         set: &StorageSet,
-        kind: RegisterKind,
-        key: &[u8],
-    ) -> Vec<dsm::economic::cell_observation::MemberCellRead> {
-        use dsm::economic::cell_observation::MemberCellRead;
+        namespace: &[u8],
+        key: &[u8; 32],
+        value: &[u8],
+    ) -> Vec<String> {
         with_state(|s| {
             set.members()
                 .iter()
-                .map(|member| {
-                    // A FAILING MEMBER DOES NOT ANSWER. It does not answer
-                    // "empty": modelling an outage as an absence would let a
-                    // fixture manufacture the one observation a forward walk
-                    // treats as terminal.
-                    if s.failing.contains(&member.member_id) {
-                        return MemberCellRead::Unavailable;
-                    }
-                    let echoed = s
-                        .echo_override
-                        .get(&member.member_id)
-                        .cloned()
-                        .unwrap_or_else(|| Some(member.member_id.clone()));
-                    // BOTH halves of the echo, exactly as the live client
-                    // folds them (`storage_node_sdk::answer_counts_for`): a
-                    // member that rebuilt its register still answers with its
-                    // own id, so identity alone cannot tell it apart from the
-                    // member the vault committed.
-                    let echoed_incarnation = s
-                        .incarnation_override
-                        .get(&member.member_id)
-                        .copied()
-                        .unwrap_or(Some(member.register_incarnation_id));
-                    if echoed.as_deref() != Some(member.member_id.as_str())
-                        || echoed_incarnation != Some(member.register_incarnation_id)
-                    {
-                        return MemberCellRead::Unavailable;
-                    }
-                    match s
-                        .cells
-                        .get(&(member.member_id.clone(), kind))
-                        .and_then(|cells| cells.get(key))
-                    {
-                        Some((b, _)) => MemberCellRead::Value(b.clone()),
-                        None => MemberCellRead::Absent,
-                    }
+                .filter(|m| {
+                    s.keyed
+                        .get(&m.member_id)
+                        .and_then(|cells| cells.get(&(namespace.to_vec(), *key)))
+                        .map(|values| values.iter().any(|v| v == value))
+                        .unwrap_or(false)
                 })
+                .map(|m| m.member_id.clone())
                 .collect()
         })
     }
