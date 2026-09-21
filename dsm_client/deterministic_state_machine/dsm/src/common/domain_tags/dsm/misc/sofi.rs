@@ -123,6 +123,28 @@ pub const TAG_DSM_SOFI_VAULT_GENESIS_LOCATOR: TaggedHashDomain<'static> =
 pub const TAG_DSM_SOFI_VAULT_GENESIS_OBJECT: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/sofi/vault-genesis-object/v1");
 
+// ── Immutable-store namespaces of the published protocol objects (Part II
+//    §10, rebuild step R8). One per kind: the namespace is part of the
+//    address, so bytes of one kind can never be fetched as another. ────────
+
+/// The signed setup envelope (`SignedSofiObject` over `SofiSetupBody`),
+/// indexed under `ρ` and under the relationship index key.
+pub const TAG_DSM_SOFI_SETUP_OBJECT: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/sofi/setup-object/v1");
+/// The signed precommit envelope, indexed under `PrecommitId`.
+pub const TAG_DSM_SOFI_PRECOMMIT_OBJECT: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/sofi/precommit-object/v1");
+/// The exact `P(E)` bytes, indexed under `L(E)`.
+pub const TAG_DSM_SOFI_PREIMAGE_OBJECT: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/sofi/preimage-object/v1");
+/// A policy-fulfillment witness `G_j` (no signature), indexed under
+/// `PolicyFulfillmentId_j`.
+pub const TAG_DSM_SOFI_POLICY_FULFILLMENT_OBJECT: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/sofi/policy-fulfillment-object/v1");
+/// The signed fulfillment envelope, indexed under `FulfillmentId`.
+pub const TAG_DSM_SOFI_FULFILLMENT_OBJECT: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/sofi/fulfillment-object/v1");
+
 // ── The DLV tree's leaves, and the route digest (P15-4, P15-8) ─────────────
 
 /// `H(tag ‖ v)` — where a vault's own state leaf sits in its DLV tree.
@@ -178,6 +200,11 @@ pub(crate) const SOFI_TAGS: &[TaggedHashDomain<'static>] = &[
     TAG_DSM_SOFI_VAULT_ID,
     TAG_DSM_SOFI_VAULT_GENESIS_LOCATOR,
     TAG_DSM_SOFI_VAULT_GENESIS_OBJECT,
+    TAG_DSM_SOFI_SETUP_OBJECT,
+    TAG_DSM_SOFI_PRECOMMIT_OBJECT,
+    TAG_DSM_SOFI_PREIMAGE_OBJECT,
+    TAG_DSM_SOFI_POLICY_FULFILLMENT_OBJECT,
+    TAG_DSM_SOFI_FULFILLMENT_OBJECT,
     TAG_DSM_SOFI_VAULT_CREATION_KEY,
     TAG_DSM_SOFI_VAULT_STATE_KEY,
     TAG_DSM_SOFI_VAULT_LEAF_STATE,

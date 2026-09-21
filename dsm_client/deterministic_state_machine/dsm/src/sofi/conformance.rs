@@ -21,10 +21,11 @@ use std::collections::BTreeMap;
 
 use super::arith::CellResolution;
 use super::derive::{self, policy_fulfillment_id, precommit_id};
+use super::publication::{recognize_setup, Signed};
 use super::signature::{verify_fulfillment, verify_precommit, SignatureError};
 use super::wire::{
     next_position, DlvPolicyFulfillmentBody, SettlementPreimage, SofiResolutionClaim,
-    SofiSetupBody, SofiWireError, TraderFulfillmentBody, TraderPrecommitBody, ValidationRef,
+    SofiWireError, TraderFulfillmentBody, TraderPrecommitBody, ValidationRef,
 };
 use crate::ccb::decode::policy_object_address;
 
@@ -111,8 +112,8 @@ pub enum ConformanceMissing {
     /// A reference of `𝒞_E^pre` whose object was not fetched, or whose
     /// fetched bytes do not re-derive the reference.
     ClosureObject(ValidationRef),
-    /// `SetupRegistered(ρ)` is not established: the setup body was not
-    /// fetched as `Stored`, or the bytes at `ρ` do not re-hash to `ρ`.
+    /// `SetupRegistered(ρ)` is not established: the setup object was not
+    /// fetched as `Stored`, or the bytes at `ρ` do not re-derive `ρ`.
     Setup { setup_ref: D32 },
     /// The earlier attempt key `K^(attempt)` of this vault, which `F` skips
     /// past, has no permanent storage resolution in hand.
@@ -139,11 +140,7 @@ impl FulfillmentConformance {
 }
 
 /// The exact `P` a fulfillment names, in the envelope a verifier fetched.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PrecommitEnvelope {
-    pub body: TraderPrecommitBody,
-    pub signature: Vec<u8>,
-}
+pub type PrecommitEnvelope = Signed<TraderPrecommitBody>;
 
 /// What a verifier fetched for `FulfillmentConformance(F)`: objects that were
 /// `Stored` and cells as Core resolved them, nothing defaulted (G2). A key
@@ -160,7 +157,8 @@ pub struct ConformanceEvidence {
     /// bytes for a content, claim or setup reference; the final bytes at
     /// `K_root(p)` for a conditional-claim reference.
     pub closure: BTreeMap<ValidationRef, Vec<u8>>,
-    /// Items 6 and 7: `Stored` setup bodies by the `ρ` they were fetched for.
+    /// Items 6 and 7: `Stored` setup objects (the signed envelope, Part II
+    /// §10) by the `ρ` they were fetched for.
     pub setups: BTreeMap<D32, Vec<u8>>,
     /// Item 5: the storage resolution of `K^(a)` of a vault, by `(v, a)`, for
     /// the attempts `F` skips past.
@@ -344,7 +342,7 @@ fn closure_object_verifies(reference: &ValidationRef, bytes: &[u8]) -> Option<bo
                 && c.fulfillment_id == *fulfillment_id
         }),
         ValidationRef::Setup { setup_ref } => {
-            SofiSetupBody::decode(bytes).is_ok_and(|b| derive::setup_ref(&b) == *setup_ref)
+            recognize_setup(bytes).is_some_and(|(rho, _)| rho == *setup_ref)
         }
     })
 }
@@ -435,14 +433,15 @@ pub fn fulfillment_conformance(
     }
 
     // Items 6 and 7: every leg's setup is Stored under its ρ, recomputed from
-    // the bytes; and once in hand, it is the setup of THIS trader for THIS
-    // vault, made before the operation.
+    // the bytes of its envelope; and once in hand, it is the setup of THIS
+    // trader for THIS vault, made before the operation.
     for leg in precommit.legs() {
         let body = evidence
             .setups
             .get(&leg.setup_ref)
-            .and_then(|bytes| SofiSetupBody::decode(bytes).ok())
-            .filter(|body| derive::setup_ref(body) == leg.setup_ref);
+            .and_then(|bytes| recognize_setup(bytes))
+            .filter(|(rho, _)| *rho == leg.setup_ref)
+            .map(|(_, signed)| signed.body);
         let Some(body) = body else {
             items.missing(
                 6,
@@ -559,10 +558,11 @@ mod tests {
     use super::*;
     use crate::ccb::class;
     use crate::crypto::sphincs::{generate_sphincs_keypair, sphincs_sign};
+    use crate::sofi::publication::Publication;
     use crate::sofi::validation::fixtures::{
         policies, policy_addr, swap_fixture_with, vault_id_of, DEV, G, P_POS, SIG_ALG,
     };
-    use crate::sofi::wire::{AttemptEntry, PreEClosureIndex, PrecommitLeg};
+    use crate::sofi::wire::{AttemptEntry, PreEClosureIndex, PrecommitLeg, SofiSetupBody};
 
     #[test]
     fn invalid_dominates_and_unavailable_never_becomes_invalid() {
@@ -614,6 +614,18 @@ mod tests {
 
     /// `base` with `legs`, under `pk`: the fixture's P carries a placeholder
     /// key, and the tests need one that can sign.
+    /// The published form of a setup: its envelope. The signature is not
+    /// what conformance checks (SetupValid is RouteValidation's), so any
+    /// non-empty one carries.
+    fn setup_object(body: &SofiSetupBody) -> Vec<u8> {
+        Publication::Setup {
+            body,
+            signature: &[0x5E; 8],
+        }
+        .object_bytes()
+        .unwrap()
+    }
+
     fn rebuild(
         base: &TraderPrecommitBody,
         pk: &[u8],
@@ -683,7 +695,7 @@ mod tests {
         let setups: Vec<(D32, Vec<u8>)> = (0..2)
             .map(|j| {
                 let body = setup_body(&pk, j, G, DEV, SETUP_POS);
-                (derive::setup_ref(&body), body.encode())
+                (derive::setup_ref(&body), setup_object(&body))
             })
             .collect();
         let (market, _, _) = policies(0);
@@ -1042,7 +1054,7 @@ mod tests {
                 body: p,
             });
             ev.preimage = Some(bent.preimage);
-            ev.setups.insert(rho, body.encode());
+            ev.setups.insert(rho, setup_object(body));
             (rho, fulfillment_conformance(&f, &sign_f(&r.sk, &f), &ev))
         };
         // Another trader's setup of this vault.
