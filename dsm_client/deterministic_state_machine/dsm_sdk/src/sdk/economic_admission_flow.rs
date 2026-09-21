@@ -904,6 +904,8 @@ pub(crate) async fn finish_admission(
         &leaves,
         &set.id(),
         &post_admit_artifacts,
+        // An ordinary admission selects no vault head.
+        &[],
     )?;
     if had_post_admit {
         // Land the post-admission objects (the release) on the fleet NOW —
