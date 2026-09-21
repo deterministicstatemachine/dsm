@@ -8781,153 +8781,202 @@ export class EconomicRootClaimV1 extends Message<EconomicRootClaimV1> {
 }
 
 /**
- * A claim on ONE single-use ERA faucet ticket — the unit of the network's
- * finite bootstrap allocation (800,000,000 tickets x 100 ERA = 80B ERA per
- * DSM network; era_faucet_id is network-scoped).
+ * A release from the network's ONE canonical native ERA reserve (Part IX
+ * §51: fixed genesis supply, emission is release, no minting after genesis).
  *
- * Consuming the ticket IS the source depletion: there is no faucet reserve
- * leaf, no mutable `remaining`, no global faucet successor chain. Each ticket
- * is an independent write-once cell keyed (faucet_id, ticket_index), so a
- * contested or poisoned ticket affects only itself and the faucet cannot be
- * bricked at a shared head.
+ * The reserve is a state lineage: R_0 is the genesis state (the whole
+ * distributable supply, generation 0) and every release is the successor
+ * object at the cell K(reserve_id, parent_root) — leader first over the
+ * committed set, first recognized occupant wins, Final once the leader and
+ * two other members hold it. Core recomputes the successor state from the
+ * bytes: remaining' = remaining − amount, generation' = generation + 1. A
+ * release that does not fit its parent (wrong root, wrong generation, zero,
+ * more than remains) is not an object naming the cell and counts as nothing.
  *
- * The body binds the claimant identity (genesis/devid/AK), the TARGET
- * economic position, and the recipient operation digest. Position + digest
- * binding is the non-reuse mechanism: the envelope commits ONE target
- * position (whose root-register cell is itself write-once) and ONE exact
- * operation, so a winning ticket funds at most one validated credit.
+ * The body names its recipient directly. Under `faucet_claimant` the
+ * recipient IS the claimant: the signature over the body under
+ * `claimant_public_key` is the whole source of the release, and the verifier
+ * checks that key is the recipient's proven AK. Other sources (an emission
+ * lottery, later) add arms to `source`; the reserve mechanics do not change.
  *
  * Signature covers the BODY only:
- * SPHINCS+(sk, BLAKE3("DSM/era-faucet-ticket-claim-sign/v1" || 0x00 ||
- * canonical_body_bytes)). Members verify claimant ATTRIBUTION (public key and
- * devid == authenticated caller) plus COORDINATE VALIDITY (canonical
- * faucet_id, ticket_index < 800M) — rejecting a coordinate that does not
- * exist in the protocol is not judging economics; it denies an invented
- * faucet universe any place to write. Everything beyond that (balances,
- * provenance, admission) is judged by verifiers, never by nodes.
+ * SPHINCS+(sk, BLAKE3("DSM/native-reserve-release-sign/v1" || 0x00 ||
+ * canonical_body_bytes)). Strict: decode -> re-encode equality; the client
+ * signs ONCE per parent root and replays the exact bytes on every retry.
  *
- * Strict: decode -> re-encode equality; the client signs ONCE and replays the
- * exact bytes on every retry (a byte-different re-encode is a different value
- * at a write-once cell).
- *
- * @generated from message dsm.FaucetTicketClaimBodyV1
+ * @generated from message dsm.FaucetClaimantRecipientV1
  */
-export class FaucetTicketClaimBodyV1 extends Message<FaucetTicketClaimBodyV1> {
+export class FaucetClaimantRecipientV1 extends Message<FaucetClaimantRecipientV1> {
   /**
-   * @generated from field: bytes faucet_id = 1;
-   */
-  faucetId = new Uint8Array(0);
-
-  /**
-   * @generated from field: uint64 ticket_index = 2;
-   */
-  ticketIndex = protoInt64.zero;
-
-  /**
-   * @generated from field: bytes claimant_genesis = 3;
-   */
-  claimantGenesis = new Uint8Array(0);
-
-  /**
-   * @generated from field: bytes claimant_devid = 4;
-   */
-  claimantDevid = new Uint8Array(0);
-
-  /**
-   * @generated from field: uint64 claimant_economic_position = 5;
-   */
-  claimantEconomicPosition = protoInt64.zero;
-
-  /**
-   * @generated from field: bytes recipient_operation_digest = 6;
-   */
-  recipientOperationDigest = new Uint8Array(0);
-
-  /**
-   * @generated from field: bytes claimant_public_key = 7;
+   * @generated from field: bytes claimant_public_key = 1;
    */
   claimantPublicKey = new Uint8Array(0);
 
-  /**
-   * @generated from field: bytes storage_set_id = 8;
-   */
-  storageSetId = new Uint8Array(0);
-
-  constructor(data?: PartialMessage<FaucetTicketClaimBodyV1>) {
+  constructor(data?: PartialMessage<FaucetClaimantRecipientV1>) {
     super();
     proto3.util.initPartial(data, this);
   }
 
   static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.FaucetTicketClaimBodyV1";
+  static readonly typeName = "dsm.FaucetClaimantRecipientV1";
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "faucet_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 2, name: "ticket_index", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
-    { no: 3, name: "claimant_genesis", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 4, name: "claimant_devid", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 5, name: "claimant_economic_position", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
-    { no: 6, name: "recipient_operation_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 7, name: "claimant_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 8, name: "storage_set_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 1, name: "claimant_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): FaucetTicketClaimBodyV1 {
-    return new FaucetTicketClaimBodyV1().fromBinary(bytes, options);
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): FaucetClaimantRecipientV1 {
+    return new FaucetClaimantRecipientV1().fromBinary(bytes, options);
   }
 
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): FaucetTicketClaimBodyV1 {
-    return new FaucetTicketClaimBodyV1().fromJson(jsonValue, options);
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): FaucetClaimantRecipientV1 {
+    return new FaucetClaimantRecipientV1().fromJson(jsonValue, options);
   }
 
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): FaucetTicketClaimBodyV1 {
-    return new FaucetTicketClaimBodyV1().fromJsonString(jsonString, options);
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): FaucetClaimantRecipientV1 {
+    return new FaucetClaimantRecipientV1().fromJsonString(jsonString, options);
   }
 
-  static equals(a: FaucetTicketClaimBodyV1 | PlainMessage<FaucetTicketClaimBodyV1> | undefined, b: FaucetTicketClaimBodyV1 | PlainMessage<FaucetTicketClaimBodyV1> | undefined): boolean {
-    return proto3.util.equals(FaucetTicketClaimBodyV1, a, b);
+  static equals(a: FaucetClaimantRecipientV1 | PlainMessage<FaucetClaimantRecipientV1> | undefined, b: FaucetClaimantRecipientV1 | PlainMessage<FaucetClaimantRecipientV1> | undefined): boolean {
+    return proto3.util.equals(FaucetClaimantRecipientV1, a, b);
   }
 }
 
 /**
- * @generated from message dsm.FaucetTicketClaimV1
+ * @generated from message dsm.NativeReserveReleaseBodyV1
  */
-export class FaucetTicketClaimV1 extends Message<FaucetTicketClaimV1> {
+export class NativeReserveReleaseBodyV1 extends Message<NativeReserveReleaseBodyV1> {
   /**
-   * @generated from field: dsm.FaucetTicketClaimBodyV1 body = 1;
+   * @generated from field: bytes reserve_id = 1;
    */
-  body?: FaucetTicketClaimBodyV1;
+  reserveId = new Uint8Array(0);
 
   /**
-   * @generated from field: bytes claimant_signature = 2;
+   * @generated from field: bytes parent_root = 2;
    */
-  claimantSignature = new Uint8Array(0);
+  parentRoot = new Uint8Array(0);
 
-  constructor(data?: PartialMessage<FaucetTicketClaimV1>) {
+  /**
+   * @generated from field: uint64 generation = 3;
+   */
+  generation = protoInt64.zero;
+
+  /**
+   * @generated from field: uint64 amount = 4;
+   */
+  amount = protoInt64.zero;
+
+  /**
+   * @generated from field: bytes recipient_genesis = 5;
+   */
+  recipientGenesis = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes recipient_devid = 6;
+   */
+  recipientDevid = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint64 recipient_economic_position = 7;
+   */
+  recipientEconomicPosition = protoInt64.zero;
+
+  /**
+   * @generated from field: bytes recipient_operation_digest = 8;
+   */
+  recipientOperationDigest = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes storage_set_id = 9;
+   */
+  storageSetId = new Uint8Array(0);
+
+  /**
+   * @generated from oneof dsm.NativeReserveReleaseBodyV1.source
+   */
+  source: {
+    /**
+     * @generated from field: dsm.FaucetClaimantRecipientV1 faucet_claimant = 10;
+     */
+    value: FaucetClaimantRecipientV1;
+    case: "faucetClaimant";
+  } | { case: undefined; value?: undefined } = { case: undefined };
+
+  constructor(data?: PartialMessage<NativeReserveReleaseBodyV1>) {
     super();
     proto3.util.initPartial(data, this);
   }
 
   static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.FaucetTicketClaimV1";
+  static readonly typeName = "dsm.NativeReserveReleaseBodyV1";
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "body", kind: "message", T: FaucetTicketClaimBodyV1 },
-    { no: 2, name: "claimant_signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 1, name: "reserve_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "parent_root", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "generation", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 4, name: "amount", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 5, name: "recipient_genesis", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 6, name: "recipient_devid", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 7, name: "recipient_economic_position", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 8, name: "recipient_operation_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 9, name: "storage_set_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 10, name: "faucet_claimant", kind: "message", T: FaucetClaimantRecipientV1, oneof: "source" },
   ]);
 
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): FaucetTicketClaimV1 {
-    return new FaucetTicketClaimV1().fromBinary(bytes, options);
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): NativeReserveReleaseBodyV1 {
+    return new NativeReserveReleaseBodyV1().fromBinary(bytes, options);
   }
 
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): FaucetTicketClaimV1 {
-    return new FaucetTicketClaimV1().fromJson(jsonValue, options);
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): NativeReserveReleaseBodyV1 {
+    return new NativeReserveReleaseBodyV1().fromJson(jsonValue, options);
   }
 
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): FaucetTicketClaimV1 {
-    return new FaucetTicketClaimV1().fromJsonString(jsonString, options);
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): NativeReserveReleaseBodyV1 {
+    return new NativeReserveReleaseBodyV1().fromJsonString(jsonString, options);
   }
 
-  static equals(a: FaucetTicketClaimV1 | PlainMessage<FaucetTicketClaimV1> | undefined, b: FaucetTicketClaimV1 | PlainMessage<FaucetTicketClaimV1> | undefined): boolean {
-    return proto3.util.equals(FaucetTicketClaimV1, a, b);
+  static equals(a: NativeReserveReleaseBodyV1 | PlainMessage<NativeReserveReleaseBodyV1> | undefined, b: NativeReserveReleaseBodyV1 | PlainMessage<NativeReserveReleaseBodyV1> | undefined): boolean {
+    return proto3.util.equals(NativeReserveReleaseBodyV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.NativeReserveReleaseV1
+ */
+export class NativeReserveReleaseV1 extends Message<NativeReserveReleaseV1> {
+  /**
+   * @generated from field: dsm.NativeReserveReleaseBodyV1 body = 1;
+   */
+  body?: NativeReserveReleaseBodyV1;
+
+  /**
+   * @generated from field: bytes signature = 2;
+   */
+  signature = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<NativeReserveReleaseV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.NativeReserveReleaseV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "body", kind: "message", T: NativeReserveReleaseBodyV1 },
+    { no: 2, name: "signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): NativeReserveReleaseV1 {
+    return new NativeReserveReleaseV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): NativeReserveReleaseV1 {
+    return new NativeReserveReleaseV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): NativeReserveReleaseV1 {
+    return new NativeReserveReleaseV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: NativeReserveReleaseV1 | PlainMessage<NativeReserveReleaseV1> | undefined, b: NativeReserveReleaseV1 | PlainMessage<NativeReserveReleaseV1> | undefined): boolean {
+    return proto3.util.equals(NativeReserveReleaseV1, a, b);
   }
 }
 

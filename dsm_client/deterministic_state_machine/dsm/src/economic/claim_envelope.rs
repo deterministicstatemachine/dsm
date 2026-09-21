@@ -12,24 +12,23 @@
 //!
 //! ## What a member checks, and what it must not
 //!
-//! Attribution and storage only. A member never runs P0–P6, never validates a
-//! transition, and never judges economics. What it does do is refuse a claim
-//! that says someone other than the authenticated caller wrote it.
+//! Storage only. A member never runs P0–P6, never validates a transition,
+//! never judges economics, and never checks who carries the bytes (Part II
+//! §9): it keeps every value it is given at the cell, in arrival order.
 //!
-//! That refusal is load-bearing because `K_root` does **not** gate writes.
-//! The cell's coordinate is identity-scoped but derivable by anyone holding a
-//! victim's public `(G, DevID, position)`, and the register is write-once — so
-//! a single accepted value in that cell burns the position forever. The
-//! attribution check is what makes such a write impossible, and it is only as
-//! strong as the authentication behind `AuthenticatedCaller`, which the
-//! verifying end establishes through P0–P6.
+//! What protects a trader's cell is recognition, not a member. The cell's
+//! coordinate is identity-scoped but derivable by anyone holding a trader's
+//! public `(G, DevID, position)`; bytes anyone sends there are kept, but only
+//! a claim that verifies under the trader's own key is an object naming the
+//! cell, and Core's leader-first read counts nothing else. A claim in the
+//! trader's name that the trader never signed is not a rival and not a
+//! winner, however early it arrived.
 
 use prost::Message;
 
 use crate::ccb::decode::DecodeError;
 use crate::ccb::{class, CcbError, CcbObject};
 use crate::economic::claim::EconomicRootClaimBody;
-use crate::economic::register::{AttributionError, AuthenticatedCaller};
 use crate::types::proto as generated;
 
 /// Matches the proto's `dsm_max_len`; prost does not enforce it, so this
@@ -40,10 +39,8 @@ const MAX_KEY_OR_SIG_BYTES: usize = 65_535;
 /// its own `claimant_public_key`.
 ///
 /// Verifying the signature proves the body was signed by whoever holds that
-/// key. It does **not** prove that key belongs to the caller — that is
-/// attribution, checked separately by [`verify_claim_attribution`], and the
-/// two are kept apart because a member can do the second without the first
-/// being sufficient.
+/// key. It does **not** prove that key is the trader's P0–P6-proven AK —
+/// the verifying end establishes that, never a member.
 /// **Fields are private, and [`decode_and_verify_economic_root_claim`] is the
 /// only thing that builds one.** This type is a CAPABILITY: holding it is the
 /// proof that a signature verified, and every consumer takes it on exactly
@@ -222,33 +219,6 @@ pub fn economic_root_claim_envelope_digest(envelope_bytes: &[u8]) -> [u8; 32] {
     );
     h.update(envelope_bytes);
     *h.finalize().as_bytes()
-}
-
-/// The member-side attribution check. Storage-layer only.
-///
-/// Deliberately takes a decoded-and-signature-verified claim: a member that
-/// checked attribution without checking the signature would accept a body
-/// anyone could have written on the caller's behalf, and one that checked the
-/// signature without attribution would let an authenticated caller claim as
-/// somebody else.
-pub fn verify_claim_attribution(
-    claim: &VerifiedEconomicRootClaim,
-    caller: &AuthenticatedCaller,
-    configured_storage_set_id: &[u8; 32],
-) -> Result<(), AttributionError> {
-    if claim.body().claimant_public_key != caller.public_key {
-        return Err(AttributionError::ClaimantIsNotCaller);
-    }
-    if claim.body().trader_devid != caller.device_id {
-        return Err(AttributionError::DeviceIsNotCaller);
-    }
-    if claim.body().root_register_storage_set_id != *configured_storage_set_id {
-        return Err(AttributionError::WrongStorageSet {
-            claimed: claim.body().root_register_storage_set_id,
-            configured: *configured_storage_set_id,
-        });
-    }
-    Ok(())
 }
 
 /// Whether the class this module decodes is the one the registry names.

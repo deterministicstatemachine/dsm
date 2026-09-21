@@ -22,7 +22,58 @@
 #![allow(clippy::disallowed_methods)] // unwrap/expect acceptable in deterministic tests
 
 use crate::db;
-use crate::db::write_once_properties::{reopenable_pool, test_pool, unique_key};
+
+/// The backend under test.
+///
+/// SQLite has an in-process default (`:memory:`), so a plain `cargo test`
+/// behaves as before. Postgres has none: a Postgres build with no server is
+/// not a backend, and a suite that quietly passed without one would report a
+/// green board that never executed the shipped store. So the Postgres build
+/// REFUSES rather than skips.
+pub(crate) fn test_pool() -> db::DBPool {
+    db::create_pool(&test_database_url(), true).expect("pool")
+}
+
+#[cfg(feature = "local-dev")]
+fn test_database_url() -> String {
+    std::env::var("DSM_TEST_DATABASE_URL").unwrap_or_else(|_| ":memory:".to_string())
+}
+
+#[cfg(not(feature = "local-dev"))]
+fn test_database_url() -> String {
+    std::env::var("DSM_TEST_DATABASE_URL").expect(
+        "DSM_TEST_DATABASE_URL must name a Postgres database: these are the cell and index \
+         properties for the SHIPPED backend, and skipping them would report a green board \
+         that never executed it",
+    )
+}
+
+/// A pool that can be closed and re-opened over the SAME durable store — a
+/// temp file on SQLite, the configured server on Postgres. The restart
+/// property needs both opens to see one store; on Postgres the path is
+/// ignored because the server IS the store.
+#[cfg(feature = "local-dev")]
+pub(crate) fn reopenable_pool(path: &str) -> db::DBPool {
+    db::create_pool(path, true).expect("pool")
+}
+
+#[cfg(not(feature = "local-dev"))]
+pub(crate) fn reopenable_pool(_path: &str) -> db::DBPool {
+    test_pool()
+}
+
+/// A cell key unique to this test process and call site. Postgres keeps ONE
+/// database for the whole run, so a fixed key would make two tests contend
+/// for one cell and pass or fail by ordering.
+pub(crate) fn unique_key(tag: u8) -> [u8; 32] {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let mut id = [0u8; 32];
+    id[0] = tag;
+    id[1..5].copy_from_slice(&std::process::id().to_le_bytes()[..4]);
+    id[5..13].copy_from_slice(&NEXT.fetch_add(1, Ordering::Relaxed).to_le_bytes());
+    id
+}
 
 const NS: &[u8] = b"DSM/cell-properties";
 

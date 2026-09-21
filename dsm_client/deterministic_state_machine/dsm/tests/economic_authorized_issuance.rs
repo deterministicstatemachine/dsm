@@ -24,7 +24,7 @@ use std::collections::BTreeMap;
 use dsm::crypto::sphincs::{generate_keypair, sphincs_sign, SphincsVariant};
 use dsm::economic::issuance::IssuanceAuthorizationBody;
 use dsm::economic::provenance::{
-    verify_transition_provenance, FaucetTicketWin, PeerLineageFailure, ProvenanceContext,
+    verify_transition_provenance, ReserveReleaseWin, PeerLineageFailure, ProvenanceContext,
     ProvenanceError, ProvenanceResolver, ValidatedPeerTransition,
 };
 use dsm::economic::tree::EconomicSmt;
@@ -133,7 +133,7 @@ impl ProvenanceResolver for IssuanceResolver {
             "no peer lineage here".into(),
         ))
     }
-    fn winning_faucet_ticket(&self, _f: &[u8; 32], _t: u64) -> Option<FaucetTicketWin> {
+    fn native_reserve_release(&self, _r: &[u8; 32], _g: u64) -> Option<ReserveReleaseWin> {
         None
     }
     fn immutable_evidence(
@@ -193,7 +193,7 @@ fn fixture(
         policy_commit,
         message: String::new(),
     };
-    let op_digest = dsm::economic::faucet::dsm_operation_digest(&op.to_bytes());
+    let op_digest = dsm::economic::admission::dsm_operation_digest(&op.to_bytes());
 
     let body = IssuanceAuthorizationBody {
         policy_commit,
@@ -273,7 +273,7 @@ fn fixture_with_stranger(signer_count: usize, amount: u64) -> Fixture {
         policy_commit,
         message: String::new(),
     };
-    let op_digest = dsm::economic::faucet::dsm_operation_digest(&op.to_bytes());
+    let op_digest = dsm::economic::admission::dsm_operation_digest(&op.to_bytes());
     let body = IssuanceAuthorizationBody {
         policy_commit,
         issuer_genesis: G,

@@ -1,45 +1,53 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! The ERA faucet claim flow — the first production run of the whole economic
-//! admission lifecycle.
+//! The beta ERA faucet claim — one release of the network's native reserve
+//! to the claimant, through the whole economic admission lifecycle.
 //!
 //! ```text
 //! target position = admitted + 1        (position 0 = activate(), empty root)
 //! loop attempts:
-//!     ticket   = select_ticket(G, DevID, target, attempt)
-//!     op       = FaucetClaim { era_faucet_id(network), ticket }
-//!     envelope = frozen-or-sign-once(claim body binding target + op digest)
-//!     quorum-claim the ticket           (contested -> next attempt)
-//!     break
-//! witness  = FROM the accepted core transition (one +100 ERA credit,
-//!            0x0030 source)              -- core decides what +100 means
+//!     head     = walk the reserve lineage (memoised, leader first)
+//!     op       = FaucetClaim { era_reserve_id(network), head.generation + 1 }
+//!     release  = frozen-or-sign-once(NativeReserveRelease naming THIS device,
+//!                target position, op digest, x = ERA_FAUCET_PAYOUT)
+//!     write it at K(reserve, R_head), leader first
+//!     read back: OUR release Final  -> break
+//!                another object     -> the head moved; next attempt
+//! witness  = FROM the accepted core transition (one +x ERA credit,
+//!            0x005D source)              -- core decides what +x means
 //! manifest = provenance index DERIVED from the witness
 //! ONE TX   = advance (fence-coupled) + pending row + FROZEN evidence
 //! publish evidence to q members (attributed)        -> EvidencePublished
 //! register the root (frozen envelope, sign-once)    -> Registered
 //! advance_validated with the LIVE resolver          -> verifier's answer
 //! ONE TX   = admitted coordinate + leaf cache + clear pending + unfenced head
+//! carry the release to every member in the background
 //! ```
+//!
+//! The claim names its recipient directly: the release is signed by this
+//! device's AK and names this device, so `FaucetClaim(A, x) ⇒ recipient = A`
+//! — no selection, no spend gate, nobody else paid. Finality is the leader
+//! plus two other members; the carry to the rest never gates the claim.
 //!
 //! ## Recovery
 //!
 //! No timeout ever aborts an admission. Every external step is preceded by a
-//! durable frozen artifact, so [`resume_pending_claim`] finishes the exact
-//! same admission byte-identically from whichever boundary the crash hit:
+//! durable frozen artifact, so a resumed claim finishes the exact same
+//! admission byte-identically from whichever boundary the crash hit:
 //!
 //! ```text
-//! ticket won, nothing local     -> the frozen ticket envelope re-claims
-//!                                  (held-identical) and the flow re-runs
+//! release final, nothing local  -> the walk memoises it; the release naming
+//!                                  this device's target position is reused
 //! accepted, evidence unpublished-> republish sweep carries the frozen bytes
 //! published, root unregistered  -> the frozen root claim registers (or a
 //!                                  lost response is resolved by READING)
 //! registered, not admitted      -> re-verify, then admit
 //! ```
 
-use dsm::economic::admission::{PendingAdmissionKind, PendingEconomicAdmission};
-use dsm::economic::faucet::{
-    dsm_operation_digest, era_faucet_id, faucet_claim_evidence_addr, sign_faucet_ticket_claim,
-    FaucetTicketClaimBody, ERA_FAUCET_PAYOUT,
+use dsm::economic::admission::{dsm_operation_digest, PendingAdmissionKind, PendingEconomicAdmission};
+use dsm::economic::native_reserve::{
+    era_reserve_id, release_evidence_addr, sign_release, NativeReserveReleaseBody,
+    NativeReserveState, ReleaseSource, SuccessorRead, WalkStop, ERA_FAUCET_PAYOUT,
 };
 use dsm::economic::write_set::CreditSourceFacts;
 use dsm::types::device_state::{BalanceDelta, BalanceDirection};
@@ -51,8 +59,8 @@ use crate::sdk::economic_admission_flow::{
     authority_material, build_dsm_admission, canonical_set, finish_admission,
     producer_tree_and_pre_state, resume_pending_admission, validated_root_or_activate,
 };
-use crate::sdk::economic_registers::{claim_faucet_ticket, select_ticket, RegisterError};
-use crate::storage::client_db::economic_faucet;
+use crate::sdk::native_reserve::{read_successor, walk_reserve, write_release};
+use crate::storage::client_db::native_reserve as reserve_db;
 use crate::util::deterministic_time::tick;
 
 fn storage_err(what: &str, e: impl core::fmt::Display) -> DsmError {
@@ -64,6 +72,11 @@ pub struct ClaimOutcome {
     pub tokens_received: u64,
     pub economic_position: u64,
 }
+
+/// Attempts at winning a generation before the claim reports "retry later".
+/// Each attempt is one full leader-first write at the current head; losing
+/// one means the head moved under a concurrent claimant.
+const MAX_ATTEMPTS: u64 = 8;
 
 /// Run one complete claim. Idempotent under crash + retry via the frozen
 /// artifacts; a pending admission from a previous run is finished first.
@@ -86,84 +99,139 @@ pub async fn claim_era_faucet(core: &CoreSDK, network_id: &[u8]) -> Result<Claim
     let set = canonical_set(network_id)?;
     let validated = validated_root_or_activate(core)?;
     let target_position = validated.economic_position() + 1;
-    let faucet_id = era_faucet_id(network_id);
+    let reserve_id = era_reserve_id(network_id);
     let (public_key, secret_key) = crate::sdk::signing_authority::current_keypair()
         .map_err(|e| storage_err("signing authority", e))?;
+    let runtime = tokio::runtime::Handle::current();
 
-    // ── Win a ticket (strategy loop; any in-range ticket is valid) ─────────
-    const MAX_ATTEMPTS: u64 = 64;
-    let mut won: Option<(u64, Vec<u8>, [u8; 32])> = None; // (ticket, envelope, op_digest)
-    for attempt in 0..MAX_ATTEMPTS {
-        let ticket_index = select_ticket(&genesis, &devid, target_position, attempt)?;
+    // ── Win a generation of the reserve (leader first at the head) ────────
+    let mut won: Option<(u64, Vec<u8>, [u8; 32])> = None; // (generation, envelope, op_digest)
+    for _attempt in 0..MAX_ATTEMPTS {
+        let stop = tokio::task::block_in_place(|| walk_reserve(&set, network_id, &runtime))?;
+        // A release naming THIS position that the walk already established as
+        // final is this claim, resumed: reuse it rather than releasing twice.
+        if let Some((generation, envelope)) =
+            reserve_db::release_for_recipient(&reserve_id, &genesis, &devid, target_position)
+                .map_err(|e| storage_err("reserve memo", e))?
+        {
+            let op = Operation::FaucetClaim {
+                reserve_id,
+                generation,
+            };
+            won = Some((generation, envelope, dsm_operation_digest(&op.to_bytes())));
+            break;
+        }
+        let parent: NativeReserveState = match stop {
+            WalkStop::Head(state) => state,
+            WalkStop::LeaderHeld { .. } => {
+                return Err(DsmError::storage(
+                    "the reserve's next release is held at its leader but not yet final — \
+                     retry later"
+                        .to_string(),
+                    None::<std::io::Error>,
+                ))
+            }
+            WalkStop::Unavailable(_) | WalkStop::BudgetExhausted(_) => {
+                return Err(DsmError::storage(
+                    "the reserve head could not be read — retry later".to_string(),
+                    None::<std::io::Error>,
+                ))
+            }
+        };
+        let generation = parent.generation + 1;
         let op = Operation::FaucetClaim {
-            faucet_id,
-            ticket_index,
+            reserve_id,
+            generation,
         };
         let op_digest = dsm_operation_digest(&op.to_bytes());
 
-        // Frozen-or-sign-once, BEFORE any member write.
-        let envelope = match economic_faucet::get_frozen_ticket_claim(&faucet_id, ticket_index)
-            .map_err(|e| storage_err("load frozen ticket claim", e))?
+        // Frozen-or-sign-once per parent root, BEFORE any member write.
+        let parent_root = parent.root();
+        let envelope = match reserve_db::get_frozen_release(&reserve_id, &parent_root)
+            .map_err(|e| storage_err("load frozen release", e))?
         {
             Some(bytes) => bytes,
             None => {
-                let body = FaucetTicketClaimBody {
-                    faucet_id,
-                    ticket_index,
-                    claimant_genesis: genesis,
-                    claimant_devid: devid,
-                    claimant_economic_position: target_position,
+                let body = NativeReserveReleaseBody {
+                    reserve_id,
+                    parent_root,
+                    generation,
+                    amount: ERA_FAUCET_PAYOUT,
+                    recipient_genesis: genesis,
+                    recipient_devid: devid,
+                    recipient_economic_position: target_position,
                     recipient_operation_digest: op_digest,
-                    claimant_public_key: public_key.clone(),
                     storage_set_id: set.id(),
+                    source: ReleaseSource::FaucetClaimant {
+                        claimant_public_key: public_key.clone(),
+                    },
                 };
-                let bytes = sign_faucet_ticket_claim(&body, &secret_key)
-                    .map_err(|e| storage_err("sign ticket claim", e))?;
-                economic_faucet::put_frozen_ticket_claim(
-                    &faucet_id,
-                    ticket_index,
-                    &bytes,
-                    tick() as i64,
-                )
-                .map_err(|e| storage_err("freeze ticket claim", e))?;
+                let bytes =
+                    sign_release(&body, &secret_key).map_err(|e| storage_err("sign release", e))?;
+                reserve_db::put_frozen_release(&reserve_id, &parent_root, &bytes, tick() as i64)
+                    .map_err(|e| storage_err("freeze release", e))?;
                 // Read BACK rather than trusting the in-memory copy: a silent
                 // retention failure must surface before anything goes out.
-                economic_faucet::get_frozen_ticket_claim(&faucet_id, ticket_index)
-                    .map_err(|e| storage_err("re-read frozen claim", e))?
+                reserve_db::get_frozen_release(&reserve_id, &parent_root)
+                    .map_err(|e| storage_err("re-read frozen release", e))?
                     .ok_or_else(|| {
                         DsmError::storage(
-                            "frozen ticket claim did not persist".to_string(),
+                            "frozen release did not persist".to_string(),
                             None::<std::io::Error>,
                         )
                     })?
             }
         };
 
-        match claim_faucet_ticket(&set, network_id, &envelope).await {
-            Ok(_) => {
-                won = Some((ticket_index, envelope, op_digest));
+        let write = write_release(&set, &parent, &envelope).await?;
+        if !write.leader_reached {
+            return Err(DsmError::storage(
+                "the reserve cell's leader is unreachable — no member stands in; retry with \
+                 the same bytes"
+                    .to_string(),
+                None::<std::io::Error>,
+            ));
+        }
+        match read_successor(&set, &parent).await? {
+            SuccessorRead::Final { release, .. } if release.envelope_bytes == envelope => {
+                won = Some((generation, envelope, op_digest));
                 break;
             }
-            Err(RegisterError::Contested { .. }) => continue, // ticket burned; next
-            Err(e) => return Err(storage_err("ticket register", e)),
+            SuccessorRead::LeaderHeld { release, .. } if release.envelope_bytes == envelope => {
+                return Err(DsmError::storage(
+                    "the release is held at the reserve's leader but fewer than two other \
+                     members hold it yet — retry with the same bytes"
+                        .to_string(),
+                    None::<std::io::Error>,
+                ));
+            }
+            // Another release got to the leader first: the head moved.
+            SuccessorRead::Final { .. } | SuccessorRead::LeaderHeld { .. } => continue,
+            SuccessorRead::Open | SuccessorRead::Unavailable => {
+                return Err(DsmError::storage(
+                    "the reserve cell could not be read back — retry with the same bytes"
+                        .to_string(),
+                    None::<std::io::Error>,
+                ))
+            }
         }
     }
-    let Some((ticket_index, envelope, op_digest)) = won else {
+    let Some((generation, envelope, op_digest)) = won else {
         return Err(DsmError::storage(
-            format!("no ticket won in {MAX_ATTEMPTS} attempts — retry later"),
+            format!("no reserve generation won in {MAX_ATTEMPTS} attempts — retry later"),
             None::<std::io::Error>,
         ));
     };
 
     // ── Prepare-first, through the ONE generalized producer ────────────────
     // The witness is built by the SAME write-set table the verifier checks;
-    // the faucet contributes only its facts (the ticket evidence address)
-    // and its extra frozen artifact (the exact winning envelope).
+    // the claim contributes only its facts (the release's evidence address)
+    // and its extra frozen artifact (the exact final release).
     let (mut tree, pre_state) = producer_tree_and_pre_state(&validated)?;
     let pre_root = tree.root();
     let op = Operation::FaucetClaim {
-        faucet_id,
-        ticket_index,
+        reserve_id,
+        generation,
     };
     let prepared = PendingEconomicAdmission::prepared(
         PendingAdmissionKind::DsmBacked,
@@ -177,16 +245,16 @@ pub async fn claim_era_faucet(core: &CoreSDK, network_id: &[u8]) -> Result<Claim
         amount: ERA_FAUCET_PAYOUT,
     };
     let authority = authority_material(network_id, &genesis)?;
-    let facts = CreditSourceFacts::FaucetTicket {
-        faucet_claim_evidence_addr: faucet_claim_evidence_addr(&envelope),
+    let facts = CreditSourceFacts::NativeReserveRelease {
+        release_evidence_addr: release_evidence_addr(&envelope),
     };
     let extra = vec![(
         crate::sdk::economic_registers::immutable_object_key(
-            dsm::common::domain_tags::TAG_DSM_ERA_FAUCET_TICKET_CLAIM,
+            dsm::common::domain_tags::TAG_DSM_NATIVE_RESERVE_RELEASE,
             &envelope,
         ),
         envelope.clone(),
-        "faucet-ticket-claim",
+        "native-reserve-release",
     )];
     let mut built = None;
     let (_outcome, pending) = core.faucet_claim_advance(
@@ -233,6 +301,11 @@ pub async fn claim_era_faucet(core: &CoreSDK, network_id: &[u8]) -> Result<Claim
         Vec::new(),
     )
     .await?;
+    // The carry to every member is best effort here and retried by the sync
+    // pass; the claim is admitted regardless.
+    if let Err(e) = crate::sdk::native_reserve::carry_pending_releases(&set).await {
+        log::warn!("[faucet] reserve carry deferred: {e}");
+    }
     Ok(ClaimOutcome {
         tokens_received: ERA_FAUCET_PAYOUT,
         economic_position: admitted.economic_position,

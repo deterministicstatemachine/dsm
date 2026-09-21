@@ -49,7 +49,7 @@ use dsm_sdk::storage::client_db;
 const RECEIVER: [u8; 32] = [0xB2; 32];
 const RECEIVER_GENESIS: [u8; 32] = [0xC3; 32];
 /// What one faucet claim yields — the sender's whole balance.
-const SENDER_ERA: u64 = dsm::economic::faucet::ERA_FAUCET_PAYOUT;
+const SENDER_ERA: u64 = dsm::economic::native_reserve::ERA_FAUCET_PAYOUT;
 const SEND_AMOUNT: u64 = 50;
 
 fn era_policy() -> [u8; 32] {

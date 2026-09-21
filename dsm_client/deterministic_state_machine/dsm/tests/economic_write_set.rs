@@ -12,7 +12,8 @@
 
 use std::collections::BTreeMap;
 
-use dsm::economic::faucet::{dsm_economic_operation_id, era_faucet_id, ERA_FAUCET_PAYOUT};
+use dsm::economic::admission::dsm_economic_operation_id;
+use dsm::economic::native_reserve::{era_reserve_id, ERA_FAUCET_PAYOUT};
 use dsm::economic::mutation::EconomicLeafMutation;
 use dsm::economic::state::{EconomicBalanceState, EconomicLeafState};
 use dsm::economic::tree::EconomicSmt;
@@ -98,7 +99,7 @@ fn witness_for(
         pre_root,
         built.post_root,
         econ_op_id(),
-        dsm::economic::faucet::dsm_operation_digest(&operation.to_bytes()),
+        dsm::economic::admission::dsm_operation_digest(&operation.to_bytes()),
         built.mutations,
         built.credit_sources,
     )
@@ -187,11 +188,11 @@ fn a_recipient_transfer_credit_round_trips_with_its_consumed_source() {
 #[test]
 fn a_faucet_claim_round_trips_on_the_builder() {
     let op = Operation::FaucetClaim {
-        faucet_id: era_faucet_id(b"dsm-testnet"),
-        ticket_index: 42,
+        reserve_id: era_reserve_id(b"dsm-testnet"),
+        generation: 42,
     };
-    let facts = CreditSourceFacts::FaucetTicket {
-        faucet_claim_evidence_addr: [0x99; 32],
+    let facts = CreditSourceFacts::NativeReserveRelease {
+        release_evidence_addr: [0x99; 32],
     };
     let witness = round_trip(&op, EconomicSmt::new(), BTreeMap::new(), &facts);
     match &witness.mutations[0].post_state {
@@ -293,7 +294,7 @@ fn a_debit_with_an_extra_mutation_is_refused() {
         pre_root,
         tree.root(),
         econ_op_id(),
-        dsm::economic::faucet::dsm_operation_digest(&burn(50, era()).to_bytes()),
+        dsm::economic::admission::dsm_operation_digest(&burn(50, era()).to_bytes()),
         mutations,
         Vec::new(),
     );
@@ -367,7 +368,7 @@ fn a_recipient_credit_without_its_consumed_source_is_refused() {
         pre_root,
         t2.root(),
         econ_op_id(),
-        dsm::economic::faucet::dsm_operation_digest(&op.to_bytes()),
+        dsm::economic::admission::dsm_operation_digest(&op.to_bytes()),
         vec![rebuilt],
         sources,
     )

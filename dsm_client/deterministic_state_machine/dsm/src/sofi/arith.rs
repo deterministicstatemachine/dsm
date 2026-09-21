@@ -81,6 +81,102 @@ pub fn resolve(
     }
 }
 
+/// A read handed to [`resolve_objects`] did not have one entry per
+/// committed member.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArityError {
+    pub reads: usize,
+}
+
+impl core::fmt::Display for ArityError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "a cell read carries one entry per committed member ({STORAGE_MEMBER_COUNT}), got {}",
+            self.reads
+        )
+    }
+}
+
+impl std::error::Error for ArityError {}
+
+/// What the raw reads of one cell established, over the recognized view
+/// (Part II §13) — the Core read adapter of rebuild step R4.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ObjectResolution {
+    /// The leader's first recognized object, held by two other members.
+    Final(Vec<u8>),
+    /// The leader's first recognized object, not yet held by two others. No
+    /// other object will ever be final at this key.
+    LeaderHeld(Vec<u8>),
+    /// The leader answered and holds no recognized object: the key is open.
+    Open,
+    /// The leader did not answer. Never read as empty; no member stands in.
+    Unavailable,
+}
+
+/// Derive `LeaderHeld` and `Final` from raw member reads: everything each
+/// member holds at the key in arrival order, `None` where a member did not
+/// answer, with the leader at `leader` — its position in the committed set,
+/// which the caller computed from the seed and never from availability.
+///
+/// `recognized` is Core's recognition of an object naming the key from its
+/// bytes. Bytes it refuses count as nothing anywhere: they are neither a
+/// rival nor a winner, however early they arrived and however many members
+/// hold them. Nothing is counted against a quorum.
+pub fn resolve_objects(
+    reads: &[Option<Vec<Vec<u8>>>],
+    leader: usize,
+    recognized: impl Fn(&[u8]) -> bool,
+) -> Result<ObjectResolution, ArityError> {
+    if reads.len() != STORAGE_MEMBER_COUNT {
+        return Err(ArityError { reads: reads.len() });
+    }
+    let naming: Vec<Option<Vec<&Vec<u8>>>> = reads
+        .iter()
+        .map(|r| {
+            r.as_ref()
+                .map(|values| values.iter().filter(|v| recognized(v)).collect())
+        })
+        .collect();
+    let observations: [CellObservation; STORAGE_MEMBER_COUNT] = naming
+        .iter()
+        .map(|r| match r {
+            Some(values) => {
+                CellObservation::Holds(values.iter().map(|v| *blake3::hash(v).as_bytes()).collect())
+            }
+            None => CellObservation::Unknown,
+        })
+        .collect::<Vec<_>>()
+        .try_into()
+        .map_err(|_| ArityError { reads: reads.len() })?;
+    // The digest `resolve` names is the leader's first recognized object, so
+    // it is in the leader's read; a read that somehow lacks it establishes
+    // nothing rather than something.
+    let first = |digest: [u8; 32]| -> Option<Vec<u8>> {
+        naming.get(leader)?.as_ref().and_then(|values| {
+            values
+                .iter()
+                .find(|v| *blake3::hash(v).as_bytes() == digest)
+                .map(|v| (*v).clone())
+        })
+    };
+    Ok(match resolve(&observations, leader) {
+        CellResolution::Final(d) => match first(d) {
+            Some(bytes) => ObjectResolution::Final(bytes),
+            None => ObjectResolution::Unavailable,
+        },
+        CellResolution::LeaderHeld(d) => match first(d) {
+            Some(bytes) => ObjectResolution::LeaderHeld(bytes),
+            None => ObjectResolution::Unavailable,
+        },
+        CellResolution::Unresolved => match observations.get(leader) {
+            Some(CellObservation::Holds(_)) => ObjectResolution::Open,
+            _ => ObjectResolution::Unavailable,
+        },
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -171,5 +267,69 @@ mod tests {
         let obs = [holds(&[A]), holds(&[B]), holds(&[B]), holds(&[B]), empty()];
         assert_eq!(resolve(&obs, 0), CellResolution::LeaderHeld(A));
         assert_eq!(resolve(&obs, 1), CellResolution::Final(B));
+    }
+
+    // ── The bytes-level adapter (R4) ──────────────────────────────────────
+
+    fn object(tag: u8) -> Vec<u8> {
+        vec![b'o', tag]
+    }
+    fn garbage() -> Vec<u8> {
+        b"g".to_vec()
+    }
+    fn recognized(v: &[u8]) -> bool {
+        v.first() == Some(&b'o')
+    }
+
+    #[test]
+    fn the_adapter_derives_final_from_the_recognized_view() {
+        let x = object(1);
+        let reads = vec![
+            Some(vec![garbage(), x.clone()]),
+            Some(vec![x.clone()]),
+            Some(vec![x.clone()]),
+            None,
+            Some(vec![]),
+        ];
+        assert_eq!(
+            resolve_objects(&reads, 0, recognized).unwrap(),
+            ObjectResolution::Final(x)
+        );
+    }
+
+    #[test]
+    fn the_adapter_tells_open_from_unavailable_at_the_leader() {
+        let x = object(1);
+        let open = vec![
+            Some(vec![garbage()]),
+            Some(vec![x.clone()]),
+            Some(vec![x.clone()]),
+            Some(vec![x.clone()]),
+            Some(vec![x.clone()]),
+        ];
+        assert_eq!(
+            resolve_objects(&open, 0, recognized).unwrap(),
+            ObjectResolution::Open,
+            "garbage at the leader and copies everywhere: the key is open"
+        );
+        let unread = vec![
+            None,
+            Some(vec![x.clone()]),
+            Some(vec![x.clone()]),
+            Some(vec![x.clone()]),
+            Some(vec![x]),
+        ];
+        assert_eq!(
+            resolve_objects(&unread, 0, recognized).unwrap(),
+            ObjectResolution::Unavailable
+        );
+    }
+
+    #[test]
+    fn the_adapter_refuses_a_read_of_the_wrong_arity() {
+        assert_eq!(
+            resolve_objects(&[Some(vec![])], 0, recognized),
+            Err(ArityError { reads: 1 })
+        );
     }
 }

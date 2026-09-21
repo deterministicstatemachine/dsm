@@ -37,6 +37,7 @@ pub mod economic_admission_flow;
 pub mod economic_registers;
 pub mod faucet_claim_flow;
 pub mod kv;
+pub mod native_reserve;
 pub mod runtime_config;
 pub mod sdk_context;
 

@@ -300,8 +300,9 @@ pub(crate) fn build_dsm_admission(
     let pre_root = tree.root();
     let c_dsm_plus = chain_state.compute_chain_tip();
     let op_bytes = operation.to_bytes();
-    let op_digest = dsm::economic::faucet::dsm_operation_digest(&op_bytes);
-    let econ_op_id = dsm::economic::faucet::dsm_economic_operation_id(genesis, devid, &c_dsm_plus);
+    let op_digest = dsm::economic::admission::dsm_operation_digest(&op_bytes);
+    let econ_op_id =
+        dsm::economic::admission::dsm_economic_operation_id(genesis, devid, &c_dsm_plus);
 
     let built = build_write_set(
         operation,
@@ -504,7 +505,7 @@ pub(crate) async fn stage_admission(
     let (tree, pre_state) = producer_tree_and_pre_state(&validated)?;
     let authority = authority_material(&network_id, &genesis)?;
     let target_position = validated.economic_position() + 1;
-    let op_digest = dsm::economic::faucet::dsm_operation_digest(&operation.to_bytes());
+    let op_digest = dsm::economic::admission::dsm_operation_digest(&operation.to_bytes());
     let (facts, extra_artifacts) = facts_for_position(target_position)?;
     let prepared = PendingEconomicAdmission::prepared(
         dsm::economic::admission::PendingAdmissionKind::DsmBacked,
@@ -1397,7 +1398,7 @@ pub(crate) async fn prevalidate_incoming_transfer_admission(
         sender_ak,
     )
     .map_err(|e| terminal(format!("signed operation does not bind: {e}")))?;
-    let op_digest = dsm::economic::faucet::dsm_operation_digest(&signed_op.to_bytes());
+    let op_digest = dsm::economic::admission::dsm_operation_digest(&signed_op.to_bytes());
     let prepared = PendingEconomicAdmission::prepared(
         dsm::economic::admission::PendingAdmissionKind::DsmBacked,
         validated.economic_position() + 1,

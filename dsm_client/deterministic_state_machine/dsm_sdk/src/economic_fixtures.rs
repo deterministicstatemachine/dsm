@@ -64,11 +64,10 @@ pub fn canonical_member_ids() -> Vec<String> {
         .collect()
 }
 
-/// The pinned register quorum `q`.
+/// The delivery quorum over the pinned register members: the strict
+/// majority `publication::quorum_for` — artifact delivery, not authority.
 pub fn canonical_quorum() -> usize {
-    dsm::economic::register::resolve_root_register_profile(NETWORK)
-        .expect("the beta network is pinned")
-        .quorum as usize
+    crate::storage::client_db::publication::quorum_for(canonical_member_ids().len()) as usize
 }
 
 /// How many nodes one b0x submit lands on: the submit loop stops at `q`
@@ -242,7 +241,7 @@ pub fn empty_router_with(
     (router, keypair, guard)
 }
 
-/// Claim ERA through the REAL faucet admission (0x0030). Returns the admitted
+/// Claim ERA through the REAL faucet admission (0x005D). Returns the admitted
 /// economic position.
 pub fn claim_era(router: &AppRouterImpl) -> u64 {
     crate::runtime::get_runtime()

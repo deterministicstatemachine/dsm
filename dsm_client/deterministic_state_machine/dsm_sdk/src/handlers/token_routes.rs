@@ -2144,7 +2144,7 @@ impl AppRouterImpl {
             policy_commit,
             message: req.message.clone(),
         };
-        let operation_digest = dsm::economic::faucet::dsm_operation_digest(&op.to_bytes());
+        let operation_digest = dsm::economic::admission::dsm_operation_digest(&op.to_bytes());
         let (issuer_genesis, issuer_devid) = match self.core_sdk.device_head() {
             Some(h) => (h.genesis_digest(), h.devid()),
             Option::None => return err("token.mint: no device head".into()),

@@ -59,11 +59,6 @@ struct ServerConfig {
     seed_peers: Vec<String>,
     /// `[[storage_set.members]]` — each member's id and register incarnation.
     storage_set_members: Vec<(String, [u8; 32])>,
-    /// The DSM network this node serves (`node.network_id`). Gates the ERA
-    /// faucet-ticket register — its canonical identity is network-scoped, so
-    /// no network means the register is inactive (fail closed, like an
-    /// absent [storage_set]).
-    network_id: Option<String>,
 }
 
 fn load_server_config(opts: &Opts) -> Result<ServerConfig> {
@@ -169,12 +164,6 @@ fn load_server_config(opts: &Opts) -> Result<ServerConfig> {
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
 
-    // The DSM network this node serves. NOT defaulted: the ERA faucet
-    // identity is era_faucet_id(network_id), so a defaulted network would let
-    // a misconfigured node acknowledge tickets for a faucet universe nobody
-    // meant it to serve.
-    let network_id: Option<String> = settings.get_string("node.network_id").ok();
-
     if opts.auto_detect {
         let node_index = opts.node_index.unwrap_or(0);
         let detected = NetworkDetector::detect_network_config_with_tls(node_index, tls_enabled)?;
@@ -192,7 +181,6 @@ fn load_server_config(opts: &Opts) -> Result<ServerConfig> {
             database_url,
             seed_peers,
             storage_set_members,
-            network_id: network_id.clone(),
         });
     }
 
@@ -235,7 +223,6 @@ fn load_server_config(opts: &Opts) -> Result<ServerConfig> {
         database_url,
         seed_peers,
         storage_set_members,
-        network_id,
     })
 }
 
@@ -299,17 +286,6 @@ fn build_router(state: Arc<AppState>, config: &ServerConfig, benchmark_mode: boo
         api::vault::slot::create_router(state.clone()).layer(public_rate_layer.clone());
     // Keyed cells and indexes: bytes in, bytes out. No write authorization;
     // a member keeps everything it is given and refuses nothing.
-    // ERA faucet-ticket register (native emission, its own contract): writes behind
-    // device auth (attribution against the authenticated key AND device),
-    // reads public. The x-dsm-node-id echo is NORMATIVE for this register:
-    // quorum reads count a response only when the echo equals the member
-    // queried. Assembled by the library so the conformance suite drives
-    // exactly what is served.
-    let economic_register_write_router =
-        dsm_storage_node::economic_register_write_router(state.clone());
-    let economic_register_read_router =
-        dsm_storage_node::economic_register_read_router(state.clone())
-            .layer(public_rate_layer.clone());
     let recovery_capsule_router =
         api::vault::recovery::create_router(state.clone()).layer(public_rate_layer.clone());
     // Device registration
@@ -354,8 +330,6 @@ fn build_router(state: Arc<AppState>, config: &ServerConfig, benchmark_mode: boo
         .merge(tips_router)
         .merge(genesis_router)
         .merge(dlv_slot_router)
-        .merge(economic_register_write_router)
-        .merge(economic_register_read_router)
         .merge(recovery_capsule_router)
         .merge(device_router) // exposes /api/v2/device/register
         .merge(paidk_router) // PaidK spend-gate endpoints
@@ -535,16 +509,6 @@ async fn async_main() -> Result<()> {
         log::warn!(
             "no [storage_set] configured — the settlement-slot register is INACTIVE on this node \
              (every claim is refused)"
-        );
-    }
-    if let Some(network) = server_config.network_id.as_ref() {
-        log::info!("network configured: {network} — the faucet-ticket register is active");
-        state = state.with_network_id(network.clone().into_bytes());
-    } else {
-        log::warn!(
-            "no node.network_id configured — the faucet-ticket register is INACTIVE on this \
-             node (every ticket claim is refused); the canonical ERA faucet identity is \
-             network-scoped and cannot be derived without it"
         );
     }
 

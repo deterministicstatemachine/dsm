@@ -17,7 +17,6 @@
 //! - [`transport`]  — message delivery (b0x, gossip)
 
 pub mod cells;
-pub mod economic;
 pub mod identity;
 pub mod infra;
 pub mod objects;

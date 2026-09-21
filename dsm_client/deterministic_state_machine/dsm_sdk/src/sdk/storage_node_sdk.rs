@@ -106,174 +106,6 @@ pub struct KeyedPutFanout {
     pub total: u32,
 }
 
-/// One member's answer to a settlement-slot claim submission.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MemberClaimResult {
-    /// The member accepted our bytes as the FIRST value for the slot.
-    Accepted,
-    /// The member already held exactly our bytes (idempotent re-ack).
-    HeldIdentical,
-    /// The member holds DIFFERENT bytes; `held_digest` names them (as the
-    /// member reported it), if it did.
-    Refused { held_digest: Option<Vec<u8>> },
-    /// No usable answer: transport error, auth failure, no set configured on
-    /// the member, foreign set, malformed — the member did NOT accept.
-    Unavailable(String),
-}
-
-/// One member's outcome in a settlement-slot claim fan-out.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MemberClaimOutcome {
-    pub member_id: String,
-    pub endpoint: String,
-    pub result: MemberClaimResult,
-    /// The node id the member echoed (`x-dsm-node-id`); an acceptance counts
-    /// only when it equals `member_id`.
-    pub echoed_node_id: Option<String>,
-}
-
-/// Result of submitting one frozen claim envelope to every member of a set.
-/// Never short-circuits; the caller decides quorum.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ClaimFanout {
-    pub outcomes: Vec<MemberClaimOutcome>,
-    pub total: u32,
-}
-
-/// The ONE mapping from a register member's answer — HTTP status plus the
-/// register's `{prefix}-outcome` header, and its `{prefix}-held-digest`
-/// header when present — to what the client counts.
-///
-/// Pure and shared: every live claim path calls it, and so does the
-/// in-process register double, which reproduces a member's `(status,
-/// outcome)` pair and hands it here rather than constructing results of its
-/// own. That is what makes "the fake refuses exactly as the node does" a
-/// statement about one function rather than two hand-typed tables.
-///
-/// Exactly three answers count; EVERY other pair — a transport-layer 401/403/
-/// 409-without-outcome/413/415, an endpoint 400 `malformed`, 403
-/// `signature-invalid` / `claimant-not-caller` / `device-not-caller`, 422
-/// `foreign-set` / `noncanonical-faucet` / `ticket-out-of-range`, 503
-/// `no-storage-set` / `no-network`, 500 `error` — is `Unavailable`, which the
-/// quorum counter ignores: the member did NOT accept, and nothing else about
-/// it is the client's to interpret.
-pub fn classify_one_shot_response(
-    status: u16,
-    outcome: &str,
-    held_digest_b32: Option<&str>,
-) -> MemberClaimResult {
-    match (status, outcome) {
-        (200, "accepted") => MemberClaimResult::Accepted,
-        (200, "held-identical") => MemberClaimResult::HeldIdentical,
-        (409, "refused") => MemberClaimResult::Refused {
-            held_digest: held_digest_b32.and_then(crate::util::text_id::decode_base32_crockford),
-        },
-        (code, other) => MemberClaimResult::Unavailable(format!("status {code} outcome {other:?}")),
-    }
-}
-
-/// Every `(status, outcome)` pair a register member emits, mapped once. The
-/// in-process register double reproduces a member's pair and calls this same
-/// function, so this table is what "the fake refuses exactly as the node
-/// does" rests on; it must enumerate the node's vocabulary, not a sample.
-#[cfg(test)]
-mod one_shot_classifier_tests {
-    use super::{classify_one_shot_response, MemberClaimResult};
-
-    #[test]
-    fn the_three_countable_answers_and_nothing_else() {
-        assert_eq!(
-            classify_one_shot_response(200, "accepted", None),
-            MemberClaimResult::Accepted
-        );
-        assert_eq!(
-            classify_one_shot_response(200, "held-identical", None),
-            MemberClaimResult::HeldIdentical
-        );
-        let digest = [0x5Au8; 32];
-        let b32 = crate::util::text_id::encode_base32_crockford(&digest);
-        assert_eq!(
-            classify_one_shot_response(409, "refused", Some(&b32)),
-            MemberClaimResult::Refused {
-                held_digest: Some(digest.to_vec())
-            }
-        );
-        // A refusal whose held-digest header is absent or undecodable still
-        // refuses; it just cannot name the winner.
-        assert_eq!(
-            classify_one_shot_response(409, "refused", None),
-            MemberClaimResult::Refused { held_digest: None }
-        );
-        assert_eq!(
-            classify_one_shot_response(409, "refused", Some("not base32!")),
-            MemberClaimResult::Refused { held_digest: None }
-        );
-        // The countable answers are bound to THEIR status: the same outcome
-        // word on another status is not an acceptance.
-        assert!(matches!(
-            classify_one_shot_response(201, "accepted", None),
-            MemberClaimResult::Unavailable(_)
-        ));
-        assert!(matches!(
-            classify_one_shot_response(200, "refused", None),
-            MemberClaimResult::Unavailable(_)
-        ));
-    }
-
-    #[test]
-    fn every_member_refusal_is_unavailable_with_its_exact_text() {
-        // Endpoint refusals (both registers) and the device_auth layer's.
-        for (status, outcome) in [
-            (400u16, "malformed"),
-            (400, "caller-id-malformed"),
-            (403, "signature-invalid"),
-            (403, "claimant-not-caller"),
-            (403, "device-not-caller"),
-            (422, "foreign-set"),
-            (422, "noncanonical-faucet"),
-            (422, "ticket-out-of-range"),
-            (503, "no-storage-set"),
-            (503, "no-network"),
-            (500, "error"),
-            (401, ""),
-            (403, ""),
-            (409, ""),
-            (413, ""),
-            (415, ""),
-        ] {
-            assert_eq!(
-                classify_one_shot_response(status, outcome, None),
-                MemberClaimResult::Unavailable(format!("status {status} outcome {outcome:?}")),
-                "({status}, {outcome:?})"
-            );
-        }
-    }
-}
-
-/// The request headers a claim submission carries besides its body: the
-/// carrier content type, and — when the member is authenticated — the
-/// device's bearer authorization and a fresh transport message id (replay
-/// guard only; register idempotency is by BYTES, not by message id).
-///
-/// Shared for the same reason as [`classify_one_shot_response`]: a
-/// conformance harness that drives a real member router must send exactly
-/// what the live client sends, and a second copy of this list would be a
-/// second definition of the wire contract.
-pub fn one_shot_claim_headers(
-    auth: Option<&StorageAuthContext>,
-    message_id: &str,
-) -> Vec<(&'static str, String)> {
-    let mut headers = vec![("Content-Type", "application/octet-stream".to_string())];
-    if let Some(auth) = auth {
-        headers.push((
-            "authorization",
-            format!("DSM {}:{}", auth.device_id_b32, auth.token_b32),
-        ));
-        headers.push(("x-dsm-message-id", message_id.to_string()));
-    }
-    headers
-}
-
 /// API-facing health status for nodes
 #[derive(Debug, Clone)]
 pub struct ApiNodeHealthStatus {
@@ -709,46 +541,6 @@ impl std::fmt::Display for StorageNodeError {
 
 impl std::error::Error for StorageNodeError {}
 
-/// What a member said about ITSELF alongside a register answer.
-///
-/// Both halves are required for the answer to count. `node_id` says which
-/// member replied; `register_incarnation` says which durable register history
-/// that member is serving. A vault commits the pair at birth, so a member
-/// that still owns its identity key but rebuilt its register no longer
-/// matches, and its answers stop counting.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct MemberEcho {
-    pub node_id: Option<String>,
-    pub register_incarnation: Option<[u8; 32]>,
-}
-
-/// Whether an answer can be counted for the member the set committed.
-///
-/// BOTH halves must match, and a failure of either is `Unavailable` — never
-/// an absence and never a value:
-///
-/// | echoed | verdict |
-/// |---|---|
-/// | member A, incarnation X (the committed pair) | may count |
-/// | member A, incarnation Y | unavailable — this is A, but not the register history the vault named |
-/// | member B, incarnation X | unavailable — attribution failure |
-/// | either half missing | unavailable — an answer about nobody |
-///
-/// The second row is the one this exists for. A member that lost and rebuilt
-/// its register can honestly report "nothing here" for a cell the committed
-/// incarnation once held, and node identity alone cannot tell that apart from
-/// the real member reporting the same thing. Counting it as emptiness is the
-/// undetectable substitution. It is also NOT a forgery — the node is not
-/// lying, it simply is no longer the member this vault committed — which is
-/// why the verdict is `Unavailable` and not an invalid-credit finding.
-pub fn answer_counts_for(
-    echoed: &MemberEcho,
-    member: &crate::sdk::storage_set::StorageMember,
-) -> bool {
-    echoed.node_id.as_deref() == Some(member.member_id.as_str())
-        && echoed.register_incarnation == Some(member.register_incarnation_id)
-}
-
 impl StorageNodeClient {
     pub async fn new(config: StorageNodeConfig) -> Result<Self, StorageNodeError> {
         let client = build_ca_aware_client();
@@ -1101,123 +893,6 @@ impl StorageNodeClient {
             Err(StorageNodeError::server_error(format!(
                 "PUT failed with status: {status}"
             )))
-        }
-    }
-
-    /// Submit the exact frozen claim envelope to THIS member's settlement-slot
-    /// register (`POST /api/v2/settlement-slot/claim`, device-authenticated).
-    /// Returns the member's outcome and its echoed node id. Never retries: the
-    /// caller owns idempotent replay of the same bytes.
-    /// POST one-shot register claim to an economic register endpoint
-    /// (`faucet-ticket` or `economic-root`). Same contract as the settlement
-    /// register: outcome/held-digest headers with the given prefix, register
-    /// idempotency by BYTES, fresh message id per attempt (transport replay
-    /// guard only).
-    pub async fn post_one_shot_claim(
-        &self,
-        path: &str,
-        header_prefix: &str,
-        envelope: &[u8],
-    ) -> (MemberClaimResult, Option<String>) {
-        let url = format!("{base}{path}", base = self.node_info.url);
-        let msg_id = Self::generate_message_id("one-shot-claim");
-        let mut req_builder = self.client.post(&url);
-        for (name, value) in one_shot_claim_headers(self.auth.as_ref(), &msg_id) {
-            req_builder = req_builder.header(name, value);
-        }
-        let response = match req_builder.body(envelope.to_vec()).send().await {
-            Ok(r) => r,
-            Err(e) => {
-                return (
-                    MemberClaimResult::Unavailable(format!("HTTP request failed: {e}")),
-                    None,
-                )
-            }
-        };
-        let echoed = response
-            .headers()
-            .get("x-dsm-node-id")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
-        let outcome_hdr = response
-            .headers()
-            .get(format!("{header_prefix}-outcome").as_str())
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string())
-            .unwrap_or_default();
-        let held_digest_hdr = response
-            .headers()
-            .get(format!("{header_prefix}-held-digest").as_str())
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
-        let result = classify_one_shot_response(
-            response.status().as_u16(),
-            &outcome_hdr,
-            held_digest_hdr.as_deref(),
-        );
-        (result, echoed)
-    }
-
-    /// GET a register cell. Returns `(read, echoed node id)`.
-    ///
-    /// THE THREE-VALUED READ. An explicit `404` is this member ASSERTING the
-    /// cell holds nothing; every other unsuccessful outcome — transport error,
-    /// timeout, 5xx from a failing database, a body that will not read — is
-    /// [`MemberCellRead::Unavailable`] and supports no conclusion in either
-    /// direction. Collapsing those into "no value" let a quorum of broken
-    /// members manufacture an emptiness fact, which is the one observation a
-    /// forward lineage walk treats as terminal.
-    ///
-    /// The echo is NORMATIVE, and it has TWO halves: a response without the
-    /// member's own node id, or without the register incarnation that member
-    /// is serving, is uncountable — the caller folds either into
-    /// `Unavailable` rather than counting it as a value or as an absence.
-    pub async fn get_register_cell(
-        &self,
-        path: &str,
-    ) -> (dsm::economic::cell_observation::MemberCellRead, MemberEcho) {
-        use dsm::economic::cell_observation::MemberCellRead;
-        let url = format!("{base}{path}", base = self.node_info.url);
-        let response = match self.client.get(&url).send().await {
-            Ok(r) => r,
-            Err(_) => return (MemberCellRead::Unavailable, MemberEcho::default()),
-        };
-        let echoed = MemberEcho {
-            node_id: response
-                .headers()
-                .get("x-dsm-node-id")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.to_string()),
-            register_incarnation: response
-                .headers()
-                .get("x-dsm-register-incarnation")
-                .and_then(|v| v.to_str().ok())
-                .and_then(crate::util::text_id::decode_base32_crockford)
-                .and_then(|raw| <[u8; 32]>::try_from(raw).ok()),
-        };
-        let status = response.status().as_u16();
-        let outcome = response
-            .headers()
-            .get("x-dsm-slot-outcome")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
-        // AN ABSENCE MUST BE ASSERTED. A bare 404 proves only that something
-        // in that process declined to serve the path — a route miss reaches
-        // the fallback, which still carries the identity echo — so emptiness
-        // is counted only when the member SAYS the cell is absent. Any other
-        // status, and any 404 without that assertion, answered nothing.
-        if status == 404 {
-            return match outcome.as_deref() {
-                Some("absent") => (MemberCellRead::Absent, echoed),
-                _ => (MemberCellRead::Unavailable, echoed),
-            };
-        }
-        if status != 200 {
-            return (MemberCellRead::Unavailable, echoed);
-        }
-        match response.bytes().await {
-            Ok(b) => (MemberCellRead::Value(b.to_vec()), echoed),
-            Err(_) => (MemberCellRead::Unavailable, echoed),
         }
     }
 
@@ -1682,80 +1357,28 @@ impl StorageNodeSDK {
         })
     }
 
-    /// Submit one frozen settlement-slot claim envelope to EVERY member of the
-    /// canonical set. Never short-circuits; the caller counts acceptances whose
-    /// echoed node id equals the member id and decides quorum.
-    /// Fan a one-shot register claim out to every member of `set` — the
-    /// generic sibling of `submit_settlement_slot_claim`, for the economic
-    /// registers. Never short-circuits; `total` is the SET size.
-    pub async fn submit_one_shot_claim(
+    /// Part II §8 step 5: carry `value` at `key` under `namespace` to ONE
+    /// member of `set` (an index into `set.members()`). Any party may carry
+    /// the bytes to a member not reached at write time; a member keeps what
+    /// it is given, so carrying bytes it already holds is harmless.
+    pub async fn put_cell_to_member(
         &self,
         set: &crate::sdk::storage_set::StorageSet,
-        path: &str,
-        header_prefix: &str,
-        envelope: &[u8],
-    ) -> ClaimFanout {
-        let mut outcomes = Vec::with_capacity(set.len());
-        for member in set.members() {
-            let client = self
-                .clients
-                .iter()
-                .find(|c| c.node_info.url == member.endpoint);
-            let (result, echoed_node_id) = match client {
-                None => (
-                    MemberClaimResult::Unavailable("no client for this member's endpoint".into()),
-                    None,
-                ),
-                Some(c) => c.post_one_shot_claim(path, header_prefix, envelope).await,
-            };
-            outcomes.push(MemberClaimOutcome {
-                member_id: member.member_id.clone(),
-                endpoint: member.endpoint.clone(),
-                result,
-                echoed_node_id,
-            });
-        }
-        ClaimFanout {
-            outcomes,
-            total: set.len() as u32,
-        }
-    }
-
-    /// Fan a register-cell GET out to every member. Returns one row per
-    /// member: `(member_id, echoed node id, winner bytes if any)`.
-    /// One attributed read per COMMITTED MEMBER, in set order.
-    ///
-    /// Attribution is folded in here: a member whose response does not echo
-    /// that member's own id is `Unavailable`, never counted as a value and
-    /// never counted as an absence. A member this client cannot locate is
-    /// likewise `Unavailable` — configuration only tells us where to ask, and
-    /// failing to ask is not an answer.
-    pub async fn read_register_cell(
-        &self,
-        set: &crate::sdk::storage_set::StorageSet,
-        path: &str,
-    ) -> Vec<dsm::economic::cell_observation::MemberCellRead> {
-        use dsm::economic::cell_observation::MemberCellRead;
-        let mut rows = Vec::with_capacity(set.len());
-        for member in set.members() {
-            let client = self
-                .clients
-                .iter()
-                .find(|c| c.node_info.url == member.endpoint);
-            let read = match client {
-                None => MemberCellRead::Unavailable,
-                Some(c) => {
-                    let (read, echoed) = c.get_register_cell(path).await;
-                    if answer_counts_for(&echoed, member) {
-                        read
-                    } else {
-                        MemberCellRead::Unavailable
-                    }
-                }
-            };
-            rows.push(read);
-        }
-        rows
+        member: usize,
+        namespace: &[u8],
+        key_b32: &str,
+        value: &[u8],
+    ) -> Result<(), String> {
+        let member = set
+            .members()
+            .get(member)
+            .ok_or_else(|| "no such member index".to_string())?;
+        let client = self
+            .clients
+            .iter()
+            .find(|c| c.node_info.url == member.endpoint)
+            .ok_or_else(|| "no client for this member's endpoint".to_string())?;
+        client.put_cell(namespace, key_b32, value).await
     }
 
     /// Part II §8, the write procedure: the leader of the cell (an index into
@@ -6033,61 +5656,6 @@ mod tests {
         let (s2, p2) = StorageNodeSDK::build_initial_device_tree_payload([0x02u8; 32]).unwrap();
         assert_ne!(s1.root_hash, s2.root_hash);
         assert_ne!(p1, p2);
-    }
-}
-
-#[cfg(test)]
-mod member_echo_tests {
-    #![allow(clippy::disallowed_methods)] // unwrap/expect acceptable in deterministic tests
-    use super::{answer_counts_for, MemberEcho};
-    use crate::sdk::storage_set::StorageMember;
-
-    fn committed() -> StorageMember {
-        StorageMember {
-            member_id: "dsm-node-1".into(),
-            register_incarnation_id: [0xC1; 32],
-            endpoint: "http://n1.example".into(),
-        }
-    }
-
-    fn echo(node_id: Option<&str>, incarnation: Option<[u8; 32]>) -> MemberEcho {
-        MemberEcho {
-            node_id: node_id.map(|s| s.to_string()),
-            register_incarnation: incarnation,
-        }
-    }
-
-    /// The whole matrix, one case per row of the contract.
-    #[test]
-    fn only_the_committed_member_in_its_committed_incarnation_counts() {
-        let m = committed();
-
-        assert!(
-            answer_counts_for(&echo(Some("dsm-node-1"), Some([0xC1; 32])), &m),
-            "the committed pair counts"
-        );
-
-        assert!(
-            !answer_counts_for(&echo(Some("dsm-node-1"), Some([0x99; 32])), &m),
-            "SAME NODE, REBUILT REGISTER: this is the substitution the pair \
-             exists to catch — it must not count, in either direction"
-        );
-
-        assert!(
-            !answer_counts_for(&echo(Some("dsm-node-2"), Some([0xC1; 32])), &m),
-            "another member answering for this one is an attribution failure"
-        );
-
-        assert!(
-            !answer_counts_for(&echo(None, Some([0xC1; 32])), &m),
-            "an answer that names no member is an answer about nobody"
-        );
-        assert!(
-            !answer_counts_for(&echo(Some("dsm-node-1"), None), &m),
-            "a member that will not say which register it is serving has not \
-             answered the question that matters"
-        );
-        assert!(!answer_counts_for(&echo(None, None), &m), "no echo at all");
     }
 }
 

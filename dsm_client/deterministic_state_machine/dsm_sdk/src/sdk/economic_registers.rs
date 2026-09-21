@@ -1,74 +1,32 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! The client side of the economic registers, plus ticket selection and the
-//! live provenance resolver.
+//! The client side of the economic root register, and the live provenance
+//! resolver.
 //!
 //! ## The root register is a cell (Part II §8, §13)
 //!
 //! `K_root(q)` is a keyed cell that keeps every value it is given. The writer
 //! computes the leader from `s(q)` over the committed set and writes there
-//! first; Core derives `LeaderHeld` and `Final` from the raw reads. Nothing
-//! is counted and no node decides.
-//!
-//! ## Counting, faucet tickets only
-//!
-//! The native ERA emission register is left as it is: a member's answer
-//! counts toward quorum ONLY when the echoed `x-dsm-node-id` equals the
-//! member id queried. On writes: `accepted` and `held-identical` count
-//! (attributed); a `refused` whose held digest equals OUR digest is an
-//! acceptance in different words; a generic `refused` NEVER counts.
+//! first; Core derives `LeaderHeld` and `Final` from the raw reads
+//! (`dsm::sofi::arith::resolve_objects`). Nothing is counted and no node
+//! decides.
 //!
 //! ## Frozen envelopes
 //!
-//! Every envelope is signed ONCE, durably retained BEFORE the first
-//! register-member write, and replayed byte-identically forever. SPHINCS+
-//! signing here is deterministic: a regenerated envelope is indistinguishable
-//! from a replayed one downstream, so the safe design is for regeneration to
-//! be impossible — the load-only discipline of `FrozenClaimEnvelope`, applied
-//! to both new registers.
-//!
-//! ## Ticket selection is STRATEGY, not validity
-//!
-//! Any in-range ticket is valid. [`select_ticket`] only decides where this
-//! client looks first, which is why it lives here (SDK) and not in protocol
-//! core: changing the search strategy later must not masquerade as a protocol
-//! change. The seed includes the TARGET ECONOMIC POSITION so each admitted
-//! position gets its own deterministic sequence — without it, claim 10,001
-//! would walk the identity's 10,000 already-consumed tickets first. Selection
-//! is publicly predictable; V1 promises conservation, not anti-targeting.
+//! Every envelope is signed ONCE, durably retained BEFORE the first member
+//! write, and replayed byte-identically forever. SPHINCS+ signing here is
+//! deterministic: a regenerated envelope is indistinguishable from a replayed
+//! one downstream, so the safe design is for regeneration to be impossible.
 
-use dsm::common::domain_tags::TAG_DSM_ERA_FAUCET_TICKET_SELECT;
-use dsm::crypto::blake3::dsm_domain_hasher;
-use dsm::economic::faucet::{faucet_claim_evidence_addr, ERA_FAUCET_TICKET_COUNT};
 use dsm::economic::provenance::{
-    FaucetTicketWin, PeerLineageFailure, ProvenanceResolver, ValidatedPeerTransition,
+    PeerLineageFailure, ProvenanceResolver, ReserveReleaseWin, ValidatedPeerTransition,
 };
-use dsm::types::error::DsmError;
 
-use crate::sdk::storage_node_sdk::{ClaimFanout, MemberClaimResult};
 use crate::sdk::storage_set::StorageSet;
 use crate::util::text_id;
 
-/// Deterministically choose the ticket this claimant tries at `attempt` for
-/// `target_economic_position`. Exact-uniform over the ticket space via the
-/// DJTE rejection sampler.
-pub fn select_ticket(
-    genesis: &[u8; 32],
-    device_id: &[u8; 32],
-    target_economic_position: u64,
-    attempt: u64,
-) -> Result<u64, DsmError> {
-    let mut h = dsm_domain_hasher(TAG_DSM_ERA_FAUCET_TICKET_SELECT);
-    h.update(genesis);
-    h.update(device_id);
-    h.update(&target_economic_position.to_be_bytes());
-    h.update(&attempt.to_be_bytes());
-    let seed = *h.finalize().as_bytes();
-    dsm::emissions::uniform_index(&seed, ERA_FAUCET_TICKET_COUNT)
-}
-
-/// Unforgeable evidence that THIS claim envelope won its cell at quorum.
-/// Private fields; constructible only by the claim functions below.
+/// Evidence that THIS envelope reached its cell's leader. Private fields;
+/// constructible only by the register functions below.
 #[derive(Debug, Clone)]
 pub struct ClaimedCell {
     accepted: u32,
@@ -87,16 +45,9 @@ impl ClaimedCell {
 /// Why a register operation did not establish its cell.
 #[derive(Debug)]
 pub enum RegisterError {
-    /// Not enough attributed members answered; retry later with the SAME bytes.
+    /// The leader was not reached, or too few members answered; retry later
+    /// with the SAME bytes.
     StorageUnavailable { accepted: u32, total: u32 },
-    /// Another value holds the cell. For a ticket: pick the next attempt's
-    /// ticket. For a root cell: see `Conflict` — contested here means OUR
-    /// bytes lost, which for a root written only by us is already abnormal.
-    Contested { refused_by: u32 },
-    /// CATASTROPHIC (root register only): members hold DIFFERENT values for
-    /// one cell, or a cell this device owns holds bytes this device never
-    /// signed. Quarantine — never hash-order, never overwrite, never retry.
-    Conflict { detail: String },
 }
 
 impl core::fmt::Display for RegisterError {
@@ -104,89 +55,11 @@ impl core::fmt::Display for RegisterError {
         match self {
             Self::StorageUnavailable { accepted, total } => write!(
                 f,
-                "register unavailable: {accepted}/{total} attributed acceptances — retry with \
+                "register unavailable: {accepted}/{total} members hold the bytes — retry with \
                  the SAME frozen bytes"
             ),
-            Self::Contested { refused_by } => {
-                write!(
-                    f,
-                    "register cell held by another value ({refused_by} refusals)"
-                )
-            }
-            Self::Conflict { detail } => write!(
-                f,
-                "REGISTER CONFLICT — quarantine, do not retry, do not overwrite: {detail}"
-            ),
         }
     }
-}
-
-/// Count a claim fan-out under Req 15.8 + the tightened write rule.
-fn count_claim(
-    fanout: &ClaimFanout,
-    our_digest: &[u8; 32],
-    quorum: u32,
-) -> Result<ClaimedCell, RegisterError> {
-    let mut accepted = 0u32;
-    let mut refused_by = 0u32;
-    for o in &fanout.outcomes {
-        let attributed = o.echoed_node_id.as_deref() == Some(o.member_id.as_str());
-        match &o.result {
-            MemberClaimResult::Accepted | MemberClaimResult::HeldIdentical => {
-                if attributed {
-                    accepted += 1;
-                }
-            }
-            MemberClaimResult::Refused { held_digest } => {
-                // Refused-with-OUR-digest is an acceptance in different words
-                // — and carries the same attribution requirement. A generic
-                // refusal NEVER counts toward quorum.
-                if held_digest.as_deref() == Some(our_digest.as_slice()) {
-                    if attributed {
-                        accepted += 1;
-                    }
-                } else {
-                    refused_by += 1;
-                }
-            }
-            MemberClaimResult::Unavailable(_) => {}
-        }
-    }
-    if accepted >= quorum {
-        Ok(ClaimedCell {
-            accepted,
-            total: fanout.total,
-        })
-    } else if refused_by > 0 {
-        Err(RegisterError::Contested { refused_by })
-    } else {
-        Err(RegisterError::StorageUnavailable {
-            accepted,
-            total: fanout.total,
-        })
-    }
-}
-
-/// Claim one faucet ticket with the FROZEN envelope bytes, at the members of
-/// `set` serving `network_id` — the network whose canonical faucet the ticket
-/// belongs to.
-pub async fn claim_faucet_ticket(
-    set: &StorageSet,
-    network_id: &[u8],
-    frozen_envelope: &[u8],
-) -> Result<ClaimedCell, RegisterError> {
-    let digest = faucet_claim_evidence_addr(frozen_envelope);
-    let fanout =
-        crate::sdk::storage_io::submit_faucet_ticket_claim(set, network_id, frozen_envelope)
-            .await
-            .map_err(|e| RegisterError::StorageUnavailable {
-                accepted: 0,
-                total: {
-                    let _ = e;
-                    set.len() as u32
-                },
-            })?;
-    count_claim(&fanout, &digest, set.quorum())
 }
 
 /// The namespace of the economic root cells: the key domain's own bytes.
@@ -250,43 +123,6 @@ pub async fn register_economic_root(
     })
 }
 
-/// The quorum-agreed winner for one cell, or `None` when no winner is
-/// established.
-///
-/// For the faucet-ticket and economic-root cells, whose callers act only on a
-/// winner. Anything else — an explicit empty at quorum, contradictory claims,
-/// or an unusable read — is `None` here, and a caller that must tell those
-/// apart uses [`dsm::economic::cell_observation::observe_cell`] directly, as
-/// the vault cells do.
-async fn read_cell_quorum(
-    set: &StorageSet,
-    reads: Vec<dsm::economic::cell_observation::MemberCellRead>,
-) -> Result<Option<Vec<u8>>, RegisterError> {
-    use dsm::economic::cell_observation::{observe_cell, CellObservation};
-    match observe_cell(&reads, set.quorum()) {
-        CellObservation::Claimed(b) => Ok(Some(b)),
-        CellObservation::Conflict { distinct } => Err(RegisterError::Conflict {
-            detail: format!("{distinct} distinct values observed for one write-once cell"),
-        }),
-        CellObservation::EmptyAtQuorum | CellObservation::Unavailable { .. } => Ok(None),
-    }
-}
-
-/// The quorum winner for one faucet ticket, if established.
-pub async fn read_winning_faucet_ticket(
-    set: &StorageSet,
-    faucet_id: &[u8; 32],
-    ticket_index: u64,
-) -> Result<Option<Vec<u8>>, RegisterError> {
-    let rows = crate::sdk::storage_io::read_faucet_ticket_cell(set, faucet_id, ticket_index)
-        .await
-        .map_err(|_| RegisterError::StorageUnavailable {
-            accepted: 0,
-            total: set.len() as u32,
-        })?;
-    read_cell_quorum(set, rows).await
-}
-
 /// The FINAL value at `K_root(q)` (Part II §13), derived by Core from raw
 /// member reads: the leader's first object naming the key, held by two other
 /// members. `seed` is `s(q)` from a root the caller validated itself. `None`
@@ -297,8 +133,7 @@ pub async fn read_economic_root_cell(
     k_root: &[u8; 32],
     seed: &[u8; 32],
 ) -> Result<Option<Vec<u8>>, RegisterError> {
-    use dsm::sofi::arith::{resolve, CellObservation, CellResolution};
-    use dsm::sofi::wire::STORAGE_MEMBER_COUNT;
+    use dsm::sofi::arith::{resolve_objects, ObjectResolution};
     let total = set.len() as u32;
     let unavailable = || RegisterError::StorageUnavailable { accepted: 0, total };
     let leader = crate::sdk::storage_io::leader_index(set, seed).map_err(|_| unavailable())?;
@@ -306,40 +141,18 @@ pub async fn read_economic_root_cell(
         .await
         .map_err(|_| unavailable())?;
     // Only objects naming the key are observed; everything else is nothing.
-    let naming: Vec<Option<Vec<&Vec<u8>>>> = reads
-        .iter()
-        .map(|r| {
-            r.as_ref().map(|values| {
-                values
-                    .iter()
-                    .filter(|v| names_root_key(v, k_root))
-                    .collect()
-            })
-        })
-        .collect();
-    let observations: [CellObservation; STORAGE_MEMBER_COUNT] = naming
-        .iter()
-        .map(|r| match r {
-            Some(values) => {
-                CellObservation::Holds(values.iter().map(|v| *blake3::hash(v).as_bytes()).collect())
-            }
-            None => CellObservation::Unknown,
-        })
-        .collect::<Vec<_>>()
-        .try_into()
-        .map_err(|_| unavailable())?;
-    match resolve(&observations, leader) {
-        CellResolution::Final(digest) => Ok(naming[leader].as_ref().and_then(|values| {
-            values
-                .iter()
-                .find(|v| *blake3::hash(v).as_bytes() == digest)
-                .map(|v| (*v).clone())
-        })),
-        CellResolution::LeaderHeld(_) | CellResolution::Unresolved => Ok(None),
+    match resolve_objects(&reads, leader, |v| names_root_key(v, k_root))
+        .map_err(|_| unavailable())?
+    {
+        ObjectResolution::Final(bytes) => Ok(Some(bytes)),
+        ObjectResolution::LeaderHeld(_)
+        | ObjectResolution::Open
+        | ObjectResolution::Unavailable => Ok(None),
     }
 }
 
-/// The LIVE provenance resolver: register cells at quorum, immutable objects
+/// The LIVE provenance resolver: register cells final at their leader, the
+/// native reserve walked from its genesis state, immutable objects
 /// re-hash-verified, peer lineages resolved through the core walker with the
 /// device-local validated-start cache (never authority — an `Invalid` from a
 /// cached start discards the row and re-walks from position 0).
@@ -422,20 +235,19 @@ impl dsm::economic::peer_lineage::PeerEvidenceFetcher for LiveRegisterResolver<'
         .map_err(|e| PeerLineageFailure::Incomplete(e.to_string()))
     }
 
-    fn faucet_ticket_cell(
+    fn native_reserve_release(
         &self,
-        faucet_id: &[u8; 32],
-        ticket_index: u64,
-    ) -> Result<Option<Vec<u8>>, PeerLineageFailure> {
-        let fid = *faucet_id;
-        tokio::task::block_in_place(|| {
-            self.runtime
-                .block_on(read_winning_faucet_ticket(self.set, &fid, ticket_index))
-        })
-        .map_err(|e| match e {
-            RegisterError::Conflict { detail } => PeerLineageFailure::Quarantined(detail),
-            other => PeerLineageFailure::Incomplete(other.to_string()),
-        })
+        reserve_id: &[u8; 32],
+        generation: u64,
+    ) -> Result<Option<ReserveReleaseWin>, PeerLineageFailure> {
+        crate::sdk::native_reserve::release_at(
+            self.set,
+            &self.expected_network_id,
+            &self.runtime,
+            reserve_id,
+            generation,
+        )
+        .map_err(|e| PeerLineageFailure::Incomplete(e.to_string()))
     }
 
     fn immutable(
@@ -609,15 +421,13 @@ impl dsm::economic::peer_lineage::PeerEvidenceFetcher for RecordingResolver<'_> 
         dsm::economic::peer_lineage::PeerEvidenceFetcher::register_cell(self.inner, k_root, seed)
     }
 
-    fn faucet_ticket_cell(
+    fn native_reserve_release(
         &self,
-        faucet_id: &[u8; 32],
-        ticket_index: u64,
-    ) -> Result<Option<Vec<u8>>, PeerLineageFailure> {
-        dsm::economic::peer_lineage::PeerEvidenceFetcher::faucet_ticket_cell(
-            self.inner,
-            faucet_id,
-            ticket_index,
+        reserve_id: &[u8; 32],
+        generation: u64,
+    ) -> Result<Option<ReserveReleaseWin>, PeerLineageFailure> {
+        dsm::economic::peer_lineage::PeerEvidenceFetcher::native_reserve_release(
+            self.inner, reserve_id, generation,
         )
     }
 
@@ -698,22 +508,20 @@ impl ProvenanceResolver for LiveRegisterResolver<'_> {
         )
     }
 
-    fn winning_faucet_ticket(
+    fn native_reserve_release(
         &self,
-        faucet_id: &[u8; 32],
-        ticket_index: u64,
-    ) -> Option<FaucetTicketWin> {
-        let set = self.set;
-        let fid = *faucet_id;
-        let bytes = tokio::task::block_in_place(|| {
-            self.runtime
-                .block_on(read_winning_faucet_ticket(set, &fid, ticket_index))
-        })
+        reserve_id: &[u8; 32],
+        generation: u64,
+    ) -> Option<ReserveReleaseWin> {
+        crate::sdk::native_reserve::release_at(
+            self.set,
+            &self.expected_network_id,
+            &self.runtime,
+            reserve_id,
+            generation,
+        )
         .ok()
-        .flatten()?;
-        Some(FaucetTicketWin {
-            envelope_bytes: bytes,
-        })
+        .flatten()
     }
 
     fn immutable_evidence(
@@ -773,15 +581,6 @@ pub(crate) fn anchored_policy_bytes_local_or_network(
     Ok(bytes)
 }
 
-/// Base32 path helpers shared by live and fake paths.
-pub(crate) fn faucet_ticket_path(faucet_id: &[u8; 32], ticket_index: u64) -> String {
-    format!(
-        "/api/v2/faucet-ticket/{}/{}",
-        text_id::encode_base32_crockford(faucet_id),
-        ticket_index
-    )
-}
-
 pub(crate) fn immutable_object_key(
     namespace: dsm::crypto::domain::TaggedHashDomain<'_>,
     payload: &[u8],
@@ -804,199 +603,4 @@ pub(crate) fn immutable_object_key_for_inner(
         String::from_utf8_lossy(namespace.source_bytes()),
         text_id::encode_base32_crockford(&addr)
     )
-}
-
-#[cfg(test)]
-mod tests {
-    //! Direct controls on the Req 15.8 counting rules — the pure gates every
-    //! register operation funnels through. Each test is the mutation control
-    //! for one counting clause: weaken that clause and its test goes red.
-
-    use super::*;
-    use crate::sdk::storage_node_sdk::{ClaimFanout, MemberClaimOutcome, MemberClaimResult};
-    use crate::sdk::storage_set::StorageMember;
-
-    fn three_member_set() -> StorageSet {
-        StorageSet::new(
-            (1..=3)
-                .map(|i| StorageMember {
-                    register_incarnation_id: [0xC0 | i as u8; 32],
-                    member_id: format!("dsm-node-{i}"),
-                    endpoint: format!("http://127.0.0.1:808{i}"),
-                })
-                .collect(),
-        )
-        .expect("set")
-    }
-
-    fn outcome(member: &str, echo: Option<&str>, result: MemberClaimResult) -> MemberClaimOutcome {
-        MemberClaimOutcome {
-            member_id: member.to_string(),
-            endpoint: String::new(),
-            result,
-            echoed_node_id: echo.map(str::to_string),
-        }
-    }
-
-    fn fanout(outcomes: Vec<MemberClaimOutcome>) -> ClaimFanout {
-        let total = outcomes.len() as u32;
-        ClaimFanout { outcomes, total }
-    }
-
-    #[test]
-    fn an_unattributed_acceptance_never_counts() {
-        // Two members say "accepted" but one echoes a DIFFERENT node id —
-        // a response that cannot be attributed to the member queried is
-        // uncountable (Req 15.8), so quorum is NOT met.
-        let f = fanout(vec![
-            outcome(
-                "dsm-node-1",
-                Some("dsm-node-1"),
-                MemberClaimResult::Accepted,
-            ),
-            outcome(
-                "dsm-node-2",
-                Some("dsm-node-9"),
-                MemberClaimResult::Accepted,
-            ),
-            outcome(
-                "dsm-node-3",
-                None,
-                MemberClaimResult::Unavailable("down".into()),
-            ),
-        ]);
-        match count_claim(&f, &[0u8; 32], 2) {
-            Err(RegisterError::StorageUnavailable { accepted, .. }) => assert_eq!(accepted, 1),
-            other => panic!("unattributed acceptance counted: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn a_generic_refusal_never_counts_toward_quorum() {
-        // One attributed acceptance + one generic refusal at q=2: the refusal
-        // must fail the claim CLOSED (contested), never count toward it.
-        let f = fanout(vec![
-            outcome(
-                "dsm-node-1",
-                Some("dsm-node-1"),
-                MemberClaimResult::Accepted,
-            ),
-            outcome(
-                "dsm-node-2",
-                Some("dsm-node-2"),
-                MemberClaimResult::Refused { held_digest: None },
-            ),
-            outcome(
-                "dsm-node-3",
-                None,
-                MemberClaimResult::Unavailable("down".into()),
-            ),
-        ]);
-        match count_claim(&f, &[0u8; 32], 2) {
-            Err(RegisterError::Contested { refused_by }) => assert_eq!(refused_by, 1),
-            other => panic!("generic refusal mis-counted: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn refused_with_our_exact_digest_counts_only_when_attributed() {
-        // held-identical reported as a refusal carrying OUR digest is an
-        // acceptance in different words — with the same attribution bar.
-        let ours = [7u8; 32];
-        let held = MemberClaimResult::Refused {
-            held_digest: Some(ours.to_vec()),
-        };
-        let attributed = fanout(vec![
-            outcome(
-                "dsm-node-1",
-                Some("dsm-node-1"),
-                MemberClaimResult::Accepted,
-            ),
-            outcome("dsm-node-2", Some("dsm-node-2"), held.clone()),
-        ]);
-        let cell = count_claim(&attributed, &ours, 2).expect("attributed identical digest counts");
-        assert_eq!(cell.accepted(), 2);
-
-        let unattributed = fanout(vec![
-            outcome(
-                "dsm-node-1",
-                Some("dsm-node-1"),
-                MemberClaimResult::Accepted,
-            ),
-            outcome("dsm-node-2", Some("dsm-node-9"), held),
-        ]);
-        assert!(
-            count_claim(&unattributed, &ours, 2).is_err(),
-            "identical digest without attribution must not count"
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn divergent_values_in_one_write_once_cell_are_a_conflict() {
-        // Two attributed members holding DIFFERENT bytes for one cell is the
-        // catastrophic case: quarantine, never hash-order, never overwrite.
-        use dsm::economic::cell_observation::MemberCellRead;
-        let set = three_member_set();
-        let reads = vec![
-            MemberCellRead::Value(vec![1u8]),
-            MemberCellRead::Value(vec![2u8]),
-            MemberCellRead::Absent,
-        ];
-        match read_cell_quorum(&set, reads).await {
-            Err(RegisterError::Conflict { .. }) => {}
-            other => panic!("divergent cell not quarantined: {other:?}"),
-        }
-    }
-
-    /// ATTRIBUTION IS FOLDED INTO THE READ, and it is load-bearing in the
-    /// dangerous direction: an unattributed response must not be counted as an
-    /// ABSENCE, because a quorum of absences is the one observation a forward
-    /// lineage walk treats as terminal.
-    ///
-    /// The cell is empty here, so a correctly-echoing member says `Absent`. A
-    /// member whose response carries another id or none, and a member that is
-    /// down, each say nothing at all — and the observation is `Unavailable`
-    /// rather than an emptiness a walker would act on.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn a_mis_echoed_or_failing_member_is_never_counted_as_an_absence() {
-        use dsm::economic::cell_observation::{observe_cell, CellObservation, MemberCellRead};
-        let set = three_member_set();
-        crate::sdk::storage_io::fake_registers::reset();
-        crate::sdk::storage_io::fake_registers::set_echo(
-            "dsm-node-2",
-            Some("dsm-node-9".to_string()),
-        );
-        // And a member that is simply DOWN. An outage is the same kind of
-        // non-answer as a mis-echo: it must never become the absence a
-        // forward walk would read as a frontier.
-        crate::sdk::storage_io::fake_registers::fail_member("dsm-node-3", true);
-        let reads = crate::sdk::storage_io::fake_registers::read(
-            &set,
-            crate::sdk::storage_io::fake_registers::RegisterKind::FaucetTicket,
-            b"cell-key",
-        );
-        assert_eq!(
-            reads[0],
-            MemberCellRead::Absent,
-            "an attributed member with no row asserts absence"
-        );
-        assert_eq!(
-            reads[1],
-            MemberCellRead::Unavailable,
-            "a mis-echoed response is not an answer"
-        );
-        assert_eq!(
-            reads[2],
-            MemberCellRead::Unavailable,
-            "a member that is down is not an answer"
-        );
-        assert!(
-            matches!(
-                observe_cell(&reads, set.quorum()),
-                CellObservation::Unavailable { attributed: 1, .. }
-            ),
-            "one absence is short of quorum and the other two answered nothing"
-        );
-        crate::sdk::storage_io::fake_registers::reset();
-    }
 }

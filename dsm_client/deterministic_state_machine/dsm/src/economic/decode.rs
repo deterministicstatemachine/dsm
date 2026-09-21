@@ -21,7 +21,7 @@ use crate::economic::issuance::IssuanceAuthorizationBody;
 use crate::ccb::decode::{invalid, Cursor, DecodeError};
 use crate::ccb::{class, CcbObject};
 use crate::economic::credit::{
-    CreditSource, CreditSourceAuthorizedIssuance, CreditSourceValidatedFaucetDistribution,
+    CreditSource, CreditSourceAuthorizedIssuance, CreditSourceNativeReserveRelease,
     CreditSourceValidatedPeerDebit, CreditSourceVerifiedOfflineReentry,
 };
 use crate::economic::mutation::EconomicLeafMutation;
@@ -327,17 +327,17 @@ fn read_credit_source(c: &mut Cursor<'_>) -> Result<CreditSource, DecodeError> {
                 },
             ))
         }
-        class::CREDIT_SOURCE_VALIDATED_FAUCET_DISTRIBUTION => {
+        class::CREDIT_SOURCE_NATIVE_RESERVE_RELEASE => {
             c.envelope(
-                CreditSourceValidatedFaucetDistribution::CLASS,
-                CreditSourceValidatedFaucetDistribution::SCHEMA,
+                CreditSourceNativeReserveRelease::CLASS,
+                CreditSourceNativeReserveRelease::SCHEMA,
             )?;
-            Ok(CreditSource::ValidatedFaucetDistribution(
-                CreditSourceValidatedFaucetDistribution {
+            Ok(CreditSource::NativeReserveRelease(
+                CreditSourceNativeReserveRelease {
                     credit_mutation_index: c.u32()?,
-                    faucet_id: c.digest32()?,
-                    ticket_index: c.u64()?,
-                    faucet_claim_evidence_addr: c.digest32()?,
+                    reserve_id: c.digest32()?,
+                    generation: c.u64()?,
+                    release_evidence_addr: c.digest32()?,
                 },
             ))
         }

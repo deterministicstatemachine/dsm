@@ -114,7 +114,7 @@ async fn a_stale_admission_snapshot_is_refused_not_committed() {
         dsm::economic::admission::PendingAdmissionKind::DsmBacked,
         1, // already admitted
         dsm::economic::tree::empty_economic_root(),
-        dsm::economic::faucet::dsm_operation_digest(&burn_op(1).to_bytes()),
+        dsm::economic::admission::dsm_operation_digest(&burn_op(1).to_bytes()),
     );
     let _ = head;
     let err = core
@@ -1090,7 +1090,7 @@ async fn a_failed_finish_holds_the_mint_and_resume_completes_the_same_admission(
         policy_commit,
         message: String::new(),
     };
-    let op_digest = dsm::economic::faucet::dsm_operation_digest(&mint.to_bytes());
+    let op_digest = dsm::economic::admission::dsm_operation_digest(&mint.to_bytes());
     let delta = dsm::types::device_state::BalanceDelta {
         policy_commit,
         direction: dsm::types::device_state::BalanceDirection::Credit,

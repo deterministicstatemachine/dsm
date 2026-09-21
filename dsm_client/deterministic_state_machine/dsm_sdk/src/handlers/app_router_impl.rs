@@ -1240,7 +1240,7 @@ impl AppRouterImpl {
         let econ_target_position = econ_validated.economic_position() + 1;
         let admission_op = signed_op.clone();
         let admission_op_digest =
-            dsm::economic::faucet::dsm_operation_digest(&admission_op.to_bytes());
+            dsm::economic::admission::dsm_operation_digest(&admission_op.to_bytes());
         let econ_pre_root = econ_tree.borrow().root();
         let econ_prepared = dsm::economic::admission::PendingEconomicAdmission::prepared(
             dsm::economic::admission::PendingAdmissionKind::DsmBacked,

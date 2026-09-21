@@ -57,6 +57,41 @@
 //! leaf runs normally throughout, because blocking it would make an economic
 //! publication delay look like a device fault.
 
+use crate::common::domain_tags::{
+    TAG_DSM_ECONOMIC_OPERATION_DIGEST_DSM, TAG_DSM_ECONOMIC_OPERATION_ID_DSM,
+};
+use crate::crypto::blake3::dsm_domain_hasher;
+
+/// `operation_digest_dsm = H_dom(DSM/economic-operation-digest/dsm/v1,
+/// exact Operation::to_bytes())`.
+pub fn dsm_operation_digest(operation_bytes: &[u8]) -> [u8; 32] {
+    let mut h = dsm_domain_hasher(TAG_DSM_ECONOMIC_OPERATION_DIGEST_DSM);
+    h.update(operation_bytes);
+    *h.finalize().as_bytes()
+}
+
+/// `EconomicOperationId_dsm = H_dom(DSM/economic-operation-id/dsm/v2,
+/// G ‖ DevID ‖ C_dsm+)`.
+///
+/// `c_dsm_plus` is the accepted DSM successor's chain-state commitment — the
+/// relationship chain tip the acceptance installed. The id names WHICH
+/// authenticated successor performed the operation; the operation digest
+/// names WHAT was performed. Two successors can carry byte-identical
+/// operation bytes, so an id derived from the digest (the burned `/v1`
+/// preimage) could not tell them apart — and
+/// `consumed_source.consumer_economic_operation_id` needs to.
+pub fn dsm_economic_operation_id(
+    genesis: &[u8; 32],
+    device_id: &[u8; 32],
+    c_dsm_plus: &[u8; 32],
+) -> [u8; 32] {
+    let mut h = dsm_domain_hasher(TAG_DSM_ECONOMIC_OPERATION_ID_DSM);
+    h.update(genesis);
+    h.update(device_id);
+    h.update(c_dsm_plus);
+    *h.finalize().as_bytes()
+}
+
 use crate::economic::classifier::EconomicEffect;
 use crate::types::operations::Operation;
 

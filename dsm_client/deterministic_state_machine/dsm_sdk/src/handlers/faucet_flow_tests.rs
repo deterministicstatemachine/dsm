@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! End-to-end tests for the ERA faucet claim flow, over the fake registers —
-//! the full lifecycle: ticket won, fence-coupled advance, evidence frozen +
-//! published, root registered, verifier-validated, admitted.
+//! End-to-end tests for the ERA faucet claim flow, over the fake fleet —
+//! the full lifecycle: a generation of the native reserve won leader first,
+//! fence-coupled advance, evidence frozen + published, root registered,
+//! verifier-validated, admitted.
 //!
 //! `flavor = "multi_thread"` is required: the live resolver bridges the sync
 //! verifier to async quorum reads via `block_in_place`.
@@ -119,12 +120,6 @@ pub(crate) fn setup(seed: u8) -> (CoreSDK, FleetGuard) {
     client_db::reset_database_for_tests();
     client_db::init_database().expect("init db");
     crate::sdk::storage_io::fake_registers::reset();
-    // The binding register is a THIRD process-global store, alongside the object
-    // fleet and the economic-root registers. It must be reset here for the same
-    // reason they are: a previous test's records — or worse, a stale
-    // (member_id, incarnation) echo — make a later vault's binding key answer
-    // for the wrong fleet, and `ensure_registered` will not correct an entry
-    // that already exists.
     let (public_key, devid, genesis) = install_testnet_identity(seed);
     let core =
         CoreSDK::new_with_device(DeviceInfo::new(devid, public_key.clone())).expect("core sdk");
@@ -152,45 +147,6 @@ fn canonical_set() -> StorageSet {
         .expect("canonical set resolvable in test mode")
 }
 
-/// The process authenticated as ANOTHER device for the duration of one
-/// register request, restored on drop. A register member attributes a
-/// claim to the device that authenticated the request; a test that has a
-/// second party claim must make that party the caller, exactly as a second
-/// handset would be — never present its envelope from the first party's
-/// session and rely on a lenient double.
-struct AsDevice {
-    saved: Option<(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>)>,
-}
-
-impl AsDevice {
-    fn enter(device_id: [u8; 32], public_key: Vec<u8>) -> Self {
-        use crate::sdk::app_state::AppState;
-        let saved = match (
-            AppState::get_device_id(),
-            AppState::get_public_key(),
-            AppState::get_genesis_hash(),
-            AppState::get_device_tree_root(),
-        ) {
-            (Some(d), Some(p), Some(g), Some(r)) => Some((d, p, g, r.to_vec())),
-            _ => None,
-        };
-        let genesis = AppState::get_genesis_hash().unwrap_or_else(|| vec![0u8; 32]);
-        let root = AppState::get_device_tree_root()
-            .map(|r| r.to_vec())
-            .unwrap_or_else(|| vec![0u8; 32]);
-        AppState::set_identity_info(device_id.to_vec(), public_key, genesis, root);
-        Self { saved }
-    }
-}
-
-impl Drop for AsDevice {
-    fn drop(&mut self) {
-        if let Some((d, p, g, r)) = self.saved.take() {
-            crate::sdk::app_state::AppState::set_identity_info(d, p, g, r);
-        }
-    }
-}
-
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn a_full_claim_credits_100_era_and_admits_position_1() {
@@ -215,7 +171,7 @@ async fn a_full_claim_credits_100_era_and_admits_position_1() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
-async fn a_repeat_claimant_succeeds_on_a_different_ticket() {
+async fn a_repeat_claimant_succeeds_on_the_next_generation() {
     let (core, _fleet) = setup(0xA2);
     let one = claim_era_faucet(&core, NETWORK).await.expect("first claim");
     assert_eq!(one.economic_position, 1);
@@ -229,100 +185,135 @@ async fn a_repeat_claimant_succeeds_on_a_different_ticket() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
-async fn poisoned_ticket_does_not_brick_the_faucet_end_to_end() {
-    // THE availability regression control, through the WHOLE flow: an
-    // attacker consumes the victim's attempt-0 ticket first; the victim's
-    // claim still succeeds via the next attempt. If this fails, shared state
-    // crept back between tickets. It proves ticket INDEPENDENCE, not
-    // guaranteed claimant liveness under targeted pre-consumption — selection
-    // is publicly predictable and that residual is documented in the plan.
+async fn a_concurrent_claimant_at_the_head_does_not_brick_the_faucet_end_to_end() {
+    // THE availability control, through the WHOLE flow: another claimant's
+    // release wins the reserve's next generation first (it reached the
+    // leader first, and is final). The victim's claim loses that race,
+    // re-walks to the moved head, and wins the generation after. Nothing is
+    // bricked: a lost generation costs nothing but a retry, and the reserve
+    // moved by exactly the other claimant's release.
     let (core, _fleet) = setup(0xA3);
-    let head = core.device_head().expect("head");
-    let (genesis, devid) = (head.genesis_digest(), head.devid());
-    let target = crate::sdk::economic_registers::select_ticket(&genesis, &devid, 1, 0)
-        .expect("victim's attempt-0 ticket");
-
-    // Attacker (its own identity/key) wins that exact ticket first — as
-    // ITSELF: a register attributes a claim to the authenticated device, so
-    // the attacker's envelope must arrive from the attacker's session.
-    let (atk_pk, atk_sk) = dsm::crypto::sphincs::generate_sphincs_keypair().unwrap();
-    let attacker_devid = [0x67u8; 32];
     let set = canonical_set();
-    let poison = dsm::economic::faucet::sign_faucet_ticket_claim(
-        &dsm::economic::faucet::FaucetTicketClaimBody {
-            faucet_id: dsm::economic::faucet::era_faucet_id(NETWORK),
-            ticket_index: target,
-            claimant_genesis: [0x66; 32],
-            claimant_devid: attacker_devid,
-            claimant_economic_position: 1,
+    let r0 = crate::sdk::native_reserve::genesis_state(&set, NETWORK);
+
+    // The other claimant (its own identity/key) releases generation 1 to
+    // itself — as ITSELF: the release names its own recipient and is signed
+    // by its own key.
+    let (atk_pk, atk_sk) = dsm::crypto::sphincs::generate_sphincs_keypair().unwrap();
+    let rival = dsm::economic::native_reserve::sign_release(
+        &dsm::economic::native_reserve::NativeReserveReleaseBody {
+            reserve_id: r0.reserve_id,
+            parent_root: r0.root(),
+            generation: 1,
+            amount: dsm::economic::native_reserve::ERA_FAUCET_PAYOUT,
+            recipient_genesis: [0x66; 32],
+            recipient_devid: [0x67; 32],
+            recipient_economic_position: 1,
             recipient_operation_digest: [0x68; 32],
-            claimant_public_key: atk_pk.clone(),
             storage_set_id: set.id(),
+            source: dsm::economic::native_reserve::ReleaseSource::FaucetClaimant {
+                claimant_public_key: atk_pk,
+            },
         },
         &atk_sk,
     )
     .unwrap();
-    {
-        let _as_attacker = AsDevice::enter(attacker_devid, atk_pk);
-        crate::sdk::economic_registers::claim_faucet_ticket(&set, NETWORK, &poison)
-            .await
-            .expect("attacker consumes the ticket — allowed, costs exactly that ticket");
-    }
+    let write = crate::sdk::native_reserve::write_release(&set, &r0, &rival)
+        .await
+        .expect("the rival's release reaches the members");
+    assert!(write.leader_reached);
 
     let outcome = claim_era_faucet(&core, NETWORK)
         .await
-        .expect("victim claims on the NEXT attempt's ticket");
+        .expect("the victim claims the NEXT generation");
     assert_eq!(outcome.tokens_received, 100);
     assert_eq!(core.device_head().unwrap().balance(&era()), 100);
+    // The reserve moved by both releases, in order: the rival's at 1, ours at 2.
+    let handle = tokio::runtime::Handle::current();
+    let head = tokio::task::spawn_blocking({
+        let set = set.clone();
+        move || crate::sdk::native_reserve::walk_reserve(&set, NETWORK, &handle)
+    })
+    .await
+    .unwrap()
+    .expect("walk");
+    match head {
+        dsm::economic::native_reserve::WalkStop::Head(state) => {
+            assert_eq!(state.generation, 2);
+            assert_eq!(
+                state.remaining_supply,
+                dsm::economic::native_reserve::ERA_RESERVE_GENESIS_SUPPLY - 200
+            );
+        }
+        other => panic!("{other:?}"),
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
-async fn crash_after_ticket_win_before_acceptance_resumes_byte_identically() {
-    // Boundary 1: ticket won at quorum, envelope frozen, then crash before
-    // the local advance. The retry re-derives the same ticket, loads the
-    // FROZEN envelope (sign-once), gets held-identical from the register,
-    // and completes.
+async fn crash_after_the_release_is_final_before_acceptance_resumes_byte_identically() {
+    // Boundary 1: the release is final at the members, frozen locally, then
+    // crash before the local advance. The retry walks the reserve, finds the
+    // FINAL release naming this device's target position (sign-once: the
+    // frozen bytes), and completes on that generation — never releasing a
+    // second time for the same position.
     let (core, _fleet) = setup(0xA4);
     let head = core.device_head().expect("head");
     let (genesis, devid) = (head.genesis_digest(), head.devid());
-    let faucet_id = dsm::economic::faucet::era_faucet_id(NETWORK);
-    let ticket = crate::sdk::economic_registers::select_ticket(&genesis, &devid, 1, 0).unwrap();
     let set = canonical_set();
+    let r0 = crate::sdk::native_reserve::genesis_state(&set, NETWORK);
 
     // The pre-crash half, exactly as the flow performs it: build the op,
-    // sign the envelope, freeze it, win the quorum cell — then "crash".
+    // sign the release, freeze it, write it leader first — then "crash".
     let op = dsm::types::operations::Operation::FaucetClaim {
-        faucet_id,
-        ticket_index: ticket,
+        reserve_id: r0.reserve_id,
+        generation: 1,
     };
-    let op_digest = dsm::economic::faucet::dsm_operation_digest(&op.to_bytes());
+    let op_digest = dsm::economic::admission::dsm_operation_digest(&op.to_bytes());
     let (pk, sk) = crate::sdk::signing_authority::current_keypair().unwrap();
-    let envelope = dsm::economic::faucet::sign_faucet_ticket_claim(
-        &dsm::economic::faucet::FaucetTicketClaimBody {
-            faucet_id,
-            ticket_index: ticket,
-            claimant_genesis: genesis,
-            claimant_devid: devid,
-            claimant_economic_position: 1,
+    let envelope = dsm::economic::native_reserve::sign_release(
+        &dsm::economic::native_reserve::NativeReserveReleaseBody {
+            reserve_id: r0.reserve_id,
+            parent_root: r0.root(),
+            generation: 1,
+            amount: dsm::economic::native_reserve::ERA_FAUCET_PAYOUT,
+            recipient_genesis: genesis,
+            recipient_devid: devid,
+            recipient_economic_position: 1,
             recipient_operation_digest: op_digest,
-            claimant_public_key: pk,
             storage_set_id: set.id(),
+            source: dsm::economic::native_reserve::ReleaseSource::FaucetClaimant {
+                claimant_public_key: pk,
+            },
         },
         &sk,
     )
     .unwrap();
-    client_db::economic_faucet::put_frozen_ticket_claim(&faucet_id, ticket, &envelope, 1).unwrap();
-    crate::sdk::economic_registers::claim_faucet_ticket(&set, NETWORK, &envelope)
+    client_db::native_reserve::put_frozen_release(&r0.reserve_id, &r0.root(), &envelope, 1)
+        .unwrap();
+    crate::sdk::native_reserve::write_release(&set, &r0, &envelope)
         .await
-        .expect("pre-crash quorum win");
+        .expect("pre-crash final release");
 
-    // Restart: the full flow completes on the SAME ticket, same bytes.
+    // Restart: the full flow completes on the SAME generation, same bytes.
     let outcome = claim_era_faucet(&core, NETWORK)
         .await
         .expect("resumed claim");
     assert_eq!(outcome.tokens_received, 100);
     assert_eq!(outcome.economic_position, 1);
+    let handle = tokio::runtime::Handle::current();
+    let win = tokio::task::spawn_blocking({
+        let set = set.clone();
+        move || crate::sdk::native_reserve::release_at(&set, NETWORK, &handle, &r0.reserve_id, 1)
+    })
+    .await
+    .unwrap()
+    .expect("memo")
+    .expect("generation 1 is final");
+    assert_eq!(
+        win.envelope_bytes, envelope,
+        "the resumed claim used the frozen release"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

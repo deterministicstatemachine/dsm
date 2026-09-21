@@ -104,25 +104,27 @@ impl CcbObject for CreditSourceVerifiedOfflineReentry {
     const SCHEMA: u16 = 1;
 }
 
-/// `0x0030` schema 1 — the recipient credit of a consumed ERA faucet ticket.
+/// `0x005D` schema 1 — the recipient credit of one native reserve release.
 ///
-/// Deliberately carries NO asset and NO amount: both are protocol-derived
-/// (builtin ERA, the fixed payout) and already established by the credit
-/// mutation and the addressed evidence — a copy here would be a second place
-/// for one fact to disagree with itself. `faucet_id` is compared against the
-/// CANONICAL `era_faucet_id(network_id)` by the verifier; the descriptor and
-/// the winner agreeing with each other proves nothing about the cap.
+/// Deliberately carries NO asset and NO amount: both are read from the
+/// release the walk established as final at `generation` of the reserve —
+/// a copy here would be a second place for one fact to disagree with itself.
+/// `reserve_id` is compared against the CANONICAL `era_reserve_id(network_id)`
+/// by the verifier; the descriptor and the release agreeing with each other
+/// proves nothing about the supply.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CreditSourceValidatedFaucetDistribution {
+pub struct CreditSourceNativeReserveRelease {
     pub credit_mutation_index: u32,
-    pub faucet_id: [u8; 32],
-    pub ticket_index: u64,
-    /// Content address of the EXACT signed `FaucetTicketClaimV1` bytes.
-    pub faucet_claim_evidence_addr: [u8; 32],
+    pub reserve_id: [u8; 32],
+    /// The generation the release installed: `R_{generation}` succeeds
+    /// `R_{generation − 1}` by exactly this release.
+    pub generation: u64,
+    /// Content address of the EXACT signed `NativeReserveReleaseV1` bytes.
+    pub release_evidence_addr: [u8; 32],
 }
 
-impl CcbObject for CreditSourceValidatedFaucetDistribution {
-    const CLASS: u16 = class::CREDIT_SOURCE_VALIDATED_FAUCET_DISTRIBUTION;
+impl CcbObject for CreditSourceNativeReserveRelease {
+    const CLASS: u16 = class::CREDIT_SOURCE_NATIVE_RESERVE_RELEASE;
     const SCHEMA: u16 = 1;
 }
 
@@ -132,7 +134,7 @@ pub enum CreditSource {
     AuthorizedIssuance(CreditSourceAuthorizedIssuance),
     ValidatedPeerDebit(CreditSourceValidatedPeerDebit),
     VerifiedOfflineReentry(CreditSourceVerifiedOfflineReentry),
-    ValidatedFaucetDistribution(CreditSourceValidatedFaucetDistribution),
+    NativeReserveRelease(CreditSourceNativeReserveRelease),
 }
 
 impl CreditSource {
@@ -144,7 +146,7 @@ impl CreditSource {
             Self::AuthorizedIssuance(_) => CreditSourceAuthorizedIssuance::CLASS,
             Self::ValidatedPeerDebit(_) => CreditSourceValidatedPeerDebit::CLASS,
             Self::VerifiedOfflineReentry(_) => CreditSourceVerifiedOfflineReentry::CLASS,
-            Self::ValidatedFaucetDistribution(_) => CreditSourceValidatedFaucetDistribution::CLASS,
+            Self::NativeReserveRelease(_) => CreditSourceNativeReserveRelease::CLASS,
         }
     }
 
@@ -155,7 +157,7 @@ impl CreditSource {
             Self::AuthorizedIssuance(s) => s.credit_mutation_index,
             Self::ValidatedPeerDebit(s) => s.credit_mutation_index,
             Self::VerifiedOfflineReentry(s) => s.credit_mutation_index,
-            Self::ValidatedFaucetDistribution(s) => s.credit_mutation_index,
+            Self::NativeReserveRelease(s) => s.credit_mutation_index,
         }
     }
 
@@ -170,7 +172,7 @@ impl CreditSource {
             Self::AuthorizedIssuance(s) => vec![s.issuance_authorization_addr],
             Self::ValidatedPeerDebit(s) => vec![s.acceptance_evidence_addr],
             Self::VerifiedOfflineReentry(s) => vec![s.branch_evidence_addr],
-            Self::ValidatedFaucetDistribution(s) => vec![s.faucet_claim_evidence_addr],
+            Self::NativeReserveRelease(s) => vec![s.release_evidence_addr],
         }
     }
 
@@ -192,12 +194,12 @@ impl CreditSource {
                 push_u32(&mut out, s.peer_debit_mutation_index); // 5
                 push_digest32(&mut out, &s.acceptance_evidence_addr); // 6
             }
-            Self::ValidatedFaucetDistribution(s) => {
-                push_envelope::<CreditSourceValidatedFaucetDistribution>(&mut out);
+            Self::NativeReserveRelease(s) => {
+                push_envelope::<CreditSourceNativeReserveRelease>(&mut out);
                 push_u32(&mut out, s.credit_mutation_index); // 1
-                push_digest32(&mut out, &s.faucet_id); // 2
-                push_u64(&mut out, s.ticket_index); // 3
-                push_digest32(&mut out, &s.faucet_claim_evidence_addr); // 4
+                push_digest32(&mut out, &s.reserve_id); // 2
+                push_u64(&mut out, s.generation); // 3
+                push_digest32(&mut out, &s.release_evidence_addr); // 4
             }
             Self::VerifiedOfflineReentry(s) => {
                 if s.prior_boundary_id == s.unload_boundary_id {

@@ -368,7 +368,7 @@ impl AcceptedSubstrate {
         evidence_addr: [u8; 32],
     ) -> Self {
         let operation_digest =
-            crate::economic::faucet::dsm_operation_digest(&verified_operation.to_bytes());
+            crate::economic::admission::dsm_operation_digest(&verified_operation.to_bytes());
         Self::DsmSuccessor(Box::new(AcceptedDsmSuccessor {
             verified_operation,
             operation_digest,
@@ -646,7 +646,7 @@ pub fn advance_validated(
             // byte-identical operations; `C_dsm+` is what tells them apart,
             // and `consumed_source.consumer_economic_operation_id` depends
             // on it being told apart.
-            let expected = crate::economic::faucet::dsm_economic_operation_id(
+            let expected = crate::economic::admission::dsm_economic_operation_id(
                 genesis,
                 device_id,
                 &s.c_dsm_plus,
@@ -746,7 +746,7 @@ pub fn advance_validated(
     // winning claim naming any other set is foreign whatever its bytes say.
     let profile =
         crate::economic::register::resolve_root_register_profile(network_id).map_err(|e| {
-            EconomicValidationError::Provenance(ProvenanceError::FaucetWinnerInvalid(match e {
+            EconomicValidationError::Provenance(ProvenanceError::RegisterNotResolvable(match e {
                 crate::economic::register::RegisterResolutionError::UnknownNetwork { .. } => {
                     "no register profile for the claimant's network"
                 }
@@ -760,14 +760,14 @@ pub fn advance_validated(
     let candidate = resolver
         .root_register_candidate_set(network_id)
         .map_err(|_| {
-            EconomicValidationError::Provenance(ProvenanceError::FaucetWinnerInvalid(
+            EconomicValidationError::Provenance(ProvenanceError::RegisterNotResolvable(
                 "the network's register set could not be resolved",
             ))
         })?;
     // The candidate must re-derive the network's PINNED set id. Membership
     // alone would leave the incarnations to whatever the catalog offered.
     profile.verify_candidate(&candidate).map_err(|_| {
-        EconomicValidationError::Provenance(ProvenanceError::FaucetWinnerInvalid(
+        EconomicValidationError::Provenance(ProvenanceError::RegisterNotResolvable(
             "the resolved register set is not this network's pinned register",
         ))
     })?;

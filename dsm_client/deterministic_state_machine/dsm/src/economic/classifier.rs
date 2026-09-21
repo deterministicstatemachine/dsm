@@ -73,11 +73,11 @@ pub fn classify(operation: &Operation) -> EconomicEffect {
 
         // ── Closed write sets ───────────────────────────────────────────
         Mint { .. } | Burn { .. } | CreateToken { .. } => ClosedWriteSet,
-        // One balance credit of exactly the derived payout, funded by the
-        // consumed ticket (CreditSourceValidatedFaucetDistribution, 0x0030).
-        // NOT a mint: the units come from the network's finite bootstrap
-        // allocation, and the accepting transition refuses the operation
-        // without a matching pending admission.
+        // One balance credit of exactly the beta payout, funded by one
+        // release of the network's native reserve
+        // (CreditSourceNativeReserveRelease, 0x005D). NOT a mint: the units
+        // leave the fixed genesis supply, and the accepting transition refuses
+        // the operation without a matching pending admission.
         FaucetClaim { .. } => ClosedWriteSet,
         // One role-dependent economic event, not a Transfer fact and a
         // separate Receive fact: the role follows from whether

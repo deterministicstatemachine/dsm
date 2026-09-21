@@ -223,54 +223,43 @@ cargo run -p dsm_vertical_validation -- implementation-traces
 
 Tip: if the state space is large, shrink constants in `DSM.cfg` (fewer devices, smaller payloads).
 
-## DSM_EconRegisterObservation.tla — the economic register, observed concurrently
+## DSM_NativeReserveRelease.tla — the native ERA reserve, released leader first
 
-The write-once economic register read under concurrency: competing claimants,
-member outage, register **rebuild**, and a **non-atomic read round** whose
-samples interleave with all of them.
+One network's native ERA reserve (Part IX §51, rebuild step R4) at its head
+state and the ONE cell where its successor is decided, replicated across the
+frozen five-member set: claimants write releases naming themselves, anyone
+writes garbage, members keep everything and decide nothing, Core recognizes
+(a release that verifies AND is the successor of the state it validated),
+resolves leader first, and advances the reserve by exactly the amount the
+final release names. The Rust twins are `dsm/src/economic/native_reserve.rs`
+(the construction predicate, recognition, the walk) and
+`dsm_sdk/src/sdk/native_reserve.rs` (the leader-first write, the memoised
+walk, the background carry); the algebra is `lean4/DSMNativeReserve.lean`.
 
-Owns the *behavioural* half of the frozen `observe_cell` semantics
-(`dsm/src/economic/cell_observation.rs:122-175`). The *algebraic* half — that
-the canonical quorum is the strict majority, and that `2q > n` forces any two
-qualifying quorums to intersect — is a universal statement over all `n` and
-lives in `lean4/DSMEconomicSmtSeparation.lean` §10. Neither restates the other.
-`Quorum` is a CONSTANT here, exactly as `observe_cell` takes it as an argument;
-there is deliberately no operator computing a quorum from `Cardinality(Member)`,
-because a local majority-of-catalog rule is the verifier's opinion, not the
-vault's.
+Two properties, kept apart (owner ruling, 2026-09-20): finality is the
+deterministic leader plus two other members holding the same recognized
+object — `ThreeHoldersIsFinal`, `UnavailableNonLeaderNeverBlocks` — and
+replication is all-member, in the background, never a condition of finality
+(`_AllMembersHoldReachable` witnesses every member holding the winner). The
+reserve's accounting is `Conservation` (`Supply = remaining + Σ balances`),
+`NoValidReserveTransitionMints`, `NoCreatorBackout` and `RecipientIsClaimant`
+(`FaucetClaim(A, x) ⇒ balance[A] += x`).
 
-What TLC uniquely buys is the **round**: what can happen to the register between
-sampling one member and the next, and what a reader may conclude across a
-sequence of rounds. `NoEmptyAtQuorumAfterClaimed` is the statement only a model
-checker can make — a cell observed `Claimed` is never later observed empty,
-across every interleaving of claims, outages and rebuilds.
-
-### Deliberate falsifications — now machine-gated
-
-Each config below models a **real shipped defect** and must violate the named
-invariant. These are no longer asserted in this table and checked by nobody:
-`TlaSpec::expect_violation` inverts the verdict, and the run passes only if TLC
-reports *exactly* that invariant. Three ways to fail — no violation at all (the
-invariant is decoration), the wrong invariant (the config is not modelling what
-it claims), or a TLC error.
+### Deliberate falsifications and non-vacuity — machine-gated
 
 | Config | Models | Must violate |
 |---|---|---|
-| `_FlattenCollapse` | `peer_lineage.rs:165-169` `.ok().flatten()` — a quarantined write-once cell delivered as emptiness | `EmptinessIsGrounded` |
-| `_UnavailableIsNone` | `economic_registers.rs:232` `Unavailable => Ok(None)` | `EmptinessIsGrounded` |
-| `_ErrorIsEmpty` | the historical defect `cell_observation.rs` exists to remove: an unusable answer classified as "no value" | `EmptyAtQuorumIsWitnessed` |
-| `_NoIncarnationEcho` | attribution on node id alone — the live economic read path before the incarnation header was stamped | `EmptyAtQuorumIsWitnessed` |
-| `_Reachability` | **non-vacuity**: `Conflict` must be REACHABLE from two claimants racing one write-once cell, with no misbehaviour. Without it the configs above could pass for the wrong reason | `ConflictUnreachable` |
-
-Mutation-controlled: neutering `_FlattenCollapse` back to the faithful consumer
-makes the gate report
-
-```
-FAILED [expected-to-fail] ...
-  ERROR: falsification config must violate EmptinessIsGrounded,
-         but saw no violation at all — the invariant is decoration
-```
-
+| `_CountWithoutLeader` | finality counted over any three holders | `FinalRequiresLeader` |
+| `_AvailabilityLeader` | the leader is whoever is reachable | `LeaderFromCommittedSet` |
+| `_AllMemberFinality` | finality waits for every member (five copies) | `ThreeHoldersIsFinal` |
+| `_UnavailableNonLeaderBlocks` | the same fault, seen from a member that is down | `UnavailableNonLeaderNeverBlocks` |
+| `_OverdraftRecognized` | recognition accepts a release of more than remains — the one arm that would mint | `NoValidReserveTransitionMints` |
+| `_MintArm` | a transition that raises `remaining` | `Conservation` |
+| `_CreatorBackout` | a transition that moves units to a creator without a release | `NoCreatorBackout` |
+| `_RecipientSubstitution` | the release credits someone other than its claimant | `RecipientIsClaimant` |
+| `_ReleaseReachable` | **non-vacuity**: a release does advance the reserve | `NeverReleased` |
+| `_AllMembersHoldReachable` | **non-vacuity**: every member eventually holds the final release | `NeverAllHold` |
+| `_LossAtLeaderReachable` | **non-vacuity**: two recognized releases race, one loses at the leader | `NeverLostAtLeader` |
 
 ## The foundation: lean4/DSMRecognition.lean
 

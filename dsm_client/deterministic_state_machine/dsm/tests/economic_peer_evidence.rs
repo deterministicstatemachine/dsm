@@ -17,8 +17,8 @@ use dsm::economic::peer_acceptance::{
     acceptance_evidence_addr, ek_cert_step_addr, verify_peer_transfer_acceptance, AcceptanceParty,
 };
 use dsm::economic::provenance::{
-    verify_credit_source, FaucetTicketWin, PeerLineageFailure, ProvenanceContext, ProvenanceError,
-    ProvenanceResolver, ValidatedPeerTransition,
+    verify_credit_source, ReserveReleaseWin, PeerLineageFailure, ProvenanceContext,
+    ProvenanceError, ProvenanceResolver, ValidatedPeerTransition,
 };
 use dsm::economic::state::{EconomicBalanceState, EconomicLeafState};
 use dsm::economic::successor_evidence::{
@@ -377,7 +377,7 @@ impl ProvenanceResolver for OnePeer {
     ) -> Result<ValidatedPeerTransition, PeerLineageFailure> {
         Ok(self.vpt.clone())
     }
-    fn winning_faucet_ticket(&self, _f: &[u8; 32], _i: u64) -> Option<FaucetTicketWin> {
+    fn native_reserve_release(&self, _r: &[u8; 32], _g: u64) -> Option<ReserveReleaseWin> {
         None
     }
 
@@ -416,7 +416,7 @@ fn peer_vpt(verified_operation: Operation, debit_amount: u64) -> ValidatedPeerTr
         pre_root,
         tree.root(),
         [0x0E; 32],
-        dsm::economic::faucet::dsm_operation_digest(&verified_operation.to_bytes()),
+        dsm::economic::admission::dsm_operation_digest(&verified_operation.to_bytes()),
         vec![mutation],
         Vec::new(),
     )
@@ -597,7 +597,7 @@ fn the_addr_checked_acceptance_bytes_must_hash_to_the_descriptor_address() {
         ) -> Result<ValidatedPeerTransition, PeerLineageFailure> {
             Ok(self.vpt.clone())
         }
-        fn winning_faucet_ticket(&self, _f: &[u8; 32], _i: u64) -> Option<FaucetTicketWin> {
+        fn native_reserve_release(&self, _r: &[u8; 32], _g: u64) -> Option<ReserveReleaseWin> {
             None
         }
 

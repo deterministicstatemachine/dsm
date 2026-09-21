@@ -11,13 +11,12 @@
 use dsm::ccb::genesis::sigalg;
 use dsm::economic::claim::EconomicRootClaimBody;
 use dsm::economic::claim_envelope::{
-    decode_and_verify_economic_root_claim, sign_economic_root_claim, verify_claim_attribution,
-    ClaimEnvelopeError,
+    decode_and_verify_economic_root_claim, sign_economic_root_claim, ClaimEnvelopeError,
 };
 use dsm::economic::lineage::{activate, EconomicActivationSnapshot};
 use dsm::economic::register::{
     economic_root_register_key, resolve_for_trader, resolve_root_register_profile,
-    AttributionError, AuthenticatedCaller, RegisteredEconomicRoot, RegisterResolutionError,
+    RegisteredEconomicRoot, RegisterResolutionError,
 };
 use dsm::economic::tree::empty_economic_root;
 
@@ -54,10 +53,9 @@ fn each_position_of_each_identity_is_its_own_cell() {
 // ── Network-scoped resolution, fail closed ─────────────────────────────────
 
 #[test]
-fn the_beta_register_resolves_to_the_five_member_fleet_at_q_three() {
+fn the_beta_register_resolves_to_the_five_member_fleet() {
     let p = resolve_root_register_profile(b"dsm-testnet").expect("known network");
     assert_eq!(p.members.len(), 5);
-    assert_eq!(p.quorum, 3);
     // The set id is a re-derivation over `(member, incarnation)` pairs, not a
     // constant somebody typed — so a member list that drifts, or a member
     // that rebuilt its register, changes the id rather than silently
@@ -235,53 +233,6 @@ fn a_claim_signed_for_one_position_does_not_verify_at_another() {
 }
 
 // ── Member-side attribution ────────────────────────────────────────────────
-
-#[test]
-fn a_member_refuses_a_claim_that_is_not_the_callers() {
-    let (pk, sk) = keypair();
-    let set = resolve_root_register_profile(b"dsm-testnet")
-        .unwrap()
-        .storage_set_id;
-    let envelope = sign_economic_root_claim(&body(&pk, set), &sk).expect("signable");
-    let claim = decode_and_verify_economic_root_claim(&envelope).expect("verifies");
-
-    let caller = AuthenticatedCaller {
-        public_key: pk.clone(),
-        device_id: DEV,
-    };
-    assert!(verify_claim_attribution(&claim, &caller, &set).is_ok());
-
-    // Signature-valid, but written by someone else. This — not K_root — is
-    // what prevents third-party preemption: the cell coordinate is derivable
-    // by anyone holding the victim's public (G, DevID, position), so only the
-    // attribution refusal stops a write that would burn the cell forever.
-    let impostor = AuthenticatedCaller {
-        public_key: keypair().0,
-        device_id: DEV,
-    };
-    assert_eq!(
-        verify_claim_attribution(&claim, &impostor, &set).unwrap_err(),
-        AttributionError::ClaimantIsNotCaller
-    );
-
-    let wrong_device = AuthenticatedCaller {
-        public_key: pk,
-        device_id: [0x99; 32],
-    };
-    assert_eq!(
-        verify_claim_attribution(&claim, &wrong_device, &set).unwrap_err(),
-        AttributionError::DeviceIsNotCaller
-    );
-
-    // A member refuses a claim addressed to a register it is not part of.
-    let other_set = [0x77; 32];
-    assert!(matches!(
-        verify_claim_attribution(&claim, &caller, &other_set).unwrap_err(),
-        AttributionError::WrongStorageSet { .. }
-    ));
-}
-
-// ── Activation ─────────────────────────────────────────────────────────────
 
 #[test]
 fn a_fresh_identity_activates_at_the_canonical_empty_root() {

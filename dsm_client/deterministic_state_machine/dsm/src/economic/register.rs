@@ -17,34 +17,15 @@
 //!
 //! ## Nodes stay dumb
 //!
-//! A member's checks are **storage and attribution only**:
-//!
-//! ```text
-//! signature verifies under the body's claimant_public_key
-//! claimant_public_key == authenticated_caller.public_key
-//! trader_devid        == authenticated_caller.device_id
-//! storage_set_id      == this node's configured set
-//! then write-once
-//! ```
-//!
-//! No P0–P6, no transition validation, no economics.
-//!
-//! Attribution is not optional politeness — it is the **only** thing standing
-//! between a victim and a permanently burned cell. `K_root` identity-scopes
-//! the coordinate but does not gate writes to it: anyone who knows a victim's
-//! `G` and `DevID` can compute `K_root(G_v, D_v, k)`, and the register is
-//! write-once, so one accepted value there burns that position forever. The
-//! member refusing a claim whose `claimant_public_key` and `trader_devid` are
-//! not the authenticated caller's is what makes that write impossible.
-//!
-//! ```text
-//! K_root                identity-scopes the cell
-//! claimant attribution  prevents third-party preemption of that cell
-//! ```
-//!
-//! Attribution is only as strong as the authentication behind it: the caller's
-//! key and device must themselves be proven, which is P0–P6's job at the
-//! verifying end, not the member's.
+//! A member checks nothing (Part II §9, §12): it keeps every value it is
+//! given at `K_root(q)`, in arrival order, and decides nothing. The writer
+//! computes the cell's leader from `s(q)` over the committed set and writes
+//! there first; Core derives `LeaderHeld` and `Final` from the raw reads
+//! (`sofi::arith`). No P0–P6, no transition validation, no economics, and no
+//! attribution: a claim carries its own authority, the claimant's signature
+//! over its exact bytes, and a claim in a victim's name that the victim never
+//! signed is not an object naming the victim's cell — it counts as nothing
+//! there, however early it arrived.
 //!
 //! ## The network scope is what stops register substitution
 //!
@@ -66,15 +47,14 @@ use crate::common::domain_tags::{
     TAG_DSM_ECONOMIC_POSITION_SEED, TAG_DSM_TRADER_ECONOMIC_ROOT_REGISTER_KEY,
 };
 use crate::crypto::blake3::dsm_domain_hasher;
-use crate::types::identifiers::encode_crockford;
 
 /// `K_root = H_dom(DSM/trader-economic-root-register-key/v1,
 /// G ‖ DevID ‖ u64_be(economic_position))`.
 ///
 /// Identity-scopes the cell and nothing more. The key is **derivable by
 /// anyone** who knows `(G, DevID, position)` — all public — so it confers no
-/// exclusivity on its own. Exclusivity comes from write-once storage plus
-/// [`AttributionError`]-checked claimant attribution.
+/// exclusivity on its own. Exclusivity comes from recognition: only a claim
+/// the trader signed is an object naming the cell.
 pub fn economic_root_register_key(
     genesis: &[u8; 32],
     device_id: &[u8; 32],
@@ -128,7 +108,6 @@ pub fn position_leader(
 /// one network's register into another's.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RootRegisterProfile {
-    pub quorum: u32,
     pub members: Vec<Vec<u8>>,
     /// The PINNED set id this network's root register lives under.
     ///
@@ -331,9 +310,9 @@ const BETA_ROOT_REGISTER_MEMBERS: [PinnedMember; 5] = [
 ];
 
 /// The network the beta fleet serves. Matches the client database's
-/// `network_id` default. The real mainnet gets its OWN id (and with it a
-/// fresh, untouched faucet allocation) as a new profile at launch — nothing
-/// claimed under this network can validate there.
+/// `network_id` default. The real mainnet gets its OWN id (and with it its
+/// own native ERA reserve, `era_reserve_id(network_id)`) as a new profile at
+/// launch — nothing claimed under this network can validate there.
 /// The network the beta root register is pinned for. One name for the
 /// network, so callers resolve the profile they were built for instead of
 /// each spelling the id themselves.
@@ -381,9 +360,6 @@ pub fn resolve_root_register_profile(
         .map(|e| e.member_id().to_vec())
         .collect();
     Ok(RootRegisterProfile {
-        // Req 6.13's fixed five-member profile. Read from the DLV profile
-        // module rather than restated, so the threshold has one home.
-        quorum: crate::dlv::beta_storage_profile::SOFI_BETA_QUORUM,
         members,
         storage_set_id,
     })
@@ -407,70 +383,6 @@ pub fn resolve_for_trader(
     }
     resolve_root_register_profile(settling_network_id)
 }
-
-/// A caller a storage node has already authenticated at the transport layer.
-///
-/// The node knows who is talking to it; attribution is checking that the claim
-/// says the same thing.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AuthenticatedCaller {
-    pub public_key: Vec<u8>,
-    /// The transport device id, already decoded to raw bytes.
-    pub device_id: [u8; 32],
-}
-
-/// The largest claim envelope a register member reads: one SPHINCS+ SPX256f
-/// signature (~49.9 KiB) plus a key and a small body. Shared by every member
-/// implementation — the storage node's handlers and the in-process register
-/// double — so "too large" is refused at the same byte on both.
-pub const MAX_CLAIM_BYTES: usize = 160 * 1024;
-
-/// Why a member refuses to store a claim. All storage-layer; none is a
-/// judgement about economics. Attribution is checked on a claim whose
-/// signature ALREADY verified — a signature failure is
-/// [`super::claim_envelope::ClaimEnvelopeError::SignatureInvalid`], never an
-/// attribution outcome.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AttributionError {
-    /// The claim names a claimant that is not the authenticated caller.
-    ClaimantIsNotCaller,
-    /// The claim names a device that is not the authenticated caller's.
-    DeviceIsNotCaller,
-    /// The claim names a storage set this node is not a member of.
-    WrongStorageSet {
-        claimed: [u8; 32],
-        configured: [u8; 32],
-    },
-}
-
-impl core::fmt::Display for AttributionError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::ClaimantIsNotCaller => write!(
-                f,
-                "economic root claim: claimant_public_key is not the authenticated caller — \
-                 an authenticated caller may not claim as someone else"
-            ),
-            Self::DeviceIsNotCaller => write!(
-                f,
-                "economic root claim: trader_devid is not the authenticated caller's device — \
-                 K_root is derivable by anyone, so this check is what stops a third party \
-                 writing into a victim's cell and burning it"
-            ),
-            Self::WrongStorageSet {
-                claimed,
-                configured,
-            } => write!(
-                f,
-                "economic root claim: names storage set {} but this member is configured for {}",
-                encode_crockford(claimed),
-                encode_crockford(configured)
-            ),
-        }
-    }
-}
-
-impl std::error::Error for AttributionError {}
 
 /// What a register member observed at one position.
 ///
