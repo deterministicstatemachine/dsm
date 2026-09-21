@@ -22,7 +22,8 @@
 //! a cell over the committed set ([`leader`]), successor-cell
 //! arithmetic ([`arith`]), the storage facts for objects and indexes
 //! ([`storage`]), three-valued validation composition and the mechanical
-//! fulfillment-against-precommit checks ([`conformance`]), and the
+//! fulfillment-against-precommit checks ([`conformance`]), what a producer
+//! publishes and how a reader recognizes it ([`publication`]), and the
 //! persistent DLV tree with structurally shared shadows ([`smt`]).
 //!
 //! ## What it is not
@@ -39,6 +40,7 @@ pub mod derive;
 pub mod fisher_yates;
 pub mod leader;
 pub mod lineage;
+pub mod publication;
 pub mod resolution;
 pub mod signature;
 pub mod smt;

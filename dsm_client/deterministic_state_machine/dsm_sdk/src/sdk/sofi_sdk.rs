@@ -49,12 +49,14 @@ use dsm::sofi::derive;
 use dsm::economic::lineage::ValidatedEconomicRoot;
 use dsm::economic::tree::EconomicSmt;
 use dsm::sofi::lineage::GenesisError;
+use dsm::sofi::publication::Signed;
 use dsm::sofi::signature::{verify_precommit, SignatureError, SigningPayload};
 use dsm::sofi::validation::{validate, Evidence, Invalid, Missing, Refusal};
 use dsm::sofi::wire::{
-    AttemptEntry, DlvCore, OwnerAuthority, ParentClaimRef, PreEClosureIndex, PrecommitLeg,
-    SettlementBody, SettlementPreimage, SofiSetupBody, SofiWireError, SwapHop, TraderCore,
-    TraderFulfillmentBody, TraderPrecommitBody, VaultCreation, VaultGenesisPreimage,
+    AttemptEntry, DlvCore, DlvPolicyFulfillmentBody, OwnerAuthority, ParentClaimRef,
+    PreEClosureIndex, PrecommitLeg, SettlementBody, SettlementPreimage, SofiSetupBody,
+    SofiWireError, SwapHop, TraderCore, TraderFulfillmentBody, TraderPrecommitBody, VaultCreation,
+    VaultGenesisPreimage,
 };
 use dsm::types::operations::Operation;
 
@@ -141,12 +143,22 @@ impl From<FulfillmentConformanceError> for BuildError {
     }
 }
 
-/// A content-addressed object to publish, with the signature its ingress
-/// checks. An unsigned `P` is refused by storage, so the two travel together.
+/// What a producer hands back to publish (Part II §10, rebuild step R8):
+/// the objects a verifier needs and cannot derive, each of a kind Core knows
+/// how to store, index and recognize (`sofi::publication`).
+///
+/// The setup and the fulfillment sign through the operation — `m_setup` and
+/// `m_F` are `Produced::signs` — so they are handed back bare and completed
+/// with that signature by `sofi_publish::publish_produced` once the caller
+/// has made it. `P` travels WITH the signature the trader already made, and
+/// a verifier checks it against the key the parent claim commits.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PublishedObject {
-    pub bytes: Vec<u8>,
-    pub signature: Vec<u8>,
+pub enum ToPublish {
+    Setup(SofiSetupBody),
+    Precommit(Signed<TraderPrecommitBody>),
+    Preimage(SettlementPreimage),
+    PolicyFulfillment(DlvPolicyFulfillmentBody),
+    Fulfillment(TraderFulfillmentBody),
 }
 
 /// A produced operation: the transition, what must be published for anyone to
@@ -162,8 +174,9 @@ pub struct Produced {
     /// the object a storage member receives has no operation around it, and
     /// `m_setup` / `m_F` are what it checks there.
     pub signs: SigningPayload,
-    /// Objects a verifier needs and cannot derive.
-    pub publish: Vec<PublishedObject>,
+    /// Objects a verifier needs and cannot derive, in the order they are
+    /// published.
+    pub publish: Vec<ToPublish>,
 }
 
 /// A precommit and its settlement preimage, built and checked, waiting for the
@@ -271,7 +284,9 @@ pub fn build_setup(
             setup_body: body.encode(),
             signature: Vec::new(),
         },
-        publish: Vec::new(),
+        // The setup body is put as an object and indexed under ρ (and the
+        // relationship index key); SetupRegistered holds once it is Stored.
+        publish: vec![ToPublish::Setup(body)],
     })
 }
 
@@ -542,7 +557,8 @@ pub fn build_fulfillment(
         .iter()
         .map(|core| core.encode().map(|b| derive::dlv_core_digest(&b)))
         .collect::<Result<_, _>>()?;
-    let mut policy_set: Vec<D32> = derive_policy_fulfillments(precommit, &shadow_cores)?
+    let witnesses = derive_policy_fulfillments(precommit, &shadow_cores)?;
+    let mut policy_set: Vec<D32> = witnesses
         .iter()
         .map(derive::policy_fulfillment_id)
         .collect();
@@ -574,21 +590,21 @@ pub fn build_fulfillment(
         precommit_id: derive::precommit_id(precommit).to_vec(),
         signature: Vec::new(),
     };
+    // Stages 4 and 5 (§31): P under PrecommitId, P(E) under L(E), every G_j
+    // under its PolicyFulfillmentId; then F itself, once m_F is signed.
+    let mut publish = vec![
+        ToPublish::Precommit(Signed {
+            body: precommit.clone(),
+            signature: precommit_signature,
+        }),
+        ToPublish::Preimage(draft.preimage.clone()),
+    ];
+    publish.extend(witnesses.into_iter().map(ToPublish::PolicyFulfillment));
+    publish.push(ToPublish::Fulfillment(fulfillment.clone()));
     Ok(Produced {
         signs: SigningPayload::FulfillmentDigest(derive::fulfillment_signing_digest(&fulfillment)),
         operation,
-        // P travels WITH its signature: storage refuses an unsigned one, and a
-        // verifier checks it against the key the parent claim commits.
-        publish: vec![
-            PublishedObject {
-                bytes: precommit.encode(),
-                signature: precommit_signature,
-            },
-            PublishedObject {
-                bytes: draft.preimage.encode()?,
-                signature: Vec::new(),
-            },
-        ],
+        publish,
     })
 }
 
@@ -864,11 +880,26 @@ mod tests {
                 .unwrap()
             ))
         );
-        assert_eq!(produced.publish[0].bytes, draft.precommit().encode());
         assert_eq!(
-            produced.publish[0].signature, p_signature,
+            produced.publish[0],
+            ToPublish::Precommit(Signed {
+                body: draft.precommit().clone(),
+                signature: p_signature,
+            }),
             "P is published WITH the signature its ingress checks"
         );
+        assert_eq!(
+            produced.publish[1],
+            ToPublish::Preimage(draft.preimage().clone())
+        );
+        assert!(matches!(
+            produced.publish[2],
+            ToPublish::PolicyFulfillment(_)
+        ));
+        assert!(matches!(
+            produced.publish.last(),
+            Some(ToPublish::Fulfillment(_))
+        ));
         assert!(produced.operation.get_signature().is_none());
 
         // What the producer says to sign is exactly what the device verifies:

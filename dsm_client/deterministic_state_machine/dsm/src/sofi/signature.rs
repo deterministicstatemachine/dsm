@@ -551,18 +551,24 @@ mod tests {
     }
 
     /// A body class this envelope does not carry is refused BY NAME, both at
-    /// construction and at verification. `G` has no issuer signature and a
-    /// setup signs through its own object, so neither belongs here.
+    /// construction and at verification. `G` has no issuer signature, so it
+    /// does not belong here.
     #[test]
     fn an_unsupported_body_class_is_refused_at_both_ends() {
         let (pk, sk) = keys();
-        let setup = setup_body(&pk);
-        let sig = sphincs_sign(&sk, &derive::setup_signing_digest(&setup)).unwrap();
+        let witness = crate::sofi::wire::DlvPolicyFulfillmentBody {
+            precommit_id: d(0x0A),
+            external_commitment: d(0x0B),
+            vault_id: d(0x0C),
+            parent_root: d(0x0D),
+            shadow_core: d(0x0E),
+        };
+        let sig = sphincs_sign(&sk, &witness.encode()).unwrap();
         // The producer cannot build one.
         assert!(matches!(
             crate::sofi::wire::SignedSofiObject::new(
-                crate::ccb::class::SOFI_SETUP_BODY,
-                &setup.encode(),
+                crate::ccb::class::SOFI_DLV_POLICY_FULFILLMENT_BODY,
+                &witness.encode(),
                 ALG,
                 &sig,
             ),
@@ -571,14 +577,40 @@ mod tests {
         // And a hostile one that arrives on the wire still DECODES, so it can
         // be refused by name rather than as an indistinguishable parse error.
         let mut bytes = signed_precommit(&pk, &sk).encode();
-        bytes[4..6].copy_from_slice(&crate::ccb::class::SOFI_SETUP_BODY.to_be_bytes());
+        bytes[4..6]
+            .copy_from_slice(&crate::ccb::class::SOFI_DLV_POLICY_FULFILLMENT_BODY.to_be_bytes());
         let hostile = crate::sofi::wire::SignedSofiObject::decode(&bytes)
             .expect("a hostile envelope decodes so it can be named");
         assert_eq!(
             verify_signed_object(&hostile, &pk),
             Err(SignatureError::UnsupportedSignedBodyClass {
-                body_class: crate::ccb::class::SOFI_SETUP_BODY
+                body_class: crate::ccb::class::SOFI_DLV_POLICY_FULFILLMENT_BODY
             })
+        );
+    }
+
+    /// A setup travels to storage in the same envelope as P and F (R8), and
+    /// the verifier applies the setup's own rule to it: `m_setup` under the
+    /// key the body commits, which must be the expected signer.
+    #[test]
+    fn a_setup_envelope_verifies_by_its_own_rule() {
+        let (pk, sk) = keys();
+        let setup = setup_body(&pk);
+        let sig = sphincs_sign(&sk, &derive::setup_signing_digest(&setup)).unwrap();
+        let env = crate::sofi::wire::SignedSofiObject::new(
+            crate::ccb::class::SOFI_SETUP_BODY,
+            &setup.encode(),
+            ALG,
+            &sig,
+        )
+        .unwrap();
+        let verified = verify_signed_object(&env, &pk).unwrap();
+        assert_eq!(verified, SignedSofiBody::Setup(setup.clone()));
+        assert_eq!(verified.object_id(), derive::setup_ref(&setup));
+        let (other_pk, _) = keys();
+        assert_eq!(
+            verify_signed_object(&env, &other_pk),
+            Err(SignatureError::NotTheExpectedSigner { what: "SofiSetup" })
         );
     }
 
@@ -678,6 +710,7 @@ mod tests {
 /// class defines. It is not "an envelope that parsed".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SignedSofiBody {
+    Setup(crate::sofi::wire::SofiSetupBody),
     Precommit(crate::sofi::wire::TraderPrecommitBody),
     Fulfillment(crate::sofi::wire::TraderFulfillmentBody),
 }
@@ -690,6 +723,7 @@ impl SignedSofiBody {
     /// republication idempotent instead of a conflict.
     pub fn object_id(&self) -> [u8; 32] {
         match self {
+            Self::Setup(b) => derive::setup_ref(b),
             Self::Precommit(b) => derive::precommit_id(b),
             Self::Fulfillment(b) => derive::fulfillment_id(b),
         }
@@ -712,7 +746,8 @@ impl SignedSofiBody {
 ///    the envelope's `signature_alg` must agree and is otherwise refused.
 ///
 /// `G` is absent on purpose: a policy-fulfillment witness has no issuer
-/// signature, and a setup signs `m_setup` through its own object.
+/// signature. A setup is carried the same way as P and F (R8): the envelope
+/// is how its `m_setup` signature travels with the body to storage.
 pub fn verify_signed_object(
     envelope: &crate::sofi::wire::SignedSofiObject,
     expected_signer: &[u8],
@@ -722,6 +757,14 @@ pub fn verify_signed_object(
     let carried = envelope.body_ccb();
 
     let decoded = match body_class {
+        class::SOFI_SETUP_BODY => {
+            let body = crate::sofi::wire::SofiSetupBody::decode(carried)
+                .map_err(|_| SignatureError::BodyDoesNotDecode { class: "SofiSetup" })?;
+            if body.encode() != carried {
+                return Err(SignatureError::BodyDoesNotDecode { class: "SofiSetup" });
+            }
+            SignedSofiBody::Setup(body)
+        }
         class::SOFI_TRADER_PRECOMMIT_BODY => {
             let body = crate::sofi::wire::TraderPrecommitBody::decode(carried).map_err(|_| {
                 SignatureError::BodyDoesNotDecode {
@@ -752,6 +795,7 @@ pub fn verify_signed_object(
     };
 
     let body_alg = match &decoded {
+        SignedSofiBody::Setup(b) => b.signature_alg(),
         SignedSofiBody::Precommit(b) => b.signature_alg(),
         SignedSofiBody::Fulfillment(b) => b.signature_alg(),
     };
@@ -770,6 +814,7 @@ pub fn verify_signed_object(
     // and refuses a body that commits any other. An `F` is likewise not
     // self-verifying: its signer must be the key `P` committed.
     match &decoded {
+        SignedSofiBody::Setup(b) => verify_setup(b, envelope.signature(), expected_signer)?,
         SignedSofiBody::Precommit(b) => {
             if b.claimant_public_key() != expected_signer {
                 return Err(SignatureError::NotTheExpectedSigner {

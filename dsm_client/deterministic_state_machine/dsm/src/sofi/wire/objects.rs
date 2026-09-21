@@ -656,7 +656,9 @@ impl SignedSofiObject {
     ) -> Result<Self, SofiWireError> {
         if !matches!(
             body_class,
-            class::SOFI_TRADER_PRECOMMIT_BODY | class::SOFI_TRADER_FULFILLMENT_BODY
+            class::SOFI_SETUP_BODY
+                | class::SOFI_TRADER_PRECOMMIT_BODY
+                | class::SOFI_TRADER_FULFILLMENT_BODY
         ) {
             return Err(SofiWireError::UnsupportedSignedBodyClass { body_class });
         }

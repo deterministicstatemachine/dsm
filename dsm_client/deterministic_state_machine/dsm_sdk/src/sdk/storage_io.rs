@@ -176,7 +176,12 @@ pub(crate) async fn put_immutable_to_all_members(
     #[cfg(any(test, feature = "test-utils"))]
     {
         // The fake fleet stores under a key carrying the address, so tests can
-        // assert exactly which immutable object reached which member.
+        // assert exactly which immutable object reached which member — and
+        // holds the object at its address for the Part II §12 object reads
+        // (`get_objects`), which is what a live member does with one put.
+        let domain = dsm::crypto::domain::TaggedHashDomain::try_new(namespace.as_bytes())
+            .map_err(|e| DsmError::verification(format!("immutable put: namespace: {e}")))?;
+        fake_fleet::put_object(set, domain, payload);
         Ok(fake_fleet::put(
             set,
             &format!("immutable::{namespace}::{expected_addr_b32}"),
