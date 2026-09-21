@@ -173,6 +173,44 @@ pub fn keep_verifying<T>(
     Resolved::None
 }
 
+/// §11, discovery: EVERY candidate that verifies, in examination order.
+///
+/// The counterpart of [`keep_verifying`] for a locator that is an index of
+/// references rather than an identity — the relationship index key, under
+/// which a trader may have published more than one setup for a vault. The
+/// scan establishes which objects are recognized under the locator and
+/// nothing about which of them applies: that is Core's, by the identity the
+/// operation names (`ρ` in a precommit leg) and the leaf the trader's tree
+/// admitted. Order of arrival confers nothing. The budget is spent and
+/// answered exactly as in [`keep_verifying`].
+pub fn keep_all_verifying<T>(
+    locator: &D32,
+    candidates: &[Option<Vec<u8>>],
+    budget: usize,
+    recognize: impl Fn(&[u8]) -> Option<(D32, T)>,
+) -> Resolved<Vec<T>> {
+    let mut kept = Vec::new();
+    for (examined, candidate) in candidates.iter().enumerate() {
+        if examined >= budget {
+            return Resolved::Unavailable;
+        }
+        let Some(bytes) = candidate else {
+            continue;
+        };
+        let Some((identity, object)) = recognize(bytes) else {
+            continue;
+        };
+        if identity == *locator {
+            kept.push(object);
+        }
+    }
+    if kept.is_empty() {
+        Resolved::None
+    } else {
+        Resolved::Kept(kept)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -393,5 +431,45 @@ mod tests {
             Resolved::None
         );
         assert_eq!(keep_verifying(&locator, &[], 0, recognize), Resolved::None);
+    }
+
+    /// Discovery under an index of references: every recognized candidate is
+    /// returned in examination order, a candidate of another identity or
+    /// garbage is passed over, the budget answers Unavailable exactly as the
+    /// single-object scan does, and nothing about order confers preference.
+    #[test]
+    fn discovery_returns_every_recognized_candidate_and_prefers_none() {
+        let locator = [0xAB; 32];
+        let recognize = |bytes: &[u8]| -> Option<([u8; 32], u8)> {
+            match bytes {
+                [id, value] => Some(([*id; 32], *value)),
+                _ => None,
+            }
+        };
+        let candidates = vec![
+            Some(vec![0xAB, 1]),
+            Some(vec![0xCD, 9]),
+            None,
+            Some(b"garbage".to_vec()),
+            Some(vec![0xAB, 2]),
+        ];
+        assert_eq!(
+            keep_all_verifying(&locator, &candidates, 5, recognize),
+            Resolved::Kept(vec![1, 2])
+        );
+        // The same scan, kept singly, is the first — which is exactly why an
+        // index of references must not be read through it.
+        assert_eq!(
+            keep_verifying(&locator, &candidates, 5, recognize),
+            Resolved::Kept(1)
+        );
+        assert_eq!(
+            keep_all_verifying(&locator, &candidates, 4, recognize),
+            Resolved::<Vec<u8>>::Unavailable
+        );
+        assert_eq!(
+            keep_all_verifying(&locator, &candidates[1..4], 3, recognize),
+            Resolved::<Vec<u8>>::None
+        );
     }
 }
