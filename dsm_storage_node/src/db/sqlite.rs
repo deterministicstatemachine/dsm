@@ -2044,6 +2044,29 @@ pub async fn put_cell(pool: &DBPool, namespace: &[u8], key: &[u8], value: &[u8])
     .await
 }
 
+/// Several keys in ONE transaction: every entry is kept after anything
+/// already at its key, or none of them is. An entry that names no coordinate
+/// — an empty namespace, a key that is not 32 bytes — makes the whole batch
+/// nothing.
+pub async fn put_cells(pool: &DBPool, entries: &[(Vec<u8>, Vec<u8>, Vec<u8>)]) -> Result<()> {
+    let entries = entries.to_vec();
+    with_conn(pool, move |conn| {
+        let tx = conn.unchecked_transaction()?;
+        for (namespace, key, value) in &entries {
+            if namespace.is_empty() || key.len() != 32 {
+                anyhow::bail!("batch put: an entry names no cell");
+            }
+            tx.execute(
+                "INSERT INTO cells (namespace, cell_key, value) VALUES (?1, ?2, ?3)",
+                rusqlite::params![namespace, key, value],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    })
+    .await
+}
+
 /// Everything held for `(namespace, key)`, in the order it arrived.
 pub async fn get_cell_values(pool: &DBPool, namespace: &[u8], key: &[u8]) -> Result<Vec<Vec<u8>>> {
     let (namespace, key) = (namespace.to_vec(), key.to_vec());

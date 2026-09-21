@@ -28657,6 +28657,99 @@ export class CellValuesV1 extends Message<CellValuesV1> {
 }
 
 /**
+ * One value for one key, as a batch put carries it. The member keeps it
+ * after anything already at the key, exactly as a single put would.
+ *
+ * @generated from message dsm.CellPutV1
+ */
+export class CellPutV1 extends Message<CellPutV1> {
+  /**
+   * @generated from field: bytes namespace = 1;
+   */
+  namespace = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes key = 2;
+   */
+  key = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes value = 3;
+   */
+  value = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<CellPutV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.CellPutV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "namespace", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "value", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): CellPutV1 {
+    return new CellPutV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): CellPutV1 {
+    return new CellPutV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): CellPutV1 {
+    return new CellPutV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: CellPutV1 | PlainMessage<CellPutV1> | undefined, b: CellPutV1 | PlainMessage<CellPutV1> | undefined): boolean {
+    return proto3.util.equals(CellPutV1, a, b);
+  }
+}
+
+/**
+ * Several keys taken in ONE local transaction at the member: all of them or
+ * none of them (Part II §17.4, the two position cells). The member still
+ * decodes none of the values and refuses none of them.
+ *
+ * @generated from message dsm.CellPutsV1
+ */
+export class CellPutsV1 extends Message<CellPutsV1> {
+  /**
+   * @generated from field: repeated dsm.CellPutV1 entries = 1;
+   */
+  entries: CellPutV1[] = [];
+
+  constructor(data?: PartialMessage<CellPutsV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.CellPutsV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "entries", kind: "message", T: CellPutV1, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): CellPutsV1 {
+    return new CellPutsV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): CellPutsV1 {
+    return new CellPutsV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): CellPutsV1 {
+    return new CellPutsV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: CellPutsV1 | PlainMessage<CellPutsV1> | undefined, b: CellPutsV1 | PlainMessage<CellPutsV1> | undefined): boolean {
+    return proto3.util.equals(CellPutsV1, a, b);
+  }
+}
+
+/**
  * @generated from message dsm.IndexEntryV1
  */
 export class IndexEntryV1 extends Message<IndexEntryV1> {

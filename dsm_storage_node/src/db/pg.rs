@@ -2344,6 +2344,28 @@ pub async fn put_cell(pool: &Pool, namespace: &[u8], key: &[u8], value: &[u8]) -
     Ok(())
 }
 
+/// Several keys in ONE durable transaction: every entry is kept after
+/// anything already at its key, or none of them is. An entry that names no
+/// coordinate — an empty namespace, a key that is not 32 bytes — makes the
+/// whole batch nothing; it is not a value the member could refuse, it is
+/// not a cell.
+pub async fn put_cells(pool: &Pool, entries: &[(Vec<u8>, Vec<u8>, Vec<u8>)]) -> Result<()> {
+    let mut client = pool.get().await?;
+    let tx = begin_durable_write(&mut client).await?;
+    for (namespace, key, value) in entries {
+        if namespace.is_empty() || key.len() != 32 {
+            anyhow::bail!("batch put: an entry names no cell");
+        }
+        tx.execute(
+            "INSERT INTO cells (namespace, cell_key, value) VALUES ($1, $2, $3)",
+            &[namespace, key, value],
+        )
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
 /// Everything held for `(namespace, key)`, in the order it arrived.
 pub async fn get_cell_values(pool: &Pool, namespace: &[u8], key: &[u8]) -> Result<Vec<Vec<u8>>> {
     let client = pool.get().await?;

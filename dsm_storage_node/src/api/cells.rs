@@ -3,11 +3,12 @@
 //! Keyed cells and indexes: bytes in, bytes out.
 //!
 //! A member does four things with a key. It keeps every value it is given for
-//! that key, in the order the values arrive; it returns everything it holds;
-//! it appends a content address under a locator; and it returns the addresses
-//! under a locator in append order. It never refuses, replaces, compares,
-//! decodes or decides. Which value counts at a key is the reader's question,
-//! answered from the bytes and the reader's own committed state.
+//! that key, in the order the values arrive — one key at a time, or several
+//! keys in one local transaction, all or none; it returns everything it
+//! holds; it appends a content address under a locator; and it returns the
+//! addresses under a locator in append order. It never refuses, replaces,
+//! compares, decodes or decides. Which value counts at a key is the reader's
+//! question, answered from the bytes and the reader's own committed state.
 //!
 //! Absence is asserted by shape: a read of a key nothing was put under is
 //! `200` with an empty list. A `404` is a route miss, never a statement about
@@ -36,11 +37,14 @@ const MAX_NAMESPACE_BYTES: usize = 128;
 /// A value held at a key. Objects live in the immutable store; a cell holds
 /// an object's envelope or a small claim, never a bulk payload.
 const MAX_CELL_VALUE_BYTES: usize = 256 * 1024;
+/// Keys one batch put may take in one transaction. A position is two.
+const MAX_BATCH_ENTRIES: usize = 16;
 const MAX_INDEX_PAGE: i64 = 256;
 
 pub fn create_router(state: Arc<AppState>) -> Router<()> {
     Router::new()
         .route("/api/v2/cell/{key}", post(put_cell).get(get_cell))
+        .route("/api/v2/cells", post(put_cells))
         .route(
             "/api/v2/index/{locator}",
             post(append_index).get(read_index),
@@ -53,6 +57,10 @@ fn namespace(headers: &HeaderMap) -> Result<Vec<u8>, StatusCode> {
         .get(NAMESPACE_HEADER)
         .map(|v| v.as_bytes().to_vec())
         .ok_or(StatusCode::BAD_REQUEST)?;
+    namespace_bytes(raw)
+}
+
+fn namespace_bytes(raw: Vec<u8>) -> Result<Vec<u8>, StatusCode> {
     if raw.is_empty()
         || raw.len() > MAX_NAMESPACE_BYTES
         || raw.contains(&0)
@@ -99,6 +107,41 @@ async fn put_cell(
         .await
         .map_err(|e| {
             log::error!("cell put: DB write failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Keep every entry's body at its key, after anything already there, in ONE
+/// local transaction: all of them or none of them. The shape of each entry
+/// is checked before anything is written, so a malformed batch is a `400`
+/// with nothing held, never a half.
+async fn put_cells(
+    Extension(state): Extension<Arc<AppState>>,
+    body: Bytes,
+) -> Result<StatusCode, StatusCode> {
+    let batch = dsm::types::proto::CellPutsV1::decode(body.as_ref())
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    if batch.entries.is_empty() || batch.entries.len() > MAX_BATCH_ENTRIES {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let mut entries = Vec::with_capacity(batch.entries.len());
+    for entry in batch.entries {
+        if entry.value.is_empty() {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        if entry.value.len() > MAX_CELL_VALUE_BYTES {
+            return Err(StatusCode::PAYLOAD_TOO_LARGE);
+        }
+        if entry.key.len() != 32 {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        entries.push((namespace_bytes(entry.namespace)?, entry.key, entry.value));
+    }
+    crate::db::put_cells(&state.db_pool, &entries)
+        .await
+        .map_err(|e| {
+            log::error!("cells put: DB write failed: {e}");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
     Ok(StatusCode::NO_CONTENT)
