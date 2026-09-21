@@ -27,7 +27,7 @@
 //! output becomes canonical only when the fulfillment resolves Realized and
 //! `advance_resolved` installs `P.realize_root` (P15-9, R15-5).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ccb::state::{FeePolicy, MarketPolicy, ReleasePolicy};
 use crate::dlv::route_commit::constant_product_output_classified;
@@ -224,7 +224,15 @@ pub enum VaultLeafPre {
 
 /// Everything the verifier fetched. Anything absent from here is Unavailable,
 /// never Invalid.
-#[derive(Debug, Default)]
+///
+/// Gate G2: `Default` exists only under `cfg(test)`. Production code builds
+/// this ONLY from fetched bytes, through [`Evidence::acquired`] at the end of
+/// an acquisition (rebuild step R5): trader leaf pre values from the
+/// verifier's own validated tree, vault leaf pre values from the vault
+/// lineage it fetched, policy objects from the immutable store under the
+/// address the vault state commits. Nothing is defaulted or filled in.
+#[derive(Debug)]
+#[cfg_attr(test, derive(Default))]
 pub struct Evidence {
     /// Canonical bytes by content address — the policy objects a vault names.
     pub objects: BTreeMap<D32, Vec<u8>>,
@@ -234,7 +242,76 @@ pub struct Evidence {
     pub vault_leaves: BTreeMap<(D32, D32), VaultLeafPre>,
 }
 
+/// What a settlement preimage needs fetched before `validate` can reach a
+/// verdict: every trader leaf a core reads or writes, and for every vault the
+/// core touches, its state leaf and every leaf the core reads or writes. The
+/// policy objects are named by the vault state once it is in hand
+/// ([`EvidenceNeeds::policies_of`]).
+///
+/// Derived from the preimage alone, so an acquisition fetches exactly what
+/// Core will consume — no more (nothing is trusted because it exists) and no
+/// less (an item not fetched is `Unavailable`).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct EvidenceNeeds {
+    /// `R_econ` keys of the trader's own leaves.
+    pub trader_keys: BTreeSet<D32>,
+    /// Per vault: the keys of its leaves, the state key included.
+    pub vaults: BTreeMap<D32, BTreeSet<D32>>,
+}
+
+impl EvidenceNeeds {
+    pub fn of(preimage: &SettlementPreimage) -> Self {
+        let trader_keys = preimage
+            .trader_core()
+            .entries()
+            .iter()
+            .map(CoreEntry::key)
+            .collect();
+        let mut vaults: BTreeMap<D32, BTreeSet<D32>> = BTreeMap::new();
+        for core in preimage.dlv_cores() {
+            let keys = vaults.entry(*core.vault_id()).or_default();
+            keys.insert(derive::vault_state_key(core.vault_id()));
+            keys.extend(core.entries().iter().map(CoreEntry::key));
+        }
+        if let SettlementBody::Close { vault_id, .. } = preimage.settlement() {
+            vaults
+                .entry(*vault_id)
+                .or_default()
+                .insert(derive::vault_state_key(vault_id));
+        }
+        Self {
+            trader_keys,
+            vaults,
+        }
+    }
+
+    /// The three policy objects a vault state commits, by class and address.
+    pub fn policies_of(state: &VaultStateLeaf) -> [(u16, D32); 3] {
+        [
+            (crate::ccb::class::MARKET_POLICY, state.market_policy),
+            (crate::ccb::class::FEE_POLICY, state.fee_policy),
+            (crate::ccb::class::RELEASE_POLICY, state.release_policy),
+        ]
+    }
+}
+
 impl Evidence {
+    /// The one production constructor: what an acquisition fetched. Every
+    /// item is checked again when consumed — an object against its address,
+    /// a leaf against the core that names it — so supplying a map proves
+    /// nothing by itself.
+    pub fn acquired(
+        objects: BTreeMap<D32, Vec<u8>>,
+        trader_leaves: BTreeMap<D32, TraderLeafPre>,
+        vault_leaves: BTreeMap<(D32, D32), VaultLeafPre>,
+    ) -> Self {
+        Self {
+            objects,
+            trader_leaves,
+            vault_leaves,
+        }
+    }
+
     /// The bytes a vault's address names, AUTHENTICATED against that address
     /// under the class's own namespace.
     ///

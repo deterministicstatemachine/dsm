@@ -40,6 +40,7 @@ pub mod kv;
 pub mod native_reserve;
 pub mod runtime_config;
 pub mod sdk_context;
+pub mod sofi_evidence;
 
 // Re-export SdkContext for convenient access
 pub use sdk_context::SdkContext;

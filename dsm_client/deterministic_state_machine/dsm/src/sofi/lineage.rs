@@ -570,6 +570,28 @@ pub fn genesis_accepted(
     Ok(vault_id)
 }
 
+/// The vault's leaves at `R_0`, for the keys an acquisition needs: the state
+/// leaf at its key, and `Absent` at every other — nobody has traded with it
+/// yet, so no relationship leaf exists (rebuild step R5).
+pub fn vault_leaves_at_genesis(
+    vault_id: &D32,
+    state: &VaultStateLeaf,
+    keys: &std::collections::BTreeSet<D32>,
+) -> std::collections::BTreeMap<(D32, D32), crate::sofi::validation::VaultLeafPre> {
+    use crate::sofi::validation::VaultLeafPre;
+    let state_key = derive::vault_state_key(vault_id);
+    keys.iter()
+        .map(|key| {
+            let pre = if *key == state_key {
+                VaultLeafPre::State(state.clone())
+            } else {
+                VaultLeafPre::Absent
+            };
+            ((*vault_id, *key), pre)
+        })
+        .collect()
+}
+
 /// `R_0` — the vault's tree holding exactly its own state leaf, and no
 /// relationship leaves: nobody has traded with it yet.
 pub fn genesis_root(vault_id: &D32, state: &VaultStateLeaf) -> Result<D32, SofiWireError> {
