@@ -4,6 +4,43 @@
 # this file only shrinks, except that a Core-only step landing a predicate
 # ahead of the steps that call it adds that one line (R7); R14 deletes the
 # file and G1 passes with no exceptions.
-dsm_client/deterministic_state_machine/dsm/src/sofi/lineage.rs genesis_accepted  # R14
-dsm_client/deterministic_state_machine/dsm/src/sofi/smt/tree.rs commit_shadow  # R14: the vault head past genesis — the consumed route's V° post state committed to the trader's tree store, so the next hop's evidence and orphaning are established
-dsm_client/deterministic_state_machine/dsm/src/sofi/smt/tree.rs prove  # R14: paths against a committed vault post root, for a vault past its genesis
+#
+# THIS FILE GREW AT R14, AND THAT IS THE POINT. R14's matcher fix (spec §41.3
+# correction 2, owed before step 5 and not done) made a call count only where
+# the name is IN SCOPE. Four of the seven lines below were never wired and
+# never baselined: they passed the old bare-name matcher through unrelated
+# functions of the same name — `sqlite::get`, `sphincs::verify`,
+# `bitcoin_query_routes::reachable`, `recipient_dispatch`'s `apply`. The list
+# is longer because it is now true.
+
+# ── the trader's persistent tree store ────────────────────────────────────
+# The whole subsystem is dark. Its only production import is
+# SDK/storage/client_db/sofi_smt_nodes.rs (`SqliteNodeStore`), whose own doc
+# says "Dark: nothing calls this yet"; every other import of these names is a
+# test. Spec §34 places `validate_staged_frontier` and `reachable` at "the
+# trader's tree store: staged post trees are validated before stage 7, and
+# nodes not reachable from a validated root are dropped after stage 10" — no
+# such behaviour exists in production, and §34 names neither `commit_shadow`
+# nor `prove`, which only this file assigns to a step. Rule T1 is wire or
+# delete, so these are one decision, not six: either the store is wired
+# behind the vault head past genesis, or the subsystem goes and §34 is
+# corrected. Recorded for the owner; not decided here.
+dsm_client/deterministic_state_machine/dsm/src/sofi/smt/tree.rs apply  # R14: the store's one constructor of a successor tree
+dsm_client/deterministic_state_machine/dsm/src/sofi/smt/tree.rs commit_shadow  # R14: persist a staged post tree and pin its root
+dsm_client/deterministic_state_machine/dsm/src/sofi/smt/tree.rs get  # R14: a leaf VALUE from a stored root — never the leaf preimage evidence needs
+dsm_client/deterministic_state_machine/dsm/src/sofi/smt/tree.rs prove  # R14: a path against a stored root; its only sound consumer is a DlvCore producer for a vault past genesis, which does not exist
+dsm_client/deterministic_state_machine/dsm/src/sofi/smt/tree.rs verify  # R14: spec §31 stage 3 names it for each leaf pre value; production binds them by the fold's pre-root instead
+dsm_client/deterministic_state_machine/dsm/src/sofi/smt/tree.rs reachable  # R14: live nodes from the pinned roots; called only by collect_garbage, whose own caller is dark
+
+# ── vault genesis acceptance ──────────────────────────────────────────────
+# BLOCKED, and the block is deliberate. ci/sofi_genesis_acceptance_binding.sh
+# (run by ci/production_safety_checks.sh) FAILS the build the moment
+# `genesis_accepted(` appears outside its own module, because `VaultCreation`
+# carries no asset commits: proving the creation leaf establishes the AMOUNTS
+# and never which balances were debited, so a presented creation operation is
+# not evidence of the accepted one. The predicate's own doc says F10 owes a
+# `VerifiedVaultCreation` whose sole constructor binds the exact accepted
+# owner transition at p_create. Spec §28.5 and §30.1 require the predicate, so
+# it cannot be deleted either. Wiring it and deleting it both fail a gate:
+# this line stands until that capability lands.
+dsm_client/deterministic_state_machine/dsm/src/sofi/lineage.rs genesis_accepted  # R14: blocked by ci/sofi_genesis_acceptance_binding.sh until F10's VerifiedVaultCreation
