@@ -10,6 +10,13 @@
 # in the baseline AND now has a caller fails too: its line must be deleted in
 # the change that wires it, so the baseline only ever shrinks. R14 deletes the
 # file; G1 then passes with no exceptions.
+#
+# A "caller" is a call `name(` or a function passed by value as a whole
+# argument `, name,` / `(name)` (R8 hands recognizers to a locator scan
+# without calling them), in production code with comments and `use`
+# statements stripped: prose in a comment is not a reference (the gate no
+# longer reads `walk (` in a doc comment as a call, R4/R5), and a re-export
+# is not a use.
 import glob
 import os
 import re
@@ -26,7 +33,10 @@ baseline_path = "ci/sofi_reachability_baseline.txt"
 def prod(path):
     t = open(path, encoding="utf-8").read()
     i = t.find("#[cfg(test)]")
-    return t if i < 0 else t[:i]
+    t = t if i < 0 else t[:i]
+    # Comments are prose, not references; a `use` is not a use.
+    t = re.sub(r"//.*", "", t)
+    return re.sub(r"\buse\s[^;]*;", "", t)
 
 
 files = [
@@ -41,11 +51,14 @@ unused = []
 used = set()
 for f in sorted(g for g in files if "/dsm/src/sofi/" in g):
     for m in re.finditer(r"^pub fn (\w+)", text[f], re.M):
-        call = re.compile(r"\b" + m.group(1) + r"\s*(::<[^>]*>)?\(")
+        name = m.group(1)
+        call = re.compile(
+            r"\b" + name + r"\s*(::<[^>]*>)?\(" + r"|[,(]\s*" + name + r"\s*[,)]"
+        )
         # A definition `fn name(` matches the call pattern; a generic one
         # `fn name<T>(` does not. Subtract whatever the definitions matched,
         # never a fixed one.
-        defn = re.compile(r"\bfn\s+" + m.group(1) + r"\s*\(")
+        defn = re.compile(r"\bfn\s+" + name + r"\s*\(")
         n = sum(len(call.findall(t)) - len(defn.findall(t)) for g, t in text.items())
         key = f"{f} {m.group(1)}"
         if n == 0:

@@ -1,6 +1,6 @@
 /-
   SoFi storage facts for objects and indexes — Part II §10, §11, §13 —
-  rebuild steps R1, R5 and R6 — self-contained Lean 4 (no Mathlib, no imports)
+  rebuild steps R1, R5, R6 and R8 — self-contained Lean 4 (no Mathlib, no imports)
 
   A member stores bytes under the hash of the bytes and appends content
   addresses under locators; it interprets nothing. Core turns raw member
@@ -45,6 +45,14 @@
       the_producer_proceeds_only_on_valid
                                      Unavailable is Valid; the producer moves
                                      on Valid alone; Invalid dominates
+    - published_is_found             (R8) put at every member + appended under
+                                     the locator ⇒ kept, identity recomputed
+    - unindexed_is_not_found         (R8) put without the append is Stored and
+                                     unreachable: a locator is the only way in
+    - published_is_found_past_foreign_candidates
+                                     (R8) whatever was appended under the locator
+                                     first, a candidate that does not recompute
+                                     to it is passed over, never returned
 
   MUTATION CONTROLS, executed against the Rust module (each turns the named
   Rust test red) and against this file (each puts the named theorem on
@@ -60,6 +68,8 @@
        (`| none => some 0` in `acquire`)           silence_acquires_nothing
     6. (R6) `and` reads Unavailable as Valid     -> unavailable_stops_the_producer,
        (`| .unavailable, v => v` in `Verdict.and`)  the_producer_proceeds_only_on_valid
+    7. (R8) `publish` without `appendIndex`      -> published_is_found,
+                                                    published_is_found_past_foreign_candidates
   Run: `lean -DwarningAsError=true DSMSofiStorage.lean`
 -/
 
@@ -404,6 +414,113 @@ theorem the_producer_proceeds_only_on_valid (u v : Verdict) :
     proceeds (Verdict.and u v) = true ↔ u = .valid ∧ v = .valid := by
   cases u <;> cases v <;> simp [Verdict.and, proceeds]
 
+-- ── §14 publication — rebuild step R8 ─────────────────────────────────────
+
+/-- A fleet as Core reads it: what the members answer at an address, and the
+addresses appended under a locator. -/
+structure Store where
+  held : Nat → List Read
+  index : Nat → List Nat
+
+/-- Three members answering the exact `(ns, p)` at its address: what a put at
+every member of a five-member set leaves behind when three of them hold it. -/
+def putAll (st : Store) (ns p : Nat) : Store :=
+  { st with held := fun a => if a = addr h ns p then [some (ns, p), some (ns, p), some (ns, p)] else st.held a }
+
+/-- Append the address of `(ns, p)` under `L`. -/
+def appendIndex (st : Store) (ns p L : Nat) : Store :=
+  { st with index := fun L' => if L' = L then st.index L' ++ [addr h ns p] else st.index L' }
+
+/-- Publish (`sofi_publish::publish`): put at every member, then index under
+`L`. The order is the writer's; the reader sees only the facts. -/
+def publish (st : Store) (ns p L : Nat) : Store :=
+  appendIndex h (putAll h st ns p) ns p L
+
+/-- Fetch by locator (`sofi_publish::fetch_*`): every candidate under `L`, its
+`Stored` bytes or nothing, kept by the recognizer with budget `b`. -/
+def find {α : Type} (st : Store) (R : Recognizer α) (L b : Nat) : Resolved α :=
+  keep R L ((st.index L).map fun a => stored h a (st.held a)) b
+
+theorem published_is_stored (st : Store) (ns p L : Nat) :
+    stored h (addr h ns p) ((publish h st ns p L).held (addr h ns p)) = some p := by
+  simp [publish, appendIndex, putAll, stored, counted, counts]
+
+theorem publish_indexes_the_address (st : Store) (ns p L : Nat) :
+    (publish h st ns p L).index L = st.index L ++ [addr h ns p] := by
+  simp [publish, appendIndex, putAll]
+
+/-- PUBLISHED IS FOUND (`a_setup_is_published_indexed_and_stored`,
+`everything_a_fulfillment_publishes_is_found_by_its_locator`): under a
+locator nothing else was appended to, a published object whose recognized
+identity is that locator is kept, with one unit of budget. -/
+theorem published_is_found {α : Type} (st : Store) (R : Recognizer α) (ns p L : Nat) (o : α)
+    (hfresh : st.index L = []) (hrec : R.recognize p = some (L, o)) :
+    find h (publish h st ns p L) R L 1 = .kept o := by
+  unfold find
+  rw [publish_indexes_the_address, hfresh]
+  simp [List.map, published_is_stored, keep, hrec]
+
+/-- PUT WITHOUT THE INDEX IS NOT FOUND (`an_object_put_without_its_index_is_not_found`):
+the object is Stored, and no reader reaches it — a locator is the only way
+in. Mutation: `publish` without `appendIndex` — `published_is_found` fails. -/
+theorem unindexed_is_not_found {α : Type} (st : Store) (R : Recognizer α) (ns p L b : Nat)
+    (hfresh : st.index L = []) :
+    stored h (addr h ns p) ((putAll h st ns p).held (addr h ns p)) = some p
+      ∧ find h (putAll h st ns p) R L b = .none := by
+  refine ⟨by simp [putAll, stored, counted, counts], ?_⟩
+  unfold find
+  simp [putAll, hfresh, keep]
+
+/-- A FOREIGN CANDIDATE IS NEVER KEPT (`a_foreign_candidate_under_the_locator_is_never_kept`):
+whatever else was appended under `L` first, the published object is what a
+reader with enough budget keeps, because the other candidates do not
+recompute to `L` — they are examined and passed over, never returned. -/
+theorem published_is_found_past_foreign_candidates {α : Type} (st : Store) (R : Recognizer α)
+    (ns p L : Nat) (o : α) (hrec : R.recognize p = some (L, o))
+    (hforeign : ∀ a bytes o', a ∈ st.index L → stored h a (st.held a) = some bytes →
+      R.recognize bytes ≠ some (L, o'))
+    (hnew : addr h ns p ∉ st.index L) :
+    find h (publish h st ns p L) R L ((st.index L).length + 1) = .kept o := by
+  unfold find
+  rw [publish_indexes_the_address]
+  have hheld : ∀ a ∈ st.index L, (publish h st ns p L).held a = st.held a := by
+    intro a ha
+    have : a ≠ addr h ns p := fun e => hnew (e ▸ ha)
+    simp [publish, appendIndex, putAll, this]
+  rw [List.map_append]
+  have hlast : (List.map (fun a => stored h a ((publish h st ns p L).held a)) [addr h ns p])
+      = [some p] := by
+    simp [List.map, published_is_stored]
+  rw [hlast]
+  -- walk past every foreign candidate, one unit of budget each
+  have : ∀ (l : List Nat), (∀ a ∈ l, a ∈ st.index L) →
+      keep R L ((l.map fun a => stored h a ((publish h st ns p L).held a)) ++ [some p])
+        (l.length + 1) = .kept o := by
+    intro l
+    induction l with
+    | nil => intro _; simp [keep, hrec]
+    | cons a l ih =>
+      intro hl
+      have ha : a ∈ st.index L := hl a (List.mem_cons_self ..)
+      have hl' : ∀ x ∈ l, x ∈ st.index L := fun x hx => hl x (List.mem_cons_of_mem _ hx)
+      simp only [List.map, List.cons_append, List.length_cons]
+      rw [hheld a ha]
+      cases hs : stored h a (st.held a) with
+      | none => simpa [keep] using ih hl'
+      | some bytes =>
+        simp only [keep]
+        cases hr : R.recognize bytes with
+        | none => exact ih hl'
+        | some io =>
+          obtain ⟨id, o'⟩ := io
+          have hne : id ≠ L := fun e => hforeign a bytes o' ha hs (by rw [hr, e])
+          simp only [hne, if_false]
+          exact ih hl'
+  exact this _ (fun _ ha => ha)
+
+#print axioms published_is_found
+#print axioms unindexed_is_not_found
+#print axioms published_is_found_past_foreign_candidates
 #print axioms stored_returns_exact_bytes
 #print axioms counting_reads_agree
 #print axioms wrong_bytes_never_count
