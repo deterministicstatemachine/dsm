@@ -16,17 +16,20 @@
 //! is `ConditionalPending` — and every such value keeps the walk unresolved
 //! and the position Pending.
 //!
-//! One fact this step leaves unestablished for every leg is ORPHANING, and
-//! it is now unestablished VISIBLY. Producing `ParentStatus::Orphaned` needs
-//! the validated canonical root of that vault at that GENERATION, and this
-//! verifier holds a set of `(vault, root)` pairs it walked to, which carries
-//! no generation. So a parent it has not reached is `Unavailable` and the
-//! position waits — where the pair of booleans this replaced wrote
-//! `parent_orphaned: false` beside `canonical_parent: false` and the ladder
-//! read "not refuted". Until the vault head store supplies that root, a
-//! defeated leg is seen through the consumer the walk finds at its chain,
-//! or it waits.
-use std::collections::{BTreeMap, BTreeSet};
+//! ORPHANING is produced here now, and it took a CHAIN to produce it. This
+//! verifier used to hold the `(vault, root)` pairs it had walked to, and a
+//! set of pairs carries no generation — so the fact that refutes a parent, a
+//! DIFFERENT root at the SAME generation, was not in it, and every defeated
+//! route waited instead of being defeated. It now holds a `VaultChain` per
+//! vault, and the generation each leg's parent sits at is recomputed from the
+//! evidence (`vault_post_states`) rather than asserted by the operation that
+//! names it.
+//!
+//! What did NOT change is the direction of the default. A vault with no
+//! chain, or a parent no generation places, is still `Unavailable` and still
+//! waits. Absence refutes nothing: a chain may simply be short, and a head is
+//! open precisely so that the next root can still arrive.
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
 
@@ -36,9 +39,9 @@ use dsm::sofi::exercise::{recognize_exercise, RecognizedExercise};
 use dsm::sofi::registration::Registration;
 use dsm::sofi::resolution::{
     effect_of, resolve_position, walk, LegFacts, ParentPosition, ParentStatus, PositionEffect,
-    Resolution, RouteFacts, WalkOutcome,
+    Resolution, RouteFacts, VaultChain, WalkOutcome,
 };
-use dsm::sofi::validation::route_validation;
+use dsm::sofi::validation::{route_validation, vault_post_states};
 use dsm::sofi::wire::{ParentClaimRef, SofiExercise, ValidationRef};
 use dsm::types::error::DsmError;
 
@@ -75,16 +78,18 @@ pub struct Resolver<'a> {
     /// conditional parent absent here has not been resolved by this
     /// verifier, and the position built on it waits (`ConditionalPending`).
     pub parents: &'a BTreeMap<D32, ParentPosition>,
-    /// The `(vault_id, root)` pairs this verifier walked to from a vault's
-    /// genesis (Section 30): its established canonical ancestry.
+    /// The canonical chain this verifier established for each vault it needs
+    /// one for (Section 30), built by `sofi_chain::ChainWalker`.
     ///
-    /// A parent in this set is [`ParentStatus::Canonical`]. A parent NOT in
-    /// it is [`ParentStatus::Unavailable`], and the position waits. It is
-    /// never [`ParentStatus::Orphaned`] from this set alone: orphaning means
-    /// a DIFFERENT root was established for that vault at that generation,
-    /// and a set of pairs carries no generation, so the fact that would
-    /// refute the parent is not in it. The vault head store produces it.
-    pub canonical: &'a BTreeSet<(D32, D32)>,
+    /// A CHAIN, not a set of pairs. The distinction is what makes
+    /// [`ParentStatus::Orphaned`] producible at all: orphaning means a
+    /// DIFFERENT root was established for that vault at THAT GENERATION, and
+    /// a set of pairs carries no generation, so a verifier holding one could
+    /// only ever answer `Canonical` or `Unavailable` and a permanently
+    /// refuted route waited forever instead of being defeated.
+    ///
+    /// A vault with no chain here is `Unavailable` for every leg naming it.
+    pub chains: &'a BTreeMap<D32, VaultChain>,
 }
 
 /// One trader position, resolved (stage 9 of §31).
@@ -333,11 +338,25 @@ impl Resolver<'_> {
                     .verdict();
 
             // RouteValidation over acquired evidence (R5).
-            let validation = route_validation(
-                precommit,
-                &exercise.preimage,
-                &acquire_evidence(self.set, &exercise.preimage, self.local).await?,
-            );
+            let evidence = acquire_evidence(self.set, &exercise.preimage, self.local).await?;
+            let validation = route_validation(precommit, &exercise.preimage, &evidence);
+
+            // The GENERATION each leg's parent sits at, recomputed from the
+            // pre states the evidence holds rather than asserted by the
+            // operation that names the parent. It is bound to the root:
+            // `acquire_evidence` serves a vault only at its genesis or at a
+            // root this verifier recorded. Without it a parent cannot be
+            // refuted, only waited on, so a vault missing here is
+            // `Unavailable` and never `Orphaned`.
+            let generations: BTreeMap<D32, u64> =
+                vault_post_states(precommit, &exercise.preimage, &evidence)
+                    .map(|posts| {
+                        posts
+                            .into_iter()
+                            .map(|p| (p.vault_id, p.pre_generation))
+                            .collect()
+                    })
+                    .unwrap_or_default();
 
             // The trader parent: P names it; what it selected is this
             // verifier's own resolution of p, or nothing yet.
@@ -384,14 +403,24 @@ impl Resolver<'_> {
                             .0
                     }
                 };
-                // Canonical when this verifier walked to exactly this root,
-                // Unavailable otherwise. Never Orphaned: see `canonical`.
-                let parent = if here.is_some()
-                    || self.canonical.contains(&(leg.vault_id, leg.parent_root))
-                {
+                // The walk is AT this key for this leg, so the root it is
+                // standing on is one it established: canonical by the same
+                // induction that produced it. Otherwise the chain decides,
+                // three-valued, at the generation the evidence places it.
+                let parent = if here.is_some() {
                     ParentStatus::Canonical
                 } else {
-                    ParentStatus::Unavailable
+                    match self.chains.get(&leg.vault_id) {
+                        Some(chain) => match generations.get(&leg.vault_id) {
+                            Some(generation) => chain.status_of(*generation, &leg.parent_root),
+                            // No generation for it: the chain can still
+                            // establish the root positively, but it cannot
+                            // refute one it has not placed.
+                            None if chain.names(&leg.parent_root) => ParentStatus::Canonical,
+                            None => ParentStatus::Unavailable,
+                        },
+                        None => ParentStatus::Unavailable,
+                    }
                 };
                 // `AttemptLive`: every earlier key of this leg's chain is
                 // skipped. The walk established it for the key it reached;
@@ -474,11 +503,21 @@ mod tests {
     }
 
     /// The heads the trader walked to: the parents its legs name.
-    fn walked_heads(r: &SignedRoute) -> BTreeSet<(D32, D32)> {
+    /// Every leg's vault, with the one-generation chain that makes its parent
+    /// canonical. The fixture's vaults are at their genesis, so each chain is
+    /// `[R_0]` and each leg's parent sits at generation zero.
+    fn walked_heads(r: &SignedRoute) -> BTreeMap<D32, VaultChain> {
         r.precommit
             .legs()
             .iter()
-            .map(|l| (l.vault_id, l.parent_root))
+            .map(|l| {
+                (
+                    l.vault_id,
+                    VaultChain {
+                        roots: vec![l.parent_root],
+                    },
+                )
+            })
             .collect()
     }
 
@@ -497,7 +536,7 @@ mod tests {
             set: &r.set,
             local: &r.local,
             parents: &parents,
-            canonical: &canonical,
+            chains: &canonical,
         };
         assert_eq!(
             block_on(resolver.resolve_trader_position(&x)).unwrap(),
@@ -541,20 +580,15 @@ mod tests {
         let x = exercised(&r);
         let parents = BTreeMap::new();
 
-        // Every head this verifier walked to EXCEPT the first leg's.
-        let partial: BTreeSet<(D32, D32)> = r
-            .precommit
-            .legs()
-            .iter()
-            .skip(1)
-            .map(|l| (l.vault_id, l.parent_root))
-            .collect();
+        // Every chain this verifier established EXCEPT the first leg's vault.
+        let mut partial = walked_heads(&r);
+        partial.remove(&r.precommit.legs()[0].vault_id);
         assert_eq!(partial.len(), r.precommit.legs().len() - 1);
         let waiting = Resolver {
             set: &r.set,
             local: &r.local,
             parents: &parents,
-            canonical: &partial,
+            chains: &partial,
         };
         let resolved = block_on(waiting.resolve_trader_position(&x)).unwrap();
         assert!(resolved.registered);
@@ -574,7 +608,7 @@ mod tests {
             set: &r.set,
             local: &r.local,
             parents: &parents,
-            canonical: &walked,
+            chains: &walked,
         };
         assert_eq!(
             block_on(complete.resolve_trader_position(&x))
@@ -620,7 +654,7 @@ mod tests {
             set: &r.set,
             local: &r.local,
             parents: &parents,
-            canonical: &canonical,
+            chains: &canonical,
         };
         let resolved = block_on(resolver.resolve_trader_position(&x)).unwrap();
         assert!(resolved.registered, "the pair is final at the position");
@@ -681,7 +715,7 @@ mod tests {
             set: &r.set,
             local: &r.local,
             parents: &parents,
-            canonical: &canonical,
+            chains: &canonical,
         };
         let resolved = block_on(resolver.resolve_trader_position(&x)).unwrap();
         assert!(!resolved.registered);
