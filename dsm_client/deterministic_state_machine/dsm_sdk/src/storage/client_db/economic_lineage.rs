@@ -209,21 +209,62 @@ pub fn get_admitted_with_conn(
 /// — the same one that clears the pending admission, so "admitted" and "no
 /// longer pending" cannot disagree.
 ///
+/// The row is written in the ONE exact shape of the position's kind — the
+/// shapes `admitted_from_row` refuses to read any other way. An ordinary
+/// position carries its root; a resolved SoFi position carries the root the
+/// route selected and the fulfillment that installed it (R13); an unresolved
+/// one carries both roots it commits and no selected root.
+///
 /// `leaves` are `(leaf_key, leaf_value, exact state CCB bytes)` for the FULL
 /// post-transition tree. Full replacement, not a delta: the cache's only
 /// claim to correctness is root equality on load, and a full write is what
 /// keeps a crash mid-update from leaving a plausible-but-wrong mixture.
 pub fn record_admitted_with_conn(
     tx: &Transaction<'_>,
-    economic_position: u64,
-    economic_root: &[u8; 32],
+    admitted: &AdmittedEconomicPosition,
     leaves: &[([u8; 32], [u8; 32], Vec<u8>)],
     now: i64,
 ) -> Result<()> {
+    let position =
+        i64::try_from(admitted.economic_position()).map_err(|_| anyhow!("position overflow"))?;
+    let (kind, root, fulfillment, realize, void): (
+        i64,
+        Option<&[u8]>,
+        Option<&[u8]>,
+        Option<&[u8]>,
+        Option<&[u8]>,
+    ) = match admitted {
+        AdmittedEconomicPosition::SingleRoot { economic_root, .. } => {
+            (0, Some(economic_root.as_slice()), None, None, None)
+        }
+        AdmittedEconomicPosition::ResolvedSofi {
+            selected_root,
+            fulfillment_id,
+            ..
+        } => (
+            1,
+            Some(selected_root.as_slice()),
+            Some(fulfillment_id.as_slice()),
+            None,
+            None,
+        ),
+        AdmittedEconomicPosition::UnresolvedSofi {
+            fulfillment_id,
+            realize_root,
+            void_root,
+            ..
+        } => (
+            2,
+            None,
+            Some(fulfillment_id.as_slice()),
+            Some(realize_root.as_slice()),
+            Some(void_root.as_slice()),
+        ),
+    };
     tx.execute(
         "INSERT INTO economic_admitted_v2 (id, economic_position, claim_kind, economic_root, \
              fulfillment_id, realize_root, void_root, updated_at)
-         VALUES (1, ?1, 0, ?2, NULL, NULL, NULL, ?3)
+         VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)
          ON CONFLICT(id) DO UPDATE SET
              economic_position = excluded.economic_position,
              claim_kind = excluded.claim_kind,
@@ -232,11 +273,7 @@ pub fn record_admitted_with_conn(
              realize_root = excluded.realize_root,
              void_root = excluded.void_root,
              updated_at = excluded.updated_at",
-        params![
-            i64::try_from(economic_position).map_err(|_| anyhow!("position overflow"))?,
-            economic_root.as_slice(),
-            now
-        ],
+        params![position, kind, root, fulfillment, realize, void, now],
     )?;
     tx.execute("DELETE FROM economic_leaf_cache", [])?;
     for (key, value, ccb) in leaves {

@@ -347,10 +347,3 @@ pub fn next_attempt(a: u64) -> Result<u64, SofiWireError> {
         counter: "successor attempt",
     })
 }
-
-/// `generation + 1`, checked.
-pub fn next_generation(g: u64) -> Result<u64, SofiWireError> {
-    g.checked_add(1).ok_or(SofiWireError::CounterOverflow {
-        counter: "vault generation",
-    })
-}

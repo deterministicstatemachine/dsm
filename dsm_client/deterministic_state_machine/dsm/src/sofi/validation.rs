@@ -36,7 +36,7 @@ use crate::economic::state::{EconomicBalanceState, EconomicLeafState};
 
 use super::conformance::Validation;
 use super::derive;
-use super::smt::{batch_fold, FoldEntry};
+use super::smt::{verify_batch, FoldEntry, FoldError};
 use super::wire::{
     next_position, CoreEntry, DlvCore, OwnerAuthority, SettlementBody, SettlementPreimage, SwapHop,
     TraderCore, TraderPrecommitBody, TraderRelationshipLeaf, VaultRelationshipLeaf, VaultStateLeaf,
@@ -421,6 +421,100 @@ pub fn route_validation(
         Ok(()) => Validation::Valid,
         Err(r) => r.validation(),
     }
+}
+
+/// The trader's leaves after the operation, for the keys `T°` touches — the
+/// post STATE behind each post value the core states, so a verifier that
+/// installs `P.R_realize` (stage 10 of §31, R13) also holds the leaves that
+/// form it. Each state is recomputed from the pre state the evidence holds
+/// and the movement the settlement commits, then bound to the value the core
+/// states: a mismatch is the refusal `validate` gives for it. `None` is a leaf
+/// absent after the operation (a zero balance). Keys the core does not touch
+/// are unchanged and not listed.
+pub fn trader_post_states(
+    precommit: &TraderPrecommitBody,
+    preimage: &SettlementPreimage,
+    evidence: &Evidence,
+) -> Result<Vec<(D32, Option<EconomicLeafState>)>, Refusal> {
+    let e = *precommit.external_commitment();
+    let movements: Vec<(D32, u64, u64)> = match preimage.settlement() {
+        SettlementBody::Swap {
+            token_in,
+            amount_in,
+            token_out,
+            exact_out,
+            ..
+        } => vec![(*token_out, *exact_out, 0), (*token_in, 0, *amount_in)],
+        SettlementBody::Close {
+            vault_id,
+            reserve_a,
+            reserve_b,
+            ..
+        } => {
+            let state = evidence.vault_state(vault_id)?;
+            let policies = Policies::resolve(evidence, &state)?;
+            vec![
+                (*policies.market.token_a(), *reserve_a, 0),
+                (*policies.market.token_b(), *reserve_b, 0),
+            ]
+        }
+    };
+    let core = preimage.trader_core();
+    let mut out = Vec::with_capacity(core.entries().len());
+    for entry in core.entries() {
+        let key = entry.key();
+        let post = match entry {
+            // A relationship advance states no post value of its own: the
+            // next leaf is derived from the base and E, and the fold against
+            // `P.R_realize` is what binds it (`trader_fold_entries`).
+            CoreEntry::Relationship { vault_id, base, .. } => {
+                out.push((
+                    key,
+                    Some(EconomicLeafState::Relationship(TraderRelationshipLeaf {
+                        vault_id: *vault_id,
+                        leaf: derive::relationship_leaf_next(base, &e),
+                    })),
+                ));
+                continue;
+            }
+            CoreEntry::Mutation { .. } | CoreEntry::Read { .. } => {
+                let (token, credit, debit) = movements
+                    .iter()
+                    .find(|(t, _, _)| {
+                        balance_key(precommit.genesis(), precommit.device_id(), t) == key
+                    })
+                    .ok_or(Refusal::Invalid(Invalid::WriteSetNotExact { core: "T°" }))?;
+                let before = match evidence.trader_leaf(&key)? {
+                    TraderLeafPre::Balance(b) if b.policy_commit == *token => b.amount,
+                    TraderLeafPre::Absent => 0,
+                    TraderLeafPre::Balance(_) | TraderLeafPre::Relationship(_) => {
+                        return Err(Refusal::Invalid(Invalid::LeafPreValueMismatch))
+                    }
+                };
+                let after = before
+                    .checked_add(*credit)
+                    .and_then(|v| v.checked_sub(*debit))
+                    .ok_or(Refusal::Invalid(Invalid::CheckedArithmetic {
+                        what: "trader balance",
+                    }))?;
+                (after != 0).then_some(EconomicLeafState::Balance(EconomicBalanceState {
+                    policy_commit: *token,
+                    amount: after,
+                }))
+            }
+        };
+        let value = post
+            .as_ref()
+            .map(|state| {
+                state
+                    .leaf_value()
+                    .map_err(|_| Refusal::Invalid(Invalid::LeafPostValueMismatch))
+            })
+            .transpose()?;
+        require(value == stated(entry).1, Invalid::LeafPostValueMismatch)?;
+        out.push((key, post));
+    }
+    Ok(out)
 }
 
 /// The same check, with the reason. Every refusal names what failed, so a test
@@ -849,18 +943,16 @@ fn dlv_fold_entries(
 /// checked here: a write set can be exactly the branch's own and still carry
 /// paths from another tree.
 fn fold_core(entries: &[FoldEntry], pre_root: &D32) -> Result<D32, Refusal> {
-    let folded = batch_fold(entries).map_err(|_| {
+    verify_batch(pre_root, entries).map_err(|e| {
         Refusal::Invalid(Invalid::CoreDoesNotFold {
-            reason: "the entries' paths are not of one tree",
+            reason: match e {
+                FoldError::PreRootMismatch { .. } => {
+                    "the entries do not fold to the core's own pre-root"
+                }
+                _ => "the entries' paths are not of one tree",
+            },
         })
-    })?;
-    require(
-        folded.pre_root == *pre_root,
-        Invalid::CoreDoesNotFold {
-            reason: "the entries do not fold to the core's own pre-root",
-        },
-    )?;
-    Ok(folded.post_root)
+    })
 }
 
 /// One vault's state before and after a swap hop, priced by its own policies.
@@ -1322,6 +1414,7 @@ pub(crate) mod fixtures {
     //! conformance tests (R7): a real `P(E)`, its `E`, a precommit whose legs
     //! derive from it, and the acquired evidence.
     use super::*;
+    use crate::sofi::smt::batch_fold;
     use crate::economic::tree::EconomicSmt;
     use crate::sofi::wire::{PreEClosureIndex, PrecommitLeg};
 
@@ -1679,6 +1772,7 @@ mod tests {
     use super::fixtures::*;
     use super::*;
     use crate::economic::tree::{EconomicSmt, ECONOMIC_SMT_HEIGHT};
+    use crate::sofi::smt::batch_fold;
     use crate::sofi::wire::{PreEClosureIndex, PrecommitLeg};
 
     #[test]
@@ -2592,6 +2686,122 @@ mod tests {
         let precommit = rebind(&f, &preimage);
         assert_eq!(
             validate(&precommit, &preimage, &f.evidence),
+            Err(Refusal::Invalid(Invalid::LeafPostValueMismatch))
+        );
+    }
+
+    /// R13, stage 10: the post states behind `P.R_realize` are recomputed
+    /// from the pre states and the movements the settlement commits — the
+    /// debit of `amount_in`, the credit of `exact_out`, the next relationship
+    /// leaf — and each is bound to the value `T°` states. A core stating
+    /// another post value is refused, never believed.
+    #[test]
+    fn trader_post_states_are_recomputed_and_bound_to_the_stated_values() {
+        let f = fixtures::swap_fixture_n(1);
+        let SettlementBody::Swap {
+            token_in,
+            amount_in,
+            token_out,
+            exact_out,
+            ..
+        } = f.preimage.settlement().clone()
+        else {
+            panic!("a swap fixture")
+        };
+        let post = trader_post_states(&f.precommit, &f.preimage, &f.evidence).unwrap();
+        assert_eq!(post.len(), f.preimage.trader_core().entries().len());
+        let in_key = balance_key(f.precommit.genesis(), f.precommit.device_id(), &token_in);
+        let out_key = balance_key(f.precommit.genesis(), f.precommit.device_id(), &token_out);
+        let TraderLeafPre::Balance(before) = f.evidence.trader_leaf(&in_key).unwrap() else {
+            panic!("the fixture holds the token spent")
+        };
+        let state_at = |key: &D32| post.iter().find(|(k, _)| k == key).unwrap().1.clone();
+        assert_eq!(
+            state_at(&in_key),
+            Some(EconomicLeafState::Balance(EconomicBalanceState {
+                policy_commit: token_in,
+                amount: before.amount - amount_in,
+            }))
+        );
+        assert_eq!(
+            state_at(&out_key),
+            Some(EconomicLeafState::Balance(EconomicBalanceState {
+                policy_commit: token_out,
+                amount: exact_out,
+            }))
+        );
+        let e = *f.precommit.external_commitment();
+        for entry in f.preimage.trader_core().entries() {
+            if let CoreEntry::Relationship { vault_id, base, .. } = entry {
+                assert_eq!(
+                    state_at(&entry.key()),
+                    Some(EconomicLeafState::Relationship(TraderRelationshipLeaf {
+                        vault_id: *vault_id,
+                        leaf: derive::relationship_leaf_next(base, &e),
+                    }))
+                );
+            }
+        }
+        // Every post state's value is the one the core states, so the fold
+        // of these states over the pre tree is R_realize.
+        for (key, state) in &post {
+            let entry = f
+                .preimage
+                .trader_core()
+                .entries()
+                .iter()
+                .find(|en| en.key() == *key)
+                .unwrap();
+            if let CoreEntry::Mutation { post, .. } = entry {
+                assert_eq!(
+                    state.as_ref().map(|s| s.leaf_value().unwrap()),
+                    absent_or(post)
+                );
+            }
+        }
+
+        // A T° stating another post value for the token spent.
+        let core = f.preimage.trader_core();
+        let mut entries = core.entries().to_vec();
+        let i = entries.iter().position(|en| en.key() == in_key).unwrap();
+        if let CoreEntry::Mutation { post, .. } = &mut entries[i] {
+            *post = fixtures::token(0x77);
+        }
+        let bent = TraderCore::new(
+            *core.genesis(),
+            *core.device_id(),
+            core.position(),
+            *core.pre_root(),
+            entries,
+        )
+        .unwrap();
+        let settlement = match f.preimage.settlement().clone() {
+            SettlementBody::Swap {
+                token_in,
+                amount_in,
+                token_out,
+                exact_out,
+                hops,
+                dlv_cores,
+                closure,
+                ..
+            } => SettlementBody::Swap {
+                token_in,
+                amount_in,
+                token_out,
+                exact_out,
+                hops,
+                trader_core: derive::trader_core_digest(&bent.encode().unwrap()),
+                dlv_cores,
+                closure,
+            },
+            other => other,
+        };
+        let preimage =
+            SettlementPreimage::new(settlement, bent, f.preimage.dlv_cores().to_vec()).unwrap();
+        let precommit = rebind(&f, &preimage);
+        assert_eq!(
+            trader_post_states(&precommit, &preimage, &f.evidence),
             Err(Refusal::Invalid(Invalid::LeafPostValueMismatch))
         );
     }

@@ -954,7 +954,6 @@ fn precommit_legs_and_route_leg_sets_are_canonical() {
 fn counters_are_checked_never_wrapped() {
     assert!(next_position(u64::MAX).is_err());
     assert!(next_attempt(u64::MAX).is_err());
-    assert!(next_generation(u64::MAX).is_err());
     assert_eq!(next_position(41), Ok(42));
     assert!(matches!(
         TraderPrecommitBody::new(
