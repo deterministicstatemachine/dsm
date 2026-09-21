@@ -55,6 +55,7 @@ echo ""
 # The funding pair is stated by a signed operation, never asserted, and F10
 # still owes the binding from that operation to the accepted owner transition.
 bash ci/sofi_genesis_acceptance_binding.sh
+bash ci/sofi_relay_is_party_neutral.sh
 
 # Only an ordinary single-root lineage can become an eligible peer debit
 # (P15-9). The discriminant is worthless if a caller can attach it, and
