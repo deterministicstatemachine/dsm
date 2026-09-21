@@ -1,80 +1,60 @@
 #!/usr/bin/env bash
+# A vault genesis is not acceptable from a PRESENTED creation operation, and
+# no Rust predicate claims otherwise.
+#
+# `genesis_accepted` was a twelve-conjunct predicate that took a creation
+# operation and an owner root and returned a vault id. It could never acquire
+# a production caller: `VaultCreation` carries no asset commitments, so
+# proving the creation leaf establishes the AMOUNTS and never which balances
+# were debited, and a caller could hand in an A/B-shaped sibling of an
+# operation that actually debited X/Y. This gate used to hold that line by
+# failing on the first caller.
+#
+# Owner ruling, spec §44.4: the standalone production predicate was the stale
+# piece, not the gate. Genesis validity is established by the vault genesis
+# constructor and recognizer with the accepted genesis root; the predicate
+# survives as the FORMAL definition and is gone from Rust. So this gate now
+# keeps it gone, and keeps the formal statement present — a deletion that
+# quietly took the statement with it would be the same hole by another route.
 set -euo pipefail
-
-# CI gate: a vault genesis cannot become consumable from a PRESENTED creation
-# operation.
-#
-# `genesis_accepted` takes a `CreationFunding`, which is the funding pair AN
-# operation states — read off a signed `SofiVaultCreate`. It is deliberately
-# NOT proof that the operation is THE one whose verified write set produced
-# the accepted owner transition holding this vault's `VaultCreation` leaf.
-#
-# The evidence gap is real and not closable by inspection: `VaultCreation`
-# carries `vault_id`, `genesis_root`, `amount_a`, `amount_b` and no asset
-# commits, so the leaf and its inclusion proof are byte-identical whichever
-# assets the creation debited. A verifier that accepted a presented operation
-# would take a vault funded from `X/Y` as one funded from the `A/B` its policy
-# names — an asset-provenance and conservation failure, not a broken vault.
-#
-# So until F10 has an opaque `VerifiedVaultCreation` whose sole constructor
-# establishes the accepted transition, `genesis_accepted` gets NO production
-# caller. This gate holds that: the only references outside its own module are
-# doc comments, and the only calls are in its own test block.
-#
-# When E2 lands the capability, this gate changes shape with it — it does not
-# get deleted.
-
-echo "=== genesis acceptance: no naive production caller ==="
+echo "=== genesis acceptance: formal only, and still stated ==="
 
 core=dsm_client/deterministic_state_machine
-lineage="$core/dsm/src/sofi/lineage.rs"
 
-[[ -f "$lineage" ]] || {
-  echo "[FAIL] the sofi lineage module is not where this gate expects it"
-  exit 1
-}
-
-# 1. `CreationFunding` states, it does not prove: one constructor, so named.
-if ! grep -q 'pub fn stated_by' "$lineage"; then
-  echo "[FAIL] CreationFunding::stated_by is missing — the funding pair must be"
-  echo "       READ OFF a signed operation, and the name must say it is only"
-  echo "       what an operation states"
-  exit 1
-fi
-ctors=$(awk '/^impl CreationFunding \{/{f=1} f&&/-> Option<Self>|-> Self/{print} f&&/^\}/{exit}' \
-  "$lineage" | wc -l | tr -d ' ')
-if [[ "$ctors" -ne 1 ]]; then
-  echo "[FAIL] CreationFunding has $ctors constructors; exactly one reads the pair"
-  echo "       off a signed operation"
-  exit 1
-fi
-echo "  ✓ the funding pair is stated by an operation, never asserted"
-
-# 2. No production caller of `genesis_accepted` anywhere in the workspace.
-callers=$(grep -rn 'genesis_accepted(' \
+# 1. No Rust predicate, anywhere, production or test. Re-introducing one needs
+#    F10's VerifiedVaultCreation first, which is a design, not an edit.
+hits=$(grep -rn 'genesis_accepted\|CreationFunding' \
   "$core/dsm/src" "$core/dsm_sdk/src" dsm_storage_node/src 2>/dev/null \
-  | grep -v "^$lineage:" || true)
-if [[ -n "$callers" ]]; then
-  echo "[FAIL] genesis_accepted has a caller outside its own module. A vault"
-  echo "       genesis must not be acceptable from a PRESENTED creation"
-  echo "       operation — F10 must derive the funding pair from the exact"
-  echo "       verified creation transition (an opaque VerifiedVaultCreation)."
-  echo "$callers"
+  | grep -vE '^[^:]*:[0-9]+:[[:space:]]*(//|///|\*)' || true)
+if [[ -n "$hits" ]]; then
+  echo "[FAIL] a vault-genesis acceptance predicate is back in Rust."
+  echo "       VaultCreation carries no asset commitments, so a PRESENTED"
+  echo "       creation establishes amounts and never which balances were"
+  echo "       debited. F10 owes an opaque VerifiedVaultCreation bound to the"
+  echo "       exact accepted owner transition at p_create; until it exists"
+  echo "       this predicate has no sound production form."
+  echo "$hits"
   exit 1
 fi
+echo "  ✓ no Rust predicate accepts a genesis from a presented creation"
 
-# And inside the module, only its own tests call it.
-first_test=$(grep -n '^#\[cfg(test)\]' "$lineage" | head -1 | cut -d: -f1)
-if [[ -z "$first_test" ]]; then
-  echo "[FAIL] no test module in $lineage; this gate cannot tell tests from production"
-  exit 1
-fi
-prod_calls=$( { awk -v t="$first_test" 'NR<t && /genesis_accepted\(/ && !/^\s*\/\//' "$lineage" \
-  | grep -v 'pub fn genesis_accepted' || true; } | wc -l | tr -d ' ')
-if [[ "$prod_calls" -ne 0 ]]; then
-  echo "[FAIL] genesis_accepted is called $prod_calls time(s) before the test module"
-  exit 1
-fi
-echo "  ✓ no production caller; the acceptance binding is still owed by F10"
-
-echo "✓ a genesis is not consumable from a presented creation operation"
+# 2. The statement did not go with the code. The formal layer still carries
+#    it, so what R14 deleted was one unsound realization and not the rule.
+lean=lean4/DSMSofiAtomicity.lean
+tla=tla/DSM_SofiFulfillment.tla
+# The DEFINITION, not a mention of it. A first draft of this check grepped for
+# the bare name and passed while the definition had been renamed away, because
+# a use site still spelled it — the same spelling-for-substance mistake G1 made
+# for the whole rebuild.
+for pair in "$lean|def GenesisAccepted" "$lean|theorem genesis_requires_validated_creation" \
+            "$tla|GenesisCanonicalOnlyIfCreationValid ==" ; do
+  f="${pair%%|*}"
+  name="${pair#*|}"
+  if ! grep -qF "$name" "$f" 2>/dev/null; then
+    echo "[FAIL] $f no longer DEFINES \`$name\`. Deleting the Rust predicate"
+    echo "       moved the rule to the formal layer; deleting it there too"
+    echo "       would remove the rule itself."
+    exit 1
+  fi
+done
+echo "  ✓ the rule is still stated where it now lives"

@@ -31,16 +31,3 @@ dsm_client/deterministic_state_machine/dsm/src/sofi/smt/tree.rs get  # R14: a le
 dsm_client/deterministic_state_machine/dsm/src/sofi/smt/tree.rs prove  # R14: a path against a stored root; its only sound consumer is a DlvCore producer for a vault past genesis, which does not exist
 dsm_client/deterministic_state_machine/dsm/src/sofi/smt/tree.rs verify  # R14: spec §31 stage 3 names it for each leaf pre value; production binds them by the fold's pre-root instead
 dsm_client/deterministic_state_machine/dsm/src/sofi/smt/tree.rs reachable  # R14: live nodes from the pinned roots; called only by collect_garbage, whose own caller is dark
-
-# ── vault genesis acceptance ──────────────────────────────────────────────
-# BLOCKED, and the block is deliberate. ci/sofi_genesis_acceptance_binding.sh
-# (run by ci/production_safety_checks.sh) FAILS the build the moment
-# `genesis_accepted(` appears outside its own module, because `VaultCreation`
-# carries no asset commits: proving the creation leaf establishes the AMOUNTS
-# and never which balances were debited, so a presented creation operation is
-# not evidence of the accepted one. The predicate's own doc says F10 owes a
-# `VerifiedVaultCreation` whose sole constructor binds the exact accepted
-# owner transition at p_create. Spec §28.5 and §30.1 require the predicate, so
-# it cannot be deleted either. Wiring it and deleting it both fail a gate:
-# this line stands until that capability lands.
-dsm_client/deterministic_state_machine/dsm/src/sofi/lineage.rs genesis_accepted  # R14: blocked by ci/sofi_genesis_acceptance_binding.sh until F10's VerifiedVaultCreation
