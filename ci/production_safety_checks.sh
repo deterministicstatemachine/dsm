@@ -38,7 +38,6 @@ echo ""
 # The persistent DLV tree trusts its builder: nothing outside `tree::apply` may
 # assemble a commit input. Field visibility and a cfg gate have no runtime
 # behaviour, so this is proven against the artifact, not by a test.
-bash ci/sofi_shadow_nonforgeable.sh
 echo ""
 
 # A validated economic root is verifier-derived; its two deliberate punctures

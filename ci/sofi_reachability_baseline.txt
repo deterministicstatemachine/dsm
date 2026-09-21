@@ -1,33 +1,29 @@
 # Gate G1 baseline (ci/sofi_reachability.py): pub fns under CORE/sofi that the
 # rebuild has not wired into production yet. One line per function, with the
 # rebuild step expected to wire it. A step that wires one DELETES its line;
-# this file only shrinks, except that a Core-only step landing a predicate
-# ahead of the steps that call it adds that one line (R7); R14 deletes the
-# file and G1 passes with no exceptions.
+# R14 deletes the file and G1 passes with no exceptions.
 #
-# THIS FILE GREW AT R14, AND THAT IS THE POINT. R14's matcher fix (spec §41.3
-# correction 2, owed before step 5 and not done) made a call count only where
-# the name is IN SCOPE. Four of the seven lines below were never wired and
-# never baselined: they passed the old bare-name matcher through unrelated
-# functions of the same name — `sqlite::get`, `sphincs::verify`,
-# `bitcoin_query_routes::reachable`, `recipient_dispatch`'s `apply`. The list
-# is longer because it is now true.
-
-# ── the trader's persistent tree store ────────────────────────────────────
-# The whole subsystem is dark. Its only production import is
-# SDK/storage/client_db/sofi_smt_nodes.rs (`SqliteNodeStore`), whose own doc
-# says "Dark: nothing calls this yet"; every other import of these names is a
-# test. Spec §34 places `validate_staged_frontier` and `reachable` at "the
-# trader's tree store: staged post trees are validated before stage 7, and
-# nodes not reachable from a validated root are dropped after stage 10" — no
-# such behaviour exists in production, and §34 names neither `commit_shadow`
-# nor `prove`, which only this file assigns to a step. Rule T1 is wire or
-# delete, so these are one decision, not six: either the store is wired
-# behind the vault head past genesis, or the subsystem goes and §34 is
-# corrected. Recorded for the owner; not decided here.
-dsm_client/deterministic_state_machine/dsm/src/sofi/smt/tree.rs apply  # R14: the store's one constructor of a successor tree
-dsm_client/deterministic_state_machine/dsm/src/sofi/smt/tree.rs commit_shadow  # R14: persist a staged post tree and pin its root
-dsm_client/deterministic_state_machine/dsm/src/sofi/smt/tree.rs get  # R14: a leaf VALUE from a stored root — never the leaf preimage evidence needs
-dsm_client/deterministic_state_machine/dsm/src/sofi/smt/tree.rs prove  # R14: a path against a stored root; its only sound consumer is a DlvCore producer for a vault past genesis, which does not exist
-dsm_client/deterministic_state_machine/dsm/src/sofi/smt/tree.rs verify  # R14: spec §31 stage 3 names it for each leaf pre value; production binds them by the fold's pre-root instead
-dsm_client/deterministic_state_machine/dsm/src/sofi/smt/tree.rs reachable  # R14: live nodes from the pinned roots; called only by collect_garbage, whose own caller is dark
+# THE LIST IS EMPTY, AND THE FILE IS NOT DELETED YET.
+#
+# It grew at R14 before it shrank, and both are the point. The matcher fix
+# (spec §41.3 correction 2, owed before step 5 and not made) required a call
+# to be IN SCOPE, and four functions that had never been wired or baselined
+# appeared: they had been passing the old bare-name matcher through unrelated
+# functions called `get`, `verify`, `reachable` and `apply` elsewhere in the
+# workspace. Three to seven. Then seven to zero, and not one of them by being
+# wired:
+#
+#   * the trader's persistent node store — `apply`, `commit_shadow`, `get`,
+#     `prove`, `verify`, `reachable` — is DELETED. Spec §44.4 ruled that the
+#     responsibility is replaced, not the dead implementation resurrected: a
+#     node store returns leaf VALUES, and the vault head past its genesis
+#     needs the leaf PREIMAGES a later acquisition consumes, so wiring them
+#     would not have made one past-genesis trade work.
+#   * `genesis_accepted` is DELETED from Rust and the rule it stated now lives
+#     in the formal layer alone (§44.4 again, and `GenesisAccepted` in Lean).
+#
+# R14 deletes this file when the rest of its deliverable is real: the
+# post-genesis path that produces `ParentStatus::Orphaned`, the production
+# SoFi facade that constructs or loads a `TraderCore` and a `DlvCore`, and the
+# twelve device scenarios. Until then an empty list is an honest statement,
+# where a deleted file would be a claim.
