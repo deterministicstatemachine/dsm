@@ -629,3 +629,151 @@ fn fold_under(trader_core: &TraderCore, leaves: &[(D32, EconomicLeafState)], e: 
         .collect();
     batch_fold(&entries).unwrap().post_root
 }
+
+// ── A signed route, installed or ready to be: the R9/R10/R11 rig ────────────
+
+use std::collections::BTreeMap;
+use std::sync::OnceLock;
+
+use dsm::crypto::sphincs::{generate_sphincs_keypair, sphincs_sign};
+use dsm::sofi::publication::Publication;
+use dsm::sofi::signature::SigningPayload;
+use dsm::sofi::wire::{SofiSetupBody, TraderFulfillmentBody, ValidationRef};
+use dsm::types::operations::Operation;
+
+use crate::sdk::sofi_publish::publish_produced;
+use crate::sdk::sofi_register::InstallRequest;
+use crate::sdk::sofi_sdk::{build_fulfillment, draft_route, Produced, ToPublish};
+use crate::sdk::storage_io::fake_registers;
+
+/// The trader's SPHINCS+ key, generated once.
+pub fn trader_keys() -> &'static (Vec<u8>, Vec<u8>) {
+    static KEYS: OnceLock<(Vec<u8>, Vec<u8>)> = OnceLock::new();
+    KEYS.get_or_init(|| generate_sphincs_keypair().unwrap())
+}
+
+pub fn trader_sign(message: &[u8]) -> Vec<u8> {
+    sphincs_sign(&trader_keys().1, message).unwrap()
+}
+
+pub fn block_on<T>(f: impl core::future::Future<Output = T>) -> T {
+    crate::runtime::get_runtime().block_on(f)
+}
+
+/// A two-hop route whose legs carry the `ρ` of real setups, everything
+/// published to the fake fleet — the setups too, when asked — and the
+/// signed exercise ready to install.
+pub struct SignedRoute {
+    pub set: StorageSet,
+    pub precommit: TraderPrecommitBody,
+    pub p_sig: Vec<u8>,
+    pub preimage: SettlementPreimage,
+    pub fulfillment: TraderFulfillmentBody,
+    pub f_sig: Vec<u8>,
+    pub own: BTreeMap<ValidationRef, Vec<u8>>,
+    pub setups: Vec<SofiSetupBody>,
+}
+
+pub fn produced_setup(body: &SofiSetupBody) -> Produced {
+    Produced {
+        operation: Operation::SofiSetup {
+            setup_body: body.encode(),
+            signature: Vec::new(),
+        },
+        signs: SigningPayload::SetupDigest(derive::setup_signing_digest(body)),
+        publish: vec![ToPublish::Setup(body.clone())],
+    }
+}
+
+pub fn signed_route(publish_setups: bool) -> SignedRoute {
+    fake_fleet::reset();
+    fake_registers::reset();
+    let set = five();
+    let setups: Vec<SofiSetupBody> = (0..2)
+        .map(|j| {
+            let vault_id = derive::vault_id(&OWNER_G, &OWNER_DEV, P_CREATE + j as u64);
+            SofiSetupBody::new(
+                G,
+                DEV,
+                P_POS - 1,
+                vault_id,
+                d(0x0B),
+                d(0x0C),
+                SIG_ALG,
+                &trader_keys().0,
+            )
+            .unwrap()
+        })
+        .collect();
+    let rhos: Vec<D32> = setups.iter().map(derive::setup_ref).collect();
+    let fx =
+        RouteFixture::swap_with_setups(2, set.id(), |j| (token(j), token(j + 1)), |j, _| rhos[j]);
+    fx.publish(&set, &all_policies());
+    let evidence = fx.acquire(&set);
+    let draft = draft_route(
+        fx.hops.clone(),
+        fx.cores.clone(),
+        &fx.ctx(&trader_keys().0),
+        fx.realize_root,
+        fx.void_root,
+        &evidence,
+    )
+    .unwrap();
+    let p_sig = trader_sign(&draft.precommit_signing_digest());
+    let attempts: Vec<(D32, u64)> = draft
+        .precommit()
+        .legs()
+        .iter()
+        .map(|l| (l.vault_id, 0))
+        .collect();
+    let produced = build_fulfillment(&draft, p_sig.clone(), &attempts).unwrap();
+    let f_sig = trader_sign(produced.signs.bytes());
+    block_on(publish_produced(&set, &produced, &f_sig)).unwrap();
+    if publish_setups {
+        for body in &setups {
+            let sig = trader_sign(&derive::setup_signing_digest(body));
+            block_on(publish_produced(&set, &produced_setup(body), &sig)).unwrap();
+        }
+    }
+    let fulfillment = produced
+        .publish
+        .iter()
+        .find_map(|p| match p {
+            ToPublish::Fulfillment(f) => Some(f.clone()),
+            _ => None,
+        })
+        .unwrap();
+    SignedRoute {
+        set,
+        precommit: draft.precommit().clone(),
+        p_sig,
+        preimage: draft.preimage().clone(),
+        fulfillment,
+        f_sig,
+        own: BTreeMap::new(),
+        setups,
+    }
+}
+
+pub fn install_request(r: &SignedRoute) -> InstallRequest<'_> {
+    InstallRequest {
+        precommit: &r.precommit,
+        precommit_signature: &r.p_sig,
+        preimage: &r.preimage,
+        fulfillment: &r.fulfillment,
+        fulfillment_signature: &r.f_sig,
+        own_objects: &r.own,
+    }
+}
+
+pub fn pair_bytes(r: &SignedRoute) -> (Vec<u8>, Vec<u8>) {
+    (
+        Publication::Fulfillment {
+            body: &r.fulfillment,
+            signature: &r.f_sig,
+        }
+        .object_bytes()
+        .unwrap(),
+        derive::resolution_claim(&r.precommit, &r.fulfillment).encode(),
+    )
+}

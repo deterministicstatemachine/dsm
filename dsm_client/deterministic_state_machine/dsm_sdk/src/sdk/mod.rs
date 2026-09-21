@@ -60,6 +60,7 @@ pub mod counterparty_genesis_helpers;
 pub mod device_admission_sdk;
 pub mod dlv_sdk;
 /// SoFi v8 producers: setup, vault creation, trade, route and close.
+pub mod sofi_exercise;
 pub mod sofi_publish;
 pub mod sofi_register;
 pub mod sofi_sdk;
