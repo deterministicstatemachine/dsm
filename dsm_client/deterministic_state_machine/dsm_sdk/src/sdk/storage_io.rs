@@ -650,6 +650,16 @@ pub mod fake_registers {
         })
     }
 
+    /// Undo one [`fail_cell`]: the member takes that cell again. A crash that
+    /// stopped a write is not permanent, and a relay only means something
+    /// once the member is back.
+    pub fn heal_cell(member_id: &str, namespace: &[u8], key: &[u8; 32]) {
+        with_state(|s| {
+            s.failing_cells
+                .remove(&(member_id.to_string(), namespace.to_vec(), *key));
+        })
+    }
+
     /// Part II §17.4 at a fake member: every entry lands at the member, or
     /// none does — one transaction, as the node's batch put is one.
     pub fn put_cells(

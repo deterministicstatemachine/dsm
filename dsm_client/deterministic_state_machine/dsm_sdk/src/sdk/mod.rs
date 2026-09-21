@@ -64,6 +64,7 @@ pub mod sofi_advance;
 pub mod sofi_exercise;
 pub mod sofi_publish;
 pub mod sofi_register;
+pub mod sofi_relay;
 pub mod sofi_resolve;
 pub mod sofi_sdk;
 // pub mod hashchain_sdk; — deleted (superseded by DeviceState + BCR archive)
