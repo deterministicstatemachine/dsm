@@ -668,36 +668,18 @@ pub enum Operation {
         genesis_preimage: Vec<u8>,
         /// Canonical `VaultCreation` bytes (class `0x005B`).
         creation: Vec<u8>,
-        /// Canonical `MarketPolicy` bytes (class `0x0007`) — the EXACT policy
-        /// object the genesis state names by content address.
-        ///
-        /// CARRIED, so that acceptance is a function of the operation's bytes
-        /// and the authenticated pre-state alone. `semantic_write_set` is
-        /// pure: it cannot resolve `VaultStateLeaf.market_policy` to a pair,
-        /// and making it fetch would put a resolver, storage availability and
-        /// foreign-walk liveness between a local acceptance decision and its
-        /// answer. 72 fixed-width bytes against the ~50KB signature this
-        /// operation already carries.
-        ///
-        /// NOT a second source of market truth: Core re-addresses these bytes
-        /// under the market-policy namespace and refuses unless the address is
-        /// the one `state.market_policy` commits. Bytes that do not
-        /// authenticate to what the state named establish nothing.
-        market_policy_preimage: Vec<u8>,
         /// The two assets the funding is debited from, in canonical order
         /// (`a < b`).
         ///
         /// SIGNED EXECUTION COORDINATES, not a second source of market truth.
-        /// Without them the debit P15-12 requires could not be derived from
-        /// the operation at all, and balances would move outside any declared
-        /// write set.
+        /// `semantic_write_set` is pure — it cannot resolve
+        /// `VaultStateLeaf.market_policy` to a pair — so without these the
+        /// debit P15-12 requires cannot be derived from the operation at all,
+        /// and balances would move outside any declared write set.
         ///
-        /// The authority is the market policy the vault state commits:
-        /// `semantic_write_set` decodes `market_policy_preimage` — after
-        /// holding it to that address — and refuses unless these two equal
-        /// the pair it reads out. Until that binding landed the check lived
-        /// only in the SDK producer, so a different producer could name any
-        /// two assets and Core refused nothing.
+        /// The authority remains the market policy the vault state commits:
+        /// `genesis_accepted` resolves it by content address and refuses
+        /// unless these two equal the pair it decodes.
         funding_a_policy_commit: [u8; 32],
         funding_b_policy_commit: [u8; 32],
         /// SPHINCS+ over the operation's canonical unsigned bytes. A creation
@@ -1033,7 +1015,6 @@ impl Operation {
             SofiVaultCreate {
                 genesis_preimage,
                 creation,
-                market_policy_preimage,
                 funding_a_policy_commit,
                 funding_b_policy_commit,
                 signature,
@@ -1041,7 +1022,6 @@ impl Operation {
                 put_u8(&mut out, 35);
                 put_bytes(&mut out, genesis_preimage);
                 put_bytes(&mut out, creation);
-                put_bytes(&mut out, market_policy_preimage);
                 put_bytes(&mut out, funding_a_policy_commit);
                 put_bytes(&mut out, funding_b_policy_commit);
                 put_bytes(&mut out, signature);
@@ -2233,9 +2213,6 @@ impl Operation {
             35 => SofiVaultCreate {
                 genesis_preimage: get_bytes(&mut input)?,
                 creation: get_bytes(&mut input)?,
-                // In the encoder's order. The policy object the genesis state
-                // names, carried so acceptance needs no resolver.
-                market_policy_preimage: get_bytes(&mut input)?,
                 // Both funding commits, in the encoder's order. Dropping
                 // either would decode to an operation that debits different
                 // assets than the one whose signature was checked.

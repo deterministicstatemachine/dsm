@@ -24,7 +24,6 @@ fn sofi_operations() -> Vec<Operation> {
         Operation::SofiVaultCreate {
             genesis_preimage: vec![0x5A, 0x00],
             creation: vec![0x5B, 0x00],
-            market_policy_preimage: vec![0x00, 0x07, 0x00, 0x01],
             funding_a_policy_commit: [0x5C; 32],
             funding_b_policy_commit: [0x5D; 32],
             signature: Vec::new(),
@@ -254,7 +253,6 @@ fn each_sofi_operation_signs_its_own_rule_and_not_the_other() {
     let unsigned_create = Operation::SofiVaultCreate {
         genesis_preimage: vec![0x5A, 0x00],
         creation: vec![0x5B, 0x00],
-        market_policy_preimage: vec![0x00, 0x07, 0x00, 0x01],
         funding_a_policy_commit: [0x5C; 32],
         funding_b_policy_commit: [0x5D; 32],
         signature: Vec::new(),
@@ -347,21 +345,16 @@ fn every_sofi_operation_round_trips_through_the_byte_codec() {
     }
 }
 
-/// The creation's carried market policy and its TWO funding commits all
-/// survive the round trip, in order.
+/// The creation's TWO funding commits both survive the round trip, in order.
 ///
 /// They are the fields most likely to be dropped or transposed by a decoder
 /// written from memory: the operation would still decode, and it would name
-/// different assets than the signature covered. The market policy preimage
-/// sits BETWEEN `creation` and the funding commits, which is where a
-/// positional mistake is silent rather than loud — drop it and both commits
-/// still decode, from the wrong offsets.
+/// different assets than the signature covered.
 #[test]
 fn a_creation_round_trips_both_funding_commits_in_order() {
     let op = Operation::SofiVaultCreate {
         genesis_preimage: vec![0x5A, 0x00],
         creation: vec![0x5B, 0x00],
-        market_policy_preimage: vec![0x00, 0x07, 0x00, 0x01],
         funding_a_policy_commit: [0xA1; 32],
         funding_b_policy_commit: [0xB2; 32],
         signature: SIG.to_vec(),
@@ -369,16 +362,10 @@ fn a_creation_round_trips_both_funding_commits_in_order() {
     let decoded = Operation::from_bytes(&op.to_bytes()).expect("decodes");
     match decoded {
         Operation::SofiVaultCreate {
-            market_policy_preimage,
             funding_a_policy_commit,
             funding_b_policy_commit,
             ..
         } => {
-            assert_eq!(
-                market_policy_preimage,
-                vec![0x00, 0x07, 0x00, 0x01],
-                "the carried policy survives, and is not read from the wrong offset"
-            );
             assert_eq!(funding_a_policy_commit, [0xA1; 32]);
             assert_eq!(funding_b_policy_commit, [0xB2; 32], "not transposed");
         }

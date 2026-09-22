@@ -802,7 +802,7 @@ fn a_setup_transition_binds_its_position_and_its_derived_root() {
             &G,
             &DEV,
             &dsm::economic::admission::dsm_economic_operation_id(&G, &DEV, &C_DSM_PLUS),
-            &dsm::economic::write_set::EconomicPreState::new(&std::collections::BTreeMap::new(), 0),
+            &dsm::economic::write_set::EconomicPreState::new(&std::collections::BTreeMap::new()),
             &mut build_tree,
             &dsm::economic::write_set::CreditSourceFacts::None,
         )
