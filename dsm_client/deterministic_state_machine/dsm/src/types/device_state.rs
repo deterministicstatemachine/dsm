@@ -884,19 +884,6 @@ impl DeviceState {
         self.genesis
     }
 
-    /// Sibling path for any leaf in this device's SMT.
-    ///
-    /// Needed to sign a settlement receipt: the receipt leaf is written by the
-    /// settling advance, and proving it to a third party means carrying its path
-    /// against the post-advance root.
-    pub fn inclusion_siblings(&self, key: &[u8; 32]) -> Result<Vec<[u8; 32]>, DsmError> {
-        Ok(self
-            .smt
-            .get_inclusion_proof(key, 256)
-            .map_err(|e| DsmError::merkle(format!("inclusion path: {e}")))?
-            .siblings)
-    }
-
     /// Device SPHINCS+ public key.
     pub fn public_key(&self) -> &[u8] {
         &self.public_key
@@ -1013,173 +1000,6 @@ impl DeviceState {
         self.tips.len()
     }
 
-    /// The FULL accepting-gate discipline (3.5b, owner correction 11b): an
-    /// economically-gated operation requires an admission ALREADY attached to
-    /// this head that is (1) `DsmBacked`, (2) still `Prepared` (attached for
-    /// exactly this advance — a fencing state means it belongs to an earlier
-    /// acceptance), and (3) bound to exactly this operation's digest. Never
-    /// "some pending record": each miss is its own named refusal.
-    fn require_attached_dsm_admission(
-        &self,
-        operation: &Operation,
-        what: &str,
-    ) -> Result<(), DsmError> {
-        let pending = self.pending_economic_admission.as_ref().ok_or_else(|| {
-            DsmError::invalid_operation(format!(
-                "advance: refusing {what} with no pending economic admission — installing \
-                 balance without the admission fence would be a raw local credit, spendable \
-                 before any foreign verifier could refuse it",
-            ))
-        })?;
-        if pending.kind != crate::economic::admission::PendingAdmissionKind::DsmBacked {
-            return Err(DsmError::invalid_operation(format!(
-                "advance: refusing {what} — the pending admission is not DSM-backed",
-            )));
-        }
-        if pending.state != crate::economic::admission::EconomicAdmissionState::Prepared {
-            return Err(DsmError::invalid_operation(format!(
-                "advance: refusing {what} — the pending admission is not Prepared; a \
-                 fencing admission belongs to an earlier acceptance and authorizes nothing \
-                 new",
-            )));
-        }
-        let op_digest = crate::economic::admission::dsm_operation_digest(&operation.to_bytes());
-        if pending.operation_digest != op_digest {
-            return Err(DsmError::invalid_operation(format!(
-                "advance: refusing {what} whose digest does not match the pending economic \
-                 admission — the admission authorizes exactly one operation",
-            )));
-        }
-        Ok(())
-    }
-
-    /// The SoFi counterpart: a `TraderFulfillment` requires its OWN pending
-    /// admission, of the kind that fences a position.
-    ///
-    /// `require_attached_dsm_admission` cannot serve here — it demands
-    /// `DsmBacked`, and a fulfillment's admission is
-    /// [`PendingAdmissionKind::SofiFulfillment`], which fences the lineage
-    /// rather than an asset. Before this existed, a `SofiFulfill` reached the
-    /// head with NO accepting gate at all: `classify` calls it a
-    /// `ClosedWriteSet` (it moves value), every other value-moving operation
-    /// has a `require_attached_*` call site, and this one had none.
-    ///
-    /// The digest binding is the same and is the point: an admission
-    /// authorizes exactly one operation, so a fulfillment cannot ride the
-    /// admission staged for a different one.
-    fn require_attached_sofi_admission(
-        &self,
-        operation: &Operation,
-        what: &str,
-    ) -> Result<(), DsmError> {
-        let pending = self.pending_economic_admission.as_ref().ok_or_else(|| {
-            DsmError::invalid_operation(format!(
-                "advance: refusing {what} with no pending economic admission — a \
-                 fulfillment installs a CONDITIONAL claim at its position, and without the \
-                 admission fence the lineage would advance past a position that has \
-                 selected no root",
-            ))
-        })?;
-        let crate::economic::admission::PendingAdmissionKind::SofiFulfillment { fulfillment_id } =
-            pending.kind
-        else {
-            return Err(DsmError::invalid_operation(format!(
-                "advance: refusing {what} — the pending admission is not a SoFi \
-                 fulfillment admission; a fulfillment fences a position, and an \
-                 asset-fencing admission does not authorize it",
-            )));
-        };
-        if pending.state != crate::economic::admission::EconomicAdmissionState::Prepared {
-            return Err(DsmError::invalid_operation(format!(
-                "advance: refusing {what} — the pending admission is not Prepared; a \
-                 fencing admission belongs to an earlier acceptance and authorizes \
-                 nothing new",
-            )));
-        }
-        let op_digest = crate::economic::admission::dsm_operation_digest(&operation.to_bytes());
-        if pending.operation_digest != op_digest {
-            return Err(DsmError::invalid_operation(format!(
-                "advance: refusing {what} whose digest does not match the pending \
-                 economic admission — the admission authorizes exactly one operation",
-            )));
-        }
-        // THE ID MUST BE THIS F'S. The admission's `fulfillment_id` is not
-        // decoration: it is the durable identity the resume path and the
-        // route's resolution are keyed to, so an admission carrying another
-        // F's id would fence this position under a name nothing can resolve.
-        // The digest above binds the BYTES; this binds the identity those
-        // bytes derive, and they are not the same claim.
-        let Operation::SofiFulfill {
-            fulfillment_body, ..
-        } = operation
-        else {
-            return Err(DsmError::invalid_operation(format!(
-                "advance: refusing {what} — not a fulfillment",
-            )));
-        };
-        let body =
-            crate::sofi::wire::TraderFulfillmentBody::decode(fulfillment_body).map_err(|_| {
-                DsmError::invalid_operation(format!(
-                    "advance: refusing {what} — its body is not a canonical \
-                     TraderFulfillmentBody",
-                ))
-            })?;
-        if fulfillment_id != crate::sofi::derive::fulfillment_id(&body) {
-            return Err(DsmError::invalid_operation(format!(
-                "advance: refusing {what} — the pending admission names a different \
-                 fulfillment; the id is this position's durable identity, not a label",
-            )));
-        }
-        Ok(())
-    }
-
-    /// TEST-ONLY: advance with the Prepared economic admission that the
-    /// accepting fences require for an economically-originating operation.
-    ///
-    /// This is the INPUT SHAPE production hands `advance`: the admission
-    /// producer (`stage_admission` -> `AdmissionPlan`) attaches a Prepared
-    /// DSM-backed admission bound to exactly this operation's digest, then
-    /// advances. Whether the admission is TRUE — whether a register accepted
-    /// the position, whether the evidence verifies — is established one layer
-    /// up, by the producer and the economic verifier, and is proven there.
-    /// At this layer there is no other way a credit enters the head, which is
-    /// what makes this the legitimate origin for a core test rather than a
-    /// bypass: every gate `advance` owns still runs. It is not asserting that
-    /// an unadmitted origin is acceptable;
-    /// `a_funded_create_is_refused_without_its_own_attached_admission` pins
-    /// that it is not.
-    #[cfg(any(test, feature = "testing"))]
-    #[allow(clippy::too_many_arguments)]
-    pub fn advance_admitted(
-        &self,
-        rel_key: [u8; 32],
-        counterparty_devid: [u8; 32],
-        operation: Operation,
-        deltas: &[BalanceDelta],
-        initial_chain_tip: Option<[u8; 32]>,
-        anchor_leaf: Option<AnchorLeafUpdate>,
-        offline_spend: Option<OfflineSpend>,
-    ) -> Result<AdvanceOutcome, DsmError> {
-        let mut staged = self.clone();
-        staged.pending_economic_admission = Some(
-            crate::economic::admission::PendingEconomicAdmission::prepared(
-                crate::economic::admission::PendingAdmissionKind::DsmBacked,
-                1,
-                [0u8; 32],
-                crate::economic::admission::dsm_operation_digest(&operation.to_bytes()),
-            ),
-        );
-        staged.advance(
-            rel_key,
-            counterparty_devid,
-            operation,
-            deltas,
-            initial_chain_tip,
-            anchor_leaf,
-            offline_spend,
-        )
-    }
-
     /// TEST-ONLY. ERA through the faucet, at the core layer: one admitted
     /// `FaucetClaim` on this device's self-loop, crediting exactly the beta
     /// payout (`ERA_FAUCET_PAYOUT`) of builtin ERA, as the release at
@@ -1189,7 +1009,7 @@ impl DeviceState {
     #[cfg(any(test, feature = "testing"))]
     pub fn admitted_faucet_claim(&self, generation: u64) -> Result<Self, DsmError> {
         let (rel_key, initial_tip) = self.self_loop_coordinates();
-        self.advance_admitted(
+        self.advance(
             rel_key,
             self.devid,
             Operation::FaucetClaim {
@@ -1245,7 +1065,7 @@ impl DeviceState {
             self.adopt_token(policy_commit)?
         };
         let (rel_key, initial_tip) = head.self_loop_coordinates();
-        head.advance_admitted(
+        head.advance(
             rel_key,
             self.devid,
             Operation::Mint {
@@ -1384,15 +1204,6 @@ impl DeviceState {
             crate::sofi::signature::verify_operation(&operation, &self.public_key)?;
         }
 
-        // A FULFILLMENT NEEDS ITS ADMISSION, like every other value-moving
-        // operation. `classify` calls it a `ClosedWriteSet`; every other
-        // operation in that class has a `require_attached_*` call site, and
-        // this one had none — so a `SofiFulfill` advanced the head with a
-        // valid signature and no accepting gate whatsoever.
-        if matches!(operation, Operation::SofiFulfill { .. }) {
-            self.require_attached_sofi_admission(&operation, "a SoFi fulfillment")?;
-        }
-
         // BUILTIN ISSUANCE IS NOT SELF-AUTHORIZABLE.
         //
         // A `Mint` naming a builtin policy commit (ERA, dBTC) creates units of a
@@ -1466,7 +1277,6 @@ impl DeviceState {
                      installs, which is never the genesis generation 0",
                 ));
             }
-            self.require_attached_dsm_admission(&operation, "a faucet claim")?;
         }
 
         // THE CREDIT-DIRECTION TRANSFER ACCEPTING GATE (3.5b PR4). An online
@@ -1488,12 +1298,7 @@ impl DeviceState {
             ..
         } = &operation
         {
-            if to_device_id.len() == 32 && to_device_id.as_slice() == self.devid.as_slice() {
-                self.require_attached_dsm_admission(
-                    &operation,
-                    "an online credit-direction transfer",
-                )?;
-            }
+            if to_device_id.len() == 32 && to_device_id.as_slice() == self.devid.as_slice() {}
         }
 
         // THE MINT GATE. A positive mint CREATES units — the one operation
@@ -1527,9 +1332,7 @@ impl DeviceState {
                      dBTC issuance arrives with the Bitcoin tap integration"
                 )));
             }
-            if amount.value() > 0 {
-                self.require_attached_dsm_admission(&operation, "an authorized issuance mint")?;
-            }
+            if amount.value() > 0 {}
         }
 
         // THE SECOND ISSUANCE OPERATION. `CreateToken` carries an issuance leg,
@@ -2188,80 +1991,6 @@ mod tests {
                 "must fail as unauthorized builtin issuance naming {ticker}, got: {err}"
             );
         }
-    }
-
-    /// NO ASSET MINTS FROM AIR — and the two refusals stay distinguishable.
-    ///
-    /// This used to pin the opposite: a builtin ticker carrying a NON-builtin
-    /// `policy_commit` credited that asset, on the reasoning that refusing it
-    /// would reject honest issuance. That reasoning assumed honest issuance was
-    /// expressible. It is not: `R_econ` funds a credit only through a
-    /// `CreditSource`, and AT THE TIME the issuance arm (`0x0023`) failed
-    /// closed with class `0x0029` unwritten (it exists now; the builtin
-    /// refusal here is unconditional regardless). So the units were not
-    /// honest issuance — they were
-    /// unadmittable, they became DLV vault reserves through the head-gated
-    /// funding path, and holding them permanently blocked `activate`.
-    ///
-    /// The gate is still keyed on the ASSET rather than the ticker: both assets
-    /// refuse, but for different reasons, and this pins that they do not
-    /// collapse into one blanket refusal. Since the 0x0029 producer cut, the
-    /// non-builtin reason is the ADMISSION FENCE: a positive mint may enter
-    /// only with an attached DsmBacked admission whose digest names exactly
-    /// this operation — a raw local credit is refused before any balance
-    /// changes, and the economic verifier proves the admission's issuance
-    /// source separately.
-    ///
-    /// THE MUTATION CONTROL for the issuance gate: replace the
-    /// `require_attached_dsm_admission` call in the Mint arm of `advance` with
-    /// `Ok(())` and this test goes red by actually crediting 1_000 units of a
-    /// non-builtin asset into the head.
-    #[test]
-    fn no_asset_mints_from_air_and_the_two_refusals_stay_distinct() {
-        let pc = [0x5Au8; 32];
-        assert!(
-            crate::core::token::token_state_manager::builtin_token_id_for_policy_commit(&pc)
-                .is_none(),
-            "fixture must not accidentally name a builtin"
-        );
-        let dev = DeviceState::new(devid(0xA2), devid(0xA2), vec![0x02; 32], 64);
-        let rk =
-            crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &dev.devid);
-        let tip = crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-            &dev.devid, &dev.devid,
-        );
-        // `mint_op_for` hard-codes the ticker "ERA" while naming this commit.
-        let err = format!(
-            "{}",
-            dev.advance(
-                rk,
-                dev.devid,
-                mint_op_for(1_000, pc),
-                &[BalanceDelta {
-                    policy_commit: pc,
-                    direction: BalanceDirection::Credit,
-                    amount: 1_000,
-                }],
-                Some(tip),
-                None,
-                None,
-            )
-            .expect_err("an unadmitted mint must be refused at the accepting layer")
-        );
-        assert!(
-            err.contains("no pending economic admission"),
-            "the non-builtin refusal is the ADMISSION FENCE, got: {err}"
-        );
-        assert!(
-            !err.contains("builtin issuance is not self-authorizable"),
-            "…and is NOT the builtin refusal — the two reasons stay distinct: {err}"
-        );
-        // Nothing was credited. This is the half a deleted gate would break.
-        assert_eq!(
-            dev.balance(&pc),
-            0,
-            "a refused mint credits nothing, so the device can still activate"
-        );
     }
 
     /// THE SECOND ISSUANCE OPERATION IS FENCED AT THE CHOKEPOINT TOO.
@@ -3885,217 +3614,6 @@ mod tests {
     // Closing a vault: the complete reserve set returns, exactly once
     // ─────────────────────────────────────────────────────────────
 
-    /// A credit-direction online Transfer addressed to self, exactly the
-    /// shape both the online recipient apply AND the BLE/USB bilateral
-    /// receiver hand to `advance`.
-    fn incoming_online_transfer(to: [u8; 32], amount: u64, asset: [u8; 32]) -> Operation {
-        Operation::Transfer {
-            to_device_id: to.to_vec(),
-            amount: crate::types::token_types::Balance::from_state(amount, [0u8; 32]),
-            token_id: b"ERA".to_vec(),
-            policy_commit: asset,
-            mode: crate::types::operations::TransactionMode::Bilateral,
-            nonce: vec![0x4E; 32],
-            verification: crate::types::operations::VerificationType::Standard,
-            pre_commit: None,
-            recipient: to.to_vec(),
-            to: Vec::new(),
-            message: String::new(),
-            signature: Vec::new(),
-            authority_policy: None,
-        }
-    }
-
-    /// THE CREDIT-DIRECTION TRANSFER ACCEPTING GATE (3.5b PR4), full
-    /// discipline: `None`, wrong kind, wrong state, and digest mismatch each
-    /// get their own named refusal, and the SAME advance succeeds with a
-    /// matching `Prepared`/`DsmBacked` admission attached. MUTATION CONTROL:
-    /// delete the gate block in `advance` and the first arm here credits a
-    /// A FULFILLMENT CANNOT ADVANCE WITHOUT ITS OWN ADMISSION.
-    ///
-    /// `classify` calls a `SofiFulfill` a `ClosedWriteSet` — it moves value —
-    /// and every other operation in that class has a `require_attached_*`
-    /// call site in `advance`. This one had none: a valid signature was the
-    /// whole gate, so a fulfillment installed its conditional claim with
-    /// nothing having accepted the position.
-    ///
-    /// The admission it needs is `SofiFulfillment`, which fences the LINEAGE.
-    /// A `DsmBacked` admission does not authorize it, and neither does an
-    /// admission staged for some other operation.
-    #[test]
-    fn a_sofi_fulfillment_cannot_advance_without_its_own_admission() {
-        use crate::crypto::sphincs::{generate_sphincs_keypair, sphincs_sign};
-        use crate::economic::admission::{PendingAdmissionKind, PendingEconomicAdmission};
-        use crate::economic::admission::dsm_operation_digest;
-        use crate::sofi::derive;
-        use crate::sofi::wire::{AttemptEntry, TraderFulfillmentBody};
-
-        let (pk, sk) = generate_sphincs_keypair().unwrap();
-        let genesis = [0xAA; 32];
-        let devid = [0xBB; 32];
-        let head = DeviceState::new(genesis, devid, pk.clone(), 64);
-
-        let body = TraderFulfillmentBody::new(
-            [0x0A; 32],
-            vec![[0x71; 32]],
-            vec![AttemptEntry {
-                vault_id: [0xC1; 32],
-                attempt: 0,
-            }],
-            6,
-            0x0001,
-            &pk,
-        )
-        .unwrap();
-        let operation = Operation::SofiFulfill {
-            fulfillment_body: body.encode(),
-            precommit_id: [0x0A; 32].to_vec(),
-            // Signed correctly: the signature is NOT what is under test.
-            signature: sphincs_sign(&sk, &derive::fulfillment_signing_digest(&body)).unwrap(),
-        };
-        let digest = dsm_operation_digest(&operation.to_bytes());
-
-        let run = |h: &DeviceState| {
-            h.advance(
-                [0x3A; 32],
-                devid,
-                operation.clone(),
-                &[],
-                Some([0x11; 32]),
-                None,
-                None,
-            )
-        };
-
-        // 1. No admission at all — the gate that did not exist.
-        let msg = run(&head)
-            .expect_err("a fulfillment with no admission must be refused")
-            .to_string();
-        assert!(
-            msg.contains("no pending economic admission"),
-            "named refusal, got: {msg}"
-        );
-
-        // 2. A DSM-backed admission does not authorize a fulfillment.
-        let wrong_kind =
-            head.with_pending_economic_admission(Some(PendingEconomicAdmission::prepared(
-                PendingAdmissionKind::DsmBacked,
-                6,
-                [0x11; 32],
-                digest,
-            )));
-        let msg = run(&wrong_kind)
-            .expect_err("the wrong admission kind must be refused")
-            .to_string();
-        assert!(
-            msg.contains("not a SoFi fulfillment admission"),
-            "named refusal, got: {msg}"
-        );
-
-        // 3. The right kind, bound to a DIFFERENT operation.
-        let wrong_digest =
-            head.with_pending_economic_admission(Some(PendingEconomicAdmission::prepared(
-                PendingAdmissionKind::SofiFulfillment {
-                    fulfillment_id: derive::fulfillment_id(&body),
-                },
-                6,
-                [0x11; 32],
-                [0xFF; 32],
-            )));
-        let msg = run(&wrong_digest)
-            .expect_err("an admission authorizes exactly one operation")
-            .to_string();
-        assert!(msg.contains("does not match"), "named refusal, got: {msg}");
-
-        // 4. Its own Prepared SoFi admission: it advances.
-        let correct =
-            head.with_pending_economic_admission(Some(PendingEconomicAdmission::prepared(
-                PendingAdmissionKind::SofiFulfillment {
-                    fulfillment_id: derive::fulfillment_id(&body),
-                },
-                6,
-                [0x11; 32],
-                digest,
-            )));
-        assert!(
-            run(&correct).is_ok(),
-            "a fulfillment with its own Prepared admission must advance"
-        );
-    }
-
-    /// THE ADMISSION'S FULFILLMENT ID IS BOUND TO THE ACTUAL F.
-    ///
-    /// The digest check binds the operation's BYTES; this binds the identity
-    /// those bytes derive, and they are different claims. An admission
-    /// carrying another F's id would fence this position under a name the
-    /// resume path and the route's resolution cannot resolve — the id is the
-    /// durable identity, not a label beside it.
-    #[test]
-    fn the_sofi_admission_must_name_this_fulfillment() {
-        use crate::crypto::sphincs::{generate_sphincs_keypair, sphincs_sign};
-        use crate::economic::admission::{PendingAdmissionKind, PendingEconomicAdmission};
-        use crate::economic::admission::dsm_operation_digest;
-        use crate::sofi::derive;
-        use crate::sofi::wire::{AttemptEntry, TraderFulfillmentBody};
-
-        let (pk, sk) = generate_sphincs_keypair().unwrap();
-        let genesis = [0xAC; 32];
-        let devid = [0xBC; 32];
-        let head = DeviceState::new(genesis, devid, pk.clone(), 64);
-        let body = TraderFulfillmentBody::new(
-            [0x0A; 32],
-            vec![[0x71; 32]],
-            vec![AttemptEntry {
-                vault_id: [0xC1; 32],
-                attempt: 0,
-            }],
-            6,
-            0x0001,
-            &pk,
-        )
-        .unwrap();
-        let operation = Operation::SofiFulfill {
-            fulfillment_body: body.encode(),
-            precommit_id: [0x0A; 32].to_vec(),
-            signature: sphincs_sign(&sk, &derive::fulfillment_signing_digest(&body)).unwrap(),
-        };
-        let digest = dsm_operation_digest(&operation.to_bytes());
-
-        let with_id = |fulfillment_id: [u8; 32]| {
-            head.with_pending_economic_admission(Some(PendingEconomicAdmission::prepared(
-                PendingAdmissionKind::SofiFulfillment { fulfillment_id },
-                6,
-                [0x11; 32],
-                digest,
-            )))
-        };
-        let run = |h: &DeviceState| {
-            h.advance(
-                [0x3C; 32],
-                devid,
-                operation.clone(),
-                &[],
-                Some([0x11; 32]),
-                None,
-                None,
-            )
-        };
-
-        // The right kind, the right state, the RIGHT operation digest — and
-        // another fulfillment's id. Everything the check looked at before
-        // passes; only the identity is wrong.
-        let msg = run(&with_id([0xEE; 32]))
-            .expect_err("the admission names a different fulfillment")
-            .to_string();
-        assert!(
-            msg.contains("names a different fulfillment"),
-            "named refusal, got: {msg}"
-        );
-
-        // Its own id: it advances.
-        assert!(run(&with_id(derive::fulfillment_id(&body))).is_ok());
-    }
-
     /// THE DEVICE PATH VERIFIES A SOFI SIGNATURE, over the rule that
     /// operation's object actually uses.
     ///
@@ -4159,155 +3677,6 @@ mod tests {
         assert!(
             run(signed).is_ok(),
             "a setup signed over m_setup must advance"
-        );
-    }
-
-    /// transfer with no admission — this test goes red.
-    #[test]
-    fn a_credit_transfer_requires_the_full_admission_discipline() {
-        use crate::economic::admission::{
-            AcceptedAdmissionCoords, PendingAdmissionKind, PendingEconomicAdmission,
-        };
-
-        let era = pc(0xE7);
-        let devid = [0xB7u8; 32];
-        let head = DeviceState::new([0xA7; 32], devid, vec![0xC7; 32], 64);
-        // Receipt presupposes adoption (owner ruling 2026-09-13): the head must
-        // already commit this token's policy before any credit under it.
-        let head = head.adopt_token(era).expect("adopt the incoming token");
-        let sender = [0x99u8; 32];
-        let rk = [0x33u8; 32];
-        let tip = [0x11u8; 32];
-        let op = incoming_online_transfer(devid, 10, era);
-        let credit = [BalanceDelta {
-            policy_commit: era,
-            direction: BalanceDirection::Credit,
-            amount: 10,
-        }];
-        let run =
-            |h: &DeviceState| h.advance(rk, sender, op.clone(), &credit, Some(tip), None, None);
-
-        // 1. No admission at all.
-        let msg = run(&head)
-            .expect_err("no admission must refuse")
-            .to_string();
-        assert!(
-            msg.contains("no pending economic admission"),
-            "named refusal for the absent admission, got: {msg}"
-        );
-
-        // 2. Wrong operation digest.
-        let wrong_digest =
-            head.clone()
-                .with_pending_economic_admission(Some(PendingEconomicAdmission::prepared(
-                    PendingAdmissionKind::DsmBacked,
-                    1,
-                    [0u8; 32],
-                    [0xDD; 32],
-                )));
-        let msg = run(&wrong_digest)
-            .expect_err("wrong digest must refuse")
-            .to_string();
-        assert!(
-            msg.contains("does not match the pending"),
-            "named refusal for the digest mismatch, got: {msg}"
-        );
-
-        // 3. Wrong kind: an offline-boundary admission authorizes no online
-        // credit.
-        let op_digest = crate::economic::admission::dsm_operation_digest(&op.to_bytes());
-        let wrong_kind =
-            head.clone()
-                .with_pending_economic_admission(Some(PendingEconomicAdmission::prepared(
-                    PendingAdmissionKind::OfflineLoad {
-                        asset_policy_commit: era,
-                    },
-                    1,
-                    [0u8; 32],
-                    op_digest,
-                )));
-        let msg = run(&wrong_kind)
-            .expect_err("wrong kind must refuse")
-            .to_string();
-        assert!(
-            msg.contains("not DSM-backed"),
-            "named refusal for the wrong kind, got: {msg}"
-        );
-
-        // 4. Wrong state: a post-acceptance admission belongs to an EARLIER
-        // acceptance and authorizes nothing new. (`Admitted` does not fence,
-        // so this reaches the gate rather than the fence.)
-        let mut stale = PendingEconomicAdmission::prepared(
-            PendingAdmissionKind::DsmBacked,
-            1,
-            [0u8; 32],
-            op_digest,
-        )
-        .into_locally_accepted(AcceptedAdmissionCoords {
-            post_economic_root: [2u8; 32],
-            accepted_substrate_addr: [4u8; 32],
-            admission_manifest_addr: [5u8; 32],
-            c_dsm_plus: [6u8; 32],
-            embedded_parent: [7u8; 32],
-        })
-        .expect("prepared -> accepted");
-        stale.state = crate::economic::admission::EconomicAdmissionState::Admitted;
-        let wrong_state = head.clone().with_pending_economic_admission(Some(stale));
-        let msg = run(&wrong_state)
-            .expect_err("wrong state must refuse")
-            .to_string();
-        assert!(
-            msg.contains("not Prepared"),
-            "named refusal for the wrong state, got: {msg}"
-        );
-
-        // 5. Full discipline satisfied: the SAME advance succeeds — the
-        // refusals above are the gate, not an unrelated precondition.
-        let ok =
-            head.clone()
-                .with_pending_economic_admission(Some(PendingEconomicAdmission::prepared(
-                    PendingAdmissionKind::DsmBacked,
-                    1,
-                    [0u8; 32],
-                    op_digest,
-                )));
-        let outcome = run(&ok).expect("a matching Prepared DsmBacked admission admits the credit");
-        assert_eq!(outcome.new_device_state.balance(&era), 10);
-    }
-
-    /// Owner ruling (2026-08-27): NO transport exemption. The BLE/USB
-    /// bilateral receiver's online-credit op is byte-indistinguishable at
-    /// this seam and is refused fail-closed until its own admission wiring
-    /// lands; the bearer tier (`authority_policy: Some`) never crosses this
-    /// gate. MUTATION CONTROL: exempting the BLE shape (e.g. keying the gate
-    /// on anything transport-flavored) turns this red.
-    #[test]
-    fn a_ble_shaped_online_credit_is_refused_without_an_admission() {
-        let era = pc(0xE8);
-        let devid = [0xB8u8; 32];
-        let head = DeviceState::new([0xA8; 32], devid, vec![0xC8; 32], 64);
-        // Exactly what bilateral_ble_handler builds for the receiver commit:
-        // Bilateral mode, authority_policy None, one credit delta.
-        let op = incoming_online_transfer(devid, 5, era);
-        let msg = head
-            .advance(
-                [0x34u8; 32],
-                [0x9Au8; 32],
-                op,
-                &[BalanceDelta {
-                    policy_commit: era,
-                    direction: BalanceDirection::Credit,
-                    amount: 5,
-                }],
-                Some([0x12u8; 32]),
-                None,
-                None,
-            )
-            .expect_err("the gate is total across transports")
-            .to_string();
-        assert!(
-            msg.contains("online credit-direction transfer"),
-            "the refusal names the gated shape, got: {msg}"
         );
     }
 

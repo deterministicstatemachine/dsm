@@ -9,9 +9,7 @@
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use dsm::crypto::blake3::dsm_domain_hasher;
-use dsm::types::operations::{
-    AuthorityMode, AuthorityPolicy, Operation, AUTHORITY_POLICY_TAG_V1,
-};
+use dsm::types::operations::{AuthorityMode, AuthorityPolicy, Operation, AUTHORITY_POLICY_TAG_V1};
 use crate::storage::client_db::GenesisRecord;
 
 /// Operation tag for a `Transfer` row carrying `signature` and `authority_policy`.

@@ -225,12 +225,9 @@ impl TokenPolicyCache {
             return Ok(policy_id);
         }
 
-        let now = Self::now();
         let policy = TokenPolicy {
             anchor: policy_anchor,
             file: policy,
-            verified: false,
-            last_verified: now,
         };
 
         // Add to cache

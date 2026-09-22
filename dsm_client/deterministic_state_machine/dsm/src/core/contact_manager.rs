@@ -82,27 +82,6 @@ impl LocalSmtVerifier {
         self.local_smt_states.insert(*device_id, proof);
     }
 
-    pub fn verify_chain_tip_locally(
-        &self,
-        device_id: &[u8; 32],
-        chain_tip_hash: &[u8; 32],
-    ) -> bool {
-        match self.local_smt_states.get(device_id) {
-            None => false,
-            Some(proof) => {
-                if &proof.state_hash != chain_tip_hash {
-                    return false;
-                }
-                let now = now_commit_height();
-                if now.saturating_sub(proof.proof_commit_height) > PROOF_MAX_AGE_COMMIT_HEIGHTS {
-                    return false;
-                }
-                // Minimal structural check: non-zero root
-                !proof.smt_root.iter().all(|&b| b == 0)
-            }
-        }
-    }
-
     pub fn verify_chain_tip_with_proof(
         &self,
         _device_id: &[u8; 32],

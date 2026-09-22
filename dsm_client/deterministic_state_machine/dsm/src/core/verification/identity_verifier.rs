@@ -74,33 +74,6 @@ impl IdentityVerifier {
         )
     }
 
-    /// Verify claim commitments against anchor expectations
-    fn verify_claim_commitments(
-        claim: &IdentityClaim,
-        anchor: &IdentityAnchor,
-    ) -> Result<bool, DsmError> {
-        // Hash the anchor data to get the expected commitment value
-        let mut hasher = crate::crypto::blake3::dsm_domain_hasher(
-            crate::common::domain_tags::TAG_DSM_IDENTITY_ANCHOR,
-        );
-
-        // Add all anchor fields to hash
-        hasher.update(anchor.identity_id.as_bytes());
-        hasher.update(&anchor.created_at_tick.to_le_bytes());
-        hasher.update(&anchor.revoked_at_tick.unwrap_or(0).to_le_bytes());
-
-        // Get the expected commitment value
-        let anchor_hash = hasher.finalize();
-
-        // Check if the commitments match (in a real implementation,
-        // this would be more sophisticated)
-        if anchor_hash.as_bytes() != claim.anchor_commitment.as_slice() {
-            return Ok(false);
-        }
-
-        Ok(true)
-    }
-
     /// Create a new identity anchor from an initial claim
     pub fn create_identity_anchor(claim: &IdentityClaim) -> Result<IdentityAnchor, DsmError> {
         // Verify the claim has a valid signature first
@@ -122,6 +95,26 @@ impl IdentityVerifier {
 
         Ok(anchor)
     }
+
+    /// The claim's `anchor_commitment` must reproduce a commitment over the
+    /// anchor's own fields, INCLUDING its public key. The previous version
+    /// hashed only `identity_id` and two ticks, so the commitment did not bind
+    /// the key the claim is verified under.
+    fn verify_claim_commitments(
+        claim: &IdentityClaim,
+        anchor: &IdentityAnchor,
+    ) -> Result<bool, DsmError> {
+        let mut hasher = crate::crypto::blake3::dsm_domain_hasher(
+            crate::common::domain_tags::TAG_DSM_IDENTITY_ANCHOR,
+        );
+        hasher.update(anchor.identity_id.as_bytes());
+        hasher.update(&(anchor.public_key.len() as u32).to_le_bytes());
+        hasher.update(&anchor.public_key);
+        hasher.update(&anchor.created_at_tick.to_le_bytes());
+        hasher.update(&anchor.revoked_at_tick.unwrap_or(0).to_le_bytes());
+        let expected = hasher.finalize();
+        Ok(expected.as_bytes() == claim.anchor_commitment.as_slice())
+    }
 }
 
 #[cfg(test)]
@@ -141,8 +134,12 @@ mod tests {
         hasher.finalize().as_bytes().to_vec()
     }
 
+    /// The anchor commitment MUST bind the public key: the claim is verified
+    /// under that key, and a commitment that omits it does not attest to the
+    /// key that produced the signature.
     fn compute_anchor_commitment(
         identity_id: &str,
+        public_key: &[u8],
         created_at_tick: u64,
         revoked_at_tick: Option<u64>,
     ) -> Vec<u8> {
@@ -150,6 +147,8 @@ mod tests {
             crate::common::domain_tags::TAG_DSM_IDENTITY_ANCHOR,
         );
         hasher.update(identity_id.as_bytes());
+        hasher.update(&(public_key.len() as u32).to_le_bytes());
+        hasher.update(public_key);
         hasher.update(&created_at_tick.to_le_bytes());
         hasher.update(&revoked_at_tick.unwrap_or(0).to_le_bytes());
         hasher.finalize().as_bytes().to_vec()
@@ -164,7 +163,8 @@ mod tests {
         let keypair = SignatureKeyPair::new().expect("identity keypair");
         let claim_hash = compute_claim_hash(identity_id, tick, expires_at_tick);
         let signature = keypair.sign(&claim_hash).expect("sign identity claim");
-        let anchor_commitment = compute_anchor_commitment(identity_id, created_at_tick, None);
+        let anchor_commitment =
+            compute_anchor_commitment(identity_id, &keypair.public_key, created_at_tick, None);
 
         let claim = IdentityClaim {
             identity_id: identity_id.to_string(),
@@ -304,11 +304,15 @@ mod tests {
         let created_at_tick = 5u64;
         let revoked_at_tick = Some(50u64);
 
-        let claim_hash = compute_claim_hash(identity_id, tick, expires);
-        let anchor_commitment =
-            compute_anchor_commitment(identity_id, created_at_tick, revoked_at_tick);
-
         let keypair = SignatureKeyPair::new().expect("identity keypair");
+
+        let claim_hash = compute_claim_hash(identity_id, tick, expires);
+        let anchor_commitment = compute_anchor_commitment(
+            identity_id,
+            &keypair.public_key,
+            created_at_tick,
+            revoked_at_tick,
+        );
         let signature = keypair.sign(&claim_hash).expect("sign identity claim");
 
         let claim = IdentityClaim {

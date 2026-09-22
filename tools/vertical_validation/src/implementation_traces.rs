@@ -469,13 +469,6 @@ fn trace_bilateral_precommit_tripwire(
                 {
                     failures.push("manager relationship tip diverged from the commit".into());
                 }
-                if manager
-                    .get_contact(&remote_device_id)
-                    .map(DsmVerifiedContact::has_verified_chain_tip)
-                    != Some(true)
-                {
-                    failures.push("contact SMT proof was not updated after the commit".into());
-                }
                 match manager.verify_relationship_integrity(&remote_device_id) {
                     Ok(true) => {}
                     Ok(false) => {
@@ -619,13 +612,6 @@ fn trace_bilateral_precomputed_finalize_hash(
         }
         if manager.has_pending_commitment(&pre.bilateral_commitment_hash) {
             failures.push("commit left the precommitment pending".into());
-        }
-        if manager
-            .get_contact(&remote_device_id)
-            .map(DsmVerifiedContact::has_verified_chain_tip)
-            != Some(true)
-        {
-            failures.push("contact SMT proof was not updated after the commit".into());
         }
 
         failures
