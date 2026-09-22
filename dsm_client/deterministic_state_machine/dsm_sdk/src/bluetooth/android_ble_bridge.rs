@@ -650,26 +650,6 @@ impl AndroidBleBridge {
         }
         cleaned
     }
-
-    /// Release a stashed prepare response for a given commitment hash (manual accept)
-    pub async fn release_pending_prepare_response(
-        &self,
-        commitment_hash: [u8; 32],
-    ) -> Result<(), DsmError> {
-        let _ = commitment_hash;
-        Err(DsmError::invalid_operation(
-            "manual prepare-response release is unavailable in the current BLE bridge",
-        ))
-    }
-
-    /// Drop any stashed prepare response for a commitment (manual reject)
-    pub async fn drop_pending_prepare_response(
-        &self,
-        commitment_hash: [u8; 32],
-    ) -> Result<(), DsmError> {
-        let _ = commitment_hash;
-        Ok(())
-    }
 }
 
 // JNI extern helpers for BLE (android_ble_*) are implemented in
