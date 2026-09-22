@@ -395,6 +395,7 @@ mod tests {
         let operation = Operation::SofiVaultCreate {
             genesis_preimage: vec![0x01, 0x02],
             creation: vec![0x03, 0x04],
+            market_policy_preimage: vec![0x00, 0x07],
             funding_a_policy_commit: [0x5C; 32],
             funding_b_policy_commit: [0x5D; 32],
             signature: Vec::new(),
@@ -403,11 +404,52 @@ mod tests {
         let signed = Operation::SofiVaultCreate {
             genesis_preimage: vec![0x01, 0x02],
             creation: vec![0x03, 0x04],
+            market_policy_preimage: vec![0x00, 0x07],
             funding_a_policy_commit: [0x5C; 32],
             funding_b_policy_commit: [0x5D; 32],
             signature: sphincs_sign(&sk, &bytes).unwrap(),
         };
         assert_eq!(verify_operation(&signed, &pk), Ok(()));
+    }
+
+    /// THE CARRIED MARKET POLICY IS UNDER THE SIGNATURE, and asserting it is
+    /// not tautological.
+    ///
+    /// Coverage is structural — `operation_signing_bytes` is the whole
+    /// canonical encoding with the signature cleared — but only while the
+    /// field is IN that encoding. Deleting its line from `Operation::to_bytes`
+    /// would silently take it back out from under the signature, leaving the
+    /// policy object substitutable after signing while every other check still
+    /// passed. This test is what goes red if that happens.
+    #[test]
+    fn altering_the_carried_market_policy_after_signing_is_refused() {
+        let (pk, sk) = keys();
+        let build = |policy: Vec<u8>, signature: Vec<u8>| Operation::SofiVaultCreate {
+            genesis_preimage: vec![0x01, 0x02],
+            creation: vec![0x03, 0x04],
+            market_policy_preimage: policy,
+            funding_a_policy_commit: [0x5C; 32],
+            funding_b_policy_commit: [0x5D; 32],
+            signature,
+        };
+        let honest = vec![0x00, 0x07, 0x00, 0x01];
+        let bytes = crate::core::state_machine::transition::operation_signing_bytes(&build(
+            honest.clone(),
+            Vec::new(),
+        ));
+        let signature = sphincs_sign(&sk, &bytes).unwrap();
+        assert_eq!(
+            verify_operation(&build(honest.clone(), signature.clone()), &pk),
+            Ok(())
+        );
+
+        // ONLY the policy bytes differ, and the signature is the same one.
+        let swapped = vec![0x00, 0x07, 0x00, 0x02];
+        assert_ne!(swapped, honest);
+        assert!(
+            verify_operation(&build(swapped, signature), &pk).is_err(),
+            "the carried market policy must be covered by the operation signature"
+        );
     }
 
     /// The body's own key cannot introduce itself: a signature that verifies
