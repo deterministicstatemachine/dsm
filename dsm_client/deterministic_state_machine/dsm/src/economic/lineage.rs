@@ -668,6 +668,7 @@ pub fn advance_validated(
                 genesis,
                 device_id,
                 witness,
+                registered.economic_position(),
             )
             .map_err(EconomicValidationError::WriteSet)?;
         }
