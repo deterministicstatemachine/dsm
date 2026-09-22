@@ -308,9 +308,7 @@ impl SmartCommitment {
         Ok(true)
     }
 
-    /// Evaluate with optional test_mode.
-    pub fn evaluate_fixed(&self, ctx: &CommitmentContext, test_mode: bool) -> bool {
-        let _ = test_mode;
+    pub fn evaluate_fixed(&self, ctx: &CommitmentContext) -> bool {
         self.evaluate(ctx)
     }
 

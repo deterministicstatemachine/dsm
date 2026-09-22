@@ -248,23 +248,6 @@ impl DeviceInfo {
         }
     }
 
-    /// Validate device info fields
-    ///
-    /// # Returns
-    /// * `Result<bool, DsmError>` - True if valid, error if invalid
-    pub fn validate(&self) -> Result<bool, crate::types::error::DsmError> {
-        // Device ID is now fixed 32 bytes, always valid
-
-        // Verify public key is not empty
-        if self.public_key.is_empty() {
-            return Err(crate::types::error::DsmError::invalid_operation(
-                "Public key cannot be empty",
-            ));
-        }
-
-        Ok(true)
-    }
-
     /// Canonical, deterministic byte encoding (no Serde/bincode)
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut out = Vec::new();
@@ -720,18 +703,6 @@ mod tests {
         let a = DeviceInfo::from_hashed_label("alice", vec![10]);
         let b = DeviceInfo::from_hashed_label("bob", vec![10]);
         assert_ne!(a.device_id, b.device_id);
-    }
-
-    #[test]
-    fn device_info_validate_ok() {
-        let di = DeviceInfo::new([0x01; 32], vec![0x99; 32]);
-        assert!(di.validate().unwrap());
-    }
-
-    #[test]
-    fn device_info_validate_empty_key_fails() {
-        let di = DeviceInfo::new([0x01; 32], vec![]);
-        assert!(di.validate().is_err());
     }
 
     #[test]

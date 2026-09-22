@@ -9,7 +9,7 @@
 //! - [`state_types`] — Legacy `State` compatibility view (slated for deletion)
 //! - [`token_types`] — [`Token`], [`TokenStatus`], supply parameters, and state context
 //! - [`identifiers`] — Type-safe wrappers: [`NodeId`], [`VaultId`], [`SessionId`], [`TransactionId`], etc.
-//! - [`operations`] — Operation trait hierarchy: [`Ops`], [`TokenOps`], [`IdOps`], [`SmartCommitOps`]
+//! - [`operations`] — Operation trait hierarchy: [`Ops`], [`TokenOps`]
 //! - [`identity`] — [`IdentityAnchor`] and [`IdentityClaim`] for device identity
 //! - [`genesis_types`] — Canonical genesis hash `G` (§2.5) and the contribution type
 //! - [`policy_types`] — [`TokenPolicy`], [`PolicyAnchor`], [`PolicyFile`] for CPTA
@@ -45,7 +45,7 @@ pub use contact_types::DsmVerifiedContact;
 pub use general::{Commitment, DirectoryEntry, KeyPair, SecurityLevel, VerificationResult};
 pub use identity::{IdentityAnchor, IdentityClaim};
 pub use identifiers::{Entropy, GenesisHash, NodeId, SessionId, Signature, TransactionId, VaultId}; // New type-safe identifiers
-pub use operations::{GenericOps, IdOps, Ops, SmartCommitOps, TokenOps}; // Remove Operation as it doesn't exist
+pub use operations::{GenericOps, Ops, TokenOps};
 pub use policy_types::{PolicyAnchor, PolicyFile, TokenPolicy};
 pub use receipt_types::{
     ParentConsumptionTracker, ReceiptAcceptance, ReceiptVerificationContext, StitchedReceiptV2,

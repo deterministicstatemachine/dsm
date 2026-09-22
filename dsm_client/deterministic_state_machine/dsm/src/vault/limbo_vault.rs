@@ -1795,7 +1795,6 @@ impl LimboVault {
             log::error!("verify_bitcoin_htlc failed: verify_header_chain failed");
             return Ok(false);
         }
-        let checkpoint_rooted = matches!(btc_network, BitcoinNetwork::Mainnet) && header_chain_ok;
 
         // 7. Entry-header anchor check (dBTC paper §12.2.3, Invariant 19):
         //    If this vault has a cached entry header (from BTC→dBTC entry),
@@ -1813,6 +1812,7 @@ impl LimboVault {
         }
 
         let verifier_evidence = RustVerifierAcceptedEvidence {
+            checkpoint_rooted: header_chain_ok,
             observation: BitcoinSettlementObservation {
                 network: btc_network,
                 bitcoin_spend_observed: true,
@@ -1828,7 +1828,6 @@ impl LimboVault {
             },
             spv_inclusion_valid,
             pow_valid,
-            checkpoint_rooted,
             same_chain_anchored,
         };
 

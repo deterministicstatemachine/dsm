@@ -617,13 +617,13 @@ impl PreCommitment {
                     context: format!("Fork with ID {fork_id} not found"),
                 })?;
 
-            self.verify_fork_selection(fork)?
+            self.verify_fork_derivation(fork)?
         };
 
         if !fork_valid {
             return Err(CommitmentError::Verification {
                 context: format!(
-                    "Fork with ID {fork_id} has insufficient signatures for selection"
+                    "Fork with ID {fork_id} is not correctly derived from its context"
                 ),
             }
             .into());
@@ -651,47 +651,6 @@ impl PreCommitment {
         }
 
         Ok(())
-    }
-
-    fn verify_fork_selection(&self, fork: &PreCommitmentFork) -> Result<bool, DsmError> {
-        let min_signatures = self.security_params.min_signatures;
-
-        if fork.signatures.is_empty() {
-            return Ok(false);
-        }
-
-        let mut valid_signatures = 0usize;
-        for (signer_id, signature) in &fork.signatures {
-            if let Some(root_sig) = self.signatures.get(signer_id) {
-                if root_sig.as_slice() == signature.as_slice() {
-                    valid_signatures += 1;
-                }
-            }
-        }
-
-        if valid_signatures < min_signatures {
-            return Ok(false);
-        }
-
-        let expected_positions =
-            Self::create_fork_positions(&fork.hash, self.security_params.min_positions);
-        if expected_positions != fork.positions {
-            return Ok(false);
-        }
-
-        // Recompute fork hash deterministically from context.
-        let ctx = build_fork_context(
-            &self.hash,
-            &fork.fork_id,
-            &fork.fixed_params,
-            &fork.variable_params,
-        );
-        let expected_hash = canonical_lp::hash_lp1(DOM_FORK_CONTEXT, &ctx);
-        if expected_hash.as_slice() != fork.hash.as_slice() {
-            return Ok(false);
-        }
-
-        Ok(true)
     }
 
     /// Verify that at least `required` signers have each produced a VALID
@@ -798,6 +757,32 @@ impl PreCommitment {
     }
 
     /// Deterministic positions (random-walk style) derived from fork_hash.
+    /// Verify a fork is correctly DERIVED: its positions are the deterministic
+    /// function of its hash, and its hash is the deterministic function of its
+    /// context. This is structure, not authorisation — it says nothing about
+    /// who signed the selection.
+    ///
+    /// The signature count that used to live here compared `fork.signatures`
+    /// against `self.signatures` byte-for-byte. Both maps are written by the
+    /// same producer, so it verified no signature at all and admitted any
+    /// producer that copied its own bytes into both places.
+    fn verify_fork_derivation(&self, fork: &PreCommitmentFork) -> Result<bool, DsmError> {
+        let expected_positions =
+            Self::create_fork_positions(&fork.hash, self.security_params.min_positions);
+        if expected_positions != fork.positions {
+            return Ok(false);
+        }
+
+        let ctx = build_fork_context(
+            &self.hash,
+            &fork.fork_id,
+            &fork.fixed_params,
+            &fork.variable_params,
+        );
+        let expected_hash = canonical_lp::hash_lp1(DOM_FORK_CONTEXT, &ctx);
+        Ok(expected_hash.as_slice() == fork.hash.as_slice())
+    }
+
     pub fn create_fork_positions(fork_hash: &[u8], count: usize) -> Vec<u8> {
         let mut positions = Vec::with_capacity(count);
         let base = canonical_lp::hash_lp1(DOM_FORK_POSITIONS, fork_hash);
@@ -889,9 +874,9 @@ impl PreCommitment {
                     context: format!("Selected fork {selected_fork_id} not found"),
                 })?;
 
-            if !self.verify_fork_selection(fork)? {
+            if !self.verify_fork_derivation(fork)? {
                 return Err(CommitmentError::Verification {
-                    context: "Selected fork verification failed".to_string(),
+                    context: "Selected fork is not correctly derived from its context".to_string(),
                 }
                 .into());
             }
@@ -1114,8 +1099,6 @@ impl ForwardLinkedCommitment {
         crate::commitments::parameter_comparison::verify_operation_parameters(
             operation,
             &self.fixed_parameters,
-            &self.variable_parameters,
-            self.min_state_number,
         )
     }
 

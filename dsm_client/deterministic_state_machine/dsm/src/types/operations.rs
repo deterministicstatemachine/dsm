@@ -37,21 +37,6 @@ pub trait Ops: Debug {
     fn to_bytes(&self) -> Vec<u8>;
 }
 
-/// Identity management operations.
-///
-/// Extended trait for operations that create, update, verify, or revoke
-/// cryptographic identities anchored to the genesis state.
-pub trait IdOps: Ops {
-    /// Verify an identity against the given SPHINCS+ public key.
-    fn verify_identity(&self, public_key: &[u8]) -> Result<bool, DsmError>;
-    /// Update the identity data associated with this operation.
-    fn update_identity(&mut self, new_data: &[u8]) -> Result<(), DsmError>;
-    /// Revoke this identity, rendering it permanently invalid.
-    fn revoke_identity(&mut self) -> Result<(), DsmError>;
-    /// Generate a cryptographic proof of identity for external verification.
-    fn get_identity_proof(&self) -> Result<Vec<u8>, DsmError>;
-}
-
 /// Token management operations.
 ///
 /// Extended trait for operations that manipulate token balances, including
@@ -81,21 +66,6 @@ pub trait GenericOps: Ops {
     fn set_data(&mut self, data: Vec<u8>) -> Result<(), DsmError>;
     /// Merge this operation's data with another generic operation's data.
     fn merge(&self, other: &dyn GenericOps) -> Result<Vec<u8>, DsmError>;
-}
-
-/// Smart commitment operations.
-///
-/// Extended trait for operations that create, verify, update, and finalise
-/// deterministic smart commitments in the DSM protocol.
-pub trait SmartCommitOps: Ops {
-    /// Verify the commitment against the given SPHINCS+ public key.
-    fn verify_commitment(&self, public_key: &[u8]) -> Result<bool, DsmError>;
-    /// Update the commitment data with new material.
-    fn update_commitment(&mut self, new_data: &[u8]) -> Result<(), DsmError>;
-    /// Finalise the commitment and return its canonical byte representation.
-    fn finalize_commitment(&mut self) -> Result<Vec<u8>, DsmError>;
-    /// Generate a cryptographic proof of commitment for external verification.
-    fn get_commitment_proof(&self) -> Result<Vec<u8>, DsmError>;
 }
 
 /// State transition execution mode (canonical encoded; no Serde).
@@ -2608,63 +2578,6 @@ impl GenericOps for Operation {
         merged.extend_from_slice(self.get_data());
         merged.extend_from_slice(other.get_data());
         Ok(merged)
-    }
-}
-
-impl IdOps for Operation {
-    fn verify_identity(&self, _public_key: &[u8]) -> Result<bool, DsmError> {
-        match self {
-            Operation::Create { .. } | Operation::Update { .. } => Ok(true),
-            _ => Ok(false),
-        }
-    }
-
-    fn update_identity(&mut self, _new_data: &[u8]) -> Result<(), DsmError> {
-        match self {
-            Operation::Update { .. } => Ok(()),
-            _ => Err(DsmError::generic(
-                "Cannot update identity with this operation",
-                None::<std::io::Error>,
-            )),
-        }
-    }
-
-    fn revoke_identity(&mut self) -> Result<(), DsmError> {
-        Err(DsmError::generic(
-            "Identity revocation not implemented for operations",
-            None::<std::io::Error>,
-        ))
-    }
-
-    fn get_identity_proof(&self) -> Result<Vec<u8>, DsmError> {
-        match self {
-            Operation::Create { .. } | Operation::Update { .. } => Ok(Vec::new()),
-            _ => Err(DsmError::generic(
-                "No identity proof for this operation",
-                None::<std::io::Error>,
-            )),
-        }
-    }
-}
-
-impl SmartCommitOps for Operation {
-    fn verify_commitment(&self, _public_key: &[u8]) -> Result<bool, DsmError> {
-        Ok(true)
-    }
-
-    fn update_commitment(&mut self, _new_data: &[u8]) -> Result<(), DsmError> {
-        Err(DsmError::generic(
-            "Cannot update commitment for operation",
-            None::<std::io::Error>,
-        ))
-    }
-
-    fn finalize_commitment(&mut self) -> Result<Vec<u8>, DsmError> {
-        Ok(self.to_bytes())
-    }
-
-    fn get_commitment_proof(&self) -> Result<Vec<u8>, DsmError> {
-        Ok(self.to_bytes())
     }
 }
 
