@@ -589,10 +589,21 @@ impl BilateralHandler for BiImpl {
         }
     }
 
+    /// Pending bilateral proposals, read from the bilateral transaction store.
+    /// `BilateralStorageSDK::get_pending_transactions` selects PENDING and
+    /// IN_PROGRESS rows; each proposal is that row's operation payload.
     async fn get_pending_transactions(&self) -> Result<Vec<Vec<u8>>, String> {
-        // Pending transactions are tracked via BilateralBleHandler sessions.
-        // The BLE coordinator handles all session state; no separate SDK needed.
-        Ok(vec![])
+        let storage = self
+            .storage
+            .as_ref()
+            .ok_or_else(|| "bilateral storage unavailable".to_string())?;
+        let rows = storage
+            .get_pending_transactions()
+            .map_err(|e| format!("read pending bilateral transactions: {e}"))?;
+        Ok(rows
+            .into_iter()
+            .map(|(_tx_id, _cp, _commit, operation_data, _phase, _created, _status)| operation_data)
+            .collect())
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -1096,18 +1107,5 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("bilateral.transfer disabled"));
-    }
-
-    // ── get_pending_transactions ─────────────────────────────────────────
-
-    #[tokio::test]
-    #[serial_test::serial]
-    async fn get_pending_transactions_returns_empty() {
-        let bi = BiImpl {
-            _config: test_config(),
-            storage: None,
-        };
-        let pending = bi.get_pending_transactions().await.unwrap();
-        assert!(pending.is_empty());
     }
 }

@@ -2203,27 +2203,6 @@ impl StorageNodeSDK {
         }
     }
 
-    /// Perform bilateral sync with remote nodes
-    pub async fn bilateral_sync(&self) -> Result<(), DsmError> {
-        if !self.config.advanced_features.enable_epidemic_sync {
-            return Err(DsmError::crypto(
-                "Bilateral sync not enabled in configuration".to_string(),
-                None::<std::io::Error>,
-            ));
-        }
-
-        // In a real implementation, this would sync with other nodes
-        // For now, just update sync state - scope the lock
-        {
-            let mut sync_state = self.bilateral_sync_state.write().await;
-            sync_state.last_sync_tick = dt::tick();
-            sync_state.pending_operations = 0;
-        }
-
-        info!("Bilateral sync completed");
-        Ok(())
-    }
-
     /// Get current storage metrics
     pub async fn get_metrics(&self) -> StorageMetrics {
         self.metrics.read().await.clone()

@@ -353,13 +353,6 @@ impl EraToken {
             fee_schedule,
         }
     }
-
-    pub fn get_fee(&self, operation_type: &str) -> Balance {
-        self.fee_schedule
-            .get(operation_type)
-            .cloned()
-            .unwrap_or(Balance::from_state(1, [0u8; 32]))
-    }
 }
 
 // ---------- Token SDK ----------
@@ -1517,37 +1510,6 @@ impl<I: Send + Sync> TokenSDK<I> {
             proof: params.proof,
             mode: TransactionMode::Bilateral,
         })
-    }
-
-    pub fn transfer_token_operation(
-        &self,
-        _from: String,
-        to: String,
-        _proof: Vec<u8>,
-    ) -> Result<Operation, DsmError> {
-        let mut op = Operation::Transfer {
-            to_device_id: to.as_bytes().to_vec(),
-            amount: Balance::zero(),
-            token_id: vec![],
-            // Legacy placeholder builder (empty token, zero amount).
-            policy_commit: [0u8; 32],
-            mode: TransactionMode::Bilateral,
-            nonce: self.generate_nonce(),
-            verification: VerificationType::Standard,
-            pre_commit: None,
-            message: "Transfer operation via TokenSDK".to_string(),
-            recipient: to.as_bytes().to_vec(),
-            to: to.into_bytes(),
-            signature: Vec::new(),
-            authority_policy: None,
-        };
-
-        let signature = self.sign_transfer_operation(&op)?;
-        if let Operation::Transfer { signature: sig, .. } = &mut op {
-            *sig = signature;
-        }
-
-        Ok(op)
     }
 
     /// Execute a smart commitment

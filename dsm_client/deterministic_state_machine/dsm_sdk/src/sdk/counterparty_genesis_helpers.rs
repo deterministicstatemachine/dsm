@@ -240,23 +240,6 @@ pub async fn fetch_genesis_state(
     create_genesis_via_blind_mpc(device_id_arr, nodes, None).await
 }
 
-/// Verify a Genesis state against known storage nodes
-pub async fn verify_genesis_state(
-    _genesis_state: &GenesisState,
-    _storage_endpoints: &[&str],
-) -> Result<bool, DsmError> {
-    // In a real implementation, this would verify the Genesis state with multiple storage nodes
-    // For now, always return true
-    Ok(true)
-}
-
-/// Generate a hash of a Genesis state
-pub fn hash_genesis_state(genesis_state: &GenesisState) -> Vec<u8> {
-    // In a real implementation, this would compute a cryptographic hash
-    // For now, just return the existing hash
-    genesis_state.hash.to_vec()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -545,19 +528,6 @@ mod tests {
 
     // ── hash_genesis_state ──
 
-    #[test]
-    fn hash_genesis_state_returns_existing_hash() {
-        let gs = dummy_genesis([0xDE; 32]);
-        let h = hash_genesis_state(&gs);
-        assert_eq!(h, vec![0xDE; 32]);
-    }
-
-    #[test]
-    fn hash_genesis_state_length_32() {
-        let gs = dummy_genesis([0x01; 32]);
-        assert_eq!(hash_genesis_state(&gs).len(), 32);
-    }
-
     // get_branch_tip_id tests removed alongside the helper.
 
     // ── CachedGenesisState clone & debug ──
@@ -703,13 +673,6 @@ mod tests {
     // bindings) removed alongside the helper.
 
     // ── hash_genesis_state: different hashes ──
-
-    #[test]
-    fn hash_genesis_state_different_inputs() {
-        let gs1 = dummy_genesis([0x01; 32]);
-        let gs2 = dummy_genesis([0x02; 32]);
-        assert_ne!(hash_genesis_state(&gs1), hash_genesis_state(&gs2));
-    }
 
     // ── mark_genesis_state_verified: idempotent ──
 

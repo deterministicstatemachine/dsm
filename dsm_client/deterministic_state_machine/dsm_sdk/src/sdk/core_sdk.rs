@@ -2589,16 +2589,6 @@ impl CoreSDK {
         ))
     }
 
-    pub async fn get_network_status(&self) -> Result<NetworkStatus, DsmError> {
-        Ok(NetworkStatus {
-            network_type: "offline".into(),
-            connected_peers: 0,
-            connection_status: "disconnected".into(),
-            is_syncing: false,
-            last_sync_time: 0, // clockless
-        })
-    }
-
     pub async fn discover_storage_nodes(
         &self,
         _network_type: String,

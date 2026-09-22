@@ -23,7 +23,7 @@ use parking_lot::RwLock;
 
 use std::collections::HashMap;
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::{PathBuf};
 use std::sync::Arc;
 
 use crate::util::deterministic_time as dt;
@@ -1186,46 +1186,6 @@ impl WalletSDK {
         Err(DsmError::invalid_operation(
             "mnemonic-based recovery is not supported; use recovery capsules (recovery_sdk)",
         ))
-    }
-
-    pub fn create_backup(&self, path: &Path) -> Result<(), DsmError> {
-        if *self.locked.read() {
-            return Err(DsmError::unauthorized(
-                "Wallet is locked",
-                None::<std::io::Error>,
-            ));
-        }
-        self.update_activity_sync();
-        *self.last_backup.write() = Some(dt::tick());
-        log::info!("Created wallet backup at {}", path.display());
-        Ok(())
-    }
-
-    pub fn backup(&self) -> Result<String, DsmError> {
-        if *self.locked.read() {
-            return Err(DsmError::unauthorized(
-                "Wallet is locked",
-                None::<std::io::Error>,
-            ));
-        }
-        self.update_activity_sync();
-        let did = self.device_id_string();
-        let path = format!("/tmp/wallet_backup_{}_{}.bin", did, dt::peek());
-        *self.last_backup.write() = Some(dt::tick());
-        log::info!("Created wallet backup at {path}");
-        Ok(path)
-    }
-
-    pub fn restore(&self, backup_path: &str) -> Result<(), DsmError> {
-        if *self.locked.read() {
-            return Err(DsmError::unauthorized(
-                "Wallet is locked",
-                None::<std::io::Error>,
-            ));
-        }
-        self.update_activity_sync();
-        log::info!("Restored wallet from backup: {backup_path}");
-        Ok(())
     }
 
     pub fn verify_transaction(&self, transaction: &WalletTransaction) -> Result<bool, DsmError> {
