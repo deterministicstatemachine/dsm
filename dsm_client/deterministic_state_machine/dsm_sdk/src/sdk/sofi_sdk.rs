@@ -332,6 +332,10 @@ pub fn build_vault_create(
     let operation = Operation::SofiVaultCreate {
         genesis_preimage: preimage.encode()?,
         creation: creation.encode(),
+        // The EXACT bytes whose address the state commits — carried, not
+        // referenced, so Core re-addresses and decodes them itself instead of
+        // taking this producer's word for the pair.
+        market_policy_preimage: market_policy_bytes.to_vec(),
         funding_a_policy_commit: token_a,
         funding_b_policy_commit: token_b,
         signature: Vec::new(),
