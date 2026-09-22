@@ -9,7 +9,7 @@
 use crate::types::error::DsmError;
 use crate::types::operations::{Operation, PreCommitmentOp, TransactionMode, VerificationType};
 use crate::types::token_types::Balance;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 // Helper function to convert Balance to canonical bytes (deterministic; no Serde)
 fn balance_to_bytes(balance: &Balance) -> Vec<u8> {
@@ -591,8 +591,6 @@ pub fn extract_operation_parameters(
 pub fn verify_operation_parameters(
     operation: &Operation,
     fixed_parameters: &HashMap<String, Vec<u8>>,
-    _variable_parameters: &HashSet<String>,
-    _timeout: u64,
 ) -> Result<bool, DsmError> {
     // Extract parameters from the operation
     let operation_params = extract_operation_parameters(operation)?;
@@ -721,7 +719,6 @@ mod tests {
         fixed_params.insert("operation_type".to_string(), b"transfer".to_vec());
 
         // Create variable parameters
-        let var_params = HashSet::new();
 
         // Create a valid operation that matches fixed parameters
         let valid_op = signed_transfer();
@@ -730,24 +727,9 @@ mod tests {
         let invalid_op = signed_update("identity_invalid");
 
         // Verify operations
-        assert!(verify_operation_parameters(
-            &valid_op,
-            &fixed_params,
-            &var_params,
-            0
-        )?);
-        assert!(!verify_operation_parameters(
-            &invalid_op,
-            &fixed_params,
-            &var_params,
-            0
-        )?);
-        assert!(!verify_operation_parameters(
-            &invalid_op,
-            &fixed_params,
-            &var_params,
-            0
-        )?);
+        assert!(verify_operation_parameters(&valid_op, &fixed_params)?);
+        assert!(!verify_operation_parameters(&invalid_op, &fixed_params)?);
+        assert!(!verify_operation_parameters(&invalid_op, &fixed_params)?);
 
         Ok(())
     }

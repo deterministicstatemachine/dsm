@@ -82,26 +82,6 @@ impl DsmVerifiedContact {
         self.chain_tip_smt_proof = smt_proof;
         // caller should set last_updated_commit_height explicitly if desired
     }
-
-    /// Verify the current chain tip against its SMT proof
-    pub fn verify_chain_tip_proof(&self) -> bool {
-        match (&self.chain_tip, &self.chain_tip_smt_proof) {
-            (Some(chain_tip), Some(proof)) => {
-                // Verify that the proof state hash matches the chain tip
-                proof.state_hash == *chain_tip
-                // Note: Full SMT verification would be done by the contact manager
-                // using the storage node's SMT verification methods
-            }
-            _ => false, // No chain tip or no proof available
-        }
-    }
-
-    /// Check if chain tip has valid SMT proof
-    pub fn has_verified_chain_tip(&self) -> bool {
-        self.chain_tip.is_some()
-            && self.chain_tip_smt_proof.is_some()
-            && self.verify_chain_tip_proof()
-    }
 }
 
 /// An inbox message received from a remote device via BLE or online relay.
@@ -268,50 +248,7 @@ mod tests {
 
     // --- verify_chain_tip_proof ---
 
-    #[test]
-    fn verify_chain_tip_proof_matching() {
-        let tip = [0xAB; 32];
-        let proof = make_matching_proof(tip);
-        let contact = make_contact(true, Some(tip), Some(proof));
-        assert!(contact.verify_chain_tip_proof());
-    }
-
-    #[test]
-    fn verify_chain_tip_proof_mismatched_hash() {
-        let tip = [0xAB; 32];
-        let mut proof = make_matching_proof(tip);
-        proof.state_hash = [0xFF; 32]; // mismatch
-        let contact = make_contact(true, Some(tip), Some(proof));
-        assert!(!contact.verify_chain_tip_proof());
-    }
-
-    #[test]
-    fn verify_chain_tip_proof_no_tip() {
-        let contact = make_contact(true, None, None);
-        assert!(!contact.verify_chain_tip_proof());
-    }
-
-    #[test]
-    fn verify_chain_tip_proof_no_proof() {
-        let contact = make_contact(true, Some([0xAB; 32]), None);
-        assert!(!contact.verify_chain_tip_proof());
-    }
-
     // --- has_verified_chain_tip ---
-
-    #[test]
-    fn has_verified_chain_tip_true() {
-        let tip = [0xCD; 32];
-        let proof = make_matching_proof(tip);
-        let contact = make_contact(true, Some(tip), Some(proof));
-        assert!(contact.has_verified_chain_tip());
-    }
-
-    #[test]
-    fn has_verified_chain_tip_false_no_proof() {
-        let contact = make_contact(true, Some([0xCD; 32]), None);
-        assert!(!contact.has_verified_chain_tip());
-    }
 
     // --- Struct construction ---
 

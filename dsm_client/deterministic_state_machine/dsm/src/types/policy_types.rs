@@ -674,8 +674,6 @@ impl From<&crate::types::proto::PolicyRoleProto> for PolicyRole {
 pub struct TokenPolicy {
     pub file: PolicyFile,
     pub anchor: PolicyAnchor,
-    pub verified: bool,
-    pub last_verified: u64, // deterministic tick, UI/ops only
 }
 
 impl TokenPolicy {
@@ -690,18 +688,7 @@ impl TokenPolicy {
     /// storage-layer anchor (for example, `DSM/policy` anchored bytes) and
     /// must be preserved exactly in runtime mapping.
     pub fn new_with_anchor(file: PolicyFile, anchor: PolicyAnchor) -> Self {
-        let now = dt::tick().1;
-        Self {
-            file,
-            anchor,
-            verified: false,
-            last_verified: now,
-        }
-    }
-
-    pub fn mark_verified(&mut self) {
-        self.verified = true;
-        self.last_verified = dt::tick().1;
+        Self { file, anchor }
     }
 
     // Issue #183 Finding 2 fix: `is_condition_satisfied` and
@@ -934,15 +921,6 @@ mod tests {
         assert!(restored.name.is_empty(), "name excluded from canonical");
     }
 
-    #[test]
-    fn token_policy_new_and_mark_verified() {
-        let pf = PolicyFile::new("tp", "v1", "auth");
-        let mut tp = TokenPolicy::new(pf).unwrap();
-        assert!(!tp.verified);
-        tp.mark_verified();
-        assert!(tp.verified);
-    }
-
     // Issue #183 Finding 2 regression: the removed `is_condition_satisfied`
     // and `are_time_conditions_satisfied` methods unconditionally returned
     // `true`. They no longer exist on `TokenPolicy`. The real evaluation
@@ -960,9 +938,10 @@ mod tests {
         // `PolicyEnforcer`.
         let pf = PolicyFile::new("tp", "v1", "auth");
         let tp = TokenPolicy::new(pf).unwrap();
-        // Construction succeeds; verification status reflects the real
-        // verified flag, not a placeholder predicate.
-        assert!(!tp.verified, "freshly constructed policy is not verified");
+        // Construction succeeds and exposes no unconditional-satisfaction
+        // shortcut. The `verified` flag this used to assert on was itself a
+        // stand-in: nothing in production set it and nothing read it.
+        let _ = tp;
     }
 
     #[test]

@@ -145,21 +145,6 @@ impl PolicyStore {
         Ok(policy)
     }
 
-    /// Verify and retrieve a policy by its anchor.
-    #[allow(clippy::unused_async)]
-    pub async fn verify_and_get_policy(
-        &self,
-        anchor: &PolicyAnchor,
-        policy_data: Option<&[u8]>,
-    ) -> Result<TokenPolicy, DsmError> {
-        if policy_data.is_some() {
-            return Err(DsmError::invalid_operation(
-                "Inline policy verification requires protobuf PolicyMessage; supply canonical prost bytes.",
-            ));
-        }
-        self.get_policy(anchor).await
-    }
-
     /// Store a policy file (persistence + cache).
     pub async fn store_policy(
         &self,
@@ -444,26 +429,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_verify_and_get_with_inline_data_rejected() {
-        let persistence = Arc::new(MockPersistence::new());
-        let store = make_store(persistence);
-
-        let pf = make_policy_file("author-v");
-        let anchor = store.store_policy(&pf).await.unwrap();
-
-        let result = store.verify_and_get_policy(&anchor, Some(b"inline")).await;
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_verify_and_get_without_data_succeeds() {
+    async fn test_get_policy_returns_the_stored_anchor() {
         let persistence = Arc::new(MockPersistence::new());
         let store = make_store(persistence);
 
         let pf = make_policy_file("author-v2");
         let anchor = store.store_policy(&pf).await.unwrap();
 
-        let policy = store.verify_and_get_policy(&anchor, None).await.unwrap();
+        let policy = store.get_policy(&anchor).await.unwrap();
         assert_eq!(policy.anchor, anchor);
     }
 }

@@ -419,9 +419,6 @@ pub struct BilateralTransactionManager {
     local_device_id: [u8; 32],
     local_genesis_hash: [u8; 32],
     chain_tip_store: std::sync::Arc<dyn ChainTipStore>,
-    /// Receiver-side pinned fused-anchor enrollments. An incoming OFFLINE_BEARER_REQUIRED commit
-    /// from a counterparty whose fused anchor is not pinned here is rejected fail-closed.
-    enrollment_store: std::sync::Arc<dyn crate::crypto::anchor_enrollment::AnchorEnrollmentStore>,
 }
 
 const PROOF_MAX_AGE_COMMIT_HEIGHTS: u64 = 86_400;
@@ -459,19 +456,7 @@ impl BilateralTransactionManager {
             local_device_id,
             local_genesis_hash,
             chain_tip_store,
-            enrollment_store: std::sync::Arc::new(
-                crate::crypto::anchor_enrollment::InMemoryAnchorEnrollmentStore::new(),
-            ),
         }
-    }
-
-    /// Inject a receiver-side anchor enrollment store (SDKs back it with persistent storage).
-    pub fn with_enrollment_store(
-        mut self,
-        store: std::sync::Arc<dyn crate::crypto::anchor_enrollment::AnchorEnrollmentStore>,
-    ) -> Self {
-        self.enrollment_store = store;
-        self
     }
 
     pub fn list_relationships(&self) -> Vec<BilateralRelationshipAnchor> {
