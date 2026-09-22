@@ -1,30 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-import { loadVectorCases } from "./loader";
-import { runVectorCases } from "./runner";
-import { realWebviewInboundAdapter } from "./webviewAdapter";
 import { runExternalCommitV2Vectors } from "./externalCommitV2";
 import { runUiVectors } from "./uiVectors";
-
-export async function runVectorsV1(baseUrl: string = "/vectors/v1"): Promise<void> {
-  // Put your vectors at: public/vectors/v1/...
-  const cases = await loadVectorCases({ baseUrl });
-  const report = await runVectorCases(cases, realWebviewInboundAdapter);
-
-  for (const r of report.results) {
-    if (r.passed) {
-      console.log(`PASS ${r.caseId}`);
-    } else {
-      console.log(`FAIL ${r.caseId} expected=${r.expected} got=${r.got}`);
-    }
-  }
-
-  if (report.failed !== 0) {
-    throw new Error(`vector run failed: ${report.passed} passed, ${report.failed} failed`);
-  }
-
-  console.log(`OK ${report.passed} passed, ${report.failed} failed`);
-}
 
 export async function runExternalCommitV2VectorsAndLog(): Promise<void> {
   const report = await runExternalCommitV2Vectors();
