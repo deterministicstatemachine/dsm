@@ -198,14 +198,6 @@ impl UnilateralHandler for UniImpl {
         match op.operation_type.as_str() {
             // Online inbox sync (result_data = u64 LE count)
             "unilateral.sync" => {
-                if self.config.enable_offline {
-                    return UniResult {
-                        success: true,
-                        result_data: 0u64.to_le_bytes().to_vec(),
-                        error_message: None,
-                    };
-                }
-
                 let b0x_address = match std::str::from_utf8(&op.data) {
                     Ok(s) => s,
                     Err(_) => {
@@ -239,15 +231,6 @@ impl UnilateralHandler for UniImpl {
 
             // Submit a unilateral operation (result_data = tx_id bytes)
             "unilateral.submit" => {
-                if self.config.enable_offline {
-                    // deterministic 16-byte placeholder in offline test mode
-                    return UniResult {
-                        success: true,
-                        result_data: vec![0u8; 16],
-                        error_message: None,
-                    };
-                }
-
                 let req = match pb::UniSubmitRequest::decode(op.data.as_slice()) {
                     Ok(r) => r,
                     Err(e) => {

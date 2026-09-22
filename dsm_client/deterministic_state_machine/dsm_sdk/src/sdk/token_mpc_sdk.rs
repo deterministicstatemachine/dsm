@@ -84,7 +84,6 @@ use dsm::{
 };
 use parking_lot::RwLock;
 use log::debug;
-use prost::Message;
 use dsm::common::deterministic_id;
 
 use super::{
@@ -386,9 +385,6 @@ impl TokenMpcSDK {
             sessions.insert(session_id.clone(), session);
         }
 
-        // Send MPC requests to storage nodes (logging/notification step)
-        self.send_mpc_requests(&session_id, &params).await?;
-
         // --- Feature-gated session completion ---
         #[cfg(not(feature = "local-mpc"))]
         {
@@ -428,59 +424,6 @@ impl TokenMpcSDK {
             }
             Ok(session_id)
         }
-    }
-
-    /// Send MPC requests to storage nodes
-    async fn send_mpc_requests(
-        &self,
-        session_id: &str,
-        params: &TokenCreationParams,
-    ) -> Result<(), DsmError> {
-        // Get creator's genesis if available. Replaces a broken
-        // `get_state_by_number(0)` call that depended on `hash[0] == 0`
-        // matching (per §4.3 there is no state_number index). Fetch BEFORE
-        // acquiring the storage_nodes lock since `local_genesis_hash` is
-        // async and we cannot hold the parking_lot guard across .await.
-        let creator_genesis_id = self
-            .core_sdk
-            .local_genesis_hash()
-            .await
-            .ok()
-            .filter(|h| h.len() >= 16)
-            .map(|h| crate::util::text_id::encode_base32_crockford(&h[..16]))
-            .unwrap_or_else(|| "unknown".to_string());
-
-        let storage_nodes = self.storage_nodes.read();
-
-        for node_url in storage_nodes.iter() {
-            #[cfg(debug_assertions)]
-            log::debug!("planning MPC request node={}", node_url);
-            // Build canonical TokenMpcRequest proto payload for deterministic transport
-            let req_proto = crate::generated::TokenMpcRequest {
-                session_id: session_id.to_string(),
-                token_name: params.token_name.clone(),
-                token_symbol: params.token_symbol.clone(),
-                threshold: params.threshold as u32,
-                creator_genesis_id: creator_genesis_id.clone(),
-                anchored_token: true,
-                request_iteration: crate::util::deterministic_time::peek(),
-            };
-            let _request_payload = req_proto.encode_to_vec();
-
-            // Send HTTP request to storage node
-            // Note: In a real implementation, this would use an HTTP client
-            // For now, we'll simulate the request
-            #[cfg(feature = "diagnostics")]
-            log::info!(
-                "Sending token MPC request to node: {} for session: {}",
-                node_url,
-                session_id
-            );
-            // Use node_url to avoid unused variable warning
-            let _ = node_url;
-        }
-
-        Ok(())
     }
 
     /// Check session status
