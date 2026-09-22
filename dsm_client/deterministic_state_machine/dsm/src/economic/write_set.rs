@@ -215,11 +215,19 @@ pub enum CreditSourceFacts {
 /// Merkle verification.
 pub struct EconomicPreState<'a> {
     pub balances: &'a BTreeMap<[u8; 32], u64>,
+    /// The position the operation being built LANDS AT — the successor of the
+    /// admitted predecessor this pre-state came from. It travels with the
+    /// pre-state because it is the same fact: a pre-state at `p` can only be
+    /// the pre-state of the transition at `p + 1`.
+    pub economic_position: u64,
 }
 
 impl<'a> EconomicPreState<'a> {
-    pub fn new(balances: &'a BTreeMap<[u8; 32], u64>) -> Self {
-        Self { balances }
+    pub fn new(balances: &'a BTreeMap<[u8; 32], u64>, economic_position: u64) -> Self {
+        Self {
+            balances,
+            economic_position,
+        }
     }
 }
 
@@ -326,6 +334,7 @@ fn semantic_write_set(
     operation: &Operation,
     local_genesis: &[u8; 32],
     local_devid: &[u8; 32],
+    economic_position: u64,
 ) -> Result<SemanticWriteSet, WriteSetError> {
     match operation {
         Operation::Transfer {
@@ -452,6 +461,7 @@ fn semantic_write_set(
         Operation::SofiVaultCreate {
             genesis_preimage,
             creation,
+            market_policy_preimage,
             funding_a_policy_commit,
             funding_b_policy_commit,
             ..
@@ -489,6 +499,84 @@ fn semantic_write_set(
             {
                 return Err(WriteSetError::MalformedVaultOperation {
                     detail: "the funded amounts are not the genesis reserves",
+                });
+            }
+            // THE PREIMAGE AGREES WITH ITSELF. `vault_id` derives from the
+            // OUTER owner coordinates, and the close path re-derives it from
+            // the INNER ones (`sofi::validation`). Two spellings of the same
+            // fact that nothing required to agree is a fork in who owns the
+            // vault, so they are held equal here rather than at one of the
+            // two readers.
+            if preimage.state.owner_genesis != preimage.owner_genesis
+                || preimage.state.owner_device_id != preimage.owner_device_id
+                || preimage.state.create_position != preimage.create_position
+            {
+                return Err(WriteSetError::MalformedVaultOperation {
+                    detail: "the genesis state names different owner coordinates than the \
+                             preimage it sits in",
+                });
+            }
+            // `p_create` IS THE POSITION THIS OPERATION LANDS AT. It is not a
+            // coordinate the caller may choose: `vault_id` derives from it, so
+            // a creation free to name any position could mint a second vault
+            // id from one transition, and the close path would then derive an
+            // owner for a vault the lineage never created at that position.
+            if preimage.create_position != economic_position {
+                return Err(WriteSetError::MalformedVaultOperation {
+                    detail: "the creation names a position other than the one it lands at",
+                });
+            }
+            // `R_0` IS DERIVED, NEVER ACCEPTED. The creation record states a
+            // genesis root; recomputing it from the canonical state is the
+            // only thing that makes it a fact rather than the caller's
+            // assertion, and every input is already in hand.
+            let derived_root = crate::sofi::lineage::genesis_root(&vault_id, &preimage.state)
+                .map_err(|_| WriteSetError::MalformedVaultOperation {
+                    detail: "a genesis state that does not encode has no root",
+                })?;
+            if record.genesis_root != derived_root {
+                return Err(WriteSetError::MalformedVaultOperation {
+                    detail: "the creation record states a genesis root the state does not derive",
+                });
+            }
+            // THE POLICY BYTES ARE THE ONES THE STATE NAMED. Re-address them
+            // under the market-policy namespace and require the address the
+            // vault state commits. This is checked BEFORE anything is read out
+            // of them: bytes that do not authenticate to what was asked for
+            // establish nothing, so they are never decoded on their own word.
+            let derived_addr = crate::ccb::decode::policy_object_address(
+                crate::ccb::class::MARKET_POLICY,
+                market_policy_preimage,
+            )
+            .ok_or(WriteSetError::MalformedVaultOperation {
+                detail: "the market policy class has no addressing rule",
+            })?;
+            if derived_addr != preimage.state.market_policy {
+                return Err(WriteSetError::MalformedVaultOperation {
+                    detail: "the carried market policy is not the one the genesis state commits",
+                });
+            }
+            // Strict decode. 72 fixed-width bytes, a pinned envelope, a pinned
+            // beta family and version, a strictly ordered pair and no trailing
+            // byte — so an accepted policy has exactly one encoding and the
+            // address above identifies it uniquely.
+            let market =
+                crate::ccb::decode::decode_market_policy(market_policy_preimage).map_err(|_| {
+                    WriteSetError::MalformedVaultOperation {
+                        detail: "a market policy that is not canonical authorizes no pair",
+                    }
+                })?;
+            // THE FUNDING IS THE AUTHORIZED PAIR. A SEPARATE binding from the
+            // address: that one proves these are the named policy's bytes,
+            // this one proves the assets actually debited are the two that
+            // policy authorizes. Without it a creation may debit X and Y while
+            // declaring a market in A and B — and a later close credits the
+            // owner A and B, which it never funded.
+            if *funding_a_policy_commit != *market.token_a()
+                || *funding_b_policy_commit != *market.token_b()
+            {
+                return Err(WriteSetError::MalformedVaultOperation {
+                    detail: "the funded assets are not the pair the market policy authorizes",
                 });
             }
             let (vault_id, leg_a, leg_b) = pair_legs(
@@ -542,7 +630,8 @@ pub fn build_write_set(
     facts: &CreditSourceFacts,
 ) -> Result<BuiltWriteSet, WriteSetError> {
     let pre_balances = pre_state.balances;
-    let semantic = semantic_write_set(operation, genesis, device_id)?;
+    let economic_position = pre_state.economic_position;
+    let semantic = semantic_write_set(operation, genesis, device_id, economic_position)?;
 
     let mut planned: Vec<PlannedLeaf> = Vec::new();
 
@@ -831,6 +920,7 @@ pub fn verify_operation_write_set(
     genesis: &[u8; 32],
     device_id: &[u8; 32],
     witness: &EconomicTransitionWitness,
+    economic_position: u64,
 ) -> Result<(), WriteSetError> {
     // THE TRIPWIRE, ON THE REAL PATH AND BEFORE ANYTHING ELSE.
     //
@@ -850,7 +940,7 @@ pub fn verify_operation_write_set(
     )
     .map_err(WriteSetError::Tripwire)?;
 
-    let semantic = semantic_write_set(operation, genesis, device_id)?;
+    let semantic = semantic_write_set(operation, genesis, device_id, economic_position)?;
 
     // Classify every mutation. The legal leaf classes are VARIANT-DRIVEN, and
     // EACH SOFI LEAF IS LEGAL FOR EXACTLY ONE OPERATION. The closure below
@@ -1188,6 +1278,7 @@ mod sofi_refusal_tests {
             Operation::SofiVaultCreate {
                 genesis_preimage: vec![0x5A, 0x00],
                 creation: vec![0x5B, 0x00],
+                market_policy_preimage: vec![0x00, 0x07],
                 funding_a_policy_commit: [0x5C; 32],
                 funding_b_policy_commit: [0x5D; 32],
                 signature: vec![0xA1; 8],
@@ -1219,7 +1310,7 @@ mod sofi_refusal_tests {
                 EconomicEffect::ClosedWriteSet,
                 "{name}: it does move value under a closed write set"
             );
-            match (&op, semantic_write_set(&op, &[0x11; 32], &[0x22; 32])) {
+            match (&op, semantic_write_set(&op, &[0x11; 32], &[0x22; 32], 0)) {
                 (Operation::SofiFulfill { .. }, Err(e)) => assert_eq!(
                     e,
                     WriteSetError::SofiWriteSetBelongsToTheResolvedPath,
@@ -1249,6 +1340,308 @@ mod sofi_refusal_tests {
         assert!(
             resolved.contains("fulfillment"),
             "it must say WHICH operation belongs to that path: {resolved}"
+        );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::disallowed_methods)] // test asserts; a failure here is the signal
+mod vault_create_binding_tests {
+    //! THE FIRST BEHAVIOURAL COVERAGE OF `SofiVaultCreate`.
+    //!
+    //! Before this module the arm had none. The only `SofiVaultCreate` any test
+    //! built carried bytes that do not decode, so it exercised classification
+    //! and never reached a single binding — which is how several of them came to
+    //! be enforced in the SDK producer alone, or not at all.
+    //!
+    //! Each test removes exactly one thing from a valid creation and names the
+    //! rule that refuses it.
+    use super::*;
+    use crate::ccb::state::{FeePolicy, MarketPolicy, ReleasePolicy};
+    use crate::sofi::wire::{VaultCreation, VaultGenesisPreimage, VaultStateLeaf};
+    use crate::sofi::wire::VAULT_STATUS_ACTIVE;
+
+    const G: [u8; 32] = [0x11; 32];
+    const DEV: [u8; 32] = [0x22; 32];
+    const POS: u64 = 7;
+    const X: u64 = 1_000;
+    const Y: u64 = 2_000;
+
+    fn tok(b: u8) -> [u8; 32] {
+        [b; 32]
+    }
+
+    fn addr(class: u16, bytes: &[u8]) -> [u8; 32] {
+        crate::ccb::decode::policy_object_address(class, bytes).expect("a policy class")
+    }
+
+    /// A creation whose every binding holds, plus the pieces a test needs to
+    /// break exactly one of them.
+    struct Valid {
+        state: VaultStateLeaf,
+        policy_bytes: Vec<u8>,
+        pair: ([u8; 32], [u8; 32]),
+    }
+
+    fn valid() -> Valid {
+        let (a, b) = (tok(0x40), tok(0x41));
+        let market = MarketPolicy::beta_constant_product(a, b).unwrap();
+        let policy_bytes = market.encode();
+        let fee = FeePolicy::new(30).unwrap();
+        let release = ReleasePolicy::beta_owner_local_full_close();
+        let state = VaultStateLeaf {
+            owner_genesis: G,
+            owner_device_id: DEV,
+            create_position: POS,
+            market_policy: addr(crate::ccb::class::MARKET_POLICY, &policy_bytes),
+            fee_policy: addr(crate::ccb::class::FEE_POLICY, &fee.encode()),
+            release_policy: addr(crate::ccb::class::RELEASE_POLICY, &release.encode()),
+            storage_set_id: tok(0x77),
+            generation: 0,
+            reserve_a: X,
+            reserve_b: Y,
+            status: VAULT_STATUS_ACTIVE,
+        };
+        Valid {
+            state,
+            policy_bytes,
+            pair: (a, b),
+        }
+    }
+
+    /// Assemble the operation from parts, so a test can perturb any one of them.
+    fn op_from(
+        v: &Valid,
+        state: &VaultStateLeaf,
+        policy_bytes: &[u8],
+        pair: ([u8; 32], [u8; 32]),
+        amounts: (u64, u64),
+        root: Option<[u8; 32]>,
+        vault_id: Option<[u8; 32]>,
+    ) -> Operation {
+        let _ = v;
+        let preimage = VaultGenesisPreimage {
+            owner_genesis: G,
+            owner_device_id: DEV,
+            create_position: POS,
+            state: state.clone(),
+        };
+        let derived = preimage.vault_id();
+        let creation = VaultCreation {
+            vault_id: vault_id.unwrap_or(derived),
+            genesis_root: root
+                .unwrap_or_else(|| crate::sofi::lineage::genesis_root(&derived, state).unwrap()),
+            amount_a: amounts.0,
+            amount_b: amounts.1,
+        };
+        Operation::SofiVaultCreate {
+            genesis_preimage: preimage.encode().unwrap(),
+            creation: creation.encode(),
+            market_policy_preimage: policy_bytes.to_vec(),
+            funding_a_policy_commit: pair.0,
+            funding_b_policy_commit: pair.1,
+            signature: vec![0xA1; 8],
+        }
+    }
+
+    fn good(v: &Valid) -> Operation {
+        op_from(v, &v.state, &v.policy_bytes, v.pair, (X, Y), None, None)
+    }
+
+    fn refusal(op: &Operation) -> &'static str {
+        match semantic_write_set(op, &G, &DEV, POS) {
+            Err(WriteSetError::MalformedVaultOperation { detail }) => detail,
+            Err(e) => panic!("expected a malformed-creation refusal, got {e:?}"),
+            Ok(_) => panic!("expected a refusal, got a write set"),
+        }
+    }
+
+    #[test]
+    fn a_creation_whose_every_binding_holds_produces_the_write_set() {
+        let v = valid();
+        match semantic_write_set(&good(&v), &G, &DEV, POS) {
+            Ok(SemanticWriteSet::SofiVaultCreate {
+                leg_a,
+                leg_b,
+                creation,
+                ..
+            }) => {
+                assert_eq!(leg_a, (v.pair.0, X), "leg a is the market's token a");
+                assert_eq!(leg_b, (v.pair.1, Y));
+                assert_eq!(creation.amount_a, X);
+            }
+            Ok(_) => panic!("expected a creation write set, got another variant"),
+            Err(e) => panic!("expected a creation write set, got {e:?}"),
+        }
+    }
+
+    /// M1's subject. The assets debited must be the two the market policy
+    /// authorizes — otherwise a creation funds with X and Y while declaring a
+    /// market in A and B, and a later close credits the owner A and B.
+    #[test]
+    fn funding_assets_that_are_not_the_markets_pair_are_refused() {
+        let v = valid();
+        let impostor = (tok(0x60), tok(0x61));
+        assert_ne!(impostor, v.pair);
+        let op = op_from(&v, &v.state, &v.policy_bytes, impostor, (X, Y), None, None);
+        assert_eq!(
+            refusal(&op),
+            "the funded assets are not the pair the market policy authorizes"
+        );
+    }
+
+    /// MA's subject, and a SEPARATE binding from the pair equality. These are
+    /// canonical, decodable, correctly ordered policy bytes that authorize
+    /// exactly the pair being funded — and they are still refused, because
+    /// they are not the policy object this vault's state names.
+    #[test]
+    fn policy_bytes_that_are_not_the_ones_the_state_names_are_refused() {
+        let v = valid();
+        let (c, d) = (tok(0x50), tok(0x51));
+        let other = MarketPolicy::beta_constant_product(c, d).unwrap().encode();
+        assert_ne!(other, v.policy_bytes);
+        // Fund the pair THOSE bytes authorize, so only the address binding can
+        // refuse this: pair equality holds against the carried policy.
+        let op = op_from(&v, &v.state, &other, (c, d), (X, Y), None, None);
+        assert_eq!(
+            refusal(&op),
+            "the carried market policy is not the one the genesis state commits"
+        );
+    }
+
+    #[test]
+    fn a_market_policy_preimage_that_is_not_canonical_is_refused() {
+        let v = valid();
+        // Each of these re-addresses to something other than what the state
+        // commits, so the address binding catches them first; the point is
+        // that no malformed policy ever reaches a decode on its own word.
+        for bad in [
+            Vec::new(),
+            v.policy_bytes[..v.policy_bytes.len() - 1].to_vec(),
+            [v.policy_bytes.clone(), vec![0x00]].concat(),
+        ] {
+            let op = op_from(&v, &v.state, &bad, v.pair, (X, Y), None, None);
+            assert_eq!(
+                refusal(&op),
+                "the carried market policy is not the one the genesis state commits",
+                "a non-canonical policy preimage must never authorize a pair"
+            );
+        }
+    }
+
+    #[test]
+    fn a_state_naming_other_owner_coordinates_than_its_preimage_is_refused() {
+        let v = valid();
+        for mutate in [0u8, 1, 2] {
+            let mut state = v.state.clone();
+            match mutate {
+                0 => state.owner_genesis = tok(0x99),
+                1 => state.owner_device_id = tok(0x99),
+                _ => state.create_position = POS + 1,
+            }
+            let op = op_from(&v, &state, &v.policy_bytes, v.pair, (X, Y), None, None);
+            assert_eq!(
+                refusal(&op),
+                "the genesis state names different owner coordinates than the preimage it sits in"
+            );
+        }
+    }
+
+    #[test]
+    fn a_creation_by_another_owner_is_refused() {
+        let v = valid();
+        let op = good(&v);
+        for (g, d) in [(tok(0x99), DEV), (G, tok(0x99))] {
+            match semantic_write_set(&op, &g, &d, POS) {
+                Err(WriteSetError::MalformedVaultOperation { detail }) => {
+                    assert_eq!(detail, "a creation debits its own owner's balances")
+                }
+                Err(e) => panic!("expected an owner refusal, got {e:?}"),
+                Ok(_) => panic!("expected an owner refusal, got a write set"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_creation_naming_a_position_it_does_not_land_at_is_refused() {
+        let v = valid();
+        let op = good(&v);
+        match semantic_write_set(&op, &G, &DEV, POS + 1) {
+            Err(WriteSetError::MalformedVaultOperation { detail }) => assert_eq!(
+                detail,
+                "the creation names a position other than the one it lands at"
+            ),
+            Err(e) => panic!("expected a position refusal, got {e:?}"),
+            Ok(_) => panic!("expected a position refusal, got a write set"),
+        }
+    }
+
+    #[test]
+    fn a_creation_stating_a_genesis_root_the_state_does_not_derive_is_refused() {
+        let v = valid();
+        let op = op_from(
+            &v,
+            &v.state,
+            &v.policy_bytes,
+            v.pair,
+            (X, Y),
+            Some(tok(0xBE)),
+            None,
+        );
+        assert_eq!(
+            refusal(&op),
+            "the creation record states a genesis root the state does not derive"
+        );
+    }
+
+    #[test]
+    fn a_creation_naming_another_vault_than_the_preimage_derives_is_refused() {
+        let v = valid();
+        let op = op_from(
+            &v,
+            &v.state,
+            &v.policy_bytes,
+            v.pair,
+            (X, Y),
+            None,
+            Some(tok(0xAD)),
+        );
+        assert_eq!(
+            refusal(&op),
+            "the creation record names another vault than the preimage derives"
+        );
+    }
+
+    #[test]
+    fn funded_amounts_that_are_not_the_genesis_reserves_are_refused() {
+        let v = valid();
+        for amounts in [(X + 1, Y), (X, Y + 1)] {
+            let op = op_from(&v, &v.state, &v.policy_bytes, v.pair, amounts, None, None);
+            assert_eq!(
+                refusal(&op),
+                "the funded amounts are not the genesis reserves"
+            );
+        }
+    }
+
+    #[test]
+    fn a_funding_pair_out_of_canonical_order_is_refused() {
+        let v = valid();
+        // Swap the market's own pair: pair equality then fails before the
+        // ordering check, which is the correct precedence — the authority is
+        // the policy, and order is a property of what it authorizes.
+        let op = op_from(
+            &v,
+            &v.state,
+            &v.policy_bytes,
+            (v.pair.1, v.pair.0),
+            (X, Y),
+            None,
+            None,
+        );
+        assert_eq!(
+            refusal(&op),
+            "the funded assets are not the pair the market policy authorizes"
         );
     }
 }
