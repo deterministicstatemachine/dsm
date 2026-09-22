@@ -455,6 +455,16 @@ impl Balance {
         self.locked
     }
 
+    /// The ledger state hash this balance was derived from, if it carries one.
+    ///
+    /// `None` means the balance was built outside a state transition (see
+    /// [`Balance::zero`]) — a caller persisting a balance MUST preserve that
+    /// distinction rather than substituting a zero hash, which would assert a
+    /// state the balance never referenced.
+    pub fn state_hash(&self) -> Option<[u8; 32]> {
+        self.state_hash
+    }
+
     /// Lock a portion of the balance
     pub fn lock(&mut self, amount: u64) -> Result<(), DsmError> {
         if amount == 0 {
@@ -562,8 +572,14 @@ impl Balance {
         result
     }
 
-    /// Internal helper to reconstruct a Balance from raw parts (used by canonical decoders).
-    pub(crate) fn from_parts(value: u64, locked: u64, state_hash: Option<[u8; 32]>) -> Self {
+    /// Reconstruct a Balance from its exact parts — the inverse of
+    /// [`Balance::value`], [`Balance::locked`] and [`Balance::state_hash`].
+    ///
+    /// Used by canonical decoders, including the SDK storage codec. Unlike
+    /// [`Balance::zero`], which anchors to the current canonical state, this
+    /// preserves `state_hash: None` rather than substituting a hash the balance
+    /// never referenced.
+    pub fn from_parts(value: u64, locked: u64, state_hash: Option<[u8; 32]>) -> Self {
         Self {
             value,
             locked,
