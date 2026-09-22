@@ -9,8 +9,61 @@
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use dsm::crypto::blake3::dsm_domain_hasher;
-use dsm::types::operations::Operation;
+use dsm::types::operations::{
+    AuthorityMode, AuthorityPolicy, Operation, AUTHORITY_POLICY_TAG_V1,
+};
 use crate::storage::client_db::GenesisRecord;
+
+/// Operation tag for a `Transfer` row carrying `signature` and `authority_policy`.
+const TRANSFER_TAG_V2: u8 = 2;
+
+/// Read the canonical, versioned authority-policy tail written by
+/// [`AuthorityPolicy::append_canonical`]: version tag, mode tag, then the two
+/// length-prefixed 32-byte identifiers.
+fn read_authority_policy(cursor: &mut &[u8]) -> Result<AuthorityPolicy> {
+    fn take_u8(cursor: &mut &[u8]) -> Result<u8> {
+        let (first, rest) = cursor
+            .split_first()
+            .ok_or_else(|| anyhow!("Insufficient bytes for authority_policy tag"))?;
+        *cursor = rest;
+        Ok(*first)
+    }
+
+    fn take_id32(cursor: &mut &[u8]) -> Result<[u8; 32]> {
+        if cursor.len() < 4 {
+            return Err(anyhow!("Insufficient bytes for authority_policy id length"));
+        }
+        let len = u32::from_le_bytes([cursor[0], cursor[1], cursor[2], cursor[3]]) as usize;
+        *cursor = &cursor[4..];
+        if len != 32 {
+            return Err(anyhow!("authority_policy id must be 32 bytes, got {len}"));
+        }
+        if cursor.len() < 32 {
+            return Err(anyhow!("Insufficient bytes for authority_policy id"));
+        }
+        let mut id = [0u8; 32];
+        id.copy_from_slice(&cursor[..32]);
+        *cursor = &cursor[32..];
+        Ok(id)
+    }
+
+    let version = take_u8(cursor)?;
+    if version != AUTHORITY_POLICY_TAG_V1 {
+        return Err(anyhow!("Unknown authority_policy version tag: {version}"));
+    }
+
+    let mode = match take_u8(cursor)? {
+        0 => AuthorityMode::OnlineChecked,
+        1 => AuthorityMode::OfflineBearerRequired,
+        other => return Err(anyhow!("Unknown authority mode tag: {other}")),
+    };
+
+    Ok(AuthorityPolicy {
+        mode,
+        policy_id: take_id32(cursor)?,
+        anchor_set_id: take_id32(cursor)?,
+    })
+}
 
 pub fn hash_blake3_bytes(data: &[u8]) -> [u8; 32] {
     *dsm::crypto::blake3::domain_hash(dsm::common::domain_tags::TAG_DSM_CODEC_HASH, data).as_bytes()
@@ -48,17 +101,28 @@ pub fn serialize_operation(op: &Operation) -> Vec<u8> {
             recipient,
             to,
             message,
-            signature: _,
-            authority_policy: _, // NOTE: storage codec does not yet persist authority_policy
+            signature,
+            authority_policy,
         } => {
-            bytes.push(1u8); // Transfer tag
+            bytes.push(TRANSFER_TAG_V2);
 
             // Encode each field with length prefix
             let to_device_bytes = to_device_id.as_slice();
             bytes.extend_from_slice(&(to_device_bytes.len() as u32).to_le_bytes());
             bytes.extend_from_slice(to_device_bytes);
 
+            // Full balance: value, locked portion, and the state hash it was
+            // derived from. Persisting only `value` silently dropped the locked
+            // amount and forced the decoder to invent a state hash.
             bytes.extend_from_slice(&amount.value().to_le_bytes());
+            bytes.extend_from_slice(&amount.locked().to_le_bytes());
+            match amount.state_hash() {
+                Some(h) => {
+                    bytes.push(1u8);
+                    bytes.extend_from_slice(&h);
+                }
+                None => bytes.push(0u8),
+            }
 
             let token_bytes = token_id.as_slice();
             bytes.extend_from_slice(&(token_bytes.len() as u32).to_le_bytes());
@@ -88,8 +152,29 @@ pub fn serialize_operation(op: &Operation) -> Vec<u8> {
             };
             bytes.push(verification_byte);
 
-            // Serialize pre_commit if present
-            bytes.push(if pre_commit.is_some() { 1 } else { 0 });
+            match pre_commit {
+                Some(pc) => {
+                    bytes.push(1u8);
+                    let mut keys: Vec<&String> = pc.fixed_parameters.keys().collect();
+                    keys.sort();
+                    bytes.extend_from_slice(&(keys.len() as u32).to_le_bytes());
+                    for k in keys {
+                        let kb = k.as_bytes();
+                        bytes.extend_from_slice(&(kb.len() as u32).to_le_bytes());
+                        bytes.extend_from_slice(kb);
+                        let v = &pc.fixed_parameters[k];
+                        bytes.extend_from_slice(&(v.len() as u32).to_le_bytes());
+                        bytes.extend_from_slice(v);
+                    }
+                    bytes.extend_from_slice(&(pc.variable_parameters.len() as u32).to_le_bytes());
+                    for v in &pc.variable_parameters {
+                        let vb = v.as_bytes();
+                        bytes.extend_from_slice(&(vb.len() as u32).to_le_bytes());
+                        bytes.extend_from_slice(vb);
+                    }
+                }
+                None => bytes.push(0u8),
+            }
 
             let recipient_bytes = recipient.as_slice();
             bytes.extend_from_slice(&(recipient_bytes.len() as u32).to_le_bytes());
@@ -102,6 +187,22 @@ pub fn serialize_operation(op: &Operation) -> Vec<u8> {
             let msg_bytes = message.as_bytes();
             bytes.extend_from_slice(&(msg_bytes.len() as u32).to_le_bytes());
             bytes.extend_from_slice(msg_bytes);
+
+            // Sender's SPHINCS+ signature. Dropping it made a restored bearer
+            // session indistinguishable from an unsigned one.
+            bytes.extend_from_slice(&(signature.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(signature);
+
+            // Authority policy (§ offline-bearer tier). Encoded with the same
+            // canonical writer the operation's own `to_bytes` uses, so the
+            // persisted tail is byte-identical to the signed one.
+            match authority_policy {
+                Some(ap) => {
+                    bytes.push(1u8);
+                    ap.append_canonical(&mut bytes);
+                }
+                None => bytes.push(0u8),
+            }
         }
         _ => {
             // For other operations, use a simplified encoding
@@ -163,10 +264,29 @@ pub fn deserialize_operation(bytes: &[u8]) -> Result<Operation> {
 
     match tag {
         0 => Ok(Operation::Genesis),
-        1 => {
+        TRANSFER_TAG_V2 => {
             // Transfer
             let to_device_id = read_bytes(&mut cursor)?;
             let amount = read_u64(&mut cursor)?;
+            let locked = read_u64(&mut cursor)?;
+            if cursor.is_empty() {
+                return Err(anyhow!("Incomplete Transfer balance state_hash flag"));
+            }
+            let has_state_hash = cursor[0];
+            cursor = &cursor[1..];
+            let state_hash = match has_state_hash {
+                0 => None,
+                1 => {
+                    if cursor.len() < 32 {
+                        return Err(anyhow!("Insufficient bytes for balance state_hash"));
+                    }
+                    let mut h = [0u8; 32];
+                    h.copy_from_slice(&cursor[..32]);
+                    cursor = &cursor[32..];
+                    Some(h)
+                }
+                other => return Err(anyhow!("Invalid balance state_hash flag: {other}")),
+            };
             let token_id = read_bytes(&mut cursor)?;
 
             // CPTA policy commitment (§9.5) — fixed 32 bytes.
@@ -212,7 +332,18 @@ pub fn deserialize_operation(bytes: &[u8]) -> Result<Operation> {
             let has_precommit = cursor[0];
             cursor = &cursor[1..];
             let pre_commit = if has_precommit == 1 {
-                Some(Default::default())
+                let mut pc = dsm::types::operations::PreCommitmentOp::default();
+                let n = read_u32(&mut cursor)? as usize;
+                for _ in 0..n {
+                    let k = read_string(&mut cursor)?;
+                    let v = read_bytes(&mut cursor)?;
+                    pc.fixed_parameters.insert(k, v);
+                }
+                let m = read_u32(&mut cursor)? as usize;
+                for _ in 0..m {
+                    pc.variable_parameters.push(read_string(&mut cursor)?);
+                }
+                Some(pc)
             } else {
                 None
             };
@@ -221,8 +352,26 @@ pub fn deserialize_operation(bytes: &[u8]) -> Result<Operation> {
             let to = read_bytes(&mut cursor)?;
             let message = read_string(&mut cursor)?;
 
-            // Create Balance from raw u64 amount (empty state hash for deserialized sessions)
-            let balance = dsm::types::token_types::Balance::from_state(amount, [0u8; 32]);
+            // Rebuild the balance exactly as persisted. The previous code
+            // substituted a zero state hash here, asserting a state the balance
+            // never referenced.
+            // `Balance::zero()` anchors to the current canonical state, so it
+            // cannot be used here: it would substitute a hash this balance never
+            // referenced. `from_parts` is the exact inverse of the encoder.
+            let balance = dsm::types::token_types::Balance::from_parts(amount, locked, state_hash);
+
+            let signature = read_bytes(&mut cursor)?;
+
+            if cursor.is_empty() {
+                return Err(anyhow!("Incomplete Transfer authority_policy flag"));
+            }
+            let has_authority = cursor[0];
+            cursor = &cursor[1..];
+            let authority_policy = match has_authority {
+                0 => None,
+                1 => Some(read_authority_policy(&mut cursor)?),
+                other => return Err(anyhow!("Invalid authority_policy flag: {other}")),
+            };
 
             Ok(Operation::Transfer {
                 to_device_id,
@@ -236,8 +385,8 @@ pub fn deserialize_operation(bytes: &[u8]) -> Result<Operation> {
                 recipient,
                 to,
                 message,
-                signature: Vec::new(),
-                authority_policy: None,
+                signature,
+                authority_policy,
             })
         }
         255 => Ok(Operation::Noop),
