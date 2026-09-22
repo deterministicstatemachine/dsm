@@ -90,7 +90,7 @@ pub fn smart_policy_witness_present(data: &std::collections::HashMap<String, Vec
 }
 
 #[inline]
-fn bit_msb_first(key: &[u8; 32], bit_index: usize) -> bool {
+pub(crate) fn bit_msb_first(key: &[u8; 32], bit_index: usize) -> bool {
     let byte = bit_index / 8;
     let bit = 7 - (bit_index % 8);
     ((key[byte] >> bit) & 1) == 1

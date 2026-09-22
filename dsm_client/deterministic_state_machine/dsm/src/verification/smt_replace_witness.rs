@@ -95,6 +95,25 @@ pub fn hash_smt_node(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
     *hasher.finalize().as_bytes()
 }
 
+impl SmtReplaceWitness {
+    /// Recompute the root by folding siblings leaf->root with the direction at
+    /// each depth taken from `smt_key`, the same convention as
+    /// `proof_primitives::verify_relationship_inclusion_proof`.
+    fn recompute_root_at_key(&self, leaf: &[u8; 32], smt_key: &[u8; 32]) -> [u8; 32] {
+        let mut acc = *leaf;
+        for (i, step) in self.path.iter().enumerate() {
+            let bit_index = 255usize.saturating_sub(i);
+            let is_right = crate::verification::proof_primitives::bit_msb_first(smt_key, bit_index);
+            acc = if is_right {
+                hash_smt_node(&step.sibling, &acc)
+            } else {
+                hash_smt_node(&acc, &step.sibling)
+            };
+        }
+        acc
+    }
+}
+
 /// Verify the Tripwire SMT replace by recomputing both roots from a single witness path.
 ///
 /// Fail-closed:
@@ -105,6 +124,7 @@ pub fn verify_tripwire_smt_replace(
     child_root: &[u8; 32],
     parent_tip: &[u8; 32],
     child_tip: &[u8; 32],
+    smt_key: &[u8; 32],
     witness_bytes: &[u8],
 ) -> Result<bool, DsmError> {
     if parent_root == child_root {
@@ -121,14 +141,22 @@ pub fn verify_tripwire_smt_replace(
         DsmError::InvalidOperation("Failed to parse SMT replace witness".to_string())
     })?;
 
+    // The witness must span the full tree and its directions must come from the
+    // key, not from the witness. Taking `is_left` from caller-supplied bytes
+    // proved only that SOME path of SOME length rebuilt the roots — never that
+    // the replacement happened AT `smt_key`.
+    if witness.path.len() != MAX_SMT_WITNESS_PATH_LEN {
+        return Ok(false);
+    }
+
     let old_leaf = hash_smt_leaf(parent_tip);
     let new_leaf = hash_smt_leaf(child_tip);
 
-    let recomputed_parent = witness.recompute_root(&old_leaf);
+    let recomputed_parent = witness.recompute_root_at_key(&old_leaf, smt_key);
     if &recomputed_parent != parent_root {
         return Ok(false);
     }
-    let recomputed_child = witness.recompute_root(&new_leaf);
+    let recomputed_child = witness.recompute_root_at_key(&new_leaf, smt_key);
     Ok(&recomputed_child == child_root)
 }
 
