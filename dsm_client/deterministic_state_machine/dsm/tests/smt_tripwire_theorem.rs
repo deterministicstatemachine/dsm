@@ -111,13 +111,47 @@ fn make_transfer_op(recipient: &[u8; 32], amount: u64) -> (Operation, Vec<u8>) {
     (op, bytes)
 }
 
-/// Encode a 1-step SMT replace witness (is_left flag + 32-byte sibling).
-fn encode_witness_1step(is_left: bool, sibling: &[u8; 32]) -> Vec<u8> {
-    let mut w = Vec::with_capacity(4 + 33);
-    w.extend_from_slice(&1u32.to_le_bytes()); // path length = 1
-    w.push(if is_left { 1 } else { 0 });
-    w.extend_from_slice(sibling);
+/// Full tree depth. The verifier requires exactly this many steps: a shorter
+/// path proved only that SOME path rebuilt the roots, never that the
+/// replacement happened at the relationship key.
+const SMT_DEPTH: usize = 256;
+
+/// Independent reimplementation of the verifier's bit convention.
+fn bit_msb_first(key: &[u8; 32], bit_index: usize) -> bool {
+    let byte = bit_index / 8;
+    let bit = 7 - (bit_index % 8);
+    ((key[byte] >> bit) & 1) == 1
+}
+
+/// Encode a full-depth witness. The per-step direction byte is still written,
+/// and is deliberately set to a constant: the verifier ignores it and derives
+/// direction from the key, which is the property these tests now pin.
+fn encode_witness_full(siblings: &[[u8; 32]]) -> Vec<u8> {
+    let mut w = Vec::with_capacity(4 + siblings.len() * 33);
+    w.extend_from_slice(&(siblings.len() as u32).to_le_bytes());
+    for sib in siblings {
+        w.push(0);
+        w.extend_from_slice(sib);
+    }
     w
+}
+
+/// Fold a leaf up to a root taking each direction from `key`, mirroring the verifier.
+fn fold_root_at_key(leaf: &[u8; 32], key: &[u8; 32], siblings: &[[u8; 32]]) -> [u8; 32] {
+    let mut acc = *leaf;
+    for (i, sib) in siblings.iter().enumerate() {
+        let bit_index = 255usize.saturating_sub(i);
+        acc = if bit_msb_first(key, bit_index) {
+            hash_smt_node(sib, &acc)
+        } else {
+            hash_smt_node(&acc, sib)
+        };
+    }
+    acc
+}
+
+fn uniform_siblings(v: [u8; 32]) -> Vec<[u8; 32]> {
+    vec![v; SMT_DEPTH]
 }
 
 // ===========================================================================
@@ -172,7 +206,7 @@ fn theorem2_divergent_roots_detected() {
     let alice = TestDevice::from_seed(10);
     let bob = TestDevice::from_seed(20);
 
-    let _rel_key = compute_smt_key(&alice.device_id, &bob.device_id);
+    let rel_key = compute_smt_key(&alice.device_id, &bob.device_id);
 
     // Parent tip and child tip.
     let parent_tip = domain_hash_bytes(dsm::common::domain_tags::TAG_DSM_TEST_TIP, &[0x01; 32]);
@@ -182,13 +216,12 @@ fn theorem2_divergent_roots_detected() {
     let old_leaf = hash_smt_leaf(&parent_tip);
     let new_leaf = hash_smt_leaf(&child_tip);
 
-    // Build a 1-step witness: the leaf is the left child, sibling is a known value.
-    let sibling = [0x99u8; 32];
-    let witness_bytes = encode_witness_1step(true, &sibling);
+    // Full-depth witness; roots folded with directions taken from the relationship key.
+    let sibs = uniform_siblings([0x99u8; 32]);
+    let witness_bytes = encode_witness_full(&sibs);
 
-    // Compute honest roots by replicating the witness logic.
-    let honest_parent_root = hash_smt_node(&old_leaf, &sibling);
-    let honest_child_root = hash_smt_node(&new_leaf, &sibling);
+    let honest_parent_root = fold_root_at_key(&old_leaf, &rel_key, &sibs);
+    let honest_child_root = fold_root_at_key(&new_leaf, &rel_key, &sibs);
 
     // Honest verification succeeds.
     let result = verify_tripwire_smt_replace(
@@ -196,6 +229,7 @@ fn theorem2_divergent_roots_detected() {
         &honest_child_root,
         &parent_tip,
         &child_tip,
+        &rel_key,
         &witness_bytes,
     )
     .expect("must not error");
@@ -209,6 +243,7 @@ fn theorem2_divergent_roots_detected() {
         &fake_root,
         &parent_tip,
         &child_tip,
+        &rel_key,
         &witness_bytes,
     )
     .expect("must not error");
@@ -293,32 +328,47 @@ fn theorem2_transitive_tripwire_web() {
 
     // Bob's SMT must commit to BOTH relationships.
     // Build a 2-level tree where ab is left, bc is right.
-    let _rel_key_ab = compute_smt_key(&alice.device_id, &bob.device_id);
-    let _rel_key_bc = compute_smt_key(&bob.device_id, &charlie.device_id);
+    let rel_key_ab = compute_smt_key(&alice.device_id, &bob.device_id);
+    let rel_key_bc = compute_smt_key(&bob.device_id, &charlie.device_id);
     let leaf_ab = hash_smt_leaf(&h_1_ab);
     let leaf_bc = hash_smt_leaf(&h_1_bc);
-    let bob_root = hash_smt_node(&leaf_ab, &leaf_bc);
 
-    // Verify Alice<->Bob relationship under Bob's root (leaf_ab is left, sibling is leaf_bc).
-    let witness_ab = encode_witness_1step(true, &leaf_bc);
+    // Alice<->Bob under Bob's root: the path is scoped to k_AB.
+    let sibs_ab = uniform_siblings(leaf_bc);
+    let witness_ab = encode_witness_full(&sibs_ab);
     let old_leaf_ab = hash_smt_leaf(&h_0_ab);
-    let old_root = hash_smt_node(&old_leaf_ab, &leaf_bc);
+    let old_root = fold_root_at_key(&old_leaf_ab, &rel_key_ab, &sibs_ab);
+    let bob_root = fold_root_at_key(&leaf_ab, &rel_key_ab, &sibs_ab);
 
-    let ok_ab = verify_tripwire_smt_replace(&old_root, &bob_root, &h_0_ab, &h_1_ab, &witness_ab)
-        .expect("verify must not error");
+    let ok_ab = verify_tripwire_smt_replace(
+        &old_root,
+        &bob_root,
+        &h_0_ab,
+        &h_1_ab,
+        &rel_key_ab,
+        &witness_ab,
+    )
+    .expect("verify must not error");
     assert!(ok_ab, "Alice<->Bob proof must verify under Bob's root");
 
     // If Bob tries a different root for Charlie, it won't match.
     let mut fake_bob_root = bob_root;
     fake_bob_root[31] ^= 0x01;
 
-    let witness_bc = encode_witness_1step(false, &leaf_ab);
+    let sibs_bc = uniform_siblings(leaf_ab);
+    let witness_bc = encode_witness_full(&sibs_bc);
     let old_leaf_bc = hash_smt_leaf(&h_0_bc);
-    let old_root_bc = hash_smt_node(&leaf_ab, &old_leaf_bc);
+    let old_root_bc = fold_root_at_key(&old_leaf_bc, &rel_key_bc, &sibs_bc);
 
-    let ok_bc_fake =
-        verify_tripwire_smt_replace(&old_root_bc, &fake_bob_root, &h_0_bc, &h_1_bc, &witness_bc)
-            .expect("verify must not error");
+    let ok_bc_fake = verify_tripwire_smt_replace(
+        &old_root_bc,
+        &fake_bob_root,
+        &h_0_bc,
+        &h_1_bc,
+        &rel_key_bc,
+        &witness_bc,
+    )
+    .expect("verify must not error");
     assert!(
         !ok_bc_fake,
         "fake root must fail for Bob<->Charlie relationship"
@@ -408,45 +458,55 @@ fn predicate_1_sphincs_tampered_sig_rejects() {
 fn predicate_2_parent_inclusion_via_witness() {
     // Build a 1-step SMT: leaf at known key with value = parent_tip.
     let parent_tip = [0x11u8; 32];
-    let _rel_key = [0x22u8; 32];
+    let rel_key = [0x22u8; 32];
     let leaf = hash_smt_leaf(&parent_tip);
 
-    // Sibling is the empty (zero) position.
-    let sibling = ZERO_LEAF;
-    // Leaf is the left child.
-    let root = hash_smt_node(&leaf, &sibling);
+    // Siblings are the empty (zero) positions; the path is scoped to rel_key.
+    let sibs = uniform_siblings(ZERO_LEAF);
+    let root = fold_root_at_key(&leaf, &rel_key, &sibs);
+    let witness_bytes = encode_witness_full(&sibs);
 
-    // Build witness: is_left = true (leaf is left child), sibling = ZERO_LEAF.
-    let witness_bytes = encode_witness_1step(true, &sibling);
-
-    // Parse and recompute to verify inclusion.
-    let witness =
-        dsm::verification::smt_replace_witness::SmtReplaceWitness::from_bytes(&witness_bytes)
-            .expect("parse");
-    let recomputed = witness.recompute_root(&leaf);
-    assert_eq!(
-        recomputed, root,
-        "witness must recompute correct parent root"
+    let parent_tip2 = [0x12u8; 32];
+    let leaf2 = hash_smt_leaf(&parent_tip2);
+    let root2 = fold_root_at_key(&leaf2, &rel_key, &sibs);
+    assert!(
+        verify_tripwire_smt_replace(
+            &root,
+            &root2,
+            &parent_tip,
+            &parent_tip2,
+            &rel_key,
+            &witness_bytes
+        )
+        .expect("must not error"),
+        "witness must recompute correct parent root at the relationship key"
     );
 }
 
 #[test]
 fn predicate_3_child_inclusion_via_witness() {
     let child_tip = [0x33u8; 32];
-    let _rel_key = [0x44u8; 32];
+    let rel_key = [0x44u8; 32];
     let leaf = hash_smt_leaf(&child_tip);
 
-    let sibling = [0xFFu8; 32];
-    let root = hash_smt_node(&sibling, &leaf); // leaf is right child
+    let sibs = uniform_siblings([0xFFu8; 32]);
+    let root = fold_root_at_key(&leaf, &rel_key, &sibs);
+    let witness_bytes = encode_witness_full(&sibs);
 
-    let witness_bytes = encode_witness_1step(false, &sibling);
-    let witness =
-        dsm::verification::smt_replace_witness::SmtReplaceWitness::from_bytes(&witness_bytes)
-            .expect("parse");
-    let recomputed = witness.recompute_root(&leaf);
-    assert_eq!(
-        recomputed, root,
-        "witness must recompute correct child root"
+    let child_tip2 = [0x34u8; 32];
+    let leaf2 = hash_smt_leaf(&child_tip2);
+    let root2 = fold_root_at_key(&leaf2, &rel_key, &sibs);
+    assert!(
+        verify_tripwire_smt_replace(
+            &root,
+            &root2,
+            &child_tip,
+            &child_tip2,
+            &rel_key,
+            &witness_bytes
+        )
+        .expect("must not error"),
+        "witness must recompute correct child root at the relationship key"
     );
 }
 
@@ -455,7 +515,7 @@ fn predicate_5_smt_replace_recomputation() {
     let alice = TestDevice::from_seed(70);
     let bob = TestDevice::from_seed(71);
 
-    let _rel_key = compute_smt_key(&alice.device_id, &bob.device_id);
+    let rel_key = compute_smt_key(&alice.device_id, &bob.device_id);
 
     let h_n = domain_hash_bytes(dsm::common::domain_tags::TAG_DSM_TEST_TIP, &[0xA0; 32]);
     let h_n1 = domain_hash_bytes(dsm::common::domain_tags::TAG_DSM_TEST_TIP, &[0xA1; 32]);
@@ -463,22 +523,22 @@ fn predicate_5_smt_replace_recomputation() {
     let old_leaf = hash_smt_leaf(&h_n);
     let new_leaf = hash_smt_leaf(&h_n1);
 
-    // 1-step tree: leaf is left, sibling is fixed.
-    let sibling = [0x77u8; 32];
-    let r_a = hash_smt_node(&old_leaf, &sibling);
-    let r_a_prime = hash_smt_node(&new_leaf, &sibling);
+    // Full-depth tree scoped to the relationship key.
+    let sibs = uniform_siblings([0x77u8; 32]);
+    let r_a = fold_root_at_key(&old_leaf, &rel_key, &sibs);
+    let r_a_prime = fold_root_at_key(&new_leaf, &rel_key, &sibs);
 
-    let witness_bytes = encode_witness_1step(true, &sibling);
+    let witness_bytes = encode_witness_full(&sibs);
 
     // Full verify cycle.
-    let ok = verify_tripwire_smt_replace(&r_a, &r_a_prime, &h_n, &h_n1, &witness_bytes)
+    let ok = verify_tripwire_smt_replace(&r_a, &r_a_prime, &h_n, &h_n1, &rel_key, &witness_bytes)
         .expect("must not error");
     assert!(ok, "honest SMT replace must verify");
 
     // Tamper r_a_prime.
     let mut bad_root = r_a_prime;
     bad_root[15] ^= 0x01;
-    let fail = verify_tripwire_smt_replace(&r_a, &bad_root, &h_n, &h_n1, &witness_bytes)
+    let fail = verify_tripwire_smt_replace(&r_a, &bad_root, &h_n, &h_n1, &rel_key, &witness_bytes)
         .expect("must not error");
     assert!(!fail, "tampered child root must fail");
 }

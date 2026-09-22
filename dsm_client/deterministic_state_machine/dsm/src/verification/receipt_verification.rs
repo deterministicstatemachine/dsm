@@ -173,11 +173,19 @@ pub fn verify_stitched_receipt(
 
     // Rule 4: SMT replace recomputation
     // Build an SMT with parent_root, replace parent_tip → child_tip, verify child_root
+    // The replace must be proven AT the relationship key, not at some path the
+    // witness chose: directions come from `k_{A<->B}`, derived canonically from
+    // the two device identities the receipt already carries.
+    let rel_smt_key = crate::core::bilateral_transaction_manager::compute_smt_key(
+        &receipt.devid_a,
+        &receipt.devid_b,
+    );
     if !verify_smt_replace(
         &receipt.parent_root,
         &receipt.child_root,
         &receipt.parent_tip,
         &receipt.child_tip,
+        &rel_smt_key,
         &receipt.rel_replace_witness,
     )? {
         return Ok(ReceiptAcceptance::reject(
@@ -282,6 +290,7 @@ fn verify_smt_replace(
     child_root: &[u8; 32],
     parent_tip: &[u8; 32],
     child_tip: &[u8; 32],
+    smt_key: &[u8; 32],
     witness_bytes: &[u8],
 ) -> Result<bool, DsmError> {
     verify_tripwire_smt_replace(
@@ -289,6 +298,7 @@ fn verify_smt_replace(
         child_root,
         parent_tip,
         child_tip,
+        smt_key,
         witness_bytes,
     )
 }
