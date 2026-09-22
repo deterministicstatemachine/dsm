@@ -119,14 +119,15 @@ fn round_trip(
         &G,
         &DEV,
         &econ_op_id(),
-        &EconomicPreState::new(&balances),
+        &EconomicPreState::new(&balances, P_CREATE),
         &mut tree,
         facts,
     )
     .expect("buildable");
     let witness = witness_for(pre_root, built, operation);
     verify_mutation_sequence(&witness.mutation_sequence(), &G, &DEV).expect("sequence verifies");
-    verify_operation_write_set(operation, &G, &DEV, &witness).expect("exact effect verifies");
+    verify_operation_write_set(operation, &G, &DEV, &witness, P_CREATE)
+        .expect("exact effect verifies");
     witness
 }
 
@@ -226,7 +227,7 @@ fn create_token_with_initial_supply_gets_the_exact_named_refusal() {
         &G,
         &DEV,
         &econ_op_id(),
-        &EconomicPreState::new(&balances),
+        &EconomicPreState::new(&balances, P_CREATE),
         &mut tree,
         &CreditSourceFacts::None,
     )
@@ -247,7 +248,7 @@ fn create_token_with_initial_supply_gets_the_exact_named_refusal() {
             &G,
             &DEV,
             &econ_op_id(),
-            &EconomicPreState::new(&b),
+            &EconomicPreState::new(&b, P_CREATE),
             &mut t,
             &CreditSourceFacts::None,
         )
@@ -256,7 +257,7 @@ fn create_token_with_initial_supply_gets_the_exact_named_refusal() {
     };
     drop(tree2);
     assert_eq!(
-        verify_operation_write_set(&create_token(1_000, 500), &G, &DEV, &some_witness),
+        verify_operation_write_set(&create_token(1_000, 500), &G, &DEV, &some_witness, P_CREATE),
         Err(WriteSetError::CreateTokenInitialSupplyRequiresIssuancePredicate)
     );
 }
@@ -275,7 +276,7 @@ fn a_debit_with_an_extra_mutation_is_refused() {
         &G,
         &DEV,
         &econ_op_id(),
-        &EconomicPreState::new(&balances),
+        &EconomicPreState::new(&balances, P_CREATE),
         &mut tree,
         &CreditSourceFacts::None,
     )
@@ -302,7 +303,7 @@ fn a_debit_with_an_extra_mutation_is_refused() {
     // ascend); when it does form, the verifier must refuse it.
     if let Ok(forged) = forged {
         assert!(matches!(
-            verify_operation_write_set(&burn(50, era()), &G, &DEV, &forged),
+            verify_operation_write_set(&burn(50, era()), &G, &DEV, &forged, P_CREATE),
             Err(WriteSetError::WrongWriteSet { .. })
         ));
     }
@@ -314,11 +315,16 @@ fn a_debit_of_the_wrong_amount_or_asset_is_refused() {
     let op = burn(40, era());
     let witness = round_trip(&op, tree, balances, &CreditSourceFacts::None);
     // Same witness, different claimed operations.
-    assert!(verify_operation_write_set(&burn(41, era()), &G, &DEV, &witness).is_err());
-    assert!(verify_operation_write_set(&burn(40, [0xEE; 32]), &G, &DEV, &witness).is_err());
+    assert!(verify_operation_write_set(&burn(41, era()), &G, &DEV, &witness, P_CREATE).is_err());
+    assert!(
+        verify_operation_write_set(&burn(40, [0xEE; 32]), &G, &DEV, &witness, P_CREATE).is_err()
+    );
     // And the role near-miss: the same delta presented as a transfer TO us
     // (credit role) is refused.
-    assert!(verify_operation_write_set(&transfer(DEV, 40, era()), &G, &DEV, &witness).is_err());
+    assert!(
+        verify_operation_write_set(&transfer(DEV, 40, era()), &G, &DEV, &witness, P_CREATE)
+            .is_err()
+    );
 }
 
 #[test]
@@ -341,7 +347,7 @@ fn a_recipient_credit_without_its_consumed_source_is_refused() {
         &G,
         &DEV,
         &econ_op_id(),
-        &EconomicPreState::new(&BTreeMap::new()),
+        &EconomicPreState::new(&BTreeMap::new(), P_CREATE),
         &mut tree,
         &facts,
     )
@@ -374,7 +380,7 @@ fn a_recipient_credit_without_its_consumed_source_is_refused() {
     )
     .unwrap();
     assert!(matches!(
-        verify_operation_write_set(&op, &G, &DEV, &stripped),
+        verify_operation_write_set(&op, &G, &DEV, &stripped, P_CREATE),
         Err(WriteSetError::WrongWriteSet { .. })
     ));
 }
@@ -406,7 +412,7 @@ fn a_mint_builds_a_credit_but_demands_its_issuance_facts() {
             &G,
             &DEV,
             &econ_op_id(),
-            &EconomicPreState::new(&balances),
+            &EconomicPreState::new(&balances, P_CREATE),
             &mut tree.clone(),
             &CreditSourceFacts::None,
         )
@@ -419,7 +425,7 @@ fn a_mint_builds_a_credit_but_demands_its_issuance_facts() {
         &G,
         &DEV,
         &econ_op_id(),
-        &EconomicPreState::new(&balances),
+        &EconomicPreState::new(&balances, P_CREATE),
         &mut tree,
         &CreditSourceFacts::AuthorizedIssuance {
             issuance_authorization_addr: [0xA9; 32],
@@ -445,7 +451,7 @@ fn a_mint_builds_a_credit_but_demands_its_issuance_facts() {
             &G,
             &DEV,
             &econ_op_id(),
-            &EconomicPreState::new(&balances),
+            &EconomicPreState::new(&balances, P_CREATE),
             &mut tree,
             &CreditSourceFacts::AuthorizedIssuance {
                 issuance_authorization_addr: [0xA9; 32],
@@ -465,7 +471,7 @@ fn insufficient_balance_refuses_the_exact_debit() {
             &G,
             &DEV,
             &econ_op_id(),
-            &EconomicPreState::new(&balances),
+            &EconomicPreState::new(&balances, P_CREATE),
             &mut tree,
             &CreditSourceFacts::None,
         ),
@@ -636,12 +642,31 @@ fn sofi_setup_operation() -> Operation {
     }
 }
 
-fn sofi_genesis_state() -> dsm::sofi::wire::VaultStateLeaf {
+/// The REAL market policy this vault's state names. It has to be real now:
+/// Core re-addresses the bytes the operation carries and requires the address
+/// the state commits, so a literal placeholder address authorizes nothing.
+fn sofi_market_policy(market: ([u8; 32], [u8; 32])) -> dsm::ccb::state::MarketPolicy {
+    dsm::ccb::state::MarketPolicy::beta_constant_product(market.0, market.1)
+        .expect("an ordered beta pair")
+}
+
+fn sofi_market_policy_addr(market: ([u8; 32], [u8; 32])) -> [u8; 32] {
+    dsm::ccb::decode::policy_object_address(
+        dsm::ccb::class::MARKET_POLICY,
+        &sofi_market_policy(market).encode(),
+    )
+    .expect("a policy class")
+}
+
+/// The MARKET pair is now a parameter, separate from the FUNDING pair the
+/// operation claims. That separation is the point of the binding under test:
+/// before it, the funding assets were free of the vault's declared market.
+fn sofi_genesis_state(market: ([u8; 32], [u8; 32])) -> dsm::sofi::wire::VaultStateLeaf {
     dsm::sofi::wire::VaultStateLeaf {
         owner_genesis: G,
         owner_device_id: DEV,
         create_position: P_CREATE,
-        market_policy: [0x31; 32],
+        market_policy: sofi_market_policy_addr(market),
         fee_policy: [0x32; 32],
         release_policy: [0x33; 32],
         storage_set_id: [0x77; 32],
@@ -653,12 +678,13 @@ fn sofi_genesis_state() -> dsm::sofi::wire::VaultStateLeaf {
 }
 
 fn sofi_create_operation(
+    market: ([u8; 32], [u8; 32]),
     funding_a: [u8; 32],
     funding_b: [u8; 32],
     amount_a: u64,
     amount_b: u64,
 ) -> Operation {
-    let state = sofi_genesis_state();
+    let state = sofi_genesis_state(market);
     let preimage = dsm::sofi::wire::VaultGenesisPreimage {
         owner_genesis: G,
         owner_device_id: DEV,
@@ -675,6 +701,7 @@ fn sofi_create_operation(
     Operation::SofiVaultCreate {
         genesis_preimage: preimage.encode().expect("preimage encodes"),
         creation: creation.encode(),
+        market_policy_preimage: sofi_market_policy(market).encode(),
         funding_a_policy_commit: funding_a,
         funding_b_policy_commit: funding_b,
         signature: vec![0xA1; 8],
@@ -723,7 +750,7 @@ fn a_setup_refuses_to_replace_an_existing_relationship() {
         &G,
         &DEV,
         &econ_op_id(),
-        &EconomicPreState::new(&BTreeMap::new()),
+        &EconomicPreState::new(&BTreeMap::new(), P_CREATE),
         &mut tree,
         &CreditSourceFacts::None,
     )
@@ -734,7 +761,7 @@ fn a_setup_refuses_to_replace_an_existing_relationship() {
         &G,
         &DEV,
         &econ_op_id(),
-        &EconomicPreState::new(&BTreeMap::new()),
+        &EconomicPreState::new(&BTreeMap::new(), P_CREATE),
         &mut tree,
         &CreditSourceFacts::None,
     );
@@ -750,7 +777,7 @@ fn a_vault_creation_debits_the_pair_and_inserts_the_record() {
     let (a, b) = ([0x40; 32], [0x41; 32]);
     let (tree, balances) = sofi_funded(&[(a, 5_000), (b, 9_000)]);
     let witness = round_trip(
-        &sofi_create_operation(a, b, 1_000, 2_000),
+        &sofi_create_operation((a, b), a, b, 1_000, 2_000),
         tree,
         balances,
         &CreditSourceFacts::None,
@@ -795,7 +822,7 @@ fn a_creation_is_refused_on_each_missing_conjunct() {
             &G,
             &DEV,
             &econ_op_id(),
-            &EconomicPreState::new(&bal),
+            &EconomicPreState::new(&bal, P_CREATE),
             &mut tree,
             &CreditSourceFacts::None,
         )
@@ -805,7 +832,7 @@ fn a_creation_is_refused_on_each_missing_conjunct() {
     // Amounts that are not the genesis reserves would mint reserves.
     assert!(matches!(
         build(
-            &sofi_create_operation(a, b, 999, 2_000),
+            &sofi_create_operation((a, b), a, b, 999, 2_000),
             balances(5_000, 9_000)
         ),
         Err(WriteSetError::MalformedVaultOperation { .. })
@@ -813,7 +840,7 @@ fn a_creation_is_refused_on_each_missing_conjunct() {
     // An unordered pair.
     assert!(matches!(
         build(
-            &sofi_create_operation(b, a, 1_000, 2_000),
+            &sofi_create_operation((a, b), b, a, 1_000, 2_000),
             balances(5_000, 9_000)
         ),
         Err(WriteSetError::MalformedVaultOperation { .. })
@@ -821,14 +848,14 @@ fn a_creation_is_refused_on_each_missing_conjunct() {
     // The same asset twice.
     assert!(matches!(
         build(
-            &sofi_create_operation(a, a, 1_000, 2_000),
+            &sofi_create_operation((a, b), a, a, 1_000, 2_000),
             balances(5_000, 9_000)
         ),
         Err(WriteSetError::MalformedVaultOperation { .. })
     ));
     // A balance that cannot cover the funding.
     assert!(build(
-        &sofi_create_operation(a, b, 1_000, 2_000),
+        &sofi_create_operation((a, b), a, b, 1_000, 2_000),
         balances(10, 9_000)
     )
     .is_err());
@@ -844,14 +871,14 @@ fn a_sofi_leaf_is_refused_under_the_wrong_operation() {
     let (mut tree, balances) = sofi_funded(&[(a, 5_000), (b, 9_000)]);
 
     // The witness a CREATION produces, verified against a SETUP.
-    let create = sofi_create_operation(a, b, 1_000, 2_000);
+    let create = sofi_create_operation((a, b), a, b, 1_000, 2_000);
     let pre_root = tree.root();
     let built = build_write_set(
         &create,
         &G,
         &DEV,
         &econ_op_id(),
-        &EconomicPreState::new(&balances),
+        &EconomicPreState::new(&balances, P_CREATE),
         &mut tree,
         &CreditSourceFacts::None,
     )
@@ -860,7 +887,7 @@ fn a_sofi_leaf_is_refused_under_the_wrong_operation() {
     let setup = sofi_setup_operation();
     assert!(
         matches!(
-            verify_operation_write_set(&setup, &G, &DEV, &creation_witness),
+            verify_operation_write_set(&setup, &G, &DEV, &creation_witness, P_CREATE),
             Err(WriteSetError::UnexpectedLeafClass)
         ),
         "a setup may not carry a creation record"
@@ -874,7 +901,7 @@ fn a_sofi_leaf_is_refused_under_the_wrong_operation() {
         &G,
         &DEV,
         &econ_op_id(),
-        &EconomicPreState::new(&BTreeMap::new()),
+        &EconomicPreState::new(&BTreeMap::new(), P_CREATE),
         &mut tree,
         &CreditSourceFacts::None,
     )
@@ -882,7 +909,7 @@ fn a_sofi_leaf_is_refused_under_the_wrong_operation() {
     let setup_witness = witness_for(pre_root, built, &setup);
     assert!(
         matches!(
-            verify_operation_write_set(&create, &G, &DEV, &setup_witness),
+            verify_operation_write_set(&create, &G, &DEV, &setup_witness, P_CREATE),
             Err(WriteSetError::UnexpectedLeafClass)
         ),
         "a creation may not carry a relationship leaf"
@@ -912,12 +939,54 @@ fn a_creation_verifies_when_key_order_opposes_asset_order() {
 
     let (tree, balances) = sofi_funded(&[(a, 5_000), (b, 9_000)]);
     let witness = round_trip(
-        &sofi_create_operation(a, b, 1_000, 2_000),
+        &sofi_create_operation((a, b), a, b, 1_000, 2_000),
         tree,
         balances,
         &CreditSourceFacts::None,
     );
     assert_eq!(witness.mutations.len(), 3);
+}
+
+/// THE ASSET-SUBSTITUTION DOOR, at the real seam.
+///
+/// Fund the creation from assets the device genuinely HOLDS, in canonical
+/// order, in the exact amounts the genesis reserves state — and have the vault
+/// declare a market in two entirely different assets. Every other binding
+/// holds. It must still be refused, because a later close credits the owner
+/// the MARKET's pair, which this creation never funded.
+///
+/// Until the funding pair was bound to the decoded market policy, this
+/// operation was accepted by both write-set halves. The binding had lived in
+/// `genesis_accepted`, whose deletion removed it, and after that only the SDK
+/// producer enforced it — which is no enforcement at all against a different
+/// producer.
+#[test]
+fn funding_assets_outside_the_declared_market_are_refused_even_when_funded() {
+    let market = ([0x40; 32], [0x41; 32]);
+    let (junk_a, junk_b) = ([0x70; 32], [0x71; 32]);
+    assert!(
+        junk_a < junk_b,
+        "the substitute pair is canonically ordered"
+    );
+    assert_ne!(junk_a, market.0);
+
+    // The device really holds the substitutes, in ample amount.
+    let (mut tree, balances) = sofi_funded(&[(junk_a, 5_000), (junk_b, 9_000)]);
+    let op = sofi_create_operation(market, junk_a, junk_b, 1_000, 2_000);
+    let err = build_write_set(
+        &op,
+        &G,
+        &DEV,
+        &[0xE0; 32],
+        &EconomicPreState::new(&balances, P_CREATE),
+        &mut tree,
+        &CreditSourceFacts::None,
+    )
+    .expect_err("a creation may not fund from outside its declared market");
+    assert!(
+        matches!(err, WriteSetError::MalformedVaultOperation { .. }),
+        "got {err:?}"
+    );
 }
 
 /// A SETUP BINDS BOTH ITS COORDINATES, not just the device.
@@ -950,7 +1019,7 @@ fn a_setup_naming_a_foreign_genesis_is_refused() {
         &G,
         &DEV,
         &econ_op_id(),
-        &EconomicPreState::new(&BTreeMap::new()),
+        &EconomicPreState::new(&BTreeMap::new(), P_CREATE),
         &mut tree,
         &CreditSourceFacts::None,
     );
@@ -977,7 +1046,7 @@ fn a_setups_root_is_the_root_its_own_transition_produces() {
         &G,
         &DEV,
         &econ_op_id(),
-        &EconomicPreState::new(&BTreeMap::new()),
+        &EconomicPreState::new(&BTreeMap::new(), P_CREATE),
         &mut tree,
         &CreditSourceFacts::None,
     )
