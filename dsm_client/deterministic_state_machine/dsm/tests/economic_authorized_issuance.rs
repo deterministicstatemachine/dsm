@@ -231,7 +231,7 @@ fn fixture(
         &G,
         &DEV,
         &[0x42u8; 32],
-        &EconomicPreState::new(&balances, 0),
+        &EconomicPreState::new(&balances),
         &mut tree,
         &CreditSourceFacts::AuthorizedIssuance {
             issuance_authorization_addr: evidence_addr,
@@ -313,7 +313,7 @@ fn fixture_with_stranger(signer_count: usize, amount: u64) -> Fixture {
         &G,
         &DEV,
         &[0x42u8; 32],
-        &EconomicPreState::new(&balances, 0),
+        &EconomicPreState::new(&balances),
         &mut tree,
         &CreditSourceFacts::AuthorizedIssuance {
             issuance_authorization_addr: evidence_addr,

@@ -163,15 +163,12 @@ pub(crate) fn producer_tree(validated: &ValidatedEconomicRoot) -> Result<Economi
 #[derive(Debug, Default, Clone)]
 pub(crate) struct AdmittedPreState {
     pub balances: BTreeMap<[u8; 32], u64>,
-    /// The position the next transition LANDS AT: the successor of the
-    /// admitted root these balances were decoded from.
-    pub economic_position: u64,
 }
 
 impl AdmittedPreState {
     /// The borrowed view `build_write_set` takes.
     pub fn as_write_set_pre_state(&self) -> dsm::economic::write_set::EconomicPreState<'_> {
-        dsm::economic::write_set::EconomicPreState::new(&self.balances, self.economic_position)
+        dsm::economic::write_set::EconomicPreState::new(&self.balances)
     }
 }
 
@@ -186,18 +183,7 @@ pub(crate) fn producer_tree_and_pre_state(
     validated: &ValidatedEconomicRoot,
 ) -> Result<(EconomicSmt, AdmittedPreState), DsmError> {
     let mut tree = EconomicSmt::new();
-    let mut pre = AdmittedPreState {
-        // The NEXT position: a pre-state at `p` is the pre-state of `p + 1`.
-        // CHECKED: a counter with no successor is a refusal, never a clamp —
-        // a saturated position would silently claim to be its own successor.
-        economic_position: validated
-            .economic_position()
-            .checked_add(1)
-            .ok_or_else(|| {
-                DsmError::invalid_operation("economic position has no successor".to_string())
-            })?,
-        ..AdmittedPreState::default()
-    };
+    let mut pre = AdmittedPreState::default();
     if validated.economic_position() == 0 {
         return Ok((tree, pre));
     }
