@@ -28,8 +28,6 @@ STORAGE     = ["dsm_storage_node/**"]
 FRONTEND    = ["dsm_client/frontend/**"]
 FORMAL      = [
   "tools/vertical_validation/**",
-  "tools/vector_runner/**",
-  "tools/vector_builder/**",
   "tla/**",
   "lean4/**",
 ]

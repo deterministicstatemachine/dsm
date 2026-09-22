@@ -1420,25 +1420,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dsm_vector_builder"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "dsm",
- "prost 0.14.4",
-]
-
-[[package]]
-name = "dsm_vector_runner"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "dsm",
- "prost 0.14.4",
- "walkdir",
-]
-
-[[package]]
 name = "dsm_vertical_validation"
 version = "0.1.0"
 dependencies = [
