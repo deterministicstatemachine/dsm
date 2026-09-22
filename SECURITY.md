@@ -62,7 +62,7 @@ In-scope for security reports:
 - Bilateral 3-phase commit protocol (Phase 1/2/3 ordering, abort safety).
 - Receipt acceptance pipeline (verify_stitched_receipt, SMT replace, EK cert chain).
 - Storage node trust boundaries (PaidK gate, signal hysteresis, registry update).
-- Bitcoin SPV verifier, HTLC unlock, dBTC bridge confirmation gate.
+- Bitcoin SPV verifier, HTLC unlock, dBTC confirmation gate.
 - Supply, accounting, double-spend, fork resolution, or state-transition invariants.
 - Recovery capsule (NFC ring, AEAD AAD format, nonce derivation, ring KDF).
 - Commitments layer (pre-commit, smart-commit, oracle binding).
