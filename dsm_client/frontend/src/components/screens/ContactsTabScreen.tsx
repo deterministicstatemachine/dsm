@@ -310,7 +310,7 @@ const ContactsTabScreen: React.FC<Props> = ({ eraTokenSrc = 'images/logos/era_to
       {showLoadingOverlay && <LoadingOverlay message={loadingMessage} eraTokenSrc={eraTokenSrc} />}
       
       {/* Tab navigation */}
-      <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+      <div data-tour="contacts-tabs" style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
         <button
           className={`wallet-style-button${fc(0)}`}
           onClick={() => setActiveTab('list')}
