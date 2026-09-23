@@ -10,6 +10,12 @@
 //! compares, decodes or decides. Which value counts at a key is the reader's
 //! question, answered from the bytes and the reader's own committed state.
 //!
+//! Every put answers with the entry's arrival record (storage spec §6, §14):
+//! this member's id, the cell, the entry's per-key arrival index, and the
+//! running hash after it. A get returns every value with its record. The
+//! records are bytes, not signatures; they become checkable when the
+//! member's ByteCommit that commits them closes.
+//!
 //! Absence is asserted by shape: a read of a key nothing was put under is
 //! `200` with an empty list. A `404` is a route miss, never a statement about
 //! the key.
@@ -52,7 +58,7 @@ pub fn create_router(state: Arc<AppState>) -> Router<()> {
         .layer(Extension(state))
 }
 
-fn namespace(headers: &HeaderMap) -> Result<Vec<u8>, StatusCode> {
+pub(crate) fn namespace(headers: &HeaderMap) -> Result<Vec<u8>, StatusCode> {
     let raw = headers
         .get(NAMESPACE_HEADER)
         .map(|v| v.as_bytes().to_vec())
@@ -71,7 +77,7 @@ fn namespace_bytes(raw: Vec<u8>) -> Result<Vec<u8>, StatusCode> {
     Ok(raw)
 }
 
-fn digest32(b32: &str) -> Result<Vec<u8>, StatusCode> {
+pub(crate) fn digest32(b32: &str) -> Result<Vec<u8>, StatusCode> {
     let bytes = text_id::decode_base32_crockford(b32.trim()).ok_or(StatusCode::BAD_REQUEST)?;
     if bytes.len() != 32 {
         return Err(StatusCode::BAD_REQUEST);
@@ -79,7 +85,26 @@ fn digest32(b32: &str) -> Result<Vec<u8>, StatusCode> {
     Ok(bytes)
 }
 
-fn octets(body: Vec<u8>) -> Response {
+/// This member's arrival record for an entry it holds.
+fn arrival_record(
+    state: &AppState,
+    namespace: Vec<u8>,
+    key: &[u8],
+    index: u64,
+    running_hash: [u8; 32],
+) -> Result<dsm::storage_cell::ArrivalRecord, StatusCode> {
+    Ok(dsm::storage_cell::ArrivalRecord {
+        member_id: state.configured_member_id.as_bytes().to_vec(),
+        namespace,
+        key: key
+            .try_into()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+        index,
+        running_hash,
+    })
+}
+
+pub(crate) fn octets(body: Vec<u8>) -> Response {
     let mut r = (StatusCode::OK, body).into_response();
     r.headers_mut().insert(
         axum::http::header::CONTENT_TYPE,
@@ -88,13 +113,14 @@ fn octets(body: Vec<u8>) -> Response {
     r
 }
 
-/// Keep the body at the key, after anything already there.
+/// Keep the body at the key, after anything already there, and answer with
+/// the entry's arrival record.
 async fn put_cell(
     Extension(state): Extension<Arc<AppState>>,
     Path(key): Path<String>,
     headers: HeaderMap,
     body: Bytes,
-) -> Result<StatusCode, StatusCode> {
+) -> Result<Response, StatusCode> {
     if body.is_empty() {
         return Err(StatusCode::BAD_REQUEST);
     }
@@ -103,13 +129,14 @@ async fn put_cell(
     }
     let ns = namespace(&headers)?;
     let key = digest32(&key)?;
-    crate::db::put_cell(&state.db_pool, &ns, &key, body.as_ref())
+    let (index, running_hash) = crate::db::put_cell(&state.db_pool, &ns, &key, body.as_ref())
         .await
         .map_err(|e| {
             log::error!("cell put: DB write failed: {e}");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
-    Ok(StatusCode::NO_CONTENT)
+    let record = arrival_record(&state, ns, &key, index, running_hash)?;
+    Ok(octets(record.to_proto().encode_to_vec()))
 }
 
 /// Keep every entry's body at its key, after anything already there, in ONE
@@ -119,7 +146,7 @@ async fn put_cell(
 async fn put_cells(
     Extension(state): Extension<Arc<AppState>>,
     body: Bytes,
-) -> Result<StatusCode, StatusCode> {
+) -> Result<Response, StatusCode> {
     let batch = dsm::types::proto::CellPutsV1::decode(body.as_ref())
         .map_err(|_| StatusCode::BAD_REQUEST)?;
     if batch.entries.is_empty() || batch.entries.len() > MAX_BATCH_ENTRIES {
@@ -138,13 +165,19 @@ async fn put_cells(
         }
         entries.push((namespace_bytes(entry.namespace)?, entry.key, entry.value));
     }
-    crate::db::put_cells(&state.db_pool, &entries)
+    let written = crate::db::put_cells(&state.db_pool, &entries)
         .await
         .map_err(|e| {
             log::error!("cells put: DB write failed: {e}");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
-    Ok(StatusCode::NO_CONTENT)
+    let mut records = Vec::with_capacity(written.len());
+    for ((ns, key, _), (index, running_hash)) in entries.into_iter().zip(written) {
+        records.push(arrival_record(&state, ns, &key, index, running_hash)?.to_proto());
+    }
+    Ok(octets(
+        dsm::types::proto::ArrivalRecordsV1 { records }.encode_to_vec(),
+    ))
 }
 
 /// Everything held at the key, in arrival order.
@@ -155,13 +188,21 @@ async fn get_cell(
 ) -> Result<Response, StatusCode> {
     let ns = namespace(&headers)?;
     let key = digest32(&key)?;
-    let values = crate::db::get_cell_values(&state.db_pool, &ns, &key)
+    let entries = crate::db::get_cell_entries(&state.db_pool, &ns, &key)
         .await
         .map_err(|e| {
             log::error!("cell get: DB read failed: {e}");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
-    let page = dsm::types::proto::CellValuesV1 { values };
+    let mut page = dsm::types::proto::CellValuesV1 {
+        values: Vec::with_capacity(entries.len()),
+        records: Vec::with_capacity(entries.len()),
+    };
+    for (value, index, running_hash) in entries {
+        page.values.push(value);
+        page.records
+            .push(arrival_record(&state, ns.clone(), &key, index, running_hash)?.to_proto());
+    }
     Ok(octets(page.encode_to_vec()))
 }
 

@@ -102,12 +102,10 @@ fn compute_object_address(dlv_id: &[u8], path: &str, content: &[u8]) -> String {
 
 /// Public read-only router — vault discovery by any device (no auth required).
 /// Storage nodes are index-only (Invariant #12); reads don't require ownership proof.
-pub fn create_router(state: Arc<crate::AppState>) -> Router<()> {
+pub fn create_router(_state: Arc<crate::AppState>) -> Router<()> {
     Router::new()
         .route("/api/v2/object/get/{key}", get(get_object_handler))
         .route("/api/v2/object/by-addr/{addr}", get(get_object_handler))
-        // Expose ByteCommit endpoints alongside object store (transport-only, deterministic addresses)
-        .merge(super::bytecommit::create_router(state.clone()))
     // Registry router is merged in main.rs, not here (avoid duplicate routes)
 }
 

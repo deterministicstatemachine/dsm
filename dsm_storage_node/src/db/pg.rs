@@ -399,8 +399,26 @@ pub async fn register_incarnation(pool: &Pool) -> Result<[u8; 32]> {
 // ===================== Generic conditional binding (Rev 15 §15.5) =====================
 
 /// Initialize database schema for storage node.
+/// Advisory-lock key serialising schema initialisation on one database.
+const INIT_DB_LOCK: i64 = 0x4453_4D49_4E49_5444;
+
+/// Create or migrate the schema. Initialisations of one database run one at
+/// a time: concurrent `CREATE … IF NOT EXISTS` statements race inside the
+/// Postgres catalog and fail, so the whole run holds a session advisory lock,
+/// released on every path.
 pub async fn init_db(pool: &Pool) -> Result<()> {
     let client = pool.get().await?;
+    client
+        .execute("SELECT pg_advisory_lock($1)", &[&INIT_DB_LOCK])
+        .await?;
+    let result = init_db_serialized(pool, &client).await;
+    client
+        .execute("SELECT pg_advisory_unlock($1)", &[&INIT_DB_LOCK])
+        .await?;
+    result
+}
+
+async fn init_db_serialized(pool: &Pool, client: &deadpool_postgres::Object) -> Result<()> {
     client
         .batch_execute(
             r#"CREATE TABLE IF NOT EXISTS register_incarnation (
@@ -537,22 +555,6 @@ pub async fn init_db(pool: &Pool) -> Result<()> {
         )
         .await?;
 
-    // ByteCommit chain metadata (verifier convenience; commit bytes live in `objects`).
-    client
-        .batch_execute(
-            r#"CREATE TABLE IF NOT EXISTS bytecommit_chain (
-                    node_id      BYTEA NOT NULL,
-                    cycle_index  BIGINT NOT NULL,
-                    digest       BYTEA NOT NULL,
-                    PRIMARY KEY(node_id, cycle_index)
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_bytecommit_chain_node_cycle
-                    ON bytecommit_chain(node_id, cycle_index);
-            "#,
-        )
-        .await?;
-
     // ── Storage Node Regulation tables (clockless, signature-free) ──────────
     // PaidK payment receipts
     client
@@ -642,23 +644,6 @@ pub async fn init_db(pool: &Pool) -> Result<()> {
         )
         .await?;
 
-    // Drain proofs (stake exit evidence)
-    client
-        .batch_execute(
-            r#"CREATE TABLE IF NOT EXISTS drain_proofs (
-                    id             BIGSERIAL PRIMARY KEY,
-                    proof_addr     TEXT NOT NULL UNIQUE,
-                    node_id        BYTEA NOT NULL,
-                    start_cycle    BIGINT NOT NULL,
-                    end_cycle      BIGINT NOT NULL,
-                    verified_local BOOLEAN NOT NULL DEFAULT FALSE,
-                    proof_bytes    BYTEA NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_drain_proofs_node ON drain_proofs(node_id);
-            "#,
-        )
-        .await?;
-
     // Phase B.4 (issue #275): bounded validator for the published
     // Device Tree state. One row per genesis. `version_number` is the
     // monotone counter the PUT /devtree/root validator enforces;
@@ -719,74 +704,83 @@ pub async fn init_db(pool: &Pool) -> Result<()> {
         )
         .await?;
 
-    Ok(())
-}
-
-/// Compute deterministic "current cycle" stats over all stored objects.
-///
-/// This is a minimal, deterministic commitment suitable for chaining.
-/// Full sparse SMT proofs are enforced client-side; storage nodes are dumb mirrors.
-pub async fn get_current_cycle_stats(pool: &Pool) -> Result<([u8; 32], u64)> {
-    let client = pool.get().await?;
-
-    // Deterministic key ordering.
-    let rows = client
-        .query("SELECT key, size_bytes FROM objects ORDER BY key ASC", &[])
-        .await?;
-
-    let mut bytes_used: u64 = 0;
-    let mut hasher = dsm::crypto::blake3::tagged_hasher(dsm::tagged_domain!(b"DSM/smt-node"));
-
-    for r in rows {
-        let key: String = r.get(0);
-        let sz: i64 = r.get(1);
-        if sz > 0 {
-            bytes_used = bytes_used.saturating_add(sz as u64);
-        }
-        hasher.update(key.as_bytes());
-        hasher.update(&[0u8]);
-        hasher.update(&sz.to_le_bytes());
+    // Arrival order is committed (storage spec §14): each entry's per-key
+    // arrival index (from 1) and the member's running hash for the key after
+    // it. The columns are added once, under an explicit table lock taken
+    // first, so two concurrent initialisations queue instead of deadlocking
+    // on a lock upgrade; after that, startup never takes the lock again.
+    let has_arrival: bool = client
+        .query_one(
+            "SELECT EXISTS (SELECT 1 FROM information_schema.columns
+             WHERE table_name = 'cells' AND column_name = 'arrival_index')",
+            &[],
+        )
+        .await?
+        .get(0);
+    if !has_arrival {
+        client
+            .batch_execute(
+                "BEGIN;
+                 LOCK TABLE cells IN ACCESS EXCLUSIVE MODE;
+                 ALTER TABLE cells ADD COLUMN IF NOT EXISTS arrival_index BIGINT;
+                 ALTER TABLE cells ADD COLUMN IF NOT EXISTS running_hash BYTEA;
+                 CREATE UNIQUE INDEX IF NOT EXISTS cells_by_arrival
+                     ON cells (namespace, cell_key, arrival_index);
+                 COMMIT;",
+            )
+            .await?;
     }
 
-    let out = hasher.finalize();
-    Ok((*out.as_bytes(), bytes_used))
-}
-
-/// Get the last recorded ByteCommit digest for `node_id`, if any.
-pub async fn get_last_bytecommit_hash(pool: &Pool, node_id: &[u8]) -> Result<Option<[u8; 32]>> {
-    let client = pool.get().await?;
-    let row = client
-        .query_opt(
-            "SELECT digest FROM bytecommit_chain WHERE node_id=$1 ORDER BY cycle_index DESC LIMIT 1",
-            &[&node_id],
+    // Which ByteCommit first committed an entry (storage spec §14). NULL
+    // until the next cycle closes. Guarded like the arrival columns.
+    let has_committed: bool = client
+        .query_one(
+            "SELECT EXISTS (SELECT 1 FROM information_schema.columns
+             WHERE table_name = 'cells' AND column_name = 'committed_cycle')",
+            &[],
         )
-        .await?;
-
-    Ok(row.map(|r| {
-        let b: Vec<u8> = r.get(0);
-        let mut out = [0u8; 32];
-        if b.len() == 32 {
-            out.copy_from_slice(&b);
-        }
-        out
-    }))
-}
-
-/// Record a ByteCommit digest at a cycle index (idempotent).
-pub async fn record_bytecommit_hash(
-    pool: &Pool,
-    node_id: &[u8],
-    cycle_index: u64,
-    digest: &[u8; 32],
-) -> Result<()> {
-    let client = pool.get().await?;
+        .await?
+        .get(0);
+    if !has_committed {
+        client
+            .batch_execute(
+                "BEGIN;
+                 LOCK TABLE cells IN ACCESS EXCLUSIVE MODE;
+                 ALTER TABLE cells ADD COLUMN IF NOT EXISTS committed_cycle BIGINT;
+                 CREATE INDEX IF NOT EXISTS cells_uncommitted
+                     ON cells (seq) WHERE committed_cycle IS NULL;
+                 COMMIT;",
+            )
+            .await?;
+    }
     client
-        .execute(
-            "INSERT INTO bytecommit_chain(node_id, cycle_index, digest) VALUES ($1,$2,$3)\
-             ON CONFLICT (node_id, cycle_index) DO NOTHING",
-            &[&node_id, &(cycle_index as i64), &digest.as_slice()],
+        .batch_execute(
+            r#"-- This node's own ByteCommits, one per cycle (storage spec §14).
+               CREATE TABLE IF NOT EXISTS own_bytecommits (
+                   cycle_index BIGINT PRIMARY KEY,
+                   digest      BYTEA NOT NULL,
+                   commit_pb   BYTEA NOT NULL
+               );
+               -- This node's mirror of its set-mates' ByteCommits: only what it
+               -- fetched from that member itself, never a third party's bytes.
+               -- Every distinct ByteCommit is kept, so an equivocation shows.
+               CREATE TABLE IF NOT EXISTS bytecommit_mirror (
+                   member_id   BYTEA NOT NULL,
+                   cycle_index BIGINT NOT NULL,
+                   digest      BYTEA NOT NULL,
+                   commit_pb   BYTEA NOT NULL,
+                   PRIMARY KEY (member_id, cycle_index, digest)
+               );"#,
         )
         .await?;
+
+    // Before the node serves a single put: rows from before arrival records
+    // existed get theirs, so no key ever mixes recorded and unrecorded rows.
+    let backfilled = backfill_cell_arrival_records(pool).await?;
+    if backfilled > 0 {
+        log::info!("cells: backfilled arrival records for {backfilled} keys");
+    }
+
     Ok(())
 }
 
@@ -2270,72 +2264,239 @@ pub async fn remove_applicant(pool: &Pool, applicant_addr: &str) -> Result<()> {
     Ok(())
 }
 
-// ===================== DrainProof & Stake Exit =====================
+// ── keyed cells and indexes: bytes in, bytes out ───────────────────────────
 
-/// Store a drain proof (idempotent by proof_addr).
-pub async fn store_drain_proof(
+/// Keep `value` for `(namespace, key)`, after anything already held there,
+/// and return its arrival record's `(index, running hash)` (storage spec
+/// §6, §14). Nothing is compared and nothing is refused. The write is
+/// durable before it is acknowledged.
+pub async fn put_cell(
     pool: &Pool,
-    proof_addr: &str,
-    node_id: &[u8],
-    start_cycle: i64,
-    end_cycle: i64,
-    verified_local: bool,
-    proof_bytes: &[u8],
+    namespace: &[u8],
+    key: &[u8],
+    value: &[u8],
+) -> Result<(u64, [u8; 32])> {
+    let mut client = pool.get().await?;
+    let tx = begin_durable_write(&mut client).await?;
+    lock_cells(&tx, [(namespace, key)]).await?;
+    let record = append_cell_entry(&tx, namespace, key, value).await?;
+    tx.commit().await?;
+    Ok(record)
+}
+
+/// Several keys in ONE durable transaction: every entry is kept after
+/// anything already at its key, or none of them is. An entry that names no
+/// coordinate — an empty namespace, a key that is not 32 bytes — makes the
+/// whole batch nothing; it is not a value the member could refuse, it is
+/// not a cell. Returns each entry's `(index, running hash)` in batch order.
+pub async fn put_cells(
+    pool: &Pool,
+    entries: &[(Vec<u8>, Vec<u8>, Vec<u8>)],
+) -> Result<Vec<(u64, [u8; 32])>> {
+    if entries
+        .iter()
+        .any(|(namespace, key, _)| namespace.is_empty() || key.len() != 32)
+    {
+        anyhow::bail!("batch put: an entry names no cell");
+    }
+    let mut client = pool.get().await?;
+    let tx = begin_durable_write(&mut client).await?;
+    lock_cells(
+        &tx,
+        entries
+            .iter()
+            .map(|(namespace, key, _)| (namespace.as_slice(), key.as_slice())),
+    )
+    .await?;
+    let mut records = Vec::with_capacity(entries.len());
+    for (namespace, key, value) in entries {
+        records.push(append_cell_entry(&tx, namespace, key, value).await?);
+    }
+    tx.commit().await?;
+    Ok(records)
+}
+
+/// Take the advisory lock of every cell a write touches, each once and in
+/// ascending lock-id order, before anything is appended. The locks serialise
+/// concurrent puts to one key so no two entries can claim the same arrival
+/// index (the unique index is the backstop); one global order means two
+/// batches over the same keys queue instead of deadlocking.
+async fn lock_cells<'a>(
+    tx: &deadpool_postgres::Transaction<'_>,
+    cells: impl IntoIterator<Item = (&'a [u8], &'a [u8])>,
 ) -> Result<()> {
-    let client = pool.get().await?;
-    client
-        .execute(
-            "INSERT INTO drain_proofs (proof_addr, node_id, start_cycle, end_cycle, verified_local, proof_bytes)
-             VALUES ($1, $2, $3, $4, $5, $6)
-             ON CONFLICT (proof_addr) DO NOTHING",
-            &[&proof_addr, &node_id, &start_cycle, &end_cycle, &verified_local, &proof_bytes],
-        )
-        .await?;
+    let mut ids = Vec::new();
+    for (namespace, key) in cells {
+        let key32: [u8; 32] = key
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("cell key is not 32 bytes"))?;
+        let lock = dsm::storage_cell::leaf_key(namespace, &key32);
+        ids.push(i64::from_be_bytes([
+            lock[0], lock[1], lock[2], lock[3], lock[4], lock[5], lock[6], lock[7],
+        ]));
+    }
+    ids.sort_unstable();
+    ids.dedup();
+    for id in ids {
+        tx.execute("SELECT pg_advisory_xact_lock($1)", &[&id])
+            .await?;
+    }
     Ok(())
 }
 
-/// Get a drain proof for a node.
-pub async fn get_drain_proof_for_node(pool: &Pool, node_id: &[u8]) -> Result<Option<Vec<u8>>> {
-    let client = pool.get().await?;
-    let row = client
+/// Append one entry inside `tx`, whose cell lock [`lock_cells`] already
+/// holds: extend the key's running hash, insert.
+async fn append_cell_entry(
+    tx: &deadpool_postgres::Transaction<'_>,
+    namespace: &[u8],
+    key: &[u8],
+    value: &[u8],
+) -> Result<(u64, [u8; 32])> {
+    let key32: [u8; 32] = key
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("cell key is not 32 bytes"))?;
+    let last = tx
         .query_opt(
-            "SELECT proof_bytes FROM drain_proofs WHERE node_id = $1 ORDER BY end_cycle DESC LIMIT 1",
-            &[&node_id],
+            "SELECT arrival_index, running_hash FROM cells
+             WHERE namespace = $1 AND cell_key = $2 AND arrival_index IS NOT NULL
+             ORDER BY arrival_index DESC LIMIT 1",
+            &[&namespace, &key],
         )
         .await?;
-    Ok(row.map(|r| r.get::<_, Vec<u8>>(0)))
+    let (prev_index, prev_hash) = match last {
+        Some(row) => {
+            let i: i64 = row.get(0);
+            let h: Vec<u8> = row.get(1);
+            let h: [u8; 32] = h
+                .as_slice()
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("stored running hash is not 32 bytes"))?;
+            (u64::try_from(i)?, h)
+        }
+        None => (0, dsm::storage_cell::running_hash_init(namespace, &key32)),
+    };
+    let index = prev_index + 1;
+    let running_hash =
+        dsm::storage_cell::running_hash_next(&prev_hash, &dsm::storage_cell::entry_digest(value));
+    tx.execute(
+        "INSERT INTO cells (namespace, cell_key, value, arrival_index, running_hash)
+         VALUES ($1, $2, $3, $4, $5)",
+        &[
+            &namespace,
+            &key,
+            &value,
+            &i64::try_from(index)?,
+            &running_hash.as_slice(),
+        ],
+    )
+    .await?;
+    Ok((index, running_hash))
 }
 
-/// Advisory check: verify d consecutive ByteCommit cycles have bytes_used=0 for a node.
-/// Returns the count of consecutive empty cycles found starting from start_cycle.
-pub async fn verify_bytecommit_chain_empty(
+/// Everything held for `(namespace, key)`, in the order it arrived.
+pub async fn get_cell_values(pool: &Pool, namespace: &[u8], key: &[u8]) -> Result<Vec<Vec<u8>>> {
+    Ok(get_cell_entries(pool, namespace, key)
+        .await?
+        .into_iter()
+        .map(|(v, _, _)| v)
+        .collect())
+}
+
+/// Everything held for `(namespace, key)`, in arrival order, each with its
+/// `(index, running hash)`.
+pub async fn get_cell_entries(
     pool: &Pool,
-    node_id: &[u8],
-    start_cycle: i64,
-    required_d: i64,
-) -> Result<bool> {
+    namespace: &[u8],
+    key: &[u8],
+) -> Result<Vec<(Vec<u8>, u64, [u8; 32])>> {
     let client = pool.get().await?;
-    // Check that exactly `required_d` consecutive cycles exist starting from start_cycle,
-    // and each has a bytecommit stored in objects whose ByteCommitV3.bytes_used == 0.
-    // Since nodes are dumb, we check the bytecommit_chain table for continuity.
-    let row = client
-        .query_one(
-            "SELECT COUNT(*)::BIGINT FROM bytecommit_chain
-             WHERE node_id = $1 AND cycle_index >= $2 AND cycle_index < $2 + $3",
-            &[&node_id, &start_cycle, &required_d],
+    let rows = client
+        .query(
+            "SELECT value, arrival_index, running_hash FROM cells
+             WHERE namespace = $1 AND cell_key = $2 ORDER BY seq ASC",
+            &[&namespace, &key],
         )
         .await?;
-    let count: i64 = row.get(0);
-    Ok(count >= required_d)
+    rows.iter()
+        .map(|r| {
+            let i: Option<i64> = r.get(1);
+            let h: Option<Vec<u8>> = r.get(2);
+            let (Some(i), Some(h)) = (i, h) else {
+                anyhow::bail!("cell entry has no arrival record; backfill has not run");
+            };
+            let h: [u8; 32] = h
+                .as_slice()
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("stored running hash is not 32 bytes"))?;
+            Ok((r.get::<_, Vec<u8>>(0), u64::try_from(i)?, h))
+        })
+        .collect()
 }
 
-// ── keyed cells and indexes: bytes in, bytes out ───────────────────────────
+/// Give every entry of every key that holds an entry without an arrival
+/// record its record: the key's values replayed in arrival (`seq`) order,
+/// exactly as storage spec §14 defines `(i, h_i)`. The key's indexes are
+/// cleared first so the unique arrival index never sees two rows claim one
+/// position mid-rewrite. Only the two metadata columns are written; no value
+/// is touched. Idempotent: a key whose entries all hold records is not read.
+pub async fn backfill_cell_arrival_records(pool: &Pool) -> Result<u64> {
+    let mut client = pool.get().await?;
+    let keys = client
+        .query(
+            "SELECT DISTINCT namespace, cell_key FROM cells WHERE arrival_index IS NULL",
+            &[],
+        )
+        .await?;
+    let mut fixed = 0u64;
+    for k in keys {
+        let namespace: Vec<u8> = k.get(0);
+        let key: Vec<u8> = k.get(1);
+        let key32: [u8; 32] = key
+            .as_slice()
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("a held cell key is not 32 bytes"))?;
+        let tx = begin_durable_write(&mut client).await?;
+        let rows = tx
+            .query(
+                "SELECT seq, value FROM cells WHERE namespace = $1 AND cell_key = $2
+                 ORDER BY seq ASC FOR UPDATE",
+                &[&namespace, &key],
+            )
+            .await?;
+        tx.execute(
+            "UPDATE cells SET arrival_index = NULL, running_hash = NULL
+             WHERE namespace = $1 AND cell_key = $2",
+            &[&namespace, &key],
+        )
+        .await?;
+        let mut h = dsm::storage_cell::running_hash_init(&namespace, &key32);
+        for (n, row) in rows.iter().enumerate() {
+            let seq: i64 = row.get(0);
+            let value: Vec<u8> = row.get(1);
+            h = dsm::storage_cell::running_hash_next(&h, &dsm::storage_cell::entry_digest(&value));
+            tx.execute(
+                "UPDATE cells SET arrival_index = $2, running_hash = $3 WHERE seq = $1",
+                &[&seq, &(n as i64 + 1), &h.as_slice()],
+            )
+            .await?;
+        }
+        tx.commit().await?;
+        fixed += 1;
+    }
+    Ok(fixed)
+}
 
-/// Keep `value` for `(namespace, key)`, after anything already held there.
-/// Nothing is compared and nothing is refused.
-pub async fn put_cell(pool: &Pool, namespace: &[u8], key: &[u8], value: &[u8]) -> Result<()> {
-    let client = pool.get().await?;
-    client
+/// A cell row exactly as a binary from before arrival records wrote it: the
+/// value and nothing else. Unit tests only.
+#[cfg(test)]
+pub(crate) async fn insert_cell_without_record(
+    pool: &Pool,
+    namespace: &[u8],
+    key: &[u8],
+    value: &[u8],
+) -> Result<()> {
+    pool.get()
+        .await?
         .execute(
             "INSERT INTO cells (namespace, cell_key, value) VALUES ($1, $2, $3)",
             &[&namespace, &key, &value],
@@ -2344,38 +2505,251 @@ pub async fn put_cell(pool: &Pool, namespace: &[u8], key: &[u8], value: &[u8]) -
     Ok(())
 }
 
-/// Several keys in ONE durable transaction: every entry is kept after
-/// anything already at its key, or none of them is. An entry that names no
-/// coordinate — an empty namespace, a key that is not 32 bytes — makes the
-/// whole batch nothing; it is not a value the member could refuse, it is
-/// not a cell.
-pub async fn put_cells(pool: &Pool, entries: &[(Vec<u8>, Vec<u8>, Vec<u8>)]) -> Result<()> {
+// ── ByteCommits (storage spec §14) ─────────────────────────────────────────
+
+/// Close the next cycle if any cell entry has arrived since the last one:
+/// stamp those entries with the new cycle, build the SMT over every cell's
+/// latest committed entry, and store the ByteCommit chained to the previous
+/// one — all in one durable transaction. Returns the latest ByteCommit
+/// (the new one, or the existing one if nothing arrived), or `None` if this
+/// node has never closed a cycle and holds no entries.
+pub async fn close_cycle(
+    pool: &Pool,
+    member_id: &[u8],
+) -> Result<Option<dsm::storage_cell::ByteCommit>> {
+    use prost::Message;
+    if member_id.is_empty() || member_id.len() > dsm::storage_cell::MAX_MEMBER_ID_LEN {
+        anyhow::bail!("member id cannot name a ByteCommit");
+    }
     let mut client = pool.get().await?;
     let tx = begin_durable_write(&mut client).await?;
-    for (namespace, key, value) in entries {
-        if namespace.is_empty() || key.len() != 32 {
-            anyhow::bail!("batch put: an entry names no cell");
-        }
-        tx.execute(
-            "INSERT INTO cells (namespace, cell_key, value) VALUES ($1, $2, $3)",
-            &[namespace, key, value],
+    // One closer at a time; puts are not blocked.
+    tx.execute(
+        "SELECT pg_advisory_xact_lock($1)",
+        &[&0x4453_4D42_434C_4F53_i64],
+    )
+    .await?;
+    let last = tx
+        .query_opt(
+            "SELECT commit_pb FROM own_bytecommits ORDER BY cycle_index DESC LIMIT 1",
+            &[],
         )
-        .await?;
+        .await?
+        .map(|r| decode_commit(&r.get::<_, Vec<u8>>(0)))
+        .transpose()?;
+    let pending: bool = tx
+        .query_one(
+            "SELECT EXISTS (SELECT 1 FROM cells WHERE committed_cycle IS NULL)",
+            &[],
+        )
+        .await?
+        .get(0);
+    if !pending {
+        tx.commit().await?;
+        return Ok(last);
     }
+    let cycle = last.as_ref().map_or(1, |c| c.cycle_index + 1);
+    let cycle_i64 = i64::try_from(cycle)?;
+    tx.execute(
+        "UPDATE cells SET committed_cycle = $1 WHERE committed_cycle IS NULL",
+        &[&cycle_i64],
+    )
+    .await?;
+    let leaves = cell_leaves_tx(&tx, cycle_i64).await?;
+    let tree =
+        dsm::storage_cell::cell_tree(leaves.iter().map(|(n, k, i, h)| (n.as_slice(), k, *i, h)));
+    let bytes_used: i64 = tx
+        .query_one(
+            "SELECT COALESCE((SELECT SUM(LENGTH(value)) FROM cells), 0)::BIGINT
+                  + COALESCE((SELECT SUM(LENGTH(payload)) FROM immutable_objects), 0)::BIGINT",
+            &[],
+        )
+        .await?
+        .get(0);
+    let commit = dsm::storage_cell::ByteCommit {
+        member_id: member_id.to_vec(),
+        cycle_index: cycle,
+        smt_root: *tree.root(),
+        bytes_used: u64::try_from(bytes_used.max(0))?,
+        parent_digest: last.as_ref().map_or([0u8; 32], |c| c.digest()),
+    };
+    let digest = commit.digest();
+    tx.execute(
+        "INSERT INTO own_bytecommits (cycle_index, digest, commit_pb) VALUES ($1, $2, $3)",
+        &[
+            &cycle_i64,
+            &digest.as_slice(),
+            &commit.to_proto().encode_to_vec(),
+        ],
+    )
+    .await?;
     tx.commit().await?;
-    Ok(())
+    Ok(Some(commit))
 }
 
-/// Everything held for `(namespace, key)`, in the order it arrived.
-pub async fn get_cell_values(pool: &Pool, namespace: &[u8], key: &[u8]) -> Result<Vec<Vec<u8>>> {
+fn decode_commit(bytes: &[u8]) -> Result<dsm::storage_cell::ByteCommit> {
+    use prost::Message;
+    let p = dsm::types::proto::ByteCommitV4::decode(bytes)?;
+    dsm::storage_cell::ByteCommit::from_proto(&p)
+        .ok_or_else(|| anyhow::anyhow!("stored ByteCommit is malformed"))
+}
+
+type CellLeaf = (Vec<u8>, [u8; 32], u64, [u8; 32]);
+
+/// Every cell's latest entry committed at or before `cycle`.
+async fn cell_leaves_tx(
+    tx: &deadpool_postgres::Transaction<'_>,
+    cycle: i64,
+) -> Result<Vec<CellLeaf>> {
+    let rows = tx
+        .query(
+            "SELECT DISTINCT ON (namespace, cell_key)
+                    namespace, cell_key, arrival_index, running_hash
+             FROM cells WHERE committed_cycle <= $1
+             ORDER BY namespace, cell_key, arrival_index DESC",
+            &[&cycle],
+        )
+        .await?;
+    rows.iter().map(row_to_leaf).collect()
+}
+
+fn row_to_leaf(r: &tokio_postgres::Row) -> Result<CellLeaf> {
+    let key: Vec<u8> = r.get(1);
+    let i: i64 = r.get(2);
+    let h: Vec<u8> = r.get(3);
+    Ok((
+        r.get(0),
+        key.as_slice()
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("cell key is not 32 bytes"))?,
+        u64::try_from(i)?,
+        h.as_slice()
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("stored running hash is not 32 bytes"))?,
+    ))
+}
+
+/// This node's ByteCommit for `cycle`, or its latest when `cycle` is `None`.
+pub async fn get_own_bytecommit(
+    pool: &Pool,
+    cycle: Option<u64>,
+) -> Result<Option<dsm::storage_cell::ByteCommit>> {
+    let client = pool.get().await?;
+    let row = match cycle {
+        Some(t) => {
+            client
+                .query_opt(
+                    "SELECT commit_pb FROM own_bytecommits WHERE cycle_index = $1",
+                    &[&i64::try_from(t)?],
+                )
+                .await?
+        }
+        None => {
+            client
+                .query_opt(
+                    "SELECT commit_pb FROM own_bytecommits ORDER BY cycle_index DESC LIMIT 1",
+                    &[],
+                )
+                .await?
+        }
+    };
+    row.map(|r| decode_commit(&r.get::<_, Vec<u8>>(0)))
+        .transpose()
+}
+
+/// The proof that this node's ByteCommit for `cycle` commits `(namespace,
+/// key)`'s latest entry as of that cycle. `None` if the cycle does not exist
+/// or the cell had no entry committed by then.
+pub async fn cell_commit_proof(
+    pool: &Pool,
+    namespace: &[u8],
+    key: &[u8; 32],
+    cycle: u64,
+) -> Result<Option<dsm::storage_cell::CellCommitProof>> {
+    let mut client = pool.get().await?;
+    let tx = client.build_transaction().read_only(true).start().await?;
+    let cycle_i64 = i64::try_from(cycle)?;
+    let exists: bool = tx
+        .query_one(
+            "SELECT EXISTS (SELECT 1 FROM own_bytecommits WHERE cycle_index = $1)",
+            &[&cycle_i64],
+        )
+        .await?
+        .get(0);
+    if !exists {
+        return Ok(None);
+    }
+    let leaves = cell_leaves_tx(&tx, cycle_i64).await?;
+    tx.commit().await?;
+    let Some((_, _, index, running_hash)) = leaves
+        .iter()
+        .find(|(n, k, _, _)| n.as_slice() == namespace && k == key)
+        .cloned()
+    else {
+        return Ok(None);
+    };
+    let tree =
+        dsm::storage_cell::cell_tree(leaves.iter().map(|(n, k, i, h)| (n.as_slice(), k, *i, h)));
+    Ok(dsm::storage_cell::CellCommitProof::from_tree(
+        &tree,
+        namespace,
+        key,
+        index,
+        running_hash,
+    ))
+}
+
+/// Keep a ByteCommit this node fetched from `member_id` itself. Idempotent
+/// for identical bytes; a different ByteCommit for the same cycle is kept
+/// beside the first as evidence. Returns whether it was not already held.
+pub async fn mirror_put(pool: &Pool, commit: &dsm::storage_cell::ByteCommit) -> Result<bool> {
+    use prost::Message;
+    let client = pool.get().await?;
+    let inserted = client
+        .execute(
+            "INSERT INTO bytecommit_mirror (member_id, cycle_index, digest, commit_pb)
+             VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
+            &[
+                &commit.member_id,
+                &i64::try_from(commit.cycle_index)?,
+                &commit.digest().as_slice(),
+                &commit.to_proto().encode_to_vec(),
+            ],
+        )
+        .await?;
+    Ok(inserted == 1)
+}
+
+/// Every distinct ByteCommit this node mirrored for `member_id` at `cycle`.
+pub async fn mirror_get(
+    pool: &Pool,
+    member_id: &[u8],
+    cycle: u64,
+) -> Result<Vec<dsm::storage_cell::ByteCommit>> {
     let client = pool.get().await?;
     let rows = client
         .query(
-            "SELECT value FROM cells WHERE namespace = $1 AND cell_key = $2 ORDER BY seq ASC",
-            &[&namespace, &key],
+            "SELECT commit_pb FROM bytecommit_mirror
+             WHERE member_id = $1 AND cycle_index = $2 ORDER BY digest",
+            &[&member_id, &i64::try_from(cycle)?],
         )
         .await?;
-    Ok(rows.iter().map(|r| r.get::<_, Vec<u8>>(0)).collect())
+    rows.iter()
+        .map(|r| decode_commit(&r.get::<_, Vec<u8>>(0)))
+        .collect()
+}
+
+/// The highest cycle mirrored for `member_id`, 0 if none.
+pub async fn mirror_last_cycle(pool: &Pool, member_id: &[u8]) -> Result<u64> {
+    let client = pool.get().await?;
+    let t: Option<i64> = client
+        .query_one(
+            "SELECT MAX(cycle_index) FROM bytecommit_mirror WHERE member_id = $1",
+            &[&member_id],
+        )
+        .await?
+        .get(0);
+    Ok(u64::try_from(t.unwrap_or(0))?)
 }
 
 /// Append a content address under `locator`. Never removed.
