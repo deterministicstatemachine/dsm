@@ -155,6 +155,20 @@ impl SparseMerkleTree {
         }
     }
 
+    /// Build a tree holding exactly `leaves`, computing the root once. A
+    /// later duplicate key replaces an earlier one. No capacity: nothing is
+    /// evicted.
+    pub fn from_leaves(leaves: impl IntoIterator<Item = ([u8; 32], [u8; 32])>) -> Self {
+        let mut tree = Self::new(usize::MAX);
+        for (key, value) in leaves {
+            if tree.leaves.insert(key, value).is_none() {
+                tree.eviction_order.push_back(key);
+            }
+        }
+        tree.root = tree.compute_subtree_hash(0);
+        tree
+    }
+
     /// Update a leaf value and recompute the root.
     ///
     /// The key must be a 256-bit relationship identifier computed via

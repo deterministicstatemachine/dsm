@@ -49,14 +49,21 @@ id = "__NODE_ID__"
 # Re-running phase 1 on a node that has already minted an incarnation is safe:
 # the value is write-once and is read back, never regenerated.
 #
+# `endpoint` is where this node reaches that set-mate to mirror its
+# ByteCommits (storage spec §14). Every member other than this node needs one:
+# a node mirrors every set-mate, and fetches one only at the endpoint named
+# here. The node refuses to start if a set-mate has none.
+#
 # [storage_set]
 # [[storage_set.members]]
 # id = "dsm-node-1"
 # register_incarnation = "<from that node's phase-1 log>"
+# endpoint = "https://<dsm-node-1 address>:8080"
 #
 # [[storage_set.members]]
 # id = "dsm-node-2"
 # register_incarnation = "<from that node's phase-1 log>"
+# endpoint = "https://<dsm-node-2 address>:8080"
 
 [network]
 listen_addr = "__LISTEN_ADDR__"

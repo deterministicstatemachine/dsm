@@ -541,6 +541,16 @@ impl std::fmt::Display for StorageNodeError {
 
 impl std::error::Error for StorageNodeError {}
 
+/// Whether an arrival record names the member and cell just written.
+fn record_names(
+    rec: &dsm::storage_cell::ArrivalRecord,
+    member_id: &str,
+    namespace: &[u8],
+    key: &[u8],
+) -> bool {
+    rec.member_id == member_id.as_bytes() && rec.namespace == namespace && rec.key[..] == *key
+}
+
 impl StorageNodeClient {
     pub async fn new(config: StorageNodeConfig) -> Result<Self, StorageNodeError> {
         let client = build_ca_aware_client();
@@ -897,14 +907,19 @@ impl StorageNodeClient {
     }
 
     /// Part II §12, put at a key: the member stores the bytes after anything
-    /// it already holds there, and interprets nothing. `204` is the only
-    /// success; there is no refusal to classify.
+    /// it already holds there, and interprets nothing. It answers with the
+    /// entry's arrival record (storage spec §6, §14), which becomes this
+    /// seat's route link. `200` with a well-formed record naming `member_id`
+    /// and this cell is the only success; there is no refusal to classify.
     pub async fn put_cell(
         &self,
+        member_id: &str,
         namespace: &[u8],
         key_b32: &str,
         value: &[u8],
-    ) -> Result<(), String> {
+    ) -> Result<dsm::storage_cell::ArrivalRecord, String> {
+        let key = crate::util::text_id::decode_base32_crockford(key_b32)
+            .ok_or_else(|| "cell key is not Base32 Crockford".to_string())?;
         let url = format!("{base}/api/v2/cell/{key_b32}", base = self.node_info.url);
         let ns =
             core::str::from_utf8(namespace).map_err(|_| "namespace is not UTF-8".to_string())?;
@@ -917,14 +932,34 @@ impl StorageNodeClient {
             .await
             .map_err(|e| format!("HTTP request failed: {e}"))?;
         match response.status().as_u16() {
-            204 => Ok(()),
+            200 => {
+                use prost::Message;
+                let body = response
+                    .bytes()
+                    .await
+                    .map_err(|e| format!("cell put: reading the record failed: {e}"))?;
+                let rec = dsm::types::proto::ArrivalRecordV1::decode(body.as_ref())
+                    .map_err(|_| "cell put: the answer is not an arrival record".to_string())?;
+                let rec = dsm::storage_cell::ArrivalRecord::from_proto(&rec)
+                    .ok_or_else(|| "cell put: malformed arrival record".to_string())?;
+                if !record_names(&rec, member_id, namespace, &key) {
+                    return Err("cell put: the record names another member or cell".into());
+                }
+                Ok(rec)
+            }
             status => Err(format!("cell put answered HTTP {status}")),
         }
     }
 
     /// Part II §17.4: several keys in ONE local transaction at the member —
     /// all of them or none of them. Each entry is `(namespace, key, value)`.
-    pub async fn put_cells(&self, entries: &[(Vec<u8>, [u8; 32], Vec<u8>)]) -> Result<(), String> {
+    /// Answers with each entry's arrival record, in batch order, each naming
+    /// `member_id` and its entry's cell.
+    pub async fn put_cells(
+        &self,
+        member_id: &str,
+        entries: &[(Vec<u8>, [u8; 32], Vec<u8>)],
+    ) -> Result<Vec<dsm::storage_cell::ArrivalRecord>, String> {
         use prost::Message;
         let url = format!("{base}/api/v2/cells", base = self.node_info.url);
         let batch = dsm::types::proto::CellPutsV1 {
@@ -945,7 +980,29 @@ impl StorageNodeClient {
             .await
             .map_err(|e| format!("HTTP request failed: {e}"))?;
         match response.status().as_u16() {
-            204 => Ok(()),
+            200 => {
+                let body = response
+                    .bytes()
+                    .await
+                    .map_err(|e| format!("cells put: reading the records failed: {e}"))?;
+                let recs = dsm::types::proto::ArrivalRecordsV1::decode(body.as_ref())
+                    .map_err(|_| "cells put: the answer is not arrival records".to_string())?;
+                if recs.records.len() != entries.len() {
+                    return Err("cells put: one arrival record per entry was not returned".into());
+                }
+                recs.records
+                    .iter()
+                    .zip(entries)
+                    .map(|(r, (namespace, key, _))| {
+                        let rec = dsm::storage_cell::ArrivalRecord::from_proto(r)
+                            .ok_or_else(|| "cells put: malformed arrival record".to_string())?;
+                        if !record_names(&rec, member_id, namespace, key) {
+                            return Err("cells put: a record names another member or cell".into());
+                        }
+                        Ok(rec)
+                    })
+                    .collect()
+            }
             status => Err(format!("cells put answered HTTP {status}")),
         }
     }
@@ -1396,7 +1453,7 @@ impl StorageNodeSDK {
         namespace: &[u8],
         key_b32: &str,
         value: &[u8],
-    ) -> Result<(), String> {
+    ) -> Result<dsm::storage_cell::ArrivalRecord, String> {
         let member = set
             .members()
             .get(member)
@@ -1406,7 +1463,9 @@ impl StorageNodeSDK {
             .iter()
             .find(|c| c.node_info.url == member.endpoint)
             .ok_or_else(|| "no client for this member's endpoint".to_string())?;
-        client.put_cell(namespace, key_b32, value).await
+        client
+            .put_cell(&member.member_id, namespace, key_b32, value)
+            .await
     }
 
     /// Part II §8, the write procedure: the leader of the cell (an index into
@@ -1432,11 +1491,14 @@ impl StorageNodeSDK {
                 .find(|c| c.node_info.url == member.endpoint);
             let result = match client {
                 None => Err("no client for this member's endpoint".to_string()),
-                Some(c) => c.put_cell(namespace, key_b32, value).await,
+                Some(c) => {
+                    c.put_cell(&member.member_id, namespace, key_b32, value)
+                        .await
+                }
             };
             match result {
-                Ok(()) if i == leader => fanout.leader_reached = true,
-                Ok(()) => fanout.copies += 1,
+                Ok(_) if i == leader => fanout.leader_reached = true,
+                Ok(_) => fanout.copies += 1,
                 Err(e) => fanout.errors.push((member.member_id.clone(), e)),
             }
         }
@@ -1463,11 +1525,11 @@ impl StorageNodeSDK {
                 .find(|c| c.node_info.url == member.endpoint);
             let result = match client {
                 None => Err("no client for this member's endpoint".to_string()),
-                Some(c) => c.put_cells(entries).await,
+                Some(c) => c.put_cells(&member.member_id, entries).await,
             };
             match result {
-                Ok(()) if i == leader => fanout.leader_reached = true,
-                Ok(()) => fanout.copies += 1,
+                Ok(_) if i == leader => fanout.leader_reached = true,
+                Ok(_) => fanout.copies += 1,
                 Err(e) => fanout.errors.push((member.member_id.clone(), e)),
             }
         }
@@ -5694,6 +5756,23 @@ mod tests {
         let (s2, p2) = StorageNodeSDK::build_initial_device_tree_payload([0x02u8; 32]).unwrap();
         assert_ne!(s1.root_hash, s2.root_hash);
         assert_ne!(p1, p2);
+    }
+
+    /// An arrival record is accepted only for the member and cell just
+    /// written: another seat's or another cell's record is not this link.
+    #[test]
+    fn an_arrival_record_must_name_the_member_and_cell_written() {
+        let rec = dsm::storage_cell::ArrivalRecord {
+            member_id: b"dsm-node-1".to_vec(),
+            namespace: b"DSM/n".to_vec(),
+            key: [3u8; 32],
+            index: 1,
+            running_hash: [4u8; 32],
+        };
+        assert!(record_names(&rec, "dsm-node-1", b"DSM/n", &[3u8; 32]));
+        assert!(!record_names(&rec, "dsm-node-2", b"DSM/n", &[3u8; 32]));
+        assert!(!record_names(&rec, "dsm-node-1", b"DSM/m", &[3u8; 32]));
+        assert!(!record_names(&rec, "dsm-node-1", b"DSM/n", &[5u8; 32]));
     }
 }
 

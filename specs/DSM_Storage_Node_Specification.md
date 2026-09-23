@@ -404,6 +404,25 @@ If `Final(K, x)` held before the loss, `x`'s chain was held by the leader and tw
 
 Each keyed-cell entry is committed with its per-key arrival index and the member's running hash for that key, `hi = H(running hash of the key before the entry ∥ digest of the entry)`, so that arrival records (§6), route links (§9), handover (§12.5) and pre-loss partitioning (§12.6) are checkable against mirrored commitments.
 
+**Rule — keyed-cell commitment formats (Owner decision, 2026-09-23)**
+
+`H_dom(d, x) = BLAKE3(d ‖ 0x00 ‖ x)`, the same primitive as immutable addressing (§5). `N` is the namespace bytes and `K` the 32-byte key. Integers are 8-byte big-endian.
+
+1. **Entry digest.** `d_i = H_dom(DSM/storage/cell-entry/v1, v_i)`, where `v_i` is the `i`-th value the member holds at `(N, K)`.
+2. **Running hash.** `h_0 = H_dom(DSM/storage/cell-run-init/v1, N ‖ K)` and `h_i = H_dom(DSM/storage/cell-run/v1, h_(i-1) ‖ d_i)`. The arrival index `i` starts at 1.
+3. **Arrival record.** `ArrivalRecordV1 { member id, N, K, i, h_i }`, where the member id is the seat's member id bytes exactly as the storage set commits them (§10, §11). A put returns the record of the entry it created. A get returns every entry's index and running hash beside its value.
+4. **Committed leaf.** The SMT whose root a ByteCommit carries holds one leaf per `(N, K)`, at key `H_dom(DSM/storage/cell-leaf-key/v1, N ‖ K)`, with value `H_dom(DSM/storage/cell-leaf/v1, i ‖ h_i)` for the latest entry. An earlier arrival record is checked by replaying the values from `h_0` to the committed running hash.
+5. **Route entry.** A writer writes to each seat of the route a `RouteEntryV1 { N, K, value, seat member id, route position 0–4, chain }`, where `chain` holds the links collected at the earlier positions. The link at a seat is the arrival record that seat returned for that entry. Because the entry's bytes carry the chain, each link commits the ones before it (§9). A position with no link carries an empty: `taken`, with the arrival record showing another value's chain first at that seat, or `no_response`.
+
+**Rule — ByteCommit format, closing and proofs (Owner decision, 2026-09-23)**
+
+1. **Fields.** `ByteCommitV4 { member id, t, root, bytes used, parent }`. The member id is the seat's member id bytes exactly as the storage set commits them. `t` starts at 1. `parent` is the previous ByteCommit's digest, or 32 zero bytes at `t = 1`. Bytes used counts the member's cell values and immutable payloads.
+2. **Digest.** `d_t = H_dom(DSM/storage/bytecommit/v1, len(M) ‖ M ‖ t ‖ root ‖ bytes used ‖ parent)`, with `len(M)` as 2 bytes and the integers as 8 bytes, big-endian. The digest is computed from the fields, never from a transport encoding.
+3. **Root.** `root` is the root of the DSM 256-bit sparse Merkle tree whose leaves are the committed cell leaves (keyed-cell formats, item 4), one per cell, for each cell's latest entry committed at or before `t`.
+4. **Closing.** A cycle closes when any party asks and at least one cell entry has arrived since the last close. A quiet node emits nothing. Closing assigns every entry that arrived since the last close to cycle `t`, so the set of entries committed by `t` is a prefix of every key's arrival order. Whether cycles must also close at a regular cadence is part of the open performance criterion (§24 item 4).
+5. **Proof.** For a cell and a cycle, a member answers with the cell's latest entry committed by that cycle (its index and running hash) and the SMT inclusion proof of the cell's leaf. A verifier checks the proof against the root of a ByteCommit it obtained from a mirror (below), never against one the member vouches for alone. An arrival record is committed when such a proof verifies, the proven index is at or after the record's, and the member's values replay to both running hashes.
+6. **Mirror sync.** Any party may ask a node to update its mirror. Nothing the caller sends chooses a peer or supplies a byte: the node fetches from each set-mate at the address in its own configuration, and keeps a fetched ByteCommit only if the answering node's echoed member id equals the member id the ByteCommit names and that member is in its set. The node checks nothing else. Every distinct ByteCommit for a member and cycle is kept, so an equivocation remains visible.
+
 **Rule — mirror provenance (Owner decision, 2026-09-22)**
 
 1. A node mirrors the ByteCommits of every node it shares a storage set with, by fetching them from that node itself.
@@ -560,7 +579,7 @@ No safety property, and no party's liveness other than the owner's own, may depe
 | 3 | Consequences of `Frozen(K)`, and whether it triggers the tripwire (§12.6). |
 | 4 | The performance criterion for pruning, expressible over committed evidence (§13). Cadence regularity (§9.1, §13.7) is one criterion; the rest are undecided. |
 | 5 | Whether vaults keep a single network-pinned set as the network grows (§10). |
-| 6 | Wire formats and domain tags for retirement, loss, handover, and registry-successor objects, for arrival records, route links, empties and the per-key running hash (§6, §9, §14), and for payment receipts (§16). |
+| 6 | Wire formats and domain tags for retirement, loss, handover, and registry-successor objects (§12, §13), and for payment receipts (§16). Arrival records, route links, empties and the per-key running hash were settled on 2026-09-23 (§14). |
 | 7 | The challenge deadline X, and the wire form of challenges and drop claims (§9.1). |
 | 8 | The credit price, its token, and how a price change is made (§17). |
 | 9 | How a credit payment is split among the five operators that store a write (§17). |

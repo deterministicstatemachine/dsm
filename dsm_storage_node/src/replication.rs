@@ -219,6 +219,11 @@ impl ReplicationManager {
         self.local_node_id
     }
 
+    /// The client this node uses for peer requests (TLS-pinned in production).
+    pub fn http_client(&self) -> &Client {
+        &self.client
+    }
+
     /// Get the current set of alive nodes
     #[allow(clippy::disallowed_methods)]
     pub fn get_alive_nodes(&self) -> Vec<pb::StorageNodeInfoV1> {

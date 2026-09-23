@@ -1,430 +1,257 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! DSM ByteCommit endpoints (deterministic, clockless, raw bytes)
-//! - Publish ByteCommit or mirror under deterministic address.
-//! - Capacity enforced per DLV slot.
-//! - Raw bytes only ("application/octet-stream").
-//! - No JSON, no wall-clock markers, no signatures verified here (nodes are dumb).
+//! ByteCommits (storage spec §14): this node's own chain, the proofs that it
+//! commits a cell's entries, and its mirror of its set-mates' chains.
+//!
+//! - **Close.** A cycle closes when anyone asks and at least one cell entry
+//!   has arrived since the last one. Nothing reads a clock: the cycle index
+//!   is a counter, and a quiet node emits nothing. Closing stamps the new
+//!   entries with the cycle, so a later proof for that cycle is exactly what
+//!   the ByteCommit committed.
+//! - **Proof.** For a cell and a cycle, the latest entry committed by then
+//!   and its SMT inclusion proof. The proof is checked by the verifier
+//!   against the root in a ByteCommit it got elsewhere (its own mirror read),
+//!   so a node cannot vouch for itself.
+//! - **Mirror.** A node mirrors a set-mate's ByteCommits only by fetching
+//!   them from that set-mate at the endpoint its own configuration names for
+//!   that member. There is no write path into the mirror: a third party's
+//!   bytes never enter it. The node checks only that the answer names the
+//!   member configured at that endpoint (the echoed id and the ByteCommit's
+//!   member id are both that member); it does not check chain links or
+//!   roots. Verifiers do. Every `/latest` answer is kept, so a member that
+//!   serves a different ByteCommit for a cycle already mirrored shows as an
+//!   equivocation.
+//!
+//! The node signs nothing and holds no key. ByteCommits are unsigned.
 
-#[cfg(feature = "dev-replication")]
-use crate::dev_replication;
-#[cfg(feature = "dev-replication")]
-use crate::timing::ExponentialBackoffTiming;
 use axum::{
     body::Bytes,
     extract::{Extension, Path},
-    http::{HeaderMap, HeaderValue, StatusCode},
-    response::IntoResponse,
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
     routing::{get, post},
     Router,
 };
-use log::{info, warn};
+use prost::Message;
 use std::sync::Arc;
 
-use crate::api::infra::hardening::{
-    blake3_tagged, mirror_set_w, window_index, B_GLOBAL, DOM_BYTECOMMIT, DOM_OBJ_BYTECOMMIT,
-    DOM_WIN_SEED,
-};
+use crate::api::cells::{digest32, namespace, octets};
 use crate::db;
 use crate::AppState;
+use dsm::storage_cell::ByteCommit;
 use dsm_sdk::util::text_id;
 
-use prost::Message;
+const CYCLE_HEADER: &str = "x-cycle";
+const ECHO_HEADER: &str = "x-dsm-node-id";
+/// Upper bound on cycles fetched from one member in one sync, so one request
+/// does bounded work; a later sync continues where this one stopped.
+const MAX_SYNC_CYCLES: u64 = 1024;
 
-/// Minimal ByteCommitV3 message used by storage nodes.
-///
-/// NOTE: This lives in the storage node crate because the node is signature-free and
-/// acts as a dumb mirror. Devices/verifiers re-check hashes and chain links.
-#[derive(Clone, PartialEq, Message)]
-pub struct ByteCommitV3 {
-    /// 32 bytes node id (content-addressed identifier)
-    #[prost(bytes = "vec", tag = "1")]
-    pub node_id: Vec<u8>,
-    /// cycle index t
-    #[prost(uint64, tag = "2")]
-    pub cycle_index: u64,
-    /// 32 bytes SMT root for node storage
-    #[prost(bytes = "vec", tag = "3")]
-    pub smt_root: Vec<u8>,
-    /// bytes used in this partition
-    #[prost(uint64, tag = "4")]
-    pub bytes_used: u64,
-    /// 32 bytes parent digest (H(B_{t-1})) or all-zero for t=0
-    #[prost(bytes = "vec", tag = "5")]
-    pub parent_digest: Vec<u8>,
-}
-
-// ---------------------- header keys ----------------------
-const HDR_DLV_ID: &str = "x-dlv-id"; // base32 32B DLV partition id
-const HDR_CAPACITY: &str = "x-capacity-bytes"; // optional i64 for new slot
-const HDR_STAKE_HASH: &str = "x-stake-hash"; // optional base32 bytes for new slot
-const HDR_CYCLE_INDEX: &str = "x-cycle-index"; // u64 ASCII
-const HDR_OBJ_ADDR: &str = "x-object-address"; // response header
-
-// ---------------------- helpers --------------------------
-
-/// dt := H("DSM/bytecommit\0" || ProtoDet(Bt))  (opaque to server)
-#[inline]
-fn bytecommit_digest_bytes(bytes: &[u8]) -> [u8; 32] {
-    blake3_tagged(DOM_BYTECOMMIT, bytes)
-}
-
-/// addrB_t := H("DSM/obj-bytecommit\0" || node_id || t || dt)
-#[inline]
-fn bytecommit_addr(node_id: &[u8; 32], cycle_index: u64, dt: &[u8; 32]) -> String {
-    let mut body = Vec::with_capacity(32 + 8 + dt.len());
-    body.extend_from_slice(node_id);
-    body.extend_from_slice(&cycle_index.to_be_bytes());
-    body.extend_from_slice(dt);
-    let digest = blake3_tagged(DOM_OBJ_BYTECOMMIT, &body);
-    text_id::encode_base32_crockford(&digest)
-}
-
-pub fn create_router(state: Arc<crate::AppState>) -> Router<()> {
+pub fn create_router(state: Arc<AppState>) -> Router<()> {
     Router::new()
-        .route("/api/v2/bytecommit/publish", post(publish_bytecommit))
-        .route("/api/v2/bytecommit/by-addr/{addr}", get(get_by_addr))
+        .route("/api/v2/bytecommit/close", post(close))
+        .route("/api/v2/bytecommit/latest", get(latest))
+        .route("/api/v2/bytecommit/cycle/{cycle}", get(by_cycle))
+        .route("/api/v2/bytecommit/proof/{key}", get(proof))
+        .route("/api/v2/bytecommit/mirror/sync", post(mirror_sync))
+        .route(
+            "/api/v2/bytecommit/mirror/{member}/{cycle}",
+            get(mirror_read),
+        )
         .layer(Extension(state))
 }
 
-/// Publish a ByteCommit or its mirror under deterministic address.
-/// Required: x-dlv-id, x-node-id, x-cycle-index. Optional: x-peer-id for mirror.
-/// Optional slot bootstrap: x-capacity-bytes + x-stake-hash.
-pub async fn publish_bytecommit(
-    Extension(state): Extension<Arc<crate::AppState>>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Result<impl IntoResponse, StatusCode> {
-    if body.is_empty() {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-
-    let dlv_id_b = headers
-        .get(HDR_DLV_ID)
-        .and_then(|v| v.to_str().ok())
-        .and_then(text_id::decode_base32_crockford)
-        .ok_or(StatusCode::BAD_REQUEST)?;
-
-    let cycle_index: u64 = headers
-        .get(HDR_CYCLE_INDEX)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.parse::<u64>().ok())
-        .ok_or(StatusCode::BAD_REQUEST)?;
-
-    // Slot bootstrap (optional)
-    let capacity_opt = headers
-        .get(HDR_CAPACITY)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.parse::<i64>().ok());
-    let stake_hash_opt = headers
-        .get(HDR_STAKE_HASH)
-        .and_then(|v| v.to_str().ok())
-        .and_then(text_id::decode_base32_crockford);
-
-    // Ensure slot exists (create iff capacity+stake provided)
-    let pool = &*state.db_pool;
-    let mut exists = db::slot_exists(pool, &dlv_id_b).await.map_err(|e| {
-        warn!("bytecommit: slot_exists DB error: {e}");
+fn internal(context: &str) -> impl Fn(anyhow::Error) -> StatusCode + '_ {
+    move |e| {
+        log::error!("bytecommit {context}: {e}");
         StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-    if !exists {
-        match (capacity_opt, stake_hash_opt.as_ref()) {
-            (Some(cap), Some(stake)) => {
-                db::create_slot(pool, &dlv_id_b, cap, stake)
-                    .await
-                    .map_err(|e| {
-                        warn!("bytecommit: create_slot DB error: {e}");
-                        StatusCode::INTERNAL_SERVER_ERROR
-                    })?;
-                exists = db::slot_exists(pool, &dlv_id_b).await.map_err(|e| {
-                    warn!("bytecommit: slot_exists (post-create) DB error: {e}");
-                    StatusCode::INTERNAL_SERVER_ERROR
-                })?;
-            }
-            _ => return Err(StatusCode::PRECONDITION_REQUIRED),
-        }
     }
-    if !exists {
-        warn!("bytecommit: slot still does not exist after creation attempt");
-        return Err(StatusCode::INTERNAL_SERVER_ERROR);
-    }
+}
 
-    // Decode minimal ByteCommitV3 to bind addressing to the canonical node_id bytes.
-    let commit = ByteCommitV3::decode(body.as_ref()).map_err(|_| StatusCode::BAD_REQUEST)?;
-    if commit.node_id.len() != 32 {
-        return Err(StatusCode::BAD_REQUEST);
+/// `204` asserts this node has no ByteCommit yet; `200` carries the latest.
+fn commit_or_absent(commit: Option<ByteCommit>) -> Response {
+    match commit {
+        Some(c) => octets(c.to_proto().encode_to_vec()),
+        None => StatusCode::NO_CONTENT.into_response(),
     }
-    if commit.cycle_index != cycle_index {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-    let mut node_id_arr = [0u8; 32];
-    node_id_arr.copy_from_slice(&commit.node_id);
+}
 
-    // Deterministic address (spec): addrB_t := H("DSM/obj-bytecommit\0" || node_id || t || dt)
-    let dt = bytecommit_digest_bytes(&body);
-    let addr = bytecommit_addr(&node_id_arr, cycle_index, &dt);
-
-    // Mirror-set computation from live registry
-    let win_seed = blake3_tagged(DOM_WIN_SEED, &dt);
-    let _t = window_index(B_GLOBAL);
-    let active_positions: Vec<Vec<u8>> = db::get_active_registry_node_ids(pool)
+/// Close the next cycle if anything arrived since the last; answer with the
+/// latest ByteCommit either way.
+async fn close(Extension(state): Extension<Arc<AppState>>) -> Result<Response, StatusCode> {
+    let commit = db::close_cycle(&state.db_pool, state.configured_member_id.as_bytes())
         .await
-        .unwrap_or_default();
-    let expected_mirrors = mirror_set_w(
-        node_id_arr.as_slice(),
-        win_seed,
-        &active_positions,
-        node_id_arr.as_slice(),
-    );
-    info!(
-        "bytecommit.publish: mirror-set computed ({} mirrors from {} active positions)",
-        expected_mirrors.len(),
-        active_positions.len()
-    );
+        .map_err(internal("close"))?;
+    Ok(commit_or_absent(commit))
+}
 
-    // Store with atomic capacity check
-    let new_size: i64 = body.len() as i64;
-    db::upsert_object_with_capacity_check(pool, &addr, body.as_ref(), &dlv_id_b, new_size)
+async fn latest(Extension(state): Extension<Arc<AppState>>) -> Result<Response, StatusCode> {
+    let commit = db::get_own_bytecommit(&state.db_pool, None)
         .await
-        .map_err(|e| {
-            if e.to_string().contains("capacity_exceeded") {
-                warn!("DLV capacity exceeded: {}", e);
-                StatusCode::INSUFFICIENT_STORAGE
-            } else {
-                StatusCode::INTERNAL_SERVER_ERROR
-            }
-        })?;
+        .map_err(internal("latest"))?;
+    Ok(commit_or_absent(commit))
+}
 
-    #[cfg(feature = "dev-replication")]
+async fn by_cycle(
+    Extension(state): Extension<Arc<AppState>>,
+    Path(cycle): Path<u64>,
+) -> Result<Response, StatusCode> {
+    match db::get_own_bytecommit(&state.db_pool, Some(cycle))
+        .await
+        .map_err(internal("cycle"))?
     {
-        // Clockless durable replication:
-        // - enqueue jobs into the local DB outbox (idempotent)
-        // - optionally pump a bounded number of due jobs
-        //
-        // Scheduling is driven by an explicit `now_iter` supplied by the caller.
-        // This avoids wall-clock dependencies.
-        let now_iter = headers
-            .get("x-dsm-now-iter")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.parse::<i64>().ok())
-            .unwrap_or(0);
-
-        dev_replication::fanout_request_durable(
-            state.clone(),
-            reqwest::Method::POST,
-            "/api/v2/bytecommit/publish",
-            &headers
-                .iter()
-                .fold(reqwest::header::HeaderMap::new(), |mut acc, (k, v)| {
-                    // best-effort conversion: keep raw bytes
-                    if let Ok(name) = reqwest::header::HeaderName::from_bytes(k.as_str().as_bytes())
-                    {
-                        if let Ok(hv) = reqwest::header::HeaderValue::from_bytes(v.as_bytes()) {
-                            acc.insert(name, hv);
-                        }
-                    }
-                    acc
-                }),
-            body.to_vec(),
-            now_iter,
-        )
-        .await;
-
-        // Pump up to a small bounded number of jobs as part of the write path.
-        // This keeps eventual delivery moving without any timers.
-        let timing = ExponentialBackoffTiming::default();
-        let _ = dev_replication::pump_replication_outbox(state.clone(), &timing, now_iter, 8).await;
+        Some(c) => Ok(octets(c.to_proto().encode_to_vec())),
+        None => Err(StatusCode::NOT_FOUND),
     }
-
-    let mut out_headers = HeaderMap::new();
-    let _ = out_headers.insert(
-        HDR_OBJ_ADDR,
-        HeaderValue::from_str(&addr).unwrap_or_else(|_| HeaderValue::from_static("")),
-    );
-    info!("bytecommit.publish: addr={addr}");
-    Ok((StatusCode::OK, out_headers))
 }
 
-/// Production ByteCommit emitter for clockless storage regulation.
-///
-/// Builds and stores a verifiable ByteCommitV3 object as ordinary content under the
-/// deterministic address:
-///   addrB_t := H("DSM/obj-bytecommit\0" || node_id || t || H(Bt))
-///
-/// The node does not sign. Verifiers check:
-/// - deterministic protobuf encoding,
-/// - parent digest link,
-/// - SMT root correctness,
-/// - mirror quorum externally.
-pub async fn emit_cycle_commitment(
-    state: &AppState,
-    cycle_index: u64,
-) -> Result<[u8; 32], anyhow::Error> {
-    let pool = &*state.db_pool;
-
-    // Canonical 32-byte operator identity (single source of truth via AppState).
-    // Per spec §7, ByteCommit carries the same canonical node_id used in gossip
-    // and replica placement; no separate derivation is performed here.
-    let node_id_32 = *state.node_id.as_bytes();
-
-    // 1) Compute node storage stats (SMT root + bytes_used) over current served objects.
-    let (smt_root, bytes_used) = db::get_current_cycle_stats(pool).await?;
-
-    // 2) Parent digest for chain continuity.
-    // Spec chain link uses dt = H("DSM/bytecommit\0" || Bt).
-    let parent_digest = db::get_last_bytecommit_hash(pool, &node_id_32)
-        .await?
-        .unwrap_or([0u8; 32]);
-
-    // 3) Construct message.
-    let commit = ByteCommitV3 {
-        node_id: node_id_32.to_vec(),
-        cycle_index,
-        smt_root: smt_root.to_vec(),
-        bytes_used,
-        parent_digest: parent_digest.to_vec(),
-    };
-
-    // 4) Deterministic protobuf bytes + dt.
-    let mut commit_bytes = Vec::with_capacity(commit.encoded_len());
-    commit.encode(&mut commit_bytes)?;
-    let dt = bytecommit_digest_bytes(&commit_bytes);
-
-    // 5) Deterministic address and store as dumb content.
-    // Use a fixed internal DLV partition id for bytecommit namespace.
-    // NOTE: This is a binary DLV id; verifiers treat ByteCommits as ordinary mirrored bytes.
-    // Storage nodes must still enforce capacity via the shared DLV slot mechanism.
-    let dlv_id: &[u8] = b"bytecommit";
-    if !db::slot_exists(pool, dlv_id).await? {
-        return Err(anyhow::anyhow!(
-            "bytecommit slot missing: create a DLV slot for id={:?} before emitting",
-            dlv_id
-        ));
-    }
-    let addr = bytecommit_addr(&node_id_32, cycle_index, &dt);
-    db::upsert_object_with_capacity_check(
-        pool,
-        &addr,
-        &commit_bytes,
-        dlv_id,
-        commit_bytes.len() as i64,
-    )
-    .await?;
-    // Record chain pointer after the object is durably stored.
-    db::record_bytecommit_hash(pool, &node_id_32, cycle_index, &dt).await?;
-
-    Ok(dt)
-}
-
-/// Deterministic address computation exposed for testing.
-#[cfg(test)]
-pub(crate) fn _test_bytecommit_addr(node_id: &[u8; 32], cycle_index: u64, dt: &[u8; 32]) -> String {
-    bytecommit_addr(node_id, cycle_index, dt)
-}
-
-/// Fetch raw bytes by deterministic Base32 Crockford address.
-pub async fn get_by_addr(
-    Extension(state): Extension<Arc<crate::AppState>>,
-    Path(addr): Path<String>,
-) -> Result<impl IntoResponse, StatusCode> {
-    let bytes = db::get_object_by_key(&state.db_pool, &addr)
+/// The proof that this node's ByteCommit for `x-cycle` commits the cell's
+/// latest entry as of that cycle. `404` when the cycle does not exist or the
+/// cell had nothing committed by then.
+async fn proof(
+    Extension(state): Extension<Arc<AppState>>,
+    Path(key): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, StatusCode> {
+    let namespace = namespace(&headers)?;
+    let cycle: u64 = headers
+        .get(CYCLE_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse().ok())
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    let key: [u8; 32] = digest32(&key)?
+        .try_into()
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    match db::cell_commit_proof(&state.db_pool, &namespace, &key, cycle)
         .await
-        .map_err(|e| {
-            warn!("bytecommit: get_by_addr DB error for addr {addr}: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?
-        .ok_or(StatusCode::NOT_FOUND)?;
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        axum::http::header::CONTENT_TYPE,
-        HeaderValue::from_static("application/octet-stream"),
-    );
-    Ok((StatusCode::OK, headers, bytes))
+        .map_err(internal("proof"))?
+    {
+        Some(p) => Ok(octets(p.to_proto().encode_to_vec())),
+        None => Err(StatusCode::NOT_FOUND),
+    }
 }
 
-#[cfg(test)]
-#[allow(clippy::disallowed_methods)]
-mod tests {
-    use super::*;
-    use prost::Message;
+/// Every distinct ByteCommit this node mirrored for the member at the cycle,
+/// as `ByteCommitsV4`. An empty list is an answer: nothing mirrored there.
+async fn mirror_read(
+    Extension(state): Extension<Arc<AppState>>,
+    Path((member, cycle)): Path<(String, u64)>,
+) -> Result<Response, StatusCode> {
+    let member = text_id::decode_base32_crockford(member.trim())
+        .filter(|m| !m.is_empty())
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    let commits = db::mirror_get(&state.db_pool, &member, cycle)
+        .await
+        .map_err(internal("mirror read"))?;
+    let page = dsm::types::proto::ByteCommitsV4 {
+        commits: commits.iter().map(ByteCommit::to_proto).collect(),
+    };
+    Ok(octets(page.encode_to_vec()))
+}
 
-    #[test]
-    fn bytecommit_digest_is_deterministic() {
-        let data = b"hello bytecommit";
-        let d1 = bytecommit_digest_bytes(data);
-        let d2 = bytecommit_digest_bytes(data);
-        assert_eq!(d1, d2);
-    }
+/// Fetch every set-mate's new ByteCommits from the set-mate itself, at the
+/// endpoint this node's own configuration names for it. Anyone may ask;
+/// nothing the caller sends chooses a peer or supplies a byte. One sync runs
+/// at a time, and set-mates are fetched concurrently. Answers with the number
+/// of ByteCommits newly mirrored.
+async fn mirror_sync(
+    Extension(state): Extension<Arc<AppState>>,
+    _body: Bytes,
+) -> Result<Response, StatusCode> {
+    let Some(set) = state.storage_set.clone() else {
+        // A node that is in no set mirrors no one.
+        return Ok(octets(0u64.to_be_bytes().to_vec()));
+    };
+    let _one_at_a_time = state.mirror_sync.lock().await;
+    let own = state.configured_member_id.as_str();
+    let client = state.replication_manager.http_client().clone();
+    let syncs = set
+        .member_endpoints()
+        .filter(|(member, _)| *member != own)
+        .map(|(member, endpoint)| {
+            let (state, client) = (&state, &client);
+            async move {
+                sync_one(state, client, endpoint, member.as_bytes())
+                    .await
+                    // One unreachable set-mate is liveness, never a reason to stop.
+                    .unwrap_or_else(|e| {
+                        log::warn!("bytecommit mirror: {member} at {endpoint}: {e}");
+                        0
+                    })
+            }
+        });
+    let added: u64 = futures::future::join_all(syncs).await.into_iter().sum();
+    Ok(octets(added.to_be_bytes().to_vec()))
+}
 
-    #[test]
-    fn bytecommit_digest_differs_for_different_input() {
-        let d1 = bytecommit_digest_bytes(b"aaa");
-        let d2 = bytecommit_digest_bytes(b"bbb");
-        assert_ne!(d1, d2);
+/// Fetch `path` from `member`'s configured endpoint and return its
+/// ByteCommit, but only if the answering node echoes `member` and the
+/// ByteCommit names `member`. `Ok(None)` when the member has no ByteCommit yet.
+async fn fetch_commit(
+    client: &reqwest::Client,
+    endpoint: &str,
+    path: &str,
+    member: &[u8],
+) -> anyhow::Result<Option<ByteCommit>> {
+    let resp = client
+        .get(format!("{}{path}", endpoint.trim_end_matches('/')))
+        .send()
+        .await?;
+    match resp.status().as_u16() {
+        200 => {}
+        204 => return Ok(None),
+        s => anyhow::bail!("answered HTTP {s}"),
     }
+    let echoed = resp
+        .headers()
+        .get(ECHO_HEADER)
+        .map(|v| v.as_bytes().to_vec())
+        .ok_or_else(|| anyhow::anyhow!("no identity echo"))?;
+    if echoed != member {
+        anyhow::bail!("the node at this endpoint is not the member configured there");
+    }
+    let body = resp.bytes().await?;
+    let commit = dsm::types::proto::ByteCommitV4::decode(body.as_ref())
+        .ok()
+        .and_then(|p| ByteCommit::from_proto(&p))
+        .ok_or_else(|| anyhow::anyhow!("not a ByteCommit"))?;
+    if commit.member_id != member {
+        anyhow::bail!("the ByteCommit names a member other than the one configured here");
+    }
+    Ok(Some(commit))
+}
 
-    #[test]
-    fn bytecommit_addr_is_deterministic() {
-        let node_id = [1u8; 32];
-        let dt = [2u8; 32];
-        let a1 = bytecommit_addr(&node_id, 5, &dt);
-        let a2 = bytecommit_addr(&node_id, 5, &dt);
-        assert_eq!(a1, a2);
-        assert!(!a1.is_empty());
+async fn sync_one(
+    state: &AppState,
+    client: &reqwest::Client,
+    endpoint: &str,
+    member: &[u8],
+) -> anyhow::Result<u64> {
+    let Some(latest) = fetch_commit(client, endpoint, "/api/v2/bytecommit/latest", member).await?
+    else {
+        return Ok(0);
+    };
+    let have = db::mirror_last_cycle(&state.db_pool, member).await?;
+    let reach = have.saturating_add(MAX_SYNC_CYCLES);
+    let mut added = 0u64;
+    for t in have + 1..=latest.cycle_index.saturating_sub(1).min(reach) {
+        let path = format!("/api/v2/bytecommit/cycle/{t}");
+        let commit = fetch_commit(client, endpoint, &path, member)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("member has a latest ByteCommit but none at {t}"))?;
+        if commit.cycle_index != t {
+            anyhow::bail!(
+                "member answered cycle {t} with cycle {}",
+                commit.cycle_index
+            );
+        }
+        added += u64::from(db::mirror_put(&state.db_pool, &commit).await?);
     }
-
-    #[test]
-    fn bytecommit_addr_varies_with_cycle() {
-        let node_id = [1u8; 32];
-        let dt = [2u8; 32];
-        let a1 = bytecommit_addr(&node_id, 0, &dt);
-        let a2 = bytecommit_addr(&node_id, 1, &dt);
-        assert_ne!(a1, a2);
+    // `/latest` is kept whatever its cycle: at or below what is already
+    // mirrored, a different ByteCommit is how a rewritten history shows.
+    // Beyond this sync's reach it waits, so no cycle in between is skipped.
+    if latest.cycle_index <= reach {
+        added += u64::from(db::mirror_put(&state.db_pool, &latest).await?);
     }
-
-    #[test]
-    fn bytecommit_addr_varies_with_node_id() {
-        let dt = [2u8; 32];
-        let a1 = bytecommit_addr(&[0u8; 32], 0, &dt);
-        let a2 = bytecommit_addr(&[1u8; 32], 0, &dt);
-        assert_ne!(a1, a2);
-    }
-
-    #[test]
-    fn bytecommit_v3_roundtrip() {
-        let commit = ByteCommitV3 {
-            node_id: vec![0xAA; 32],
-            cycle_index: 42,
-            smt_root: vec![0xBB; 32],
-            bytes_used: 1024,
-            parent_digest: vec![0; 32],
-        };
-        let mut buf = Vec::new();
-        assert!(commit.encode(&mut buf).is_ok());
-        let decoded = match ByteCommitV3::decode(buf.as_slice()) {
-            Ok(decoded) => decoded,
-            Err(err) => panic!("bytecommit should decode: {err}"),
-        };
-        assert_eq!(decoded, commit);
-    }
-
-    #[test]
-    fn bytecommit_v3_empty_node_id_detected() {
-        let commit = ByteCommitV3 {
-            node_id: vec![],
-            cycle_index: 0,
-            smt_root: vec![],
-            bytes_used: 0,
-            parent_digest: vec![],
-        };
-        assert_ne!(commit.node_id.len(), 32);
-    }
-
-    #[test]
-    fn bytecommit_digest_bytes_not_raw_blake3() {
-        let data = b"test";
-        let tagged = bytecommit_digest_bytes(data);
-        let raw = blake3::hash(data);
-        assert_ne!(tagged, *raw.as_bytes());
-    }
+    Ok(added)
 }

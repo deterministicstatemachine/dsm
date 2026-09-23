@@ -373,14 +373,15 @@ pub(crate) async fn write_cells_leader_first(
 
 /// Part II §8 step 5: carry `value` at `key` under `namespace` to one member
 /// of `set`, by index. Any party may carry the bytes to a member not reached
-/// at write time; a member keeps what it is given.
+/// at write time; a member keeps what it is given, and answers with the
+/// entry's arrival record, which is that seat's route link (storage spec §9).
 pub(crate) async fn put_cell_to_member(
     set: &crate::sdk::storage_set::StorageSet,
     member: usize,
     namespace: &[u8],
     key: &[u8; 32],
     value: &[u8],
-) -> Result<(), DsmError> {
+) -> Result<dsm::storage_cell::ArrivalRecord, DsmError> {
     #[cfg(any(test, feature = "test-utils"))]
     {
         fake_registers::put_cell_to_member(set, member, namespace, key, value)
@@ -733,7 +734,7 @@ pub mod fake_registers {
         namespace: &[u8],
         key: &[u8; 32],
         value: &[u8],
-    ) -> Result<(), String> {
+    ) -> Result<dsm::storage_cell::ArrivalRecord, String> {
         let member = &set.members()[member];
         with_state(|s| {
             if s.failing.contains(&member.member_id)
@@ -742,13 +743,26 @@ pub mod fake_registers {
             {
                 return Err("injected outage".to_string());
             }
-            s.keyed
+            let held = s
+                .keyed
                 .entry(member.member_id.clone())
                 .or_default()
                 .entry((namespace.to_vec(), *key))
-                .or_default()
-                .push(value.to_vec());
-            Ok(())
+                .or_default();
+            held.push(value.to_vec());
+            // The member's record for the entry, derived from what it holds
+            // exactly as a node derives it (storage spec §14).
+            let (index, running_hash) = dsm::storage_cell::replay(namespace, key, held)
+                .last()
+                .copied()
+                .ok_or_else(|| "a held key has no entry".to_string())?;
+            Ok(dsm::storage_cell::ArrivalRecord {
+                member_id: member.member_id.as_bytes().to_vec(),
+                namespace: namespace.to_vec(),
+                key: *key,
+                index,
+                running_hash,
+            })
         })
     }
 

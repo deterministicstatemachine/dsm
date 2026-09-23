@@ -59,6 +59,9 @@ struct ServerConfig {
     seed_peers: Vec<String>,
     /// `[[storage_set.members]]` — each member's id and register incarnation.
     storage_set_members: Vec<(String, [u8; 32])>,
+    /// `endpoint` on `[[storage_set.members]]` — where each set-mate is
+    /// reached, for ByteCommit mirroring.
+    storage_set_endpoints: Vec<(String, String)>,
 }
 
 fn load_server_config(opts: &Opts) -> Result<ServerConfig> {
@@ -121,6 +124,7 @@ fn load_server_config(opts: &Opts) -> Result<ServerConfig> {
     //     [[storage_set.members]]
     //     id = "dsm-node-1"
     //     register_incarnation = "<Base32-Crockford of 32 bytes>"
+    //     endpoint = "https://10.0.0.1:8080"   # required for every other member
     //
     // Absent = the settlement-slot register is inactive (fail closed);
     // present but not containing this node's own id = misconfiguration,
@@ -130,7 +134,7 @@ fn load_server_config(opts: &Opts) -> Result<ServerConfig> {
     // derived over. A malformed entry refuses rather than defaulting, because
     // a defaulted incarnation would resolve every set to whatever the default
     // hashed to.
-    let storage_set_members: Vec<(String, [u8; 32])> = settings
+    let storage_set_entries: Vec<(String, [u8; 32], Option<String>)> = settings
         .get_array("storage_set.members")
         .unwrap_or_default()
         .into_iter()
@@ -160,9 +164,23 @@ fn load_server_config(opts: &Opts) -> Result<ServerConfig> {
                     "[[storage_set.members]] {id:?} register_incarnation is not 32 bytes"
                 )
             })?;
-            Ok((id, inc))
+            let endpoint = match t.get("endpoint") {
+                None => None,
+                Some(v) => Some(v.clone().into_string().map_err(|_| {
+                    anyhow::anyhow!("[[storage_set.members]] {id:?} endpoint is not a string")
+                })?),
+            };
+            Ok((id, inc, endpoint))
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
+    let storage_set_endpoints: Vec<(String, String)> = storage_set_entries
+        .iter()
+        .filter_map(|(id, _, e)| e.clone().map(|e| (id.clone(), e)))
+        .collect();
+    let storage_set_members: Vec<(String, [u8; 32])> = storage_set_entries
+        .into_iter()
+        .map(|(id, inc, _)| (id, inc))
+        .collect();
 
     if opts.auto_detect {
         let node_index = opts.node_index.unwrap_or(0);
@@ -181,6 +199,7 @@ fn load_server_config(opts: &Opts) -> Result<ServerConfig> {
             database_url,
             seed_peers,
             storage_set_members,
+            storage_set_endpoints,
         });
     }
 
@@ -223,6 +242,7 @@ fn load_server_config(opts: &Opts) -> Result<ServerConfig> {
         database_url,
         seed_peers,
         storage_set_members,
+        storage_set_endpoints,
     })
 }
 
@@ -297,9 +317,6 @@ fn build_router(state: Arc<AppState>, config: &ServerConfig, benchmark_mode: boo
     // Registry scaling (signals, applicants, registry queries)
     let registry_scaling_router =
         api::registry::scaling::create_router(state.clone()).layer(public_rate_layer.clone());
-    // DrainProof & stake exit
-    let drain_proof_router =
-        api::registry::drain::create_router(state.clone()).layer(public_rate_layer.clone());
     // Gossip protocol for replication
     let gossip_router = api::transport::gossip::gossip_routes(state.clone());
     // Node discovery for SDK auto-discovery
@@ -334,7 +351,6 @@ fn build_router(state: Arc<AppState>, config: &ServerConfig, benchmark_mode: boo
         .merge(device_router) // exposes /api/v2/device/register
         .merge(paidk_router) // PaidK spend-gate endpoints
         .merge(registry_scaling_router) // signals, applicants, registry
-        .merge(drain_proof_router) // DrainProof & stake exit
         .merge(gossip_router) // Gossip protocol endpoints
         .merge(discovery_router) // Node discovery for SDK auto-discovery
         .nest("/admin", admin_router) // Every /admin/* endpoint, auth applied once
@@ -498,6 +514,10 @@ async fn async_main() -> Result<()> {
             server_config.storage_set_members.clone(),
             &server_config.node_id,
             own_incarnation,
+        )?
+        .with_endpoints(
+            &server_config.node_id,
+            server_config.storage_set_endpoints.clone(),
         )?;
         log::info!(
             "storage set configured: {} members, id={}",

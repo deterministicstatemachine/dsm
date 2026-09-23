@@ -41,6 +41,9 @@ pub struct AppState {
     /// Stamped on every generic-binding answer so a caller can tell this
     /// register history from a rebuilt one wearing the same node id.
     pub own_register_incarnation: Option<[u8; 32]>,
+    /// Held for the whole of a ByteCommit mirror sync, so one sync runs at a
+    /// time and a caller asking again waits for it instead of repeating it.
+    pub mirror_sync: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// This node's view of the canonical storage set it belongs to.
@@ -57,6 +60,11 @@ pub struct NodeStorageSet {
     /// register read so a reader can tell it apart from a rebuilt member
     /// wearing the same node id.
     pub own_incarnation: [u8; 32],
+    /// Where each set-mate is reached, from this node's own configuration
+    /// (`endpoint` on `[[storage_set.members]]`). A node mirrors every
+    /// set-mate's ByteCommits by fetching them at this endpoint and nowhere
+    /// else (storage spec §14, mirror provenance and mirror sync).
+    pub endpoints: Vec<(String, String)>,
 }
 
 impl NodeStorageSet {
@@ -99,12 +107,47 @@ impl NodeStorageSet {
             id,
             members,
             own_incarnation,
+            endpoints: Vec::new(),
         })
+    }
+
+    /// Attach each set-mate's configured endpoint. A node mirrors every node
+    /// it shares the set with (storage spec §14), so every member other than
+    /// `own_node_id` needs one. Refuses a missing endpoint, an endpoint for an
+    /// id that is not a member, and a member named twice.
+    pub fn with_endpoints(
+        mut self,
+        own_node_id: &str,
+        endpoints: Vec<(String, String)>,
+    ) -> anyhow::Result<Self> {
+        for (i, (member, _)) in endpoints.iter().enumerate() {
+            if !self.members.iter().any(|(m, _)| m == member) {
+                anyhow::bail!("storage_set endpoint names {member:?}, which is not a member");
+            }
+            if endpoints[..i].iter().any(|(m, _)| m == member) {
+                anyhow::bail!("storage_set names an endpoint for {member:?} twice");
+            }
+        }
+        for (member, _) in &self.members {
+            if member != own_node_id && !endpoints.iter().any(|(m, _)| m == member) {
+                anyhow::bail!(
+                    "storage_set member {member:?} has no endpoint: this node mirrors every \
+                     set-mate's ByteCommits and can reach one only at its configured endpoint"
+                );
+            }
+        }
+        self.endpoints = endpoints;
+        Ok(self)
     }
 
     /// The configured member ids, for logging and endpoint resolution.
     pub fn member_ids(&self) -> impl Iterator<Item = &str> {
         self.members.iter().map(|(m, _)| m.as_str())
+    }
+
+    /// `(member id, endpoint)` for every member with a configured endpoint.
+    pub fn member_endpoints(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.endpoints.iter().map(|(m, e)| (m.as_str(), e.as_str()))
     }
 }
 
@@ -134,6 +177,7 @@ impl AppState {
             current_tick: Arc::new(AtomicI64::new(0)),
             storage_set: None,
             own_register_incarnation: None,
+            mirror_sync: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -168,6 +212,7 @@ pub fn cells_router(state: Arc<AppState>) -> axum::Router<()> {
 /// the other mounts (the DLV object store, the identity mirrors), never here.
 pub fn storage_contract_router(state: Arc<AppState>) -> axum::Router<()> {
     api::cells::create_router(state.clone())
+        .merge(api::objects::bytecommit::create_router(state.clone()))
         .merge(api::objects::immutable::create_read_router(state.clone()))
         .merge(api::objects::immutable::create_write_router().layer(Extension(state)))
 }

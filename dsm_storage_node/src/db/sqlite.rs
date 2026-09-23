@@ -308,16 +308,6 @@ pub async fn init_db(pool: &DBPool) -> Result<()> {
                 CREATE INDEX IF NOT EXISTS idx_inbox_spool_expires ON inbox_spool(expires_at_iter)
                     WHERE expires_at_iter IS NOT NULL;
 
-                CREATE TABLE IF NOT EXISTS bytecommit_chain (
-                    node_id      BLOB NOT NULL,
-                    cycle_index  INTEGER NOT NULL,
-                    digest       BLOB NOT NULL,
-                    PRIMARY KEY(node_id, cycle_index)
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_bytecommit_chain_node_cycle
-                    ON bytecommit_chain(node_id, cycle_index);
-
                 -- PaidK payment receipts
                 CREATE TABLE IF NOT EXISTS payment_receipts (
                     id               INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -360,18 +350,6 @@ pub async fn init_db(pool: &DBPool) -> Result<()> {
                     capacity        INTEGER NOT NULL,
                     applicant_bytes BLOB NOT NULL
                 );
-
-                -- Drain proofs
-                CREATE TABLE IF NOT EXISTS drain_proofs (
-                    id             INTEGER PRIMARY KEY AUTOINCREMENT,
-                    proof_addr     TEXT NOT NULL UNIQUE,
-                    node_id        BLOB NOT NULL,
-                    start_cycle    INTEGER NOT NULL,
-                    end_cycle      INTEGER NOT NULL,
-                    verified_local INTEGER NOT NULL DEFAULT 0,
-                    proof_bytes    BLOB NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_drain_proofs_node ON drain_proofs(node_id);
 
                 -- Phase B.4 (issue #275): bounded validator for the
                 -- published Device Tree state. Each row is one genesis's
@@ -435,9 +413,51 @@ pub async fn init_db(pool: &DBPool) -> Result<()> {
                 );
             "#,
         )?;
+        // Arrival order is committed (storage spec §14). SQLite has no
+        // ADD COLUMN IF NOT EXISTS, so check the table first.
+        let has_index: bool = conn
+            .prepare("SELECT 1 FROM pragma_table_info('cells') WHERE name = 'arrival_index'")?
+            .exists([])?;
+        if !has_index {
+            conn.execute_batch(
+                "ALTER TABLE cells ADD COLUMN arrival_index INTEGER;
+                 ALTER TABLE cells ADD COLUMN running_hash BLOB;",
+            )?;
+        }
+        conn.execute_batch(
+            "CREATE UNIQUE INDEX IF NOT EXISTS cells_by_arrival
+                 ON cells (namespace, cell_key, arrival_index);",
+        )?;
+        // Which ByteCommit first committed an entry (storage spec §14).
+        let has_committed: bool = conn
+            .prepare("SELECT 1 FROM pragma_table_info('cells') WHERE name = 'committed_cycle'")?
+            .exists([])?;
+        if !has_committed {
+            conn.execute_batch("ALTER TABLE cells ADD COLUMN committed_cycle INTEGER;")?;
+        }
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS cells_uncommitted
+                 ON cells (seq) WHERE committed_cycle IS NULL;
+             CREATE TABLE IF NOT EXISTS own_bytecommits (
+                 cycle_index INTEGER PRIMARY KEY,
+                 digest      BLOB NOT NULL,
+                 commit_pb   BLOB NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS bytecommit_mirror (
+                 member_id   BLOB NOT NULL,
+                 cycle_index INTEGER NOT NULL,
+                 digest      BLOB NOT NULL,
+                 commit_pb   BLOB NOT NULL,
+                 PRIMARY KEY (member_id, cycle_index, digest)
+             );",
+        )?;
         Ok(())
     })
-    .await
+    .await?;
+    // Before the node serves a single put: rows from before arrival records
+    // existed get theirs, so no key ever mixes recorded and unrecorded rows.
+    backfill_cell_arrival_records(pool).await?;
+    Ok(())
 }
 
 // ===================== Replication Outbox =====================
@@ -523,72 +543,6 @@ pub async fn replication_outbox_record_failure(
         conn.execute(
             "UPDATE replication_outbox SET attempts=?2, eligible_iter=?3, last_err=?4 WHERE id=?1",
             params![id, attempts_next, eligible_iter_next, last_err],
-        )?;
-        Ok(())
-    })
-    .await
-}
-
-// ===================== Core Object Store =====================
-
-pub async fn get_current_cycle_stats(pool: &DBPool) -> Result<([u8; 32], u64)> {
-    with_conn(pool, |conn| {
-        let mut stmt =
-            conn.prepare_cached("SELECT key, size_bytes FROM objects ORDER BY key ASC")?;
-        let mut bytes_used: u64 = 0;
-        let mut hasher = dsm::crypto::blake3::tagged_hasher(dsm::tagged_domain!(b"DSM/smt-node"));
-
-        let mut rows = stmt.query([])?;
-        while let Some(row) = rows.next()? {
-            let key: String = row.get(0)?;
-            let sz: i64 = row.get(1)?;
-            if sz > 0 {
-                bytes_used = bytes_used.saturating_add(sz as u64);
-            }
-            hasher.update(key.as_bytes());
-            hasher.update(&[0u8]);
-            hasher.update(&sz.to_le_bytes());
-        }
-
-        let out = hasher.finalize();
-        Ok((*out.as_bytes(), bytes_used))
-    })
-    .await
-}
-
-pub async fn get_last_bytecommit_hash(pool: &DBPool, node_id: &[u8]) -> Result<Option<[u8; 32]>> {
-    let node_id = node_id.to_vec();
-    with_conn(pool, move |conn| {
-        let result: Option<Vec<u8>> = conn
-            .query_row(
-                "SELECT digest FROM bytecommit_chain WHERE node_id=?1 ORDER BY cycle_index DESC LIMIT 1",
-                params![node_id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        Ok(result.map(|b| {
-            let mut out = [0u8; 32];
-            if b.len() == 32 {
-                out.copy_from_slice(&b);
-            }
-            out
-        }))
-    })
-    .await
-}
-
-pub async fn record_bytecommit_hash(
-    pool: &DBPool,
-    node_id: &[u8],
-    cycle_index: u64,
-    digest: &[u8; 32],
-) -> Result<()> {
-    let node_id = node_id.to_vec();
-    let digest = digest.to_vec();
-    with_conn(pool, move |conn| {
-        conn.execute(
-            "INSERT OR IGNORE INTO bytecommit_chain(node_id, cycle_index, digest) VALUES (?1,?2,?3)",
-            params![node_id, cycle_index as i64, digest],
         )?;
         Ok(())
     })
@@ -1959,80 +1913,206 @@ pub async fn remove_applicant(pool: &DBPool, applicant_addr: &str) -> Result<()>
     .await
 }
 
-// ===================== DrainProof & Stake Exit =====================
-
-pub async fn store_drain_proof(
-    pool: &DBPool,
-    proof_addr: &str,
-    node_id: &[u8],
-    start_cycle: i64,
-    end_cycle: i64,
-    verified_local: bool,
-    proof_bytes: &[u8],
-) -> Result<()> {
-    let proof_addr = proof_addr.to_string();
-    let node_id = node_id.to_vec();
-    let proof_bytes = proof_bytes.to_vec();
-    let verified_local_i = if verified_local { 1i32 } else { 0i32 };
-    with_conn(pool, move |conn| {
-        conn.execute(
-            "INSERT OR IGNORE INTO drain_proofs
-             (proof_addr, node_id, start_cycle, end_cycle, verified_local, proof_bytes)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                proof_addr,
-                node_id,
-                start_cycle,
-                end_cycle,
-                verified_local_i,
-                proof_bytes
-            ],
-        )?;
-        Ok(())
-    })
-    .await
-}
-
-pub async fn get_drain_proof_for_node(pool: &DBPool, node_id: &[u8]) -> Result<Option<Vec<u8>>> {
-    let node_id = node_id.to_vec();
-    with_conn(pool, move |conn| {
-        let result: Option<Vec<u8>> = conn
-            .query_row(
-                "SELECT proof_bytes FROM drain_proofs WHERE node_id = ?1
-                 ORDER BY end_cycle DESC LIMIT 1",
-                params![node_id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        Ok(result)
-    })
-    .await
-}
-
-pub async fn verify_bytecommit_chain_empty(
-    pool: &DBPool,
-    node_id: &[u8],
-    start_cycle: i64,
-    required_d: i64,
-) -> Result<bool> {
-    let node_id = node_id.to_vec();
-    with_conn(pool, move |conn| {
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM bytecommit_chain
-             WHERE node_id = ?1 AND cycle_index >= ?2 AND cycle_index < ?2 + ?3",
-            params![node_id, start_cycle, required_d],
-            |row| row.get(0),
-        )?;
-        Ok(count >= required_d)
-    })
-    .await
-}
-
 // ── keyed cells and indexes: bytes in, bytes out ───────────────────────────
 
-/// Keep `value` for `(namespace, key)`, after anything already held there.
-/// Nothing is compared and nothing is refused.
-pub async fn put_cell(pool: &DBPool, namespace: &[u8], key: &[u8], value: &[u8]) -> Result<()> {
+/// Keep `value` for `(namespace, key)`, after anything already held there,
+/// and return its arrival record's `(index, running hash)` (storage spec
+/// §6, §14). Nothing is compared and nothing is refused.
+pub async fn put_cell(
+    pool: &DBPool,
+    namespace: &[u8],
+    key: &[u8],
+    value: &[u8],
+) -> Result<(u64, [u8; 32])> {
+    let (namespace, key, value) = (namespace.to_vec(), key.to_vec(), value.to_vec());
+    with_conn(pool, move |conn| {
+        let tx = conn.unchecked_transaction()?;
+        let record = append_cell_entry(&tx, &namespace, &key, &value)?;
+        tx.commit()?;
+        Ok(record)
+    })
+    .await
+}
+
+/// Several keys in ONE transaction: every entry is kept after anything
+/// already at its key, or none of them is. An entry that names no coordinate
+/// — an empty namespace, a key that is not 32 bytes — makes the whole batch
+/// nothing. Returns each entry's `(index, running hash)` in batch order.
+pub async fn put_cells(
+    pool: &DBPool,
+    entries: &[(Vec<u8>, Vec<u8>, Vec<u8>)],
+) -> Result<Vec<(u64, [u8; 32])>> {
+    let entries = entries.to_vec();
+    with_conn(pool, move |conn| {
+        let tx = conn.unchecked_transaction()?;
+        let mut records = Vec::with_capacity(entries.len());
+        for (namespace, key, value) in &entries {
+            if namespace.is_empty() || key.len() != 32 {
+                anyhow::bail!("batch put: an entry names no cell");
+            }
+            records.push(append_cell_entry(&tx, namespace, key, value)?);
+        }
+        tx.commit()?;
+        Ok(records)
+    })
+    .await
+}
+
+/// Append one entry inside `tx`. The single pooled connection serialises
+/// every put, so no two entries can claim one arrival index; the unique
+/// index is the backstop.
+fn append_cell_entry(
+    tx: &rusqlite::Transaction<'_>,
+    namespace: &[u8],
+    key: &[u8],
+    value: &[u8],
+) -> Result<(u64, [u8; 32])> {
+    let key32: [u8; 32] = key
+        .try_into()
+        .map_err(|_| anyhow!("cell key is not 32 bytes"))?;
+    let last: Option<(i64, Vec<u8>)> = tx
+        .query_row(
+            "SELECT arrival_index, running_hash FROM cells
+             WHERE namespace = ?1 AND cell_key = ?2 AND arrival_index IS NOT NULL
+             ORDER BY arrival_index DESC LIMIT 1",
+            rusqlite::params![namespace, key],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let (prev_index, prev_hash) = match last {
+        Some((i, h)) => {
+            let h: [u8; 32] = h
+                .as_slice()
+                .try_into()
+                .map_err(|_| anyhow!("stored running hash is not 32 bytes"))?;
+            (u64::try_from(i)?, h)
+        }
+        None => (0, dsm::storage_cell::running_hash_init(namespace, &key32)),
+    };
+    let index = prev_index + 1;
+    let running_hash =
+        dsm::storage_cell::running_hash_next(&prev_hash, &dsm::storage_cell::entry_digest(value));
+    tx.execute(
+        "INSERT INTO cells (namespace, cell_key, value, arrival_index, running_hash)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![
+            namespace,
+            key,
+            value,
+            i64::try_from(index)?,
+            running_hash.to_vec()
+        ],
+    )?;
+    Ok((index, running_hash))
+}
+
+/// Everything held for `(namespace, key)`, in the order it arrived.
+pub async fn get_cell_values(pool: &DBPool, namespace: &[u8], key: &[u8]) -> Result<Vec<Vec<u8>>> {
+    Ok(get_cell_entries(pool, namespace, key)
+        .await?
+        .into_iter()
+        .map(|(v, _, _)| v)
+        .collect())
+}
+
+/// Everything held for `(namespace, key)`, in arrival order, each with its
+/// `(index, running hash)`.
+pub async fn get_cell_entries(
+    pool: &DBPool,
+    namespace: &[u8],
+    key: &[u8],
+) -> Result<Vec<(Vec<u8>, u64, [u8; 32])>> {
+    let (namespace, key) = (namespace.to_vec(), key.to_vec());
+    with_conn(pool, move |conn| {
+        let mut stmt = conn.prepare(
+            "SELECT value, arrival_index, running_hash FROM cells
+             WHERE namespace = ?1 AND cell_key = ?2 ORDER BY seq ASC",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![namespace, key], |r| {
+            Ok((
+                r.get::<_, Vec<u8>>(0)?,
+                r.get::<_, Option<i64>>(1)?,
+                r.get::<_, Option<Vec<u8>>>(2)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (v, i, h) = row?;
+            let (Some(i), Some(h)) = (i, h) else {
+                anyhow::bail!("cell entry has no arrival record; backfill has not run");
+            };
+            let h: [u8; 32] = h
+                .as_slice()
+                .try_into()
+                .map_err(|_| anyhow!("stored running hash is not 32 bytes"))?;
+            out.push((v, u64::try_from(i)?, h));
+        }
+        Ok(out)
+    })
+    .await
+}
+
+/// Give every entry of every key that holds an entry without an arrival
+/// record its record: the key's values replayed in arrival (`seq`) order,
+/// exactly as storage spec §14 defines `(i, h_i)`. The key's indexes are
+/// cleared first so the unique arrival index never sees two rows claim one
+/// position mid-rewrite. Only the two metadata columns are written; no value
+/// is touched.
+pub async fn backfill_cell_arrival_records(pool: &DBPool) -> Result<u64> {
+    with_conn(pool, move |conn| {
+        let keys: Vec<(Vec<u8>, Vec<u8>)> = conn
+            .prepare("SELECT DISTINCT namespace, cell_key FROM cells WHERE arrival_index IS NULL")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<std::result::Result<_, _>>()?;
+        let mut fixed = 0u64;
+        for (namespace, key) in keys {
+            let key32: [u8; 32] = key
+                .as_slice()
+                .try_into()
+                .map_err(|_| anyhow!("a held cell key is not 32 bytes"))?;
+            let tx = conn.unchecked_transaction()?;
+            let rows: Vec<(i64, Vec<u8>)> = tx
+                .prepare(
+                    "SELECT seq, value FROM cells WHERE namespace = ?1 AND cell_key = ?2
+                     ORDER BY seq ASC",
+                )?
+                .query_map(rusqlite::params![namespace, key], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })?
+                .collect::<std::result::Result<_, _>>()?;
+            tx.execute(
+                "UPDATE cells SET arrival_index = NULL, running_hash = NULL
+                 WHERE namespace = ?1 AND cell_key = ?2",
+                rusqlite::params![namespace, key],
+            )?;
+            let mut h = dsm::storage_cell::running_hash_init(&namespace, &key32);
+            for (n, (seq, value)) in rows.iter().enumerate() {
+                h = dsm::storage_cell::running_hash_next(
+                    &h,
+                    &dsm::storage_cell::entry_digest(value),
+                );
+                tx.execute(
+                    "UPDATE cells SET arrival_index = ?2, running_hash = ?3 WHERE seq = ?1",
+                    rusqlite::params![seq, n as i64 + 1, h.to_vec()],
+                )?;
+            }
+            tx.commit()?;
+            fixed += 1;
+        }
+        Ok(fixed)
+    })
+    .await
+}
+
+/// A cell row exactly as a binary from before arrival records wrote it: the
+/// value and nothing else. Unit tests only.
+#[cfg(test)]
+pub(crate) async fn insert_cell_without_record(
+    pool: &DBPool,
+    namespace: &[u8],
+    key: &[u8],
+    value: &[u8],
+) -> Result<()> {
     let (namespace, key, value) = (namespace.to_vec(), key.to_vec(), value.to_vec());
     with_conn(pool, move |conn| {
         conn.execute(
@@ -2044,40 +2124,243 @@ pub async fn put_cell(pool: &DBPool, namespace: &[u8], key: &[u8], value: &[u8])
     .await
 }
 
-/// Several keys in ONE transaction: every entry is kept after anything
-/// already at its key, or none of them is. An entry that names no coordinate
-/// — an empty namespace, a key that is not 32 bytes — makes the whole batch
-/// nothing.
-pub async fn put_cells(pool: &DBPool, entries: &[(Vec<u8>, Vec<u8>, Vec<u8>)]) -> Result<()> {
-    let entries = entries.to_vec();
+// ── ByteCommits (storage spec §14) ─────────────────────────────────────────
+
+/// Close the next cycle if any cell entry has arrived since the last one.
+/// See the Postgres backend for the contract; the single pooled connection
+/// serialises closers and puts here.
+pub async fn close_cycle(
+    pool: &DBPool,
+    member_id: &[u8],
+) -> Result<Option<dsm::storage_cell::ByteCommit>> {
+    if member_id.is_empty() || member_id.len() > dsm::storage_cell::MAX_MEMBER_ID_LEN {
+        anyhow::bail!("member id cannot name a ByteCommit");
+    }
+    let member_id = member_id.to_vec();
     with_conn(pool, move |conn| {
+        use prost::Message;
         let tx = conn.unchecked_transaction()?;
-        for (namespace, key, value) in &entries {
-            if namespace.is_empty() || key.len() != 32 {
-                anyhow::bail!("batch put: an entry names no cell");
-            }
-            tx.execute(
-                "INSERT INTO cells (namespace, cell_key, value) VALUES (?1, ?2, ?3)",
-                rusqlite::params![namespace, key, value],
-            )?;
+        let last = tx
+            .query_row(
+                "SELECT commit_pb FROM own_bytecommits ORDER BY cycle_index DESC LIMIT 1",
+                [],
+                |r| r.get::<_, Vec<u8>>(0),
+            )
+            .optional()?
+            .map(|b| decode_commit(&b))
+            .transpose()?;
+        let pending: bool = tx
+            .prepare("SELECT 1 FROM cells WHERE committed_cycle IS NULL LIMIT 1")?
+            .exists([])?;
+        if !pending {
+            tx.commit()?;
+            return Ok(last);
         }
+        let cycle = last.as_ref().map_or(1, |c| c.cycle_index + 1);
+        let cycle_i64 = i64::try_from(cycle)?;
+        tx.execute(
+            "UPDATE cells SET committed_cycle = ?1 WHERE committed_cycle IS NULL",
+            params![cycle_i64],
+        )?;
+        let leaves = cell_leaves(&tx, cycle_i64)?;
+        let tree = dsm::storage_cell::cell_tree(
+            leaves.iter().map(|(n, k, i, h)| (n.as_slice(), k, *i, h)),
+        );
+        let bytes_used: i64 = tx.query_row(
+            "SELECT COALESCE((SELECT SUM(LENGTH(value)) FROM cells), 0)
+                  + COALESCE((SELECT SUM(LENGTH(payload)) FROM immutable_objects), 0)",
+            [],
+            |r| r.get(0),
+        )?;
+        let commit = dsm::storage_cell::ByteCommit {
+            member_id: member_id.clone(),
+            cycle_index: cycle,
+            smt_root: *tree.root(),
+            bytes_used: u64::try_from(bytes_used.max(0))?,
+            parent_digest: last.as_ref().map_or([0u8; 32], |c| c.digest()),
+        };
+        let digest = commit.digest();
+        tx.execute(
+            "INSERT INTO own_bytecommits (cycle_index, digest, commit_pb) VALUES (?1, ?2, ?3)",
+            params![
+                cycle_i64,
+                digest.to_vec(),
+                commit.to_proto().encode_to_vec()
+            ],
+        )?;
         tx.commit()?;
-        Ok(())
+        Ok(Some(commit))
     })
     .await
 }
 
-/// Everything held for `(namespace, key)`, in the order it arrived.
-pub async fn get_cell_values(pool: &DBPool, namespace: &[u8], key: &[u8]) -> Result<Vec<Vec<u8>>> {
-    let (namespace, key) = (namespace.to_vec(), key.to_vec());
+fn decode_commit(bytes: &[u8]) -> Result<dsm::storage_cell::ByteCommit> {
+    use prost::Message;
+    let p = dsm::types::proto::ByteCommitV4::decode(bytes)?;
+    dsm::storage_cell::ByteCommit::from_proto(&p)
+        .ok_or_else(|| anyhow!("stored ByteCommit is malformed"))
+}
+
+type CellLeaf = (Vec<u8>, [u8; 32], u64, [u8; 32]);
+
+/// Every cell's latest entry committed at or before `cycle`. Committed
+/// entries are a prefix of each key's arrival order, so the latest is the
+/// highest committed index.
+fn cell_leaves(conn: &Connection, cycle: i64) -> Result<Vec<CellLeaf>> {
+    let mut stmt = conn.prepare(
+        "SELECT namespace, cell_key, arrival_index, running_hash FROM cells c
+         WHERE committed_cycle <= ?1
+           AND arrival_index = (SELECT MAX(arrival_index) FROM cells c2
+                                WHERE c2.namespace = c.namespace
+                                  AND c2.cell_key = c.cell_key
+                                  AND c2.committed_cycle <= ?1)",
+    )?;
+    let rows = stmt.query_map(params![cycle], |r| {
+        Ok((
+            r.get::<_, Vec<u8>>(0)?,
+            r.get::<_, Vec<u8>>(1)?,
+            r.get::<_, i64>(2)?,
+            r.get::<_, Vec<u8>>(3)?,
+        ))
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (n, k, i, h) = row?;
+        out.push((
+            n,
+            k.as_slice()
+                .try_into()
+                .map_err(|_| anyhow!("cell key is not 32 bytes"))?,
+            u64::try_from(i)?,
+            h.as_slice()
+                .try_into()
+                .map_err(|_| anyhow!("stored running hash is not 32 bytes"))?,
+        ));
+    }
+    Ok(out)
+}
+
+/// This node's ByteCommit for `cycle`, or its latest when `cycle` is `None`.
+pub async fn get_own_bytecommit(
+    pool: &DBPool,
+    cycle: Option<u64>,
+) -> Result<Option<dsm::storage_cell::ByteCommit>> {
+    with_conn(pool, move |conn| {
+        let bytes: Option<Vec<u8>> = match cycle {
+            Some(t) => conn
+                .query_row(
+                    "SELECT commit_pb FROM own_bytecommits WHERE cycle_index = ?1",
+                    params![i64::try_from(t)?],
+                    |r| r.get(0),
+                )
+                .optional()?,
+            None => conn
+                .query_row(
+                    "SELECT commit_pb FROM own_bytecommits ORDER BY cycle_index DESC LIMIT 1",
+                    [],
+                    |r| r.get(0),
+                )
+                .optional()?,
+        };
+        bytes.map(|b| decode_commit(&b)).transpose()
+    })
+    .await
+}
+
+/// The proof that this node's ByteCommit for `cycle` commits `(namespace,
+/// key)`'s latest entry as of that cycle.
+pub async fn cell_commit_proof(
+    pool: &DBPool,
+    namespace: &[u8],
+    key: &[u8; 32],
+    cycle: u64,
+) -> Result<Option<dsm::storage_cell::CellCommitProof>> {
+    let (namespace, key) = (namespace.to_vec(), *key);
+    with_conn(pool, move |conn| {
+        let cycle_i64 = i64::try_from(cycle)?;
+        let exists = conn
+            .prepare("SELECT 1 FROM own_bytecommits WHERE cycle_index = ?1")?
+            .exists(params![cycle_i64])?;
+        if !exists {
+            return Ok(None);
+        }
+        let leaves = cell_leaves(conn, cycle_i64)?;
+        let Some((_, _, index, running_hash)) = leaves
+            .iter()
+            .find(|(n, k, _, _)| *n == namespace && *k == key)
+            .cloned()
+        else {
+            return Ok(None);
+        };
+        let tree = dsm::storage_cell::cell_tree(
+            leaves.iter().map(|(n, k, i, h)| (n.as_slice(), k, *i, h)),
+        );
+        Ok(dsm::storage_cell::CellCommitProof::from_tree(
+            &tree,
+            &namespace,
+            &key,
+            index,
+            running_hash,
+        ))
+    })
+    .await
+}
+
+/// Keep a ByteCommit this node fetched from its member itself. Returns
+/// whether it was not already held.
+pub async fn mirror_put(pool: &DBPool, commit: &dsm::storage_cell::ByteCommit) -> Result<bool> {
+    let commit = commit.clone();
+    with_conn(pool, move |conn| {
+        use prost::Message;
+        let inserted = conn.execute(
+            "INSERT OR IGNORE INTO bytecommit_mirror (member_id, cycle_index, digest, commit_pb)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                commit.member_id,
+                i64::try_from(commit.cycle_index)?,
+                commit.digest().to_vec(),
+                commit.to_proto().encode_to_vec()
+            ],
+        )?;
+        Ok(inserted == 1)
+    })
+    .await
+}
+
+/// Every distinct ByteCommit this node mirrored for `member_id` at `cycle`.
+pub async fn mirror_get(
+    pool: &DBPool,
+    member_id: &[u8],
+    cycle: u64,
+) -> Result<Vec<dsm::storage_cell::ByteCommit>> {
+    let member_id = member_id.to_vec();
     with_conn(pool, move |conn| {
         let mut stmt = conn.prepare(
-            "SELECT value FROM cells WHERE namespace = ?1 AND cell_key = ?2 ORDER BY seq ASC",
+            "SELECT commit_pb FROM bytecommit_mirror
+             WHERE member_id = ?1 AND cycle_index = ?2 ORDER BY digest",
         )?;
-        let rows = stmt.query_map(rusqlite::params![namespace, key], |r| {
+        let rows = stmt.query_map(params![member_id, i64::try_from(cycle)?], |r| {
             r.get::<_, Vec<u8>>(0)
         })?;
-        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(decode_commit(&row?)?);
+        }
+        Ok(out)
+    })
+    .await
+}
+
+/// The highest cycle mirrored for `member_id`, 0 if none.
+pub async fn mirror_last_cycle(pool: &DBPool, member_id: &[u8]) -> Result<u64> {
+    let member_id = member_id.to_vec();
+    with_conn(pool, move |conn| {
+        let t: Option<i64> = conn.query_row(
+            "SELECT MAX(cycle_index) FROM bytecommit_mirror WHERE member_id = ?1",
+            params![member_id],
+            |r| r.get(0),
+        )?;
+        Ok(u64::try_from(t.unwrap_or(0))?)
     })
     .await
 }
@@ -2118,6 +2401,7 @@ pub async fn read_index(
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // unwrap/expect acceptable in deterministic tests
 mod tests {
     use super::*;
 

@@ -28218,64 +28218,6 @@ export class ApplicantV3 extends Message<ApplicantV3> {
 }
 
 /**
- * DrainProof: d consecutive ByteCommits with bytes_used=0 (stake exit).
- * Domain: "DSM/drain\0"
- *
- * @generated from message dsm.DrainProofV3
- */
-export class DrainProofV3 extends Message<DrainProofV3> {
-  /**
-   * 32 bytes
-   *
-   * @generated from field: bytes node_id = 1;
-   */
-  nodeId = new Uint8Array(0);
-
-  /**
-   * d consecutive cycle indices
-   *
-   * @generated from field: repeated uint64 cycle_indices = 2;
-   */
-  cycleIndices: bigint[] = [];
-
-  /**
-   * H(B_t) for each cycle
-   *
-   * @generated from field: repeated bytes bytecommit_digests = 3;
-   */
-  bytecommitDigests: Uint8Array[] = [];
-
-  constructor(data?: PartialMessage<DrainProofV3>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.DrainProofV3";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "node_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 2, name: "cycle_indices", kind: "scalar", T: 4 /* ScalarType.UINT64 */, repeated: true },
-    { no: 3, name: "bytecommit_digests", kind: "scalar", T: 12 /* ScalarType.BYTES */, repeated: true },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): DrainProofV3 {
-    return new DrainProofV3().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): DrainProofV3 {
-    return new DrainProofV3().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): DrainProofV3 {
-    return new DrainProofV3().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: DrainProofV3 | PlainMessage<DrainProofV3> | undefined, b: DrainProofV3 | PlainMessage<DrainProofV3> | undefined): boolean {
-    return proto3.util.equals(DrainProofV3, a, b);
-  }
-}
-
-/**
  * Storage payment receipt for PaidK spend-gate.
  * Domain: "DSM/pay/storage\0"
  *
@@ -28510,69 +28452,6 @@ export class PaidKStatusV3 extends Message<PaidKStatusV3> {
 }
 
 /**
- * DrainProof verification response (advisory).
- *
- * @generated from message dsm.DrainVerifyV3
- */
-export class DrainVerifyV3 extends Message<DrainVerifyV3> {
-  /**
-   * @generated from field: bool verified = 1;
-   */
-  verified = false;
-
-  /**
-   * @generated from field: bytes node_id = 2;
-   */
-  nodeId = new Uint8Array(0);
-
-  /**
-   * @generated from field: uint64 start_cycle = 3;
-   */
-  startCycle = protoInt64.zero;
-
-  /**
-   * @generated from field: uint64 end_cycle = 4;
-   */
-  endCycle = protoInt64.zero;
-
-  /**
-   * @generated from field: uint32 consecutive_empty = 5;
-   */
-  consecutiveEmpty = 0;
-
-  constructor(data?: PartialMessage<DrainVerifyV3>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.DrainVerifyV3";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "verified", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
-    { no: 2, name: "node_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 3, name: "start_cycle", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
-    { no: 4, name: "end_cycle", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
-    { no: 5, name: "consecutive_empty", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): DrainVerifyV3 {
-    return new DrainVerifyV3().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): DrainVerifyV3 {
-    return new DrainVerifyV3().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): DrainVerifyV3 {
-    return new DrainVerifyV3().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: DrainVerifyV3 | PlainMessage<DrainVerifyV3> | undefined, b: DrainVerifyV3 | PlainMessage<DrainVerifyV3> | undefined): boolean {
-    return proto3.util.equals(DrainVerifyV3, a, b);
-  }
-}
-
-/**
  * @generated from message dsm.BleConnectionFailed
  */
 export class BleConnectionFailed extends Message<BleConnectionFailed> {
@@ -28628,6 +28507,13 @@ export class CellValuesV1 extends Message<CellValuesV1> {
    */
   values: Uint8Array[] = [];
 
+  /**
+   * One arrival record per value, in the same order (storage spec §14).
+   *
+   * @generated from field: repeated dsm.ArrivalRecordV1 records = 2;
+   */
+  records: ArrivalRecordV1[] = [];
+
   constructor(data?: PartialMessage<CellValuesV1>) {
     super();
     proto3.util.initPartial(data, this);
@@ -28637,6 +28523,7 @@ export class CellValuesV1 extends Message<CellValuesV1> {
   static readonly typeName = "dsm.CellValuesV1";
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
     { no: 1, name: "values", kind: "scalar", T: 12 /* ScalarType.BYTES */, repeated: true },
+    { no: 2, name: "records", kind: "message", T: ArrivalRecordV1, repeated: true },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): CellValuesV1 {
@@ -28653,6 +28540,275 @@ export class CellValuesV1 extends Message<CellValuesV1> {
 
   static equals(a: CellValuesV1 | PlainMessage<CellValuesV1> | undefined, b: CellValuesV1 | PlainMessage<CellValuesV1> | undefined): boolean {
     return proto3.util.equals(CellValuesV1, a, b);
+  }
+}
+
+/**
+ * Arrival record of one keyed-cell entry (storage spec §6, §14): the member,
+ * the cell, the entry's per-key arrival index (from 1), and the member's
+ * running hash for the key after the entry. Bytes, not a signature.
+ *
+ * @generated from message dsm.ArrivalRecordV1
+ */
+export class ArrivalRecordV1 extends Message<ArrivalRecordV1> {
+  /**
+   * exactly as the storage set commits it
+   *
+   * @generated from field: bytes member_id = 1;
+   */
+  memberId = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes namespace = 2;
+   */
+  namespace = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes key = 3;
+   */
+  key = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint64 index = 4;
+   */
+  index = protoInt64.zero;
+
+  /**
+   * @generated from field: bytes running_hash = 5;
+   */
+  runningHash = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<ArrivalRecordV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ArrivalRecordV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "member_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "namespace", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "index", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 5, name: "running_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ArrivalRecordV1 {
+    return new ArrivalRecordV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ArrivalRecordV1 {
+    return new ArrivalRecordV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ArrivalRecordV1 {
+    return new ArrivalRecordV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ArrivalRecordV1 | PlainMessage<ArrivalRecordV1> | undefined, b: ArrivalRecordV1 | PlainMessage<ArrivalRecordV1> | undefined): boolean {
+    return proto3.util.equals(ArrivalRecordV1, a, b);
+  }
+}
+
+/**
+ * The arrival records of a batch put, one per entry in the batch's order.
+ *
+ * @generated from message dsm.ArrivalRecordsV1
+ */
+export class ArrivalRecordsV1 extends Message<ArrivalRecordsV1> {
+  /**
+   * @generated from field: repeated dsm.ArrivalRecordV1 records = 1;
+   */
+  records: ArrivalRecordV1[] = [];
+
+  constructor(data?: PartialMessage<ArrivalRecordsV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ArrivalRecordsV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "records", kind: "message", T: ArrivalRecordV1, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ArrivalRecordsV1 {
+    return new ArrivalRecordsV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ArrivalRecordsV1 {
+    return new ArrivalRecordsV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ArrivalRecordsV1 {
+    return new ArrivalRecordsV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ArrivalRecordsV1 | PlainMessage<ArrivalRecordsV1> | undefined, b: ArrivalRecordsV1 | PlainMessage<ArrivalRecordsV1> | undefined): boolean {
+    return proto3.util.equals(ArrivalRecordsV1, a, b);
+  }
+}
+
+/**
+ * A member's ByteCommit for cycle t (storage spec §14). Unsigned. Its digest
+ * is computed from the fields, never from these encoded bytes.
+ *
+ * @generated from message dsm.ByteCommitV4
+ */
+export class ByteCommitV4 extends Message<ByteCommitV4> {
+  /**
+   * exactly as the storage set commits it
+   *
+   * @generated from field: bytes member_id = 1;
+   */
+  memberId = new Uint8Array(0);
+
+  /**
+   * from 1; a counter, never time
+   *
+   * @generated from field: uint64 cycle_index = 2;
+   */
+  cycleIndex = protoInt64.zero;
+
+  /**
+   * @generated from field: bytes smt_root = 3;
+   */
+  smtRoot = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint64 bytes_used = 4;
+   */
+  bytesUsed = protoInt64.zero;
+
+  /**
+   * zeros at cycle 1
+   *
+   * @generated from field: bytes parent_digest = 5;
+   */
+  parentDigest = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<ByteCommitV4>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ByteCommitV4";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "member_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "cycle_index", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 3, name: "smt_root", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "bytes_used", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 5, name: "parent_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ByteCommitV4 {
+    return new ByteCommitV4().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ByteCommitV4 {
+    return new ByteCommitV4().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ByteCommitV4 {
+    return new ByteCommitV4().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ByteCommitV4 | PlainMessage<ByteCommitV4> | undefined, b: ByteCommitV4 | PlainMessage<ByteCommitV4> | undefined): boolean {
+    return proto3.util.equals(ByteCommitV4, a, b);
+  }
+}
+
+/**
+ * Every distinct ByteCommit a mirror fetched for one member and cycle. More
+ * than one is evidence that the member equivocated.
+ *
+ * @generated from message dsm.ByteCommitsV4
+ */
+export class ByteCommitsV4 extends Message<ByteCommitsV4> {
+  /**
+   * @generated from field: repeated dsm.ByteCommitV4 commits = 1;
+   */
+  commits: ByteCommitV4[] = [];
+
+  constructor(data?: PartialMessage<ByteCommitsV4>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ByteCommitsV4";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "commits", kind: "message", T: ByteCommitV4, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ByteCommitsV4 {
+    return new ByteCommitsV4().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ByteCommitsV4 {
+    return new ByteCommitsV4().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ByteCommitsV4 {
+    return new ByteCommitsV4().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ByteCommitsV4 | PlainMessage<ByteCommitsV4> | undefined, b: ByteCommitsV4 | PlainMessage<ByteCommitsV4> | undefined): boolean {
+    return proto3.util.equals(ByteCommitsV4, a, b);
+  }
+}
+
+/**
+ * A member's proof that its ByteCommit for a cycle commits a cell's latest
+ * entry as of that cycle: the entry's index and running hash, and the SMT
+ * inclusion proof of the cell's leaf.
+ *
+ * @generated from message dsm.CellCommitProofV1
+ */
+export class CellCommitProofV1 extends Message<CellCommitProofV1> {
+  /**
+   * @generated from field: uint64 index = 1;
+   */
+  index = protoInt64.zero;
+
+  /**
+   * @generated from field: bytes running_hash = 2;
+   */
+  runningHash = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes smt_proof = 3;
+   */
+  smtProof = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<CellCommitProofV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.CellCommitProofV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "index", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 2, name: "running_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "smt_proof", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): CellCommitProofV1 {
+    return new CellCommitProofV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): CellCommitProofV1 {
+    return new CellCommitProofV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): CellCommitProofV1 {
+    return new CellCommitProofV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: CellCommitProofV1 | PlainMessage<CellCommitProofV1> | undefined, b: CellCommitProofV1 | PlainMessage<CellCommitProofV1> | undefined): boolean {
+    return proto3.util.equals(CellCommitProofV1, a, b);
   }
 }
 

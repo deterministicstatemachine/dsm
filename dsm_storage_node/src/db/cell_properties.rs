@@ -13,7 +13,11 @@
 //! 4. an index is append-only and pages in append order from the last `seq`;
 //! 5. N concurrent writers on one key lose nothing — the cell holds all N;
 //! 6. a value or index entry this node acknowledged is still held after the
-//!    store is re-opened.
+//!    store is re-opened;
+//! 7. every entry carries its arrival record (storage spec §14): indexes run
+//!    1, 2, 3 … per key with no gap or repeat, even under concurrent writers,
+//!    and each running hash is exactly what a verifier replays from the
+//!    values it reads.
 //!
 //! The pool comes from `DSM_TEST_DATABASE_URL`, so CI runs this file against
 //! a real Postgres server as well as the in-memory default; a property of the
@@ -281,4 +285,211 @@ async fn held_values_and_index_entries_survive_reopening_the_store() {
     assert_eq!(page.len(), 1);
     assert_eq!(page[0].1, vec![0xB1u8; 32]);
     let _ = std::fs::remove_file(&path);
+}
+
+/// Arrival records: what a put returns is what a get reports, and both are
+/// exactly the verifier's replay of the values (storage spec §14).
+#[tokio::test]
+async fn arrival_records_match_the_verifiers_replay() {
+    let pool = fresh_pool().await;
+    let key = unique_key(0x38);
+    let mut returned = Vec::new();
+    for v in [b"one".as_slice(), b"two", b"two"] {
+        returned.push(db::put_cell(&pool, NS, &key, v).await.expect("put"));
+    }
+    let entries = db::get_cell_entries(&pool, NS, &key).await.expect("read");
+    let values: Vec<Vec<u8>> = entries.iter().map(|(v, _, _)| v.clone()).collect();
+    let reported: Vec<(u64, [u8; 32])> = entries.iter().map(|(_, i, h)| (*i, *h)).collect();
+    let replayed = dsm::storage_cell::replay(NS, &key, &values);
+    assert_eq!(returned, replayed, "put returns the replayed record");
+    assert_eq!(reported, replayed, "get reports the replayed record");
+    assert_eq!(
+        replayed.iter().map(|(i, _)| *i).collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
+}
+
+/// A batch put returns one record per entry, each continuing its own key.
+#[tokio::test]
+async fn a_batch_put_returns_each_entrys_record() {
+    let pool = fresh_pool().await;
+    let (k1, k2) = (unique_key(0x39), unique_key(0x3A));
+    db::put_cell(&pool, NS, &k1, b"before").await.expect("put");
+    let records = db::put_cells(
+        &pool,
+        &[
+            (NS.to_vec(), k1.to_vec(), b"a".to_vec()),
+            (NS.to_vec(), k2.to_vec(), b"b".to_vec()),
+        ],
+    )
+    .await
+    .expect("batch");
+    assert_eq!(
+        records[0],
+        dsm::storage_cell::replay(NS, &k1, &[b"before".to_vec(), b"a".to_vec()])[1]
+    );
+    assert_eq!(
+        records[1],
+        dsm::storage_cell::replay(NS, &k2, &[b"b".to_vec()])[0]
+    );
+}
+
+/// Under contention every writer still gets a distinct index, the indexes
+/// are exactly 1..=N, and the records replay: no two entries share a slot in
+/// the arrival order.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_writers_get_consecutive_arrival_indexes() {
+    let pool = fresh_pool().await;
+    let key = unique_key(0x3B);
+    let mut handles = Vec::new();
+    for i in 0..16u8 {
+        let pool = pool.clone();
+        handles.push(tokio::spawn(async move {
+            db::put_cell(&pool, NS, &key, &[i; 40]).await.expect("put")
+        }));
+    }
+    let mut indexes = Vec::new();
+    for h in handles {
+        indexes.push(h.await.expect("writer").0);
+    }
+    indexes.sort();
+    assert_eq!(indexes, (1..=16).collect::<Vec<u64>>());
+    let entries = db::get_cell_entries(&pool, NS, &key).await.expect("read");
+    let values: Vec<Vec<u8>> = entries.iter().map(|(v, _, _)| v.clone()).collect();
+    let reported: Vec<(u64, [u8; 32])> = entries.iter().map(|(_, i, h)| (*i, *h)).collect();
+    assert_eq!(reported, dsm::storage_cell::replay(NS, &key, &values));
+}
+
+/// ByteCommits on the compiled backend (storage spec §14): cycles close only
+/// over new entries, link to their parent, and prove exactly the entries
+/// they committed; the mirror keeps every distinct ByteCommit it is given.
+#[tokio::test]
+async fn bytecommits_close_link_and_prove_on_this_backend() {
+    let pool = fresh_pool().await;
+    let member = b"dsm-node-props";
+    let key = unique_key(0x3C);
+    // Other tests share this store: first flush whatever they left pending.
+    let base = db::close_cycle(&pool, member).await.expect("flush");
+
+    let r1 = db::put_cell(&pool, NS, &key, b"one").await.expect("put");
+    let c1 = db::close_cycle(&pool, member)
+        .await
+        .expect("close")
+        .expect("a cycle");
+    if let Some(b) = &base {
+        assert!(c1.follows(b), "the new cycle links to the one before");
+    }
+    let values = db::get_cell_values(&pool, NS, &key).await.expect("read");
+    let p1 = db::cell_commit_proof(&pool, NS, &key, c1.cycle_index)
+        .await
+        .expect("proof")
+        .expect("committed");
+    let rec = dsm::storage_cell::ArrivalRecord {
+        member_id: member.to_vec(),
+        namespace: NS.to_vec(),
+        key,
+        index: r1.0,
+        running_hash: r1.1,
+    };
+    assert!(dsm::storage_cell::record_is_committed(
+        &rec, &values, &c1, &p1
+    ));
+    assert_eq!(
+        db::get_own_bytecommit(&pool, Some(c1.cycle_index))
+            .await
+            .expect("read"),
+        Some(c1.clone())
+    );
+
+    assert!(db::mirror_put(&pool, &c1).await.expect("mirror"), "new");
+    assert!(
+        !db::mirror_put(&pool, &c1).await.expect("again"),
+        "identical bytes are held once"
+    );
+    let mut forked = c1.clone();
+    forked.smt_root = [0xEE; 32];
+    assert!(
+        db::mirror_put(&pool, &forked).await.expect("fork"),
+        "a different one is new"
+    );
+    let mirrored = db::mirror_get(&pool, member, c1.cycle_index)
+        .await
+        .expect("read");
+    assert_eq!(
+        mirrored.len(),
+        2,
+        "identical bytes once, an equivocation kept beside it"
+    );
+    assert!(db::mirror_last_cycle(&pool, member).await.expect("last") >= c1.cycle_index);
+}
+
+/// Batches over the same keys in opposite orders all complete: a member
+/// takes a write's cell locks in one global order, so two batches queue
+/// rather than deadlock (on Postgres a deadlock aborts one of them).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn opposite_order_batches_over_the_same_keys_all_complete() {
+    let pool = fresh_pool().await;
+    let (k1, k2) = (unique_key(0x3D), unique_key(0x3E));
+    let mut handles = Vec::new();
+    for i in 0..16u8 {
+        let pool = pool.clone();
+        let (a, b) = if i % 2 == 0 { (k1, k2) } else { (k2, k1) };
+        handles.push(tokio::spawn(async move {
+            db::put_cells(
+                &pool,
+                &[
+                    (NS.to_vec(), a.to_vec(), vec![i; 8]),
+                    (NS.to_vec(), b.to_vec(), vec![i; 8]),
+                ],
+            )
+            .await
+        }));
+    }
+    for h in handles {
+        h.await.expect("writer").expect("every batch completes");
+    }
+    for k in [k1, k2] {
+        let entries = db::get_cell_entries(&pool, NS, &k).await.expect("read");
+        assert_eq!(entries.len(), 16);
+    }
+}
+
+/// Rows a binary from before arrival records wrote, before and after one
+/// the current binary recorded, all get exactly the record their arrival
+/// order defines when the store is initialised (storage spec §14), with no
+/// collision on the arrival index; a cycle then closes over them and proves
+/// the latest.
+#[tokio::test]
+async fn unrecorded_rows_get_the_records_their_arrival_order_defines() {
+    let pool = fresh_pool().await;
+    let key = unique_key(0x3F);
+    db::insert_cell_without_record(&pool, NS, &key, b"old-1")
+        .await
+        .expect("old row");
+    db::put_cell(&pool, NS, &key, b"new-2").await.expect("put");
+    db::insert_cell_without_record(&pool, NS, &key, b"old-3")
+        .await
+        .expect("old row");
+    db::init_db(&pool).await.expect("init records every row");
+
+    let entries = db::get_cell_entries(&pool, NS, &key).await.expect("read");
+    let values: Vec<Vec<u8>> = entries.iter().map(|(v, _, _)| v.clone()).collect();
+    assert_eq!(
+        values,
+        vec![b"old-1".to_vec(), b"new-2".to_vec(), b"old-3".to_vec()]
+    );
+    let reported: Vec<(u64, [u8; 32])> = entries.iter().map(|(_, i, h)| (*i, *h)).collect();
+    assert_eq!(reported, dsm::storage_cell::replay(NS, &key, &values));
+
+    let member = b"dsm-node-props";
+    let c = db::close_cycle(&pool, member)
+        .await
+        .expect("close")
+        .expect("a cycle");
+    let p = db::cell_commit_proof(&pool, NS, &key, c.cycle_index)
+        .await
+        .expect("proof")
+        .expect("committed");
+    assert_eq!((p.index, p.running_hash), reported[2]);
+    assert!(p.verifies(&c, NS, &key));
 }
