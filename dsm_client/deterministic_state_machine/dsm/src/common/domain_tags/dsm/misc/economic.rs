@@ -45,21 +45,6 @@ pub const TAG_DSM_ECONOMIC_BALANCE_KEY: TaggedHashDomain<'static> =
 pub const TAG_DSM_ECONOMIC_CONSUMED_SOURCE_KEY: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/economic-consumed-source-key/v1");
 
-/// The signed preimage of an issuance authorization (class `0x0029`):
-/// `m = H(tag ‖ 0x00 ‖ CCB(IssuanceAuthorizationBody))`.
-///
-/// The body commits the issuer's write-once economic position and the exact
-/// operation digest, so one authorization funds exactly one issuance rather
-/// than a standing permission to mint that amount repeatedly.
-pub const TAG_DSM_ISSUANCE_AUTHORIZATION_SIGN: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/issuance-authorization-sign/v1");
-/// Immutable namespace of the issuance-authorization evidence bundle — the
-/// object `CreditSourceAuthorizedIssuance.issuance_authorization_addr` names.
-pub const TAG_DSM_ISSUANCE_AUTHORIZATION_EVIDENCE: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/issuance-authorization-evidence/v1");
-/// `SourceId` of an authorized-issuance credit.
-pub const TAG_DSM_ECON_SOURCE_AUTHORIZED_ISSUANCE: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/econ-source/authorized-issuance/v1");
 /// The signed preimage of an economic root claim:
 /// `m = H(tag ‖ 0x00 ‖ CCB(EconomicRootClaimBody))`.
 pub const TAG_DSM_ECONOMIC_ROOT_CLAIM_SIGN: TaggedHashDomain<'static> =
@@ -165,6 +150,11 @@ pub const TAG_DSM_NATIVE_RESERVE_RELEASE: TaggedHashDomain<'static> =
 /// scope through `reserve_id`; one generation releases exactly once.
 pub const TAG_DSM_ECON_SOURCE_NATIVE_RESERVE_RELEASE: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/econ-source/native-reserve-release/v1");
+/// `SourceId` for a genesis release (`0x005F`):
+/// `H(tag ‖ 0x00 ‖ creator_genesis ‖ creator_devid ‖ u64_be(position) ‖ policy_commit)`.
+/// One per creation (SoFi §51).
+pub const TAG_DSM_ECON_SOURCE_GENESIS_RELEASE: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/econ-source/genesis-release/v1");
 /// Digest of an ordinary DSM operation for economic binding:
 /// `operation_digest_dsm = H(tag ‖ 0x00 ‖ exact Operation::to_bytes())`.
 pub const TAG_DSM_ECONOMIC_OPERATION_DIGEST_DSM: TaggedHashDomain<'static> =

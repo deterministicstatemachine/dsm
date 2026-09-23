@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Admin endpoints for storage node operations
 
-use crate::timing::ExponentialBackoffTiming;
 use axum::{
     extract::{Extension, RawQuery},
     http::{HeaderMap, StatusCode},
@@ -36,8 +35,7 @@ async fn require_admin_token(headers: HeaderMap) -> Result<(), StatusCode> {
     let expected = env::var(ADMIN_TOKEN_ENV).unwrap_or_default();
     if expected.trim().is_empty() {
         // Fail closed by default — a missing admin token must never silently
-        // authorize destructive endpoints (cleanup deletes objects/spool;
-        // maintenance mutates current_tick and runs replication). Local dev can
+        // authorize an admin endpoint (maintenance mutates current_tick). Local dev can
         // explicitly opt out of admin auth by setting ADMIN_INSECURE_ENV=1; a
         // plain debug build no longer disables auth on its own.
         if cfg!(debug_assertions) && env::var(ADMIN_INSECURE_ENV).as_deref() == Ok("1") {
@@ -70,48 +68,6 @@ async fn admin_auth(
     Ok(next.run(req).await)
 }
 
-#[derive(Debug, PartialEq)]
-pub struct CleanupParams {
-    /// Delete objects where iter_expires < before_iter
-    before_iter: i64,
-}
-
-/// Admin endpoint to manually trigger cleanup of expired objects and spool entries.
-/// POST /admin/cleanup?before_iter=12345
-pub async fn cleanup_expired_handler(
-    Extension(state): Extension<Arc<AppState>>,
-    RawQuery(raw): RawQuery,
-) -> Result<impl IntoResponse, StatusCode> {
-    let params = parse_cleanup_query(raw.as_deref())?;
-    let timing = ExponentialBackoffTiming::default();
-    let (objects_deleted, spool_deleted) =
-        db::cleanup_expired_objects_and_spool(&state.db_pool, &timing, params.before_iter)
-            .await
-            .map_err(|e| {
-                log::error!("cleanup_expired failed: {}", e);
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?;
-
-    info!(
-        "cleanup_expired: deleted {} objects and {} spool entries with iter_expires < {}",
-        objects_deleted, spool_deleted, params.before_iter
-    );
-
-    let resp = pb::AdminCleanupResponseV1 {
-        objects_deleted,
-        spool_deleted,
-        before_iter: params.before_iter,
-    };
-    let mut buf = Vec::with_capacity(resp.encoded_len());
-    resp.encode(&mut buf)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok((
-        StatusCode::OK,
-        [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
-        buf,
-    ))
-}
-
 /// Admin endpoint to run deterministic maintenance cycle.
 /// POST /admin/maintenance?tick=12345
 pub async fn maintenance_handler(
@@ -137,22 +93,6 @@ pub async fn maintenance_handler(
         [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
         buf,
     ))
-}
-
-fn parse_cleanup_query(raw: Option<&str>) -> Result<CleanupParams, StatusCode> {
-    let raw = raw.ok_or(StatusCode::BAD_REQUEST)?;
-    let mut before_iter = None;
-    for pair in raw.split('&') {
-        let mut it = pair.splitn(2, '=');
-        let key = it.next().unwrap_or("");
-        let val = it.next().unwrap_or("");
-        let val = decode_percent(val)?;
-        if key == "before_iter" {
-            before_iter = Some(val.parse::<i64>().map_err(|_| StatusCode::BAD_REQUEST)?);
-        }
-    }
-    let before_iter = before_iter.ok_or(StatusCode::BAD_REQUEST)?;
-    Ok(CleanupParams { before_iter })
 }
 
 fn parse_tick_query(raw: Option<&str>) -> Result<i64, StatusCode> {
@@ -222,9 +162,7 @@ fn from_hex(b: u8) -> Result<u8, StatusCode> {
 /// because there is no longer a path by which it could not be.
 pub fn admin_surface(state: Arc<AppState>) -> Router<()> {
     Router::new()
-        .route("/cleanup", post(cleanup_expired_handler))
         .route("/maintenance", post(maintenance_handler))
-        .merge(crate::api::registry::scaling::admin_routes())
         .layer(axum::middleware::from_fn(admin_auth))
         .layer(Extension(state))
 }
@@ -292,10 +230,7 @@ mod tests {
         // Every route this node serves under /admin, and a body each handler
         // will reject if — and only if — the request reaches it.
         let routes = [
-            ("/admin/cleanup", ""),
             ("/admin/maintenance", ""),
-            ("/admin/registry/seed", "short"),
-            ("/admin/registry/update", ""),
         ];
 
         for (path, body) in routes {
@@ -418,43 +353,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_cleanup_query_valid() {
-        match parse_cleanup_query(Some("before_iter=42")) {
-            Ok(p) => assert_eq!(p.before_iter, 42),
-            Err(err) => panic!("expected valid cleanup query, got {err:?}"),
-        }
-    }
-
-    #[test]
-    fn parse_cleanup_query_with_extra_params() {
-        match parse_cleanup_query(Some("foo=bar&before_iter=100&baz=1")) {
-            Ok(p) => assert_eq!(p.before_iter, 100),
-            Err(err) => panic!("expected valid cleanup query with extras, got {err:?}"),
-        }
-    }
-
-    #[test]
-    fn parse_cleanup_query_missing_param() {
-        assert_eq!(
-            parse_cleanup_query(Some("foo=bar")),
-            Err(StatusCode::BAD_REQUEST)
-        );
-    }
-
-    #[test]
-    fn parse_cleanup_query_none() {
-        assert_eq!(parse_cleanup_query(None), Err(StatusCode::BAD_REQUEST));
-    }
-
-    #[test]
-    fn parse_cleanup_query_non_numeric() {
-        assert_eq!(
-            parse_cleanup_query(Some("before_iter=abc")),
-            Err(StatusCode::BAD_REQUEST)
-        );
-    }
-
-    #[test]
     fn parse_tick_query_valid() {
         assert_eq!(parse_tick_query(Some("tick=999")), Ok(999));
     }
@@ -481,11 +379,4 @@ mod tests {
         assert_eq!(parse_tick_query(Some("tick=-5")), Ok(-5));
     }
 
-    #[test]
-    fn parse_cleanup_query_percent_encoded_value() {
-        match parse_cleanup_query(Some("before_iter=%33%37")) {
-            Ok(p) => assert_eq!(p.before_iter, 37),
-            Err(err) => panic!("expected valid percent-encoded cleanup query, got {err:?}"),
-        }
-    }
 }

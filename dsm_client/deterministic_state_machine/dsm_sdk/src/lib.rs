@@ -143,7 +143,9 @@ pub mod ble;
 // orphaned HashChainSDK/IdentitySDK demos with no consumers.
 #[cfg(test)]
 pub(crate) mod test_support {
-    pub mod fake_node;
+    // Tests run against real storage nodes, never a fake one (owner,
+    // 2026-09-23). The two-device harness is rebuilt on real nodes.
+    pub mod real_nodes;
     pub mod two_device;
 }
 #[cfg(test)]

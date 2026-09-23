@@ -391,7 +391,7 @@ means? If the answer is yes, the addition is in the wrong layer.
 The following facts are different from each other. Code that treats one as another is wrong.
 
 StorageFinal ≠ StorageReachable ≠ Canonical ≠ Consumed ≠ TraderRealized
-StorageUnresolved ≠ VerifierPending, StoragePredecessorResolved ≠ Skipped
+StoragePredecessorResolved ≠ Skipped
 GenesisStored ≠ GenesisAccepted, Registered ≠ Validated
 SemanticValidity ≠ Canonicality ≠ AttemptLiveness ≠ StorageFinality
 Precommit ≠ PolicyFulfillment ≠ TraderFulfillment
@@ -409,7 +409,7 @@ Precommit ≠ PolicyFulfillment ≠ TraderFulfillment
 | StorageFinalE(K, E) | An exercise carrying E is final at coordinate K (Section 17.5). A storage fact only: it implies nothing about exercise, conformance or consumption. |
 | Consumed | Canonical DLV economic ancestry. |
 | Validation | Semantic validity only: Valid, Invalid or Unavailable. |
-| Realized, Void, Invalid, Pending | The verifier-local result of a trader position (Section 24). |
+| Realized, Void, Invalid | The verifier-local result of a trader position (Section 24). There is no fourth result: an attempt that cannot complete its reads fails on the network (Amendment S7). |
 
 
 <!-- spec-section: SOFI-003 -->
@@ -468,15 +468,16 @@ ular the leader of a coordinate (Section 7) is eventually reachable, because no 
 3. an enabled, conforming completion write has a fair chance to reach some live attempt coordinate;
 4. recursively, the same holds for any predecessor position that has to resolve first.
 No liveness is claimed against an adversary who wins every future write forever. If required evidence never appears,
-a registered fulfillment MAY stay Pending forever.
+a registered fulfillment MAY stay unresolved forever: every attempt to resolve it fails on the network, and unresolved is
+not a result (Amendment S7).
 
-> **Note (2026-09-22).** A pending position can now be ended by the challenge rule (Amendment S1; storage spec §9.1). It then resolves Void.
+> **Note (2026-09-22).** An unresolved position can now be ended by the challenge rule (Amendment S1; storage spec §9.1). It then resolves Void.
 
 <!-- spec-section: SOFI-005-4 -->
 #### 5.4 Boundaries that remain
 - An identity can split its own registers (self split).
 - A registered route with a leg that cannot be written stays unresolved until that leg’s vault acts.
-- A position may stay Pending after its DLV keys become skippable.
+- A position may stay unresolved after its DLV keys become skippable.
 - A fulfillment may resolve Void under contention. Policy fulfillment witnesses do not lock parents, so success
 after F is never guaranteed. A guarantee would need a prepare lock, and without a clock or an abort authority
 an abandoned prepare blocks forever. The design declines it.
@@ -507,6 +508,8 @@ Every vault commits its storage set in its own state. The set is the sorted list
 · · · < m5 ), compared as raw bytes. A member that is offline is still in S. The set is identified by one hash,
 storage_set_id, which covers the member ids only, never endpoints. A node knows the member list of every
 set it belongs to.
+
+> **Amendment S6 (owner, 2026-09-23) — incarnations in the set identity.** Each member of S is committed as its member id paired with the register incarnation it serves, and storage_set_id covers those pairs, still never endpoints. Members stay sorted and compared by member id alone, so one member cannot appear twice under two incarnations. A member rebuilt under the same id has a new incarnation and is therefore not the committed member: it cannot answer for cells its lost register held. The incarnation may be revisited once members run enrolled appliances that carry this continuity in hardware.
 
 
 <!-- Source PDF page 14 -->
@@ -1389,9 +1392,10 @@ tion, and while every named DLV parent remains available to E. F ’s own condit
 T0 . A fulfillment MAY register after one of its DLV parents was lost; it can then never be realized.
 **Rule — combining the two predicates**
 
-If either predicate is Invalid, the position is Invalid. Otherwise, if either is Unavailable, the position is Pending.
-Only when both are Valid and the route is permanently defeated is the position Void. No route becomes Void
-while its conformance is unknown.
+If either predicate is Invalid, the position is Invalid. Only when both are Valid and the route is permanently defeated
+is the position Void. No route becomes Void while its conformance is unknown: a predicate is evaluated only over
+complete evidence, and an attempt that cannot obtain it within its retry budget fails on the network, which is not a
+resolution (Amendment S7).
 Registration establishes only that bytes are held at the fulfillment coordinate. It establishes no conformance and
 does not require every Rj to be unconsumed. A different registered claim at q makes a later F at q inadmissible,
 because the leader of the pair holds one value. Two fulfillments from one T0 compete at the same leader, and at most
@@ -1411,7 +1415,7 @@ has selected exactly one root.
 |---|---|---|
 | Realized | P.Rrealize | May be constructed against exactly that root |
 | Void | P.Rvoid, the prior validated root | May be constructed against exactly that root |
-| Pending | none | none |
+| Not yet resolved | none yet | none until it resolves |
 | Invalid | none, terminal | none |
 
 At most one fulfillment per lineage is unresolved in storage at a time. StorageResolved survives only as an input in-
@@ -1463,8 +1467,8 @@ consumed_route, CORE/sofi/resolution.rs:216, over RouteFacts.
 #### 23.3 Trader parent compatibility
 TraderParentCompatible(P ) holds when T0 is a single root claim, or when T0 = Cp and position p selected exactly
 T ◦ .pre_root. TraderParentImpossible(P ) holds when T0 = Cp is terminal and p selected either no root or a root
-different from T ◦ .pre_root. Both are objective and monotone. While p is Pending both are false, so that parent
-neither consumes nor skips anything.
+different from T ◦ .pre_root. Both are objective and monotone. While p is unresolved both are false, so that parent
+neither consumes nor skips anything; Core resolves q only once p has resolved (Amendment S7).
 **Code**
 trader_parent_compatible, CORE/sofi/resolution.rs:188; trader_parent_impossible, :201.
 
@@ -1528,21 +1532,23 @@ of F and every cell.
 
 <!-- spec-section: SOFI-024 -->
 ### 24 Resolution of a trader position
-Resolution is local to the verifier, deterministic, and permanent once it is not Pending. The first matching row decides.
+Resolution is local to the verifier, deterministic, and permanent. The first matching row decides. Core resolves only over
+complete facts (Amendment S7): a row whose result is "not a result" names what the SDK must still obtain, and when its
+retries are exhausted the attempt fails on the network.
 
 | Step | Result | Condition |
 |---:|---|---|
-| 0 | Pending | ¬FulfillmentRegistered(q, F) |
-| 1 | Pending | Defensive: an object supplied from outside names an unresolved conditional predecessor |
+| 0 | not a result (S7) | ¬FulfillmentRegistered(q, F) |
+| 1 | not a result (S7) | Defensive: an object supplied from outside names an unresolved conditional predecessor |
 | 2 | Invalid | The predecessor is terminal, or selected a root different from P.Rvoid; terminal |
 | 3 | Invalid | FulfillmentConformance(F) = Invalid; terminal |
 | 3a | Void | A drop claim for this position won under the challenge rule (storage spec §9.1), and RouteValidation(P, G, E) is not Invalid on the evidence in hand (Amendment S5) |
-| 4 | Pending | FulfillmentConformance(F) = Unavailable |
+| 4 | not a result (S7) | FulfillmentConformance(F) not yet evaluated |
 | 5 | Invalid | RouteValidation(P, G, E) = Invalid; terminal |
-| 6 | Pending | RouteValidation(P, G, E) = Unavailable |
+| 6 | not a result (S7) | RouteValidation(P, G, E) not yet evaluated |
 | 7 | Realized | ConsumedRoute(F, E) |
 | 8 | Void | Both predicates Valid and the route is permanently defeated: a reserved key’s leader holds another exercise first, or StorageFinalE(K, X ≠ E); a leg parent is Consumed(X ≠ E); a leg parent is orphaned |
-| 9 | Pending | Otherwise |
+| 9 | not a result (S7) | Otherwise: the facts are not complete |
 
 **Rule**
 No shortcut from registration to conformance exists. Rungs 1 and 2 are defensive: a conforming producer never
@@ -1560,9 +1566,11 @@ mutations. Mutual exclusion holds: FulfillmentRegistered(q) ∧ EconomicRootRegi
 **Code**
 resolve_position, CORE/sofi/resolution.rs:284; effect_of, :92.
 
-> **Amendment S1 (owner, 2026-09-22) — nothing negative is recorded, and Pending can end.** Realized, Void, Invalid and Pending are computed by each verifier from raw reads and are never recorded (DSM Amendment A1). Their job is to tell the next trade against a vault whether the balance ahead of it is settled. A position that stays Pending on one party may be challenged under `DSM_Storage_Node_Specification.md` §9.1: if the challenged party does not answer before the cell's leader has closed X ByteCommits, a drop claim wins at the leader and the position resolves Void. It never executes and moves no balance. The value of X is still open (storage §9.1).
+> **Amendment S1 (owner, 2026-09-22) — nothing negative is recorded, and Pending can end.** Realized, Void, Invalid and Pending are computed by each verifier from raw reads and are never recorded (DSM Amendment A1). Their job is to tell the next trade against a vault whether the balance ahead of it is settled. A position that stays Pending on one party may be challenged under `DSM_Storage_Node_Specification.md` §9.1: if the challenged party does not answer before the cell's leader has closed X ByteCommits, a drop claim wins at the leader and the position resolves Void. It never executes and moves no balance. The value of X is still open (storage §9.1). (Wording superseded by Amendment S7: Pending is not a result; a position is unresolved, and an attempt to resolve it fails on the network.)
 
 > **Amendment S5 (owner, 2026-09-22) — the drop rung.** Step 3a places a dropped position in the ladder. A position that is shown Invalid on evidence in hand (steps 2 and 3, or RouteValidation) stays Invalid; otherwise a won drop claim resolves it Void: nothing executes, no balance moves, and the trader's lineage continues from the previous root. A dropped position is the one Void declared without both predicates established, and because later evidence for it is ignored (storage spec §9.1), it can never move to Invalid.
+
+> **Amendment S7 (owner, 2026-09-23) — no Pending.** A predicate has two values, Valid and Invalid, and network status is separate (Amendment S3). A trader position resolves Realized, Void or Invalid, and nothing else. Core resolves only over complete facts: F registered at q, both predicates evaluated, every required storage fact final, and the predecessor resolved. Until the facts are complete the SDK keeps reading, relaying and retrying within its budget; when the retries are exhausted the attempt fails on the network. That failure is not a resolution: it is never recorded, never becomes Invalid or Void, and a later attempt may succeed. A position whose evidence never appears stays unresolved, which is a fact about the world, not a result. Wherever this specification says Pending or Unavailable of a position or a predicate, read it this way. Amendments S1 and S5 stand; the challenge rule that ends an unresolved position is outside beta.
 
 
 <!-- spec-section: SOFI-025 -->
@@ -1572,13 +1580,13 @@ resolve_position, CORE/sofi/resolution.rs:284; effect_of, :92.
 |---|---|---|
 | P signed or stored, witnesses computed, no F | nothing economic; the trader may abandon | nothing |
 | F signed, never published | not exercised; the trader may discard it | nothing |
-| F held by members, but not by the leader of Kful(q) | not exercised; a different F at the leader wins q | Pending, or F never registers |
-| F held by the leader of Kful(q), fewer than two copies | the race at q is settled for F; relayers complete the copies | Pending |
-| F registered | irreversible exercise; any party writes E into F’s keys and publishes closure objects | Pending until both predicates resolve |
-| a leg lost its parent before E reached it | drive storage resolution | either predicate Invalid: Invalid; either Unavailable: Pending; both Valid and defeated: Void |
+| F held by members, but not by the leader of Kful(q) | not exercised; a different F at the leader wins q | not resolved yet, or F never registers |
+| F held by the leader of Kful(q), fewer than two copies | the race at q is settled for F; relayers complete the copies | not resolved yet |
+| F registered | irreversible exercise; any party writes E into F’s keys and publishes closure objects | not resolved until both predicates are evaluated |
+| a leg lost its parent before E reached it | drive storage resolution | either predicate Invalid: Invalid; evidence not obtained within the retry budget: the attempt fails on the network (S7); both Valid and defeated: Void |
 | another exercise is first at a reserved key’s leader | storage resolved; if Void, a new P and F from the predecessor’s selected root | as in the row above |
 | every required cell final | Core evaluates the full ConsumedRoute; storage finality alone gives no result | Realized only if the whole conjunction holds |
-| evidence missing | wait | Pending |
+| evidence missing | retry within the budget | the attempt fails on the network when the retries are exhausted (S7) |
 
 ## Part V — The final wiring
 
@@ -1705,6 +1713,8 @@ of those vaults’ next attempt goes live. There is no partial route and no coor
 
 The vault side needs no action. Once a hop is consumed, that vault’s head is its Vj◦ post root, and the owner and
 every later trader find it by walking.
+
+> **Recommendation (owner, 2026-09-23) — not a rule.** Every vault must honour the policy of each of its tokens; that is a rule, not a choice (§49, MR-SOFI-0311). Within those policies, owners are encouraged to set up their vaults for a token in line with the rest of the market for that token, with only minor differences, so that their liquidity is usable by multihop routes and other traders' paths. Nothing enforces this, and no check depends on it.
 
 <!-- spec-section: SOFI-032 -->
 ### 32 Closing a vault
@@ -2356,7 +2366,8 @@ tion Valid; no leg is consumed.
 9. F on members other than the leader while a rival F ′ reaches the leader: F ′ is the exercise; F never registers.
 10. A flood of malformed auxiliary candidates: the valid one still stores and verifies; budgets give Unavailable, never
 Invalid.
-11. A registered route loses a parent while evidence is withheld: the position stays Pending, never Void; published
+11. A registered route loses a parent while evidence is withheld: the position is not resolved, and each attempt fails on
+the network when its retries are exhausted, never Void; published
 valid evidence gives Void, invalid gives Invalid.
 12. The leader of a coordinate is offline: the coordinate waits; no other member stands in.
 

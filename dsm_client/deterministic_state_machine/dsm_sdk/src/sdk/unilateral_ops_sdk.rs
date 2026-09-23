@@ -9,7 +9,7 @@
 // High-level flow for unilateral (online) transactions:
 // - Submit transactions to storage nodes via B0xSDK.submit_to_b0x
 // - Retrieve pending transactions via B0xSDK.retrieve_from_b0x_v2 (transport implementation)
-// - Process (update contact state) and acknowledge via B0xSDK.acknowledge_b0x_v2 (transport implementation)
+// - Process (update contact state) and acknowledge via B0xSDK.record_consumed_b0x (transport implementation)
 // - Maintain transaction history deterministically (ticks only)
 
 #![allow(clippy::disallowed_methods)] // Workaround for known clippy false-positive on match/expect patterns.
@@ -429,8 +429,8 @@ impl UnilateralOpsSDK {
         );
 
         let mut b0x = self.b0x_sdk.write().await;
-        // Transport is implemented by B0xSDK::acknowledge_b0x_v2 (Envelope v3 over HTTP).
-        b0x.acknowledge_b0x_v2(b0x_address, transaction_ids).await?;
+        // Transport is implemented by B0xSDK::record_consumed_b0x (Envelope v3 over HTTP).
+        b0x.record_consumed_b0x(b0x_address, transaction_ids).await?;
         info!("UnilateralOpsSDK: ack complete");
         Ok(())
     }

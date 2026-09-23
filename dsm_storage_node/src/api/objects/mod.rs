@@ -5,5 +5,3 @@
 
 pub mod bytecommit;
 pub mod immutable;
-pub mod list;
-pub mod store;

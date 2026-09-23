@@ -8,10 +8,7 @@ use std::sync::atomic::AtomicI64;
 use std::sync::Arc;
 
 pub mod api;
-pub mod auth;
 pub mod db;
-#[cfg(feature = "dev-replication")]
-pub mod dev_replication;
 pub mod replication;
 pub mod timing;
 
@@ -236,63 +233,6 @@ pub fn node_identity_echo_layer(
     )
 }
 
-/// Minimal app builder for tests that don't require DB access.
-/// It wires only the routes needed by tests (registry gate), with a lazy pool.
-///
-/// When compiled with the `local-dev` feature (SQLite), defaults to an
-/// in-memory database so no PostgreSQL installation is required.
-/// When compiled with the `postgres` feature, honours the `DSM_DATABASE_URL`
-/// environment variable (no default database URL is provided — tests that need
-/// a real PG instance must set that variable).
-pub async fn build_app_for_tests() -> anyhow::Result<axum::Router> {
-    let database_url = std::env::var("DSM_DATABASE_URL").unwrap_or_else(|_| {
-        // `local-dev` (SQLite) build: open an in-memory database.
-        // `postgres` build: callers must supply DSM_DATABASE_URL.
-        #[cfg(feature = "local-dev")]
-        {
-            ":memory:".to_string()
-        }
-        #[cfg(not(feature = "local-dev"))]
-        {
-            "postgresql://localhost:5432/dsm_storage".to_string()
-        }
-    });
-    let pool = db::create_pool(&database_url, true)?;
-
-    // Initialize DB schema for tests
-    db::init_db(&pool).await?;
-
-    let replication_config = replication::ReplicationConfig {
-        replication_factor: 3,
-        gossip_interval_ticks: 100,
-        failure_timeout_ticks: 500,
-        gossip_fanout: 3,
-        max_concurrent_jobs: 10,
-    };
-    let replication_manager = Arc::new(
-        replication::ReplicationManager::new_for_tests(
-            replication_config,
-            "test-node".to_string(),
-            "http://localhost:8080".to_string(),
-        )
-        .map_err(|e| anyhow::anyhow!("Failed to create replication manager: {}", e))?,
-    );
-
-    let state = AppState::new(
-        "test-node".to_string(),
-        "http://localhost:8080",
-        None,
-        Arc::new(pool),
-        replication_manager,
-    );
-    let state_arc = Arc::new(state);
-
-    // Only mount registry routes for the current tests
-    Ok(axum::Router::new()
-        .merge(api::registry::core::create_router(state_arc.clone()))
-        .layer(Extension(state_arc)))
-}
-
 #[cfg(test)]
 mod storage_set_tests {
     #![allow(clippy::disallowed_methods)] // unwrap/expect acceptable in deterministic tests
@@ -365,4 +305,110 @@ mod storage_set_tests {
         let b = NodeStorageSet::new(reversed, "n1", [0xC1; 32]).unwrap();
         assert_eq!(a.id, b.id);
     }
+}
+
+/// Limits the node's app applies to every request.
+#[derive(Debug, Clone, Copy)]
+pub struct AppLimits {
+    pub body_limit_bytes: usize,
+    pub concurrency_limit: usize,
+    /// Disables rate limiting on the public routes (benchmarks only).
+    pub benchmark_mode: bool,
+}
+
+/// The node's whole app: every route it serves, with its limits and layers.
+/// The binary serves exactly this, and so do tests that stand up real nodes,
+/// so no test ever runs against an assembly the binary does not serve.
+pub fn build_app(state: std::sync::Arc<AppState>, node_id: &str, limits: AppLimits) -> axum::Router<()> {
+    use axum::http::StatusCode;
+    use axum::routing::get;
+    use axum::{middleware, Extension, Router};
+    use tower::limit::ConcurrencyLimitLayer;
+    use tower_http::{limit::RequestBodyLimitLayer, trace::TraceLayer};
+
+    let b0x_router = crate::api::transport::b0x::router(state.clone());
+    let app: Router<()> = {
+    let public_rate_limiter = if limits.benchmark_mode {
+        log::info!("BENCHMARK MODE: rate limiting disabled for all public endpoints");
+        Arc::new(crate::api::infra::rate_limit::RateLimiter::new_bypass())
+    } else {
+        Arc::new(crate::api::infra::rate_limit::RateLimiter::new())
+    };
+    let public_rate_layer = middleware::from_fn_with_state(
+        public_rate_limiter.clone(),
+        crate::api::infra::rate_limit::rate_limit_by_ip,
+    );
+
+    // The storage contract's four operations (Part II §12): the immutable
+    // content-addressed store and the keyed cells and indexes, ONE public
+    // assembly with no write authorization (R2). The node is content-blind on
+    // every one of them — no payload decode, ever.
+    let storage_contract_router =
+        crate::storage_contract_router(state.clone()).layer(public_rate_layer.clone());
+    // Policy router is transport-only and signature-free; safe to expose.
+    let policy_router =
+        crate::api::vault::policy::create_router(state.clone()).layer(public_rate_layer.clone());
+    // Identity mirrors
+    let devtree_router =
+        crate::api::identity::devtree::create_router(state.clone()).layer(public_rate_layer.clone());
+    // Recovery-authority anchor — single-assignment per genesis (§0.5 bind-once)
+    let recovery_anchor_router = crate::api::identity::recovery_anchor::create_router(state.clone())
+        .layer(public_rate_layer.clone());
+    // Append-only Per-Device SMT head chain (§0.5 gap 13, R4 layer 1)
+    let pdsmt_head_router =
+        crate::api::identity::pdsmt_head::create_router(state.clone()).layer(public_rate_layer.clone());
+    let tips_router =
+        crate::api::identity::tips::create_router(state.clone()).layer(public_rate_layer.clone());
+    // Genesis mirror
+    let genesis_router =
+        crate::api::identity::genesis::create_router(state.clone()).layer(public_rate_layer.clone());
+    // DLV slot + Recovery Capsule
+    let dlv_slot_router =
+        crate::api::vault::slot::create_router(state.clone()).layer(public_rate_layer.clone());
+    // Keyed cells and indexes: bytes in, bytes out. No write authorization;
+    // a member keeps everything it is given and refuses nothing.
+    let recovery_capsule_router =
+        crate::api::vault::recovery::create_router(state.clone()).layer(public_rate_layer.clone());
+    // Gossip protocol for replication
+    let gossip_router = crate::api::transport::gossip::gossip_routes(state.clone());
+    // Node discovery for SDK auto-discovery
+    let discovery_router =
+        crate::api::registry::discovery::create_router(state.clone()).layer(public_rate_layer.clone());
+
+    // EVERY `/admin` endpoint, assembled in one place behind one token check.
+    // Two sibling admin routers nested at the same path is how the registry's
+    // update and seed endpoints came to be reachable unauthenticated.
+    let admin_router = crate::api::infra::admin::admin_surface(state.clone());
+
+    // Compose routes and layers, then install `state`.
+    // Returning `Router<()>` here is important (see Axum docs).
+    // Request metrics for Prometheus scraping
+
+    Router::new()
+        // Health check endpoint (lightweight, no DB access)
+        .route("/api/v2/health", get(|| async { (StatusCode::OK, "ok") }))
+        .merge(storage_contract_router)
+        .merge(policy_router)
+        .merge(devtree_router)
+        .merge(recovery_anchor_router)
+        .merge(pdsmt_head_router)
+        .merge(tips_router)
+        .merge(genesis_router)
+        .merge(dlv_slot_router)
+        .merge(recovery_capsule_router)
+        .merge(gossip_router) // Gossip protocol endpoints
+        .merge(discovery_router) // Node discovery for SDK auto-discovery
+        .nest("/admin", admin_router) // Every /admin/* endpoint, auth applied once
+        .layer(RequestBodyLimitLayer::new(limits.body_limit_bytes))
+        .layer(ConcurrencyLimitLayer::new(limits.concurrency_limit))
+        .layer(TraceLayer::new_for_http())
+        // The node-identity echo (see `node_identity_echo_layer`): NORMATIVE
+        // for every quorum read and write, so it is the one shared layer.
+        .layer(crate::node_identity_echo_layer(node_id))
+        .layer(Extension(state))
+
+    };
+    // b0x v2 (protobuf-only, clockless): no writer or reader authorization
+    // (storage spec §4, DSM Amendment A3).
+    app.merge(b0x_router)
 }

@@ -23,38 +23,11 @@ use axum::{
 };
 use prost::Message;
 
-use crate::{
-    auth::{device_auth, AuthState, DeviceContext},
-    AppState,
-};
+use crate::AppState;
 use dsm_sdk::util::text_id;
 
 const MAX_ENVELOPE_BYTES: usize = 128 * 1024; // 128 KiB (normalized)
 const MAX_BATCH_RETRIEVE: i64 = 64;
-
-/// Client-side invoke methods for the cert-head resync control handshake. Kept in
-/// sync with `dsm_sdk::storage::client_db::CERT_RESYNC_{REQUEST,ACK}_METHOD`.
-const CERT_RESYNC_REQUEST_METHOD: &str = "wallet.certResyncRequest";
-const CERT_RESYNC_ACK_METHOD: &str = "wallet.certResyncAck";
-
-/// True if `env` is a bounded cert-resync control message. Discrimination is on
-/// the EXPLICIT invoke method only — never a trial-decode of the body.
-fn is_cert_resync_recovery(env: &dsm::types::proto::Envelope, body_len: usize) -> bool {
-    if body_len > MAX_ENVELOPE_BYTES {
-        return false;
-    }
-    let Some(dsm::types::proto::envelope::Payload::UniversalTx(tx)) = &env.payload else {
-        return false;
-    };
-    tx.ops.iter().any(|op| {
-        matches!(
-            &op.kind,
-            Some(dsm::types::proto::universal_op::Kind::Invoke(invoke))
-                if invoke.method == CERT_RESYNC_REQUEST_METHOD
-                    || invoke.method == CERT_RESYNC_ACK_METHOD
-        )
-    })
-}
 
 fn valid_spool_key(value: &str) -> bool {
     matches!(
@@ -63,149 +36,22 @@ fn valid_spool_key(value: &str) -> bool {
     )
 }
 
-fn read_batch_varint(bytes: &[u8], cursor: &mut usize) -> Result<u64, StatusCode> {
-    let mut value = 0u64;
-    for shift in (0..64).step_by(7) {
-        let byte = *bytes.get(*cursor).ok_or(StatusCode::BAD_REQUEST)?;
-        *cursor += 1;
-        value |= u64::from(byte & 0x7f) << shift;
-        if byte & 0x80 == 0 {
-            return Ok(value);
-        }
-    }
-    Err(StatusCode::BAD_REQUEST)
-}
 
-fn read_batch_len<'a>(bytes: &'a [u8], cursor: &mut usize) -> Result<&'a [u8], StatusCode> {
-    let len = read_batch_varint(bytes, cursor)?;
-    let len = usize::try_from(len).map_err(|_| StatusCode::BAD_REQUEST)?;
-    let end = cursor.checked_add(len).ok_or(StatusCode::BAD_REQUEST)?;
-    if end > bytes.len() {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-    let out = &bytes[*cursor..end];
-    *cursor = end;
-    Ok(out)
-}
-
-/// `Envelope.message_id` is a fixed 16-byte opaque transport id (`dsm_fixed_len = 16`).
-const ACK_MESSAGE_ID_LEN: usize = 16;
-/// An ack can only retire what a retrieve handed out, so the ack batch is capped identically.
-const MAX_ACK_BATCH: usize = MAX_BATCH_RETRIEVE as usize;
-
-/// Canonical wire contract for **one ack entry**:
-///
-/// ```text
-/// Envelope { bytes message_id = 3 }   // present exactly once, exactly 16 bytes
-/// ```
-///
-/// An acknowledgement consumes the transport id and nothing else, so every other envelope field
-/// is REJECTED rather than decoded-and-ignored. That keeps the ack representation deterministic
-/// and stops this route from becoming a generic envelope parser that carries unused,
-/// attacker-controlled material (payloads, signatures, headers) into the node.
-fn validate_ack_envelope_bytes(bytes: &[u8]) -> Result<(), StatusCode> {
-    let mut cursor = 0usize;
-    let mut last_field = 0u32;
-    let mut message_id_seen = false;
-
-    while cursor < bytes.len() {
-        let key = read_batch_varint(bytes, &mut cursor)?;
-        let field = u32::try_from(key >> 3).map_err(|_| StatusCode::BAD_REQUEST)?;
-        let wire_type = key & 0x07;
-
-        // Canonical protobuf: fields serialized in non-decreasing tag order.
-        if field < last_field {
-            return Err(StatusCode::BAD_REQUEST);
-        }
-        last_field = field;
-
-        // Only `message_id` (field 3, length-delimited), and only once.
-        if field != 3 || wire_type != 2 || message_id_seen {
-            return Err(StatusCode::BAD_REQUEST);
-        }
-        message_id_seen = true;
-        if read_batch_len(bytes, &mut cursor)?.len() != ACK_MESSAGE_ID_LEN {
-            return Err(StatusCode::BAD_REQUEST);
-        }
-    }
-
-    if !message_id_seen {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-    Ok(())
-}
-
-/// Canonical wire contract for the `/api/v2/b0x/ack` body:
-///
-/// ```text
-/// BatchEnvelope { repeated Envelope envelopes = 1 }
-///   └─ Envelope { bytes message_id = 3 }
-/// ```
-///
-/// This route deliberately does NOT use the full canonical-v3 envelope validation: an ack carries
-/// no version, headers, or payload (the client has none to send — it is retiring ids it already
-/// pulled), and validating for them rejects every well-formed acknowledgement. The wire-level
-/// protections are all preserved and applied to the shape the operation actually consumes:
-/// canonical field ordering, permitted wire types, no unknown/extra fields at either level,
-/// a non-empty batch, and a bounded entry count. The overall body size is capped by the router's
-/// `RequestBodyLimitLayer(MAX_ENVELOPE_BYTES)`, and ack scoping by the canonical
-/// `x-dsm-b0x-address` check in the handler.
-///
-/// Validation runs to completion BEFORE any row is touched, so a batch containing one bad entry
-/// fails whole and never partially acks the entries preceding it.
-fn validate_ack_batch_envelope_bytes(bytes: &[u8]) -> Result<(), StatusCode> {
-    let mut cursor = 0usize;
-    let mut last_field = 0u32;
-    let mut entries = 0usize;
-
-    while cursor < bytes.len() {
-        let key = read_batch_varint(bytes, &mut cursor)?;
-        let field = u32::try_from(key >> 3).map_err(|_| StatusCode::BAD_REQUEST)?;
-        let wire_type = key & 0x07;
-
-        if field < last_field {
-            return Err(StatusCode::BAD_REQUEST);
-        }
-        last_field = field;
-
-        // Only `envelopes` (field 1, length-delimited). `batch_signature` (2) and
-        // `atomic_execution` (3) are not part of an acknowledgement and are refused.
-        if field != 1 || wire_type != 2 {
-            return Err(StatusCode::BAD_REQUEST);
-        }
-        let envelope = read_batch_len(bytes, &mut cursor)?;
-        validate_ack_envelope_bytes(envelope)?;
-
-        entries += 1;
-        if entries > MAX_ACK_BATCH {
-            return Err(StatusCode::BAD_REQUEST);
-        }
-    }
-
-    // A zero-entry batch is a no-op ack, not a malformed one: it retires nothing and touches no
-    // row. The client short-circuits before sending one; the handler stays idempotent for it.
-    Ok(())
-}
-
-pub fn router(app: Arc<AppState>, auth: Arc<AuthState>) -> Router<()> {
+/// The b0x spool: bytes in under a recipient's spool key, bytes out by that
+/// key from a position on. No write authorization and no reader authorization
+/// (storage spec §4, DSM Amendment A3): the node never checks who writes or
+/// reads, and never branches on what an envelope carries. The spool is
+/// append-only: nothing is marked read, hidden, expired or removed. Which
+/// messages a device has consumed is the device's own state, kept on the
+/// device (owner, 2026-09-23).
+pub fn router(app: Arc<AppState>) -> Router<()> {
     Router::new()
         .route("/api/v2/b0x/submit", post(submit_b0x_envelope))
-        .route("/api/v2/b0x/retrieve", get(retrieve_b0x_batch))
         .route(
             "/api/v2/b0x/retrieve/{from_seq}",
             get(retrieve_b0x_batch_from_seq),
         )
-        .route("/api/v2/b0x/ack", post(ack_b0x_batch))
-        .route(
-            "/api/v2/b0x/status/{message_id}",
-            get(get_b0x_message_status),
-        )
-        .layer(axum::middleware::from_fn_with_state(
-            auth.clone(),
-            device_auth,
-        ))
         .layer(Extension(app))
-        .layer(Extension(auth))
         .layer(tower_http::limit::RequestBodyLimitLayer::new(
             MAX_ENVELOPE_BYTES,
         ))
@@ -225,8 +71,6 @@ fn require_protobuf(headers: &HeaderMap) -> Result<(), StatusCode> {
 ///
 /// **Protocol contract:**
 /// - Requires `content-type: application/protobuf` or `application/octet-stream`.
-/// - Requires `authorization: DSM <device_id>:<token>` (enforced by device_auth middleware).
-/// - Requires `x-dsm-message-id: <base32>` for replay protection (validated by middleware).
 /// - Requires `x-dsm-recipient: <base32>` header specifying the recipient spool key.
 ///   This may be the canonical device_id or a rotated b0x routing key, but it must
 ///   always decode from Base32 Crockford to exactly 32 bytes.
@@ -237,8 +81,6 @@ fn require_protobuf(headers: &HeaderMap) -> Result<(), StatusCode> {
 /// Ordering is deterministic via BIGSERIAL. No wall-clock markers, no genesis_hash persistence.
 async fn submit_b0x_envelope(
     Extension(app): Extension<Arc<AppState>>,
-    Extension(_auth): Extension<Arc<AuthState>>,
-    Extension(_ctx): Extension<DeviceContext>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<impl IntoResponse, StatusCode> {
@@ -267,52 +109,17 @@ async fn submit_b0x_envelope(
 
     let env = dsm::envelope::from_canonical_bytes(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
 
-    // PaidK spend-gate (whitepaper §16): b0x submission is a device-initiated
-    // write that stores an artifact addressed to the recipient. The sender
-    // device must have satisfied PaidK before its envelope is admitted.
-    //
-    // RECOVERY EXEMPTION. A cert-head resync is a control handshake that re-enables
-    // a device's ability to send. It must NOT depend on the very spend authority it
-    // exists to restore — otherwise an exhausted PaidK balance is a permanent
-    // recovery deadlock. So a cert-resync message (discriminated by its explicit
-    // invoke method, bounded in size, carrying no value transfer) is admitted
-    // WITHOUT the PaidK gate; legitimacy (both-device cosignatures, monotonic
-    // epoch, one-per-relationship) is verified CLIENT-side, like every other claim
-    // the dumb-mirror node does not adjudicate.
-    if is_cert_resync_recovery(&env, body.len()) {
-        log::info!("b0x submit: cert-resync recovery message — PaidK gate exempt");
-    } else {
-        crate::api::vault::paidk::require_paidk(&app, &_ctx.device_id).await?;
-    }
-
     // NOTE: Storage nodes are dumb mirrors.
     // Do NOT validate SmartPolicy / protocol semantics here (clients verify).
 
     // Derive message id string (base32 text-id) for idempotency
     let msg_id_b32 = text_id::encode_base32_crockford(&env.message_id);
 
-    // Check for optional expiration header (x-dsm-expires-at-iter)
-    // Format: decimal-encoded iteration number (clockless expiration)
-    let expires_at_iter = headers
-        .get("x-dsm-expires-at-iter")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.parse::<i64>().ok());
-
     // Store in the recipient inbox spool using the explicit routing key.
     let pool = &*app.db_pool;
-    if let Some(expires_at) = expires_at_iter {
-        crate::db::spool_insert_with_expiration(
-            pool,
-            &recipient_spool_key,
-            &msg_id_b32,
-            &body,
-            Some(expires_at),
-        )
+    crate::db::spool_insert(pool, &recipient_spool_key, &msg_id_b32, &body)
         .await
-    } else {
-        crate::db::spool_insert(pool, &recipient_spool_key, &msg_id_b32, &body).await
-    }
-    .map_err(|e| {
+        .map_err(|e| {
         log::error!(
             "spool_insert failed for recipient {}: {:?}",
             recipient_spool_key,
@@ -322,116 +129,12 @@ async fn submit_b0x_envelope(
     })?;
 
     log::info!(
-        "📥 b0x envelope stored for recipient {} (msg_id={}, expires={:?})",
+        "📥 b0x envelope stored for recipient {} (msg_id={})",
         &recipient_spool_key[..8.min(recipient_spool_key.len())],
-        &msg_id_b32[..16.min(msg_id_b32.len())],
-        expires_at_iter
+        &msg_id_b32[..16.min(msg_id_b32.len())]
     );
-
-    // Replicate b0x envelope to peer nodes so the receiver can poll any node.
-    {
-        let rm = app.replication_manager.clone();
-        let app_clone = app.clone();
-        let repl_key = format!("b0x/{recipient_spool_key}/{msg_id_b32}");
-        let repl_data = body.to_vec();
-        tokio::spawn(async move {
-            if let Err(e) = rm
-                .replicate_object(app_clone, &repl_key, &repl_data, 0)
-                .await
-            {
-                log::warn!(
-                    "b0x replication failed for {}: {e}",
-                    &repl_key[..repl_key.len().min(32)]
-                );
-            }
-        });
-    }
 
     Ok(StatusCode::NO_CONTENT)
-}
-
-/// Retrieve a batch of Envelopes for the given b0x key, encoded as BatchEnvelope bytes.
-/// Returns BatchEnvelope (protobuf), up to MAX_BATCH_RETRIEVE items in deterministic order.
-/// This endpoint returns only envelope payloads; use the sequenced endpoint when callers need cursors.
-async fn retrieve_b0x_batch(
-    Extension(app): Extension<Arc<AppState>>,
-    Extension(_auth): Extension<Arc<AuthState>>,
-    Extension(_ctx): Extension<DeviceContext>,
-    headers: HeaderMap,
-) -> Result<axum::response::Response, StatusCode> {
-    // Fetch unacked envelopes for this device
-    let device_id = _ctx.device_id.clone();
-
-    // §16.4: If x-dsm-b0x-address header is present, use it as the inbox lookup key
-    // instead of the auth device_id. This enables tip-scoped address rotation where
-    // the sender submits to a rotated address and the recipient retrieves from it.
-    let lookup_key = if let Some(key) = headers
-        .get("x-dsm-b0x-address")
-        .and_then(|v| v.to_str().ok())
-        .filter(|v| !v.is_empty())
-    {
-        if !valid_spool_key(key) {
-            log::warn!(
-                "Invalid x-dsm-b0x-address header (must be canonical base32(32)): {}",
-                key
-            );
-            return Err(StatusCode::BAD_REQUEST);
-        }
-        key.to_string()
-    } else {
-        device_id.clone()
-    };
-
-    // Log full device_id to help correlate retrieves with stored recipients
-    log::info!(
-        "📬 retrieve_b0x_batch: incoming GET /api/v2/b0x/retrieve (device={}, lookup_key={})",
-        device_id,
-        &lookup_key[..16.min(lookup_key.len())]
-    );
-    let include_acked = headers
-        .get("x-dsm-include-acked")
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-
-    let pool = &*app.db_pool;
-    let rows = crate::db::spool_list(pool, &lookup_key, include_acked, MAX_BATCH_RETRIEVE)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    if rows.is_empty() {
-        log::info!(
-            "📭 retrieve_from_b0x_v2: inbox empty for device {}",
-            device_id
-        );
-        return Ok(StatusCode::NO_CONTENT.into_response());
-    }
-
-    // Build BatchEnvelope protobuf
-    let mut batch = dsm::types::proto::BatchEnvelope::default();
-    for item in rows {
-        match dsm::envelope::from_canonical_bytes(item.as_slice()) {
-            Ok(env) => batch.envelopes.push(env),
-            Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
-        }
-    }
-    let mut bytes = Vec::with_capacity(batch.encoded_len());
-    batch
-        .encode(&mut bytes)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    log::info!(
-        "📬 retrieve_from_b0x_v2: returning {} envelopes for device {}",
-        batch.envelopes.len(),
-        device_id
-    );
-
-    let mut headers = axum::http::HeaderMap::new();
-    headers.insert(
-        axum::http::header::CONTENT_TYPE,
-        axum::http::HeaderValue::from_static("application/octet-stream"),
-    );
-    Ok((StatusCode::OK, headers, bytes).into_response())
 }
 
 /// Retrieve a batch of Envelopes starting from a specific sequence number.
@@ -440,48 +143,40 @@ async fn retrieve_b0x_batch(
 async fn retrieve_b0x_batch_from_seq(
     axum::extract::Path(from_seq): axum::extract::Path<i64>,
     Extension(app): Extension<Arc<AppState>>,
-    Extension(_auth): Extension<Arc<AuthState>>,
-    Extension(_ctx): Extension<DeviceContext>,
     headers: HeaderMap,
 ) -> Result<axum::response::Response, StatusCode> {
-    let device_id = _ctx.device_id.clone();
-
-    // §16.4: If x-dsm-b0x-address header is present, use it as the inbox lookup key.
-    let lookup_key = if let Some(key) = headers
+    // §16.4: the spool key names the inbox. There is no authenticated device
+    // to fall back to: without the key there is nothing to read.
+    let lookup_key = headers
         .get("x-dsm-b0x-address")
         .and_then(|v| v.to_str().ok())
         .filter(|v| !v.is_empty())
-    {
-        if !valid_spool_key(key) {
-            log::warn!(
-                "Invalid x-dsm-b0x-address header (must be canonical base32(32)): {}",
-                key
-            );
-            return Err(StatusCode::BAD_REQUEST);
-        }
-        key.to_string()
-    } else {
-        device_id.clone()
-    };
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    if !valid_spool_key(lookup_key) {
+        log::warn!(
+            "Invalid x-dsm-b0x-address header (must be canonical base32(32)): {}",
+            lookup_key
+        );
+        return Err(StatusCode::BAD_REQUEST);
+    }
 
     log::info!(
-        "📬 retrieve_b0x_batch_from_seq: incoming GET /api/v2/b0x/retrieve/{} (device={}, lookup_key={})",
+        "📬 retrieve_b0x_batch_from_seq: GET /api/v2/b0x/retrieve/{} (lookup_key={})",
         from_seq,
-        device_id,
         &lookup_key[..16.min(lookup_key.len())]
     );
 
     let pool = &*app.db_pool;
     let rows =
-        crate::db::spool_list_unacked_from_seq(pool, &lookup_key, from_seq, MAX_BATCH_RETRIEVE)
+        crate::db::spool_list_from_seq(pool, lookup_key, from_seq, MAX_BATCH_RETRIEVE)
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     if rows.is_empty() {
         log::info!(
-            "📭 retrieve_b0x_batch_from_seq: no envelopes >= seq {} for device {}",
+            "📭 retrieve_b0x_batch_from_seq: no envelopes >= seq {} for {}",
             from_seq,
-            device_id
+            &lookup_key[..16.min(lookup_key.len())]
         );
         return Ok(StatusCode::NO_CONTENT.into_response());
     }
@@ -510,12 +205,12 @@ async fn retrieve_b0x_batch_from_seq(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     log::info!(
-        "📬 retrieve_b0x_batch_from_seq: returning {} envelopes (seq {}-{}, next={}) for device {}",
+        "📬 retrieve_b0x_batch_from_seq: returning {} envelopes (seq {}-{}, next={}) for {}",
         batch.envelopes.len(),
         from_seq,
         next_seq - 1,
         batch.next_seq,
-        device_id
+        &lookup_key[..16.min(lookup_key.len())]
     );
 
     let mut headers = axum::http::HeaderMap::new();
@@ -524,114 +219,6 @@ async fn retrieve_b0x_batch_from_seq(
         axum::http::HeaderValue::from_static("application/octet-stream"),
     );
     Ok((StatusCode::OK, headers, bytes).into_response())
-}
-
-/// Acknowledge a batch by message_id, scoped to the provided b0x key.
-/// Body: BatchEnvelope (protobuf) with envelopes carrying their message_id.
-///
-/// Scoping rule (per-key ACK):
-/// - If header `x-dsm-b0x-address` is present, it MUST be a canonical base32(32) spool key.
-///   The ACK is applied to that explicit inbox key, independent of the Authorization device id.
-/// - Otherwise, `x-dsm-recipient` may be used with the same base32(32) rule.
-/// - Otherwise, the ACK is scoped to the Authorization device id extracted by the auth middleware.
-///
-/// This enables deterministic per-key acknowledgements while keeping authentication and replay
-/// proofs enforced by the middleware.
-async fn ack_b0x_batch(
-    Extension(app): Extension<Arc<AppState>>,
-    Extension(_auth): Extension<Arc<AuthState>>,
-    Extension(_ctx): Extension<DeviceContext>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Result<impl IntoResponse, StatusCode> {
-    require_protobuf(&headers)?;
-    validate_ack_batch_envelope_bytes(body.as_ref())?;
-    let batch =
-        dsm::types::proto::BatchEnvelope::decode(&*body).map_err(|_| StatusCode::BAD_REQUEST)?;
-    // Determine ACK scope: prefer the explicit rotated routing key, else an explicit
-    // recipient spool key, else the authenticated device id.
-    let device_id = if let Some(spool_key) = headers
-        .get("x-dsm-b0x-address")
-        .and_then(|v| v.to_str().ok())
-        .filter(|v| !v.is_empty())
-    {
-        if !valid_spool_key(spool_key) {
-            log::warn!(
-                "Invalid x-dsm-b0x-address header (must be canonical base32(32)): {}",
-                spool_key
-            );
-            return Err(StatusCode::BAD_REQUEST);
-        }
-        spool_key.to_string()
-    } else if let Some(recipient_b32) = headers.get("x-dsm-recipient").and_then(|v| v.to_str().ok())
-    {
-        if !valid_spool_key(recipient_b32) {
-            log::warn!(
-                "Invalid x-dsm-recipient header (must be canonical base32(32)): {}",
-                recipient_b32
-            );
-            return Err(StatusCode::BAD_REQUEST);
-        }
-        recipient_b32.to_string()
-    } else {
-        _ctx.device_id.clone()
-    };
-    let msg_ids: Vec<String> = batch
-        .envelopes
-        .iter()
-        .map(|e| text_id::encode_base32_crockford(&e.message_id))
-        .collect();
-    let pool = &*app.db_pool;
-    let _updated = crate::db::spool_ack(pool, &device_id, &msg_ids)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
-async fn get_b0x_message_status(
-    Extension(app): Extension<Arc<AppState>>,
-    Extension(_auth): Extension<Arc<AuthState>>,
-    Extension(_ctx): Extension<DeviceContext>,
-    Path(message_id): Path<String>,
-) -> Result<impl IntoResponse, StatusCode> {
-    let msg_id_bytes = text_id::decode_base32_crockford(&message_id)
-        .filter(|bytes| bytes.len() == 16)
-        .ok_or(StatusCode::BAD_REQUEST)?;
-
-    let sender_bytes = text_id::decode_base32_crockford(&_ctx.device_id)
-        .filter(|bytes| bytes.len() == 32)
-        .ok_or(StatusCode::FORBIDDEN)?;
-
-    let pool = &*app.db_pool;
-    let Some((envelope_bytes, acked)) = crate::db::spool_lookup_by_message_id(pool, &message_id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-    else {
-        return Err(StatusCode::NOT_FOUND);
-    };
-
-    let env = dsm::envelope::from_canonical_bytes(envelope_bytes.as_slice())
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    if env.message_id != msg_id_bytes {
-        return Err(StatusCode::NOT_FOUND);
-    }
-
-    let envelope_sender = env
-        .headers
-        .as_ref()
-        .map(|headers| headers.device_id.clone())
-        .filter(|device_id| device_id.len() == 32)
-        .ok_or(StatusCode::NOT_FOUND)?;
-
-    if envelope_sender != sender_bytes {
-        return Err(StatusCode::NOT_FOUND);
-    }
-
-    if acked {
-        Ok(StatusCode::NO_CONTENT)
-    } else {
-        Ok(StatusCode::CONFLICT)
-    }
 }
 
 #[cfg(test)]
@@ -647,206 +234,6 @@ mod tests {
         let routed = text_id::encode_base32_crockford(&[0x55u8; 32]);
         assert!(valid_spool_key(&routed));
         assert!(!valid_spool_key("b0x[TEST][TEST][TEST]"));
-    }
-
-    // ---------------------------------------------------------------------------------------
-    // `/api/v2/b0x/ack` canonical wire contract.
-    //
-    // These are deliberately UNGATED (no DB): they pin the exact byte-level contract the handler
-    // enforces via `validate_ack_batch_envelope_bytes`, so they run in CI where the DB-backed
-    // handler tests below return early.
-    // ---------------------------------------------------------------------------------------
-
-    /// One canonical ack entry: `Envelope { message_id = 3 }` with a 16-byte id.
-    fn ack_entry(id: [u8; ACK_MESSAGE_ID_LEN]) -> Vec<u8> {
-        let mut e = vec![(3 << 3) | 2, ACK_MESSAGE_ID_LEN as u8]; // field 3, length-delimited
-        e.extend_from_slice(&id);
-        e
-    }
-
-    /// Wrap pre-encoded entries as `BatchEnvelope { envelopes = 1 }`.
-    fn ack_batch(entries: &[Vec<u8>]) -> Vec<u8> {
-        let mut b = Vec::new();
-        for e in entries {
-            b.push((1 << 3) | 2); // field 1, length-delimited
-            b.push(e.len() as u8);
-            b.extend_from_slice(e);
-        }
-        b
-    }
-
-    /// THE regression: the shape the client actually sends (message-id-only entries) must be
-    /// accepted. Before this contract existed the route validated every entry as a full canonical
-    /// v3 envelope, which requires version/headers the ack does not carry — so every real
-    /// acknowledgement was rejected 400 and `ack quorum not met: 0/3` was unavoidable.
-    #[test]
-    fn ack_accepts_message_id_only_entries() {
-        let body = ack_batch(&[ack_entry([7u8; 16]), ack_entry([8u8; 16])]);
-        assert_eq!(validate_ack_batch_envelope_bytes(&body), Ok(()));
-    }
-
-    /// The two halves agree: the CLIENT's own encoder output satisfies the NODE's contract.
-    /// This is what proves the fix, rather than a handcrafted fixture that only matches the node.
-    #[test]
-    fn client_ack_body_satisfies_the_node_ack_contract() {
-        let ids: Vec<String> = [[0x11u8; 16], [0x22u8; 16], [0x33u8; 16]]
-            .iter()
-            .map(|b| text_id::encode_base32_crockford(b))
-            .collect();
-        let body = dsm_sdk::sdk::b0x_sdk::B0xSDK::build_ack_batch_body(&ids)
-            .unwrap_or_else(|e| panic!("client ack encode failed: {e}"));
-        assert_eq!(
-            validate_ack_batch_envelope_bytes(&body),
-            Ok(()),
-            "the node must accept exactly what acknowledge_b0x_v2 sends"
-        );
-    }
-
-    /// A zero-entry ack retires nothing; it is a no-op, not malformed (the client short-circuits
-    /// before sending one, and the handler stays idempotent).
-    #[test]
-    fn ack_allows_empty_batch_as_noop() {
-        assert_eq!(validate_ack_batch_envelope_bytes(&[]), Ok(()));
-    }
-
-    /// Strict minimal contract: a FULL canonical v3 envelope (version + headers + message_id) is
-    /// refused rather than decoded-and-ignored, so the route never carries unused
-    /// attacker-controlled material.
-    #[test]
-    fn ack_rejects_full_canonical_v3_envelope() {
-        let full = dsm::types::proto::Envelope {
-            version: 3,
-            headers: Some(dsm::types::proto::Headers {
-                device_id: vec![1u8; 32],
-                chain_tip: vec![2u8; 32],
-                genesis_hash: vec![3u8; 32],
-                seq: 0,
-            }),
-            message_id: vec![7u8; 16],
-            ..Default::default()
-        };
-        let mut enc = Vec::new();
-        full.encode(&mut enc).expect("encode");
-        let body = ack_batch(&[enc]);
-        assert_eq!(
-            validate_ack_batch_envelope_bytes(&body),
-            Err(StatusCode::BAD_REQUEST)
-        );
-    }
-
-    #[test]
-    fn ack_rejects_wrong_length_or_missing_message_id() {
-        for bad_len in [0usize, 15, 17, 32] {
-            let mut e = vec![(3 << 3) | 2, bad_len as u8];
-            e.extend(std::iter::repeat_n(0x5Au8, bad_len));
-            assert_eq!(
-                validate_ack_batch_envelope_bytes(&ack_batch(&[e])),
-                Err(StatusCode::BAD_REQUEST),
-                "message_id length {bad_len} must be refused"
-            );
-        }
-        // Entry with no message_id at all.
-        assert_eq!(
-            validate_ack_batch_envelope_bytes(&ack_batch(&[Vec::new()])),
-            Err(StatusCode::BAD_REQUEST)
-        );
-    }
-
-    #[test]
-    fn ack_rejects_duplicate_message_id_in_one_entry() {
-        let mut e = ack_entry([7u8; 16]);
-        e.extend_from_slice(&ack_entry([8u8; 16]));
-        assert_eq!(
-            validate_ack_batch_envelope_bytes(&ack_batch(&[e])),
-            Err(StatusCode::BAD_REQUEST)
-        );
-    }
-
-    /// `batch_signature` (2) and `atomic_execution` (3) are not part of an acknowledgement.
-    #[test]
-    fn ack_rejects_extra_batch_level_fields() {
-        let mut with_sig = ack_batch(&[ack_entry([7u8; 16])]);
-        with_sig.push((2 << 3) | 2); // batch_signature
-        with_sig.push(1);
-        with_sig.push(0xAA);
-        assert_eq!(
-            validate_ack_batch_envelope_bytes(&with_sig),
-            Err(StatusCode::BAD_REQUEST)
-        );
-
-        let mut with_atomic = ack_batch(&[ack_entry([7u8; 16])]);
-        with_atomic.push(3 << 3); // atomic_execution, varint
-        with_atomic.push(1);
-        assert_eq!(
-            validate_ack_batch_envelope_bytes(&with_atomic),
-            Err(StatusCode::BAD_REQUEST)
-        );
-    }
-
-    #[test]
-    fn ack_rejects_wrong_wire_type_and_noncanonical_order() {
-        // envelopes (field 1) as a varint instead of length-delimited
-        assert_eq!(
-            validate_ack_batch_envelope_bytes(&[1 << 3, 0x01]),
-            Err(StatusCode::BAD_REQUEST)
-        );
-        // message_id (field 3) as a varint inside an entry
-        let e = vec![3 << 3, 0x01];
-        assert_eq!(
-            validate_ack_batch_envelope_bytes(&ack_batch(&[e])),
-            Err(StatusCode::BAD_REQUEST)
-        );
-        // Non-canonical: descending field order at entry level (field 3 then field 1).
-        let mut e2 = ack_entry([7u8; 16]);
-        e2.push((1 << 3) | 2);
-        e2.push(0);
-        assert_eq!(
-            validate_ack_batch_envelope_bytes(&ack_batch(&[e2])),
-            Err(StatusCode::BAD_REQUEST)
-        );
-    }
-
-    #[test]
-    fn ack_rejects_oversized_batch() {
-        let ok: Vec<Vec<u8>> = (0..MAX_ACK_BATCH)
-            .map(|i| ack_entry([i as u8; 16]))
-            .collect();
-        assert_eq!(validate_ack_batch_envelope_bytes(&ack_batch(&ok)), Ok(()));
-
-        let too_many: Vec<Vec<u8>> = (0..MAX_ACK_BATCH + 1)
-            .map(|i| ack_entry([i as u8; 16]))
-            .collect();
-        assert_eq!(
-            validate_ack_batch_envelope_bytes(&ack_batch(&too_many)),
-            Err(StatusCode::BAD_REQUEST)
-        );
-    }
-
-    /// A batch whose LAST entry is invalid must fail whole. Validation completes before the
-    /// handler touches a row, so nothing preceding the bad entry is acked.
-    #[test]
-    fn ack_rejects_mixed_batch_without_partially_acking() {
-        let mut bad = vec![(3 << 3) | 2, 4]; // wrong-length message_id
-        bad.extend_from_slice(&[1, 2, 3, 4]);
-        let body = ack_batch(&[ack_entry([7u8; 16]), ack_entry([8u8; 16]), bad]);
-        assert_eq!(
-            validate_ack_batch_envelope_bytes(&body),
-            Err(StatusCode::BAD_REQUEST)
-        );
-    }
-
-    #[test]
-    fn ack_rejects_truncated_and_malformed_protobuf() {
-        // Length prefix claims more bytes than remain.
-        assert_eq!(
-            validate_ack_batch_envelope_bytes(&[(1 << 3) | 2, 0x40, 0x00]),
-            Err(StatusCode::BAD_REQUEST)
-        );
-        // Unknown batch-level field.
-        assert_eq!(
-            validate_ack_batch_envelope_bytes(&[(9 << 3) | 2, 0x00]),
-            Err(StatusCode::BAD_REQUEST)
-        );
     }
 
     async fn maybe_state_and_auth() -> Option<(Arc<AppState>, Arc<AuthState>, Router)> {
@@ -1038,255 +425,4 @@ mod tests {
         assert_eq!(resp.status(), HttpStatus::UNSUPPORTED_MEDIA_TYPE);
     }
 
-    #[tokio::test]
-    async fn v2_b0x_ack_and_retrieve_basic() {
-        let Some((_app_state, _auth_state, app)) = maybe_state_and_auth().await else {
-            return;
-        };
-
-        let dev = [1u8; 32];
-        let device_id_str = dsm_sdk::util::text_id::encode_base32_crockford(&dev);
-        let token = "test-token";
-        let authz = format!("DSM {}:{}", device_id_str, token);
-        let msg_id_b32_r = dsm_sdk::util::text_id::encode_base32_crockford(&[8u8; 16]);
-        let msg_id_b32_a = dsm_sdk::util::text_id::encode_base32_crockford(&[9u8; 16]);
-
-        // retrieve (expecting 204 No Content for empty inbox)
-        let req_r = Request::builder()
-            .method("GET")
-            .uri("/api/v2/b0x/retrieve")
-            .header(axum::http::header::CONTENT_TYPE, "application/octet-stream")
-            .header("authorization", authz.clone())
-            .header("x-dsm-message-id", msg_id_b32_r)
-            .body(axum::body::Body::empty())
-            .unwrap_or_else(|e| panic!("request build failed: {e}"));
-        let resp_r = app
-            .clone()
-            .oneshot(req_r)
-            .await
-            .unwrap_or_else(|e| panic!("oneshot failed: {e}"));
-        assert_eq!(resp_r.status(), HttpStatus::NO_CONTENT);
-
-        // ack (expecting 204 No Content for empty/idempotent ack)
-        let req_a = Request::builder()
-            .method("POST")
-            .uri("/api/v2/b0x/ack")
-            .header(axum::http::header::CONTENT_TYPE, "application/octet-stream")
-            .header("authorization", authz)
-            .header("x-dsm-message-id", msg_id_b32_a)
-            .body(axum::body::Body::from(Vec::<u8>::new()))
-            .unwrap_or_else(|e| panic!("request build failed: {e}"));
-        let resp_a = app
-            .clone()
-            .oneshot(req_a)
-            .await
-            .unwrap_or_else(|e| panic!("oneshot failed: {e}"));
-        assert_eq!(resp_a.status(), HttpStatus::NO_CONTENT);
-    }
-
-    #[tokio::test]
-    async fn v2_b0x_routing_and_ack_scope_end_to_end() {
-        // DB-backed, opt-in.
-        let Some((_app_state, auth_state, app)) = maybe_state_and_auth().await else {
-            return;
-        };
-
-        let sender_dev = [1u8; 32];
-        let receiver_dev = [3u8; 32];
-        let sender_id_str = dsm_sdk::util::text_id::encode_base32_crockford(&sender_dev);
-        let receiver_id_str = dsm_sdk::util::text_id::encode_base32_crockford(&receiver_dev);
-
-        // Receiver uses the same token string "test-token"; auth hashes it.
-        let token = "test-token";
-        let token_hash = blake3::hash(token.as_bytes()).as_bytes().to_vec();
-        let receiver_pubkey = vec![9u8; 32];
-        let receiver_genesis_hash = vec![7u8; 32];
-        crate::db::register_device(
-            &auth_state.db_pool,
-            &receiver_id_str,
-            &receiver_genesis_hash,
-            &receiver_pubkey,
-            &token_hash,
-            &vec![0u8; 1184],
-            &[0u8; 64],
-        )
-        .await
-        .unwrap_or_else(|e| panic!("insert receiver device failed: {e}"));
-
-        // Build valid envelope bytes, and a base32 message-id for middleware.
-        let tip = [2u8; 32];
-        let env = make_env(&sender_dev, &tip, 16);
-        let mut body = Vec::with_capacity(env.encoded_len());
-        env.encode(&mut body)
-            .unwrap_or_else(|e| panic!("encode envelope failed: {e}"));
-
-        let msg_id_b32_submit = dsm_sdk::util::text_id::encode_base32_crockford(&[1u8; 16]);
-        let msg_id_b32_recv_a = dsm_sdk::util::text_id::encode_base32_crockford(&[2u8; 16]);
-        let msg_id_b32_recv_r = dsm_sdk::util::text_id::encode_base32_crockford(&[3u8; 16]);
-        let msg_id_b32_recv_r2 = dsm_sdk::util::text_id::encode_base32_crockford(&[4u8; 16]);
-
-        // Submit as sender, route to receiver inbox via x-dsm-recipient.
-        let auth_sender = format!("DSM {}:{}", sender_id_str, token);
-        let receiver_id_b32 = dsm_sdk::util::text_id::encode_base32_crockford(&receiver_dev);
-        let req_submit = Request::builder()
-            .method("POST")
-            .uri("/api/v2/b0x/submit")
-            .header(axum::http::header::CONTENT_TYPE, "application/octet-stream")
-            .header("authorization", auth_sender)
-            .header("x-dsm-message-id", msg_id_b32_submit)
-            .header("x-dsm-recipient", receiver_id_b32.clone())
-            .body(axum::body::Body::from(body))
-            .unwrap_or_else(|e| panic!("request build failed: {e}"));
-        let resp_submit = app
-            .clone()
-            .oneshot(req_submit)
-            .await
-            .unwrap_or_else(|e| panic!("oneshot failed: {e}"));
-        assert_eq!(resp_submit.status(), HttpStatus::NO_CONTENT);
-
-        // Retrieve as SENDER should be empty even if we try to override x-dsm-recipient.
-        let auth_sender = format!("DSM {}:{}", sender_id_str, token);
-        let req_sender_retrieve = Request::builder()
-            .method("GET")
-            .uri("/api/v2/b0x/retrieve")
-            .header(axum::http::header::CONTENT_TYPE, "application/octet-stream")
-            .header("authorization", auth_sender)
-            .header("x-dsm-message-id", msg_id_b32_recv_r)
-            .header("x-dsm-recipient", receiver_id_b32.clone())
-            .body(axum::body::Body::empty())
-            .unwrap_or_else(|e| panic!("request build failed: {e}"));
-        let resp_sender_retrieve = app
-            .clone()
-            .oneshot(req_sender_retrieve)
-            .await
-            .unwrap_or_else(|e| panic!("oneshot failed: {e}"));
-        assert_eq!(resp_sender_retrieve.status(), HttpStatus::NO_CONTENT);
-
-        // Retrieve as RECEIVER should return the envelope.
-        let auth_receiver = format!("DSM {}:{}", receiver_id_str, token);
-        let req_receiver_retrieve = Request::builder()
-            .method("GET")
-            .uri("/api/v2/b0x/retrieve")
-            .header(axum::http::header::CONTENT_TYPE, "application/octet-stream")
-            .header("authorization", auth_receiver.clone())
-            .header("x-dsm-message-id", msg_id_b32_recv_r2)
-            .body(axum::body::Body::empty())
-            .unwrap_or_else(|e| panic!("request build failed: {e}"));
-        let resp_receiver_retrieve = app
-            .clone()
-            .oneshot(req_receiver_retrieve)
-            .await
-            .unwrap_or_else(|e| panic!("oneshot failed: {e}"));
-        assert_eq!(resp_receiver_retrieve.status(), HttpStatus::OK);
-        let bytes = axum::body::to_bytes(resp_receiver_retrieve.into_body(), usize::MAX)
-            .await
-            .unwrap_or_else(|e| panic!("read body failed: {e}"));
-        let batch = dsm::types::proto::BatchEnvelope::decode(bytes.as_ref())
-            .unwrap_or_else(|e| panic!("decode batch failed: {e}"));
-        assert_eq!(batch.envelopes.len(), 1);
-        assert_eq!(batch.envelopes[0].message_id, vec![7u8; 16]);
-
-        // Ack as receiver, in the shape the client actually sends: message_id ONLY. (This used to
-        // push a full `make_env(..)` envelope, which matched the route's old full-canonical-v3
-        // validation; that validation is what rejected every real acknowledgement.)
-        let ack_body = dsm_sdk::sdk::b0x_sdk::B0xSDK::build_ack_batch_body(&[
-            dsm_sdk::util::text_id::encode_base32_crockford(&[7u8; 16]),
-        ])
-        .unwrap_or_else(|e| panic!("client ack encode failed: {e}"));
-
-        let req_ack = Request::builder()
-            .method("POST")
-            .uri("/api/v2/b0x/ack")
-            .header(axum::http::header::CONTENT_TYPE, "application/octet-stream")
-            .header("authorization", auth_receiver)
-            .header("x-dsm-message-id", msg_id_b32_recv_a)
-            .body(axum::body::Body::from(ack_body))
-            .unwrap_or_else(|e| panic!("request build failed: {e}"));
-        let resp_ack = app
-            .clone()
-            .oneshot(req_ack)
-            .await
-            .unwrap_or_else(|e| panic!("oneshot failed: {e}"));
-        assert_eq!(resp_ack.status(), HttpStatus::NO_CONTENT);
-
-        // Now receiver retrieve should be empty.
-        let auth_receiver = format!("DSM {}:{}", receiver_id_str, token);
-        let req_receiver_retrieve2 = Request::builder()
-            .method("GET")
-            .uri("/api/v2/b0x/retrieve")
-            .header(axum::http::header::CONTENT_TYPE, "application/octet-stream")
-            .header("authorization", auth_receiver)
-            .header(
-                "x-dsm-message-id",
-                dsm_sdk::util::text_id::encode_base32_crockford(&[5u8; 16]),
-            )
-            .body(axum::body::Body::empty())
-            .unwrap_or_else(|e| panic!("request build failed: {e}"));
-        let resp_receiver_retrieve2 = app
-            .oneshot(req_receiver_retrieve2)
-            .await
-            .unwrap_or_else(|e| panic!("oneshot failed: {e}"));
-        assert_eq!(resp_receiver_retrieve2.status(), HttpStatus::NO_CONTENT);
-    }
-}
-
-#[cfg(test)]
-mod cert_resync_exemption_tests {
-    use super::*;
-
-    fn env_with_method(method: &str) -> dsm::types::proto::Envelope {
-        let invoke = dsm::types::proto::Invoke {
-            method: method.to_string(),
-            args: Some(dsm::types::proto::ArgPack {
-                schema_hash: None,
-                codec: 0,
-                body: vec![0u8; 100],
-            }),
-            program: None,
-            pre_state_hash: None,
-            post_state_hash: None,
-            cosigners: vec![],
-            evidence: None,
-            nonce: None,
-        };
-        let op = dsm::types::proto::UniversalOp {
-            op_id: None,
-            actor: vec![],
-            genesis_hash: vec![],
-            kind: Some(dsm::types::proto::universal_op::Kind::Invoke(invoke)),
-        };
-        dsm::types::proto::Envelope {
-            version: 3,
-            headers: None,
-            message_id: vec![],
-            payload: Some(dsm::types::proto::envelope::Payload::UniversalTx(
-                dsm::types::proto::UniversalTx {
-                    ops: vec![op],
-                    atomic: false,
-                },
-            )),
-        }
-    }
-
-    #[test]
-    fn exempts_resync_methods_only_and_bounded() {
-        assert!(is_cert_resync_recovery(
-            &env_with_method(CERT_RESYNC_REQUEST_METHOD),
-            100
-        ));
-        assert!(is_cert_resync_recovery(
-            &env_with_method(CERT_RESYNC_ACK_METHOD),
-            100
-        ));
-        // An ordinary transfer method is NOT exempt.
-        assert!(!is_cert_resync_recovery(
-            &env_with_method("wallet.send"),
-            100
-        ));
-        // Over-size is NOT exempt even with a resync method (bounds abuse).
-        assert!(!is_cert_resync_recovery(
-            &env_with_method(CERT_RESYNC_REQUEST_METHOD),
-            MAX_ENVELOPE_BYTES + 1
-        ));
-    }
 }

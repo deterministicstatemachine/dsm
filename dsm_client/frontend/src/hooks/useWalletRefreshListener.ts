@@ -24,7 +24,6 @@ const PRIORITY_SOURCES = new Set([
   // Token lifecycle changes balances immediately and the user is watching the
   // screen when they happen — the ~2s cooldown reads as the action not working.
   'token.create',
-  'token.mint',
   'token.burn',
 ]);
 

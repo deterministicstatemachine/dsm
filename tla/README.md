@@ -223,6 +223,38 @@ cargo run -p dsm_vertical_validation -- implementation-traces
 
 Tip: if the state space is large, shrink constants in `DSM.cfg` (fewer devices, smaller payloads).
 
+## DSM_RouteChain.tla — route-chain finality at one cell
+
+Finality is a route chain (storage spec §9, §12.6; DSM Amendment A6; SoFi
+Amendment S4). A writer writes a value along the cell's route, leader first,
+each copy carrying the chain so far; a seat that does not answer is passed
+over. `LeaderHeld` is the first value to reach the leader, `Preserved` adds one
+further valid link, `Final` adds two. Only a value with a valid leader link can
+have valid further links. Nodes append and never remove.
+
+This module replaces the copy rule ("LeaderHeld and two other members hold x")
+that `DSM_SofiSuccessorCells`, `DSM_SofiFulfillment` and
+`DSM_NativeReserveRelease` still encode; those take their finality from here
+when they are rewritten (G15). The loss rule, handover and retirement are
+outside beta.
+
+| Invariant | Requirement |
+|---|---|
+| `ChainUniqueness`, `AtMostOneFinal` | MR-STOR-0143 |
+| `StatesNest` | MR-DSM-0270 |
+| `FinalSurvivesTwoLosses` | §12.6 durability under the two-seat loss bound |
+| `FinalityStable`, `LeaderHeldStable` | MR-DSM-0270, MR-STOR-0127 |
+
+| Mutation config | What it breaks | Must fail |
+|---|---|---|
+| `_AnyArrivalLeads` | any arrival at the leader counts as its link | `ChainUniqueness` |
+| `_CountWithoutLeader` | further links count without a valid leader link | `ChainUniqueness` |
+| `_NodeRemoves` | a seat drops what it holds | `FinalityStable` |
+
+```
+java -cp tla2tools.jar tlc2.TLC -config DSM_RouteChain.cfg DSM_RouteChain.tla
+```
+
 ## DSM_NativeReserveRelease.tla — the native ERA reserve, released leader first
 
 One network's native ERA reserve (Part IX §51, rebuild step R4) at its head

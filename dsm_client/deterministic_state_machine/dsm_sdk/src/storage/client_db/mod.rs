@@ -16,7 +16,6 @@ pub use crate::storage::codecs::{
 // --- Submodules (domain-specific) ---
 
 pub mod anchor_enrollments;
-mod auth_tokens;
 pub(crate) mod bcr;
 mod bilateral_sessions;
 pub mod bilateral_tip_sync;
@@ -42,6 +41,8 @@ mod projection_repair;
 pub mod publication;
 pub mod recipient_receipt_fold;
 pub mod recipient_staging;
+pub mod b0x_consumed;
+pub mod b0x_sealed;
 pub mod recovery;
 pub mod sender_outbox;
 pub mod sender_proposal;
@@ -60,7 +61,6 @@ mod withdrawals;
 // --- Wildcard re-exports (preserves all existing import paths) ---
 
 pub use types::*;
-pub use auth_tokens::*;
 pub use bcr::*;
 pub use bilateral_sessions::*;
 pub use bitcoin_accounts::*;
@@ -761,13 +761,28 @@ fn create_schema(conn: &Connection) -> Result<()> {
             observed_remote_tip_source   INTEGER
         );
 
-        CREATE TABLE IF NOT EXISTS auth_tokens(
+        -- Storage-node auth tokens are gone with writer authorization
+        -- (storage spec §4); an older database drops its table here.
+        DROP TABLE IF EXISTS auth_tokens;
+
+        -- Which b0x messages this device has consumed: the device's own
+        -- state, never a node's (b0x_consumed.rs).
+        CREATE TABLE IF NOT EXISTS b0x_consumed(
+            address     TEXT NOT NULL,
+            message_id  TEXT NOT NULL,
+            PRIMARY KEY (address, message_id)
+        );
+        CREATE TABLE IF NOT EXISTS b0x_read_position(
+            address     TEXT NOT NULL,
             endpoint    TEXT NOT NULL,
-            device_id   TEXT NOT NULL,
-            genesis     TEXT NOT NULL,
-            token       TEXT NOT NULL,
-            created_at  INTEGER NOT NULL,
-            PRIMARY KEY (endpoint, device_id, genesis)
+            next_seq    INTEGER NOT NULL,
+            PRIMARY KEY (address, endpoint)
+        );
+        -- The one sealed form of each outgoing spool payload, by message id
+        -- (DSM Amendment A7; b0x_sealed.rs).
+        CREATE TABLE IF NOT EXISTS b0x_sealed(
+            message_id  TEXT PRIMARY KEY,
+            sealed      BLOB NOT NULL
         );
 
         CREATE TABLE IF NOT EXISTS pending_transactions(
@@ -1092,8 +1107,9 @@ fn create_schema(conn: &Connection) -> Result<()> {
         -- reconstructed from them -- a re-encode is how "the bytes I verified"
         -- silently stops being "the bytes that arrived".
         --
-        -- `terminal_reject` is STICKY. A digest mismatch is a decision, and must
-        -- never decay back into "still waiting for the other half".
+        -- There is no rejected state. A pair that does not verify does not
+        -- execute, and a transfer that does not execute changes no state and
+        -- records nothing negative (DSM Amendment A1).
         CREATE TABLE IF NOT EXISTS recipient_staging(
             correlation_key          TEXT PRIMARY KEY,
             state                    TEXT NOT NULL,
@@ -1116,9 +1132,12 @@ fn create_schema(conn: &Connection) -> Result<()> {
             updated_at               INTEGER NOT NULL,
             CHECK (state IN (
                 'staged_transfer', 'staged_evidence', 'ready_to_verify',
-                'terminal_reject', 'accepted'
+                'accepted'
             ))
         );
+        -- A non-executing transfer records nothing negative (DSM Amendment
+        -- A1): rejection verdicts an older database recorded are cleared.
+        DELETE FROM recipient_staging WHERE state = 'terminal_reject';
 
         CREATE TABLE IF NOT EXISTS recipient_outbound_reply(
             commitment             BLOB PRIMARY KEY,
@@ -2091,53 +2110,6 @@ mod tests {
             created_at: 0,
         })
         .expect("store transaction with replacement schema");
-    }
-
-    #[test]
-    #[serial]
-    fn test_auth_tokens_purged_on_identity_binding_change() {
-        // Ensure DB initialized
-        let binding = match get_connection() {
-            Ok(b) => b,
-            Err(e) => panic!("db connection failed: {:?}", e),
-        };
-        let conn = match binding.lock() {
-            Ok(c) => c,
-            Err(e) => panic!("db lock failed: {:?}", e),
-        };
-
-        // Start from a clean slate
-        let _ = conn.execute("DELETE FROM auth_tokens", []);
-        let _ = conn.execute("DELETE FROM settings WHERE key = \"auth_binding_v2\"", []);
-
-        // Seed a token
-        conn.execute(
-            "INSERT OR REPLACE INTO auth_tokens(endpoint, device_id, genesis, token, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params!["http://node1", "DEV2", "GEN2", "TOK2", 1i64],
-        )
-        .unwrap();
-
-        // Avoid holding the DB lock across ensure_auth_tokens_bound_to_identity(),
-        // which also locks the global connection. Holding it here can deadlock.
-        drop(conn);
-
-        // First binding set should NOT purge
-        ensure_auth_tokens_bound_to_identity("DEV2", "GEN2").unwrap();
-        let conn = binding.lock().unwrap();
-        let count1: i64 = conn
-            .query_row("SELECT COUNT(*) FROM auth_tokens", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(count1, 1);
-
-        drop(conn);
-
-        // Changing binding should purge
-        ensure_auth_tokens_bound_to_identity("DEV3", "GEN3").unwrap();
-        let conn = binding.lock().unwrap();
-        let count2: i64 = conn
-            .query_row("SELECT COUNT(*) FROM auth_tokens", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(count2, 0);
     }
 
     #[test]

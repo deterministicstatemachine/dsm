@@ -2395,7 +2395,7 @@ impl AppRouterImpl {
                                 if !consumed_deltas.is_empty() {
                                     let n = consumed_deltas.len();
                                     match b0x_sdk
-                                        .acknowledge_b0x_v2(&tagged_addr.address, consumed_deltas)
+                                        .record_consumed_b0x(&tagged_addr.address, consumed_deltas)
                                         .await
                                     {
                                         Ok(_) => log::info!(
@@ -2434,7 +2434,7 @@ impl AppRouterImpl {
                                 if !consumed_checkpoints.is_empty() {
                                     let n = consumed_checkpoints.len();
                                     match b0x_sdk
-                                        .acknowledge_b0x_v2(&tagged_addr.address, consumed_checkpoints)
+                                        .record_consumed_b0x(&tagged_addr.address, consumed_checkpoints)
                                         .await
                                     {
                                         Ok(_) => log::info!(
@@ -2642,14 +2642,14 @@ impl AppRouterImpl {
                                         let ack_res =
                                             match tokio::runtime::Handle::try_current() {
                                                 Ok(handle) => tokio::task::block_in_place(|| {
-                                                    handle.block_on(b0x_sdk.acknowledge_b0x_v2(
+                                                    handle.block_on(b0x_sdk.record_consumed_b0x(
                                                         &inbox_key,
                                                         tx_ids.clone(),
                                                     ))
                                                 }),
                                                 Err(_) => {
                                                     if let Ok(rt) = tokio::runtime::Runtime::new() {
-                                                        rt.block_on(b0x_sdk.acknowledge_b0x_v2(
+                                                        rt.block_on(b0x_sdk.record_consumed_b0x(
                                                             &inbox_key,
                                                             tx_ids.clone(),
                                                         ))
@@ -2763,7 +2763,7 @@ impl AppRouterImpl {
                                     }
                                     let mut all_acked = true;
                                     for (route, ids) in groups {
-                                        match b0x_sdk.acknowledge_b0x_v2(&route, ids.clone()).await {
+                                        match b0x_sdk.record_consumed_b0x(&route, ids.clone()).await {
                                             Ok(_) => log::info!(
                                                 "[storage.sync] ADR 0003 ACKed {} id(s) on retained route {}..",
                                                 ids.len(),
@@ -2826,53 +2826,30 @@ impl AppRouterImpl {
                                 log::warn!("[storage.sync] §16.6 reply delivery sweep errored (non-fatal): {e}");
                             }
 
-                            // §5.4 RETIRED AS PROTOCOL AUTHORITY — TRANSPORT GC ONLY.
-                            //
-                            // This sweep used to advance the projection tip, promote the
-                            // Local cert head, finalize the proposal and release the gate,
-                            // all keyed off a storage-node ACK. It no longer touches any of
-                            // them. The verified countersigned acceptance artifact is the
-                            // sole finalization authority and commits that whole sequence in
-                            // ONE transaction (`finalize_on_acceptance_atomically`).
-                            //
-                            // An ACK is a TRANSPORT fact: a node observed the recipient
-                            // consume its spooled copy. It carries no evidence the recipient
-                            // ACCEPTED the transfer, so it may never mutate canonical,
-                            // projection, proposal, gate, or certificate state. What remains
-                            // is collection: outbox rows the finalizer already moved to
-                            // `gc_pending`, whose wire copies are now consumed.
+                            // §5.4 OUTBOX COLLECTION. A row reaches `gc_pending` only
+                            // after the recipient's verified countersigned acceptance
+                            // finalized it (`finalize_on_acceptance_atomically`): that
+                            // acceptance is the proof the recipient consumed the
+                            // transfer. Nothing is asked of a storage node — a spool
+                            // is append-only and holds no read state (storage spec
+                            // §4) — so the row completes here.
                             if let Ok(collectable) =
                                 crate::storage::client_db::gc_pending_sender_outbox()
                             {
                                 for row in &collectable {
-                                    // The wire id IS the deterministic submission id;
-                                    // `message_ids` is a redundant bind that can be
-                                    // missing when the process died between
-                                    // `submitted` and the bind. Fall back rather than
-                                    // skipping the row forever.
-                                    let message_id = row
-                                        .message_ids
-                                        .as_deref()
-                                        .unwrap_or(row.submission_id.as_str());
-                                    match b0x_sdk.is_message_acknowledged(message_id).await {
-                                        Ok(true) => match crate::storage::client_db::set_sender_outbox_status(
-                                            &row.relationship_key,
-                                            &row.canonical_parent,
-                                            &row.proposal_nonce,
-                                            crate::storage::client_db::OUTBOX_COMPLETE,
-                                        ) {
-                                            Ok(_) => log::info!(
-                                                "[storage.sync] §5.4 GC: {message_id} consumed by the recipient; outbox row complete"
-                                            ),
-                                            Err(e) => log::warn!(
-                                                "[storage.sync] §5.4 GC: could not mark {message_id} complete: {e}"
-                                            ),
-                                        },
-                                        Ok(false) => log::debug!(
-                                            "[storage.sync] §5.4 GC: {message_id} still spooled; retaining the outbox row"
+                                    match crate::storage::client_db::set_sender_outbox_status(
+                                        &row.relationship_key,
+                                        &row.canonical_parent,
+                                        &row.proposal_nonce,
+                                        crate::storage::client_db::OUTBOX_COMPLETE,
+                                    ) {
+                                        Ok(_) => log::info!(
+                                            "[storage.sync] §5.4: outbox row {} complete",
+                                            row.submission_id
                                         ),
-                                        Err(e) => log::debug!(
-                                            "[storage.sync] §5.4 GC: ACK check failed for {message_id}: {e}"
+                                        Err(e) => log::warn!(
+                                            "[storage.sync] §5.4: could not mark outbox row {} complete: {e}",
+                                            row.submission_id
                                         ),
                                     }
                                 }

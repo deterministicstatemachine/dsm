@@ -1018,6 +1018,14 @@ pub const CLOSURE_FORBIDDEN_CONTENT_CLASSES: &[u16] = &[
     // is keyed by CLASS, so a new wrapper class is not covered by the entries
     // for the bodies it carries.
     class::SOFI_SIGNED_OBJECT,
+    // The classes of B°, T°, V° and P(E) (SoFi §18.1, MR-SOFI-0176): each
+    // contains or commits the current E's operation, so none may appear in
+    // the closure E itself commits.
+    class::SOFI_SETTLEMENT_SWAP,
+    class::SOFI_SETTLEMENT_CLOSE,
+    class::SOFI_TRADER_CORE,
+    class::SOFI_DLV_CORE,
+    class::SOFI_SETTLEMENT_PREIMAGE,
 ];
 
 /// `𝒞_E^pre` — the exact finite set of E-independent validation references,

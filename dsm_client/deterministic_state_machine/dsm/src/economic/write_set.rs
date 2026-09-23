@@ -37,7 +37,7 @@
 use std::collections::BTreeMap;
 
 use crate::economic::credit::{
-    CreditSource, CreditSourceAuthorizedIssuance, CreditSourceNativeReserveRelease,
+    CreditSource, CreditSourceGenesisRelease, CreditSourceNativeReserveRelease,
     CreditSourceValidatedPeerDebit,
 };
 use crate::economic::mutation::EconomicLeafMutation;
@@ -57,20 +57,6 @@ pub enum WriteSetError {
     /// against a tree whose leaf is non-zero); refusing at build gives an
     /// honest producer a named error instead of an unverifiable witness.
     SourceAlreadyConsumed,
-    /// `CreateToken` with `initial_supply > 0`: supply-at-creation is not an
-    /// enabled path.
-    ///
-    /// The name predates class `0x0029`, which now exists — so the reason has
-    /// changed rather than the outcome. Issuance is available, but through
-    /// `Mint` against an already-anchored policy: create with zero supply,
-    /// then issue under the policy's own authority. The original hazard also
-    /// still stands — funding a new asset's supply from the ERA fee debit
-    /// would turn a fee payment into arbitrary issuance, since
-    /// `SameTransitionMove` is same-asset conservation.
-    ///
-    /// Enabling supply-at-creation is a deliberate three-place diff: this
-    /// arm, the route guard, and the accepting-layer refusal.
-    CreateTokenInitialSupplyRequiresIssuancePredicate,
     /// The operation touches online value with no defined foreign-verifiable
     /// source predicate.
     UnsupportedValueTransition,
@@ -130,12 +116,6 @@ impl core::fmt::Display for WriteSetError {
                 f,
                 "this funding source has already been consumed — a source funds exactly one \
                  credit, and V1 defines no splits"
-            ),
-            Self::CreateTokenInitialSupplyRequiresIssuancePredicate => write!(
-                f,
-                "CreateToken with initial_supply > 0 cannot enter a validated lineage: the new \
-                 asset's supply must be issued through Mint against the anchored policy, and \
-                 the ERA fee debit must not fund a different asset"
             ),
             Self::UnsupportedValueTransition => write!(
                 f,
@@ -199,14 +179,10 @@ pub enum CreditSourceFacts {
         peer_debit_mutation_index: u32,
         acceptance_evidence_addr: [u8; 32],
     },
-    /// A policy-authorized issuance (0x0023 -> 0x0029). The evidence address
-    /// freezes the bundle carrying the canonical policy bytes, the signed
-    /// authorization body and the k-of-N signatures. EVERY other coordinate —
-    /// asset, amount, issuer, position, operation digest — is read from the
-    /// operation and the witness, never supplied twice.
-    AuthorizedIssuance {
-        issuance_authorization_addr: [u8; 32],
-    },
+    /// The genesis release of a token's whole supply at its creation
+    /// (`0x005F`). Nothing is supplied: the asset and the amount are the
+    /// accepted `CreateToken`'s own, and the policy is fetched by its commit.
+    GenesisRelease,
 }
 
 /// The producer's authenticated pre-state, decoded. `balances` is keyed by
@@ -291,6 +267,17 @@ enum SemanticWriteSet {
         leg_b: ([u8; 32], u64),
         creation: crate::sofi::wire::VaultCreation,
     },
+    /// `CreateToken` (SoFi §51): the ERA fee debit and the creator's credit of
+    /// the new token's whole genesis supply, as ONE write set. The credit's
+    /// source is the genesis release (`0x005F`), whose arm checks the amount
+    /// against the genesis supply the token's policy commits. Fee and supply
+    /// are different assets: neither funds the other.
+    CreateTokenRelease {
+        /// `(ERA policy_commit, fee_amount)`.
+        fee: ([u8; 32], u64),
+        /// `(the new token's policy_commit, its whole genesis supply)`.
+        release: ([u8; 32], u64),
+    },
 }
 
 /// One asset leg of a vault pair: `(policy_commit, amount)`.
@@ -325,7 +312,7 @@ fn pair_legs(
 enum FactsKind {
     NativeReserveRelease,
     PeerDebit,
-    AuthorizedIssuance,
+    GenesisRelease,
 }
 
 /// The one table: what an operation does to `R_econ`, or why it cannot be
@@ -373,20 +360,24 @@ fn semantic_write_set(
             policy_commit: *policy_commit,
             amount: amount.value(),
         }),
+        // Creation releases the token's whole genesis supply to its creator
+        // (`ReleaseRule::AllAtCreation`, SoFi §51) in the same write set as
+        // the ERA fee. A token with no supply is not a token (§50).
         Operation::CreateToken {
             initial_supply,
             fee_amount,
+            policy_commit,
             ..
         } => {
-            if initial_supply.value() > 0 {
-                return Err(WriteSetError::CreateTokenInitialSupplyRequiresIssuancePredicate);
-            }
-            if *fee_amount == 0 {
+            if initial_supply.value() == 0 {
                 return Err(WriteSetError::NoEconomicWriteSet);
             }
-            Ok(SemanticWriteSet::DebitOnly {
-                policy_commit: crate::core::token::token_state_manager::era_policy_commit(),
-                amount: *fee_amount,
+            Ok(SemanticWriteSet::CreateTokenRelease {
+                fee: (
+                    crate::core::token::token_state_manager::era_policy_commit(),
+                    *fee_amount,
+                ),
+                release: (*policy_commit, initial_supply.value()),
             })
         }
         // The beta faucet: one balance credit of exactly the beta payout of
@@ -402,20 +393,6 @@ fn semantic_write_set(
         // funded by the 0x0023 arm resolving a 0x0029 authorization. The
         // amount and asset come from the operation; the write set states the
         // effect, and the arm states who was entitled to cause it.
-        Operation::Mint {
-            policy_commit,
-            amount,
-            ..
-        } => {
-            if amount.value() == 0 {
-                return Err(WriteSetError::NoEconomicWriteSet);
-            }
-            Ok(SemanticWriteSet::Credit {
-                policy_commit: *policy_commit,
-                amount: amount.value(),
-                facts_required: FactsKind::AuthorizedIssuance,
-            })
-        }
         // SOFI v8 IS REFUSED HERE BY NAME — and the three do not share a
         // reason, which is why they no longer share an arm.
         //
@@ -693,10 +670,7 @@ pub fn build_write_set(
                     CreditSourceFacts::NativeReserveRelease { .. },
                     FactsKind::NativeReserveRelease
                 ) | (CreditSourceFacts::PeerDebit { .. }, FactsKind::PeerDebit)
-                    | (
-                        CreditSourceFacts::AuthorizedIssuance { .. },
-                        FactsKind::AuthorizedIssuance
-                    )
+                    | (CreditSourceFacts::GenesisRelease, FactsKind::GenesisRelease)
             );
             if !matches {
                 return Err(WriteSetError::FactsDoNotMatchOperation);
@@ -840,20 +814,14 @@ pub fn build_write_set(
                 u32::try_from(index).map_err(|_| WriteSetError::Ccb("index overflow".into()))?;
             let PlannedSource::External(facts) = planned_source;
             let source = match (facts, operation) {
-                // The descriptor carries the evidence ADDRESS and the credit
-                // index, and nothing else: asset, amount, issuer, position and
-                // operation digest all live in the signed authorization body
-                // the arm resolves, so there is no second place for one fact
-                // to disagree with itself.
-                (
-                    CreditSourceFacts::AuthorizedIssuance {
-                        issuance_authorization_addr,
-                    },
-                    Operation::Mint { .. } | Operation::CreateToken { .. },
-                ) => CreditSource::AuthorizedIssuance(CreditSourceAuthorizedIssuance {
-                    credit_mutation_index,
-                    issuance_authorization_addr,
-                }),
+                // The descriptor carries the credit index and nothing else: the
+                // asset and the amount are the operation's own, so there is no
+                // second place for one fact to disagree with itself.
+                (CreditSourceFacts::GenesisRelease, Operation::CreateToken { .. }) => {
+                    CreditSource::GenesisRelease(CreditSourceGenesisRelease {
+                        credit_mutation_index,
+                    })
+                }
                 (
                     CreditSourceFacts::NativeReserveRelease {
                         release_evidence_addr,
@@ -1112,9 +1080,9 @@ pub fn verify_operation_write_set(
                     Ok(())
                 }
                 (
-                    FactsKind::AuthorizedIssuance,
-                    CreditSource::AuthorizedIssuance(d),
-                    Operation::Mint { .. } | Operation::CreateToken { .. },
+                    FactsKind::GenesisRelease,
+                    CreditSource::GenesisRelease(d),
+                    Operation::CreateToken { .. },
                 ) => {
                     // THE SHAPE HALF of the issuance rule. Exactly one balance
                     // credit and nothing else: non-reuse is the signed body's
