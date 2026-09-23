@@ -14,10 +14,10 @@ Every extraction in this round is taken against exactly these bytes:
 
 | File | `git hash-object` | Lines |
 |---|---|---|
-| `specs/DSM_High_Level_Explainer.md` | `c21b78c5a37ae0899e1cf3556fe10b0fa4e087a7` | 4296 |
-| `specs/SoFi_Settlement_Specification.md` | `86bce47771a8802b20438afef52e63d64e73e174` | 2592 |
+| `specs/DSM_High_Level_Explainer.md` | `c74cf30a0f9fdba31e0ae95911f11eb8eb206bdf` | 4298 |
+| `specs/SoFi_Settlement_Specification.md` | `9a8a8f47227a7f647078829b2811aee2bd88726e` | 2594 |
 | `specs/dBTC_Native_Specification.md` | `233a3e72a5b16a023af830f4c8ffaad4ba9391a8` | 2160 |
-| `specs/DSM_Storage_Node_Specification.md` | `cb30606704f33ee19db2e5c1669ff7bc6ce04d3b` | 543 |
+| `specs/DSM_Storage_Node_Specification.md` | `bfd3d6011e54942b51ef394e82dbd1b51b8706b4` | 568 |
 
 The DSM and SoFi specifications were amended on 2026-09-22 (marked "Amendment" in their text). The storage-node specification was added to the corpus on 2026-09-22, before any other extractor started. The owner accepted it in full the same day. Extract its items marked **Open** with Flags `ambiguous` and a Requirement text that says so, never as settled requirements.
 
@@ -141,10 +141,11 @@ Each extraction also has a Findings table:
 - **Near matches** were never auto-merged. Pairs that the matcher joined but that state different things were split, and each half placed with the row it belongs to.
 - **Open items** go to §8.5 and are never requirements. A row that mixes a settled rule with an open question keeps the settled part as a requirement and moves the question to §8.5.
 - **Single-extractor rows** were each reviewed against the source; none was dropped by vote.
+- **Post-reconciliation amendment (2026-09-22): route-chain finality.** For finding GPT-4, finality was redefined as a route chain (storage spec §9, §12.6, §14, §22; DSM Amendment A6; SoFi Amendment S4). §1 pins the amended files. Canonical rows restating the old rule were rewritten, and rows for the new rules were added at the end of §8.1, §8.2 and §8.4 with source `amendment`. The extraction files in `extractions/` remain as extracted against the earlier hashes.
 
 ## 8 Canonical requirements
 
-Reconciled on 2026-09-22 from two extractions: `claude-chat` (798 rows) and `chatgpt` (880 rows). The record of how is in §7.1. Every row of both extractions is accounted for exactly once: in a canonical row below, in the Open list (§8.5), or in the exclusions (§8.6).
+Reconciled on 2026-09-22 from two extractions: `claude-chat` (798 rows) and `chatgpt` (880 rows). The record of how is in §7.1. Every row of both extractions is accounted for exactly once: in a canonical row below, in the Open list (§8.5), or in the exclusions (§8.6). Rows added later by amendment carry the source `amendment` (§7.1).
 
 | Spec | Canonical requirements | Found by both | Found by one |
 |---|---:|---:|---:|
@@ -153,6 +154,8 @@ Reconciled on 2026-09-22 from two extractions: `claude-chat` (798 rows) and `cha
 | dBTC_Native_Specification.md | 135 | 116 | 19 |
 | DSM_Storage_Node_Specification.md | 128 | 122 | 6 |
 | **Total** | **859** | **652** | **207** |
+
+Added afterwards by amendment (§7.1): DSM 1, SoFi 1, storage 16, for 877 canonical requirements in all.
 
 Columns: **ID** is the canonical ID (`MR-<spec>-nnnn`, in document order). **Sources** are the extraction IDs merged into the row (`cc:` claude-chat, `gpt:` chatgpt); the first source locates the quote. **Flags** carry the findings in §8.7 that bear on the row.
 
@@ -193,9 +196,9 @@ Columns: **ID** is the canonical ID (`MR-<spec>-nnnn`, in document order). **Sou
 | MR-DSM-0031 | invariant | derived | The register has one cell per (G, DevID, position), and the cell key is derived from those three values. | cc: DSM-HL-009/L535; gpt: DSM-HL-009/L535 | 2/2 | none |
 | MR-DSM-0032 | invariant | derived | The cell leader is chosen by a deterministic shuffle seeded from G, DevID, position, and the validated root at the previous position. No node id or availability view enters the seed. | cc: DSM-HL-009/L537; gpt: DSM-HL-009/L537 | 2/2 | none |
 | MR-DSM-0033 | authority | derived | A register cell entry is a root claim signed by the device owner, and only the owner can sign one. | cc: DSM-HL-009/L540.a | 1/2: claude-chat | none |
-| MR-DSM-0034 | obligation | derived | The writer writes the claim to the leader first, then the same bytes to the other members. | cc: DSM-HL-009/L540.b; gpt: DSM-HL-009/L540 | 2/2 | none |
+| MR-DSM-0034 | obligation | derived | The writer writes the claim to the leader first, then to the other seats in the cell's route order, each copy carrying the chain so far (Amendment A6). | cc: DSM-HL-009/L540.b; gpt: DSM-HL-009/L540 | 2/2 | none |
 | MR-DSM-0035 | evidence | derived | The rule deciding a cell is evaluated by the verifier from raw reads, never by a node. | cc: DSM-HL-009/L543 | 1/2: claude-chat | none |
-| MR-DSM-0036 | invariant | derived | The root at position n+1 is the first claim naming that cell at the leader. It is final once the leader and two other members hold it; a claim the leader does not hold is never final. | cc: DSM-HL-009/L544; gpt: DSM-HL-009/L543 | 2/2 | none |
+| MR-DSM-0036 | invariant | derived | The root at position n+1 is the first claim naming that cell at the leader; it is final once its route chain has the leader's link and two further links (Amendment A6), and a claim without a valid leader link is never final. | cc: DSM-HL-009/L544; gpt: DSM-HL-009/L543 | 2/2 | none |
 | MR-DSM-0037 | liveness-boundary | derived | If the leader is unreachable the cell waits. No other member stands in. | cc: DSM-HL-009/L545; gpt: DSM-HL-011/L840 | 2/2 | none |
 | MR-DSM-0038 | transition | derived | Cell holds a root other than the presented one → the presented parent is superseded → reject. | cc: DSM-HL-009/L549; gpt: DSM-HL-009/L549 | 2/2 | none |
 | MR-DSM-0039 | evidence | derived | Cell empty → accept only once the payer has registered the presented root at n+1 and the receiver has derived it final from its own reads. No registration, no accept. | cc: DSM-HL-009/L552; gpt: DSM-HL-009/L552 | 2/2 | none |
@@ -217,7 +220,7 @@ Columns: **ID** is the canonical ID (`MR-<spec>-nnnn`, in document order). **Sou
 | MR-DSM-0055 | invariant | derived | No protocol-relevant node path reads a clock; ordering inside the node uses logical ticks. | cc: DSM-HL-011/L754; gpt: DSM-HL-011/L754 | 2/2 | none |
 | MR-DSM-0056 | invariant | derived | Inter-node gossip is state synchronisation only: no leader election, Raft, Paxos, or vote. | cc: DSM-HL-011/L755; gpt: DSM-HL-011/L755 | 2/2 | none |
 | MR-DSM-0057 | authority | explicit | A node may refuse a write addressed to an account that has not met the one-time spend-gate, and refuses nothing else and nothing on protocol grounds. | cc: DSM-HL-011/L758; gpt: DSM-HL-011/L758.a | 2/2 | none |
-| MR-DSM-0058 | liveness-boundary | explicit | A party pays all five members of its set; a write goes through once the cell's leader and two others hold it, so the other members carry what one refuses. | cc: DSM-HL-011/L760; gpt: DSM-HL-011/L760 | 2/2 | tension(STOR open item 9: how a credit payment is split among five operators) |
+| MR-DSM-0058 | liveness-boundary | explicit | A party pays all five members of its set; a write goes through once its route chain has three links, the leader's and two more, so the other seats carry what one refuses. | cc: DSM-HL-011/L760; gpt: DSM-HL-011/L760 | 2/2 | tension(R-1) |
 | MR-DSM-0059 | liveness-boundary | explicit | A member refusing a cell it leads stalls that cell until the party opts it out or the network cuts it; this never changes validity. | cc: DSM-HL-011/L761; gpt: DSM-HL-011/L761 | 2/2 | none |
 | MR-DSM-0060 | authority | explicit | Payment enforcement is keyed on the account the write is addressed to, never on who is writing. | cc: DSM-HL-011/L763; gpt: DSM-HL-011/L763 | 2/2 | none |
 | MR-DSM-0061 | prohibition | explicit | Payment enforcement never applies to DLVs; creating a vault consumes its creator's credits like any write, and afterwards its storage never depends on anyone's payment. | cc: DSM-HL-011/L764; gpt: DSM-HL-011/L764 | 2/2 | none |
@@ -242,9 +245,9 @@ Columns: **ID** is the canonical ID (`MR-<spec>-nnnn`, in document order). **Sou
 | MR-DSM-0080 | obligation | derived | A device may write only after paying a flat rate to K = 3 distinct operators. The node stores the receipts and counts distinct operators, and the device is then enabled permanently. This join event drives DJTE (emissions: out of scope). | cc: DSM-HL-011/L808; gpt: DSM-HL-011/L808 | 2/2 | none |
 | MR-DSM-0081 | invariant | derived | A cell's leader is the first member of a Fisher–Yates shuffle of the owner-committed storage set, seeded from committed state: for a device, genesis, id, position, and validated root; for a vault, vault id and parent root. | cc: DSM-HL-011/L821; gpt: DSM-HL-011/L821 | 2/2 | none |
 | MR-DSM-0082 | invariant | derived | Node ids, availability, and the caller's identity never enter a leader seed. | cc: DSM-HL-011/L823 | 1/2: claude-chat | none |
-| MR-DSM-0083 | obligation | derived | The writer writes a cell value to the leader first, then the same bytes to the other members; any party may carry the bytes to members not yet reached. | cc: DSM-HL-011/L826; gpt: DSM-HL-011/L826 | 2/2 | none |
+| MR-DSM-0083 | obligation | derived | The writer writes a cell value to the leader first, then to the other seats in the cell's route order, each copy carrying the chain so far; any party may carry the chain to seats not yet reached (Amendment A6). | cc: DSM-HL-011/L826; gpt: DSM-HL-011/L826 | 2/2 | none |
 | MR-DSM-0084 | invariant | derived | Every member keeps everything it is given for a key, in arrival order. Nothing is refused, replaced, or compared, and there is no write authorization. | cc: DSM-HL-011/L829; gpt: DSM-HL-011/L829 | 2/2 | none |
-| MR-DSM-0085 | invariant | derived | The winner at a cell is the first object naming it at the leader, final once the leader and two other members hold it. | cc: DSM-HL-011/L833; gpt: DSM-HL-011/L833 | 2/2 | none |
+| MR-DSM-0085 | invariant | derived | The winner at a cell is the first object naming it at the leader, final once its route chain has three links, the leader's first (Amendment A6). | cc: DSM-HL-011/L833; gpt: DSM-HL-011/L833 | 2/2 | none |
 | MR-DSM-0086 | evidence | derived | The verifier derives winner and finality from raw reads; no node evaluates them. | cc: DSM-HL-011/L837; gpt: DSM-HL-011/L837 | 2/2 | none |
 | MR-DSM-0087 | authority | derived | Registration is not validation. A node stores an invalid claim as faithfully as a valid one, and whether the root is a valid transition is the verifier's question. | cc: DSM-HL-011/L843; gpt: DSM-HL-011/L843 | 2/2 | none |
 | MR-DSM-0088 | safety-assumption | derived | Restoring a member from a snapshot that predates a value it held is a safety violation, not an availability event. | cc: DSM-HL-011/L847; gpt: DSM-HL-011/L846 | 2/2 | none |
@@ -367,7 +370,7 @@ Columns: **ID** is the canonical ID (`MR-<spec>-nnnn`, in document order). **Sou
 | MR-DSM-0205 | authority | derived | A funded vault is authority committed in advance, so an absent owner's reserves can move to a live trader who meets the committed conditions. | cc: DSM-HL-063/L2999; gpt: DSM-HL-063/L2999 | 2/2 | none |
 | MR-DSM-0206 | invariant | derived | Every vault parent has a successor cell whose leader is the first member of a deterministic shuffle of the vault's storage set seeded from the vault id and the parent root. | cc: DSM-HL-063/L3027 | 1/2: claude-chat | none |
 | MR-DSM-0207 | evidence | derived | An exercise binds by hash the trader's signed fulfilment, signed precommit, settlement preimage and policy witnesses. | cc: DSM-HL-063/L3029; gpt: DSM-HL-063/L3028 | 2/2 | none |
-| MR-DSM-0208 | invariant | derived | The winner at a vault cell is the first exercise at the leader naming that cell, final once the leader and two others hold it; everything else at the cell counts as nothing. | cc: DSM-HL-063/L3035.a | 1/2: claude-chat | none |
+| MR-DSM-0208 | invariant | derived | The winner at a vault cell is the first exercise at the leader naming that cell, final once its route chain has three links, the leader's first (Amendment A6); everything else at the cell counts as nothing. | cc: DSM-HL-063/L3035.a | 1/2: claude-chat | none |
 | MR-DSM-0209 | transition | derived | A losing attempt is dropped and never becomes state; the parent's next attempt key goes live and the loser rebuilds from the parent actually selected. | cc: DSM-HL-063/L3035.b | 1/2: claude-chat | none |
 | MR-DSM-0210 | invariant | derived | The cells of different vaults have different leaders and never wait for each other; there is no shared sequencer. | cc: DSM-HL-063/L3046 | 1/2: claude-chat | none |
 | MR-DSM-0211 | transition | derived | Winning a vault cell does not move reserves. Reserves move only when the trader's position resolves: fulfilment registered at its own position cell, conforming to the precommit, route valid against the exact parents named, and every leg final with a live attempt and a canonical parent. | cc: DSM-HL-063/L3052; gpt: DSM-HL-063/L3052, DSM-HL-063/L3053 | 2/2 | none |
@@ -417,7 +420,7 @@ Columns: **ID** is the canonical ID (`MR-<spec>-nnnn`, in document order). **Sou
 | MR-DSM-0255 | dependency-boundary | explicit | Offline physical claims rest on the security of the fused hardware and measurement boundary (offline: out of scope). | cc: DSM-HL-080/L3997; gpt: DSM-HL-080/L3986.d | 2/2 | none |
 | MR-DSM-0256 | safety-assumption | derived | Durable member memory: a storage member never alters, reorders or loses what it holds for a key, across restart, restoration and storage migration. | cc: DSM-HL-080/L3998; gpt: DSM-HL-080/L3998 | 2/2 | none |
 | MR-DSM-0257 | safety-assumption | derived | Writer and verifier compute a cell's leader from the owner-committed member set and committed state only; no availability view, node id or caller choice moves a cell. | cc: DSM-HL-080/L4001; gpt: DSM-HL-080/L4001 | 2/2 | none |
-| MR-DSM-0258 | liveness-boundary | derived | Failing to reach a cell's leader, or two other members, is a liveness failure and the cell waits; violating durable member memory is a safety failure. | cc: DSM-HL-080/L4004; gpt: DSM-HL-080/L4004 | 2/2 | none |
+| MR-DSM-0258 | liveness-boundary | derived | Failing to reach a cell's leader, or two further seats of its route, is a liveness failure and the cell waits; violating durable member memory is a safety failure. | cc: DSM-HL-080/L4004; gpt: DSM-HL-080/L4004 | 2/2 | none |
 | MR-DSM-0259 | obligation | derived | The concrete primitives are post-quantum: BLAKE3 for hashing, SPHINCS+ for signatures, Kyber for key encapsulation. | cc: DSM-HL-080/L4008; gpt: DSM-HL-080/L4008 | 2/2 | none |
 | MR-DSM-0260 | proof-obligation | derived | Key-scoped uniqueness and Tripwire are proved in Lean 4 over an abstract guarded model, with no axioms in the uniqueness and Tripwire core. | cc: DSM-HL-081/L4036; gpt: DSM-HL-081/L4034 | 2/2 | none |
 | MR-DSM-0261 | proof-obligation | explicit | A TLA+ model checks that a deliberately malformed family (different keys for one shared resource) violates uniqueness, showing guard-family well-formedness is load-bearing. | cc: DSM-HL-081/L4045 | 1/2: claude-chat | none |
@@ -429,6 +432,7 @@ Columns: **ID** is the canonical ID (`MR-<spec>-nnnn`, in document order). **Sou
 | MR-DSM-0267 | obligation | explicit | A production implementation must faithfully refine the abstract model; conformance testing and the enforcement skeleton tie the code to it. | cc: DSM-HL-081/L4085; gpt: DSM-HL-081/L4085 | 2/2 | none |
 | MR-DSM-0268 | transition | derived | A step computes ρcore, selects a candidate from P, verifies its guard, derives descriptor and key, checks K ∉ Σ, applies the transformation, adds K to Σ, updates u, Π and Ω, recomputes ρcore, commits the next P and Γ, and recomputes ρ. | cc: DSM-HL-082/L4129 | 1/2: claude-chat | none |
 | MR-DSM-0269 | invariant | derived | Applications with shared public resources use one keyed cell per resource, with one leader derived from committed state, where the first object to arrive counts; this gives exclusivity without a universal order. | cc: DSM-HL-085/L4273 | 1/2: claude-chat | none |
+| MR-DSM-0270 | invariant | explicit | Finality is a route chain: a value is final when its chain has the leader's link and two further links along the cell's Fisher–Yates route; the three links are not a vote, and nodes still check, sign and decide nothing. | amendment: DSM Amendment A6 (2026-09-22) | amendment | none |
 
 ### 8.2 SoFi settlement specification
 
@@ -514,8 +518,8 @@ Columns: **ID** is the canonical ID (`MR-<spec>-nnnn`, in document order). **Sou
 | MR-SOFI-0078 | invariant | explicit | A trader position q uses the seed H(DSM/economic/position-seed/v1; G ∥ DevID ∥ q ∥ Rp), with Rp the validated economic root at p or the genesis root at the first position. | cc: SOFI-007-2/L567; gpt: SOFI-007-2/L564 | 2/2 | none |
 | MR-SOFI-0079 | obligation | explicit | The writer computes K and its leader. | cc: SOFI-008/L598; gpt: SOFI-008/L598 | 2/2 | none |
 | MR-SOFI-0080 | invariant | explicit | The winner at K is the first object at the leader that names K. | cc: SOFI-008/L600; gpt: SOFI-008/L599 | 2/2 | none |
-| MR-SOFI-0081 | obligation | explicit | The writer writes the same bytes to the other members of S. | cc: SOFI-008/L601; gpt: SOFI-008/L601 | 2/2 | none |
-| MR-SOFI-0082 | invariant | explicit | Once the leader and two other members hold x, the value is final at K. | cc: SOFI-008/L602; gpt: SOFI-008/L608 | 2/2 | none |
+| MR-SOFI-0081 | obligation | explicit | After the leader, the writer writes x to the route's seats in route order, each copy carrying the chain so far (Amendment S4). | cc: SOFI-008/L601; gpt: SOFI-008/L601 | 2/2 | none |
+| MR-SOFI-0082 | invariant | explicit | x is final at K once its route chain has the leader's link and two further links (Amendment S4). | cc: SOFI-008/L602; gpt: SOFI-008/L608 | 2/2 | none |
 | MR-SOFI-0083 | obligation | explicit | Any party may carry the bytes to members not yet reached. | cc: SOFI-008/L603; gpt: SOFI-008/L603 | 2/2 | none |
 | MR-SOFI-0084 | evidence | explicit | Core evaluates finality from raw reads; no node evaluates it. | cc: SOFI-008/L610; gpt: SOFI-008/L610 | 2/2 | none |
 | MR-SOFI-0085 | invariant | explicit | A value the leader does not hold is never final. | cc: SOFI-008/L612 | 1/2: claude-chat | none |
@@ -761,6 +765,7 @@ Columns: **ID** is the canonical ID (`MR-<spec>-nnnn`, in document order). **Sou
 | MR-SOFI-0325 | invariant | explicit | The new token's policy names the old token's policy_commit, and that is the only link between them. | cc: SOFI-053/L2567; gpt: SOFI-053/L2567 | 2/2 | none |
 | MR-SOFI-0326 | obligation | derived | The former mint-and-burn flag governs burns only. | gpt: SOFI-054/L2584 | 1/2: chatgpt | none |
 | MR-SOFI-0327 | conformance-test | derived | Token-policy rule changes have named tests that fail when their checks are removed. | gpt: SOFI-054/L2586 | 1/2: chatgpt | none |
+| MR-SOFI-0328 | invariant | explicit | Final(K, x) and every use of it in SoFi are replaced by the storage-spec route chain: x is final with a valid leader link and two further valid links; LeaderHeld(K, y) means y has the valid leader link and still settles that no other value is final at K. | amendment: SoFi Amendment S4 (2026-09-22) | amendment | none |
 
 ### 8.3 dBTC native specification
 
@@ -923,7 +928,7 @@ Columns: **ID** is the canonical ID (`MR-<spec>-nnnn`, in document order). **Sou
 | MR-STOR-0015 | safety-assumption | explicit | Restoring a node from a snapshot that predates a held value is a safety violation, not an availability event. | cc: STOR-003/L84; gpt: STOR-003/L84 | 2/2 | none |
 | MR-STOR-0016 | safety-assumption | explicit | Misresponses about immutable objects are detectable by hash and affect availability only. | cc: STOR-003/L85; gpt: STOR-003/L85 | 2/2 | none |
 | MR-STOR-0017 | obligation | explicit | A store outside the fault model fails closed. | cc: STOR-003/L86; gpt: STOR-003/L86 | 2/2 | none |
-| MR-STOR-0018 | liveness-boundary | explicit | Failing to reach a cell's leader or two other members is a liveness failure and the cell waits; violating durable memory is a safety failure. | cc: STOR-003/L90; gpt: STOR-003/L90 | 2/2 | none |
+| MR-STOR-0018 | liveness-boundary | explicit | Failing to reach a cell's leader, or two further seats of its route, is a liveness failure and the cell waits; violating durable memory is a safety failure. | cc: STOR-003/L90; gpt: STOR-003/L90 | 2/2 | none |
 | MR-STOR-0019 | safety-assumption | explicit | The durable-memory assumptions bind a role (seat), not a machine: memory survives the machine through handover, and total loss is handled by the loss rule, never by treating a new machine's empty memory as history. | cc: STOR-003/L94; gpt: STOR-003/L94 | 2/2 | none |
 | MR-STOR-0020 | evidence | explicit | Core derives exactly three storage facts (LeaderHeld, Final, Stored) from raw reads and uses nothing else from storage; registered is not validated. | cc: STOR-004/L101; gpt: STOR-004/L101 | 2/2 | none |
 | MR-STOR-0021 | prohibition | explicit | A storage fact not established from the reads in hand is never read as its negation; a verifier records nothing for a presentation it does not accept, and nothing a node returns is a verdict. | cc: STOR-004/L105; gpt: STOR-004/L105 | 2/2 | none |
@@ -947,14 +952,14 @@ Columns: **ID** is the canonical ID (`MR-<spec>-nnnn`, in document order). **Sou
 | MR-STOR-0039 | evidence | explicit | The recipient's device reads only relationships it has pre-added and accepts a message only if signed by the other device of that relationship. | cc: STOR-008/L155; gpt: STOR-008/L155 | 2/2 | none |
 | MR-STOR-0040 | obligation | explicit | The DSM §11 envelope checks are performed by the devices at both ends. | cc: STOR-008/L156; gpt: STOR-008/L156 | 2/2 | none |
 | MR-STOR-0041 | prohibition | explicit | The node never verifies who is writing, not even that the writer is one of the relationship's devices, because a node that can check can block; bytes written under a never-pre-added relationship are never read and are accepted. | cc: STOR-008/L160; gpt: STOR-008/L160 | 2/2 | none |
-| MR-STOR-0042 | authority | explicit | The writer and Core compute a cell's leader with SoFi's shuffle; a node never computes one and does not know which cells it leads. | cc: STOR-009/L167; gpt: STOR-009/L167 | 2/2 | none |
+| MR-STOR-0042 | authority | explicit | The writer and Core compute a cell's route R(K) = FisherYates(s, S) and its leader, the route's first seat; a node never computes either and does not know which cells it leads. | cc: STOR-009/L167; gpt: STOR-009/L167 | 2/2 | none |
 | MR-STOR-0043 | prohibition | explicit | A leader seed derives from committed state only; availability, caller identity and node ids never enter it. | cc: STOR-009/L168; gpt: STOR-009/L168 | 2/2 | none |
 | MR-STOR-0044 | invariant | explicit | The set a cell's leader is drawn from is the set committed in the state that seeds the cell; an offline member is still in it. | cc: STOR-009/L169; gpt: STOR-009/L169 | 2/2 | none |
 | MR-STOR-0045 | prohibition | explicit | A verifier reads a cell only after every check decidable from evidence in hand has passed; an Invalid transition never causes a storage read. | cc: STOR-009/L170; gpt: STOR-009/L170 | 2/2 | none |
-| MR-STOR-0046 | invariant | explicit | Final(K, x) holds iff x is the first object naming K at the leader and at least two other members hold x; Core evaluates it from raw reads, never a node. | cc: STOR-009/L174; gpt: STOR-009/L174, STOR-009/L176 | 2/2 | none |
-| MR-STOR-0047 | invariant | explicit | A value the leader does not hold is never final, and at most one value is final at a cell. | cc: STOR-009/L177; gpt: STOR-009/L177, STOR-009/L178 | 2/2 | none |
+| MR-STOR-0046 | invariant | explicit | Final(K, x) holds iff x's route chain has a valid leader link and at least two further valid links; Core evaluates it from raw reads and the carried chain, never a node. | cc: STOR-009/L174; gpt: STOR-009/L174, STOR-009/L176 | 2/2 | none |
+| MR-STOR-0047 | invariant | explicit | A value without a valid leader link is never final, and at most one value has a valid leader link at a cell, so at most one value is preserved or final. | cc: STOR-009/L177; gpt: STOR-009/L177, STOR-009/L178 | 2/2 | none |
 | MR-STOR-0048 | liveness-boundary | explicit | If the leader is unreachable the cell waits; no other member stands in. | cc: STOR-009/L179; gpt: STOR-009/L179 | 2/2 | none |
-| MR-STOR-0049 | invariant | explicit | A cell's leader is a function of the set committed when the cell was seeded and is never re-derived over a later set, registry or binding. | cc: STOR-009/L183; gpt: STOR-009/L183 | 2/2 | none |
+| MR-STOR-0049 | invariant | explicit | A cell's route, and so its leader, is a function of the set committed when the cell was seeded and is never re-derived over a later set, registry or binding. | cc: STOR-009/L183; gpt: STOR-009/L183 | 2/2 | none |
 | MR-STOR-0050 | transition | explicit | When a result is pending on one party, any party may write a challenge to the pending cell's leader; the challenged party answers with the missing piece, or a drop claim competes, and the first to reach the leader wins. | cc: STOR-009-1/L190; gpt: STOR-009-1/L190, STOR-009-1/L191, STOR-009-1/L192 | 2/2 | none |
 | MR-STOR-0051 | evidence | explicit | A drop claim counts only if the leader's ByteCommit chain shows at least X ByteCommits closed after the first one including the challenge. | cc: STOR-009-1/L193; gpt: STOR-009-1/L193 | 2/2 | tension(GPT-7) |
 | MR-STOR-0052 | invariant | explicit | Once a drop claim wins, the pending result is dropped for every verifier and later evidence for it is ignored; in SoFi a dropped trade is Void. | cc: STOR-009-1/L194; gpt: STOR-009-1/L194 | 2/2 | none |
@@ -989,9 +994,9 @@ Columns: **ID** is the canonical ID (`MR-<spec>-nnnn`, in document order). **Sou
 | MR-STOR-0081 | liveness-boundary | explicit | Until handover completes, the retiring operator serves the role, and its stake is not released until every role it served is handed over. | cc: STOR-012-5/L330; gpt: STOR-012-5/L330, STOR-012-5/L331 | 2/2 | none |
 | MR-STOR-0082 | obligation | explicit | An operator must durably replicate a role's memory before acknowledging a write to that role. | cc: STOR-012-5/L335; gpt: STOR-012-5/L335 | 2/2 | none |
 | MR-STOR-0083 | transition | explicit | If a role's memory is lost without handover, the record carries a loss marker, and each survivor records it in its own ordered memory; material held before it is pre-loss material. | cc: STOR-012-6/L342; gpt: STOR-012-6/L342, STOR-012-6/L343 | 2/2 | none |
-| MR-STOR-0084 | transition | explicit | For a cell whose leader role was lost, the claims held pre-loss by at least two survivors decide it: none means nothing was realized and the new operator leads; one is the winner; two or more freeze the cell with no winner. | cc: STOR-012-6/L344; gpt: STOR-012-6/L344, STOR-012-6/L348, STOR-012-6/L349, STOR-012-6/L350 | 2/2 | tension(GPT-4) |
-| MR-STOR-0085 | prohibition | explicit | For a cell with qualifying pre-loss material, the new operator's arrival log is never used as the leader's order. | cc: STOR-012-6/L352; gpt: STOR-012-6/L352 | 2/2 | none |
-| MR-STOR-0086 | theorem | explicit | The survivor rule never contradicts a pre-loss final result; it resolves to it or freezes the cell, and freezing requires the signer to have equivocated. | cc: STOR-012-6/L356; gpt: STOR-012-6/L356 | 2/2 | tension(GPT-4) |
+| MR-STOR-0084 | transition | explicit | For a cell whose leader role was lost, the survivors' pre-loss chains decide it: valid chains for exactly one value make it the winner (continued along the remaining route if short of three links); no valid chain means no value was final and the cell is written afresh under the new operator; valid chains for two values freeze the cell. | cc: STOR-012-6/L344; gpt: STOR-012-6/L344, STOR-012-6/L348, STOR-012-6/L349, STOR-012-6/L350 | 2/2 | none |
+| MR-STOR-0085 | prohibition | explicit | For a cell with a valid pre-loss chain, the new operator's arrival log is never used as the leader's order. | cc: STOR-012-6/L352; gpt: STOR-012-6/L352 | 2/2 | none |
+| MR-STOR-0086 | theorem | explicit | Loss never reverses or loses a final value: at least one seat after the leader survives with the chain and the mirror to verify it, only one value can have a valid leader link, and a cell freezes only if the leader equivocated. | cc: STOR-012-6/L356; gpt: STOR-012-6/L356 | 2/2 | none |
 | MR-STOR-0087 | invariant | explicit | The active registry is the sorted list of operator ids, stored as an immutable object, advancing by a pure function of the prior registry and hash-referenced capacity, performance and applicant evidence. | cc: STOR-013/L368; gpt: STOR-013/L368, STOR-013/L367 | 2/2 | none |
 | MR-STOR-0088 | transition | explicit | Each registry successor is a keyed cell on the network's pinned set keyed by the prior registry's address; anyone may write a candidate, non-recomputing objects are not candidates, and the first candidate at the leader wins under the ordinary finality rule. | cc: STOR-013/L369; gpt: STOR-013/L369 | 2/2 | none |
 | MR-STOR-0089 | prohibition | explicit | Pruning is computed from committed evidence only; locally measured latency or uptime never enters it. | cc: STOR-013/L370; gpt: STOR-013/L370 | 2/2 | none |
@@ -1001,7 +1006,7 @@ Columns: **ID** is the canonical ID (`MR-<spec>-nnnn`, in document order). **Sou
 | MR-STOR-0093 | obligation | explicit | Each cycle a node emits an unsigned ByteCommit with its node id, a cycle counter (never time), the SMT root over what it holds, bytes used, and the previous digest; it is stored under a deterministic address and mirrored. | cc: STOR-014/L382; gpt: STOR-014/L382, STOR-014/L383 | 2/2 | none |
 | MR-STOR-0094 | evidence | explicit | A verifier checks a ByteCommit's chain link and root itself; it is never accepted by counting mirrors. | cc: STOR-014/L384; gpt: STOR-014/L384 | 2/2 | none |
 | MR-STOR-0095 | evidence | explicit | Up and Down capacity signals reference windows of accepted ByteCommits and are checked against them. | cc: STOR-014/L385; gpt: STOR-014/L385 | 2/2 | none |
-| MR-STOR-0096 | obligation | explicit | Each keyed-cell entry is committed with its per-key arrival index, so handover and pre-loss partitioning are checkable. | cc: STOR-014/L389; gpt: STOR-014/L389 | 2/2 | none |
+| MR-STOR-0096 | obligation | explicit | Each keyed-cell entry is committed with its per-key arrival index and the member's running hash for that key, so arrival records, route links, handover and pre-loss partitioning are checkable. | cc: STOR-014/L389; gpt: STOR-014/L389 | 2/2 | none |
 | MR-STOR-0097 | evidence | explicit | An operator stakes through a stake DLV, which unlocks only on a mirrored DrainProof of two consecutive accepted ByteCommits with zero bytes used. | cc: STOR-015/L397; gpt: STOR-015/L397, STOR-015/L396 | 2/2 | none |
 | MR-STOR-0098 | theorem | explicit | Because retention never depends on payment, an operator's memory empties only after every role is handed over, so a DrainProof proves completed handover and a refusing operator never recovers its stake. | cc: STOR-015/L401; gpt: STOR-015/L401 | 2/2 | none |
 | MR-STOR-0099 | invariant | explicit | A device is receive-only after genesis until it has paid a flat rate to three distinct operators; spending is then enabled permanently with no renewal. | cc: STOR-016/L412; gpt: STOR-016/L412 | 2/2 | none |
@@ -1013,7 +1018,7 @@ Columns: **ID** is the canonical ID (`MR-<spec>-nnnn`, in document order). **Sou
 | MR-STOR-0105 | evidence | explicit | Credits are refilled by paying operators, with the payment receipts as evidence, through the spend-gate path. | cc: STOR-017/L425; gpt: STOR-017/L425 | 2/2 | none |
 | MR-STOR-0106 | prohibition | explicit | Credits are counted in storage used, never in time, so no clock enters any protocol path. | cc: STOR-017/L426; gpt: STOR-017/L426 | 2/2 | none |
 | MR-STOR-0107 | liveness-boundary | explicit | A party with exhausted credits cannot act, which is liveness only, never invalidity; before acting the client checks its own balance. | cc: STOR-017/L427; gpt: STOR-017/L427 | 2/2 | none |
-| MR-STOR-0108 | liveness-boundary | explicit | Paying and getting through are separate: a write goes through once the cell's leader and two others hold it. | cc: STOR-017/L428; gpt: STOR-017/L428 | 2/2 | none |
+| MR-STOR-0108 | liveness-boundary | explicit | Paying and getting through are separate: a write goes through once its route chain has three links, the leader's and two more. | cc: STOR-017/L428; gpt: STOR-017/L428 | 2/2 | none |
 | MR-STOR-0109 | authority | explicit | A node may refuse a write addressed to an account that has not met the spend-gate. | cc: STOR-017/L432; gpt: STOR-017/L432 | 2/2 | none |
 | MR-STOR-0110 | prohibition | explicit | Any refusal is keyed on the addressed account, never the connected writer, so relayers are admitted and the node never checks the writer. | cc: STOR-017/L433; gpt: STOR-017/L433 | 2/2 | none |
 | MR-STOR-0111 | prohibition | explicit | Refusal never applies to DLVs and never depends on payload content or what else is held at a key. | cc: STOR-017/L434; gpt: STOR-017/L434 | 2/2 | none |
@@ -1027,13 +1032,29 @@ Columns: **ID** is the canonical ID (`MR-<spec>-nnnn`, in document order). **Sou
 | MR-STOR-0119 | invariant | explicit | No safety property, and no party's liveness other than the owner's own, depends on the owner continuing to exist: retention is not tied to owner activity, operator exit is by handover, and retirement, the survivor rule and frozen-cell consequences are verifier rules, never owner actions. | cc: STOR-020/L463; gpt: STOR-020/L463, STOR-020/L467 | 2/2 | none |
 | MR-STOR-0120 | obligation | explicit | After a prune or exit, any client may restore missing replicas of immutable objects, accepted by hash only. | cc: STOR-021/L478; gpt: STOR-021/L478 | 2/2 | none |
 | MR-STOR-0121 | prohibition | explicit | Keyed-cell arrival order is not repairable by clients; it moves only by handover and, if lost, the cell is resolved by the loss rule. | cc: STOR-021/L479; gpt: STOR-021/L479 | 2/2 | none |
-| MR-STOR-0122 | proof-obligation | explicit | History invariance: a handover changes no LeaderHeld or Final fact for any cell. | cc: STOR-022/L490; gpt: STOR-022/L490 | 2/2 | none |
-| MR-STOR-0123 | proof-obligation | explicit | Survivor-rule soundness: the loss rule never selects a value other than the pre-loss final value and freezes only when two survivor-held objects name one cell. | cc: STOR-022/L491; gpt: STOR-022/L491 | 2/2 | tension(GPT-4) |
+| MR-STOR-0122 | proof-obligation | explicit | History invariance: a handover changes no LeaderHeld, Preserved or Final fact for any cell. | cc: STOR-022/L490; gpt: STOR-022/L490 | 2/2 | none |
+| MR-STOR-0123 | proof-obligation | explicit | Loss soundness: with at most two seats lost, the loss rule selects the pre-loss final value whenever one existed, never selects another, and freezes only if the leader equivocated. | cc: STOR-022/L491; gpt: STOR-022/L491 | 2/2 | none |
 | MR-STOR-0124 | proof-obligation | explicit | Retirement convergence: with at most two seats named per record, no two verifiers act on different occupants of one seat. | cc: STOR-022/L492; gpt: STOR-022/L492 | 2/2 | none |
 | MR-STOR-0125 | proof-obligation | explicit | Registry determinism: verifiers holding the same winning candidate and inputs compute the same registry. | cc: STOR-022/L493; gpt: STOR-022/L493 | 2/2 | none |
 | MR-STOR-0126 | proof-obligation | explicit | Rebind unpredictability: the party cannot compute the rebind seed before its retirement is effective. | cc: STOR-022/L494; gpt: STOR-022/L494 | 2/2 | none |
-| MR-STOR-0127 | proof-obligation | explicit | Leader immutability: no binding, registry or retirement event changes the leader of any committed cell. | cc: STOR-022/L495; gpt: STOR-022/L495 | 2/2 | none |
+| MR-STOR-0127 | proof-obligation | explicit | Route immutability: no binding, registry or retirement event changes a committed cell's route, and so its leader. | cc: STOR-022/L495; gpt: STOR-022/L495 | 2/2 | none |
 | MR-STOR-0128 | obligation | explicit | Use storage Part III succession to refine frozen SoFi membership without changing member IDs. | gpt: STOR-023-1/L508 | 1/2: chatgpt | none |
+| MR-STOR-0129 | obligation | explicit | A put to a keyed cell returns the entry's arrival record (member id, key, per-key arrival index, running hash); it is bytes, not a signature, checkable once the member's ByteCommit covering it closes. | amendment: storage §6 (2026-09-22) | amendment | none |
+| MR-STOR-0130 | transition | explicit | A writer writes a value to the route's seats in route order, leader first, each copy carrying the chain built so far; the chain is built live and never reconstructed from copies. | amendment: storage §9 (2026-09-22) | amendment | none |
+| MR-STOR-0131 | invariant | explicit | A link at a seat is that seat's arrival record for the value, naming the cell, the seat and its route position, and committing the previous link. | amendment: storage §9 (2026-09-22) | amendment | none |
+| MR-STOR-0132 | evidence | explicit | The leader link is valid only if the value is the first recognized object naming the cell in the leader's arrival log; bytes that are not a recognized object naming the cell never count. | amendment: storage §9 (2026-09-22) | amendment | none |
+| MR-STOR-0133 | evidence | explicit | A later link is valid only if its entry carries a valid chain from the leader link, its position is higher than every earlier link's, and its seat's own mirror of the leader's ByteCommits covers the leader link. | amendment: storage §9 (2026-09-22) | amendment | none |
+| MR-STOR-0134 | obligation | explicit | Where a seat yields no link, the writer records an empty for that position (taken, provable from that seat's arrival record; or no response, proving nothing); an empty never counts as a link. | amendment: storage §9 (2026-09-22) | amendment | none |
+| MR-STOR-0135 | prohibition | explicit | A node verifies nothing about a chain: it stores the bytes it receives in arrival order and returns their arrival record; verifiers evaluate chains. | amendment: storage §9 (2026-09-22) | amendment | none |
+| MR-STOR-0136 | liveness-boundary | explicit | Links are carried forward at once without waiting for ByteCommits; a link becomes verifiable when the ByteCommit committing its arrival record has closed. | amendment: storage §9 (2026-09-22) | amendment | none |
+| MR-STOR-0137 | obligation | explicit | Normal operation writes to all five seats of the route, and any party may continue a chain along the remaining route. | amendment: storage §9 (2026-09-22) | amendment | none |
+| MR-STOR-0138 | invariant | explicit | Preserved(K, x) holds iff x's chain has a valid leader link and at least one further valid link; a preserved value is not final and never spendable, and a receiver relies only on Final. | amendment: storage §9 (2026-09-22) | amendment | none |
+| MR-STOR-0139 | prohibition | explicit | Only pre-loss material identifies the winner after a leader loss; a chain first presented after the loss marker counts as nothing for that cell, even if its leader link verifies. | amendment: storage §12.6 (2026-09-22) | amendment | none |
+| MR-STOR-0140 | obligation | explicit | A node mirrors the ByteCommits of every node it shares a storage set with, by fetching them from that node itself. | amendment: storage §14 (2026-09-22) | amendment | none |
+| MR-STOR-0141 | prohibition | explicit | A node's mirror is its own namespace: bytes a third party presents as another node's ByteCommit never enter it. | amendment: storage §14 (2026-09-22) | amendment | none |
+| MR-STOR-0142 | safety-assumption | explicit | A verifier treats a member's mirror of another node's ByteCommits under the same fault model as the member's own memory; ByteCommits stay unsigned and nodes hold no key. | amendment: storage §14 (2026-09-22) | amendment | none |
+| MR-STOR-0143 | proof-obligation | explicit | Chain uniqueness: at most one value has a valid leader link at a cell, so at most one value is preserved or final. | amendment: storage §22 (2026-09-22) | amendment | none |
+| MR-STOR-0144 | proof-obligation | explicit | Mirror soundness: bytes a third party presents as a node's ByteCommit never enter another node's mirror of that node. | amendment: storage §22 (2026-09-22) | amendment | none |
 
 ### 8.5 Open items (not requirements)
 
@@ -1073,11 +1094,11 @@ The specifications mark these undecided. They are recorded so they are not lost,
 
 These come from the chatgpt extraction's findings table (GPT-n, IDs as cited there) and from the reconciliation itself (R-n). The claude-chat findings were all resolved before this round (amendments A1 to A5 and S1 to S3; PR #967). Each canonical row a finding bears on carries it in its Flags column.
 
-**Needs a ruling: safety**
+**Safety**
 
 | # | Finding |
 |---|---|
-| GPT-4 | **The storage loss rule has a hole.** A value is final once the leader and two other members hold it. If the two lost seats are the leader and one of those two, only one survivor holds the final value, so it is not in C (which needs two survivors), and the cell reads as "nothing happened" and can be written again. The two-loss model does not give the soundness that storage §22.2 claims. |
+| GPT-4 | **Resolved 2026-09-22 (owner): finality is a route chain** (storage spec §9, §12.6, §14; DSM Amendment A6; SoFi Amendment S4). The old loss rule counted a value only if two survivors held it, so a final value could be dropped when the leader and one of its holders were lost, and a value written to two other members before the loss could replace it. Now the cell's Fisher–Yates route is written in order, each copy after the leader carrying proof that the value was first at the leader, and a value is final at three links. At least one seat after the leader survives any two-seat loss holding that proof, so a lost leader is recovered without guessing and nothing freezes unless the leader equivocated. |
 
 **Needs a ruling: design gaps**
 

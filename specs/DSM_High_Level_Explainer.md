@@ -840,6 +840,8 @@ copies.
 - If the leader is unreachable, the cell waits. No other member stands in, because a fallback chosen
 from who is reachable would let two writers settle at two different nodes.
 
+> **Amendment A6 (owner, 2026-09-22) — finality is a route chain.** Wherever this document says a value is final once the leader and two other members hold it (here, and in §3, §9, §63 and §80), read the rule of `DSM_Storage_Node_Specification.md` §9. The cell's Fisher–Yates shuffle fixes a route through all five seats, and its first seat is the leader. The writer writes to the seats in route order, and each copy after the leader carries the chain of arrival records returned so far, proving the value was first at the leader. A value is final when its chain has the leader's link and two further links. Three links are not a vote: the leader fixes the order, and the two later links carry the proof of that order to seats that survive the leader, so a lost leader is recovered without guessing (storage spec §12.6). Nodes still check nothing, sign nothing and decide nothing; verifiers evaluate the chain.
+
 Registered is not validated. A malicious device can register an arbitrary claim perfectly consistently
 and the leader will store it; whether the root inside it is the result of a valid transition is the verifier’s
 question and nothing the node says bears on it. What the node contributes is memory: the leader keeps
