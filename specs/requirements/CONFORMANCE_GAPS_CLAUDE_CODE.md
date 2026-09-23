@@ -1,4 +1,6 @@
-# CONFORMANCE_GAPS
+# CONFORMANCE_GAPS — Claude Code pass
+
+One of three independent comparisons (Claude Code, Gemini, ChatGPT). The three are combined into `CONFORMANCE_GAPS.md`; this file is an input to that, not the result.
 
 Derived artifact. Not a source of protocol truth; `specs/README.md` governs. The requirements are the canonical rows of `MASTER_REQUIREMENTS.md` §8. This file records how the backend stands against each of them, and what the backend does that no requirement asks for.
 
