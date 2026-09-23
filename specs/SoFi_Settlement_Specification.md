@@ -615,6 +615,8 @@ Four consequences follow from the rule and the fault model.
 final at K. A verifier MAY classify the loss from the leader’s cell alone.
 4. If the leader is unreachable, the cell waits for it. No other member stands in, because a fallback chosen by who
 is reachable would let two writers settle at two different nodes.
+
+> **Amendment S4 (owner, 2026-09-22) — finality is a route chain.** `Final(K, x)` above, and every use of it in this document, is replaced by the rule of `DSM_Storage_Node_Specification.md` §9: `x` is final when its route chain has a valid leader link and two further valid links along the cell's Fisher–Yates route. Write-procedure steps 3 and 4 read accordingly: after the leader, the writer writes `x` to the route's seats in route order, each copy carrying the chain so far, and `x` is final at three links. Consequences 1 to 4 above still hold, with `LeaderHeld(K, y)` meaning that `y` has the valid leader link; it still settles that no other value is final at `K`.
 **Rule — members keep what they are given**
 
 No member refuses, replaces or compares anything. A value another member already holds for K can therefore

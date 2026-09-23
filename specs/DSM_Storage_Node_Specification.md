@@ -87,7 +87,7 @@ A node MUST NOT decide who owns an asset, validate a burn as an economic authori
 
 **Rule — safety and liveness (Imported: DSM §80)**
 
-Failure to reach a cell's leader, or two other members, is a liveness failure: the cell waits. Violation of durable memory is a safety failure.
+Failure to reach a cell's leader, or two further seats of its route, is a liveness failure: the cell waits. Violation of durable memory is a safety failure.
 
 **Rule — the fault model binds roles (Owner decision)**
 
@@ -98,7 +98,7 @@ Items 2 and 3 bind a *role* (§11), not a machine. A role's memory survives the 
 
 **Rule (Imported: SoFi §13, §2.3)**
 
-Core derives exactly three storage facts from raw reads: `LeaderHeld(K, x)`, `Final(K, x)`, and `Stored(o)`. It uses nothing else from storage. Registered is not Validated, and a storage fact implies nothing about semantic validity.
+Core derives exactly three storage facts from raw reads: `LeaderHeld(K, x)`, `Final(K, x)`, and `Stored(o)`, with `LeaderHeld` and `Final` defined by route chains (§9). It uses nothing else from storage, except that the loss rule (§12.6) also reads `Preserved` (§9). Registered is not Validated, and a storage fact implies nothing about semantic validity.
 
 **Rule — nothing negative is recorded (Owner decision; DSM Amendment A1)**
 
@@ -129,6 +129,7 @@ A storage fact is either established from the reads in hand or not established, 
 2. Get returns everything held at the key, in the order it arrived, or that it holds none.
 3. No member refuses, replaces or compares anything held at a key, except that a node MAY refuse a write addressed to an account that has not met the spend-gate (§16, §17). There is no write authorization: a signed object carries its signer's authority, and a derived object is recomputed by whoever reads it.
 4. Any party MAY carry bytes to members not yet reached.
+5. A put to a keyed cell returns the entry's **arrival record**: the member id, the key, the entry's per-key arrival index, and the member's running hash for that key after the entry (§14). The record is bytes, not a signature. It becomes checkable when the member's ByteCommit that commits it closes (Owner decision, 2026-09-22).
 
 <!-- spec-section: STOR-007 -->
 ### 7 Indexes
@@ -160,27 +161,41 @@ Nothing can be sent to a party that has not pre-established the sender as a cont
 The node does not verify who is writing, not even that the writer is one of the relationship's two devices. A node that can check can block, and blocking is an authority the node must not have. Software that skips the sender-side check can still compute a relationship id and write bytes under it; those bytes are never read by the recipient and change nothing. That is accepted.
 
 <!-- spec-section: STOR-009 -->
-### 9 Leader and finality
+### 9 Route, leader and finality
 
-**Rule — the leader (Imported: SoFi §7, §7.1; DSM §80.12)**
+**Rule — the route and the leader (Imported: SoFi §7, §7.1; DSM §80.12. Route: Owner decision, 2026-09-22)**
 
-1. The writer and Core compute a cell's leader as `L(K) = FisherYates(s, S)[0]`, with the shuffle of SoFi §7.1. A node never computes a leader and does not know which cells it leads.
+1. The writer and Core compute a cell's **route** as `R(K) = FisherYates(s, S) = [r0, r1, r2, r3, r4]`, with the shuffle of SoFi §7.1. The **leader** is `L(K) = r0`. A node never computes a route or a leader and does not know which cells it leads.
 2. The seed `s` is derived from committed state only. Availability, the caller's identity, and node ids never enter a seed.
-3. `S` is the storage set committed in the state that seeds the cell. A member that is offline is still in `S`.
+3. `S` is the storage set committed in the state that seeds the cell. A member that is offline is still in `S`, and keeps its position in the route.
 4. A verifier reads a cell only after every check it can decide from evidence already in hand has passed. A transition that is Invalid on what the verifier holds never causes a storage read (Imported: DSM Amendment A4).
 
-**Rule — finality (Imported: SoFi §8; DSM §9)**
+**Rule — route chains (Owner decision, 2026-09-22)**
 
-`Final(K, x) ⇔ x is the first object naming K at the leader ∧ |{m ∈ S \ {leader} : m holds x}| ≥ 2`.
+1. A writer writes a value `x` to the route's seats in route order, leader first. Each copy after the leader carries the chain built so far. The chain is built live, as the write goes; it is never reconstructed afterwards from copies.
+2. A **link** at seat `ri` is the arrival record that seat returned for `x` (§6). It names the cell, the seat and its route position `i`, and it commits the previous link.
+3. The **leader link** is valid only if `x` is the first recognized object naming `K` in the leader's arrival log. Bytes that are not a recognized object naming `K` never count, so junk written to the leader blocks nothing.
+4. A later link is valid only if the entry it records carries a valid chain beginning with the leader link, its position is higher than every earlier link's, and its seat's own mirror of the leader's ByteCommits (§14) covers the leader link.
+5. Where a seat yields no link, the writer records an **empty** for that position, so the route never shortens or reorders. An empty is either **taken** (another value's valid chain is already first at that seat, provable from that seat's arrival record) or **no response** (recorded, and proving nothing, because nobody can prove that a seat failed). An empty never counts as a link.
+6. A node verifies nothing about a chain. It stores the bytes it receives, in arrival order, and returns their arrival record. Verifiers evaluate chains.
+7. Links are carried forward at once; the writer does not wait for ByteCommits between seats. A link becomes verifiable when the ByteCommit that commits its arrival record has closed (§14).
+8. Normal operation writes to all five seats. Any party MAY continue a chain along the remaining route.
 
-1. Core evaluates finality from raw reads. No node evaluates it.
-2. A value the leader does not hold is never final.
-3. At most one value is final at a cell.
+**Rule — finality (Owner decision, 2026-09-22; replaces "first at the leader and held by two other members"; applied to SoFi §8 as Amendment S4 and to DSM §3, §9, §11, §63 and §80 as Amendment A6)**
+
+- `LeaderHeld(K, x) ⇔ x has a valid leader link at K`.
+- `Preserved(K, x) ⇔ x's chain has a valid leader link and at least one further valid link`.
+- `Final(K, x) ⇔ x's chain has a valid leader link and at least two further valid links`.
+
+1. Core evaluates these from raw reads and the carried chain. No node evaluates them.
+2. At most one value has a valid leader link at a cell, so at most one value is preserved or final.
+3. A receiver relies only on `Final`. A preserved value is not final and is never spendable; preservation matters only for loss (§12.6). Stopping a chain at two links gains a writer nothing, and any party can complete it.
 4. If the leader is unreachable, the cell waits. No other member stands in.
+5. Three links are not a quorum and do not vote. They are three positions of one route: the leader fixes the order, and the two later links carry the proof of that order to seats that survive the leader.
 
-**Invariant — historical leaders are fixed (Owner decision)**
+**Invariant — historical routes are fixed (Owner decision)**
 
-A cell's leader is a function of the set committed when the cell was seeded. It MUST NOT be re-derived over any later set, registry, or binding. Changing who serves a role (§12) never changes which role leads a cell.
+A cell's route, and so its leader, is a function of the set committed when the cell was seeded. It MUST NOT be re-derived over any later set, registry, or binding. Changing who serves a role (§12) never changes which role holds which position of a cell's route.
 
 <!-- spec-section: STOR-009-1 -->
 #### 9.1 Pending challenges counted in the leader's ByteCommits
@@ -301,11 +316,11 @@ No owner action is ever required for a network cut. There is no other trigger.
 4. **Verifier rule.**
    - A verifier that finds a record at none of the members it read proceeds as though no such record is effective.
    - A verifier that finds a record at any member MUST either confirm it at every survivor, and then treat it as effective, or wait. It MUST NOT proceed as though the record were not effective.
-5. **More than two seats out at once is outside the model.** Finality already needs three live seats, the leader and two others (§9), so a set with three or more seats out cannot advance any cell. It waits. No rule here resolves it, and safety is unaffected.
+5. **More than two seats out at once is outside the model.** Finality already needs three live seats, the leader and two further seats of the route (§9), so a set with three or more seats out cannot advance any cell. It waits. No rule here resolves it, and safety is unaffected.
 
 **Property — retirement convergence (Owner decision)**
 
-Every finality read touches three seats: the leader and two others. A record names at most two seats, so every finality read touches at least one survivor. If a record is effective, every survivor holds it, so every verifier that can read a cell sees it. A verifier that sees it nowhere among the members it read is therefore right that it is not effective. A verifier that sees it but cannot confirm it waits rather than acting on the old occupant, so no two verifiers act on different occupants of one seat. This is full replication among the survivors, not quorum overlap.
+Every finality read touches three seats: the leader and two further seats of the route. A record names at most two seats, so every finality read touches at least one survivor. If a record is effective, every survivor holds it, so every verifier that can read a cell sees it. A verifier that sees it nowhere among the members it read is therefore right that it is not effective. A verifier that sees it but cannot confirm it waits rather than acting on the old occupant, so no two verifiers act on different occupants of one seat. This is full replication among the survivors, not quorum overlap.
 
 **Why not a quorum**
 
@@ -337,25 +352,26 @@ An operator MUST durably replicate a role's memory before a write to that role i
 <!-- spec-section: STOR-012-6 -->
 #### 12.6 Loss
 
-**Rule (Owner decision)**
+**Rule (Owner decision; route chains 2026-09-22, finding GPT-4)**
 
 1. If a role's memory is lost with no handover, the retirement record carries a loss marker.
 2. Each surviving operator records the loss marker at a point in its own ordered memory. For each survivor, material it held before that point is **pre-loss** material.
-3. For a cell `K` whose leader role was lost, the verifier forms `C = {x : x names K and at least two survivors hold x as pre-loss material}` and resolves `K` as follows:
+3. For a cell `K` whose leader role was lost, the verifier looks in the survivors' pre-loss material for valid chains of `K` (§9) and resolves `K` as follows:
 
-| `|C|` | Result |
+| Pre-loss chains at survivors | Result |
 |---|---|
-| 0 | No value was realized at `K` before the loss. The role's new operator leads `K` from here. |
-| 1 | The single member of `C` is the winner at `K`. |
-| ≥ 2 | `Frozen(K)`: no winner. The objects in `C` are evidence of equivocation by whoever signed them. |
+| Valid chains for exactly one value `x` | `x` is the winner at `K`. If its chain has fewer than three links, any party MAY continue it along the remaining route. |
+| No valid chain | No value was final at `K` before the loss. The role's new operator serves the leader position for `K` from here, and `K` is written afresh. |
+| Valid chains for two different values | `Frozen(K)`: no winner. Two valid leader links for one cell mean the leader recorded two values first, which §3 excludes; the chains are evidence that it did. |
 
-4. For a cell with any qualifying pre-loss material, the new operator's arrival log MUST NOT be used as the leader's order. Otherwise an equivocator could write a fresh "first" object into an empty replacement and rewrite a decided cell.
+4. Only pre-loss material identifies the winner. A chain first presented after the loss marker counts as nothing for `K`, even if its leader link verifies. Otherwise a value that never reached a second seat could appear after `K` had been written afresh.
+5. For a cell with a valid pre-loss chain, the new operator's arrival log MUST NOT be used as the leader's order.
 
-**Property — the survivor rule never contradicts a final result (Owner decision)**
+**Property — loss never reverses or loses a final value (Owner decision)**
 
-If `Final(K, x)` held before the loss, then `x` was held by the leader and at least two other members. The other members are survivors and lose nothing (§3), so `x ∈ C`. At most one value is final at a cell, so if `|C| = 1`, its member is `x`. The rule can resolve to a final result or freeze the cell, but it never selects a different winner. Freezing requires two objects naming one cell, each held by two survivors, which requires the signer to have equivocated.
+If `Final(K, x)` held before the loss, `x`'s chain was held by the leader and two further seats, and each of those seats' links counted only once that seat's own mirror covered the leader link (§9). A record names at most two seats, so at least one of those two further seats survives, holding the chain and the means to verify it: `x` is the winner. Only one value can have a valid leader link (§3), so no other value is ever selected. If no survivor holds a valid chain, no value was final, so writing `K` afresh creates no second final value. The rule freezes a cell only if the leader equivocated.
 
-**Open — consequences of `Frozen(K)`.** What a frozen cell means for DSM acceptance, SoFi resolution, and dBTC, and whether it triggers the DSM tripwire (§53) against the equivocating signer, is not decided here.
+**Open — consequences of `Frozen(K)`.** What a frozen cell means for DSM acceptance, SoFi resolution, and dBTC, and whether it triggers the DSM tripwire (§53), is not decided here. Under route chains a frozen cell requires a leader that equivocated, which §3 excludes.
 
 ---
 
@@ -386,7 +402,13 @@ If `Final(K, x)` held before the loss, then `x` was held by the leader and at le
 
 **Rule — arrival order is committed (Owner decision)**
 
-Each keyed-cell entry is committed with its per-key arrival index, so that handover (§12.5) and pre-loss partitioning (§12.6) are checkable against mirrored commitments.
+Each keyed-cell entry is committed with its per-key arrival index and the member's running hash for that key, `hi = H(running hash of the key before the entry ∥ digest of the entry)`, so that arrival records (§6), route links (§9), handover (§12.5) and pre-loss partitioning (§12.6) are checkable against mirrored commitments.
+
+**Rule — mirror provenance (Owner decision, 2026-09-22)**
+
+1. A node mirrors the ByteCommits of every node it shares a storage set with, by fetching them from that node itself.
+2. The mirror is its own namespace. No third-party write enters it: bytes someone else presents as another node's ByteCommit never populate a node's mirror of that node.
+3. A verifier treats a member's mirror of another node's ByteCommits under the same fault model as the member's own memory (§3). ByteCommits stay unsigned, and nodes hold no key.
 
 <!-- spec-section: STOR-015 -->
 ### 15 Stake and exit
@@ -425,7 +447,7 @@ Retention never depends on payment (§19), so an operator's memory empties only 
 4. Credits are refilled by paying operators. The payment receipts are the evidence for the refill, through the same path as the spend-gate (§16).
 5. Credits are counted in storage used, never in time, so no clock enters any protocol path.
 6. A party whose credits are exhausted cannot act. That is a liveness consequence only, never an invalidity. Before acting, the client checks its own credit balance.
-7. Paying and getting through are separate: a write goes through at a cell once that cell's leader and two other members hold it (§9).
+7. Paying and getting through are separate: a write goes through at a cell once its route chain has three links, the leader's and two more (§9).
 
 **Rule — node refusal is bounded (Owner decision)**
 
@@ -487,12 +509,14 @@ No safety property, and no party's liveness other than the owner's own, may depe
 
 | # | Obligation |
 |---|---|
-| 22.1 | History invariance: a handover changes no `LeaderHeld` or `Final` fact for any cell. |
-| 22.2 | Survivor-rule soundness: under §3, the rule of §12.6 never selects a value other than the pre-loss final value, and freezes only when two survivor-held objects name one cell. |
+| 22.1 | History invariance: a handover changes no `LeaderHeld`, `Preserved` or `Final` fact for any cell. |
+| 22.2 | Loss soundness: under §3, with at most two seats lost, the rule of §12.6 selects the pre-loss final value whenever one existed, never selects another value, and freezes only if the leader equivocated. |
 | 22.3 | Retirement convergence: with at most two seats named per record, no two verifiers act on different occupants of one seat. |
 | 22.4 | Registry determinism: any two verifiers holding the same winning registry candidate and its referenced inputs compute the same registry. |
 | 22.5 | Rebind unpredictability: the party cannot compute `s_rebind` before its retirement is effective. |
-| 22.6 | Leader immutability: no binding, registry, or retirement event changes `L(K)` for any committed cell. |
+| 22.6 | Route immutability: no binding, registry, or retirement event changes `R(K)`, and so `L(K)`, for any committed cell. |
+| 22.7 | Chain uniqueness: at most one value has a valid leader link at a cell, so at most one value is preserved or final. |
+| 22.8 | Mirror soundness: bytes a third party presents as a node's ByteCommit never enter another node's mirror of that node (§14). |
 
 <!-- spec-section: STOR-023 -->
 ### 23 Conflicts for the owner
@@ -508,6 +532,7 @@ No safety property, and no party's liveness other than the owner's own, may depe
 | 4 | SoFi §6 says membership is frozen per vault and replacement is unspecified; SoFi §46 reserves `DSM/sofi/membership-handover/v1`. | Part III of this document; the reserved tag becomes SoFi's encoding of §12.5. |
 | 5 | DSM §62 prices storage traffic with prepaid credits, while an earlier decision priced storage by monthly subscription. | **Owner ruling:** credits adopted, at a fixed network price per storage used (§17); the subscription is removed. |
 | 6 | DSM §63 calls a vault's storage set owner-chosen, while SoFi §6 and §10 here make it the network-pinned set. | **Owner ruling:** the set is assigned, never chosen. Applied as DSM Amendment A5. |
+| 7 | SoFi §8 and DSM §9, §11 define finality as first at the leader and held by two other members, which cannot recover a lost leader soundly (finding GPT-4). | **Owner ruling (2026-09-22):** finality is the route chain of §9. Applied as SoFi Amendment S4 and DSM Amendment A6. |
 
 <!-- spec-section: STOR-023-2 -->
 #### 23.2 From the October 2025 specification, not adopted
@@ -516,7 +541,7 @@ No safety property, and no party's liveness other than the owner's own, may depe
 |---|---|
 | "No validators, sequencers, or leaders" | Every keyed cell has a leader (DSM §9, §11; SoFi §7). |
 | Nodes MUST reject on partition, address, or capacity mismatch | A node refuses nothing on protocol grounds (DSM §11); the only refusal it may make is for its own payment (§17). Address checking on immutable objects is kept (§5). |
-| Redundancy N = 6 per object, reads succeed with any K = 3 | Five members per committed set; finality is the leader plus two others (SoFi §6, §8). |
+| Redundancy N = 6 per object, reads succeed with any K = 3 | Five members per committed set; finality is a three-link route chain, the leader first (§9; SoFi §6, §8 as amended by S4). |
 | Per-object placement over the whole registry | Committed sets per vault or party (§10). |
 | ByteCommit accepted by mirror count | "Nobody counts toward a threshold" (DSM §3); §14 here. |
 | Its keyed Fisher–Yates variant | SoFi §7.1 governs. |
@@ -533,7 +558,7 @@ No safety property, and no party's liveness other than the owner's own, may depe
 | 3 | Consequences of `Frozen(K)`, and whether it triggers the tripwire (§12.6). |
 | 4 | The performance criterion for pruning, expressible over committed evidence (§13). Cadence regularity (§9.1, §13.7) is one criterion; the rest are undecided. |
 | 5 | Whether vaults keep a single network-pinned set as the network grows (§10). |
-| 6 | Wire formats and domain tags for retirement, loss, handover, and registry-successor objects. |
+| 6 | Wire formats and domain tags for retirement, loss, handover, and registry-successor objects, and for arrival records, route links, empties and the per-key running hash (§6, §9, §14). |
 | 7 | The challenge deadline X, the wire form of challenges and drop claims, and SoFi's rule for a dropped pending result (§9.1). |
 | 8 | The credit price, its token, and how a price change is made (§17). |
 | 9 | How a credit payment is split among the five operators that store a write (§17). |
