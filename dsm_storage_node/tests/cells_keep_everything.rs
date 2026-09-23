@@ -6,15 +6,15 @@
 //! with an empty list. An index is append-only and pages from the last `seq`.
 //! Nothing here decodes a value; the payloads are arbitrary bytes on purpose.
 
-#![cfg(feature = "local-dev")]
 #![allow(clippy::disallowed_methods)]
+
+mod common;
 
 use std::sync::Arc;
 
 use axum::{body::Body, http::Request, http::StatusCode, Router};
 use dsm_sdk::util::text_id;
 use dsm_storage_node::{
-    db,
     replication::{ReplicationConfig, ReplicationManager},
     AppState,
 };
@@ -23,10 +23,10 @@ use tower::ServiceExt;
 
 const NS: &str = "DSM/cells-contract";
 
-async fn member() -> Router {
+/// A member over a fresh store of its own, named `store`.
+async fn member(store: &str) -> Router {
     let endpoint = "http://member.local:8080".to_string();
-    let pool = Arc::new(db::create_pool(":memory:", true).expect("pool"));
-    db::init_db(&pool).await.expect("init db");
+    let pool = common::fresh_store(store).await;
     let rm = Arc::new(
         ReplicationManager::new_for_tests(
             ReplicationConfig {
@@ -145,11 +145,11 @@ async fn put_batch(app: &Router, entries: Vec<(Vec<u8>, [u8; 32], Vec<u8>)>) -> 
 /// batch that names no cell, neither.
 #[tokio::test]
 async fn a_batch_put_takes_every_key_or_none_on_the_served_assembly() {
-    let app = member().await;
+    let app = member("cells_a_batch_put_takes_every_key_or_none_on_the_s").await;
     let (k1, k2) = (key(0x21), key(0x22));
     assert_eq!(
         put(&app, Some(NS), &k1, b"already here").await,
-        StatusCode::NO_CONTENT
+        StatusCode::OK
     );
     assert_eq!(
         put_batch(
@@ -160,7 +160,7 @@ async fn a_batch_put_takes_every_key_or_none_on_the_served_assembly() {
             ],
         )
         .await,
-        StatusCode::NO_CONTENT
+        StatusCode::OK
     );
     assert_eq!(
         get(&app, &k1).await.1,
@@ -196,15 +196,12 @@ async fn a_batch_put_takes_every_key_or_none_on_the_served_assembly() {
 
 #[tokio::test]
 async fn a_second_value_at_a_key_is_kept_after_the_first_never_refused() {
-    let app = member().await;
+    let app = member("cells_a_second_value_at_a_key_is_kept_after_the_fi").await;
     let k = key(0x01);
-    assert_eq!(
-        put(&app, Some(NS), &k, b"first").await,
-        StatusCode::NO_CONTENT
-    );
+    assert_eq!(put(&app, Some(NS), &k, b"first").await, StatusCode::OK);
     assert_eq!(
         put(&app, Some(NS), &k, b"second, different").await,
-        StatusCode::NO_CONTENT,
+        StatusCode::OK,
         "a contested key is not a refusal"
     );
     let (status, values) = get(&app, &k).await;
@@ -219,7 +216,7 @@ async fn a_second_value_at_a_key_is_kept_after_the_first_never_refused() {
 /// Identical bytes twice are two arrivals. The member does not compare.
 #[tokio::test]
 async fn an_identical_value_put_twice_is_held_twice() {
-    let app = member().await;
+    let app = member("cells_an_identical_value_put_twice_is_held_twice").await;
     let k = key(0x02);
     put(&app, Some(NS), &k, b"same").await;
     put(&app, Some(NS), &k, b"same").await;
@@ -230,7 +227,7 @@ async fn an_identical_value_put_twice_is_held_twice() {
 /// Absence is asserted by shape, not by status: an empty list under `200`.
 #[tokio::test]
 async fn a_key_nothing_was_put_under_reads_as_an_empty_list_with_200() {
-    let app = member().await;
+    let app = member("cells_a_key_nothing_was_put_under_reads_as_an_empt").await;
     let (status, values) = get(&app, &key(0x5E)).await;
     assert_eq!(status, StatusCode::OK);
     assert!(values.is_empty());
@@ -240,7 +237,7 @@ async fn a_key_nothing_was_put_under_reads_as_an_empty_list_with_200() {
 /// another cell.
 #[tokio::test]
 async fn a_namespace_scopes_the_key() {
-    let app = member().await;
+    let app = member("cells_a_namespace_scopes_the_key").await;
     let k = key(0x03);
     put(&app, Some(NS), &k, b"in NS").await;
     put(&app, Some("DSM/other"), &k, b"in other").await;
@@ -251,7 +248,7 @@ async fn a_namespace_scopes_the_key() {
 /// An index is append-only and pages from the last `seq`.
 #[tokio::test]
 async fn an_index_pages_in_append_order_from_the_last_seq() {
-    let app = member().await;
+    let app = member("cells_an_index_pages_in_append_order_from_the_last").await;
     let loc = key(0x10);
     let addrs = [[0xA1u8; 32], [0xA2u8; 32], [0xA3u8; 32]];
     for a in &addrs {
@@ -279,7 +276,7 @@ async fn an_index_pages_in_append_order_from_the_last_seq() {
 /// never its meaning.
 #[tokio::test]
 async fn only_malformed_requests_are_refused() {
-    let app = member().await;
+    let app = member("cells_only_malformed_requests_are_refused").await;
     let k = key(0x04);
     assert_eq!(
         put(&app, Some(NS), &k, b"").await,
@@ -306,4 +303,55 @@ async fn only_malformed_requests_are_refused() {
         StatusCode::BAD_REQUEST,
         "an index entry is exactly 32 bytes"
     );
+}
+
+/// A put answers with the entry's arrival record, and a get returns every
+/// value's record beside it; both are the verifier's replay (storage spec §14).
+#[tokio::test]
+async fn a_put_answers_with_the_arrival_record_a_verifier_replays() {
+    let app = member("cells_a_put_answers_with_the_arrival_record_a_veri").await;
+    let k = key(0x41);
+    let mut returned = Vec::new();
+    for v in [b"one".as_slice(), b"two"] {
+        let req = Request::builder()
+            .method("POST")
+            .uri(format!("/api/v2/cell/{k}"))
+            .header("x-namespace", NS)
+            .body(Body::from(v.to_vec()))
+            .expect("request");
+        let resp = app.clone().oneshot(req).await.expect("oneshot");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let rec = dsm::types::proto::ArrivalRecordV1::decode(body.as_ref()).expect("record");
+        returned.push(dsm::storage_cell::ArrivalRecord::from_proto(&rec).expect("well formed"));
+    }
+    let values = vec![b"one".to_vec(), b"two".to_vec()];
+    let replay = dsm::storage_cell::replay(NS.as_bytes(), &[0x41; 32], &values);
+    for (rec, (i, h)) in returned.iter().zip(&replay) {
+        assert_eq!((rec.index, rec.running_hash), (*i, *h));
+        assert_eq!(rec.key, [0x41; 32]);
+        assert_eq!(rec.namespace, NS.as_bytes());
+        assert!(rec.agrees_with(&values));
+    }
+
+    let req = Request::builder()
+        .method("GET")
+        .uri(format!("/api/v2/cell/{k}"))
+        .header("x-namespace", NS)
+        .body(Body::empty())
+        .expect("request");
+    let resp = app.clone().oneshot(req).await.expect("oneshot");
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let page = dsm::types::proto::CellValuesV1::decode(body.as_ref()).expect("page");
+    assert_eq!(page.values, values);
+    let got: Vec<_> = page
+        .records
+        .iter()
+        .map(|r| dsm::storage_cell::ArrivalRecord::from_proto(r).expect("well formed"))
+        .collect();
+    assert_eq!(got, returned, "get reports what put returned");
 }

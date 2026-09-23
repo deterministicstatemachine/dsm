@@ -13,7 +13,7 @@
 //! - [`objects`]    — raw byte storage (store, list, bytecommit, immutable)
 //! - [`cells`]      — keyed cells and indexes: bytes in, bytes out
 //! - [`vault`]      — DLV / policy / recovery / paidk
-//! - [`registry`]   — node registry, scaling, discovery, drain-proof
+//! - [`registry`]   — node registry, scaling, discovery
 //! - [`transport`]  — message delivery (b0x, gossip)
 
 pub mod cells;

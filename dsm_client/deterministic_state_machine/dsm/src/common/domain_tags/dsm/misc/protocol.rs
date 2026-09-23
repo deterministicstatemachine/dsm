@@ -68,6 +68,26 @@ pub const TAG_DSM_VAULT_STATE_ANCHOR_V3: TaggedHashDomain<'static> =
 /// Req 15.2's idempotence meaningful rather than accidental.
 pub const TAG_DSM_STORAGE_OBJECT: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/storage-object");
+/// Keyed-cell entry digest `d_i = H_dom(tag, v_i)` (storage spec §14,
+/// keyed-cell commitment formats).
+pub const TAG_DSM_STORAGE_CELL_ENTRY_V1: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/storage/cell-entry/v1");
+/// Per-key running hash seed `h_0 = H_dom(tag, N ‖ K)` (storage spec §14).
+pub const TAG_DSM_STORAGE_CELL_RUN_INIT_V1: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/storage/cell-run-init/v1");
+/// Per-key running hash step `h_i = H_dom(tag, h_(i-1) ‖ d_i)` (storage spec §14).
+pub const TAG_DSM_STORAGE_CELL_RUN_V1: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/storage/cell-run/v1");
+/// SMT key of a keyed cell's committed leaf `H_dom(tag, N ‖ K)` (storage spec §14).
+pub const TAG_DSM_STORAGE_CELL_LEAF_KEY_V1: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/storage/cell-leaf-key/v1");
+/// SMT value of a keyed cell's committed leaf `H_dom(tag, i ‖ h_i)` (storage spec §14).
+pub const TAG_DSM_STORAGE_CELL_LEAF_V1: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/storage/cell-leaf/v1");
+/// ByteCommit digest `d_t = H_dom(tag, canonical fields)` (storage spec §14,
+/// ByteCommit format).
+pub const TAG_DSM_STORAGE_BYTECOMMIT_V1: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/storage/bytecommit/v1");
 /// `k_v = H_dom(DSM/binding-keyset, c_n)` — one settlement resource key from a
 /// vault's committed parent state (Def 6.17). The vault id is NOT restated:
 /// c_n commits it, so supplying both would admit a disagreeing pair.

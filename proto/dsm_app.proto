@@ -4237,14 +4237,6 @@ message ApplicantV3 {
   bytes seed_app  = 5; // H("DSM/app_seed\0" || hw_bind || G)
 }
 
-// DrainProof: d consecutive ByteCommits with bytes_used=0 (stake exit).
-// Domain: "DSM/drain\0"
-message DrainProofV3 {
-  bytes node_id = 1; // 32 bytes
-  repeated uint64 cycle_indices = 2; // d consecutive cycle indices
-  repeated bytes bytecommit_digests = 3; // H(B_t) for each cycle
-}
-
 // Storage payment receipt for PaidK spend-gate.
 // Domain: "DSM/pay/storage\0"
 message StoragePaymentReceiptV3 {
@@ -4288,15 +4280,6 @@ message PaidKStatusV3 {
   uint32 required_k      = 3;
 }
 
-// DrainProof verification response (advisory).
-message DrainVerifyV3 {
-  bool verified           = 1;
-  bytes node_id           = 2;
-  uint64 start_cycle      = 3;
-  uint64 end_cycle        = 4;
-  uint32 consecutive_empty = 5;
-}
-
 message BleConnectionFailed {
   string address = 1;
   string error = 2;
@@ -4307,6 +4290,49 @@ message BleConnectionFailed {
 // asserted absence. The member decodes none of the values.
 message CellValuesV1 {
   repeated bytes values = 1 [(dsm_max_len)=262144];
+  // One arrival record per value, in the same order (storage spec §14).
+  repeated ArrivalRecordV1 records = 2;
+}
+
+// Arrival record of one keyed-cell entry (storage spec §6, §14): the member,
+// the cell, the entry's per-key arrival index (from 1), and the member's
+// running hash for the key after the entry. Bytes, not a signature.
+message ArrivalRecordV1 {
+  bytes  member_id    = 1 [(dsm_max_len)=128]; // exactly as the storage set commits it
+  bytes  namespace    = 2 [(dsm_max_len)=128];
+  bytes  key          = 3 [(dsm_fixed_len)=32];
+  uint64 index        = 4;
+  bytes  running_hash = 5 [(dsm_fixed_len)=32];
+}
+
+// The arrival records of a batch put, one per entry in the batch's order.
+message ArrivalRecordsV1 {
+  repeated ArrivalRecordV1 records = 1;
+}
+
+// A member's ByteCommit for cycle t (storage spec §14). Unsigned. Its digest
+// is computed from the fields, never from these encoded bytes.
+message ByteCommitV4 {
+  bytes  member_id     = 1 [(dsm_max_len)=128]; // exactly as the storage set commits it
+  uint64 cycle_index   = 2;                     // from 1; a counter, never time
+  bytes  smt_root      = 3 [(dsm_fixed_len)=32];
+  uint64 bytes_used    = 4;
+  bytes  parent_digest = 5 [(dsm_fixed_len)=32]; // zeros at cycle 1
+}
+
+// Every distinct ByteCommit a mirror fetched for one member and cycle. More
+// than one is evidence that the member equivocated.
+message ByteCommitsV4 {
+  repeated ByteCommitV4 commits = 1;
+}
+
+// A member's proof that its ByteCommit for a cycle commits a cell's latest
+// entry as of that cycle: the entry's index and running hash, and the SMT
+// inclusion proof of the cell's leaf.
+message CellCommitProofV1 {
+  uint64 index        = 1;
+  bytes  running_hash = 2 [(dsm_fixed_len)=32];
+  bytes  smt_proof    = 3 [(dsm_max_len)=8300];
 }
 
 // One value for one key, as a batch put carries it. The member keeps it
