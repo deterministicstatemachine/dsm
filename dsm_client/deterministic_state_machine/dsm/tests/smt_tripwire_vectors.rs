@@ -457,7 +457,7 @@ fn smt_key_determinism_reversed_args() {
 
 #[test]
 fn golden_inclusion_proof_absent_key() {
-    let smt = SparseMerkleTree::new(256);
+    let smt = SparseMerkleTree::new();
     let key = [0x07u8; 32];
 
     let proof = smt
@@ -487,7 +487,7 @@ fn golden_inclusion_proof_absent_key() {
 
 #[test]
 fn golden_inclusion_proof_present_key() {
-    let mut smt = SparseMerkleTree::new(256);
+    let mut smt = SparseMerkleTree::new();
     let key = [0x07u8; 32];
     let value = [0x42u8; 32];
     smt.update_leaf(&key, &value).expect("insert leaf");
@@ -518,7 +518,7 @@ fn golden_inclusion_proof_present_key() {
 
 #[test]
 fn golden_smt_replace_first_tx() {
-    let mut smt = SparseMerkleTree::new(256);
+    let mut smt = SparseMerkleTree::new();
     let key = [0x07u8; 32];
     let new_tip = [0x42u8; 32];
 
@@ -562,7 +562,7 @@ fn golden_smt_replace_first_tx() {
 
 #[test]
 fn golden_proof_serialization_round_trip() {
-    let mut smt = SparseMerkleTree::new(256);
+    let mut smt = SparseMerkleTree::new();
     let key = [0x07u8; 32];
     let value = [0x42u8; 32];
     smt.update_leaf(&key, &value).expect("insert leaf");

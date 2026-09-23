@@ -64,7 +64,9 @@ pub struct Route {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RouteError {
     /// The committed set does not have exactly five members.
-    NotFiveMembers { members: usize },
+    NotFiveMembers {
+        members: usize,
+    },
     Shuffle(FisherYatesError),
 }
 
@@ -342,6 +344,198 @@ pub struct CellEvidence {
     pub seats: Vec<SeatEvidence>,
 }
 
+/// What Core reads at a cell once it has evaluated the route chains: the cell
+/// is open, or one value holds it with a chain that has gone as far as
+/// `state`. `value` is the value's bytes, as the leader holds them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CellReading {
+    Open,
+    Held {
+        value: Vec<u8>,
+        id: [u8; 32],
+        state: ChainState,
+    },
+}
+
+impl CellReading {
+    /// The storage fact, without the bytes.
+    pub fn fact(&self) -> CellFact {
+        match self {
+            CellReading::Open => CellFact::Open,
+            CellReading::Held { id, state, .. } => CellFact::Held {
+                id: *id,
+                state: *state,
+            },
+        }
+    }
+}
+
+/// What the evidence in hand does not yet show. Never a verdict: the
+/// acquisition layer fetches it and evaluates again, and a network that never
+/// delivers it is a network failure, not an answer (SoFi Amendment S7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Missing {
+    /// The leader has not been read. No other seat stands in (§9 finality 4).
+    LeaderUnread,
+    /// The leader holds a recognized value first, but no closed ByteCommit of
+    /// the leader's covering its arrival record is in hand yet (§9 rule 7).
+    LeaderLinkUncommitted,
+}
+
+/// The arrival record `seat` gave the `index`-th value (1-based) of `values`.
+fn record_at(
+    seat: &[u8],
+    namespace: &[u8],
+    key: &[u8; 32],
+    values: &[Vec<u8>],
+    index: usize,
+) -> Option<ArrivalRecord> {
+    let (i, running_hash) = crate::storage_cell::replay(namespace, key, &values[..index])
+        .last()
+        .copied()?;
+    Some(ArrivalRecord {
+        member_id: seat.to_vec(),
+        namespace: namespace.to_vec(),
+        key: *key,
+        index: i,
+        running_hash,
+    })
+}
+
+fn committed_by(record: &ArrivalRecord, values: &[Vec<u8>], at: &Option<CommittedAt>) -> bool {
+    at.as_ref().is_some_and(|c| {
+        crate::storage_cell::record_is_committed(record, values, &c.commit, &c.proof)
+    })
+}
+
+/// Evaluate a cell's route chains (storage spec §9). `recognize` returns the
+/// id of a value that is a recognized object naming the cell, and `None` for
+/// anything else; unrecognized bytes never count, wherever they arrived.
+///
+/// 1. The leader link is valid for the first recognized value in the
+///    leader's arrival log, stored as the cell's position-0 entry at the
+///    leader, and only once the leader's ByteCommit commits its record.
+/// 2. A later link at position `i` is valid when that seat holds the same
+///    value's position-`i` entry, whose carried chain begins with that leader
+///    link and carries no link that is not itself valid; its own record is
+///    committed by the seat's ByteCommit; and the seat's mirror of the
+///    leader's ByteCommits covers the leader link (§9 rule 4).
+/// 3. The value's state is its count of valid links (§9 finality).
+pub fn evaluate<F>(ev: &CellEvidence, recognize: F) -> Result<CellReading, Missing>
+where
+    F: Fn(&[u8]) -> Option<[u8; 32]>,
+{
+    let seat_ev = |i: usize| ev.seats.get(i);
+    let leader_ev = seat_ev(0).ok_or(Missing::LeaderUnread)?;
+    let leader_values = leader_ev.values.as_ref().ok_or(Missing::LeaderUnread)?;
+    let leader_id = ev.route.leader();
+
+    // 1. The first recognized value at the leader.
+    let mut first = None;
+    for (n, bytes) in leader_values.iter().enumerate() {
+        let Some(entry) = RouteEntry::decode(bytes) else {
+            continue;
+        };
+        if entry.namespace != ev.namespace
+            || entry.key != ev.key
+            || entry.position != 0
+            || !entry.chain.is_empty()
+            || !entry.fits(&ev.route)
+        {
+            continue;
+        }
+        if let Some(id) = recognize(&entry.value) {
+            first = Some((n + 1, entry, id));
+            break;
+        }
+    }
+    let Some((leader_index, leader_entry, id)) = first else {
+        return Ok(CellReading::Open);
+    };
+    let leader_record = record_at(
+        leader_id,
+        &ev.namespace,
+        &ev.key,
+        leader_values,
+        leader_index,
+    )
+    .ok_or(Missing::LeaderLinkUncommitted)?;
+    if !committed_by(&leader_record, leader_values, &leader_ev.committed) {
+        return Err(Missing::LeaderLinkUncommitted);
+    }
+
+    // 2. Later links, in route order; `valid[j]` is the record of the valid
+    // link at position j, if any.
+    let mut valid: Vec<Option<ArrivalRecord>> = vec![None; ev.route.seats().len()];
+    valid[0] = Some(leader_record.clone());
+    for i in 1..ev.route.seats().len() {
+        let (Some(seat), Some(seat_id)) = (seat_ev(i), ev.route.seat(i)) else {
+            continue;
+        };
+        let Some(values) = seat.values.as_ref() else {
+            continue;
+        };
+        // Rule 4: this seat's own mirror of the leader's ByteCommits covers
+        // the leader link.
+        let leader_seen = seat.leader_seen.as_ref().is_some_and(|c| {
+            c.commit.member_id.as_slice() == leader_id
+                && crate::storage_cell::record_is_committed(
+                    &leader_record,
+                    leader_values,
+                    &c.commit,
+                    &c.proof,
+                )
+        });
+        if !leader_seen {
+            continue;
+        }
+        for (n, bytes) in values.iter().enumerate() {
+            let Some(entry) = RouteEntry::decode(bytes) else {
+                continue;
+            };
+            if entry.namespace != ev.namespace
+                || entry.key != ev.key
+                || entry.position != i
+                || entry.value != leader_entry.value
+                || entry.chain.len() != i
+                || !entry.fits(&ev.route)
+                || entry.chain[0] != ChainSlot::Link(leader_record.clone())
+            {
+                continue;
+            }
+            // Every link the entry carries must itself be a valid link.
+            let carried_ok = entry
+                .chain
+                .iter()
+                .enumerate()
+                .skip(1)
+                .all(|(j, slot)| match slot {
+                    ChainSlot::Link(r) => valid[j].as_ref() == Some(r),
+                    ChainSlot::Taken(_) | ChainSlot::NoResponse => true,
+                });
+            if !carried_ok {
+                continue;
+            }
+            let Some(record) = record_at(seat_id, &ev.namespace, &ev.key, values, n + 1) else {
+                continue;
+            };
+            if committed_by(&record, values, &seat.committed) {
+                valid[i] = Some(record);
+                break;
+            }
+        }
+    }
+
+    // 3. The state is the count of valid links.
+    let links = valid.iter().filter(|r| r.is_some()).count();
+    let state = ChainState::of_links(links).ok_or(Missing::LeaderLinkUncommitted)?;
+    Ok(CellReading::Held {
+        value: leader_entry.value,
+        id,
+        state,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -353,7 +547,13 @@ mod tests {
     }
 
     fn five() -> StorageSetMembers {
-        set(&["dsm-node-1", "dsm-node-2", "dsm-node-3", "dsm-node-4", "dsm-node-5"])
+        set(&[
+            "dsm-node-1",
+            "dsm-node-2",
+            "dsm-node-3",
+            "dsm-node-4",
+            "dsm-node-5",
+        ])
     }
 
     fn record(member: &[u8], ns: &[u8], key: [u8; 32], index: u64) -> ArrivalRecord {
@@ -370,10 +570,21 @@ mod tests {
     fn a_route_is_the_fisher_yates_permutation_of_the_committed_set() {
         let seed = [3u8; 32];
         let route = Route::of(&seed, &five()).expect("route");
-        let ids: Vec<Vec<u8>> = five().entries().iter().map(|e| e.member_id().to_vec()).collect();
-        assert_eq!(route.seats(), permute(&seed, &ids).expect("permute").as_slice());
+        let ids: Vec<Vec<u8>> = five()
+            .entries()
+            .iter()
+            .map(|e| e.member_id().to_vec())
+            .collect();
+        assert_eq!(
+            route.seats(),
+            permute(&seed, &ids).expect("permute").as_slice()
+        );
         assert_eq!(route.leader(), route.seats()[0].as_slice());
-        assert_ne!(Route::of(&[4u8; 32], &five()).expect("route"), route, "the seed decides");
+        assert_ne!(
+            Route::of(&[4u8; 32], &five()).expect("route"),
+            route,
+            "the seed decides"
+        );
     }
 
     #[test]
@@ -405,7 +616,10 @@ mod tests {
             last = last.next(ChainSlot::NoResponse, &route).expect("next");
         }
         assert_eq!(last.position, ROUTE_LEN - 1);
-        assert!(last.next(ChainSlot::NoResponse, &route).is_none(), "no position past the route");
+        assert!(
+            last.next(ChainSlot::NoResponse, &route).is_none(),
+            "no position past the route"
+        );
     }
 
     #[test]
@@ -419,21 +633,37 @@ mod tests {
 
         let mut p = good.to_proto();
         p.chain.clear();
-        assert_eq!(RouteEntry::decode(&prost::Message::encode_to_vec(&p)), None, "a slot missing");
+        assert_eq!(
+            RouteEntry::decode(&prost::Message::encode_to_vec(&p)),
+            None,
+            "a slot missing"
+        );
 
         let mut p = good.to_proto();
         p.position = ROUTE_LEN as u32;
-        assert_eq!(RouteEntry::decode(&prost::Message::encode_to_vec(&p)), None, "off the route");
+        assert_eq!(
+            RouteEntry::decode(&prost::Message::encode_to_vec(&p)),
+            None,
+            "off the route"
+        );
 
         let mut other = record(route.leader(), &ns, key, 1);
         other.key = [2u8; 32];
         let mut p = good.to_proto();
         p.chain = vec![ChainSlot::Link(other).to_proto()];
-        assert_eq!(RouteEntry::decode(&prost::Message::encode_to_vec(&p)), None, "another cell's record");
+        assert_eq!(
+            RouteEntry::decode(&prost::Message::encode_to_vec(&p)),
+            None,
+            "another cell's record"
+        );
 
         let mut p = good.to_proto();
         p.chain = vec![proto::ChainSlotV1 { kind: None }];
-        assert_eq!(RouteEntry::decode(&prost::Message::encode_to_vec(&p)), None, "an empty slot");
+        assert_eq!(
+            RouteEntry::decode(&prost::Message::encode_to_vec(&p)),
+            None,
+            "an empty slot"
+        );
 
         // The same entry under another byte string: a field repeated at the
         // end (protobuf keeps the last scalar) decodes to an equal message,
@@ -443,7 +673,11 @@ mod tests {
             position: 1,
             ..Default::default()
         }));
-        assert_eq!(RouteEntry::decode(&noncanonical), None, "a non-canonical encoding");
+        assert_eq!(
+            RouteEntry::decode(&noncanonical),
+            None,
+            "a non-canonical encoding"
+        );
     }
 
     #[test]

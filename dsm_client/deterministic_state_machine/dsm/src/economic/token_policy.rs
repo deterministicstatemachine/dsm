@@ -138,7 +138,10 @@ impl<'a> Reader<'a> {
     }
     fn bytes(&mut self, n: usize) -> Result<&'a [u8], String> {
         let end = self.off.checked_add(n).ok_or("policy blob is truncated")?;
-        let s = self.b.get(self.off..end).ok_or("policy blob is truncated")?;
+        let s = self
+            .b
+            .get(self.off..end)
+            .ok_or("policy blob is truncated")?;
         self.off = end;
         Ok(s)
     }
@@ -170,7 +173,9 @@ pub fn parse_token_policy_blob(blob: &[u8]) -> Result<TokenPolicy, String> {
 
     let version = r.u8()?;
     if version != TOKEN_POLICY_VERSION {
-        return Err(format!("policy blob version {version} is not {TOKEN_POLICY_VERSION}"));
+        return Err(format!(
+            "policy blob version {version} is not {TOKEN_POLICY_VERSION}"
+        ));
     }
     if r.u8()? != TOKEN_KIND_FUNGIBLE {
         return Err("policy blob is not FUNGIBLE".into());
@@ -178,9 +183,11 @@ pub fn parse_token_policy_blob(blob: &[u8]) -> Result<TokenPolicy, String> {
     match r.u8()? {
         SUPPLY_CLASS_NATIVE => {}
         SUPPLY_CLASS_EXTERNALLY_BACKED => {
-            return Err("policy blob is externally backed; its backing rule has no specified \
+            return Err(
+                "policy blob is externally backed; its backing rule has no specified \
                         encoding yet, so it is refused rather than read without one"
-                .into())
+                    .into(),
+            )
         }
         other => return Err(format!("policy blob supply class {other} is unknown")),
     }
@@ -231,7 +238,9 @@ pub fn parse_token_policy_blob(blob: &[u8]) -> Result<TokenPolicy, String> {
     }
     let decimals = r.u8()? as u32;
     if decimals > MAX_DECIMALS {
-        return Err(format!("policy blob decimals {decimals} exceed {MAX_DECIMALS}"));
+        return Err(format!(
+            "policy blob decimals {decimals} exceed {MAX_DECIMALS}"
+        ));
     }
 
     // Neither class is unlimited, and a zero supply is not a token (§50).
@@ -344,7 +353,10 @@ mod tests {
         let cases: Vec<(&str, Box<dyn Fn(&mut Vec<u8>)>)> = vec![
             ("version", Box::new(|b| b[0] = 2)),
             ("kind", Box::new(|b| b[1] = 1)),
-            ("externally backed", Box::new(|b| b[2] = SUPPLY_CLASS_EXTERNALLY_BACKED)),
+            (
+                "externally backed",
+                Box::new(|b| b[2] = SUPPLY_CLASS_EXTERNALLY_BACKED),
+            ),
             ("unknown class", Box::new(|b| b[2] = 7)),
             ("meaningless flag", Box::new(|b| b[3] |= 0x08)),
             ("unknown release rule", Box::new(|b| b[4] = 9)),
@@ -352,15 +364,24 @@ mod tests {
             ("threshold above n", Box::new(|b| b[5] = 2)),
             ("zero signers", Box::new(|b| b[6] = 0)),
             ("trailing byte", Box::new(|b| b.push(0))),
-            ("truncated", Box::new(|b| {
-                b.pop();
-            })),
-            ("allowlist flag without payload", Box::new(|b| b[3] |= POLICY_FLAG_ALLOWLIST)),
+            (
+                "truncated",
+                Box::new(|b| {
+                    b.pop();
+                }),
+            ),
+            (
+                "allowlist flag without payload",
+                Box::new(|b| b[3] |= POLICY_FLAG_ALLOWLIST),
+            ),
         ];
         for (why, edit) in cases {
             let mut b = blob();
             edit(&mut b);
-            assert!(parse_token_policy_blob(&b).is_err(), "{why} must be refused");
+            assert!(
+                parse_token_policy_blob(&b).is_err(),
+                "{why} must be refused"
+            );
         }
     }
 

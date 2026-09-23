@@ -32,7 +32,7 @@ impl SpentProofSmt {
     pub fn new() -> Self {
         Self {
             spent: HashMap::new(),
-            tree: SparseMerkleTree::new(usize::MAX),
+            tree: SparseMerkleTree::new(),
         }
     }
 

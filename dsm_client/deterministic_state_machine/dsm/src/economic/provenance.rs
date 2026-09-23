@@ -444,10 +444,15 @@ pub trait ProvenanceResolver {
 /// Why a credit is not funded.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProvenanceError {
-    /// A `0x0023` authorized-issuance credit failed one of the conjuncts:
-    /// the policy bytes, the signed body, the V1 support matrix, or the
-    /// k-of-N threshold over the exact issuance.
+    /// A `0x005F` genesis-release credit failed one of its conjuncts: it
+    /// rides no `CreateToken`, the token's committed policy does not parse,
+    /// its release rule is not all-at-creation, or its genesis supply is not
+    /// a balance.
     GenesisReleaseInvalid(String),
+    /// The token's committed policy could not be established for a
+    /// genesis release: not fetched, or the bytes did not re-hash to the
+    /// commit. The taxonomy survives, so an outage is retried.
+    GenesisReleasePolicy(PeerLineageFailure),
     /// A DLV successor's leg fails the applicable token policy — the SoFi
     /// Def 4.1 / Req 4.4 / Req 4.6 conjunct on every market movement and
     /// every release. The anchored bytes did not re-hash to the committed
@@ -539,6 +544,9 @@ impl core::fmt::Display for ProvenanceError {
         match self {
             Self::GenesisReleaseInvalid(m) => {
                 write!(f, "genesis-release credit is invalid: {m}")
+            }
+            Self::GenesisReleasePolicy(e) => {
+                write!(f, "genesis-release token policy: {e}")
             }
             Self::MarketLegPolicy(m) => {
                 write!(f, "market leg token policy: {m}")
@@ -680,13 +688,73 @@ pub fn genesis_release_source_id(
     creator_economic_position: u64,
     policy_commit: &[u8; 32],
 ) -> [u8; 32] {
-    let mut h =
-        dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_ECON_SOURCE_GENESIS_RELEASE);
+    let mut h = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_ECON_SOURCE_GENESIS_RELEASE);
     h.update(creator_genesis);
     h.update(creator_devid);
     h.update(&creator_economic_position.to_be_bytes());
     h.update(policy_commit);
     *h.finalize().as_bytes()
+}
+
+/// Establish what a genesis release (`0x005F`, SoFi §51) funds.
+///
+/// The asset is the accepted `CreateToken`'s own `policy_commit`, and the
+/// amount is the genesis supply the policy under that commit states — so the
+/// generic asset/amount equality in [`verify_credit_source`] forces the credit
+/// to be exactly the whole supply of exactly the new token. The credit lands
+/// in the witness of the identity under validation, which is the creator.
+fn verify_genesis_release(
+    resolver: &dyn ProvenanceResolver,
+    ctx: &ProvenanceContext<'_>,
+) -> Result<FundedCredit, ProvenanceError> {
+    // The operation is the verified substrate's, never the descriptor's: the
+    // descriptor carries no asset and no amount to disagree with it.
+    let policy_commit = match ctx.verified_operation {
+        Some(crate::types::operations::Operation::CreateToken { policy_commit, .. }) => {
+            *policy_commit
+        }
+        _ => {
+            return Err(ProvenanceError::GenesisReleaseInvalid(
+                "a genesis release rides only the CreateToken that creates its token".into(),
+            ))
+        }
+    };
+    let bytes = resolver
+        .anchored_policy_bytes(&policy_commit)
+        .map_err(ProvenanceError::GenesisReleasePolicy)?;
+    // Bytes that do not re-hash to the commit are not the policy; they supply
+    // nothing and prove nothing about the token.
+    if crate::crypto::blake3::domain_hash_bytes(crate::common::domain_tags::TAG_DSM_POLICY, &bytes)
+        != policy_commit
+    {
+        return Err(ProvenanceError::GenesisReleasePolicy(
+            PeerLineageFailure::Incomplete(
+                "policy bytes do not re-hash to the token's policy commit".into(),
+            ),
+        ));
+    }
+    let policy = crate::economic::token_policy::parse_token_policy(&bytes)
+        .map_err(|e| ProvenanceError::GenesisReleaseInvalid(format!("policy: {e}")))?;
+    if policy.release_rule != crate::economic::token_policy::ReleaseRule::AllAtCreation {
+        return Err(ProvenanceError::GenesisReleaseInvalid(
+            "the token's release rule does not release its supply at creation".into(),
+        ));
+    }
+    let amount = u64::try_from(policy.genesis_supply).map_err(|_| {
+        ProvenanceError::GenesisReleaseInvalid(
+            "the genesis supply exceeds what one balance can hold".into(),
+        )
+    })?;
+    Ok(FundedCredit {
+        source_id: genesis_release_source_id(
+            ctx.genesis,
+            ctx.device_id,
+            ctx.economic_position,
+            &policy_commit,
+        ),
+        policy_commit,
+        amount,
+    })
 }
 
 /// `SourceId` for a peer's validated debit.
@@ -884,9 +952,7 @@ pub fn verify_credit_source(
         // credit goes to the creating device, its asset is the new token, its
         // amount is exactly the policy's genesis supply, and the policy's
         // release rule is `AllAtCreation`. No signer authorizes it.
-        CreditSource::GenesisRelease(_) => {
-            verify_genesis_release(ctx, resolver, credit_index, credit)?
-        }
+        CreditSource::GenesisRelease(_) => verify_genesis_release(resolver, ctx)?,
 
         CreditSource::ValidatedPeerDebit(p) => {
             // The resolver returns a VALIDATED transition or nothing. It

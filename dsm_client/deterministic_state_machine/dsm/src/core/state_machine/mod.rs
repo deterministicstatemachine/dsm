@@ -346,7 +346,7 @@ mod state_machine_tests {
         // canonical head rather than an override — but how the head came to hold
         // a balance is not incidental: a restored, invented balance would make
         // this test pass against a head no device could ever have.
-        let head = crate::types::device_state::DeviceState::new(devid, devid, vec![0xAAu8; 32], 64)
+        let head = crate::types::device_state::DeviceState::new(devid, devid, vec![0xAAu8; 32])
             .admitted_faucet_claim(0)
             .expect("faucet claim")
             .admitted_faucet_claim(1)
@@ -541,7 +541,6 @@ mod state_machine_tests {
             genesis_state.hash,
             device_id,
             genesis_state.device_info.public_key.clone(),
-            1024,
         ));
         state_machine.set_state(genesis_state);
 
@@ -569,7 +568,6 @@ mod state_machine_tests {
             initial_state.hash,
             dev_id,
             initial_state.device_info.public_key.clone(),
-            1024,
         ));
         machine.set_state(initial_state);
 

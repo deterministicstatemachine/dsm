@@ -18,7 +18,7 @@
 //! is not validation: whether the route it carries realizes is the ladder's
 //! question (rebuild step R12), answered from the same bytes.
 
-use super::arith::{CellResolution, ObjectResolution};
+use crate::route_chain::{CellFact, CellReading, Missing};
 use super::derive;
 use super::publication::{
     recognize_policy_fulfillment, recognize_precommit, recognize_fulfillment, Signed,
@@ -121,30 +121,34 @@ pub fn exercise_names_key(
 }
 
 /// `SuccessorResolution(K)` (Section 23.1) as the ladder reads it: the cell's
-/// resolution over the recognized view, carrying the `E` of the exercise
-/// that won — `Final(E)`, `LeaderHeld(E)`, or `Unresolved` — and the
-/// exercise itself when there is one. A cell whose leader holds no exercise
-/// naming the key is open; an unread leader establishes nothing; both are
-/// `Unresolved`, and no key is ever dead.
+/// storage fact from its route chains, identified by the `E` of the exercise
+/// that holds it, and the exercise itself when there is one. A cell whose
+/// leader holds no exercise naming the key is `Open`; evidence that does not
+/// yet decide the cell is `Missing`, a network status and never an answer.
+/// No key is ever dead.
 pub fn attempt_resolution(
-    objects: &ObjectResolution,
+    reading: &Result<CellReading, Missing>,
     vault_id: &D32,
     parent_root: &D32,
     attempt: u64,
-) -> (CellResolution, Option<RecognizedExercise>) {
-    let recognized = |bytes: &Vec<u8>| exercise_names_key(bytes, vault_id, parent_root, attempt);
-    match objects {
-        ObjectResolution::Final(bytes) => match recognized(bytes) {
-            Some(x) => (CellResolution::Final(x.external_commitment), Some(x)),
-            None => (CellResolution::Unresolved, None),
-        },
-        ObjectResolution::LeaderHeld(bytes) => match recognized(bytes) {
-            Some(x) => (CellResolution::LeaderHeld(x.external_commitment), Some(x)),
-            None => (CellResolution::Unresolved, None),
-        },
-        ObjectResolution::Open | ObjectResolution::Unavailable => {
-            (CellResolution::Unresolved, None)
+) -> (Result<CellFact, Missing>, Option<RecognizedExercise>) {
+    match reading {
+        Ok(CellReading::Held { value, state, .. }) => {
+            match exercise_names_key(value, vault_id, parent_root, attempt) {
+                Some(x) => (
+                    Ok(CellFact::Held {
+                        id: x.external_commitment,
+                        state: *state,
+                    }),
+                    Some(x),
+                ),
+                // The reading was evaluated with this recognizer; bytes that
+                // somehow fail it establish nothing.
+                None => (Err(Missing::LeaderLinkUncommitted), None),
+            }
         }
+        Ok(CellReading::Open) => (Ok(CellFact::Open), None),
+        Err(m) => (Err(*m), None),
     }
 }
 

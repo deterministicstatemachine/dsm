@@ -373,7 +373,7 @@ pub(crate) mod tests {
             compute_smt_key, initial_chain_tip_from_device_ids,
         };
         let me = [0x21u8; 32];
-        let head = dsm::types::device_state::DeviceState::new(me, me, vec![0xAB; 64], 64);
+        let head = dsm::types::device_state::DeviceState::new(me, me, vec![0xAB; 64]);
         head.advance(
             compute_smt_key(&me, &me),
             me,

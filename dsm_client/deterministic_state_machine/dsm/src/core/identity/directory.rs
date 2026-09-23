@@ -112,7 +112,10 @@ impl std::error::Error for DirectoryError {}
 
 impl DirectoryEntry {
     /// Sign `body` with the device's AK secret key.
-    pub fn sign(body: DirectoryEntryBody, ak_secret_key: &[u8]) -> Result<Self, crate::types::error::DsmError> {
+    pub fn sign(
+        body: DirectoryEntryBody,
+        ak_secret_key: &[u8],
+    ) -> Result<Self, crate::types::error::DsmError> {
         let signature = sphincs::sphincs_sign(ak_secret_key, &body.signing_digest())?;
         Ok(Self { body, signature })
     }
@@ -128,7 +131,8 @@ impl DirectoryEntry {
 
     /// Decode cell bytes: only the one canonical encoding of an entry.
     pub fn decode(bytes: &[u8]) -> Result<Self, DirectoryError> {
-        let p = proto::DeviceDirectoryEntryV1::decode(bytes).map_err(|_| DirectoryError::Malformed)?;
+        let p =
+            proto::DeviceDirectoryEntryV1::decode(bytes).map_err(|_| DirectoryError::Malformed)?;
         if p.encode_to_vec() != bytes {
             return Err(DirectoryError::Malformed);
         }
@@ -206,9 +210,10 @@ mod tests {
     use super::*;
 
     fn device(seed: u8) -> (Vec<u8>, Vec<u8>, [u8; 32], [u8; 32]) {
-        let (pk, sk) = sphincs::generate_keypair_from_seed(sphincs::SphincsVariant::SPX256f, &[seed; 32])
-            .map(|kp| (kp.public_key.clone(), kp.secret_key.clone()))
-            .expect("keypair");
+        let (pk, sk) =
+            sphincs::generate_keypair_from_seed(sphincs::SphincsVariant::SPX256f, &[seed; 32])
+                .map(|kp| (kp.public_key.clone(), kp.secret_key.clone()))
+                .expect("keypair");
         let att_a = [seed.wrapping_add(1); 32];
         let device_id = derive_devid(&pk, &att_a);
         (pk, sk, att_a, device_id)
@@ -242,7 +247,12 @@ mod tests {
         let foreign = DirectoryEntry::sign(body(&spk, satt, id, 99), &ssk).unwrap();
         assert_eq!(foreign.verify(), Err(DirectoryError::NotThisDevicesKey));
 
-        let values = [squat.encode(), foreign.encode(), b"junk".to_vec(), own.encode()];
+        let values = [
+            squat.encode(),
+            foreign.encode(),
+            b"junk".to_vec(),
+            own.encode(),
+        ];
         let chosen = select_entry(&[9u8; 32], &id, values.iter().map(Vec::as_slice));
         assert_eq!(chosen, Some(own));
     }
@@ -269,8 +279,13 @@ mod tests {
     #[test]
     fn only_the_canonical_encoding_decodes() {
         let (pk, sk, att_a, id) = device(6);
-        let mut bytes = DirectoryEntry::sign(body(&pk, att_a, id, 1), &sk).unwrap().encode();
+        let mut bytes = DirectoryEntry::sign(body(&pk, att_a, id, 1), &sk)
+            .unwrap()
+            .encode();
         bytes.extend_from_slice(&[0x10, 0x01]); // a repeated field appended
-        assert_eq!(DirectoryEntry::decode(&bytes), Err(DirectoryError::Malformed));
+        assert_eq!(
+            DirectoryEntry::decode(&bytes),
+            Err(DirectoryError::Malformed)
+        );
     }
 }

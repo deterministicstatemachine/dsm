@@ -192,8 +192,8 @@ mod tests {
             .collect();
 
         // pd_smt: rel_key -> current_tip; leaf_index: rel_key -> committed_digest.
-        let mut pd = SparseMerkleTree::new(256);
-        let mut idx = SparseMerkleTree::new(256);
+        let mut pd = SparseMerkleTree::new();
+        let mut idx = SparseMerkleTree::new();
         for l in &leaves {
             pd.update_leaf(&l.rel_key, &l.current_tip).unwrap();
             idx.update_leaf(&l.rel_key, &l.committed_digest()).unwrap();

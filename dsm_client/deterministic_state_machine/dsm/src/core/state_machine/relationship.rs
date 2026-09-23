@@ -264,7 +264,6 @@ impl RelationshipStatePair {
                         Operation::FaucetClaim { .. } => b"faucetcl",
                         Operation::Generic { .. } => b"generic_",
                         Operation::Transfer { .. } => b"transfer",
-                        Operation::Mint { .. } => b"mint____",
                         Operation::Burn { .. } => b"burn____",
                         Operation::Create { .. } => b"create__",
                         Operation::Update { .. } => b"update__",

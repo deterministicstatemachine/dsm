@@ -123,7 +123,7 @@ pub(crate) fn setup(seed: u8) -> (CoreSDK, FleetGuard) {
     let (public_key, devid, genesis) = install_testnet_identity(seed);
     let core =
         CoreSDK::new_with_device(DeviceInfo::new(devid, public_key.clone())).expect("core sdk");
-    core.set_device_head_for_testing(DeviceState::new(genesis, devid, public_key, 1024));
+    core.set_device_head_for_testing(DeviceState::new(genesis, devid, public_key));
     (core, guard)
 }
 

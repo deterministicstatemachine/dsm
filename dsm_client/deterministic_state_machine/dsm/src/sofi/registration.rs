@@ -22,7 +22,7 @@
 
 use std::collections::BTreeMap;
 
-use super::arith::ObjectResolution;
+use crate::route_chain::{CellReading, ChainState, Missing};
 use super::derive;
 use super::publication::{recognize_fulfillment, Signed};
 use super::wire::{TraderFulfillmentBody, TraderPrecommitBody};
@@ -97,16 +97,22 @@ pub enum Registration {
 /// [`names_fulfillment_key`], `root` with the register reader's rule (any
 /// registered claim whose coordinates derive `K_root(q)`; `C_q` is one).
 pub fn fulfillment_registered(
-    fulfillment: &ObjectResolution,
-    root: &ObjectResolution,
+    fulfillment: &Result<CellReading, Missing>,
+    root: &Result<CellReading, Missing>,
     genesis: &D32,
     device_id: &D32,
     position: u64,
     precommits: &impl PrecommitLookup,
 ) -> Registration {
-    let ObjectResolution::Final(bytes) = fulfillment else {
-        // Open, held at the leader without two copies, or unread: nothing
-        // is registered yet, and nothing is settled against this position.
+    let Ok(CellReading::Held {
+        value: bytes,
+        state: ChainState::Final,
+        ..
+    }) = fulfillment
+    else {
+        // Open, held without two further links, or undecided on the evidence
+        // in hand: nothing is registered yet, and nothing is settled against
+        // this position.
         return Registration::Unresolved;
     };
     let Some(signed) = names_fulfillment_key(bytes, genesis, device_id, position, precommits)
@@ -120,20 +126,20 @@ pub fn fulfillment_registered(
     };
     let claim = derive::resolution_claim(precommit, &signed.body).encode();
     match root {
-        ObjectResolution::Final(held) if *held == claim => Registration::Registered(signed),
-        // Another claim is the leader's first object at K_root(q): final or
-        // not yet, no other value will ever be final there (Part II §8).
-        ObjectResolution::Final(_) => Registration::NeverRegistered {
-            fulfillment: signed,
-            settled_at: PositionCell::Root,
-        },
-        ObjectResolution::LeaderHeld(held) if *held != claim => Registration::NeverRegistered {
-            fulfillment: signed,
-            settled_at: PositionCell::Root,
-        },
-        ObjectResolution::LeaderHeld(_)
-        | ObjectResolution::Open
-        | ObjectResolution::Unavailable => Registration::Unresolved,
+        Ok(CellReading::Held {
+            value: held,
+            state: ChainState::Final,
+            ..
+        }) if *held == claim => Registration::Registered(signed),
+        // Another claim holds the leader link at K_root(q): final or not yet,
+        // no other value will ever be final there (§9 finality 2).
+        Ok(CellReading::Held { value: held, .. }) if *held != claim => {
+            Registration::NeverRegistered {
+                fulfillment: signed,
+                settled_at: PositionCell::Root,
+            }
+        }
+        Ok(CellReading::Held { .. }) | Ok(CellReading::Open) | Err(_) => Registration::Unresolved,
     }
 }
 

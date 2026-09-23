@@ -399,7 +399,6 @@ pub struct OfflineSpend {
 ///   touched) and the allocation debit must equal `op.amount`. The operation must be a bearer
 ///   transfer (`OfflineBearerRequired`). This keeps ONE conservation chokepoint across both
 ///   value regimes — the allocation debit is the conserved source, exactly as an online `Debit` is.
-/// - `Mint`: exactly one `Credit` delta of `amount`.
 /// - `Burn`: exactly one `Debit` delta of `amount`.
 /// - Every other operation: no balance deltas, and no `offline_spend`.
 fn validate_conservation(
@@ -482,30 +481,6 @@ fn validate_conservation(
             if &d.policy_commit != policy_commit {
                 return Err(DsmError::invalid_operation(
                     "conservation: transfer delta policy_commit != operation policy_commit",
-                ));
-            }
-            Ok(())
-        }
-        Operation::Mint {
-            amount,
-            policy_commit,
-            ..
-        } => {
-            if deltas.len() != 1
-                || deltas[0].direction != BalanceDirection::Credit
-                || deltas[0].amount != amount.value()
-            {
-                return Err(DsmError::invalid_operation(
-                    "conservation: mint must apply exactly one credit delta of the mint amount",
-                ));
-            }
-            // Bind the credited ASSET to the one the signed operation names.
-            // Without this the guard checks only count/direction/amount, so a
-            // mint for token X could credit a different asset entirely (e.g.
-            // ERA) — the delta's policy_commit was unconstrained.
-            if &deltas[0].policy_commit != policy_commit {
-                return Err(DsmError::invalid_operation(
-                    "conservation: mint delta policy_commit != operation policy_commit",
                 ));
             }
             Ok(())
@@ -700,19 +675,13 @@ impl DeviceState {
     /// Construct a fresh, empty device state at genesis.
     ///
     /// The SMT starts empty (root = empty-leaf default), balances are
-    /// zero, and no relationship tips exist. `max_relationships` bounds
-    /// the SMT's leaf cache (FIFO eviction).
-    pub fn new(
-        genesis: [u8; 32],
-        devid: [u8; 32],
-        public_key: Vec<u8>,
-        max_relationships: usize,
-    ) -> Self {
+    /// zero, and no relationship tips exist.
+    pub fn new(genesis: [u8; 32], devid: [u8; 32], public_key: Vec<u8>) -> Self {
         Self {
             genesis,
             devid,
             public_key,
-            smt: SparseMerkleTree::new(max_relationships),
+            smt: SparseMerkleTree::new(),
             balances: BTreeMap::new(),
             tips: BTreeMap::new(),
             legacy_anchor: None,
@@ -776,9 +745,8 @@ impl DeviceState {
         // defaulted `None` here would be a silent fence-open on any path that
         // forgot — a gate precondition with no mandatory producer.
         pending_economic_admission: Option<crate::economic::admission::PendingEconomicAdmission>,
-        max_relationships: usize,
     ) -> Result<Self, DsmError> {
-        let mut state = Self::new(genesis, devid, public_key, max_relationships);
+        let mut state = Self::new(genesis, devid, public_key);
         state.legacy_anchor = legacy_anchor;
         state.balances = balances;
         state.offline_allocations = offline_allocations;
@@ -1028,10 +996,6 @@ impl DeviceState {
         .map(|o| o.new_device_state)
     }
 
-    /// TEST-ONLY. A user asset through authorized issuance, at the core
-    /// layer: one admitted `Mint` of `amount` units of `policy_commit` on the
-    /// self-loop. A builtin commit is refused exactly as in production — ERA
-    /// comes only from [`Self::admitted_faucet_claim`].
     /// TEST-ONLY. Adopt `policy_commit` on this device: the authenticated
     /// transition behind ADD TOKEN, as a no-delta self-loop advance. Idempotent.
     #[cfg(any(test, feature = "testing"))]
@@ -1051,39 +1015,6 @@ impl DeviceState {
                 None,
             )
             .map(|o| o.new_device_state)
-    }
-
-    #[cfg(any(test, feature = "testing"))]
-    pub fn admitted_mint(&self, policy_commit: [u8; 32], amount: u64) -> Result<Self, DsmError> {
-        // A minter is the token's issuer, and production issuers adopt in the
-        // creation advance (`CreateToken` writes the leaf). The fixture has no
-        // creation step, so adopt here: an un-adopted device cannot be
-        // credited, by design, and a fixture must not bypass that.
-        let head = if self.has_adopted(&policy_commit) {
-            self.clone()
-        } else {
-            self.adopt_token(policy_commit)?
-        };
-        let (rel_key, initial_tip) = head.self_loop_coordinates();
-        head.advance(
-            rel_key,
-            self.devid,
-            Operation::Mint {
-                amount: crate::types::token_types::Balance::from_state(amount, [0u8; 32]),
-                token_id: b"TEST".to_vec(),
-                policy_commit,
-                message: String::new(),
-            },
-            &[BalanceDelta {
-                policy_commit,
-                direction: BalanceDirection::Credit,
-                amount,
-            }],
-            Some(initial_tip),
-            None,
-            None,
-        )
-        .map(|o| o.new_device_state)
     }
 
     /// The device's self-loop relationship key and its spec-canonical initial
@@ -1204,38 +1135,6 @@ impl DeviceState {
             crate::sofi::signature::verify_operation(&operation, &self.public_key)?;
         }
 
-        // BUILTIN ISSUANCE IS NOT SELF-AUTHORIZABLE.
-        //
-        // A `Mint` naming a builtin policy commit (ERA, dBTC) creates units of a
-        // supply nobody may unilaterally expand. Every check that used to stand
-        // between a caller and that credit was satisfiable by the caller alone:
-        // the route builds its own authorization and stamps `authorized_by` with
-        // the caller's own device id; ERA's preloaded policy carries zero
-        // conditions and zero roles, so the enforcer iterates nothing and
-        // returns "allowed"; dBTC has no registered policy at all and takes the
-        // builtin escape hatch; and `validate_conservation` only checks that the
-        // single credit delta matches the amount and asset the same caller
-        // signed. Nothing anywhere established a right to issue.
-        //
-        // The gate lives HERE, at the accepting transition, and not on the route,
-        // because a route guard binds only the callers that go through it: any
-        // future route, or any direct `advance` caller, would silently reopen the
-        // hole. This is the chokepoint every mint must cross.
-        //
-        // Fail-closed with no exemption for BUILTINS: class 0x0029 exists and
-        // authorizes user-token issuance, but a builtin's issuance is not
-        // self-authorizable under any policy signature — ERA enters through
-        // the faucet's bootstrap tickets, dBTC through the Bitcoin tap. A
-        // `SupplyCap` condition would NOT be an issuance predicate either: it
-        // reads `circulating_le` from caller-supplied enforcement context, and
-        // no canonical producer authenticates that number.
-        // Keyed on `policy_commit`, which is the identity that actually moves
-        // value: `validate_conservation` binds the credit delta to it, `balances`
-        // is keyed by it, and the compat projection resolves a ticker FROM it.
-        // The `token_id` string is metadata — a mint carrying the ticker "ERA"
-        // with a non-builtin commit credits that non-builtin asset and can never
-        // project as ERA, so rejecting on the string would refuse honest mints
-        // without closing anything.
         // THE PENDING-ADMISSION FENCE.
         //
         // Reads `self`, not an argument. A caller-supplied `pending: bool`
@@ -1299,40 +1198,6 @@ impl DeviceState {
         } = &operation
         {
             if to_device_id.len() == 32 && to_device_id.as_slice() == self.devid.as_slice() {}
-        }
-
-        // THE MINT GATE. A positive mint CREATES units — the one operation
-        // whose whole effect is a credit with no prior holder — so it may
-        // enter canonical device state only through the economic-admission
-        // fence, exactly like a faucet claim or an online credit-direction
-        // transfer. This layer does NOT parse the 0x0029 evidence; its job is
-        // narrower and load-bearing: no raw local positive credit without an
-        // attached admission. The economic verifier proves the admission's
-        // 0x0023 AuthorizedIssuance source during validation.
-        //
-        // The builtin arm stays UNCONDITIONAL and is keyed on the COMMIT, not
-        // the ticker: builtin issuance is not self-authorizable under any
-        // admission — ERA leaves the network's native reserve by release
-        // (the beta faucet), and dBTC arrives with the Bitcoin tap
-        // integration.
-        if let Operation::Mint {
-            policy_commit,
-            amount,
-            ..
-        } = &operation
-        {
-            if let Some(name) =
-                crate::core::token::token_state_manager::builtin_token_id_for_policy_commit(
-                    policy_commit,
-                )
-            {
-                return Err(DsmError::invalid_operation(format!(
-                    "advance: refusing to mint the builtin token {name} — builtin issuance is not \
-                     self-authorizable; ERA is released from the network's native reserve and \
-                     dBTC issuance arrives with the Bitcoin tap integration"
-                )));
-            }
-            if amount.value() > 0 {}
         }
 
         // Offline-bearer spend: draw the value from the device-bound offline-cash allocation instead of
@@ -1936,7 +1801,7 @@ mod tests {
         for ticker in ["ERA", "dBTC"] {
             let pc = crate::core::token::builtin_policy_commit_for_token(ticker)
                 .expect("builtin commit");
-            let dev = DeviceState::new(devid(0xA1), devid(0xA1), vec![0x01; 32], 64);
+            let dev = DeviceState::new(devid(0xA1), devid(0xA1), vec![0x01; 32]);
             let rk =
                 crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &dev.devid);
             let tip = crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
@@ -1990,7 +1855,7 @@ mod tests {
         let era = crate::core::token::token_state_manager::era_policy_commit();
         // ERA from the faucet: one admitted claim, the protocol payout — enough
         // for the creation fee, which is all this refusal needs to get past.
-        let dev = DeviceState::new(devid(0xA4), devid(0xA4), vec![0x04; 32], 64)
+        let dev = DeviceState::new(devid(0xA4), devid(0xA4), vec![0x04; 32])
             .admitted_faucet_claim(0)
             .expect("faucet claim");
         let rk =
@@ -2048,7 +1913,7 @@ mod tests {
         let pc_new = [0x7Du8; 32];
         let era = crate::core::token::token_state_manager::era_policy_commit();
         // ERA from the faucet: one admitted claim, exactly the creation fee.
-        let dev = DeviceState::new(devid(0xA5), devid(0xA5), vec![0x05; 32], 64)
+        let dev = DeviceState::new(devid(0xA5), devid(0xA5), vec![0x05; 32])
             .admitted_faucet_claim(0)
             .expect("faucet claim");
         let rk =
@@ -2095,7 +1960,7 @@ mod tests {
     #[test]
     fn a_zero_amount_mint_is_not_refused_as_issuance() {
         let pc = [0x5Au8; 32];
-        let dev = DeviceState::new(devid(0xA3), devid(0xA3), vec![0x03; 32], 64);
+        let dev = DeviceState::new(devid(0xA3), devid(0xA3), vec![0x03; 32]);
         let rk =
             crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &dev.devid);
         let tip = crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
@@ -2129,7 +1994,7 @@ mod tests {
     // ── amendment 2c-H: a route settle's movement and its receipt leaves ────
 
     fn fresh_device(b: u8) -> DeviceState {
-        DeviceState::new([0u8; 32], devid(b), pubkey(), 1024)
+        DeviceState::new([0u8; 32], devid(b), pubkey())
     }
 
     fn op() -> Operation {
@@ -3604,7 +3469,7 @@ mod tests {
         let (pk, sk) = generate_sphincs_keypair().unwrap();
         let genesis = [0xA9u8; 32];
         let devid = [0xB9u8; 32];
-        let head = DeviceState::new(genesis, devid, pk.clone(), 64);
+        let head = DeviceState::new(genesis, devid, pk.clone());
         let body = SofiSetupBody::new(
             genesis, devid, 5, [0xC1; 32], [0x66; 32], [0x67; 32], 0x0001, &pk,
         )

@@ -260,7 +260,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     fn checkpoint() -> DeviceState {
-        DeviceState::new([0x01u8; 32], [0x02u8; 32], vec![0xAAu8; 32], 16)
+        DeviceState::new([0x01u8; 32], [0x02u8; 32], vec![0xAAu8; 32])
     }
 
     /// A preserved state that claims `parent` on `rel`, carrying a witness so the

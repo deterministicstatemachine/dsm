@@ -176,7 +176,6 @@ impl TestDevice {
                 self.genesis,
                 self.device_id,
                 self.ak_pk.clone(),
-                1024,
             ));
         self.router = Some(Arc::new(router));
     }

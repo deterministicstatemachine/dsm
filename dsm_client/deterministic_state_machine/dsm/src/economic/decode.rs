@@ -257,15 +257,6 @@ fn read_leaf_state(c: &mut Cursor<'_>) -> Result<EconomicLeafState, DecodeError>
                 },
             ))
         }
-        class::CREDIT_SOURCE_GENESIS_RELEASE => {
-            c.envelope(
-                CreditSourceGenesisRelease::CLASS,
-                CreditSourceGenesisRelease::SCHEMA,
-            )?;
-            Ok(CreditSource::GenesisRelease(CreditSourceGenesisRelease {
-                credit_mutation_index: c.u32()?,
-            }))
-        }
         got => Err(DecodeError::WrongClass { got }),
     }
 }
@@ -301,6 +292,15 @@ fn read_credit_source(c: &mut Cursor<'_>) -> Result<CreditSource, DecodeError> {
                     release_evidence_addr: c.digest32()?,
                 },
             ))
+        }
+        class::CREDIT_SOURCE_GENESIS_RELEASE => {
+            c.envelope(
+                CreditSourceGenesisRelease::CLASS,
+                CreditSourceGenesisRelease::SCHEMA,
+            )?;
+            Ok(CreditSource::GenesisRelease(CreditSourceGenesisRelease {
+                credit_mutation_index: c.u32()?,
+            }))
         }
         got => Err(DecodeError::WrongClass { got }),
     }

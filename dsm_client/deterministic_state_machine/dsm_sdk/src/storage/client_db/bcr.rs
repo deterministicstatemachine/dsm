@@ -401,7 +401,6 @@ pub fn decode_device_state(
         extra_leaves,
         offline_allocations,
         pending_economic_admission,
-        1024,
     )
     .map_err(|e| anyhow!("DeviceState::restore failed: {e}"))?;
 
@@ -710,7 +709,7 @@ mod tests {
 
         init_test_db();
         let devid = [0xC3u8; 32];
-        let head = DeviceState::new([0xB2u8; 32], devid, vec![0xAAu8; 32], 64);
+        let head = DeviceState::new([0xB2u8; 32], devid, vec![0xAAu8; 32]);
         update_bcr_device_head(&head).expect("store head");
 
         // A head with no pending row reloads unfenced.
@@ -861,7 +860,6 @@ mod tests {
             [0x11; 32],
             device_id,
             owner_keypair().public_key.clone(),
-            1024,
         );
         // Adoption precedes receipt (owner ruling 2026-09-13): a credit of a
         // policy the head has not adopted is refused at `advance`, so the
@@ -967,7 +965,6 @@ mod tests {
                 .offline_allocations_snapshot()
                 .clone(),
             None, // no admission pending in this fixture
-            1024,
         )
         .expect("restore head with signed rel state");
 
@@ -1129,7 +1126,6 @@ mod tests {
             BTreeMap::new(),
             BTreeMap::new(),
             None, // no admission pending in this fixture
-            1024,
         )
         .expect("restore head with state-less tip");
         (device_id, rel_key, head)

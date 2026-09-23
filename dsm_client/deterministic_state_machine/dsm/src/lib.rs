@@ -73,8 +73,8 @@ pub mod ccb; // canonical commit bytes — docs/papers/ccb-object-registry.md
 pub mod commitments;
 pub mod common;
 // keyed-cell arrival records and running hashes (storage spec §14)
-pub mod storage_cell;
 pub mod route_chain;
+pub mod storage_cell;
 pub mod storage_object; // Area 4 immutable content addressing — addr(N, P)
                         // pub mod config; // Network detection moved to SDK - no HTTP in core
 pub mod core;

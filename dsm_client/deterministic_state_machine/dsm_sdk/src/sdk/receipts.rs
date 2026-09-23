@@ -3274,7 +3274,7 @@ mod tests {
             dsm::common::device_tree::DeviceTree::single(devid_a).root(),
         ));
 
-        let state = DeviceState::new(genesis, devid_a, public_key, 64);
+        let state = DeviceState::new(genesis, devid_a, public_key);
         let rel_key = dsm::verification::smt_replace_witness::compute_smt_key(&devid_a, &devid_b);
         let outcome = state
             .advance(

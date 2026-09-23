@@ -334,33 +334,6 @@ impl TokenStateManager {
                 new_balances.insert(recipient_key, new_recipient_balance);
             }
 
-            Operation::Mint {
-                amount, token_id, ..
-            } => {
-                let token_id_str = canonical_token_id_str(token_id).ok_or_else(|| {
-                    DsmError::invalid_operation("Mint has malformed or empty token_id")
-                })?;
-                // No embedded-proof verification: Mint authorization is the
-                // 0x0029 issuance evidence, proven during economic admission.
-
-                let owner_pk = &current_state.device_info.public_key;
-                let owner_key = self.make_balance_key(owner_pk, token_id_str)?;
-
-                let current_balance = new_balances
-                    .get(&owner_key)
-                    .cloned()
-                    .unwrap_or_else(|| Balance::from_state(0, current_state.hash));
-
-                let new_mint_value = current_balance
-                    .value()
-                    .checked_add(amount.value())
-                    .ok_or_else(|| DsmError::invalid_operation("Balance overflow on mint"))?;
-                new_balances.insert(
-                    owner_key,
-                    Balance::from_state(new_mint_value, current_state.hash),
-                );
-            }
-
             Operation::Burn {
                 amount,
                 token_id,
@@ -529,7 +502,6 @@ impl TokenStateManager {
 
         let token_id = match operation {
             Operation::Transfer { token_id, .. } => token_id,
-            Operation::Mint { token_id, .. } => token_id,
             Operation::Burn { token_id, .. } => token_id,
             Operation::LockToken { token_id, .. } => token_id,
             Operation::UnlockToken { token_id, .. } => token_id,
@@ -558,19 +530,6 @@ impl TokenStateManager {
                     amount.value().to_string().into_bytes(),
                 );
                 context.insert("recipient".to_string(), recipient.clone());
-            }
-            Operation::Mint { amount, .. } => {
-                // Amount facts stay (supply semantics may read them); the
-                // legacy authorized_by witness is gone — Mint authority is the
-                // 0x0029 evidence, not a caller-chosen byte string.
-                context.insert(
-                    "amount_u64".to_string(),
-                    amount.value().to_le_bytes().to_vec(),
-                );
-                context.insert(
-                    "amount".to_string(),
-                    amount.value().to_string().into_bytes(),
-                );
             }
             Operation::Burn { amount, .. } => {
                 context.insert(
@@ -650,7 +609,6 @@ impl TokenStateManager {
 
         let op_type = match operation {
             Operation::Transfer { .. } => "transfer",
-            Operation::Mint { .. } => "mint",
             Operation::Burn { .. } => "burn",
             Operation::LockToken { .. } => "lock",
             Operation::UnlockToken { .. } => "unlock",

@@ -327,10 +327,6 @@ impl Operation {
                 token_id: op_token_id,
                 ..
             } => op_token_id.as_slice() == token_id,
-            Operation::Mint {
-                token_id: op_token_id,
-                ..
-            } => op_token_id.as_slice() == token_id,
             Operation::Burn {
                 token_id: op_token_id,
                 ..
@@ -387,8 +383,7 @@ pub fn generate_position_sequence(
 
 /// Enforce that an Operation carries the authorization material required by
 /// its protocol semantics — non-empty signature for device-key-signed ops,
-/// non-empty proof_of_authorization for Mint, non-empty proof_of_ownership
-/// for Burn, etc.
+/// non-empty proof_of_ownership for Burn, etc.
 ///
 /// This is the canonical rule. Any code path that builds a `StateTransition`
 /// destined for acceptance MUST call this helper before applying the
@@ -435,13 +430,6 @@ pub fn enforce_operation_authorization(operation: &Operation) -> Result<(), DsmE
                     "Transfer missing signature (and therefore proof_of_authorization)",
                 ));
             }
-        }
-        Operation::Mint { .. } => {
-            // Mint carries NO authorization bytes. Authorization of unit
-            // creation is the 0x0029 issuance evidence resolved during
-            // economic admission — there is nothing inside the operation for
-            // this legacy check to demand, and demanding anything here would
-            // recreate the second authorization channel that was deleted.
         }
         Operation::Burn {
             proof_of_ownership, ..
@@ -690,25 +678,6 @@ pub fn verify_token_balance_consistency(
     operation: &Operation,
 ) -> Result<bool, DsmError> {
     match operation {
-        Operation::Mint {
-            amount, token_id, ..
-        } => {
-            let current = token_balance_map_for_verification(current_state, token_id);
-            if current.is_empty() {
-                return Ok(false);
-            }
-            let deltas =
-                token_balance_deltas_for_verification(previous_state, current_state, token_id);
-            let positive = deltas
-                .values()
-                .filter(|delta| **delta > 0)
-                .copied()
-                .collect::<Vec<_>>();
-            let negative = deltas.values().filter(|delta| **delta < 0).count();
-            if negative != 0 || positive.len() != 1 || positive[0] != amount.value() as i128 {
-                return Ok(false);
-            }
-        }
         Operation::Burn {
             amount, token_id, ..
         } => {
@@ -1094,9 +1063,8 @@ pub fn create_next_state(
         }
 
         // ── Operations that don't carry signatures ────────────────
-        // Mint/Burn carry proof_of_authorization/proof_of_ownership but
-        // not a SPHINCS+ signature field on the Operation itself; they are
-        // verified by their own proof paths.
+        // Burn carries proof_of_ownership but not a SPHINCS+ signature field
+        // on the Operation itself; it is verified by its own proof path.
         // Noop is a no-op sentinel — unsigned by design.
         // Genesis/Create/Update/Delete are legacy structural ops.
         _ => {}
@@ -1119,7 +1087,7 @@ pub fn create_next_state(
     // Sparse index is advisory only per §2.2 and must not affect acceptance.
     next_state.sparse_index = crate::types::state_types::SparseIndex::default();
 
-    // Apply token balance delta for Transfer/Mint/Burn operations on device-canonical
+    // Apply token balance delta for Transfer/Burn operations on device-canonical
     // transitions only. Bilateral relationship-chain transitions skip this — the bilateral
     // settlement handler applies the delta to the device canonical state separately.
     if !require_bilateral {
@@ -1246,40 +1214,6 @@ fn apply_token_balance_delta(
                         .insert(recipient_key, new_recipient_balance);
                 }
             }
-        }
-        Operation::Mint {
-            token_id, amount, ..
-        } => {
-            let token_id_str = canonical_token_id_str(token_id)
-                .ok_or_else(|| DsmError::invalid_operation("Mint has malformed or empty token_id"))?
-                .to_string();
-            // No embedded-proof verification: Mint authorization is the
-            // 0x0029 issuance evidence, proven by the economic verifier during
-            // admission. This legacy path performs only the balance
-            // arithmetic; on the canonical device-head path the accepting
-            // layer refuses any positive mint without an attached admission.
-            let _ = amount;
-            let policy_commit = crate::core::token::resolve_policy_commit(&token_id_str)?;
-            let owner_key = crate::core::token::derive_canonical_balance_key(
-                &policy_commit,
-                &current_state.device_info.public_key,
-                &token_id_str,
-            );
-
-            let current_balance = next_state
-                .token_balances
-                .get(&owner_key)
-                .cloned()
-                .unwrap_or_else(|| Balance::from_state(0, current_state.hash));
-            let new_mint_value = current_balance
-                .value()
-                .checked_add(amount.value())
-                .ok_or_else(|| DsmError::invalid_operation("Balance overflow on mint"))?;
-
-            next_state.token_balances.insert(
-                owner_key,
-                Balance::from_state(new_mint_value, current_state.hash),
-            );
         }
         Operation::Burn {
             token_id,

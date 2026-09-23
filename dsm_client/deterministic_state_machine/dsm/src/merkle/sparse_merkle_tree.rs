@@ -109,7 +109,7 @@ pub fn get_bit(key: &[u8; 32], bit_index: usize) -> u8 {
 // SparseMerkleTree — the canonical Per-Device SMT (§2.2)
 // ───────────────────────────────────────────────────────────────────
 
-/// Per-Device Sparse Merkle Tree with 256-bit keys and bounded leaf count.
+/// Per-Device Sparse Merkle Tree with 256-bit keys.
 ///
 /// This is the canonical SMT described in §2.2 of the whitepaper. Each device
 /// maintains one of these trees indexing its bilateral relationships. Keys are
@@ -126,6 +126,12 @@ pub struct SparseMerkleTree {
     defaults: Box<[[u8; 32]; 257]>,
     /// Current root hash.
     root: [u8; 32],
+}
+
+impl Default for SparseMerkleTree {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SparseMerkleTree {
@@ -537,16 +543,9 @@ mod tests {
     }
 
     #[test]
-    fn empty_tree_root_is_deterministic() {
-        let smt1 = SparseMerkleTree::new(256);
-        let smt2 = SparseMerkleTree::new(100);
-        // Empty trees with different max_leaves have the same root
-        assert_eq!(smt1.root(), smt2.root());
-    }
-
     #[test]
     fn empty_tree_root_matches_default_chain() {
-        let smt = SparseMerkleTree::new(256);
+        let smt = SparseMerkleTree::new();
         assert_eq!(*smt.root(), empty_root(256));
     }
 
@@ -566,7 +565,7 @@ mod tests {
 
     #[test]
     fn update_and_prove() {
-        let mut smt = SparseMerkleTree::new(256);
+        let mut smt = SparseMerkleTree::new();
 
         let key = [1u8; 32];
         let value = [42u8; 32];
@@ -581,7 +580,7 @@ mod tests {
 
     #[test]
     fn verify_proof_against_root_static() {
-        let mut smt = SparseMerkleTree::new(256);
+        let mut smt = SparseMerkleTree::new();
 
         let key = [7u8; 32];
         let value = [99u8; 32];
@@ -602,7 +601,7 @@ mod tests {
 
     #[test]
     fn multi_leaf_proofs() {
-        let mut smt = SparseMerkleTree::new(256);
+        let mut smt = SparseMerkleTree::new();
 
         let keys: [[u8; 32]; 3] = [
             {
@@ -643,7 +642,7 @@ mod tests {
 
     #[test]
     fn leaf_update_changes_root() {
-        let mut smt = SparseMerkleTree::new(256);
+        let mut smt = SparseMerkleTree::new();
 
         let key = [1u8; 32];
         let value1 = [42u8; 32];
@@ -664,7 +663,7 @@ mod tests {
 
     #[test]
     fn proof_size_bounding() {
-        let mut smt = SparseMerkleTree::new(256);
+        let mut smt = SparseMerkleTree::new();
 
         let key = [1u8; 32];
         let value = [42u8; 32];

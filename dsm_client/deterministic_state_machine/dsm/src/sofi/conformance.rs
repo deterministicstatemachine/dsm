@@ -23,7 +23,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::route_chain::CellFact;
+use crate::route_chain::{CellFact, ChainState};
 use super::derive::{self, policy_fulfillment_id, precommit_id};
 use super::publication::{recognize_setup, Signed};
 use super::signature::{verify_fulfillment, verify_precommit, SignatureError};
@@ -114,7 +114,9 @@ pub enum FulfillmentConformanceError {
 ///   `MAX_AUTH_ENVELOPES`;
 /// - the unique objects, deduplicated by `ValidationRef`: at most
 ///   `MAX_VALIDATION_FETCH_BYTES` in aggregate.
-pub fn conformance_bounds(evidence: &ConformanceEvidence) -> Result<(), FulfillmentConformanceError> {
+pub fn conformance_bounds(
+    evidence: &ConformanceEvidence,
+) -> Result<(), FulfillmentConformanceError> {
     use super::wire::{MAX_AUTH_ENVELOPES, MAX_CLOSURE_OBJECT_BYTES, MAX_VALIDATION_FETCH_BYTES};
 
     let setups_outside_closure = evidence.setups.iter().filter(|(setup_ref, _)| {
@@ -343,23 +345,31 @@ pub fn check_fulfillment_against_precommit(
 
 // ── The predicate ──────────────────────────────────────────────────────────
 
-/// The per-item results, folded in ITEM order: the first Invalid item names
-/// the reason, else the first Unavailable item names what is missing, else
-/// Valid. Invalid dominates whatever is missing, so a withheld object can
-/// never hide a refusal, and nothing missing is ever read as one.
+/// One item's outcome: a value over the bytes in hand, or the object the
+/// item still needs.
+enum Item {
+    Valid,
+    Invalid(FulfillmentConformanceError),
+    Missing(ConformanceMissing),
+}
+
+/// The per-item outcomes, folded in ITEM order: the first Invalid item names
+/// the reason, else the first missing object is what the acquisition layer
+/// fetches next, else Valid. Invalid dominates whatever is missing, so a
+/// withheld object can never hide a refusal, and nothing missing is ever read
+/// as one.
 #[derive(Default)]
-struct Items(Vec<(u8, FulfillmentConformance)>);
+struct Items(Vec<(u8, Item)>);
 
 impl Items {
     fn valid(&mut self, item: u8) {
-        self.0.push((item, FulfillmentConformance::Valid));
+        self.0.push((item, Item::Valid));
     }
     fn invalid(&mut self, item: u8, why: FulfillmentConformanceError) {
-        self.0.push((item, FulfillmentConformance::Invalid(why)));
+        self.0.push((item, Item::Invalid(why)));
     }
     fn missing(&mut self, item: u8, what: ConformanceMissing) {
-        self.0
-            .push((item, FulfillmentConformance::Unavailable(what)));
+        self.0.push((item, Item::Missing(what)));
     }
     fn note(&mut self, item: u8, r: Result<(), FulfillmentConformanceError>) {
         match r {
@@ -367,17 +377,29 @@ impl Items {
             Err(why) => self.invalid(item, why),
         }
     }
-    fn fold(self) -> FulfillmentConformance {
-        let first = |wanted: Validation| {
-            self.0
-                .iter()
-                .filter(|(_, c)| c.verdict() == wanted)
-                .min_by_key(|(item, _)| *item)
-                .map(|(_, c)| c.clone())
-        };
-        first(Validation::Invalid)
-            .or_else(|| first(Validation::Unavailable))
-            .unwrap_or(FulfillmentConformance::Valid)
+    fn fold(self) -> Result<FulfillmentConformance, ConformanceMissing> {
+        let mut invalid: Option<(u8, FulfillmentConformanceError)> = None;
+        let mut missing: Option<(u8, ConformanceMissing)> = None;
+        for (item, outcome) in self.0 {
+            match outcome {
+                Item::Valid => {}
+                Item::Invalid(why) => {
+                    if invalid.as_ref().is_none_or(|(first, _)| item < *first) {
+                        invalid = Some((item, why));
+                    }
+                }
+                Item::Missing(what) => {
+                    if missing.as_ref().is_none_or(|(first, _)| item < *first) {
+                        missing = Some((item, what));
+                    }
+                }
+            }
+        }
+        match (invalid, missing) {
+            (Some((_, why)), _) => Ok(FulfillmentConformance::Invalid(why)),
+            (None, Some((_, what))) => Err(what),
+            (None, None) => Ok(FulfillmentConformance::Valid),
+        }
     }
 }
 
@@ -422,15 +444,20 @@ fn closure_object_verifies(reference: &ValidationRef, bytes: &[u8]) -> Option<bo
 ///
 /// A producer MUST obtain `Valid` before it publishes `F`; a verifier draws
 /// the same answer from the same bytes. Registration supplies no truth value.
+///
+/// `Err` names an object the evidence does not hold, or holds as bytes that
+/// are not the object named: the predicate is not evaluated yet, and the
+/// acquisition layer fetches what is named (Amendment S3). It is never a
+/// value and is never recorded as one.
 pub fn fulfillment_conformance(
     fulfillment: &TraderFulfillmentBody,
     fulfillment_signature: &[u8],
     evidence: &ConformanceEvidence,
-) -> FulfillmentConformance {
+) -> Result<FulfillmentConformance, ConformanceMissing> {
     // SoFi §18.4: a known bound violation is Invalid, and it is known from
     // the evidence alone.
     if let Err(bound) = conformance_bounds(evidence) {
-        return FulfillmentConformance::Invalid(bound);
+        return Ok(FulfillmentConformance::Invalid(bound));
     }
     let mut items = Items::default();
 
@@ -453,39 +480,33 @@ pub fn fulfillment_conformance(
     // Item 1: the exact referenced P, available and verifying. A fetched
     // object that is not the P F names, or a copy whose envelope does not
     // verify, establishes nothing about P.
-    let precommit = match &evidence.precommit {
-        Some(fetched) if precommit_id(&fetched.body) == *fulfillment.precommit_id() => {
-            match verify_precommit(&fetched.body, &fetched.signature) {
-                Ok(()) => Some(&fetched.body),
-                Err(_) => {
-                    items.missing(1, ConformanceMissing::PrecommitSignature);
-                    None
-                }
-            }
-        }
-        _ => {
-            items.missing(1, ConformanceMissing::Precommit);
-            None
-        }
-    };
-    let Some(precommit) = precommit else {
+    let fetched = &evidence.precommit;
+    if precommit_id(&fetched.body) != *fulfillment.precommit_id() {
+        items.missing(1, ConformanceMissing::Precommit);
         return items.fold();
-    };
+    }
+    if verify_precommit(&fetched.body, &fetched.signature).is_err() {
+        items.missing(1, ConformanceMissing::PrecommitSignature);
+        return items.fold();
+    }
+    let precommit = &fetched.body;
 
     items.note(1, successor_position(precommit, fulfillment));
     items.note(2, key_is_the_precommitted_one(precommit, fulfillment));
     items.note(4, attempts_cover_legs(precommit, fulfillment));
 
     // Item 5: an attempt above zero skips past the key before it, which must
-    // have resolved permanently — final on anything. `LeaderHeld` settles
-    // that no other value will be final there, but is not final; a key never
-    // dies, so this waits and never refuses.
+    // have resolved permanently — final on anything. A chain short of final
+    // is not a resolution; a key never dies, so this waits and never refuses.
     for attempt in fulfillment.attempts() {
         let Some(earlier) = attempt.attempt.checked_sub(1) else {
             continue;
         };
         match evidence.prior_attempts.get(&(attempt.vault_id, earlier)) {
-            Some(CellResolution::Final(_)) => items.valid(5),
+            Some(CellFact::Held {
+                state: ChainState::Final,
+                ..
+            }) => items.valid(5),
             _ => items.missing(
                 5,
                 ConformanceMissing::PriorAttempt {
@@ -541,14 +562,11 @@ pub fn fulfillment_conformance(
     // Item 8: the exact P(E) — the preimage that recomputes the E P commits —
     // and every object 𝒞_E^pre references. Items 3 and 7 read P(E) too: the
     // shadows E commits, and the legs it derives.
-    let preimage = evidence
-        .preimage
-        .as_ref()
-        .filter(|pe| derive::recompute_e(pe).is_ok_and(|e| e == *precommit.external_commitment()));
-    let Some(preimage) = preimage else {
+    let preimage = &evidence.preimage;
+    if !derive::recompute_e(preimage).is_ok_and(|e| e == *precommit.external_commitment()) {
         items.missing(8, ConformanceMissing::Preimage);
         return items.fold();
-    };
+    }
     items.valid(8);
     for reference in preimage.settlement().closure().refs() {
         match evidence

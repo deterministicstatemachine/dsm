@@ -26,9 +26,9 @@ const _: () = assert!(
 );
 
 pub mod authority_resolver;
+pub mod directory;
 pub mod genesis;
 pub mod genesis_session;
-pub mod directory;
 pub mod genesis_v2;
 pub mod genesis_v3;
 // hierarchical_device_management deleted: 1180-line module with zero external

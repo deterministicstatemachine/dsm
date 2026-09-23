@@ -621,7 +621,7 @@ mod tests {
     fn test_chain_tip_proof_generation() {
         let verifier = LocalSmtVerifier::new();
         let chain_tip = [5u8; 32];
-        let mut smt = crate::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
+        let mut smt = crate::merkle::sparse_merkle_tree::SparseMerkleTree::new();
         let smt_key = [0u8; 32];
 
         // Insert chain tip into SMT first — proofs are only valid for inserted keys.
@@ -641,7 +641,7 @@ mod tests {
         let verifier = LocalSmtVerifier::new();
         let device_id = create_test_device_id(1);
         let chain_tip = [5u8; 32];
-        let mut smt = crate::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
+        let mut smt = crate::merkle::sparse_merkle_tree::SparseMerkleTree::new();
         let smt_key = [0u8; 32];
 
         // Insert chain tip into SMT first — matches production flow where
@@ -683,7 +683,7 @@ mod tests {
         let mut contact = create_test_contact(device_id, genesis_hash);
 
         let chain_tip = [5u8; 32];
-        let mut smt = crate::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
+        let mut smt = crate::merkle::sparse_merkle_tree::SparseMerkleTree::new();
         let smt_key = [0u8; 32];
         // Insert chain tip into SMT before generating proof.
         smt.update_leaf(&smt_key, &chain_tip).unwrap();

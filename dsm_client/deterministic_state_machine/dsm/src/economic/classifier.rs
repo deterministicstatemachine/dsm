@@ -72,7 +72,7 @@ pub fn classify(operation: &Operation) -> EconomicEffect {
         DlvUnlock { .. } => None,
 
         // ── Closed write sets ───────────────────────────────────────────
-        Mint { .. } | Burn { .. } | CreateToken { .. } => ClosedWriteSet,
+        Burn { .. } | CreateToken { .. } => ClosedWriteSet,
         // One balance credit of exactly the beta payout, funded by one
         // release of the network's native reserve
         // (CreditSourceNativeReserveRelease, 0x005D). NOT a mint: the units

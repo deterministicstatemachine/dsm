@@ -796,7 +796,6 @@ impl CoreSDK {
                 genesis_hash,
                 self.device_info.device_id,
                 self.device_info.public_key.clone(),
-                1024,
             )
         });
         head.set_genesis_digest(genesis_hash);
@@ -4738,7 +4737,6 @@ mod tests {
             [0u8; 32],
             sdk.device_info.device_id,
             sdk.device_info.public_key.clone(),
-            1024,
         ));
         assert_eq!(
             sdk.device_head()
@@ -4950,7 +4948,6 @@ mod tests {
                 [9u8; 32],
                 sdk.device_info.device_id,
                 vec![0u8; 64],
-                256,
             );
             sdk.state_machine.lock().set_device_head(ds);
         }
@@ -5082,7 +5079,7 @@ mod tests {
 
         let sdk = test_sdk();
         {
-            let ds = DeviceState::new([9u8; 32], sdk.device_info.device_id, vec![0u8; 64], 256);
+            let ds = DeviceState::new([9u8; 32], sdk.device_info.device_id, vec![0u8; 64]);
             sdk.state_machine.lock().set_device_head(ds);
         }
         let recipient = [4u8; 32];
@@ -5177,7 +5174,7 @@ mod tests {
 
         let sdk = test_sdk();
         {
-            let ds = DeviceState::new([9u8; 32], sdk.device_info.device_id, vec![0u8; 64], 256);
+            let ds = DeviceState::new([9u8; 32], sdk.device_info.device_id, vec![0u8; 64]);
             sdk.state_machine.lock().set_device_head(ds);
         }
         let recipient = [4u8; 32];
@@ -5215,7 +5212,7 @@ mod tests {
 
         let sdk = test_sdk();
         {
-            let ds = DeviceState::new([9u8; 32], sdk.device_info.device_id, vec![0u8; 64], 256);
+            let ds = DeviceState::new([9u8; 32], sdk.device_info.device_id, vec![0u8; 64]);
             sdk.state_machine.lock().set_device_head(ds);
         }
         let recipient = [4u8; 32];
@@ -5279,7 +5276,7 @@ mod tests {
 
         let sdk = test_sdk();
         {
-            let ds = DeviceState::new([9u8; 32], sdk.device_info.device_id, vec![0u8; 64], 256);
+            let ds = DeviceState::new([9u8; 32], sdk.device_info.device_id, vec![0u8; 64]);
             sdk.state_machine.lock().set_device_head(ds);
         }
         let recipient = [4u8; 32];
@@ -5783,7 +5780,7 @@ mod tests {
 
         let sdk = test_sdk();
         {
-            let ds = DeviceState::new([9u8; 32], sdk.device_info.device_id, vec![0u8; 64], 256);
+            let ds = DeviceState::new([9u8; 32], sdk.device_info.device_id, vec![0u8; 64]);
             sdk.state_machine.lock().set_device_head(ds);
         }
         let recipient = [4u8; 32];
@@ -5975,7 +5972,7 @@ mod tests {
         use dsm::types::device_state::{AnchorLeafUpdate, DeviceState};
 
         let sdk = test_sdk();
-        let ds = DeviceState::new([9u8; 32], sdk.device_info.device_id, vec![0u8; 64], 256);
+        let ds = DeviceState::new([9u8; 32], sdk.device_info.device_id, vec![0u8; 64]);
         sdk.state_machine.lock().set_device_head(ds);
 
         let cp = [0x33u8; 32];

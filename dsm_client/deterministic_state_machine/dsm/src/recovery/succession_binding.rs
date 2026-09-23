@@ -771,7 +771,7 @@ mod tests {
     /// SparseMerkleTree root.
     fn with_real_inclusion(ev: &mut CrossRelationshipSuccessionEvidence) {
         use crate::merkle::sparse_merkle_tree::SparseMerkleTree;
-        let mut pd = SparseMerkleTree::new(256);
+        let mut pd = SparseMerkleTree::new();
         pd.update_leaf(&ev.old_rel_key, &ev.t_old_current).unwrap();
         pd.update_leaf(&ev.new_rel_key, &ev.t_new_established)
             .unwrap();

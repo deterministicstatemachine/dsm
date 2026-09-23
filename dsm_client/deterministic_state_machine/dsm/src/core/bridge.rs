@@ -843,6 +843,17 @@ pub fn handle_envelope_universal(env_bytes: &[u8]) -> Vec<u8> {
             debug_b32: "".to_string(),
         }),
 
+        // A sealed spool payload is opened by the SDK's retrieval path
+        // (DSM Amendment A7); it is transport, never a request.
+        Some(gp::envelope::Payload::Sealed(_)) => gp::envelope::Payload::Error(gp::Error {
+            code: 415,
+            message: "Sealed spool payloads are opened by the SDK's retrieval path".to_string(),
+            context: vec![],
+            source_tag: 10,
+            is_recoverable: false,
+            debug_b32: "".to_string(),
+        }),
+
         // Recovery & bilateral responses must not arrive as requests.
         Some(
             gp::envelope::Payload::RecoveryCapsuleDecryptResponse(_)
@@ -872,9 +883,13 @@ pub fn handle_envelope_universal(env_bytes: &[u8]) -> Vec<u8> {
             | gp::envelope::Payload::StorageStatusResponse(_)
             | gp::envelope::Payload::TokenCreateRequest(_)
             | gp::envelope::Payload::TokenCreateResponse(_)
-            | gp::envelope::Payload::TokenMintResponse(_)
             | gp::envelope::Payload::TokenBurnResponse(_)
-            | gp::envelope::Payload::TokenFeeScheduleResponse(_),
+            | gp::envelope::Payload::TokenFeeScheduleResponse(_)
+            | gp::envelope::Payload::SofiVaultCreatedResponse(_)
+            | gp::envelope::Payload::SofiSetupResponse(_)
+            | gp::envelope::Payload::SofiFindRouteResponse(_)
+            | gp::envelope::Payload::SofiPositionResponse(_)
+            | gp::envelope::Payload::SofiRelayResponse(_),
         ) => gp::envelope::Payload::Error(gp::Error {
             code: 409,
             message: "Responses should not be sent as requests".to_string(),

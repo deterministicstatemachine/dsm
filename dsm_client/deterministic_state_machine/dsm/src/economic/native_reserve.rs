@@ -30,7 +30,7 @@
 //! raise availability and nothing else: no member votes, compares or decides,
 //! the leader of a cell is `FisherYates(seed(reserve_id, R_n), S)[0]` over the
 //! COMMITTED set, and `Final` is the leader's first recognized object held by
-//! two others ([`crate::sofi::arith::resolve`]). Which bytes at the cell are
+//! two further links on its route chain ([`crate::route_chain::evaluate`]). Which bytes at the cell are
 //! an object naming it is Core's question, answered here by
 //! [`recognize_release`]: a release that does not fit its parent — wrong
 //! reserve, wrong root, wrong generation, zero, or more than remains — is not
@@ -64,7 +64,7 @@ use crate::common::domain_tags::{
     TAG_DSM_NATIVE_RESERVE_SEED, TAG_DSM_NATIVE_RESERVE_STATE,
 };
 use crate::crypto::blake3::dsm_domain_hasher;
-use crate::sofi::arith::ObjectResolution;
+use crate::route_chain::{evaluate, CellEvidence, CellReading, ChainState};
 use crate::storage_object::immutable_addr;
 use crate::types::proto as generated;
 
@@ -510,47 +510,44 @@ pub enum SuccessorRead {
     Unavailable,
 }
 
-/// Resolve the parent's successor cell from raw member reads — everything
-/// each member holds at the key in arrival order, `None` where a member did
-/// not answer — with the leader at index `leader` of the committed set.
+/// Resolve the parent's successor cell from its route-chain evidence (storage
+/// spec §9): the leader's arrival log, each later seat's, and the ByteCommits
+/// that make their links checkable.
 ///
-/// Recognition first, then the leader-first rule over the recognized view:
+/// Recognition first: only bytes that are a release of this parent count, so
 /// unrecognized bytes are never an occupant, never final, however early they
-/// arrived and however many members hold them.
-pub fn resolve_successor(
-    parent: &NativeReserveState,
-    reads: &[Option<Vec<Vec<u8>>>],
-    leader: usize,
-) -> Result<SuccessorRead, crate::sofi::arith::ArityError> {
-    let resolution = crate::sofi::arith::resolve_objects(reads, leader, |bytes| {
-        recognize_release(parent, bytes).is_some()
-    })?;
-    // The resolved bytes were recognized above, so they rebuild into a
-    // release that is the parent's successor; bytes that somehow do not
-    // establish nothing, never something.
+/// arrived. `Unavailable` means the evidence in hand does not yet decide the
+/// cell (the leader unread, or its link not yet committed): a network status
+/// the caller retries, never an answer.
+pub fn resolve_successor(parent: &NativeReserveState, evidence: &CellEvidence) -> SuccessorRead {
+    let reading = evaluate(evidence, |bytes| {
+        recognize_release(parent, bytes).map(|_| crate::storage_cell::entry_digest(bytes))
+    });
+    // The held bytes were recognized above, so they rebuild into a release
+    // that is the parent's successor; bytes that somehow do not establish
+    // nothing, never something.
     let recognized = |bytes: &[u8]| -> Option<(VerifiedRelease, NativeReserveState)> {
         let release = recognize_release(parent, bytes)?;
         let child = release_constructible(parent, &release).ok()?;
         Some((release, child))
     };
-    Ok(match resolution {
-        ObjectResolution::Final(bytes) => match recognized(&bytes) {
-            Some((release, child)) => SuccessorRead::Final {
+    match reading {
+        Ok(CellReading::Held { value, state, .. }) => match (recognized(&value), state) {
+            (Some((release, child)), ChainState::Final) => SuccessorRead::Final {
                 release: Box::new(release),
                 child,
             },
-            None => SuccessorRead::Unavailable,
+            (Some((release, child)), ChainState::LeaderHeld | ChainState::Preserved) => {
+                SuccessorRead::LeaderHeld {
+                    release: Box::new(release),
+                    child,
+                }
+            }
+            (None, _) => SuccessorRead::Unavailable,
         },
-        ObjectResolution::LeaderHeld(bytes) => match recognized(&bytes) {
-            Some((release, child)) => SuccessorRead::LeaderHeld {
-                release: Box::new(release),
-                child,
-            },
-            None => SuccessorRead::Unavailable,
-        },
-        ObjectResolution::Open => SuccessorRead::Open,
-        ObjectResolution::Unavailable => SuccessorRead::Unavailable,
-    })
+        Ok(CellReading::Open) => SuccessorRead::Open,
+        Err(_) => SuccessorRead::Unavailable,
+    }
 }
 
 /// Where a walk of the lineage stopped.

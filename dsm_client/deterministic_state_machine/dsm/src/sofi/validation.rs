@@ -113,14 +113,23 @@ pub enum Invalid {
     /// A `V°` relationship entry, or the leaf it advances, belongs to another
     /// trader than the core's own marker says.
     RelationshipIdentityMismatch,
+    /// A leg's setup names another trader than the precommit's.
+    SetupNotThisTrader,
+    /// A leg's setup names another vault than the leg's.
+    SetupNotThisVault,
+    /// A leg's setup is not signed by the precommit's trader key.
+    SetupSignature,
+    /// A token's committed policy does not parse.
+    TokenPolicyDoesNotParse { token: D32 },
+    /// A token's committed policy forbids transfer, so it cannot be a market
+    /// leg — the vault's, or any hop's through it (SoFi §19.5, §49).
+    TokenNotTransferable { token: D32 },
 }
 
-/// The three-valued conjunction, as an accumulator.
-///
-/// `Validation::and` already fixes the algebra: any Invalid dominates, and
-/// only in its absence does Unavailable win. A validator that returned on the
-/// first missing object would break exactly that — evidence a verifier happens
-/// not to hold would mask an invalidity it could already prove. So every
+/// The conjunction, as an accumulator: any Invalid dominates, and only in its
+/// absence does missing evidence stop the predicate. A validator that returned
+/// on the first missing object would let evidence a verifier happens not to
+/// hold mask an invalidity it could already prove. So every
 /// INDEPENDENTLY decidable check runs, and only checks that genuinely need the
 /// missing datum are skipped.
 #[derive(Debug, Default)]
@@ -140,7 +149,7 @@ impl Verdict {
                     self.invalid = Some(reason);
                 }
             }
-            Err(Refusal::Unavailable(what)) => {
+            Err(Refusal::Incomplete(what)) => {
                 if self.missing.is_none() {
                     self.missing = Some(what);
                 }
@@ -165,7 +174,7 @@ impl Verdict {
             return Err(Refusal::Invalid(reason));
         }
         if let Some(what) = self.missing {
-            return Err(Refusal::Unavailable(what));
+            return Err(Refusal::Incomplete(what));
         }
         Ok(())
     }
@@ -190,19 +199,27 @@ pub enum Missing {
     /// establish NOTHING — note 9: a non-verifying candidate can never prove
     /// invalidity, it only fails to supply the object.
     NonVerifyingObject { addr: D32 },
+    /// The `TokenPolicyV3` bytes a market token's policy commit names.
+    TokenPolicy { commit: D32 },
 }
 
-/// The outcome of a static validation over complete evidence: why the
-/// operation is Invalid. There is no other refusal (Amendment S3).
+/// Why validation stopped. `Invalid` is the predicate's value. `Incomplete`
+/// is not a value at all: the evidence lacks an object, so the predicate is
+/// not evaluated yet, and the acquisition layer fetches what is named
+/// (Amendment S3). A missing or non-verifying object never proves invalidity
+/// (note 9); an invalidity provable from what is in hand stands regardless.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Refusal {
     Invalid(Invalid),
+    Incomplete(Missing),
 }
 
 impl Refusal {
-    pub fn validation(&self) -> Validation {
+    /// The predicate's value, when the refusal is one.
+    pub fn validation(&self) -> Result<Validation, Missing> {
         match self {
-            Self::Invalid(_) => Validation::Invalid,
+            Self::Invalid(_) => Ok(Validation::Invalid),
+            Self::Incomplete(m) => Err(m.clone()),
         }
     }
 }
@@ -351,12 +368,12 @@ impl Evidence {
             .objects
             .get(addr)
             .map(Vec::as_slice)
-            .ok_or(Refusal::Unavailable(Missing::Policy { addr: *addr }))?;
+            .ok_or(Refusal::Incomplete(Missing::Policy { addr: *addr }))?;
         let derived = crate::ccb::decode::policy_object_address(object_class, bytes).ok_or(
-            Refusal::Unavailable(Missing::NonVerifyingObject { addr: *addr }),
+            Refusal::Incomplete(Missing::NonVerifyingObject { addr: *addr }),
         )?;
         if derived != *addr {
-            return Err(Refusal::Unavailable(Missing::NonVerifyingObject {
+            return Err(Refusal::Incomplete(Missing::NonVerifyingObject {
                 addr: *addr,
             }));
         }
@@ -366,13 +383,13 @@ impl Evidence {
     fn trader_leaf(&self, key: &D32) -> Result<&TraderLeafPre, Refusal> {
         self.trader_leaves
             .get(key)
-            .ok_or(Refusal::Unavailable(Missing::TraderLeaf { key: *key }))
+            .ok_or(Refusal::Incomplete(Missing::TraderLeaf { key: *key }))
     }
 
     fn vault_leaf(&self, vault_id: &D32, key: &D32) -> Result<&VaultLeafPre, Refusal> {
         self.vault_leaves
             .get(&(*vault_id, *key))
-            .ok_or(Refusal::Unavailable(Missing::VaultLeaf {
+            .ok_or(Refusal::Incomplete(Missing::VaultLeaf {
                 vault_id: *vault_id,
                 key: *key,
             }))
@@ -437,14 +454,90 @@ impl Policies {
     }
 }
 
-/// `RouteValidation(P, G, E)`, as the ladder reads it.
+/// `SetupValid` for one leg of P (SoFi §16, §20.1): the setup the leg names by
+/// `ρ` is the canonical envelope whose body re-derives `ρ`, names P's trader
+/// and the leg's vault, and is signed by P's trader key.
+///
+/// Bytes that do not authenticate to `ρ` supply nothing (note 9). The
+/// ClaimRef the setup names is not decided here: the trader's claim at the
+/// setup's position is not in `Evidence`.
+fn setup_valid(
+    precommit: &TraderPrecommitBody,
+    leg: &crate::sofi::wire::PrecommitLeg,
+    evidence: &Evidence,
+) -> Result<(), Refusal> {
+    let bytes = evidence
+        .setups
+        .get(&leg.setup_ref)
+        .ok_or(Refusal::Incomplete(Missing::Setup {
+            setup_ref: leg.setup_ref,
+        }))?;
+    let non_verifying = || {
+        Refusal::Incomplete(Missing::NonVerifyingObject {
+            addr: leg.setup_ref,
+        })
+    };
+    let (rho, signed) =
+        crate::sofi::publication::recognize_setup(bytes).ok_or_else(non_verifying)?;
+    if rho != leg.setup_ref {
+        return Err(non_verifying());
+    }
+    let body = &signed.body;
+    if body.genesis() != precommit.genesis() || body.device_id() != precommit.device_id() {
+        return Err(Refusal::Invalid(Invalid::SetupNotThisTrader));
+    }
+    if *body.vault_id() != leg.vault_id {
+        return Err(Refusal::Invalid(Invalid::SetupNotThisVault));
+    }
+    crate::sofi::signature::verify_setup(body, &signed.signature, precommit.claimant_public_key())
+        .map_err(|_| Refusal::Invalid(Invalid::SetupSignature))
+}
+
+/// Both tokens of a vault the operation touches pass their policies as market
+/// legs (SoFi §19.5, §49; MR-SOFI-0311), an intermediate token of a route
+/// included. ERA and dBTC are pre-rooted and never consult a policy. Any
+/// other token's `TokenPolicyV3` bytes are re-hashed to its commit before
+/// they establish anything.
+fn market_legs_permitted(
+    core: &crate::sofi::wire::DlvCore,
+    evidence: &Evidence,
+) -> Result<(), Refusal> {
+    let state = evidence.vault_state(core.vault_id())?;
+    let policies = Policies::resolve(evidence, &state)?;
+    for commit in EvidenceNeeds::token_policies_of(&policies.market) {
+        if crate::core::token::builtin_token_id_for_policy_commit(&commit).is_some() {
+            continue;
+        }
+        let bytes = evidence
+            .token_policies
+            .get(&commit)
+            .ok_or(Refusal::Incomplete(Missing::TokenPolicy { commit }))?;
+        let derived = crate::crypto::blake3::domain_hash_bytes(
+            crate::common::domain_tags::TAG_DSM_POLICY,
+            bytes,
+        );
+        if derived != commit {
+            return Err(Refusal::Incomplete(Missing::NonVerifyingObject {
+                addr: commit,
+            }));
+        }
+        let policy = crate::economic::token_policy::parse_token_policy(bytes)
+            .map_err(|_| Refusal::Invalid(Invalid::TokenPolicyDoesNotParse { token: commit }))?;
+        crate::economic::issuance::check_market_leg_permitted(&policy)
+            .map_err(|_| Refusal::Invalid(Invalid::TokenNotTransferable { token: commit }))?;
+    }
+    Ok(())
+}
+
+/// `RouteValidation(P, G, E)`: Valid or Invalid over complete evidence, or
+/// the object still missing (Amendment S3).
 pub fn route_validation(
     precommit: &TraderPrecommitBody,
     preimage: &SettlementPreimage,
     evidence: &Evidence,
-) -> Validation {
+) -> Result<Validation, Missing> {
     match validate(precommit, preimage, evidence) {
-        Ok(()) => Validation::Valid,
+        Ok(()) => Ok(Validation::Valid),
         Err(r) => r.validation(),
     }
 }
@@ -1999,7 +2092,7 @@ mod tests {
         ));
         assert!(matches!(
             validate(&f.precommit, &f.preimage, &without_policy),
-            Err(Refusal::Unavailable(Missing::Policy { .. }))
+            Err(Refusal::Incomplete(Missing::Policy { .. }))
         ));
         assert_eq!(
             route_validation(&f.precommit, &f.preimage, &without_policy),
@@ -3486,7 +3579,7 @@ mod tests {
             .insert(addr, b"not a policy at all".to_vec());
         assert_eq!(
             validate(&f.precommit, &f.preimage, &evidence),
-            Err(Refusal::Unavailable(Missing::NonVerifyingObject { addr }))
+            Err(Refusal::Incomplete(Missing::NonVerifyingObject { addr }))
         );
         assert_eq!(
             route_validation(&f.precommit, &f.preimage, &evidence),

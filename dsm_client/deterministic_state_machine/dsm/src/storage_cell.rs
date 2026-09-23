@@ -601,7 +601,7 @@ mod tests {
                 .zip(&hashes)
                 .map(|(k, h)| (ns.as_slice(), k, 3, h)),
         );
-        let mut incremental = SparseMerkleTree::new(usize::MAX);
+        let mut incremental = SparseMerkleTree::new();
         for (k, h) in keys.iter().zip(&hashes) {
             incremental
                 .update_leaf(&leaf_key(&ns, k), &leaf_value(3, h))

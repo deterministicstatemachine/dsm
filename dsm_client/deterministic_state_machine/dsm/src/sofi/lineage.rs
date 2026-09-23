@@ -261,7 +261,6 @@ pub fn advance_resolved(
         // Zero mutations: the lineage continues exactly where it was.
         Resolution::Void => previous.economic_root(),
         Resolution::Invalid => return Err(AdvanceError::LineageIsTerminal),
-        Resolution::Pending => return Err(AdvanceError::NotResolved),
     };
     Ok(ValidatedEconomicRoot::from_resolved_sofi_position(q, root))
 }
@@ -529,7 +528,7 @@ mod tests {
     /// literal no settlement could produce.
     fn realized_rig() -> (crate::sofi::validation::fixtures::Fixture, DeviceState) {
         let fx = crate::sofi::validation::fixtures::swap_fixture_n(1);
-        let mut receiver = DeviceState::new(G, DEV, vec![0x01; 32], 64);
+        let mut receiver = DeviceState::new(G, DEV, vec![0x01; 32]);
         for policy_commit in trader_credits(&fx.preimage, &fx.evidence).unwrap() {
             receiver = receiver.adopt_token(policy_commit).unwrap();
         }
@@ -971,7 +970,7 @@ mod tests {
         assert_eq!(credits.len(), 1, "a one-hop swap credits its output only");
 
         // A receiver that has adopted NOTHING.
-        let bare = DeviceState::new(G, DEV, vec![0x01; 32], 64);
+        let bare = DeviceState::new(G, DEV, vec![0x01; 32]);
         assert!(!bare.has_adopted(&credits[0]));
         assert_eq!(
             advance_resolved(
@@ -1095,7 +1094,7 @@ mod tests {
         );
 
         // A receiver that adopted the OUTPUT only — not the intermediate.
-        let receiver = DeviceState::new(G, DEV, vec![0x01; 32], 64)
+        let receiver = DeviceState::new(G, DEV, vec![0x01; 32])
             .adopt_token(hops[1].token_out)
             .unwrap();
         assert!(!receiver.has_adopted(&intermediate));

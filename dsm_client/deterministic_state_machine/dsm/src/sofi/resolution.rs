@@ -35,7 +35,7 @@
 //! step R12), so a registered `F` that never conformed is Invalid and one
 //! whose conformance is undecided is Pending — never Void, never Realized.
 
-use crate::route_chain::CellFact;
+use crate::route_chain::{CellFact, ChainState};
 use super::conformance::Validation;
 use super::wire::next_attempt;
 
@@ -88,13 +88,13 @@ pub enum PositionEffect {
     None,
 }
 
-/// The effect of a resolved position. Pending has no effect yet; Invalid never
-/// has one, because the lineage is terminal there.
+/// The effect of a resolved position. Invalid never has one, because the
+/// lineage is terminal there.
 pub fn effect_of(resolution: Resolution) -> PositionEffect {
     match resolution {
         Resolution::Realized => PositionEffect::InstallRealizeRoot,
         Resolution::Void => PositionEffect::InstallPreviousRoot,
-        Resolution::Invalid | Resolution::Pending => PositionEffect::None,
+        Resolution::Invalid => PositionEffect::None,
     }
 }
 
@@ -225,17 +225,18 @@ impl LegFacts {
     /// per-leg commitment would let a "route" be assembled out of legs that
     /// each finalized a different operation.
     pub fn final_on(&self, e: &[u8; 32]) -> bool {
-        self.cell == CellResolution::Final(*e)
+        self.cell
+            == CellFact::Held {
+                id: *e,
+                state: ChainState::Final,
+            }
     }
 
-    /// Some OTHER operation's commitment got to this key's leader first, or is
-    /// already final there. Either way this operation can never be final at
-    /// the key: `LeaderHeld` settles the race before the copies arrive.
+    /// Some OTHER operation's commitment holds this key's leader link, final or
+    /// not. Either way this operation can never be final at the key: at most
+    /// one value has a valid leader link at a cell (storage spec §9).
     pub fn final_on_other(&self, e: &[u8; 32]) -> bool {
-        matches!(
-            self.cell,
-            CellResolution::Final(v) | CellResolution::LeaderHeld(v) if v != *e
-        )
+        matches!(self.cell, CellFact::Held { id, .. } if id != *e)
     }
 }
 
@@ -297,15 +298,13 @@ impl RouteFacts<'_> {
 
 /// `TraderParentCompatible(P)`: the parent either is an ordinary claim, or is
 /// a conditional claim that selected exactly the root this operation was built
-/// on.
-///
-/// False while the parent is Pending: an undecided parent neither consumes nor
-/// skips anything on its own.
+/// on. The parent is always resolved here: Core resolves only over complete
+/// facts, the predecessor's resolution among them (Amendment S7).
 pub fn trader_parent_compatible(parent: &ParentPosition, parent_pre_root: &[u8; 32]) -> bool {
     match parent {
         ParentPosition::SingleRoot => true,
         ParentPosition::ConditionalSelected { selected_root } => selected_root == parent_pre_root,
-        ParentPosition::ConditionalPending | ParentPosition::ConditionalNoRoot => false,
+        ParentPosition::ConditionalNoRoot => false,
     }
 }
 
@@ -313,12 +312,12 @@ pub fn trader_parent_compatible(parent: &ParentPosition, parent_pre_root: &[u8; 
 /// root this operation was built on — either it selected nothing (Invalid), or
 /// it selected the other branch.
 ///
-/// Objective and monotone, and false while the parent is Pending.
+/// Objective and monotone.
 pub fn trader_parent_impossible(parent: &ParentPosition, parent_pre_root: &[u8; 32]) -> bool {
     match parent {
         ParentPosition::ConditionalNoRoot => true,
         ParentPosition::ConditionalSelected { selected_root } => selected_root != parent_pre_root,
-        ParentPosition::SingleRoot | ParentPosition::ConditionalPending => false,
+        ParentPosition::SingleRoot => false,
     }
 }
 
@@ -399,67 +398,65 @@ pub fn route_impossible(facts: &RouteFacts<'_>) -> Option<ImpossibleArm> {
     None
 }
 
-/// The resolution ladder (Section 24). Verifier-local, deterministic, and
-/// permanent once it is not `Pending`. The first matching rung decides.
+/// Why Core does not resolve a position yet: its facts are not complete
+/// (Amendment S7). Never a result and never recorded: the SDK keeps reading,
+/// relaying and retrying within its budget, and when the retries are
+/// exhausted the attempt fails on the network.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Incomplete {
+    /// F is not registered at q.
+    NotRegistered,
+    /// Some required storage fact is not final, and nothing is lost yet.
+    StorageNotFinal,
+}
+
+/// The resolution ladder (Section 24; Amendment S7). Verifier-local,
+/// deterministic, permanent, and only over complete facts. The first matching
+/// rung decides.
 ///
 /// | Rung | Result | Condition |
 /// |---|---|---|
-/// | 0 | Pending | F is not registered |
-/// | 1 | Pending | the parent is a conditional claim that has not resolved |
-/// | 2 | Invalid | the parent resolved and did not select this operation's root |
-/// | 3 | Invalid | `FulfillmentConformance(F) = Invalid` |
-/// | 4 | Pending | `FulfillmentConformance(F) = Unavailable` |
-/// | 5 | Realized | `ConsumedRoute(F, E)` |
-/// | 6 | Invalid | `RouteValidation = Invalid` |
-/// | 7 | Void | both predicates Valid, storage-resolved, and the route is lost |
-/// | 8 | Pending | otherwise, including `RouteValidation = Unavailable` |
+/// | 0 | not yet (`Incomplete`) | F is not registered |
+/// | 1 | Invalid | the parent resolved and did not select this operation's root |
+/// | 2 | Invalid | `FulfillmentConformance(F) = Invalid` |
+/// | 3 | Realized | `ConsumedRoute(F, E)` |
+/// | 4 | Invalid | `RouteValidation = Invalid` |
+/// | 5 | Void | storage-resolved, and a reserved key or a parent is lost |
+/// | 6 | not yet (`Incomplete`) | otherwise: a required storage fact is not final |
 ///
-/// Rungs 1 and 2 come before any route result: a position built on a branch
-/// the parent never took is Invalid whatever its own legs did. Rungs 5 and 6
-/// are Section 24's rows 5 to 7 in the order the Lean twin (`resolve`) states
-/// them; the answers agree because `ConsumedRoute` carries `Valid`.
-pub fn resolve_position(facts: &RouteFacts<'_>) -> Resolution {
+/// The predecessor's resolution is part of the complete facts: the caller
+/// resolves it first. Rung 1 comes before any route result: a position built
+/// on a branch the parent never took is Invalid whatever its own legs did.
+/// Both predicates are binary, so Void never waits on a third value: rung 4
+/// has already turned an invalid route Invalid before rung 5 can Void it.
+pub fn resolve_position(facts: &RouteFacts<'_>) -> Result<Resolution, Incomplete> {
     // 0 — nothing is exercised before registration.
     if !facts.registered {
-        return Resolution::Pending;
+        return Err(Incomplete::NotRegistered);
     }
-    // 1 — an undecided conditional parent decides nothing here yet.
-    if facts.parent == ParentPosition::ConditionalPending {
-        return Resolution::Pending;
-    }
-    // 2 — the parent took another branch, or none.
+    // 1 — the parent took another branch, or none.
     if trader_parent_impossible(&facts.parent, &facts.parent_pre_root) {
-        return Resolution::Invalid;
+        return Ok(Resolution::Invalid);
     }
-    // 3 — the fulfillment never satisfied its own rules. Terminal, whatever
+    // 2 — the fulfillment never satisfied its own rules. Terminal, whatever
     // the cells say: registration supplied no truth value.
     if facts.conformance == Validation::Invalid {
-        return Resolution::Invalid;
+        return Ok(Resolution::Invalid);
     }
-    // 4 — conformance undecided. No route becomes Void while its conformance
-    // is unknown (Section 21.1): a Void here could turn Invalid on evidence.
-    if facts.conformance == Validation::Unavailable {
-        return Resolution::Pending;
-    }
-    // 5 — the route consumed every required parent.
+    // 3 — the route consumed every required parent.
     if consumed_route(facts) {
-        return Resolution::Realized;
+        return Ok(Resolution::Realized);
     }
-    // 6 — statically invalid, permanently.
+    // 4 — statically invalid, permanently.
     if facts.validation == Validation::Invalid {
-        return Resolution::Invalid;
+        return Ok(Resolution::Invalid);
     }
-    // 7 — both predicates Valid, storage-resolved, and lost. Validity first:
-    // without it a route lost while evidence is Unavailable would Void and
-    // then turn Invalid when the evidence arrived (R14-1).
-    if facts.validation == Validation::Valid
-        && facts.storage_resolved
-        && (facts.a_reserved_key_is_lost() || facts.a_parent_is_lost())
-    {
-        return Resolution::Void;
+    // 5 — valid, storage-resolved, and lost.
+    if facts.storage_resolved && (facts.a_reserved_key_is_lost() || facts.a_parent_is_lost()) {
+        return Ok(Resolution::Void);
     }
-    // 8 — not decided. Evidence may still arrive.
-    Resolution::Pending
+    // 6 — the facts are not complete yet.
+    Err(Incomplete::StorageNotFinal)
 }
 
 /// How one attempt key of one DLV leg classifies during the walk.
@@ -524,7 +521,9 @@ pub fn classify_attempt(
         // consumed as an economic execution on its own.
         if let Some(why) = fulfillment_impossible(facts) {
             let reason = match why {
-                FulfillmentImpossibility::ConformanceInvalid => SkipReason::RejectedFinalConformance,
+                FulfillmentImpossibility::ConformanceInvalid => {
+                    SkipReason::RejectedFinalConformance
+                }
                 FulfillmentImpossibility::Route(ImpossibleArm::ValidationInvalid)
                     if !facts.multi_leg() =>
                 {

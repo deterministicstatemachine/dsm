@@ -1317,7 +1317,7 @@ mod tests {
         let leaf0 = [0xC0u8; 32];
         let leaf1 = [0xC1u8; 32];
 
-        let mut smt = SparseMerkleTree::new(256);
+        let mut smt = SparseMerkleTree::new();
         // Bootstrap leaf_0, then the "parent" proof against prev_root.
         let parent_proof = set_anchor_state_leaf_value(&mut smt, &b, &leaf0).expect("set0");
         let prev_root = *smt.root();

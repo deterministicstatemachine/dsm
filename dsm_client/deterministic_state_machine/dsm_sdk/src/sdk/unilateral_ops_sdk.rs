@@ -93,7 +93,7 @@ impl UnilateralOpsSDK {
         device_id: String,
     ) -> Self {
         let per_device_smt = Arc::new(RwLock::new(
-            dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256),
+            dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(),
         ));
         Self {
             b0x_sdk: Arc::new(RwLock::new(b0x_sdk)),
@@ -112,7 +112,7 @@ impl UnilateralOpsSDK {
         device_id_bytes: [u8; 32],
     ) -> Self {
         let per_device_smt = Arc::new(RwLock::new(
-            dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256),
+            dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(),
         ));
         Self {
             b0x_sdk: Arc::new(RwLock::new(b0x_sdk)),

@@ -114,7 +114,6 @@ pub mod class {
     // never authority.
     pub const CREDIT_SOURCE_VALIDATED_PEER_DEBIT: u16 = 0x0025;
 
-
     /// The recipient credit of a native reserve release (Part IX §51): one
     /// generation of the network's ONE ERA reserve lineage, released leader
     /// first to the recipient the release names. Scoped to one network

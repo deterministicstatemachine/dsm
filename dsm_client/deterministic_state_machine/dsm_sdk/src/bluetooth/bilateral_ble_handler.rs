@@ -394,7 +394,7 @@ impl BilateralBleHandler {
         // Use the shared Per-Device SMT singleton (initialized during SDK bootstrap).
         // Falls back to a fresh instance if bootstrap hasn't run yet (e.g. tests).
         let per_device_smt = Arc::new(RwLock::new(
-            dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256),
+            dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(),
         ));
         Self {
             bilateral_tx_manager,

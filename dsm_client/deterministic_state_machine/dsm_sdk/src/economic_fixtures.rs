@@ -236,7 +236,6 @@ pub fn empty_router_with(
             genesis,
             devid,
             keypair.public_key().to_vec(),
-            1024,
         ));
     (router, keypair, guard)
 }

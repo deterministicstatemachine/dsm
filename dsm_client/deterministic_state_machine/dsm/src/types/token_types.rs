@@ -117,7 +117,6 @@ impl TokenSupply {
     pub fn is_fixed(&self) -> bool {
         matches!(self, TokenSupply::Fixed(_))
     }
-
 }
 
 impl TokenSupplyInfo {

@@ -312,7 +312,6 @@ fn pair_legs(
 enum FactsKind {
     NativeReserveRelease,
     PeerDebit,
-    GenesisRelease,
 }
 
 /// The one table: what an operation does to `R_econ`, or why it cannot be
@@ -670,7 +669,6 @@ pub fn build_write_set(
                     CreditSourceFacts::NativeReserveRelease { .. },
                     FactsKind::NativeReserveRelease
                 ) | (CreditSourceFacts::PeerDebit { .. }, FactsKind::PeerDebit)
-                    | (CreditSourceFacts::GenesisRelease, FactsKind::GenesisRelease)
             );
             if !matches {
                 return Err(WriteSetError::FactsDoNotMatchOperation);
@@ -787,6 +785,44 @@ pub fn build_write_set(
                 pre: None,
                 post: Some(state),
                 source: None,
+            });
+        }
+        // SoFi §51: the ERA fee debit and the whole genesis supply credited
+        // to the creator, as one write set.
+        SemanticWriteSet::CreateTokenRelease { fee, release } => {
+            if *facts != CreditSourceFacts::GenesisRelease {
+                return Err(WriteSetError::FactsDoNotMatchOperation);
+            }
+            if fee.1 > 0 {
+                planned.push(plan_balance_debit(
+                    genesis,
+                    device_id,
+                    pre_balances,
+                    fee.0,
+                    fee.1,
+                )?);
+            }
+            let (policy_commit, amount) = release;
+            // FROM ZERO. A balance of this commit already in the creator's
+            // authenticated pre-state is units of it already released, and a
+            // second release of the genesis supply would exceed it.
+            if pre_balances.get(&policy_commit).copied().unwrap_or(0) != 0 {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "the creator already holds units of the token it creates",
+                });
+            }
+            let post = balance_state(policy_commit, amount)?;
+            let key = post
+                .as_ref()
+                .map(|s| s.leaf_key(genesis, device_id))
+                .ok_or(WriteSetError::WrongWriteSet {
+                    detail: "a genesis release credits no units",
+                })?;
+            planned.push(PlannedLeaf {
+                key,
+                pre: None,
+                post,
+                source: Some(PlannedSource::External(facts.clone())),
             });
         }
     }
@@ -1079,34 +1115,6 @@ pub fn verify_operation_write_set(
                     }
                     Ok(())
                 }
-                (
-                    FactsKind::GenesisRelease,
-                    CreditSource::GenesisRelease(d),
-                    Operation::CreateToken { .. },
-                ) => {
-                    // THE SHAPE HALF of the issuance rule. Exactly one balance
-                    // credit and nothing else: non-reuse is the signed body's
-                    // position + operation-digest binding, proven by the
-                    // 0x0023 provenance arm — never a consumed-source leaf.
-                    // Everything semantic (the policy bytes, the k-of-N
-                    // signatures, amount, position, digest) is that arm's job;
-                    // this layer pins that the witness claims exactly the
-                    // effect the operation derives and that the descriptor
-                    // funds exactly the one credit.
-                    if !consumed.is_empty() || witness.mutations.len() != 1 {
-                        return Err(WriteSetError::WrongWriteSet {
-                            detail: "an authorized issuance is exactly one balance credit — \
-                                     its non-reuse is the authorization's position+digest \
-                                     binding, not a consumed-source leaf",
-                        });
-                    }
-                    if d.credit_mutation_index != b.mutation_index {
-                        return Err(WriteSetError::WrongWriteSet {
-                            detail: "issuance source does not fund the balance credit",
-                        });
-                    }
-                    Ok(())
-                }
                 (FactsKind::PeerDebit, CreditSource::ValidatedPeerDebit(d), _) => {
                     if consumed.len() != 1 || witness.mutations.len() != 2 {
                         return Err(WriteSetError::WrongWriteSet {
@@ -1206,6 +1214,55 @@ pub fn verify_operation_write_set(
                 });
             }
             Ok(())
+        }
+        // SoFi §51: the fee debit, if any, and the release credit from zero,
+        // funded by the one genesis-release source. The source's arm proves
+        // the amount is the policy's genesis supply; this layer pins that the
+        // witness is exactly this operation's effect.
+        SemanticWriteSet::CreateTokenRelease { fee, release } => {
+            if fee.0 == release.0 {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "the fee and the created token are different assets",
+                });
+            }
+            if !consumed.is_empty() {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "a token creation consumes no external source",
+                });
+            }
+            let expected = if fee.1 > 0 { 2 } else { 1 };
+            if balances.len() != expected || witness.mutations.len() != expected {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "a token creation is its fee debit and one release credit",
+                });
+            }
+            if fee.1 > 0 {
+                let observed = expect_one_balance(&balances, fee.0)?;
+                if observed.pre_amount.checked_sub(observed.post_amount) != Some(fee.1) {
+                    return Err(WriteSetError::WrongWriteSet {
+                        detail: "the fee debit is not the operation's fee",
+                    });
+                }
+            }
+            let credit = expect_one_balance(&balances, release.0)?;
+            if credit.pre_amount != 0 || credit.post_amount != release.1 {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "the release is not the operation's supply credited from zero",
+                });
+            }
+            match witness.credit_sources.as_slice() {
+                [CreditSource::GenesisRelease(d)] => {
+                    if d.credit_mutation_index != credit.mutation_index {
+                        return Err(WriteSetError::WrongWriteSet {
+                            detail: "the genesis release does not fund the supply credit",
+                        });
+                    }
+                    Ok(())
+                }
+                _ => Err(WriteSetError::WrongWriteSet {
+                    detail: "a token creation is funded by exactly one genesis release",
+                }),
+            }
         }
     }
 }

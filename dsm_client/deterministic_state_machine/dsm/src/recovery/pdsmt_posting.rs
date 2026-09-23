@@ -446,7 +446,7 @@ pub fn build_pdsmt_snapshot(
 
     // 1. Build leaf records (proofs filled once both roots exist) + the leaf index.
     let rel_keys = device_state.relationship_keys();
-    let mut index = SparseMerkleTree::new(rel_keys.len().max(1));
+    let mut index = SparseMerkleTree::new();
     let mut leaves: Vec<PostedPdsmtLeafRecord> = Vec::with_capacity(rel_keys.len());
     for rel_key in &rel_keys {
         let tip = device_state.rel_chain_tip(rel_key).ok_or_else(|| {
@@ -681,13 +681,13 @@ mod tests {
     /// `rel_key → committed_digest`. Returns (leaf, pd_smt_root, leaf_index_root).
     fn leaf_with_real_proofs() -> (PostedPdsmtLeafRecord, [u8; 32], [u8; 32]) {
         let mut l = leaf(ValueCapability::Yes);
-        let mut pd = SparseMerkleTree::new(256);
+        let mut pd = SparseMerkleTree::new();
         pd.update_leaf(&l.rel_key, &l.current_tip).unwrap();
         let pd_root = *pd.root();
         let tip_proof = pd.get_inclusion_proof(&l.rel_key, 256).unwrap().to_bytes();
 
         let cd = l.committed_digest();
-        let mut idx = SparseMerkleTree::new(256);
+        let mut idx = SparseMerkleTree::new();
         idx.update_leaf(&l.rel_key, &cd).unwrap();
         let idx_root = *idx.root();
         let idx_proof = idx.get_inclusion_proof(&l.rel_key, 256).unwrap().to_bytes();
@@ -796,7 +796,7 @@ mod tests {
         let owner = [0xA0; 32];
         // The issuance lands on the device's SELF-LOOP — a value relationship
         // of its own, exactly as a real device's faucet claim is.
-        let dev = DeviceState::new(genesis, owner, vec![0xAA; 64], 1024)
+        let dev = DeviceState::new(genesis, owner, vec![0xAA; 64])
             .admitted_mint([0xF1; 32], 1_000)
             .expect("admitted mint");
         let rk_self = compute_smt_key(&owner, &owner);
