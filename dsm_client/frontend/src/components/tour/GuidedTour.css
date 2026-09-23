@@ -1,0 +1,221 @@
+/* Guided tour overlay.
+ *
+ * The component portals into document.body and positions everything in
+ * viewport coordinates from getBoundingClientRect, so every piece here is
+ * position: fixed. The root lets clicks through; the four shade panels around
+ * the target block them, the guard covers the target on explanation steps,
+ * and the dialogue takes its own clicks. */
+
+.gt-root {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  pointer-events: none;
+  font-family: 'Martian Mono', monospace;
+}
+
+.gt-shade {
+  position: fixed;
+  background: rgba(0, 0, 0, 0.55);
+  pointer-events: auto;
+}
+
+.gt-shade--full {
+  inset: 0;
+}
+
+.gt-guard {
+  position: fixed;
+  background: transparent;
+  pointer-events: auto;
+}
+
+.gt-ring {
+  position: fixed;
+  border: 2px solid var(--text);
+  border-radius: 6px;
+  box-shadow: 0 0 0 2px rgba(var(--bg-rgb), 0.6), 0 0 12px rgba(var(--text-rgb), 0.45);
+  pointer-events: none;
+  animation: gt-pulse 1.6s ease-in-out infinite;
+}
+
+.gt-ring--live {
+  border-style: dashed;
+  animation-duration: 0.9s;
+}
+
+.gt-arrow {
+  position: fixed;
+  width: 0;
+  height: 0;
+  border-left: 9px solid transparent;
+  border-right: 9px solid transparent;
+  pointer-events: none;
+  animation: gt-bob 0.9s ease-in-out infinite;
+}
+
+.gt-arrow--down {
+  border-top: 14px solid var(--text);
+}
+
+.gt-arrow--up {
+  border-bottom: 14px solid var(--text);
+}
+
+.gt-dialog {
+  position: fixed;
+  box-sizing: border-box;
+  padding: 8px;
+  background: var(--bg);
+  color: var(--text);
+  border: 2px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 4px 0 rgba(var(--text-rgb), 0.25), 0 8px 18px rgba(0, 0, 0, 0.35);
+  pointer-events: auto;
+}
+
+.gt-dialog--middle {
+  transform: translateY(-50%);
+}
+
+.gt-dialog__top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+  font-size: 8px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+
+.gt-badge {
+  padding: 1px 5px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  font-weight: 700;
+}
+
+.gt-count {
+  color: var(--text-dark);
+}
+
+.gt-dialog__main {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.gt-guide {
+  flex: none;
+  width: 40px;
+  height: 40px;
+  object-fit: contain;
+  image-rendering: pixelated;
+}
+
+.gt-copy {
+  flex: 1;
+  min-width: 0;
+}
+
+.gt-title {
+  margin-bottom: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+
+.gt-body {
+  min-height: 3.6em;
+  margin: 0;
+  font-size: 9px;
+  line-height: 1.45;
+}
+
+.gt-caret {
+  animation: gt-blink 1s steps(1) infinite;
+}
+
+/* Read by screen readers in full, while the visible copy types out. */
+.gt-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.gt-controls {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.gt-btn {
+  padding: 5px 8px;
+  font-family: inherit;
+  font-size: 8px;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: var(--text);
+  background: transparent;
+  border: 2px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.gt-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.gt-btn--primary {
+  color: var(--bg);
+  background: var(--text);
+  border-color: var(--text);
+  font-weight: 700;
+}
+
+.gt-btn--ghost {
+  border-color: transparent;
+  color: var(--text-dark);
+}
+
+.gt-todo {
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  animation: gt-blink 1.2s steps(1) infinite;
+}
+
+@keyframes gt-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+
+@keyframes gt-bob {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(3px); }
+}
+
+@keyframes gt-blink {
+  0%, 49% { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .gt-ring,
+  .gt-arrow,
+  .gt-caret,
+  .gt-todo {
+    animation: none;
+  }
+}
