@@ -144,9 +144,8 @@ async fn re_putting_identical_bytes_acks_and_the_read_is_unchanged() {
 
 /// R2: no write authorization anywhere. The put carries no `authorization`
 /// header and no device token exists, and the member takes the bytes — on
-/// the assembly the binary serves. MUTATION CONTROL (executed): layer
-/// `auth::device_auth` onto the write router in `storage_contract_router` and
-/// this test goes red with 401.
+/// the assembly the binary serves. MUTATION CONTROL: any writer check added
+/// to the write router in `storage_contract_router` turns this test red.
 #[tokio::test]
 async fn a_put_with_no_authorization_is_taken_on_the_served_assembly() {
     let app = member().await;

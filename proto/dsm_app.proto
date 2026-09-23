@@ -836,26 +836,24 @@ message TokenCreateRequest {
   string ticker = 1; // 2-8 uppercase
   string alias = 2; // display name
   uint32 decimals = 3; // 0..18
-  bytes max_supply_u128 = 4 [(dsm_fixed_len)=16]; // big-endian u128
-  reserved 5;
-  reserved "policy_anchor";
+  // The whole supply that will ever exist (SoFi §47, §51). User-created
+  // tokens in beta release all of it to the creator at creation.
+  bytes genesis_supply_u128 = 4 [(dsm_fixed_len)=16]; // big-endian u128, > 0
+  reserved 5, 6, 9;
+  reserved "policy_anchor", "initial_alloc_u128", "unlimited_supply", "max_supply_u128";
 
-  bytes  initial_alloc_u128     = 6 [(dsm_fixed_len)=16]; // big-endian u128
-  bool   mint_burn_enabled      = 7;
+  bool   burn_enabled           = 7;   // governs burns only (§54)
   bool   transferable           = 8;
-  bool   unlimited_supply       = 9;
-  // 1..=255. Signatures required to authorize a mint or burn. The signer set
-  // itself is filled in by Rust (the creating device), never by the client.
-  uint32 mint_burn_threshold    = 10;
+  // 1..=n. The signer set itself is filled in by Rust (the creating device),
+  // never by the client. It authorizes only what the policy's own rules
+  // name, and never issuance.
+  uint32 threshold              = 10;
   string description            = 11 [(dsm_max_len)=65535];
   string icon_url               = 12 [(dsm_max_len)=65535];
   // Optional inline allowlist of 32-byte device ids.
   repeated bytes allowlist_device_ids = 13 [(dsm_max_len)=32];
 }
 
-// Mint additional supply of an existing token. Authority and the supply cap
-// are enforced by the token's committed policy conditions; the client supplies
-// intent only and never an authorization it constructed itself.
 // Drop a token's IDENTITY from this device. Canonical balances are not
 // touched: forgetting is refused unless the balance is zero, because a device
 // must not be able to make an asset it holds unnameable.
@@ -866,17 +864,6 @@ message TokenForgetResponse {
   bool   success  = 1;
   string token_id = 2;
   string message  = 3 [(dsm_max_len)=1024];
-}
-message TokenMintRequest {
-  string token_id  = 1;
-  uint64 amount    = 2;
-  string message   = 3 [(dsm_max_len)=1024];
-}
-message TokenMintResponse {
-  bool   success   = 1;
-  string token_id  = 2;
-  uint64 new_balance = 3;
-  string message   = 4;
 }
 
 // Burn supply the caller holds. Burn ≤ balance is enforced by the conservation
@@ -1398,23 +1385,6 @@ message GossipStatusV1 {
   repeated StorageNodeInfoV1 nodes = 2;
 }
 
-message ObjectListItemV1 {
-  string key        = 1;
-  string dlv_id_b32 = 2; // base32-crockford
-  int64  size_bytes = 3;
-}
-
-message ObjectListResponseV1 {
-  repeated ObjectListItemV1 items = 1;
-  optional string next_cursor = 2;
-}
-
-message AdminCleanupResponseV1 {
-  uint64 objects_deleted = 1;
-  uint64 spool_deleted   = 2;
-  int64  before_iter     = 3; // deterministic counter (admin only)
-}
-
 message AdminMaintenanceResponseV1 {
   int64 tick = 1; // deterministic counter (admin only)
   bool  ok   = 2;
@@ -1772,10 +1742,6 @@ message RegisterDeviceRequest {
   // identity: sign( domain_hash("DSM/kyber-identity-binding\0",
   //   device_id || genesis_hash || kyber_public_key) ). MANDATORY.
   bytes kyber_binding_sig = 5 [(dsm_max_len)=51200];
-}
-
-message RegisterDeviceResponse {
-  bytes token = 1 [(dsm_fixed_len)=32];
 }
 
 // ================= Bilateral Operations (binary IDs) =================
@@ -2780,9 +2746,17 @@ message Envelope {
     OfflineCashResponse               offline_cash_response            = 113;
     // Local-only responses: never routed through a storage node, so they sit
     // above the nodes' compiled-in payload allowlist without needing a redeploy.
-    TokenMintResponse                 token_mint_response              = 115;
     TokenBurnResponse                 token_burn_response              = 116;
     TokenFeeScheduleResponse          token_fee_schedule_response      = 117;
+    // SoFi routes (SoFi §27), local-only like the token responses.
+    SofiVaultCreatedResponse          sofi_vault_created_response      = 120;
+    SofiSetupResponse                 sofi_setup_response              = 121;
+    SofiFindRouteResponse             sofi_find_route_response         = 122;
+    SofiPositionResponse              sofi_position_response           = 123;
+    SofiRelayResponse                 sofi_relay_response              = 124;
+    // A sealed spool payload (DSM Amendment A7). The envelope that carries it
+    // has a message id and nothing else a node could read: no headers.
+    SealedEnvelopeV1                  sealed                           = 125;
 
 
     // Reply to `token.forget`.
@@ -2798,6 +2772,138 @@ message Envelope {
   // rides inside UniversalTx (tag 10) as an explicit `receipt.countersign.b` invoke
   // (ReceiptCountersignB) instead. Reserved so the number is never silently reused.
   reserved 114;
+  reserved 115; // was token_mint_response: there is no minting after genesis (SoFi §48)
+}
+
+// ===================== Sealed spool payloads (DSM Amendment A7) =====================
+// Everything a relationship sends through the spool is sealed end to end. The
+// recipient decapsulates `kem_ciphertext` with its own Kyber secret; the shared
+// secret and the envelope's message id give the one key the inner envelope is
+// sealed under (`dsm::crypto::spool_seal`). For a transfer step the Kyber
+// exchange is the step's own; for a message it is one made for it.
+message SealedEnvelopeV1 {
+  bytes kem_ciphertext = 1 [(dsm_fixed_len)=1088]; // ML-KEM-768 ciphertext to the recipient
+  bytes ciphertext     = 2 [(dsm_max_len)=262144]; // XChaCha20-Poly1305 over the inner envelope bytes
+}
+
+// ===================== Device directory (owner, 2026-09-23) =====================
+// Each device writes its own entry, signed with its AK, to the keyed cell
+// H(DSM/device-directory-key/v1, genesis, device_id) under the namespace
+// DSM/device-directory/v1. Nodes store every entry and check nothing; a reader
+// keeps the entry whose AK hashes (with AttA) to the device id and whose
+// signature verifies, highest counter first (dsm::core::identity::directory).
+message DeviceDirectoryEntryBodyV1 {
+  bytes  genesis          = 1 [(dsm_fixed_len)=32];
+  bytes  device_id        = 2 [(dsm_fixed_len)=32];
+  bytes  ak_public_key    = 3 [(dsm_fixed_len)=64];
+  bytes  att_a            = 4 [(dsm_fixed_len)=32];
+  bytes  kyber_public_key = 5 [(dsm_fixed_len)=1184];
+  uint64 counter          = 6;
+}
+message DeviceDirectoryEntryV1 {
+  DeviceDirectoryEntryBodyV1 body = 1;
+  bytes signature                 = 2 [(dsm_max_len)=65536]; // SPHINCS+ by AK over the body digest
+}
+
+// ===================== SoFi routes (SoFi §27) =====================
+// The app reaches SoFi only through these routes (handlers/sofi_routes.rs).
+// Requests carry the user's intent; producers assemble, Core decides, and a
+// route never interprets a storage read (SoFi §26). Token commits are 32-byte
+// policy_commits; vault ids are 32 bytes; amounts are base units.
+
+// sofi.createVault (§28). The beta market family is constant product with
+// exact input and the beta release family is the owner's full close, so the
+// owner chooses the pair, the reserves and the fee. The storage set is the
+// network's pinned set, never chosen (DSM Amendment A5).
+message SofiCreateVaultRequest {
+  bytes  token_a_policy_commit = 1 [(dsm_fixed_len)=32]; // token_a < token_b, bytewise
+  bytes  token_b_policy_commit = 2 [(dsm_fixed_len)=32];
+  uint64 reserve_a             = 3;                      // > 0
+  uint64 reserve_b             = 4;                      // > 0
+  uint32 fee_bps               = 5;                      // < 10000
+}
+message SofiVaultCreatedResponse {
+  bytes  vault_id = 1 [(dsm_fixed_len)=32];
+  uint64 position = 2; // the owner's economic position that carries the creation
+}
+
+// sofi.setup (§29): set up with a vault once, before trading against it.
+message SofiSetupRequest {
+  bytes vault_id = 1 [(dsm_fixed_len)=32];
+}
+message SofiSetupResponse {
+  bytes  setup_ref = 1 [(dsm_fixed_len)=32]; // ρ
+  uint64 position  = 2;
+}
+
+// sofi.findRoute (§30, §27): path search over walked vault heads. A hop list
+// carries no authority.
+message SofiFindRouteRequest {
+  bytes  token_in_policy_commit  = 1 [(dsm_fixed_len)=32];
+  bytes  token_out_policy_commit = 2 [(dsm_fixed_len)=32];
+  uint64 amount_in               = 3;
+}
+message SofiHopV1 {
+  bytes  vault_id                = 1 [(dsm_fixed_len)=32];
+  bytes  parent_root             = 2 [(dsm_fixed_len)=32]; // the walked head the hop prices against
+  bytes  token_in_policy_commit  = 3 [(dsm_fixed_len)=32];
+  bytes  token_out_policy_commit = 4 [(dsm_fixed_len)=32];
+  uint64 amount_in               = 5;
+  uint64 amount_out              = 6;
+}
+message SofiFindRouteResponse {
+  repeated SofiHopV1 hops = 1; // empty when no route exists
+}
+
+// sofi.trade (§31): one hop against one vault.
+message SofiTradeRequest {
+  bytes  vault_id               = 1 [(dsm_fixed_len)=32];
+  bytes  token_in_policy_commit = 2 [(dsm_fixed_len)=32];
+  uint64 amount_in              = 3;
+  uint64 min_amount_out         = 4;
+}
+
+// sofi.route (§31): a multihop route, all or none, through distinct vaults in
+// hop order (at most ROUTE_MAX_LEGS).
+message SofiRouteRequest {
+  repeated bytes vault_ids      = 1 [(dsm_fixed_len)=32];
+  bytes  token_in_policy_commit = 2 [(dsm_fixed_len)=32];
+  uint64 amount_in              = 3;
+  uint64 min_amount_out         = 4;
+}
+
+// sofi.close (§32): the owner closes its own vault under its release policy.
+message SofiCloseRequest {
+  bytes vault_id = 1 [(dsm_fixed_len)=32];
+}
+
+// sofi.resolve (§27): resolve and advance the device's pending position.
+message SofiResolveRequest {}
+
+// Where a trade, route, close or resolve left the device's position.
+// Predicates are Valid or Invalid only; RETRIES_EXHAUSTED is the separate
+// network status (the predicates held, the network retries ran out).
+enum SofiPositionState {
+  SOFI_POSITION_STATE_UNSPECIFIED       = 0;
+  SOFI_POSITION_STATE_REALIZED          = 1;
+  SOFI_POSITION_STATE_VOID              = 2; // nothing executed, no balance moved
+  SOFI_POSITION_STATE_INVALID           = 3; // the predicates failed
+  SOFI_POSITION_STATE_RETRIES_EXHAUSTED = 4; // the network retries ran out
+}
+message SofiPositionResponse {
+  uint64            position = 1;
+  SofiPositionState state    = 2;
+}
+
+// sofi.relay (§33): complete any registered fulfillment whose hops are not all
+// final. Needs nothing from the trader beyond naming the position.
+message SofiRelayRequest {
+  bytes  trader_genesis   = 1 [(dsm_fixed_len)=32];
+  bytes  trader_device_id = 2 [(dsm_fixed_len)=32];
+  uint64 position         = 3;
+}
+message SofiRelayResponse {
+  uint32 cells_written = 1;
 }
 
 // ===================== §16.6 REPLY WINDOW =====================
@@ -4309,6 +4415,31 @@ message ArrivalRecordV1 {
 message ArrivalRecordsV1 {
   repeated ArrivalRecordV1 records = 1;
 }
+
+// What a writer puts at each seat of a cell's route (storage spec §9, §14
+// keyed-cell formats item 5). The same value goes to every seat; what differs
+// is the seat, its route position, and the chain collected so far. A node
+// stores these bytes and returns their arrival record; it never reads them.
+message RouteEntryV1 {
+  bytes  namespace      = 1 [(dsm_max_len)=128];
+  bytes  key            = 2 [(dsm_fixed_len)=32];
+  bytes  value          = 3 [(dsm_max_len)=262144];
+  bytes  seat_member_id = 4 [(dsm_max_len)=128]; // the seat at `position`, as the set commits it
+  uint32 position       = 5;                     // 0 = the leader, up to 4
+  repeated ChainSlotV1 chain = 6;                // one slot per earlier position, in route order
+}
+
+// One earlier position of a route chain: the link that seat returned, or an
+// empty recording why there is none. An empty never counts as a link.
+message ChainSlotV1 {
+  oneof kind {
+    ArrivalRecordV1 link        = 1; // the seat's arrival record for this value
+    ArrivalRecordV1 taken       = 2; // the seat's arrival record showing another value's chain first
+    NoResponseV1    no_response = 3; // recorded, proves nothing
+  }
+}
+
+message NoResponseV1 {}
 
 // A member's ByteCommit for cycle t (storage spec §14). Unsigned. Its digest
 // is computed from the fields, never from these encoded bytes.

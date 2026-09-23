@@ -1019,9 +1019,30 @@ fn closure_index_enforces_bounds_order_and_current_e_exclusion() {
         Err(SofiWireError::NotStrictlyAscending { .. })
     ));
 
-    // P, G, F, C_q, aux evidence, records, outcome cells and the index itself
-    // may never be content-bound; neither may bodies with their own ref variant.
-    for class in CLOSURE_FORBIDDEN_CONTENT_CLASSES {
+    // Written from the specification, not from the implementation's list, so
+    // an omission there fails here (MR-SOFI-0176). P, every G, F, C_q, the aux
+    // reference and the index itself contain or depend on the current E; the
+    // classes of B°, T°, V° and P(E) are forbidden by SoFi §18.1; the signed
+    // wrapper carries P and F; setup bodies and economic root claims have
+    // their own typed references.
+    use dsm::ccb::class;
+    let spec_forbidden: &[u16] = &[
+        class::SOFI_TRADER_PRECOMMIT_BODY,
+        class::SOFI_DLV_POLICY_FULFILLMENT_BODY,
+        class::SOFI_TRADER_FULFILLMENT_BODY,
+        class::SOFI_RESOLUTION_CLAIM,
+        class::SOFI_POLICY_FULFILLMENT_AUX_REF,
+        class::SOFI_PRE_E_CLOSURE_INDEX,
+        class::SOFI_SIGNED_OBJECT,
+        class::SOFI_SETUP_BODY,
+        class::ECONOMIC_ROOT_CLAIM_BODY,
+        class::SOFI_SETTLEMENT_SWAP,
+        class::SOFI_SETTLEMENT_CLOSE,
+        class::SOFI_TRADER_CORE,
+        class::SOFI_DLV_CORE,
+        class::SOFI_SETTLEMENT_PREIMAGE,
+    ];
+    for class in spec_forbidden {
         assert!(
             matches!(
                 PreEClosureIndex::new(vec![ValidationRef::ContentAddr {

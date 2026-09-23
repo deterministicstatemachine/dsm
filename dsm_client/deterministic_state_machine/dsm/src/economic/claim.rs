@@ -254,6 +254,15 @@ pub fn verify_manifest_provenance_index(
     witness: &EconomicTransitionWitness,
 ) -> Result<(), CcbError> {
     let derived = witness.derived_provenance_index();
+    // SoFi §18.4: direct external provenance per transition is bounded; a
+    // known bound violation is Invalid, and the witness alone establishes it.
+    let max = crate::sofi::wire::MAX_PROVENANCE_FANOUT;
+    if derived.len() > max {
+        return Err(CcbError::ProvenanceFanoutExceeded {
+            count: derived.len(),
+            max,
+        });
+    }
     if manifest.provenance_evidence_addrs() != derived.as_slice() {
         return Err(CcbError::ManifestProvenanceIndexMismatch {
             manifest_count: manifest.provenance_evidence_addrs().len(),

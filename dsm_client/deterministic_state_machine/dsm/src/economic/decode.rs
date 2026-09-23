@@ -17,12 +17,11 @@
 //! manifest (`0x001B` / `0x001C`) are the register and admission layer and
 //! decode with that work, not here.
 
-use crate::economic::issuance::IssuanceAuthorizationBody;
 use crate::ccb::decode::{invalid, Cursor, DecodeError};
 use crate::ccb::{class, CcbObject};
 use crate::economic::credit::{
-    CreditSource, CreditSourceAuthorizedIssuance, CreditSourceNativeReserveRelease,
-    CreditSourceValidatedPeerDebit, CreditSourceVerifiedOfflineReentry,
+    CreditSource, CreditSourceGenesisRelease, CreditSourceNativeReserveRelease,
+    CreditSourceValidatedPeerDebit,
 };
 use crate::economic::mutation::EconomicLeafMutation;
 use crate::economic::state::{EconomicBalanceState, EconomicConsumedSourceState, EconomicLeafState};
@@ -154,41 +153,6 @@ pub fn decode_admission_manifest(bytes: &[u8]) -> Result<EconomicAdmissionManife
 }
 
 /// Decode a standalone `EconomicLeafState` — one of classes `0x001F`–`0x0022`.
-/// Decode a standalone `IssuanceAuthorizationBody` — class `0x0029`, schema 1.
-///
-/// Strict on both ends: the envelope must be exactly this class and schema,
-/// and the bytes must be fully consumed. The caller additionally requires
-/// re-encode equality, because the signature covers BYTES — two encodings
-/// carrying one authorization would be two authorizations.
-pub fn decode_issuance_authorization_body(
-    bytes: &[u8],
-) -> Result<IssuanceAuthorizationBody, DecodeError> {
-    let mut c = Cursor { b: bytes, i: 0 };
-    c.envelope(
-        IssuanceAuthorizationBody::CLASS,
-        IssuanceAuthorizationBody::SCHEMA,
-    )?;
-    let policy_commit = c.digest32()?;
-    let issuer_genesis = c.digest32()?;
-    let issuer_devid = c.digest32()?;
-    let issuer_economic_position = c.u64()?;
-    let recipient_operation_digest = c.digest32()?;
-    let amount = c.u64()?;
-    if c.i != c.b.len() {
-        return Err(DecodeError::TrailingBytes {
-            extra: c.b.len() - c.i,
-        });
-    }
-    Ok(IssuanceAuthorizationBody {
-        policy_commit,
-        issuer_genesis,
-        issuer_devid,
-        issuer_economic_position,
-        recipient_operation_digest,
-        amount,
-    })
-}
-
 pub fn decode_leaf_state(bytes: &[u8]) -> Result<EconomicLeafState, DecodeError> {
     let mut c = Cursor { b: bytes, i: 0 };
     let s = read_leaf_state(&mut c)?;
@@ -293,24 +257,21 @@ fn read_leaf_state(c: &mut Cursor<'_>) -> Result<EconomicLeafState, DecodeError>
                 },
             ))
         }
+        class::CREDIT_SOURCE_GENESIS_RELEASE => {
+            c.envelope(
+                CreditSourceGenesisRelease::CLASS,
+                CreditSourceGenesisRelease::SCHEMA,
+            )?;
+            Ok(CreditSource::GenesisRelease(CreditSourceGenesisRelease {
+                credit_mutation_index: c.u32()?,
+            }))
+        }
         got => Err(DecodeError::WrongClass { got }),
     }
 }
 
 fn read_credit_source(c: &mut Cursor<'_>) -> Result<CreditSource, DecodeError> {
     match c.peek_class()? {
-        class::CREDIT_SOURCE_AUTHORIZED_ISSUANCE => {
-            c.envelope(
-                CreditSourceAuthorizedIssuance::CLASS,
-                CreditSourceAuthorizedIssuance::SCHEMA,
-            )?;
-            Ok(CreditSource::AuthorizedIssuance(
-                CreditSourceAuthorizedIssuance {
-                    credit_mutation_index: c.u32()?,
-                    issuance_authorization_addr: c.digest32()?,
-                },
-            ))
-        }
         class::CREDIT_SOURCE_VALIDATED_PEER_DEBIT => {
             c.envelope(
                 CreditSourceValidatedPeerDebit::CLASS,
@@ -338,30 +299,6 @@ fn read_credit_source(c: &mut Cursor<'_>) -> Result<CreditSource, DecodeError> {
                     reserve_id: c.digest32()?,
                     generation: c.u64()?,
                     release_evidence_addr: c.digest32()?,
-                },
-            ))
-        }
-        class::CREDIT_SOURCE_VERIFIED_OFFLINE_REENTRY => {
-            c.envelope(
-                CreditSourceVerifiedOfflineReentry::CLASS,
-                CreditSourceVerifiedOfflineReentry::SCHEMA,
-            )?;
-            let credit_mutation_index = c.u32()?;
-            let prior_boundary_id = c.digest32()?;
-            let unload_boundary_id = c.digest32()?;
-            if prior_boundary_id == unload_boundary_id {
-                return Err(DecodeError::Invalid(
-                    "offline reentry: prior_boundary_id equals unload_boundary_id — the \
-                     consumed checkpoint must be the predecessor"
-                        .to_string(),
-                ));
-            }
-            Ok(CreditSource::VerifiedOfflineReentry(
-                CreditSourceVerifiedOfflineReentry {
-                    credit_mutation_index,
-                    prior_boundary_id,
-                    unload_boundary_id,
-                    branch_evidence_addr: c.digest32()?,
                 },
             ))
         }

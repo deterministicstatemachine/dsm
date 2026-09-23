@@ -9,7 +9,7 @@
 //! ## Layout
 //!
 //! - [`infra`]      — cross-cutting plumbing (admin, hardening, rate-limit, network-config)
-//! - [`identity`]   — device & genesis identity (authenticate, device_api, genesis, devtree, tips)
+//! - [`identity`]   — genesis identity (authenticate, genesis, devtree, tips); device directory entries are ordinary keyed cells
 //! - [`objects`]    — raw byte storage (store, list, bytecommit, immutable)
 //! - [`cells`]      — keyed cells and indexes: bytes in, bytes out
 //! - [`vault`]      — DLV / policy / recovery / paidk

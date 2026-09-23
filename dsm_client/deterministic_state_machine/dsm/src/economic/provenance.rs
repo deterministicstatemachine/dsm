@@ -447,7 +447,7 @@ pub enum ProvenanceError {
     /// A `0x0023` authorized-issuance credit failed one of the conjuncts:
     /// the policy bytes, the signed body, the V1 support matrix, or the
     /// k-of-N threshold over the exact issuance.
-    AuthorizedIssuanceInvalid(String),
+    GenesisReleaseInvalid(String),
     /// A DLV successor's leg fails the applicable token policy — the SoFi
     /// Def 4.1 / Req 4.4 / Req 4.6 conjunct on every market movement and
     /// every release. The anchored bytes did not re-hash to the committed
@@ -502,8 +502,6 @@ pub enum ProvenanceError {
     /// The consumed-source leaf names a different consumer than this
     /// transition.
     ConsumedByAnotherOperation,
-    /// The source is defined but its semantics land in a later cut.
-    NotYetImplemented { class: u16 },
     /// The descriptor names a reserve other than THE canonical one for the
     /// claimant's authenticated network. The stop-the-line check: without it,
     /// an invented reserve id is a second genesis supply.
@@ -539,8 +537,8 @@ pub enum ProvenanceError {
 impl core::fmt::Display for ProvenanceError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::AuthorizedIssuanceInvalid(m) => {
-                write!(f, "authorized-issuance credit is invalid: {m}")
+            Self::GenesisReleaseInvalid(m) => {
+                write!(f, "genesis-release credit is invalid: {m}")
             }
             Self::MarketLegPolicy(m) => {
                 write!(f, "market leg token policy: {m}")
@@ -614,10 +612,6 @@ impl core::fmt::Display for ProvenanceError {
                 f,
                 "credit provenance: the consumed-source leaf names a different consuming operation"
             ),
-            Self::NotYetImplemented { class } => write!(
-                f,
-                "credit provenance: source class {class:#06x} has no acceptance semantics yet"
-            ),
             Self::NotTheCanonicalReserve { .. } => write!(
                 f,
                 "credit provenance: not THE canonical native ERA reserve for the claimant's \
@@ -673,22 +667,25 @@ impl core::fmt::Display for ProvenanceError {
 
 impl std::error::Error for ProvenanceError {}
 
-/// `SourceId` for a policy-authorized issuance.
+/// `SourceId` for a genesis release: one per creation.
 ///
-/// Derived only from authenticated coordinates, all of which the verifier has
-/// already required to equal the operation and the position under validation.
-/// The position and the operation digest are what make it unique per issuance
-/// event rather than per (asset, amount) pair.
-pub fn authorized_issuance_source_id(
-    body: &crate::economic::issuance::IssuanceAuthorizationBody,
+/// `H(tag ‖ 0x00 ‖ creator_genesis ‖ creator_devid ‖ u64_be(creator_position) ‖
+/// policy_commit)`. Every input is authenticated: the creator's coordinates
+/// are the position under validation, and `policy_commit` is the accepted
+/// `CreateToken`'s own. A token is created once, at one position of one
+/// lineage, so its release has exactly one source id.
+pub fn genesis_release_source_id(
+    creator_genesis: &[u8; 32],
+    creator_devid: &[u8; 32],
+    creator_economic_position: u64,
+    policy_commit: &[u8; 32],
 ) -> [u8; 32] {
     let mut h =
-        dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_ECON_SOURCE_AUTHORIZED_ISSUANCE);
-    h.update(&body.policy_commit);
-    h.update(&body.issuer_genesis);
-    h.update(&body.issuer_devid);
-    h.update(&body.issuer_economic_position.to_be_bytes());
-    h.update(&body.recipient_operation_digest);
+        dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_ECON_SOURCE_GENESIS_RELEASE);
+    h.update(creator_genesis);
+    h.update(creator_devid);
+    h.update(&creator_economic_position.to_be_bytes());
+    h.update(policy_commit);
     *h.finalize().as_bytes()
 }
 
@@ -878,167 +875,17 @@ pub fn verify_credit_source(
         })?;
 
     let funded = match source {
-        // ── 0x0023: POLICY-AUTHORIZED ISSUANCE (V1) ───────────────────────
+        // ── 0x005F: GENESIS RELEASE (SoFi §51) ───────────────────────────
         //
-        // Answers WHO HAD THE RIGHT TO CREATE THESE UNITS, from the committed
-        // token policy rather than the issuer's assertion.
-        //
-        // It does NOT answer whether the units are backed. There is no backing
-        // condition in the policy vocabulary to enforce, so "authorized" must
-        // never be read as "collateralized" — here or anywhere downstream.
-        CreditSource::AuthorizedIssuance(d) => {
-            let invalid = |m: String| ProvenanceError::AuthorizedIssuanceInvalid(m);
-            let op = ctx
-                .verified_operation
-                .ok_or_else(|| invalid("issuance requires the verified operation".into()))?;
-
-            // 1. The exact accepted operation's own issuance coordinates. Read
-            //    from the AUTHENTICATED successor, never from the descriptor.
-            let (op_policy_commit, op_amount, op_kind) = match op {
-                // THE AUTHORIZATION NEVER RIDES INSIDE THE OPERATION IT
-                // AUTHORIZES — and since the producer cut this is structural,
-                // not a check: Mint has no authorization fields at all. The
-                // `0x0029` signatures cover this operation's digest and live
-                // only in the evidence bundle the descriptor addresses.
-                crate::types::operations::Operation::Mint {
-                    policy_commit,
-                    amount,
-                    ..
-                } => (*policy_commit, amount.value(), "mint"),
-                // Reachable only if supply-at-creation is later enabled; today
-                // the route, the write-set table and the accepting layer all
-                // refuse it. Handled here so the arm covers the operations the
-                // descriptor may legitimately accompany rather than silently
-                // depending on which of the three refuses first.
-                crate::types::operations::Operation::CreateToken {
-                    policy_commit,
-                    initial_supply,
-                    ..
-                } => (*policy_commit, initial_supply.value(), "create_token"),
-                _ => {
-                    return Err(invalid(
-                        "an authorized-issuance credit requires a Mint or CreateToken".into(),
-                    ))
-                }
-            };
-            if op_amount == 0 {
-                return Err(invalid("issuance of zero units authorizes nothing".into()));
-            }
-
-            // 2. The evidence bundle, by exact content address.
-            let bundle_bytes = resolver
-                .immutable_evidence(
-                    crate::common::domain_tags::TAG_DSM_ISSUANCE_AUTHORIZATION_EVIDENCE,
-                    &d.issuance_authorization_addr,
-                )
-                .map_err(ProvenanceError::OwnerLineage)?;
-            // The descriptor's address is the INNER content identity —
-            // `H_dom(namespace, payload)` — the same form every other object
-            // in the evidence DAG (witness, manifest, authority, successor
-            // evidence) is addressed by, and the form the resolver's fetch
-            // path derives its store key from. The outer storage-object addr
-            // exists too, but an arm that committed to it would name an
-            // address no resolver can dereference.
-            if crate::storage_object::immutable_inner(
-                crate::common::domain_tags::TAG_DSM_ISSUANCE_AUTHORIZATION_EVIDENCE,
-                &bundle_bytes,
-            ) != d.issuance_authorization_addr
-            {
-                return Err(invalid(
-                    "issuance evidence bytes do not hash to the descriptor's address".into(),
-                ));
-            }
-            let ev = crate::economic::issuance_authorization_evidence::
-                decode_issuance_authorization_evidence(&bundle_bytes)
-                .map_err(invalid)?;
-
-            // 3. The policy bytes ARE the policy: re-hash them to the commit
-            //    the OPERATION names. Nothing is fetched and nothing mutable
-            //    is trusted — the commit is the content hash.
-            let recomputed = crate::crypto::blake3::domain_hash_bytes(
-                crate::common::domain_tags::TAG_DSM_POLICY,
-                &ev.canonical_policy_bytes,
-            );
-            if recomputed != op_policy_commit {
-                return Err(invalid(
-                    "the carried policy bytes do not hash to the operation's policy commit".into(),
-                ));
-            }
-
-            // 4. The signed body states THIS issuance, on THIS lineage, at
-            //    THIS write-once position. Position + operation digest are the
-            //    non-reuse mechanism: the same bytes replayed at another
-            //    position carry the earlier one and fail here.
-            let b = &ev.body;
-            if b.policy_commit != op_policy_commit
-                || b.amount != op_amount
-                || b.issuer_genesis != *ctx.genesis
-                || b.issuer_devid != *ctx.device_id
-            {
-                return Err(invalid(
-                    "the issuance authorization states a different issuance".into(),
-                ));
-            }
-            if b.issuer_economic_position != ctx.economic_position {
-                return Err(invalid(
-                    "the issuance authorization is for a different economic position".into(),
-                ));
-            }
-            if b.recipient_operation_digest != witness.operation_digest {
-                return Err(invalid(
-                    "the issuance authorization is for a different operation".into(),
-                ));
-            }
-
-            // 5. The policy's issuance conditions, decided by the V1 support
-            //    matrix. Anything not independently foreign-verifiable refuses
-            //    rather than being ignored.
-            let policy =
-                crate::economic::issuance::parse_issuance_policy(&ev.canonical_policy_bytes)
-                    .map_err(|e| invalid(format!("issuance policy: {e}")))?;
-            crate::economic::issuance::check_issuance_permitted(
-                &policy,
-                op_kind,
-                op_amount,
-                ctx.device_id,
-            )
-            .map_err(|e| invalid(format!("issuance policy: {e}")))?;
-
-            // 6. k of N DISTINCT policy-named signers over the exact body.
-            //    Keys come from the POLICY; a key presented in the bundle that
-            //    the policy does not name is not a signer, however valid its
-            //    signature.
-            let digest = b
-                .signing_digest()
-                .map_err(|e| invalid(format!("issuance signing digest: {e}")))?;
-            let mut satisfied: Vec<usize> = Vec::new();
-            for (pk, sig) in &ev.signatures {
-                let Some(idx) = policy.signers.iter().position(|s| s == pk) else {
-                    continue;
-                };
-                if satisfied.contains(&idx) {
-                    continue;
-                }
-                if matches!(
-                    crate::crypto::sphincs::sphincs_verify(pk, &digest, sig),
-                    Ok(true)
-                ) {
-                    satisfied.push(idx);
-                }
-            }
-            if (satisfied.len() as u32) < policy.threshold {
-                return Err(invalid(format!(
-                    "issuance authorized by {} distinct policy signer(s), threshold is {}",
-                    satisfied.len(),
-                    policy.threshold
-                )));
-            }
-
-            FundedCredit {
-                source_id: authorized_issuance_source_id(b),
-                policy_commit: op_policy_commit,
-                amount: op_amount,
-            }
+        // The creator's credit of a native token's whole genesis supply, in
+        // the transition that creates the token. Established from the
+        // accepted `CreateToken` and the policy its `policy_commit` names,
+        // fetched under `TAG_DSM_POLICY` and re-hashed to that commit: the
+        // credit goes to the creating device, its asset is the new token, its
+        // amount is exactly the policy's genesis supply, and the policy's
+        // release rule is `AllAtCreation`. No signer authorizes it.
+        CreditSource::GenesisRelease(_) => {
+            verify_genesis_release(ctx, resolver, credit_index, credit)?
         }
 
         CreditSource::ValidatedPeerDebit(p) => {
@@ -1126,10 +973,6 @@ pub fn verify_credit_source(
                 policy_commit: debit_asset,
                 amount: debit_amount,
             }
-        }
-
-        CreditSource::VerifiedOfflineReentry(_) => {
-            return Err(ProvenanceError::NotYetImplemented { class: 0x0028 })
         }
 
         CreditSource::NativeReserveRelease(d) => {
@@ -1250,7 +1093,7 @@ fn requires_consumed_source_record(source: &CreditSource) -> bool {
     // over `CreditSource` in this module forces an arm; this one now does too,
     // and the permissive answer has to be written down to be chosen.
     match source {
-        CreditSource::ValidatedPeerDebit(_) | CreditSource::VerifiedOfflineReentry(_) => true,
+        CreditSource::ValidatedPeerDebit(_) => true,
         CreditSource::NativeReserveRelease(_) => false,
         // The remaining arms answer `false`, exactly as the allowlist did.
         // Each is bound to a coordinate that cannot be replayed: a
@@ -1259,7 +1102,8 @@ fn requires_consumed_source_record(source: &CreditSource) -> bool {
         // proven against. Listing
         // them is the point — the answer is now written down rather than
         // inherited from whichever arm a `matches!` happened to omit.
-        CreditSource::AuthorizedIssuance(_) => false,
+        // Bound to the one `CreateToken` that carries it: creation happens once.
+        CreditSource::GenesisRelease(_) => false,
     }
 }
 

@@ -1524,35 +1524,11 @@ impl BilateralBleHandler {
             }
         }
 
-        // Ensure we have a verified contact and relationship. Allow a special-case
-        // loopback path when the counterparty is the local device (test harnesses).
+        // Ensure we have a verified contact and relationship. A self-device
+        // counterparty takes the same path as any other: a real contact record,
+        // or a refusal. There is no test-only contact (owner, 2026-09-23).
         if counterparty_device_id == self.device_id {
-            // Loopback allowance is strictly for tests; never enabled in production builds.
-            if cfg!(test) {
-                let mut mgr = self.bilateral_tx_manager.write().await;
-                if !mgr.has_verified_contact(&counterparty_device_id) {
-                    let contact = dsm::types::contact_types::DsmVerifiedContact {
-                        alias: "self".to_string(),
-                        device_id: self.device_id,
-                        genesis_hash: mgr.local_genesis_hash(),
-                        public_key: vec![7u8; 32], // deterministic loopback test key
-                        genesis_material: vec![],
-                        chain_tip: None,
-                        chain_tip_smt_proof: None,
-                        genesis_verified_online: true,
-                        verified_at_commit_height: 1,
-                        added_at_commit_height: 1,
-                        last_updated_commit_height: 1,
-                        verifying_storage_nodes: vec![],
-                        ble_address: None,
-                    };
-                    let _ = mgr.add_verified_contact(contact);
-                }
-                if mgr.get_relationship(&counterparty_device_id).is_none() {
-                    let _ = mgr.establish_relationship(&counterparty_device_id).await;
-                }
-                drop(mgr);
-            } else {
+            {
                 let mgr = self.bilateral_tx_manager.read().await;
                 let has_contact = mgr.has_verified_contact(&counterparty_device_id);
                 drop(mgr);

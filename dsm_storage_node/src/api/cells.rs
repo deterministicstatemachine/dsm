@@ -41,8 +41,10 @@ use dsm_sdk::util::text_id;
 const NAMESPACE_HEADER: &str = "x-namespace";
 const MAX_NAMESPACE_BYTES: usize = 128;
 /// A value held at a key. Objects live in the immutable store; a cell holds
-/// an object's envelope or a small claim, never a bulk payload.
-const MAX_CELL_VALUE_BYTES: usize = 256 * 1024;
+/// an object's envelope or a small claim, never a bulk payload. Writers put a
+/// route entry at each seat (storage spec §9), which wraps the value with its
+/// chain, so the limit is Core's largest entry, not its largest value.
+const MAX_CELL_VALUE_BYTES: usize = dsm::route_chain::MAX_ENTRY_BYTES;
 /// Keys one batch put may take in one transaction. A position is two.
 const MAX_BATCH_ENTRIES: usize = 16;
 const MAX_INDEX_PAGE: i64 = 256;

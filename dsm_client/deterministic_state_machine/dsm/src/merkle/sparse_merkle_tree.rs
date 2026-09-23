@@ -6,7 +6,8 @@
 //!
 //! Leaves are stored in a HashMap keyed by 256-bit relationship identifiers
 //! computed as `BLAKE3("DSM/smt-key\0" || min(DevID_A, DevID_B) || max(DevID_A, DevID_B))`.
-//! When the leaf count exceeds `max_leaves`, the oldest leaf is evicted (FIFO).
+//! A commitment tree never drops a leaf: every relationship head the device
+//! holds stays in the root it commits (MR-DSM-0116, MR-DSM-0121).
 //!
 //! Domain separation (normative, §2.2):
 //!   leaf:     `BLAKE3("DSM/smt-leaf\0" || value)`
@@ -19,7 +20,7 @@
 //!   `DEFAULT[0] = hash_smt_leaf(ZERO_LEAF)`
 //!   `DEFAULT[d+1] = hash_smt_node(DEFAULT[d], DEFAULT[d])  ∀d≥0`
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use crate::common::domain_tags::{TAG_SMT_LEAF, TAG_SMT_NODE};
@@ -115,7 +116,8 @@ pub fn get_bit(key: &[u8; 32], bit_index: usize) -> u8 {
 /// 256-bit relationship identifiers; values are 32-byte chain tip digests.
 #[derive(Clone)]
 pub struct SparseMerkleTree {
-    /// Sparse leaf storage: relationship key → chain tip. Bounded by `max_leaves`.
+    /// Sparse leaf storage: relationship key → chain tip. Unbounded: the root
+    /// commits every leaf the tree holds.
     leaves: HashMap<[u8; 32], [u8; 32]>,
     /// Precomputed default hash at each tree level.
     /// Index 0 = root level default, index 256 = leaf level default.
@@ -124,15 +126,11 @@ pub struct SparseMerkleTree {
     defaults: Box<[[u8; 32]; 257]>,
     /// Current root hash.
     root: [u8; 32],
-    /// Maximum number of stored leaves before FIFO eviction.
-    max_leaves: usize,
-    /// Eviction order (front = oldest key).
-    eviction_order: VecDeque<[u8; 32]>,
 }
 
 impl SparseMerkleTree {
-    /// Create a new Per-Device SMT with the given maximum leaf count.
-    pub fn new(max_leaves: usize) -> Self {
+    /// Create an empty Per-Device SMT.
+    pub fn new() -> Self {
         let mut defaults = Box::new([[0u8; 32]; 257]);
 
         // Level 256 = leaf level: hash_smt_leaf(ZERO_LEAF)
@@ -150,20 +148,15 @@ impl SparseMerkleTree {
             leaves: HashMap::new(),
             defaults,
             root,
-            max_leaves,
-            eviction_order: VecDeque::new(),
         }
     }
 
     /// Build a tree holding exactly `leaves`, computing the root once. A
-    /// later duplicate key replaces an earlier one. No capacity: nothing is
-    /// evicted.
+    /// later duplicate key replaces an earlier one.
     pub fn from_leaves(leaves: impl IntoIterator<Item = ([u8; 32], [u8; 32])>) -> Self {
-        let mut tree = Self::new(usize::MAX);
+        let mut tree = Self::new();
         for (key, value) in leaves {
-            if tree.leaves.insert(key, value).is_none() {
-                tree.eviction_order.push_back(key);
-            }
+            tree.leaves.insert(key, value);
         }
         tree.root = tree.compute_subtree_hash(0);
         tree
@@ -174,23 +167,7 @@ impl SparseMerkleTree {
     /// The key must be a 256-bit relationship identifier computed via
     /// `compute_smt_key(DevID_A, DevID_B)`.
     pub fn update_leaf(&mut self, key: &[u8; 32], value: &[u8; 32]) -> Result<(), &'static str> {
-        // Remove old position in eviction order if key already exists
-        if self.leaves.contains_key(key) {
-            self.eviction_order.retain(|k| k != key);
-        }
-
-        // Insert / update
         self.leaves.insert(*key, *value);
-        self.eviction_order.push_back(*key);
-
-        // Evict oldest if over capacity
-        while self.leaves.len() > self.max_leaves {
-            if let Some(oldest) = self.eviction_order.pop_front() {
-                self.leaves.remove(&oldest);
-            } else {
-                break;
-            }
-        }
 
         // Recompute root from all leaves
         self.root = self.compute_subtree_hash(0);
@@ -384,18 +361,6 @@ impl SparseMerkleTree {
     /// Number of non-default leaves currently stored.
     pub fn leaf_count(&self) -> usize {
         self.leaves.len()
-    }
-
-    /// Get statistics: (current_leaf_count, max_leaves).
-    pub fn cache_stats(&self) -> (usize, usize) {
-        (self.leaves.len(), self.max_leaves)
-    }
-
-    /// Clear all leaves (for memory pressure recovery).
-    pub fn clear_cache(&mut self) {
-        self.leaves.clear();
-        self.eviction_order.clear();
-        self.root = self.defaults[0];
     }
 
     /// Atomic SMT-Replace: update leaf from old value to `new_value`,
@@ -695,45 +660,6 @@ mod tests {
         let proof = smt.get_inclusion_proof(&key, 256).unwrap();
         assert_eq!(proof.value, Some(value2));
         assert!(smt.verify_inclusion_proof(&proof));
-    }
-
-    #[test]
-    fn cache_eviction_fifo() {
-        let mut smt = SparseMerkleTree::new(3);
-
-        // Insert 5 leaves — oldest 2 should be evicted
-        for i in 0..5u8 {
-            let mut key = [0u8; 32];
-            key[0] = i;
-            let value = [i; 32];
-            smt.update_leaf(&key, &value).unwrap();
-        }
-
-        let (size, max) = smt.cache_stats();
-        assert_eq!(size, 3);
-        assert_eq!(max, 3);
-
-        // Newest 3 (keys 2, 3, 4) should have valid proofs
-        for i in 2..5u8 {
-            let mut key = [0u8; 32];
-            key[0] = i;
-            let proof = smt.get_inclusion_proof(&key, 256);
-            assert!(proof.is_ok(), "Proof should exist for key {}", i);
-            assert!(smt.verify_inclusion_proof(&proof.unwrap()));
-        }
-
-        // Oldest 2 (keys 0, 1) should be evicted — proof returns ZERO_LEAF
-        for i in 0..2u8 {
-            let mut key = [0u8; 32];
-            key[0] = i;
-            let proof = smt.get_inclusion_proof(&key, 256).unwrap();
-            assert_eq!(
-                proof.value,
-                Some(ZERO_LEAF),
-                "Evicted key {} should produce ZERO_LEAF proof",
-                i
-            );
-        }
     }
 
     #[test]

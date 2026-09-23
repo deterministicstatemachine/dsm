@@ -89,6 +89,9 @@ pub mod discovery;
 pub mod storage_io;
 pub mod storage_node_health;
 pub mod storage_node_sdk;
+pub mod route_seats;
+pub mod sofi_flow;
+pub mod device_directory;
 pub mod storage_set; // canonical storage-set identity + catalog (the anchor chooses the set; config resolves it)
 
 // Chain tip synchronization and blockchain integration
@@ -166,10 +169,8 @@ pub use token_mpc_sdk::TokenMpcSDK;
 // If chain integration is required, implement a protobuf-native transport and reintroduce here.
 pub use runtime_config::RuntimeConfig;
 #[cfg(feature = "storage")]
-pub use storage_sync_sdk::StorageSyncSdk;
 #[cfg(feature = "storage")]
 pub mod genesis_publisher;
 #[cfg(feature = "storage")]
-pub mod storage_sync_sdk;
 pub use b0x_sdk::B0xSDK;
 pub use unilateral_ops_sdk::UnilateralOpsSDK;

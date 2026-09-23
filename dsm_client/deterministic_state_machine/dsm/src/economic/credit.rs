@@ -44,24 +44,6 @@
 
 use crate::ccb::{class, push_digest32, push_envelope, push_u32, push_u64, CcbError, CcbObject};
 
-/// `0x0023` schema 1 — funded by an authorized issuance transition.
-///
-/// The authorization itself is addressed rather than inline: class `0x0029`
-/// (`IssuanceAuthorizationBody`) defines the issuance predicate, and the
-/// descriptor names the evidence bundle carrying it by INNER content identity.
-/// Inlining the bundle here would put one fact in two encodings; the arm
-/// fetches and re-verifies the addressed bytes instead.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CreditSourceAuthorizedIssuance {
-    pub credit_mutation_index: u32,
-    pub issuance_authorization_addr: [u8; 32],
-}
-
-impl CcbObject for CreditSourceAuthorizedIssuance {
-    const CLASS: u16 = class::CREDIT_SOURCE_AUTHORIZED_ISSUANCE;
-    const SCHEMA: u16 = 1;
-}
-
 /// `0x0025` schema 1 — funded by a peer's validated debit.
 ///
 /// The peer coordinates are members because the debit must be locatable in a
@@ -79,28 +61,6 @@ pub struct CreditSourceValidatedPeerDebit {
 
 impl CcbObject for CreditSourceValidatedPeerDebit {
     const CLASS: u16 = class::CREDIT_SOURCE_VALIDATED_PEER_DEBIT;
-    const SCHEMA: u16 = 1;
-}
-
-/// `0x0028` schema 1 — funded by value returning from the offline regime.
-///
-/// `prior_boundary_id` is the **checkpoint being consumed**, and it is the
-/// anti-fork field. Deriving the source from the terminal offline state
-/// instead would be an inflation bug: two forks of one branch derive two
-/// distinct source ids and both reenter, so 100 exported returns as 130. Both
-/// forks satisfy "complete valid branch", because the offline protocol does
-/// not promise global branch uniqueness. Consuming the PRIOR checkpoint makes
-/// the second sibling collide on a leaf that is no longer ZERO.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CreditSourceVerifiedOfflineReentry {
-    pub credit_mutation_index: u32,
-    pub prior_boundary_id: [u8; 32],
-    pub unload_boundary_id: [u8; 32],
-    pub branch_evidence_addr: [u8; 32],
-}
-
-impl CcbObject for CreditSourceVerifiedOfflineReentry {
-    const CLASS: u16 = class::CREDIT_SOURCE_VERIFIED_OFFLINE_REENTRY;
     const SCHEMA: u16 = 1;
 }
 
@@ -128,13 +88,31 @@ impl CcbObject for CreditSourceNativeReserveRelease {
     const SCHEMA: u16 = 1;
 }
 
-/// One funding statement for one credit. Closed: four arms, no `Custom`.
+/// `0x005F` schema 1 — the creator's credit of a native token's whole genesis
+/// supply, released in the transition that creates the token
+/// (`ReleaseRule::AllAtCreation`, SoFi §51).
+///
+/// Deliberately carries NO asset, NO amount and NO address: the asset is the
+/// accepted `CreateToken`'s own `policy_commit`, the policy bytes are fetched
+/// under that commit (`H(TAG_DSM_POLICY, bytes)`), and the amount must equal
+/// the genesis supply those bytes commit. A copy here would be a second place
+/// for one fact to disagree with itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreditSourceGenesisRelease {
+    pub credit_mutation_index: u32,
+}
+
+impl CcbObject for CreditSourceGenesisRelease {
+    const CLASS: u16 = class::CREDIT_SOURCE_GENESIS_RELEASE;
+    const SCHEMA: u16 = 1;
+}
+
+/// One funding statement for one credit. Closed: three arms, no `Custom`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CreditSource {
-    AuthorizedIssuance(CreditSourceAuthorizedIssuance),
     ValidatedPeerDebit(CreditSourceValidatedPeerDebit),
-    VerifiedOfflineReentry(CreditSourceVerifiedOfflineReentry),
     NativeReserveRelease(CreditSourceNativeReserveRelease),
+    GenesisRelease(CreditSourceGenesisRelease),
 }
 
 impl CreditSource {
@@ -143,10 +121,9 @@ impl CreditSource {
     /// without a separate discriminant field.
     pub fn class(&self) -> u16 {
         match self {
-            Self::AuthorizedIssuance(_) => CreditSourceAuthorizedIssuance::CLASS,
             Self::ValidatedPeerDebit(_) => CreditSourceValidatedPeerDebit::CLASS,
-            Self::VerifiedOfflineReentry(_) => CreditSourceVerifiedOfflineReentry::CLASS,
             Self::NativeReserveRelease(_) => CreditSourceNativeReserveRelease::CLASS,
+            Self::GenesisRelease(_) => CreditSourceGenesisRelease::CLASS,
         }
     }
 
@@ -154,10 +131,9 @@ impl CreditSource {
     /// what makes the bijection expressible.
     pub fn credit_mutation_index(&self) -> u32 {
         match self {
-            Self::AuthorizedIssuance(s) => s.credit_mutation_index,
             Self::ValidatedPeerDebit(s) => s.credit_mutation_index,
-            Self::VerifiedOfflineReentry(s) => s.credit_mutation_index,
             Self::NativeReserveRelease(s) => s.credit_mutation_index,
+            Self::GenesisRelease(s) => s.credit_mutation_index,
         }
     }
 
@@ -169,10 +145,11 @@ impl CreditSource {
     /// description of provenance.
     pub fn external_evidence_addrs(&self) -> Vec<[u8; 32]> {
         match self {
-            Self::AuthorizedIssuance(s) => vec![s.issuance_authorization_addr],
             Self::ValidatedPeerDebit(s) => vec![s.acceptance_evidence_addr],
-            Self::VerifiedOfflineReentry(s) => vec![s.branch_evidence_addr],
             Self::NativeReserveRelease(s) => vec![s.release_evidence_addr],
+            // The policy it releases under is addressed by the operation's own
+            // policy_commit, not by the descriptor: nothing external to index.
+            Self::GenesisRelease(_) => vec![],
         }
     }
 
@@ -180,11 +157,6 @@ impl CreditSource {
     pub fn encode(&self) -> Result<Vec<u8>, CcbError> {
         let mut out = Vec::new();
         match self {
-            Self::AuthorizedIssuance(s) => {
-                push_envelope::<CreditSourceAuthorizedIssuance>(&mut out);
-                push_u32(&mut out, s.credit_mutation_index); // 1
-                push_digest32(&mut out, &s.issuance_authorization_addr); // 2
-            }
             Self::ValidatedPeerDebit(s) => {
                 push_envelope::<CreditSourceValidatedPeerDebit>(&mut out);
                 push_u32(&mut out, s.credit_mutation_index); // 1
@@ -201,15 +173,9 @@ impl CreditSource {
                 push_u64(&mut out, s.generation); // 3
                 push_digest32(&mut out, &s.release_evidence_addr); // 4
             }
-            Self::VerifiedOfflineReentry(s) => {
-                if s.prior_boundary_id == s.unload_boundary_id {
-                    return Err(CcbError::OfflineReentryBoundaryIsItsOwnParent);
-                }
-                push_envelope::<CreditSourceVerifiedOfflineReentry>(&mut out);
+            Self::GenesisRelease(s) => {
+                push_envelope::<CreditSourceGenesisRelease>(&mut out);
                 push_u32(&mut out, s.credit_mutation_index); // 1
-                push_digest32(&mut out, &s.prior_boundary_id); // 2
-                push_digest32(&mut out, &s.unload_boundary_id); // 3
-                push_digest32(&mut out, &s.branch_evidence_addr); // 4
             }
         }
         Ok(out)

@@ -1,25 +1,29 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Three-valued validation composition and `FulfillmentConformance(F)`, the
-//! predicate of Part IV §20.2, over what a verifier fetched.
+//! Binary validation composition and `FulfillmentConformance(F)`, the
+//! predicate of Part IV §20.2, over evidence in hand.
 //!
 //! Nothing here evaluates DLV policy, balances, canonicality, attempt liveness
 //! or storage finality of the route: that is `RouteValidation`. Conformance is
 //! the other predicate — whether `F` is the exercise of exactly its `P`, with
 //! the objects and storage facts the exercise depends on in hand — and it is
-//! `Valid`, `Invalid` with a reason, or `Unavailable` naming what is missing.
+//! `Valid` or `Invalid` with a reason.
 //!
-//! Two rules shape every arm below. A fact about bytes in hand (a signature
-//! that does not verify, a set that is not the canonical one, an attempt
-//! vector with a hole) is `Invalid`, permanently. A read that established
-//! nothing — an object not fetched, or fetched bytes that are not the object
-//! named — is `Unavailable`, never `Invalid`: a wrong copy is not evidence
-//! that no right copy exists, and a hostile relayer serving garbage must not
-//! be able to end a lineage with it. Registration supplies no truth value.
+//! Amendment S3: every Core predicate is binary and is evaluated only over
+//! evidence in hand. "Unavailable" is not a predicate value. It is the
+//! acquisition layer's report that a fetch has not completed, and its answer
+//! is a bounded retry there; Core is not called until the evidence it needs
+//! is complete. A read that established nothing — an object not fetched, or
+//! fetched bytes that are not the object named — is therefore never evidence:
+//! the acquisition layer discards it and fetches again, and a hostile relayer
+//! serving garbage cannot end a lineage with it. A fact about bytes in hand
+//! (a signature that does not verify, a set that is not the canonical one, an
+//! attempt vector with a hole) is `Invalid`, permanently. Registration
+//! supplies no truth value.
 
 use std::collections::BTreeMap;
 
-use super::arith::CellResolution;
+use crate::route_chain::CellFact;
 use super::derive::{self, policy_fulfillment_id, precommit_id};
 use super::publication::{recognize_setup, Signed};
 use super::signature::{verify_fulfillment, verify_precommit, SignatureError};
@@ -31,22 +35,19 @@ use crate::ccb::decode::policy_object_address;
 
 type D32 = [u8; 32];
 
-/// Static semantic validity. `Invalid` is permanent; `Unavailable` is not.
+/// Static semantic validity over evidence in hand. Binary (Amendment S3):
+/// `Invalid` is permanent, and there is no third value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Validation {
     Valid,
     Invalid,
-    Unavailable,
 }
 
 impl Validation {
-    /// The three-valued conjunction: any Invalid is Invalid; otherwise any
-    /// Unavailable is Unavailable; otherwise Valid. Missing evidence can never
-    /// mask a proven invalidity, and can never be read as one.
+    /// The conjunction: any Invalid is Invalid; otherwise Valid.
     pub fn and(self, other: Validation) -> Validation {
         match (self, other) {
             (Validation::Invalid, _) | (_, Validation::Invalid) => Validation::Invalid,
-            (Validation::Unavailable, _) | (_, Validation::Unavailable) => Validation::Unavailable,
             _ => Validation::Valid,
         }
     }
@@ -93,10 +94,69 @@ pub enum FulfillmentConformanceError {
     ClosureReferenceHasNoAddressingRule { object_class: u16 },
     /// The successor position does not exist.
     Wire(SofiWireError),
+    /// A referenced object's canonical bytes exceed `MAX_CLOSURE_OBJECT_BYTES`
+    /// (SoFi §18.4).
+    ClosureObjectTooLarge { bytes: usize },
+    /// P, F and the parent envelopes together exceed `MAX_AUTH_ENVELOPES`.
+    TooManyAuthEnvelopes { envelopes: usize },
+    /// The unique objects the validation uses exceed
+    /// `MAX_VALIDATION_FETCH_BYTES` in aggregate.
+    ValidationFetchTooLarge { bytes: usize },
 }
 
-/// What a verifier has not established, named so the caller can fetch it.
-/// None of these is a fact about F.
+/// The bounds of SoFi §18.4 that conformance evidence can exceed. A known
+/// bound violation is Invalid, never Unavailable. Every object here verified
+/// against the reference it was fetched for — the acquisition layer admits
+/// nothing else — so non-verifying candidates never count (§17.2, rule 5).
+///
+/// - each referenced object: at most `MAX_CLOSURE_OBJECT_BYTES`;
+/// - signed envelopes, P and F plus one per parent claim reference: at most
+///   `MAX_AUTH_ENVELOPES`;
+/// - the unique objects, deduplicated by `ValidationRef`: at most
+///   `MAX_VALIDATION_FETCH_BYTES` in aggregate.
+pub fn conformance_bounds(evidence: &ConformanceEvidence) -> Result<(), FulfillmentConformanceError> {
+    use super::wire::{MAX_AUTH_ENVELOPES, MAX_CLOSURE_OBJECT_BYTES, MAX_VALIDATION_FETCH_BYTES};
+
+    let setups_outside_closure = evidence.setups.iter().filter(|(setup_ref, _)| {
+        !evidence.closure.contains_key(&ValidationRef::Setup {
+            setup_ref: **setup_ref,
+        })
+    });
+    let mut total: usize = 0;
+    for bytes in evidence
+        .closure
+        .values()
+        .chain(setups_outside_closure.map(|(_, b)| b))
+    {
+        if bytes.len() > MAX_CLOSURE_OBJECT_BYTES {
+            return Err(FulfillmentConformanceError::ClosureObjectTooLarge { bytes: bytes.len() });
+        }
+        total = total.saturating_add(bytes.len());
+    }
+    if total > MAX_VALIDATION_FETCH_BYTES {
+        return Err(FulfillmentConformanceError::ValidationFetchTooLarge { bytes: total });
+    }
+
+    let parent_envelopes = evidence
+        .closure
+        .keys()
+        .filter(|r| {
+            matches!(
+                r,
+                ValidationRef::SingleRootClaim { .. } | ValidationRef::ConditionalClaim { .. }
+            )
+        })
+        .count();
+    let envelopes = 2 + parent_envelopes;
+    if envelopes > MAX_AUTH_ENVELOPES {
+        return Err(FulfillmentConformanceError::TooManyAuthEnvelopes { envelopes });
+    }
+    Ok(())
+}
+
+/// What the acquisition layer has not yet got for `FulfillmentConformance(F)`,
+/// named so it can fetch it. None of these is a fact about F, and none is a
+/// predicate value: the predicate is not evaluated until nothing is missing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConformanceMissing {
     /// The referenced P was not fetched, or the fetched object is not the P
@@ -120,12 +180,11 @@ pub enum ConformanceMissing {
     PriorAttempt { vault_id: D32, attempt: u64 },
 }
 
-/// `FulfillmentConformance(F)`.
+/// `FulfillmentConformance(F)`, over complete evidence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FulfillmentConformance {
     Valid,
     Invalid(FulfillmentConformanceError),
-    Unavailable(ConformanceMissing),
 }
 
 impl FulfillmentConformance {
@@ -134,7 +193,6 @@ impl FulfillmentConformance {
         match self {
             Self::Valid => Validation::Valid,
             Self::Invalid(_) => Validation::Invalid,
-            Self::Unavailable(_) => Validation::Unavailable,
         }
     }
 }
@@ -142,17 +200,18 @@ impl FulfillmentConformance {
 /// The exact `P` a fulfillment names, in the envelope a verifier fetched.
 pub type PrecommitEnvelope = Signed<TraderPrecommitBody>;
 
-/// What a verifier fetched for `FulfillmentConformance(F)`: objects that were
-/// `Stored` and cells as Core resolved them, nothing defaulted (G2). A key
-/// that is absent is a read that was not made or established nothing; the
-/// predicate answers `Unavailable` for it, never `Invalid`.
+/// Everything `FulfillmentConformance(F)` consumes, complete: objects that
+/// were `Stored` and cells as Core resolved them, nothing defaulted (G2). The
+/// acquisition layer builds this only once every item is in hand and every
+/// fetched object re-derives the reference it was fetched for; until then it
+/// reports what is missing ([`ConformanceMissing`]) and retries, and the
+/// predicate is not evaluated.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(test, derive(Default))]
 pub struct ConformanceEvidence {
     /// Item 1: the P that `F.precommit_id` names, in a fetched envelope.
-    pub precommit: Option<PrecommitEnvelope>,
+    pub precommit: PrecommitEnvelope,
     /// Items 3, 7 and 8: `P(E)`, fetched under `L(E)`.
-    pub preimage: Option<SettlementPreimage>,
+    pub preimage: SettlementPreimage,
     /// Item 8: the bytes fetched for each reference of `𝒞_E^pre` — `Stored`
     /// bytes for a content, claim or setup reference; the final bytes at
     /// `K_root(p)` for a conditional-claim reference.
@@ -160,9 +219,9 @@ pub struct ConformanceEvidence {
     /// Items 6 and 7: `Stored` setup objects (the signed envelope, Part II
     /// §10) by the `ρ` they were fetched for.
     pub setups: BTreeMap<D32, Vec<u8>>,
-    /// Item 5: the storage resolution of `K^(a)` of a vault, by `(v, a)`, for
-    /// the attempts `F` skips past.
-    pub prior_attempts: BTreeMap<(D32, u64), CellResolution>,
+    /// Item 5: the storage fact at `K^(a)` of a vault, by `(v, a)`, for the
+    /// attempts `F` skips past, as Core evaluated its route chains.
+    pub prior_attempts: BTreeMap<(D32, u64), CellFact>,
 }
 
 /// The canonical `G_j` identity for every DLV leg of `P`, in P's leg order.
@@ -368,6 +427,11 @@ pub fn fulfillment_conformance(
     fulfillment_signature: &[u8],
     evidence: &ConformanceEvidence,
 ) -> FulfillmentConformance {
+    // SoFi §18.4: a known bound violation is Invalid, and it is known from
+    // the evidence alone.
+    if let Err(bound) = conformance_bounds(evidence) {
+        return FulfillmentConformance::Invalid(bound);
+    }
     let mut items = Items::default();
 
     // Item 2, the half decidable from F alone: the envelope verifies under

@@ -10,7 +10,6 @@
 use super::core_sdk::{CoreSDK, TokenManagerTrait};
 use super::identity_sdk::IdentitySDK;
 #[cfg(feature = "storage")]
-use super::storage_sync_sdk::{StorageSyncSdk, WalletDisplayData};
 use super::token_sdk::TokenSDK;
 
 use dsm::types::error::DsmError;
@@ -1305,46 +1304,6 @@ impl WalletSDK {
         self.token_sdk
             .import_token_metadata(token_id, metadata)
             .await
-    }
-
-    #[cfg(feature = "storage")]
-    pub async fn get_wallet_display_data(
-        &self,
-        _storage_sync_sdk: &StorageSyncSdk,
-    ) -> Result<WalletDisplayData, DsmError> {
-        if *self.locked.read() {
-            return Err(DsmError::unauthorized(
-                "Wallet is locked",
-                None::<std::io::Error>,
-            ));
-        }
-        self.update_activity_sync();
-        // This function is only compiled when storage feature is enabled.
-        // Concrete storage sync semantics must be provided by WalletDisplayData
-        // and StorageSyncSdk implementors.
-        Err(DsmError::internal(
-            "Storage-backed wallet display data is not available in this binary",
-            None::<std::convert::Infallible>,
-        ))
-    }
-
-    #[cfg(feature = "storage")]
-    pub async fn sync_wallet_data(
-        &self,
-        _storage_sync_sdk: &StorageSyncSdk,
-    ) -> Result<(), DsmError> {
-        if *self.locked.read() {
-            return Err(DsmError::unauthorized(
-                "Wallet is locked",
-                None::<std::io::Error>,
-            ));
-        }
-        self.update_activity_sync();
-        // Deterministic hard-fail until concrete sync wiring is provided.
-        Err(DsmError::internal(
-            "Storage-backed wallet sync is not available in this binary",
-            None::<std::convert::Infallible>,
-        ))
     }
 
     #[cfg(test)]

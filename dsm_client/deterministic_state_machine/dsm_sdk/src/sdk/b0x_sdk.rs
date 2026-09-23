@@ -875,328 +875,6 @@ impl B0xSDK {
         Ok(tok)
     }
 
-    /// Register device; on 409, transparently request a token re-issue.
-    pub async fn register_device(&self) -> Result<(), DsmError> {
-        info!("🔐 Register device flow start");
-
-        let device_id_b32 = self.device_id.clone();
-        let device_identity = self.core_sdk.get_device_identity();
-
-        if device_identity.public_key.is_empty() {
-            return Err(DsmError::internal(
-                format!(
-                    "Invalid public key length (must be non-empty): {}",
-                    device_identity.public_key.len()
-                ),
-                None::<std::io::Error>,
-            ));
-        }
-
-        let genesis_hash = self.core_sdk.local_genesis_hash().await?;
-        if genesis_hash.len() != 32 {
-            return Err(DsmError::internal(
-                format!("Invalid genesis hash len: {}", genesis_hash.len()),
-                None::<std::io::Error>,
-            ));
-        }
-
-        let genesis_b32 = text_id::encode_base32_crockford(&genesis_hash);
-        // Mandatory Kyber identity binding (DSM beta, no legacy path). Self-registration.
-        let (kyber_public_key, kyber_binding_sig) =
-            crate::sdk::kyber_identity::build_local_kyber_identity_binding()?;
-        let req = dsm::types::proto::RegisterDeviceRequest {
-            device_id: text_id::decode_base32_crockford(&device_id_b32).unwrap_or_default(),
-            pubkey: device_identity.public_key.clone(),
-            genesis_hash: genesis_hash.clone(),
-            kyber_public_key,
-            kyber_binding_sig,
-        };
-        let mut body = Vec::with_capacity(req.encoded_len());
-        req.encode(&mut body).map_err(|e| {
-            DsmError::internal(
-                format!("RegisterDeviceRequest encode failed: {e}"),
-                None::<std::io::Error>,
-            )
-        })?;
-
-        // Hydrate any persisted tokens into memory map first
-        self.hydrate_tokens_from_disk().await;
-
-        let mut last_err: Option<DsmError> = None;
-
-        for endpoint in &self.storage_node_endpoints {
-            // Primary: /device/register
-            let url_register = format!("{}/api/v2/device/register", endpoint);
-
-            match self
-                .http_client
-                .post(&url_register)
-                .header("Content-Type", "application/protobuf")
-                .body(body.clone())
-                .send()
-                .await
-            {
-                Ok(resp) if resp.status().is_success() => {
-                    let bytes = resp.bytes().await.map_err(|e| {
-                        DsmError::internal(
-                            format!("RegisterDeviceResponse read failed: {e}"),
-                            None::<std::io::Error>,
-                        )
-                    })?;
-                    let parsed = dsm::types::proto::RegisterDeviceResponse::decode(bytes.as_ref())
-                        .map_err(|e| {
-                            DsmError::internal(
-                                format!("RegisterDeviceResponse decode failed: {e}"),
-                                None::<std::io::Error>,
-                            )
-                        })?;
-                    // store in per-endpoint map; token is bytes on wire, encode to Base32
-                    let token_b32 = text_id::encode_base32_crockford(&parsed.token);
-                    let cache_key = format!("{}|{}|{}", endpoint, genesis_b32, device_id_b32);
-                    self.tokens_by_endpoint
-                        .write()
-                        .await
-                        .insert(cache_key, token_b32.clone());
-                    if let Err(e) = crate::storage::client_db::store_auth_token(
-                        endpoint,
-                        &device_id_b32,
-                        &genesis_b32,
-                        &token_b32,
-                    ) {
-                        warn!("Persist token failed: {e}");
-                    }
-                    info!("✅ Registered at {}", endpoint);
-                    return Ok(());
-                }
-                Ok(resp) if resp.status() == reqwest::StatusCode::CONFLICT => {
-                    // Device already registered, ask server to issue/return the existing token.
-                    let url_token = format!("{}/api/v2/device/token", endpoint);
-                    match self
-                        .http_client
-                        .post(&url_token)
-                        .header("Content-Type", "application/protobuf")
-                        .body(body.clone())
-                        .send()
-                        .await
-                    {
-                        Ok(resp2) if resp2.status().is_success() => {
-                            let bytes = resp2.bytes().await.map_err(|e| {
-                                DsmError::internal(
-                                    format!("Token response read failed: {e}"),
-                                    None::<std::io::Error>,
-                                )
-                            })?;
-                            let parsed =
-                                dsm::types::proto::RegisterDeviceResponse::decode(bytes.as_ref())
-                                    .map_err(|e| {
-                                    DsmError::internal(
-                                        format!("Token response decode failed: {e}"),
-                                        None::<std::io::Error>,
-                                    )
-                                })?;
-                            let token_b32 = text_id::encode_base32_crockford(&parsed.token);
-                            let cache_key =
-                                format!("{}|{}|{}", endpoint, genesis_b32, device_id_b32);
-                            self.tokens_by_endpoint
-                                .write()
-                                .await
-                                .insert(cache_key, token_b32.clone());
-                            if let Err(e) = crate::storage::client_db::store_auth_token(
-                                endpoint,
-                                &device_id_b32,
-                                &genesis_b32,
-                                &token_b32,
-                            ) {
-                                warn!("Persist token failed: {e}");
-                            }
-                            info!("🔑 Token re-issued at {}", endpoint);
-                            return Ok(());
-                        }
-                        Ok(resp2) => {
-                            let status = resp2.status();
-                            let body_txt = resp2.text().await.unwrap_or_default();
-                            warn!(
-                                "Token re-issue failed at {}: status={} body={}",
-                                endpoint, status, body_txt
-                            );
-                            last_err = Some(DsmError::internal(
-                                format!(
-                                    "Registration failed: 409 and token re-issue failed (status={} body={})",
-                                    status, body_txt
-                                ),
-                                None::<std::io::Error>,
-                            ));
-                        }
-                        Err(e) => {
-                            warn!("Token re-issue transport failed at {}: {}", endpoint, e);
-                            last_err = Some(DsmError::internal(
-                                format!(
-                                    "Registration failed: 409 and token re-issue transport failed: {}",
-                                    e
-                                ),
-                                None::<std::io::Error>,
-                            ));
-                        }
-                    }
-                }
-                Ok(resp) => {
-                    let status = resp.status();
-                    let body_txt = resp.text().await.unwrap_or_default();
-                    last_err = Some(DsmError::internal(
-                        format!("Registration failed {}: {}", status, body_txt),
-                        None::<std::io::Error>,
-                    ));
-                }
-                Err(e) => {
-                    last_err = Some(DsmError::internal(
-                        format!("HTTP error: {e}"),
-                        None::<std::io::Error>,
-                    ));
-                }
-            }
-        }
-
-        Err(last_err.unwrap_or_else(|| {
-            DsmError::internal("No storage endpoints available", None::<std::io::Error>)
-        }))
-    }
-
-    /// Register on a specific endpoint; returns token string.
-    async fn register_device_on(&self, endpoint: &str) -> Result<String, DsmError> {
-        let device_id_b32 = self.device_id.clone();
-        let device_identity = self.core_sdk.get_device_identity();
-        let genesis_hash = self.core_sdk.local_genesis_hash().await?;
-        let genesis_b32 = text_id::encode_base32_crockford(&genesis_hash);
-        let device_id_raw = text_id::decode_base32_crockford(&device_id_b32).unwrap_or_default();
-
-        info!(
-            "register_device_on {}: device_id_raw.len={} pubkey.len={} genesis_hash.len={}",
-            endpoint,
-            device_id_raw.len(),
-            device_identity.public_key.len(),
-            genesis_hash.len(),
-        );
-
-        // Mandatory Kyber identity binding (DSM beta, no legacy path). Self-registration.
-        let (kyber_public_key, kyber_binding_sig) =
-            crate::sdk::kyber_identity::build_local_kyber_identity_binding()?;
-        let req = dsm::types::proto::RegisterDeviceRequest {
-            device_id: device_id_raw,
-            pubkey: device_identity.public_key.clone(),
-            genesis_hash: genesis_hash.clone(),
-            kyber_public_key,
-            kyber_binding_sig,
-        };
-        let mut body = Vec::with_capacity(req.encoded_len());
-        req.encode(&mut body).map_err(|e| {
-            DsmError::internal(
-                format!("RegisterDeviceRequest encode failed: {e}"),
-                None::<std::io::Error>,
-            )
-        })?;
-
-        let url_register = format!("{}/api/v2/device/register", endpoint);
-        let resp_ok = match self
-            .http_client
-            .post(&url_register)
-            .header("Content-Type", "application/protobuf")
-            .body(body.clone())
-            .send()
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                let msg = format!("register_device_on {} HTTP send failed: {e}", endpoint);
-                warn!("{}", msg);
-                return Err(DsmError::internal(msg, None::<std::io::Error>));
-            }
-        };
-
-        let status = resp_ok.status();
-        info!("register_device_on {}: HTTP status={}", endpoint, status);
-
-        if status.is_success() {
-            let bytes = resp_ok.bytes().await.map_err(|e| {
-                DsmError::internal(
-                    format!("RegisterDeviceResponse read failed: {e}"),
-                    None::<std::io::Error>,
-                )
-            })?;
-            let parsed = dsm::types::proto::RegisterDeviceResponse::decode(bytes.as_ref())
-                .map_err(|e| {
-                    DsmError::internal(
-                        format!("RegisterDeviceResponse decode failed: {e}"),
-                        None::<std::io::Error>,
-                    )
-                })?;
-            let token_b32 = text_id::encode_base32_crockford(&parsed.token);
-            if let Err(e) = crate::storage::client_db::store_auth_token(
-                endpoint,
-                &device_id_b32,
-                &genesis_b32,
-                &token_b32,
-            ) {
-                warn!("Persist token failed: {e}");
-            }
-            return Ok(token_b32);
-        }
-
-        if status == reqwest::StatusCode::CONFLICT {
-            let url_token = format!("{}/api/v2/device/token", endpoint);
-            let resp2 = self
-                .http_client
-                .post(&url_token)
-                .header("Content-Type", "application/protobuf")
-                .body(body)
-                .send()
-                .await
-                .map_err(|e| {
-                    DsmError::internal(format!("token HTTP error: {e}"), None::<std::io::Error>)
-                })?;
-            if !resp2.status().is_success() {
-                return Err(DsmError::internal(
-                    format!("token re-issue failed: status={}", resp2.status()),
-                    None::<std::io::Error>,
-                ));
-            }
-            let bytes = resp2.bytes().await.map_err(|e| {
-                DsmError::internal(
-                    format!("Token response read failed: {e}"),
-                    None::<std::io::Error>,
-                )
-            })?;
-            let parsed = dsm::types::proto::RegisterDeviceResponse::decode(bytes.as_ref())
-                .map_err(|e| {
-                    DsmError::internal(
-                        format!("Token response decode failed: {e}"),
-                        None::<std::io::Error>,
-                    )
-                })?;
-            let token_b32 = text_id::encode_base32_crockford(&parsed.token);
-            if let Err(e) = crate::storage::client_db::store_auth_token(
-                endpoint,
-                &device_id_b32,
-                &genesis_b32,
-                &token_b32,
-            ) {
-                warn!("Persist token failed: {e}");
-            }
-            return Ok(token_b32);
-        }
-
-        // Unexpected status — read body for diagnostics
-        let resp_body = resp_ok
-            .text()
-            .await
-            .unwrap_or_else(|_| "<unreadable>".into());
-        let msg = format!(
-            "register_device_on {} failed: status={} body={}",
-            endpoint, status, resp_body
-        );
-        warn!("{}", msg);
-        Err(DsmError::internal(msg, None::<std::io::Error>))
-    }
-
     // ------------------------------------------------------------------------
     // §16.6 reply window (Envelope v3 over HTTP)
     // ------------------------------------------------------------------------
@@ -1657,6 +1335,10 @@ impl B0xSDK {
         let mut last_err: Option<String> = None;
         let mut delivered = 0usize;
         let quorum = self.quorum_k.min(self.storage_node_endpoints.len()).max(1);
+        // DSM Amendment A7: a node only ever holds the sealed form. A message
+        // is sealed ONCE, and its sealed bytes are kept by message id, so every
+        // node and every retry gets identical bytes.
+        let sealed = self.sealed_bytes_for(routing_key, &message_id_b32, &built.bytes)?;
 
         for endpoint in self.storage_node_endpoints.clone() {
             let token = match self.ensure_token_for_endpoint(&endpoint).await {
@@ -1674,7 +1356,7 @@ impl B0xSDK {
                 .header("Authorization", format!("DSM {}:{}", auth_device_id, token))
                 .header("x-dsm-message-id", message_id_b32.clone())
                 .header("x-dsm-recipient", routing_key.to_string())
-                .body(built.bytes.clone())
+                .body(sealed.clone())
                 .send()
                 .await;
             match resp {
@@ -1788,6 +1470,10 @@ impl B0xSDK {
                 None::<std::io::Error>,
             )
         })?;
+        // DSM Amendment A7: a node only ever holds the sealed form. A message
+        // is sealed ONCE, and its sealed bytes are kept by message id, so every
+        // node and every retry gets identical bytes.
+        let buf = self.sealed_bytes_for(&routing_key, &message_id_b32, &buf)?;
 
         let auth_device_id = self.device_id.clone();
         let mut delivered = 0usize;
@@ -2797,6 +2483,10 @@ impl B0xSDK {
     ) -> Result<(), DsmError> {
         let mut attempt = 0;
         let mut delay = std::time::Duration::from_millis(retry_config.base_delay_ms);
+        // DSM Amendment A7: a node only ever holds the sealed form. A message
+        // is sealed ONCE, and its sealed bytes are kept by message id, so every
+        // node and every retry gets identical bytes.
+        let sealed = self.sealed_bytes_for(routing_key, message_id_b32, envelope_buf)?;
 
         loop {
             // Ensure token for this endpoint
@@ -2829,7 +2519,7 @@ impl B0xSDK {
                 .header("Authorization", format!("DSM {}:{}", auth_device_id, token))
                 .header("x-dsm-message-id", message_id_b32)
                 .header("x-dsm-recipient", routing_key)
-                .body(envelope_buf.to_vec());
+                .body(sealed.clone());
 
             if std::env::var("DSM_SDK_TEST_MODE").is_ok() {
                 req = req.timeout(std::time::Duration::from_secs(2));
@@ -3110,30 +2800,28 @@ impl B0xSDK {
     }
 
     // ------------------------------------------------------------------------
-    // v2 Retrieval & Acknowledgement (Envelope v3 over HTTP)
-    // These are implemented conservatively to avoid schema drift:
-    // - retrieve: POST /api/v2/b0x/retrieve with a small protobuf request
-    // - ack:      POST /api/v2/b0x/ack with a small protobuf request
-    // If your proto defines specific messages, wire them here; otherwise
-    // this remains a safe, binary-first contract.
+    // v2 retrieval (Envelope v3 over HTTP)
+    //
+    // A node's spool is append-only and read from a position (storage spec
+    // §4): it never marks, hides or removes a message. Which messages this
+    // device has consumed is its own state (`client_db::b0x_consumed`): each
+    // node is read from the position below which everything is consumed,
+    // consumed messages are skipped, and the rest are merged across nodes.
     // ------------------------------------------------------------------------
+
+    /// Pages read from one node in one retrieval: bounds the work per call.
+    /// The next call continues from the stored position.
+    const MAX_RETRIEVE_PAGES_PER_NODE: usize = 16;
 
     pub async fn retrieve_from_b0x_v2(
         &mut self,
         b0x_address: &str,
         _limit: usize,
     ) -> Result<Vec<B0xEntry>, DsmError> {
-        // Multi-node retrieve: query all healthy endpoints; merge unique entries by id.
-        // Generate a unique message ID for this retrieve request (required by auth middleware)
-        let mut msg_id_bytes = [0u8; 16];
-        let mut os_rng = OsRng;
-        rand::TryRngCore::try_fill_bytes(&mut os_rng, &mut msg_id_bytes).map_err(|e| {
-            DsmError::crypto(
-                format!("OsRng entropy failure: {e}"),
-                None::<std::io::Error>,
-            )
-        })?;
-        let msg_id_b32 = text_id::encode_base32_crockford(&msg_id_bytes);
+        use crate::storage::client_db::b0x_consumed;
+        let local = |e: anyhow::Error| {
+            DsmError::storage(format!("b0x consumed record: {e}"), None::<std::io::Error>)
+        };
 
         if b0x_address.is_empty() {
             return Err(DsmError::internal(
@@ -3152,123 +2840,89 @@ impl B0xSDK {
         if endpoints.is_empty() {
             return Ok(vec![]);
         }
+
         let mut map: HashMap<String, dsm::types::proto::Envelope> = HashMap::new();
-        let mut unauthorized_count = 0usize;
-        let mut polled_count = 0usize;
         for epc in endpoints {
-            let token = match self.ensure_token_for_endpoint(&epc).await {
-                Ok(t) => t,
-                Err(_) => {
-                    if std::env::var("DSM_SDK_TEST_MODE").is_ok() {
-                        println!(
-                            "retrieve token debug: endpoint={} route={} token_error=1",
-                            epc, b0x_address
-                        );
-                    }
-                    self.circuit_breaker.mark_node_failed(&epc).await;
-                    continue;
-                }
-            };
-            let url = format!("{}/api/v2/b0x/retrieve", epc);
-            // NOTE: Do not log the full Authorization header (it contains a bearer-like token).
-            let did = self.device_id.trim();
-            info!(
-                "📬 retrieve_from_b0x_v2: GET {} (device_prefix={}..., msg_id={}...) auth_device_id diag: len={} base32_32={} dotted={}",
-                url,
-                &did[..8.min(did.len())],
-                &msg_id_b32[..8.min(msg_id_b32.len())],
-                did.len(),
-                base32_decodes_to_32_bytes(did),
-                looks_like_dotted_decimal_bytes(did)
-            );
-
-            let mut req = self
-                .http_client
-                .get(&url)
-                .header("Accept", "application/protobuf")
-                .header("Authorization", format!("DSM {}:{}", self.device_id, token))
-                .header("x-dsm-message-id", &msg_id_b32);
-
-            // Scope retrieval to the explicit rotated inbox key.
-            req = req.header("x-dsm-b0x-address", b0x_address);
-
-            if std::env::var("DSM_SDK_TEST_MODE").is_ok() {
-                req = req.header("x-dsm-include-acked", "1");
-            }
-
-            let resp = req.send().await;
-            polled_count += 1;
-            match resp {
-                Ok(r) if r.status() == reqwest::StatusCode::NO_CONTENT => {
-                    if std::env::var("DSM_SDK_TEST_MODE").is_ok() {
-                        println!(
-                            "retrieve empty debug: endpoint={} route={}",
-                            epc, b0x_address
-                        );
-                    }
-                    self.circuit_breaker.mark_node_healthy(&epc).await;
-                }
-                Ok(r) if r.status().is_success() => {
-                    let bytes = r.bytes().await.map_err(|e| {
-                        DsmError::internal(
-                            format!("retrieve read failed: {e}"),
-                            None::<std::io::Error>,
-                        )
-                    })?;
-                    let batch = match dsm::types::proto::BatchEnvelope::decode(bytes.as_ref()) {
-                        Ok(b) => b,
-                        Err(e) => {
-                            warn!("BatchEnvelope decode failed from {}: {}", epc, e);
-                            self.circuit_breaker.mark_node_failed(&epc).await;
-                            continue;
+            // `position`: below it, everything on this node is consumed.
+            // `cursor`: where the next page is read from. A message still
+            // waiting (one half of a pair) stops `position`, never `cursor`,
+            // so nothing behind it is held up.
+            let mut position = b0x_consumed::read_position(b0x_address, &epc).map_err(local)?;
+            let mut cursor = position;
+            let mut consumed_run = true;
+            let mut failed = false;
+            for _ in 0..Self::MAX_RETRIEVE_PAGES_PER_NODE {
+                let url = format!("{}/api/v2/b0x/retrieve/{}", epc, cursor);
+                let resp = self
+                    .http_client
+                    .get(&url)
+                    .header("Accept", "application/protobuf")
+                    .header("x-dsm-b0x-address", b0x_address)
+                    .send()
+                    .await;
+                let batch = match resp {
+                    Ok(r) if r.status() == reqwest::StatusCode::NO_CONTENT => break,
+                    Ok(r) if r.status().is_success() => {
+                        let bytes = match r.bytes().await {
+                            Ok(b) => b,
+                            Err(e) => {
+                                warn!("b0x retrieve read failed from {}: {}", epc, e);
+                                failed = true;
+                                break;
+                            }
+                        };
+                        match dsm::types::proto::SequencedBatchEnvelope::decode(bytes.as_ref()) {
+                            Ok(b) => b,
+                            Err(e) => {
+                                warn!("SequencedBatchEnvelope decode failed from {}: {}", epc, e);
+                                failed = true;
+                                break;
+                            }
                         }
+                    }
+                    Ok(r) => {
+                        warn!("b0x retrieve from {} answered HTTP {}", epc, r.status());
+                        failed = true;
+                        break;
+                    }
+                    Err(e) => {
+                        warn!("b0x retrieve transport failure for {}: {}", epc, e);
+                        failed = true;
+                        break;
+                    }
+                };
+                if batch.envelopes.is_empty() || batch.next_seq <= cursor {
+                    break;
+                }
+                for sequenced in batch.envelopes {
+                    let Some(env) = sequenced.envelope else {
+                        continue;
                     };
-                    if std::env::var("DSM_SDK_TEST_MODE").is_ok() {
-                        println!(
-                            "retrieve raw debug: endpoint={} route={} raw_envelopes={}",
-                            epc,
-                            b0x_address,
-                            batch.envelopes.len(),
-                        );
+                    let id = text_id::encode_base32_crockford(&env.message_id);
+                    if b0x_consumed::is_consumed(b0x_address, &id).map_err(local)? {
+                        if consumed_run {
+                            position = position.max(sequenced.seq_num + 1);
+                        }
+                    } else {
+                        consumed_run = false;
+                        // DSM Amendment A7: open the seal before anything reads
+                        // the envelope. What does not open is not from this
+                        // relationship's counterparty and is skipped.
+                        match self.open_sealed(b0x_address, &env) {
+                            Ok(inner) => {
+                                map.entry(envelope_merge_key(&inner)).or_insert(inner);
+                            }
+                            Err(e) => warn!("b0x envelope {} does not open: {}", id, e),
+                        }
                     }
-                    for env in batch.envelopes {
-                        map.entry(envelope_merge_key(&env)).or_insert(env);
-                    }
-                    self.circuit_breaker.mark_node_healthy(&epc).await;
                 }
-                Ok(r) if r.status() == reqwest::StatusCode::UNAUTHORIZED => {
-                    // Token is invalid for this endpoint/device-id. Purge it and continue with other endpoints.
-                    if std::env::var("DSM_SDK_TEST_MODE").is_ok() {
-                        println!(
-                            "retrieve unauthorized debug: endpoint={} route={}",
-                            epc, b0x_address
-                        );
-                    }
-                    self.purge_persisted_token_for_endpoint(&epc).await;
-                    self.circuit_breaker.mark_node_failed(&epc).await;
-                    unauthorized_count += 1;
-                    warn!("[DSM_SDK] Inbox token invalid for endpoint {}. Purged token and continuing with other endpoints.", epc);
-                }
-                Ok(r) => {
-                    if std::env::var("DSM_SDK_TEST_MODE").is_ok() {
-                        println!(
-                            "retrieve other-status debug: endpoint={} route={} status={}",
-                            epc,
-                            b0x_address,
-                            r.status()
-                        );
-                    }
-                    self.circuit_breaker.mark_node_failed(&epc).await;
-                }
-                Err(e) => {
-                    if std::env::var("DSM_SDK_TEST_MODE").is_ok() {
-                        println!(
-                            "retrieve transport debug: endpoint={} route={} error={}",
-                            epc, b0x_address, e
-                        );
-                    }
-                    self.circuit_breaker.mark_node_failed(&epc).await;
-                }
+                cursor = batch.next_seq;
+            }
+            b0x_consumed::advance_read_position(b0x_address, &epc, position).map_err(local)?;
+            if failed {
+                self.circuit_breaker.mark_node_failed(&epc).await;
+            } else {
+                self.circuit_breaker.mark_node_healthy(&epc).await;
             }
         }
 
@@ -3328,250 +2982,26 @@ impl B0xSDK {
             }
         }
         info!("📬 retrieve_from_b0x_v2: merged {} entries", entries.len());
-        // Only surface InboxTokenInvalid if ALL polled endpoints responded 401.
-        // If at least one endpoint is healthy (NO_CONTENT/success/other), do not escalate to UI error.
-        if polled_count > 0 && unauthorized_count == polled_count && entries.is_empty() {
-            return Err(DsmError::InboxTokenInvalid(
-                "Inbox token invalid for this device across all endpoints. Genesis-bound inbox cannot be re-registered. Please re-bind device or contact support.".to_string()
-            ));
-        }
         Ok(entries)
     }
 
-    pub async fn is_message_acknowledged(
-        &mut self,
-        message_id_b32: &str,
-    ) -> Result<bool, DsmError> {
-        let msg_id_bytes = text_id::decode_base32_crockford(message_id_b32).ok_or_else(|| {
-            DsmError::internal("message_id must be valid base32", None::<std::io::Error>)
-        })?;
-        if msg_id_bytes.len() != 16 {
-            return Err(DsmError::internal(
-                format!(
-                    "message_id must decode to 16 bytes (got {})",
-                    msg_id_bytes.len()
-                ),
-                None::<std::io::Error>,
-            ));
-        }
-
-        let mut request_msg_id = [0u8; 16];
-        let mut os_rng = OsRng;
-        rand::TryRngCore::try_fill_bytes(&mut os_rng, &mut request_msg_id).map_err(|e| {
-            DsmError::crypto(
-                format!("OsRng entropy failure: {e}"),
-                None::<std::io::Error>,
-            )
-        })?;
-        let request_msg_id_b32 = text_id::encode_base32_crockford(&request_msg_id);
-
-        let endpoints: Vec<String> = self
-            .storage_node_endpoints
-            .iter()
-            .filter(|ep| futures::executor::block_on(self.circuit_breaker.is_node_healthy(ep)))
-            .cloned()
-            .collect();
-        if endpoints.is_empty() {
-            return Err(DsmError::internal(
-                "No healthy endpoints",
-                None::<std::io::Error>,
-            ));
-        }
-
-        let quorum = self.quorum_k.min(endpoints.len()).max(1);
-        let mut acked_count = 0usize;
-        let mut seen_unacked = false;
-        let mut saw_authoritative_status = false;
-
-        for epc in endpoints {
-            let token = match self.ensure_token_for_endpoint(&epc).await {
-                Ok(t) => t,
-                Err(_) => {
-                    self.circuit_breaker.mark_node_failed(&epc).await;
-                    continue;
-                }
-            };
-
-            let url = format!("{}/api/v2/b0x/status/{}", epc, message_id_b32);
-            let resp = self
-                .http_client
-                .get(&url)
-                .header("Authorization", format!("DSM {}:{}", self.device_id, token))
-                .header("x-dsm-message-id", &request_msg_id_b32)
-                .send()
-                .await;
-
-            match resp {
-                Ok(r) if r.status() == reqwest::StatusCode::NO_CONTENT => {
-                    acked_count += 1;
-                    saw_authoritative_status = true;
-                    self.circuit_breaker.mark_node_healthy(&epc).await;
-                    if acked_count >= quorum {
-                        return Ok(true);
-                    }
-                }
-                Ok(r) if r.status() == reqwest::StatusCode::CONFLICT => {
-                    seen_unacked = true;
-                    saw_authoritative_status = true;
-                    self.circuit_breaker.mark_node_healthy(&epc).await;
-                }
-                Ok(r) if r.status() == reqwest::StatusCode::UNAUTHORIZED => {
-                    self.purge_persisted_token_for_endpoint(&epc).await;
-                    self.circuit_breaker.mark_node_failed(&epc).await;
-                }
-                Ok(r) if r.status() == reqwest::StatusCode::NOT_FOUND => {
-                    self.circuit_breaker.mark_node_healthy(&epc).await;
-                }
-                Ok(_) => {
-                    self.circuit_breaker.mark_node_failed(&epc).await;
-                }
-                Err(_) => {
-                    self.circuit_breaker.mark_node_failed(&epc).await;
-                }
-            }
-        }
-
-        match summarize_ack_status(acked_count, quorum, seen_unacked, saw_authoritative_status) {
-            AckStatusSummary::Acked => Ok(true),
-            AckStatusSummary::NotAcked => Ok(false),
-            AckStatusSummary::Unavailable => Err(DsmError::internal(
-                format!("message status unavailable or below quorum: acked {acked_count}/{quorum}"),
-                None::<std::io::Error>,
-            )),
-        }
-    }
-
-    /// Encode the `/api/v2/b0x/ack` body: a `BatchEnvelope` whose entries carry ONLY the
-    /// transport `message_id`.
-    ///
-    /// This is the exact wire shape the storage node's ack route contracts for
-    /// (`validate_ack_batch_envelope_bytes`): an acknowledgement retires ids the client already
-    /// pulled, so it has no version, headers, or payload to send and the node must not demand
-    /// them. Extracted so both halves of that contract can be tested against each other without
-    /// standing up HTTP.
-    pub fn build_ack_batch_body(tx_ids: &[String]) -> Result<Vec<u8>, DsmError> {
-        let mut batch = dsm::types::proto::BatchEnvelope::default();
-        for tx_id in tx_ids {
-            if let Some(mid_bytes) = text_id::decode_base32_crockford(tx_id) {
-                batch.envelopes.push(dsm::types::proto::Envelope {
-                    message_id: mid_bytes,
-                    ..Default::default()
-                });
-            } else {
-                warn!("Skipping invalid tx_id in ack: {}", tx_id);
-            }
-        }
-        let mut body = Vec::with_capacity(batch.encoded_len());
-        batch.encode(&mut body).map_err(|e| {
-            DsmError::internal(
-                format!("ack batch encode failed: {e}"),
-                None::<std::io::Error>,
-            )
-        })?;
-        Ok(body)
-    }
-
-    pub async fn acknowledge_b0x_v2(
+    /// Record `message_ids` (base32 transport ids) as consumed from
+    /// `b0x_address` — on this device only. A node is never told: its spool is
+    /// append-only, and what this device has consumed is its own state. Call
+    /// it for exactly the messages processed; a message left unrecorded is
+    /// read again on the next retrieval.
+    pub async fn record_consumed_b0x(
         &mut self,
         b0x_address: &str,
-        tx_ids: Vec<String>,
+        message_ids: Vec<String>,
     ) -> Result<(), DsmError> {
-        if tx_ids.is_empty() {
+        if message_ids.is_empty() {
             return Ok(());
-        }
-        if b0x_address.is_empty() {
-            return Err(DsmError::internal(
-                "acknowledge_b0x_v2 requires a rotated b0x address",
-                None::<std::io::Error>,
-            ));
         }
         validate_b0x_address(b0x_address)?;
-        // Multi-node ack: broadcast; require quorum_k successes.
-        // Generate a unique message ID for this ack request (required by auth middleware)
-        let mut msg_id_bytes = [0u8; 16];
-        let mut os_rng = OsRng;
-        rand::TryRngCore::try_fill_bytes(&mut os_rng, &mut msg_id_bytes).map_err(|e| {
-            DsmError::crypto(
-                format!("OsRng entropy failure: {e}"),
-                None::<std::io::Error>,
-            )
-        })?;
-        let msg_id_b32 = text_id::encode_base32_crockford(&msg_id_bytes);
-
-        // ACK scoping:
-        // - `x-dsm-b0x-address` MUST match the rotated inbox key used at submit.
-        // - Authorization remains the recipient device identity for auth only.
-
-        let body = Self::build_ack_batch_body(&tx_ids)?;
-
-        let endpoints: Vec<String> = self
-            .storage_node_endpoints
-            .iter()
-            .filter(|ep| futures::executor::block_on(self.circuit_breaker.is_node_healthy(ep)))
-            .cloned()
-            .collect();
-        if endpoints.is_empty() {
-            return Err(DsmError::internal(
-                "No healthy endpoints",
-                None::<std::io::Error>,
-            ));
-        }
-        let total = endpoints.len();
-        let quorum = self.quorum_k.min(total);
-        let mut successes = 0usize;
-        for epc in endpoints {
-            let token = match self.ensure_token_for_endpoint(&epc).await {
-                Ok(t) => t,
-                Err(_) => {
-                    self.circuit_breaker.mark_node_failed(&epc).await;
-                    continue;
-                }
-            };
-            let url = format!("{}/api/v2/b0x/ack", epc);
-
-            let mut req = self
-                .http_client
-                .post(&url)
-                .header("Content-Type", "application/protobuf")
-                .header("Authorization", format!("DSM {}:{}", self.device_id, token))
-                .header("x-dsm-message-id", &msg_id_b32);
-            // Explicitly scope ACK to the rotated inbox key that was retrieved.
-            req = req.header("x-dsm-b0x-address", b0x_address);
-
-            let resp = req.body(body.clone()).send().await;
-            match resp {
-                Ok(r)
-                    if r.status().is_success() || r.status() == reqwest::StatusCode::NO_CONTENT =>
-                {
-                    self.circuit_breaker.mark_node_healthy(&epc).await;
-                    successes += 1;
-                    if successes >= quorum {
-                        break;
-                    }
-                }
-                Ok(r) if r.status() == reqwest::StatusCode::UNAUTHORIZED => {
-                    self.purge_persisted_token_for_endpoint(&epc).await;
-                    self.circuit_breaker.mark_node_failed(&epc).await;
-                }
-                Ok(_) => {
-                    self.circuit_breaker.mark_node_failed(&epc).await;
-                }
-                Err(_) => {
-                    self.circuit_breaker.mark_node_failed(&epc).await;
-                }
-            }
-        }
-        if successes >= quorum {
-            info!(
-                "✅ ack quorum satisfied: {}/{} (K={})",
-                successes, total, quorum
-            );
-            return Ok(());
-        }
-        Err(DsmError::internal(
-            format!("ack quorum not met: {}/{} (K={})", successes, total, quorum),
-            None::<std::io::Error>,
-        ))
+        crate::storage::client_db::b0x_consumed::record_consumed(b0x_address, &message_ids).map_err(
+            |e| DsmError::storage(format!("record consumed b0x messages: {e}"), None::<std::io::Error>),
+        )
     }
 
     // ------------------------------------------------------------------------

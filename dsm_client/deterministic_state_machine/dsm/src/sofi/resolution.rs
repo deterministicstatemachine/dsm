@@ -4,7 +4,7 @@
 //!
 //! Every function here is pure and total over the facts it is handed. It
 //! fetches nothing, trusts no caller's opinion, and evaluates no policy: a
-//! fact is either an objective storage observation ([`CellResolution`]), a
+//! fact is either an objective storage observation ([`CellFact`]), a
 //! static validity verdict ([`Validation`]), or a monotone register fact
 //! (registration, canonicality, orphaning). Where those facts come
 //! from is E2's and E3's business.
@@ -13,7 +13,8 @@
 //!
 //! - one trader position's result — [`resolve_position`], the F2 ladder;
 //! - whether the route was actually consumed — [`consumed_route`];
-//! - whether it can never be — [`route_impossible`], the four arms;
+//! - whether it can never be — [`fulfillment_impossible`]: conformance, then
+//!   [`route_impossible`], the four arms;
 //! - which DLV successor keys may be skipped — [`classify_attempt`] and
 //!   [`walk`].
 //!
@@ -34,7 +35,7 @@
 //! step R12), so a registered `F` that never conformed is Invalid and one
 //! whose conformance is undecided is Pending — never Void, never Realized.
 
-use super::arith::CellResolution;
+use crate::route_chain::CellFact;
 use super::conformance::Validation;
 use super::wire::next_attempt;
 
@@ -42,15 +43,16 @@ use super::wire::next_attempt;
 /// names as its trader parent `T0`.
 ///
 /// A trader may build `P` on a conditional parent before that parent resolves,
-/// because the storage fence only requires `p` to be storage-resolved. The
-/// branch it guessed is decided here, not at ingress.
+/// because the storage fence only requires `p` to be storage-resolved; the
+/// branch it guessed is decided here, not at ingress. Resolving `q` needs `p`
+/// resolved: the SDK resolves the parent first as part of acquiring `q`'s
+/// facts, and when its retries are exhausted the attempt fails on the network
+/// (Amendment S7). An unresolved parent is never a fact Core is handed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParentPosition {
     /// `T0` is an ordinary single-root claim. P conformance already bound
     /// `T°.pre_root` to that exact registered root at ingress.
     SingleRoot,
-    /// `T0` is a conditional SoFi claim `C_p` that has not resolved.
-    ConditionalPending,
     /// `C_p` resolved and selected this root: `R_realize` when `p` realized,
     /// `R_void` when it voided.
     ConditionalSelected { selected_root: [u8; 32] },
@@ -58,7 +60,10 @@ pub enum ParentPosition {
     ConditionalNoRoot,
 }
 
-/// A trader-position result. Permanent once it is not `Pending`.
+/// A trader-position result. Every one is permanent (Amendment S7). Core
+/// resolves only over complete storage facts: until they are complete the
+/// SDK keeps reading and relaying, and when its retries are exhausted the
+/// attempt fails on the network. That is never a resolution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Resolution {
     /// The route consumed every required parent under this fulfillment.
@@ -67,14 +72,6 @@ pub enum Resolution {
     Void,
     /// The operation never satisfied the rules. Terminal.
     Invalid,
-    /// Not yet decided, including while evidence is unavailable.
-    Pending,
-}
-
-impl Resolution {
-    pub fn is_terminal(self) -> bool {
-        !matches!(self, Resolution::Pending)
-    }
 }
 
 /// What the position does to the trader's economic lineage once it resolves.
@@ -209,7 +206,7 @@ impl VaultChain {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LegFacts {
     /// The storage resolution of `K^(a_j)`.
-    pub cell: CellResolution,
+    pub cell: CellFact,
     /// The named parent `R_j` against this vault's validated canonical root
     /// at that generation.
     pub parent: ParentStatus,
@@ -483,6 +480,32 @@ pub enum SkipReason {
     RejectedFinalSingleLeg,
     /// A final cell of an operation that can never realize.
     RejectedFinalRoute(ImpossibleArm),
+    /// A final cell of a fulfillment that is not the exercise of its P:
+    /// `FulfillmentConformance(F) = Invalid` (SoFi §23.5, MR-SOFI-0238).
+    RejectedFinalConformance,
+}
+
+/// Why a fulfillment can never realize (SoFi §23.5):
+///
+/// ```text
+/// FulfillmentImpossible(F, E) ⇔ FulfillmentConformance(F) = Invalid ∨ RouteImpossible(P(F), E)
+/// ```
+///
+/// `RouteImpossible` stays scoped to P and E and takes no F, because several
+/// candidate fulfillments can reference one P; conformance is the F-level arm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FulfillmentImpossibility {
+    ConformanceInvalid,
+    Route(ImpossibleArm),
+}
+
+/// `FulfillmentImpossible(F, E)`: the conformance arm first, then the route
+/// arms. Both inputs are binary and in hand (Amendment S3).
+pub fn fulfillment_impossible(facts: &RouteFacts<'_>) -> Option<FulfillmentImpossibility> {
+    if facts.conformance == Validation::Invalid {
+        return Some(FulfillmentImpossibility::ConformanceInvalid);
+    }
+    route_impossible(facts).map(FulfillmentImpossibility::Route)
 }
 
 /// Classify the attempt key of `leg` under the facts of the registered
@@ -499,11 +522,15 @@ pub fn classify_attempt(
         // A final cell of an operation that cannot realize is stranded, never
         // a partial execution: nothing rolls back, because the cell was never
         // consumed as an economic execution on its own.
-        if let Some(arm) = route_impossible(facts) {
-            let reason = if !facts.multi_leg() && arm == ImpossibleArm::ValidationInvalid {
-                SkipReason::RejectedFinalSingleLeg
-            } else {
-                SkipReason::RejectedFinalRoute(arm)
+        if let Some(why) = fulfillment_impossible(facts) {
+            let reason = match why {
+                FulfillmentImpossibility::ConformanceInvalid => SkipReason::RejectedFinalConformance,
+                FulfillmentImpossibility::Route(ImpossibleArm::ValidationInvalid)
+                    if !facts.multi_leg() =>
+                {
+                    SkipReason::RejectedFinalSingleLeg
+                }
+                FulfillmentImpossibility::Route(arm) => SkipReason::RejectedFinalRoute(arm),
             };
             return (AttemptClass::Skipped, Some(reason));
         }
@@ -786,6 +813,26 @@ mod tests {
                 ImpossibleArm::TraderParentImpossible
             ))
         );
+    }
+
+    /// SoFi §23.5, MR-SOFI-0238: a final cell of a conformance-Invalid
+    /// fulfillment is skipped, so the walk moves past it instead of stalling
+    /// on it forever. `RouteImpossible` stays silent: it takes no F.
+    #[test]
+    fn a_final_cell_of_a_conformance_invalid_fulfillment_is_skipped() {
+        let legs = [good_leg()];
+        let facts = RouteFacts {
+            conformance: Validation::Invalid,
+            ..realized(&legs)
+        };
+        assert_eq!(route_impossible(&facts), None, "RouteImpossible takes no F");
+        assert_eq!(
+            fulfillment_impossible(&facts),
+            Some(FulfillmentImpossibility::ConformanceInvalid)
+        );
+        let (class, reason) = classify_attempt(&facts, &legs[0]);
+        assert_eq!(class, AttemptClass::Skipped);
+        assert_eq!(reason, Some(SkipReason::RejectedFinalConformance));
     }
 
     /// Lean `trader_parent_arm_is_monotone`: once the parent is terminal the

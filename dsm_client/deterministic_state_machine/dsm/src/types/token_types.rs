@@ -74,13 +74,12 @@ pub enum TokenType {
     Wrapped,
 }
 
-/// Token supply management parameters
+/// Token supply: always a fixed genesis supply. Neither supply class has an
+/// unlimited option, and nothing is minted after genesis (SoFi §48, §50).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum TokenSupply {
-    /// Fixed supply with a specific amount
+    /// The whole supply that will ever exist.
     Fixed(u64),
-    /// Unlimited supply that can be minted as needed
-    Unlimited,
 }
 
 /// Token supply implementation details (internal struct)
@@ -107,16 +106,10 @@ impl TokenSupply {
         Self::Fixed(total_supply)
     }
 
-    /// Create an unlimited supply token  
-    pub fn unlimited() -> Self {
-        Self::Unlimited
-    }
-
     /// Get the maximum supply if it's a fixed supply
     pub fn max_supply(&self) -> Option<u64> {
         match self {
             TokenSupply::Fixed(amount) => Some(*amount),
-            TokenSupply::Unlimited => None,
         }
     }
 
@@ -125,10 +118,6 @@ impl TokenSupply {
         matches!(self, TokenSupply::Fixed(_))
     }
 
-    /// Check if this is unlimited supply
-    pub fn is_unlimited(&self) -> bool {
-        matches!(self, TokenSupply::Unlimited)
-    }
 }
 
 impl TokenSupplyInfo {

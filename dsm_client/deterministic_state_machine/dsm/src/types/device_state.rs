@@ -540,9 +540,9 @@ fn validate_conservation(
         //
         // Conservation holds per-asset. ERA: a strict destruction of
         // `fee_amount` with no counterparty credit — the same semantics as
-        // `Burn`. New asset: genesis issuance of `initial_supply` against a
-        // commit proven distinct from every existing asset. It is the `Mint`
-        // rule generalized to two legs over two provably different assets.
+        // `Burn`. New asset: the release of its whole genesis supply,
+        // `initial_supply`, to the creator (`ReleaseRule::AllAtCreation`),
+        // against a commit proven distinct from every existing asset.
         Operation::CreateToken {
             initial_supply,
             policy_commit,
@@ -1333,31 +1333,6 @@ impl DeviceState {
                 )));
             }
             if amount.value() > 0 {}
-        }
-
-        // THE SECOND ISSUANCE OPERATION. `CreateToken` carries an issuance leg,
-        // and `validate_conservation` deliberately PERMITS it (the arm requires
-        // exactly one credit of `initial_supply` under the new token's own
-        // commit). Refusing it only in the route and only in the write-set
-        // builder leaves the chokepoint itself open — precisely the shape that
-        // made `Mint` a live defect, since a route guard binds one caller and
-        // the write-set rule binds only paths that build one.
-        //
-        // No production caller can reach it today: `Operation::CreateToken` has
-        // a single constructor, which passes only the ERA fee debit, so
-        // conservation would refuse a supply leg for want of the delta. That is
-        // an argument for fencing it now rather than later — the gap is
-        // currently free to close, and it is exactly the kind that a future
-        // caller closes by accident in the wrong direction.
-        if let Operation::CreateToken { initial_supply, .. } = &operation {
-            if initial_supply.value() > 0 {
-                return Err(DsmError::invalid_operation(
-                    "advance: refusing to create a token with initial supply — supply at \
-                     creation has no issuance source. Create the token with zero supply and \
-                     issue through token.mint, whose credit is funded by a 0x0029 issuance \
-                     authorization the verifier reruns",
-                ));
-            }
         }
 
         // Offline-bearer spend: draw the value from the device-bound offline-cash allocation instead of

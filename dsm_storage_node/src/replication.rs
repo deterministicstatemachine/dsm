@@ -2,9 +2,9 @@
 
 //! Production-grade replication for DSM storage nodes.
 //!
-//! This module implements distributed storage replication with dynamic node
-//! membership, failure detection, and data partitioning. Unlike dev_replication.rs,
-//! this is designed for production deployment across multiple nodes.
+//! Peer membership and failure detection by gossip. A node never places or
+//! copies objects to peers it chooses: which members hold a cell or an object
+//! is the storage set's and the writer's (storage spec §9), not the node's.
 //!
 //! Key features:
 //! - Dynamic node discovery via gossip protocol
@@ -14,13 +14,11 @@
 //! - Network partition tolerance
 //! - Clockless operation using deterministic ticks
 
-use crate::api::infra::hardening::{blake3_tagged, permute_unbiased, DOM_NODE_ID, DOM_PLACE};
-use crate::db;
+use crate::api::infra::hardening::{blake3_tagged, DOM_NODE_ID};
 use crate::AppState;
 use dsm::types::proto as pb;
 use prost::Message;
-use reqwest::header::{HeaderMap, HeaderValue};
-use reqwest::{Client, Method};
+use reqwest::Client;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::CertificateDer;
 use rustls::{ClientConfig, RootCertStore};
@@ -241,132 +239,6 @@ impl ReplicationManager {
             .collect()
     }
 
-    /// Determine replication targets for an object using spec-mandated keyed Fisher-Yates.
-    ///
-    /// Per spec §17: seed = H("DSM/place\0" || object_key), then Fisher-Yates permutation
-    /// over alive nodes sorted by node_id ascending (stable pre-order).
-    pub async fn get_replication_targets(&self, object_key: &str) -> Vec<pb::StorageNodeInfoV1> {
-        let mut alive_nodes = self.get_alive_nodes();
-        if alive_nodes.is_empty() {
-            return Vec::new();
-        }
-
-        // Stable pre-order: sort by raw 32-byte node_id ascending.
-        alive_nodes.sort_by_key(node_sort_key);
-
-        // Keyed Fisher-Yates: seed = H("DSM/place\0" || object_key)
-        let seed = blake3_tagged(DOM_PLACE, object_key.as_bytes());
-        let permuted = permute_unbiased(seed, &alive_nodes);
-
-        permuted
-            .into_iter()
-            .take(self.config.replication_factor)
-            .collect()
-    }
-
-    /// Replicate an object to its targets
-    pub async fn replicate_object(
-        &self,
-        _state: Arc<AppState>,
-        object_key: &str,
-        data: &[u8],
-        now_tick: i64,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let targets = self.get_replication_targets(object_key).await;
-
-        // Skip if we don't have enough nodes for replication
-        if targets.len() < self.config.replication_factor {
-            log::warn!(
-                "Insufficient nodes for replication: have {}, need {}",
-                targets.len(),
-                self.config.replication_factor
-            );
-            return Ok(());
-        }
-
-        // Create idempotency key based on object key and current tick
-        let idempotency_key = format!("{}_{}", object_key, now_tick);
-
-        let local_b32 = self.local_node_id.to_base32();
-        for target in targets {
-            if target.node_id == local_b32 {
-                // Local storage - already done
-                continue;
-            }
-
-            // Enqueue replication job using existing dev_replication infrastructure
-            // but with production node addresses
-            let mut headers = HeaderMap::new();
-            headers.insert(
-                "x-dsm-idempotency",
-                HeaderValue::from_str(&idempotency_key)?,
-            );
-            headers.insert(
-                "content-type",
-                HeaderValue::from_static("application/octet-stream"),
-            );
-
-            // Use the existing dev_replication enqueue function but with production target
-            self.enqueue_replication_job(
-                _state.clone(),
-                Method::PUT,
-                &format!("/objects/{}", object_key),
-                &headers,
-                data.to_vec(),
-                &target.address,
-                now_tick,
-            )
-            .await?;
-        }
-
-        Ok(())
-    }
-
-    /// Enqueue a replication job to a specific target
-    #[allow(clippy::too_many_arguments)]
-    async fn enqueue_replication_job(
-        &self,
-        _state: Arc<AppState>,
-        method: Method,
-        path: &str,
-        headers: &HeaderMap,
-        body: Vec<u8>,
-        target_address: &str,
-        now_tick: i64,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        // Get idempotency key
-        let idempotency_key = headers
-            .get("x-dsm-idempotency")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("unknown");
-
-        // Encode headers deterministically
-        let mut hdrs: Vec<(String, Vec<u8>)> = Vec::new();
-        for (k, v) in headers.iter() {
-            hdrs.push((k.as_str().to_string(), v.as_bytes().to_vec()));
-        }
-        // Add replication guard
-        hdrs.push(("x-dsm-replicated".to_string(), b"1".to_vec()));
-        let hdr_bytes = db::encode_headers_deterministic(&hdrs);
-
-        // Enqueue the job
-        db::replication_outbox_enqueue(
-            &_state.db_pool,
-            db::ReplicationOutboxEnqueueParams {
-                target: target_address,
-                method: method.as_str(),
-                path,
-                headers: &hdr_bytes,
-                body: &body,
-                idempotency_key,
-                eligible_iter: now_tick,
-            },
-        )
-        .await?;
-
-        Ok(())
-    }
-
     /// Process gossip messages and update node states
     #[allow(clippy::disallowed_methods)]
     pub async fn process_gossip(&self, gossip: pb::GossipMessageV1, now_tick: i64) {
@@ -487,7 +359,8 @@ impl ReplicationManager {
         Ok(())
     }
 
-    /// Periodic maintenance: send gossip and process replication jobs
+    /// Periodic maintenance: send gossip. A node never places or copies
+    /// objects to peers it chooses; who holds what is the storage set's.
     pub fn maintenance_cycle(
         &self,
         #[allow(unused_variables)] state: Arc<AppState>,
@@ -501,24 +374,6 @@ impl ReplicationManager {
                 if let Err(e) = replication_manager.send_gossip(alive_nodes, now_tick).await {
                     log::error!("Gossip failed: {}", e);
                 }
-            });
-        }
-
-        // Process replication outbox (reuse dev_replication pump)
-        #[cfg(feature = "dev-replication")]
-        {
-            use crate::timing::ExponentialBackoffTiming;
-            let timing = ExponentialBackoffTiming::default();
-            let state_clone = state.clone();
-            let max_jobs = self.config.max_concurrent_jobs as i64;
-            tokio::spawn(async move {
-                let _ = crate::dev_replication::pump_replication_outbox(
-                    state_clone,
-                    &timing,
-                    now_tick,
-                    max_jobs,
-                )
-                .await;
             });
         }
 
@@ -665,76 +520,6 @@ mod tests {
         let local_b32 = mgr.local_node_id.to_base32();
         assert!(ids.contains(&local_b32.as_str()));
         assert!(ids.contains(&alive_id.as_str()));
-    }
-
-    #[tokio::test]
-    async fn get_replication_targets_deterministic() {
-        let mgr = make_manager("node-a", "http://127.0.0.1:8080");
-        {
-            let mut states = must(mgr.node_states.write());
-            for i in 0..5 {
-                let address = format!("http://127.0.0.1:{}", 8081 + i as u16);
-                let id = node_id_for_addr(&address);
-                states.insert(
-                    id.clone(),
-                    pb::StorageNodeInfoV1 {
-                        node_id: id.clone(),
-                        address,
-                        last_seen_tick: 0,
-                        status: pb::StorageNodeStatus::Alive as i32,
-                    },
-                );
-            }
-        }
-        let targets1 = mgr.get_replication_targets("obj-key-1").await;
-        let targets2 = mgr.get_replication_targets("obj-key-1").await;
-        assert_eq!(targets1.len(), 2); // replication_factor=2
-        assert_eq!(
-            targets1.iter().map(|n| &n.node_id).collect::<Vec<_>>(),
-            targets2.iter().map(|n| &n.node_id).collect::<Vec<_>>(),
-        );
-    }
-
-    #[tokio::test]
-    async fn get_replication_targets_empty_when_no_nodes() {
-        let mgr = make_manager("node-a", "http://127.0.0.1:8080");
-        {
-            let mut states = must(mgr.node_states.write());
-            let local_node_id = mgr.local_node_id.to_base32();
-            must_some(states.get_mut(&local_node_id), "local node should exist").status =
-                pb::StorageNodeStatus::Dead as i32;
-        }
-        let targets = mgr.get_replication_targets("any-key").await;
-        assert!(targets.is_empty());
-    }
-
-    #[tokio::test]
-    async fn get_replication_targets_different_keys_may_differ() {
-        let mgr = make_manager("node-a", "http://127.0.0.1:8080");
-        {
-            let mut states = must(mgr.node_states.write());
-            for i in 0..10 {
-                let address = format!("http://127.0.0.1:{}", 9000 + i);
-                let id = node_id_for_addr(&address);
-                states.insert(
-                    id.clone(),
-                    pb::StorageNodeInfoV1 {
-                        node_id: id,
-                        address,
-                        last_seen_tick: 0,
-                        status: pb::StorageNodeStatus::Alive as i32,
-                    },
-                );
-            }
-        }
-        let t1 = mgr.get_replication_targets("key-alpha").await;
-        let t2 = mgr.get_replication_targets("key-beta").await;
-        // With 11 nodes and RF=2, different keys should (very likely) produce different placements
-        let ids1: Vec<&str> = t1.iter().map(|n| n.node_id.as_str()).collect();
-        let ids2: Vec<&str> = t2.iter().map(|n| n.node_id.as_str()).collect();
-        // At minimum both should return the correct count
-        assert_eq!(ids1.len(), 2);
-        assert_eq!(ids2.len(), 2);
     }
 
     #[tokio::test]

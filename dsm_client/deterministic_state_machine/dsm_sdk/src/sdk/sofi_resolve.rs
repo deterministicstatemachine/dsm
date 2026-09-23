@@ -34,7 +34,9 @@ use std::future::Future;
 use std::pin::Pin;
 
 use dsm::sofi::arith::CellResolution;
-use dsm::sofi::conformance::{fulfillment_conformance, Validation};
+use dsm::sofi::conformance::{
+    conformance_in_hand, fulfillment_conformance, FulfillmentConformance, Validation,
+};
 use dsm::sofi::exercise::{recognize_exercise, RecognizedExercise};
 use dsm::sofi::registration::Registration;
 use dsm::sofi::resolution::{
@@ -286,6 +288,21 @@ impl Resolver<'_> {
             let precommit = &exercise.precommit.body;
             let fulfillment = &exercise.fulfillment.body;
             let e = exercise.external_commitment;
+
+            // Evidence in hand first (MR-DSM-0041, MR-DSM-0042, MR-STOR-0045):
+            // every conformance check decidable from the exercise itself — P,
+            // F, their signatures, P(E) and the closure objects the exercise
+            // carries — runs before any read. Invalid here is Invalid with no
+            // network access: no register cell, no evidence fetch.
+            if let FulfillmentConformance::Invalid(reason) = conformance_in_hand(
+                &exercise.precommit,
+                fulfillment,
+                &exercise.fulfillment.signature,
+                &exercise.preimage,
+                &exercise.closure,
+            ) {
+                return Ok(Fetched::invalid_in_hand(exercise, walked, reason));
+            }
 
             // Registration from the position pair (R10). The pair decides
             // for every F at q at once: a root cell final on another claim,

@@ -189,6 +189,11 @@ proptest = "1.11.0"
 quickcheck = "1.0.3"
 rstest = "0.26.1"
 serial_test = "3.5.0"
+# Real storage nodes for tests (owner, 2026-09-23: no fake nodes). The node
+# already depends on this crate; a dev-dependency back to it is a cycle Cargo
+# allows. Built with its SQLite backend, test builds only.
+dsm_storage_node = { path = "../../../dsm_storage_node", default-features = false, features = ["strict", "local-dev"] }
+axum = "0.8" # serves the real node app in tests (the node's own version)
 dsm = { version = "0.1.0-beta.3", path = "../dsm", default-features = false, features = ["testing"] }
 # SELF dev-dependency, enabling `test-utils` for THIS crate's own integration
 # tests (`tests/*.rs`) only. Integration tests are external consumers, so a

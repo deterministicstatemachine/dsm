@@ -5,7 +5,7 @@ import './TokenCreationDialog.css';
 import { TokenCoin } from './TokenCoin';
 import { encodeCoinSource, silhouetteFromRgba } from '../utils/coinArtwork';
 import { readImageRgba } from '../utils/imageRgba';
-import { dsmClient } from '@/services/dsmClient';
+import { createToken } from '@/dsm/policies';
 import { getTokenCreationFeeEra } from '@/dsm/policies';
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -637,7 +637,7 @@ export const TokenCreationDialog: React.FC<{ onClose: () => void; onSuccess?: ()
     setCreating(true);
     try {
       const s = stateRef.current;
-      const res = await dsmClient.createToken({
+      const res = await createToken({
         ticker:             s.ticker.trim().toUpperCase(),
         alias:              s.alias.trim(),
         decimals:           effectiveDecimals,
@@ -692,7 +692,7 @@ export const TokenCreationDialog: React.FC<{ onClose: () => void; onSuccess?: ()
       setResolving(true);
       try {
         const s = stateRef.current;
-        const again = await dsmClient.createToken({
+        const again = await createToken({
           ticker:             s.ticker.trim().toUpperCase(),
           alias:              s.alias.trim(),
           decimals:           effectiveDecimals,

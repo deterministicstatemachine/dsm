@@ -42,14 +42,15 @@ use super::get_connection;
 use crate::util::deterministic_time::tick;
 
 /// Where a staged transfer sits. `Absent` is the lack of a row, never a stored
-/// value.
+/// value. There is no rejected state: a transfer that does not execute changes
+/// no state and records nothing negative (DSM Amendment A1). Its bytes stay
+/// raw material, never a verdict, so the same pair may be staged again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StagingState {
     Absent,
     StagedTransfer,
     StagedEvidence,
     ReadyToVerify,
-    TerminalReject,
     Accepted,
 }
 
@@ -60,7 +61,6 @@ impl StagingState {
             StagingState::StagedTransfer => "staged_transfer",
             StagingState::StagedEvidence => "staged_evidence",
             StagingState::ReadyToVerify => "ready_to_verify",
-            StagingState::TerminalReject => "terminal_reject",
             StagingState::Accepted => "accepted",
         }
     }
@@ -70,15 +70,14 @@ impl StagingState {
             "staged_transfer" => StagingState::StagedTransfer,
             "staged_evidence" => StagingState::StagedEvidence,
             "ready_to_verify" => StagingState::ReadyToVerify,
-            "terminal_reject" => StagingState::TerminalReject,
             "accepted" => StagingState::Accepted,
             other => return Err(anyhow!("unknown recipient_staging.state: {other}")),
         })
     }
 
-    /// Terminal states are never left. Reaping may only ever consider these.
+    /// The terminal state is never left. Reaping may only ever consider it.
     pub fn is_terminal(self) -> bool {
-        matches!(self, StagingState::TerminalReject | StagingState::Accepted)
+        matches!(self, StagingState::Accepted)
     }
 
     /// Whether an ACK may be emitted. Only a completed acceptance qualifies —
@@ -548,23 +547,6 @@ pub fn mark_accepted(correlation_key: &str) -> Result<()> {
         params![
             correlation_key,
             StagingState::Accepted.as_str(),
-            tick() as i64
-        ],
-    )?;
-    Ok(())
-}
-
-/// Record a terminal rejection. Sticky by construction.
-pub fn mark_rejected(correlation_key: &str, reason: &str) -> Result<()> {
-    let binding = get_connection()?;
-    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
-    conn.execute(
-        "UPDATE recipient_staging SET state = ?2, reject_reason = ?3, updated_at = ?4
-         WHERE correlation_key = ?1",
-        params![
-            correlation_key,
-            StagingState::TerminalReject.as_str(),
-            reason,
             tick() as i64
         ],
     )?;

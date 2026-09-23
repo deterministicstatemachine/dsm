@@ -112,30 +112,18 @@ pub mod class {
     // ruling 2026-08-28) — schema 2 adds the peer economic-position locator
     // (`owner_economic_position` / `trader_economic_position`), untrusted,
     // never authority.
-    pub const CREDIT_SOURCE_AUTHORIZED_ISSUANCE: u16 = 0x0023;
     pub const CREDIT_SOURCE_VALIDATED_PEER_DEBIT: u16 = 0x0025;
-    pub const CREDIT_SOURCE_VERIFIED_OFFLINE_REENTRY: u16 = 0x0028;
 
-    /// `0x0029` — the authenticated issuance authorization an `0x0023`
-    /// `AuthorizedIssuance` credit resolves against.
-    ///
-    /// Allocated with the field table that earns it: it answers WHO HAD THE
-    /// RIGHT TO CREATE THESE UNITS, and it answers it from the committed token
-    /// policy rather than from the issuer's assertion. V1 is deliberately
-    /// narrow — it admits issuance only under a `TokenAuthority` threshold met
-    /// by distinct policy-named signers over the exact issuance, and refuses
-    /// every policy condition whose inputs are not foreign-verifiable.
-    ///
-    /// It proves POLICY AUTHORIZATION, never backing: nothing here establishes
-    /// that the issued units are redeemable for or collateralized by any other
-    /// asset.
-    pub const ISSUANCE_AUTHORIZATION_BODY: u16 = 0x0029;
 
     /// The recipient credit of a native reserve release (Part IX §51): one
     /// generation of the network's ONE ERA reserve lineage, released leader
     /// first to the recipient the release names. Scoped to one network
     /// through its `reserve_id`. Replaces the burned `0x0030` ticket credit.
     pub const CREDIT_SOURCE_NATIVE_RESERVE_RELEASE: u16 = 0x005D;
+    /// `0x005F` — the creator's credit of a native token's whole genesis
+    /// supply, released in the transition that creates the token
+    /// (`ReleaseRule::AllAtCreation`, SoFi §51).
+    pub const CREDIT_SOURCE_GENESIS_RELEASE: u16 = 0x005F;
 
     // ── SoFi v8: the unilateral trader operation ────────────────────────
     //
@@ -358,6 +346,18 @@ pub mod burned_class {
     /// A credit funded by a debit in the same transition — produced only by
     /// the old settle write set, burned with it.
     pub const CREDIT_SOURCE_SAME_TRANSITION_MOVE: u16 = 0x0024;
+    /// The verified offline re-entry credit — never produced by any path.
+    /// Offline value is the device's designated offline accounting; moving it
+    /// back to the online balance is a state change in the device's own
+    /// transition, with no credit source and no cost (owner, 2026-09-23).
+    pub const CREDIT_SOURCE_VERIFIED_OFFLINE_REENTRY: u16 = 0x0028;
+    /// The authorized-issuance credit and the issuance authorization it
+    /// resolved against: a policy's signer set authorizing new units. There
+    /// is no minting after genesis and the signer set never authorizes
+    /// issuance (SoFi §48, §54; owner, 2026-09-23). A token's supply is
+    /// released at creation (`0x005F`) or from a reserve (`0x005D`).
+    pub const CREDIT_SOURCE_AUTHORIZED_ISSUANCE: u16 = 0x0023;
+    pub const ISSUANCE_AUTHORIZATION_BODY: u16 = 0x0029;
     /// The old market's leaf states — a vault reserve leg, a settlement
     /// receipt and the bundle acceptance — and the trader acceptance and
     /// receipt objects that certified them. Burned with the QuorumBind
@@ -412,6 +412,9 @@ pub mod burned_class {
         ALLOCATION_BUNDLE,
         DSM_SUCCESSOR_EVIDENCE,
         MARKET_TERMS,
+        CREDIT_SOURCE_VERIFIED_OFFLINE_REENTRY,
+        CREDIT_SOURCE_AUTHORIZED_ISSUANCE,
+        ISSUANCE_AUTHORIZATION_BODY,
     ];
 
     pub fn is_burned_class(object_class: u16) -> bool {
@@ -565,8 +568,6 @@ pub enum CcbError {
     /// An admission manifest naming both substrates, or neither. The object
     /// shape is what states the substrate; exactly one is present.
     ManifestSubstrateNotExactlyOne,
-    /// An offline reentry naming one boundary as its own predecessor.
-    OfflineReentryBoundaryIsItsOwnParent,
     /// Credit sources out of order, or two sources for one credit.
     CreditSourcesNotStrictlyAscending { index: usize },
     /// A source naming a mutation index the witness does not have.
@@ -584,6 +585,9 @@ pub enum CcbError {
         manifest_count: usize,
         derived_count: usize,
     },
+    /// One transition introduces more direct external provenance references
+    /// than `MAX_PROVENANCE_FANOUT` (SoFi §18.4). A known bound violation.
+    ProvenanceFanoutExceeded { count: usize, max: usize },
 }
 
 impl core::fmt::Display for CcbError {
@@ -653,11 +657,6 @@ impl core::fmt::Display for CcbError {
                  and offline_boundary_evidence_addr must be present — the object shape is \
                  what states the substrate"
             ),
-            CcbError::OfflineReentryBoundaryIsItsOwnParent => write!(
-                f,
-                "credit source: prior_boundary_id equals unload_boundary_id — the consumed \
-                 checkpoint must be the PREDECESSOR of the reentry, not the reentry itself"
-            ),
             CcbError::CreditSourcesNotStrictlyAscending { index } => write!(
                 f,
                 "economic transition witness: credit source {index} is not strictly after its \
@@ -703,6 +702,11 @@ impl core::fmt::Display for CcbError {
                  addresses but the witness's credit sources reference {derived_count} distinct \
                  external addresses — the field is a DERIVED publication index, not a second \
                  description of provenance"
+            ),
+            CcbError::ProvenanceFanoutExceeded { count, max } => write!(
+                f,
+                "economic admission: the transition introduces {count} direct external \
+                 provenance references, more than the bound of {max}"
             ),
         }
     }

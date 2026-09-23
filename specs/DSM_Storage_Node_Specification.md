@@ -144,14 +144,14 @@ Anyone MAY append the content address of an object the member already holds unde
 **Rule (Imported: DSM §11)**
 
 1. **Tip mirror.** A public head and encrypted per-relationship leaves, keyed by device and relationship.
-2. **Inbox spool.** Unilateral delivery to an offline counterparty. Envelopes are strictly versioned, ordered by insertion, acknowledged per routing key, and never opened by the node.
+2. **Inbox spool.** Unilateral delivery to an offline counterparty. Envelopes are strictly versioned, ordered by insertion, and never opened by the node. The spool is append-only and read from a position: nothing is marked, hidden, expired or removed after a write, and which messages a device has consumed is the device's own state. Every payload is ciphertext, sealed end to end under a per-step key derived from the relationship's Kyber exchange (Owner decision, 2026-09-23; DSM Amendment A7).
 3. **Identity and recovery.** Genesis anchoring, device-tree indexing, and recovery capsules, stored as bytes under derived keys. Recovery is out of scope for this round; this document imports it as substrate only.
 
 **Rule — routing exists only through a pre-established contact (Owner decision; Imported: DSM §9, §13)**
 
 Nothing can be sent to a party that has not pre-established the sender as a contact. A relationship is created by mutual pre-add from committed state, never by first contact (DSM §9, §13), and the same rule governs token policies.
 
-1. A message is sent to a relationship, never to a genesis account. The relationship is addressed by its chain id, the hash of the two device ids.
+1. A message is sent to a relationship, never to a genesis account. The relationship is the address. Its inbox address is per relationship and changes every step: the hash of the recipient's genesis, the recipient's device id and the relationship's current chain tip (owner, 2026-09-23).
 2. **Sender side.** The sender's device sends only over a relationship it has pre-added. With no relationship there is nothing to address, so nothing is sent.
 3. **Recipient side.** The recipient's device reads only relationships it has pre-added, and accepts a message only if it is signed by the other device of that relationship.
 4. The checks listed in DSM §11 (canonical encoding, device authentication, replay-protected message id, recipient key) are performed by the devices at both ends.
@@ -225,8 +225,10 @@ The leader's cadence is driven by all of its customers' traffic, and a node does
 
 **Rule (Imported: SoFi §6, §19.8)**
 
-1. A storage set is five member ids committed in state, identified by `storage_set_id`, which covers member ids only and never endpoints.
+1. A storage set is five members committed in state. Each member is committed as its member id paired with the register incarnation it serves, and `storage_set_id` covers those pairs, never endpoints (Owner decision, 2026-09-23; SoFi Amendment S6).
 2. A vault's set is the network's pinned set. Vault genesis is accepted only if `storage_set_id` equals it.
+
+*Why the incarnation is committed.* A member that loses its register and is rebuilt under the same member id gets a new incarnation. Committing the pair makes the rebuilt member a different member of the set, so it cannot answer for cells its lost register held, for example by reporting a cell empty. Once members run enrolled appliances whose hardware identity carries this continuity, the incarnation may be revisited; until then it stays in the set identity.
 
 **Rule — party sets (Owner decision)**
 
@@ -345,9 +347,14 @@ A quorum rule (say, three of four) would let a record become effective while one
 3. Until handover completes, the role is served by the retiring operator.
 4. A retiring operator's stake cannot be released until it has handed over every role it served (§15).
 
-**Rule — replicate before counting (Owner decision)**
+**Rule — replicate before counting (Owner decision; route chains 2026-09-23)**
 
-An operator MUST durably replicate a role's memory before a write to that role is acknowledged. Permanent loss of a role then requires the loss of every replica, not one machine.
+A write is replicated by its route chain, not by copies kept behind one seat.
+
+1. Each seat MUST write a value durably before it returns that value's arrival record.
+2. A write counts only once its chain holds the leader's link and two further links (§9). Each link commits the one before it, so the three records qualify each other: none of them stands alone, and together they are the proof.
+3. Losing one or two of those seats leaves a surviving link whose chain carries the leader's link, and the value is completed under §12.6, not lost. Permanent loss of a final value requires the loss of all three seats holding its links.
+4. An operator is not required to keep a second copy of a role's memory.
 
 <!-- spec-section: STOR-012-6 -->
 #### 12.6 Loss
@@ -470,7 +477,7 @@ Retention never depends on payment (§19), so an operator's memory empties only 
 
 **Rule — node refusal is bounded (Owner decision)**
 
-1. A node MAY refuse a write addressed to an account that has not met the spend-gate (§16). Whether nodes also refuse writes from an account whose credits are exhausted, or only receivers enforce credits, is Open (§24).
+1. A node MAY refuse a write addressed to an account that has not met the spend-gate (§16), and MAY refuse a write addressed to an account whose credits are exhausted: the spend-gate is the first payment and credits the continuing one, so an account keeps paying for its storage (Owner decision, 2026-09-23). Both refusals are keyed on the account written to, never on the writer; both are outside beta.
 2. Any refusal is keyed on the account the write is addressed to, never on who is connected. A relayer carrying a party's bytes is admitted, and the node still never checks the writer (§8).
 3. Refusal never applies to DLVs (§18), and never depends on a payload's content or on what else is held at a key.
 4. To the protocol, a refusal is indistinguishable from unavailability: liveness only, never validity.
@@ -583,7 +590,7 @@ No safety property, and no party's liveness other than the owner's own, may depe
 | 7 | The challenge deadline X, and the wire form of challenges and drop claims (§9.1). |
 | 8 | The credit price, its token, and how a price change is made (§17). |
 | 9 | How a credit payment is split among the five operators that store a write (§17). |
-| 10 | Whether nodes also refuse writes from accounts whose credits are exhausted, or only receivers enforce credits (§17). |
+| 10 | Settled 2026-09-23: nodes may refuse writes addressed to an account whose credits are exhausted (§17). |
 | 11 | The pruning window and its exemptions (§19). |
 | 12 | The minimum network size: a set needs five distinct operators, and replacements need more to draw from (§12). |
 | 13 | Whether opting out of a member should carry a cost (§12.4). |

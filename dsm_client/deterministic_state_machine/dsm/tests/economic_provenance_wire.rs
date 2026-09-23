@@ -12,7 +12,7 @@
 
 use dsm::ccb::decode::DecodeError;
 use dsm::ccb::{CcbError, CcbObject};
-use dsm::economic::credit::{CreditSource, CreditSourceVerifiedOfflineReentry};
+use dsm::economic::credit::CreditSource;
 use dsm::economic::decode::decode_leaf_state;
 use dsm::economic::mutation::EconomicLeafMutation;
 use dsm::economic::state::{EconomicBalanceState, EconomicLeafState};
@@ -65,24 +65,6 @@ fn a_credit_with_no_source_is_refused() {
     assert_eq!(
         witness(debit_then_credit(), vec![]).unwrap_err(),
         CcbError::UnfundedCredit { mutation_index: 1 }
-    );
-}
-
-#[test]
-fn an_offline_reentry_cannot_consume_its_own_boundary() {
-    // Deriving the source from the terminal state instead of the PRIOR
-    // checkpoint is the inflation bug: two forks derive two ids and both
-    // reenter. The wire refuses the degenerate form of that mistake.
-    let source = CreditSource::VerifiedOfflineReentry(CreditSourceVerifiedOfflineReentry {
-        credit_mutation_index: 1,
-        prior_boundary_id: [0x5A; 32],
-        unload_boundary_id: [0x5A; 32],
-        branch_evidence_addr: [0x6B; 32],
-    });
-    let w = witness(debit_then_credit(), vec![source]).expect("structurally fine");
-    assert_eq!(
-        w.encode().unwrap_err(),
-        CcbError::OfflineReentryBoundaryIsItsOwnParent
     );
 }
 

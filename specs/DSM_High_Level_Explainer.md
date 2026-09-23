@@ -755,7 +755,7 @@ protocol-relevant path reads a clock; ordering inside the node uses logical tick
 Inter-node gossip exists, and it is state synchronisation only: no leader election, no Raft, no Paxos
 between nodes, no vote.
 
-> **Amendment A2 (owner, 2026-09-22) — payment is the one refusal.** A node may refuse a write addressed to an account that has not met the one-time spend-gate below. It refuses nothing else, and nothing on protocol grounds. Whether nodes also refuse writes from accounts whose storage credits are exhausted is open (storage spec §17, §24).
+> **Amendment A2 (owner, 2026-09-22) — payment is the one refusal.** A node may refuse a write addressed to an account that has not met the one-time spend-gate below. It refuses nothing else, and nothing on protocol grounds. It may also refuse a write addressed to an account whose storage credits are exhausted: the spend-gate is the first payment and credits are the continuing one, so an account keeps paying for its storage (owner, 2026-09-23). Both refusals are keyed on the account written to, and both are outside beta.
 >
 > - **Paying and getting through are separate.** A party pays for storage with credits (storage spec §17); how a payment is split among the five members of its set is open (storage spec §24, item 9). A write goes through once its route chain has three links (Amendment A6), so the other seats carry what one member refuses.
 > - **The one exception is a leader.** No member stands in for a cell's leader, so if a member refuses a cell it happens to lead, that cell waits until the party opts the member out or the network cuts it. That is a stall, never a change in validity.
@@ -782,15 +782,22 @@ relationship. This is where a counterparty’s copy of a receipt lives: a second
 frontier, alongside the register below.
 
 Inbox spool. Unilateral delivery for the offline counterparty. Envelopes are strictly versioned, ordered
-by insertion, and acknowledged per routing key. The node never opens the envelope and checks nothing
-about it (Amendment A3).
+by insertion, and read from a position; nothing is marked, hidden, expired or removed after a write. The
+node never opens the envelope and checks nothing about it (Amendment A3), and every payload it holds is
+ciphertext (Amendment A7).
 
 > **Amendment A3 (owner, 2026-09-22) — routing exists only through a pre-established contact, and the node never checks the writer.** This replaces the admission gates the source placed at the node (canonical encoding, device authentication, a replay-protected message id, and a recipient key).
 >
-> - **A message goes to a relationship, never to a genesis account.** A relationship is addressed by its chain id, the hash of the two device ids. Nobody can send to a party it has not pre-added: with no relationship there is nothing to address.
+> - **A message goes to a relationship, never to a genesis account.** The relationship is the address: Its inbox address is per relationship and changes every step: the hash of the recipient's genesis, the recipient's device id and the relationship's current chain tip (owner, 2026-09-23). Nobody can send to a party it has not pre-added: with no relationship there is nothing to address.
 > - **Both ends check.** The sender's device sends only over relationships it has pre-added. The recipient's device reads only relationships it has pre-added, and accepts only messages signed by the other device of that relationship. The checks the source listed are performed by the devices at both ends.
 > - **The node does not check who is writing,** not even whether the writer is one of the relationship's two devices. A node that can check can block, and blocking is an authority a node must not have.
 > - **What that leaves is worthless to an attacker.** Software that skips the sender-side check can compute a relationship id and write bytes under it, but nothing changes: writing into someone else's relationship needs two victims' ids and fails the recipient's signature check, and writing under one's own id and a victim's is never read, because the victim never pre-added it.
+
+> **Amendment A7 (owner, 2026-09-23) — the spool is append-only and its payloads are sealed.**
+>
+> - **Append-only.** A node never marks, hides, expires or removes a spool envelope after it is written, and serves a spool from a position. Which messages a device has consumed is the device's own state, kept on the device; no node holds read state, and no one can change another party's. This replaces "acknowledged per routing key".
+> - **Sealed.** Every spool payload — a transfer body, a reply, a message — is encrypted end to end between the two parties of its relationship. Each step's Kyber encapsulation, which already yields the step's shared secret, also yields a message key under its own domain tag, never reused for another step, and the payload is sealed under an authenticated cipher. A node holds ciphertext only. This is what makes "only the parties to a relationship hold its bytes" true of the spool.
+> - **Not SoFi.** SoFi's objects and cells are public verification material by design — any trader walks a vault's head, any verifier checks a route, any relayer completes a registered fulfillment — and stay unencrypted.
 
 Identity and recovery. Genesis anchoring, device-tree indexing, and recovery capsules, all stored as
 bytes under derived keys.

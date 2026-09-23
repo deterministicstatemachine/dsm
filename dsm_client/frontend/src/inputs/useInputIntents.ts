@@ -60,6 +60,9 @@ export function useInputIntents({
       case 'TOKENS':
         navigate('accounts');
         break;
+      case 'TRADE':
+        navigate('sofi');
+        break;
       case 'CONTACTS':
         navigate('contacts');
         break;

@@ -12,9 +12,6 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use axum::http::StatusCode;
-use axum::routing::get;
-use axum::{middleware, Extension, Router};
 use axum_server::tls_rustls::RustlsConfig;
 
 use clap::Parser;
@@ -22,12 +19,10 @@ use config::{Config, File};
 use log::info;
 use rustls::crypto::{self, CryptoProvider};
 use std::sync::Once;
-use tower::limit::ConcurrencyLimitLayer;
-use tower_http::{limit::RequestBodyLimitLayer, trace::TraceLayer};
 
 use dsm_sdk::util::text_id;
 
-use dsm_storage_node::{api, auth, db, replication, AppState};
+use dsm_storage_node::{api, db, replication, AppState};
 
 use api::infra::network_config::NetworkDetector;
 
@@ -246,122 +241,6 @@ fn load_server_config(opts: &Opts) -> Result<ServerConfig> {
     })
 }
 
-/// Build the app and return `Router<()>`.
-fn build_router(state: Arc<AppState>, config: &ServerConfig, benchmark_mode: bool) -> Router<()> {
-    let public_rate_limiter = if benchmark_mode {
-        log::info!("BENCHMARK MODE: rate limiting disabled for all public endpoints");
-        Arc::new(api::infra::rate_limit::RateLimiter::new_bypass())
-    } else {
-        Arc::new(api::infra::rate_limit::RateLimiter::new())
-    };
-    let public_rate_layer = middleware::from_fn_with_state(
-        public_rate_limiter.clone(),
-        api::infra::rate_limit::rate_limit_by_ip,
-    );
-
-    // Start with deterministic storage APIs you already have
-    // (merge only the routers that are public & compile cleanly).
-    // Object store reads (GET) are public; writes (PUT/DELETE) are behind device_auth
-    // to prevent unauthenticated deletion or modification of vault advertisements.
-    let object_read_router =
-        api::objects::store::create_router(state.clone()).layer(public_rate_layer.clone());
-    let object_write_auth_state = Arc::new(auth::AuthState {
-        db_pool: state.db_pool.clone(),
-    });
-    let object_write_router = api::objects::store::create_write_router()
-        .layer(axum::middleware::from_fn_with_state(
-            object_write_auth_state,
-            auth::device_auth,
-        ))
-        .layer(Extension(state.clone()));
-    // The storage contract's four operations (Part II §12): the immutable
-    // content-addressed store and the keyed cells and indexes, ONE public
-    // assembly with no write authorization (R2). The node is content-blind on
-    // every one of them — no payload decode, ever.
-    let storage_contract_router =
-        dsm_storage_node::storage_contract_router(state.clone()).layer(public_rate_layer.clone());
-    let object_list_router =
-        api::objects::list::create_router(state.clone()).layer(public_rate_layer.clone());
-    let registry_router =
-        api::registry::core::create_router(state.clone()).layer(public_rate_layer.clone());
-    // Policy router is transport-only and signature-free; safe to expose.
-    let policy_router =
-        api::vault::policy::create_router(state.clone()).layer(public_rate_layer.clone());
-    // Identity mirrors
-    let devtree_router =
-        api::identity::devtree::create_router(state.clone()).layer(public_rate_layer.clone());
-    // Recovery-authority anchor — single-assignment per genesis (§0.5 bind-once)
-    let recovery_anchor_router = api::identity::recovery_anchor::create_router(state.clone())
-        .layer(public_rate_layer.clone());
-    // Append-only Per-Device SMT head chain (§0.5 gap 13, R4 layer 1)
-    let pdsmt_head_router =
-        api::identity::pdsmt_head::create_router(state.clone()).layer(public_rate_layer.clone());
-    let tips_router =
-        api::identity::tips::create_router(state.clone()).layer(public_rate_layer.clone());
-    // Genesis mirror
-    let genesis_router =
-        api::identity::genesis::create_router(state.clone()).layer(public_rate_layer.clone());
-    // DLV slot + Recovery Capsule
-    let dlv_slot_router =
-        api::vault::slot::create_router(state.clone()).layer(public_rate_layer.clone());
-    // Keyed cells and indexes: bytes in, bytes out. No write authorization;
-    // a member keeps everything it is given and refuses nothing.
-    let recovery_capsule_router =
-        api::vault::recovery::create_router(state.clone()).layer(public_rate_layer.clone());
-    // Device registration
-    let device_router =
-        api::identity::device_api::create_router(state.clone()).layer(public_rate_layer.clone());
-    // PaidK spend-gate
-    let paidk_router =
-        api::vault::paidk::create_router(state.clone()).layer(public_rate_layer.clone());
-    // Registry scaling (signals, applicants, registry queries)
-    let registry_scaling_router =
-        api::registry::scaling::create_router(state.clone()).layer(public_rate_layer.clone());
-    // Gossip protocol for replication
-    let gossip_router = api::transport::gossip::gossip_routes(state.clone());
-    // Node discovery for SDK auto-discovery
-    let discovery_router =
-        api::registry::discovery::create_router(state.clone()).layer(public_rate_layer.clone());
-
-    // EVERY `/admin` endpoint, assembled in one place behind one token check.
-    // Two sibling admin routers nested at the same path is how the registry's
-    // update and seed endpoints came to be reachable unauthenticated.
-    let admin_router = api::infra::admin::admin_surface(state.clone());
-
-    // Compose routes and layers, then install `state`.
-    // Returning `Router<()>` here is important (see Axum docs).
-    // Request metrics for Prometheus scraping
-
-    Router::new()
-        // Health check endpoint (lightweight, no DB access)
-        .route("/api/v2/health", get(|| async { (StatusCode::OK, "ok") }))
-        .merge(object_read_router)
-        .merge(object_write_router)
-        .merge(storage_contract_router)
-        .merge(object_list_router)
-        .merge(registry_router) // exposes /api/v2/registry/* as in your tests
-        .merge(policy_router)
-        .merge(devtree_router)
-        .merge(recovery_anchor_router)
-        .merge(pdsmt_head_router)
-        .merge(tips_router)
-        .merge(genesis_router)
-        .merge(dlv_slot_router)
-        .merge(recovery_capsule_router)
-        .merge(device_router) // exposes /api/v2/device/register
-        .merge(paidk_router) // PaidK spend-gate endpoints
-        .merge(registry_scaling_router) // signals, applicants, registry
-        .merge(gossip_router) // Gossip protocol endpoints
-        .merge(discovery_router) // Node discovery for SDK auto-discovery
-        .nest("/admin", admin_router) // Every /admin/* endpoint, auth applied once
-        .layer(RequestBodyLimitLayer::new(config.body_limit_bytes))
-        .layer(ConcurrencyLimitLayer::new(config.concurrency_limit))
-        .layer(TraceLayer::new_for_http())
-        // The node-identity echo (see `node_identity_echo_layer`): NORMATIVE
-        // for every quorum read and write, so it is the one shared layer.
-        .layer(dsm_storage_node::node_identity_echo_layer(&config.node_id))
-        .layer(Extension(state))
-}
 
 // Ensure a rustls CryptoProvider is installed once per-process (required by rustls >= 0.23)
 fn ensure_rustls_provider_installed() {
@@ -534,18 +413,18 @@ async fn async_main() -> Result<()> {
 
     let app_state = Arc::new(state.clone());
 
-    let mut app = build_router(app_state.clone(), &server_config, opts.benchmark_mode);
-
-    // NOTE: No wall-clock maintenance loop. Maintenance cycles are invoked explicitly
-    // via admin tooling with deterministic tick inputs.
-
-    // Mount b0x v2 (protobuf-only, clockless) with auth middleware
-    // Auth now uses the shared DB pool instead of a separate bare connection
-    let auth_state = Arc::new(auth::AuthState {
-        db_pool: db_pool.clone(),
-    });
-    let b0x_router = api::transport::b0x::router(Arc::new(state.clone()), auth_state);
-    app = app.merge(b0x_router);
+    // The one assembly the node serves (`dsm_storage_node::build_app`), shared
+    // with tests that stand up real nodes. No wall-clock maintenance loop:
+    // maintenance is invoked explicitly with deterministic tick inputs.
+    let app = dsm_storage_node::build_app(
+        app_state.clone(),
+        &server_config.node_id,
+        dsm_storage_node::AppLimits {
+            body_limit_bytes: server_config.body_limit_bytes,
+            concurrency_limit: server_config.concurrency_limit,
+            benchmark_mode: opts.benchmark_mode,
+        },
+    );
 
     info!(
         "DSM storage node ready: deterministic storage APIs (ByteCommit/ObjectStore + Registry) (node {} addr {} tls {})",

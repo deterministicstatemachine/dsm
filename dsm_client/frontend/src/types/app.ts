@@ -20,4 +20,5 @@ export type ScreenType =
   | 'recovery'
   | 'nfc_recovery'
   | 'recovery_pipeline'
-  | 'additional_device';
+  | 'additional_device'
+  | 'sofi';
