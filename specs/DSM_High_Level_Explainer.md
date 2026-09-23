@@ -755,14 +755,14 @@ protocol-relevant path reads a clock; ordering inside the node uses logical tick
 Inter-node gossip exists, and it is state synchronisation only: no leader election, no Raft, no Paxos
 between nodes, no vote.
 
-> **Amendment A2 (owner, 2026-09-22) — payment is the one refusal.** A node may refuse a write addressed to an account that has not paid it: the one-time spend-gate below, or the node's own monthly subscription. It refuses nothing else, and nothing on protocol grounds.
+> **Amendment A2 (owner, 2026-09-22) — payment is the one refusal.** A node may refuse a write addressed to an account that has not met the one-time spend-gate below. It refuses nothing else, and nothing on protocol grounds. Whether nodes also refuse writes from accounts whose storage credits are exhausted is open (storage spec §17, §24).
 >
 > - **Paying and getting through are separate.** A party pays all five members of its storage set. A write goes through once the cell's leader and two other members hold it, so the other members carry what one member refuses.
 > - **The one exception is a leader.** No member stands in for a cell's leader, so if a member refuses a cell it happens to lead, that cell waits until the party opts the member out or the network cuts it. That is a stall, never a change in validity.
 > - **No further protection is needed.** A node is one of five. Refusing a paying customer loses that customer and counts against the node's performance score, for a negligible gain.
 > - **Enforcement is keyed on the account the write is addressed to, never on who is writing.** Anyone may still carry a paid-up party's bytes, and the node never checks the writer (Amendment A3).
-> - **It never applies to DLVs.** Creating a vault requires paid-up storage; after that, a vault's storage never depends on anyone's payment, because everyone depends on it.
-> - **Subscriptions stay off-protocol.** A monthly subscription is measured in clock time, so it is enforced in a billing gateway outside every protocol path. Before acting, a client checks that it is paid up with its members.
+> - **It never applies to DLVs.** Creating a vault consumes its creator's credits like any write; after that, a vault's storage never depends on anyone's payment, because everyone depends on it.
+> - **Storage is paid on-chain with credits.** Credits are charged by storage used at a fixed network price, counted in storage and never in time, and checked by the receiver like any debit (storage spec §17). Before acting, a client checks its own credit balance.
 >
 > Details: `DSM_Storage_Node_Specification.md` §16–§19.
 
@@ -2963,6 +2963,8 @@ the spend-gate. Receiving never debits, so a victim’s credits cannot be draine
 time window in any of this. Bitcoin’s fee market solves congestion with a clock and a global queue; DSM
 removes the global queue and prices only the sender’s own accepted steps.
 
+> **Note (2026-09-22).** Credits are the storage payment mechanism: charged by storage used, at a fixed network price in token units (storage spec §17).
+
 
 <!-- spec-section: DSM-HL-063 -->
 ### 63 Sovereign Finance (SoFi)
@@ -3101,6 +3103,8 @@ Two costs are explicit in the specification. First, a market trade is online: it
 set reachable, so SoFi does not inherit DSM’s offline-bearer path. Second, the leader of a cell must
 be reachable for that cell to advance; while it is not, the cell waits, and no other member stands in.
 Both are liveness properties. Neither lets reserves move without a completed bilateral exchange.
+
+> **Amendment A5 (owner, 2026-09-22) — a vault's storage set is assigned, never chosen.** A vault's storage set is the network's pinned set (SoFi §6; storage spec §10). No owner, liquidity provider or trader chooses storage members. Where this section says the LP commits a storage-member set or calls it owner-chosen, read: the vault commits the network's pinned set.
 
 
 <!-- spec-section: DSM-HL-064 -->

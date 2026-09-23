@@ -127,7 +127,7 @@ A storage fact is either established from the reads in hand or not established, 
 
 1. Put at a key stores the bytes a writer sends for that key after everything already held there.
 2. Get returns everything held at the key, in the order it arrived, or that it holds none.
-3. No member refuses, replaces or compares anything held at a key, except that a node MAY refuse a write addressed to an account that has not paid it (§17). There is no write authorization: a signed object carries its signer's authority, and a derived object is recomputed by whoever reads it.
+3. No member refuses, replaces or compares anything held at a key, except that a node MAY refuse a write addressed to an account that has not met the spend-gate (§16, §17). There is no write authorization: a signed object carries its signer's authority, and a derived object is recomputed by whoever reads it.
 4. Any party MAY carry bytes to members not yet reached.
 
 <!-- spec-section: STOR-007 -->
@@ -218,7 +218,7 @@ The leader's cadence is driven by all of its customers' traffic, and a node does
 1. Every party has its own storage set for its own objects and cells. Traders' objects and cells go to the trader's set; an owner's objects and cells go to the owner's set.
 2. A party's set is assigned from the active registry by Fisher–Yates. The party never chooses a member.
 3. A party MAY opt out of a member. The replacement is drawn by Fisher–Yates (§12.4). The party may draw another poor performer; that is accepted.
-4. A party pays each member of its set (§17).
+4. A party pays for storage with credits (§17).
 
 **Open — device register set.** DSM §9 and §80.12 require the economic-root register's set to be "owner-committed". Where that set is committed in device state is not specified.
 
@@ -231,6 +231,10 @@ The leader's cadence is driven by all of its customers' traffic, and a node does
 2. A seat is served by one operator at a time, `op(r)`. Which operator occupies a seat is not committed in any party's state.
 3. Once `S` is committed, it never changes. The leader of every cell is a seat, so it is fixed forever (§9), whichever machine later occupies that seat.
 4. Operator endpoints are resolved outside committed state. Whether endpoint resolution is network configuration or a committed object is Open.
+
+**Why**
+
+SoFi §6 already separates member ids from endpoints, and nodes hold no keys, so a member id is not bound to hardware. Treating the id as a role lets the machine change while every historical cell keeps its meaning. No party's state has to change, so succession never depends on an owner who is offline, lapsed, or dead.
 
 <!-- spec-section: STOR-011-1 -->
 #### 11.1 Two separate Fisher–Yates selections
@@ -263,10 +267,6 @@ seat 3 remains seat 3                  historically chose seat 3
 **Why**
 
 Without seats, replacing machine A with machine B would change the membership input to every historical leader derivation, and two observers could derive different winners for the same past race. With seats, leader selection refers only to the stable position, and the separate assignment mechanism decides which machine currently serves it.
-
-**Why**
-
-SoFi §6 already separates member ids from endpoints, and nodes hold no keys, so a member id is not bound to hardware. Treating the id as a role lets the machine change while every historical cell keeps its meaning. No party's state has to change, so succession never depends on an owner who is offline, lapsed, or dead.
 
 <!-- spec-section: STOR-012 -->
 ### 12 Binding and succession
@@ -318,7 +318,7 @@ A quorum rule (say, three of four) would let a record become effective while one
 
 1. The replacement operator is drawn by the seat-assignment selection (§11.1) from the active registry, excluding operators already seated in the set.
 2. The seed MUST NOT be computable by the party before the retirement is effective. Construction: `s_rebind = H(DSM/storage/rebind/v1; role ∥ H(record) ∥ D)`, where `D` is the sorted list of digests of the first ByteCommit (§14) of each surviving operator whose root includes the record. `D` depends on everything those operators hold, so the party cannot predict it or steer it by repeating opt-outs.
-3. The party pays the new operator before its next action (§17). Re-payment on every redraw is an intended economic brake on repeated opt-outs.
+3. Under per-write credits, opting out carries no payment. The unpredictable seed (item 2) is the defence against steering a seat by repeated opt-outs. Whether opting out should carry a cost is Open (§24).
 
 <!-- spec-section: STOR-012-5 -->
 #### 12.5 Handover
@@ -415,31 +415,33 @@ Retention never depends on payment (§19), so an operator's memory empties only 
 4. `PaidK` is also the join event that drives DJTE, which verifiers evaluate over the same receipts. Emissions are out of scope for this round; this document imports the gate as substrate only.
 
 <!-- spec-section: STOR-017 -->
-### 17 Subscriptions
+### 17 Storage credits
 
 **Rule (Owner decision)**
 
-1. Storage is paid by a monthly subscription, per node, off-chain. Operators compete on price.
-2. The subscription is **not** a protocol mechanism, because a month is clock time. No subscription check MAY appear in Core or in any protocol path of the node. Billing sits in a gateway in front of the protocol code.
-3. Each party pays all five members of its own set. Paying is separate from getting through: a write goes through at a cell once that cell's leader and two other members hold it (§9). So one member refusing does not stop the party; the others carry the write.
-4. The one exception is a member refusing a cell it happens to lead. No other member stands in for a leader (§9), so that cell waits until the member is opted out (§10) or cut (§13). This is a liveness stall, never a validity change, and an operation already under way that meets it stays Pending.
-5. The client checks, before acting, that it is paid up with its members and can write to them. The check runs in the SDK or app layer, never in Core, against status reported by each operator, never against a flag the client sets for itself.
+1. Storage is paid on-chain with credits. A party's credit balance is a leaf in its own committed state.
+2. The credit price is fixed in token units as a committed network parameter and is charged by the storage a write actually uses. Operators do not set prices; they compete on performance (§13). The real-world cost of storage follows the token's exchange value.
+3. A sender-authored, state-advancing transition consumes the credits for the storage it uses, inside that transition. The receiver checks the debit as part of acceptance, like any balance debit. Receiving never debits.
+4. Credits are refilled by paying operators. The payment receipts are the evidence for the refill, through the same path as the spend-gate (§16).
+5. Credits are counted in storage used, never in time, so no clock enters any protocol path.
+6. A party whose credits are exhausted cannot act. That is a liveness consequence only, never an invalidity. Before acting, the client checks its own credit balance.
+7. Paying and getting through are separate: a write goes through at a cell once that cell's leader and two other members hold it (§9).
 
-**Rule — nodes enforce their own payment (Owner decision)**
+**Rule — node refusal is bounded (Owner decision)**
 
-1. A node MAY refuse a write addressed to an account that has not paid it, whether the one-time gate (§16) or its subscription.
-2. Enforcement is keyed on the account the write is addressed to, never on who is connected. A relayer carrying a paid-up party's bytes is admitted, and the node still never checks the writer (§8).
-3. Enforcement never applies to DLVs (§18), and never depends on a payload's content or on what else is held at a key.
-4. To the protocol, a payment refusal is indistinguishable from unavailability: liveness only, never validity.
-5. **Why no protection against abuse is needed:** a node is one of five in a party's set, and the others carry a write it refuses. A refusal can only stall the cells that node leads, and only until the party opts it out (§10) or it is cut (§13). A node that refuses a paying customer loses that customer for a negligible gain.
+1. A node MAY refuse a write addressed to an account that has not met the spend-gate (§16). Whether nodes also refuse writes from an account whose credits are exhausted, or only receivers enforce credits, is Open (§24).
+2. Any refusal is keyed on the account the write is addressed to, never on who is connected. A relayer carrying a party's bytes is admitted, and the node still never checks the writer (§8).
+3. Refusal never applies to DLVs (§18), and never depends on a payload's content or on what else is held at a key.
+4. To the protocol, a refusal is indistinguishable from unavailability: liveness only, never validity.
+5. A node is one of five in a party's set, and the others carry a write it refuses. A refusal can only stall the cells that node leads, and only until the party opts it out (§10) or it is cut (§13).
 
 <!-- spec-section: STOR-018 -->
 ### 18 DLV exemption
 
 **Rule (Owner decision)**
 
-1. Creating a DLV requires paid-up storage.
-2. After creation, a DLV's objects and cells, and writes to them, never depend on anyone's subscription, the owner's included, because everyone depends on them.
+1. Creating a DLV consumes the creator's credits like any write.
+2. After creation, a DLV's objects and cells, and writes to them, never depend on anyone's credits or payment, the owner's included, because everyone depends on them.
 3. A lapse in payment never removes or cancels a DLV.
 4. A DLV's storage set is the network-pinned set (§10); its succession is driven by the network (§12.2), never by the owner.
 
@@ -450,7 +452,8 @@ Retention never depends on payment (§19), so an operator's memory empties only 
 
 1. A node MUST NOT delete, expire, or age out held bytes because of lapsed payment, owner inactivity, or owner death.
 2. The only path by which an operator's memory for a role empties is handover (§12.5).
-3. Reads for verification are not subscription-gated. Receiving value, and verifying provenance, MUST NOT cost the reader a subscription.
+3. Reads for verification cost no credits. Receiving value, and verifying provenance, MUST NOT cost the reader anything.
+4. **Pruning (Owner direction; Open).** Data past a certain age is to be pruned by a sliding window, with age measured in logical units (positions, generations or ByteCommit cycles), never time. Until the window and its exemptions are specified, nothing is pruned. Whatever rule is adopted MUST NOT make a slot that held a claim read as empty, and MUST NOT prune live DLV or dBTC backing material.
 
 <!-- spec-section: STOR-020 -->
 ### 20 Owner independence
@@ -503,6 +506,8 @@ No safety property, and no party's liveness other than the owner's own, may depe
 | 2 | DSM §11 says a node never refuses a value, yet gives the spool admission gates. | **Owner ruling:** routing exists only through a pre-established contact, so a non-contact has nowhere to send; the node refuses nothing on protocol grounds and the checks are done by the devices at both ends (§8). Applied as DSM Amendment A3. |
 | 3 | SoFi §40.4 (Part VIII, a historical implementation plan) keeps a gate requiring the root register to decode and verify signed single root claims and check attribution. SoFi §12 says a member never checks, decodes, or decides anything, and DSM §11 agrees. | **Owner ruling (by §8's reasoning):** a node that checks the writer can block, so the root register must not verify caller signatures. SoFi §12 governs and the Part VIII gate is retired. Applied as SoFi Amendment S2. |
 | 4 | SoFi §6 says membership is frozen per vault and replacement is unspecified; SoFi §46 reserves `DSM/sofi/membership-handover/v1`. | Part III of this document; the reserved tag becomes SoFi's encoding of §12.5. |
+| 5 | DSM §62 prices storage traffic with prepaid credits, while an earlier decision priced storage by monthly subscription. | **Owner ruling:** credits adopted, at a fixed network price per storage used (§17); the subscription is removed. |
+| 6 | DSM §63 calls a vault's storage set owner-chosen, while SoFi §6 and §10 here make it the network-pinned set. | **Owner ruling:** the set is assigned, never chosen. Applied as DSM Amendment A5. |
 
 <!-- spec-section: STOR-023-2 -->
 #### 23.2 From the October 2025 specification, not adopted
@@ -530,3 +535,9 @@ No safety property, and no party's liveness other than the owner's own, may depe
 | 5 | Whether vaults keep a single network-pinned set as the network grows (§10). |
 | 6 | Wire formats and domain tags for retirement, loss, handover, and registry-successor objects. |
 | 7 | The challenge deadline X, the wire form of challenges and drop claims, and SoFi's rule for a dropped pending result (§9.1). |
+| 8 | The credit price, its token, and how a price change is made (§17). |
+| 9 | How a credit payment is split among the five operators that store a write (§17). |
+| 10 | Whether nodes also refuse writes from accounts whose credits are exhausted, or only receivers enforce credits (§17). |
+| 11 | The pruning window and its exemptions (§19). |
+| 12 | The minimum network size: a set needs five distinct operators, and replacements need more to draw from (§12). |
+| 13 | Whether opting out of a member should carry a cost (§12.4). |
