@@ -14,10 +14,10 @@ Every extraction in this round is taken against exactly these bytes:
 
 | File | `git hash-object` | Lines |
 |---|---|---|
-| `specs/DSM_High_Level_Explainer.md` | `972574a9e6e9f06290372717fe568a93ef0cef20` | 4292 |
-| `specs/SoFi_Settlement_Specification.md` | `d8f2b2a049b53b462c2acfad8fa19232bb237053` | 2588 |
+| `specs/DSM_High_Level_Explainer.md` | `c21b78c5a37ae0899e1cf3556fe10b0fa4e087a7` | 4296 |
+| `specs/SoFi_Settlement_Specification.md` | `86bce47771a8802b20438afef52e63d64e73e174` | 2592 |
 | `specs/dBTC_Native_Specification.md` | `233a3e72a5b16a023af830f4c8ffaad4ba9391a8` | 2160 |
-| `specs/DSM_Storage_Node_Specification.md` | `a8d3a3aaefdc0ed74b4ec8ff4276b31140b31a60` | 532 |
+| `specs/DSM_Storage_Node_Specification.md` | `cb30606704f33ee19db2e5c1669ff7bc6ce04d3b` | 543 |
 
 The DSM and SoFi specifications were amended on 2026-09-22 (marked "Amendment" in their text). The storage-node specification was added to the corpus on 2026-09-22, before any other extractor started. The owner accepted it in full the same day. Extract its items marked **Open** with Flags `ambiguous` and a Requirement text that says so, never as settled requirements.
 
