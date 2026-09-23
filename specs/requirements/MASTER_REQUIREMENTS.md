@@ -17,7 +17,7 @@ Every extraction in this round is taken against exactly these bytes:
 | `specs/DSM_High_Level_Explainer.md` | `c21b78c5a37ae0899e1cf3556fe10b0fa4e087a7` | 4296 |
 | `specs/SoFi_Settlement_Specification.md` | `86bce47771a8802b20438afef52e63d64e73e174` | 2592 |
 | `specs/dBTC_Native_Specification.md` | `233a3e72a5b16a023af830f4c8ffaad4ba9391a8` | 2160 |
-| `specs/DSM_Storage_Node_Specification.md` | `cb30606704f33ee19db2e5c1669ff7bc6ce04d3b` | 543 |
+| `specs/DSM_Storage_Node_Specification.md` | `a64d5f05e08330b560b8320c17166d48b24340d5` | 543 |
 
 The DSM and SoFi specifications were amended on 2026-09-22 (marked "Amendment" in their text). The storage-node specification was added to the corpus on 2026-09-22, before any other extractor started. The owner accepted it in full the same day. Extract its items marked **Open** with Flags `ambiguous` and a Requirement text that says so, never as settled requirements.
 
@@ -141,6 +141,7 @@ Each extraction also has a Findings table:
 - **Near matches** were never auto-merged. Pairs that the matcher joined but that state different things were split, and each half placed with the row it belongs to.
 - **Open items** go to §8.5 and are never requirements. A row that mixes a settled rule with an open question keeps the settled part as a requirement and moves the question to §8.5.
 - **Single-extractor rows** were each reviewed against the source; none was dropped by vote.
+- **Post-reconciliation amendment (2026-09-22).** Storage spec §12.6 and §22.2 were corrected for finding GPT-4 (line numbers unchanged). §1 pins the corrected file; the canonical rows restating that rule are updated. The extraction files in `extractions/` remain as extracted against the previous storage-spec hash `cb306067`.
 
 ## 8 Canonical requirements
 
@@ -989,9 +990,9 @@ Columns: **ID** is the canonical ID (`MR-<spec>-nnnn`, in document order). **Sou
 | MR-STOR-0081 | liveness-boundary | explicit | Until handover completes, the retiring operator serves the role, and its stake is not released until every role it served is handed over. | cc: STOR-012-5/L330; gpt: STOR-012-5/L330, STOR-012-5/L331 | 2/2 | none |
 | MR-STOR-0082 | obligation | explicit | An operator must durably replicate a role's memory before acknowledging a write to that role. | cc: STOR-012-5/L335; gpt: STOR-012-5/L335 | 2/2 | none |
 | MR-STOR-0083 | transition | explicit | If a role's memory is lost without handover, the record carries a loss marker, and each survivor records it in its own ordered memory; material held before it is pre-loss material. | cc: STOR-012-6/L342; gpt: STOR-012-6/L342, STOR-012-6/L343 | 2/2 | none |
-| MR-STOR-0084 | transition | explicit | For a cell whose leader role was lost, the claims held pre-loss by at least two survivors decide it: none means nothing was realized and the new operator leads; one is the winner; two or more freeze the cell with no winner. | cc: STOR-012-6/L344; gpt: STOR-012-6/L344, STOR-012-6/L348, STOR-012-6/L349, STOR-012-6/L350 | 2/2 | tension(GPT-4) |
+| MR-STOR-0084 | transition | explicit | For a cell whose leader role was lost, the claims held pre-loss by at least one survivor decide it: none means nothing was realized and the new operator leads; one is the winner; two or more freeze the cell with no winner. | cc: STOR-012-6/L344; gpt: STOR-012-6/L344, STOR-012-6/L348, STOR-012-6/L349, STOR-012-6/L350 | 2/2 | none |
 | MR-STOR-0085 | prohibition | explicit | For a cell with qualifying pre-loss material, the new operator's arrival log is never used as the leader's order. | cc: STOR-012-6/L352; gpt: STOR-012-6/L352 | 2/2 | none |
-| MR-STOR-0086 | theorem | explicit | The survivor rule never contradicts a pre-loss final result; it resolves to it or freezes the cell, and freezing requires the signer to have equivocated. | cc: STOR-012-6/L356; gpt: STOR-012-6/L356 | 2/2 | tension(GPT-4) |
+| MR-STOR-0086 | theorem | explicit | The survivor rule never contradicts a pre-loss final result: it resolves to it or freezes the cell; freezing is evidence of equivocation only where a single party can sign objects naming the cell. | cc: STOR-012-6/L356; gpt: STOR-012-6/L356 | 2/2 | none |
 | MR-STOR-0087 | invariant | explicit | The active registry is the sorted list of operator ids, stored as an immutable object, advancing by a pure function of the prior registry and hash-referenced capacity, performance and applicant evidence. | cc: STOR-013/L368; gpt: STOR-013/L368, STOR-013/L367 | 2/2 | none |
 | MR-STOR-0088 | transition | explicit | Each registry successor is a keyed cell on the network's pinned set keyed by the prior registry's address; anyone may write a candidate, non-recomputing objects are not candidates, and the first candidate at the leader wins under the ordinary finality rule. | cc: STOR-013/L369; gpt: STOR-013/L369 | 2/2 | none |
 | MR-STOR-0089 | prohibition | explicit | Pruning is computed from committed evidence only; locally measured latency or uptime never enters it. | cc: STOR-013/L370; gpt: STOR-013/L370 | 2/2 | none |
@@ -1028,7 +1029,7 @@ Columns: **ID** is the canonical ID (`MR-<spec>-nnnn`, in document order). **Sou
 | MR-STOR-0120 | obligation | explicit | After a prune or exit, any client may restore missing replicas of immutable objects, accepted by hash only. | cc: STOR-021/L478; gpt: STOR-021/L478 | 2/2 | none |
 | MR-STOR-0121 | prohibition | explicit | Keyed-cell arrival order is not repairable by clients; it moves only by handover and, if lost, the cell is resolved by the loss rule. | cc: STOR-021/L479; gpt: STOR-021/L479 | 2/2 | none |
 | MR-STOR-0122 | proof-obligation | explicit | History invariance: a handover changes no LeaderHeld or Final fact for any cell. | cc: STOR-022/L490; gpt: STOR-022/L490 | 2/2 | none |
-| MR-STOR-0123 | proof-obligation | explicit | Survivor-rule soundness: the loss rule never selects a value other than the pre-loss final value and freezes only when two survivor-held objects name one cell. | cc: STOR-022/L491; gpt: STOR-022/L491 | 2/2 | tension(GPT-4) |
+| MR-STOR-0123 | proof-obligation | explicit | Survivor-rule soundness: with at most two seats lost, the loss rule never selects a value other than the pre-loss final value and freezes only when survivors hold two different objects naming one cell. | cc: STOR-022/L491; gpt: STOR-022/L491 | 2/2 | none |
 | MR-STOR-0124 | proof-obligation | explicit | Retirement convergence: with at most two seats named per record, no two verifiers act on different occupants of one seat. | cc: STOR-022/L492; gpt: STOR-022/L492 | 2/2 | none |
 | MR-STOR-0125 | proof-obligation | explicit | Registry determinism: verifiers holding the same winning candidate and inputs compute the same registry. | cc: STOR-022/L493; gpt: STOR-022/L493 | 2/2 | none |
 | MR-STOR-0126 | proof-obligation | explicit | Rebind unpredictability: the party cannot compute the rebind seed before its retirement is effective. | cc: STOR-022/L494; gpt: STOR-022/L494 | 2/2 | none |
@@ -1073,11 +1074,11 @@ The specifications mark these undecided. They are recorded so they are not lost,
 
 These come from the chatgpt extraction's findings table (GPT-n, IDs as cited there) and from the reconciliation itself (R-n). The claude-chat findings were all resolved before this round (amendments A1 to A5 and S1 to S3; PR #967). Each canonical row a finding bears on carries it in its Flags column.
 
-**Needs a ruling: safety**
+**Safety**
 
 | # | Finding |
 |---|---|
-| GPT-4 | **The storage loss rule has a hole.** A value is final once the leader and two other members hold it. If the two lost seats are the leader and one of those two, only one survivor holds the final value, so it is not in C (which needs two survivors), and the cell reads as "nothing happened" and can be written again. The two-loss model does not give the soundness that storage §22.2 claims. |
+| GPT-4 | **Resolved 2026-09-22 (owner, storage spec §12.6).** The loss rule counted a value only if two survivors held it. When the lost seats were the leader and one holder of a final value, that value was not counted and the cell could be written again; worse, an object written to two other members before the loss would have been selected in place of the final value. The threshold is now one survivor, which never selects anything but the final value; the cost is that any competing object held by a survivor freezes the cell. The canonical rows for §12.6 and §22.2 are updated. |
 
 **Needs a ruling: design gaps**
 
