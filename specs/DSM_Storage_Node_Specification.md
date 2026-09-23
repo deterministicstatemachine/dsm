@@ -341,19 +341,19 @@ An operator MUST durably replicate a role's memory before a write to that role i
 
 1. If a role's memory is lost with no handover, the retirement record carries a loss marker.
 2. Each surviving operator records the loss marker at a point in its own ordered memory. For each survivor, material it held before that point is **pre-loss** material.
-3. For a cell `K` whose leader role was lost, the verifier forms `C = {x : x names K and at least two survivors hold x as pre-loss material}` and resolves `K` as follows:
+3. For a cell `K` whose leader role was lost, the verifier forms `C = {x : x names K and at least one survivor holds x as pre-loss material}` and resolves `K` as follows:
 
 | `|C|` | Result |
 |---|---|
 | 0 | No value was realized at `K` before the loss. The role's new operator leads `K` from here. |
 | 1 | The single member of `C` is the winner at `K`. |
-| ≥ 2 | `Frozen(K)`: no winner. The objects in `C` are evidence of equivocation by whoever signed them. |
+| ≥ 2 | `Frozen(K)`: no winner. Where only one party can sign an object naming `K` (a device's register cell), the objects in `C` are evidence that party equivocated. Where several parties can (a vault successor cell), they may be ordinary competition and prove nothing. |
 
 4. For a cell with any qualifying pre-loss material, the new operator's arrival log MUST NOT be used as the leader's order. Otherwise an equivocator could write a fresh "first" object into an empty replacement and rewrite a decided cell.
 
-**Property — the survivor rule never contradicts a final result (Owner decision)**
+**Property — the survivor rule never contradicts a final result (Owner decision; corrected 2026-09-22, finding GPT-4)**
 
-If `Final(K, x)` held before the loss, then `x` was held by the leader and at least two other members. The other members are survivors and lose nothing (§3), so `x ∈ C`. At most one value is final at a cell, so if `|C| = 1`, its member is `x`. The rule can resolve to a final result or freeze the cell, but it never selects a different winner. Freezing requires two objects naming one cell, each held by two survivors, which requires the signer to have equivocated.
+If `Final(K, x)` held before the loss, then `x` was held by the leader and at least two other members. A record names at most two seats and one of them is the leader, so at most one of those other members is lost, and at least one survivor holds `x`: `x ∈ C`. At most one value is final at a cell, so if `|C| = 1` its member is `x`, and if `|C| = 0` no value was final. The rule can resolve to a final result or freeze the cell, but it never selects a different winner. A threshold of two survivors would not be sound: when the leader and one holder of `x` are the two seats lost, only one survivor holds `x`, and an object written to two other members before the loss would be selected in its place. The cost of the threshold of one is liveness: any competing object held by one survivor freezes the cell, so a lost leader role can freeze vault cells where traders were racing.
 
 **Open — consequences of `Frozen(K)`.** What a frozen cell means for DSM acceptance, SoFi resolution, and dBTC, and whether it triggers the DSM tripwire (§53) against the equivocating signer, is not decided here.
 
@@ -488,7 +488,7 @@ No safety property, and no party's liveness other than the owner's own, may depe
 | # | Obligation |
 |---|---|
 | 22.1 | History invariance: a handover changes no `LeaderHeld` or `Final` fact for any cell. |
-| 22.2 | Survivor-rule soundness: under §3, the rule of §12.6 never selects a value other than the pre-loss final value, and freezes only when two survivor-held objects name one cell. |
+| 22.2 | Survivor-rule soundness: under §3, with at most two seats lost, the rule of §12.6 never selects a value other than the pre-loss final value, and freezes only when survivors hold two different objects naming one cell. |
 | 22.3 | Retirement convergence: with at most two seats named per record, no two verifiers act on different occupants of one seat. |
 | 22.4 | Registry determinism: any two verifiers holding the same winning registry candidate and its referenced inputs compute the same registry. |
 | 22.5 | Rebind unpredictability: the party cannot compute `s_rebind` before its retirement is effective. |
