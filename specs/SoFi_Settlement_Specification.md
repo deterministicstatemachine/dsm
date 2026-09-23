@@ -1536,6 +1536,7 @@ Resolution is local to the verifier, deterministic, and permanent once it is not
 | 1 | Pending | Defensive: an object supplied from outside names an unresolved conditional predecessor |
 | 2 | Invalid | The predecessor is terminal, or selected a root different from P.Rvoid; terminal |
 | 3 | Invalid | FulfillmentConformance(F) = Invalid; terminal |
+| 3a | Void | A drop claim for this position won under the challenge rule (storage spec §9.1), and RouteValidation(P, G, E) is not Invalid on the evidence in hand (Amendment S5) |
 | 4 | Pending | FulfillmentConformance(F) = Unavailable |
 | 5 | Invalid | RouteValidation(P, G, E) = Invalid; terminal |
 | 6 | Pending | RouteValidation(P, G, E) = Unavailable |
@@ -1560,6 +1561,8 @@ mutations. Mutual exclusion holds: FulfillmentRegistered(q) ∧ EconomicRootRegi
 resolve_position, CORE/sofi/resolution.rs:284; effect_of, :92.
 
 > **Amendment S1 (owner, 2026-09-22) — nothing negative is recorded, and Pending can end.** Realized, Void, Invalid and Pending are computed by each verifier from raw reads and are never recorded (DSM Amendment A1). Their job is to tell the next trade against a vault whether the balance ahead of it is settled. A position that stays Pending on one party may be challenged under `DSM_Storage_Node_Specification.md` §9.1: if the challenged party does not answer before the cell's leader has closed X ByteCommits, a drop claim wins at the leader and the position resolves Void. It never executes and moves no balance. The value of X is still open (storage §9.1).
+
+> **Amendment S5 (owner, 2026-09-22) — the drop rung.** Step 3a places a dropped position in the ladder. A position that is shown Invalid on evidence in hand (steps 2 and 3, or RouteValidation) stays Invalid; otherwise a won drop claim resolves it Void: nothing executes, no balance moves, and the trader's lineage continues from the previous root. A dropped position is the one Void declared without both predicates established, and because later evidence for it is ignored (storage spec §9.1), it can never move to Invalid.
 
 
 <!-- spec-section: SOFI-025 -->
