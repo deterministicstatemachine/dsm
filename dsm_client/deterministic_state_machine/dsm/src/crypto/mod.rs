@@ -70,6 +70,7 @@ pub mod kyber;
 pub mod rng;
 pub mod signatures;
 pub mod sphincs;
+pub mod spool_seal;
 
 // Micro-level determinism property tests.
 // Kept under `crypto` so they can access crypto primitives without exposing new APIs.

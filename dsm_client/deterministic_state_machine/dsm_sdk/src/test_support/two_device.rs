@@ -13,9 +13,9 @@
 //!
 //! Every helper drives PRODUCTION code, never a re-implementation of it: a send
 //! is the real `wallet.send` handler (`process_online_transfer_logic`) against
-//! a [`FakeB0xNode`]; a receive, a reply and a finalize are the real
-//! `storage.sync` on the entered device. The node is a dumb mirror, so a
-//! failure can only come from the code under test.
+//! real storage nodes ([`RealNodeSet`]); a receive, a reply and a finalize are the real
+//! `storage.sync` on the entered device. The nodes are the storage node's own
+//! code, so a failure comes from the code under test or from a real node.
 //!
 //! STRICTLY SERIALIZED. Exactly one device is active while production code runs;
 //! A-side and B-side calls must never overlap in-process, because `AppState`,
@@ -26,7 +26,7 @@
 use crate::handlers::app_router_impl::AppRouterImpl;
 use crate::sdk::app_state::AppState;
 use crate::storage::client_db::{self, ContactRecord};
-use crate::test_support::fake_node::FakeB0xNode;
+use crate::test_support::real_nodes::RealNodeSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -129,12 +129,12 @@ impl TestDevice {
         crate::bridge::install_local_kyber_pubkey(self.kyber_pk.clone());
     }
 
-    /// Bring the device up against `node`: seed its genesis record (what
-    /// `local_genesis_hash` and inbox routing read) and build its
+    /// Bring the device up against real `nodes`: seed its genesis record
+    /// (what `local_genesis_hash` and inbox routing read) and build its
     /// `AppRouterImpl` — per-device `CoreSDK` (genesis'd) and wallet.
-    pub fn boot(&mut self, nodes: &[FakeB0xNode]) {
+    pub fn boot(&mut self, nodes: &RealNodeSet) {
         self.enter();
-        let endpoints: Vec<String> = nodes.iter().map(|n| n.endpoint.clone()).collect();
+        let endpoints: Vec<String> = nodes.endpoints();
         let genesis_b32 = crate::util::text_id::encode_base32_crockford(&self.genesis);
         client_db::store_genesis_record_with_verification(&client_db::GenesisRecord {
             genesis_id: genesis_b32,
@@ -336,62 +336,13 @@ impl TestDevice {
     }
 }
 
-/// A booted A/B pair sharing a fleet of the network's pinned register members
-/// (one fake node per member, as in production), mutually added as contacts
-/// and funded. The starting point of every protocol test.
+/// A booted A/B pair on a set of real storage nodes (the network's pinned
+/// register members, one real node each), mutually added as contacts and
+/// funded. The starting point of every protocol test.
 pub struct Pair {
-    pub nodes: Vec<FakeB0xNode>,
+    pub nodes: RealNodeSet,
     pub a: TestDevice,
     pub b: TestDevice,
-}
-
-impl Pair {
-    /// Every `POST /api/v2/b0x/submit` any node received, in arrival order per
-    /// node (node 0's first, then node 1's, ...).
-    pub fn submits(&self) -> Vec<crate::test_support::fake_node::RecordedPost> {
-        self.nodes.iter().flat_map(|n| n.submits()).collect()
-    }
-
-    /// Make every node answer `status` to submits under `message_id`.
-    pub fn override_submit(&self, message_id: &str, status: u16) {
-        for n in &self.nodes {
-            n.override_submit(message_id, status);
-        }
-    }
-
-    pub fn clear_submit_override(&self, message_id: &str) {
-        for n in &self.nodes {
-            n.clear_submit_override(message_id);
-        }
-    }
-
-    /// Delay `message_id` in transit on every node (spooled, not served).
-    pub fn hold_message(&self, message_id: &str) {
-        for n in &self.nodes {
-            n.hold_message(message_id);
-        }
-    }
-
-    pub fn release_message(&self, message_id: &str) {
-        for n in &self.nodes {
-            n.release_message(message_id);
-        }
-    }
-
-    /// Take the whole fleet down for writes (`Some(503)`) or back up (`None`).
-    pub fn override_all_submits(&self, status: Option<u16>) {
-        for n in &self.nodes {
-            n.override_all_submits(status);
-        }
-    }
-
-    /// Number of nodes on which `message_id` is spooled AND acked.
-    pub fn acked_count(&self, message_id: &str) -> usize {
-        self.nodes
-            .iter()
-            .filter(|n| n.is_acked(message_id) == Some(true))
-            .count()
-    }
 }
 
 impl Pair {
@@ -400,21 +351,9 @@ impl Pair {
     /// fund them.
     pub async fn boot(a_funding: u64, b_funding: u64) -> Self {
         client_db::reset_database_for_tests();
-        // The fake registers are PROCESS-GLOBAL and the harness identities are
-        // deterministic, so a previous test's root claims sit at exactly the
-        // positions this test will re-register — without a reset the second
-        // suite-ordered test dies on a register CONFLICT (different bytes,
-        // same K_root) that no single-test run can reproduce.
-        crate::sdk::storage_io::fake_registers::reset();
-        // Same reasoning for the binding register: a process-global store whose
-        // stale member echoes would make a later vault's key answer for the
-        // wrong fleet.
-        let nodes: Vec<FakeB0xNode> = crate::economic_fixtures::canonical_member_ids()
-            .iter()
-            .map(|_| FakeB0xNode::spawn())
-            .collect();
-        let endpoints: Vec<String> = nodes.iter().map(|n| n.endpoint.clone()).collect();
-        crate::test_support::fake_node::point_env_config_at(&endpoints);
+        // Fresh real nodes per pair: each test gets empty registers, so no
+        // earlier test's claims sit where this one will write.
+        let nodes = RealNodeSet::start(crate::economic_fixtures::canonical_member_ids().len()).await;
         let mut a = TestDevice::create("A", 0x0A);
         let mut b = TestDevice::create("B", 0x0B);
         a.boot(&nodes);
@@ -499,13 +438,13 @@ mod tests {
     // actually uses: the AK `wallet.send` signs with (signing authority) and
     // the Kyber key the wallet installs. A mismatch here would make every
     // "peer refuses" assertion downstream a fixture artefact.
-    #[test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[serial_test::serial]
-    fn device_material_matches_production_derivations() {
+    async fn device_material_matches_production_derivations() {
         client_db::reset_database_for_tests();
-        let node = FakeB0xNode::spawn();
+        let nodes = RealNodeSet::start(5).await;
         let mut a = TestDevice::create("A", 0x0A);
-        a.boot(std::slice::from_ref(&node));
+        a.boot(&nodes);
         assert_eq!(
             crate::sdk::signing_authority::current_public_key().expect("ak"),
             a.ak_pk,

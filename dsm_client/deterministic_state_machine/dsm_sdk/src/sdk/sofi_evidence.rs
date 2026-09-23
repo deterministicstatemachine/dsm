@@ -15,13 +15,18 @@
 //! | vault leaf pre values | the vault's genesis preimage, found by its locator and recognized by Core; at `R_0` the tree holds exactly the state leaf |
 //! | policy objects | the immutable store, under the address the vault state commits, `Stored` on three members |
 //!
-//! Anything that is not fetched is simply absent from the evidence, and Core
-//! answers `Unavailable` for it — never `Invalid`, never a filled-in value.
+//! Amendment S3: Core's predicates are binary and see only complete evidence.
+//! "Unavailable" lives here, in acquisition: an item not yet fetched, or
+//! fetched bytes that do not authenticate, is retried up to the budget, and
+//! if the evidence is still incomplete this layer answers
+//! [`Acquired::Exhausted`] naming what is missing: a network failure, never a
+//! predicate value. Nothing is evaluated, filled in or recorded on it, and a
+//! producer that gets it stops (MR-SOFI-0272).
 //! A vault PAST its genesis is served by the vault head and evidence store
 //! (`client_db::sofi_vault_head`, spec §44.4): the post state a resolved
 //! transition selected, which this device kept for exactly this. The record
 //! must be the head the core was built on, and it must reproduce its own
-//! root, or the leaves stay unfetched and Core answers `Unavailable`.
+//! root, or the leaves are not in hand and acquisition answers `Exhausted`.
 
 use std::collections::BTreeMap;
 
@@ -145,18 +150,39 @@ pub async fn fetch_vault_genesis(
     )
     .await?;
     Ok(match resolved {
-        Resolved::Kept(preimage) => Some(preimage),
+        // SoFi §28 step 5: a vault is relied on only once its genesis is
+        // ACCEPTED — the signed creation bound to the accepted owner
+        // transition, the market policy the state commits re-derived from its
+        // bytes, the pair ordered, and both token policies permitting a market
+        // leg (§49). Recognizing the bytes is not accepting the vault.
+        Resolved::Kept(preimage) => Some(accept_vault_genesis(set, preimage).await?),
         Resolved::None | Resolved::Unavailable => None,
     })
 }
 
-/// Acquire everything `preimage` needs, from storage and the local leaves.
-/// What could not be fetched is left out, and Core answers `Unavailable`.
+/// What an acquisition produced: the complete evidence a Core predicate
+/// consumes, or, once its retry budget is spent, what is still missing.
+/// Predicates are Valid or Invalid only; this is the separate network status
+/// (Amendment S3, owner 2026-09-23). An operation fails on Invalid predicates,
+/// or, with Valid predicates, fails when its network retries are exhausted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Acquired<T, M> {
+    /// Everything the predicate consumes is in hand and authenticates.
+    Complete(T),
+    /// The retry budget is spent and these items are still not in hand: the
+    /// operation fails on the network. The caller evaluates nothing and
+    /// records nothing.
+    Exhausted(Vec<M>),
+}
+
+/// Acquire everything `preimage` needs, from storage and the local leaves,
+/// retrying within the budget. `Complete` only when every item is in hand and
+/// authenticates; otherwise `Exhausted` naming what is missing.
 pub async fn acquire_evidence(
     set: &StorageSet,
     preimage: &SettlementPreimage,
     local: &LocalLeaves,
-) -> Result<Evidence, DsmError> {
+) -> Result<Acquired<Evidence, dsm::sofi::validation::Missing>, DsmError> {
     let needs = EvidenceNeeds::of(preimage);
 
     let trader_leaves: BTreeMap<D32, TraderLeafPre> = needs

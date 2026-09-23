@@ -283,32 +283,6 @@ pub enum Operation {
         /// The reserve generation this claim's release installs (`≥ 1`).
         generation: u64,
     },
-    /// Mint new tokens into existence.
-    ///
-    /// NOTHING IN THIS OPERATION ASSERTS ISSUANCE AUTHORITY. The legacy
-    /// `authorized_by` / `proof_of_authorization` channel is deleted: those
-    /// bytes participated in the operation digest, and the `0x0029`
-    /// authorization signs a body that COMMITS that digest — so authorization
-    /// material inside the operation has no fixed point. Authority comes only
-    /// from the attached economic admission: this operation's exact digest is
-    /// named by a policy-signed `IssuanceAuthorizationBody`, resolved by the
-    /// `0x0023 AuthorizedIssuance` arm during validation.
-    Mint {
-        /// Quantity of tokens to mint (must be > 0).
-        amount: Balance,
-        /// Binary identifier of the token type to mint.
-        token_id: Vec<u8>,
-        /// CPTA commit of the asset being minted.
-        ///
-        /// The conservation guard binds the applied `BalanceDelta` to THIS
-        /// value, so a mint cannot credit an asset other than the one the
-        /// signed operation names. Without it the guard could only check the
-        /// delta's count/direction/amount, and a mint for token X could credit
-        /// ERA. Mirrors `Transfer.policy_commit`.
-        policy_commit: [u8; 32],
-        /// Human-readable description of the minting event.
-        message: String,
-    },
     /// Adopt a token's public policy on THIS device.
     ///
     /// The authenticated state transition behind "ADD TOKEN". Applying it
@@ -771,12 +745,11 @@ impl Operation {
             // egress gate and the per-asset bearer gate entirely.
             | CreateToken { .. } => true,
 
-            // Not value egress: ingress (Receive / Mint), identity,
+            // Not value egress: ingress (Receive), identity,
             // relationship, recovery, links, invalidation, generic, and no-op.
             Genesis
             | Create { .. }
             | Update { .. }
-            | Mint { .. }
             | AddRelationship { .. }
             | CreateRelationship { .. }
             | RemoveRelationship { .. }
@@ -810,7 +783,7 @@ impl Operation {
     /// relationships that never carried value are excluded from the gate-set.
     ///
     /// This is strictly broader than [`Self::is_value_egress`]: it ALSO counts value
-    /// *ingress* (`Mint` / `Receive` / `CreateToken`), because a relationship that
+    /// *ingress* (`Receive` / `CreateToken`), because a relationship that
     /// only ever received value still holds reconcilable value at recovery time and
     /// must be in the gate-set. Egress and ingress are kept in one classifier (egress
     /// via `is_value_egress`, plus the ingress arm here) so the two cannot drift.
@@ -824,7 +797,7 @@ impl Operation {
         // recovery, links, invalidation, generic, no-op) is non-value.
         matches!(
             self,
-            Mint { .. } | Receive { .. } | CreateToken { .. } | FaucetClaim { .. }
+            Receive { .. } | CreateToken { .. } | FaucetClaim { .. }
         )
     }
 
@@ -899,7 +872,6 @@ impl Operation {
             Genesis
             | Create { .. }
             | Update { .. }
-            | Mint { .. }
             | AddRelationship { .. }
             | CreateRelationship { .. }
             | RemoveRelationship { .. }
@@ -1122,20 +1094,6 @@ impl Operation {
                 if let Some(ap) = authority_policy {
                     ap.append_canonical(&mut out);
                 }
-            }
-            Mint {
-                amount,
-                token_id,
-                policy_commit,
-                message,
-            } => {
-                put_u8(&mut out, 4);
-                let bal = amount.to_le_bytes();
-                put_bytes(&mut out, &bal);
-                put_bytes(&mut out, token_id);
-                // CPTA policy commitment — same length-prefixed convention as Transfer.
-                put_bytes(&mut out, policy_commit);
-                put_str(&mut out, message);
             }
             Burn {
                 amount,
@@ -1757,21 +1715,6 @@ impl Operation {
                     authority_policy,
                 }
             }
-            4 => {
-                let amount = dec_balance(&mut input)?;
-                let token_id = get_bytes(&mut input)?;
-                let policy_commit: [u8; 32] =
-                    get_bytes(&mut input)?.as_slice().try_into().map_err(|_| {
-                        DsmError::invalid_operation("mint policy_commit must be 32 bytes")
-                    })?;
-                let message = get_str(&mut input)?;
-                Mint {
-                    amount,
-                    token_id,
-                    policy_commit,
-                    message,
-                }
-            }
             5 => {
                 let amount = dec_balance(&mut input)?;
                 let token_id = get_bytes(&mut input)?;
@@ -2240,9 +2183,6 @@ impl Operation {
     /// Get proof of authorization if available
     pub fn get_proof_of_authorization(&self) -> Option<Vec<u8>> {
         match self {
-            // Mint carries NO authorization bytes: its authority is the 0x0029
-            // evidence bundle resolved during economic admission, never a
-            // field inside the operation whose digest that evidence signs.
             // For Transfer, the signature IS the proof of authorization
             Operation::Transfer { signature, .. } if !signature.is_empty() => {
                 Some(signature.clone())
@@ -2313,7 +2253,6 @@ impl Operation {
             Operation::Create { .. } => "create",
             Operation::Update { .. } => "update",
             Operation::Transfer { .. } => "transfer",
-            Operation::Mint { .. } => "mint",
             Operation::Burn { .. } => "burn",
             Operation::LockToken { .. } => "lock_token",
             Operation::UnlockToken { .. } => "unlock_token",
@@ -2452,7 +2391,6 @@ impl Ops for Operation {
         match self {
             Operation::Generic { .. } => Ok(true),
             Operation::Transfer { amount, .. } => Ok(amount.value() > 0),
-            Operation::Mint { amount, .. } => Ok(amount.value() > 0),
             Operation::Burn { amount, .. } => Ok(amount.value() > 0),
             Operation::LockToken { .. } => Ok(true),
             Operation::UnlockToken { .. } => Ok(true),
@@ -2472,7 +2410,6 @@ impl Ops for Operation {
             Operation::FaucetClaim { .. } => "faucet_claim",
             Operation::Generic { .. } => "generic",
             Operation::Transfer { .. } => "transfer",
-            Operation::Mint { .. } => "mint",
             Operation::Burn { .. } => "burn",
             Operation::Create { .. } => "create",
             Operation::Update { .. } => "update",
@@ -2511,7 +2448,6 @@ impl TokenOps for Operation {
     fn is_valid(&self) -> bool {
         match self {
             Operation::Transfer { amount, .. } => amount.value() > 0,
-            Operation::Mint { amount, .. } => amount.value() > 0,
             Operation::Burn { amount, .. } => amount.value() > 0,
             Operation::Lock { amount, .. } => amount.value() > 0,
             Operation::Unlock { amount, .. } => amount.value() > 0,
@@ -2526,7 +2462,6 @@ impl TokenOps for Operation {
     fn verify_token(&self, _public_key: &[u8]) -> Result<bool, DsmError> {
         match self {
             Operation::Transfer { .. }
-            | Operation::Mint { .. }
             | Operation::Burn { .. }
             | Operation::Lock { .. }
             | Operation::Unlock { .. } => Ok(true),
@@ -2708,162 +2643,6 @@ mod tests {
         decoded
     }
 
-    #[test]
-    fn is_value_egress_classifies_owner_value_movement() {
-        // Egress: owner value movement must be gated during identity recovery.
-        assert!(Operation::Burn {
-            amount: test_balance(1),
-            token_id: vec![1],
-            policy_commit: [0u8; 32],
-            proof_of_ownership: vec![],
-            message: String::new(),
-        }
-        .is_value_egress());
-        assert!(Operation::LockToken {
-            token_id: vec![1],
-            amount: 1,
-            purpose: b"dlv_collateral".to_vec(),
-            mode: TransactionMode::Unilateral,
-            signature: vec![],
-        }
-        .is_value_egress());
-
-        // Not egress: ingress + identity/neutral operations proceed during recovery.
-        assert!(!Operation::Genesis.is_value_egress());
-        assert!(!Operation::Noop.is_value_egress());
-        assert!(!Operation::default().is_value_egress());
-        assert!(!Operation::Mint {
-            amount: test_balance(1),
-            token_id: vec![1],
-            policy_commit: [0u8; 32],
-            message: String::new(),
-        }
-        .is_value_egress());
-    }
-
-    #[test]
-    fn is_value_bearing_classifies_value_capable_relationships() {
-        // Egress ops are value-bearing (superset of is_value_egress).
-        let burn = Operation::Burn {
-            amount: test_balance(1),
-            token_id: vec![1],
-            policy_commit: [0u8; 32],
-            proof_of_ownership: vec![],
-            message: String::new(),
-        };
-        assert!(burn.is_value_egress() && burn.is_value_bearing());
-
-        // Ingress ops are value-bearing but NOT egress — a relationship that only
-        // received value is still value-capable (must be in the recovery gate-set).
-        let mint = Operation::Mint {
-            amount: test_balance(1),
-            token_id: vec![1],
-            policy_commit: [0u8; 32],
-            message: String::new(),
-        };
-        assert!(!mint.is_value_egress() && mint.is_value_bearing());
-        let receive = Operation::Receive {
-            token_id: b"TKN".to_vec(),
-            from_device_id: vec![0xAA; 32],
-            amount: test_balance(1),
-            recipient: vec![],
-            message: String::new(),
-            mode: TransactionMode::Unilateral,
-            nonce: vec![],
-            verification: VerificationType::Standard,
-            sender_state_hash: None,
-        };
-        assert!(!receive.is_value_egress() && receive.is_value_bearing());
-
-        // Pure contact/social/neutral relationships are NOT value-capable.
-        assert!(!Operation::Genesis.is_value_bearing());
-        assert!(!Operation::Noop.is_value_bearing());
-        assert!(!Operation::default().is_value_bearing());
-        assert!(!Operation::AddRelationship {
-            from_id: [1; 32],
-            to_id: [2; 32],
-            relationship_type: b"bilateral_transfer".to_vec(),
-            metadata: vec![],
-            proof: vec![],
-            mode: TransactionMode::Bilateral,
-            message: String::new(),
-        }
-        .is_value_bearing());
-    }
-
-    #[test]
-    fn egress_asset_matches_is_value_egress_and_extracts_token() {
-        // P5: egress_asset is the canonical asset-id companion to is_value_egress. The
-        // invariant `is_value_egress() == (egress_asset() != NotEgress)` must hold for every
-        // variant — a representative sample across egress / ingress / neutral.
-        let burn = Operation::Burn {
-            amount: test_balance(7),
-            token_id: b"ERA".to_vec(),
-            policy_commit: [0u8; 32],
-            proof_of_ownership: vec![],
-            message: String::new(),
-        };
-        assert_eq!(
-            burn.egress_asset(),
-            EgressAsset::Asset {
-                token_id: b"ERA".to_vec(),
-                amount: 7
-            }
-        );
-
-        let lt = Operation::LockToken {
-            token_id: b"ERA".to_vec(),
-            amount: -5, // negative i64 clamps to 0 (no canonical egress size)
-            purpose: b"dlv".to_vec(),
-            mode: TransactionMode::Unilateral,
-            signature: vec![],
-        };
-        assert_eq!(
-            lt.egress_asset(),
-            EgressAsset::Asset {
-                token_id: b"ERA".to_vec(),
-                amount: 0
-            }
-        );
-
-        // Vault-keyed DLV claim → asset can't be named here → Unidentified (fail-closed gate).
-        let claim = Operation::DlvClaim {
-            vault_id: vec![1, 2, 3],
-            claim_proof: vec![],
-            claimant_public_key: vec![],
-            signature: vec![],
-            mode: TransactionMode::Unilateral,
-        };
-        assert_eq!(claim.egress_asset(), EgressAsset::Unidentified);
-        assert!(claim.is_value_egress());
-
-        // Non-egress → NotEgress.
-        assert_eq!(Operation::Noop.egress_asset(), EgressAsset::NotEgress);
-        assert_eq!(Operation::Genesis.egress_asset(), EgressAsset::NotEgress);
-
-        // The invariant, across a representative set.
-        let mint = Operation::Mint {
-            amount: test_balance(1),
-            token_id: b"ERA".to_vec(),
-            policy_commit: [0u8; 32],
-            message: String::new(),
-        };
-        for op in [
-            &burn,
-            &lt,
-            &claim,
-            &mint,
-            &Operation::Noop,
-            &Operation::Genesis,
-        ] {
-            assert_eq!(
-                op.is_value_egress(),
-                !matches!(op.egress_asset(), EgressAsset::NotEgress),
-                "egress_asset must agree with is_value_egress for {op:?}"
-            );
-        }
-    }
-
     // ------------------------------------------------------------------ //
     //  Round-trip tests for every variant
     // ------------------------------------------------------------------ //
@@ -2977,16 +2756,6 @@ mod tests {
                 message: String::new(),
                 signature: vec![],
                 authority_policy: None,
-            });
-        }
-
-        #[test]
-        fn mint() {
-            roundtrip(&Operation::Mint {
-                amount: test_balance(10_000),
-                token_id: b"ERA".to_vec(),
-                policy_commit: [0u8; 32],
-                message: "mint tokens".into(),
             });
         }
 
@@ -3493,14 +3262,6 @@ mod tests {
             };
             assert_eq!(transfer.get_operation_type(), "transfer");
 
-            let mint = Operation::Mint {
-                amount: test_balance(1),
-                token_id: vec![],
-                policy_commit: [0u8; 32],
-                message: String::new(),
-            };
-            assert_eq!(mint.get_operation_type(), "mint");
-
             let burn = Operation::Burn {
                 amount: test_balance(1),
                 token_id: vec![],
@@ -3893,17 +3654,6 @@ mod tests {
         }
 
         #[test]
-        fn is_valid_mint_positive() {
-            let op = Operation::Mint {
-                amount: test_balance(50),
-                token_id: b"ERA".to_vec(),
-                policy_commit: [0u8; 32],
-                message: String::new(),
-            };
-            assert!(TokenOps::is_valid(&op));
-        }
-
-        #[test]
         fn is_valid_lock_positive() {
             let op = Operation::Lock {
                 token_id: b"ERA".to_vec(),
@@ -4007,14 +3757,15 @@ mod tests {
         #[test]
         fn balance_with_state_hash_roundtrips() {
             let bal = Balance::from_parts(12345, 0, Some([0xFE; 32]));
-            let op = Operation::Mint {
+            let op = Operation::Burn {
                 amount: bal.clone(),
                 token_id: b"T".to_vec(),
                 policy_commit: [0u8; 32],
+                proof_of_ownership: vec![],
                 message: String::new(),
             };
             let decoded = roundtrip(&op);
-            if let Operation::Mint { amount, .. } = decoded {
+            if let Operation::Burn { amount, .. } = decoded {
                 assert_eq!(amount.value(), bal.value());
             } else {
                 panic!("wrong variant");

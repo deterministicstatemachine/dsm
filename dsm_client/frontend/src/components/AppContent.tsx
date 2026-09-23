@@ -322,6 +322,7 @@ export default function AppContent({
                 actions: {
                   WALLET: () => navigate('wallet'),
                   TOKENS: () => navigate('accounts'),
+                  TRADE: () => navigate('sofi'),
                   CONTACTS: () => navigate('contacts'),
                   STORAGE: () => navigate('storage'),
                   SETTINGS: () => navigate('settings'),

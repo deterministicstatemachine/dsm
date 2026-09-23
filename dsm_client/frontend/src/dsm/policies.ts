@@ -26,7 +26,28 @@ import { emitWalletRefresh } from './events';
  *
  * `details` carries the user's intent only.
  */
-export async function createToken(details: any): Promise<{ success: boolean; tokenId?: string; anchorBase32?: string; message?: string }> {
+/**
+ * What a token is created with (SoFi §48–§51). The whole genesis supply is
+ * released to the creator at creation; there is no minting afterwards, and no
+ * unlimited supply.
+ */
+export interface TokenCreateDetails {
+  ticker: string;
+  alias: string;
+  decimals: number;
+  /** The whole supply, in base units. Fixed at creation. */
+  genesisSupply: string;
+  /** Whether holders may burn their own units. */
+  burnEnabled: boolean;
+  transferable: boolean;
+  threshold: number;
+  description?: string;
+  iconUrl?: string;
+  allowlistKind?: 'NONE' | 'INLINE';
+  allowlistData?: string;
+}
+
+export async function createToken(details: TokenCreateDetails): Promise<{ success: boolean; tokenId?: string; anchorBase32?: string; message?: string }> {
   try {
     const u128be = (v: string | number | undefined): Uint8Array => {
       const out = new Uint8Array(16);
@@ -53,12 +74,10 @@ export async function createToken(details: any): Promise<{ success: boolean; tok
       ticker: String(details?.ticker || '').trim().toUpperCase(),
       alias: String(details?.alias || '').trim(),
       decimals: Number(details?.decimals ?? 0),
-      maxSupplyU128: u128be(details?.maxSupply) as any,
-      initialAllocU128: u128be(details?.initialAlloc) as any,
-      mintBurnEnabled: Boolean(details?.mintBurnEnabled),
-      transferable: Boolean(details?.transferable !== false),
-      unlimitedSupply: Boolean(details?.unlimitedSupply),
-      mintBurnThreshold: Number(details?.mintBurnThreshold ?? 1),
+      genesisSupplyU128: u128be(details.genesisSupply) as any,
+      burnEnabled: Boolean(details.burnEnabled),
+      transferable: Boolean(details.transferable),
+      threshold: Number(details.threshold),
       description: String(details?.description || '').trim(),
       iconUrl: String(details?.iconUrl || '').trim(),
       allowlistDeviceIds: allowlist as any,
@@ -281,39 +300,6 @@ export async function forgetToken(
   }
   const resp = env.payload.value;
   return { success: resp.success, message: resp.message };
-}
-
-export async function mintToken(args: { tokenId: string; amount: string | number; message?: string }): Promise<{ success: boolean; newBalance?: bigint; message?: string }> {
-  try {
-    const req = new pb.TokenMintRequest({
-      tokenId: String(args?.tokenId || '').trim(),
-      amount: BigInt(String(args?.amount ?? '0')),
-      message: String(args?.message || ''),
-    } as any);
-    const argPack = new pb.ArgPack({
-      codec: pb.Codec.PROTO as any,
-      body: new Uint8Array(req.toBinary()),
-    });
-    const env = decodeFramedEnvelopeV3(
-      await routerInvokeBin('token.mint', new Uint8Array(argPack.toBinary())),
-    );
-    if (env.payload.case === 'error') throw new Error(env.payload.value.message);
-    if (env.payload.case !== 'tokenMintResponse') {
-      throw new Error(`Expected tokenMintResponse, got ${env.payload.case}`);
-    }
-    const resp = env.payload.value;
-    if (resp.success) {
-      try {
-        emitWalletRefresh({ source: 'token.mint', tokenId: resp.tokenId, anchorBase32: '' });
-      } catch (e) {
-        console.warn('mintToken: emitWalletRefresh failed (non-fatal):', e);
-      }
-    }
-    return { success: Boolean(resp.success), newBalance: resp.newBalance, message: resp.message || undefined };
-  } catch (e) {
-    console.warn('mintToken failed:', e);
-    return { success: false, message: e instanceof Error ? e.message : String(e) };
-  }
 }
 
 /** Burn supply the caller holds. Burn <= balance is enforced by the core conservation guard. */

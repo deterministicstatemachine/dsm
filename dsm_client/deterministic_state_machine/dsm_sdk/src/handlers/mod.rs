@@ -57,6 +57,9 @@ pub mod session_routes;
 pub mod storage_routes;
 pub mod system_routes;
 pub mod token_routes;
+pub mod sofi_routes;
+#[cfg(test)]
+mod real_node_e2e_tests;
 pub mod transfer_helpers;
 pub mod wallet_routes;
 pub use recovery_impl::RecoveryImpl;

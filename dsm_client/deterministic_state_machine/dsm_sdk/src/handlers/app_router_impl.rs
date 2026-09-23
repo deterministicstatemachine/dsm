@@ -94,23 +94,6 @@ pub(crate) struct CachedWithdrawalPlan {
     pub cached_at_tick: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct QuorumDeviceIdentity {
-    pub(crate) device_id: [u8; 32],
-    pub(crate) genesis_hash: [u8; 32],
-    pub(crate) public_key: Vec<u8>,
-    /// Recipient ML-KEM-768 public key (online per-step-EK encapsulation target),
-    /// registry-carried and MANDATORY. Included in the `Eq` quorum so a node that
-    /// serves a divergent Kyber key (equivocation) breaks agreement.
-    pub(crate) kyber_public_key: Vec<u8>,
-    /// SPHINCS+ (device AK) signature binding `kyber_public_key` to the device
-    /// identity. Verified by the consuming client against the pinned QR/BLE AK
-    /// before the Kyber key is used or cached (ADR 0002) — on this node-served
-    /// path that is the repair/hydrate flow, NOT at contact-add (the QR carries
-    /// no Kyber key).
-    pub(crate) kyber_binding_sig: Vec<u8>,
-}
-
 /// §16.6 defect zero: per-step EK material captured at signing time and written
 /// LATER, inside the single pre-submit transaction.
 ///
@@ -2832,30 +2815,6 @@ pub(crate) fn collect_rotated_inbox_addresses(
         .collect()
 }
 
-fn select_quorum_device_identity(
-    candidates: impl IntoIterator<Item = QuorumDeviceIdentity>,
-) -> Option<QuorumDeviceIdentity> {
-    // Quorum agreement must cover the FULL identity, including the mandatory
-    // Kyber material — otherwise a node could equivocate on the ML-KEM key while
-    // still counting toward quorum on the other fields.
-    let mut counts: HashMap<([u8; 32], Vec<u8>, Vec<u8>, Vec<u8>), (usize, QuorumDeviceIdentity)> =
-        HashMap::new();
-    for candidate in candidates {
-        let key = (
-            candidate.genesis_hash,
-            candidate.public_key.clone(),
-            candidate.kyber_public_key.clone(),
-            candidate.kyber_binding_sig.clone(),
-        );
-        let entry = counts.entry(key).or_insert((0, candidate.clone()));
-        entry.0 += 1;
-        if entry.0 >= 3 {
-            return Some(entry.1.clone());
-        }
-    }
-    None
-}
-
 /// Whether a node/quorum-served authoritative AK may participate in a contact-identity repair.
 /// The pairing-established contact AK is the trust root: a non-empty authoritative AK that DIFFERS
 /// from it is a substitution attempt and is rejected; an empty or matching one carries no
@@ -3096,128 +3055,6 @@ mod ak_trust_root_tests {
     }
 }
 
-pub(crate) async fn fetch_quorum_device_identity(
-    storage_endpoints: &[String],
-    device_id: [u8; 32],
-) -> Result<QuorumDeviceIdentity, String> {
-    if storage_endpoints.is_empty() {
-        return Err("device identity quorum requires configured storage endpoints".to_string());
-    }
-
-    let client = crate::sdk::storage_node_sdk::build_ca_aware_client();
-    let device_id_b32 = crate::util::text_id::encode_base32_crockford(&device_id);
-    let mut candidates = Vec::new();
-    let mut last_error: Option<String> = None;
-
-    for endpoint in storage_endpoints {
-        let url = format!(
-            "{}/api/v2/device/{}",
-            endpoint.trim_end_matches('/'),
-            device_id_b32
-        );
-        match client.get(&url).send().await {
-            Ok(resp) if resp.status().is_success() => {
-                let bytes = resp
-                    .bytes()
-                    .await
-                    .map_err(|e| format!("device identity read failed: {e}"))?;
-                let decoded = generated::RegisterDeviceRequest::decode(bytes.as_ref())
-                    .map_err(|e| format!("device identity decode failed: {e}"))?;
-                if decoded.device_id.as_slice() != device_id.as_slice() {
-                    last_error = Some(format!("device identity mismatch from {}", endpoint));
-                    continue;
-                }
-                let genesis_hash: [u8; 32] = match decoded.genesis_hash.as_slice().try_into() {
-                    Ok(value) => value,
-                    Err(_) => {
-                        last_error = Some(format!(
-                            "device identity from {} had invalid genesis length {}",
-                            endpoint,
-                            decoded.genesis_hash.len()
-                        ));
-                        continue;
-                    }
-                };
-                if decoded.pubkey.is_empty() {
-                    last_error = Some(format!(
-                        "device identity from {} had empty pubkey",
-                        endpoint
-                    ));
-                    continue;
-                }
-                // Kyber material is MANDATORY (DSM beta, no legacy path). A record
-                // without a well-formed ML-KEM-768 key + binding is invalid; the
-                // cryptographic binding is verified against the pinned AK before the
-                // Kyber key is cached/used (repair/hydrate paths; ADR 0002), NOT at
-                // contact-add.
-                if decoded.kyber_public_key.len() != 1184 {
-                    last_error = Some(format!(
-                        "device identity from {} had invalid kyber_public_key length {}",
-                        endpoint,
-                        decoded.kyber_public_key.len()
-                    ));
-                    continue;
-                }
-                if decoded.kyber_binding_sig.is_empty() {
-                    last_error = Some(format!(
-                        "device identity from {} had empty kyber_binding_sig",
-                        endpoint
-                    ));
-                    continue;
-                }
-                candidates.push(QuorumDeviceIdentity {
-                    device_id,
-                    genesis_hash,
-                    public_key: decoded.pubkey,
-                    kyber_public_key: decoded.kyber_public_key,
-                    kyber_binding_sig: decoded.kyber_binding_sig,
-                });
-            }
-            Ok(resp)
-                if resp.status() == reqwest::StatusCode::NOT_FOUND
-                    || resp.status() == reqwest::StatusCode::BAD_REQUEST =>
-            {
-                last_error = Some(format!(
-                    "device identity lookup HTTP {} from {}",
-                    resp.status(),
-                    endpoint
-                ));
-            }
-            Ok(resp)
-                if resp.status() == reqwest::StatusCode::METHOD_NOT_ALLOWED
-                    || resp.status() == reqwest::StatusCode::NOT_IMPLEMENTED =>
-            {
-                last_error = Some(format!(
-                    "device identity lookup HTTP {} from {}",
-                    resp.status(),
-                    endpoint
-                ));
-            }
-            Ok(resp) => {
-                last_error = Some(format!(
-                    "device identity lookup HTTP {} from {}",
-                    resp.status(),
-                    endpoint
-                ));
-            }
-            Err(e) => {
-                last_error = Some(format!(
-                    "device identity lookup failed for {}: {}",
-                    endpoint, e
-                ));
-            }
-        }
-    }
-
-    if let Some(identity) = select_quorum_device_identity(candidates) {
-        return Ok(identity);
-    }
-
-    Err(last_error.unwrap_or_else(|| {
-        "device identity quorum unavailable across storage endpoints".to_string()
-    }))
-}
-
 #[async_trait]
 impl AppRouter for AppRouterImpl {
     fn sync_balance_cache(&self) {
@@ -3420,9 +3257,13 @@ impl AppRouter for AppRouterImpl {
             // Token
             "token.create"
             | "token.forget"
-            | "token.mint"
             | "token.burn"
             | "tokens.publishPolicy" => self.handle_token_invoke(i).await,
+            // SoFi (SoFi §27): the only way the app reaches SoFi.
+            "sofi.createVault" | "sofi.setup" | "sofi.findRoute" | "sofi.trade"
+            | "sofi.route" | "sofi.close" | "sofi.relay" | "sofi.resolve" => {
+                self.handle_sofi_invoke(i).await
+            }
             // BLE
             "ble.command" => self.handle_ble_invoke(i).await,
             // Bilateral reconcile
@@ -3659,88 +3500,6 @@ fn format_registry_quorum_failure(stats: &RegistryQuorumAttemptStats, attempts: 
         stats.read_failures,
         stats.mismatched_payloads,
     )
-}
-
-async fn verify_device_tree_evidence_quorum_once(
-    node_urls: &[String],
-    client: &reqwest::Client,
-    addr: &str,
-    evidence: &[u8],
-    device_id: [u8; 32],
-    genesis_hash: [u8; 32],
-) -> (
-    Vec<dsm::types::identifiers::NodeId>,
-    RegistryQuorumAttemptStats,
-) {
-    let mut verified = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    let mut stats = RegistryQuorumAttemptStats {
-        configured_nodes: node_urls.len(),
-        ..RegistryQuorumAttemptStats::default()
-    };
-
-    for node_url in node_urls {
-        let trimmed = node_url.trim_end_matches('/');
-        if trimmed.is_empty() {
-            continue;
-        }
-        if !seen.insert(trimmed.to_string()) {
-            continue;
-        }
-
-        stats.unique_nodes_checked += 1;
-
-        let url = format!("{}/api/v2/registry/get/{}", trimmed, addr);
-        let resp = match client.get(&url).send().await {
-            Ok(r) => r,
-            Err(e) => {
-                stats.fetch_failures += 1;
-                log::warn!(
-                    "genesis verify: registry fetch failed for {}: {}",
-                    trimmed,
-                    e
-                );
-                continue;
-            }
-        };
-
-        if !resp.status().is_success() {
-            stats.non_success_statuses += 1;
-            continue;
-        }
-
-        let bytes = match resp.bytes().await {
-            Ok(b) => b,
-            Err(e) => {
-                stats.read_failures += 1;
-                log::warn!(
-                    "genesis verify: registry read failed for {}: {}",
-                    trimmed,
-                    e
-                );
-                continue;
-            }
-        };
-
-        if bytes.as_ref() == evidence {
-            verified.push(dsm::types::identifiers::NodeId::new(trimmed.to_string()));
-        } else if let Ok(entry) = generated::DeviceTreeEntry::decode(bytes.as_ref()) {
-            if entry.device_id == device_id && entry.genesis_hash == genesis_hash {
-                verified.push(dsm::types::identifiers::NodeId::new(trimmed.to_string()));
-            } else {
-                stats.mismatched_payloads += 1;
-            }
-        } else {
-            stats.mismatched_payloads += 1;
-        }
-
-        if verified.len() >= REGISTRY_QUORUM_THRESHOLD {
-            break;
-        }
-    }
-
-    stats.verified_nodes = verified.len();
-    (verified, stats)
 }
 
 // registry_content_addr_b64url and b64_url_no_pad moved to
@@ -4039,81 +3798,6 @@ mod tests {
         assert!(
             recipient_addresses.contains(&sender_route),
             "recipient must poll the sender's first online route",
-        );
-    }
-
-    #[test]
-    fn select_quorum_device_identity_requires_three_matching_nodes() {
-        let device_id = [0x11u8; 32];
-        let good = QuorumDeviceIdentity {
-            device_id,
-            genesis_hash: [0x22u8; 32],
-            public_key: vec![0x33u8; 64],
-            kyber_public_key: vec![0x66u8; 1184],
-            kyber_binding_sig: vec![0x77u8; 64],
-        };
-        let bad = QuorumDeviceIdentity {
-            device_id,
-            genesis_hash: [0x44u8; 32],
-            public_key: vec![0x55u8; 64],
-            kyber_public_key: vec![0x66u8; 1184],
-            kyber_binding_sig: vec![0x77u8; 64],
-        };
-
-        let selected =
-            select_quorum_device_identity(vec![good.clone(), bad, good.clone(), good.clone()])
-                .expect("quorum identity");
-
-        assert_eq!(selected, good);
-    }
-
-    #[test]
-    fn select_quorum_device_identity_returns_none_without_quorum() {
-        let device_id = [0x11u8; 32];
-        let selected = select_quorum_device_identity(vec![
-            QuorumDeviceIdentity {
-                device_id,
-                genesis_hash: [0x22u8; 32],
-                public_key: vec![0x33u8; 64],
-                kyber_public_key: vec![0x66u8; 1184],
-                kyber_binding_sig: vec![0x77u8; 64],
-            },
-            QuorumDeviceIdentity {
-                device_id,
-                genesis_hash: [0x44u8; 32],
-                public_key: vec![0x55u8; 64],
-                kyber_public_key: vec![0x66u8; 1184],
-                kyber_binding_sig: vec![0x77u8; 64],
-            },
-            QuorumDeviceIdentity {
-                device_id,
-                genesis_hash: [0x22u8; 32],
-                public_key: vec![0x33u8; 64],
-                kyber_public_key: vec![0x66u8; 1184],
-                kyber_binding_sig: vec![0x77u8; 64],
-            },
-        ]);
-
-        assert!(selected.is_none());
-    }
-
-    #[test]
-    fn select_quorum_device_identity_rejects_kyber_equivocation() {
-        // Same device_id + genesis + pubkey across all three nodes, but each
-        // serves a DIFFERENT ML-KEM key (registry equivocation). No quorum can
-        // form because the Kyber material is part of the identity's equality.
-        let device_id = [0x11u8; 32];
-        let node = |kpk: u8| QuorumDeviceIdentity {
-            device_id,
-            genesis_hash: [0x22u8; 32],
-            public_key: vec![0x33u8; 64],
-            kyber_public_key: vec![kpk; 1184],
-            kyber_binding_sig: vec![0x77u8; 64],
-        };
-        let selected = select_quorum_device_identity(vec![node(0xA1), node(0xB2), node(0xC3)]);
-        assert!(
-            selected.is_none(),
-            "kyber equivocation across nodes must prevent quorum agreement"
         );
     }
 

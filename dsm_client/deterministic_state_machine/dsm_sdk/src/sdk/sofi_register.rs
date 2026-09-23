@@ -196,11 +196,16 @@ pub async fn acquire_prior_attempts(
 /// request. Items 1, 2 and 8 come with the request; item 6's setups are
 /// fetched under their `ρ` (R8); the closure objects are fetched by the rule
 /// of each reference kind; item 5's earlier attempt cells come from
-/// [`acquire_prior_attempts`], the one path the verifier uses too.
+/// [`acquire_prior_attempts`], the one path the verifier uses too. Retries
+/// within the budget; `Complete` only when every item is in hand and
+/// authenticates, otherwise `Exhausted` naming what is missing (Amendment S3).
 pub async fn acquire_conformance_evidence(
     set: &StorageSet,
     request: &InstallRequest<'_>,
-) -> Result<ConformanceEvidence, DsmError> {
+) -> Result<
+    crate::sdk::sofi_evidence::Acquired<ConformanceEvidence, dsm::sofi::conformance::ConformanceMissing>,
+    DsmError,
+> {
     let mut setups = BTreeMap::new();
     for leg in request.precommit.legs() {
         if let Resolved::Kept(signed) = fetch_setup(set, &leg.setup_ref).await? {

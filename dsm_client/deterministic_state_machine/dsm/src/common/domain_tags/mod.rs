@@ -146,7 +146,10 @@ mod tests {
     // 389 since E1c-2a froze `DSM/sofi/vault-creation-key/v1`, the R_econ key
     // the owner's creation record occupies (P15-12).
     // +6 for the keyed-cell and ByteCommit formats (storage spec §14, 2026-09-23).
-    const EXPECTED_TAG_COUNT: usize = 389;
+    // -3 for the retired signer-issuance tags, +1 for the genesis release
+    // (SoFi §51), +1 for the spool seal (DSM Amendment A7), +2 for the
+    // self-signed device directory, 2026-09-23.
+    const EXPECTED_TAG_COUNT: usize = 390;
 
     /// Scan the crate source for every declared domain-tag constant.
     ///

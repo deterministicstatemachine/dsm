@@ -10,7 +10,7 @@ import { useDpadNav } from '../../hooks/useDpadNav';
 import { useWalletRefreshListener } from '../../hooks/useWalletRefreshListener';
 import { TokenCreationDialog } from '../TokenCreationDialog';
 import TokenIdentityPanel from '../TokenIdentityPanel';
-import { mintToken, burnToken, addTokenByAnchor, forgetToken } from '../../dsm/policies';
+import { burnToken, addTokenByAnchor, forgetToken } from '../../dsm/policies';
 import { TokenCoin } from '../TokenCoin';
 
 type TokenSymbol = 'ERA' | string;
@@ -100,7 +100,7 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
   const [addedToken, setAddedToken] = useState<
     { ticker: string; tokenId: string; anchorBase32: string } | null
   >(null);
-  const [supplyAction, setSupplyAction] = useState<{ tokenId: string; kind: 'mint' | 'burn' } | null>(null);
+  const [supplyAction, setSupplyAction] = useState<{ tokenId: string; kind: 'burn' } | null>(null);
   const [amount, setAmount] = useState('');
   const [busy, setBusy] = useState(false);
 
@@ -256,10 +256,9 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
     setError(null);
     setSuccessMsg(null);
     try {
-      const fn = supplyAction.kind === 'mint' ? mintToken : burnToken;
-      const res = await fn({ tokenId: supplyAction.tokenId, amount: amount.trim() });
+      const res = await burnToken({ tokenId: supplyAction.tokenId, amount: amount.trim() });
       if (res?.success) {
-        setSuccessMsg(`${supplyAction.kind === 'mint' ? 'Minted' : 'Burned'} ${amount.trim()} ${supplyAction.tokenId}.`);
+        setSuccessMsg(`Burned ${amount.trim()} ${supplyAction.tokenId}.`);
         setSupplyAction(null);
         setAmount('');
         await loadBalances();
@@ -811,13 +810,6 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
                             </>
                           ) : (
                             <div style={{ display: 'flex', gap: 8 }}>
-                              <button
-                                type="button"
-                                onClick={() => { setSupplyAction({ tokenId: balance.tokenId, kind: 'mint' }); setAmount(''); }}
-                                style={SUPPLY_BTN}
-                              >
-                                MINT
-                              </button>
                               <button
                                 type="button"
                                 onClick={() => { setSupplyAction({ tokenId: balance.tokenId, kind: 'burn' }); setAmount(''); }}

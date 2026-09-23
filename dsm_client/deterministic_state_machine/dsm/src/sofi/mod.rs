@@ -19,8 +19,7 @@
 //! The byte-exact wire registry and the pure derivations: field tables and
 //! strict codecs ([`wire`]), domain-separated keys and identities
 //! ([`derive`]), the seeded permutation ([`fisher_yates`]) and the leader of
-//! a cell over the committed set ([`leader`]), successor-cell
-//! arithmetic ([`arith`]), the storage facts for objects and indexes
+//! a cell over the committed set ([`leader`]), the storage facts for objects and indexes
 //! ([`storage`]), three-valued validation composition and the mechanical
 //! fulfillment-against-precommit checks ([`conformance`]), what a producer
 //! publishes and how a reader recognizes it ([`publication`]), the exercise
@@ -36,7 +35,6 @@
 //! economics; this layer gives them exact bytes and exact keys, nothing more.
 
 pub mod admission;
-pub mod arith;
 pub mod conformance;
 pub mod derive;
 pub mod exercise;

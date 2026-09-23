@@ -171,8 +171,9 @@ impl Verdict {
     }
 }
 
-/// An object a check needed and did not get. Never a statement about the
-/// operation — only about what the verifier holds.
+/// An object the acquisition layer has not yet got for `RouteValidation`.
+/// Never a statement about the operation, and never a predicate value: the
+/// predicate is not evaluated until nothing is missing (Amendment S3).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Missing {
     /// A policy object named by a vault state, by content address.
@@ -183,24 +184,25 @@ pub enum Missing {
     VaultLeaf { vault_id: D32, key: D32 },
     /// The vault's own state leaf, which every branch needs.
     VaultState { vault_id: D32 },
+    /// The signed setup envelope stored at `ρ` for one of P's legs.
+    Setup { setup_ref: D32 },
     /// Bytes were supplied for an address but do not authenticate to it. They
     /// establish NOTHING — note 9: a non-verifying candidate can never prove
     /// invalidity, it only fails to supply the object.
     NonVerifyingObject { addr: D32 },
 }
 
-/// The outcome of a static validation, with its reason.
+/// The outcome of a static validation over complete evidence: why the
+/// operation is Invalid. There is no other refusal (Amendment S3).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Refusal {
     Invalid(Invalid),
-    Unavailable(Missing),
 }
 
 impl Refusal {
     pub fn validation(&self) -> Validation {
         match self {
             Self::Invalid(_) => Validation::Invalid,
-            Self::Unavailable(_) => Validation::Unavailable,
         }
     }
 }
@@ -222,8 +224,10 @@ pub enum VaultLeafPre {
     Absent,
 }
 
-/// Everything the verifier fetched. Anything absent from here is Unavailable,
-/// never Invalid.
+/// Everything `RouteValidation` consumes, complete for its preimage. The
+/// acquisition layer builds it only once every item [`EvidenceNeeds`] and the
+/// fetched vault states name is in hand and authenticates; until then it
+/// reports [`Missing`] and retries, and the predicate is not evaluated.
 ///
 /// Gate G2: `Default` exists only under `cfg(test)`. Production code builds
 /// this ONLY from fetched bytes, through [`Evidence::acquired`] at the end of
@@ -240,6 +244,14 @@ pub struct Evidence {
     pub trader_leaves: BTreeMap<D32, TraderLeafPre>,
     /// Pre-states of vault leaves, by `(vault_id, key)`.
     pub vault_leaves: BTreeMap<(D32, D32), VaultLeafPre>,
+    /// The signed setup envelope stored at `ρ`, for every leg of P: what
+    /// `SetupValid` is decided over (SoFi §16, §20.1).
+    pub setups: BTreeMap<D32, Vec<u8>>,
+    /// Exact `TokenPolicyV3` bytes by `policy_commit`, for both tokens of
+    /// every vault the operation touches, an intermediate token included
+    /// (SoFi §19.5, §49). Re-hashed to the commit under `TAG_DSM_POLICY` when
+    /// consumed: bytes supplied under a commit prove nothing by themselves.
+    pub token_policies: BTreeMap<D32, Vec<u8>>,
 }
 
 /// What a settlement preimage needs fetched before `validate` can reach a
@@ -257,10 +269,13 @@ pub struct EvidenceNeeds {
     pub trader_keys: BTreeSet<D32>,
     /// Per vault: the keys of its leaves, the state key included.
     pub vaults: BTreeMap<D32, BTreeSet<D32>>,
+    /// The `ρ` of every leg of P: each leg's setup envelope, for `SetupValid`.
+    pub setups: BTreeSet<D32>,
 }
 
 impl EvidenceNeeds {
-    pub fn of(preimage: &SettlementPreimage) -> Self {
+    pub fn of(precommit: &TraderPrecommitBody, preimage: &SettlementPreimage) -> Self {
+        let setups = precommit.legs().iter().map(|leg| leg.setup_ref).collect();
         let trader_keys = preimage
             .trader_core()
             .entries()
@@ -282,10 +297,17 @@ impl EvidenceNeeds {
         Self {
             trader_keys,
             vaults,
+            setups,
         }
     }
 
     /// The three policy objects a vault state commits, by class and address.
+    /// The two token policies a vault's market names: what the transferable
+    /// check of SoFi §49 is decided over, for both tokens of every hop.
+    pub fn token_policies_of(market: &crate::ccb::state::MarketPolicy) -> [D32; 2] {
+        [*market.token_a(), *market.token_b()]
+    }
+
     pub fn policies_of(state: &VaultStateLeaf) -> [(u16, D32); 3] {
         [
             (crate::ccb::class::MARKET_POLICY, state.market_policy),
@@ -304,11 +326,15 @@ impl Evidence {
         objects: BTreeMap<D32, Vec<u8>>,
         trader_leaves: BTreeMap<D32, TraderLeafPre>,
         vault_leaves: BTreeMap<(D32, D32), VaultLeafPre>,
+        setups: BTreeMap<D32, Vec<u8>>,
+        token_policies: BTreeMap<D32, Vec<u8>>,
     ) -> Self {
         Self {
             objects,
             trader_leaves,
             vault_leaves,
+            setups,
+            token_policies,
         }
     }
 
@@ -724,6 +750,22 @@ pub fn validate(
     // B° names its cores by digest. Those references are what bind the body to
     // the objects P(E) carries, so they are checked rather than assumed.
     verdict.note(check_settlement_core_references(precommit, preimage));
+
+    // SetupValid for every required leg (SoFi §16, §20.1; MR-SOFI-0135,
+    // 0205): canonical body encoding, ρ, the signature over m_setup, ClaimRef,
+    // and the identity and vault relationship rules. FulfillmentConformance
+    // carries only the durability half, SetupRegistered; without this,
+    // setup validity would drop out of the conjunction realization depends on.
+    for leg in precommit.legs() {
+        verdict.note(setup_valid(precommit, leg, evidence));
+    }
+
+    // Every token passes its policy on every SoFi leg, an intermediate token
+    // included (SoFi §19.5, §49; MR-SOFI-0311): both tokens of every vault
+    // the operation touches must be transferable.
+    for core in preimage.dlv_cores() {
+        verdict.note(market_legs_permitted(core, evidence));
+    }
 
     match preimage.settlement() {
         SettlementBody::Swap {

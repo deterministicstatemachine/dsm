@@ -4,17 +4,8 @@
 //!
 //! ## Why this is not the per-device relationship SMT
 //!
-//! Two reasons, either of which alone would be sufficient.
-//!
-//! First, [`crate::merkle::sparse_merkle_tree::SparseMerkleTree`] is a
-//! **bounded FIFO cache**: `update_leaf` evicts the oldest key once the leaf
-//! count exceeds `max_leaves`, and the tree is sized by `max_relationships`.
-//! Silent eviction is tolerable for relationship tips, which can be refetched.
-//! It is not tolerable for economic state, where an evicted leaf is a balance
-//! that vanished from the root with no record that it ever existed. This tree
-//! never evicts.
-//!
-//! Second, that tree's leaf hash commits the value and **not the key**, so a
+//! [`crate::merkle::sparse_merkle_tree::SparseMerkleTree`]'s leaf hash
+//! commits the value and **not the key**, so a
 //! proof is portable across positions holding the same value. For relationship
 //! tips that is nearly harmless. Here two different assets routinely hold the
 //! same amount, so a key-blind leaf hash would let a proof for one asset be

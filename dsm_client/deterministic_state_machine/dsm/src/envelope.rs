@@ -51,7 +51,12 @@ const ALLOWED_PAYLOAD_TAGS: &[u32] = &[
     39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62,
     63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86,
     87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106,
+    SEALED_PAYLOAD_TAG,
 ];
+
+/// The sealed spool payload (DSM Amendment A7). An envelope carrying it has a
+/// version, a message id and the seal: no headers, which would name the sender.
+const SEALED_PAYLOAD_TAG: u32 = 125;
 
 fn parsing_error(message: impl Into<String>) -> DsmError {
     DsmError::parsing(message.into(), None::<std::io::Error>)
@@ -225,6 +230,7 @@ pub fn validate_canonical_envelope_v3_bytes(bytes: &[u8]) -> Result<(), DsmError
     let mut headers_seen = false;
     let mut message_id_seen = false;
     let mut payload_seen = false;
+    let mut sealed_seen = false;
 
     while cursor < bytes.len() {
         let key = read_varint(bytes, &mut cursor)?;
@@ -296,6 +302,7 @@ pub fn validate_canonical_envelope_v3_bytes(bytes: &[u8]) -> Result<(), DsmError
                     return Err(parsing_error("Envelope oneof payload has multiple fields"));
                 }
                 payload_seen = true;
+                sealed_seen = tag == SEALED_PAYLOAD_TAG;
                 skip_field(bytes, &mut cursor, wire_type)?;
             }
             tag => {
@@ -307,7 +314,12 @@ pub fn validate_canonical_envelope_v3_bytes(bytes: &[u8]) -> Result<(), DsmError
     if !version_seen {
         return Err(parsing_error("Envelope.version is required"));
     }
-    if !headers_seen {
+    // A sealed envelope carries its headers inside the seal; an open one
+    // carries them outside. Never both, never neither.
+    if sealed_seen && headers_seen {
+        return Err(parsing_error("a sealed Envelope must not carry headers"));
+    }
+    if !sealed_seen && !headers_seen {
         return Err(parsing_error("Envelope.headers is required"));
     }
     if !message_id_seen {
