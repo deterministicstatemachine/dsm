@@ -470,6 +470,8 @@ ular the leader of a coordinate (Section 7) is eventually reachable, because no 
 No liveness is claimed against an adversary who wins every future write forever. If required evidence never appears,
 a registered fulfillment MAY stay Pending forever.
 
+> **Note (2026-09-22).** A pending position can now be ended by the challenge rule (Amendment S1; storage spec §9.1). It then resolves Void.
+
 <!-- spec-section: SOFI-005-4 -->
 #### 5.4 Boundaries that remain
 - An identity can split its own registers (self split).
@@ -2586,3 +2588,5 @@ consumed once, and redemption burns in the same transition as its release.
 A What remains open
 Nothing. Every question this design raises is settled by the attributes of its objects (Read this first). Storage member
 replacement is not part of this work; DSM/sofi/membership-handover/v1 is reserved for it.
+
+> **Note (2026-09-22).** Superseded. Open items are listed in `DSM_Storage_Node_Specification.md` §24, and member replacement is specified there (Part III).
