@@ -14,10 +14,10 @@ Every extraction in this round is taken against exactly these bytes:
 
 | File | `git hash-object` | Lines |
 |---|---|---|
-| `specs/DSM_High_Level_Explainer.md` | `c74cf30a0f9fdba31e0ae95911f11eb8eb206bdf` | 4298 |
-| `specs/SoFi_Settlement_Specification.md` | `9a8a8f47227a7f647078829b2811aee2bd88726e` | 2594 |
+| `specs/DSM_High_Level_Explainer.md` | `aa4dc320055fcbc92cb9657c7c4fabc5ca1b6fb7` | 4298 |
+| `specs/SoFi_Settlement_Specification.md` | `4c62ee789bbaa1e038665024db39d9706c13d84d` | 2597 |
 | `specs/dBTC_Native_Specification.md` | `233a3e72a5b16a023af830f4c8ffaad4ba9391a8` | 2160 |
-| `specs/DSM_Storage_Node_Specification.md` | `bfd3d6011e54942b51ef394e82dbd1b51b8706b4` | 568 |
+| `specs/DSM_Storage_Node_Specification.md` | `8d43ac0292925b7684e3c9f337468dd1876a953f` | 571 |
 
 The DSM and SoFi specifications were amended on 2026-09-22 (marked "Amendment" in their text). The storage-node specification was added to the corpus on 2026-09-22, before any other extractor started. The owner accepted it in full the same day. Extract its items marked **Open** with Flags `ambiguous` and a Requirement text that says so, never as settled requirements.
 
@@ -141,6 +141,7 @@ Each extraction also has a Findings table:
 - **Near matches** were never auto-merged. Pairs that the matcher joined but that state different things were split, and each half placed with the row it belongs to.
 - **Open items** go to §8.5 and are never requirements. A row that mixes a settled rule with an open question keeps the settled part as a requirement and moves the question to §8.5.
 - **Single-extractor rows** were each reviewed against the source; none was dropped by vote.
+- **Wording amendment (2026-09-22).** Findings GPT-1, GPT-2, GPT-8, GPT-9, GPT-10 and R-1 were resolved in the specs (DSM A1 and A2 wording, SoFi Amendment S5 and ladder step 3a, storage §13, §14, §16, §19, §24). The affected canonical rows were rewritten, one row was added for S5, and one Open item for the October 2025 dependencies.
 - **Post-reconciliation amendment (2026-09-22): route-chain finality.** For finding GPT-4, finality was redefined as a route chain (storage spec §9, §12.6, §14, §22; DSM Amendment A6; SoFi Amendment S4). §1 pins the amended files. Canonical rows restating the old rule were rewritten, and rows for the new rules were added at the end of §8.1, §8.2 and §8.4 with source `amendment`. The extraction files in `extractions/` remain as extracted against the earlier hashes.
 
 ## 8 Canonical requirements
@@ -155,7 +156,7 @@ Reconciled on 2026-09-22 from two extractions: `claude-chat` (798 rows) and `cha
 | DSM_Storage_Node_Specification.md | 128 | 122 | 6 |
 | **Total** | **859** | **652** | **207** |
 
-Added afterwards by amendment (§7.1): DSM 1, SoFi 1, storage 16, for 877 canonical requirements in all.
+Added afterwards by amendment (§7.1): DSM 1, SoFi 2, storage 16, for 878 canonical requirements in all.
 
 Columns: **ID** is the canonical ID (`MR-<spec>-nnnn`, in document order). **Sources** are the extraction IDs merged into the row (`cc:` claude-chat, `gpt:` chatgpt); the first source locates the quote. **Flags** carry the findings in §8.7 that bear on the row.
 
@@ -179,8 +180,8 @@ Columns: **ID** is the canonical ID (`MR-<spec>-nnnn`, in document order). **Sou
 | MR-DSM-0014 | transition | derived | Accept(s, s′, w) is exactly CandidateOK ∧ GuardOK ∧ StructuralOK ∧ LinearityOK ∧ PolicyOK ∧ ModeOK. | cc: DSM-HL-005/L281; gpt: DSM-HL-005/L279, DSM-HL-005/L269, DSM-HL-005/L271, DSM-HL-005/L273, DSM-HL-005/L275, DSM-HL-005/L277, DSM-HL-005/L283 | 2/2 | none |
 | MR-DSM-0015 | invariant | explicit | Every conjunct of Accept is Boolean, so Accept ∈ {True, False}. | cc: DSM-HL-005/L290 | 1/2: claude-chat | none |
 | MR-DSM-0016 | transition | explicit | A transition either satisfies the full acceptance predicate or does not execute; there is no third protocol value. | cc: DSM-HL-005/L295; gpt: DSM-HL-005/L295 | 2/2 | none |
-| MR-DSM-0017 | liveness-boundary | explicit | Evidence that cannot be obtained yet is not a verdict: nothing executes and the attempt is retried (API status Pending/Unavailable). Both layers can end in Invalid: network evidence, once obtained, can show the transition Invalid, and when retrying ends without the evidence the transition is Invalid; where others depend on the outcome, retrying ends only through the challenge rule (storage §9.1). | cc: DSM-HL-005/L297; gpt: DSM-HL-005/L297.a, DSM-HL-005/L297.b, DSM-HL-005/L297.c | 2/2 | tension(GPT-2) |
-| MR-DSM-0018 | prohibition | explicit | A transition that does not execute leaves nothing in state or in storage. | cc: DSM-HL-005/L298; gpt: DSM-HL-005/L298 | 2/2 | tension(GPT-1) |
+| MR-DSM-0017 | liveness-boundary | explicit | Evidence that cannot be obtained yet is not a verdict: nothing executes and the attempt is retried (API status Pending/Unavailable). Network evidence, once obtained, can show the transition Invalid; when retrying ends without the evidence, the transition does not execute (Accept is False) and nothing moves; where others depend on the outcome, retrying ends only through the challenge rule (storage §9.1). | cc: DSM-HL-005/L297; gpt: DSM-HL-005/L297.a, DSM-HL-005/L297.b, DSM-HL-005/L297.c | 2/2 | none |
+| MR-DSM-0018 | prohibition | explicit | A transition that does not execute changes no state, and nothing negative is recorded anywhere; bytes written while it was attempted stay in storage as raw material and are never a verdict. | cc: DSM-HL-005/L298; gpt: DSM-HL-005/L298 | 2/2 | none |
 | MR-DSM-0019 | obligation | explicit | Where something waits on an outcome, the subsystem derives from raw reads whether a transition that has not executed can still execute. The next trade against a vault proceeds only once the trade ahead has executed or provably never can. | cc: DSM-HL-005/L300; gpt: DSM-HL-005/L300 | 2/2 | none |
 | MR-DSM-0020 | authority | derived | Global ordering is not an input to validity. Validity is expressed through parent state, explicit dependencies, chain adjacency, authenticated roots, precommitment, guards, resource consumption, and policy. | cc: DSM-HL-006/L309; gpt: DSM-HL-006/L309 | 2/2 | none |
 | MR-DSM-0021 | obligation | derived | An application that needs a sequence relation encodes it explicitly in canonical state or policy. No external ordering service supplies it. | cc: DSM-HL-006/L328; gpt: DSM-HL-006/L328 | 2/2 | none |
@@ -220,7 +221,7 @@ Columns: **ID** is the canonical ID (`MR-<spec>-nnnn`, in document order). **Sou
 | MR-DSM-0055 | invariant | derived | No protocol-relevant node path reads a clock; ordering inside the node uses logical ticks. | cc: DSM-HL-011/L754; gpt: DSM-HL-011/L754 | 2/2 | none |
 | MR-DSM-0056 | invariant | derived | Inter-node gossip is state synchronisation only: no leader election, Raft, Paxos, or vote. | cc: DSM-HL-011/L755; gpt: DSM-HL-011/L755 | 2/2 | none |
 | MR-DSM-0057 | authority | explicit | A node may refuse a write addressed to an account that has not met the one-time spend-gate, and refuses nothing else and nothing on protocol grounds. | cc: DSM-HL-011/L758; gpt: DSM-HL-011/L758.a | 2/2 | none |
-| MR-DSM-0058 | liveness-boundary | explicit | A party pays all five members of its set; a write goes through once its route chain has three links, the leader's and two more, so the other seats carry what one refuses. | cc: DSM-HL-011/L760; gpt: DSM-HL-011/L760 | 2/2 | tension(R-1) |
+| MR-DSM-0058 | liveness-boundary | explicit | A party pays for storage with credits, and how a payment is split among its five members is open; a write goes through once its route chain has three links, so the other seats carry what one refuses. | cc: DSM-HL-011/L760; gpt: DSM-HL-011/L760 | 2/2 | none |
 | MR-DSM-0059 | liveness-boundary | explicit | A member refusing a cell it leads stalls that cell until the party opts it out or the network cuts it; this never changes validity. | cc: DSM-HL-011/L761; gpt: DSM-HL-011/L761 | 2/2 | none |
 | MR-DSM-0060 | authority | explicit | Payment enforcement is keyed on the account the write is addressed to, never on who is writing. | cc: DSM-HL-011/L763; gpt: DSM-HL-011/L763 | 2/2 | none |
 | MR-DSM-0061 | prohibition | explicit | Payment enforcement never applies to DLVs; creating a vault consumes its creator's credits like any write, and afterwards its storage never depends on anyone's payment. | cc: DSM-HL-011/L764; gpt: DSM-HL-011/L764 | 2/2 | none |
@@ -685,11 +686,11 @@ Columns: **ID** is the canonical ID (`MR-<spec>-nnnn`, in document order). **Sou
 | MR-SOFI-0245 | invariant | derived | Dependencies respect increasing positions and construction order from P through witnesses to F. | gpt: SOFI-023-6/L1522 | 1/2: chatgpt | none |
 | MR-SOFI-0246 | evidence | derived | A parent is orphaned once its canonical successor at g + 1 resolves to something else; storage reachability of the objects needed to rebuild a tuple is required for P's legs, F's legs and every cell. | cc: SOFI-023-6/L1523; gpt: SOFI-023-6/L1523 | 2/2 | none |
 | MR-SOFI-0247 | invariant | explicit | Resolution is local to the verifier, deterministic, and permanent once not Pending; the first matching rung of the ladder decides. | cc: SOFI-024/L1529.a; gpt: SOFI-024/L1529 | 2/2 | none |
-| MR-SOFI-0248 | transition | explicit | Resolution ladder: not registered → Pending; defensive unresolved predecessor → Pending; terminal or mismatched predecessor → Invalid; conformance Invalid → Invalid; route validation Invalid → Invalid; either still undecided → Pending; ConsumedRoute → Realized; both Valid and permanently defeated → Void; otherwise Pending. | cc: SOFI-024/L1529.b; gpt: SOFI-024/L1533, SOFI-024/L1534, SOFI-024/L1536, SOFI-024/L1540, SOFI-024/L1541 | 2/2 | none |
+| MR-SOFI-0248 | transition | explicit | Resolution ladder: not registered → Pending; defensive unresolved predecessor → Pending; terminal or mismatched predecessor → Invalid; conformance Invalid → Invalid; won drop claim with route validation not Invalid on evidence in hand → Void (step 3a); route validation Invalid → Invalid; either still undecided → Pending; ConsumedRoute → Realized; both Valid and permanently defeated → Void; otherwise Pending. | cc: SOFI-024/L1529.b; gpt: SOFI-024/L1533, SOFI-024/L1534, SOFI-024/L1536, SOFI-024/L1540, SOFI-024/L1541 | 2/2 | none |
 | MR-SOFI-0249 | prohibition | explicit | No shortcut exists from registration to conformance. | cc: SOFI-024/L1545; gpt: SOFI-024/L1545 | 2/2 | none |
 | MR-SOFI-0250 | invariant | explicit | Invalid means the operation never satisfied the rules; Void means a valid operation could not execute. No position moves from Void to Invalid, and a Void position performs zero mutations. | cc: SOFI-024/L1554; gpt: SOFI-024/L1555 | 2/2 | none |
 | MR-SOFI-0251 | invariant | explicit | Mutual exclusion: if a fulfillment is registered at q and a root claim C is registered at q, then C = Cq. | cc: SOFI-024/L1556; gpt: SOFI-024/L1556 | 2/2 | none |
-| MR-SOFI-0252 | prohibition | explicit | Realized, Void, Invalid and Pending are computed by each verifier from raw reads and never recorded; a position pending on one party can be challenged under storage §9.1 and, if dropped, resolves Void. | cc: SOFI-024/L1560; gpt: SOFI-024/L1560.a, SOFI-024/L1560.b | 2/2 | tension(GPT-1, GPT-2) |
+| MR-SOFI-0252 | prohibition | explicit | Realized, Void, Invalid and Pending are computed by each verifier from raw reads and never recorded; a position pending on one party can be challenged under storage §9.1 and, if dropped, resolves Void. | cc: SOFI-024/L1560; gpt: SOFI-024/L1560.a, SOFI-024/L1560.b | 2/2 | none |
 | MR-SOFI-0253 | transition | derived | Crash recovery: before F is registered nothing economic has happened and the trader may abandon; F held by members but not the leader is not exercised; F at the leader is settled and relayers complete copies; after registration any party completes the exercise; Realized only if the whole conjunction holds; missing evidence waits. | cc: SOFI-025/L1571; gpt: SOFI-025/L1571, SOFI-025/L1568, SOFI-025/L1575 | 2/2 | none |
 | MR-SOFI-0254 | prohibition | explicit | Producers assemble and publish; Core decides. A producer never interprets a storage read, never skips a Core check, and never advances state except through the Core transition with Core's result unchanged. | cc: SOFI-026/L1609; gpt: SOFI-026/L1609 | 2/2 | none |
 | MR-SOFI-0255 | obligation | derived | Expose create, setup, findRoute, trade, route, close, relay and resolve through their specified SoFi routes. | gpt: SOFI-027/L1615 | 1/2: chatgpt | none |
@@ -766,6 +767,7 @@ Columns: **ID** is the canonical ID (`MR-<spec>-nnnn`, in document order). **Sou
 | MR-SOFI-0326 | obligation | derived | The former mint-and-burn flag governs burns only. | gpt: SOFI-054/L2584 | 1/2: chatgpt | none |
 | MR-SOFI-0327 | conformance-test | derived | Token-policy rule changes have named tests that fail when their checks are removed. | gpt: SOFI-054/L2586 | 1/2: chatgpt | none |
 | MR-SOFI-0328 | invariant | explicit | Final(K, x) and every use of it in SoFi are replaced by the storage-spec route chain: x is final with a valid leader link and two further valid links; LeaderHeld(K, y) means y has the valid leader link and still settles that no other value is final at K. | amendment: SoFi Amendment S4 (2026-09-22) | amendment | none |
+| MR-SOFI-0329 | transition | explicit | A position whose drop claim won under the challenge rule resolves Void (ladder step 3a) unless it is shown Invalid on evidence in hand; nothing executes, no balance moves, the lineage continues from the previous root, and it can never move to Invalid. | amendment: SoFi Amendment S5 (2026-09-22) | amendment | none |
 
 ### 8.3 dBTC native specification
 
@@ -1000,17 +1002,17 @@ Columns: **ID** is the canonical ID (`MR-<spec>-nnnn`, in document order). **Sou
 | MR-STOR-0087 | invariant | explicit | The active registry is the sorted list of operator ids, stored as an immutable object, advancing by a pure function of the prior registry and hash-referenced capacity, performance and applicant evidence. | cc: STOR-013/L368; gpt: STOR-013/L368, STOR-013/L367 | 2/2 | none |
 | MR-STOR-0088 | transition | explicit | Each registry successor is a keyed cell on the network's pinned set keyed by the prior registry's address; anyone may write a candidate, non-recomputing objects are not candidates, and the first candidate at the leader wins under the ordinary finality rule. | cc: STOR-013/L369; gpt: STOR-013/L369 | 2/2 | none |
 | MR-STOR-0089 | prohibition | explicit | Pruning is computed from committed evidence only; locally measured latency or uptime never enters it. | cc: STOR-013/L370; gpt: STOR-013/L370 | 2/2 | none |
-| MR-STOR-0090 | dependency-boundary | explicit | Growth selects new operators by the salted applicant ranking anchored in the genesis commit-reveal, so no party can bias selection. | cc: STOR-013/L371; gpt: STOR-013/L371 | 2/2 | ambiguous(GPT-10) |
+| MR-STOR-0090 | dependency-boundary | explicit | Growth selects new operators by a salted applicant ranking anchored in a genesis commit-reveal, so no party can bias selection; the ranking and commit-reveal themselves are open (storage spec §24 item 14). | cc: STOR-013/L371; gpt: STOR-013/L371 | 2/2 | none |
 | MR-STOR-0091 | invariant | explicit | A new operator's grace period from pruning is counted in ByteCommit cycles, never in time. | cc: STOR-013/L372; gpt: STOR-013/L372 | 2/2 | none |
 | MR-STOR-0092 | authority | explicit | An operator below the performance bar is never admitted and is cut when it falls below it; cadence regularity is part of the score. | cc: STOR-013/L373; gpt: STOR-013/L373 | 2/2 | none |
 | MR-STOR-0093 | obligation | explicit | Each cycle a node emits an unsigned ByteCommit with its node id, a cycle counter (never time), the SMT root over what it holds, bytes used, and the previous digest; it is stored under a deterministic address and mirrored. | cc: STOR-014/L382; gpt: STOR-014/L382, STOR-014/L383 | 2/2 | none |
 | MR-STOR-0094 | evidence | explicit | A verifier checks a ByteCommit's chain link and root itself; it is never accepted by counting mirrors. | cc: STOR-014/L384; gpt: STOR-014/L384 | 2/2 | none |
-| MR-STOR-0095 | evidence | explicit | Up and Down capacity signals reference windows of accepted ByteCommits and are checked against them. | cc: STOR-014/L385; gpt: STOR-014/L385 | 2/2 | none |
+| MR-STOR-0095 | evidence | explicit | Up and Down capacity signals reference windows of accepted ByteCommits and are checked against them; how they are computed is open (storage spec §24 item 14). | cc: STOR-014/L385; gpt: STOR-014/L385 | 2/2 | none |
 | MR-STOR-0096 | obligation | explicit | Each keyed-cell entry is committed with its per-key arrival index and the member's running hash for that key, so arrival records, route links, handover and pre-loss partitioning are checkable. | cc: STOR-014/L389; gpt: STOR-014/L389 | 2/2 | none |
 | MR-STOR-0097 | evidence | explicit | An operator stakes through a stake DLV, which unlocks only on a mirrored DrainProof of two consecutive accepted ByteCommits with zero bytes used. | cc: STOR-015/L397; gpt: STOR-015/L397, STOR-015/L396 | 2/2 | none |
 | MR-STOR-0098 | theorem | explicit | Because retention never depends on payment, an operator's memory empties only after every role is handed over, so a DrainProof proves completed handover and a refusing operator never recovers its stake. | cc: STOR-015/L401; gpt: STOR-015/L401 | 2/2 | none |
 | MR-STOR-0099 | invariant | explicit | A device is receive-only after genesis until it has paid a flat rate to three distinct operators; spending is then enabled permanently with no renewal. | cc: STOR-016/L412; gpt: STOR-016/L412 | 2/2 | none |
-| MR-STOR-0100 | authority | explicit | A node enforces the spend-gate itself: it stores the device-signed receipts, counts distinct operators, and may refuse writes addressed to a device that has not met it. | cc: STOR-016/L414; gpt: STOR-016/L414, STOR-016/L413 | 2/2 | tension(GPT-9) |
+| MR-STOR-0100 | authority | explicit | A node enforces the spend-gate itself: it stores the device-signed receipts, counts distinct operators, and may refuse writes addressed to a device that has not met it. This is the one place a node reads content: it parses only payment receipts addressed to the account being written to and counts the distinct operator ids among them; credit refills are checked by receivers, never nodes. | cc: STOR-016/L414; gpt: STOR-016/L414, STOR-016/L413 | 2/2 | none |
 | MR-STOR-0101 | dependency-boundary | explicit | PaidK is also the join event driving DJTE, evaluated by verifiers over the same receipts; emissions are out of scope. | cc: STOR-016/L415; gpt: STOR-016/L415 | 2/2 | none |
 | MR-STOR-0102 | invariant | explicit | Storage is paid on-chain with credits, a balance leaf in the party's own committed state. | cc: STOR-017/L422; gpt: STOR-017/L422 | 2/2 | none |
 | MR-STOR-0103 | invariant | explicit | The credit price is fixed in token units as a committed network parameter and charged by storage actually used; operators do not set prices and compete on performance. | cc: STOR-017/L423; gpt: STOR-017/L423 | 2/2 | none |
@@ -1028,7 +1030,7 @@ Columns: **ID** is the canonical ID (`MR-<spec>-nnnn`, in document order). **Sou
 | MR-STOR-0115 | authority | explicit | A DLV's storage set is the network-pinned set, and its succession is driven by the network, never by the owner. | cc: STOR-018/L446; gpt: STOR-018/L446 | 2/2 | none |
 | MR-STOR-0116 | prohibition | explicit | A node must not delete, expire or age out held bytes because of lapsed payment, owner inactivity or owner death; the only way a role's memory empties is handover. | cc: STOR-019/L453; gpt: STOR-019/L453, STOR-019/L454 | 2/2 | none |
 | MR-STOR-0117 | prohibition | explicit | Reads for verification cost no credits; receiving value and verifying provenance cost the reader nothing. | cc: STOR-019/L455; gpt: STOR-019/L455 | 2/2 | none |
-| MR-STOR-0118 | obligation | explicit | Pruning is by a sliding window of logical age (positions, generations or ByteCommit cycles, never time); nothing is pruned until the window and exemptions are specified, and no rule may make a claimed slot read as empty or prune live DLV or dBTC backing material. | cc: STOR-019/L456; gpt: STOR-019/L456 | 2/2 | ambiguous(GPT-8) |
+| MR-STOR-0118 | obligation | explicit | Nothing is pruned until the pruning window and its exemptions are specified, and no pruning rule may make a claimed slot read as empty, prune live DLV or dBTC backing material, or prune chain evidence the loss rule needs; pruning is by a sliding window of logical age, never time, whose window and exemptions are open. | cc: STOR-019/L456; gpt: STOR-019/L456 | 2/2 | none |
 | MR-STOR-0119 | invariant | explicit | No safety property, and no party's liveness other than the owner's own, depends on the owner continuing to exist: retention is not tied to owner activity, operator exit is by handover, and retirement, the survivor rule and frozen-cell consequences are verifier rules, never owner actions. | cc: STOR-020/L463; gpt: STOR-020/L463, STOR-020/L467 | 2/2 | none |
 | MR-STOR-0120 | obligation | explicit | After a prune or exit, any client may restore missing replicas of immutable objects, accepted by hash only. | cc: STOR-021/L478; gpt: STOR-021/L478 | 2/2 | none |
 | MR-STOR-0121 | prohibition | explicit | Keyed-cell arrival order is not repairable by clients; it moves only by handover and, if lost, the cell is resolved by the loss rule. | cc: STOR-021/L479; gpt: STOR-021/L479 | 2/2 | none |
@@ -1064,7 +1066,7 @@ The specifications mark these undecided. They are recorded so they are not lost,
 |---|---|---|---|
 | 1 | DSM-HL-011/L758 | whether nodes also refuse writes from accounts whose storage credits are exhausted, or only receivers enforce credits (same item as storage spec §24 item 10). | DSM-HL-011/L758.b |
 | 2 | SOFI-024/L1560 | the challenge deadline X (same item as storage spec §24 item 7). | SOFI-024/L1560.c |
-| 3 | STOR-009-1/L202 | X, challenge and drop wire forms, and the SoFi drop-consumption rule remain unspecified. | STOR-009-1/L202 |
+| 3 | STOR-009-1/L202 | X, and the wire forms of challenges and drop claims, remain unspecified (the SoFi drop rule is now step 3a, Amendment S5). | STOR-009-1/L202 |
 | 4 | STOR-010/L223 | where the economic-root register's owner-committed set is committed in device state is not specified. | STOR-010/L223 |
 | 5 | STOR-011/L233 | operator endpoints are resolved outside committed state; whether by network configuration or a committed object is undecided. | STOR-011/L233 |
 | 6 | STOR-012-6/L358 | the consequences of a frozen cell for DSM, SoFi and dBTC, and whether it triggers the tripwire, are undecided. | STOR-012-6/L358 |
@@ -1075,13 +1077,14 @@ The specifications mark these undecided. They are recorded so they are not lost,
 | 11 | STOR-024/L534 | the performance-pruning criterion beyond cadence regularity is unspecified. | STOR-024/L534 |
 | 12 | STOR-024/L535 | whether one network-pinned vault set persists through network growth is unspecified. | STOR-024/L535 |
 | 13 | STOR-024/L536 | retirement, loss, handover and registry-successor wire forms and domains are unspecified. | STOR-024/L536 |
-| 14 | STOR-024/L537 | challenge deadline X, challenge/drop wire forms and SoFi drop resolution remain incomplete. | STOR-024/L537 |
+| 14 | STOR-024/L537 | challenge deadline X and the challenge/drop wire forms remain unspecified. | STOR-024/L537 |
 | 15 | STOR-024/L538 | credit price, payment token and price-change process are unspecified. | STOR-024/L538 |
 | 16 | STOR-024/L539 | payment allocation across the five storing operators is unspecified. | STOR-024/L539 |
 | 17 | STOR-024/L540 | node enforcement of exhausted credits is unspecified. | STOR-024/L540 |
 | 18 | STOR-024/L541 | pruning window and exemptions are unspecified. | STOR-024/L541 |
 | 19 | STOR-024/L542 | minimum registry size and replacement capacity are unspecified. | STOR-024/L542 |
 | 20 | STOR-024/L543 | whether member opt-out has an explicit charge is unspecified. | STOR-024/L543 |
+| 21 | STOR-024 (item 14) | The registry growth ranking, its genesis commit-reveal anchor, and the Up and Down capacity-signal computations, now referenced from the October 2025 spec outside the corpus. | amendment 2026-09-22 |
 
 ### 8.6 Exclusions
 
@@ -1120,16 +1123,16 @@ These come from the chatgpt extraction's findings table (GPT-n, IDs as cited the
 | GPT-20 | dBTC: partial burns of one shared origin by different holders at once; the cross-device claim on a backing generation is not specified at the same precision as local serialisation. |
 | GPT-23 | SoFi genesis says locator writes are attributed to the owner, while S2 and storage forbid writer checks at the node. Confirm attribution is a Core matter and locator appends stay unauthenticated. |
 
-**Wording clarifications**
+**Wording clarifications (all resolved 2026-09-22)**
 
 | # | Finding |
 |---|---|
-| GPT-1 | Amendment A1 says a transition that does not execute "leaves nothing in state or in storage", but losing attempts and challenge objects do stay in storage. Say that it means no negative verdict is recorded. |
-| GPT-2 | Challenge termination is Invalid in DSM A1's account but Void for a SoFi position under S1 and S3. State the relation, and where the drop rung sits in the SoFi ladder. |
-| GPT-8 | Storage §19's pruning paragraph is marked Open but contains MUST NOT rules and an interim no-pruning rule. Say which parts are settled now. (The canonical row keeps them as settled, flagged.) |
-| GPT-9 | Receipt counting for the spend-gate is the one content-aware exception at the node; receipt authenticity and binding are not fully specified. |
-| GPT-10 | Registry growth and capacity signals rely on the superseded October 2025 spec, which is outside the pinned corpus. |
-| R-1 | DSM Amendment A2 still says "a party pays all five members of its storage set" (MR row for DSM-HL-011/L760), which predates per-write credits. How a credit payment is split among five operators is Open (storage §24 item 9). |
+| GPT-1 | **Resolved 2026-09-22: DSM A1 now says no state changes and nothing negative is recorded; bytes of attempts stay as raw material, never a verdict.** |
+| GPT-2 | **Resolved 2026-09-22: DSM A1 now says a transition whose evidence never arrives does not execute (not "Invalid"); SoFi gains ladder step 3a, a won drop claim resolves Void (Amendment S5).** |
+| GPT-8 | **Resolved 2026-09-22: storage §19 now separates the settled pruning constraints (including chain evidence needed for loss recovery) from the open window and exemptions.** |
+| GPT-9 | **Resolved 2026-09-22: storage §16 states the exception exactly (only payment receipts addressed to the written account, counting distinct operator ids); receipt format joins open item 6; refills are checked by receivers.** |
+| GPT-10 | **Resolved 2026-09-22: the October 2025 dependencies are marked Open in storage §13 and §14 and listed as open item 14.** |
+| R-1 | **Resolved 2026-09-22:** DSM A2 now says a party pays with credits, the split among five members is open, and a write goes through at three route-chain links. |
 
 **For information only:** GPT-21, GPT-22 and GPT-24 record scope (out-of-scope subsystems, superseded passages, and that this is a specification extraction, not a code audit).
 

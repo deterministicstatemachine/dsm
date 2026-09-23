@@ -214,7 +214,7 @@ A cell's route, and so its leader, is a function of the set committed when the c
 
 The leader's cadence is driven by all of its customers' traffic, and a node does not know which cells it leads (§9), so it cannot target one challenge. Speeding up its whole chain is visible to every customer and is scored (§13). Operators that underperform are never admitted and are cut, and parties may opt out of members of their own sets.
 
-**Open:** the value of X; the wire form of a challenge and a drop claim; and the SoFi rule that consumes a dropped result (SoFi §24 has no rung for it).
+**Open:** the value of X, and the wire form of a challenge and a drop claim. SoFi resolves a dropped position Void (SoFi §24, step 3a; Amendment S5).
 
 ---
 
@@ -384,7 +384,7 @@ If `Final(K, x)` held before the loss, `x`'s chain was held by the leader and tw
 2. The registry advances by a pure function of the prior registry and input objects referenced by hash: capacity and performance evidence (Up/Down signals, §14), and applicant packs.
 3. Each registry successor is a keyed cell on the network's pinned set, keyed by the prior registry's address. Any party MAY write a candidate successor. A verifier recomputes a candidate from the inputs it references; an object that does not recompute is not a candidate. The winner is the first candidate at the cell's leader, and it is final under the ordinary rule (§9). This settles which of several valid candidates (built from different discovered inputs) becomes the registry, without a vote.
 4. Pruning MUST be computed from committed evidence only (ByteCommit chains and signals that reference them). Measurements a node makes locally, such as latency or uptime, MUST NOT enter the rule, because different nodes observe different values.
-5. Growth selects new operators by the salted applicant ranking of the October 2025 spec §9, which is anchored in the genesis commit-reveal (§5 of that spec), so no party can bias selection.
+5. Growth selects new operators by a salted applicant ranking anchored in a genesis commit-reveal, so no party can bias selection. **Open:** the ranking and the commit-reveal are defined only in the October 2025 spec (§9 and §5 there), which is outside this corpus; they are to be specified here (§24 item 14).
 6. A new operator is protected from pruning for a grace period counted in ByteCommit cycles, never in time (October 2025 spec §10).
 7. **Owner decision:** an operator that does not meet the performance bar is never admitted, and one that falls below it is cut. Cadence regularity, meaning the size and spacing of an operator's ByteCommit cycles compared with its own history and its peers, is part of the performance score.
 
@@ -398,7 +398,7 @@ If `Final(K, x)` held before the loss, `x`'s chain was held by the leader and tw
 1. Each cycle, a node emits an unsigned ByteCommit containing: its node id, a cycle index (a counter, never time), the SMT root over what it holds, the bytes used, and the digest of its previous ByteCommit.
 2. A ByteCommit is stored as an ordinary object under a deterministic address and mirrored by peers.
 3. A verifier checks the chain link and the root itself. A ByteCommit is **not** accepted by counting how many mirrors hold it; the October 2025 mirror-count rule is not adopted.
-4. Up and Down capacity signals reference windows of accepted ByteCommits and are checked against them (October 2025 spec §8).
+4. Up and Down capacity signals reference windows of accepted ByteCommits and are checked against them. **Open:** how the signals are computed is defined only in the October 2025 spec (§8 there), outside this corpus (§24 item 14).
 
 **Rule — arrival order is committed (Owner decision)**
 
@@ -433,7 +433,7 @@ Retention never depends on payment (§19), so an operator's memory empties only 
 
 1. A device is receive-only after genesis until it has paid a flat rate to K = 3 distinct storage operators. On first satisfaction, spending is enabled permanently, with no renewal.
 2. Payment receipts are device-signed objects stored like any other object.
-3. A node enforces the gate itself: it stores the receipts, counts distinct operators, and MAY refuse writes addressed to a device that has not met the gate (§17, enforcement bounds).
+3. A node enforces the gate itself: it stores the receipts, counts distinct operators, and MAY refuse writes addressed to a device that has not met the gate (§17, enforcement bounds). This is the one place a node reads content, and its scope is exact: the node parses only payment receipts addressed to the account being written to, and counts the distinct operator ids among them. It reads nothing else. Credit refills (§17) are checked by receivers, never by nodes.
 4. `PaidK` is also the join event that drives DJTE, which verifiers evaluate over the same receipts. Emissions are out of scope for this round; this document imports the gate as substrate only.
 
 <!-- spec-section: STOR-017 -->
@@ -475,7 +475,9 @@ Retention never depends on payment (§19), so an operator's memory empties only 
 1. A node MUST NOT delete, expire, or age out held bytes because of lapsed payment, owner inactivity, or owner death.
 2. The only path by which an operator's memory for a role empties is handover (§12.5).
 3. Reads for verification cost no credits. Receiving value, and verifying provenance, MUST NOT cost the reader anything.
-4. **Pruning (Owner direction; Open).** Data past a certain age is to be pruned by a sliding window, with age measured in logical units (positions, generations or ByteCommit cycles), never time. Until the window and its exemptions are specified, nothing is pruned. Whatever rule is adopted MUST NOT make a slot that held a claim read as empty, and MUST NOT prune live DLV or dBTC backing material.
+4. **Pruning (Owner direction).** Data past a certain age is to be pruned by a sliding window, with age measured in logical units (positions, generations or ByteCommit cycles), never time.
+   - **Settled now:** nothing is pruned until the window and its exemptions are specified. Whatever rule is adopted MUST NOT make a slot that held a claim read as empty, MUST NOT prune live DLV or dBTC backing material, and MUST NOT prune chain evidence that the loss rule needs (§9, §12.6).
+   - **Open:** the window and its exemptions (§24 item 11).
 
 <!-- spec-section: STOR-020 -->
 ### 20 Owner independence
@@ -558,11 +560,12 @@ No safety property, and no party's liveness other than the owner's own, may depe
 | 3 | Consequences of `Frozen(K)`, and whether it triggers the tripwire (§12.6). |
 | 4 | The performance criterion for pruning, expressible over committed evidence (§13). Cadence regularity (§9.1, §13.7) is one criterion; the rest are undecided. |
 | 5 | Whether vaults keep a single network-pinned set as the network grows (§10). |
-| 6 | Wire formats and domain tags for retirement, loss, handover, and registry-successor objects, and for arrival records, route links, empties and the per-key running hash (§6, §9, §14). |
-| 7 | The challenge deadline X, the wire form of challenges and drop claims, and SoFi's rule for a dropped pending result (§9.1). |
+| 6 | Wire formats and domain tags for retirement, loss, handover, and registry-successor objects, for arrival records, route links, empties and the per-key running hash (§6, §9, §14), and for payment receipts (§16). |
+| 7 | The challenge deadline X, and the wire form of challenges and drop claims (§9.1). |
 | 8 | The credit price, its token, and how a price change is made (§17). |
 | 9 | How a credit payment is split among the five operators that store a write (§17). |
 | 10 | Whether nodes also refuse writes from accounts whose credits are exhausted, or only receivers enforce credits (§17). |
 | 11 | The pruning window and its exemptions (§19). |
 | 12 | The minimum network size: a set needs five distinct operators, and replacements need more to draw from (§12). |
 | 13 | Whether opting out of a member should carry a cost (§12.4). |
+| 14 | The registry growth ranking, its genesis commit-reveal anchor, and the Up and Down capacity-signal computations, now referenced from the October 2025 spec outside this corpus (§13, §14). |
