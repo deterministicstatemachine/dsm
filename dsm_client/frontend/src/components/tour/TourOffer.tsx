@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 // First-run offer of the guided tour.
 //
 // Shown once, on the home screen of a ready wallet, to someone who has never

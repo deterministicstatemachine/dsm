@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 import React from 'react';
 import fs from 'fs';
 import path from 'path';
