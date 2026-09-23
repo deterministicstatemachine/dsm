@@ -73,7 +73,11 @@ One Markdown table row per requirement, grouped under a heading per spec section
 - **Force**:
   - `explicit` means the text uses a normative word or sits in a labelled box.
   - `derived` means the extractor judged declarative text to be normative. Derived entries are where extractors are expected to disagree, which is why this is recorded.
-- **Requirement**: one testable sentence in the extractor's own words.
+- **Requirement**: one testable sentence in the extractor's own words, written only after reading the complete source sentence or sentences.
+  - It states nothing the source does not state: no added conditions, exceptions, mechanisms, parameters or examples.
+  - It omits nothing that changes the meaning: every condition, alternative and exception the source states is kept.
+  - If in doubt, copy the source sentence.
+  - The quote check verifies only the Quote column. It does not check this column, so reconciliation reads every Requirement against its source text.
 - **Attaches**:
   - For a SoFi or dBTC entry, the DSM ID it refines.
   - For a restatement inside the same document, the ID of the primary statement.
@@ -101,8 +105,8 @@ A partial extraction is fine. An unmarked gap is not. Coverage is how a section 
 Generate the anchor list with:
 
 ```
-awk '/spec-section:/{match($0,/spec-section: [A-Z0-9-]+/);a=substr($0,RSTART+14,RLENGTH-14);l=NR;w=1;next} w&&/^#/{t=$0;sub(/^#+ */,"",t);print "| " a " | " l " | " t " | not-read |";w=0}' specs/DSM_High_Level_Explainer.md specs/SoFi_Settlement_Specification.md specs/DSM_Storage_Node_Specification.md
-awk '/<a id="DBTC-SPEC/{match($0,/DBTC-SPEC[A-Z0-9-]*/);a=substr($0,RSTART,RLENGTH);l=NR;w=1;next} w&&/^#/{t=$0;sub(/^#+ */,"",t);print "| " a " | " l " | " t " | not-read |";w=0}' specs/dBTC_Native_Specification.md
+awk '/spec-section:/{match($0,/spec-section: [A-Z0-9-]+/);a=substr($0,RSTART+14,RLENGTH-14);l=FNR;w=1;next} w&&/^#/{t=$0;sub(/^#+ */,"",t);print "| " a " | " l " | " t " | not-read |";w=0}' specs/DSM_High_Level_Explainer.md specs/SoFi_Settlement_Specification.md specs/DSM_Storage_Node_Specification.md
+awk '/<a id="DBTC-SPEC/{match($0,/DBTC-SPEC[A-Z0-9-]*/);a=substr($0,RSTART,RLENGTH);l=FNR;w=1;next} w&&/^#/{t=$0;sub(/^#+ */,"",t);print "| " a " | " l " | " t " | not-read |";w=0}' specs/dBTC_Native_Specification.md
 ```
 
 ## 6 Findings section
