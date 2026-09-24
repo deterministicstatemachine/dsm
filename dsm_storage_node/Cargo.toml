@@ -64,9 +64,6 @@ async-trait = "0.1"
 # DSM Core (for SPHINCS+ and shared types)
 dsm = { version = "0.1.0-beta.3", path = "../dsm_client/deterministic_state_machine/dsm" }
 
-# DSM SDK (for centralized utilities like base32 Crockford)
-dsm_sdk = { version = "0.1.0-beta.3", path = "../dsm_client/deterministic_state_machine/dsm_sdk" }
-
 # Protobuf support
 prost = "0.14"
 metrics = "0.24"

@@ -114,14 +114,14 @@ impl core::fmt::Display for AdvanceError {
                 "advance: refusing to credit token {} — this device has not adopted its \
                  policy; adoption (ADD TOKEN) must precede receipt, and a settlement that \
                  roots the token on the receiver's behalf does not satisfy it",
-                crate::types::identifiers::encode_crockford(policy_commit)
+                crate::utils::text_id::encode_base32_crockford(policy_commit)
             ),
             Self::ReceiptIsNotThisOperation { expected, derived } => write!(
                 f,
                 "the receipt is for another operation: E {} was expected, its settlement \
                  recomputes {}",
-                crate::types::identifiers::encode_crockford(expected),
-                crate::types::identifiers::encode_crockford(derived)
+                crate::utils::text_id::encode_base32_crockford(expected),
+                crate::utils::text_id::encode_base32_crockford(derived)
             ),
             Self::Counter(e) => write!(f, "{e}"),
         }

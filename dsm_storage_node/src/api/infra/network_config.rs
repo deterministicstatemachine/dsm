@@ -7,7 +7,7 @@
 //! during gossip and replication setup.
 
 use anyhow::Result;
-use dsm_sdk::util::text_id;
+use dsm::utils::text_id;
 use log::{debug, info};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
 use std::process::Command;

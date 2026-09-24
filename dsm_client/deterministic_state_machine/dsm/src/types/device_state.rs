@@ -1056,7 +1056,7 @@ impl DeviceState {
                 return Err(DsmError::invalid_operation(format!(
                     "resolved position: this head holds {held} of token {}, and the root the \
                      position was built on holds {} — the head is not the one that registered it",
-                    crate::types::identifiers::encode_crockford(&change.policy_commit),
+                    crate::utils::text_id::encode_base32_crockford(&change.policy_commit),
                     change.before
                 )));
             }
@@ -1250,7 +1250,7 @@ impl DeviceState {
                     "advance: refusing to credit token {} — this device has not adopted its \
                      policy; adoption (ADD TOKEN) must precede receipt so the policy is \
                      verifiable from local state",
-                    crate::types::identifiers::encode_crockford(&d.policy_commit)
+                    crate::utils::text_id::encode_base32_crockford(&d.policy_commit)
                 )));
             }
         }

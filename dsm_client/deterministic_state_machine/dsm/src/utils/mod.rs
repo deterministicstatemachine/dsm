@@ -7,6 +7,8 @@
 //! ## Sub-modules
 //!
 //! * `file`: File system operations and helpers
+//! * `text_id`: Base32 Crockford and dotted-decimal text for display edges
 
 #[cfg(test)]
 pub mod file;
+pub mod text_id;

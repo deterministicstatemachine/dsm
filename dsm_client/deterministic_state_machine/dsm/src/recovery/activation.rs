@@ -234,7 +234,7 @@ mod tests {
     /// the set-logic tests, which fail at count/commit/set-equality/binding first).
     fn stub_ev(c: [u8; 32]) -> CrossRelationshipSuccessionEvidence {
         let kp = generate_keypair_from_seed(SphincsVariant::SPX256f, &[0x42; 32]).expect("kp");
-        let a_old_str = crate::types::identifiers::encode_crockford(&OLD);
+        let a_old_str = crate::utils::text_id::encode_base32_crockford(&OLD);
         let tombstone =
             create_tombstone(&[0x01; 32], 0, &[0x02; 32], &a_old_str, &kp.secret_key).expect("t");
         let succession = create_succession(

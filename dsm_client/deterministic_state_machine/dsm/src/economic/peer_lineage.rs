@@ -50,7 +50,7 @@ use crate::economic::register::{
 };
 use crate::route_chain::{CellEvidence, CellReading, ChainState};
 use crate::economic::successor_evidence::verify_dsm_successor_evidence;
-use crate::types::identifiers::encode_crockford;
+use crate::utils::text_id::encode_base32_crockford;
 use crate::economic::witness::EconomicTransitionWitness;
 
 /// Total step budget for one walk, across ALL identities it touches.
@@ -444,8 +444,8 @@ fn walk_positions(
         let claim = claim.single_root().map_err(|conditional| {
             PeerLineageFailure::Unresolved(format!(
                 "peer {}/{} at position {position}: {conditional}",
-                encode_crockford(peer_genesis),
-                encode_crockford(peer_devid)
+                encode_base32_crockford(peer_genesis),
+                encode_base32_crockford(peer_devid)
             ))
         })?;
         let body = claim.body().clone();
@@ -623,7 +623,7 @@ mod tests {
         ) -> Result<ReserveReleaseWin, PeerLineageFailure> {
             Err(PeerLineageFailure::Incomplete(format!(
                 "no reserve release in this test: {} at {generation}",
-                encode_crockford(reserve_id)
+                encode_base32_crockford(reserve_id)
             )))
         }
         fn root_register_candidate_set(
@@ -642,7 +642,7 @@ mod tests {
         ) -> Result<Vec<u8>, PeerLineageFailure> {
             Err(PeerLineageFailure::Incomplete(format!(
                 "no objects in this test: {} under {:?}",
-                encode_crockford(addr),
+                encode_base32_crockford(addr),
                 namespace.source_bytes()
             )))
         }
@@ -652,7 +652,7 @@ mod tests {
         ) -> Result<Vec<u8>, PeerLineageFailure> {
             Err(PeerLineageFailure::Incomplete(format!(
                 "no policies in this test: {}",
-                encode_crockford(policy_commit)
+                encode_base32_crockford(policy_commit)
             )))
         }
     }
@@ -882,7 +882,7 @@ mod tests {
             ("realize_root", claim.realize_root),
             ("void_root", claim.void_root),
         ] {
-            let b32 = crate::types::identifiers::encode_crockford(&root);
+            let b32 = crate::utils::text_id::encode_base32_crockford(&root);
             assert!(
                 !rendered.contains(&b32),
                 "{name} leaked into the refusal: {rendered}"

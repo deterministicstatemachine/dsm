@@ -321,7 +321,7 @@ impl core::fmt::Display for PredecessorHasNotSelected {
             "the admitted position {} is conditional on fulfillment {} and has selected \
              no root: nothing descends from it until the route resolves",
             self.economic_position,
-            crate::types::identifiers::encode_crockford(&self.fulfillment_id)
+            crate::utils::text_id::encode_base32_crockford(&self.fulfillment_id)
         )
     }
 }
@@ -978,7 +978,7 @@ mod admitted_position_tests {
         let rendered = refusal.to_string();
         for root in [REALIZE, VOID] {
             assert!(
-                !rendered.contains(&crate::types::identifiers::encode_crockford(&root)),
+                !rendered.contains(&crate::utils::text_id::encode_base32_crockford(&root)),
                 "a committed root leaked: {rendered}"
             );
         }

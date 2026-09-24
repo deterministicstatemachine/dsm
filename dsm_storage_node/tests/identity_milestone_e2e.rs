@@ -127,7 +127,7 @@ async fn the_milestone_path_works_end_to_end_with_no_legacy_anywhere() {
     let pool = common::fresh_store("identity_milestone").await;
 
     let addr = immutable_addr(TAG_DSM_VAULT_STATE, &ccb);
-    let addr_b32 = dsm_sdk::util::text_id::encode_base32_crockford(&addr);
+    let addr_b32 = dsm::utils::text_id::encode_base32_crockford(&addr);
     let outcome = db::insert_immutable_object_if_absent(
         &pool,
         &addr_b32,
@@ -159,7 +159,7 @@ async fn the_milestone_path_works_end_to_end_with_no_legacy_anywhere() {
     assert_eq!(fetch_addr, addr, "identity → address, no index anywhere");
     let (ns, fetched) = db::get_immutable_object(
         &pool,
-        &dsm_sdk::util::text_id::encode_base32_crockford(&fetch_addr),
+        &dsm::utils::text_id::encode_base32_crockford(&fetch_addr),
     )
     .await
     .expect("get")
