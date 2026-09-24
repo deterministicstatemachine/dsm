@@ -214,8 +214,6 @@ fn map_error_code(error: &DsmError) -> ErrorCode {
         | DsmError::Configuration { .. }
         | DsmError::TimeError(_)
         | DsmError::SystemError(_)
-        | DsmError::MintNotAllowed
-        | DsmError::BurnNotAllowed
         | DsmError::FaucetDisabled
         | DsmError::FaucetNotAvailable
         | DsmError::InboxTokenInvalid(_)

@@ -393,13 +393,6 @@ fn semantic_write_set(
             amount: crate::economic::native_reserve::ERA_FAUCET_PAYOUT,
             facts_required: FactsKind::NativeReserveRelease,
         }),
-        // ISSUANCE: one balance credit of exactly the operation's amount,
-        // funded by the 0x0023 arm resolving a 0x0029 authorization. The
-        // amount and asset come from the operation; the write set states the
-        // effect, and the arm states who was entitled to cause it.
-        // SOFI v8 IS REFUSED HERE BY NAME — and the three do not share a
-        // reason, which is why they no longer share an arm.
-        //
         // A FULFILLMENT belongs to the resolved path: its write set is fixed
         // by its own preimage and its position is earned by the route's
         // resolution, so `advance_validated` is the wrong constructor.

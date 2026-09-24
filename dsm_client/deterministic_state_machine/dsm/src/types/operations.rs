@@ -465,7 +465,8 @@ pub enum Operation {
     CreateToken {
         /// Binary unique identifier for the new token type.
         token_id: Vec<u8>,
-        /// Initial supply minted at creation. May be zero.
+        /// The whole supply, released to the creator at creation (SoFi §51).
+        /// Never zero: a token with no genesis supply is not a token (§50).
         initial_supply: Balance,
         /// CPTA commit of the NEW asset — mandatory.
         ///
@@ -659,7 +660,7 @@ impl Operation {
     /// could both move the same pre-recovery value — the split-acceptance
     /// recovery double-spend (spec vector V1).
     ///
-    /// Pure value *ingress* (receiving, minting) and identity / relationship /
+    /// Pure value *ingress* (receiving, token creation) and identity / relationship /
     /// recovery / link / neutral operations are NOT egress and proceed normally — recovery itself must be able to advance, and
     /// receiving value can never create a double-spend of the owner's funds.
     ///
@@ -742,7 +743,7 @@ impl Operation {
         if self.is_value_egress() {
             return true;
         }
-        // Value ingress: receiving, minting, and token creation bring value INTO the
+        // Value ingress: receiving and token creation bring value INTO the
         // relationship without being egress. Everything else (identity, relationship,
         // recovery, links, invalidation, generic, no-op) is non-value.
         matches!(

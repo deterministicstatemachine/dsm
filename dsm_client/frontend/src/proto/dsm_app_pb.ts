@@ -24703,7 +24703,7 @@ export class PolicyConditionProto extends Message<PolicyConditionProto> {
 }
 
 /**
- * Who may mint or burn this token, and how many of them must co-sign.
+ * Who may burn this token or create it, and how many of them must co-sign.
  * `signers` are raw SPHINCS+ public keys; the verifier takes the key from
  * HERE, never from the caller's own proof.
  *
@@ -24750,8 +24750,8 @@ export class TokenAuthorityProto extends Message<TokenAuthorityProto> {
 }
 
 /**
- * Hard ceiling on circulating supply. `unlimited` and `max_supply` are
- * mutually exclusive; the policy parser enforces one canonical encoding.
+ * The whole supply a token is created with. Nothing is minted after genesis
+ * (SoFi §48) and no supply is unlimited (§54): 2 was the unlimited flag.
  *
  * @generated from message dsm.SupplyCapProto
  */
@@ -24760,11 +24760,6 @@ export class SupplyCapProto extends Message<SupplyCapProto> {
    * @generated from field: bytes max_supply_u128 = 1;
    */
   maxSupplyU128 = new Uint8Array(0);
-
-  /**
-   * @generated from field: bool unlimited = 2;
-   */
-  unlimited = false;
 
   constructor(data?: PartialMessage<SupplyCapProto>) {
     super();
@@ -24775,7 +24770,6 @@ export class SupplyCapProto extends Message<SupplyCapProto> {
   static readonly typeName = "dsm.SupplyCapProto";
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
     { no: 1, name: "max_supply_u128", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 2, name: "unlimited", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SupplyCapProto {

@@ -13,7 +13,7 @@
 //! is not a witness with a suffix; it is not a witness.
 //!
 //! Scope is the witness closure: `0x001D`, `0x001E`, the leaf states
-//! `0x001F`–`0x0022`, and the credit sources `0x0023`–`0x0028`, `0x0030` and `0x0035`. The claim and
+//! `0x001F`–`0x0022`, and the credit sources `0x0025`, `0x005D` and `0x005F`. The claim and
 //! manifest (`0x001B` / `0x001C`) are the register and admission layer and
 //! decode with that work, not here.
 
@@ -56,8 +56,8 @@ pub fn decode_leaf_mutation(bytes: &[u8]) -> Result<EconomicLeafMutation, Decode
     Ok(m)
 }
 
-/// Decode a standalone `CreditSource` — one of classes `0x0023`–`0x0028`,
-/// `0x0030` and `0x0035`.
+/// Decode a standalone `CreditSource` — one of classes `0x0025`, `0x005D`
+/// and `0x005F`.
 pub fn decode_credit_source(bytes: &[u8]) -> Result<CreditSource, DecodeError> {
     let mut c = Cursor { b: bytes, i: 0 };
     let s = read_credit_source(&mut c)?;

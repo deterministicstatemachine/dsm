@@ -61,7 +61,7 @@ pub struct EconomicTransitionWitness {
     pub operation_digest: [u8; 32],
     pub mutations: Vec<EconomicLeafMutation>,
     /// Strictly ascending by `credit_mutation_index`. Inline, heterogeneous
-    /// CCB objects of classes `0x0023`–`0x0028`; each carries its own envelope,
+    /// CCB objects of classes `0x0025`, `0x005D` and `0x005F`; each carries its own envelope,
     /// which is what keeps the sequence parseable without a side-channel
     /// discriminant.
     pub credit_sources: Vec<CreditSource>,

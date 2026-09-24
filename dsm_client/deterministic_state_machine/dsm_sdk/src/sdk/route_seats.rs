@@ -156,9 +156,10 @@ fn entry_at_leader(cell: &RoutedCell, value: &[u8]) -> RouteEntry {
 /// leader's record for each value is the first link, and every later copy
 /// carries it. So the leader's log is read first, and a value the leader
 /// already holds keeps the record of its FIRST copy — writing it again would
-/// add a copy whose record no chain begins with. Values it does not hold are
-/// put there, all `N` in one transaction. When the leader does not answer,
-/// the write stops: a later copy would have no leader record to carry.
+/// add a copy whose record no chain begins with. Only the values it does not
+/// hold are put there, together in one transaction, each record returned to
+/// the value it names. When the leader does not answer, the write stops: a
+/// later copy would have no leader record to carry.
 async fn from_leader<S: RouteSeats, const N: usize>(
     seats: &S,
     route: &Route,
@@ -176,20 +177,20 @@ async fn from_leader<S: RouteSeats, const N: usize>(
             }
         }
     }
-    if links.iter().any(Option::is_none) {
-        let batch: Vec<CellPut> = cells
+    let missing: Vec<usize> = (0..N).filter(|&i| links[i].is_none()).collect();
+    if !missing.is_empty() {
+        let batch: Vec<CellPut> = missing
             .iter()
-            .map(|(cell, value)| {
+            .map(|&i| {
+                let (cell, value) = cells[i];
                 let entry = entry_at_leader(cell, value);
                 (entry.namespace.clone(), entry.key, entry.encode())
             })
             .collect();
         match seats.put_entries(route.leader(), &batch).await {
             Ok(records) => {
-                for (link, put) in links.iter_mut().zip(records) {
-                    if link.is_none() {
-                        *link = Some(put);
-                    }
+                for (&i, put) in missing.iter().zip(records) {
+                    links[i] = Some(put);
                 }
             }
             Err(e) => {
@@ -514,6 +515,13 @@ pub async fn continue_recorded_writes(
 /// Every mirror keeps each distinct ByteCommit it fetched for a member and
 /// cycle (§14 mirror sync), so a mirror holding two, or two mirrors holding
 /// different ones, show the member equivocating; none is used then.
+///
+/// One mirror holding it is enough, by the spec, not by default: nodes crash
+/// and omit but never alter what they hold (§3), a member's mirror is held to
+/// that same model (§14 mirror provenance, rule 3), and a ByteCommit "is not
+/// accepted by counting how many mirrors hold it" (§14 rule 3). What makes it
+/// evidence is its chain link and its root, which Core checks
+/// ([`CommittedAt::chain_link_holds`], `record_is_committed`).
 fn agreed(member: &[u8], cycle: u64, held: &[Vec<ByteCommit>]) -> Option<ByteCommit> {
     let mut found: Option<&ByteCommit> = None;
     for commit in held.iter().flatten() {
@@ -548,8 +556,26 @@ async fn committed_at<S: RouteSeats>(
         }
     }
     let commit = agreed(member, cycle, &held)?;
+    // The member's previous ByteCommit, from the same mirrors, for the
+    // chain link (§14 rule 3). Cycle 1 has none: its parent is zero.
+    let parent = match cycle.checked_sub(1).filter(|previous| *previous >= 1) {
+        None => None,
+        Some(previous) => {
+            let mut held = Vec::with_capacity(mirrors.len());
+            for mirror in mirrors {
+                if let Some(commits) = seats.mirrored(mirror, member, previous).await {
+                    held.push(commits);
+                }
+            }
+            Some(agreed(member, previous, &held)?)
+        }
+    };
     let proof = seats.proof(member, namespace, key, cycle).await?;
-    Some(CommittedAt { commit, proof })
+    Some(CommittedAt {
+        commit,
+        parent,
+        proof,
+    })
 }
 
 /// Everything a verifier gathers about a cell for Core to evaluate.
@@ -744,6 +770,68 @@ mod tests {
         let m = b"dsm-node-1";
         assert_eq!(agreed(m, 3, &[vec![commit(b"dsm-node-2", 3, 1)]]), None);
         assert_eq!(agreed(m, 3, &[vec![commit(m, 4, 1)]]), None);
+    }
+
+    /// A value the leader already holds keeps its first copy: writing it again
+    /// beside a value the leader lacks puts only the new one there, and the
+    /// held value's leader record is the one it already had. On the storage
+    /// node's own code, on Postgres.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn a_value_the_leader_already_holds_is_not_written_there_again() {
+        let _fleet = crate::test_support::one_device::Fleet::start();
+        let set = crate::sdk::storage_set::canonical_set(crate::economic_fixtures::NETWORK)
+            .expect("the pinned set");
+        let members = crate::sdk::storage_set::as_ccb_members(&set).expect("members");
+        let seed = [0x5A; 32];
+        let cell = |key: u8| {
+            RoutedCell::new(
+                b"DSM/test/leader-copy",
+                [key; 32],
+                &seed,
+                &members,
+                &set.id(),
+            )
+            .expect("a routed cell")
+        };
+        let (a, b) = (cell(0x01), cell(0x02));
+        assert_eq!(a.route(), b.route(), "one seed, one route");
+        let seats = NodeSeats::new(&set).expect("seats");
+        let leader = a.route().leader().to_vec();
+
+        let mut quiet_one = |_: &[WriteReport; 1]| Ok(());
+        let [first] = from_leader(&seats, a.route(), [(&a, b"A".as_slice())], &mut quiet_one)
+            .await
+            .expect("write A");
+        let mut quiet_two = |_: &[WriteReport; 2]| Ok(());
+        let [again, fresh] = from_leader(
+            &seats,
+            a.route(),
+            [(&a, b"A".as_slice()), (&b, b"B".as_slice())],
+            &mut quiet_two,
+        )
+        .await
+        .expect("write A and B");
+
+        let at_leader = |cell: &RoutedCell| {
+            let seats = &seats;
+            let leader = leader.clone();
+            let (namespace, key) = (cell.namespace().to_vec(), *cell.key());
+            async move {
+                seats
+                    .read_values(&leader, &namespace, &key)
+                    .await
+                    .expect("the leader answers")
+            }
+        };
+        assert_eq!(at_leader(&a).await.len(), 1, "A has one copy at the leader");
+        assert_eq!(at_leader(&b).await.len(), 1, "B has one copy at the leader");
+        assert_eq!(
+            again.slots.first(),
+            first.slots.first(),
+            "A's leader link is the record of its first copy"
+        );
+        assert!(matches!(fresh.slots.first(), Some(ChainSlot::Link(_))));
     }
 
     #[test]
