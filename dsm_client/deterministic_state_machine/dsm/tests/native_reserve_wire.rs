@@ -153,24 +153,39 @@ impl OneRelease {
 impl ProvenanceResolver for OneRelease {
     fn root_register_candidate_set(
         &self,
-        _network_id: &[u8],
+        network_id: &[u8],
     ) -> Result<dsm::ccb::StorageSetMembers, PeerLineageFailure> {
+        if network_id != dsm::economic::register::BETA_NETWORK_ID {
+            return Err(PeerLineageFailure::Incomplete(format!(
+                "no register set for network {network_id:?} in this fixture"
+            )));
+        }
         Ok(beta_candidate_set())
     }
 
     fn validated_peer_transition(
         &self,
-        _g: &[u8; 32],
-        _d: &[u8; 32],
-        _p: u64,
+        genesis: &[u8; 32],
+        device_id: &[u8; 32],
+        position: u64,
     ) -> Result<ValidatedPeerTransition, PeerLineageFailure> {
-        Err(PeerLineageFailure::Incomplete(
-            "no peer store in this fixture".into(),
-        ))
+        Err(PeerLineageFailure::Incomplete(format!(
+            "no peer store in this fixture: {genesis:?}/{device_id:?} at {position}"
+        )))
     }
 
-    fn native_reserve_release(&self, r: &[u8; 32], g: u64) -> Option<ReserveReleaseWin> {
-        (*r == self.reserve_id && g == self.generation).then(|| ReserveReleaseWin {
+    fn native_reserve_release(
+        &self,
+        reserve_id: &[u8; 32],
+        generation: u64,
+    ) -> Result<ReserveReleaseWin, PeerLineageFailure> {
+        if *reserve_id != self.reserve_id || generation != self.generation {
+            return Err(PeerLineageFailure::Incomplete(format!(
+                "this fixture's walk reached generation {} only, not {generation} of {reserve_id:?}",
+                self.generation
+            )));
+        }
+        Ok(ReserveReleaseWin {
             envelope_bytes: self.envelope.clone(),
             parent: self.parent,
         })
@@ -178,21 +193,22 @@ impl ProvenanceResolver for OneRelease {
 
     fn immutable_evidence(
         &self,
-        _namespace: dsm::crypto::domain::TaggedHashDomain<'static>,
-        _addr: &[u8; 32],
+        namespace: dsm::crypto::domain::TaggedHashDomain<'static>,
+        addr: &[u8; 32],
     ) -> Result<Vec<u8>, PeerLineageFailure> {
-        Err(PeerLineageFailure::Incomplete(
-            "no evidence store in this fixture".into(),
-        ))
+        Err(PeerLineageFailure::Incomplete(format!(
+            "no evidence store in this fixture: {addr:?} under {:?}",
+            namespace.source_bytes()
+        )))
     }
 
     fn anchored_policy_bytes(
         &self,
-        _policy_commit: &[u8; 32],
+        policy_commit: &[u8; 32],
     ) -> Result<Vec<u8>, PeerLineageFailure> {
-        Err(PeerLineageFailure::Incomplete(
-            "this fixture roots no token anchors".into(),
-        ))
+        Err(PeerLineageFailure::Incomplete(format!(
+            "this fixture roots no token anchors: {policy_commit:?}"
+        )))
     }
 }
 
@@ -202,43 +218,55 @@ struct Nothing;
 impl ProvenanceResolver for Nothing {
     fn root_register_candidate_set(
         &self,
-        _network_id: &[u8],
+        network_id: &[u8],
     ) -> Result<dsm::ccb::StorageSetMembers, PeerLineageFailure> {
+        if network_id != dsm::economic::register::BETA_NETWORK_ID {
+            return Err(PeerLineageFailure::Incomplete(format!(
+                "no register set for network {network_id:?} in this fixture"
+            )));
+        }
         Ok(beta_candidate_set())
     }
 
     fn validated_peer_transition(
         &self,
-        _g: &[u8; 32],
-        _d: &[u8; 32],
-        _p: u64,
+        genesis: &[u8; 32],
+        device_id: &[u8; 32],
+        position: u64,
     ) -> Result<ValidatedPeerTransition, PeerLineageFailure> {
-        Err(PeerLineageFailure::Incomplete(
-            "no peer store in this fixture".into(),
-        ))
+        Err(PeerLineageFailure::Incomplete(format!(
+            "no peer store in this fixture: {genesis:?}/{device_id:?} at {position}"
+        )))
     }
 
-    fn native_reserve_release(&self, _r: &[u8; 32], _g: u64) -> Option<ReserveReleaseWin> {
-        None
+    fn native_reserve_release(
+        &self,
+        reserve_id: &[u8; 32],
+        generation: u64,
+    ) -> Result<ReserveReleaseWin, PeerLineageFailure> {
+        Err(PeerLineageFailure::Incomplete(format!(
+            "no reserve release in this fixture: generation {generation} of {reserve_id:?}"
+        )))
     }
 
     fn immutable_evidence(
         &self,
-        _namespace: dsm::crypto::domain::TaggedHashDomain<'static>,
-        _addr: &[u8; 32],
+        namespace: dsm::crypto::domain::TaggedHashDomain<'static>,
+        addr: &[u8; 32],
     ) -> Result<Vec<u8>, PeerLineageFailure> {
-        Err(PeerLineageFailure::Incomplete(
-            "no evidence store in this fixture".into(),
-        ))
+        Err(PeerLineageFailure::Incomplete(format!(
+            "no evidence store in this fixture: {addr:?} under {:?}",
+            namespace.source_bytes()
+        )))
     }
 
     fn anchored_policy_bytes(
         &self,
-        _policy_commit: &[u8; 32],
+        policy_commit: &[u8; 32],
     ) -> Result<Vec<u8>, PeerLineageFailure> {
-        Err(PeerLineageFailure::Incomplete(
-            "this fixture roots no token anchors".into(),
-        ))
+        Err(PeerLineageFailure::Incomplete(format!(
+            "this fixture roots no token anchors: {policy_commit:?}"
+        )))
     }
 }
 

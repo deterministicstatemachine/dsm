@@ -390,16 +390,15 @@ pub trait ProvenanceResolver {
     ) -> Result<ValidatedPeerTransition, PeerLineageFailure>;
 
     /// The release that installed `generation` of the native reserve
-    /// `reserve_id`, FINAL at its cell (the leader's first recognized object,
-    /// held by two other members of the committed set) on a walk from the
-    /// reserve's genesis state. `None` while the lineage has not reached that
-    /// generation, and the verifier fails closed on it: a credit is not
-    /// funded by a release nobody can show was final.
+    /// `reserve_id`, final at its cell on a walk from the reserve's genesis
+    /// state. `Incomplete` while the lineage has not reached that generation
+    /// or its evidence cannot be read: a credit is not funded by a release
+    /// nobody can show was final, and not showing it yet is not a forgery.
     fn native_reserve_release(
         &self,
         reserve_id: &[u8; 32],
         generation: u64,
-    ) -> Option<ReserveReleaseWin>;
+    ) -> Result<ReserveReleaseWin, PeerLineageFailure>;
 
     /// The network's root-register set as the local catalog resolves it.
     ///
@@ -516,9 +515,14 @@ pub enum ProvenanceError {
     },
     /// A release is never the genesis generation.
     GenerationIsGenesis,
-    /// The reserve lineage has not reached this generation with a final
-    /// release. Fails closed.
-    ReleaseNotEstablished { generation: u64 },
+    /// No final release at this generation could be established: the
+    /// reserve lineage has not reached it yet, or its evidence could not be
+    /// read. The taxonomy survives in `failure`, so an outage is retried and
+    /// never read as a forgery.
+    ReleaseNotEstablished {
+        generation: u64,
+        failure: PeerLineageFailure,
+    },
     /// The established envelope is not a valid release, is not the successor
     /// of the state the walk validated, or names different coordinates than
     /// the descriptor.
@@ -630,10 +634,13 @@ impl core::fmt::Display for ProvenanceError {
                 f,
                 "credit provenance: generation 0 is the reserve's genesis state, never a release"
             ),
-            Self::ReleaseNotEstablished { generation } => write!(
+            Self::ReleaseNotEstablished {
+                generation,
+                failure,
+            } => write!(
                 f,
-                "credit provenance: no final release at reserve generation {generation} — fail \
-                 closed; a credit is not funded by a release nobody can show was final"
+                "credit provenance: no final release established at reserve generation \
+                 {generation}: {failure}"
             ),
             Self::ReleaseInvalid(why) => {
                 write!(f, "credit provenance: reserve release invalid: {why}")
@@ -1068,8 +1075,9 @@ pub fn verify_credit_source(
             //    set, nothing counted.
             let win = resolver
                 .native_reserve_release(&d.reserve_id, d.generation)
-                .ok_or(ProvenanceError::ReleaseNotEstablished {
+                .map_err(|failure| ProvenanceError::ReleaseNotEstablished {
                     generation: d.generation,
+                    failure,
                 })?;
             // 4. The release verifies and IS the successor of the state the
             //    walk validated: `remaining' = remaining − amount`, so the

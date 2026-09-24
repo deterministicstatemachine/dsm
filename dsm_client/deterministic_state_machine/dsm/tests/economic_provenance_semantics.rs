@@ -28,42 +28,54 @@ struct NoPeers;
 impl ProvenanceResolver for NoPeers {
     fn root_register_candidate_set(
         &self,
-        _network_id: &[u8],
+        network_id: &[u8],
     ) -> Result<dsm::ccb::StorageSetMembers, dsm::economic::provenance::PeerLineageFailure> {
+        if network_id != dsm::economic::register::BETA_NETWORK_ID {
+            return Err(PeerLineageFailure::Incomplete(format!(
+                "no register set for network {network_id:?} in this fixture"
+            )));
+        }
         Ok(crate::beta_candidate_set())
     }
 
     fn validated_peer_transition(
         &self,
-        _g: &[u8; 32],
-        _d: &[u8; 32],
-        _p: u64,
+        genesis: &[u8; 32],
+        device_id: &[u8; 32],
+        position: u64,
     ) -> Result<ValidatedPeerTransition, PeerLineageFailure> {
-        Err(PeerLineageFailure::Incomplete(
-            "no peer store in this fixture".into(),
-        ))
+        Err(PeerLineageFailure::Incomplete(format!(
+            "no peer store in this fixture: {genesis:?}/{device_id:?} at {position}"
+        )))
     }
-    fn native_reserve_release(&self, _r: &[u8; 32], _g: u64) -> Option<ReserveReleaseWin> {
-        None
+    fn native_reserve_release(
+        &self,
+        reserve_id: &[u8; 32],
+        generation: u64,
+    ) -> Result<ReserveReleaseWin, PeerLineageFailure> {
+        Err(PeerLineageFailure::Incomplete(format!(
+            "no reserve release in this fixture: generation {generation} of {reserve_id:?}"
+        )))
     }
 
     fn immutable_evidence(
         &self,
-        _namespace: dsm::crypto::domain::TaggedHashDomain<'static>,
-        _addr: &[u8; 32],
+        namespace: dsm::crypto::domain::TaggedHashDomain<'static>,
+        addr: &[u8; 32],
     ) -> Result<Vec<u8>, PeerLineageFailure> {
-        Err(PeerLineageFailure::Incomplete(
-            "no evidence store in this fixture".into(),
-        ))
+        Err(PeerLineageFailure::Incomplete(format!(
+            "no evidence store in this fixture: {addr:?} under {:?}",
+            namespace.source_bytes()
+        )))
     }
 
     fn anchored_policy_bytes(
         &self,
-        _policy_commit: &[u8; 32],
+        policy_commit: &[u8; 32],
     ) -> Result<Vec<u8>, PeerLineageFailure> {
-        Err(PeerLineageFailure::Incomplete(
-            "this fixture roots no token anchors".into(),
-        ))
+        Err(PeerLineageFailure::Incomplete(format!(
+            "this fixture roots no token anchors: {policy_commit:?}"
+        )))
     }
 }
 
@@ -202,7 +214,7 @@ impl ProvenanceResolver for Anchors {
         &self,
         reserve_id: &[u8; 32],
         generation: u64,
-    ) -> Option<ReserveReleaseWin> {
+    ) -> Result<ReserveReleaseWin, PeerLineageFailure> {
         NoPeers.native_reserve_release(reserve_id, generation)
     }
     fn immutable_evidence(
@@ -398,7 +410,7 @@ fn policy_bytes_that_are_not_the_commit_establish_nothing() {
             &self,
             reserve_id: &[u8; 32],
             generation: u64,
-        ) -> Option<ReserveReleaseWin> {
+        ) -> Result<ReserveReleaseWin, PeerLineageFailure> {
             NoPeers.native_reserve_release(reserve_id, generation)
         }
         fn immutable_evidence(

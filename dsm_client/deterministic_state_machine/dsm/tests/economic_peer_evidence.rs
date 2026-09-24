@@ -364,38 +364,59 @@ struct OnePeer {
 impl ProvenanceResolver for OnePeer {
     fn root_register_candidate_set(
         &self,
-        _network_id: &[u8],
+        network_id: &[u8],
     ) -> Result<dsm::ccb::StorageSetMembers, dsm::economic::provenance::PeerLineageFailure> {
+        if network_id != dsm::economic::register::BETA_NETWORK_ID {
+            return Err(PeerLineageFailure::Incomplete(format!(
+                "no register set for network {network_id:?} in this fixture"
+            )));
+        }
         Ok(crate::beta_candidate_set())
     }
 
     fn validated_peer_transition(
         &self,
-        _g: &[u8; 32],
-        _d: &[u8; 32],
-        _p: u64,
+        genesis: &[u8; 32],
+        device_id: &[u8; 32],
+        position: u64,
     ) -> Result<ValidatedPeerTransition, PeerLineageFailure> {
+        if (self.vpt.peer_genesis(), self.vpt.peer_devid()) != (genesis, device_id)
+            || self.vpt.validated_root().economic_position() != position
+        {
+            return Err(PeerLineageFailure::Incomplete(format!(
+                "this fixture holds one peer transition, not {genesis:?}/{device_id:?} at {position}"
+            )));
+        }
         Ok(self.vpt.clone())
     }
-    fn native_reserve_release(&self, _r: &[u8; 32], _g: u64) -> Option<ReserveReleaseWin> {
-        None
+    fn native_reserve_release(
+        &self,
+        reserve_id: &[u8; 32],
+        generation: u64,
+    ) -> Result<ReserveReleaseWin, PeerLineageFailure> {
+        Err(PeerLineageFailure::Incomplete(format!(
+            "no reserve release in this fixture: generation {generation} of {reserve_id:?}"
+        )))
     }
 
     fn immutable_evidence(
         &self,
-        _namespace: dsm::crypto::domain::TaggedHashDomain<'static>,
-        _addr: &[u8; 32],
+        namespace: dsm::crypto::domain::TaggedHashDomain<'static>,
+        addr: &[u8; 32],
     ) -> Result<Vec<u8>, PeerLineageFailure> {
-        Err(PeerLineageFailure::Incomplete("no evidence store".into()))
+        Err(PeerLineageFailure::Incomplete(format!(
+            "no evidence store: {addr:?} under {:?}",
+            namespace.source_bytes()
+        )))
     }
 
     fn anchored_policy_bytes(
         &self,
-        _policy_commit: &[u8; 32],
+        policy_commit: &[u8; 32],
     ) -> Result<Vec<u8>, PeerLineageFailure> {
-        Err(PeerLineageFailure::Incomplete(
-            "this fixture roots no token anchors".into(),
-        ))
+        Err(PeerLineageFailure::Incomplete(format!(
+            "this fixture roots no token anchors: {policy_commit:?}"
+        )))
     }
 }
 
@@ -584,39 +605,67 @@ fn the_addr_checked_acceptance_bytes_must_hash_to_the_descriptor_address() {
     impl ProvenanceResolver for WrongBytes {
         fn root_register_candidate_set(
             &self,
-            _network_id: &[u8],
+            network_id: &[u8],
         ) -> Result<dsm::ccb::StorageSetMembers, dsm::economic::provenance::PeerLineageFailure>
         {
+            if network_id != dsm::economic::register::BETA_NETWORK_ID {
+                return Err(PeerLineageFailure::Incomplete(format!(
+                    "no register set for network {network_id:?} in this fixture"
+                )));
+            }
             Ok(crate::beta_candidate_set())
         }
 
         fn validated_peer_transition(
             &self,
-            _g: &[u8; 32],
-            _d: &[u8; 32],
-            _p: u64,
+            genesis: &[u8; 32],
+            device_id: &[u8; 32],
+            position: u64,
         ) -> Result<ValidatedPeerTransition, PeerLineageFailure> {
+            if (self.vpt.peer_genesis(), self.vpt.peer_devid()) != (genesis, device_id)
+                || self.vpt.validated_root().economic_position() != position
+            {
+                return Err(PeerLineageFailure::Incomplete(format!(
+                    "this fixture holds one peer transition, not {genesis:?}/{device_id:?} at {position}"
+                )));
+            }
             Ok(self.vpt.clone())
         }
-        fn native_reserve_release(&self, _r: &[u8; 32], _g: u64) -> Option<ReserveReleaseWin> {
-            None
+        fn native_reserve_release(
+            &self,
+            reserve_id: &[u8; 32],
+            generation: u64,
+        ) -> Result<ReserveReleaseWin, PeerLineageFailure> {
+            Err(PeerLineageFailure::Incomplete(format!(
+                "no reserve release in this fixture: generation {generation} of {reserve_id:?}"
+            )))
         }
 
         fn immutable_evidence(
             &self,
-            _n: dsm::crypto::domain::TaggedHashDomain<'static>,
-            _a: &[u8; 32],
+            namespace: dsm::crypto::domain::TaggedHashDomain<'static>,
+            addr: &[u8; 32],
         ) -> Result<Vec<u8>, PeerLineageFailure> {
-            Ok(vec![0xEE; 64])
+            let served = vec![0xEE; 64];
+            assert_eq!(
+                namespace.source_bytes(),
+                dsm::common::domain_tags::TAG_DSM_PEER_TRANSFER_ACCEPTANCE.source_bytes()
+            );
+            assert_ne!(
+                dsm::economic::peer_acceptance::acceptance_evidence_addr(&served),
+                *addr,
+                "the fixture serves bytes that are not the object asked for"
+            );
+            Ok(served)
         }
 
         fn anchored_policy_bytes(
             &self,
-            _policy_commit: &[u8; 32],
+            policy_commit: &[u8; 32],
         ) -> Result<Vec<u8>, PeerLineageFailure> {
-            Err(PeerLineageFailure::Incomplete(
-                "this fixture roots no token anchors".into(),
-            ))
+            Err(PeerLineageFailure::Incomplete(format!(
+                "this fixture roots no token anchors: {policy_commit:?}"
+            )))
         }
     }
     let resolver = WrongBytes {

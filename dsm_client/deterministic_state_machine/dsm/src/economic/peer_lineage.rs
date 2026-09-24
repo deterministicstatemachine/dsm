@@ -39,7 +39,7 @@ use crate::economic::claim::AdmissionSubstrate;
 use crate::economic::decode::decode_admission_manifest;
 use crate::economic::lineage::{
     AdmittedEconomicPosition, activate, advance_validated, AcceptedSubstrate,
-    EconomicActivationSnapshot, ValidatedEconomicRoot,
+    EconomicActivationSnapshot, EconomicValidationError, ValidatedEconomicRoot,
 };
 use crate::economic::provenance::{
     PeerLineageFailure, ProvenanceResolver, ReserveReleaseWin, ValidatedPeerTransition,
@@ -69,14 +69,14 @@ pub trait PeerEvidenceFetcher {
     /// mirror of the leader. The walker evaluates them.
     fn register_cell(&self, cell: &RootCell) -> Result<CellEvidence, PeerLineageFailure>;
     /// The release that installed `generation` of the native reserve
-    /// `reserve_id`, established FINAL by a walk of the reserve lineage from
-    /// its genesis state, with the state it succeeded. `None` while the
-    /// lineage has not reached that generation.
+    /// `reserve_id`, established final by a walk of the reserve lineage from
+    /// its genesis state, with the state it succeeded. `Incomplete` while
+    /// the lineage has not reached that generation.
     fn native_reserve_release(
         &self,
         reserve_id: &[u8; 32],
         generation: u64,
-    ) -> Result<Option<ReserveReleaseWin>, PeerLineageFailure>;
+    ) -> Result<ReserveReleaseWin, PeerLineageFailure>;
     /// The network's root-register set as the local catalog resolves it —
     /// CANDIDATE entries the caller must re-derive and check, never authority.
     fn root_register_candidate_set(
@@ -151,11 +151,8 @@ impl ProvenanceResolver for WalkingResolver<'_> {
         &self,
         reserve_id: &[u8; 32],
         generation: u64,
-    ) -> Option<ReserveReleaseWin> {
-        self.fetcher
-            .native_reserve_release(reserve_id, generation)
-            .ok()
-            .flatten()
+    ) -> Result<ReserveReleaseWin, PeerLineageFailure> {
+        self.fetcher.native_reserve_release(reserve_id, generation)
     }
 
     fn root_register_candidate_set(
@@ -206,6 +203,83 @@ pub fn validate_peer_lineage(
         start,
         &mut state,
     )
+}
+
+/// A failure met inside a step, kept in its own class and located at the
+/// position where it was met.
+fn at_position(position: u64, failure: PeerLineageFailure) -> PeerLineageFailure {
+    match failure {
+        PeerLineageFailure::Incomplete(m) => {
+            PeerLineageFailure::Incomplete(format!("at position {position}: {m}"))
+        }
+        PeerLineageFailure::Invalid(m) => {
+            PeerLineageFailure::Invalid(format!("at position {position}: {m}"))
+        }
+        PeerLineageFailure::Quarantined(m) => {
+            PeerLineageFailure::Quarantined(format!("at position {position}: {m}"))
+        }
+        PeerLineageFailure::Unresolved(m) => {
+            PeerLineageFailure::Unresolved(format!("at position {position}: {m}"))
+        }
+    }
+}
+
+/// The class of a step's validation failure. Evidence that verified as
+/// wrong is `Invalid`; evidence that could not be established — a nested
+/// peer's lineage, a reserve release, a token policy, acceptance evidence —
+/// keeps the class it was established in, so an outage anywhere below a step
+/// is retried and never read as a forgery (storage spec §4: a fact that is
+/// not established is never read as its negation).
+fn step_failure(position: u64, e: EconomicValidationError) -> PeerLineageFailure {
+    use crate::economic::provenance::ProvenanceError as P;
+    let invalid_at = |e: &dyn core::fmt::Display| invalid(format!("validation at {position}: {e}"));
+    match e {
+        EconomicValidationError::Provenance(p) => match p {
+            P::GenesisReleasePolicy(failure)
+            | P::PeerTransitionNotValidated { failure, .. }
+            | P::AcceptanceEvidence(failure)
+            | P::OwnerLineage(failure)
+            | P::ReleaseNotEstablished { failure, .. } => at_position(position, failure),
+            P::GenesisReleaseInvalid(..)
+            | P::MarketLegPolicy(..)
+            | P::PeerDebitIsNotAnOnlineTransfer
+            | P::PeerDebitNotAddressedToConsumer
+            | P::PeerDebitIndexIsNotTheOperationDebit
+            | P::PeerWitnessDoesNotMatchValidatedRoot
+            | P::SofiLineageNotEligible
+            | P::PeerMutationIsNotADebit { .. }
+            | P::AssetMismatch { .. }
+            | P::AmountMismatch { .. }
+            | P::IndexOutOfRange { .. }
+            | P::NotACredit { .. }
+            | P::DuplicateSourceId
+            | P::SourceNotRecordedAsConsumed { .. }
+            | P::ConsumedByAnotherOperation
+            | P::NotTheCanonicalReserve { .. }
+            | P::GenerationIsGenesis
+            | P::ReleaseInvalid(..)
+            | P::ReleaseRecipientMismatch
+            | P::ReleaseBindingMismatch
+            | P::ReleaseForeignSet
+            | P::ReleaseEvidenceAddrMismatch
+            | P::RegisterNotResolvable(..) => invalid_at(&p),
+        },
+        EconomicValidationError::PreRootIsNotThePredecessor { .. }
+        | EconomicValidationError::PositionIsNotSuccessor { .. }
+        | EconomicValidationError::RegisteredClaimNamesAnotherTrader
+        | EconomicValidationError::SetupPositionIsNotThePredecessor { .. }
+        | EconomicValidationError::SetupRootIsNotTheDerivedRoot { .. }
+        | EconomicValidationError::RegisteredRootDiffersFromWitness { .. }
+        | EconomicValidationError::Transition(..)
+        | EconomicValidationError::OperationDigestMismatch { .. }
+        | EconomicValidationError::EconomicOperationIdMismatch { .. }
+        | EconomicValidationError::SubstrateKindMismatch
+        | EconomicValidationError::SubstrateEvidenceMismatch { .. }
+        | EconomicValidationError::OfflineBoundaryWriteSetNotYetSpecified
+        | EconomicValidationError::WriteSet(..)
+        | EconomicValidationError::ManifestAddrMismatch { .. }
+        | EconomicValidationError::Manifest(..) => invalid_at(&e),
+    }
 }
 
 fn incomplete(m: impl Into<String>) -> PeerLineageFailure {
@@ -485,7 +559,7 @@ fn walk_positions(
             &facts.network_id,
             &facts.proven_ak,
         )
-        .map_err(|e| invalid(format!("validation at {position}: {e}")))?;
+        .map_err(|e| step_failure(position, e))?;
         validated = advanced.root;
         last = Some((
             witness,
@@ -555,7 +629,7 @@ mod tests {
             &self,
             reserve_id: &[u8; 32],
             generation: u64,
-        ) -> Result<Option<ReserveReleaseWin>, PeerLineageFailure> {
+        ) -> Result<ReserveReleaseWin, PeerLineageFailure> {
             Err(PeerLineageFailure::Incomplete(format!(
                 "no reserve release in this test: {} at {generation}",
                 encode_crockford(reserve_id)
@@ -731,6 +805,60 @@ mod tests {
                 "written through position {last}: {outcome:?}"
             );
         }
+    }
+
+    /// A failure met below a step keeps its class: evidence that could not
+    /// be established is retried, and only evidence that verified as wrong is
+    /// `Invalid` (storage spec §4).
+    #[test]
+    fn a_step_failure_keeps_the_class_it_was_established_in() {
+        use crate::economic::provenance::ProvenanceError as P;
+        let unavailable = |m: &str| PeerLineageFailure::Incomplete(m.to_string());
+        let provenance = |p: P| EconomicValidationError::Provenance(p);
+        assert!(matches!(
+            step_failure(
+                3,
+                provenance(P::ReleaseNotEstablished {
+                    generation: 1,
+                    failure: unavailable("the reserve lineage has not reached generation 1"),
+                })
+            ),
+            PeerLineageFailure::Incomplete(_)
+        ));
+        assert!(matches!(
+            step_failure(
+                3,
+                provenance(P::PeerTransitionNotValidated {
+                    peer_economic_position: 2,
+                    failure: PeerLineageFailure::Unresolved("mid-route".into()),
+                })
+            ),
+            PeerLineageFailure::Unresolved(_)
+        ));
+        assert!(matches!(
+            step_failure(
+                3,
+                provenance(P::OwnerLineage(unavailable("no member answered")))
+            ),
+            PeerLineageFailure::Incomplete(_)
+        ));
+        assert!(matches!(
+            step_failure(
+                3,
+                provenance(P::AmountMismatch {
+                    source: 1,
+                    credit: 2
+                })
+            ),
+            PeerLineageFailure::Invalid(_)
+        ));
+        assert!(matches!(
+            step_failure(
+                3,
+                EconomicValidationError::RegisteredClaimNamesAnotherTrader
+            ),
+            PeerLineageFailure::Invalid(_)
+        ));
     }
 
     /// NO PATH from a conditional cell to a validated root. The walk is the
