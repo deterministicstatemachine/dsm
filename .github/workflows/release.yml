@@ -73,6 +73,25 @@ jobs:
     name: Test gate
     runs-on: ubuntu-latest
     needs: [validate-tag]
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: dsm_node_test
+        ports:
+          - 5432:5432
+        # Without a health check the job races the container's first accept().
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    # The storage node's store is Postgres, and the SDK suites run their nodes
+    # on it: every node-backed test needs this server.
+    env:
+      DSM_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/dsm_node_test
     steps:
       - uses: actions/checkout@v7
 
@@ -88,7 +107,7 @@ jobs:
       - name: Build (release)
         run: cargo build --locked --workspace --release
 
-      - name: Test (workspace, excluding storage node default features)
+      - name: Test (workspace, then the storage node on Postgres)
         run: |
           # --test-threads=1 for the same reason as ci.yml: process-global
           # singletons make parallel test threads a nondeterministic flake
@@ -96,7 +115,7 @@ jobs:
           # other. This workflow previously omitted the flag, running a
           # parallelism the merge gate never exercised.
           cargo test --locked --workspace --exclude dsm_storage_node --release -- --nocapture --test-threads=1
-          cargo test --locked -p dsm_storage_node --release --no-default-features --features local-dev,strict -- --nocapture
+          cargo test --locked -p dsm_storage_node --release -- --nocapture --test-threads=1
 
       - name: Security audit (every tracked Cargo.lock)
         run: |

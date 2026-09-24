@@ -434,7 +434,9 @@ pub struct Policies {
 }
 
 impl Policies {
-    fn resolve(evidence: &Evidence, state: &VaultStateLeaf) -> Result<Self, Refusal> {
+    /// The three policies `state` commits, from the objects `evidence` holds,
+    /// each re-addressed before it is decoded.
+    pub fn resolve(evidence: &Evidence, state: &VaultStateLeaf) -> Result<Self, Refusal> {
         let market = crate::ccb::decode::decode_market_policy(
             evidence.policy_bytes(&state.market_policy, crate::ccb::class::MARKET_POLICY)?,
         )
@@ -572,6 +574,30 @@ pub fn route_validation(
     match validate(precommit, preimage, evidence) {
         Ok(()) => Ok(Validation::Valid),
         Err(r) => r.validation(),
+    }
+}
+
+/// `RouteValidation` over the operation alone — nothing fetched and nothing
+/// of the verifier's (MR-DSM-0041, MR-DSM-0042): `Some(reason)` when the
+/// route is Invalid whatever storage holds, so nothing is read to know it;
+/// `None` when nothing in hand refutes it. It is [`validate`] over empty
+/// evidence: Invalid dominates whatever is missing, so an item that needs a
+/// fetch never hides a refusal and never makes one.
+pub fn route_invalid_in_hand(
+    precommit: &TraderPrecommitBody,
+    preimage: &SettlementPreimage,
+) -> Option<Invalid> {
+    let nothing = Evidence::acquired(
+        BTreeMap::new(),
+        BTreeMap::new(),
+        BTreeMap::new(),
+        BTreeMap::new(),
+        BTreeMap::new(),
+        BTreeMap::new(),
+    );
+    match validate(precommit, preimage, &nothing) {
+        Err(Refusal::Invalid(why)) => Some(why),
+        Ok(()) | Err(Refusal::Incomplete(..)) => None,
     }
 }
 
@@ -751,26 +777,38 @@ pub fn trader_credits(
         .collect())
 }
 
-/// The trader's leaves after the operation, for the keys `T°` touches — the
-/// post STATE behind each post value the core states, so a verifier that
-/// installs `P.R_realize` (stage 10 of §31, R13) also holds the leaves that
-/// form it. Each state is recomputed from the pre state the evidence holds
-/// and the movement the settlement commits, then bound to the value the core
-/// states: a mismatch is the refusal `validate` gives for it. `None` is a leaf
-/// absent after the operation (a zero balance). Keys the core does not touch
-/// are unchanged and not listed.
-pub fn trader_post_states(
+/// One trader balance a settlement moves: the amount under the pre-root and
+/// the amount under the realize root, for one token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TraderBalanceChange {
+    pub policy_commit: D32,
+    /// What the balance leaf held before the operation; zero for an absent
+    /// leaf.
+    pub before: u64,
+    /// What it holds after; zero is a leaf absent after the operation.
+    pub after: u64,
+}
+
+/// One entry of `T°` after the operation: its key, its post state, and — for
+/// a balance leaf — the change the settlement made to it.
+type TraderPost = (D32, Option<EconomicLeafState>, Option<TraderBalanceChange>);
+
+/// The one derivation behind [`trader_post_states`] and
+/// [`trader_balance_changes`]: each post state recomputed from the pre state
+/// the evidence holds and the movement the settlement commits, then bound to
+/// the value the core states.
+fn trader_posts(
     precommit: &TraderPrecommitBody,
     preimage: &SettlementPreimage,
     evidence: &Evidence,
-) -> Result<Vec<(D32, Option<EconomicLeafState>)>, Refusal> {
+) -> Result<Vec<TraderPost>, Refusal> {
     let e = *precommit.external_commitment();
     let movements = trader_movements(preimage, evidence)?;
     let core = preimage.trader_core();
     let mut out = Vec::with_capacity(core.entries().len());
     for entry in core.entries() {
         let key = entry.key();
-        let post = match entry {
+        let (post, change) = match entry {
             // A relationship advance states no post value of its own: the
             // next leaf is derived from the base and E, and the fold against
             // `P.R_realize` is what binds it (`trader_fold_entries`).
@@ -781,13 +819,14 @@ pub fn trader_post_states(
                         vault_id: *vault_id,
                         leaf: derive::relationship_leaf_next(base, &e),
                     })),
+                    None,
                 ));
                 continue;
             }
             CoreEntry::Mutation { .. } | CoreEntry::Read { .. } => {
                 let (token, credit, debit) = movements
                     .iter()
-                    .find(|(t, _, _)| {
+                    .find(|(t, ..)| {
                         balance_key(precommit.genesis(), precommit.device_id(), t) == key
                     })
                     .ok_or(Refusal::Invalid(Invalid::WriteSetNotExact { core: "T°" }))?;
@@ -804,10 +843,17 @@ pub fn trader_post_states(
                     .ok_or(Refusal::Invalid(Invalid::CheckedArithmetic {
                         what: "trader balance",
                     }))?;
-                (after != 0).then_some(EconomicLeafState::Balance(EconomicBalanceState {
-                    policy_commit: *token,
-                    amount: after,
-                }))
+                (
+                    (after != 0).then_some(EconomicLeafState::Balance(EconomicBalanceState {
+                        policy_commit: *token,
+                        amount: after,
+                    })),
+                    TraderBalanceChange {
+                        policy_commit: *token,
+                        before,
+                        after,
+                    },
+                )
             }
         };
         let value = post
@@ -819,9 +865,43 @@ pub fn trader_post_states(
             })
             .transpose()?;
         require(value == stated(entry).1, Invalid::LeafPostValueMismatch)?;
-        out.push((key, post));
+        out.push((key, post, Some(change)));
     }
     Ok(out)
+}
+
+/// The trader's leaves after the operation, for the keys `T°` touches — the
+/// post STATE behind each post value the core states, so a verifier that
+/// installs `P.R_realize` (stage 10 of §31, R13) also holds the leaves that
+/// form it. Each state is recomputed from the pre state the evidence holds
+/// and the movement the settlement commits, then bound to the value the core
+/// states: a mismatch is the refusal `validate` gives for it. `None` is a leaf
+/// absent after the operation (a zero balance). Keys the core does not touch
+/// are unchanged and not listed.
+pub fn trader_post_states(
+    precommit: &TraderPrecommitBody,
+    preimage: &SettlementPreimage,
+    evidence: &Evidence,
+) -> Result<Vec<(D32, Option<EconomicLeafState>)>, Refusal> {
+    Ok(trader_posts(precommit, preimage, evidence)?
+        .into_iter()
+        .map(|(key, post, ..)| (key, post))
+        .collect())
+}
+
+/// The trader balances the operation moves, each bound exactly as
+/// [`trader_post_states`] binds its leaf: the balance before, from the pre
+/// state the evidence holds, and after, recomputed from the settlement's
+/// movement and equal to the value `T°` states under `P.R_realize`.
+pub fn trader_balance_changes(
+    precommit: &TraderPrecommitBody,
+    preimage: &SettlementPreimage,
+    evidence: &Evidence,
+) -> Result<Vec<TraderBalanceChange>, Refusal> {
+    Ok(trader_posts(precommit, preimage, evidence)?
+        .into_iter()
+        .filter_map(|(.., change)| change)
+        .collect())
 }
 
 /// The same check, with the reason. Every refusal names what failed, so a test
@@ -1278,8 +1358,40 @@ fn fold_core(entries: &[FoldEntry], pre_root: &D32) -> Result<D32, Refusal> {
     })
 }
 
-/// One vault's state before and after a swap hop, priced by its own policies.
-fn swap_vault_post(
+/// `Fold(T°, E)`: the root a trader core's entries fold to under `E`, each
+/// relationship advanced by `relationship_leaf_next` against the leaf the
+/// trader holds — what `P.R_realize` must be. The producer computes it with
+/// this function and the verifier checks it with the same one.
+pub fn realize_root(
+    core: &TraderCore,
+    external_commitment: &D32,
+    evidence: &Evidence,
+) -> Result<D32, Refusal> {
+    let entries = trader_fold_entries(core, external_commitment, evidence)?;
+    fold_core(&entries, core.pre_root())
+}
+
+/// A vault's state after its owner's full close: the next generation, both
+/// reserves released, retired.
+pub fn close_vault_post(pre_state: &VaultStateLeaf) -> Result<VaultStateLeaf, Refusal> {
+    let generation = pre_state.generation.checked_add(1).ok_or(Refusal::Invalid(
+        Invalid::CheckedArithmetic {
+            what: "vault generation",
+        },
+    ))?;
+    Ok(VaultStateLeaf {
+        generation,
+        reserve_a: 0,
+        reserve_b: 0,
+        status: VAULT_STATUS_RETIRED,
+        ..pre_state.clone()
+    })
+}
+
+/// One vault's state before and after a swap hop, priced by its own policies:
+/// the one computation the producer builds `V°` with and the verifier checks
+/// it by.
+pub fn swap_vault_post(
     state: &VaultStateLeaf,
     policies: &Policies,
     hop: &SwapHop,
@@ -1503,7 +1615,7 @@ fn validate_swap(
             }
         }
         match dlv_fold_entries(core, &e, evidence) {
-            Ok(entries) => verdict.note(fold_core(&entries, core.pre_root()).map(|_| ())),
+            Ok(entries) => verdict.note(fold_core(&entries, core.pre_root()).and(Ok(()))),
             Err(refusal) => verdict.note(Err(refusal)),
         }
     }
@@ -1552,17 +1664,14 @@ fn validate_swap(
         hops.len(),
     ));
 
-    match trader_fold_entries(trader_core, &e, evidence) {
-        Ok(entries) => verdict.note(fold_core(&entries, trader_core.pre_root()).and_then(
-            |post_root| {
-                require(
-                    post_root == *precommit.realize_root(),
-                    Invalid::RealizeRootIsNotTheFold,
-                )
-            },
-        )),
-        Err(refusal) => verdict.note(Err(refusal)),
-    }
+    verdict.note(
+        realize_root(trader_core, &e, evidence).and_then(|post_root| {
+            require(
+                post_root == *precommit.realize_root(),
+                Invalid::RealizeRootIsNotTheFold,
+            )
+        }),
+    );
 }
 
 /// The trader core holds exactly the named balance movements and one
@@ -1657,25 +1766,14 @@ fn validate_close(
             preimage.dlv_cores().len() == 1 && *core.vault_id() == *vault_id,
             Invalid::LegsDoNotMatchPrecommit,
         ));
-        match pre_state.generation.checked_add(1) {
-            None => verdict.note(Err(Refusal::Invalid(Invalid::CheckedArithmetic {
-                what: "vault generation",
-            }))),
-            Some(generation) => {
-                let retired = VaultStateLeaf {
-                    generation,
-                    reserve_a: 0,
-                    reserve_b: 0,
-                    status: VAULT_STATUS_RETIRED,
-                    ..pre_state.clone()
-                };
-                verdict.note(check_vault_write_set(core, &retired, pre_state));
-            }
+        match close_vault_post(pre_state) {
+            Ok(retired) => verdict.note(check_vault_write_set(core, &retired, pre_state)),
+            Err(refusal) => verdict.note(Err(refusal)),
         }
     }
     if let Some(core) = core {
         match dlv_fold_entries(core, &e, evidence) {
-            Ok(entries) => verdict.note(fold_core(&entries, core.pre_root()).map(|_| ())),
+            Ok(entries) => verdict.note(fold_core(&entries, core.pre_root()).and(Ok(()))),
             Err(refusal) => verdict.note(Err(refusal)),
         }
     }
@@ -1717,17 +1815,14 @@ fn validate_close(
         }
     }
 
-    match trader_fold_entries(trader_core, &e, evidence) {
-        Ok(entries) => verdict.note(fold_core(&entries, trader_core.pre_root()).and_then(
-            |post_root| {
-                require(
-                    post_root == *precommit.realize_root(),
-                    Invalid::RealizeRootIsNotTheFold,
-                )
-            },
-        )),
-        Err(refusal) => verdict.note(Err(refusal)),
-    }
+    verdict.note(
+        realize_root(trader_core, &e, evidence).and_then(|post_root| {
+            require(
+                post_root == *precommit.realize_root(),
+                Invalid::RealizeRootIsNotTheFold,
+            )
+        }),
+    );
 }
 
 #[cfg(test)]
@@ -2121,8 +2216,8 @@ pub(crate) mod fixtures {
         let pairs: Vec<(D32, D32)> = route_tokens.windows(2).map(|w| (w[0].0, w[1].0)).collect();
         let mut parts: Vec<VaultParts> = Vec::new();
         let mut amount = AMOUNT_IN;
-        for j in 0..hops {
-            let part = swap_vault_parts_over(j, pairs[j], amount, derive::setup_ref(&setup(j)));
+        for (j, pair) in pairs.iter().enumerate() {
+            let part = swap_vault_parts_over(j, *pair, amount, derive::setup_ref(&setup(j)));
             amount = part.hop.amount_out;
             parts.push(part);
         }
@@ -2582,6 +2677,23 @@ mod tests {
             Err(Refusal::Invalid(Invalid::CoreDoesNotFold {
                 reason: "the entries do not fold to the core's own pre-root",
             }))
+        );
+    }
+
+    /// MR-DSM-0041: a route refuted by its own bytes is Invalid with nothing
+    /// fetched; a valid route has nothing refuted in hand, though its leaves
+    /// and policies are not.
+    #[test]
+    fn what_the_operation_decides_alone_is_decided_before_any_read() {
+        let f = swap_fixture_n(2);
+        assert_eq!(route_invalid_in_hand(&f.precommit, &f.preimage), None);
+        let bent = with_swap(&f, |hops, _, _| {
+            hops[1].amount_in -= 1;
+        });
+        let precommit = rebind(&f, &bent);
+        assert_eq!(
+            route_invalid_in_hand(&precommit, &bent),
+            Some(Invalid::RouteDoesNotChain { hop: 1 })
         );
     }
 
@@ -4190,7 +4302,7 @@ mod tests {
         let (lower, locked, upper) = (9u8..=u8::MAX)
             .find_map(|i| {
                 let locked = committed(token_policy_bytes_with(i, 0));
-                let lower = tokens().iter().filter(|t| t.0 < locked.0).last()?.clone();
+                let lower = tokens().iter().rev().find(|t| t.0 < locked.0)?.clone();
                 let upper = tokens().iter().find(|t| t.0 > locked.0)?.clone();
                 Some((lower, locked, upper))
             })

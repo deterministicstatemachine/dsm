@@ -3,14 +3,11 @@
 //! Storage node DB layer (clean, DLV-only)
 //! Minimal schema + helpers used by the DLV-backed object store.
 
-use crate::api::infra::hardening::{BBYTES, BEV};
-use crate::timing::TimingStrategy;
 use anyhow::{anyhow, Result};
 use deadpool_postgres::Runtime; // Added Runtime import
 use deadpool_postgres::{ManagerConfig, Pool, RecyclingMethod};
 // use tokio_postgres::Row; // removed: no longer mapping rows to SlotRecord
 use tokio_postgres_rustls::MakeRustlsConnect;
-
 
 /// Create a TLS connector for PostgreSQL connections using webpki root certificates.
 fn create_tls_connector() -> MakeRustlsConnect {
@@ -130,7 +127,7 @@ mod durable_posture_tests {
     /// already `on` would prove nothing.
     #[tokio::test]
     async fn a_claim_transaction_sets_its_own_durability_rather_than_inheriting_it() {
-        let pool = crate::db::cell_properties::test_pool();
+        let pool = crate::db::test_store::test_pool();
         let mut client = pool.get().await.expect("client");
         client
             .batch_execute("SET synchronous_commit = off")
@@ -276,16 +273,16 @@ async fn init_db_serialized(pool: &Pool, client: &deadpool_postgres::Object) -> 
         .await?;
     // Clockless b0x inbox spool (per-device)
     client
-            .batch_execute(
-                r#"CREATE TABLE IF NOT EXISTS inbox_spool (
+        .batch_execute(
+            r#"CREATE TABLE IF NOT EXISTS inbox_spool (
                         id                BIGSERIAL PRIMARY KEY,
                         device_id         TEXT NOT NULL,
                         message_id        TEXT NOT NULL UNIQUE,
                         envelope          BYTEA NOT NULL
                     );
                 "#,
-            )
-            .await?;
+        )
+        .await?;
 
     // Schema migration for older inbox_spool rows missing newer columns (clockless ordering).
     client
@@ -324,9 +321,6 @@ async fn init_db_serialized(pool: &Pool, client: &deadpool_postgres::Object) -> 
         )
         .await?;
 
-
-
-
     // Phase B.4 (issue #275): bounded validator for the published
     // Device Tree state. One row per genesis. `version_number` is the
     // monotone counter the PUT /devtree/root validator enforces;
@@ -345,18 +339,6 @@ async fn init_db_serialized(pool: &Pool, client: &deadpool_postgres::Object) -> 
                 CREATE INDEX IF NOT EXISTS idx_device_tree_states_version
                     ON device_tree_states(genesis_b32, version_number);
 
-                -- Single-assignment store for recovery-authority anchors
-                -- (spec §0.5 bind-once). Keyed by genesis: the FIRST valid
-                -- anchor wins and is immutable; a different anchor for the same
-                -- genesis is rejected (409). Storage enforces single-assignment
-                -- ONLY — clients verify the anchor cryptographically.
-                CREATE TABLE IF NOT EXISTS recovery_authority_anchors (
-                    genesis_b32        TEXT PRIMARY KEY,
-                    anchor_hash        BYTEA NOT NULL,
-                    payload            BYTEA NOT NULL,
-                    first_written_tick BIGINT NOT NULL
-                );
-
                 -- IMMUTABLE OBJECT STORE (Area 4, Rev 15 §15.3). Keyed by the
                 -- content address addr(N, P); write-once forever — no UPDATE
                 -- and no DELETE statement exists against this table anywhere.
@@ -367,21 +349,6 @@ async fn init_db_serialized(pool: &Pool, client: &deadpool_postgres::Object) -> 
                     namespace          BYTEA NOT NULL,
                     payload            BYTEA NOT NULL,
                     first_written_tick BIGINT NOT NULL
-                );
-
-                -- Append-only Per-Device SMT head chain (spec §0.5 gap 13, R4
-                -- layer 1). One row per (device, head_number); a head is accepted
-                -- only if it links the current tip. No overwrite, no fork. Full
-                -- history retained for snapshot reads. Storage enforces the chain
-                -- shape ONLY; clients verify head signatures + inclusion.
-                CREATE TABLE IF NOT EXISTS pdsmt_head_chain (
-                    device_b32        TEXT NOT NULL,
-                    head_number       BIGINT NOT NULL,
-                    head_hash         BYTEA NOT NULL,
-                    parent_head_hash  BYTEA NOT NULL,
-                    payload           BYTEA NOT NULL,
-                    inserted_at_tick  BIGINT NOT NULL,
-                    PRIMARY KEY (device_b32, head_number)
                 );
             "#,
         )
@@ -465,18 +432,6 @@ async fn init_db_serialized(pool: &Pool, client: &deadpool_postgres::Object) -> 
     }
 
     Ok(())
-}
-
-/// Check whether a slot exists for the given DLV id.
-pub async fn slot_exists(pool: &Pool, dlv_id: &[u8]) -> Result<bool> {
-    let client = pool.get().await?;
-    let row = client
-        .query_opt(
-            "SELECT 1 FROM dlv_slots WHERE dlv_id = $1 LIMIT 1",
-            &[&dlv_id],
-        )
-        .await?;
-    Ok(row.is_some())
 }
 
 pub async fn create_slot(
@@ -676,81 +631,9 @@ async fn begin_durable_write(
     Ok(tx)
 }
 
-/// Outcome of [`insert_recovery_authority_anchor_if_absent`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RecoveryAnchorUpsertOutcome {
-    /// No prior anchor existed for this genesis; the row was newly inserted.
-    Inserted,
-    /// An identical anchor (same `anchor_hash`) already exists — idempotent replay.
-    AlreadyExistsIdentical,
-    /// A DIFFERENT anchor already exists for this genesis — rejected (bind-once).
-    Conflict,
-}
-
-/// Single-assignment insert of a recovery-authority anchor, keyed by genesis
-/// (spec §0.5 bind-once). First write wins; an identical replay (same
-/// `anchor_hash`) is idempotent; any DIFFERENT anchor for the same genesis is
-/// rejected. Runs as a `SERIALIZABLE` transaction with `FOR UPDATE` so concurrent
-/// writers serialise. Storage enforces single-assignment ONLY — it does NOT attest
-/// recovery validity; clients verify the anchor cryptographically.
-pub async fn insert_recovery_authority_anchor_if_absent(
-    pool: &Pool,
-    genesis_b32: &str,
-    anchor_hash: &[u8],
-    payload: &[u8],
-    first_written_tick: u64,
-) -> Result<RecoveryAnchorUpsertOutcome> {
-    use tokio_postgres::IsolationLevel;
-
-    let tick_i64 = i64::try_from(first_written_tick).map_err(|_| {
-        anyhow::anyhow!("first_written_tick {first_written_tick} does not fit in i64")
-    })?;
-
-    let mut client = pool.get().await?;
-    let tx = client
-        .build_transaction()
-        .isolation_level(IsolationLevel::Serializable)
-        .start()
-        .await?;
-
-    let row = tx
-        .query_opt(
-            "SELECT anchor_hash FROM recovery_authority_anchors WHERE genesis_b32 = $1 FOR UPDATE",
-            &[&genesis_b32],
-        )
-        .await?;
-
-    let outcome = match row {
-        Some(r) => {
-            let existing: Vec<u8> = r.get(0);
-            if existing == anchor_hash {
-                RecoveryAnchorUpsertOutcome::AlreadyExistsIdentical
-            } else {
-                RecoveryAnchorUpsertOutcome::Conflict
-            }
-        }
-        None => {
-            let stmt = tx
-                .prepare_cached(
-                    "INSERT INTO recovery_authority_anchors
-                       (genesis_b32, anchor_hash, payload, first_written_tick)
-                     VALUES ($1, $2, $3, $4)",
-                )
-                .await?;
-            tx.execute(&stmt, &[&genesis_b32, &anchor_hash, &payload, &tick_i64])
-                .await?;
-            RecoveryAnchorUpsertOutcome::Inserted
-        }
-    };
-
-    tx.commit().await?;
-    Ok(outcome)
-}
-
-/// Return the persisted recovery-authority anchor payload bytes for a genesis,
-/// or `None` if none has been written.
-/// Outcome of [`insert_immutable_object_if_absent`]. See `sqlite.rs` for the
-/// contract; the two backends implement one behaviour.
+/// Outcome of [`insert_immutable_object_if_absent`]: the tuple was inserted,
+/// the identical `(namespace, payload)` tuple was already held, or a different
+/// tuple is held at the address and stays as it was.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ImmutablePutOutcome {
     Inserted,
@@ -828,167 +711,6 @@ pub async fn get_immutable_object(
         )
         .await?;
     Ok(row.map(|r| (r.get(0), r.get(1))))
-}
-
-pub async fn get_recovery_authority_anchor_payload(
-    pool: &Pool,
-    genesis_b32: &str,
-) -> Result<Option<Vec<u8>>> {
-    let client = pool.get().await?;
-    let row = client
-        .query_opt(
-            "SELECT payload FROM recovery_authority_anchors WHERE genesis_b32 = $1",
-            &[&genesis_b32],
-        )
-        .await?;
-    Ok(row.map(|r| {
-        let payload: Vec<u8> = r.get(0);
-        payload
-    }))
-}
-
-// ============================================================
-// Append-only Per-Device SMT head chain (spec §0.5 gap 13, R4 layer 1)
-// ============================================================
-
-/// Outcome of [`insert_pdsmt_head_if_chained`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PdsmtHeadChainOutcome {
-    /// The head was appended at `head_number` (0 = genesis head).
-    Appended { head_number: u64 },
-    /// A head with the SAME hash already exists at this `head_number` — idempotent replay.
-    AlreadyExistsIdentical,
-    /// The head does not link the current tip (fork / gap / stale / position mismatch).
-    Conflict,
-}
-
-/// Append a PDSMT head iff it correctly links the device's current chain tip (see the
-/// sqlite twin for the full contract). Runs as a `SERIALIZABLE` transaction with
-/// `FOR UPDATE` so concurrent posters serialise. Append-only: existing rows are never
-/// updated or deleted.
-#[allow(clippy::too_many_arguments)]
-pub async fn insert_pdsmt_head_if_chained(
-    pool: &Pool,
-    device_b32: &str,
-    head_number: u64,
-    head_hash: &[u8],
-    parent_head_hash: &[u8],
-    payload: &[u8],
-    inserted_at_tick: u64,
-) -> Result<PdsmtHeadChainOutcome> {
-    use tokio_postgres::IsolationLevel;
-
-    let head_number_i64 = i64::try_from(head_number)
-        .map_err(|_| anyhow::anyhow!("head_number {head_number} does not fit in i64"))?;
-    let tick_i64 = i64::try_from(inserted_at_tick)
-        .map_err(|_| anyhow::anyhow!("inserted_at_tick {inserted_at_tick} does not fit in i64"))?;
-
-    let mut client = pool.get().await?;
-    let tx = client
-        .build_transaction()
-        .isolation_level(IsolationLevel::Serializable)
-        .start()
-        .await?;
-
-    // A row already at this position? (idempotent replay vs position fork)
-    let at_row = tx
-        .query_opt(
-            "SELECT head_hash FROM pdsmt_head_chain WHERE device_b32 = $1 AND head_number = $2 FOR UPDATE",
-            &[&device_b32, &head_number_i64],
-        )
-        .await?;
-
-    let outcome = if let Some(r) = at_row {
-        let existing: Vec<u8> = r.get(0);
-        if existing == head_hash {
-            PdsmtHeadChainOutcome::AlreadyExistsIdentical
-        } else {
-            PdsmtHeadChainOutcome::Conflict
-        }
-    } else {
-        let tip = tx
-            .query_opt(
-                "SELECT head_number, head_hash FROM pdsmt_head_chain
-                 WHERE device_b32 = $1 ORDER BY head_number DESC LIMIT 1 FOR UPDATE",
-                &[&device_b32],
-            )
-            .await?;
-
-        let chains = match &tip {
-            None => head_number == 0 && parent_head_hash.iter().all(|&b| b == 0),
-            Some(r) => {
-                let tip_n: i64 = r.get(0);
-                let tip_hash: Vec<u8> = r.get(1);
-                let tip_n_u = u64::try_from(tip_n).unwrap_or(u64::MAX);
-                head_number == tip_n_u.saturating_add(1) && parent_head_hash == tip_hash.as_slice()
-            }
-        };
-
-        if chains {
-            let stmt = tx
-                .prepare_cached(
-                    "INSERT INTO pdsmt_head_chain
-                       (device_b32, head_number, head_hash, parent_head_hash, payload, inserted_at_tick)
-                     VALUES ($1, $2, $3, $4, $5, $6)",
-                )
-                .await?;
-            tx.execute(
-                &stmt,
-                &[
-                    &device_b32,
-                    &head_number_i64,
-                    &head_hash,
-                    &parent_head_hash,
-                    &payload,
-                    &tick_i64,
-                ],
-            )
-            .await?;
-            PdsmtHeadChainOutcome::Appended { head_number }
-        } else {
-            PdsmtHeadChainOutcome::Conflict
-        }
-    };
-
-    tx.commit().await?;
-    Ok(outcome)
-}
-
-/// Return the payload of the device's latest (highest `head_number`) PDSMT head, or `None`.
-pub async fn get_pdsmt_head_latest(pool: &Pool, device_b32: &str) -> Result<Option<Vec<u8>>> {
-    let client = pool.get().await?;
-    let row = client
-        .query_opt(
-            "SELECT payload FROM pdsmt_head_chain WHERE device_b32 = $1
-             ORDER BY head_number DESC LIMIT 1",
-            &[&device_b32],
-        )
-        .await?;
-    Ok(row.map(|r| {
-        let payload: Vec<u8> = r.get(0);
-        payload
-    }))
-}
-
-/// Return the payload of the device's PDSMT head at a specific `head_number`, or `None`.
-pub async fn get_pdsmt_head_at(
-    pool: &Pool,
-    device_b32: &str,
-    head_number: u64,
-) -> Result<Option<Vec<u8>>> {
-    let head_number_i64 = i64::try_from(head_number)
-        .map_err(|_| anyhow::anyhow!("head_number {head_number} does not fit in i64"))?;
-    let client = pool.get().await?;
-    let row = client
-        .query_opt(
-            "SELECT payload FROM pdsmt_head_chain WHERE device_b32 = $1 AND head_number = $2",
-            &[&device_b32, &head_number_i64],
-        )
-        .await?;
-    Ok(row.map(|r| {
-        let payload: Vec<u8> = r.get(0);
-        payload
-    }))
 }
 
 // ===================== b0x Inbox Spool (clockless) =====================
@@ -1080,7 +802,7 @@ pub type DBPool = Pool;
 
 /// Create a connection pool to Postgres (synchronous constructor)
 /// Uses TLS if available, falls back to NoTls for localhost dev environments
-pub fn create_pool(database_url: &str, _lazy: bool) -> anyhow::Result<DBPool> {
+pub fn create_pool(database_url: &str) -> anyhow::Result<DBPool> {
     let mut cfg = deadpool_postgres::Config::new();
     cfg.url = Some(database_url.to_string());
     cfg.manager = Some(ManagerConfig {
@@ -1100,7 +822,6 @@ pub fn create_pool(database_url: &str, _lazy: bool) -> anyhow::Result<DBPool> {
 }
 
 // Ensure module ends cleanly
-
 
 // ===================== PaidK Spend-Gate =====================
 

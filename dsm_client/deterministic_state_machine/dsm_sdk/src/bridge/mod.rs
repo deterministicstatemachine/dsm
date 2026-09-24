@@ -10,8 +10,8 @@
 //!
 //! 1. After SDK bootstrap, call [`app_router()`] to get the installed router.
 //! 2. Use [`AppRouter::query()`] for read-only operations:
-//!    - `"balance.list"`, `"wallet.history"`, `"contacts.list"`, `"sys.tick"`,
-//!      `"state.info"`, `"bitcoin.balance"`, `"bilateral.pending_list"`, etc.
+//!    - `"balance.list"`, `"wallet.history"`, `"contacts.list"`,
+//!      `"bitcoin.balance"`, `"bilateral.pending_list"`, etc.
 //! 3. Use [`AppRouter::invoke()`] for state-mutating operations:
 //!    - `"wallet.send"`, `"token.create"`, `"faucet.claim"`, `"prefs.set"`,
 //!      `"message.send"`, `"dbrw.export_report"`, etc.
@@ -44,9 +44,8 @@
 //!
 //! ---
 //!
-//! Defines the minimal traits (`AppRouter`, `BilateralHandler`,
-//! `UnilateralHandler`), dispatch types (`AppQuery`, `AppInvoke`,
-//! `BiPrepare`, `UniOp`, etc.), and `OnceLock`-based installer functions
+//! Defines the minimal traits (`AppRouter`, `BilateralHandler`), dispatch
+//! types (`AppQuery`, `AppInvoke`, `BiPrepare`, etc.), and `OnceLock`-based installer functions
 //! used by the SDK handler implementations. This keeps the transport/UI
 //! bridge entirely out of the pure `dsm` core crate.
 
@@ -125,7 +124,6 @@ pub trait AppRouter: Send + Sync {
         _counterparty_devid: [u8; 32],
         _operation: dsm::types::operations::Operation,
         _deltas: &[dsm::types::device_state::BalanceDelta],
-        _initial_chain_tip: Option<[u8; 32]>,
         _anchor_leaf: Option<dsm::types::device_state::AnchorLeafUpdate>,
         _offline_spend: Option<dsm::types::device_state::OfflineSpend>,
     ) -> Result<dsm::types::device_state::AdvanceOutcome, dsm::types::error::DsmError> {
@@ -205,7 +203,6 @@ pub trait AppRouter: Send + Sync {
         _counterparty_devid: [u8; 32],
         _operation: dsm::types::operations::Operation,
         _deltas: &[dsm::types::device_state::BalanceDelta],
-        _initial_chain_tip: Option<[u8; 32]>,
         _anchor_leaf: Option<dsm::types::device_state::AnchorLeafUpdate>,
         _offline_spend: Option<dsm::types::device_state::OfflineSpend>,
     ) -> Result<dsm::types::device_state::AdvanceOutcome, dsm::types::error::DsmError> {
@@ -341,14 +338,13 @@ pub fn anchor_enrollment_store(
 }
 
 /// SENDER-side fused-anchor appliance factory. Produces the fresh `AnchorAppliance` the offline-bearer
-/// release is built on. The device layer installs a factory that returns a `UsbAnchorAppliance`
-/// driving the physical RP2350/TROPIC01; `build_offline_bearer_release` calls it ONCE and caches the
-/// result (the appliance is stateful — its counter advances and its witness key erases on COMMIT).
+/// release is built on: a client driving the physical RP2350/TROPIC01, installed by the device layer.
+/// `build_offline_bearer_release` calls it ONCE and caches the result (the appliance is stateful —
+/// its counter advances and its witness key erases on COMMIT).
 ///
-/// `None` until installed. On device, an absent factory means offline-bearer is unavailable and the
-/// send FAILS CLOSED (no mock fallback) — "offline = chips". The in-process mock is used only by the
-/// SDK's own `#[cfg(test)]` release-path tests. The factory returns `Result` so a failed chip connect
-/// (e.g. STATUS unreadable) propagates as a fail-closed error rather than a silent mock.
+/// `None` until installed, and no appliance transport exists yet to install: offline-bearer is
+/// unavailable and the send FAILS CLOSED — "offline = chips". The factory returns `Result` so a
+/// failed chip connect (e.g. STATUS unreadable) propagates as a fail-closed error.
 type AnchorApplianceFactory = Arc<
     dyn Fn() -> Result<Box<dyn crate::anchor::AnchorAppliance + Send>, dsm::types::error::DsmError>
         + Send
@@ -372,18 +368,6 @@ pub fn anchor_appliance_factory() -> Option<AnchorApplianceFactory> {
     ANCHOR_APPLIANCE_FACTORY.read().ok()?.clone()
 }
 
-/// Test-only: uninstall the factory so the next test does not inherit it.
-///
-/// The factory is process-global. A test that installs one and does not remove it
-/// changes the anchor-attach outcome for every test that runs after it, which surfaces
-/// as unrelated failures far from the cause.
-#[cfg(test)]
-pub(crate) fn clear_anchor_appliance_factory_for_tests() {
-    if let Ok(mut g) = ANCHOR_APPLIANCE_FACTORY.write() {
-        *g = None;
-    }
-}
-
 #[cfg(test)]
 pub(crate) unsafe fn reset_bridge_handlers_for_tests() {
     if let Ok(mut guard) = APP_ROUTER.write() {
@@ -392,52 +376,10 @@ pub(crate) unsafe fn reset_bridge_handlers_for_tests() {
     if let Ok(mut guard) = FULL_APP_ROUTER_IDENTITY.write() {
         *guard = None;
     }
-    if let Ok(mut guard) = UNILATERAL_HANDLER.write() {
-        *guard = None;
-    }
     std::ptr::write(
         std::ptr::addr_of!(BILATERAL_HANDLER) as *mut OnceCell<Arc<dyn BilateralHandler>>,
         OnceCell::new(),
     );
-}
-
-// ---------- Unilateral Ops ----------
-
-#[derive(Debug, Clone)]
-pub struct UniOp {
-    pub operation_type: String,
-    pub data: Vec<u8>,
-}
-
-#[derive(Debug, Clone)]
-pub struct UniResult {
-    pub success: bool,
-    pub result_data: Vec<u8>,
-    pub error_message: Option<String>,
-}
-
-#[async_trait::async_trait]
-pub trait UnilateralHandler: Send + Sync {
-    async fn handle(&self, op: UniOp) -> UniResult;
-}
-
-/// Unilateral handler storage. Uses RwLock to allow replacement (pre-genesis → post-genesis).
-static UNILATERAL_HANDLER: Lazy<RwLock<Option<Arc<dyn UnilateralHandler>>>> =
-    Lazy::new(|| RwLock::new(None));
-
-pub fn install_unilateral_handler(handler: Arc<dyn UnilateralHandler>) {
-    match UNILATERAL_HANDLER.write() {
-        Ok(mut guard) => {
-            *guard = Some(handler);
-        }
-        Err(_) => {
-            log::error!("install_unilateral_handler: unilateral handler lock poisoned");
-        }
-    }
-}
-
-pub fn unilateral_handler() -> Option<Arc<dyn UnilateralHandler>> {
-    UNILATERAL_HANDLER.read().ok()?.clone()
 }
 
 // ---------------- Contact Management Helpers ----------------
@@ -452,171 +394,39 @@ pub fn sdk_remove_contact(contact_id: &str) -> bool {
     }
 }
 
-/// Helper: convert a u64 balance to the U128 le-bytes format used by TokenBalanceEntry.
-fn u64_to_u128_le(val: u64) -> crate::generated::U128 {
-    let mut le = vec![0u8; 16];
-    le[..8].copy_from_slice(&val.to_le_bytes());
-    crate::generated::U128 { le }
-}
-
-/// Fetch all token balances as a BalancesListResponse (strict, protobuf-encoded).
+/// Every token balance, as the app router's `balance.list` answers it: the
+/// CANONICAL `BalanceGetResponse` rows, never a surrogate.
 ///
-/// Routes through the app router `balance.list` handler which aggregates from authoritative sources:
-/// 1. All DSM tokens from canonical balance projection rows materialized from DSM state
-/// 2. Ensures dBTC always appears (even with 0) so the token picker works
-///
-/// Falls back to direct SQLite reads if the app router is not yet available.
-/// Returns the CANONICAL `BalanceGetResponse` rows, not a surrogate.
-///
-/// This used to narrow each row into `TokenBalanceEntry { token_id, amount }`
-/// and the JNI layer re-inflated it with `..Default::default()`, so `symbol`,
-/// `decimals`, `locked` and `token_name` were silently dropped and came back
-/// empty/zero. On device that meant a 2-decimal token with 100_000 base units
-/// rendered as "100000" — the wallet had no decimals to format with, because a
-/// two-field surrogate had thrown them away mid-flight.
-///
-/// One authoritative message end to end. A second representation only invites
-/// the two to drift again.
+/// There is no second source. Without a router, or when the router's answer
+/// does not decode, this is an error — never rows assembled from projection
+/// caches with zero balances filled in.
 pub fn get_all_balances_strict() -> Result<Vec<crate::generated::BalanceGetResponse>, String> {
-    let device_id = crate::sdk::app_state::AppState::get_device_id()
-        .ok_or_else(|| "No device_id available".to_string())?;
-    let device_id_b32 = crate::util::text_id::encode_base32_crockford(&device_id);
-    log::info!(
-        "[getAllBalancesStrict] device_id_b32={} (first16)",
-        &device_id_b32[..device_id_b32.len().min(16)]
-    );
-
-    // Try the app router first — it aggregates from the live authoritative paths.
-    if let Some(router) = app_router() {
-        let query = AppQuery {
-            path: "balance.list".to_string(),
-            params: vec![],
-        };
-        let result = futures::executor::block_on(router.query(query));
-        if result.success && !result.data.is_empty() {
-            // Response is 0x03-framed Envelope containing BalancesListResponse payload.
-            let data = if result.data.first() == Some(&0x03) {
-                &result.data[1..]
-            } else {
-                &result.data
-            };
-            if let Ok(envelope) = crate::envelope::from_canonical_bytes(data) {
-                if let Some(crate::generated::envelope::Payload::BalancesListResponse(resp)) =
-                    envelope.payload
-                {
-                    log::info!(
-                        "[getAllBalancesStrict] via app_router: {} items",
-                        resp.balances.len()
-                    );
-                    for b in &resp.balances {
-                        log::info!("[getAllBalancesStrict]   {}={}", b.token_id, b.available);
-                    }
-                    // The router already built the canonical rows, metadata
-                    // and all. Pass them straight through.
-                    return Ok(resp.balances);
-                }
-            }
-            log::warn!("[getAllBalancesStrict] app_router returned data but failed to decode");
-        } else {
-            log::warn!(
-                "[getAllBalancesStrict] app_router query failed: {:?}",
-                result.error_message
-            );
+    let router =
+        app_router().ok_or_else(|| "balance.list: app router not installed".to_string())?;
+    let result = futures::executor::block_on(router.query(AppQuery {
+        path: "balance.list".to_string(),
+        params: vec![],
+    }));
+    if !result.success {
+        return Err(format!(
+            "balance.list: {}",
+            result
+                .error_message
+                .unwrap_or_else(|| "the router refused without a reason".to_string())
+        ));
+    }
+    let envelope = crate::handlers::response_helpers::decode_local_envelope(&result.data)
+        .map_err(|e| format!("balance.list answer: {e}"))?;
+    match envelope.payload {
+        Some(dsm::types::proto::envelope::Payload::BalancesListResponse(list)) => {
+            // This crate and `dsm::types::proto` each generate the message from
+            // the one .proto; the bytes are the same message.
+            crate::generated::BalancesListResponse::decode(list.encode_to_vec().as_slice())
+                .map(|list| list.balances)
+                .map_err(|e| format!("balance.list answer: {e}"))
         }
+        other => Err(format!("balance.list answered {other:?}")),
     }
-
-    // Fallback: direct SQLite reads (pre-genesis or if app router unavailable)
-    log::info!("[getAllBalancesStrict] falling back to direct SQLite reads");
-    let mut entries: Vec<(String, u64)> = Vec::new();
-
-    // 1. Tokens from canonical projection rows only.
-    match crate::storage::client_db::list_balance_projections(&device_id_b32) {
-        Ok(projected) => {
-            for record in projected {
-                let tok_id = record.token_id;
-                if let Some(existing) = entries.iter_mut().find(|(t, _)| t == &tok_id) {
-                    if record.available > existing.1 {
-                        existing.1 = record.available;
-                    }
-                } else {
-                    entries.push((tok_id, record.available));
-                }
-            }
-        }
-        Err(e) => {
-            log::warn!(
-                "[getAllBalancesStrict] list_balance_projections failed: {}",
-                e
-            );
-        }
-    }
-
-    if !entries.iter().any(|(token_id, _)| token_id == "ERA") {
-        entries.push(("ERA".to_string(), 0));
-    }
-
-    // 3. Ensure dBTC always appears (even with 0) so token picker works
-    if !entries.iter().any(|(t, _)| t == "dBTC") {
-        entries.push(("dBTC".to_string(), 0));
-    }
-
-    entries.sort_by(|a, b| a.0.cmp(&b.0));
-
-    log::info!(
-        "[getAllBalancesStrict] returning {} entries: {:?}",
-        entries.len(),
-        entries
-            .iter()
-            .map(|(t, a)| format!("{}={}", t, a))
-            .collect::<Vec<_>>()
-    );
-
-    // The fallback builds the same canonical rows, enriched from the same
-    // registry the router uses, so a pre-genesis read is not a second shape.
-    Ok(entries
-        .into_iter()
-        .map(|(token_id, available)| {
-            let mut row = crate::generated::BalanceGetResponse {
-                token_id,
-                available,
-                locked: 0,
-                ..Default::default()
-            };
-            // Same registry the router reads. (Note: this crate and
-            // dsm::types::proto each generate their own BalanceGetResponse from
-            // the one .proto, so the router's enrichment helper is not directly
-            // callable here — that duplication is worth collapsing separately.)
-            match row.token_id.trim().to_uppercase().as_str() {
-                "ERA" => {
-                    row.symbol = "ERA".into();
-                    row.token_name = "ERA".into();
-                    row.decimals = 0;
-                }
-                "DBTC" => {
-                    row.token_id = "dBTC".into();
-                    row.symbol = "dBTC".into();
-                    row.token_name = "dBTC".into();
-                    row.decimals = 8;
-                }
-                _ => {
-                    if let Ok(Some(t)) =
-                        crate::storage::client_db::token_registry::get_token_by_ticker(
-                            &row.token_id,
-                        )
-                    {
-                        row.symbol = t.ticker.clone();
-                        row.token_name = if t.alias.is_empty() {
-                            t.ticker
-                        } else {
-                            t.alias
-                        };
-                        row.decimals = t.decimals;
-                    }
-                }
-            }
-            row
-        })
-        .collect())
 }
 
 /// Fetch wallet history as WalletHistoryResponse (strict, protobuf-encoded)
@@ -688,23 +498,11 @@ pub trait BilateralHandler: Send + Sync {
     async fn accept(&self, a: BiAccept) -> BiResult;
     async fn commit(&self, c: BiCommit) -> BiResult;
 
-    /// Retrieve pending transactions (beta requirement: strict sync).
-    /// Returns serialized pb::OfflineBilateralTransaction messages.
-    async fn get_pending_transactions(&self) -> Result<Vec<Vec<u8>>, String>;
-
     /// Allow downcasting to concrete type for SDK injection.
     fn as_any(&self) -> &dyn std::any::Any;
 }
 
 static BILATERAL_HANDLER: OnceCell<Arc<dyn BilateralHandler>> = OnceCell::new();
-
-pub fn get_pending_bilateral_proposals_strict() -> Result<Vec<Vec<u8>>, String> {
-    if let Some(h) = BILATERAL_HANDLER.get() {
-        crate::runtime::get_runtime().block_on(h.get_pending_transactions())
-    } else {
-        Err("Bilateral handler not installed".to_string())
-    }
-}
 
 pub fn install_bilateral_handler(handler: Arc<dyn BilateralHandler>) {
     let _ = BILATERAL_HANDLER.set(handler);
@@ -831,17 +629,6 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl UnilateralHandler for Dummy {
-        async fn handle(&self, _op: UniOp) -> UniResult {
-            UniResult {
-                success: true,
-                result_data: vec![],
-                error_message: None,
-            }
-        }
-    }
-
-    #[async_trait::async_trait]
     impl BilateralHandler for Dummy {
         async fn prepare(&self, _p: BiPrepare) -> BiResult {
             BiResult {
@@ -872,10 +659,6 @@ mod tests {
             }
         }
 
-        async fn get_pending_transactions(&self) -> Result<Vec<Vec<u8>>, String> {
-            Ok(vec![])
-        }
-
         fn as_any(&self) -> &dyn std::any::Any {
             self
         }
@@ -887,33 +670,8 @@ mod tests {
             Ok(_) => {}
             Err(e) => panic!("Failed to install app router: {:?}", e),
         }
-        install_unilateral_handler(Arc::new(Dummy));
         install_bilateral_handler(Arc::new(Dummy));
         assert!(app_router().is_some());
-        assert!(unilateral_handler().is_some());
         assert!(bilateral_handler().is_some());
-    }
-
-    /// Reset all bridge handler singletons for testing.
-    ///
-    /// # Safety
-    /// This function is UNSAFE and should ONLY be called in single-threaded test contexts.
-    /// The bilateral handler uses OnceCell which requires unsafe pointer writes to reset.
-    pub unsafe fn reset_bridge_handlers_for_tests() {
-        // APP_ROUTER and UNILATERAL_HANDLER are RwLock-based — safe to clear.
-        if let Ok(mut guard) = APP_ROUTER.write() {
-            *guard = None;
-        }
-        if let Ok(mut guard) = FULL_APP_ROUTER_IDENTITY.write() {
-            *guard = None;
-        }
-        if let Ok(mut guard) = UNILATERAL_HANDLER.write() {
-            *guard = None;
-        }
-        // BILATERAL_HANDLER is still OnceCell — requires unsafe reset.
-        std::ptr::write(
-            std::ptr::addr_of!(BILATERAL_HANDLER) as *mut OnceCell<Arc<dyn BilateralHandler>>,
-            OnceCell::new(),
-        );
     }
 }

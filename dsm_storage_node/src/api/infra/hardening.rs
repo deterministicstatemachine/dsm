@@ -8,19 +8,6 @@ use blake3::Hasher;
 use dsm::crypto::domain::TaggedHashDomain;
 use std::env;
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Normative parameters (clockless) - per whitepaper Sec. storage-regulation
-// These constants define the protocol economics and are reserved for future use
-// in ByteCommit verification, capacity signals, and Node Registry operations.
-// ─────────────────────────────────────────────────────────────────────────────
-#[allow(dead_code)]
-pub const QUORUM_Q: usize = 2; // acceptance quorum
-
-#[allow(dead_code)]
-pub const BEV: usize = 1 << 12; // events per node cycle threshold
-#[allow(dead_code)]
-pub const BBYTES: usize = 1 << 30; // bytes per node cycle threshold
-
 /// Domain-separated BLAKE3-256, storage-node side: `domain || 0x00 || body`.
 ///
 /// Takes a validated [`TaggedHashDomain`], so a caller cannot spell the

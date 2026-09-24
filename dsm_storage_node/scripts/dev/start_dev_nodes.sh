@@ -102,14 +102,8 @@ start_node() {
         return 1
     fi
 
-    # Build benchmark flag if BENCHMARK_MODE is set
-    local bench_flag=""
-    if [ "${BENCHMARK_MODE:-}" = "1" ]; then
-        bench_flag="--benchmark-mode"
-    fi
-
     # Enable verbose logging for diagnostics and detach from terminal
-    nohup env RUST_LOG=info "$BIN_PATH" --config "$config_file" --verbose $bench_flag > "$log_file" 2>&1 &
+    nohup env RUST_LOG=info "$BIN_PATH" --config "$config_file" --verbose > "$log_file" 2>&1 &
     local pid=$!
     
     echo "Node ${node_num} PID: $pid"
@@ -144,7 +138,7 @@ start_node() {
                 echo -e "${RED}✗ Debug binary not found; cannot start node${NC}"
                 return 1
             fi
-            nohup env RUST_LOG=info "$BIN_PATH" --config "$config_file" --verbose $bench_flag > "$log_file" 2>&1 &
+            nohup env RUST_LOG=info "$BIN_PATH" --config "$config_file" --verbose > "$log_file" 2>&1 &
             pid=$!
             echo "Node ${node_num} fallback PID: $pid"
             echo "$pid" > "dev-node${node_num}.pid"

@@ -10,10 +10,6 @@
 //! inclusion in state hashes and Envelope v3 payloads. No JSON or serde is used
 //! on the canonical path; all encoding uses length-prefixed binary with fixed
 //! variant tags.
-//!
-//! Trait hierarchies ([`Ops`], [`IdOps`], [`TokenOps`], [`GenericOps`],
-//! [`SmartCommitOps`]) provide domain-specific validation and execution
-//! interfaces that [`Operation`] implements.
 
 use std::{collections::HashMap, fmt::Debug};
 
@@ -21,52 +17,6 @@ use crate::{
     commitments::precommit::SecurityParameters,
     types::{error::DsmError, token_types::Balance},
 };
-
-/// Base operations trait that all specific operation traits inherit from.
-///
-/// Provides the fundamental interface for validating, executing, identifying,
-/// and serialising any state transition operation.
-pub trait Ops: Debug {
-    /// Validate that this operation's fields are internally consistent.
-    fn validate(&self) -> Result<bool, DsmError>;
-    /// Execute the operation and return its canonical byte output.
-    fn execute(&self) -> Result<Vec<u8>, DsmError>;
-    /// Return a string identifier for this operation type.
-    fn get_id(&self) -> &str;
-    /// Encode this operation to its canonical, deterministic byte representation.
-    fn to_bytes(&self) -> Vec<u8>;
-}
-
-/// Token management operations.
-///
-/// Extended trait for operations that manipulate token balances, including
-/// transfer, mint, burn, lock, and unlock. Expiration is enforced by state
-/// progression (logical ticks), not wall-clock time.
-pub trait TokenOps: Ops {
-    /// Check whether this token operation references a valid, non-zero amount.
-    fn is_valid(&self) -> bool;
-    /// Check whether this token has expired based on state progression.
-    fn has_expired(&self) -> bool;
-    /// Verify the token operation against the given SPHINCS+ public key.
-    fn verify_token(&self, public_key: &[u8]) -> Result<bool, DsmError>;
-    /// Extend the validity window by a number of logical ticks.
-    fn extend_validity(&mut self, duration: u64) -> Result<(), DsmError>;
-}
-
-/// Generic operations for protocol extensibility.
-///
-/// Provides a type-erased interface for operations that do not fit the
-/// identity or token categories, allowing application-specific extensions.
-pub trait GenericOps: Ops {
-    /// Return the application-defined operation type label.
-    fn get_operation_type(&self) -> &str;
-    /// Return the raw payload data for this generic operation.
-    fn get_data(&self) -> &[u8];
-    /// Replace the payload data for this generic operation.
-    fn set_data(&mut self, data: Vec<u8>) -> Result<(), DsmError>;
-    /// Merge this operation's data with another generic operation's data.
-    fn merge(&self, other: &dyn GenericOps) -> Result<Vec<u8>, DsmError>;
-}
 
 /// State transition execution mode (canonical encoded; no Serde).
 ///
@@ -893,7 +843,7 @@ impl Operation {
     /// - Strings/bytes: u32 LE length prefix + raw bytes
     /// - `Vec<Vec<u8>>`: u32 count + each encoded as above
     /// - `Option<Vec<u8>>`: 1 byte tag (0/1) + payload when present
-    /// - Balance: Balance::to_le_bytes() (fixed length canonical)
+    /// - Balance: `Balance::canonical_amount_bytes()` — value and lock, 16 bytes
     pub fn to_bytes(&self) -> Vec<u8> {
         use Operation::*;
         let mut out = Vec::new();
@@ -1067,7 +1017,7 @@ impl Operation {
                 put_u8(&mut out, 3);
                 put_bytes(&mut out, to_device_id);
                 // Balance canonical
-                let bal = amount.to_le_bytes();
+                let bal = amount.canonical_amount_bytes();
                 put_bytes(&mut out, &bal);
                 put_bytes(&mut out, token_id);
                 // CPTA policy commitment (§9.5) — bound into the signed bytes.
@@ -1103,7 +1053,7 @@ impl Operation {
                 message,
             } => {
                 put_u8(&mut out, 5);
-                let bal = amount.to_le_bytes();
+                let bal = amount.canonical_amount_bytes();
                 put_bytes(&mut out, &bal);
                 put_bytes(&mut out, token_id);
                 put_bytes(&mut out, policy_commit);
@@ -1148,7 +1098,7 @@ impl Operation {
             } => {
                 put_u8(&mut out, 8);
                 put_bytes(&mut out, token_id);
-                let bal = amount.to_le_bytes();
+                let bal = amount.canonical_amount_bytes();
                 put_bytes(&mut out, &bal);
                 put_bytes(&mut out, purpose);
                 put_bytes(&mut out, owner);
@@ -1165,7 +1115,7 @@ impl Operation {
             } => {
                 put_u8(&mut out, 9);
                 put_bytes(&mut out, token_id);
-                let bal = amount.to_le_bytes();
+                let bal = amount.canonical_amount_bytes();
                 put_bytes(&mut out, &bal);
                 put_bytes(&mut out, purpose);
                 put_bytes(&mut out, owner);
@@ -1316,7 +1266,7 @@ impl Operation {
                 put_u8(&mut out, 19);
                 put_bytes(&mut out, token_id);
                 put_bytes(&mut out, from_device_id);
-                let bal = amount.to_le_bytes();
+                let bal = amount.canonical_amount_bytes();
                 put_bytes(&mut out, &bal);
                 put_bytes(&mut out, recipient);
                 put_str(&mut out, message);
@@ -1353,7 +1303,7 @@ impl Operation {
             } => {
                 put_u8(&mut out, 20);
                 put_bytes(&mut out, token_id);
-                let bal = initial_supply.to_le_bytes();
+                let bal = initial_supply.canonical_amount_bytes();
                 put_bytes(&mut out, &bal);
                 // Mandatory now: the issued asset and the ERA destroyed for it
                 // are both part of what gets signed.
@@ -1541,42 +1491,25 @@ impl Operation {
             }
             Ok(v)
         }
-        // Balance decoding: mirror `Balance::to_le_bytes()` wrapped by a length prefix in to_bytes
+        // Balance decoding: an operation's amount is exactly
+        // `Balance::canonical_amount_bytes()` behind a length prefix.
         fn dec_balance(inp: &mut &[u8]) -> Result<Balance, DsmError> {
-            let blob = get_bytes(inp)?; // length-prefixed canonical balance bytes
-            let mut cur: &[u8] = &blob;
-            let value = {
-                let mut a = [0u8; 8];
-                a.copy_from_slice(take(&mut cur, 8)?);
-                u64::from_le_bytes(a)
-            };
-            let locked = {
-                let mut a = [0u8; 8];
-                a.copy_from_slice(take(&mut cur, 8)?);
-                u64::from_le_bytes(a)
-            };
-            // Per §4.3 no counter is part of canonical Balance encoding.
-            let state_hash = if !cur.is_empty() {
-                if cur.len() != 32 {
-                    return Err(DsmError::SerializationError(
-                        "Invalid state hash length".into(),
-                    ));
-                }
-                let mut h = [0u8; 32];
-                h.copy_from_slice(cur);
-                Some(h)
-            } else {
-                None
-            };
-            Ok(Balance::from_parts(value, locked, state_hash))
-        }
-        #[allow(dead_code)]
-        fn dec_option_bytes(inp: &mut &[u8]) -> Result<Option<Vec<u8>>, DsmError> {
-            match get_u8(inp)? {
-                0 => Ok(None),
-                1 => Ok(Some(get_bytes(inp)?)),
-                _ => Err(DsmError::invalid_operation("bad opt tag")),
+            let blob = get_bytes(inp)?;
+            if blob.len() != 16 {
+                return Err(DsmError::SerializationError(format!(
+                    "an operation amount is 16 bytes, got {}",
+                    blob.len()
+                )));
             }
+            let mut value = [0u8; 8];
+            value.copy_from_slice(&blob[..8]);
+            let mut locked = [0u8; 8];
+            locked.copy_from_slice(&blob[8..]);
+            Ok(Balance::from_parts(
+                u64::from_le_bytes(value),
+                u64::from_le_bytes(locked),
+                None,
+            ))
         }
         fn dec_precommit_op(inp: &mut &[u8]) -> Result<PreCommitmentOp, DsmError> {
             // fixed_parameters
@@ -2281,6 +2214,16 @@ impl Operation {
         }
     }
 
+    /// The EXACT bytes an operation's signature covers: its canonical encoding
+    /// with the signature field cleared.
+    ///
+    /// One rule, in one place. A producer that hashed or framed these bytes
+    /// differently would be a second definition of "signed", and the verifier
+    /// only implements this one.
+    pub fn signing_bytes(&self) -> Vec<u8> {
+        self.with_cleared_signature().to_bytes()
+    }
+
     /// Return a clone of this operation with all signature/proof fields cleared.
     /// Used to compute the canonical signing payload (sign over everything except
     /// the signature field itself).
@@ -2386,136 +2329,6 @@ impl Operation {
     }
 }
 
-impl Ops for Operation {
-    fn validate(&self) -> Result<bool, DsmError> {
-        match self {
-            Operation::Generic { .. } => Ok(true),
-            Operation::Transfer { amount, .. } => Ok(amount.value() > 0),
-            Operation::Burn { amount, .. } => Ok(amount.value() > 0),
-            Operation::LockToken { .. } => Ok(true),
-            Operation::UnlockToken { .. } => Ok(true),
-            Operation::Lock { .. } => Ok(true),
-            Operation::Unlock { .. } => Ok(true),
-            _ => Ok(true),
-        }
-    }
-
-    fn execute(&self) -> Result<Vec<u8>, DsmError> {
-        Ok(self.to_bytes())
-    }
-
-    fn get_id(&self) -> &str {
-        match self {
-            Operation::Genesis => "genesis",
-            Operation::FaucetClaim { .. } => "faucet_claim",
-            Operation::Generic { .. } => "generic",
-            Operation::Transfer { .. } => "transfer",
-            Operation::Burn { .. } => "burn",
-            Operation::Create { .. } => "create",
-            Operation::Update { .. } => "update",
-            Operation::AddRelationship { .. } => "add_relationship",
-            Operation::CreateRelationship { .. } => "create_relationship",
-            Operation::RemoveRelationship { .. } => "remove_relationship",
-            Operation::Recovery { .. } => "recovery",
-            Operation::Delete { .. } => "delete",
-            Operation::Link { .. } => "link",
-            Operation::Unlink { .. } => "unlink",
-            Operation::Invalidate { .. } => "invalidate",
-            Operation::LockToken { .. } => "lock_token",
-            Operation::UnlockToken { .. } => "unlock_token",
-            Operation::Lock { .. } => "lock",
-            Operation::Unlock { .. } => "unlock",
-            Operation::Receive { .. } => "receive",
-            Operation::CreateToken { .. } => "create_token",
-            Operation::AdoptToken { .. } => "adopt_token",
-            Operation::Noop => "noop",
-            Operation::DlvCreate { .. } => "dlv_create",
-            Operation::DlvUnlock { .. } => "dlv_unlock",
-            Operation::DlvClaim { .. } => "dlv_claim",
-            Operation::DlvInvalidate { .. } => "dlv_invalidate",
-            Operation::SofiSetup { .. } => "sofi_setup",
-            Operation::SofiVaultCreate { .. } => "sofi_vault_create",
-            Operation::SofiFulfill { .. } => "sofi_fulfill",
-        }
-    }
-
-    fn to_bytes(&self) -> Vec<u8> {
-        self.to_bytes()
-    }
-}
-
-impl TokenOps for Operation {
-    fn is_valid(&self) -> bool {
-        match self {
-            Operation::Transfer { amount, .. } => amount.value() > 0,
-            Operation::Burn { amount, .. } => amount.value() > 0,
-            Operation::Lock { amount, .. } => amount.value() > 0,
-            Operation::Unlock { amount, .. } => amount.value() > 0,
-            _ => false,
-        }
-    }
-
-    fn has_expired(&self) -> bool {
-        false
-    }
-
-    fn verify_token(&self, _public_key: &[u8]) -> Result<bool, DsmError> {
-        match self {
-            Operation::Transfer { .. }
-            | Operation::Burn { .. }
-            | Operation::Lock { .. }
-            | Operation::Unlock { .. } => Ok(true),
-            _ => Ok(false),
-        }
-    }
-
-    fn extend_validity(&mut self, _duration: u64) -> Result<(), DsmError> {
-        Err(DsmError::generic(
-            "Cannot extend validity of an operation",
-            None::<std::io::Error>,
-        ))
-    }
-}
-
-impl GenericOps for Operation {
-    fn get_operation_type(&self) -> &str {
-        match self {
-            Operation::Genesis => "genesis",
-            Operation::Generic { .. } => "generic",
-            _ => self.get_id(),
-        }
-    }
-
-    fn get_data(&self) -> &[u8] {
-        match self {
-            Operation::Generic { data, .. } => data,
-            _ => &[],
-        }
-    }
-
-    fn set_data(&mut self, data: Vec<u8>) -> Result<(), DsmError> {
-        match self {
-            Operation::Generic {
-                data: ref mut d, ..
-            } => {
-                *d = data;
-                Ok(())
-            }
-            _ => Err(DsmError::generic(
-                "Cannot set data on non-generic operation",
-                None::<std::io::Error>,
-            )),
-        }
-    }
-
-    fn merge(&self, other: &dyn GenericOps) -> Result<Vec<u8>, DsmError> {
-        let mut merged = Vec::new();
-        merged.extend_from_slice(self.get_data());
-        merged.extend_from_slice(other.get_data());
-        Ok(merged)
-    }
-}
-
 /// Pre-commitment parameters for binding a future state transition.
 ///
 /// A pre-commitment constrains a future operation by fixing certain parameters
@@ -2566,22 +2379,12 @@ impl Ord for PreCommitmentOp {
     }
 }
 
-// Implement conversion from StateTransition to Operation
-use crate::core::state_machine::transition::StateTransition;
-
-impl From<StateTransition> for Operation {
-    fn from(transition: StateTransition) -> Self {
-        // Simply extract the operation from the transition
-        transition.operation
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn test_balance(value: u64) -> Balance {
-        Balance::from_parts(value, 0, Some([0xAB; 32]))
+        Balance::amount(value)
     }
 
     #[test]
@@ -3100,141 +2903,6 @@ mod tests {
     }
 
     // ------------------------------------------------------------------ //
-    //  Ops trait tests
-    // ------------------------------------------------------------------ //
-    mod ops_trait {
-        use super::*;
-
-        #[test]
-        fn validate_transfer_zero_amount() {
-            let op = Operation::Transfer {
-                policy_commit: [0u8; 32],
-                to_device_id: vec![0x01; 32],
-                amount: test_balance(0),
-                token_id: b"ERA".to_vec(),
-                mode: TransactionMode::Bilateral,
-                nonce: vec![],
-                verification: VerificationType::Standard,
-                pre_commit: None,
-                recipient: vec![],
-                to: vec![],
-                message: String::new(),
-                signature: vec![],
-                authority_policy: None,
-            };
-            assert!(!Ops::validate(&op).unwrap());
-        }
-
-        #[test]
-        fn validate_transfer_positive_amount() {
-            let op = Operation::Transfer {
-                policy_commit: [0u8; 32],
-                to_device_id: vec![0x01; 32],
-                amount: test_balance(100),
-                token_id: b"ERA".to_vec(),
-                mode: TransactionMode::Bilateral,
-                nonce: vec![],
-                verification: VerificationType::Standard,
-                pre_commit: None,
-                recipient: vec![],
-                to: vec![],
-                message: String::new(),
-                signature: vec![],
-                authority_policy: None,
-            };
-            assert!(Ops::validate(&op).unwrap());
-        }
-
-        #[test]
-        fn validate_genesis_is_true() {
-            assert!(Ops::validate(&Operation::Genesis).unwrap());
-        }
-
-        #[test]
-        fn validate_noop_is_true() {
-            assert!(Ops::validate(&Operation::Noop).unwrap());
-        }
-
-        #[test]
-        fn get_id_returns_correct_strings() {
-            let cases: Vec<(Operation, &str)> = vec![
-                (Operation::Genesis, "genesis"),
-                (Operation::Noop, "noop"),
-                (
-                    Operation::Create {
-                        message: String::new(),
-                        identity_data: vec![],
-                        public_key: vec![],
-                        metadata: vec![],
-                        commitment: vec![],
-                        proof: vec![],
-                        mode: TransactionMode::Bilateral,
-                    },
-                    "create",
-                ),
-                (
-                    Operation::Update {
-                        message: String::new(),
-                        identity_id: vec![],
-                        updated_data: vec![],
-                        proof: vec![],
-                        forward_link: None,
-                    },
-                    "update",
-                ),
-                (
-                    Operation::Delete {
-                        reason: String::new(),
-                        proof: vec![],
-                        mode: TransactionMode::Bilateral,
-                        id: vec![],
-                    },
-                    "delete",
-                ),
-                (
-                    Operation::Recovery {
-                        message: String::new(),
-                        state_number: 0,
-                        state_hash: vec![],
-                        state_entropy: vec![],
-                        invalidation_data: vec![],
-                        new_state_data: vec![],
-                        new_state_number: 0,
-                        new_state_hash: vec![],
-                        new_state_entropy: vec![],
-                        compromise_proof: vec![],
-                        authority_sigs: vec![],
-                    },
-                    "recovery",
-                ),
-                (
-                    Operation::DlvCreate {
-                        vault_id: vec![],
-                        creator_public_key: vec![],
-                        parameters_hash: vec![],
-                        fulfillment_condition: vec![],
-                        intended_recipient: None,
-                        signature: vec![],
-                        mode: TransactionMode::Unilateral,
-                    },
-                    "dlv_create",
-                ),
-            ];
-            for (op, expected) in cases {
-                assert_eq!(Ops::get_id(&op), expected);
-            }
-        }
-
-        #[test]
-        fn execute_returns_bytes() {
-            let op = Operation::Genesis;
-            let result = Ops::execute(&op).unwrap();
-            assert!(!result.is_empty());
-            assert_eq!(result, op.to_bytes());
-        }
-    }
-
-    // ------------------------------------------------------------------ //
     //  get_operation_type tests
     // ------------------------------------------------------------------ //
     mod operation_type {
@@ -3598,178 +3266,59 @@ mod tests {
     }
 
     // ------------------------------------------------------------------ //
-    //  TokenOps trait tests
-    // ------------------------------------------------------------------ //
-    mod token_ops {
-        use super::*;
-
-        #[test]
-        fn is_valid_transfer_positive() {
-            let op = Operation::Transfer {
-                policy_commit: [0u8; 32],
-                to_device_id: vec![0x01; 32],
-                amount: test_balance(100),
-                token_id: b"ERA".to_vec(),
-                mode: TransactionMode::Bilateral,
-                nonce: vec![],
-                verification: VerificationType::Standard,
-                pre_commit: None,
-                recipient: vec![],
-                to: vec![],
-                message: String::new(),
-                signature: vec![],
-                authority_policy: None,
-            };
-            assert!(TokenOps::is_valid(&op));
-        }
-
-        #[test]
-        fn is_valid_transfer_zero() {
-            let op = Operation::Transfer {
-                policy_commit: [0u8; 32],
-                to_device_id: vec![0x01; 32],
-                amount: test_balance(0),
-                token_id: b"ERA".to_vec(),
-                mode: TransactionMode::Bilateral,
-                nonce: vec![],
-                verification: VerificationType::Standard,
-                pre_commit: None,
-                recipient: vec![],
-                to: vec![],
-                message: String::new(),
-                signature: vec![],
-                authority_policy: None,
-            };
-            assert!(!TokenOps::is_valid(&op));
-        }
-
-        #[test]
-        fn is_valid_genesis_returns_false() {
-            assert!(!TokenOps::is_valid(&Operation::Genesis));
-        }
-
-        #[test]
-        fn is_valid_noop_returns_false() {
-            assert!(!TokenOps::is_valid(&Operation::Noop));
-        }
-
-        #[test]
-        fn is_valid_lock_positive() {
-            let op = Operation::Lock {
-                token_id: b"ERA".to_vec(),
-                amount: test_balance(10),
-                purpose: vec![],
-                owner: vec![],
-                message: String::new(),
-                signature: vec![],
-            };
-            assert!(TokenOps::is_valid(&op));
-        }
-
-        #[test]
-        fn has_expired_returns_false() {
-            assert!(!TokenOps::has_expired(&Operation::Genesis));
-            let transfer = Operation::Transfer {
-                policy_commit: [0u8; 32],
-                to_device_id: vec![],
-                amount: test_balance(1),
-                token_id: vec![],
-                mode: TransactionMode::Bilateral,
-                nonce: vec![],
-                verification: VerificationType::Standard,
-                pre_commit: None,
-                recipient: vec![],
-                to: vec![],
-                message: String::new(),
-                signature: vec![],
-                authority_policy: None,
-            };
-            assert!(!TokenOps::has_expired(&transfer));
-        }
-    }
-
-    // ------------------------------------------------------------------ //
-    //  GenericOps trait tests
-    // ------------------------------------------------------------------ //
-    mod generic_ops {
-        use super::*;
-
-        #[test]
-        fn get_data_returns_data_for_generic() {
-            let op = Operation::Generic {
-                operation_type: b"test".to_vec(),
-                data: vec![10, 20, 30],
-                message: String::new(),
-                signature: vec![],
-            };
-            assert_eq!(GenericOps::get_data(&op), &[10, 20, 30]);
-        }
-
-        #[test]
-        fn get_data_returns_empty_for_non_generic() {
-            assert!(GenericOps::get_data(&Operation::Genesis).is_empty());
-            assert!(GenericOps::get_data(&Operation::Noop).is_empty());
-        }
-
-        #[test]
-        fn set_data_works_for_generic() {
-            let mut op = Operation::Generic {
-                operation_type: b"test".to_vec(),
-                data: vec![1],
-                message: String::new(),
-                signature: vec![],
-            };
-            GenericOps::set_data(&mut op, vec![99, 100]).unwrap();
-            assert_eq!(GenericOps::get_data(&op), &[99, 100]);
-        }
-
-        #[test]
-        fn set_data_errors_for_non_generic() {
-            let mut op = Operation::Genesis;
-            assert!(GenericOps::set_data(&mut op, vec![1]).is_err());
-        }
-
-        #[test]
-        fn merge_concatenates_data() {
-            let a = Operation::Generic {
-                operation_type: b"t".to_vec(),
-                data: vec![1, 2],
-                message: String::new(),
-                signature: vec![],
-            };
-            let b = Operation::Generic {
-                operation_type: b"t".to_vec(),
-                data: vec![3, 4],
-                message: String::new(),
-                signature: vec![],
-            };
-            let merged = GenericOps::merge(&a, &b).unwrap();
-            assert_eq!(merged, vec![1, 2, 3, 4]);
-        }
-    }
-
-    // ------------------------------------------------------------------ //
     //  Balance round-trip through Operation encoding
     // ------------------------------------------------------------------ //
     mod balance_encoding {
         use super::*;
 
-        #[test]
-        fn balance_with_state_hash_roundtrips() {
-            let bal = Balance::from_parts(12345, 0, Some([0xFE; 32]));
-            let op = Operation::Burn {
-                amount: bal.clone(),
+        fn burn_of(amount: Balance) -> Operation {
+            Operation::Burn {
+                amount,
                 token_id: b"T".to_vec(),
                 policy_commit: [0u8; 32],
                 proof_of_ownership: vec![],
                 message: String::new(),
-            };
-            let decoded = roundtrip(&op);
-            if let Operation::Burn { amount, .. } = decoded {
-                assert_eq!(amount.value(), bal.value());
-            } else {
-                panic!("wrong variant");
             }
+        }
+
+        /// Ruling #7: an operation signs an amount's value and lock, never a
+        /// state reference the amount may carry — two operations that differ
+        /// only there have the same signed bytes, and the decoded amount
+        /// references no state.
+        #[test]
+        fn an_amounts_state_reference_is_not_signed() {
+            let referencing = burn_of(Balance::from_parts(12345, 0, Some([0xFE; 32])));
+            let plain = burn_of(Balance::amount(12345));
+            assert_eq!(referencing.to_bytes(), plain.to_bytes());
+            assert_eq!(referencing.signing_bytes(), plain.signing_bytes());
+            match Operation::from_bytes(&referencing.to_bytes()).expect("decodes") {
+                Operation::Burn { amount, .. } => {
+                    assert_eq!(amount.value(), 12345);
+                    assert_eq!(amount.state_hash(), None);
+                }
+                other => panic!("wrong variant: {other:?}"),
+            }
+        }
+
+        /// An amount encoded with a state reference — the 48-byte form signed
+        /// before ruling #7 — is not an operation amount.
+        #[test]
+        fn an_amount_carrying_a_state_reference_does_not_decode() {
+            let plain = burn_of(Balance::amount(12345));
+            let bytes = plain.to_bytes();
+            let mut blob = vec![16u8, 0, 0, 0];
+            blob.extend_from_slice(&Balance::amount(12345).canonical_amount_bytes());
+            let at = bytes
+                .windows(blob.len())
+                .position(|w| w == blob.as_slice())
+                .expect("the amount blob");
+            let mut widened = bytes[..at].to_vec();
+            widened.extend_from_slice(&[48u8, 0, 0, 0]);
+            widened.extend_from_slice(&blob[4..]);
+            widened.extend_from_slice(&[0xFE; 32]);
+            widened.extend_from_slice(&bytes[at + blob.len()..]);
+            let err = Operation::from_bytes(&widened).expect_err("a 48-byte amount is refused");
+            assert!(err.to_string().contains("amount is 16 bytes"), "{err}");
         }
 
         #[test]
@@ -3787,7 +3336,7 @@ mod tests {
 
         #[test]
         fn balance_with_locked_roundtrips() {
-            let bal = Balance::from_parts(1000, 200, Some([0x01; 32]));
+            let bal = Balance::from_parts(1000, 200, None);
             let op = Operation::Lock {
                 token_id: b"ERA".to_vec(),
                 amount: bal.clone(),

@@ -11,8 +11,7 @@
 //! no transfer + no evidence            -> absent (no row)
 //! transfer only                        -> staged_transfer
 //! evidence only                        -> staged_evidence
-//! both present, unverified             -> ready_to_verify
-//! digest mismatch                      -> terminal_reject
+//! both present, digest-bound          -> ready_to_verify
 //! verified + canonical apply committed -> accepted
 //! ```
 //!
@@ -27,9 +26,12 @@
 //! 3. **Idempotent, but fail-closed.** Re-inserting identical bytes is a no-op.
 //!    The same key with *different* bytes or a different digest is an error, not
 //!    a silent overwrite.
-//! 4. **`terminal_reject` is sticky.** A digest mismatch is a decision. It must
-//!    never decay back into "still waiting for the other half", because that
-//!    would let a mismatched pair be retried until something eventually matched.
+//! 4. **A half that does not bind is not staged.** The transfer names its
+//!    evidence by digest, so an evidence half with another digest — or a
+//!    transfer naming another digest than the evidence staged under its key —
+//!    is not this pair's other half. It is refused, and nothing is recorded
+//!    about it (DSM Amendment A1, MR-DSM-0018): the half already staged keeps
+//!    waiting for the one that binds.
 //!
 //! This module deliberately contains **no acceptance cryptography and no ACK**.
 //! Verification and apply are wired on top of it, and no ACK-producing path is
@@ -39,7 +41,6 @@ use anyhow::{anyhow, Result};
 use rusqlite::{params, OptionalExtension};
 
 use super::get_connection;
-use crate::util::deterministic_time::tick;
 
 /// Where a staged transfer sits. `Absent` is the lack of a row, never a stored
 /// value. There is no rejected state: a transfer that does not execute changes
@@ -96,7 +97,6 @@ pub struct StagingRecord {
     pub expected_evidence_digest: Option<[u8; 32]>,
     pub evidence_bytes: Option<Vec<u8>>,
     pub evidence_digest: Option<[u8; 32]>,
-    pub reject_reason: Option<String>,
     /// The b0x inbox address the first half arrived on. `None` on rows staged
     /// before route retention existed, or after this key's ACKs released it.
     pub retained_route: Option<String>,
@@ -127,7 +127,7 @@ fn to32(v: &[u8]) -> Result<[u8; 32]> {
 }
 
 const STAGING_COLS: &str = "correlation_key, state, transfer_bytes, expected_evidence_digest, \
-     evidence_bytes, evidence_digest, reject_reason, retained_route";
+     evidence_bytes, evidence_digest, retained_route";
 
 fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<StagingRecord> {
     let state_str: String = row.get(1)?;
@@ -155,8 +155,7 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<StagingRecord> {
         expected_evidence_digest: eed.as_deref().map(to32_r).transpose()?,
         evidence_bytes: row.get(4)?,
         evidence_digest: ed.as_deref().map(to32_r).transpose()?,
-        reject_reason: row.get(6)?,
-        retained_route: row.get(7)?,
+        retained_route: row.get(6)?,
     })
 }
 
@@ -225,23 +224,20 @@ pub fn stage_transfer_half(
 ) -> Result<StagingState> {
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
-    let now = tick() as i64;
 
     if let Some(existing) = load(&conn, correlation_key)? {
-        if existing.state == StagingState::TerminalReject {
-            return Err(anyhow!(
-                "recipient_staging: {correlation_key} is terminally rejected \
-                 ({}); a rejected pair must not be re-staged",
-                existing
-                    .reject_reason
-                    .as_deref()
-                    .unwrap_or("no reason recorded")
-            ));
-        }
         // Route equality is checked BEFORE the byte checks and BEFORE any
         // write, in the same critical section, so a conflicting half can
         // never leave a partial record behind.
         check_route(&existing, route)?;
+        if let Some(staged) = existing.evidence_digest {
+            if staged != *expected_evidence_digest {
+                return Err(anyhow!(
+                    "recipient_staging: {correlation_key} holds evidence that is not the \
+                     evidence this transfer names; the transfer is not staged"
+                ));
+            }
+        }
         if let Some(prior) = existing.transfer_bytes.as_deref() {
             if prior != transfer_bytes {
                 return Err(anyhow!(
@@ -263,14 +259,13 @@ pub fn stage_transfer_half(
         // so this only ever writes when the column is still NULL.
         conn.execute(
             "UPDATE recipient_staging
-             SET transfer_bytes = ?2, expected_evidence_digest = ?3, updated_at = ?4,
-                 retained_route = COALESCE(retained_route, ?5)
+             SET transfer_bytes = ?2, expected_evidence_digest = ?3,
+                 retained_route = COALESCE(retained_route, ?4)
              WHERE correlation_key = ?1",
             params![
                 correlation_key,
                 transfer_bytes,
                 expected_evidence_digest.as_slice(),
-                now,
                 route
             ],
         )?;
@@ -278,15 +273,14 @@ pub fn stage_transfer_half(
         conn.execute(
             "INSERT INTO recipient_staging(
                 correlation_key, state, transfer_bytes, expected_evidence_digest,
-                retained_route, created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+                retained_route
+             ) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
                 correlation_key,
                 StagingState::StagedTransfer.as_str(),
                 transfer_bytes,
                 expected_evidence_digest.as_slice(),
                 route,
-                now
             ],
         )?;
     }
@@ -309,20 +303,17 @@ pub fn stage_evidence_half(
     );
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
-    let now = tick() as i64;
 
     if let Some(existing) = load(&conn, correlation_key)? {
-        if existing.state == StagingState::TerminalReject {
-            return Err(anyhow!(
-                "recipient_staging: {correlation_key} is terminally rejected \
-                 ({}); a rejected pair must not be re-staged",
-                existing
-                    .reject_reason
-                    .as_deref()
-                    .unwrap_or("no reason recorded")
-            ));
-        }
         check_route(&existing, route)?;
+        if let Some(named) = existing.expected_evidence_digest {
+            if named != digest {
+                return Err(anyhow!(
+                    "recipient_staging: {correlation_key} holds a transfer naming other \
+                     evidence; this evidence half is not staged"
+                ));
+            }
+        }
         if let Some(prior) = existing.evidence_bytes.as_deref() {
             if prior != evidence_bytes {
                 return Err(anyhow!(
@@ -336,30 +327,23 @@ pub fn stage_evidence_half(
         }
         conn.execute(
             "UPDATE recipient_staging
-             SET evidence_bytes = ?2, evidence_digest = ?3, updated_at = ?4,
-                 retained_route = COALESCE(retained_route, ?5)
+             SET evidence_bytes = ?2, evidence_digest = ?3,
+                 retained_route = COALESCE(retained_route, ?4)
              WHERE correlation_key = ?1",
-            params![
-                correlation_key,
-                evidence_bytes,
-                digest.as_slice(),
-                now,
-                route
-            ],
+            params![correlation_key, evidence_bytes, digest.as_slice(), route],
         )?;
     } else {
         conn.execute(
             "INSERT INTO recipient_staging(
                 correlation_key, state, evidence_bytes, evidence_digest,
-                retained_route, created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+                retained_route
+             ) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
                 correlation_key,
                 StagingState::StagedEvidence.as_str(),
                 evidence_bytes,
                 digest.as_slice(),
                 route,
-                now
             ],
         )?;
     }
@@ -384,7 +368,7 @@ pub fn staging_rows_needing_completion() -> Result<Vec<StagingRecord>> {
     let mut stmt = conn.prepare(&format!(
         "SELECT {STAGING_COLS} FROM recipient_staging
          WHERE state = ?1 OR (state = ?2 AND retained_route IS NOT NULL)
-         ORDER BY created_at"
+         ORDER BY rowid"
     ))?;
     let rows = stmt
         .query_map(
@@ -448,24 +432,19 @@ pub fn counterparty_has_unconverged_inbound(counterparty_device_id: &[u8]) -> Re
     Ok(false)
 }
 
-/// Every retained route that must stay in the recipient's poll set: rows with a
-/// route and NOT terminally rejected. `accepted` rows are included until their
-/// ACK releases the route — the ACK, not the state, is what proves the sender
-/// no longer needs it.
-///
-/// A `terminal_reject` row never ACKs and must never keep polling; it would
-/// re-download a ~118 KB evidence half every poll forever.
+/// Every retained route that must stay in the recipient's poll set: every row
+/// with a route. `accepted` rows are included until their ACK releases the
+/// route — the ACK, not the state, is what proves the sender no longer needs
+/// it.
 pub fn retained_routes_for_polling() -> Result<Vec<String>> {
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
     let mut stmt = conn.prepare(
         "SELECT DISTINCT retained_route FROM recipient_staging
-         WHERE retained_route IS NOT NULL AND state != ?1",
+         WHERE retained_route IS NOT NULL",
     )?;
     let routes = stmt
-        .query_map(params![StagingState::TerminalReject.as_str()], |r| {
-            r.get::<_, String>(0)
-        })?
+        .query_map([], |r| r.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(routes)
 }
@@ -477,51 +456,25 @@ pub fn release_retained_route(correlation_key: &str) -> Result<bool> {
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
     let n = conn.execute(
-        "UPDATE recipient_staging SET retained_route = NULL, updated_at = ?2
+        "UPDATE recipient_staging SET retained_route = NULL
          WHERE correlation_key = ?1 AND retained_route IS NOT NULL",
-        params![correlation_key, tick() as i64],
+        params![correlation_key],
     )?;
     Ok(n > 0)
 }
 
-/// Recompute the stored state from the halves, and bind the digest once both
-/// are present.
-///
-/// A mismatch here is TERMINAL. It is not "keep waiting": the transfer named an
-/// evidence object and something else arrived, and letting that decay back into
-/// a waiting state would allow retrying until something eventually matched.
+/// Recompute the stored state from the halves. A half that does not bind is
+/// never staged, so two halves under one key are digest-bound.
 fn reconcile(conn: &rusqlite::Connection, correlation_key: &str) -> Result<StagingState> {
     let rec = load(conn, correlation_key)?
         .ok_or_else(|| anyhow!("recipient_staging: {correlation_key} vanished mid-reconcile"))?;
     if rec.state.is_terminal() {
         return Ok(rec.state);
     }
-
-    let next = match (rec.expected_evidence_digest, rec.evidence_digest) {
-        (Some(expected), Some(actual)) if expected != actual => {
-            let reason = format!(
-                "evidence digest mismatch: transfer references {}, evidence hashes to {}",
-                crate::util::text_id::encode_base32_crockford(&expected),
-                crate::util::text_id::encode_base32_crockford(&actual)
-            );
-            conn.execute(
-                "UPDATE recipient_staging SET state = ?2, reject_reason = ?3, updated_at = ?4
-                 WHERE correlation_key = ?1",
-                params![
-                    correlation_key,
-                    StagingState::TerminalReject.as_str(),
-                    reason,
-                    tick() as i64
-                ],
-            )?;
-            return Ok(StagingState::TerminalReject);
-        }
-        _ => rec.derived_state(),
-    };
-
+    let next = rec.derived_state();
     conn.execute(
-        "UPDATE recipient_staging SET state = ?2, updated_at = ?3 WHERE correlation_key = ?1",
-        params![correlation_key, next.as_str(), tick() as i64],
+        "UPDATE recipient_staging SET state = ?2 WHERE correlation_key = ?1",
+        params![correlation_key, next.as_str()],
     )?;
     Ok(next)
 }
@@ -543,17 +496,13 @@ pub fn mark_accepted(correlation_key: &str) -> Result<()> {
         ));
     }
     conn.execute(
-        "UPDATE recipient_staging SET state = ?2, updated_at = ?3 WHERE correlation_key = ?1",
-        params![
-            correlation_key,
-            StagingState::Accepted.as_str(),
-            tick() as i64
-        ],
+        "UPDATE recipient_staging SET state = ?2 WHERE correlation_key = ?1",
+        params![correlation_key, StagingState::Accepted.as_str()],
     )?;
     Ok(())
 }
 
-/// Keys eligible for reaping: TERMINAL only.
+/// Keys eligible for reaping: accepted ones only.
 ///
 /// Deliberately not age-based. Reaping an incomplete half converts "waiting" into
 /// permanent limbo — the transfer is forward-only, so the sender will not reissue
@@ -566,7 +515,7 @@ pub fn reapable_keys() -> Result<Vec<String>> {
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
     let mut stmt = conn.prepare(
         "SELECT correlation_key FROM recipient_staging
-         WHERE state IN ('terminal_reject', 'accepted')",
+         WHERE state = 'accepted'",
     )?;
     let rows = stmt
         .query_map([], |row| row.get::<_, String>(0))?
@@ -580,9 +529,7 @@ mod tests {
     use serial_test::serial;
 
     fn fresh_db() {
-        unsafe {
-            std::env::set_var("DSM_SDK_TEST_MODE", "1");
-        }
+        crate::economic_fixtures::use_test_storage_dir();
         crate::storage::client_db::reset_database_for_tests();
         crate::storage::client_db::init_database().expect("init db");
     }
@@ -699,21 +646,34 @@ mod tests {
         );
 
         stage_evidence_half(key, &ev, "TESTROUTE").expect("stage evidence");
+        // With the transfer staged, other evidence does not bind to the digest
+        // it names, and is refused on that before anything else.
         let err = stage_evidence_half(key, &evidence(0xEE), "TESTROUTE")
-            .expect_err("a different evidence half must be refused");
-        assert!(err.to_string().contains("DIFFERENT evidence half"), "{err}");
+            .expect_err("evidence the transfer does not name must be refused");
+        assert!(err.to_string().contains("naming other evidence"), "{err}");
 
         // The originals survive untouched.
         let rec = get_staging(key).expect("load").expect("row");
         assert_eq!(rec.transfer_bytes.as_deref(), Some(&b"transfer-bytes"[..]));
         assert_eq!(rec.evidence_bytes.as_deref(), Some(ev.as_slice()));
+
+        // With only the evidence staged, a different evidence half for the same
+        // key is refused as a different half.
+        let evidence_first = "XFER-4E";
+        stage_evidence_half(evidence_first, &ev, "TESTROUTE").expect("stage evidence");
+        let err = stage_evidence_half(evidence_first, &evidence(0xEE), "TESTROUTE")
+            .expect_err("a different evidence half must be refused");
+        assert!(err.to_string().contains("DIFFERENT evidence half"), "{err}");
+        let rec = get_staging(evidence_first).expect("load").expect("row");
+        assert_eq!(rec.evidence_bytes.as_deref(), Some(ev.as_slice()));
     }
 
-    /// Both halves present but the digest does not bind -> TERMINAL reject,
-    /// and it must never decay back into "waiting for the other half".
+    /// A half that does not bind is refused and nothing is recorded about it
+    /// (MR-DSM-0018): the staged half keeps waiting, and the half that binds
+    /// completes the pair, whichever arrives first.
     #[test]
     #[serial]
-    fn both_halves_with_a_wrong_digest_reject_terminally() {
+    fn a_half_that_does_not_bind_is_not_staged() {
         fresh_db();
         let key = "XFER-5";
         let real = evidence(0xE5);
@@ -721,35 +681,31 @@ mod tests {
 
         stage_transfer_half(key, b"transfer-bytes", &digest_of(&real), "TESTROUTE")
             .expect("stage transfer");
-        let st = stage_evidence_half(key, &impostor, "TESTROUTE").expect("stage impostor evidence");
-        assert_eq!(
-            st,
-            StagingState::TerminalReject,
-            "a digest that does not bind must reject, not wait"
-        );
-
+        let err = stage_evidence_half(key, &impostor, "TESTROUTE")
+            .expect_err("evidence the transfer does not name is not staged");
+        assert!(err.to_string().contains("not staged"), "{err}");
         let rec = get_staging(key).expect("load").expect("row");
-        assert!(rec
-            .reject_reason
-            .as_deref()
-            .is_some_and(|r| r.contains("digest mismatch")));
+        assert_eq!(rec.evidence_bytes, None, "nothing of the impostor is kept");
+        assert_eq!(rec.state, StagingState::StagedTransfer);
+        assert_eq!(
+            stage_evidence_half(key, &real, "TESTROUTE").expect("the binding half"),
+            StagingState::ReadyToVerify
+        );
 
-        // Sticky: re-staging either half cannot revive it.
-        assert!(
-            stage_evidence_half(key, &real, "TESTROUTE").is_err(),
-            "must stay rejected"
-        );
-        assert!(
-            stage_transfer_half(key, b"transfer-bytes", &digest_of(&real), "TESTROUTE").is_err(),
-            "must stay rejected"
-        );
+        // The mirror image: evidence first, then a transfer naming another.
+        let key = "XFER-6";
+        stage_evidence_half(key, &real, "TESTROUTE").expect("stage evidence");
+        let err = stage_transfer_half(key, b"transfer-bytes", &digest_of(&impostor), "TESTROUTE")
+            .expect_err("a transfer naming other evidence is not staged");
+        assert!(err.to_string().contains("not staged"), "{err}");
         assert_eq!(
             staging_state(key).expect("state"),
-            StagingState::TerminalReject
+            StagingState::StagedEvidence
         );
-        assert!(
-            !StagingState::TerminalReject.may_ack(),
-            "a rejected pair must never be ACK-able"
+        assert_eq!(
+            stage_transfer_half(key, b"transfer-bytes", &digest_of(&real), "TESTROUTE")
+                .expect("the binding half"),
+            StagingState::ReadyToVerify
         );
     }
 
@@ -882,12 +838,11 @@ mod tests {
         );
     }
 
-    /// The route stays in the poll set for every non-rejected row — through
+    /// The route stays in the poll set for every row with one — through
     /// `accepted` — and is released ONLY by an explicit call after ACK success.
-    /// A `terminal_reject` row must never keep polling.
     #[test]
     #[serial]
-    fn retained_routes_are_polled_until_released_and_never_for_rejects() {
+    fn retained_routes_are_polled_until_released() {
         fresh_db();
 
         // One half staged from route R: retained.
@@ -898,27 +853,18 @@ mod tests {
         stage_transfer_half("K-B", b"tb", &digest_of(&ev_b), "ROUTE-B").expect("stage");
         stage_evidence_half("K-B", &ev_b, "ROUTE-B").expect("stage");
         mark_accepted("K-B").expect("accept");
-        // A rejected pair: NOT retained.
-        let ev_c = evidence(0x33);
-        stage_transfer_half("K-C", b"tc", &digest_of(&ev_c), "ROUTE-C").expect("stage");
-        stage_evidence_half("K-C", &evidence(0x34), "ROUTE-C")
-            .expect("stage (mismatch is recorded, not an error)");
-        assert_eq!(
-            staging_state("K-C").expect("state"),
-            StagingState::TerminalReject
-        );
 
         let mut routes = retained_routes_for_polling().expect("routes");
         routes.sort();
         assert_eq!(
             routes,
             vec!["ROUTE-A".to_string(), "ROUTE-B".to_string()],
-            "incomplete and unACKed-accepted rows keep their route; a reject does not"
+            "incomplete and unACKed-accepted rows keep their route"
         );
 
         // Completion candidates are the DB's view, not a touched-key vector:
         // K-A once both halves land (ready_to_verify), K-B while its ACK is
-        // unproven (accepted + retained route). The reject never.
+        // unproven (accepted + retained route).
         stage_evidence_half("K-A", &ev_a, "ROUTE-A").expect("stage");
         let needing = |label: &str| -> Vec<String> {
             let mut v: Vec<String> = staging_rows_needing_completion()

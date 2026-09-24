@@ -40,7 +40,7 @@ fn econ_op_id() -> [u8; 32] {
 fn transfer(to: [u8; 32], amount: u64, policy_commit: [u8; 32]) -> Operation {
     Operation::Transfer {
         to_device_id: to.to_vec(),
-        amount: Balance::from_state(amount, [0u8; 32]),
+        amount: Balance::amount(amount),
         token_id: b"T".to_vec(),
         policy_commit,
         mode: TransactionMode::Unilateral,
@@ -57,7 +57,7 @@ fn transfer(to: [u8; 32], amount: u64, policy_commit: [u8; 32]) -> Operation {
 
 fn burn(amount: u64, policy_commit: [u8; 32]) -> Operation {
     Operation::Burn {
-        amount: Balance::from_state(amount, [0u8; 32]),
+        amount: Balance::amount(amount),
         token_id: b"T".to_vec(),
         policy_commit,
         proof_of_ownership: Vec::new(),
@@ -68,7 +68,7 @@ fn burn(amount: u64, policy_commit: [u8; 32]) -> Operation {
 fn create_token(initial_supply: u64, fee_amount: u64) -> Operation {
     Operation::CreateToken {
         token_id: b"NEW".to_vec(),
-        initial_supply: Balance::from_state(initial_supply, [0u8; 32]),
+        initial_supply: Balance::amount(initial_supply),
         policy_commit: [0x77; 32],
         fee_amount,
         name: String::new(),

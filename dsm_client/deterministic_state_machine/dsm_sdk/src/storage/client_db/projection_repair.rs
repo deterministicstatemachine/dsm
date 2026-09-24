@@ -21,7 +21,6 @@ use anyhow::Result;
 use rusqlite::{params, OptionalExtension};
 
 use super::get_connection;
-use crate::util::deterministic_time::tick;
 
 /// A projection the process failed to write after its transaction committed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,7 +29,6 @@ pub struct ProjectionRepair {
     pub token_id: String,
     /// Why it was queued — diagnostic only, never branched on.
     pub reason: String,
-    pub created_at: u64,
 }
 
 /// Record that a projection needs rebuilding from canonical state.
@@ -43,10 +41,10 @@ pub fn enqueue_projection_repair(device_id: &str, token_id: &str, reason: &str) 
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
     conn.execute(
-        "INSERT INTO projection_repair_queue (device_id, token_id, reason, created_at)
-         VALUES (?1, ?2, ?3, ?4)
+        "INSERT INTO projection_repair_queue (device_id, token_id, reason)
+         VALUES (?1, ?2, ?3)
          ON CONFLICT(device_id, token_id) DO UPDATE SET reason = excluded.reason",
-        params![device_id, token_id, reason, tick() as i64],
+        params![device_id, token_id, reason],
     )?;
     Ok(())
 }
@@ -56,8 +54,8 @@ pub fn pending_projection_repairs() -> Result<Vec<ProjectionRepair>> {
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
     let mut stmt = conn.prepare(
-        "SELECT device_id, token_id, reason, created_at
-           FROM projection_repair_queue ORDER BY created_at",
+        "SELECT device_id, token_id, reason
+           FROM projection_repair_queue ORDER BY rowid",
     )?;
     let rows = stmt
         .query_map([], |r| {
@@ -65,7 +63,6 @@ pub fn pending_projection_repairs() -> Result<Vec<ProjectionRepair>> {
                 device_id: r.get(0)?,
                 token_id: r.get(1)?,
                 reason: r.get(2)?,
-                created_at: r.get::<_, i64>(3)? as u64,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -140,7 +137,17 @@ pub fn drain_projection_repairs(
             continue;
         };
         let effective = head.balance(&policy_commit);
-        let locked = super::get_locked_balance(&item.device_id, &item.token_id).unwrap_or(0);
+        let locked = match super::get_locked_balance(&item.device_id, &item.token_id) {
+            Ok(locked) => locked,
+            Err(e) => {
+                log::warn!(
+                    "[projection-repair] cannot read the locked amount for {}:{} ({e}) — retaining",
+                    item.device_id,
+                    item.token_id
+                );
+                continue;
+            }
+        };
 
         match super::build_balance_projection_from_device_head(
             &item.device_id,
@@ -153,7 +160,14 @@ pub fn drain_projection_repairs(
         .and_then(|record| super::upsert_balance_projection(&record))
         {
             Ok(()) => {
-                let _ = clear_projection_repair(&item.device_id, &item.token_id);
+                if let Err(e) = clear_projection_repair(&item.device_id, &item.token_id) {
+                    log::warn!(
+                        "[projection-repair] rebuilt {}:{} but could not dequeue it ({e}); \
+                         the next sweep rebuilds it again",
+                        item.device_id,
+                        item.token_id
+                    );
+                }
                 repaired += 1;
                 log::info!(
                     "[projection-repair] rebuilt {}:{} from canonical head (available={})",
@@ -220,7 +234,7 @@ pub fn reconcile_projections_with_head(
         let token_id = token_id.as_str();
         checked += 1;
 
-        let locked = super::get_locked_balance(&device_txt, token_id).unwrap_or(0);
+        let locked = super::get_locked_balance(&device_txt, token_id)?;
         let expected_available = head_balance.saturating_sub(locked);
 
         let current = super::get_balance_projection(&device_txt, token_id)?;
@@ -298,7 +312,7 @@ mod tests {
     use serial_test::serial;
 
     fn init() {
-        unsafe { std::env::set_var("DSM_SDK_TEST_MODE", "1") };
+        crate::economic_fixtures::use_test_storage_dir();
         crate::storage::client_db::reset_database_for_tests();
         crate::storage::client_db::init_database().expect("init db");
     }
@@ -309,32 +323,41 @@ mod tests {
         f(&conn)
     }
 
-    /// Build a canonical head holding ERA through the ONLY path that produces
-    /// ERA in the real system: `claims` admitted faucet claims on the device's
-    /// self-loop, the protocol payout (`ERA_FAUCET_PAYOUT` = 100) each. The
-    /// head is then persisted-and-reloaded by the code under test exactly as a
-    /// device's own head is; nothing here writes a balance directly.
-    fn head_with_era(claims: u64) -> ([u8; 32], dsm::types::device_state::DeviceState) {
-        let devid = [0x8Cu8; 32];
-        let mut head =
-            dsm::types::device_state::DeviceState::new(devid, devid, vec![0xAAu8; 32]);
-        for ticket in 0..claims {
-            head = head
-                .admitted_faucet_claim(ticket)
-                .expect("an admitted faucet claim on the self-loop");
+    /// A device holding `claims` faucet payouts of ERA, each one a real
+    /// admitted claim on the network's pinned nodes, and then its ERA
+    /// projection blanked out-of-band — the state the startup reconcile exists
+    /// to repair. Nothing here writes a balance.
+    async fn device_with_era_and_no_projection(
+        seed: u8,
+        claims: u64,
+    ) -> crate::test_support::one_device::Device {
+        let d = crate::test_support::one_device::Device::start(seed).await;
+        for _ in 0..claims {
+            crate::sdk::faucet_claim_flow::claim_era_faucet(
+                d.core(),
+                crate::economic_fixtures::NETWORK,
+            )
+            .await
+            .expect("a faucet claim admits");
         }
-        (devid, head)
+        with_conn(|c| {
+            c.execute("DELETE FROM balance_projections", [])
+                .expect("blank the projections")
+        });
+        d
     }
 
     /// THE 8XK CASE. Head intact (three faucet payouts = 300 ERA), projection
     /// empty (blanked out-of-band, no repair ever queued). The startup reconcile
     /// must rebuild the projection from the head WITHOUT touching the head.
-    #[test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[serial]
-    fn reconcile_rebuilds_a_projection_blanked_out_of_band() {
-        init();
-        let (devid, head) = head_with_era(3);
-        crate::storage::client_db::update_bcr_device_head(&head).expect("write head");
+    async fn reconcile_rebuilds_a_projection_blanked_out_of_band() {
+        let d = device_with_era_and_no_projection(0x8C, 3).await;
+        let devid = d.router.device_id_bytes;
+        let head = crate::storage::client_db::load_bcr_device_head(&devid)
+            .unwrap()
+            .expect("the device's persisted head");
         let root_before = head.root();
 
         let devid_txt = crate::util::text_id::encode_base32_crockford(&devid);
@@ -383,9 +406,8 @@ mod tests {
         with_conn(|c| {
             c.execute(
                 "INSERT INTO contacts (contact_id, device_id, alias, genesis_hash, chain_tip,
-                     added_at, verified, status, needs_online_reconcile,
-                     last_seen_online_counter, last_seen_ble_counter, local_bilateral_chain_tip)
-                 VALUES ('c1', ?1, 'peer', X'00', ?2, 0, 1, 'active', 1, 0, 0, ?3)",
+                     verified, status, needs_online_reconcile, local_bilateral_chain_tip)
+                 VALUES ('c1', ?1, 'peer', X'00', ?2, 1, 'active', 1, ?3)",
                 rusqlite::params![&devd[..], &parent[..], &target[..]],
             )
             .unwrap();
@@ -409,7 +431,6 @@ mod tests {
             amount: 6,
             token_id: "ERA".into(),
             status: crate::storage::client_db::PROPOSAL_FINALIZED.into(),
-            created_at: 0,
         };
         crate::storage::client_db::insert_sender_proposal(&proposal).unwrap();
 
@@ -427,12 +448,11 @@ mod tests {
     }
 
     /// A projection that already matches the head is left alone (idempotent, cheap).
-    #[test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[serial]
-    fn reconcile_is_a_noop_when_projection_matches() {
-        init();
-        let (devid, head) = head_with_era(1);
-        crate::storage::client_db::update_bcr_device_head(&head).expect("write head");
+    async fn reconcile_is_a_noop_when_projection_matches() {
+        let d = device_with_era_and_no_projection(0x8D, 1).await;
+        let devid = d.router.device_id_bytes;
         assert_eq!(reconcile_projections_against_head(&devid).unwrap(), (1, 1));
         // Second pass: already matches → nothing rebuilt.
         assert_eq!(reconcile_projections_against_head(&devid).unwrap(), (0, 1));

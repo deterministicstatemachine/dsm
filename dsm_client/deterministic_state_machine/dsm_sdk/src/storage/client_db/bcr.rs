@@ -30,12 +30,10 @@ use dsm::types::device_state::{
     DeviceState, OfflineAllocation, RelChainTip, RelationshipChainState, ValueCapability,
 };
 use dsm::types::operations::Operation;
-use log::warn;
 use rusqlite::{params, Connection, OptionalExtension};
 
 use super::get_connection;
 use crate::storage::codecs::{read_len_u32, read_u8, read_vec, take};
-use crate::util::deterministic_time::tick;
 
 /// Store a compact suspicious-activity report (bytes-only).
 pub fn store_bcr_report(report: &[u8]) -> Result<()> {
@@ -44,11 +42,9 @@ pub fn store_bcr_report(report: &[u8]) -> Result<()> {
         log::warn!("DB lock poisoned, recovering");
         poisoned.into_inner()
     });
-    let now = tick();
-
     conn.execute(
-        "INSERT INTO bcr_reports(report, created_at) VALUES (?1, ?2)",
-        params![report, now as i64],
+        "INSERT INTO bcr_reports(report) VALUES (?1)",
+        params![report],
     )?;
 
     Ok(())
@@ -437,8 +433,7 @@ pub fn store_bcr_chain_state(
         log::warn!("DB lock poisoned, recovering");
         poisoned.into_inner()
     });
-    let now = tick();
-    store_bcr_chain_state_with_conn(&conn, device_id, state, published, now)
+    store_bcr_chain_state_with_conn(&conn, device_id, state, published)
 }
 
 pub(crate) fn store_bcr_chain_state_with_conn(
@@ -446,7 +441,6 @@ pub(crate) fn store_bcr_chain_state_with_conn(
     device_id: &[u8; 32],
     state: &RelationshipChainState,
     published: bool,
-    now: u64,
 ) -> Result<()> {
     let chain_tip = state.compute_chain_tip();
     let bytes = encode_rel_chain_state(state);
@@ -454,8 +448,8 @@ pub(crate) fn store_bcr_chain_state_with_conn(
     conn.execute(
         "INSERT OR REPLACE INTO bcr_chain_states(
             device_id, rel_key, chain_tip, embedded_parent, state_bytes,
-            published, created_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            published
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         params![
             device_id.as_slice(),
             state.rel_key.as_slice(),
@@ -463,15 +457,14 @@ pub(crate) fn store_bcr_chain_state_with_conn(
             state.embedded_parent.as_slice(),
             bytes,
             if published { 1i32 } else { 0i32 },
-            now as i64,
         ],
     )?;
 
     Ok(())
 }
 
-/// Load all archived [`RelationshipChainState`]s for a device, ordered by
-/// insertion time. Optionally filter to published-only.
+/// Load all archived [`RelationshipChainState`]s for a device, in insertion
+/// order. Optionally filter to published-only.
 pub fn get_bcr_chain_states(
     device_id: &[u8],
     published_only: bool,
@@ -490,13 +483,13 @@ pub fn get_bcr_chain_states(
         conn.prepare(
             "SELECT state_bytes, chain_tip FROM bcr_chain_states
              WHERE device_id = ?1 AND published = 1
-             ORDER BY created_at ASC, rowid ASC",
+             ORDER BY rowid ASC",
         )?
     } else {
         conn.prepare(
             "SELECT state_bytes, chain_tip FROM bcr_chain_states
              WHERE device_id = ?1
-             ORDER BY created_at ASC, rowid ASC",
+             ORDER BY rowid ASC",
         )?
     };
 
@@ -505,64 +498,28 @@ pub fn get_bcr_chain_states(
         let tip: Vec<u8> = row.get(1)?;
         Ok((bytes, tip))
     })?;
-    let dropped = DroppedCounter::reset();
     let mut out = Vec::new();
     for row in iter {
-        let (bytes, expected_tip) = row?;
-        match decode_rel_chain_state(&bytes) {
-            Ok((state, recomputed_tip)) => {
-                if expected_tip.len() == 32 && recomputed_tip.as_slice() != expected_tip.as_slice()
-                {
-                    warn!("[client_db] bcr_chain_states tip mismatch (corruption?), skipping row");
-                    dropped.set(dropped.get() + 1);
-                    continue;
-                }
-                out.push(state);
-            }
-            Err(e) => {
-                warn!("[client_db] Skipping invalid bcr_chain_states row: {e}");
-                dropped.set(dropped.get() + 1);
-            }
-        }
+        let (bytes, stored_tip) = row?;
+        out.push(archived_state(&bytes, &stored_tip)?);
     }
 
     Ok(out)
 }
 
-/// How many rows the last `get_bcr_chain_states` call on this thread dropped.
-///
-/// Skipping an unreadable row is right for display — one bad row should not
-/// blank the history. It is wrong for anything that DERIVES AN AMOUNT from that
-/// history: a dropped `Mint` silently lowers the total, and a supply cap
-/// checked against a total that is too low permits a mint it should refuse.
-/// That is a fail-open, so callers computing an authority figure must ask
-/// whether the history they just read was complete and refuse to answer when it
-/// was not. Thread-local because the read and the question are the same call
-/// chain; the value is reset at the start of every load.
-pub fn last_load_dropped_rows() -> u32 {
-    DROPPED_ROWS.with(|d| d.get())
-}
-
-thread_local! {
-    static DROPPED_ROWS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
-}
-
-/// Handle over the per-thread dropped-row counter for one load.
-struct DroppedCounter;
-
-impl DroppedCounter {
-    fn reset() -> Self {
-        DROPPED_ROWS.with(|d| d.set(0));
-        Self
+/// One archived row, exactly as stored: bytes that decode to a chain state
+/// whose tip is the tip the row is keyed by. Anything else is a corrupt row,
+/// and a corrupt row is an error — never skipped, because a history read with
+/// a row missing is a history of another chain.
+fn archived_state(bytes: &[u8], stored_tip: &[u8]) -> Result<RelationshipChainState> {
+    let (state, recomputed_tip) = decode_rel_chain_state(bytes)
+        .map_err(|e| anyhow!("bcr_chain_states: a row does not decode: {e}"))?;
+    if recomputed_tip.as_slice() != stored_tip {
+        return Err(anyhow!(
+            "bcr_chain_states: a row's state does not recompute the tip it is stored under"
+        ));
     }
-
-    fn get(&self) -> u32 {
-        DROPPED_ROWS.with(|d| d.get())
-    }
-
-    fn set(&self, n: u32) {
-        DROPPED_ROWS.with(|d| d.set(n));
-    }
+    Ok(state)
 }
 
 /// Load all archived chain states for a specific relationship `rel_key`,
@@ -584,7 +541,7 @@ pub fn get_bcr_chain_states_for_rel(
     let mut stmt = conn.prepare(
         "SELECT state_bytes, chain_tip FROM bcr_chain_states
          WHERE device_id = ?1 AND rel_key = ?2
-         ORDER BY created_at ASC, rowid ASC",
+         ORDER BY rowid ASC",
     )?;
 
     let iter = stmt.query_map(params![device_id, rel_key.as_slice()], |row| {
@@ -595,18 +552,8 @@ pub fn get_bcr_chain_states_for_rel(
 
     let mut out = Vec::new();
     for row in iter {
-        let (bytes, expected_tip) = row?;
-        match decode_rel_chain_state(&bytes) {
-            Ok((state, recomputed_tip)) => {
-                if expected_tip.len() == 32 && recomputed_tip.as_slice() != expected_tip.as_slice()
-                {
-                    warn!("[client_db] bcr_chain_states tip mismatch (corruption?), skipping row");
-                    continue;
-                }
-                out.push(state);
-            }
-            Err(e) => warn!("[client_db] Skipping invalid bcr_chain_states row: {e}"),
-        }
+        let (bytes, stored_tip) = row?;
+        out.push(archived_state(&bytes, &stored_tip)?);
     }
 
     Ok(out)
@@ -619,27 +566,24 @@ pub fn update_bcr_device_head(head: &DeviceState) -> Result<()> {
         log::warn!("DB lock poisoned, recovering");
         poisoned.into_inner()
     });
-    let now = tick();
-    update_bcr_device_head_with_conn(&conn, head, now)
+    update_bcr_device_head_with_conn(&conn, head)
 }
 
 pub(crate) fn update_bcr_device_head_with_conn(
     conn: &Connection,
     head: &DeviceState,
-    now: u64,
 ) -> Result<()> {
     let smt_root = head.root();
     let bytes = encode_device_state(head);
     let devid = head.devid();
 
     conn.execute(
-        "INSERT INTO bcr_device_heads(device_id, smt_root, head_bytes, updated_at)
-         VALUES (?1, ?2, ?3, ?4)
+        "INSERT INTO bcr_device_heads(device_id, smt_root, head_bytes)
+         VALUES (?1, ?2, ?3)
          ON CONFLICT(device_id) DO UPDATE SET
             smt_root = excluded.smt_root,
-            head_bytes = excluded.head_bytes,
-            updated_at = excluded.updated_at",
-        params![devid.as_slice(), smt_root.as_slice(), bytes, now as i64,],
+            head_bytes = excluded.head_bytes",
+        params![devid.as_slice(), smt_root.as_slice(), bytes],
     )?;
 
     Ok(())
@@ -739,7 +683,7 @@ mod tests {
             let mut conn = binding.lock().unwrap();
             let tx = conn.transaction().expect("tx");
             crate::storage::client_db::economic_admission::put_pending_admission_with_conn(
-                &tx, &devid, &pending, 2,
+                &tx, &devid, &pending,
             )
             .expect("write pending");
             tx.commit().expect("commit");
@@ -774,7 +718,7 @@ mod tests {
     }
 
     fn init_test_db() {
-        unsafe { std::env::set_var("DSM_SDK_TEST_MODE", "1") };
+        crate::economic_fixtures::use_test_storage_dir();
         crate::storage::client_db::reset_database_for_tests();
         crate::storage::client_db::init_database().expect("init db");
     }
@@ -785,7 +729,7 @@ mod tests {
         Operation::Transfer {
             policy_commit: [0xD4; 32],
             to_device_id: vec![0xA1; 32],
-            amount: TokenBalance::from_state(amount, [0u8; 32]),
+            amount: TokenBalance::amount(amount),
             token_id: b"ERA".to_vec(),
             mode: TransactionMode::Bilateral,
             nonce: vec![0xCC; 8],
@@ -854,23 +798,16 @@ mod tests {
     ) {
         let device_id = [0xA1; 32];
         let counterparty = [0xB2; 32];
-        let rel_key = [0xC3; 32];
+        let rel_key =
+            dsm::core::bilateral_transaction_manager::compute_smt_key(&device_id, &counterparty);
         let policy_commit = [0xD4; 32];
-        let device = DeviceState::new(
-            [0x11; 32],
-            device_id,
-            owner_keypair().public_key.clone(),
-        );
+        let device = DeviceState::new([0x11; 32], device_id, owner_keypair().public_key.clone());
         // Adoption precedes receipt (owner ruling 2026-09-13): a credit of a
         // policy the head has not adopted is refused at `advance`, so the
         // fixture adopts through the real self-loop `AdoptToken` transition
         // first — the same shape `tokens.addByAnchor` commits on a device.
-        let (self_rel, self_tip) = (
-            dsm::core::bilateral_transaction_manager::compute_smt_key(&device_id, &device_id),
-            dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-                &device_id, &device_id,
-            ),
-        );
+        let self_rel =
+            dsm::core::bilateral_transaction_manager::compute_smt_key(&device_id, &device_id);
         let adopted = device
             .advance(
                 self_rel,
@@ -880,7 +817,6 @@ mod tests {
                     signature: vec![0xAD; 64],
                 },
                 &[],
-                Some(self_tip),
                 None,
                 None,
             )
@@ -891,7 +827,10 @@ mod tests {
             tip_entropy: adopted.new_chain_state.entropy.clone(),
             value_capability: ValueCapability::Unknown,
         };
-        let device = adopted.new_device_state;
+        let device = adopted
+            .new_device_state
+            .establish_relationship(counterparty)
+            .expect("the relationship is established before its first step");
         // The PR4 credit gate: a credit-direction Transfer advances only
         // with a matching Prepared DsmBacked admission attached — the honest
         // fixture precondition, exactly what production attaches. Stripped
@@ -915,7 +854,6 @@ mod tests {
                     direction: BalanceDirection::Credit,
                     amount: 7,
                 }],
-                Some([0x55; 32]),
                 None,
                 None,
             )
@@ -992,14 +930,8 @@ mod tests {
                 }],
                 None,
                 None,
-                None,
             )
             .expect("second advance");
-        let outcome1_head = outcome1
-            .new_device_state
-            .clone()
-            .with_pending_economic_admission(None);
-        let _ = &outcome1_head;
         store_bcr_chain_state(&device_id, &outcome1.new_chain_state, false)
             .expect("store unpublished rel state");
 
@@ -1015,6 +947,46 @@ mod tests {
             all[1].compute_chain_tip(),
             outcome1.new_chain_state.compute_chain_tip()
         );
+    }
+
+    /// A row whose bytes do not decode, or whose state does not recompute the
+    /// tip it is stored under, fails the load — both loaders, every caller.
+    #[test]
+    #[serial]
+    fn a_corrupt_archived_row_fails_the_load() {
+        let (device_id, _, rel_key, rel0, _) = sample_device_and_rel();
+        for corrupt in ["undecodable", "wrong tip"] {
+            init_test_db();
+            store_bcr_chain_state(&device_id, &rel0, true).expect("store");
+            {
+                let binding = get_connection().expect("conn");
+                let conn = binding.lock().expect("lock");
+                let changed = match corrupt {
+                    "undecodable" => conn.execute(
+                        "UPDATE bcr_chain_states SET state_bytes = X'00' WHERE device_id = ?1",
+                        params![device_id.as_slice()],
+                    ),
+                    _ => conn.execute(
+                        "UPDATE bcr_chain_states SET chain_tip = ?1 WHERE device_id = ?2",
+                        params![[0x5Au8; 32].as_slice(), device_id.as_slice()],
+                    ),
+                }
+                .expect("corrupt the row");
+                assert_eq!(changed, 1);
+            }
+            assert!(
+                get_bcr_chain_states(&device_id, false).is_err(),
+                "{corrupt}: device load"
+            );
+            assert!(
+                get_bcr_chain_states(&device_id, true).is_err(),
+                "{corrupt}: published load"
+            );
+            assert!(
+                get_bcr_chain_states_for_rel(&device_id, &rel_key).is_err(),
+                "{corrupt}: relationship load"
+            );
+        }
     }
 
     #[test]
@@ -1041,7 +1013,6 @@ mod tests {
                     direction: BalanceDirection::Credit,
                     amount: 11,
                 }],
-                None,
                 None,
                 None,
             )

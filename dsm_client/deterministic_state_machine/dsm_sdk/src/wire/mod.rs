@@ -186,7 +186,6 @@ fn map_error_code(error: &DsmError) -> ErrorCode {
         | DsmError::InvalidKeyLength
         | DsmError::InvalidCiphertext
         | DsmError::HashChain(_)
-        | DsmError::ForwardCommitment(_)
         | DsmError::Genesis(_)
         | DsmError::DeviceHierarchy(_)
         | DsmError::ExternalCommitment(_)

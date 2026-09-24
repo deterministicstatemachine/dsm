@@ -18,7 +18,10 @@
 //! is not validation: whether the route it carries realizes is the ladder's
 //! question (rebuild step R12), answered from the same bytes.
 
-use crate::route_chain::{evaluate, CellError, CellEvidence, CellReading, Missing, RoutedCell};
+use crate::route_chain::{
+    check_completion_proof, completion_proof, evaluate, CellError, CellEvidence, CellReading,
+    CompletionProof, Missing, ProofRefusal, RoutedCell,
+};
 use super::derive;
 use super::publication::{
     recognize_policy_fulfillment, recognize_precommit, recognize_fulfillment, Signed,
@@ -183,10 +186,36 @@ pub fn attempt_resolution(
     cell: &AttemptCell,
     evidence: &CellEvidence,
 ) -> Result<CellReading<RecognizedExercise>, Missing> {
-    evaluate(&cell.cell, evidence, |bytes| {
+    evaluate(&cell.cell, evidence, exercise_at(cell))
+}
+
+/// The recognizer of an attempt cell: exercises naming its key, identified
+/// by their `E`.
+fn exercise_at(cell: &AttemptCell) -> impl Fn(&[u8]) -> Option<(D32, RecognizedExercise)> + '_ {
+    move |bytes| {
         exercise_names_key(bytes, &cell.vault_id, &cell.parent_root, cell.attempt)
             .map(|x| (x.external_commitment, x))
-    })
+    }
+}
+
+/// The completion proof of the exercise final at an attempt cell (storage
+/// spec §9; SoFi Amendment S10), with the exercise; `None` while no chain of
+/// the exercise holding the cell has three links.
+pub fn attempt_completion(
+    cell: &AttemptCell,
+    evidence: &CellEvidence,
+) -> Result<Option<(RecognizedExercise, CompletionProof)>, Missing> {
+    completion_proof(&cell.cell, evidence, exercise_at(cell))
+}
+
+/// Check a kept completion proof of an attempt cell against the reads in
+/// `evidence`: the exercise it proves final.
+pub fn check_attempt_completion(
+    cell: &AttemptCell,
+    evidence: &CellEvidence,
+    proof: &CompletionProof,
+) -> Result<RecognizedExercise, ProofRefusal> {
+    check_completion_proof(&cell.cell, evidence, proof, exercise_at(cell))
 }
 
 #[cfg(test)]
@@ -380,6 +409,42 @@ mod tests {
         assert!(recognize_exercise(&bent.encode()).is_none());
     }
 
+    /// An exercise final at its attempt cell has a completion proof built
+    /// from the reads, and the proof checks against them.
+    #[test]
+    fn a_final_exercise_has_a_completion_proof_that_checks() {
+        let f = swap_fixture_n(2);
+        let built = exercise(&f, &[0, 1]);
+        let bytes = built.exercise.encode();
+        let leg = &built.precommit.legs()[0];
+        let at = AttemptCell::new(
+            &leg.vault_id,
+            &leg.parent_root,
+            0,
+            &committed_set(),
+            &committed_set_id(),
+        )
+        .expect("the committed set");
+        let mut seats = Cell::at(at.routed());
+        seats.write(&bytes, 1, &[]);
+        assert!(matches!(
+            attempt_completion(&at, &seats.evidence()),
+            Ok(None)
+        ));
+        let mut seats = Cell::at(at.routed());
+        seats.write(&bytes, ROUTE_LEN - 1, &[]);
+        let Ok(Some((proven, proof))) = attempt_completion(&at, &seats.evidence()) else {
+            panic!("a final exercise has a completion proof")
+        };
+        assert_eq!(
+            proven.external_commitment,
+            *built.precommit.external_commitment()
+        );
+        let checked = check_attempt_completion(&at, &seats.evidence(), &proof)
+            .expect("the kept proof checks");
+        assert_eq!(checked.fulfillment.body, built.fulfillment);
+    }
+
     /// The ladder's read of a successor key: the exercise that holds it,
     /// identified by its E, final or leader-held; a cell whose leader holds
     /// no exercise naming the key is open; an unread leader decides nothing.
@@ -436,5 +501,42 @@ mod tests {
             fact(&attempt_resolution(&at(0), &unread)),
             Err(Missing::LeaderUnread)
         );
+    }
+
+    /// The leader of an attempt cell is the first member of the Fisher-Yates
+    /// shuffle of the committed set under the vault's storage seed — nothing
+    /// else enters (Part II §7.2).
+    #[test]
+    fn an_attempt_cells_leader_is_the_first_member_of_the_seeded_shuffle_over_s() {
+        let (v, r) = ([0xA1; 32], [0xB2; 32]);
+        let ids: Vec<Vec<u8>> = committed_set()
+            .entries()
+            .iter()
+            .map(|e| e.member_id().to_vec())
+            .collect();
+        let expected = crate::sofi::fisher_yates::first_member(&derive::storage_seed(&v, &r), &ids)
+            .expect("shuffle");
+        for attempt in [0, 1, 7] {
+            let cell = AttemptCell::new(&v, &r, attempt, &committed_set(), &committed_set_id())
+                .expect("cell");
+            assert_eq!(cell.routed().route().leader(), expected.as_slice());
+        }
+    }
+
+    /// The seed consumes the vault and the parent root, so a writer cannot
+    /// choose its leader: change either and the leader moves for some value.
+    #[test]
+    fn an_attempt_cells_leader_is_bound_to_the_vault_and_the_parent_root() {
+        let leader = |v: [u8; 32], r: [u8; 32]| {
+            AttemptCell::new(&v, &r, 0, &committed_set(), &committed_set_id())
+                .expect("cell")
+                .routed()
+                .route()
+                .leader()
+                .to_vec()
+        };
+        let base = leader([0xA1; 32], [0xB2; 32]);
+        assert!((0u8..32).any(|b| leader([0xA1; 32], [b; 32]) != base));
+        assert!((0u8..32).any(|b| leader([b; 32], [0xB2; 32]) != base));
     }
 }

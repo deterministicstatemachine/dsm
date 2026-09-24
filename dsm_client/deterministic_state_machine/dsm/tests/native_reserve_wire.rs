@@ -527,8 +527,6 @@ fn conservation_refuses_anything_but_the_derived_payout() {
     let devid = [0x33u8; 32];
     let head = DeviceState::new([0x44u8; 32], devid, vec![0xAA; 32]);
     let rel = dsm::core::bilateral_transaction_manager::compute_smt_key(&devid, &devid);
-    let tip =
-        dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(&devid, &devid);
     let op = claim_op(era_reserve_id(NETWORK), 42);
 
     // Wrong amount and wrong asset each refused: nothing is caller-chosen.
@@ -555,7 +553,6 @@ fn conservation_refuses_anything_but_the_derived_payout() {
                 devid,
                 op.clone(),
                 std::slice::from_ref(&delta),
-                Some(tip),
                 None,
                 None,
             )

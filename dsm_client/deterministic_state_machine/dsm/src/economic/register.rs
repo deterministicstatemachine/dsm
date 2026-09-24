@@ -49,7 +49,10 @@ use crate::common::domain_tags::{
 };
 use crate::crypto::blake3::dsm_domain_hasher;
 use crate::economic::claim_envelope::RegisteredEconomicClaim;
-use crate::route_chain::{evaluate, CellError, CellEvidence, CellReading, Missing, RoutedCell};
+use crate::route_chain::{
+    check_completion_proof, completion_proof, evaluate, CellError, CellEvidence, CellReading,
+    CompletionProof, Missing, ProofRefusal, RoutedCell,
+};
 
 /// `K_root = H_dom(DSM/trader-economic-root-register-key/v1,
 /// G ‖ DevID ‖ u64_be(economic_position))`.
@@ -147,10 +150,36 @@ pub fn read_root_cell(
     cell: &RootCell,
     evidence: &CellEvidence,
 ) -> Result<CellReading<RegisteredEconomicClaim>, Missing> {
-    evaluate(&cell.cell, evidence, |bytes| {
+    evaluate(&cell.cell, evidence, claim_at(cell))
+}
+
+/// The recognizer of a root cell: claims naming its key, identified by the
+/// entry digest of their exact bytes.
+fn claim_at(cell: &RootCell) -> impl Fn(&[u8]) -> Option<([u8; 32], RegisteredEconomicClaim)> + '_ {
+    move |bytes| {
         root_claim_naming(bytes, cell.cell.key())
             .map(|claim| (crate::storage_cell::entry_digest(bytes), claim))
-    })
+    }
+}
+
+/// The completion proof of the claim final at a root cell (storage spec
+/// §9), with the claim; `None` while no chain of the claim holding the cell
+/// has three links.
+pub fn root_completion(
+    cell: &RootCell,
+    evidence: &CellEvidence,
+) -> Result<Option<(RegisteredEconomicClaim, CompletionProof)>, Missing> {
+    completion_proof(&cell.cell, evidence, claim_at(cell))
+}
+
+/// Check a kept completion proof of a root cell against the reads in
+/// `evidence`: the claim it proves final.
+pub fn check_root_completion(
+    cell: &RootCell,
+    evidence: &CellEvidence,
+    proof: &CompletionProof,
+) -> Result<RegisteredEconomicClaim, ProofRefusal> {
+    check_completion_proof(&cell.cell, evidence, proof, claim_at(cell))
 }
 
 /// `s(q)` — the seed of a trader's position cells (Part II §7.2), consumed
@@ -630,5 +659,45 @@ mod registered_root_construction_tests {
         // second path: `RegisteredEconomicRoot` has no public fields and no
         // other constructor.
         assert!(decoded.single_root().is_err());
+    }
+
+    /// A claim final at its root cell has a completion proof built from the
+    /// reads, and the proof checks against them; a claim held at the leader
+    /// alone has none.
+    #[test]
+    fn a_final_root_claim_has_a_completion_proof_that_checks() {
+        use crate::route_chain::fixtures::{committed_set, committed_set_id, Cell};
+        use crate::route_chain::ROUTE_LEN;
+        let claim = crate::sofi::wire::SofiResolutionClaim {
+            genesis: [0x11; 32],
+            device_id: [0x22; 32],
+            position: 9,
+            fulfillment_id: [0xF1; 32],
+            realize_root: [0xA1; 32],
+            void_root: [0xB1; 32],
+        };
+        let bytes = claim.encode();
+        let cell = RootCell::new(
+            &[0x11; 32],
+            &[0x22; 32],
+            9,
+            &[0x5E; 32],
+            &committed_set(),
+            &committed_set_id(),
+        )
+        .expect("the committed set");
+        let mut held = Cell::at(cell.routed());
+        held.write(&bytes, 0, &[]);
+        assert_eq!(root_completion(&cell, &held.evidence()), Ok(None));
+        let mut seats = Cell::at(cell.routed());
+        seats.write(&bytes, ROUTE_LEN - 1, &[]);
+        let Ok(Some((proven, proof))) = root_completion(&cell, &seats.evidence()) else {
+            panic!("a final claim has a completion proof")
+        };
+        assert_eq!(proven, decode_registered_economic_claim(&bytes).unwrap());
+        assert_eq!(
+            check_root_completion(&cell, &seats.evidence(), &proof),
+            Ok(proven)
+        );
     }
 }

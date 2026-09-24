@@ -22,7 +22,7 @@
 //! position exists, it is terminal, and it moved nothing.
 
 use crate::economic::lineage::ValidatedEconomicRoot;
-use crate::sofi::validation::{trader_credits, Evidence};
+use crate::sofi::validation::{trader_balance_changes, trader_credits, Evidence, TraderBalanceChange};
 use crate::sofi::wire::SettlementPreimage;
 use crate::types::device_state::DeviceState;
 
@@ -30,7 +30,7 @@ use super::derive;
 use super::resolution::Resolution;
 use super::wire::{
     next_position, ParentClaimRef, SofiWireError, TraderFulfillmentBody, TraderPrecommitBody,
-    VaultStateLeaf,
+    VaultGenesisPreimage, VaultStateLeaf,
 };
 
 type D32 = [u8; 32];
@@ -61,6 +61,9 @@ pub enum AdvanceError {
     CreditsNotDerivable,
     /// A realized position credits a token this device has not adopted.
     TokenNotAdopted { policy_commit: D32 },
+    /// The balances a realized position moves could not be derived from the
+    /// evidence the verdict was reached on.
+    BalancesNotDerivable,
     /// The receipt describes a different operation from the one being
     /// installed: its settlement does not recompute this `P`'s `E`.
     ReceiptIsNotThisOperation { expected: D32, derived: D32 },
@@ -101,6 +104,10 @@ impl core::fmt::Display for AdvanceError {
             Self::CreditsNotDerivable => write!(
                 f,
                 "the credits of this realized position are not derivable from its evidence"
+            ),
+            Self::BalancesNotDerivable => write!(
+                f,
+                "the balances this realized position moves are not derivable from its evidence"
             ),
             Self::TokenNotAdopted { policy_commit } => write!(
                 f,
@@ -202,12 +209,27 @@ fn adoption_admits(
     Ok(())
 }
 
-/// What [`advance_resolved`] establishes at `q`: the validated root, and the
-/// claim `C_q` accepted there.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The trader balances a resolved position moves, as [`advance_resolved`]
+/// derived them from the settlement and the evidence its verdict was reached
+/// on. A Void moves none. Only `advance_resolved` builds one, so the balances
+/// a device head takes from a resolution are the ones the installed root
+/// holds, never a caller's list ([`DeviceState::with_resolved_position`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedBalances(Vec<TraderBalanceChange>);
+
+impl ResolvedBalances {
+    pub fn changes(&self) -> &[TraderBalanceChange] {
+        &self.0
+    }
+}
+
+/// What [`advance_resolved`] establishes at `q`: the validated root, the
+/// claim `C_q` accepted there, and the trader balances the root moved.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedAdvance {
     pub root: ValidatedEconomicRoot,
     pub claim: crate::economic::lineage::AcceptedClaim,
+    pub balances: ResolvedBalances,
 }
 
 /// Advance the validated lineage through a resolved SoFi position (P15-10).
@@ -253,21 +275,24 @@ pub fn advance_resolved(
             derived: derived_digest,
         });
     }
-    let root = match resolution {
+    let (root, balances) = match resolution {
         Resolution::Realized => {
+            let receipt = receipt.ok_or(AdvanceError::RealizedWithoutReceipt)?;
             // The adoption invariant, inside the function that installs the
             // root, so that no caller can reach a realized advance without it.
-            adoption_admits(
-                precommit,
-                receipt.ok_or(AdvanceError::RealizedWithoutReceipt)?,
-            )?;
-            *precommit.realize_root()
+            adoption_admits(precommit, receipt)?;
+            // The balances the realize root holds for the tokens T° moves,
+            // from the same bytes `adoption_admits` just bound to this `E`.
+            let changes = trader_balance_changes(precommit, receipt.preimage, receipt.evidence)
+                .map_err(|_| AdvanceError::BalancesNotDerivable)?;
+            (*precommit.realize_root(), ResolvedBalances(changes))
         }
         // Zero mutations: the lineage continues exactly where it was.
-        Resolution::Void => previous.economic_root(),
+        Resolution::Void => (previous.economic_root(), ResolvedBalances(Vec::new())),
         Resolution::Invalid => return Err(AdvanceError::LineageIsTerminal),
     };
     Ok(ResolvedAdvance {
+        balances,
         root: ValidatedEconomicRoot::from_resolved_sofi_position(q, root),
         claim: crate::economic::lineage::AcceptedClaim::from_resolved_sofi_position(
             *precommit.genesis(),
@@ -383,21 +408,8 @@ pub fn descendant_fence(
     }
 }
 
-/// Why a vault's market policy is not the one its genesis state commits.
-///
-/// WHAT THIS NO LONGER IS. It was the refusal set of `genesis_accepted`, a
-/// twelve-conjunct predicate that established a vault genesis from a
-/// PRESENTED creation operation. That predicate could never acquire a
-/// production caller — `VaultCreation` carries no asset commitments, so
-/// proving the creation leaf establishes the AMOUNTS and never which balances
-/// were debited — and a CI gate existed to keep it callerless. Owner ruling
-/// Section 44.4 settled it: the standalone production predicate was the stale
-/// piece, not the gate. Genesis validity is established by the vault genesis
-/// constructor and recognizer with the accepted genesis root, the predicate
-/// survives as the formal definition (`lean4/DSMSofiAtomicity.lean`,
-/// `GenesisAccepted`; `tla/DSM_SofiFulfillment.tla`,
-/// `GenesisCanonicalOnlyIfCreationValid`), and what remains here is the
-/// market-policy half that `build_vault_create` actually uses.
+/// Why a vault's market policy is not the one its genesis state commits:
+/// what the creation builder refuses before the owner signs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GenesisError {
     /// The pair is not strictly ordered, so the market policy would admit two
@@ -431,6 +443,234 @@ impl core::fmt::Display for GenesisError {
 }
 
 impl std::error::Error for GenesisError {}
+
+/// A vault genesis a verifier accepted (SoFi §19.8 `GenesisAccepted`): the
+/// genesis preimage that the owner's validated transition at `p_create`
+/// carried, with the market it commits. Only [`genesis_accepted`] constructs
+/// it, and a walk of a vault starts from nothing else (§30 step 1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcceptedVaultGenesis {
+    vault_id: D32,
+    preimage: VaultGenesisPreimage,
+    genesis_root: D32,
+    market: crate::ccb::state::MarketPolicy,
+}
+
+impl AcceptedVaultGenesis {
+    /// `v = vault_id(G_o, DevID_o, p_create)`.
+    pub fn vault_id(&self) -> &D32 {
+        &self.vault_id
+    }
+
+    /// The preimage the owner's creation carried.
+    pub fn preimage(&self) -> &VaultGenesisPreimage {
+        &self.preimage
+    }
+
+    /// `V_0`, the vault's state at generation zero.
+    pub fn state(&self) -> &VaultStateLeaf {
+        &self.preimage.state
+    }
+
+    /// `R_0`.
+    pub fn genesis_root(&self) -> &D32 {
+        &self.genesis_root
+    }
+
+    /// The market policy `V_0` commits.
+    pub fn market(&self) -> &crate::ccb::state::MarketPolicy {
+        &self.market
+    }
+}
+
+/// Evidence genesis acceptance consumes that is not in hand. A network
+/// status: the vault is neither accepted nor refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GenesisMissing {
+    /// The `TokenPolicyV3` bytes one of the vault's two tokens commits, or
+    /// bytes that do not re-hash to that commit.
+    TokenPolicy { commit: D32 },
+}
+
+/// Why a vault genesis is not accepted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GenesisInvalid {
+    /// The fetched bytes are not a canonical genesis preimage.
+    PreimageDoesNotDecode,
+    /// The validated transition is not the owner's at `p_create`.
+    NotTheOwnersCreationPosition,
+    /// The owner's validated transition at `p_create` is not a vault
+    /// creation, or created a vault from other preimage bytes.
+    NotTheCreationTheOwnerMade,
+    /// `V_0` is not at generation zero.
+    NotGenerationZero { generation: u64 },
+    /// `V_0` is not Active.
+    NotActive { status: u16 },
+    /// `V_0` names a storage set other than the network's pinned set.
+    NotThePinnedSet { named: D32, pinned: D32 },
+    /// No root register profile is pinned for this network.
+    NoPinnedSet,
+    /// `V_0` does not encode, so it has no `R_0`.
+    StateDoesNotEncode,
+    /// The carried market-policy bytes are not the policy `V_0` commits, or
+    /// not a canonical policy with an ordered pair.
+    Market(GenesisError),
+    /// A token's committed policy does not parse.
+    TokenPolicyDoesNotParse { token: D32 },
+    /// A token's policy refuses it as a market leg (§49: `transferable`
+    /// binds vault creation).
+    TokenNotTransferable { token: D32 },
+}
+
+/// Why genesis acceptance has no answer yet, or its answer is no.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GenesisRefusal {
+    Missing(GenesisMissing),
+    Invalid(GenesisInvalid),
+}
+
+/// SoFi §19.8 `GenesisAccepted`, over the genesis preimage bytes a verifier
+/// fetched under `vault_genesis_locator(v)` and the owner's transition at
+/// `p_create` as the verifier's own walk of the owner's lineage validated it.
+///
+/// The validated transition carries the conjuncts its write set enforces:
+/// `v` derived from the owner coordinates and `p_create`, reserves equal to
+/// the funded amounts and the debits, the creation record's `R_0` recomputed
+/// from `V_0`, and the funded pair the market policy authorizes. Acceptance
+/// binds the fetched bytes to that transition — the operation the owner
+/// signed carried exactly these bytes — and adds what the transition does not
+/// decide: `V_0` at generation zero and Active, on the network's pinned set,
+/// with both tokens transferable (§49).
+///
+/// `token_policies` holds `TokenPolicyV3` bytes by `policy_commit`; each is
+/// re-hashed to its commit before it establishes anything.
+pub fn genesis_accepted(
+    network_id: &[u8],
+    preimage_bytes: &[u8],
+    owner: &crate::economic::provenance::ValidatedPeerTransition,
+    token_policies: &std::collections::BTreeMap<D32, Vec<u8>>,
+) -> Result<AcceptedVaultGenesis, GenesisRefusal> {
+    creation_accepted(
+        network_id,
+        preimage_bytes,
+        &OwnerCreation {
+            genesis: owner.peer_genesis(),
+            device_id: owner.peer_devid(),
+            position: owner.validated_root().economic_position(),
+            operation: owner.verified_operation(),
+        },
+        token_policies,
+    )
+}
+
+/// The owner's validated transition, as far as acceptance reads it.
+struct OwnerCreation<'a> {
+    genesis: &'a D32,
+    device_id: &'a D32,
+    position: u64,
+    operation: &'a crate::types::operations::Operation,
+}
+
+fn creation_accepted(
+    network_id: &[u8],
+    preimage_bytes: &[u8],
+    owner: &OwnerCreation<'_>,
+    token_policies: &std::collections::BTreeMap<D32, Vec<u8>>,
+) -> Result<AcceptedVaultGenesis, GenesisRefusal> {
+    let invalid = GenesisRefusal::Invalid;
+    let preimage = VaultGenesisPreimage::decode(preimage_bytes)
+        .map_err(|_| invalid(GenesisInvalid::PreimageDoesNotDecode))?;
+    if preimage.owner_genesis != *owner.genesis
+        || preimage.owner_device_id != *owner.device_id
+        || preimage.create_position != owner.position
+    {
+        return Err(invalid(GenesisInvalid::NotTheOwnersCreationPosition));
+    }
+    let crate::types::operations::Operation::SofiVaultCreate {
+        genesis_preimage,
+        market_policy_preimage,
+        ..
+    } = owner.operation
+    else {
+        return Err(invalid(GenesisInvalid::NotTheCreationTheOwnerMade));
+    };
+    if genesis_preimage.as_slice() != preimage_bytes {
+        return Err(invalid(GenesisInvalid::NotTheCreationTheOwnerMade));
+    }
+    let state = &preimage.state;
+    if state.generation != 0 {
+        return Err(invalid(GenesisInvalid::NotGenerationZero {
+            generation: state.generation,
+        }));
+    }
+    if state.status != super::wire::VAULT_STATUS_ACTIVE {
+        return Err(invalid(GenesisInvalid::NotActive {
+            status: state.status,
+        }));
+    }
+    let pinned = crate::economic::register::resolve_root_register_profile(network_id)
+        .map_err(|_| invalid(GenesisInvalid::NoPinnedSet))?
+        .storage_set_id;
+    if state.storage_set_id != pinned {
+        return Err(invalid(GenesisInvalid::NotThePinnedSet {
+            named: state.storage_set_id,
+            pinned,
+        }));
+    }
+    let vault_id = preimage.vault_id();
+    let genesis_root =
+        genesis_root(&vault_id, state).map_err(|_| invalid(GenesisInvalid::StateDoesNotEncode))?;
+    let committed = crate::ccb::decode::policy_object_address(
+        crate::ccb::class::MARKET_POLICY,
+        market_policy_preimage,
+    );
+    if committed != Some(state.market_policy) {
+        return Err(invalid(GenesisInvalid::Market(
+            GenesisError::MarketPolicyIsNotTheCommittedOne,
+        )));
+    }
+    // `token_a < token_b`: a `MarketPolicy` with an unordered pair does not
+    // decode.
+    let market =
+        crate::ccb::decode::decode_market_policy(market_policy_preimage).map_err(|_| {
+            invalid(GenesisInvalid::Market(
+                GenesisError::MarketPolicyDoesNotDecode,
+            ))
+        })?;
+    for token in [*market.token_a(), *market.token_b()] {
+        token_is_a_market_leg(&token, token_policies)?;
+    }
+    Ok(AcceptedVaultGenesis {
+        vault_id,
+        preimage,
+        genesis_root,
+        market,
+    })
+}
+
+/// §49: `transferable` binds vault creation for both tokens. ERA and dBTC are
+/// pre-rooted and consult no policy.
+fn token_is_a_market_leg(
+    token: &D32,
+    token_policies: &std::collections::BTreeMap<D32, Vec<u8>>,
+) -> Result<(), GenesisRefusal> {
+    if crate::core::token::builtin_token_id_for_policy_commit(token).is_some() {
+        return Ok(());
+    }
+    let missing = GenesisRefusal::Missing(GenesisMissing::TokenPolicy { commit: *token });
+    let bytes = token_policies.get(token).ok_or(missing.clone())?;
+    let derived =
+        crate::crypto::blake3::domain_hash_bytes(crate::common::domain_tags::TAG_DSM_POLICY, bytes);
+    if derived != *token {
+        return Err(missing);
+    }
+    let policy = crate::economic::token_policy::parse_token_policy(bytes).map_err(|_| {
+        GenesisRefusal::Invalid(GenesisInvalid::TokenPolicyDoesNotParse { token: *token })
+    })?;
+    crate::economic::issuance::check_market_leg_permitted(&policy).map_err(|_| {
+        GenesisRefusal::Invalid(GenesisInvalid::TokenNotTransferable { token: *token })
+    })
+}
 
 /// The vault's leaves at `R_0`, for the keys an acquisition needs: the state
 /// leaf at its key, and `Absent` at every other — nobody has traded with it
@@ -591,6 +831,107 @@ mod tests {
                 derive::claim_ref(&derive::resolution_claim(&p, &f).encode())
             )
         );
+    }
+
+    /// The swap the realized rig resolves: `AMOUNT_IN` of its first token
+    /// out of the trader's 50 000, and its exact output of the last one in.
+    fn swap_terms(fx: &crate::sofi::validation::fixtures::Fixture) -> (D32, D32, u64) {
+        match fx.preimage.settlement() {
+            crate::sofi::wire::SettlementBody::Swap {
+                token_in,
+                token_out,
+                exact_out,
+                ..
+            } => (*token_in, *token_out, *exact_out),
+            crate::sofi::wire::SettlementBody::Close { .. } => {
+                panic!("the realized rig is a swap")
+            }
+        }
+    }
+
+    /// A Realized position moves the trader's balances to what its realize
+    /// root holds, and a head holding what the pre-root held takes exactly
+    /// those balances.
+    #[test]
+    fn a_realized_position_moves_exactly_the_balances_its_realize_root_holds() {
+        use crate::sofi::validation::fixtures::AMOUNT_IN;
+        let (fx, receiver) = realized_rig();
+        let (token_in, token_out, exact_out) = swap_terms(&fx);
+        let p = fx.precommit.clone();
+        let f = fulfillment(&p);
+        let advanced = advance_resolved(
+            &previous(*p.void_root()),
+            &p,
+            &f,
+            &claims(&p, &f),
+            Resolution::Realized,
+            Some(&receipt(&fx, &receiver)),
+        )
+        .unwrap();
+        let mut changes = advanced.balances.changes().to_vec();
+        changes.sort_by_key(|c| c.policy_commit);
+        let mut expected = vec![
+            TraderBalanceChange {
+                policy_commit: token_in,
+                before: 50_000,
+                after: 50_000 - AMOUNT_IN,
+            },
+            TraderBalanceChange {
+                policy_commit: token_out,
+                before: 0,
+                after: exact_out,
+            },
+        ];
+        expected.sort_by_key(|c| c.policy_commit);
+        assert_eq!(changes, expected);
+
+        let holding = receiver.created_token(token_in, 50_000).unwrap();
+        let resolved = holding.with_resolved_position(&advanced.balances).unwrap();
+        assert_eq!(resolved.balance(&token_in), 50_000 - AMOUNT_IN);
+        assert_eq!(resolved.balance(&token_out), exact_out);
+        // The balances only: the resolution is not a transition, so the
+        // device root is the one that registered the position.
+        assert_eq!(resolved.root(), holding.root());
+    }
+
+    /// The balances a resolution moves start from the pre-root's. A head that
+    /// holds anything else did not register the position, and takes nothing.
+    #[test]
+    fn a_head_that_does_not_hold_the_pre_balances_takes_no_resolution() {
+        let (fx, receiver) = realized_rig();
+        let (token_in, ..) = swap_terms(&fx);
+        let p = fx.precommit.clone();
+        let f = fulfillment(&p);
+        let advanced = advance_resolved(
+            &previous(*p.void_root()),
+            &p,
+            &f,
+            &claims(&p, &f),
+            Resolution::Realized,
+            Some(&receipt(&fx, &receiver)),
+        )
+        .unwrap();
+        assert!(receiver.with_resolved_position(&advanced.balances).is_err());
+        let short = receiver.created_token(token_in, 49_999).unwrap();
+        assert!(short.with_resolved_position(&advanced.balances).is_err());
+    }
+
+    /// A Void position moves nothing: the head it leaves is the head it had.
+    #[test]
+    fn a_void_position_moves_no_balance() {
+        let pre = d(0xA0);
+        let p = precommit(pre, d(0xA1));
+        let f = fulfillment(&p);
+        let advanced = advance_resolved(
+            &previous(pre),
+            &p,
+            &f,
+            &claims(&p, &f),
+            Resolution::Void,
+            None,
+        )
+        .unwrap();
+        assert!(advanced.balances.changes().is_empty());
     }
 
     /// SofiVoid has zero mutations: the position exists, it is terminal, and
@@ -1165,5 +1506,294 @@ mod tests {
             )
             .is_err());
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::disallowed_methods)] // test asserts; a failure here is the signal
+mod genesis_acceptance {
+    //! SoFi §19.8 `GenesisAccepted` over a creation signed with the owner's
+    //! key and policy bytes that re-hash to their commits. Each test changes
+    //! one thing the owner's validated creation or `V_0` holds and names the
+    //! conjunct that refuses it.
+
+    use std::collections::BTreeMap;
+
+    use super::*;
+    use crate::ccb::state::{FeePolicy, MarketPolicy, ReleasePolicy};
+    use crate::sofi::validation::fixtures::{
+        committed, token_policy_bytes_with, tokens, trader_keys, DEV, G, P_CREATE,
+    };
+    use crate::sofi::wire::{VaultCreation, VAULT_STATUS_ACTIVE, VAULT_STATUS_RETIRED};
+    use crate::types::operations::Operation;
+
+    const NETWORK: &[u8] = crate::economic::register::BETA_NETWORK_ID;
+
+    fn pinned_set() -> D32 {
+        crate::economic::register::resolve_root_register_profile(NETWORK)
+            .expect("the beta network pins a register set")
+            .storage_set_id
+    }
+
+    fn addr(class: u16, bytes: &[u8]) -> D32 {
+        crate::ccb::decode::policy_object_address(class, bytes).expect("a policy class")
+    }
+
+    /// A creation as the owner signed it, with what a verifier fetched.
+    struct Creation {
+        preimage_bytes: Vec<u8>,
+        operation: Operation,
+        token_policies: BTreeMap<D32, Vec<u8>>,
+    }
+
+    /// `V_0` over `pair` at generation zero, Active, on the pinned set.
+    fn genesis_state(pair: (D32, D32)) -> (VaultStateLeaf, Vec<u8>) {
+        let market = MarketPolicy::beta_constant_product(pair.0, pair.1).unwrap();
+        let market_bytes = market.encode();
+        let fee = FeePolicy::new(30).unwrap();
+        let release = ReleasePolicy::beta_owner_local_full_close();
+        let state = VaultStateLeaf {
+            owner_genesis: G,
+            owner_device_id: DEV,
+            create_position: P_CREATE,
+            market_policy: addr(crate::ccb::class::MARKET_POLICY, &market_bytes),
+            fee_policy: addr(crate::ccb::class::FEE_POLICY, &fee.encode()),
+            release_policy: addr(crate::ccb::class::RELEASE_POLICY, &release.encode()),
+            storage_set_id: pinned_set(),
+            generation: 0,
+            reserve_a: 1_000,
+            reserve_b: 2_000,
+            status: VAULT_STATUS_ACTIVE,
+        };
+        (state, market_bytes)
+    }
+
+    /// The creation of `state` as the owner signs it — over the operation's
+    /// signing bytes, with the owner's key — and the verifier's token
+    /// policies.
+    fn creation_of(state: VaultStateLeaf, market_bytes: Vec<u8>, pair: (D32, D32)) -> Creation {
+        let preimage = VaultGenesisPreimage {
+            owner_genesis: G,
+            owner_device_id: DEV,
+            create_position: P_CREATE,
+            state,
+        };
+        let vault_id = preimage.vault_id();
+        let record = VaultCreation {
+            vault_id,
+            genesis_root: genesis_root(&vault_id, &preimage.state).unwrap(),
+            amount_a: preimage.state.reserve_a,
+            amount_b: preimage.state.reserve_b,
+        };
+        let preimage_bytes = preimage.encode().unwrap();
+        let build = |signature: Vec<u8>| Operation::SofiVaultCreate {
+            genesis_preimage: preimage_bytes.clone(),
+            creation: record.encode(),
+            market_policy_preimage: market_bytes.clone(),
+            funding_a_policy_commit: pair.0,
+            funding_b_policy_commit: pair.1,
+            signature,
+        };
+        let signing = (build(Vec::new())).signing_bytes();
+        let operation =
+            build(crate::crypto::sphincs::sphincs_sign(&trader_keys().1, &signing).unwrap());
+        Creation {
+            preimage_bytes,
+            operation,
+            token_policies: tokens().iter().cloned().collect(),
+        }
+    }
+
+    fn valid() -> Creation {
+        let pair = (tokens()[0].0, tokens()[1].0);
+        let (state, market_bytes) = genesis_state(pair);
+        creation_of(state, market_bytes, pair)
+    }
+
+    fn accept_at(c: &Creation, position: u64) -> Result<AcceptedVaultGenesis, GenesisRefusal> {
+        creation_accepted(
+            NETWORK,
+            &c.preimage_bytes,
+            &OwnerCreation {
+                genesis: &G,
+                device_id: &DEV,
+                position,
+                operation: &c.operation,
+            },
+            &c.token_policies,
+        )
+    }
+
+    fn accept(c: &Creation) -> Result<AcceptedVaultGenesis, GenesisRefusal> {
+        accept_at(c, P_CREATE)
+    }
+
+    #[test]
+    fn the_genesis_the_owners_creation_carried_is_accepted() {
+        let c = valid();
+        assert_eq!(
+            crate::sofi::signature::verify_operation(&c.operation, &trader_keys().0),
+            Ok(()),
+            "the creation is signed under the owner's key"
+        );
+        let accepted = accept(&c).unwrap();
+        let preimage = VaultGenesisPreimage::decode(&c.preimage_bytes).unwrap();
+        assert_eq!(accepted.vault_id(), &preimage.vault_id());
+        assert_eq!(
+            accepted.genesis_root(),
+            &genesis_root(&preimage.vault_id(), &preimage.state).unwrap()
+        );
+        assert_eq!(accepted.state(), &preimage.state);
+        assert_eq!(accepted.market().token_a(), &tokens()[0].0);
+    }
+
+    /// Fetched bytes are accepted only as the bytes the owner's creation
+    /// carried: another genesis for the same vault, and a transition that
+    /// created no vault, bind nothing.
+    #[test]
+    fn a_genesis_the_owner_did_not_create_is_refused() {
+        let mut c = valid();
+        let mut other = VaultGenesisPreimage::decode(&c.preimage_bytes).unwrap();
+        other.state.reserve_a += 1;
+        c.preimage_bytes = other.encode().unwrap();
+        assert_eq!(
+            accept(&c),
+            Err(GenesisRefusal::Invalid(
+                GenesisInvalid::NotTheCreationTheOwnerMade
+            ))
+        );
+
+        let mut c = valid();
+        c.operation = Operation::Noop;
+        assert_eq!(
+            accept(&c),
+            Err(GenesisRefusal::Invalid(
+                GenesisInvalid::NotTheCreationTheOwnerMade
+            ))
+        );
+    }
+
+    /// The validated transition must be the owner's at `p_create`: the
+    /// owner's transition at another position creates nothing at `v`.
+    #[test]
+    fn a_transition_at_another_position_is_not_the_creation() {
+        assert_eq!(
+            accept_at(&valid(), P_CREATE + 1),
+            Err(GenesisRefusal::Invalid(
+                GenesisInvalid::NotTheOwnersCreationPosition
+            ))
+        );
+    }
+
+    #[test]
+    fn a_genesis_past_generation_zero_is_refused() {
+        let pair = (tokens()[0].0, tokens()[1].0);
+        let (mut state, market_bytes) = genesis_state(pair);
+        state.generation = 3;
+        assert_eq!(
+            accept(&creation_of(state, market_bytes, pair)),
+            Err(GenesisRefusal::Invalid(GenesisInvalid::NotGenerationZero {
+                generation: 3
+            }))
+        );
+    }
+
+    #[test]
+    fn a_retired_genesis_is_refused() {
+        let pair = (tokens()[0].0, tokens()[1].0);
+        let (mut state, market_bytes) = genesis_state(pair);
+        state.status = VAULT_STATUS_RETIRED;
+        assert_eq!(
+            accept(&creation_of(state, market_bytes, pair)),
+            Err(GenesisRefusal::Invalid(GenesisInvalid::NotActive {
+                status: VAULT_STATUS_RETIRED
+            }))
+        );
+    }
+
+    #[test]
+    fn a_genesis_on_another_storage_set_is_refused() {
+        let pair = (tokens()[0].0, tokens()[1].0);
+        let (mut state, market_bytes) = genesis_state(pair);
+        state.storage_set_id = [0x77; 32];
+        assert_eq!(
+            accept(&creation_of(state, market_bytes, pair)),
+            Err(GenesisRefusal::Invalid(GenesisInvalid::NotThePinnedSet {
+                named: [0x77; 32],
+                pinned: pinned_set(),
+            }))
+        );
+    }
+
+    /// The market the vault trades is the policy `V_0` commits: bytes of
+    /// another market carried beside it establish nothing about this vault.
+    #[test]
+    fn a_carried_market_that_is_not_the_committed_one_is_refused() {
+        let pair = (tokens()[0].0, tokens()[1].0);
+        let (state, market_bytes) = genesis_state(pair);
+        let other = MarketPolicy::beta_constant_product(tokens()[1].0, tokens()[2].0)
+            .unwrap()
+            .encode();
+        assert_ne!(other, market_bytes);
+        assert_eq!(
+            accept(&creation_of(state, other, pair)),
+            Err(GenesisRefusal::Invalid(GenesisInvalid::Market(
+                GenesisError::MarketPolicyIsNotTheCommittedOne
+            )))
+        );
+    }
+
+    /// A token policy not in hand, or bytes that are another token's, leave
+    /// acceptance without an answer; neither is a refusal of the vault.
+    #[test]
+    fn a_token_policy_not_in_hand_is_missing() {
+        let mut c = valid();
+        let token_b = tokens()[1].0;
+        c.token_policies.remove(&token_b);
+        assert_eq!(
+            accept(&c),
+            Err(GenesisRefusal::Missing(GenesisMissing::TokenPolicy {
+                commit: token_b
+            }))
+        );
+        c.token_policies.insert(token_b, tokens()[2].1.clone());
+        assert_eq!(
+            accept(&c),
+            Err(GenesisRefusal::Missing(GenesisMissing::TokenPolicy {
+                commit: token_b
+            }))
+        );
+    }
+
+    /// §49: `transferable` binds vault creation, whichever side the token is.
+    #[test]
+    fn a_vault_over_a_token_that_forbids_transfer_is_refused() {
+        let locked = committed(token_policy_bytes_with(9, 0));
+        let mut pair = [tokens()[0].0, locked.0];
+        pair.sort();
+        let pair = (pair[0], pair[1]);
+        let (state, market_bytes) = genesis_state(pair);
+        let mut c = creation_of(state, market_bytes, pair);
+        c.token_policies.insert(locked.0, locked.1);
+        assert_eq!(
+            accept(&c),
+            Err(GenesisRefusal::Invalid(
+                GenesisInvalid::TokenNotTransferable { token: locked.0 }
+            ))
+        );
+    }
+
+    /// ERA is pre-rooted: a vault over it consults no ERA policy.
+    #[test]
+    fn a_pre_rooted_token_consults_no_policy() {
+        let era = crate::core::token::token_state_manager::era_policy_commit();
+        let mut pair = [tokens()[0].0, era];
+        pair.sort();
+        let pair = (pair[0], pair[1]);
+        let (state, market_bytes) = genesis_state(pair);
+        let mut c = creation_of(state, market_bytes, pair);
+        c.token_policies
+            .retain(|commit, _| *commit == tokens()[0].0);
+        assert!(accept(&c).is_ok());
     }
 }

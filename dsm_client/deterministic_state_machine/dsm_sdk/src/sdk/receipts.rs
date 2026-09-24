@@ -1,28 +1,13 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! # Receipt Primitives for Offline Bilateral Flows
+//! # Receipt construction and per-step signing
 //!
-//! Re-exports canonical receipt types and verification from `dsm::core`,
-//! adding SDK-level helpers for relationship key derivation and monotonic
-//! counter checking on stitched receipts.
+//! Builds the canonical stitched receipt of a relationship step and derives the
+//! per-step ephemeral keys that answer it. Verification is Core's
+//! (`dsm::verification::receipt_verification`); nothing here re-implements it.
 
 use dsm::types::error::DsmError;
-use dsm::common::domain_tags::TAG_RECEIPT_COMMIT;
-
-// Re-export canonical types from dsm core
-pub use dsm::types::receipt_types::{
-    DeviceTreeAcceptanceCommitment, ParentConsumptionTracker as ReceiptGuard, ReceiptAcceptance,
-    ReceiptVerificationContext, StitchedReceiptV2,
-};
-
-/// Derive relationship key from counterparty public key.
-/// Domain-separated to prevent collision with other hash contexts.
-pub fn derive_relationship_key(counterparty_pk: &[u8]) -> [u8; 32] {
-    dsm::crypto::blake3::domain_hash_bytes(
-        dsm::common::domain_tags::TAG_DSM_RELATIONSHIP_KEY,
-        counterparty_pk,
-    )
-}
+use dsm::types::receipt_types::{DeviceTreeAcceptanceCommitment, StitchedReceiptV2};
 
 /// Compute the receipt challenge-response target.
 ///
@@ -388,8 +373,7 @@ pub fn advance_local_chain_head_after_signing(
     init: bool,
 ) -> Result<(), DsmError> {
     use crate::storage::client_db::{
-        advance_local_cert_chain_head_with_sk, init_cert_chain_head,
-        init_local_cert_chain_head_with_sk, CertChainSide,
+        advance_local_cert_chain_head_with_sk, init_local_cert_chain_head_with_sk,
     };
 
     if init {
@@ -413,8 +397,6 @@ pub fn advance_local_chain_head_after_signing(
         )
         .map_err(|e| DsmError::invalid_operation(format!("chain-head SK advance: {e}")))?;
     }
-    // Suppress unused-import in the init=false branch.
-    let _ = (init_cert_chain_head, CertChainSide::Local);
     Ok(())
 }
 
@@ -582,166 +564,21 @@ pub fn verify_per_step_ek_signing_strict_aware(
     Ok(PerStepEkVerifyOutcome::Verified)
 }
 
-/// Verify a stitched receipt with signatures.
+/// Build the canonical receipt of one relationship step (§4.2).
 ///
-/// Delegates to the canonical core verifier for cryptographic receipt checks.
-/// Replay protection is enforced by the `ParentConsumptionTracker`
-/// (one-time parent-tip lock per relationship), NOT by sequence numbers —
-/// the protocol is clockless (§4.3).
+/// The single stitched-receipt constructor in the SDK. `parent_path` is the
+/// tree's own path at the relationship key, taken from the advance that made
+/// the step (`AdvanceOutcome::smt_proofs.parent_proof`): it must carry
+/// `parent_tip`, it is the receipt's one relationship proof, and the same
+/// siblings folded with `child_tip` are `child_root` — there is no second
+/// proof. `transition_entropy` is the same advance's derivation (Part VII
+/// step 3), the receipt's canonical field 21.
 ///
-/// Token balance conservation and non-negativity are enforced when applying the
-/// state transition in core, not from receipt bytes alone.
-///
-/// Cert chain verification (whitepaper §11.1): the sender chain head is
-/// required for offline receipt acceptance. Parent/root inclusion proves state
-/// consistency, but it is not spend authority. The receipt challenge is the
-/// proposed transition context. The response is `sig_a` or `sig_b` under the
-/// fresh EK key derived from h_n, C_pre, k_step (keyed under Smaster), with `ek_cert`
-/// linking that key to AK at step 0 or the prior EK on later steps.
-#[allow(clippy::too_many_arguments)]
-pub fn verify_stitched_receipt(
-    receipt: &StitchedReceiptV2,
-    sig_a: &[u8],
-    sig_b: &[u8],
-    pk_a: &[u8],
-    pk_b: &[u8],
-    device_tree_commitment: DeviceTreeAcceptanceCommitment,
-    guard: Option<&mut ReceiptGuard>,
-) -> Result<(), DsmError> {
-    use crate::sdk::app_state::AppState;
-    use crate::storage::client_db::{load_cert_chain_head_pubkey, CertChainSide};
-    use dsm::verification::smt_replace_witness::compute_smt_key;
-
-    let smt_key = compute_smt_key(&receipt.devid_a, &receipt.devid_b);
-    // Match receipt party (A vs B) to local-vs-counterparty roles by
-    // looking up the local device id. If we can't determine which side
-    // is local, fail closed rather than accepting a receipt without sender
-    // EK-cert-chain authorization.
-    let local_id = AppState::get_device_id();
-    let (head_for_a, head_for_b): (Option<Vec<u8>>, Option<Vec<u8>>) = match local_id.as_deref() {
-        Some(id) if id.len() == 32 && id == receipt.devid_a.as_slice() => {
-            // We are party A. Our chain head verifies our own cert (sig_a),
-            // counterparty's chain head verifies their cert (sig_b).
-            (
-                load_cert_chain_head_pubkey(&smt_key, CertChainSide::Local)
-                    .ok()
-                    .flatten(),
-                load_cert_chain_head_pubkey(&smt_key, CertChainSide::Counterparty)
-                    .ok()
-                    .flatten(),
-            )
-        }
-        Some(id) if id.len() == 32 && id == receipt.devid_b.as_slice() => {
-            // We are party B (counter-signer). Local side maps to B; A is
-            // the remote sender whose chain we track as Counterparty.
-            (
-                load_cert_chain_head_pubkey(&smt_key, CertChainSide::Counterparty)
-                    .ok()
-                    .flatten(),
-                load_cert_chain_head_pubkey(&smt_key, CertChainSide::Local)
-                    .ok()
-                    .flatten(),
-            )
-        }
-        _ => (None, None),
-    };
-
-    if head_for_a.is_none() {
-        return Err(DsmError::invalid_operation(
-            "Receipt verification failed: missing sender cert-chain head for cert-chain-bound \
-             receipt authorization",
-        ));
-    }
-
-    // Per-step Kyber consistency (whitepaper §11): if the receipt carries
-    // a per-step EK_pk_a, it MUST also carry the corresponding kyber_ct_a
-    // — they're the two halves of the per-step EK derivation context. A
-    // receipt with ek_pk_a but no kyber_ct_a is structurally malformed:
-    // either the sender skipped the Kyber encapsulation (spec violation)
-    // or the ct was stripped in transit. Same enforcement on the B side
-    // when sig_b is present.
-    if !receipt.ek_pk_a.is_empty() && receipt.kyber_ct_a.is_empty() {
-        return Err(DsmError::invalid_operation(
-            "Receipt verification failed: ek_pk_a is set but kyber_ct_a is missing — \
-             per-step EK derivation requires both halves of the Kyber context",
-        ));
-    }
-    if !sig_b.is_empty() && !receipt.ek_pk_b.is_empty() && receipt.kyber_ct_b.is_empty() {
-        return Err(DsmError::invalid_operation(
-            "Receipt verification failed: ek_pk_b is set but kyber_ct_b is missing — \
-             per-step EK derivation requires both halves of the Kyber context",
-        ));
-    }
-
-    // Per-step EK pubkey (whitepaper §11.1): when the receipt carries
-    // `ek_pk_a`/`ek_pk_b`, those override the externally-passed `pk_a`/`pk_b`.
-    // This is what makes `sig_a`/`sig_b` verifiable without out-of-band
-    // distribution of per-step keys: each receipt carries its own freshly-
-    // derived EK_pk, and the cert chain (already verified above via
-    // ek_cert_a/b) chains it back to AK_pk.
-    //
-    let pk_a_effective: Vec<u8> = if !receipt.ek_pk_a.is_empty() {
-        receipt.ek_pk_a.clone()
-    } else {
-        pk_a.to_vec()
-    };
-    let pk_b_effective: Vec<u8> = if !receipt.ek_pk_b.is_empty() {
-        receipt.ek_pk_b.clone()
-    } else {
-        pk_b.to_vec()
-    };
-
-    let mut ctx = ReceiptVerificationContext::new(
-        device_tree_commitment,
-        receipt.parent_root,
-        pk_a_effective,
-        pk_b_effective,
-    );
-    if let Some(head) = head_for_a {
-        ctx = ctx.with_chain_head_a(head);
-    }
-    if let Some(head) = head_for_b {
-        ctx = ctx.with_chain_head_b(head);
-    }
-
-    // Prepare signatures on the receipt
-    let mut receipt_with_sigs = receipt.clone();
-    receipt_with_sigs.add_sig_a(sig_a.to_vec());
-    receipt_with_sigs.add_sig_b(sig_b.to_vec());
-
-    // Use canonical verification
-    let mut local_tracker;
-    let tracker = if let Some(g) = guard {
-        g
-    } else {
-        local_tracker = ReceiptGuard::new();
-        &mut local_tracker
-    };
-
-    let result = dsm::verification::receipt_verification::verify_stitched_receipt(
-        &receipt_with_sigs,
-        &ctx,
-        tracker,
-    )?;
-
-    if result.valid {
-        Ok(())
-    } else {
-        Err(DsmError::invalid_operation(format!(
-            "Receipt verification failed: {}",
-            result.reason.unwrap_or_else(|| "unknown".to_string())
-        )))
-    }
-}
-
-/// Build receipt with **real** Per-Device SMT roots and inclusion proofs (§4.2).
-///
-/// This is the single authoritative stitched-receipt constructor in the SDK.
-/// Callers must supply the actual SMT roots and serialized inclusion proofs
-/// produced by `SparseMerkleTree` after an `update_leaf()` call, and the
-/// transition entropy of the same advance (`AdvanceOutcome::transition_entropy`,
-/// Part VII step 3) — the receipt's canonical field 21, which the recipient
-/// feeds into `C_pre` and the symmetric tip and recomputes `child_tip` from.
+/// Refused when a part is missing or wrong: no genesis hash in the app state, a
+/// path that is not at the key or does not carry the parent tip, or a receipt
+/// that fails
+/// [`verify_receipt_state`](dsm::verification::receipt_verification::verify_receipt_state)
+/// against `device_tree_commitment`, the sender's authenticated `R_G`.
 #[allow(clippy::too_many_arguments)]
 pub fn build_bilateral_receipt_with_smt(
     devid_a: [u8; 32],
@@ -750,64 +587,34 @@ pub fn build_bilateral_receipt_with_smt(
     child_tip: [u8; 32],
     parent_root: [u8; 32],
     child_root: [u8; 32],
-    rel_proof_parent: Vec<u8>,
-    rel_proof_child: Vec<u8>,
-    device_tree_commitment: Option<DeviceTreeAcceptanceCommitment>,
+    parent_path: &dsm::merkle::sparse_merkle_tree::SmtInclusionProof,
+    device_tree_commitment: &DeviceTreeAcceptanceCommitment,
     transition_entropy: [u8; 32],
-) -> Option<Vec<u8>> {
+) -> Result<Vec<u8>, DsmError> {
     use dsm::common::device_tree;
 
-    // 1. Real genesis hash from AppState.
-    let genesis = {
-        let mut g = [0u8; 32];
-        if let Some(gh) = crate::sdk::app_state::AppState::get_genesis_hash() {
-            if gh.len() >= 32 {
-                g.copy_from_slice(&gh[..32]);
-            }
-        }
-        if g == [0u8; 32] {
-            log::warn!(
-                "[receipts] genesis hash unavailable from AppState — receipt will be unverifiable"
-            );
-            return None;
-        }
-        g
-    };
+    let genesis = crate::sdk::app_state::AppState::get_genesis_hash()
+        .and_then(|g| <[u8; 32]>::try_from(g.as_slice()).ok())
+        .ok_or_else(|| {
+            DsmError::invalid_operation("receipt: the app state holds no 32-byte genesis hash")
+        })?;
 
-    // 2. Build device tree proof via DeviceTree builder (§2.3).
-    //    The authenticated commitment used for `π_dev` MUST be supplied explicitly
-    //    by the caller. Today that commitment is the concrete root `R_G`.
-    let device_tree_commitment = match device_tree_commitment {
-        Some(commitment) => commitment,
-        None => {
-            log::error!(
-                "[receipts] build_bilateral_receipt_with_smt: authenticated device-tree commitment is required; refusing to derive a synthetic R_G"
-            );
-            return None;
-        }
-    };
-    let r_g = device_tree_commitment.root();
-    let dev_tree = device_tree::DeviceTree::single(devid_a);
-    let dev_proof_obj = dev_tree
-        .proof(&devid_a)
-        .unwrap_or(device_tree::DevTreeProof {
-            siblings: Vec::new(),
-            path_bits: Vec::new(),
-            leaf_to_root: true,
-        });
-    let dev_proof = dev_proof_obj.to_bytes();
-
-    // 3. Zero-depth replace witness (tripwire).
-    let witness: Vec<u8> = 0u32.to_le_bytes().to_vec();
-
-    // 4. Verify device proof against R_G before assembly.
-    let parsed_dev = device_tree::DevTreeProof::from_bytes(&dev_proof)?;
-    if !parsed_dev.verify(&devid_a, &r_g) {
-        log::warn!("[receipts] Device proof verification failed against R_G");
-        return None;
+    let relationship_key =
+        dsm::core::bilateral_transaction_manager::compute_smt_key(&devid_a, &devid_b);
+    if parent_path.key != relationship_key || parent_path.value != Some(parent_tip) {
+        return Err(DsmError::invalid_operation(
+            "receipt: the relationship path is not the parent tip's path at the relationship key",
+        ));
     }
 
-    // 5. Assemble receipt with real SMT roots and proofs.
+    let dev_proof = device_tree::DeviceTree::single(devid_a)
+        .proof(&devid_a)
+        .ok_or_else(|| {
+            DsmError::invalid_operation(
+                "receipt: the single-device tree has no path for the sender",
+            )
+        })?;
+
     let mut receipt = StitchedReceiptV2::new(
         genesis,
         devid_a,
@@ -816,229 +623,17 @@ pub fn build_bilateral_receipt_with_smt(
         child_tip,
         parent_root,
         child_root,
-        rel_proof_parent,
-        rel_proof_child,
-        dev_proof,
+        parent_path.to_bytes(),
+        dev_proof.to_bytes(),
     );
-    receipt.set_rel_replace_witness(witness);
     receipt.set_transition_entropy(transition_entropy);
-    receipt.to_canonical_protobuf().ok()
-}
 
-/// Verify a stitched receipt from its canonical protobuf bytes (§4.3).
-///
-/// Both counterparties share an **identical chain tip** h_n for C_{A↔B}.
-/// Implements the normative verification rules from §4.3:
-///
-/// 1. Protobuf decodes the receipt (which requires the transition entropy, field 21)
-/// 2. All 32-byte fixed fields (genesis, devids, tips, roots, entropy) must be non-zero
-/// 3. §4.3#2: π_rel proves h_n ∈ r_A and π'_rel proves h_{n+1} ∈ r'_A
-///    (SmtInclusionProof deserialization + root reconstruction)
-/// 4. §4.3#4: Leaf-replace recomputation — replacing h_n with h_{n+1} using
-///    the same sibling path must yield r'_A byte-exactly
-/// 5. §4.3#3: π_dev proves DevID_A ∈ R_G (Device Tree inclusion)
-///
-/// `device_tree_commitment`: explicit authenticated commitment for the sender's
-/// Device Tree path. `None` is rejected.
-/// Returns `true` only if all checks pass.
-pub fn verify_receipt_bytes(
-    receipt_bytes: &[u8],
-    device_tree_commitment: Option<DeviceTreeAcceptanceCommitment>,
-) -> bool {
-    use dsm::merkle::sparse_merkle_tree::{SmtInclusionProof, SparseMerkleTree};
-    use dsm::common::device_tree;
-    use dsm::verification::smt_replace_witness::compute_smt_key;
-
-    // 1. Decode the canonical protobuf into a StitchedReceiptV2.
-    let receipt = match StitchedReceiptV2::from_canonical_protobuf(receipt_bytes) {
-        Ok(r) => r,
-        Err(_) => return false,
-    };
-
-    // 2. Non-zero fixed fields. The transition entropy is Core's derivation
-    //    for this step (Part VII step 3); a receipt that names none is not a
-    //    receipt of any transition.
-    let is_zero = |b: &[u8; 32]| b.iter().all(|&v| v == 0);
-    if is_zero(&receipt.genesis)
-        || is_zero(&receipt.devid_a)
-        || is_zero(&receipt.devid_b)
-        || is_zero(&receipt.parent_tip)
-        || is_zero(&receipt.child_tip)
-        || is_zero(&receipt.parent_root)
-        || is_zero(&receipt.child_root)
-        || is_zero(&receipt.transition_entropy)
-    {
-        return false;
-    }
-
-    // 3–4. §4.3#2+#4: Both counterparties share an IDENTICAL chain tip.
-    //   π_rel proves h_n ∈ r_A, π'_rel proves h_{n+1} ∈ r'_A.
-    //   Leaf-replace recomputation (same siblings, swap h_n→h_{n+1}) must yield r'_A.
-    let smt_key = compute_smt_key(&receipt.devid_a, &receipt.devid_b);
-
-    let parent_proof = deserialize_inclusion_proof(&receipt.rel_proof_parent).ok();
-    let child_proof = match deserialize_inclusion_proof(&receipt.rel_proof_child) {
-        Ok(p) => p,
-        Err(_) => return false, // child proof must always exist (post-update)
-    };
-
-    // §4.3#2: π'_rel proves h_{n+1} ∈ r'_A
-    if child_proof.key != smt_key {
-        return false;
-    }
-    if child_proof.value != Some(receipt.child_tip) {
-        return false;
-    }
-    if !SparseMerkleTree::verify_proof_against_root(&child_proof, &receipt.child_root) {
-        return false;
-    }
-
-    if let Some(pp) = parent_proof {
-        // Full verification: parent proof exists.
-        if pp.key != smt_key {
-            return false;
-        }
-        // §4.3#2: π_rel MUST prove inclusion of h_n in r_A.
-        // Fail closed: the proof value must be present and must equal parent_tip.
-        // A non-inclusion proof (value=None) or value mismatch both reject.
-        match pp.value {
-            Some(v) if v == receipt.parent_tip => { /* inclusion of correct tip */ }
-            _ => return false,
-        }
-
-        // §4.3#2: π_rel proves h_n ∈ r_A
-        if !SparseMerkleTree::verify_proof_against_root(&pp, &receipt.parent_root) {
-            return false;
-        }
-
-        // §4.3#4: Leaf-replace recomputation.
-        // Single leaf change ⇒ sibling path is identical.
-        // Replace h_n with h_{n+1} using parent's siblings → must yield r'_A.
-        let replace_proof = SmtInclusionProof {
-            key: smt_key,
-            value: Some(receipt.child_tip),
-            siblings: pp.siblings,
-        };
-        if !SparseMerkleTree::verify_proof_against_root(&replace_proof, &receipt.child_root) {
-            return false;
-        }
-    }
-    // If parent proof absent: first tx for this relationship (leaf was ZERO_LEAF).
-    // Child proof already verified above.
-
-    // 5. §4.3#3: Device proof must parse and verify against the authenticated
-    //    local commitment used for `π_dev`.
-    //    Today this is the raw root `R_G`, supplied by the caller from a trusted
-    //    external source (§2.3 commit path). If None, reject: acceptance predicates
-    //    must never derive `R_G` from the receipt itself.
-    let r_g = match device_tree_commitment {
-        Some(commitment) => commitment.root(),
-        None => {
-            log::error!(
-                "[receipts] §4.3#3 FATAL: authenticated device-tree commitment not provided — \
-                 R_G or an equivalent authenticated persisted commitment must be externally supplied, never derived from the receipt itself."
-            );
-            return false;
-        }
-    };
-    match device_tree::DevTreeProof::from_bytes(&receipt.dev_proof) {
-        Some(parsed) => {
-            if !parsed.verify(&receipt.devid_a, &r_g) {
-                return false;
-            }
-        }
-        None => return false,
-    }
-
-    true
-}
-
-/// Serialize a `SmtInclusionProof` to bytes for wire transport.
-///
-/// Format: [32-byte key][1-byte has_value][optional 32-byte value][4-byte LE sibling count][32-byte siblings...]
-pub fn serialize_inclusion_proof(
-    proof: &dsm::merkle::sparse_merkle_tree::SmtInclusionProof,
-) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(32 + 1 + 32 + 4 + proof.siblings.len() * 32);
-    buf.extend_from_slice(&proof.key);
-    buf.push(proof.value.is_some() as u8);
-    if let Some(v) = &proof.value {
-        buf.extend_from_slice(v);
-    }
-    buf.extend_from_slice(&(proof.siblings.len() as u32).to_le_bytes());
-    for s in &proof.siblings {
-        buf.extend_from_slice(s);
-    }
-    buf
-}
-
-/// Deserialize a `SmtInclusionProof` from bytes.
-pub fn deserialize_inclusion_proof(
-    data: &[u8],
-) -> Result<dsm::merkle::sparse_merkle_tree::SmtInclusionProof, DsmError> {
-    if data.len() < 33 {
-        return Err(DsmError::invalid_operation(
-            "inclusion proof too short: need at least 33 bytes",
-        ));
-    }
-    let mut key = [0u8; 32];
-    key.copy_from_slice(&data[..32]);
-    let has_value = data[32] != 0;
-    let mut offset = 33;
-    let value = if has_value {
-        if data.len() < offset + 32 {
-            return Err(DsmError::invalid_operation(
-                "inclusion proof truncated at value",
-            ));
-        }
-        let mut v = [0u8; 32];
-        v.copy_from_slice(&data[offset..offset + 32]);
-        offset += 32;
-        Some(v)
-    } else {
-        None
-    };
-    if data.len() < offset + 4 {
-        return Err(DsmError::invalid_operation(
-            "inclusion proof truncated at sibling count",
-        ));
-    }
-    let count =
-        u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap_or_default()) as usize;
-    offset += 4;
-    if data.len() < offset + count * 32 {
-        return Err(DsmError::invalid_operation(
-            "inclusion proof truncated at siblings",
-        ));
-    }
-    let mut siblings = Vec::with_capacity(count);
-    for i in 0..count {
-        let mut s = [0u8; 32];
-        s.copy_from_slice(&data[offset + i * 32..offset + (i + 1) * 32]);
-        siblings.push(s);
-    }
-    Ok(dsm::merkle::sparse_merkle_tree::SmtInclusionProof {
-        key,
-        value,
-        siblings,
-    })
-}
-
-/// Deterministically derive a stitched receipt sigma from canonical input parts.
-///
-/// This uses the DSM receipt commitment domain tag and length-prefixes each input
-/// part to prevent ambiguity:
-/// `BLAKE3("DSM/receipt-commit\0" || len(part_0)||part_0 || ... )`.
-///
-/// Callers should prefer a true `StitchedReceiptV2::compute_commitment()` when
-/// available. This helper mirrors the same domain and deterministic framing.
-pub fn derive_stitched_receipt_sigma(parts: &[&[u8]]) -> [u8; 32] {
-    let mut hasher = dsm::crypto::blake3::dsm_domain_hasher(TAG_RECEIPT_COMMIT);
-    for part in parts {
-        hasher.update(&(part.len() as u32).to_le_bytes());
-        hasher.update(part);
-    }
-    *hasher.finalize().as_bytes()
+    // The sender checks the state rules before anything is signed or sent.
+    dsm::verification::receipt_verification::verify_receipt_state(
+        &receipt,
+        device_tree_commitment,
+    )?;
+    receipt.to_canonical_protobuf()
 }
 
 /// Deterministically encode a protocol-only transition payload.
@@ -1070,9 +665,7 @@ pub fn compute_protocol_transition_commitment(payload_bytes: &[u8]) -> [u8; 32] 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dsm::types::device_state::DeviceState;
     use dsm::types::operations::Operation;
-    use dsm::merkle::sparse_merkle_tree::SmtInclusionProof;
 
     const TEST_SESSION_BINDING: [u8; 32] = [0x5A; 32];
 
@@ -1266,19 +859,8 @@ mod tests {
     /// (replaces the old explicit K_DBRW argument). Returns the at-rest key for
     /// `advance_local_chain_head_after_signing` calls.
     fn setup_signing_identity() -> [u8; 32] {
-        // Storage base dir is a process-global set-once; set it idempotently so the helper
-        // works regardless of test ordering (AppState::set_identity_info persists to disk).
-        let _ =
-            crate::storage_utils::set_storage_base_dir(std::path::PathBuf::from("./.dsm_testdata"));
-        crate::sdk::app_state::AppState::reset_for_testing();
-        crate::sdk::app_state::AppState::set_identity_info(
-            vec![0x11; 32], // device_id (DevID)
-            vec![0xAB; 32], // device signing pubkey (placeholder; not folded into Smaster)
-            vec![0x22; 32], // genesis_hash (G)
-            vec![0u8; 32],  // smt root
-        );
-        crate::sdk::recovery_sdk::RecoverySDK::set_cached_wallet_seed_for_testing(vec![0x9C; 64]);
-        crate::init::current_chain_head_at_rest_key().expect("at-rest key for tests")
+        crate::economic_fixtures::local_device(0x11);
+        crate::init::current_chain_head_at_rest_key().expect("the chain head's at-rest key")
     }
 
     /// Helper: build minimal valid signing inputs for tests.
@@ -1683,7 +1265,6 @@ mod tests {
             [0x05; 32],     // parent_root
             [0x06; 32],     // child_root
             vec![0x07; 16], // rel_proof_parent
-            vec![0x08; 16], // rel_proof_child
             vec![0x09; 16], // dev_proof
         );
         let commitment = receipt.compute_commitment().unwrap();
@@ -1873,7 +1454,6 @@ mod tests {
             [0x05; 32],
             [0x06; 32],
             vec![0x07; 16],
-            vec![0x08; 16],
             vec![0x09; 16],
         );
         let commit0 = receipt_step0.compute_commitment().unwrap();
@@ -1947,7 +1527,6 @@ mod tests {
             [0x55; 32],
             [0x66; 32],
             vec![0x77; 16],
-            vec![0x88; 16],
             vec![0x99; 16],
         );
         let commit1 = receipt_step1.compute_commitment().unwrap();
@@ -2041,7 +1620,6 @@ mod tests {
             [0x05; 32],
             [0x06; 32],
             vec![0x07; 16],
-            vec![0x08; 16],
             vec![0x09; 16],
         );
         let commitment = receipt.compute_commitment().unwrap();
@@ -2130,7 +1708,6 @@ mod tests {
             [0x05; 32],
             [0x06; 32],
             vec![0x07; 16],
-            vec![0x08; 16],
             vec![0x09; 16],
         );
         let commitment = receipt.compute_commitment().unwrap();
@@ -2215,7 +1792,6 @@ mod tests {
             [0x05; 32],
             [0x06; 32],
             vec![0x07; 16],
-            vec![0x08; 16],
             vec![0x09; 16],
         );
         let commitment = receipt.compute_commitment().unwrap();
@@ -2390,7 +1966,6 @@ mod tests {
                 [0x05 | step; 32],
                 [0x06 | step; 32],
                 vec![0x07; 16],
-                vec![0x08; 16],
                 vec![0x09; 16],
             );
             let commitment = receipt.compute_commitment().unwrap();
@@ -2567,7 +2142,6 @@ mod tests {
             [0x05; 32],
             [0x06; 32],
             vec![0x07; 16],
-            vec![0x08; 16],
             vec![0x09; 16],
         );
         let sub_commitment = substitution_check_receipt.compute_commitment().unwrap();
@@ -2618,7 +2192,7 @@ mod tests {
         // EK signer can re-derive `Smaster` internally. Without this the test only
         // passed when an earlier test happened to leave `G` set in the process-global
         // AppState — an implicit ordering dependency that flakes under parallel runs.
-        let _ = setup_signing_identity();
+        setup_signing_identity();
 
         let (ak_pk, ak_sk) = generate_ephemeral_keypair(&[0xC2; 32]).unwrap();
         let kyber_kp = dsm::crypto::kyber::generate_kyber_keypair().expect("kyber keygen");
@@ -2631,7 +2205,6 @@ mod tests {
             [0x05; 32],
             [0x06; 32],
             vec![0x07; 16],
-            vec![0x08; 16],
             vec![0x09; 16],
         );
         let commitment = receipt.compute_commitment().unwrap();
@@ -2679,7 +2252,6 @@ mod tests {
             [0x05; 32],
             [0x06; 32],
             vec![0x07; 16],
-            vec![0x08; 16],
             vec![0x09; 16],
         );
 
@@ -2754,248 +2326,6 @@ mod tests {
         )
         .expect_err("requesting B-side verification on an A-only receipt must fail-closed");
         assert!(err_b.to_string().contains("missing ek_pk_B"));
-    }
-
-    // ── derive_relationship_key ──
-
-    #[test]
-    fn derive_relationship_key_deterministic() {
-        let pk = [0xABu8; 32];
-        let a = derive_relationship_key(&pk);
-        let b = derive_relationship_key(&pk);
-        assert_eq!(a, b, "same input must yield identical key");
-    }
-
-    #[test]
-    fn derive_relationship_key_varies_with_input() {
-        let k1 = derive_relationship_key(&[1u8; 32]);
-        let k2 = derive_relationship_key(&[2u8; 32]);
-        assert_ne!(k1, k2);
-    }
-
-    #[test]
-    fn derive_relationship_key_nonzero() {
-        let k = derive_relationship_key(b"any-counterparty-pk");
-        assert_ne!(k, [0u8; 32]);
-    }
-
-    // ── serialize / deserialize inclusion proof round-trip ──
-
-    fn sample_proof(with_value: bool, siblings: usize) -> SmtInclusionProof {
-        SmtInclusionProof {
-            key: [0x11u8; 32],
-            value: if with_value { Some([0x22u8; 32]) } else { None },
-            siblings: (0..siblings)
-                .map(|i| [(i as u8).wrapping_add(0x30); 32])
-                .collect(),
-        }
-    }
-
-    #[test]
-    fn roundtrip_proof_with_value_no_siblings() {
-        let proof = sample_proof(true, 0);
-        let bytes = serialize_inclusion_proof(&proof);
-        let decoded = deserialize_inclusion_proof(&bytes).unwrap();
-        assert_eq!(decoded.key, proof.key);
-        assert_eq!(decoded.value, proof.value);
-        assert!(decoded.siblings.is_empty());
-    }
-
-    #[test]
-    fn roundtrip_proof_without_value_no_siblings() {
-        let proof = sample_proof(false, 0);
-        let bytes = serialize_inclusion_proof(&proof);
-        let decoded = deserialize_inclusion_proof(&bytes).unwrap();
-        assert_eq!(decoded.key, proof.key);
-        assert_eq!(decoded.value, None);
-        assert!(decoded.siblings.is_empty());
-    }
-
-    #[test]
-    fn roundtrip_proof_with_value_and_siblings() {
-        let proof = sample_proof(true, 4);
-        let bytes = serialize_inclusion_proof(&proof);
-        let decoded = deserialize_inclusion_proof(&bytes).unwrap();
-        assert_eq!(decoded.key, proof.key);
-        assert_eq!(decoded.value, proof.value);
-        assert_eq!(decoded.siblings.len(), 4);
-        assert_eq!(decoded.siblings, proof.siblings);
-    }
-
-    #[test]
-    fn roundtrip_proof_without_value_with_siblings() {
-        let proof = sample_proof(false, 3);
-        let bytes = serialize_inclusion_proof(&proof);
-        let decoded = deserialize_inclusion_proof(&bytes).unwrap();
-        assert_eq!(decoded.value, None);
-        assert_eq!(decoded.siblings.len(), 3);
-    }
-
-    #[test]
-    fn serialize_proof_expected_length_with_value() {
-        let proof = sample_proof(true, 2);
-        let bytes = serialize_inclusion_proof(&proof);
-        // 32 (key) + 1 (has_value) + 32 (value) + 4 (count) + 2*32 (siblings)
-        assert_eq!(bytes.len(), 32 + 1 + 32 + 4 + 64);
-    }
-
-    #[test]
-    fn serialize_proof_expected_length_without_value() {
-        let proof = sample_proof(false, 2);
-        let bytes = serialize_inclusion_proof(&proof);
-        // 32 (key) + 1 (has_value) + 4 (count) + 2*32 (siblings)
-        assert_eq!(bytes.len(), 32 + 1 + 4 + 64);
-    }
-
-    // ── deserialize error cases ──
-
-    #[test]
-    fn deserialize_too_short() {
-        let short = vec![0u8; 10];
-        assert!(deserialize_inclusion_proof(&short).is_err());
-    }
-
-    #[test]
-    fn deserialize_truncated_at_value() {
-        // 32 key + has_value=1, but no value bytes
-        let mut data = vec![0u8; 33];
-        data[32] = 1; // has_value = true
-        assert!(deserialize_inclusion_proof(&data).is_err());
-    }
-
-    #[test]
-    fn deserialize_truncated_at_sibling_count() {
-        // 32 key + has_value=0, missing sibling count bytes
-        let data = vec![0u8; 33]; // has_value=0, no count
-        assert!(deserialize_inclusion_proof(&data).is_err());
-    }
-
-    #[test]
-    fn deserialize_truncated_siblings() {
-        // valid header + count=2, but only 1 sibling worth of bytes
-        let proof = sample_proof(false, 2);
-        let bytes = serialize_inclusion_proof(&proof);
-        let truncated = &bytes[..bytes.len() - 16]; // remove half of second sibling
-        assert!(deserialize_inclusion_proof(truncated).is_err());
-    }
-
-    #[test]
-    fn deserialize_empty_is_err() {
-        assert!(deserialize_inclusion_proof(&[]).is_err());
-    }
-
-    // ── derive_stitched_receipt_sigma ──
-
-    #[test]
-    fn sigma_deterministic() {
-        let parts: Vec<&[u8]> = vec![b"hello", b"world"];
-        let a = derive_stitched_receipt_sigma(&parts);
-        let b = derive_stitched_receipt_sigma(&parts);
-        assert_eq!(a, b);
-    }
-
-    #[test]
-    fn sigma_varies_with_different_parts() {
-        let s1 = derive_stitched_receipt_sigma(&[b"a", b"b"]);
-        let s2 = derive_stitched_receipt_sigma(&[b"a", b"c"]);
-        assert_ne!(s1, s2);
-    }
-
-    #[test]
-    fn sigma_order_matters() {
-        let s1 = derive_stitched_receipt_sigma(&[b"first", b"second"]);
-        let s2 = derive_stitched_receipt_sigma(&[b"second", b"first"]);
-        assert_ne!(s1, s2);
-    }
-
-    #[test]
-    fn sigma_empty_parts() {
-        let s = derive_stitched_receipt_sigma(&[]);
-        assert_ne!(s, [0u8; 32]);
-    }
-
-    #[test]
-    fn sigma_nonzero() {
-        let s = derive_stitched_receipt_sigma(&[b"test"]);
-        assert_ne!(s, [0u8; 32]);
-    }
-
-    #[test]
-    fn sigma_length_prefixing_prevents_ambiguity() {
-        // "ab" + "cd" vs "abc" + "d" should differ due to length prefixes
-        let s1 = derive_stitched_receipt_sigma(&[b"ab", b"cd"]);
-        let s2 = derive_stitched_receipt_sigma(&[b"abc", b"d"]);
-        assert_ne!(s1, s2);
-    }
-
-    /// Receipt verification rejects relationships that have no recorded chain
-    /// heads. Parent/root inclusion alone is not spend authority.
-    #[test]
-    #[serial_test::serial]
-    fn rejects_receipt_without_chain_heads() {
-        use crate::storage::client_db::reset_database_for_tests;
-
-        unsafe {
-            std::env::set_var("DSM_SDK_TEST_MODE", "1");
-        }
-
-        let devid_a = [0x71u8; 32];
-        let devid_b = [0x72u8; 32];
-        let genesis = [0x73u8; 32];
-        let public_key = vec![0x74u8; 64];
-
-        let storage_dir =
-            std::env::temp_dir().join(format!("dsm_strict_mode_test_{}", std::process::id()));
-        let _ = crate::storage_utils::set_storage_base_dir(storage_dir);
-        reset_database_for_tests();
-
-        crate::sdk::app_state::AppState::set_identity_info(
-            devid_a.to_vec(),
-            public_key.clone(),
-            genesis.to_vec(),
-            [0u8; 32].to_vec(),
-        );
-
-        // Build a minimal receipt; we don't need it to verify
-        // cryptographically — strict-mode rejection fires BEFORE the
-        // canonical core verifier runs.
-        let receipt = StitchedReceiptV2::new(
-            genesis,
-            devid_a,
-            devid_b,
-            [0x01; 32],
-            [0x02; 32],
-            [0x03; 32],
-            [0x04; 32],
-            vec![],
-            vec![],
-            vec![],
-        );
-        let device_tree_commitment = DeviceTreeAcceptanceCommitment::from_root(
-            dsm::common::device_tree::DeviceTree::single(devid_a).root(),
-        );
-
-        let result = verify_stitched_receipt(
-            &receipt,
-            &[0xAA; 64],
-            &[0xBB; 64],
-            &public_key,
-            &public_key,
-            device_tree_commitment,
-            None,
-        );
-
-        assert!(
-            result.is_err(),
-            "verification without chain heads must reject"
-        );
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("missing sender cert-chain head")
-                || err.contains("cert-chain-bound receipt authorization"),
-            "wrong rejection reason: {}",
-            err
-        );
     }
 
     // ── encode_protocol_transition_payload ──
@@ -3079,107 +2409,6 @@ mod tests {
         assert_ne!(c, [0u8; 32]);
     }
 
-    // ── serialize/deserialize: additional edge cases ──
-
-    #[test]
-    fn roundtrip_proof_many_siblings() {
-        let proof = SmtInclusionProof {
-            key: [0xFF; 32],
-            value: Some([0xEE; 32]),
-            siblings: (0..256).map(|i| [(i as u8); 32]).collect(),
-        };
-        let bytes = serialize_inclusion_proof(&proof);
-        let decoded = deserialize_inclusion_proof(&bytes).unwrap();
-        assert_eq!(decoded.siblings.len(), 256);
-        assert_eq!(decoded.key, [0xFF; 32]);
-        assert_eq!(decoded.value, Some([0xEE; 32]));
-        for (i, sib) in decoded.siblings.iter().enumerate() {
-            assert_eq!(*sib, [(i as u8); 32]);
-        }
-    }
-
-    #[test]
-    fn serialize_proof_key_is_first_32_bytes() {
-        let proof = SmtInclusionProof {
-            key: [0xAB; 32],
-            value: None,
-            siblings: vec![],
-        };
-        let bytes = serialize_inclusion_proof(&proof);
-        assert_eq!(&bytes[..32], &[0xAB; 32]);
-    }
-
-    #[test]
-    fn serialize_has_value_byte_zero_when_none() {
-        let proof = SmtInclusionProof {
-            key: [0; 32],
-            value: None,
-            siblings: vec![],
-        };
-        let bytes = serialize_inclusion_proof(&proof);
-        assert_eq!(bytes[32], 0);
-    }
-
-    #[test]
-    fn serialize_has_value_byte_one_when_some() {
-        let proof = SmtInclusionProof {
-            key: [0; 32],
-            value: Some([0; 32]),
-            siblings: vec![],
-        };
-        let bytes = serialize_inclusion_proof(&proof);
-        assert_eq!(bytes[32], 1);
-    }
-
-    #[test]
-    fn deserialize_exact_minimum_no_value() {
-        // 32 key + 1 has_value(0) + 4 count(0) = 37 bytes
-        let mut data = vec![0u8; 37];
-        data[32] = 0; // has_value = false
-                      // count bytes already zero (0 siblings)
-        let proof = deserialize_inclusion_proof(&data).unwrap();
-        assert_eq!(proof.key, [0u8; 32]);
-        assert_eq!(proof.value, None);
-        assert!(proof.siblings.is_empty());
-    }
-
-    #[test]
-    fn deserialize_exact_minimum_with_value() {
-        // 32 key + 1 has_value(1) + 32 value + 4 count(0) = 69 bytes
-        let mut data = vec![0u8; 69];
-        data[32] = 1; // has_value = true
-        data[33..65].copy_from_slice(&[0xCC; 32]); // value
-                                                   // count bytes at 65..69 already zero
-        let proof = deserialize_inclusion_proof(&data).unwrap();
-        assert_eq!(proof.value, Some([0xCC; 32]));
-        assert!(proof.siblings.is_empty());
-    }
-
-    #[test]
-    fn deserialize_sibling_count_as_le_u32() {
-        let proof = sample_proof(false, 1);
-        let bytes = serialize_inclusion_proof(&proof);
-        // After key(32) + has_value(1) byte, count is at offset 33..37
-        let count = u32::from_le_bytes(bytes[33..37].try_into().unwrap());
-        assert_eq!(count, 1);
-    }
-
-    // ── sigma: additional edge cases ──
-
-    #[test]
-    fn sigma_single_empty_part_differs_from_no_parts() {
-        let s_empty = derive_stitched_receipt_sigma(&[]);
-        let s_one_empty = derive_stitched_receipt_sigma(&[b""]);
-        assert_ne!(s_empty, s_one_empty);
-    }
-
-    #[test]
-    fn sigma_large_input() {
-        let big = vec![0x42u8; 10_000];
-        let s = derive_stitched_receipt_sigma(&[&big]);
-        assert_ne!(s, [0u8; 32]);
-    }
-
     // ── encode_protocol_transition_payload: additional ──
 
     #[test]
@@ -3196,30 +2425,7 @@ mod tests {
         assert_ne!(a, b);
     }
 
-    // ── derive_relationship_key: additional ──
-
-    #[test]
-    fn derive_relationship_key_empty_input() {
-        let k = derive_relationship_key(&[]);
-        assert_ne!(k, [0u8; 32]);
-    }
-
-    #[test]
-    fn derive_relationship_key_large_input() {
-        let big = vec![0xCC; 1024];
-        let k = derive_relationship_key(&big);
-        assert_ne!(k, [0u8; 32]);
-    }
-
     // ── compute_protocol_transition_commitment ──
-
-    #[test]
-    fn protocol_commitment_uses_different_domain_from_sigma() {
-        let data = b"same-payload";
-        let sigma = derive_stitched_receipt_sigma(&[data.as_slice()]);
-        let proto = compute_protocol_transition_commitment(data);
-        assert_ne!(sigma, proto);
-    }
 
     // ── encode + commit roundtrip ──
 
@@ -3241,101 +2447,87 @@ mod tests {
     }
 
     // #[serial] required: this test mutates the process-global `AppState`
-    // (via `set_identity_info`) and the `DSM_SDK_TEST_MODE` env var. Running
+    // (via `set_identity_info`). Running
     // concurrently with other identity/AppState-touching tests (e.g.
     // `dlv_sdk::tests::*` and `bilateral_ble_handler::tests::test_register_
     // sender_session_persists_canonical_sender_session`) produces intermittent
     // CI failures where one test sees the other's identity.
     #[test]
     #[serial_test::serial]
-    fn first_ever_receipt_requires_merkle_pre_root_not_cas_parent_root() {
-        unsafe {
-            std::env::set_var("DSM_SDK_TEST_MODE", "1");
-        }
-
-        let devid_a = [0x41u8; 32];
-        let devid_b = [0x42u8; 32];
-        let genesis = [0x43u8; 32];
-        let public_key = vec![0x44u8; 64];
-        let initial_tip = [0x45u8; 32];
-
-        let storage_dir =
-            std::env::temp_dir().join(format!("dsm_receipts_test_{}", std::process::id()));
-        let _ = crate::storage_utils::set_storage_base_dir(storage_dir);
-
-        crate::sdk::app_state::AppState::set_identity_info(
-            devid_a.to_vec(),
-            public_key.clone(),
-            genesis.to_vec(),
-            [0u8; 32].to_vec(),
+    fn a_first_step_receipt_starts_from_the_root_the_device_committed() {
+        use crate::test_support::two_device::TestDevice;
+        let peer = TestDevice::create("B", 0x42);
+        let local = TestDevice::create("A", 0x41);
+        let (devid_a, devid_b) = (local.device_id, peer.device_id);
+        let h0 = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+            &devid_a, &devid_b,
         );
-
-        let device_tree_commitment = Some(DeviceTreeAcceptanceCommitment::from_root(
+        let device_tree_commitment = DeviceTreeAcceptanceCommitment::from_root(
             dsm::common::device_tree::DeviceTree::single(devid_a).root(),
-        ));
-
-        let state = DeviceState::new(genesis, devid_a, public_key);
-        let rel_key = dsm::verification::smt_replace_witness::compute_smt_key(&devid_a, &devid_b);
-        let outcome = state
-            .advance(
-                rel_key,
-                devid_b,
-                Operation::Noop,
-                &[],
-                Some(initial_tip),
-                None,
-                None,
-            )
-            .expect("first-ever advance should succeed");
-
-        assert_ne!(
-            outcome.parent_r_a, outcome.smt_proofs.pre_root,
-            "first-ever advance must distinguish CAS parent root from Merkle proof pre_root"
         );
 
+        let head = crate::storage::client_db::load_bcr_device_head(&devid_a)
+            .expect("load the head")
+            .expect("genesis installed the head");
+        let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(&devid_a, &devid_b);
+        assert!(
+            head.advance(rel_key, devid_b, Operation::Noop, &[], None, None)
+                .is_err(),
+            "a step on a relationship the device never established is refused"
+        );
+
+        let established = head.establish_relationship(devid_b).expect("establish");
+        let outcome = established
+            .advance(rel_key, devid_b, Operation::Noop, &[], None, None)
+            .expect("the first step");
+        assert_eq!(outcome.parent_r_a, established.root());
+        assert_eq!(
+            outcome.smt_proofs.pre_root,
+            established.root(),
+            "the first step's pre-state root is the root the device committed"
+        );
         let parent_tip = outcome
             .smt_proofs
             .parent_proof
             .value
-            .expect("first-ever parent proof should carry seeded initial tip");
-        let child_tip = outcome.new_chain_state.compute_chain_tip();
-        let parent_proof = outcome.smt_proofs.parent_proof.to_bytes();
-        let child_proof = outcome.smt_proofs.child_proof.to_bytes();
+            .expect("the parent path authenticates the established leaf");
+        assert_eq!(parent_tip, h0);
 
-        let receipt_with_proof_root = build_bilateral_receipt_with_smt(
+        let child_tip = outcome.new_chain_state.compute_chain_tip();
+        let receipt = build_bilateral_receipt_with_smt(
             devid_a,
             devid_b,
             parent_tip,
             child_tip,
             outcome.smt_proofs.pre_root,
             outcome.child_r_a,
-            parent_proof.clone(),
-            child_proof.clone(),
-            device_tree_commitment,
+            &outcome.smt_proofs.parent_proof,
+            &device_tree_commitment,
             outcome.transition_entropy(),
         )
-        .expect("receipt with Merkle pre_root");
-        assert!(verify_receipt_bytes(
-            &receipt_with_proof_root,
-            device_tree_commitment,
-        ));
+        .expect("the first step's receipt");
+        let decoded = StitchedReceiptV2::from_canonical_protobuf(&receipt)
+            .expect("the built receipt decodes");
+        dsm::verification::receipt_verification::verify_receipt_state(
+            &decoded,
+            &device_tree_commitment,
+        )
+        .expect("the first step's receipt holds its state rules");
 
-        let receipt_with_cas_root = build_bilateral_receipt_with_smt(
-            devid_a,
-            devid_b,
-            parent_tip,
-            child_tip,
-            outcome.parent_r_a,
-            outcome.child_r_a,
-            parent_proof,
-            child_proof,
-            device_tree_commitment,
-            outcome.transition_entropy(),
-        )
-        .expect("receipt with CAS parent root");
         assert!(
-            !verify_receipt_bytes(&receipt_with_cas_root, device_tree_commitment),
-            "using parent_r_a should fail receipt verification on first-ever advances"
+            build_bilateral_receipt_with_smt(
+                devid_a,
+                devid_b,
+                parent_tip,
+                child_tip,
+                head.root(),
+                outcome.child_r_a,
+                &outcome.smt_proofs.parent_proof,
+                &device_tree_commitment,
+                outcome.transition_entropy(),
+            )
+            .is_err(),
+            "a root from before the relationship was established is not the step's parent: no receipt"
         );
     }
 }

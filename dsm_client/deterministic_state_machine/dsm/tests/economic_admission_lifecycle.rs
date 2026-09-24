@@ -58,7 +58,7 @@ fn pending(kind: PendingAdmissionKind, state: EconomicAdmissionState) -> Pending
 fn bearer_transfer(policy_commit: [u8; 32]) -> Operation {
     Operation::Transfer {
         to_device_id: vec![1; 32],
-        amount: Balance::from_state(5, [0u8; 32]),
+        amount: Balance::amount(5),
         token_id: b"ERA".to_vec(),
         policy_commit,
         mode: TransactionMode::Bilateral,

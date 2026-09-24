@@ -42,8 +42,12 @@ fi
 # THIS SCRIPT MINTS A NEW CA AND DELETES THE OLD ONE.
 #
 # The CA private key exists in exactly one place — ${OUT_DIR}/ca/ca.key. It is
-# not in git (only the public cert is, as scripts/ca.crt) and it cannot be
-# reconstructed. Deleting it means the deployed fleet's certificates can never
+# not in git, and it cannot be reconstructed. (The public cert lives beside it
+# at ${OUT_DIR}/ca/ca.crt and is bundled into clients as the app asset
+# dsm_client/frontend/public/ca.crt. A second committed copy at scripts/ca.crt
+# was deleted 2026-09-12: it had drifted to a DIFFERENT CA with the same
+# subject, so the two disagreed silently about which fleet a client could
+# trust. Keep exactly one public cert in the tree.) Deleting it means the deployed fleet's certificates can never
 # be reissued or extended: every node must be redeployed with a new CA, and
 # every client CA bundle re-pushed, before anything can talk to anything.
 #

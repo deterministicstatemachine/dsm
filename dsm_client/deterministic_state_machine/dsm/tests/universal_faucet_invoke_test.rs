@@ -26,9 +26,7 @@ fn universal_faucet_claim_invoke_routes_to_approuter_claim() {
         version: 3,
         headers: Some(gp::Headers {
             device_id: vec![4u8; 32],
-            chain_tip: vec![5u8; 32],
             genesis_hash: vec![3u8; 32],
-            seq: 1,
         }),
         message_id: vec![6u8; 16],
         payload: Some(gp::envelope::Payload::UniversalTx(gp::UniversalTx {
@@ -65,7 +63,6 @@ fn universal_faucet_claim_invoke_routes_to_approuter_claim() {
             let resp = gp::FaucetClaimResponse {
                 success: true,
                 tokens_received: 1000,
-                next_available_index: 0,
                 message: "Faucet claim successful (test)".to_string(),
             };
             let arg_pack = gp::ArgPack {
@@ -85,7 +82,7 @@ fn universal_faucet_claim_invoke_routes_to_approuter_claim() {
         .unwrap_or_else(|e| panic!("install app router failed: {e}"));
 
     let resp_bytes = dsm::core::bridge::handle_envelope_universal(&env.encode_to_vec());
-    let resp_env = dsm::envelope::from_canonical_bytes(resp_bytes.as_slice())
+    let resp_env = dsm::envelope::local_answer_from_canonical_bytes(resp_bytes.as_slice())
         .unwrap_or_else(|e| panic!("decode response envelope failed: {e}"));
 
     match resp_env.payload {

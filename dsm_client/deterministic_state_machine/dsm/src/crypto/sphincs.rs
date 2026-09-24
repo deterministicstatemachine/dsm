@@ -226,12 +226,6 @@ impl SpxAddress {
         // tree number there while indexing leaves.
         self.w[6] = i;
     }
-    #[allow(dead_code)]
-    fn copy_subtree_from(&mut self, other: &SpxAddress) {
-        self.w[0] = other.w[0];
-        self.w[1] = other.w[1];
-        self.w[2] = other.w[2];
-    }
     fn as_bytes(&self) -> [u8; 32] {
         let mut out = [0u8; 32];
         for (i, word) in self.w.iter().enumerate() {

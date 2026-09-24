@@ -313,7 +313,7 @@ test: ## Run Rust workspace tests + frontend jest tests
 	# --test-threads=1: dsm_sdk/storage suites share process-global singletons; a
 	# non-serial test racing a #[serial] one flakes nondeterministically. Match CI.
 	cargo test --workspace --exclude dsm_storage_node -- --nocapture --test-threads=1
-	cargo test -p dsm_storage_node --no-default-features --features local-dev,strict -- --nocapture
+	cargo test -p dsm_storage_node -- --nocapture --test-threads=1
 	@echo "==> Running frontend tests..."
 	cd $(FRONTEND_DIR) && \
 		[ -s $$HOME/.nvm/nvm.sh ] && . $$HOME/.nvm/nvm.sh; \
@@ -322,11 +322,10 @@ test: ## Run Rust workspace tests + frontend jest tests
 
 .PHONY: test-rust
 test-rust: ## Run Rust tests only
-	# Most of the workspace uses the default (postgres-feature) build.
-	# dsm_storage_node integration tests use the local-dev (SQLite) build so
-	# they run without a live PostgreSQL instance.
-	cargo test --workspace --exclude dsm_storage_node -- --nocapture
-	cargo test -p dsm_storage_node --no-default-features --features local-dev,strict -- --nocapture
+	# Node-backed tests run on Postgres: set DSM_TEST_DATABASE_URL to a
+	# database on a running server (they refuse to run without one).
+	cargo test --workspace --exclude dsm_storage_node -- --nocapture --test-threads=1
+	cargo test -p dsm_storage_node -- --nocapture --test-threads=1
 
 .PHONY: test-frontend
 test-frontend: ## Run frontend jest tests only
@@ -451,8 +450,8 @@ release-preflight: ## Run the full pre-tag release gate (lint, test, audit, CI s
 	cargo clippy --all-targets -- -D warnings
 	@echo ""
 	@echo "── [2/8] Rust tests ────────────────────────────────────────"
-	cargo test --workspace --exclude dsm_storage_node -- --nocapture
-	cargo test -p dsm_storage_node --no-default-features --features local-dev,strict -- --nocapture
+	cargo test --workspace --exclude dsm_storage_node -- --nocapture --test-threads=1
+	cargo test -p dsm_storage_node -- --nocapture --test-threads=1
 	@echo ""
 	@echo "── [3/8] Security audit ────────────────────────────────────"
 	cargo deny check

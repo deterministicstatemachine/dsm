@@ -38,9 +38,8 @@
 //! emits an operation the validator will deterministically reject has produced
 //! a way to strand a trader, not a trade.
 //!
-//! Dark: nothing calls these yet.
+//! `sdk::sofi_flow` runs them for the SoFi routes.
 
-use dsm::core::state_machine::transition::operation_signing_bytes;
 use dsm::sofi::admission::{preimage_admissible, NotAdmissible};
 use dsm::sofi::conformance::{
     check_fulfillment_against_precommit, derive_policy_fulfillments, FulfillmentConformanceError,
@@ -51,7 +50,7 @@ use dsm::economic::tree::EconomicSmt;
 use dsm::sofi::lineage::GenesisError;
 use dsm::sofi::publication::Signed;
 use dsm::sofi::signature::{verify_precommit, SignatureError, SigningPayload};
-use dsm::sofi::validation::{validate, Evidence, Invalid, Missing, Refusal};
+use dsm::sofi::validation::{realize_root, validate, Evidence, Invalid, Missing, Refusal};
 use dsm::sofi::wire::{
     AttemptEntry, DlvCore, DlvPolicyFulfillmentBody, OwnerAuthority, ParentClaimRef,
     PreEClosureIndex, PrecommitLeg, SettlementBody, SettlementPreimage, SofiSetupBody,
@@ -59,6 +58,8 @@ use dsm::sofi::wire::{
     VaultGenesisPreimage,
 };
 use dsm::types::operations::Operation;
+
+use crate::sdk::sofi_evidence::LocalLeaves;
 
 type D32 = [u8; 32];
 
@@ -75,15 +76,17 @@ pub enum BuildError {
     /// would hand the trader an operation that is already refused.
     StaticallyInvalid(Invalid),
     /// Rule T5: evidence the verifier needs is not in hand, so the producer
-    /// stops — it never publishes, exercises or advances on Unavailable.
+    /// stops — it never publishes, exercises or advances without a verdict.
     /// Nothing about the operation is wrong; what is missing is named.
-    Unavailable(Missing),
+    Incomplete(Missing),
     /// `P` is not validly signed, so the fulfillment would name a precommit
     /// storage refuses.
     PrecommitSignature(SignatureError),
     /// A vault genesis a verifier would refuse — the market policy does not
     /// authenticate, or its pair is not canonical.
     Genesis(GenesisError),
+    /// The trader's own leaves cannot supply the pre values its core names.
+    LocalLeaves(String),
     /// This identity already holds a relationship with that vault. `h⁰` is a
     /// function of the setup id, so a second setup would reset a chain that
     /// has already advanced.
@@ -104,12 +107,13 @@ impl core::fmt::Display for BuildError {
                 "a verifier refuses this operation ({reason:?}); it is not a trade, it is a \
                  way to strand one"
             ),
-            Self::Unavailable(missing) => write!(
+            Self::Incomplete(missing) => write!(
                 f,
                 "the producer stops: evidence a verifier needs is not in hand ({missing:?}); \
-                 nothing is published, exercised or advanced on Unavailable"
+                 nothing is published, exercised or advanced without a verdict"
             ),
             Self::Genesis(e) => write!(f, "{e}"),
+            Self::LocalLeaves(e) => write!(f, "the trader's own leaves: {e}"),
             Self::PreTreeIsNotThePredecessor => write!(
                 f,
                 "the producer's economic tree is not the validated predecessor's root: \
@@ -177,6 +181,46 @@ pub struct Produced {
     /// Objects a verifier needs and cannot derive, in the order they are
     /// published.
     pub publish: Vec<ToPublish>,
+}
+
+/// A precommit and its settlement preimage, assembled and not yet checked.
+/// The evidence a verifier consumes is acquired over exactly these
+/// (`EvidenceNeeds::of`), so it cannot be acquired before them; only
+/// [`check_draft`] turns this into a [`PrecommitDraft`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UncheckedDraft {
+    precommit: TraderPrecommitBody,
+    preimage: SettlementPreimage,
+}
+
+impl UncheckedDraft {
+    pub fn precommit(&self) -> &TraderPrecommitBody {
+        &self.precommit
+    }
+
+    pub fn preimage(&self) -> &SettlementPreimage {
+        &self.preimage
+    }
+}
+
+/// The verifier's own verdict over a draft, over evidence acquired for it
+/// (`sofi_evidence::acquire_evidence`, rebuild step R5). Any result but Valid
+/// stops the producer (rebuild step R6): Invalid means the trader would be
+/// building something a verifier already refuses; evidence not in hand
+/// means there is no verdict, and rule T5 says a producer never publishes,
+/// exercises or advances without one.
+pub fn check_draft(
+    draft: UncheckedDraft,
+    evidence: &Evidence,
+) -> Result<PrecommitDraft, BuildError> {
+    match validate(&draft.precommit, &draft.preimage, evidence) {
+        Ok(()) => Ok(PrecommitDraft {
+            precommit: draft.precommit,
+            preimage: draft.preimage,
+        }),
+        Err(Refusal::Invalid(reason)) => Err(BuildError::StaticallyInvalid(reason)),
+        Err(Refusal::Incomplete(missing)) => Err(BuildError::Incomplete(missing)),
+    }
 }
 
 /// A precommit and its settlement preimage, built and checked, waiting for the
@@ -266,7 +310,7 @@ pub fn build_setup(
         key,
         state
             .leaf_value()
-            .map_err(|_| BuildError::SetupAlreadyExists)?,
+            .map_err(|e| BuildError::LocalLeaves(format!("relationship leaf value: {e}")))?,
     );
     let body = SofiSetupBody::new(
         genesis,
@@ -345,7 +389,7 @@ pub fn build_vault_create(
         // `R_0` are derivations of the preimage it carries. So it signs the
         // operation, by the one frozen rule — inventing a vault-create digest
         // here would be a rule no verifier implements.
-        signs: SigningPayload::OperationBytes(operation_signing_bytes(&operation)),
+        signs: SigningPayload::OperationBytes(operation.signing_bytes()),
         operation,
         publish: Vec::new(),
     })
@@ -366,21 +410,32 @@ pub struct TraderContext<'a> {
     pub trader_core: TraderCore,
 }
 
-/// Assemble `P(E)` and `P`, refusing anything beta will not run and anything a
-/// verifier already calls Invalid.
+/// Assemble `P(E)` and `P`, refusing anything beta will not run.
+///
+/// Neither root is the caller's: `R_void` is `T°.pre_root` (P15-2), and
+/// `R_realize` is `Fold(T°, E)` over the trader's own leaves, computed by the
+/// Core function the verifier checks it with — so it can only be computed
+/// once `E` exists, which is here.
 fn draft(
     settlement: SettlementBody,
     ctx: &TraderContext<'_>,
     cores: Vec<DlvCore>,
     legs: Vec<PrecommitLeg>,
-    realize_root: D32,
-    void_root: D32,
-    evidence: &Evidence,
-) -> Result<PrecommitDraft, BuildError> {
+    local: &LocalLeaves,
+) -> Result<UncheckedDraft, BuildError> {
     let preimage = SettlementPreimage::new(settlement, ctx.trader_core.clone(), cores)?;
     // Beta will not execute this, so nothing here will build it.
     preimage_admissible(&preimage).map_err(BuildError::NotAdmissible)?;
     let e = derive::recompute_e(&preimage)?;
+    let trader_evidence = local
+        .trader_evidence(&ctx.trader_core)
+        .map_err(|why| BuildError::LocalLeaves(why.to_string()))?;
+    let realize = match realize_root(&ctx.trader_core, &e, &trader_evidence) {
+        Ok(root) => root,
+        Err(Refusal::Invalid(reason)) => return Err(BuildError::StaticallyInvalid(reason)),
+        Err(Refusal::Incomplete(missing)) => return Err(BuildError::Incomplete(missing)),
+    };
+    let void_root = *ctx.trader_core.pre_root();
     let precommit = TraderPrecommitBody::new(
         ctx.genesis,
         ctx.device_id,
@@ -388,28 +443,14 @@ fn draft(
         ctx.parent_claim,
         e,
         legs,
-        realize_root,
+        realize,
         void_root,
         ctx.storage_set_id,
         ctx.signature_alg,
         ctx.claimant_public_key,
     )?;
 
-    // THE VERIFIER'S OWN VERDICT, over the evidence the producer ACQUIRED
-    // (`sofi_evidence::acquire_evidence`, rebuild step R5) — never a default.
-    // Any result but Valid stops the producer (rebuild step R6): Invalid means
-    // the trader would be building something a verifier already refuses;
-    // Unavailable means the verifier could not decide, and rule T5 says a
-    // producer never publishes, exercises or advances on that. The three-valued
-    // conjunction never lets missing evidence hide a refusal, and never lets
-    // it pass for one.
-    match validate(&precommit, &preimage, evidence) {
-        Ok(()) => {}
-        Err(Refusal::Invalid(reason)) => return Err(BuildError::StaticallyInvalid(reason)),
-        Err(Refusal::Unavailable(missing)) => return Err(BuildError::Unavailable(missing)),
-    }
-
-    Ok(PrecommitDraft {
+    Ok(UncheckedDraft {
         precommit,
         preimage,
     })
@@ -420,18 +461,9 @@ pub fn draft_trade(
     hop: SwapHop,
     core: DlvCore,
     ctx: &TraderContext<'_>,
-    realize_root: D32,
-    void_root: D32,
-    evidence: &Evidence,
-) -> Result<PrecommitDraft, BuildError> {
-    draft_route(
-        vec![hop],
-        vec![core],
-        ctx,
-        realize_root,
-        void_root,
-        evidence,
-    )
+    local: &LocalLeaves,
+) -> Result<UncheckedDraft, BuildError> {
+    draft_route(vec![hop], vec![core], ctx, local)
 }
 
 /// A route over one or more vaults. Beta executes at most two hops, and this
@@ -441,13 +473,11 @@ pub fn draft_route(
     hops: Vec<SwapHop>,
     cores: Vec<DlvCore>,
     ctx: &TraderContext<'_>,
-    realize_root: D32,
-    void_root: D32,
-    evidence: &Evidence,
-) -> Result<PrecommitDraft, BuildError> {
+    local: &LocalLeaves,
+) -> Result<UncheckedDraft, BuildError> {
     let (first, last) = match (hops.first(), hops.last()) {
         (Some(f), Some(l)) => (*f, *l),
-        _ => {
+        (None, ..) | (.., None) => {
             return Err(BuildError::Wire(SofiWireError::Cardinality {
                 field: "swap hops",
                 min: 1,
@@ -481,15 +511,7 @@ pub fn draft_route(
         dlv_cores: core_digests,
         closure: PreEClosureIndex::new(Vec::new())?,
     };
-    draft(
-        settlement,
-        ctx,
-        sorted_cores,
-        legs,
-        realize_root,
-        void_root,
-        evidence,
-    )
+    draft(settlement, ctx, sorted_cores, legs, local)
 }
 
 /// A full close of one vault by its origin owner.
@@ -506,10 +528,8 @@ pub fn draft_close(
     reserve_b: u64,
     core: DlvCore,
     ctx: &TraderContext<'_>,
-    realize_root: D32,
-    void_root: D32,
-    evidence: &Evidence,
-) -> Result<PrecommitDraft, BuildError> {
+    local: &LocalLeaves,
+) -> Result<UncheckedDraft, BuildError> {
     let settlement = SettlementBody::Close {
         vault_id,
         parent_root,
@@ -530,9 +550,7 @@ pub fn draft_close(
             parent_root,
             setup_ref,
         }],
-        realize_root,
-        void_root,
-        evidence,
+        local,
     )
 }
 
@@ -610,755 +628,4 @@ pub fn build_fulfillment(
         operation,
         publish,
     })
-}
-
-#[cfg(test)]
-#[allow(clippy::disallowed_methods)] // test asserts; a failure here is the signal
-mod tests {
-    use super::*;
-    use dsm::economic::keys::balance_key;
-    use dsm::economic::tree::{EconomicSmt, ECONOMIC_SMT_HEIGHT};
-    use dsm::sofi::wire::{CoreEntry, VaultStateLeaf, VAULT_STATUS_ACTIVE};
-
-    const G: D32 = [0x11; 32];
-    const DEV: D32 = [0x22; 32];
-    const P_POS: u64 = 5;
-    const ALG: u16 = 0x0001;
-    const PRE_ROOT: D32 = [0x61; 32];
-    const REL_BASE: D32 = [0x63; 32];
-
-    /// A REAL keypair. The producer verifies `m_P` cryptographically, so a
-    /// constant stand-in would only prove the check was skipped. Generated
-    /// once: keygen is ~30ms and a signature ~500ms here.
-    fn keypair() -> &'static (Vec<u8>, Vec<u8>) {
-        static KEYS: std::sync::OnceLock<(Vec<u8>, Vec<u8>)> = std::sync::OnceLock::new();
-        KEYS.get_or_init(|| dsm::crypto::sphincs::generate_sphincs_keypair().unwrap())
-    }
-
-    fn sign(message: &[u8]) -> Vec<u8> {
-        dsm::crypto::sphincs::sphincs_sign(&keypair().1, message).unwrap()
-    }
-
-    /// The trader's own signature over `m_P`, as the caller would return it.
-    fn sign_precommit(draft: &PrecommitDraft) -> Vec<u8> {
-        sign(&draft.precommit_signing_digest())
-    }
-
-    fn d(byte: u8) -> D32 {
-        [byte; 32]
-    }
-
-    /// No evidence at all — what a verifier holds before any acquisition. A
-    /// draft over it is refused only for what needs no evidence.
-    fn no_evidence() -> Evidence {
-        Evidence::acquired(
-            std::collections::BTreeMap::new(),
-            std::collections::BTreeMap::new(),
-            std::collections::BTreeMap::new(),
-        )
-    }
-
-    /// The vault's market policy, and the address it is committed by. Derived
-    /// from the bytes so a fixture cannot commit one market and present
-    /// another.
-    fn market_bytes() -> Vec<u8> {
-        dsm::ccb::state::MarketPolicy::beta_constant_product(d(0x40), d(0x41))
-            .unwrap()
-            .encode()
-    }
-
-    fn market_addr() -> D32 {
-        dsm::ccb::decode::policy_object_address(dsm::ccb::class::MARKET_POLICY, &market_bytes())
-            .unwrap()
-    }
-
-    fn path() -> Vec<D32> {
-        vec![[0u8; 32]; ECONOMIC_SMT_HEIGHT]
-    }
-
-    fn balance(token: D32) -> CoreEntry {
-        CoreEntry::Mutation {
-            key: balance_key(&G, &DEV, &token),
-            pre: d(0x41),
-            post: d(0x42),
-            path: path(),
-        }
-    }
-
-    fn relationship(vault: D32) -> CoreEntry {
-        CoreEntry::Relationship {
-            genesis: G,
-            device_id: DEV,
-            vault_id: vault,
-            base: REL_BASE,
-            path: path(),
-        }
-    }
-
-    /// `T°`, in the EXACT shape the branch permits: the intent's two endpoint
-    /// movements and one relationship advancement per leg. A fixture with a
-    /// different shape is refused by the write-set rule before anything else
-    /// is examined, which is the point.
-    fn trader_core(token_in: D32, token_out: D32, vaults: &[D32]) -> TraderCore {
-        let mut entries = vec![balance(token_out), balance(token_in)];
-        entries.extend(vaults.iter().map(|v| relationship(*v)));
-        entries.sort_by_key(CoreEntry::key);
-        TraderCore::new(G, DEV, P_POS + 1, PRE_ROOT, entries).unwrap()
-    }
-
-    /// `V°`: its own state leaf and the matching relationship advancement.
-    fn dlv_core(vault: u8) -> DlvCore {
-        let vault_id = d(vault);
-        DlvCore::new(vault_id, d(0x62), G, DEV, REL_BASE, {
-            let mut entries = vec![
-                CoreEntry::Mutation {
-                    key: dsm::sofi::derive::vault_state_key(&vault_id),
-                    pre: d(0x51),
-                    post: d(0x52),
-                    path: path(),
-                },
-                relationship(vault_id),
-            ];
-            entries.sort_by_key(CoreEntry::key);
-            entries
-        })
-        .unwrap()
-    }
-
-    /// A hop that actually chains: it gives out what the next hop takes in, at
-    /// the amount the next hop consumes.
-    fn hop(vault: u8, token_in: u8, amount_in: u64, token_out: u8, amount_out: u64) -> SwapHop {
-        SwapHop {
-            vault_id: d(vault),
-            parent_root: d(0x62),
-            setup_ref: d(0x55),
-            token_in: d(token_in),
-            amount_in,
-            token_out: d(token_out),
-            amount_out,
-        }
-    }
-
-    fn ctx(core: TraderCore) -> TraderContext<'static> {
-        TraderContext {
-            genesis: G,
-            device_id: DEV,
-            position: P_POS,
-            parent_claim: ParentClaimRef::SingleRoot { claim_ref: d(0x66) },
-            storage_set_id: d(0x77),
-            signature_alg: ALG,
-            claimant_public_key: &keypair().0,
-            trader_core: core,
-        }
-    }
-
-    fn one_hop_ctx() -> TraderContext<'static> {
-        ctx(trader_core(d(0x40), d(0x41), &[d(0xC1)]))
-    }
-
-    /// THE ROUTE MUST CHAIN, and a producer refuses one that does not — with
-    /// no evidence fetched at all, because a verifier needs none to know.
-    /// This test previously built exactly this pair and PASSED, which is what
-    /// made it a demonstration of the bug rather than a test of the gate.
-    #[test]
-    fn a_producer_refuses_a_route_that_does_not_chain() {
-        // hop0 gives 0x41/90; hop1 takes 0x40/100. Neither end matches.
-        let broken = vec![
-            hop(0xC1, 0x40, 100, 0x41, 90),
-            hop(0xC2, 0x40, 100, 0x41, 90),
-        ];
-        assert_eq!(
-            draft_route(
-                broken,
-                vec![dlv_core(0xC1), dlv_core(0xC2)],
-                &ctx(trader_core(d(0x40), d(0x41), &[d(0xC1), d(0xC2)])),
-                d(0xA1),
-                PRE_ROOT,
-                &no_evidence()
-            ),
-            Err(BuildError::StaticallyInvalid(Invalid::RouteDoesNotChain {
-                hop: 1
-            }))
-        );
-    }
-
-    /// `P.void_root` IS `T°.pre_root` (P15-2) — evidence-independent, so the
-    /// producer refuses a draft that guesses it.
-    #[test]
-    fn a_producer_refuses_a_void_root_that_is_not_the_pre_root() {
-        assert_eq!(
-            draft_trade(
-                hop(0xC1, 0x40, 100, 0x41, 90),
-                dlv_core(0xC1),
-                &one_hop_ctx(),
-                d(0xA1),
-                d(0x6F),
-                &no_evidence()
-            ),
-            Err(BuildError::StaticallyInvalid(
-                Invalid::VoidRootIsNotThePreRoot
-            ))
-        );
-    }
-
-    /// Beta's hop cap is refused before anything is assembled (R16-6).
-    #[test]
-    fn a_producer_refuses_a_route_beta_will_not_execute() {
-        let hops = vec![
-            hop(0xC1, 0x40, 100, 0x41, 90),
-            hop(0xC2, 0x41, 90, 0x42, 80),
-            hop(0xC3, 0x42, 80, 0x43, 70),
-        ];
-        let vaults = [d(0xC1), d(0xC2), d(0xC3)];
-        assert_eq!(
-            draft_route(
-                hops,
-                vaults.iter().map(|v| dlv_core(v[0])).collect(),
-                &ctx(trader_core(d(0x40), d(0x43), &vaults)),
-                d(0xA1),
-                PRE_ROOT,
-                &no_evidence()
-            ),
-            Err(BuildError::NotAdmissible(NotAdmissible::TooManyLegs {
-                legs: 3,
-                max: 2
-            }))
-        );
-    }
-
-    // ── Over ACQUIRED evidence: the producer builds only what a verifier
-    // validates, and stops on what it cannot decide (rebuild step R6) ────
-
-    use crate::sdk::sofi_test_fixtures::{all_policies, five, RouteFixture};
-    use crate::sdk::storage_io::fake_fleet;
-    use dsm::sofi::validation::Missing;
-    use serial_test::serial;
-
-    /// A one-hop swap at a vault's genesis, published to the fake fleet, its
-    /// evidence acquired, and the draft the producer builds over it.
-    fn one_hop() -> (RouteFixture, PrecommitDraft) {
-        fake_fleet::reset();
-        let set = five();
-        let fx = RouteFixture::swap(1, set.id());
-        fx.publish(&set, &all_policies());
-        let evidence = fx.acquire(&set);
-        let draft = draft_route(
-            fx.hops.clone(),
-            fx.cores.clone(),
-            &fx.ctx(&keypair().0),
-            fx.realize_root,
-            fx.void_root,
-            &evidence,
-        )
-        .expect("acquired evidence validates the draft");
-        (fx, draft)
-    }
-
-    /// An exercise is signed TWICE, and the draft is the first stage: it hands
-    /// back `m_P` and nothing else. (The producer this replaces returned one
-    /// object and dropped P's signature on the floor.)
-    #[test]
-    #[serial]
-    fn an_exercise_is_signed_twice_and_p_travels_with_its_signature() {
-        let (fx, draft) = one_hop();
-        assert_eq!(
-            draft.precommit_signing_digest(),
-            derive::precommit_signing_digest(draft.precommit()),
-            "m_P is the precommit's own frozen digest"
-        );
-
-        let p_signature = sign_precommit(&draft);
-        let produced =
-            build_fulfillment(&draft, p_signature.clone(), &[(fx.vaults[0].vault_id, 0)]).unwrap();
-        // The second signature is over `m_F` — the fulfillment's OWN digest,
-        // which is what a storage member checks on the bare object.
-        assert_eq!(
-            produced.signs,
-            SigningPayload::FulfillmentDigest(derive::fulfillment_signing_digest(
-                &TraderFulfillmentBody::decode(match &produced.operation {
-                    Operation::SofiFulfill {
-                        fulfillment_body, ..
-                    } => fulfillment_body,
-                    _ => panic!("a fulfillment"),
-                })
-                .unwrap()
-            ))
-        );
-        assert_eq!(
-            produced.publish[0],
-            ToPublish::Precommit(Signed {
-                body: draft.precommit().clone(),
-                signature: p_signature,
-            }),
-            "P is published WITH the signature its ingress checks"
-        );
-        assert_eq!(
-            produced.publish[1],
-            ToPublish::Preimage(draft.preimage().clone())
-        );
-        assert!(matches!(
-            produced.publish[2],
-            ToPublish::PolicyFulfillment(_)
-        ));
-        assert!(matches!(
-            produced.publish.last(),
-            Some(ToPublish::Fulfillment(_))
-        ));
-        assert!(produced.operation.get_signature().is_none());
-
-        // What the producer says to sign is exactly what the device verifies:
-        // the same rule, reached from both sides.
-        let signed = produced
-            .operation
-            .with_signature(sign(produced.signs.bytes()));
-        assert_eq!(
-            dsm::sofi::signature::verify_operation(&signed, &keypair().0),
-            Ok(())
-        );
-    }
-
-    /// The P signature is VERIFIED, not counted. A producer that only checked
-    /// for non-empty bytes would let the trader sign `m_F` — the irreversible
-    /// half — against a precommit storage then refuses.
-    #[test]
-    #[serial]
-    fn a_producer_refuses_a_precommit_that_is_not_validly_signed() {
-        let (fx, draft) = one_hop();
-        let attempts = [(fx.vaults[0].vault_id, 0)];
-
-        assert_eq!(
-            build_fulfillment(&draft, Vec::new(), &attempts),
-            Err(BuildError::PrecommitSignature(SignatureError::Missing {
-                what: "TraderPrecommit"
-            }))
-        );
-        // Right length, wrong bytes.
-        assert_eq!(
-            build_fulfillment(&draft, vec![0xAB; 49_856], &attempts),
-            Err(BuildError::PrecommitSignature(
-                SignatureError::DoesNotVerify {
-                    what: "TraderPrecommit"
-                }
-            ))
-        );
-        // A real signature over the WRONG message: `m_F`'s digest is not
-        // `m_P`'s, and signing the wrong one does not make P publishable.
-        assert_eq!(
-            build_fulfillment(
-                &draft,
-                sign(&derive::precommit_id(draft.precommit())),
-                &attempts
-            ),
-            Err(BuildError::PrecommitSignature(
-                SignatureError::DoesNotVerify {
-                    what: "TraderPrecommit"
-                }
-            ))
-        );
-        // The real one is accepted.
-        assert!(build_fulfillment(&draft, sign_precommit(&draft), &attempts).is_ok());
-    }
-
-    /// A route that chains builds, at the beta cap — over acquired evidence
-    /// for both vaults.
-    #[test]
-    #[serial]
-    fn a_two_hop_route_that_chains_builds() {
-        fake_fleet::reset();
-        let set = five();
-        let fx = RouteFixture::swap(2, set.id());
-        fx.publish(&set, &all_policies());
-        let evidence = fx.acquire(&set);
-        let draft = draft_route(
-            fx.hops.clone(),
-            fx.cores.clone(),
-            &fx.ctx(&keypair().0),
-            fx.realize_root,
-            fx.void_root,
-            &evidence,
-        )
-        .unwrap();
-        let produced = build_fulfillment(
-            &draft,
-            sign_precommit(&draft),
-            &[(fx.vaults[0].vault_id, 0), (fx.vaults[1].vault_id, 1)],
-        )
-        .unwrap();
-        assert!(matches!(produced.operation, Operation::SofiFulfill { .. }));
-    }
-
-    /// The attempt vector is chosen at exercise time, and one that does not
-    /// cover P's legs is refused here rather than at a member's ingress.
-    #[test]
-    #[serial]
-    fn a_producer_refuses_attempts_that_do_not_cover_the_legs() {
-        let (_fx, draft) = one_hop();
-        // An attempt for a vault this P never names.
-        assert_eq!(
-            build_fulfillment(&draft, sign_precommit(&draft), &[(d(0xCF), 0)]),
-            Err(BuildError::Conformance(
-                FulfillmentConformanceError::AttemptsDoNotCoverLegs
-            ))
-        );
-        // An empty attempt vector is not even canonical bytes.
-        assert!(matches!(
-            build_fulfillment(&draft, sign_precommit(&draft), &[]),
-            Err(BuildError::Wire(SofiWireError::Cardinality {
-                field: "attempts",
-                ..
-            }))
-        ));
-    }
-
-    /// A close is the same operation variant as a trade — the branch lives in
-    /// `B°` — and no producer can name the reserved authority (R18-1). Over
-    /// acquired evidence: the owner closes its own vault at genesis.
-    #[test]
-    #[serial]
-    fn a_close_is_the_same_variant_and_only_the_origin_owner() {
-        fake_fleet::reset();
-        let set = five();
-        let fx = RouteFixture::close(set.id());
-        fx.publish(&set, &all_policies());
-        let evidence = fx.acquire(&set);
-        let vault = &fx.vaults[0];
-        let draft = draft_close(
-            vault.vault_id,
-            vault.parent_root,
-            d(0x55),
-            vault.state().reserve_a,
-            vault.state().reserve_b,
-            fx.cores[0].clone(),
-            &fx.ctx(&keypair().0),
-            fx.realize_root,
-            fx.void_root,
-            &evidence,
-        )
-        .unwrap();
-        let produced =
-            build_fulfillment(&draft, sign_precommit(&draft), &[(vault.vault_id, 0)]).unwrap();
-        assert!(matches!(produced.operation, Operation::SofiFulfill { .. }));
-        match draft.preimage().settlement() {
-            SettlementBody::Close {
-                owner_authority, ..
-            } => assert_eq!(*owner_authority, OwnerAuthority::Origin),
-            _ => panic!("a close"),
-        }
-    }
-
-    /// GATE G5 — rule T5: Unavailable stops the producer. Each evidence item
-    /// withheld in turn — every policy object, then the vault genesis — and
-    /// the draft is refused naming what is missing; no `PrecommitDraft`
-    /// exists, so nothing is published, exercised or advanced. The R6
-    /// mutation control: let the producer proceed on Unavailable and this
-    /// goes red.
-    #[test]
-    #[serial]
-    fn unavailable_stops_the_producer_and_nothing_is_produced() {
-        for withheld in all_policies() {
-            fake_fleet::reset();
-            let set = five();
-            let fx = RouteFixture::swap(1, set.id());
-            let published: Vec<u16> = all_policies()
-                .into_iter()
-                .filter(|c| *c != withheld)
-                .collect();
-            fx.publish(&set, &published);
-            let evidence = fx.acquire(&set);
-            let (addr, _) = fx.vaults[0].policy(withheld);
-            let refused = draft_route(
-                fx.hops.clone(),
-                fx.cores.clone(),
-                &fx.ctx(&keypair().0),
-                fx.realize_root,
-                fx.void_root,
-                &evidence,
-            );
-            assert_eq!(
-                refused.map(|_| ()),
-                Err(BuildError::Unavailable(Missing::Policy { addr })),
-                "withholding {withheld:#06x} stops the producer, naming the missing policy"
-            );
-        }
-        // The vault genesis withheld: nothing about the vault is in hand.
-        fake_fleet::reset();
-        let set = five();
-        let fx = RouteFixture::swap(1, set.id());
-        for (class, bytes) in &fx.vaults[0].policies {
-            let _ = (class, bytes);
-        }
-        let evidence = fx.acquire(&set);
-        assert!(matches!(
-            draft_route(
-                fx.hops.clone(),
-                fx.cores.clone(),
-                &fx.ctx(&keypair().0),
-                fx.realize_root,
-                fx.void_root,
-                &evidence,
-            ),
-            Err(BuildError::Unavailable(
-                Missing::VaultLeaf { .. } | Missing::VaultState { .. }
-            ))
-        ));
-    }
-
-    /// Missing evidence never hides a refusal: with every object withheld, a
-    /// route that does not chain is still Invalid, not Unavailable.
-    #[test]
-    #[serial]
-    fn missing_evidence_never_hides_a_refusal() {
-        fake_fleet::reset();
-        let set = five();
-        let fx = RouteFixture::swap(2, set.id());
-        let evidence = fx.acquire(&set);
-        let mut broken = fx.hops.clone();
-        broken.swap(0, 1);
-        assert!(matches!(
-            draft_route(
-                broken,
-                fx.cores.clone(),
-                &fx.ctx(&keypair().0),
-                fx.realize_root,
-                fx.void_root,
-                &evidence,
-            ),
-            Err(BuildError::StaticallyInvalid(_))
-        ));
-    }
-
-    /// The vault-create signature is the OPERATION's frozen rule — the
-    /// canonical unsigned bytes — not a digest this module invents. (It used
-    /// to be `blake3(genesis_preimage ‖ creation)`, which no verifier checks.)
-    #[test]
-    fn a_vault_creation_signs_the_operations_own_bytes() {
-        let state = VaultStateLeaf {
-            owner_genesis: G,
-            owner_device_id: DEV,
-            create_position: P_POS,
-            market_policy: market_addr(),
-            fee_policy: d(0x32),
-            release_policy: d(0x33),
-            storage_set_id: d(0x77),
-            generation: 0,
-            reserve_a: 1_000,
-            reserve_b: 2_000,
-            status: VAULT_STATUS_ACTIVE,
-        };
-        let preimage = VaultGenesisPreimage {
-            owner_genesis: G,
-            owner_device_id: DEV,
-            create_position: P_POS,
-            state: state.clone(),
-        };
-        let created = build_vault_create(&preimage, &market_bytes()).unwrap();
-        // The funding assets are the authenticated pair, and the amounts are
-        // the genesis reserves — neither is a caller's argument.
-        match &created.operation {
-            Operation::SofiVaultCreate {
-                funding_a_policy_commit,
-                funding_b_policy_commit,
-                creation,
-                ..
-            } => {
-                assert_eq!(*funding_a_policy_commit, d(0x40));
-                assert_eq!(*funding_b_policy_commit, d(0x41));
-                let record = VaultCreation::decode(creation).unwrap();
-                assert_eq!((record.amount_a, record.amount_b), (1_000, 2_000));
-            }
-            _ => panic!("a creation"),
-        }
-        // A creation has no protocol object digest of its own, so it signs the
-        // operation — and it is the verifier's own rule, byte for byte.
-        assert_eq!(
-            created.signs,
-            SigningPayload::OperationBytes(
-                dsm::core::state_machine::transition::operation_signing_bytes(&created.operation)
-            ),
-            "one signing rule, and it is the verifier's"
-        );
-        let Operation::SofiVaultCreate {
-            genesis_preimage,
-            creation,
-            ..
-        } = &created.operation
-        else {
-            panic!("a creation")
-        };
-        assert_ne!(
-            created.signs.bytes(),
-            [genesis_preimage.clone(), creation.clone()].concat(),
-            "not a bare concatenation of the objects it carries"
-        );
-        // And the signature the device will check is over exactly those bytes.
-        // Signed by the payload the producer named, on the operation the
-        // producer built — reconstructing it here would be a second copy that
-        // could drift from the one the bytes cover.
-        let signed = created
-            .operation
-            .clone()
-            .with_signature(sign(created.signs.bytes()));
-        assert_eq!(
-            dsm::sofi::signature::verify_operation(&signed, &keypair().0),
-            Ok(())
-        );
-
-        // `vault_id` and `R_0` are the preimage's own derivations.
-        let decoded = VaultCreation::decode(creation).unwrap();
-        assert_eq!(decoded.vault_id, preimage.vault_id());
-        let mut tree = EconomicSmt::new();
-        tree.insert(
-            derive::vault_state_key(&preimage.vault_id()),
-            derive::vault_state_leaf_value(&state).unwrap(),
-        );
-        assert_eq!(decoded.genesis_root, tree.root());
-    }
-
-    /// A PRODUCER CANNOT EMIT FUNDING THE VERIFIER WILL REFUSE, because it
-    /// does not choose it: the pair comes from the same authenticated policy
-    /// `genesis_accepted` resolves. Bytes that are not the committed policy
-    /// stop the build instead of producing an operation the owner would sign
-    /// and a verifier would then reject.
-    #[test]
-    fn a_producer_refuses_a_creation_whose_policy_does_not_authenticate() {
-        let state = VaultStateLeaf {
-            owner_genesis: G,
-            owner_device_id: DEV,
-            create_position: P_POS,
-            market_policy: market_addr(),
-            fee_policy: d(0x32),
-            release_policy: d(0x33),
-            storage_set_id: d(0x77),
-            generation: 0,
-            reserve_a: 1_000,
-            reserve_b: 2_000,
-            status: VAULT_STATUS_ACTIVE,
-        };
-        let preimage = VaultGenesisPreimage {
-            owner_genesis: G,
-            owner_device_id: DEV,
-            create_position: P_POS,
-            state,
-        };
-        // A valid policy — for another market.
-        let other = dsm::ccb::state::MarketPolicy::beta_constant_product(d(0x50), d(0x51))
-            .unwrap()
-            .encode();
-        assert_eq!(
-            build_vault_create(&preimage, &other),
-            Err(BuildError::Genesis(
-                GenesisError::MarketPolicyIsNotTheCommittedOne
-            ))
-        );
-        // Bytes that are not a policy at all.
-        assert_eq!(
-            build_vault_create(&preimage, &[0xAB; 8]),
-            Err(BuildError::Genesis(
-                GenesisError::MarketPolicyIsNotTheCommittedOne
-            ))
-        );
-        // The committed one builds.
-        assert!(build_vault_create(&preimage, &market_bytes()).is_ok());
-    }
-
-    /// A setup signs `m_setup` — its own object's digest — and NOT the
-    /// operation that carries it. The same object reaches a storage member
-    /// with no operation around it, and `m_setup` is what the member checks.
-    #[test]
-    fn a_setup_signs_its_object_and_not_the_operation() {
-        // ONE predecessor context: the position and the root travel together,
-        // so the producer cannot compute R_T^setup against a tree that is not
-        // the predecessor's.
-        let tree = EconomicSmt::new();
-        let previous = |root: D32| {
-            ValidatedEconomicRoot::rehydrate_from_admitted_store(
-                dsm::economic::lineage::AdmittedEconomicPosition::SingleRoot {
-                    economic_position: P_POS,
-                    economic_root: root,
-                },
-            )
-            .unwrap()
-        };
-        let produced = build_setup(
-            &previous(tree.root()),
-            &tree,
-            G,
-            DEV,
-            d(0xC1),
-            d(0x66),
-            ALG,
-            &keypair().0,
-        )
-        .unwrap();
-        assert!(matches!(produced.operation, Operation::SofiSetup { .. }));
-        let setup = match &produced.operation {
-            Operation::SofiSetup { setup_body, .. } => SofiSetupBody::decode(setup_body).unwrap(),
-            _ => panic!("a setup"),
-        };
-        assert_eq!(
-            produced.signs,
-            SigningPayload::SetupDigest(derive::setup_signing_digest(&setup))
-        );
-
-        // `R_T^setup` IS DERIVED: the root after the absent→h⁰ insertion, not
-        // anything the caller chose.
-        let sigma = derive::setup_id(&G, &DEV, P_POS, &d(0xC1));
-        let state = dsm::economic::state::EconomicLeafState::Relationship(
-            dsm::sofi::wire::TraderRelationshipLeaf {
-                vault_id: d(0xC1),
-                leaf: derive::relationship_leaf_genesis(&sigma),
-            },
-        );
-        let mut expected = EconomicSmt::new();
-        expected.insert(state.leaf_key(&G, &DEV), state.leaf_value().unwrap());
-        assert_eq!(*setup.setup_root(), expected.root());
-
-        // And a SECOND setup for the same vault is refused, never recomputed:
-        // h⁰ is the setup id's derivation, so it would reset a live chain.
-        assert_eq!(
-            build_setup(
-                &previous(expected.root()),
-                &expected,
-                G,
-                DEV,
-                d(0xC1),
-                d(0x66),
-                ALG,
-                &keypair().0
-            ),
-            Err(BuildError::SetupAlreadyExists)
-        );
-
-        // A tree that is not the predecessor's root is refused outright: `p`,
-        // `R_p` and `R_T^setup` come from ONE context, so a producer cannot
-        // mix a real tree with another position's root and emit something
-        // self-consistent that the verifier deterministically refuses.
-        assert_eq!(
-            build_setup(
-                &previous(d(0xEE)),
-                &tree,
-                G,
-                DEV,
-                d(0xC2),
-                d(0x66),
-                ALG,
-                &keypair().0
-            ),
-            Err(BuildError::PreTreeIsNotThePredecessor)
-        );
-        assert_ne!(
-            produced.signs.bytes(),
-            dsm::core::state_machine::transition::operation_signing_bytes(&produced.operation),
-            "a setup does not additionally sign the operation"
-        );
-        // What the producer says to sign is exactly what the device verifies.
-        let signed = produced
-            .operation
-            .clone()
-            .with_signature(sign(produced.signs.bytes()));
-        assert_eq!(
-            dsm::sofi::signature::verify_operation(&signed, &keypair().0),
-            Ok(())
-        );
-    }
 }

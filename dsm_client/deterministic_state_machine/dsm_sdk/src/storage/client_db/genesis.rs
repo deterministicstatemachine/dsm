@@ -2,7 +2,6 @@
 //! Genesis record persistence and verification.
 
 use anyhow::Result;
-use log::warn;
 use rusqlite::{params, OptionalExtension};
 
 use super::get_connection;
@@ -10,14 +9,11 @@ use super::types::GenesisRecord;
 use crate::storage::codecs::{
     encode_genesis_record_bytes, generate_hash_chain_proof_bytes, smt_proof_bytes,
 };
-use crate::util::deterministic_time::tick;
 
 pub fn store_genesis_record_with_verification(record: &GenesisRecord) -> Result<()> {
     let enc = encode_genesis_record_bytes(record);
     let proof_bytes = generate_hash_chain_proof_bytes(&enc);
     let smt_bytes = smt_proof_bytes(record.merkle_root.as_bytes(), &enc);
-    let ts = tick();
-
     let storage_nodes_text = record.storage_nodes.join(",");
 
     let binding = get_connection()?;
@@ -31,8 +27,8 @@ pub fn store_genesis_record_with_verification(record: &GenesisRecord) -> Result<
              genesis_id,device_id,mpc_proof,device_birth_binding,merkle_root,
              participant_count,chain_tip,publication_hash,storage_nodes,
              entropy_hash,protocol_version,hash_chain_proof,smt_proof,
-             verification_step,created_at,genesis_nonce,genesis_profile,network_id)
-         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
+             verification_step,genesis_nonce,genesis_profile,network_id)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
         params![
             record.genesis_id,
             record.device_id,
@@ -47,8 +43,7 @@ pub fn store_genesis_record_with_verification(record: &GenesisRecord) -> Result<
             record.protocol_version,
             &proof_bytes as &[u8],
             &smt_bytes as &[u8],
-            ts as i64,
-            ts as i64,
+            record.verification_step.map(|v| v as i64),
             record.genesis_nonce,
             record.genesis_profile,
             record.network_id,
@@ -106,7 +101,7 @@ fn get_verified_genesis_record_where(
                         verification_step,genesis_nonce,genesis_profile,network_id
                    FROM genesis_records
                  {filter}
-               ORDER BY created_at DESC
+               ORDER BY rowid DESC
                   LIMIT 1"
             ),
             filter_params,
@@ -184,7 +179,9 @@ fn get_verified_genesis_record_where(
             let enc = encode_genesis_record_bytes(&rec);
             let recomputed = generate_hash_chain_proof_bytes(&enc);
             if proof.as_slice() != recomputed.as_slice() {
-                warn!("Genesis hash-chain proof FAILED");
+                return Err(anyhow::anyhow!(
+                    "genesis record {id}: its stored hash-chain proof does not recompute"
+                ));
             }
         }
         return Ok(Some(rec));
@@ -198,7 +195,7 @@ mod tests {
     use serial_test::serial;
 
     fn init_test_db() {
-        unsafe { std::env::set_var("DSM_SDK_TEST_MODE", "1") };
+        crate::economic_fixtures::use_test_storage_dir();
         crate::storage::client_db::reset_database_for_tests();
         crate::storage::client_db::init_database().expect("init db");
     }

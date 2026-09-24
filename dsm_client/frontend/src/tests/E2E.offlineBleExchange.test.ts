@@ -103,8 +103,6 @@ describe('E2E: Offline BLE exchange -> wallet refresh', () => {
           const headersBytes = new pb.Headers({
             deviceId: ALICE_DEVICE_ID,
             genesisHash: ALICE_GENESIS as any,
-            chainTip: new Uint8Array(32),
-            seq: 1n as any,
           }).toBinary();
           return wrapSuccessEnvelope(headersBytes);
         }
@@ -188,7 +186,7 @@ describe('E2E: Offline BLE exchange -> wallet refresh', () => {
       getDeviceIdBin: () => base32CrockfordEncode(ALICE_DEVICE_ID),
       getGenesisHashBin: () => base32CrockfordEncode(ALICE_GENESIS),
       getTransportHeadersV3Bin: () =>
-        new pb.Headers({ deviceId: ALICE_DEVICE_ID, genesisHash: ALICE_GENESIS as any, chainTip: new Uint8Array(32) }).toBinary(),
+        new pb.Headers({ deviceId: ALICE_DEVICE_ID, genesisHash: ALICE_GENESIS as any,}).toBinary(),
     };
 
     // Start offline send
@@ -214,7 +212,7 @@ describe('E2E: Offline BLE exchange -> wallet refresh', () => {
 
     // Craft BilateralPrepareResponse envelope arriving over BLE
     const resp = new pb.BilateralPrepareResponse({ commitmentHash: zeroHash32(), localSignature: new Uint8Array(64) });
-    const env = new pb.Envelope({ version: 3, headers: new pb.Headers({ deviceId: ALICE_DEVICE_ID, genesisHash: ALICE_GENESIS as any, chainTip: new Uint8Array(32) }), payload: { case: 'bilateralPrepareResponse', value: resp } });
+    const env = new pb.Envelope({ version: 3, headers: new pb.Headers({ deviceId: ALICE_DEVICE_ID, genesisHash: ALICE_GENESIS as any,}), payload: { case: 'bilateralPrepareResponse', value: resp } });
     const rawBytes = env.toBinary();
     const bytes = new Uint8Array(1 + rawBytes.length);
     bytes[0] = 0x03;

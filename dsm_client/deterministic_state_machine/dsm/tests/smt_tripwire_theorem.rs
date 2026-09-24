@@ -5,13 +5,13 @@
 //!
 //! - **Theorem 2 (Atomic Interlock Tripwire):** Any attempt to fork a bilateral
 //!   chain is detected deterministically — same parent cannot produce two valid
-//!   successors; divergent roots are caught by the witness verifier; and
+//!   successors; divergent roots are caught by the replace check; and
 //!   signature forgery is computationally infeasible.
 //!
 //! - **Theorem 1 (Modal Lock):** Relationship-scoped keys are deterministic and
 //!   independent across different bilateral pairs.
 //!
-//! - **Acceptance Predicates (§4.3):** SPHINCS+ signatures, SMT replace witnesses,
+//! - **Acceptance Predicates (§4.3):** SPHINCS+ signatures, the SMT replace over the one relationship path,
 //!   and device-tree inclusion proofs are verified end-to-end.
 //!
 //! - **Chain Integrity:** Successive tips are unique, deterministic, and
@@ -29,9 +29,7 @@ use dsm::merkle::sparse_merkle_tree::ZERO_LEAF;
 use dsm::types::operations::{Operation, TransactionMode, VerificationType};
 use dsm::types::receipt_types::ParentConsumptionTracker;
 use dsm::types::token_types::Balance;
-use dsm::verification::smt_replace_witness::{
-    hash_smt_leaf, hash_smt_node, verify_tripwire_smt_replace,
-};
+use dsm::merkle::sparse_merkle_tree::{hash_smt_leaf, hash_smt_node, verify_smt_replace};
 
 // ---------------------------------------------------------------------------
 // Test Harness
@@ -95,7 +93,7 @@ fn make_transfer_op(recipient: &[u8; 32], amount: u64) -> (Operation, Vec<u8>) {
     let op = Operation::Transfer {
         policy_commit: [0u8; 32],
         to_device_id: recipient.to_vec(),
-        amount: Balance::from_state(amount, [0u8; 32]),
+        amount: Balance::amount(amount),
         token_id: b"ERA".to_vec(),
         mode: TransactionMode::Bilateral,
         nonce: vec![0u8; 16],
@@ -111,9 +109,8 @@ fn make_transfer_op(recipient: &[u8; 32], amount: u64) -> (Operation, Vec<u8>) {
     (op, bytes)
 }
 
-/// Full tree depth. The verifier requires exactly this many steps: a shorter
-/// path proved only that SOME path rebuilt the roots, never that the
-/// replacement happened at the relationship key.
+/// Full tree depth. The verifier requires exactly this many siblings: a
+/// shorter path would commit the leaf under a root of some other height.
 const SMT_DEPTH: usize = 256;
 
 /// Independent reimplementation of the verifier's bit convention.
@@ -123,17 +120,18 @@ fn bit_msb_first(key: &[u8; 32], bit_index: usize) -> bool {
     ((key[byte] >> bit) & 1) == 1
 }
 
-/// Encode a full-depth witness. The per-step direction byte is still written,
-/// and is deliberately set to a constant: the verifier ignores it and derives
-/// direction from the key, which is the property these tests now pin.
-fn encode_witness_full(siblings: &[[u8; 32]]) -> Vec<u8> {
-    let mut w = Vec::with_capacity(4 + siblings.len() * 33);
-    w.extend_from_slice(&(siblings.len() as u32).to_le_bytes());
-    for sib in siblings {
-        w.push(0);
-        w.extend_from_slice(sib);
-    }
-    w
+/// The replace check every receipt verifier makes, through the one
+/// primitive: the path authenticates `old` under `pre` and folds `new` to
+/// exactly `post`.
+fn replace_holds(
+    pre: &[u8; 32],
+    post: &[u8; 32],
+    old: &[u8; 32],
+    new: &[u8; 32],
+    key: &[u8; 32],
+    siblings: &[[u8; 32]],
+) -> bool {
+    matches!(verify_smt_replace(pre, key, old, new, siblings), Ok(root) if root == *post)
 }
 
 /// Fold a leaf up to a root taking each direction from `key`, mirroring the verifier.
@@ -216,37 +214,34 @@ fn theorem2_divergent_roots_detected() {
     let old_leaf = hash_smt_leaf(&parent_tip);
     let new_leaf = hash_smt_leaf(&child_tip);
 
-    // Full-depth witness; roots folded with directions taken from the relationship key.
+    // Full-depth path; roots folded with directions taken from the relationship key.
     let sibs = uniform_siblings([0x99u8; 32]);
-    let witness_bytes = encode_witness_full(&sibs);
 
     let honest_parent_root = fold_root_at_key(&old_leaf, &rel_key, &sibs);
     let honest_child_root = fold_root_at_key(&new_leaf, &rel_key, &sibs);
 
     // Honest verification succeeds.
-    let result = verify_tripwire_smt_replace(
+    let result = replace_holds(
         &honest_parent_root,
         &honest_child_root,
         &parent_tip,
         &child_tip,
         &rel_key,
-        &witness_bytes,
-    )
-    .expect("must not error");
+        &sibs,
+    );
     assert!(result, "honest verification must pass");
 
     // Fake root: tamper one byte.
     let mut fake_root = honest_child_root;
     fake_root[0] ^= 0xFF;
-    let result_fake = verify_tripwire_smt_replace(
+    let result_fake = replace_holds(
         &honest_parent_root,
         &fake_root,
         &parent_tip,
         &child_tip,
         &rel_key,
-        &witness_bytes,
-    )
-    .expect("must not error");
+        &sibs,
+    );
     assert!(!result_fake, "tampered root must fail verification");
 }
 
@@ -335,20 +330,18 @@ fn theorem2_transitive_tripwire_web() {
 
     // Alice<->Bob under Bob's root: the path is scoped to k_AB.
     let sibs_ab = uniform_siblings(leaf_bc);
-    let witness_ab = encode_witness_full(&sibs_ab);
     let old_leaf_ab = hash_smt_leaf(&h_0_ab);
     let old_root = fold_root_at_key(&old_leaf_ab, &rel_key_ab, &sibs_ab);
     let bob_root = fold_root_at_key(&leaf_ab, &rel_key_ab, &sibs_ab);
 
-    let ok_ab = verify_tripwire_smt_replace(
+    let ok_ab = replace_holds(
         &old_root,
         &bob_root,
         &h_0_ab,
         &h_1_ab,
         &rel_key_ab,
-        &witness_ab,
-    )
-    .expect("verify must not error");
+        &sibs_ab,
+    );
     assert!(ok_ab, "Alice<->Bob proof must verify under Bob's root");
 
     // If Bob tries a different root for Charlie, it won't match.
@@ -356,19 +349,17 @@ fn theorem2_transitive_tripwire_web() {
     fake_bob_root[31] ^= 0x01;
 
     let sibs_bc = uniform_siblings(leaf_ab);
-    let witness_bc = encode_witness_full(&sibs_bc);
     let old_leaf_bc = hash_smt_leaf(&h_0_bc);
     let old_root_bc = fold_root_at_key(&old_leaf_bc, &rel_key_bc, &sibs_bc);
 
-    let ok_bc_fake = verify_tripwire_smt_replace(
+    let ok_bc_fake = replace_holds(
         &old_root_bc,
         &fake_bob_root,
         &h_0_bc,
         &h_1_bc,
         &rel_key_bc,
-        &witness_bc,
-    )
-    .expect("verify must not error");
+        &sibs_bc,
+    );
     assert!(
         !ok_bc_fake,
         "fake root must fail for Bob<->Charlie relationship"
@@ -455,7 +446,7 @@ fn predicate_1_sphincs_tampered_sig_rejects() {
 }
 
 #[test]
-fn predicate_2_parent_inclusion_via_witness() {
+fn predicate_2_parent_inclusion_via_the_path() {
     // Build a 1-step SMT: leaf at known key with value = parent_tip.
     let parent_tip = [0x11u8; 32];
     let rel_key = [0x22u8; 32];
@@ -464,49 +455,31 @@ fn predicate_2_parent_inclusion_via_witness() {
     // Siblings are the empty (zero) positions; the path is scoped to rel_key.
     let sibs = uniform_siblings(ZERO_LEAF);
     let root = fold_root_at_key(&leaf, &rel_key, &sibs);
-    let witness_bytes = encode_witness_full(&sibs);
 
     let parent_tip2 = [0x12u8; 32];
     let leaf2 = hash_smt_leaf(&parent_tip2);
     let root2 = fold_root_at_key(&leaf2, &rel_key, &sibs);
     assert!(
-        verify_tripwire_smt_replace(
-            &root,
-            &root2,
-            &parent_tip,
-            &parent_tip2,
-            &rel_key,
-            &witness_bytes
-        )
-        .expect("must not error"),
-        "witness must recompute correct parent root at the relationship key"
+        replace_holds(&root, &root2, &parent_tip, &parent_tip2, &rel_key, &sibs),
+        "the path must authenticate the parent and fold the child at the relationship key"
     );
 }
 
 #[test]
-fn predicate_3_child_inclusion_via_witness() {
+fn predicate_3_child_inclusion_via_the_path() {
     let child_tip = [0x33u8; 32];
     let rel_key = [0x44u8; 32];
     let leaf = hash_smt_leaf(&child_tip);
 
     let sibs = uniform_siblings([0xFFu8; 32]);
     let root = fold_root_at_key(&leaf, &rel_key, &sibs);
-    let witness_bytes = encode_witness_full(&sibs);
 
     let child_tip2 = [0x34u8; 32];
     let leaf2 = hash_smt_leaf(&child_tip2);
     let root2 = fold_root_at_key(&leaf2, &rel_key, &sibs);
     assert!(
-        verify_tripwire_smt_replace(
-            &root,
-            &root2,
-            &child_tip,
-            &child_tip2,
-            &rel_key,
-            &witness_bytes
-        )
-        .expect("must not error"),
-        "witness must recompute correct child root at the relationship key"
+        replace_holds(&root, &root2, &child_tip, &child_tip2, &rel_key, &sibs),
+        "the path must fold the child to its root at the relationship key"
     );
 }
 
@@ -528,18 +501,14 @@ fn predicate_5_smt_replace_recomputation() {
     let r_a = fold_root_at_key(&old_leaf, &rel_key, &sibs);
     let r_a_prime = fold_root_at_key(&new_leaf, &rel_key, &sibs);
 
-    let witness_bytes = encode_witness_full(&sibs);
-
     // Full verify cycle.
-    let ok = verify_tripwire_smt_replace(&r_a, &r_a_prime, &h_n, &h_n1, &rel_key, &witness_bytes)
-        .expect("must not error");
+    let ok = replace_holds(&r_a, &r_a_prime, &h_n, &h_n1, &rel_key, &sibs);
     assert!(ok, "honest SMT replace must verify");
 
     // Tamper r_a_prime.
     let mut bad_root = r_a_prime;
     bad_root[15] ^= 0x01;
-    let fail = verify_tripwire_smt_replace(&r_a, &bad_root, &h_n, &h_n1, &rel_key, &witness_bytes)
-        .expect("must not error");
+    let fail = replace_holds(&r_a, &bad_root, &h_n, &h_n1, &rel_key, &sibs);
     assert!(!fail, "tampered child root must fail");
 }
 
@@ -721,11 +690,11 @@ fn balance_conservation_arithmetic() {
         );
 
         // Verify via Balance type.
-        let sender_bal = Balance::from_state(sender_initial, [0u8; 32]);
+        let sender_bal = Balance::amount(sender_initial);
         assert_eq!(sender_bal.value(), sender_initial);
 
-        let remaining_bal = Balance::from_state(sender_remaining, [0u8; 32]);
-        let gained_bal = Balance::from_state(receiver_gained, [0u8; 32]);
+        let remaining_bal = Balance::amount(sender_remaining);
+        let gained_bal = Balance::amount(receiver_gained);
         assert_eq!(
             remaining_bal.value() + gained_bal.value(),
             sender_bal.value(),

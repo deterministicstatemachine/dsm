@@ -1,25 +1,19 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Storage node DB layer — unified interface.
-//!
-//! Default (PostgreSQL): `deadpool_postgres::Pool` via `db::pg`.
-//! Local-dev (SQLite):   `rusqlite::Connection` wrapped in `Arc<Mutex<>>` via `db::sqlite`.
-//!
-//! Feature flag `local-dev` switches the implementation at compile time.
+//! Storage node DB layer: PostgreSQL through `deadpool_postgres::Pool`.
 
-#[cfg(not(feature = "local-dev"))]
 mod pg;
 
-#[cfg(not(feature = "local-dev"))]
 pub use pg::*;
 
-#[cfg(feature = "local-dev")]
-mod sqlite;
+/// The Postgres database the node's unit tests run on.
+#[cfg(test)]
+pub(crate) mod test_store;
 
-#[cfg(feature = "local-dev")]
-pub use sqlite::*;
-
-/// The keyed-cell and index properties a member owes, run against whichever
-/// backend is compiled.
+/// The keyed-cell and index properties a member owes.
 #[cfg(test)]
 mod cell_properties;
+
+/// The immutable-object and device-tree properties of the store.
+#[cfg(test)]
+mod store_properties;

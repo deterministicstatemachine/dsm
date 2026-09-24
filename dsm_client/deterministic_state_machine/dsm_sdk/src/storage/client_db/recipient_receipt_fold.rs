@@ -23,7 +23,6 @@ use super::cert_chain::{
     decrypt_chain_sk, CasHeadOutcome, CertChainSide,
 };
 use super::get_connection;
-use crate::util::deterministic_time::tick;
 use anyhow::{anyhow, Result};
 use rusqlite::{params, OptionalExtension};
 
@@ -91,7 +90,6 @@ pub struct RecipientAcceptanceJournal {
     /// may not originate on that relationship.
     pub peer_finalized: bool,
     pub status: String,
-    pub created_at: u64,
 }
 
 impl std::fmt::Debug for RecipientAcceptanceJournal {
@@ -124,18 +122,12 @@ fn hex_prefix(b: &[u8; 32]) -> String {
     format!("{:02x}{:02x}{:02x}{:02x}..", b[0], b[1], b[2], b[3])
 }
 
-fn arr32(v: Vec<u8>, what: &str) -> Result<[u8; 32]> {
-    v.as_slice()
-        .try_into()
-        .map_err(|_| anyhow!("{what} is not 32 bytes"))
-}
-
 const JOURNAL_COLS: &str = "relationship_key, parent_tip, child_tip, counterparty_device_id, \
      commitment, receipt_parent_root_a, receipt_child_root_a, precommit_digest, artifact_hash, \
      expected_local_b_head, new_local_b_head, new_local_b_sk_enc, \
      expected_counterparty_a_head, new_counterparty_a_head, receipt_bytes, \
      projection_parent_tip, projection_target_tip, applied_parent_tip_b, applied_child_tip_b, \
-     release_bytes, peer_finalized, status, created_at";
+     release_bytes, peer_finalized, status";
 
 /// Domain-separated hash binding the EXACT persisted full receipt bytes (signed EK
 /// artifact). Hash the precise stored/outbox bytes — never deserialize+reserialize.
@@ -152,36 +144,29 @@ pub fn acceptance_artifact_hash(exact_full_receipt_bytes: &[u8]) -> [u8; 32] {
 fn row_to_journal(row: &rusqlite::Row) -> rusqlite::Result<RecipientAcceptanceJournal> {
     let g = |i: usize| -> rusqlite::Result<Vec<u8>> { row.get::<_, Vec<u8>>(i) };
     let go = |i: usize| -> rusqlite::Result<Option<Vec<u8>>> { row.get::<_, Option<Vec<u8>>>(i) };
-    let to32 = |v: Vec<u8>| -> [u8; 32] {
-        let mut a = [0u8; 32];
-        let n = v.len().min(32);
-        a[..n].copy_from_slice(&v[..n]);
-        a
-    };
     Ok(RecipientAcceptanceJournal {
-        relationship_key: to32(g(0)?),
-        parent_tip: to32(g(1)?),
-        child_tip: to32(g(2)?),
-        counterparty_device_id: to32(g(3)?),
-        commitment: to32(g(4)?),
-        receipt_parent_root_a: to32(g(5)?),
-        receipt_child_root_a: to32(g(6)?),
-        precommit_digest: to32(g(7)?),
-        prepared_receipt_artifact_hash: to32(g(8)?),
+        relationship_key: super::column_32(row, 0)?,
+        parent_tip: super::column_32(row, 1)?,
+        child_tip: super::column_32(row, 2)?,
+        counterparty_device_id: super::column_32(row, 3)?,
+        commitment: super::column_32(row, 4)?,
+        receipt_parent_root_a: super::column_32(row, 5)?,
+        receipt_child_root_a: super::column_32(row, 6)?,
+        precommit_digest: super::column_32(row, 7)?,
+        prepared_receipt_artifact_hash: super::column_32(row, 8)?,
         expected_local_b_head: go(9)?,
         new_local_b_head: g(10)?,
         new_local_b_sk_enc: go(11)?,
         expected_counterparty_a_head: go(12)?,
         new_counterparty_a_head: g(13)?,
         receipt_bytes: g(14)?,
-        projection_parent_tip: to32(g(15)?),
-        projection_target_tip: to32(g(16)?),
-        applied_parent_tip_b: to32(g(17)?),
-        applied_child_tip_b: to32(g(18)?),
+        projection_parent_tip: super::column_32(row, 15)?,
+        projection_target_tip: super::column_32(row, 16)?,
+        applied_parent_tip_b: super::column_32(row, 17)?,
+        applied_child_tip_b: super::column_32(row, 18)?,
         release_bytes: go(19)?,
         peer_finalized: row.get::<_, i64>(20)? != 0,
         status: row.get::<_, String>(21)?,
-        created_at: row.get::<_, i64>(22)? as u64,
     })
 }
 
@@ -223,7 +208,7 @@ pub fn insert_prepared_acceptance_journal_with_conn(
     conn.execute(
         &format!(
             "INSERT INTO acceptance_fold_journal ({JOURNAL_COLS}) \
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)"
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22)"
         ),
         params![
             rec.relationship_key.as_slice(),
@@ -249,7 +234,6 @@ pub fn insert_prepared_acceptance_journal_with_conn(
             // Never set here: only the verified certificate flips it.
             0i64,
             STATUS_PREPARED,
-            tick() as i64,
         ],
     )?;
     Ok(())
@@ -464,8 +448,8 @@ pub(crate) fn record_accepted_transition_in_tx(
             relationship_key, parent_tip, child_tip, receipt_parent_root_a, receipt_child_root_a,
             applied_parent_root_b, applied_child_root_b, applied_parent_tip_b, applied_child_tip_b,
             precommit_digest, prepared_receipt_commitment, prepared_receipt_artifact_hash,
-            sender_device, recipient_device, created_at
-         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
+            sender_device, recipient_device
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
         params![
             m.relationship_key.as_slice(),
             m.parent_tip.as_slice(),
@@ -481,7 +465,6 @@ pub(crate) fn record_accepted_transition_in_tx(
             m.prepared_receipt_artifact_hash.as_slice(),
             m.sender_device.as_slice(),
             m.recipient_device.as_slice(),
-            tick() as i64,
         ],
     )?;
     Ok(())
@@ -492,12 +475,6 @@ fn get_accepted_transition_locked(
     relationship_key: &[u8; 32],
     parent_tip: &[u8; 32],
 ) -> Result<Option<AcceptedTransition>> {
-    let to32 = |v: Vec<u8>| -> [u8; 32] {
-        let mut a = [0u8; 32];
-        let n = v.len().min(32);
-        a[..n].copy_from_slice(&v[..n]);
-        a
-    };
     Ok(conn
         .query_row(
             "SELECT child_tip, receipt_parent_root_a, receipt_child_root_a, \
@@ -511,18 +488,18 @@ fn get_accepted_transition_locked(
                 Ok(AcceptedTransition {
                     relationship_key: *relationship_key,
                     parent_tip: *parent_tip,
-                    child_tip: to32(r.get(0)?),
-                    receipt_parent_root_a: to32(r.get(1)?),
-                    receipt_child_root_a: to32(r.get(2)?),
-                    applied_parent_root_b: to32(r.get(3)?),
-                    applied_child_root_b: to32(r.get(4)?),
-                    applied_parent_tip_b: to32(r.get(5)?),
-                    applied_child_tip_b: to32(r.get(6)?),
-                    precommit_digest: to32(r.get(7)?),
-                    prepared_receipt_commitment: to32(r.get(8)?),
-                    prepared_receipt_artifact_hash: to32(r.get(9)?),
-                    sender_device: to32(r.get(10)?),
-                    recipient_device: to32(r.get(11)?),
+                    child_tip: super::column_32(r, 0)?,
+                    receipt_parent_root_a: super::column_32(r, 1)?,
+                    receipt_child_root_a: super::column_32(r, 2)?,
+                    applied_parent_root_b: super::column_32(r, 3)?,
+                    applied_child_root_b: super::column_32(r, 4)?,
+                    applied_parent_tip_b: super::column_32(r, 5)?,
+                    applied_child_tip_b: super::column_32(r, 6)?,
+                    precommit_digest: super::column_32(r, 7)?,
+                    prepared_receipt_commitment: super::column_32(r, 8)?,
+                    prepared_receipt_artifact_hash: super::column_32(r, 9)?,
+                    sender_device: super::column_32(r, 10)?,
+                    recipient_device: super::column_32(r, 11)?,
                 })
             },
         )
@@ -667,8 +644,8 @@ pub fn insert_outbound_reply(
     conn.execute(
         "INSERT OR IGNORE INTO recipient_outbound_reply
             (commitment, relationship_key, counterparty_device_id, child_tip, receipt_bytes,
-             release_bytes, held, submitted, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8)",
+             release_bytes, held, submitted)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0)",
         params![
             commitment.as_slice(),
             relationship_key.as_slice(),
@@ -677,7 +654,6 @@ pub fn insert_outbound_reply(
             receipt_bytes,
             release_bytes,
             held as i64,
-            tick() as i64,
         ],
     )?;
     Ok(())
@@ -943,7 +919,7 @@ pub fn find_release_bytes_for_manifest_addr(manifest_addr: &[u8; 32]) -> Result<
     let mut stmt = conn.prepare(
         "SELECT release_bytes FROM acceptance_fold_journal
          WHERE release_bytes IS NOT NULL AND status != 'rejected'
-         ORDER BY created_at DESC",
+         ORDER BY rowid DESC",
     )?;
     let rows = stmt
         .query_map([], |r| r.get::<_, Vec<u8>>(0))?
@@ -976,7 +952,7 @@ mod tests {
     const WRAP: [u8; 32] = [0x42u8; 32];
 
     fn init_test_db() {
-        unsafe { std::env::set_var("DSM_SDK_TEST_MODE", "1") };
+        crate::economic_fixtures::use_test_storage_dir();
         crate::storage::client_db::reset_database_for_tests();
         crate::storage::client_db::init_database().expect("init db");
     }
@@ -1013,7 +989,6 @@ mod tests {
             new_counterparty_a_head: ek_pk_a,
             receipt_bytes: b"EXACT-RECEIPT-BYTES".to_vec(),
             status: STATUS_PREPARED.to_string(),
-            created_at: 0,
         }
     }
 

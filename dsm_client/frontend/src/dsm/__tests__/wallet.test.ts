@@ -265,7 +265,7 @@ describe('wallet.ts', () => {
           case: 'inboxResponse',
           value: new pb.InboxResponse({
             items: [
-              new pb.InboxItem({ id: 'msg1', preview: 'Hello', senderId: 'alice', tick: 5n, isStaleRoute: false }),
+              new pb.InboxItem({ id: 'msg1', preview: 'Hello', senderId: 'alice', isStaleRoute: false }),
               new pb.InboxItem({ id: 'msg2', preview: 'World', isStaleRoute: true }),
             ],
           }),
@@ -351,7 +351,7 @@ describe('wallet.ts', () => {
         payload: {
           case: 'inboxResponse',
           value: new pb.InboxResponse({
-            items: [new pb.InboxItem({ id: 'b0x1', preview: 'hi', senderId: 'bob', tick: 3n, isStaleRoute: true })],
+            items: [new pb.InboxItem({ id: 'b0x1', preview: 'hi', senderId: 'bob', isStaleRoute: true })],
           }),
         },
       });
@@ -363,7 +363,6 @@ describe('wallet.ts', () => {
         id: 'b0x1',
         preview: 'hi',
         senderId: 'bob',
-        tick: 3n,
         isStaleRoute: true,
       });
     });

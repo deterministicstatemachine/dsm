@@ -6,28 +6,28 @@
 //! ```text
 //! target position = admitted + 1        (position 0 = activate(), empty root)
 //! loop attempts:
-//!     head     = walk the reserve lineage (memoised, leader first)
+//!     head     = walk the reserve lineage (memoised)
 //!     op       = FaucetClaim { era_reserve_id(network), head.generation + 1 }
 //!     release  = frozen-or-sign-once(NativeReserveRelease naming THIS device,
 //!                target position, op digest, x = ERA_FAUCET_PAYOUT)
-//!     write it at K(reserve, R_head), leader first
-//!     read back: OUR release Final  -> break
-//!                another object     -> the head moved; next attempt
+//!     write it along K(reserve, R_head)'s route, leader first
+//!     read back: OUR release Final  -> keep its completion proof; break
+//!                another release    -> the head moved; next attempt
 //! witness  = FROM the accepted core transition (one +x ERA credit,
 //!            0x005D source)              -- core decides what +x means
 //! manifest = provenance index DERIVED from the witness
 //! ONE TX   = advance (fence-coupled) + pending row + FROZEN evidence
-//! publish evidence to q members (attributed)        -> EvidencePublished
-//! register the root (frozen envelope, sign-once)    -> Registered
+//! put the evidence, read it back Stored             -> EvidencePublished
+//! register the root claim along K_root(q)'s route   -> Registered
+//! read it back Final at K_root(q)
 //! advance_validated with the LIVE resolver          -> verifier's answer
 //! ONE TX   = admitted coordinate + leaf cache + clear pending + unfenced head
-//! carry the release to every member in the background
 //! ```
 //!
 //! The claim names its recipient directly: the release is signed by this
 //! device's AK and names this device, so `FaucetClaim(A, x) ⇒ recipient = A`
-//! — no selection, no spend gate, nobody else paid. Finality is the leader
-//! plus two other members; the carry to the rest never gates the claim.
+//! — no selection, no spend gate, nobody else paid. The release is final
+//! once three of its cell's five seats hold its chain (storage spec §9).
 //!
 //! ## Recovery
 //!
@@ -56,12 +56,12 @@ use dsm::types::operations::Operation;
 
 use crate::sdk::core_sdk::CoreSDK;
 use crate::sdk::economic_admission_flow::{
-    authority_material, build_dsm_admission, canonical_set, finish_admission,
-    producer_tree_and_pre_state, resume_pending_admission, validated_root_or_activate,
+    authority_material, build_dsm_admission, finish_admission, producer_tree_and_pre_state,
+    resume_pending_admission, validated_root_or_activate,
 };
-use crate::sdk::native_reserve::{read_successor, walk_reserve, write_release};
+use crate::sdk::storage_set::canonical_set;
+use crate::sdk::native_reserve::{keep_release_completion, read_successor, walk_reserve, write_release};
 use crate::storage::client_db::native_reserve as reserve_db;
-use crate::util::deterministic_time::tick;
 
 fn storage_err(what: &str, e: impl core::fmt::Display) -> DsmError {
     DsmError::storage(format!("{what}: {e}"), None::<std::io::Error>)
@@ -106,7 +106,8 @@ pub async fn claim_era_faucet(core: &CoreSDK, network_id: &[u8]) -> Result<Claim
 
     // ── Win a generation of the reserve (leader first at the head) ────────
     let mut won: Option<(u64, Vec<u8>, [u8; 32])> = None; // (generation, envelope, op_digest)
-    for _attempt in 0..MAX_ATTEMPTS {
+    for attempt in 1..=MAX_ATTEMPTS {
+        log::debug!("[faucet] attempt {attempt} at the reserve head");
         let stop = tokio::task::block_in_place(|| walk_reserve(&set, network_id, &runtime))?;
         // A release naming THIS position that the walk already established as
         // final is this claim, resumed: reuse it rather than releasing twice.
@@ -114,6 +115,22 @@ pub async fn claim_era_faucet(core: &CoreSDK, network_id: &[u8]) -> Result<Claim
             reserve_db::release_for_recipient(&reserve_id, &genesis, &devid, target_position)
                 .map_err(|e| storage_err("reserve memo", e))?
         {
+            let reserve_genesis = crate::sdk::native_reserve::genesis_state(network_id)?;
+            let win = reserve_db::release_at(&reserve_genesis, generation)
+                .map_err(|e| storage_err("reserve memo", e))?
+                .ok_or_else(|| {
+                    storage_err(
+                        "reserve memo",
+                        format!("the release at generation {generation} has no memoised parent"),
+                    )
+                })?;
+            if !keep_release_completion(&set, &win.parent, &envelope).await? {
+                return Err(storage_err(
+                    "reserve completion",
+                    "the resumed release's completion proof could not be rebuilt from the \
+                     seats yet — retry later",
+                ));
+            }
             let op = Operation::FaucetClaim {
                 reserve_id,
                 generation,
@@ -123,15 +140,17 @@ pub async fn claim_era_faucet(core: &CoreSDK, network_id: &[u8]) -> Result<Claim
         }
         let parent: NativeReserveState = match stop {
             WalkStop::Head(state) => state,
-            WalkStop::LeaderHeld { .. } => {
-                return Err(DsmError::storage(
-                    "the reserve's next release is held at its leader but not yet final — \
-                     retry later"
-                        .to_string(),
-                    None::<std::io::Error>,
-                ))
+            WalkStop::LeaderHeld {
+                settled, release, ..
+            } => {
+                // The next release is decided but its chain stopped short of
+                // three links. Any party MAY continue a chain along the
+                // remaining route (storage spec §9 rule 8), whoever's release
+                // it is; the next attempt walks past it once it is final.
+                write_release(&set, &settled, &release.envelope_bytes).await?;
+                continue;
             }
-            WalkStop::Unavailable(_) | WalkStop::BudgetExhausted(_) => {
+            WalkStop::Unavailable { .. } | WalkStop::BudgetExhausted(..) => {
                 return Err(DsmError::storage(
                     "the reserve head could not be read — retry later".to_string(),
                     None::<std::io::Error>,
@@ -168,7 +187,7 @@ pub async fn claim_era_faucet(core: &CoreSDK, network_id: &[u8]) -> Result<Claim
                 };
                 let bytes =
                     sign_release(&body, &secret_key).map_err(|e| storage_err("sign release", e))?;
-                reserve_db::put_frozen_release(&reserve_id, &parent_root, &bytes, tick() as i64)
+                reserve_db::put_frozen_release(&reserve_id, &parent_root, &bytes)
                     .map_err(|e| storage_err("freeze release", e))?;
                 // Read BACK rather than trusting the in-memory copy: a silent
                 // retention failure must surface before anything goes out.
@@ -184,7 +203,7 @@ pub async fn claim_era_faucet(core: &CoreSDK, network_id: &[u8]) -> Result<Claim
         };
 
         let write = write_release(&set, &parent, &envelope).await?;
-        if !write.leader_reached {
+        if !write.reached_leader() {
             return Err(DsmError::storage(
                 "the reserve cell's leader is unreachable — no member stands in; retry with \
                  the same bytes"
@@ -194,20 +213,27 @@ pub async fn claim_era_faucet(core: &CoreSDK, network_id: &[u8]) -> Result<Claim
         }
         match read_successor(&set, &parent).await? {
             SuccessorRead::Final { release, .. } if release.envelope_bytes == envelope => {
+                if !keep_release_completion(&set, &parent, &envelope).await? {
+                    return Err(storage_err(
+                        "reserve completion",
+                        "the release read final but its completion proof could not be built \
+                         from the seats — retry with the same bytes",
+                    ));
+                }
                 won = Some((generation, envelope, op_digest));
                 break;
             }
             SuccessorRead::LeaderHeld { release, .. } if release.envelope_bytes == envelope => {
                 return Err(DsmError::storage(
-                    "the release is held at the reserve's leader but fewer than two other \
-                     members hold it yet — retry with the same bytes"
+                    "the release holds the reserve cell's leader link but its chain does not \
+                     have three links yet — retry with the same bytes"
                         .to_string(),
                     None::<std::io::Error>,
                 ));
             }
             // Another release got to the leader first: the head moved.
             SuccessorRead::Final { .. } | SuccessorRead::LeaderHeld { .. } => continue,
-            SuccessorRead::Open | SuccessorRead::Unavailable => {
+            SuccessorRead::Open | SuccessorRead::Unavailable(..) => {
                 return Err(DsmError::storage(
                     "the reserve cell could not be read back — retry with the same bytes"
                         .to_string(),
@@ -257,30 +283,32 @@ pub async fn claim_era_faucet(core: &CoreSDK, network_id: &[u8]) -> Result<Claim
         "native-reserve-release",
     )];
     let mut built = None;
-    let (_outcome, pending) = core.faucet_claim_advance(
-        op.clone(),
-        &delta,
-        prepared,
-        |chain_state| {
-            let parts = build_dsm_admission(
-                &genesis,
-                &devid,
-                chain_state,
-                &op,
-                &pre_state,
-                &mut tree,
-                &facts,
-                &authority,
-                extra,
-            )?;
-            let coords = parts.coords;
-            let artifacts = parts.artifacts.clone();
-            built = Some(parts);
-            Ok((coords, artifacts))
-        },
-        &set.id(),
-        None,
-    )?;
+    let pending = core
+        .faucet_claim_advance(
+            op.clone(),
+            &delta,
+            prepared,
+            |chain_state| {
+                let parts = build_dsm_admission(
+                    &genesis,
+                    &devid,
+                    chain_state,
+                    &op,
+                    &pre_state,
+                    &mut tree,
+                    &facts,
+                    &authority,
+                    extra,
+                )?;
+                let coords = parts.coords;
+                let artifacts = parts.artifacts.clone();
+                built = Some(parts);
+                Ok((coords, artifacts))
+            },
+            &set.id(),
+            None,
+        )?
+        .1;
     let parts = built.ok_or_else(|| {
         DsmError::storage(
             "advance committed without building the witness".to_string(),
@@ -301,11 +329,6 @@ pub async fn claim_era_faucet(core: &CoreSDK, network_id: &[u8]) -> Result<Claim
         Vec::new(),
     )
     .await?;
-    // The carry to every member is best effort here and retried by the sync
-    // pass; the claim is admitted regardless.
-    if let Err(e) = crate::sdk::native_reserve::carry_pending_releases(&set).await {
-        log::warn!("[faucet] reserve carry deferred: {e}");
-    }
     Ok(ClaimOutcome {
         tokens_received: ERA_FAUCET_PAYOUT,
         economic_position: admitted.economic_position,

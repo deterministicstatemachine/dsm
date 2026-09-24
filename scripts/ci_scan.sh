@@ -105,7 +105,7 @@ fail_if_found "Forbidden version=2 markers" "${EXCLUDES[@]}" -e '\bversion\s*=\s
 #     legacy type names
 #   - accept_v2 / accept_legacy / legacy_envelope          → semantic flags
 # Anchored on `envelope` keyword for the numeric inequality so that
-# non-envelope schema bumps (soft_vault, recovery capsule) don't trigger.
+# non-envelope schema bumps (the recovery capsule) don't trigger.
 fail_if_found "envelope-version lenient acceptance (seam a)" "${EXCLUDES[@]}" \
   -e '\bEnvelopeV[12]\b|\benvelope\b.*\bversion\s*[<≤]\s*3\b|\baccept_v2\b|\baccept_legacy\b|\blegacy_envelope\b' \
   "${SCAN_ROOTS[@]}"

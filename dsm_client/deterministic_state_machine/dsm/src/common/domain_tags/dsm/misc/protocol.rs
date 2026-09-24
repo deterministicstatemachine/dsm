@@ -4,12 +4,6 @@
 
 use crate::crypto::domain::TaggedHashDomain;
 
-pub const TAG_DSM_ANCHOR_TICK: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/anchor-tick");
-pub const TAG_DSM_BALANCE_ANCHOR: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/balance-anchor");
-pub const TAG_DSM_CANONICAL_BALANCE: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/canonical-balance");
 pub const TAG_DSM_CANONICAL_LP: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/canonical-lp");
 pub const TAG_DSM_DETERMINISTIC_ID: TaggedHashDomain<'static> =

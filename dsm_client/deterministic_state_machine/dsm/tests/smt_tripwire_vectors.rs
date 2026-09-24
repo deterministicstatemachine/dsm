@@ -9,11 +9,8 @@
 
 use dsm::crypto::blake3::dsm_domain_hasher;
 use dsm::merkle::sparse_merkle_tree::{
-    default_node, empty_root, hash_smt_node, SmtInclusionProof, SparseMerkleTree,
+    default_node, empty_root, hash_smt_leaf, hash_smt_node, SmtInclusionProof, SparseMerkleTree,
     DEFAULT_SMT_HEIGHT, ZERO_LEAF,
-};
-use dsm::verification::smt_replace_witness::{
-    hash_smt_leaf, hash_smt_node as witness_hash_node, SmtReplaceWitness,
 };
 use dsm::core::bilateral_transaction_manager::{
     compute_precommit, compute_smt_key, compute_successor_tip,
@@ -58,7 +55,7 @@ const GOLDEN_FIRST_TX_POST_ROOT: &str = "Q6E1YEENJDT4ZQ9CN0Y52H144ZTHEB2EW94YTR8
 fn golden_tag_smt_node() {
     let left = [0x01u8; 32];
     let right = [0x02u8; 32];
-    let result = witness_hash_node(&left, &right);
+    let result = hash_smt_node(&left, &right);
     assert_eq!(
         to_b32(&result),
         GOLDEN_SMT_NODE,
@@ -320,72 +317,9 @@ fn cross_impl_leaf_hash_consistent() {
     }
 }
 
-#[test]
-fn cross_impl_node_hash_core_vs_witness() {
-    for i in 0u8..100 {
-        let mut left = [0u8; 32];
-        left[0] = i;
-        left[15] = i.wrapping_mul(3);
-        let mut right = [0u8; 32];
-        right[0] = i.wrapping_add(50);
-        right[15] = i.wrapping_mul(11);
-
-        let core_hash = hash_smt_node(&left, &right);
-        let witness_hash = witness_hash_node(&left, &right);
-
-        assert_eq!(
-            core_hash,
-            witness_hash,
-            "sparse_merkle_tree::hash_smt_node and smt_replace_witness::hash_smt_node diverge for pair {i}"
-        );
-    }
-}
-
 // ===========================================================================
 // Serialization
 // ===========================================================================
-
-#[test]
-fn smt_replace_witness_roundtrip() {
-    // Build a witness with 3 steps manually in wire format
-    let step_count: u32 = 3;
-    let mut wire = Vec::new();
-    wire.extend_from_slice(&step_count.to_le_bytes());
-
-    let siblings: [[u8; 32]; 3] = [[0xAA; 32], [0xBB; 32], [0xCC; 32]];
-    let is_lefts: [u8; 3] = [1, 0, 1];
-
-    for i in 0..3 {
-        wire.push(is_lefts[i]);
-        wire.extend_from_slice(&siblings[i]);
-    }
-
-    let witness = SmtReplaceWitness::from_bytes(&wire).expect("valid witness bytes must parse");
-
-    // Re-encode manually and decode again
-    let witness2 = SmtReplaceWitness::from_bytes(&wire).expect("second parse must succeed");
-
-    // Both must produce the same root from an arbitrary leaf
-    let leaf = hash_smt_leaf(&[0x42; 32]);
-    let root1 = witness.recompute_root(&leaf);
-    let root2 = witness2.recompute_root(&leaf);
-    assert_eq!(root1, root2, "witness roundtrip produced different roots");
-
-    // Root must be non-zero (not degenerate)
-    assert_ne!(root1, [0u8; 32], "witness root should not be all zeros");
-}
-
-#[test]
-fn smt_replace_witness_rejects_bad_is_left() {
-    let step_count: u32 = 1;
-    let mut wire = Vec::new();
-    wire.extend_from_slice(&step_count.to_le_bytes());
-    wire.push(2); // invalid: is_left must be 0 or 1
-    wire.extend_from_slice(&[0xDD; 32]);
-
-    let result = SmtReplaceWitness::from_bytes(&wire);
-    assert!(result.is_none(), "witness with is_left=2 must be rejected");
-}
 
 // ===========================================================================
 // Bit Ordering
@@ -490,7 +424,7 @@ fn golden_inclusion_proof_present_key() {
     let mut smt = SparseMerkleTree::new();
     let key = [0x07u8; 32];
     let value = [0x42u8; 32];
-    smt.update_leaf(&key, &value).expect("insert leaf");
+    smt.update_leaf(&key, &value);
 
     let proof = smt
         .get_inclusion_proof(&key, 256)
@@ -565,7 +499,7 @@ fn golden_proof_serialization_round_trip() {
     let mut smt = SparseMerkleTree::new();
     let key = [0x07u8; 32];
     let value = [0x42u8; 32];
-    smt.update_leaf(&key, &value).expect("insert leaf");
+    smt.update_leaf(&key, &value);
 
     let proof = smt.get_inclusion_proof(&key, 256).expect("proof");
     let bytes = proof.to_bytes();

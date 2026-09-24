@@ -212,8 +212,9 @@ Positions are numbered 0 to 4 in route order. Position 0 is always the leader.
 
 *The completion proof*
 
-8. The **completion proof** of `x` at `K` is the prefix of one chain of `x`, from position 0 through the chain's third link: for every position in that range, in route order, either the link recorded there or an empty. A seat passed over appears as the empty in its place.
+8. The **completion proof** of `x` at `K` is `x` itself and the prefix of one chain of `x`, from position 0 through the chain's third link: for every position in that range, in route order, either the link recorded there or an empty. A seat passed over appears as the empty in its place.
 9. A completion proof is checked online. The verifier reads the seats itself and accepts the proof only if:
+   - `x` is the value holding the leader link at `K`;
    - every link in it is valid under the route-chain rules above;
    - the copy that holds the third link carries exactly the proof's earlier positions.
 

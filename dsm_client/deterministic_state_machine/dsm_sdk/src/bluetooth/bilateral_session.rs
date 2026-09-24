@@ -114,8 +114,6 @@ pub struct BilateralBleSession {
     pub phase: BilateralPhase,
     pub local_signature: Option<Vec<u8>>,
     pub counterparty_signature: Option<Vec<u8>>,
-    pub created_at_ticks: u64,
-    pub expires_at_ticks: u64,
     /// BLE MAC address of the sender (for response routing)
     pub sender_ble_address: Option<String>,
     /// Wall-clock creation time for staleness detection (in-memory only, not persisted)
@@ -298,7 +296,6 @@ impl SessionStore {
             phase: phase_to_str(&session.phase).to_string(),
             local_signature: session.local_signature.clone(),
             counterparty_signature: session.counterparty_signature.clone(),
-            created_at_step: session.created_at_ticks,
             sender_ble_address: session.sender_ble_address.clone(),
             stitched_receipt_bytes: session.stitched_receipt_bytes.clone(),
         };
@@ -471,11 +468,6 @@ impl SessionStore {
 
     // -- Internal helpers ----------------------------------------------------
 
-    #[cfg(test)]
-    pub(crate) async fn all_sessions(&self) -> HashMap<[u8; 32], BilateralBleSession> {
-        self.sessions.lock().await.clone()
-    }
-
     fn record_to_session(&self, record: &BilateralSessionRecord) -> Option<BilateralBleSession> {
         let operation = match deserialize_operation(&record.operation_bytes) {
             Ok(op) => op,
@@ -518,8 +510,6 @@ impl SessionStore {
             phase: phase_from_str(&record.phase),
             local_signature: record.local_signature.clone(),
             counterparty_signature: record.counterparty_signature.clone(),
-            created_at_ticks: record.created_at_step,
-            expires_at_ticks: u64::MAX,
             sender_ble_address: record.sender_ble_address.clone(),
             created_at_wall: Instant::now(),
             pre_finalize_entropy: None,
@@ -546,8 +536,6 @@ mod tests {
             phase,
             local_signature: None,
             counterparty_signature: None,
-            created_at_ticks: 0,
-            expires_at_ticks: u64::MAX,
             sender_ble_address: None,
             created_at_wall: Instant::now(),
             stitched_receipt_bytes: None,

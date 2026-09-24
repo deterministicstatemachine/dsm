@@ -65,7 +65,8 @@ use crate::common::domain_tags::{
 };
 use crate::crypto::blake3::dsm_domain_hasher;
 use crate::route_chain::{
-    evaluate, CellError, CellEvidence, CellReading, ChainState, Missing, RoutedCell,
+    check_completion_proof, completion_proof, evaluate, CellError, CellEvidence, CellReading,
+    ChainState, CompletionProof, Missing, ProofRefusal, RoutedCell,
 };
 use crate::storage_object::immutable_addr;
 use crate::types::proto as generated;
@@ -560,12 +561,7 @@ impl SuccessorCell {
 /// however early they arrived. What holds the cell is the release and the
 /// child state recognition built.
 pub fn resolve_successor(cell: &SuccessorCell, evidence: &CellEvidence) -> SuccessorRead {
-    let parent = &cell.parent;
-    let reading = evaluate(&cell.cell, evidence, |bytes| {
-        let release = decode_and_verify_release(bytes).ok()?;
-        let child = release_constructible(parent, &release).ok()?;
-        Some((crate::storage_cell::entry_digest(bytes), (release, child)))
-    });
+    let reading = evaluate(&cell.cell, evidence, release_of(&cell.parent));
     match reading {
         Ok(CellReading::Held {
             object: (release, child),
@@ -586,6 +582,44 @@ pub fn resolve_successor(cell: &SuccessorCell, evidence: &CellEvidence) -> Succe
         Ok(CellReading::Open) => SuccessorRead::Open,
         Err(missing) => SuccessorRead::Unavailable(missing),
     }
+}
+
+/// A release recognized at a successor cell: its entry digest, the verified
+/// release, and the child state it builds.
+type RecognizedRelease = ([u8; 32], (VerifiedRelease, NativeReserveState));
+
+/// The recognizer of a successor cell: bytes that verify as a release AND
+/// succeed `parent`, with the child state they build. Anything else counts as
+/// nothing at the cell.
+fn release_of(parent: &NativeReserveState) -> impl Fn(&[u8]) -> Option<RecognizedRelease> + '_ {
+    move |bytes| {
+        let release = decode_and_verify_release(bytes).ok()?;
+        let child = release_constructible(parent, &release).ok()?;
+        Some((crate::storage_cell::entry_digest(bytes), (release, child)))
+    }
+}
+
+/// The completion proof of the release final at a successor cell (storage
+/// spec §9), with the release and the child it builds; `None` while no chain
+/// of the release holding the cell has three links.
+pub fn successor_completion(
+    cell: &SuccessorCell,
+    evidence: &CellEvidence,
+) -> Result<Option<(VerifiedRelease, NativeReserveState, CompletionProof)>, Missing> {
+    Ok(
+        completion_proof(&cell.cell, evidence, release_of(&cell.parent))?
+            .map(|((release, child), proof)| (release, child, proof)),
+    )
+}
+
+/// Check a kept completion proof of a successor cell against the reads in
+/// `evidence`: the release it proves final, and the child it builds.
+pub fn check_successor_completion(
+    cell: &SuccessorCell,
+    evidence: &CellEvidence,
+    proof: &CompletionProof,
+) -> Result<(VerifiedRelease, NativeReserveState), ProofRefusal> {
+    check_completion_proof(&cell.cell, evidence, proof, release_of(&cell.parent))
 }
 
 /// Where a walk of the lineage stopped.
@@ -983,6 +1017,29 @@ mod tests {
                 child: child_a
             },
             "A's own chain, continued after B's copies, makes A final"
+        );
+    }
+
+    /// A final release has a completion proof, and the proof checks against
+    /// the same seats; a release that is only leader-held has none.
+    #[test]
+    fn a_final_release_has_a_completion_proof_that_checks() {
+        let r0 = genesis();
+        let release = signed(&r0, 100);
+        let (at, mut cell) = successor_cell(&r0);
+        cell.write(&release.envelope_bytes, 1, &[]);
+        assert_eq!(successor_completion(&at, &cell.evidence()), Ok(None));
+        let (at, mut cell) = successor_cell(&r0);
+        cell.write(&release.envelope_bytes, ROUTE_LEN - 1, &[]);
+        let child = release_constructible(&r0, &release).unwrap();
+        let Ok(Some((proven, proven_child, proof))) = successor_completion(&at, &cell.evidence())
+        else {
+            panic!("a final release has a completion proof")
+        };
+        assert_eq!((&proven, proven_child), (&release, child));
+        assert_eq!(
+            check_successor_completion(&at, &cell.evidence(), &proof),
+            Ok((release, child))
         );
     }
 

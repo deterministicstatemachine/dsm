@@ -1,60 +1,48 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! DSM Contact SDK (proto-only, bytes-only)
-//! - No Base64
-//! - No hex
-//! - No JSON
-//!
-//! UI layers may encode/decode whole protobuf blobs for display/QR only.
+//! Contacts: the counterparties this device resolved through the device
+//! directory, held in memory by Core's contact manager and persisted in the
+//! client database.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use anyhow::Result as AnyResult;
-use blake3::Hasher;
-use prost::Message;
 use tokio::sync::RwLock;
 
 use dsm::core::contact_manager::{ContactError, DsmContactManager};
+use dsm::core::identity::directory::DirectoryEntry;
+use dsm::types::contact_types::DsmVerifiedContact;
 use dsm::types::error::DsmError;
 use dsm::types::identifiers::NodeId;
-use dsm::types::operations::{Operation, TransactionMode};
-use dsm::common::domain_tags::TAG_BILATERAL_SESSION;
-
-// Use the SAME proto namespace as the rest of the app to avoid type mismatches.
 use dsm::types::proto as pb;
 
-use crate::util::deterministic_time as dt;
+fn storage_err(what: &str, e: impl core::fmt::Display) -> DsmError {
+    DsmError::storage(format!("{what}: {e}"), None::<std::io::Error>)
+}
 
 #[derive(Debug, Clone)]
 pub struct ContactManager {
     dsm_manager: Arc<RwLock<DsmContactManager>>,
-    pub groups: HashMap<String, Vec<[u8; 32]>>,
     pub device_id: [u8; 32],
     pub genesis_hash: [u8; 32],
 }
 
-pub type ContactSDK = ContactManager;
-
 impl ContactManager {
-    fn with_manager_write_sync<R, F>(&self, op_name: &str, f: F) -> Result<R, DsmError>
-    where
-        R: Send,
-        F: FnOnce(&mut DsmContactManager) -> Result<R, DsmError> + Send,
-    {
-        let mgr = self.dsm_manager.clone();
-        std::thread::scope(|scope| {
-            scope
-                .spawn(move || {
-                    let mut guard = mgr.blocking_write();
-                    f(&mut guard)
-                })
-                .join()
-                .map_err(|_| {
-                    DsmError::internal(
-                        format!("Thread panicked in {op_name}"),
-                        None::<std::io::Error>,
-                    )
-                })?
+    /// Open this device's contacts: Core's manager holding every persisted
+    /// contact. A malformed persisted contact is refused, never skipped.
+    pub fn open(device_id: [u8; 32], genesis_hash: [u8; 32]) -> Result<Self, DsmError> {
+        let mut manager = DsmContactManager::new(device_id);
+        let records = crate::storage::client_db::get_all_contacts()
+            .map_err(|e| storage_err("load contacts", e))?;
+        for record in records {
+            let contact = record
+                .to_verified_contact()
+                .map_err(|e| storage_err("load contacts", e))?;
+            manager.add_verified_contact(contact)?;
+        }
+        Ok(Self {
+            dsm_manager: Arc::new(RwLock::new(manager)),
+            device_id,
+            genesis_hash,
         })
     }
 
@@ -63,1074 +51,210 @@ impl ContactManager {
         contact_device_id: [u8; 32],
         contact_genesis_hash: [u8; 32],
     ) -> [u8; 32] {
-        // h_0 = hasher(TAG_BILATERAL_SESSION) || sorted(G_A, DevID_A, G_B, DevID_B)
-        // Lexicographic ordering ensures identical hash regardless of initiator.
-        // MUST stay in sync with initial_relationship_chain_tip() in bilateral_transaction_manager.rs.
-        let our_device_id = self.device_id;
-        let our_genesis = self.genesis_hash;
-
-        let (genesis_a, device_a, genesis_b, device_b) = if our_device_id < contact_device_id {
-            (
-                our_genesis,
-                our_device_id,
-                contact_genesis_hash,
-                contact_device_id,
-            )
-        } else {
-            (
-                contact_genesis_hash,
-                contact_device_id,
-                our_genesis,
-                our_device_id,
-            )
-        };
-
-        // MUST match initial_relationship_chain_tip() in bilateral_transaction_manager.rs exactly.
-        // Using TAG_BILATERAL_SESSION with dsm_domain_hasher — not a raw blake3 hasher with a
-        // manually-injected tag — because dsm_domain_hasher derives a keyed context from the
-        // tag string, producing a different output than treating the tag as plain data.
-        let mut hasher = dsm::crypto::blake3::dsm_domain_hasher(TAG_BILATERAL_SESSION);
-        hasher.update(&genesis_a);
-        hasher.update(&device_a);
-        hasher.update(&genesis_b);
-        hasher.update(&device_b);
-
-        let hash = hasher.finalize();
-        let mut tip = [0u8; 32];
-        tip.copy_from_slice(hash.as_bytes());
-        tip
-    }
-
-    pub fn new_with_storage_nodes(
-        device_id: [u8; 32],
-        genesis_hash: [u8; 32],
-        storage_nodes: Vec<String>,
-    ) -> Self {
-        let node_ids: Vec<NodeId> = storage_nodes.into_iter().map(NodeId::new).collect();
-        let dsm_manager = Arc::new(RwLock::new(DsmContactManager::new(
-            device_id,
-            node_ids.clone(),
-        )));
-
-        let mut instance = Self {
-            dsm_manager,
-            groups: HashMap::new(),
-            device_id,
-            genesis_hash,
-        };
-
-        // Load persisted contacts from database on startup
-        instance.load_contacts_from_database();
-
-        instance
-    }
-
-    /// Load persisted contacts from SQLite database on startup
-    fn load_contacts_from_database(&mut self) {
-        use crate::storage::client_db::get_all_contacts;
-
-        log::info!("[DSM_SDK] 🔄 Loading contacts from SQLite database...");
-
-        match get_all_contacts() {
-            Ok(records) => {
-                let total_count = records.len();
-                log::info!("[DSM_SDK] 📚 Found {} contacts in database", total_count);
-
-                let mut loaded_count = 0;
-                for record in records {
-                    // Convert ContactRecord to DsmVerifiedContact
-                    if record.device_id.len() != 32 {
-                        log::warn!(
-                            "[DSM_SDK] ⚠️ Skipping contact '{}' with invalid device_id length {}",
-                            record.alias,
-                            record.device_id.len()
-                        );
-                        continue;
-                    }
-                    if record.genesis_hash.len() != 32 {
-                        log::warn!("[DSM_SDK] ⚠️ Skipping contact '{}' with invalid genesis_hash length {}",
-                            record.alias, record.genesis_hash.len());
-                        continue;
-                    }
-
-                    let mut device_id = [0u8; 32];
-                    let mut genesis_hash = [0u8; 32];
-                    device_id.copy_from_slice(&record.device_id);
-                    genesis_hash.copy_from_slice(&record.genesis_hash);
-
-                    let verified_contact = dsm::types::contact_types::DsmVerifiedContact {
-                        alias: record.alias.clone(),
-                        device_id,
-                        genesis_hash,
-                        public_key: record.public_key.clone(),
-                        genesis_material: Vec::new(),
-                        chain_tip: record.current_chain_tip.as_ref().map(|tip| {
-                            let mut hash = [0u8; 32];
-                            if tip.len() == 32 {
-                                hash.copy_from_slice(tip);
-                            }
-                            hash
-                        }),
-                        chain_tip_smt_proof: None,
-                        genesis_verified_online: record.verified,
-                        verified_at_commit_height: record.added_at,
-                        added_at_commit_height: record.added_at,
-                        last_updated_commit_height: record.added_at,
-                        verifying_storage_nodes: Vec::new(),
-                        ble_address: record.ble_address.clone(),
-                    };
-
-                    let load_result =
-                        self.with_manager_write_sync("load_contacts_from_database", move |mgr| {
-                            mgr.add_verified_contact(verified_contact.clone())?;
-                            // §2.2: no initial SMT seeding. The first canonical
-                            // advance for this relationship populates T_A at
-                            // `k_{A↔B}` via `DeviceState::advance`, with
-                            // `initial_chain_tip_from_device_ids` as the
-                            // seed for `embedded_parent`.
-                            Ok(())
-                        });
-
-                    if let Err(e) = load_result {
-                        log::warn!(
-                            "[DSM_SDK] ⚠️ Failed to load contact '{}' from database: {}",
-                            record.alias,
-                            e
-                        );
-                    } else {
-                        loaded_count += 1;
-                        log::info!(
-                            "[DSM_SDK] ✅ Loaded contact '{}' from database",
-                            record.alias
-                        );
-                    }
-                }
-
-                log::info!(
-                    "[DSM_SDK] 🎉 Successfully loaded {}/{} contacts from database",
-                    loaded_count,
-                    total_count
-                );
-            }
-            Err(e) => {
-                log::warn!("[DSM_SDK] ⚠️ Failed to load contacts from database: {}", e);
-                // Non-fatal: continue with empty contact list
-            }
-        }
-    }
-
-    pub fn new_with_default_storage_nodes(device_id: [u8; 32], genesis_hash: [u8; 32]) -> Self {
-        let defaults = match std::env::var("DSM_STORAGE_LAN_IP") {
-            Ok(lan_ip) if !lan_ip.trim().is_empty() => vec![
-                format!("http://{lan_ip}:8080"),
-                format!("http://{lan_ip}:8081"),
-                format!("http://{lan_ip}:8082"),
-            ],
-            _ => {
-                log::warn!("ContactSDK: no DSM_STORAGE_LAN_IP set; storage nodes empty");
-                Vec::new()
-            }
-        };
-        Self::new_with_storage_nodes(device_id, genesis_hash, defaults)
-    }
-
-    /// Add a contact when you already trust/verified the genesis payload bytes.
-    pub async fn add_contact_with_verified_genesis(
-        &mut self,
-        contact_device_id: [u8; 32],
-        alias: &str,
-        genesis_payload: &[u8],
-    ) -> Result<pb::ContactAddResponse, ContactError> {
-        self.add_contact_with_verified_genesis_and_ble(
-            contact_device_id,
-            alias,
-            genesis_payload,
-            None,
-            Vec::new(),
-            Vec::new(),
+        dsm::core::bilateral_transaction_manager::initial_relationship_chain_tip(
+            &self.device_id,
+            &self.genesis_hash,
+            &contact_device_id,
+            &contact_genesis_hash,
         )
-        .await
     }
 
-    /// Add a contact with optional BLE address for offline transfers
-    pub async fn add_contact_with_verified_genesis_and_ble(
+    /// Add the counterparty a directory read proved: its genesis, device id,
+    /// AK and Kyber key exactly as its own entry signs them, with the members
+    /// of the pinned set that hold that entry.
+    pub async fn add_contact_from_directory(
         &mut self,
-        contact_device_id: [u8; 32],
         alias: &str,
-        genesis_payload: &[u8],
-        ble_address: Option<String>,
-        signing_public_key: Vec<u8>,
+        entry: &DirectoryEntry,
         verifying_nodes: Vec<NodeId>,
     ) -> Result<pb::ContactAddResponse, ContactError> {
-        // Compute canonical genesis hash (BLAKE3-256).
-        let h = dsm::crypto::blake3::domain_hash(
-            dsm::common::domain_tags::TAG_DSM_CONTACT_GENESIS,
-            genesis_payload,
-        );
-        let mut gh = [0u8; 32];
-        gh.copy_from_slice(h.as_bytes());
+        let required = dsm::sofi::wire::STORAGE_FINALITY_COUNT;
+        if verifying_nodes.len() < required {
+            return Err(ContactError::GenesisVerificationFailed(format!(
+                "{} members hold the directory entry; {required} needed",
+                verifying_nodes.len()
+            )));
+        }
+        entry
+            .verify()
+            .map_err(|e| ContactError::GenesisVerificationFailed(e.to_string()))?;
+        let device_id = entry.body.device_id;
+        let genesis_hash = entry.body.genesis;
+        let initial_chain_tip = self.compute_initial_chain_tip(device_id, genesis_hash);
 
-        // Deterministic initial relationship tip (h_0) for this contact.
-        let initial_chain_tip = self.compute_initial_chain_tip(contact_device_id, gh);
-
-        // Deterministic counters: advance exactly once for this event.
-        let _now: u64 = dt::tick();
-
-        // Persist into core
-        let verified = dsm::types::contact_types::DsmVerifiedContact {
+        let verified = DsmVerifiedContact {
             alias: alias.to_string(),
-            device_id: contact_device_id,
-            genesis_hash: gh,
-            public_key: signing_public_key.clone(),
-            genesis_material: genesis_payload.to_vec(),
+            device_id,
+            genesis_hash,
+            public_key: entry.body.ak_public_key.clone(),
             chain_tip: Some(initial_chain_tip),
-            chain_tip_smt_proof: None,
             genesis_verified_online: true,
-            verified_at_commit_height: _now,
-            added_at_commit_height: _now,
-            last_updated_commit_height: _now,
-            verifying_storage_nodes: verifying_nodes.clone(),
-            ble_address: ble_address.clone(),
+            verifying_storage_nodes: verifying_nodes,
+            ble_address: None,
         };
-        {
-            let mut mgr = self.dsm_manager.write().await;
-            mgr.add_verified_contact(verified.clone()).map_err(|e| {
+        self.dsm_manager
+            .write()
+            .await
+            .add_verified_contact(verified.clone())
+            .map_err(|e| {
                 ContactError::InvalidContactData(format!("Core add_verified_contact failed: {e}"))
             })?;
-            // §2.2: first canonical advance populates T_A at k_{A↔B} via
-            // `DeviceState::advance` (with `initial_chain_tip_from_device_ids`
-            // as the `embedded_parent` seed). No up-front SMT seeding needed.
-        }
 
-        // ✅ PRODUCTION FIX: Persist to SQLite for durability across restarts
-        {
-            use crate::storage::client_db::{store_contact, ContactRecord};
-            use std::collections::HashMap;
-
-            log::info!("[DSM_SDK] 📝 Persisting contact to SQLite: alias={}", alias);
-            let hash_bytes = crate::util::domain_helpers::device_id_hash_bytes(&contact_device_id);
-            let contact_id = format!(
-                "c_{}",
-                &crate::util::text_id::encode_base32_crockford(&hash_bytes)[..8]
-            );
-
-            let contact_record = ContactRecord {
-                contact_id,
-                device_id: contact_device_id.to_vec(),
-                alias: alias.to_string(),
-                genesis_hash: gh.to_vec(),
-                // CRITICAL: Initialize chain_tip to deterministic relationship tip (h_0).
-                current_chain_tip: Some(initial_chain_tip.to_vec()),
-                added_at: _now,
-                verified: true,
-                verification_proof: None,
-                metadata: HashMap::new(),
-                ble_address: ble_address.clone(),
-                status: "Created".to_string(),
-                needs_online_reconcile: false,
-                last_seen_online_counter: 0,
-                last_seen_ble_counter: 0,
-                public_key: signing_public_key.clone(),
-                kyber_public_key: Vec::new(),
-                previous_chain_tip: None,
-            };
-
-            match store_contact(&contact_record) {
-                Ok(_) => {
-                    // Atomic tip sync: ensure both chain_tip and local_bilateral_chain_tip
-                    // are aligned at the initial value.
-                    let request = crate::storage::client_db::bilateral_tip_sync::TipSyncRequest {
-                        counterparty_device_id: contact_device_id,
-                        expected_parent_tip: initial_chain_tip,
-                        target_tip: initial_chain_tip,
-                    };
-                    if let Err(e) = crate::storage::client_db::bilateral_tip_sync::sync_bilateral_tips_atomically(&request) {
-                        log::warn!(
-                            "[DSM_SDK] ⚠️ Failed to persist initial bilateral chain tip atomically: {}",
-                            e
-                        );
-                    }
-                    log::info!("[DSM_SDK] ✅ Contact stored successfully in SQLite");
-
-                    // §2.3: Store the contact's Device Tree root R_G so that receipt
-                    // verification during inbox sync can validate π_dev proofs.
-                    // For a single-device tree, R_G = hash_leaf(device_id) and is
-                    // deterministic from the contact's device ID alone.
-                    let contact_device_tree_root =
-                        dsm::common::device_tree::DeviceTree::single(contact_device_id).root();
-                    if let Err(e) = crate::storage::client_db::store_contact_device_tree_root(
-                        &contact_device_id,
-                        &contact_device_tree_root,
-                    ) {
-                        log::warn!(
-                            "[DSM_SDK] ⚠️ Failed to store contact device tree root: {}",
-                            e
-                        );
-                    }
-
-                    // Mark device as paired to persist BLE connection in Android layer
-                    #[allow(unused_variables)]
-                    if let Some(ref addr) = ble_address {
-                        #[cfg(all(target_os = "android", feature = "bluetooth"))]
-                        {
-                            use crate::bluetooth::mark_device_as_paired;
-                            if let Err(e) = mark_device_as_paired(addr) {
-                                log::warn!("[DSM_SDK] ⚠️ Failed to mark device as paired: {}", e);
-                                // Non-fatal: contact is still stored
-                            } else {
-                                log::info!("[DSM_SDK] ✅ Device marked as paired: {}", addr);
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    log::warn!("[DSM_SDK] ⚠️ Failed to persist contact to SQLite: {}", e);
-                    // Non-fatal: contact is still in memory
-                }
-            }
-        }
-
-        // Read back (authoritative)
-        let stored = {
-            let mgr = self.dsm_manager.read().await;
-            mgr.get_contact(&contact_device_id).cloned()
-        };
-
-        let (
-            alias,
-            device_id,
-            genesis_hash,
-            chain_tip,
-            verified_online,
-            verified_at,
-            added_at,
-            nodes,
-        ) = if let Some(ref c) = stored {
-            (
-                c.alias.clone(),
-                c.device_id.to_vec(),
-                c.genesis_hash.to_vec(),
-                c.chain_tip.map(|h| h.to_vec()),
-                c.genesis_verified_online,
-                c.verified_at_commit_height,
-                c.added_at_commit_height,
-                c.verifying_storage_nodes
-                    .iter()
-                    .map(|n| n.to_string())
-                    .collect::<Vec<_>>(),
-            )
-        } else {
-            (
-                alias.to_string(),
-                contact_device_id.to_vec(),
-                gh.to_vec(),
-                Some(initial_chain_tip.to_vec()),
-                true,
-                _now,
-                _now,
-                Vec::new(),
-            )
-        };
-
-        Ok(pb::ContactAddResponse {
-            alias,
-            device_id,
-            genesis_hash: Some(pb::Hash32 { v: genesis_hash }),
-            chain_tip: chain_tip.map(|h| pb::Hash32 { v: h }),
-            chain_tip_smt_proof: None,
-            alias_binding: None,
-            genesis_verified_online: verified_online,
-            verify_counter: verified_at,
-            added_counter: added_at,
-            verifying_storage_nodes: nodes,
-            ble_address: ble_address.unwrap_or_default(),
-            signing_public_key: stored
-                .as_ref()
-                .map(|c| c.public_key.clone())
-                .unwrap_or_else(|| signing_public_key.clone()),
-            send_status: Some(
-                crate::handlers::relationship_status::derive_local_send_status_for_device_id(
-                    &contact_device_id,
-                ),
-            ),
-        })
-    }
-
-    /// Add a contact when you have an expected genesis hash (bytes) and the payload (bytes).
-    pub async fn add_contact_with_genesis_and_hash(
-        &mut self,
-        contact_device_id: [u8; 32],
-        alias: &str,
-        expected_genesis_hash: [u8; 32],
-        genesis_payload: &[u8],
-    ) -> Result<pb::ContactAddResponse, ContactError> {
-        self.add_contact_with_genesis_and_hash_and_signing_key(
-            contact_device_id,
-            alias,
-            expected_genesis_hash,
-            genesis_payload,
-            Vec::new(),
-            Vec::new(),
-        )
-        .await
-    }
-
-    /// Add a contact when you have an expected genesis hash (bytes), the payload (bytes),
-    /// and the signing public key.
-    pub async fn add_contact_with_genesis_and_hash_and_signing_key(
-        &mut self,
-        contact_device_id: [u8; 32],
-        alias: &str,
-        expected_genesis_hash: [u8; 32],
-        genesis_payload: &[u8],
-        signing_public_key: Vec<u8>,
-        verifying_nodes: Vec<NodeId>,
-    ) -> Result<pb::ContactAddResponse, ContactError> {
-        let computed = dsm::crypto::blake3::domain_hash(
-            dsm::common::domain_tags::TAG_DSM_CONTACT_GENESIS,
-            genesis_payload,
+        let hash_bytes = crate::util::domain_helpers::device_id_hash_bytes(&device_id);
+        let contact_id = format!(
+            "c_{}",
+            &crate::util::text_id::encode_base32_crockford(&hash_bytes)[..8]
         );
-        if computed.as_bytes() != &expected_genesis_hash {
-            return Err(ContactError::GenesisVerificationFailed(
-                "Genesis hash mismatch".to_string(),
-            ));
-        }
-        self.add_contact_with_verified_genesis_and_ble(
-            contact_device_id,
-            alias,
-            genesis_payload,
-            None,
-            signing_public_key,
-            verifying_nodes,
-        )
-        .await
-    }
-
-    /// Strict path: add a contact when a quorum (≥3) of storage nodes has attested
-    /// the counterparty's genesis hash equals expected_genesis_hash.
-    /// No local payload preimage is required; we persist empty genesis_material and
-    /// record verifying_storage_nodes.
-    pub async fn add_contact_with_verified_hash_from_nodes(
-        &mut self,
-        contact_device_id: [u8; 32],
-        alias: &str,
-        expected_genesis_hash: [u8; 32],
-        verifying_nodes: Vec<NodeId>,
-    ) -> Result<pb::ContactAddResponse, ContactError> {
-        self.add_contact_with_verified_hash_from_nodes_and_ble(
-            contact_device_id,
-            alias,
-            expected_genesis_hash,
-            verifying_nodes,
-            None,
-            Vec::new(),
-        )
-        .await
-    }
-
-    /// Strict path with signing key (no BLE address)
-    pub async fn add_contact_with_verified_hash_from_nodes_and_signing_key(
-        &mut self,
-        contact_device_id: [u8; 32],
-        alias: &str,
-        expected_genesis_hash: [u8; 32],
-        verifying_nodes: Vec<NodeId>,
-        signing_public_key: Vec<u8>,
-    ) -> Result<pb::ContactAddResponse, ContactError> {
-        self.add_contact_with_verified_hash_from_nodes_and_ble(
-            contact_device_id,
-            alias,
-            expected_genesis_hash,
-            verifying_nodes,
-            None,
-            signing_public_key,
-        )
-        .await
-    }
-
-    /// Strict path with optional BLE address for offline transfers
-    pub async fn add_contact_with_verified_hash_from_nodes_and_ble(
-        &mut self,
-        contact_device_id: [u8; 32],
-        alias: &str,
-        expected_genesis_hash: [u8; 32],
-        verifying_nodes: Vec<NodeId>,
-        ble_address: Option<String>,
-        signing_public_key: Vec<u8>,
-    ) -> Result<pb::ContactAddResponse, ContactError> {
-        if verifying_nodes.len() < 3 {
-            return Err(ContactError::GenesisVerificationFailed(
-                "Insufficient verifying nodes (need ≥3)".to_string(),
-            ));
-        }
-
-        let _now: u64 = dt::tick();
-
-        let initial_chain_tip =
-            self.compute_initial_chain_tip(contact_device_id, expected_genesis_hash);
-        log::info!("[DSM_SDK] ✅ Created initial chain tip for bilateral relationship");
-
-        let verified = dsm::types::contact_types::DsmVerifiedContact {
+        let record = crate::storage::client_db::ContactRecord {
+            contact_id,
+            device_id: device_id.to_vec(),
             alias: alias.to_string(),
-            device_id: contact_device_id,
-            genesis_hash: expected_genesis_hash,
-            public_key: signing_public_key.clone(),
-            genesis_material: Vec::new(),
-            chain_tip: Some(initial_chain_tip),
-            chain_tip_smt_proof: None,
-            genesis_verified_online: true,
-            verified_at_commit_height: _now,
-            added_at_commit_height: _now,
-            last_updated_commit_height: _now,
-            verifying_storage_nodes: verifying_nodes.clone(),
-            ble_address: ble_address.clone(),
+            genesis_hash: genesis_hash.to_vec(),
+            current_chain_tip: Some(initial_chain_tip.to_vec()),
+            verified: true,
+            verification_proof: None,
+            metadata: HashMap::new(),
+            ble_address: None,
+            status: "Created".to_string(),
+            needs_online_reconcile: false,
+            public_key: entry.body.ak_public_key.clone(),
+            kyber_public_key: entry.body.kyber_public_key.clone(),
+            previous_chain_tip: None,
         };
-        {
-            let mut mgr = self.dsm_manager.write().await;
-            log::info!(
-                "[DSM_SDK] ➕ Adding contact to in-memory HashMap: alias={}",
-                alias
-            );
-            mgr.add_verified_contact(verified.clone()).map_err(|e| {
-                ContactError::InvalidContactData(format!("Core add_verified_contact failed: {e}"))
-            })?;
-            // §2.2: first canonical advance populates T_A at k_{A↔B}.
-            log::info!("[DSM_SDK] ✅ Contact added to HashMap successfully");
-        }
-
-        // ✅ Verify it's in the HashMap
-        {
-            let mgr = self.dsm_manager.read().await;
-            let count = mgr.list_contacts().len();
-            log::info!(
-                "[DSM_SDK] 📊 Total contacts in HashMap after add: {}",
-                count
-            );
-        }
-
-        // ✅ PRODUCTION FIX: Persist to SQLite for durability across restarts
-        {
-            use crate::storage::client_db::{store_contact, ContactRecord};
-            use std::collections::HashMap;
-
-            log::info!("[DSM_SDK] 📝 Persisting contact to SQLite: alias={}", alias);
-            let hash_bytes = crate::util::domain_helpers::device_id_hash_bytes(&contact_device_id);
-            let contact_id = format!(
-                "c_{}",
-                &crate::util::text_id::encode_base32_crockford(&hash_bytes)[..8]
-            );
-            log::info!("[DSM_SDK] 📝 Generated contact_id: {}", contact_id);
-
-            let contact_record = ContactRecord {
-                contact_id,
-                device_id: contact_device_id.to_vec(),
-                alias: alias.to_string(),
-                genesis_hash: expected_genesis_hash.to_vec(),
-                // CRITICAL: Initialize chain_tip to deterministic relationship tip (h_0).
-                current_chain_tip: Some(initial_chain_tip.to_vec()),
-                added_at: _now,
-                verified: true,
-                verification_proof: None,
-                metadata: HashMap::new(),
-                ble_address: ble_address.clone(),
-                status: "Created".to_string(),
-                needs_online_reconcile: false,
-                last_seen_online_counter: 0,
-                last_seen_ble_counter: 0,
-                public_key: signing_public_key.clone(),
-                kyber_public_key: Vec::new(),
-                previous_chain_tip: None,
-            };
-
-            log::info!("[DSM_SDK] 📝 Calling store_contact()...");
-            match store_contact(&contact_record) {
-                Ok(_) => {
-                    log::info!("[DSM_SDK] ✅ Contact stored successfully in SQLite");
-                    let request = crate::storage::client_db::bilateral_tip_sync::TipSyncRequest {
-                        counterparty_device_id: contact_device_id,
-                        expected_parent_tip: initial_chain_tip,
-                        target_tip: initial_chain_tip,
-                    };
-                    if let Err(e) = crate::storage::client_db::bilateral_tip_sync::sync_bilateral_tips_atomically(&request) {
-                        log::error!(
-                            "[DSM_SDK] ❌ Failed to persist initial bilateral chain tip atomically: {}",
-                            e
-                        );
-                        return Err(ContactError::InvalidChainTip(format!(
-                            "Failed to persist initial local bilateral chain tip: {e}"
-                        )));
-                    }
-
-                    // §2.3: Store the contact's Device Tree root R_G so that receipt
-                    // verification during inbox sync can validate π_dev proofs.
-                    // For a single-device tree, R_G = hash_leaf(device_id) and is
-                    // deterministic from the contact's device ID alone.
-                    let contact_device_tree_root =
-                        dsm::common::device_tree::DeviceTree::single(contact_device_id).root();
-                    if let Err(e) = crate::storage::client_db::store_contact_device_tree_root(
-                        &contact_device_id,
-                        &contact_device_tree_root,
-                    ) {
-                        log::warn!(
-                            "[DSM_SDK] ⚠️ Failed to store contact device tree root: {}",
-                            e
-                        );
-                    }
-
-                    // Mark device as paired to persist BLE connection in Android layer
-                    #[allow(unused_variables)]
-                    if let Some(ref addr) = ble_address {
-                        #[cfg(all(target_os = "android", feature = "bluetooth"))]
-                        {
-                            use crate::bluetooth::mark_device_as_paired;
-                            if let Err(e) = mark_device_as_paired(addr) {
-                                log::warn!("[DSM_SDK] ⚠️ Failed to mark device as paired: {}", e);
-                                // Non-fatal: contact is still stored
-                            } else {
-                                log::info!("[DSM_SDK] ✅ Device marked as paired: {}", addr);
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    log::error!("[DSM_SDK] ❌ SQLite persistence failed: {}", e);
-                    return Err(ContactError::InvalidContactData(format!(
-                        "SQLite persistence failed: {e}"
-                    )));
-                }
-            }
-        }
-
-        // Read back (authoritative)
-        let stored = {
-            let mgr = self.dsm_manager.read().await;
-            mgr.get_contact(&contact_device_id).cloned()
-        };
-
-        let (
-            alias,
-            device_id,
-            genesis_hash,
-            chain_tip,
-            verified_online,
-            verified_at,
-            added_at,
-            nodes,
-        ) = if let Some(ref c) = stored {
-            (
-                c.alias.clone(),
-                c.device_id.to_vec(),
-                c.genesis_hash.to_vec(),
-                c.chain_tip.map(|h| h.to_vec()),
-                c.genesis_verified_online,
-                c.verified_at_commit_height,
-                c.added_at_commit_height,
-                c.verifying_storage_nodes
-                    .iter()
-                    .map(|n| n.to_string())
-                    .collect::<Vec<_>>(),
-            )
-        } else {
-            (
-                alias.to_string(),
-                contact_device_id.to_vec(),
-                expected_genesis_hash.to_vec(),
-                Some(initial_chain_tip.to_vec()),
-                true,
-                _now,
-                _now,
-                verifying_nodes.into_iter().map(|n| n.to_string()).collect(),
-            )
-        };
-
-        Ok(pb::ContactAddResponse {
-            alias,
-            device_id,
-            genesis_hash: Some(pb::Hash32 { v: genesis_hash }),
-            chain_tip: chain_tip.map(|h| pb::Hash32 { v: h }),
-            chain_tip_smt_proof: None,
-            alias_binding: None,
-            genesis_verified_online: verified_online,
-            verify_counter: verified_at,
-            added_counter: added_at,
-            verifying_storage_nodes: nodes,
-            ble_address: ble_address.unwrap_or_default(),
-            signing_public_key: stored
-                .as_ref()
-                .map(|c| c.public_key.clone())
-                .unwrap_or_else(|| signing_public_key.clone()),
-            send_status: Some(
-                crate::handlers::relationship_status::derive_local_send_status_for_device_id(
-                    &contact_device_id,
-                ),
-            ),
-        })
-    }
-
-    pub async fn get_verified_contact(
-        &self,
-        device_id: [u8; 32],
-    ) -> Option<dsm::types::contact_types::DsmVerifiedContact> {
-        let mgr = self.dsm_manager.read().await;
-        mgr.get_contact(&device_id).cloned()
-    }
-
-    pub async fn can_perform_bilateral_transaction(
-        &self,
-        device_id: [u8; 32],
-    ) -> Result<bool, ContactError> {
-        let mgr = self.dsm_manager.read().await;
-        if let Some(c) = mgr.get_contact(&device_id) {
-            Ok(c.can_perform_bilateral_transaction())
-        } else {
-            Err(ContactError::ContactNotFound)
-        }
-    }
-
-    pub async fn update_contact_chain_tip_unilateral(
-        &mut self,
-        contact_device_id: [u8; 32],
-        expected_parent_tip: [u8; 32],
-        new_chain_tip: [u8; 32],
-    ) -> Result<(), ContactError> {
-        // §2.2: Canonical advance (DeviceState.smt) already owns SMT state.
-        // This helper only persists the symmetric §16.6 tip to contacts.chain_tip
-        // for future precommit + b0x addressing.
+        crate::storage::client_db::store_contact(&record).map_err(|e| {
+            ContactError::InvalidContactData(format!("SQLite persistence failed: {e}"))
+        })?;
         let request = crate::storage::client_db::bilateral_tip_sync::TipSyncRequest {
-            counterparty_device_id: contact_device_id,
-            expected_parent_tip,
-            target_tip: new_chain_tip,
+            counterparty_device_id: device_id,
+            expected_parent_tip: initial_chain_tip,
+            target_tip: initial_chain_tip,
         };
-        match crate::storage::client_db::bilateral_tip_sync::sync_bilateral_tips_atomically(&request) {
-            Ok(outcome) => match outcome {
-                crate::storage::client_db::bilateral_tip_sync::TipSyncOutcome::Advanced { .. }
-                | crate::storage::client_db::bilateral_tip_sync::TipSyncOutcome::RepairedAtTarget { .. }
-                | crate::storage::client_db::bilateral_tip_sync::TipSyncOutcome::AlreadyAtTarget { .. } => {}
-                _ => {
-                    return Err(ContactError::InvalidChainTip(
-                        "Finalized unilateral chain tip parent mismatch".to_string(),
-                    ));
-                }
-            },
-            Err(e) => {
-                return Err(ContactError::InvalidChainTip(format!(
-                    "Failed to persist finalized unilateral chain tip update: {e}"
-                )));
-            }
-        }
+        crate::storage::client_db::bilateral_tip_sync::sync_bilateral_tips_atomically(&request)
+            .map_err(|e| {
+                ContactError::InvalidChainTip(format!(
+                    "Failed to persist initial local bilateral chain tip: {e}"
+                ))
+            })?;
+        // §2.3: the contact's Device Tree root R_G, against which receipt
+        // verification during inbox sync checks π_dev proofs.
+        let contact_device_tree_root =
+            dsm::common::device_tree::DeviceTree::single(device_id).root();
+        crate::storage::client_db::store_contact_device_tree_root(
+            &device_id,
+            &contact_device_tree_root,
+        )
+        .map_err(|e| {
+            ContactError::InvalidContactData(format!(
+                "Failed to store contact device tree root: {e}"
+            ))
+        })?;
 
-        Ok(())
+        Ok(contact_add_response(&verified))
     }
 
-    pub async fn list_verified_contacts(
-        &self,
-    ) -> Vec<dsm::types::contact_types::DsmVerifiedContact> {
-        use crate::storage::client_db::get_contact_by_device_id;
-
-        let mgr = self.dsm_manager.read().await;
-        let mut out: Vec<dsm::types::contact_types::DsmVerifiedContact> =
-            Vec::with_capacity(mgr.list_contacts().len());
-
-        // Overlay persisted fields (e.g., ble_address) from SQLite onto the in-memory contacts
-        // so callers like contacts.list see the latest BLE readiness without requiring a restart
-        // or a separate in-memory mutation hook.
-        let contacts = mgr.list_contacts();
-        for mut cc in contacts.into_iter().cloned() {
-            // Fetch persisted record; best-effort overlay
-            match get_contact_by_device_id(&cc.device_id) {
-                Ok(Some(rec)) => {
-                    if rec.ble_address.is_some() {
-                        cc.ble_address = rec.ble_address.clone();
-                    }
-                    // If in the future more persisted fields must override memory, add here.
-                }
-                Ok(None) => {
-                    // No persisted record found; leave as-is
-                }
-                Err(e) => {
-                    log::debug!(
-                        "[DSM_SDK] list_verified_contacts: get_contact_by_device_id error: {}",
-                        e
-                    );
-                }
-            }
-            out.push(cc);
-        }
-
-        out
+    pub async fn get_verified_contact(&self, device_id: [u8; 32]) -> Option<DsmVerifiedContact> {
+        self.dsm_manager
+            .read()
+            .await
+            .get_contact(&device_id)
+            .cloned()
     }
 
-    /// Restore a contact from persistent storage (used on app startup)
+    /// Every contact, with the BLE address the client database holds for it:
+    /// that address is written there, apart from the in-memory contact.
+    pub async fn list_verified_contacts(&self) -> Result<Vec<DsmVerifiedContact>, DsmError> {
+        let manager = self.dsm_manager.read().await;
+        manager
+            .list_contacts()
+            .into_iter()
+            .map(|contact| {
+                let mut contact = contact.clone();
+                let record =
+                    crate::storage::client_db::get_contact_by_device_id(&contact.device_id)
+                        .map_err(|e| storage_err("contact lookup", e))?
+                        .ok_or_else(|| {
+                            storage_err(
+                                "contact lookup",
+                                "a contact held in memory has no persisted row",
+                            )
+                        })?;
+                contact.ble_address = record.ble_address;
+                Ok(contact)
+            })
+            .collect()
+    }
+
+    /// Replace the in-memory contact with one read back from storage.
     pub async fn restore_contact_from_storage(
         &mut self,
-        contact: dsm::types::contact_types::DsmVerifiedContact,
+        contact: DsmVerifiedContact,
     ) -> Result<(), DsmError> {
-        let mut mgr = self.dsm_manager.write().await;
-        mgr.add_verified_contact(contact)
-    }
-
-    /// Synchronous version for app startup
-    pub fn restore_contact_from_storage_sync(
-        &mut self,
-        contact: dsm::types::contact_types::DsmVerifiedContact,
-    ) -> Result<(), DsmError> {
-        self.with_manager_write_sync("restore_contact_from_storage_sync", move |mgr| {
-            mgr.add_verified_contact(contact)
-        })
-    }
-
-    pub async fn export_contacts(&self) -> Result<pb::ContactsListResponse, DsmError> {
-        let mgr = self.dsm_manager.read().await;
-        let contacts = mgr.list_contacts();
-        let mut out: Vec<pb::ContactAddResponse> = Vec::with_capacity(contacts.len());
-
-        for c in contacts {
-            let persisted = match crate::storage::client_db::get_contact_by_device_id(&c.device_id)
-            {
-                Ok(record) => record,
-                Err(e) => {
-                    log::debug!(
-                        "[DSM_SDK] export_contacts: get_contact_by_device_id error: {}",
-                        e
-                    );
-                    None
-                }
-            };
-            let persisted_chain_tip = persisted
-                .as_ref()
-                .and_then(|record| record.current_chain_tip.as_ref())
-                .and_then(|tip| {
-                    if tip.len() == 32 {
-                        let mut arr = [0u8; 32];
-                        arr.copy_from_slice(tip);
-                        Some(arr)
-                    } else {
-                        None
-                    }
-                });
-
-            out.push(pb::ContactAddResponse {
-                alias: c.alias.clone(),
-                device_id: c.device_id.to_vec(),
-                genesis_hash: Some(pb::Hash32 {
-                    v: c.genesis_hash.to_vec(),
-                }),
-                chain_tip: persisted_chain_tip
-                    .or(c.chain_tip)
-                    .map(|h| pb::Hash32 { v: h.to_vec() }),
-                chain_tip_smt_proof: None,
-                alias_binding: None,
-                genesis_verified_online: c.genesis_verified_online,
-                verify_counter: c.verified_at_commit_height,
-                added_counter: c.added_at_commit_height,
-                verifying_storage_nodes: c
-                    .verifying_storage_nodes
-                    .iter()
-                    .map(|n| n.to_string())
-                    .collect(),
-                ble_address: persisted
-                    .as_ref()
-                    .and_then(|record| record.ble_address.clone())
-                    .or_else(|| c.ble_address.clone())
-                    .unwrap_or_default(),
-                signing_public_key: c.public_key.clone(),
-                send_status: Some(
-                    crate::handlers::relationship_status::derive_local_send_status_for_device_id(
-                        &c.device_id,
-                    ),
-                ),
-            });
-        }
-
-        Ok(pb::ContactsListResponse { contacts: out })
-    }
-
-    pub fn add_to_group(&mut self, contact_device_id: [u8; 32], group: &str) {
-        self.groups
-            .entry(group.to_string())
-            .or_default()
-            .push(contact_device_id);
-    }
-
-    pub fn get_group(&self, group: &str) -> Option<&Vec<[u8; 32]>> {
-        self.groups.get(group)
-    }
-
-    // -------------------- Operation builders (boundary caution) --------------------
-    //
-    // Operation::AddRelationship currently uses string identifiers.
-    // To keep this module bytes-only, provide a labels-based builder;
-    // the bytes-only wrappers fail closed (explicit error) to avoid ad-hoc encodings.
-
-    /// Preferred: build an AddRelationship operation from human labels (provided by UI).
-    pub fn create_add_contact_operation_with_labels(
-        &self,
-        from_label: &str,
-        to_label: &str,
-        relationship_type: &str,
-        metadata: Vec<u8>,
-        use_bilateral: bool,
-    ) -> Result<Operation, DsmError> {
-        Ok(Operation::AddRelationship {
-            from_id: crate::util::domain_helpers::device_id_hash(from_label),
-            to_id: crate::util::domain_helpers::device_id_hash(to_label),
-            relationship_type: relationship_type.as_bytes().to_vec(),
-            metadata,
-            proof: vec![],
-            mode: if use_bilateral {
-                TransactionMode::Bilateral
-            } else {
-                TransactionMode::Unilateral
-            },
-            message: "Add contact relationship".to_string(),
-        })
-    }
-
-    /// Bytes-only wrapper: fail closed to prevent silent encodings.
-    pub fn create_add_contact_operation(
-        &self,
-        _contact_device_id: [u8; 32],
-        _relationship_type: &str,
-        _metadata: Vec<u8>,
-        _use_bilateral: bool,
-    ) -> Result<Operation, DsmError> {
-        Err(DsmError::invalid_operation(
-            "create_add_contact_operation requires UI-provided labels; \
-             use create_add_contact_operation_with_labels(from_label, to_label, ...)",
-        ))
-    }
-
-    /// Bytes-only wrapper with explicit from-device: same fail-closed stance.
-    pub fn create_add_contact_operation_with_device(
-        &self,
-        _from_device_id: [u8; 32],
-        _contact_device_id: [u8; 32],
-        _relationship_type: &str,
-        _metadata: Vec<u8>,
-        _use_bilateral: bool,
-    ) -> Result<Operation, DsmError> {
-        Err(DsmError::invalid_operation(
-            "create_add_contact_operation_with_device requires UI-provided labels; \
-             use create_add_contact_operation_with_labels(from_label, to_label, ...)",
-        ))
+        self.dsm_manager.write().await.add_verified_contact(contact)
     }
 }
 
-// ------------------------ Contact QR (bytes-only) ------------------------
-
-impl ContactManager {
-    /// Build a ContactQrV3 protobuf payload as raw bytes (for UI display/QR).
-    pub fn build_contact_qr_v3_payload(
-        &self,
-        network: &str,
-        storage_nodes: &[&str],
-        sdk_build_bytes: &[u8],
-        device_id_bytes: &[u8; 32],
-    ) -> AnyResult<Vec<u8>> {
-        let mut h = Hasher::new();
-        h.update(sdk_build_bytes);
-        let fp = h.finalize();
-
-        // Fetch local genesis hash from AppState as raw 32 bytes.
-        let genesis_bytes = {
-            if let Some(gh) = crate::sdk::app_state::AppState::get_genesis_hash() {
-                if gh.len() == 32 {
-                    gh
-                } else {
-                    Vec::new()
-                }
-            } else {
-                Vec::new()
-            }
-        };
-
-        let msg = pb::ContactQrV3 {
-            device_id: device_id_bytes.to_vec(),
-            network: network.trim().to_string(),
-            storage_nodes: storage_nodes
-                .iter()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect(),
-            sdk_fingerprint: fp.as_bytes().to_vec(),
-            genesis_hash: genesis_bytes,
-            // Include SPHINCS+ signing public key from AppState for bilateral verification
-            signing_public_key: crate::sdk::app_state::AppState::get_public_key()
-                .unwrap_or_default(),
-            preferred_alias: String::new(),
-        };
-
-        let mut buf = Vec::with_capacity(msg.encoded_len());
-        msg.encode(&mut buf)?;
-        Ok(buf)
-    }
-
-    /// Parse a ContactQrV3 from raw protobuf bytes.
-    pub fn parse_contact_qr_v3_payload(bytes: &[u8]) -> AnyResult<pb::ContactQrV3> {
-        Ok(pb::ContactQrV3::decode(bytes)?)
+/// The response a contact add or lookup returns for `contact`.
+pub fn contact_add_response(
+    contact: &dsm::types::contact_types::DsmVerifiedContact,
+) -> pb::ContactAddResponse {
+    pb::ContactAddResponse {
+        alias: contact.alias.clone(),
+        device_id: contact.device_id.to_vec(),
+        genesis_hash: Some(pb::Hash32 {
+            v: contact.genesis_hash.to_vec(),
+        }),
+        chain_tip: contact.chain_tip.map(|tip| pb::Hash32 { v: tip.to_vec() }),
+        alias_binding: None,
+        genesis_verified_online: contact.genesis_verified_online,
+        verifying_storage_nodes: contact
+            .verifying_storage_nodes
+            .iter()
+            .map(|node| node.to_string())
+            .collect(),
+        // proto3: the empty string is how an absent address encodes.
+        ble_address: match &contact.ble_address {
+            Some(address) => address.clone(),
+            None => String::new(),
+        },
+        signing_public_key: contact.public_key.clone(),
+        send_status: Some(
+            crate::handlers::relationship_status::derive_local_send_status_for_device_id(
+                &contact.device_id,
+            ),
+        ),
     }
 }
-
-// ------------------------ Optional state update hook ------------------------
-
-// update_contact_from_transition deleted: zero production callers, and
-// the body explicitly dropped the &State parameter (`let _ = state`,
-// "reserved for future chain-tip syncing"). Classic dead-parameter
-// residue. Chain-tip sync now flows through ChainTipStore + DeviceState.
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use prost::Message;
 
-    fn test_manager() -> ContactManager {
-        let device_id = [0xAA; 32];
-        let genesis_hash = [0xBB; 32];
+    fn manager_of(device_id: [u8; 32], genesis_hash: [u8; 32]) -> ContactManager {
         ContactManager {
-            dsm_manager: Arc::new(RwLock::new(DsmContactManager::new(device_id, vec![]))),
-            groups: HashMap::new(),
+            dsm_manager: Arc::new(RwLock::new(DsmContactManager::new(device_id))),
             device_id,
             genesis_hash,
         }
     }
 
-    // ── compute_initial_chain_tip ────────────────────────────────────
-
     #[test]
     fn chain_tip_is_deterministic() {
-        let cm = test_manager();
-        let contact_id = [0xCC; 32];
-        let contact_genesis = [0xDD; 32];
-
-        let tip1 = cm.compute_initial_chain_tip(contact_id, contact_genesis);
-        let tip2 = cm.compute_initial_chain_tip(contact_id, contact_genesis);
+        let cm = manager_of([0xAA; 32], [0xBB; 32]);
+        let tip1 = cm.compute_initial_chain_tip([0xCC; 32], [0xDD; 32]);
+        let tip2 = cm.compute_initial_chain_tip([0xCC; 32], [0xDD; 32]);
         assert_eq!(tip1, tip2, "same inputs must produce same tip");
     }
 
     #[test]
     fn chain_tip_is_order_independent() {
-        // Device A -> B should produce the same tip as Device B -> A
         let device_a = [0x01; 32];
         let genesis_a = [0x11; 32];
         let device_b = [0x02; 32];
         let genesis_b = [0x22; 32];
-
-        let cm_a = ContactManager {
-            dsm_manager: Arc::new(RwLock::new(DsmContactManager::new(device_a, vec![]))),
-            groups: HashMap::new(),
-            device_id: device_a,
-            genesis_hash: genesis_a,
-        };
-
-        let cm_b = ContactManager {
-            dsm_manager: Arc::new(RwLock::new(DsmContactManager::new(device_b, vec![]))),
-            groups: HashMap::new(),
-            device_id: device_b,
-            genesis_hash: genesis_b,
-        };
-
-        let tip_a_to_b = cm_a.compute_initial_chain_tip(device_b, genesis_b);
-        let tip_b_to_a = cm_b.compute_initial_chain_tip(device_a, genesis_a);
+        let tip_a_to_b =
+            manager_of(device_a, genesis_a).compute_initial_chain_tip(device_b, genesis_b);
+        let tip_b_to_a =
+            manager_of(device_b, genesis_b).compute_initial_chain_tip(device_a, genesis_a);
         assert_eq!(
             tip_a_to_b, tip_b_to_a,
             "chain tip must be symmetric regardless of initiator"
@@ -1139,200 +263,9 @@ mod tests {
 
     #[test]
     fn chain_tip_differs_for_different_contacts() {
-        let cm = test_manager();
+        let cm = manager_of([0xAA; 32], [0xBB; 32]);
         let tip1 = cm.compute_initial_chain_tip([0x01; 32], [0x11; 32]);
         let tip2 = cm.compute_initial_chain_tip([0x02; 32], [0x22; 32]);
         assert_ne!(tip1, tip2, "different contacts should have different tips");
     }
-
-    #[test]
-    fn chain_tip_is_32_bytes() {
-        let cm = test_manager();
-        let tip = cm.compute_initial_chain_tip([0x99; 32], [0x88; 32]);
-        assert_eq!(tip.len(), 32);
-        assert_ne!(tip, [0u8; 32], "tip should not be all zeros");
-    }
-
-    // ── Group management ─────────────────────────────────────────────
-
-    #[test]
-    fn add_to_group_and_get_group() {
-        let mut cm = test_manager();
-        let id1 = [0x01; 32];
-        let id2 = [0x02; 32];
-
-        cm.add_to_group(id1, "family");
-        cm.add_to_group(id2, "family");
-        cm.add_to_group(id1, "work");
-
-        let family = cm.get_group("family").expect("family group exists");
-        assert_eq!(family.len(), 2);
-        assert_eq!(family[0], id1);
-        assert_eq!(family[1], id2);
-
-        let work = cm.get_group("work").expect("work group exists");
-        assert_eq!(work.len(), 1);
-
-        assert!(cm.get_group("unknown").is_none());
-    }
-
-    // ── QR payload parsing ───────────────────────────────────────────
-
-    #[test]
-    fn parse_contact_qr_v3_payload_roundtrip() {
-        let qr = pb::ContactQrV3 {
-            device_id: vec![0xAA; 32],
-            network: "test".into(),
-            storage_nodes: vec!["http://a:8080".into(), "http://b:8081".into()],
-            sdk_fingerprint: vec![0xBB; 32],
-            genesis_hash: vec![0xCC; 32],
-            signing_public_key: vec![0xDD; 64],
-            preferred_alias: "Alice".into(),
-        };
-        let bytes = qr.encode_to_vec();
-        let parsed = ContactManager::parse_contact_qr_v3_payload(&bytes).expect("parse QR payload");
-        assert_eq!(parsed.device_id, vec![0xAA; 32]);
-        assert_eq!(parsed.network, "test");
-        assert_eq!(parsed.storage_nodes.len(), 2);
-        assert_eq!(parsed.preferred_alias, "Alice");
-    }
-
-    #[test]
-    fn parse_contact_qr_v3_invalid_bytes() {
-        let result = ContactManager::parse_contact_qr_v3_payload(&[0xFF, 0xFF, 0xFF]);
-        // prost will succeed with default fields for random bytes in many cases,
-        // but truly invalid protobuf should either succeed with defaults or error.
-        // The important thing is it doesn't panic.
-        let _ = result;
-    }
-
-    #[test]
-    #[serial_test::serial]
-    fn export_contacts_overlays_persisted_chain_tip() {
-        unsafe {
-            std::env::set_var("DSM_SDK_TEST_MODE", "1");
-        }
-        crate::storage::client_db::reset_database_for_tests();
-        crate::storage::client_db::init_database().expect("init db");
-
-        let mut manager = test_manager();
-        let contact_device_id = [0xCC; 32];
-        let contact_genesis = [0xDD; 32];
-        let persisted_tip = [0xEE; 32];
-
-        manager
-            .restore_contact_from_storage_sync(dsm::types::contact_types::DsmVerifiedContact {
-                alias: "Persisted Tip".to_string(),
-                device_id: contact_device_id,
-                genesis_hash: contact_genesis,
-                public_key: vec![0xAB; 32],
-                genesis_material: Vec::new(),
-                chain_tip: None,
-                chain_tip_smt_proof: None,
-                genesis_verified_online: true,
-                verified_at_commit_height: 1,
-                added_at_commit_height: 1,
-                last_updated_commit_height: 1,
-                verifying_storage_nodes: Vec::new(),
-                ble_address: None,
-            })
-            .expect("seed in-memory contact");
-
-        crate::storage::client_db::store_contact(&crate::storage::client_db::ContactRecord {
-            contact_id: "persisted-tip-contact".to_string(),
-            device_id: contact_device_id.to_vec(),
-            alias: "Persisted Tip".to_string(),
-            genesis_hash: contact_genesis.to_vec(),
-            public_key: vec![0xAB; 32],
-            kyber_public_key: Vec::new(),
-            current_chain_tip: Some(persisted_tip.to_vec()),
-            added_at: 1,
-            verified: true,
-            verification_proof: None,
-            metadata: HashMap::new(),
-            ble_address: None,
-            status: "BleCapable".to_string(),
-            needs_online_reconcile: false,
-            last_seen_online_counter: 0,
-            last_seen_ble_counter: 0,
-            previous_chain_tip: None,
-        })
-        .expect("seed persisted contact");
-
-        let rt = tokio::runtime::Runtime::new().expect("runtime");
-        let exported = rt
-            .block_on(manager.export_contacts())
-            .expect("export contacts");
-        let exported_tip = exported
-            .contacts
-            .first()
-            .and_then(|contact| contact.chain_tip.as_ref())
-            .map(|hash| hash.v.clone());
-
-        assert_eq!(exported_tip, Some(persisted_tip.to_vec()));
-    }
-
-    // ── Operation builders (fail-closed) ─────────────────────────────
-
-    #[test]
-    fn create_add_contact_operation_with_labels_builds_bilateral() {
-        let cm = test_manager();
-        let op = cm
-            .create_add_contact_operation_with_labels("alice", "bob", "friend", vec![1, 2, 3], true)
-            .expect("build operation");
-
-        match op {
-            Operation::AddRelationship {
-                relationship_type,
-                mode,
-                message,
-                ..
-            } => {
-                assert_eq!(relationship_type, b"friend");
-                assert_eq!(mode, TransactionMode::Bilateral);
-                assert_eq!(message, "Add contact relationship");
-            }
-            _ => panic!("expected AddRelationship"),
-        }
-    }
-
-    #[test]
-    fn create_add_contact_operation_with_labels_builds_unilateral() {
-        let cm = test_manager();
-        let op = cm
-            .create_add_contact_operation_with_labels("alice", "bob", "colleague", vec![], false)
-            .expect("build operation");
-
-        match op {
-            Operation::AddRelationship { mode, .. } => {
-                assert_eq!(mode, TransactionMode::Unilateral);
-            }
-            _ => panic!("expected AddRelationship"),
-        }
-    }
-
-    #[test]
-    fn create_add_contact_operation_bytes_only_fails_closed() {
-        let cm = test_manager();
-        let result = cm.create_add_contact_operation([0x01; 32], "friend", vec![], false);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn create_add_contact_operation_with_device_fails_closed() {
-        let cm = test_manager();
-        let result = cm.create_add_contact_operation_with_device(
-            [0x01; 32],
-            [0x02; 32],
-            "friend",
-            vec![],
-            true,
-        );
-        assert!(result.is_err());
-    }
-
-    // update_contact_from_transition tests removed: function deleted as
-    // it had zero production callers and explicitly dropped its &State
-    // parameter. The "accepts AddRelationship" / "rejects Generic" pattern
-    // is no longer meaningful since the function is gone.
 }

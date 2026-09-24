@@ -9,57 +9,9 @@
 //! - Advanced token operations (transfer, mint, burn, lock)
 //! - Quantum-resistant token state evolution
 use std::collections::HashMap;
-use std::cell::RefCell;
 
 use crate::types::error::DsmError;
-use crate::types::policy_types::{PolicyAnchor, PolicyFile};
 use base32::encode;
-
-// Thread-local storage for current state context
-thread_local! {
-    static CURRENT_STATE_CONTEXT: RefCell<Option<StateContext>> = const { RefCell::new(None) };
-}
-
-/// State context for proper DSM protocol compliance.
-///
-/// Per §4.3 there is no counter — the canonical "current state" is just the
-/// state hash (§2.1 adjacency) and the device binding.
-#[derive(Clone, Debug)]
-pub struct StateContext {
-    /// Current canonical state hash as per DSM protocol
-    pub state_hash: [u8; 32],
-    /// Device ID for this state context
-    pub device_id: [u8; 32],
-}
-
-impl StateContext {
-    /// Create a new state context
-    pub fn new(state_hash: [u8; 32], device_id: [u8; 32]) -> Self {
-        Self {
-            state_hash,
-            device_id,
-        }
-    }
-
-    /// Set the current state context (thread-local)
-    pub fn set_current(context: StateContext) {
-        CURRENT_STATE_CONTEXT.with(|c| {
-            *c.borrow_mut() = Some(context);
-        });
-    }
-
-    /// Clear the current state context
-    pub fn clear_current() {
-        CURRENT_STATE_CONTEXT.with(|c| {
-            *c.borrow_mut() = None;
-        });
-    }
-
-    /// Get the current state context if available
-    pub fn get_current() -> Option<StateContext> {
-        CURRENT_STATE_CONTEXT.with(|c| c.borrow().clone())
-    }
-}
 
 /// Token type representing the nature and properties of a token
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -80,19 +32,6 @@ pub enum TokenType {
 pub enum TokenSupply {
     /// The whole supply that will ever exist.
     Fixed(u64),
-}
-
-/// Token supply implementation details (internal struct)
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct TokenSupplyInfo {
-    /// Total fixed supply
-    pub total_supply: u64,
-    /// Current circulating supply
-    pub circulating_supply: u64,
-    /// Maximum allowed supply (can be None for unlimited)
-    pub max_supply: Option<u64>,
-    /// Minimum allowed supply (cannot go below this value)
-    pub min_supply: Option<u64>,
 }
 
 impl TokenSupply {
@@ -119,88 +58,6 @@ impl TokenSupply {
     }
 }
 
-impl TokenSupplyInfo {
-    /// Create a new TokenSupplyInfo with fixed total supply
-    pub fn new(total_supply: u64) -> Self {
-        Self {
-            total_supply,
-            circulating_supply: total_supply,
-            max_supply: Some(total_supply),
-            min_supply: Some(0),
-        }
-    }
-
-    /// Create a TokenSupplyInfo with flexible minting/burning parameters
-    pub fn with_limits(
-        total_supply: u64,
-        max_supply: Option<u64>,
-        min_supply: Option<u64>,
-    ) -> Self {
-        Self {
-            total_supply,
-            circulating_supply: total_supply,
-            max_supply,
-            min_supply,
-        }
-    }
-
-    /// Check if a supply change is within allowed limits
-    /// Returns true if applying the amount would keep supply within limits
-    pub fn is_valid_supply_change(&self, amount: u64, is_addition: bool) -> bool {
-        if is_addition {
-            // For additions, ensure we don't exceed maximum
-            let new_supply = self.circulating_supply.saturating_add(amount);
-            if let Some(max) = self.max_supply {
-                if new_supply > max {
-                    return false;
-                }
-            }
-            true
-        } else {
-            // For subtractions, ensure we don't go below minimum
-            // If attempting to decrease by more than current supply, it's invalid
-            if amount > self.circulating_supply {
-                return false;
-            }
-
-            let new_supply = self.circulating_supply.saturating_sub(amount);
-            if let Some(min) = self.min_supply {
-                if new_supply < min {
-                    return false;
-                }
-            }
-            true
-        }
-    }
-
-    /// Check if a supply change using TokenAmount is within allowed limits
-    pub fn validate_supply_change(&self, amount: TokenAmount, is_mint: bool) -> bool {
-        if is_mint {
-            // Adding tokens - check against max_supply
-            let new_supply = self.circulating_supply.saturating_add(amount.value());
-            if let Some(max) = self.max_supply {
-                if new_supply > max {
-                    return false;
-                }
-            }
-            true
-        } else {
-            // Burning tokens - check against min_supply and circulating_supply
-            if amount.value() > self.circulating_supply {
-                return false;
-            }
-
-            let new_supply = self.circulating_supply.saturating_sub(amount.value());
-            if let Some(min) = self.min_supply {
-                if new_supply < min {
-                    return false;
-                }
-            }
-            true
-        }
-    }
-}
-
 /// Token identity and metadata
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TokenMetadata {
@@ -216,8 +73,6 @@ pub struct TokenMetadata {
     pub token_type: TokenType,
     /// Owner of the token (creator's identity)
     pub owner_id: [u8; 32],
-    /// Creation tick
-    pub creation_tick: u64,
     /// Optional URI for token metadata
     pub metadata_uri: Option<String>,
     /// Description of the token
@@ -240,7 +95,6 @@ impl TokenMetadata {
         decimals: u8,
         token_type: TokenType,
         owner_id: [u8; 32],
-        state_number: u64,
         policy_anchor: Option<String>,
     ) -> Self {
         Self {
@@ -250,7 +104,6 @@ impl TokenMetadata {
             decimals,
             token_type,
             owner_id,
-            creation_tick: state_number,
             metadata_uri: None,
             description: None,
             icon_url: None,
@@ -360,47 +213,20 @@ pub struct Balance {
 }
 
 impl Balance {
-    /// Create a zero balance for non-state-transition contexts.
-    ///
-    /// Used in contexts where a balance is needed for structure initialization,
-    /// testing, or other purposes that don't involve actual state transitions.
-    /// For real token operations inside DSM transitions, use `from_state()`.
+    /// A zero amount, referencing no state.
     pub fn zero() -> Self {
-        let anchor = Self::get_current_canonical_state_hash()
-            .unwrap_or_else(Self::derive_default_canonical_state_hash);
-        Self::from_state(0, anchor)
+        Self::amount(0)
     }
 
-    /// Get the current canonical state hash from the DSM system context
-    pub fn get_current_canonical_state_hash() -> Option<[u8; 32]> {
-        if let Some(hash) = Self::get_thread_local_state_hash() {
-            return Some(hash);
+    /// An amount as an operation carries it: a value, no lock, and no
+    /// reference to a state. An operation's signed bytes encode the value and
+    /// the lock only ([`Balance::canonical_amount_bytes`]).
+    pub fn amount(value: u64) -> Self {
+        Self {
+            value,
+            locked: 0,
+            state_hash: None,
         }
-        None
-    }
-
-    /// Deterministic default when no thread-local state context is present.
-    /// Uses device_id from StateContext when available; otherwise a fixed domain-separated salt.
-    fn derive_default_canonical_state_hash() -> [u8; 32] {
-        let device_tag = StateContext::get_current()
-            .map(|c| c.device_id.to_vec())
-            .unwrap_or_else(|| {
-                let mut tag = b"DSM/balance-fall".to_vec();
-                tag.extend_from_slice(b"back\0");
-                tag
-            });
-
-        let mut hasher = crate::crypto::blake3::dsm_domain_hasher(
-            crate::common::domain_tags::TAG_DSM_CANONICAL_BALANCE,
-        );
-        hasher.update(&device_tag);
-        let digest = hasher.finalize();
-        *digest.as_bytes()
-    }
-
-    /// Get thread-local state hash if available
-    pub fn get_thread_local_state_hash() -> Option<[u8; 32]> {
-        StateContext::get_current().map(|ctx| ctx.state_hash)
     }
 
     /// Create a balance bound to a specific state hash (§2.1 hash adjacency).
@@ -549,6 +375,16 @@ impl Balance {
         self
     }
 
+    /// The 16 bytes an operation signs for an amount: value then lock, little
+    /// endian. The state reference a held balance may carry is not part of
+    /// any signed operation.
+    pub fn canonical_amount_bytes(&self) -> [u8; 16] {
+        let mut out = [0u8; 16];
+        out[..8].copy_from_slice(&self.value.to_le_bytes());
+        out[8..].copy_from_slice(&self.locked.to_le_bytes());
+        out
+    }
+
     /// Convert to little-endian bytes for hashing. Per §4.3 no counter participates.
     pub fn to_le_bytes(&self) -> Vec<u8> {
         let mut result = Vec::with_capacity(16 + 32);
@@ -579,232 +415,6 @@ impl Balance {
 impl std::fmt::Display for Balance {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.value)
-    }
-}
-
-/// Token Registry for managing token metadata and supply information
-#[derive(Clone, Debug, Default)]
-pub struct TokenRegistry {
-    /// Map of token IDs to their metadata
-    pub tokens: HashMap<String, TokenMetadata>,
-    /// Map of token IDs to their supply information
-    pub supplies: HashMap<String, TokenSupplyInfo>,
-    /// Native token ID (ERA)
-    pub native_token_id: String,
-}
-
-fn default_era_policy_anchor_uri() -> String {
-    let mut policy = PolicyFile::new("ERA Token Policy", "1.0.0", "system");
-    policy.with_description("Default policy for the ERA token in DSM ecosystem");
-    policy.add_metadata("token_type", "native");
-    policy.add_metadata("governance", "meritocratic");
-    policy.add_metadata("supply_model", "fixed");
-    let anchor = PolicyAnchor::from_policy(&policy).unwrap_or(PolicyAnchor([0u8; 32]));
-    format!("dsm:policy:{}", anchor.to_base32())
-}
-
-impl TokenRegistry {
-    /// Create a new empty TokenRegistry
-    pub fn new() -> Self {
-        let native_token_id = "ERA".to_string();
-        let mut tokens = HashMap::new();
-        let mut supplies = HashMap::new();
-
-        // Initialize ERA token
-        let system_owner = {
-            let hash = crate::crypto::blake3::domain_hash(
-                crate::common::domain_tags::TAG_DSM_TOKEN_HASH,
-                b"system",
-            );
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(hash.as_bytes());
-            arr
-        };
-        let root_metadata = TokenMetadata::new(
-            &native_token_id,
-            "ERA",
-            "ERA",
-            18, // 18 decimals like ETH
-            TokenType::Native,
-            system_owner,
-            0, // genesis state_number
-            Some(default_era_policy_anchor_uri()),
-        );
-
-        // Initialize with a fixed supply of 80 billion tokens
-        let root_supply =
-            TokenSupplyInfo::new(80_000_000_000u64.saturating_mul(10u64.saturating_pow(18)));
-
-        tokens.insert(native_token_id.clone(), root_metadata);
-        supplies.insert(native_token_id.clone(), root_supply);
-
-        Self {
-            tokens,
-            supplies,
-            native_token_id,
-        }
-    }
-
-    /// Register a new token
-    pub fn register_token(
-        &mut self,
-        metadata: TokenMetadata,
-        supply: TokenSupplyInfo,
-    ) -> Result<(), DsmError> {
-        let token_id = metadata.token_id.clone();
-
-        if self.tokens.contains_key(&token_id) {
-            return Err(DsmError::invalid_operation(format!(
-                "Token {token_id} already exists"
-            )));
-        }
-
-        // Register the token
-        self.tokens.insert(token_id.clone(), metadata);
-        self.supplies.insert(token_id, supply);
-
-        Ok(())
-    }
-
-    /// Get token metadata by ID
-    pub fn get_token(&self, token_id: &str) -> Option<&TokenMetadata> {
-        self.tokens.get(token_id)
-    }
-
-    /// Get token supply information by ID
-    pub fn get_supply(&self, token_id: &str) -> Option<&TokenSupplyInfo> {
-        self.supplies.get(token_id)
-    }
-
-    /// Update token supply with unsigned amount and explicit addition/subtraction flag
-    pub fn update_supply(
-        &mut self,
-        token_id: &str,
-        amount: u64,
-        is_addition: bool,
-    ) -> Result<(), DsmError> {
-        let supply = self
-            .supplies
-            .get_mut(token_id)
-            .ok_or_else(|| DsmError::invalid_operation(format!("Token {token_id} not found")))?;
-
-        if !supply.is_valid_supply_change(amount, is_addition) {
-            return Err(DsmError::invalid_operation(format!(
-                "Invalid supply change for token {token_id}"
-            )));
-        }
-
-        // Handle supply change with explicit operation semantics
-        if is_addition {
-            supply.circulating_supply = supply.circulating_supply.saturating_add(amount);
-        } else {
-            supply.circulating_supply = supply.circulating_supply.saturating_sub(amount);
-        }
-
-        Ok(())
-    }
-
-    /// Check if a token is native (ERA)
-    pub fn is_native_token(&self, token_id: &str) -> bool {
-        token_id == self.native_token_id
-    }
-
-    /// Get canonical token ID combining owner ID and token ID
-    pub fn canonical_token_id(&self, token_id: &str) -> Result<String, DsmError> {
-        let metadata = self
-            .get_token(token_id)
-            .ok_or_else(|| DsmError::invalid_operation(format!("Token {token_id} not found")))?;
-
-        Ok(metadata.canonical_id())
-    }
-
-    pub fn create_token(
-        &mut self,
-        params: CreateTokenParams,
-        state_number: u64,
-    ) -> Result<(TokenMetadata, TokenSupplyInfo), DsmError> {
-        let system_owner = {
-            let hash = crate::crypto::blake3::domain_hash(
-                crate::common::domain_tags::TAG_DSM_TOKEN_HASH,
-                b"system",
-            );
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(hash.as_bytes());
-            arr
-        };
-
-        // Use the params to create token
-        let metadata = TokenMetadata {
-            name: params.name,
-            symbol: params.token_id.clone(),
-            description: params.description,
-            icon_url: params.icon_url,
-            decimals: params.decimals,
-            fields: HashMap::new(),
-            token_id: params.token_id.clone(),
-            token_type: TokenType::Created,
-            owner_id: system_owner,
-            creation_tick: state_number,
-            metadata_uri: params.metadata_uri,
-            policy_anchor: params.policy_anchor,
-        };
-
-        let supply = TokenSupplyInfo {
-            total_supply: params.initial_supply.unwrap_or(0),
-            circulating_supply: params.initial_supply.unwrap_or(0),
-            max_supply: params.max_supply,
-            min_supply: Some(0),
-        };
-
-        self.tokens.insert(params.token_id, metadata.clone());
-        self.supplies
-            .insert(metadata.token_id.clone(), supply.clone());
-
-        Ok((metadata, supply))
-    }
-}
-
-pub struct CreateTokenParams {
-    pub token_id: String,
-    pub name: String,
-    pub description: Option<String>,
-    pub icon_url: Option<String>,
-    pub metadata_uri: Option<String>,
-    pub decimals: u8,
-    pub initial_supply: Option<u64>,
-    pub max_supply: Option<u64>,
-    pub policy_anchor: Option<String>,
-}
-
-/// Token Factory for creating new tokens
-#[derive(Clone, Debug)]
-pub struct TokenFactory {
-    /// Token registry
-    pub registry: TokenRegistry,
-    /// Fee in ERA tokens for token creation
-    pub creation_fee: u64,
-    /// Genesis state hash
-    pub genesis_hash: Vec<u8>,
-}
-
-impl TokenFactory {
-    /// Create a new TokenFactory
-    pub fn new(creation_fee: u64, genesis_hash: Vec<u8>) -> Self {
-        Self {
-            registry: TokenRegistry::new(),
-            creation_fee,
-            genesis_hash,
-        }
-    }
-
-    /// Get creation fee
-    pub fn get_creation_fee(&self) -> u64 {
-        self.creation_fee
-    }
-
-    /// Update creation fee
-    pub fn set_creation_fee(&mut self, fee: u64) {
-        self.creation_fee = fee;
     }
 }
 
@@ -1111,75 +721,6 @@ mod tests {
         assert!(s.is_fixed());
     }
 
-    // --- TokenSupplyInfo ---
-
-    #[test]
-    fn token_supply_info_new() {
-        let info = TokenSupplyInfo::new(1_000_000);
-        assert_eq!(info.total_supply, 1_000_000);
-        assert_eq!(info.circulating_supply, 1_000_000);
-        assert_eq!(info.max_supply, Some(1_000_000));
-        assert_eq!(info.min_supply, Some(0));
-    }
-
-    #[test]
-    fn token_supply_info_with_limits() {
-        let info = TokenSupplyInfo::with_limits(500, Some(1000), Some(100));
-        assert_eq!(info.total_supply, 500);
-        assert_eq!(info.max_supply, Some(1000));
-        assert_eq!(info.min_supply, Some(100));
-    }
-
-    #[test]
-    fn supply_change_addition_within_max() {
-        let info = TokenSupplyInfo::with_limits(500, Some(1000), Some(0));
-        assert!(info.is_valid_supply_change(500, true));
-    }
-
-    #[test]
-    fn supply_change_addition_exceeds_max() {
-        let info = TokenSupplyInfo::with_limits(500, Some(1000), Some(0));
-        assert!(!info.is_valid_supply_change(501, true));
-    }
-
-    #[test]
-    fn supply_change_subtraction_within_min() {
-        let info = TokenSupplyInfo::with_limits(500, Some(1000), Some(100));
-        assert!(info.is_valid_supply_change(400, false));
-    }
-
-    #[test]
-    fn supply_change_subtraction_below_min() {
-        let info = TokenSupplyInfo::with_limits(500, Some(1000), Some(100));
-        assert!(!info.is_valid_supply_change(401, false));
-    }
-
-    #[test]
-    fn supply_change_subtraction_exceeds_circulating() {
-        let info = TokenSupplyInfo::new(100);
-        assert!(!info.is_valid_supply_change(101, false));
-    }
-
-    #[test]
-    fn supply_change_unlimited_max() {
-        let info = TokenSupplyInfo::with_limits(500, None, Some(0));
-        assert!(info.is_valid_supply_change(u64::MAX - 500, true));
-    }
-
-    #[test]
-    fn validate_supply_change_with_token_amount_mint() {
-        let info = TokenSupplyInfo::with_limits(500, Some(600), Some(0));
-        assert!(info.validate_supply_change(TokenAmount::new(100), true));
-        assert!(!info.validate_supply_change(TokenAmount::new(101), true));
-    }
-
-    #[test]
-    fn validate_supply_change_with_token_amount_burn() {
-        let info = TokenSupplyInfo::with_limits(500, Some(1000), Some(100));
-        assert!(info.validate_supply_change(TokenAmount::new(400), false));
-        assert!(!info.validate_supply_change(TokenAmount::new(401), false));
-    }
-
     // --- Balance ---
 
     #[test]
@@ -1199,7 +740,7 @@ mod tests {
 
     #[test]
     fn balance_lock_and_unlock() {
-        let mut b = Balance::from_state(100, [0; 32]);
+        let mut b = Balance::amount(100);
         b.lock(30).unwrap();
         assert_eq!(b.locked(), 30);
 
@@ -1209,61 +750,61 @@ mod tests {
 
     #[test]
     fn balance_lock_zero_fails() {
-        let mut b = Balance::from_state(100, [0; 32]);
+        let mut b = Balance::amount(100);
         assert!(b.lock(0).is_err());
     }
 
     #[test]
     fn balance_lock_exceeds_available() {
-        let mut b = Balance::from_state(50, [0; 32]);
+        let mut b = Balance::amount(50);
         assert!(b.lock(51).is_err());
     }
 
     #[test]
     fn balance_unlock_zero_fails() {
-        let mut b = Balance::from_state(100, [0; 32]);
+        let mut b = Balance::amount(100);
         b.lock(50).unwrap();
         assert!(b.unlock(0).is_err());
     }
 
     #[test]
     fn balance_unlock_exceeds_locked() {
-        let mut b = Balance::from_state(100, [0; 32]);
+        let mut b = Balance::amount(100);
         b.lock(30).unwrap();
         assert!(b.unlock(31).is_err());
     }
 
     #[test]
     fn balance_update_addition() {
-        let mut b = Balance::from_state(100, [0; 32]);
+        let mut b = Balance::amount(100);
         b.update(50, true);
         assert_eq!(b.value(), 150);
     }
 
     #[test]
     fn balance_update_subtraction() {
-        let mut b = Balance::from_state(100, [0; 32]);
+        let mut b = Balance::amount(100);
         b.update(30, false);
         assert_eq!(b.value(), 70);
     }
 
     #[test]
     fn balance_update_sub_saturates() {
-        let mut b = Balance::from_state(10, [0; 32]);
+        let mut b = Balance::amount(10);
         b.update(100, false);
         assert_eq!(b.value(), 0);
     }
 
     #[test]
     fn balance_update_with_amount_deduction_insufficient() {
-        let mut b = Balance::from_state(10, [0; 32]);
+        let mut b = Balance::amount(10);
         let result = b.update_with_amount(TokenAmount::new(20), false);
         assert!(result.is_err());
     }
 
     #[test]
     fn balance_update_add_and_sub() {
-        let mut b = Balance::from_state(100, [0; 32]);
+        let mut b = Balance::amount(100);
         b.update_add(50);
         assert_eq!(b.value(), 150);
         b.update_sub(30).unwrap();
@@ -1272,20 +813,20 @@ mod tests {
 
     #[test]
     fn balance_update_sub_insufficient() {
-        let mut b = Balance::from_state(10, [0; 32]);
+        let mut b = Balance::amount(10);
         assert!(b.update_sub(11).is_err());
     }
 
     #[test]
     fn balance_formatted() {
-        let b = Balance::from_state(1_500_000, [0; 32]);
+        let b = Balance::amount(1_500_000);
         let f = b.formatted(6);
         assert_eq!(f, "1.500000");
     }
 
     #[test]
     fn balance_with_state_hash() {
-        let b = Balance::from_state(100, [0; 32]).with_state_hash([0xFF; 32]);
+        let b = Balance::amount(100).with_state_hash([0xFF; 32]);
         let bytes = b.to_le_bytes();
         assert!(bytes.len() > 24);
     }
@@ -1298,24 +839,8 @@ mod tests {
 
     #[test]
     fn balance_display() {
-        let b = Balance::from_state(12345, [0; 32]);
+        let b = Balance::amount(12345);
         assert_eq!(format!("{b}"), "12345");
-    }
-
-    // --- StateContext ---
-
-    #[test]
-    fn state_context_thread_local_set_get_clear() {
-        StateContext::clear_current();
-        assert!(StateContext::get_current().is_none());
-
-        StateContext::set_current(StateContext::new([0xAA; 32], [0xBB; 32]));
-        let ctx = StateContext::get_current().unwrap();
-        assert_eq!(ctx.state_hash, [0xAA; 32]);
-        assert_eq!(ctx.device_id, [0xBB; 32]);
-
-        StateContext::clear_current();
-        assert!(StateContext::get_current().is_none());
     }
 
     // --- TokenMetadata ---
@@ -1329,7 +854,6 @@ mod tests {
             8,
             TokenType::Created,
             [0; 32],
-            1,
             None,
         )
         .with_description("A test token")
@@ -1351,62 +875,16 @@ mod tests {
 
     #[test]
     fn token_metadata_canonical_id() {
-        let meta = TokenMetadata::new(
-            "ERA",
-            "ERA",
-            "ERA",
-            18,
-            TokenType::Native,
-            [0xAA; 32],
-            0,
-            None,
-        );
+        let meta = TokenMetadata::new("ERA", "ERA", "ERA", 18, TokenType::Native, [0xAA; 32], None);
         let cid = meta.canonical_id();
         assert!(cid.ends_with(".ERA"));
-    }
-
-    // --- TokenRegistry ---
-
-    #[test]
-    fn token_registry_new_has_era() {
-        let reg = TokenRegistry::new();
-        assert!(reg.get_token("ERA").is_some());
-        assert!(reg.get_supply("ERA").is_some());
-        assert!(reg.is_native_token("ERA"));
-        assert!(!reg.is_native_token("BTC"));
-    }
-
-    #[test]
-    fn token_registry_register_duplicate_fails() {
-        let mut reg = TokenRegistry::new();
-        let meta = TokenMetadata::new("ERA", "ERA", "ERA", 18, TokenType::Native, [0; 32], 0, None);
-        let supply = TokenSupplyInfo::new(100);
-        assert!(reg.register_token(meta, supply).is_err());
-    }
-
-    #[test]
-    fn token_registry_register_new_token() {
-        let mut reg = TokenRegistry::new();
-        let meta = TokenMetadata::new(
-            "TEST",
-            "Test",
-            "TST",
-            8,
-            TokenType::Created,
-            [0; 32],
-            1,
-            None,
-        );
-        let supply = TokenSupplyInfo::new(1000);
-        reg.register_token(meta, supply).unwrap();
-        assert!(reg.get_token("TEST").is_some());
     }
 
     // --- Token ---
 
     #[test]
     fn token_new_and_accessors() {
-        let balance = Balance::from_state(100, [0; 32]);
+        let balance = Balance::amount(100);
         let t = Token::new("alice", vec![1, 2, 3], vec![4, 5], balance, [0xCC; 32]);
 
         assert!(t.id().contains("alice"));
@@ -1421,7 +899,7 @@ mod tests {
 
     #[test]
     fn token_set_status_revoked() {
-        let balance = Balance::from_state(100, [0; 32]);
+        let balance = Balance::amount(100);
         let mut t = Token::new("bob", vec![1], vec![], balance, [0; 32]);
         t.set_status(TokenStatus::Revoked);
         assert!(!t.is_valid());
@@ -1430,7 +908,7 @@ mod tests {
 
     #[test]
     fn token_set_owner() {
-        let balance = Balance::from_state(100, [0; 32]);
+        let balance = Balance::amount(100);
         let mut t = Token::new("bob", vec![1], vec![], balance, [0; 32]);
         t.set_owner("charlie");
         assert_eq!(t.owner_id(), "charlie");
@@ -1438,21 +916,11 @@ mod tests {
 
     #[test]
     fn token_update_balance() {
-        let balance = Balance::from_state(100, [0; 32]);
+        let balance = Balance::amount(100);
         let mut t = Token::new("bob", vec![1], vec![], balance, [0; 32]);
         t.update_balance(50, true);
         assert_eq!(t.balance().value(), 150);
         t.update_balance(30, false);
         assert_eq!(t.balance().value(), 120);
-    }
-
-    // --- TokenFactory ---
-
-    #[test]
-    fn token_factory_creation_fee() {
-        let mut f = TokenFactory::new(1000, vec![0; 32]);
-        assert_eq!(f.get_creation_fee(), 1000);
-        f.set_creation_fee(2000);
-        assert_eq!(f.get_creation_fee(), 2000);
     }
 }

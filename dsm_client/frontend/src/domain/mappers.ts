@@ -166,7 +166,6 @@ export function mapContactList(list: any[], bleSnapshot?: { deviceIds: Record<st
     } else if (typeof c.chainTip === 'string') {
       chainTip = c.chainTip;
     }
-    const chainTipSmtProof = c.chainTipSmtProof;
     const sendStatus = mapRelationshipSendStatus(c.sendStatus);
 
     const directBle = normalizeBleAddress(String(c.bleAddress || ''));
@@ -176,12 +175,9 @@ export function mapContactList(list: any[], bleSnapshot?: { deviceIds: Record<st
       deviceId,
       genesisHash,
       chainTip: chainTip || undefined,
-      chainTipSmtProof: chainTipSmtProof || undefined,
       bleAddress: mappedBle,
       status: c.status,
       genesisVerifiedOnline: c.genesisVerifiedOnline,
-      verifyCounter: typeof c.lastSeenTick === 'bigint' ? Number(c.lastSeenTick) : c.verifyCounter,
-      addedCounter: typeof c.addedCounter === 'bigint' ? Number(c.addedCounter) : c.addedCounter,
       verifyingStorageNodes: c.verifyingStorageNodes,
       signingPublicKey: c.publicKey instanceof Uint8Array && c.publicKey.length > 0
         ? toBase32(c.publicKey) : undefined,
@@ -252,14 +248,6 @@ export function mapTransactions(list: any[]): DomainTransaction[] {
       : undefined;
     const tokenId = rawTokenId
       || (txType === 'dbtc_mint' || txType === 'dbtc_burn' ? 'dBTC' : undefined);
-    const createdAtRaw = t.createdAt;
-    const createdAt = typeof createdAtRaw === 'bigint'
-      ? Number(createdAtRaw)
-      : typeof createdAtRaw === 'number'
-        ? createdAtRaw
-        : typeof createdAtRaw === 'string'
-          ? Number.parseInt(createdAtRaw, 10)
-          : undefined;
     const memo = typeof t.memo === 'string' && t.memo.length > 0 ? t.memo : undefined;
     const type: 'online' | 'offline' = (txType === 'bilateral_offline' || txType === 'bilateral_offline_recovered')
       ? 'offline'
@@ -285,7 +273,6 @@ export function mapTransactions(list: any[]): DomainTransaction[] {
       stitchedReceipt,
       receiptVerified: !!t.receiptVerified,
       tokenId,
-      createdAt: (typeof createdAt === 'number' && Number.isFinite(createdAt) && createdAt > 0) ? createdAt : undefined,
       memo,
     };
   });

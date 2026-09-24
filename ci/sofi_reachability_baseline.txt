@@ -3,7 +3,14 @@
 # rebuild step expected to wire it. A step that wires one DELETES its line;
 # R14 deletes the file and G1 passes with no exceptions.
 #
-# THE LIST IS EMPTY, AND THE FILE IS NOT DELETED YET.
+# TWO ENTRIES, BOTH THE SAME HOLE (2026-09-24).
+#
+# Storage spec §9 rules 9 and 11: the client that relies on a `Final` keeps
+# its completion proof, and a verifier checks a presented proof online, from
+# its own reads of the seats. The SDK keeps the proofs (sofi_exercise,
+# sofi_registration). The checks below are those verifiers. No party receives
+# a kept proof to check yet, so neither has a production caller; the facade
+# that presents a completion proof wires them and deletes these lines.
 #
 # It grew at R14 before it shrank, and both are the point. The matcher fix
 # (spec §41.3 correction 2, owed before step 5 and not made) required a call
@@ -27,3 +34,5 @@
 # SoFi facade that constructs or loads a `TraderCore` and a `DlvCore`, and the
 # twelve device scenarios. Until then an empty list is an honest statement,
 # where a deleted file would be a claim.
+dsm_client/deterministic_state_machine/dsm/src/sofi/exercise.rs check_attempt_completion
+dsm_client/deterministic_state_machine/dsm/src/sofi/registration.rs check_fulfillment_completion

@@ -265,7 +265,7 @@ fn policy_commit_of(bytes: &[u8]) -> [u8; 32] {
 fn create_token(policy_commit: [u8; 32], supply: u64) -> dsm::types::operations::Operation {
     dsm::types::operations::Operation::CreateToken {
         token_id: b"TKN".to_vec(),
-        initial_supply: dsm::types::token_types::Balance::from_state(supply, [0u8; 32]),
+        initial_supply: dsm::types::token_types::Balance::amount(supply),
         policy_commit,
         fee_amount: 0,
         name: "Token".into(),
@@ -339,7 +339,7 @@ fn a_genesis_release_rides_only_its_creating_operation() {
     let policy = native_policy((G, DEV), RELEASE_AT_CREATION, 1_000);
     let pc = policy_commit_of(&policy);
     let burn = dsm::types::operations::Operation::Burn {
-        amount: dsm::types::token_types::Balance::from_state(1, [0u8; 32]),
+        amount: dsm::types::token_types::Balance::amount(1),
         token_id: b"TKN".to_vec(),
         policy_commit: pc,
         proof_of_ownership: Vec::new(),

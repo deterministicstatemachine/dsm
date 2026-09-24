@@ -149,7 +149,21 @@ mod tests {
     // -3 for the retired signer-issuance tags, +1 for the genesis release
     // (SoFi §51), +1 for the spool seal (DSM Amendment A7), +2 for the
     // self-signed device directory, 2026-09-23.
-    const EXPECTED_TAG_COUNT: usize = 392;
+    // -4 with the clock, 2026-09-24: the online-transfer nonce and payload
+    // digest (their only caller's nonce was discarded), the anchor "tick" (a
+    // tip hash shown as a time), and the v3 transfer signing preimage (no
+    // caller; transfers sign the canonical Operation bytes).
+    // -1 with the seeded RNG, 2026-09-24: the entropy mixer's seed (its only
+    // callers were tests of itself). -5 with the SDK soft vault (no user): its
+    // envelope, commitment, KEK, key-type and nonce domains. -1 with the
+    // SmartPolicy vault condition: the DLV smart-policy hash domain.
+    // -6 with invented response headers, 2026-09-24: a local answer names no
+    // sender and no message, so the error-envelope device/chain/genesis
+    // domains and the two JNI envelope message-id domains have no input.
+    // -1 with the forward-linked commitment (ruling #4): its hash domain.
+    // -2 with the balance anchors (ruling #7): an operation's amount references
+    // no state, and a zero balance no invented one.
+    const EXPECTED_TAG_COUNT: usize = 373;
 
     /// Scan the crate source for every declared domain-tag constant.
     ///

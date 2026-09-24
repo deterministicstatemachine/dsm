@@ -28,7 +28,6 @@ use rand::rngs::OsRng;
 use rusqlite::{params, Connection, OptionalExtension};
 
 use super::get_connection;
-use crate::util::deterministic_time::tick;
 
 // =================== Encrypted chain-head SK helpers (§11.1) ===================
 //
@@ -138,7 +137,6 @@ pub struct CertChainHead {
     pub side: CertChainSide,
     pub chain_head_pubkey: Vec<u8>,
     pub step_count: u64,
-    pub updated_at: u64,
 }
 
 /// Initialize a chain head for a relationship. Idempotent: if a row already
@@ -155,16 +153,14 @@ pub fn init_cert_chain_head(
 ) -> Result<bool> {
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
-    let now = tick() as i64;
     let inserted = conn.execute(
         "INSERT OR IGNORE INTO cert_chain_heads
-            (relationship_key, side, chain_head_pubkey, step_count, updated_at)
-         VALUES (?1, ?2, ?3, 0, ?4)",
+            (relationship_key, side, chain_head_pubkey, step_count)
+         VALUES (?1, ?2, ?3, 0)",
         params![
             relationship_key.as_slice(),
             side.as_i64(),
-            chain_head_pubkey,
-            now
+            chain_head_pubkey
         ],
     )?;
     Ok(inserted > 0)
@@ -181,14 +177,12 @@ pub fn advance_cert_chain_head(
 ) -> Result<Option<u64>> {
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
-    let now = tick() as i64;
     let updated = conn.execute(
         "UPDATE cert_chain_heads
          SET chain_head_pubkey = ?1,
-             step_count = step_count + 1,
-             updated_at = ?2
-         WHERE relationship_key = ?3 AND side = ?4",
-        params![new_pubkey, now, relationship_key.as_slice(), side.as_i64()],
+             step_count = step_count + 1
+         WHERE relationship_key = ?2 AND side = ?3",
+        params![new_pubkey, relationship_key.as_slice(), side.as_i64()],
     )?;
     if updated == 0 {
         return Ok(None);
@@ -240,17 +234,11 @@ pub fn init_local_cert_chain_head_with_sk(
     let encrypted_sk = encrypt_chain_sk(chain_head_secret_key, chain_head_wrap_key)?;
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
-    let now = tick() as i64;
     let inserted = conn.execute(
         "INSERT OR IGNORE INTO cert_chain_heads
-            (relationship_key, side, chain_head_pubkey, chain_head_sk_encrypted, step_count, updated_at)
-         VALUES (?1, 0, ?2, ?3, 0, ?4)",
-        params![
-            relationship_key.as_slice(),
-            chain_head_pubkey,
-            encrypted_sk,
-            now
-        ],
+            (relationship_key, side, chain_head_pubkey, chain_head_sk_encrypted, step_count)
+         VALUES (?1, 0, ?2, ?3, 0)",
+        params![relationship_key.as_slice(), chain_head_pubkey, encrypted_sk],
     )?;
     Ok(inserted > 0)
 }
@@ -267,15 +255,13 @@ pub fn advance_local_cert_chain_head_with_sk(
     let encrypted_sk = encrypt_chain_sk(new_secret_key, chain_head_wrap_key)?;
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
-    let now = tick() as i64;
     let updated = conn.execute(
         "UPDATE cert_chain_heads
          SET chain_head_pubkey = ?1,
              chain_head_sk_encrypted = ?2,
-             step_count = step_count + 1,
-             updated_at = ?3
-         WHERE relationship_key = ?4 AND side = 0",
-        params![new_pubkey, encrypted_sk, now, relationship_key.as_slice()],
+             step_count = step_count + 1
+         WHERE relationship_key = ?3 AND side = 0",
+        params![new_pubkey, encrypted_sk, relationship_key.as_slice()],
     )?;
     if updated == 0 {
         return Ok(None);
@@ -335,18 +321,15 @@ pub fn cas_advance_local_cert_chain_head_with_sk(
         let encrypted_sk = encrypt_chain_sk(new_secret_key, chain_head_wrap_key)?;
         let binding = get_connection()?;
         let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
-        let now = tick() as i64;
         let updated = conn.execute(
             "UPDATE cert_chain_heads
              SET chain_head_pubkey = ?1,
                  chain_head_sk_encrypted = ?2,
-                 step_count = step_count + 1,
-                 updated_at = ?3
-             WHERE relationship_key = ?4 AND side = 0 AND chain_head_pubkey = ?5",
+                 step_count = step_count + 1
+             WHERE relationship_key = ?3 AND side = 0 AND chain_head_pubkey = ?4",
             params![
                 new_pubkey,
                 encrypted_sk,
-                now,
                 relationship_key.as_slice(),
                 expected
             ],
@@ -404,12 +387,11 @@ pub fn cas_advance_counterparty_cert_chain_head_with_conn(
     new_pubkey: &[u8],
 ) -> Result<CasHeadOutcome> {
     if let Some(expected) = expected_current {
-        let now = tick() as i64;
         let updated = conn.execute(
             "UPDATE cert_chain_heads
-             SET chain_head_pubkey = ?1, step_count = step_count + 1, updated_at = ?2
-             WHERE relationship_key = ?3 AND side = 1 AND chain_head_pubkey = ?4",
-            params![new_pubkey, now, relationship_key.as_slice(), expected],
+             SET chain_head_pubkey = ?1, step_count = step_count + 1
+             WHERE relationship_key = ?2 AND side = 1 AND chain_head_pubkey = ?3",
+            params![new_pubkey, relationship_key.as_slice(), expected],
         )?;
         if updated == 1 {
             let step: i64 = conn
@@ -442,9 +424,9 @@ pub fn cas_advance_counterparty_cert_chain_head_with_conn(
             conn.execute(
                 "INSERT OR IGNORE INTO cert_chain_heads
                     (relationship_key, side, chain_head_pubkey, chain_head_sk_encrypted,
-                     step_count, updated_at)
-                 VALUES (?1, 1, ?2, NULL, 0, ?3)",
-                params![relationship_key.as_slice(), new_pubkey, tick() as i64],
+                     step_count)
+                 VALUES (?1, 1, ?2, NULL, 0)",
+                params![relationship_key.as_slice(), new_pubkey],
             )?;
             Ok(CasHeadOutcome::GenesisInit)
         }
@@ -473,16 +455,14 @@ pub fn cas_advance_local_cert_chain_head_with_conn(
 ) -> Result<CasHeadOutcome> {
     let encrypted_sk = encrypt_chain_sk(new_secret_key, chain_head_wrap_key)?;
     if let Some(expected) = expected_current {
-        let now = tick() as i64;
         let updated = conn.execute(
             "UPDATE cert_chain_heads
              SET chain_head_pubkey = ?1, chain_head_sk_encrypted = ?2,
-                 step_count = step_count + 1, updated_at = ?3
-             WHERE relationship_key = ?4 AND side = 0 AND chain_head_pubkey = ?5",
+                 step_count = step_count + 1
+             WHERE relationship_key = ?3 AND side = 0 AND chain_head_pubkey = ?4",
             params![
                 new_pubkey,
                 encrypted_sk,
-                now,
                 relationship_key.as_slice(),
                 expected
             ],
@@ -518,14 +498,9 @@ pub fn cas_advance_local_cert_chain_head_with_conn(
             conn.execute(
                 "INSERT OR IGNORE INTO cert_chain_heads
                     (relationship_key, side, chain_head_pubkey, chain_head_sk_encrypted,
-                     step_count, updated_at)
-                 VALUES (?1, 0, ?2, ?3, 0, ?4)",
-                params![
-                    relationship_key.as_slice(),
-                    new_pubkey,
-                    encrypted_sk,
-                    tick() as i64
-                ],
+                     step_count)
+                 VALUES (?1, 0, ?2, ?3, 0)",
+                params![relationship_key.as_slice(), new_pubkey, encrypted_sk],
             )?;
             Ok(CasHeadOutcome::GenesisInit)
         }
@@ -540,12 +515,11 @@ pub fn cas_advance_counterparty_cert_chain_head(
     if let Some(expected) = expected_current {
         let binding = get_connection()?;
         let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
-        let now = tick() as i64;
         let updated = conn.execute(
             "UPDATE cert_chain_heads
-             SET chain_head_pubkey = ?1, step_count = step_count + 1, updated_at = ?2
-             WHERE relationship_key = ?3 AND side = 1 AND chain_head_pubkey = ?4",
-            params![new_pubkey, now, relationship_key.as_slice(), expected],
+             SET chain_head_pubkey = ?1, step_count = step_count + 1
+             WHERE relationship_key = ?2 AND side = 1 AND chain_head_pubkey = ?3",
+            params![new_pubkey, relationship_key.as_slice(), expected],
         )?;
         if updated == 1 {
             let step: i64 = conn
@@ -636,12 +610,11 @@ pub fn pending_local_head_signer(
 pub fn wipe_local_chain_head_sk(relationship_key: &[u8; 32]) -> Result<()> {
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
-    let now = tick() as i64;
     conn.execute(
         "UPDATE cert_chain_heads
-         SET chain_head_sk_encrypted = NULL, updated_at = ?1
-         WHERE relationship_key = ?2 AND side = 0",
-        params![now, relationship_key.as_slice()],
+         SET chain_head_sk_encrypted = NULL
+         WHERE relationship_key = ?1 AND side = 0",
+        params![relationship_key.as_slice()],
     )?;
     Ok(())
 }
@@ -804,18 +777,16 @@ pub fn stash_pending_local_head_with_conn(
     is_init: bool,
 ) -> Result<()> {
     let encrypted_sk = encrypt_chain_sk(ek_secret_key, chain_head_wrap_key)?;
-    let now = tick() as i64;
     conn.execute(
         "INSERT OR REPLACE INTO pending_local_cert_heads
-            (relationship_key, commitment_hash, ek_pubkey, ek_sk_encrypted, is_init, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            (relationship_key, commitment_hash, ek_pubkey, ek_sk_encrypted, is_init)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
         params![
             relationship_key.as_slice(),
             commitment_hash.as_slice(),
             ek_pubkey,
             encrypted_sk,
-            is_init as i64,
-            now
+            is_init as i64
         ],
     )?;
     Ok(())
@@ -860,7 +831,6 @@ pub fn promote_pending_local_head_with_conn(
     let Some((ek_pk, sk_ct, is_init)) = row else {
         return Ok(None);
     };
-    let now = tick() as i64;
     if is_init != 0 {
         // Relationship genesis: the sign fell back to the root AK because
         // no Local row existed. Record EK_1 as the step-0 head. If a row
@@ -869,26 +839,26 @@ pub fn promote_pending_local_head_with_conn(
         // ignored and the UPDATE below advances instead.
         let inserted = tx.execute(
             "INSERT OR IGNORE INTO cert_chain_heads
-                (relationship_key, side, chain_head_pubkey, chain_head_sk_encrypted, step_count, updated_at)
-             VALUES (?1, 0, ?2, ?3, 0, ?4)",
-            params![relationship_key.as_slice(), ek_pk, sk_ct, now],
+                (relationship_key, side, chain_head_pubkey, chain_head_sk_encrypted, step_count)
+             VALUES (?1, 0, ?2, ?3, 0)",
+            params![relationship_key.as_slice(), ek_pk, sk_ct],
         )?;
         if inserted == 0 {
             tx.execute(
                 "UPDATE cert_chain_heads
                  SET chain_head_pubkey = ?1, chain_head_sk_encrypted = ?2,
-                     step_count = step_count + 1, updated_at = ?3
-                 WHERE relationship_key = ?4 AND side = 0",
-                params![ek_pk, sk_ct, now, relationship_key.as_slice()],
+                     step_count = step_count + 1
+                 WHERE relationship_key = ?3 AND side = 0",
+                params![ek_pk, sk_ct, relationship_key.as_slice()],
             )?;
         }
     } else {
         tx.execute(
             "UPDATE cert_chain_heads
              SET chain_head_pubkey = ?1, chain_head_sk_encrypted = ?2,
-                 step_count = step_count + 1, updated_at = ?3
-             WHERE relationship_key = ?4 AND side = 0",
-            params![ek_pk, sk_ct, now, relationship_key.as_slice()],
+                 step_count = step_count + 1
+             WHERE relationship_key = ?3 AND side = 0",
+            params![ek_pk, sk_ct, relationship_key.as_slice()],
         )?;
     }
     tx.execute(
@@ -938,7 +908,7 @@ pub fn drop_pending_local_heads_for_relationship(relationship_key: &[u8; 32]) ->
     Ok(deleted)
 }
 
-/// Load the full chain head record (pubkey + step_count + timestamp).
+/// Load the full chain head record (pubkey + step_count).
 pub fn load_cert_chain_head(
     relationship_key: &[u8; 32],
     side: CertChainSide,
@@ -947,24 +917,22 @@ pub fn load_cert_chain_head(
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
     let row = conn
         .query_row(
-            "SELECT chain_head_pubkey, step_count, updated_at
+            "SELECT chain_head_pubkey, step_count
              FROM cert_chain_heads
              WHERE relationship_key = ?1 AND side = ?2",
             params![relationship_key.as_slice(), side.as_i64()],
             |row| {
                 let pk: Vec<u8> = row.get(0)?;
                 let step: i64 = row.get(1)?;
-                let ts: i64 = row.get(2)?;
-                Ok((pk, step, ts))
+                Ok((pk, step))
             },
         )
         .optional()?;
-    Ok(row.map(|(pk, step, ts)| CertChainHead {
+    Ok(row.map(|(pk, step)| CertChainHead {
         relationship_key: relationship_key.to_vec(),
         side,
         chain_head_pubkey: pk,
         step_count: step as u64,
-        updated_at: ts as u64,
     }))
 }
 

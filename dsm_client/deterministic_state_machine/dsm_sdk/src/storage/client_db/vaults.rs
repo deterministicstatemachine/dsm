@@ -5,7 +5,6 @@ use anyhow::Result;
 use rusqlite::{params, OptionalExtension};
 
 use super::get_connection;
-use crate::util::deterministic_time::tick;
 
 /// Insert or update a vault store entry.
 /// `entry_header` is the 80-byte Bitcoin block header cached at entry time (Invariant 19, §12.2.3).
@@ -17,17 +16,15 @@ pub fn put_vault(
     entry_header: &[u8; 80],
     btc_amount_sats: u64,
 ) -> Result<()> {
-    let now = tick();
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|poisoned| {
         log::warn!("DB lock poisoned in put_vault, recovering");
         poisoned.into_inner()
     });
     conn.execute(
-        "INSERT OR REPLACE INTO vault_store(vault_id, vault_proto_full, vault_state, entry_header, btc_amount_sats, created_at)
-         VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
-        params![vault_id, vault_proto_full as &[u8], vault_state, entry_header as &[u8], btc_amount_sats as i64, now as i64],
-    )?;
+        "INSERT OR REPLACE INTO vault_store(vault_id, vault_proto_full, vault_state, entry_header, btc_amount_sats)
+         VALUES(?1, ?2, ?3, ?4, ?5)",
+        params![vault_id, vault_proto_full as &[u8], vault_state, entry_header as &[u8], btc_amount_sats as i64])?;
     Ok(())
 }
 
@@ -69,7 +66,7 @@ pub fn get_vault(vault_id: &str) -> Result<Option<(Vec<u8>, String, [u8; 80], u6
     }
 }
 
-/// List all **active/limbo** vaults with `btc_amount_sats >= min_sats`, ordered by `created_at ASC` (oldest first).
+/// List all **active/limbo** vaults with `btc_amount_sats >= min_sats`, in insertion order (oldest first).
 /// Filters out "received", "transferred", "invalidated", "unlocked", and "claimed" vaults.
 pub fn list_vaults_by_amount(min_sats: u64) -> Result<Vec<String>> {
     let binding = get_connection()?;
@@ -78,7 +75,7 @@ pub fn list_vaults_by_amount(min_sats: u64) -> Result<Vec<String>> {
         poisoned.into_inner()
     });
     let mut stmt = conn.prepare(
-        "SELECT vault_id FROM vault_store WHERE btc_amount_sats >= ?1 AND vault_state IN ('active', 'limbo') ORDER BY created_at ASC",
+        "SELECT vault_id FROM vault_store WHERE btc_amount_sats >= ?1 AND vault_state IN ('active', 'limbo') ORDER BY rowid ASC",
     )?;
     let ids = stmt.query_map(params![min_sats as i64], |row| row.get::<_, String>(0))?;
     let mut result = Vec::new();
@@ -103,7 +100,7 @@ pub fn find_oldest_active_vault(min_amount_sats: u64) -> Result<Option<String>> 
     conn.query_row(
         "SELECT vault_id FROM vault_store
          WHERE btc_amount_sats >= ?1 AND vault_state IN ('active', 'limbo')
-         ORDER BY btc_amount_sats ASC, created_at ASC LIMIT 1",
+         ORDER BY btc_amount_sats ASC, rowid ASC LIMIT 1",
         params![min_amount_sats as i64],
         |row| row.get(0),
     )
@@ -126,7 +123,7 @@ pub fn find_vault_sats_for_transfer(min_amount_sats: u64) -> Result<Option<u64>>
     conn.query_row(
         "SELECT btc_amount_sats FROM vault_store
          WHERE btc_amount_sats >= ?1 AND vault_state IN ('active', 'limbo')
-         ORDER BY btc_amount_sats ASC, created_at ASC LIMIT 1",
+         ORDER BY btc_amount_sats ASC, rowid ASC LIMIT 1",
         params![min_amount_sats as i64],
         |row| row.get::<_, i64>(0).map(|v| v as u64),
     )
@@ -143,7 +140,7 @@ pub fn list_all_vault_ids() -> Result<Vec<String>> {
         log::warn!("DB lock poisoned in list_all_vault_ids, recovering");
         poisoned.into_inner()
     });
-    let mut stmt = conn.prepare("SELECT vault_id FROM vault_store ORDER BY created_at ASC")?;
+    let mut stmt = conn.prepare("SELECT vault_id FROM vault_store ORDER BY rowid ASC")?;
     let ids = stmt.query_map([], |row| row.get::<_, String>(0))?;
     let mut result = Vec::new();
     for id in ids {
@@ -183,7 +180,7 @@ pub fn get_oldest_active_vault_for_amount(
     conn.query_row(
         "SELECT vault_id, vault_proto_full, vault_state, entry_header FROM vault_store
          WHERE btc_amount_sats >= ?1 AND vault_state IN ('active', 'limbo')
-         ORDER BY btc_amount_sats ASC, created_at ASC LIMIT 1",
+         ORDER BY btc_amount_sats ASC, rowid ASC LIMIT 1",
         params![min_amount_sats as i64],
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
     )
@@ -201,7 +198,7 @@ pub fn remove_oldest_active_vault(min_amount_sats: u64) -> Result<Option<String>
         .query_row(
             "SELECT vault_id FROM vault_store
              WHERE btc_amount_sats >= ?1 AND vault_state IN ('active', 'limbo')
-             ORDER BY btc_amount_sats ASC, created_at ASC LIMIT 1",
+             ORDER BY btc_amount_sats ASC, rowid ASC LIMIT 1",
             params![min_amount_sats as i64],
             |row| row.get(0),
         )
@@ -237,7 +234,7 @@ mod tests {
     use serial_test::serial;
 
     fn init_test_db() {
-        unsafe { std::env::set_var("DSM_SDK_TEST_MODE", "1") };
+        crate::economic_fixtures::use_test_storage_dir();
         crate::storage::client_db::reset_database_for_tests();
         crate::storage::client_db::init_database().expect("init db");
     }

@@ -3,20 +3,19 @@
 
 use anyhow::Result;
 use log::info;
-use rusqlite::{params, Connection, Row};
+use rusqlite::{params, Connection, OptionalExtension, Row};
 
 use super::get_connection;
 use super::tokens::{upsert_balance_projection_with_conn, BalanceProjectionRecord};
 use super::types::TransactionRecord;
 use crate::storage::codecs::{meta_from_blob, meta_to_blob};
-use crate::util::deterministic_time::tick;
 
-fn upsert_transaction_row(conn: &Connection, tx: &TransactionRecord, now: u64) -> Result<usize> {
+fn upsert_transaction_row(conn: &Connection, tx: &TransactionRecord) -> Result<usize> {
     let affected = conn.execute(
         "INSERT INTO transactions (
             tx_id, tx_hash, from_device, to_device, amount, tx_type,
-            status, chain_height, step_index, commitment_hash, proof_data, metadata, created_at
-        ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)
+            status, commitment_hash, proof_data, metadata
+        ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
         ON CONFLICT(tx_id) DO UPDATE SET
             tx_hash = excluded.tx_hash,
             from_device = excluded.from_device,
@@ -24,11 +23,6 @@ fn upsert_transaction_row(conn: &Connection, tx: &TransactionRecord, now: u64) -
             amount = excluded.amount,
             tx_type = excluded.tx_type,
             status = excluded.status,
-            chain_height = excluded.chain_height,
-            step_index = CASE
-                WHEN excluded.step_index > transactions.step_index THEN excluded.step_index
-                ELSE transactions.step_index
-            END,
             commitment_hash = COALESCE(transactions.commitment_hash, excluded.commitment_hash),
             proof_data = CASE
                 WHEN (transactions.proof_data IS NULL OR length(transactions.proof_data) = 0)
@@ -48,12 +42,9 @@ fn upsert_transaction_row(conn: &Connection, tx: &TransactionRecord, now: u64) -
             tx.amount as i64,
             tx.tx_type,
             tx.status,
-            tx.chain_height as i64,
-            tx.step_index as i64,
             tx.commitment_hash.as_deref(),
             tx.proof_data.as_deref(),
             meta_to_blob(&tx.metadata),
-            now as i64,
         ],
     )?;
     Ok(affected)
@@ -77,17 +68,16 @@ pub fn apply_sender_settlement_and_store_transaction_atomic(
         poisoned.into_inner()
     });
 
-    let now = tick();
     let txdb = conn.transaction()?;
 
     let token = token_id.unwrap_or("ERA");
 
-    let affected = upsert_transaction_row(&txdb, tx, now)?;
+    let affected = upsert_transaction_row(&txdb, tx)?;
     txdb.execute(
         "INSERT OR REPLACE INTO bilateral_sender_settlements(
-            tx_id, sender_device_id, completed_at
-         ) VALUES (?1, ?2, ?3)",
-        params![tx.tx_id, sender_device_id, now as i64],
+            tx_id, sender_device_id
+         ) VALUES (?1, ?2)",
+        params![tx.tx_id, sender_device_id],
     )?;
     txdb.commit()?;
 
@@ -136,7 +126,6 @@ pub fn apply_bilateral_settlement_bundle_atomic(
         poisoned.into_inner()
     });
 
-    let now = tick();
     let txdb = conn.transaction()?;
     let token = bundle.token_id.unwrap_or("ERA");
 
@@ -147,20 +136,14 @@ pub fn apply_bilateral_settlement_bundle_atomic(
             chain_tip = ?1,
             local_bilateral_chain_tip = ?1,
             observed_remote_chain_tip = NULL,
-            observed_remote_tip_updated_at = NULL,
             observed_remote_tip_source = NULL,
             needs_online_reconcile = 0,
-            last_seen_online_counter = ?2,
             status = CASE
                 WHEN status = 'BleCapable' THEN 'BleCapable'
                 ELSE 'OnlineCapable'
             END
-         WHERE device_id = ?3",
-        params![
-            bundle.new_chain_tip,
-            now as i64,
-            bundle.counterparty_device_id
-        ],
+         WHERE device_id = ?2",
+        params![bundle.new_chain_tip, bundle.counterparty_device_id],
     )?;
 
     // 2. Balance projection (display cache only).
@@ -169,14 +152,14 @@ pub fn apply_bilateral_settlement_bundle_atomic(
     }
 
     // 3. Transaction history row.
-    let affected = upsert_transaction_row(&txdb, bundle.tx, now)?;
+    let affected = upsert_transaction_row(&txdb, bundle.tx)?;
 
     // 4. Sender-settlements idempotency row.
     txdb.execute(
         "INSERT OR REPLACE INTO bilateral_sender_settlements(
-            tx_id, sender_device_id, completed_at
-         ) VALUES (?1, ?2, ?3)",
-        params![bundle.tx.tx_id, bundle.sender_device_id, now as i64],
+            tx_id, sender_device_id
+         ) VALUES (?1, ?2)",
+        params![bundle.tx.tx_id, bundle.sender_device_id],
     )?;
 
     txdb.commit()?;
@@ -216,7 +199,6 @@ pub fn apply_receiver_confirm_and_store_transaction_atomic(
         poisoned.into_inner()
     });
 
-    let now = tick();
     let txdb = conn.transaction()?;
 
     // 1. Advance chain tip (mirrors update_finalized_bilateral_chain_tip)
@@ -226,20 +208,18 @@ pub fn apply_receiver_confirm_and_store_transaction_atomic(
             chain_tip = ?1,
             local_bilateral_chain_tip = ?1,
             observed_remote_chain_tip = NULL,
-            observed_remote_tip_updated_at = NULL,
             observed_remote_tip_source = NULL,
             needs_online_reconcile = 0,
-            last_seen_online_counter = ?2,
             status = CASE
                 WHEN status = 'BleCapable' THEN 'BleCapable'
                 ELSE 'OnlineCapable'
             END
-         WHERE device_id = ?3",
-        params![new_chain_tip, now as i64, counterparty_device_id],
+         WHERE device_id = ?2",
+        params![new_chain_tip, counterparty_device_id],
     )?;
 
     // 2. Store transaction history
-    let affected = upsert_transaction_row(&txdb, tx, now)?;
+    let affected = upsert_transaction_row(&txdb, tx)?;
     txdb.commit()?;
 
     if affected > 0 {
@@ -275,7 +255,6 @@ pub fn apply_receiver_confirm_bundle_atomic(bundle: ReceiverConfirmBundle<'_>) -
         poisoned.into_inner()
     });
 
-    let now = tick();
     let txdb = conn.transaction()?;
 
     txdb.execute(
@@ -284,27 +263,21 @@ pub fn apply_receiver_confirm_bundle_atomic(bundle: ReceiverConfirmBundle<'_>) -
             chain_tip = ?1,
             local_bilateral_chain_tip = ?1,
             observed_remote_chain_tip = NULL,
-            observed_remote_tip_updated_at = NULL,
             observed_remote_tip_source = NULL,
             needs_online_reconcile = 0,
-            last_seen_online_counter = ?2,
             status = CASE
                 WHEN status = 'BleCapable' THEN 'BleCapable'
                 ELSE 'OnlineCapable'
             END
-         WHERE device_id = ?3",
-        params![
-            bundle.new_chain_tip,
-            now as i64,
-            bundle.counterparty_device_id
-        ],
+         WHERE device_id = ?2",
+        params![bundle.new_chain_tip, bundle.counterparty_device_id],
     )?;
 
     if let Some(record) = bundle.projection {
         upsert_balance_projection_with_conn(&txdb, record)?;
     }
 
-    let affected = upsert_transaction_row(&txdb, bundle.tx, now)?;
+    let affected = upsert_transaction_row(&txdb, bundle.tx)?;
     txdb.commit()?;
 
     if affected > 0 {
@@ -327,11 +300,10 @@ pub fn store_transaction(tx: &TransactionRecord) -> Result<()> {
         log::warn!("DB lock poisoned, recovering");
         poisoned.into_inner()
     });
-    let now = tick();
     // Upsert by tx_id so we can safely backfill missing proof_data when a transaction
     // is first stored without a receipt and finalized later with stitched bytes.
     // Important: never downgrade proof_data from non-empty to empty.
-    let affected = upsert_transaction_row(&conn, tx, now)?;
+    let affected = upsert_transaction_row(&conn, tx)?;
     if affected > 0 {
         info!("Transaction upserted successfully, amount={}", tx.amount);
     } else {
@@ -406,23 +378,22 @@ pub fn transaction_exists(tx_id: &str) -> bool {
     .unwrap_or(false)
 }
 
-pub fn is_sender_settlement_completed(tx_id: &str, sender_device_id: &str) -> bool {
-    let binding = match get_connection() {
-        Ok(b) => b,
-        Err(_) => return false,
-    };
+pub fn is_sender_settlement_completed(tx_id: &str, sender_device_id: &str) -> Result<bool> {
+    let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|poisoned| {
         log::warn!("DB lock poisoned, recovering");
         poisoned.into_inner()
     });
-    conn.query_row(
-        "SELECT 1 FROM bilateral_sender_settlements
-         WHERE tx_id = ?1 AND sender_device_id = ?2
-         LIMIT 1",
-        params![tx_id, sender_device_id],
-        |_| Ok(true),
-    )
-    .unwrap_or(false)
+    Ok(conn
+        .query_row(
+            "SELECT 1 FROM bilateral_sender_settlements
+             WHERE tx_id = ?1 AND sender_device_id = ?2
+             LIMIT 1",
+            params![tx_id, sender_device_id],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
 }
 
 pub fn get_transaction_history(
@@ -435,39 +406,22 @@ pub fn get_transaction_history(
         poisoned.into_inner()
     });
     let lim = match limit {
-        Some(0) => 100,
+        Some(0) | None => 100,
         Some(n) => n,
-        None => 100,
     };
-
-    // DEBUG: Check total transactions in table
-    let total: i64 = conn
-        .query_row("SELECT COUNT(*) FROM transactions", [], |r| r.get(0))
-        .unwrap_or(0);
-    log::info!(
-        "[get_transaction_history] Total transactions in table: {}",
-        total
-    );
-
-    // DEBUG: If we have a device_id filter, also check what devices exist
-    if let Some(d) = &device_id {
-        let sample: Option<String> = conn
-            .query_row("SELECT from_device FROM transactions LIMIT 1", [], |r| {
-                r.get(0)
-            })
-            .ok();
-        log::info!(
-            "[get_transaction_history] Looking for device: \"{}\", sample from_device in table: {:?}",
-            d,
-            sample
-        );
-    }
+    let lim = i64::try_from(lim).map_err(|e| anyhow::anyhow!("history limit: {e}"))?;
 
     let map_row = |row: &Row| -> rusqlite::Result<TransactionRecord> {
-        let meta_blob: Vec<u8> = row.get(11)?;
-        let metadata = meta_from_blob(&meta_blob).unwrap_or_default();
+        let meta_blob: Vec<u8> = row.get(9)?;
+        let metadata = meta_from_blob(&meta_blob).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(
+                9,
+                rusqlite::types::Type::Blob,
+                format!("transaction metadata: {e}").into(),
+            )
+        })?;
         let tx_type: String = row.get(5)?;
-        let proof_data = match row.get::<_, Option<Vec<u8>>>(10)? {
+        let proof_data = match row.get::<_, Option<Vec<u8>>>(8)? {
             Some(_) if tx_type == "unilateral_send" => None,
             other => other,
         };
@@ -479,71 +433,31 @@ pub fn get_transaction_history(
             amount: row.get::<_, i64>(4)? as u64,
             tx_type,
             status: row.get(6)?,
-            chain_height: row.get::<_, i64>(7)? as u64,
-            step_index: row.get::<_, i64>(8)? as u64,
-            commitment_hash: row.get::<_, Option<Vec<u8>>>(9)?,
+            commitment_hash: row.get::<_, Option<Vec<u8>>>(7)?,
             proof_data,
             metadata,
-            created_at: row.get::<_, i64>(12)? as u64,
         })
     };
 
-    if let Some(d) = device_id {
-        // DEBUG: Test query with explicit string matching
-        let test_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM transactions WHERE from_device = ?1 OR to_device = ?1",
-                params![d],
-                |r| r.get(0),
-            )
-            .unwrap_or(-1);
-        log::info!(
-            "[get_transaction_history] Test query for device \"{}\" returned count: {}",
-            d,
-            test_count
-        );
-
-        let query = format!(
-            "SELECT tx_id, tx_hash, from_device, to_device, amount, tx_type, status, chain_height, step_index, commitment_hash, proof_data, metadata, created_at FROM transactions WHERE from_device = ?1 OR to_device = ?1 ORDER BY step_index DESC LIMIT {lim}",
-        );
-        log::info!("[get_transaction_history] Executing main query: {}", query);
-        let mut stmt = conn.prepare(&query)?;
-        let iter = stmt.query_map(params![d], map_row)?;
-        let mut out = Vec::new();
-        let mut row_counter = 0;
-        for r in iter {
-            row_counter += 1;
-            match r {
-                Ok(item) => {
-                    log::info!(
-                        "[get_transaction_history] Mapped row successfully: {}",
-                        item.tx_id
-                    );
-                    out.push(item);
-                }
-                Err(e) => {
-                    log::error!("[get_transaction_history] Failed to map row: {:?}", e);
-                    // Don't fail the whole request, just skip the bad row
-                }
-            }
-        }
-        log::info!(
-            "[get_transaction_history] Iterator yielded {} rows",
-            row_counter
-        );
-        Ok(out)
-    } else {
-        let query = format!(
-            "SELECT tx_id, tx_hash, from_device, to_device, amount, tx_type, status, chain_height, step_index, commitment_hash, proof_data, metadata, created_at FROM transactions ORDER BY step_index DESC LIMIT {lim}",
-        );
-        let mut stmt = conn.prepare(&query)?;
-        let iter = stmt.query_map([], map_row)?;
-        let mut out = Vec::new();
-        for r in iter {
-            out.push(r?);
-        }
-        Ok(out)
-    }
+    // Newest first, in the order this device recorded them.
+    const COLS: &str = "tx_id, tx_hash, from_device, to_device, amount, tx_type, status, \
+                        commitment_hash, proof_data, metadata";
+    let rows = match device_id {
+        Some(d) => conn
+            .prepare(&format!(
+                "SELECT {COLS} FROM transactions WHERE from_device = ?1 OR to_device = ?1 \
+                 ORDER BY rowid DESC LIMIT ?2"
+            ))?
+            .query_map(params![d, lim], map_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?,
+        None => conn
+            .prepare(&format!(
+                "SELECT {COLS} FROM transactions ORDER BY rowid DESC LIMIT ?1"
+            ))?
+            .query_map(params![lim], map_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?,
+    };
+    Ok(rows)
 }
 
 #[cfg(test)]
@@ -557,9 +471,7 @@ mod tests {
     #[test]
     #[serial]
     fn sender_settlement_clears_stale_live_peer_claim() {
-        unsafe {
-            std::env::set_var("DSM_SDK_TEST_MODE", "1");
-        }
+        crate::economic_fixtures::use_test_storage_dir();
         reset_database_for_tests();
         init_database().expect("init db");
 
@@ -581,15 +493,12 @@ mod tests {
             public_key: vec![0x11; 32],
             kyber_public_key: Vec::new(),
             current_chain_tip: Some(stale_tip.to_vec()),
-            added_at: 0,
             verified: true,
             verification_proof: None,
             metadata: HashMap::new(),
             ble_address: None,
             status: "BleCapable".to_string(),
             needs_online_reconcile: true,
-            last_seen_online_counter: 0,
-            last_seen_ble_counter: 0,
             previous_chain_tip: None,
         })
         .expect("store contact");
@@ -613,12 +522,9 @@ mod tests {
             amount: 7,
             tx_type: "bilateral_offline".to_string(),
             status: "completed".to_string(),
-            chain_height: 0,
-            step_index: 0,
             commitment_hash: None,
             proof_data: None,
             metadata: HashMap::new(),
-            created_at: 0,
         };
 
         apply_bilateral_settlement_bundle_atomic(BilateralSenderSettlementBundle {
@@ -653,9 +559,7 @@ mod tests {
     #[test]
     #[serial]
     fn receiver_settlement_clears_stale_live_peer_claim() {
-        unsafe {
-            std::env::set_var("DSM_SDK_TEST_MODE", "1");
-        }
+        crate::economic_fixtures::use_test_storage_dir();
         reset_database_for_tests();
         init_database().expect("init db");
 
@@ -677,15 +581,12 @@ mod tests {
             public_key: vec![0x22; 32],
             kyber_public_key: Vec::new(),
             current_chain_tip: Some(stale_tip.to_vec()),
-            added_at: 0,
             verified: true,
             verification_proof: None,
             metadata: HashMap::new(),
             ble_address: None,
             status: "BleCapable".to_string(),
             needs_online_reconcile: true,
-            last_seen_online_counter: 0,
-            last_seen_ble_counter: 0,
             previous_chain_tip: None,
         })
         .expect("store contact");
@@ -709,12 +610,9 @@ mod tests {
             amount: 9,
             tx_type: "bilateral_offline".to_string(),
             status: "completed".to_string(),
-            chain_height: 0,
-            step_index: 0,
             commitment_hash: None,
             proof_data: None,
             metadata: HashMap::new(),
-            created_at: 0,
         };
 
         apply_receiver_confirm_bundle_atomic(ReceiverConfirmBundle {
@@ -749,9 +647,7 @@ mod tests {
     #[test]
     #[serial]
     fn unilateral_history_suppresses_proof_data() {
-        unsafe {
-            std::env::set_var("DSM_SDK_TEST_MODE", "1");
-        }
+        crate::economic_fixtures::use_test_storage_dir();
         reset_database_for_tests();
         init_database().expect("init db");
 
@@ -766,12 +662,9 @@ mod tests {
             amount: 5,
             tx_type: "unilateral_send".to_string(),
             status: "submitted".to_string(),
-            chain_height: 0,
-            step_index: 1,
             commitment_hash: None,
             proof_data: Some(vec![0xAA; 12]),
             metadata: HashMap::new(),
-            created_at: 0,
         })
         .expect("store unilateral transaction");
 

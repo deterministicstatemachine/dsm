@@ -17,19 +17,10 @@ use crate::crypto::sphincs;
 use crate::types::error::DsmError;
 use crate::types::identifiers::NodeId;
 
-use rand::RngCore;
 use std::collections::HashSet;
 use crate::crypto::blake3::dsm_domain_hasher;
 
 // -------------------- Helpers --------------------
-
-#[inline]
-#[allow(dead_code)]
-fn generate_secure_random(rng: &mut impl RngCore, len: usize) -> Result<Vec<u8>, DsmError> {
-    let mut bytes = vec![0u8; len];
-    rng.fill_bytes(&mut bytes);
-    Ok(bytes)
-}
 
 #[inline]
 fn blake3_hash(data: &[u8]) -> Result<[u8; 32], DsmError> {
@@ -37,25 +28,6 @@ fn blake3_hash(data: &[u8]) -> Result<[u8; 32], DsmError> {
         *crate::crypto::blake3::domain_hash(crate::tagged_domain!(b"DSM/genesis-hash"), data)
             .as_bytes(),
     )
-}
-
-#[allow(dead_code)]
-fn select_random_subset<T: Clone>(
-    items: &[T],
-    count: usize,
-    rng: &mut impl RngCore,
-) -> Result<Vec<T>, DsmError> {
-    if count > items.len() {
-        return Err(DsmError::invalid_parameter(
-            "Subset count larger than input size",
-        ));
-    }
-    let mut indices: Vec<usize> = (0..items.len()).collect();
-    for i in 0..count {
-        let j = (rng.next_u32() as usize % (items.len() - i)) + i;
-        indices.swap(i, j);
-    }
-    Ok(indices[..count].iter().map(|&i| items[i].clone()).collect())
 }
 
 // -------------------- Types --------------------
@@ -148,16 +120,6 @@ impl SigningKey {
             secret_key: sk,
         })
     }
-
-    #[allow(dead_code)]
-    fn sign(&self, message: &[u8]) -> Result<Vec<u8>, DsmError> {
-        sphincs::sphincs_sign(&self.secret_key, message)
-    }
-
-    #[allow(dead_code)]
-    fn verify(&self, message: &[u8], signature: &[u8]) -> Result<bool, DsmError> {
-        sphincs::sphincs_verify(&self.public_key, message, signature)
-    }
 }
 
 impl KyberKey {
@@ -167,17 +129,6 @@ impl KyberKey {
             public_key: keypair.public_key.clone(),
             secret_key: keypair.secret_key.clone(),
         })
-    }
-
-    #[allow(dead_code)]
-    fn encapsulate(&self, recipient_public_key: &[u8]) -> Result<(Vec<u8>, Vec<u8>), DsmError> {
-        let (ss, ct) = kyber::kyber_encapsulate(recipient_public_key)?;
-        Ok((ss, ct))
-    }
-
-    #[allow(dead_code)]
-    fn decapsulate(&self, ciphertext: &[u8]) -> Result<Vec<u8>, DsmError> {
-        kyber::kyber_decapsulate(&self.secret_key, ciphertext)
     }
 }
 

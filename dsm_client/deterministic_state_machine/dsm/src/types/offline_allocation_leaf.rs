@@ -138,7 +138,7 @@ mod tests {
         let value = offline_allocation_value(amount, seq);
 
         let mut tree = SparseMerkleTree::new();
-        tree.update_leaf(&key, &value).expect("update_leaf");
+        tree.update_leaf(&key, &value);
         let root = *tree.root();
         let proof = tree
             .get_inclusion_proof(&key, 256)

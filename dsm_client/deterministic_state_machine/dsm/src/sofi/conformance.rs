@@ -631,6 +631,45 @@ pub fn fulfillment_conformance(
     items.fold()
 }
 
+/// The conformance items an exercise decides from its own bytes, before any
+/// read (MR-DSM-0041, MR-DSM-0042): `P` and `F` and their signatures,
+/// `P(E)`, the policy-fulfillment set, the attempts, and the closure objects
+/// the exercise carries, in the preimage's reference order. `Some(reason)`
+/// when one of them is Invalid: `F` does not conform whatever storage holds,
+/// and nothing is fetched to know it. `None` when nothing in hand refutes
+/// it; conformance is then decided over fetched evidence.
+///
+/// It is [`fulfillment_conformance`] over this evidence alone. Invalid
+/// dominates whatever is missing, so an item that needs a fetch — a setup,
+/// an earlier attempt key — never hides a refusal and never makes one.
+pub fn conformance_invalid_in_hand(
+    precommit: &PrecommitEnvelope,
+    fulfillment: &TraderFulfillmentBody,
+    fulfillment_signature: &[u8],
+    preimage: &SettlementPreimage,
+    carried_closure: &[Vec<u8>],
+) -> Option<FulfillmentConformanceError> {
+    let closure = preimage
+        .settlement()
+        .closure()
+        .refs()
+        .iter()
+        .copied()
+        .zip(carried_closure.iter().cloned())
+        .collect();
+    let in_hand = ConformanceEvidence {
+        precommit: precommit.clone(),
+        preimage: preimage.clone(),
+        closure,
+        setups: BTreeMap::new(),
+        prior_attempts: BTreeMap::new(),
+    };
+    match fulfillment_conformance(fulfillment, fulfillment_signature, &in_hand) {
+        Ok(FulfillmentConformance::Invalid(why)) => Some(why),
+        Ok(FulfillmentConformance::Valid) | Err(..) => None,
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::disallowed_methods)] // test asserts; a failure here is the signal
 mod tests {
@@ -953,6 +992,58 @@ mod tests {
                 expected: r.precommit.position() + 1,
                 got: r.precommit.position() + 2,
             })
+        );
+    }
+
+    /// The exercise's own bytes, with nothing fetched: the closure objects in
+    /// the preimage's reference order.
+    fn carried(r: &Rig) -> Vec<Vec<u8>> {
+        r.preimage
+            .settlement()
+            .closure()
+            .refs()
+            .iter()
+            .map(|reference| r.closure[reference].clone())
+            .collect()
+    }
+
+    /// MR-DSM-0041: an item decidable from the exercise refuses it with
+    /// nothing fetched; a conforming exercise has nothing refuted in hand,
+    /// though its setups and earlier keys are not.
+    #[test]
+    fn what_the_exercise_decides_alone_is_decided_before_any_read() {
+        let r = rig();
+        let envelope = PrecommitEnvelope {
+            body: r.precommit.clone(),
+            signature: r.precommit_sig.clone(),
+        };
+        assert_eq!(
+            conformance_invalid_in_hand(
+                &envelope,
+                &r.fulfillment,
+                &r.fulfillment_sig,
+                &r.preimage,
+                &carried(r)
+            ),
+            None
+        );
+        let f = fulfillment_with(
+            r,
+            r.fulfillment.policy_fulfillment_set().to_vec(),
+            r.fulfillment.attempts().to_vec(),
+            r.precommit.position() + 2,
+            pk(),
+        );
+        assert_eq!(
+            conformance_invalid_in_hand(&envelope, &f, &sign_f(&f), &r.preimage, &carried(r)),
+            Some(FulfillmentConformanceError::PositionNotSuccessor {
+                expected: r.precommit.position() + 1,
+                got: r.precommit.position() + 2,
+            })
+        );
+        assert_eq!(
+            conformance_invalid_in_hand(&envelope, &r.fulfillment, &[], &r.preimage, &carried(r)),
+            Some(FulfillmentConformanceError::FulfillmentUnsigned)
         );
     }
 

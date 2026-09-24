@@ -65,15 +65,10 @@ describe('HeaderService', () => {
   describe('invalidateCache', () => {
     it('forces next fetchHeaders to re-fetch', async () => {
       const devId = new Uint8Array(32).fill(0x01);
-      const chainTip = new Uint8Array(32).fill(0x02);
+      const genesisHash = new Uint8Array(32).fill(0x02);
 
       mockCheckIdentity.mockResolvedValue('READY');
-      mockFromBinary.mockReturnValue({
-        deviceId: devId,
-        chainTip,
-        genesisHash: null,
-        seq: 1n,
-      });
+      mockFromBinary.mockReturnValue({ deviceId: devId, genesisHash });
       mockQueryHeaders.mockResolvedValue(new Uint8Array([1, 2, 3]));
 
       await headerService.fetchHeaders();
@@ -92,41 +87,19 @@ describe('HeaderService', () => {
 
   describe('fetchHeaders', () => {
     const devId = new Uint8Array(32).fill(0xaa);
-    const chainTip = new Uint8Array(32).fill(0xbb);
     const genesisHash = new Uint8Array(32).fill(0xcc);
 
     it('returns transport headers on success', async () => {
       mockCheckIdentity.mockResolvedValue('READY');
-      mockFromBinary.mockReturnValue({
-        deviceId: devId,
-        chainTip,
-        genesisHash,
-        seq: 42n,
-      });
+      mockFromBinary.mockReturnValue({ deviceId: devId, genesisHash });
       mockQueryHeaders.mockResolvedValue(new Uint8Array([10, 20]));
 
       const h = await headerService.fetchHeaders();
       expect(h.deviceId).toEqual(devId);
-      expect(h.chainTip).toEqual(chainTip);
       expect(h.genesisHash).toEqual(genesisHash);
-      expect(h.seq).toBe('42');
       // Verify it's a clone, not the same reference
       expect(h.deviceId).not.toBe(devId);
-    });
-
-    it('sets seq to "0" when proto seq is falsy', async () => {
-      mockCheckIdentity.mockResolvedValue('READY');
-      mockFromBinary.mockReturnValue({
-        deviceId: devId,
-        chainTip,
-        genesisHash: null,
-        seq: 0n,
-      });
-      mockQueryHeaders.mockResolvedValue(new Uint8Array([1]));
-
-      const h = await headerService.fetchHeaders();
-      expect(h.seq).toBe('0');
-      expect(h.genesisHash).toBeNull();
+      expect(h.genesisHash).not.toBe(genesisHash);
     });
 
     it('throws when identity is not ready', async () => {
@@ -142,55 +115,31 @@ describe('HeaderService', () => {
 
     it('throws when deviceId is wrong length', async () => {
       mockCheckIdentity.mockResolvedValue('READY');
-      mockFromBinary.mockReturnValue({
-        deviceId: new Uint8Array(16),
-        chainTip,
-        genesisHash: null,
-        seq: 0n,
-      });
+      mockFromBinary.mockReturnValue({ deviceId: new Uint8Array(16), genesisHash });
       mockQueryHeaders.mockResolvedValue(new Uint8Array([1]));
 
       await expect(headerService.fetchHeaders()).rejects.toThrow(/invalid deviceId length/);
     });
 
-    it('throws when chainTip is wrong length', async () => {
+    it('throws when genesisHash is missing', async () => {
       mockCheckIdentity.mockResolvedValue('READY');
-      mockFromBinary.mockReturnValue({
-        deviceId: devId,
-        chainTip: new Uint8Array(8),
-        genesisHash: null,
-        seq: 0n,
-      });
+      mockFromBinary.mockReturnValue({ deviceId: devId, genesisHash: new Uint8Array(0) });
       mockQueryHeaders.mockResolvedValue(new Uint8Array([1]));
 
-      await expect(headerService.fetchHeaders()).rejects.toThrow(/invalid chainTip length/);
+      await expect(headerService.fetchHeaders()).rejects.toThrow(/invalid genesisHash length/);
     });
   });
 
   describe('createPbHeaders', () => {
-    it('constructs proto Headers with all fields', () => {
+    it('constructs proto Headers naming the device and its genesis', () => {
       const h: TransportHeaders = {
         deviceId: new Uint8Array(32).fill(0xdd),
-        chainTip: new Uint8Array(32).fill(0xee),
         genesisHash: new Uint8Array(32).fill(0xff),
-        seq: '99',
       };
 
       const pbH = headerService.createPbHeaders(h);
-      expect(pbH).toBeDefined();
-      expect((pbH as unknown as Record<string, unknown>).seq).toBe(99n);
-    });
-
-    it('omits genesisHash when null', () => {
-      const h: TransportHeaders = {
-        deviceId: new Uint8Array(32).fill(0x11),
-        chainTip: new Uint8Array(32).fill(0x22),
-        genesisHash: null,
-        seq: '0',
-      };
-
-      const pbH = headerService.createPbHeaders(h);
-      expect((pbH as unknown as Record<string, unknown>).genesisHash).toBeUndefined();
+      expect(pbH.deviceId).toEqual(h.deviceId);
+      expect(pbH.genesisHash).toEqual(h.genesisHash);
     });
   });
 });

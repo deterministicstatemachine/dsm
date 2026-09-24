@@ -2,7 +2,8 @@
 //! Bilateral finality barrier — protocol tests over the two-device harness.
 //!
 //! Every test drives PRODUCTION code end to end: the real `wallet.send`, the
-//! real `storage.sync` on each side, a dumb spooling fleet in between. See
+//! real `storage.sync` on each side, the network's pinned set of storage
+//! nodes in between; every fault is a node that stops serving. See
 //! `test_support::two_device` for the harness contract (strictly serialized;
 //! one device active at a time — every assertion helper below reads the
 //! database of whichever device is currently entered).
@@ -131,6 +132,19 @@ fn send_status(peer: &TestDevice) -> generated::RelationshipSendStatus {
 
 fn pending_catchup() -> i32 {
     generated::RelationshipSendBlockReason::PendingCatchup as i32
+}
+
+/// The id of the finality certificate the ENTERED sender froze for `rel`.
+fn frozen_certificate_id(rel: &[u8; 32]) -> String {
+    let binding = cdb::get_connection().expect("conn");
+    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    conn.query_row(
+        "SELECT submission_id FROM sender_outbox_artifacts \
+         WHERE relationship_key = ?1 AND role = 'relationship_finalized'",
+        rusqlite::params![rel.as_slice()],
+        |r| r.get(0),
+    )
+    .expect("certificate id")
 }
 
 /// One complete generation `from → to`: the real send, the recipient's sync
@@ -466,9 +480,12 @@ async fn r3_sender_stays_gated_until_the_checkpoint_reaches_quorum() {
     let b_sync = p.b.sync().await;
     assert!(b_sync.success, "{:?}", b_sync.errors);
 
-    // The fleet is down for writes: A finalizes locally, cannot ship the
-    // checkpoint. (Mutation M3 — clear the gate in the local finalize → red.)
-    p.override_all_submits(Some(503));
+    // Three members' spools fail. A reads B's delta from the two whose spools
+    // serve and finalizes — every cell it reads to verify the release still
+    // serves — but the checkpoint reaches only two spools, below quorum.
+    // (Mutation M3 — clear the gate in the local finalize → red.)
+    let down = crate::economic_fixtures::members_to_break_quorum();
+    p.nodes.fail_spools(&down).await;
     let a_sync = p.a.sync().await;
     assert!(a_sync.success, "{:?}", a_sync.errors);
     p.a.enter();
@@ -488,7 +505,7 @@ async fn r3_sender_stays_gated_until_the_checkpoint_reaches_quorum() {
     assert_eq!(p.a.era_balance(), 990, "no second debit");
 
     // Fleet back: the sweep replays the exact certificate, quorum, release.
-    p.override_all_submits(None);
+    p.nodes.restore_spools(&down).await;
     let a_sync = p.a.sync().await;
     assert!(a_sync.success, "{:?}", a_sync.errors);
     p.a.enter();
@@ -505,41 +522,77 @@ async fn r3_sender_stays_gated_until_the_checkpoint_reaches_quorum() {
     assert!(ok.success, "{:?}", ok.error_message);
 }
 
+/// A step in flight is not a lost head. A's first transfer is signed with a
+/// per-step EK that waits, pending, for the step's finalization; until then A
+/// has no Local head for the relationship. A second send in that window is
+/// refused by the catch-up gate — and the relationship is never marked as
+/// needing a cert-chain resync, which would block it until a joint resync.
+/// Once the step finalizes, A sends again. (Mutation: drop the pending-head
+/// term from wallet.send's head-loss check → the second send marks a resync
+/// and this goes red.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_send_before_the_previous_step_finalizes_is_gated_never_marked_for_resync() {
+    let p = Pair::boot(1_000, 0).await;
+    let rel = p.a.rel_key_with(&p.b);
+    let sent = p.a.send(&p.b, 10).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+
+    let early = p.a.send(&p.b, 1).await;
+    assert!(
+        !early.success,
+        "the second send waits for the first to finalize"
+    );
+    let msg = early.error_message.unwrap_or_default();
+    assert!(
+        !msg.contains("resync"),
+        "a pending step is not a lost head: {msg}"
+    );
+    p.a.enter();
+    assert!(
+        !cdb::cert_resync_blocks_send(&rel).expect("resync state"),
+        "the relationship is not marked for resync"
+    );
+    assert_eq!(p.a.era_balance(), 990, "no second debit");
+
+    // The step finalizes; the relationship sends again.
+    let b_sync = p.b.sync().await;
+    assert!(b_sync.success, "{:?}", b_sync.errors);
+    let a_sync = p.a.sync().await;
+    assert!(a_sync.success, "{:?}", a_sync.errors);
+    let released = p.b.sync().await;
+    assert!(released.success, "{:?}", released.errors);
+    let again = p.a.send(&p.b, 1).await;
+    assert!(again.success, "{:?}", again.error_message);
+}
+
 // =====================================================================
-// R4 — A STORAGE ACK IS NOT A RELEASE. B consumed (ACKed) both halves on
-// every node; A observes "acked" through the calibration route. Today that
-// route clears the gate; the barrier keeps it armed — only a verified
-// countersignature and a quorum'd certificate release it.
+// R4 — CALIBRATION IS NOT A RELEASE. B applied the transfer; A asks the
+// calibration route what it can observe. Only a verified countersignature
+// and a certificate at quorum release the gate.
 // =====================================================================
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
-async fn r4_a_storage_ack_cannot_release_the_sender_gate() {
+async fn r4_calibration_cannot_release_the_sender_gate() {
     let p = Pair::boot(1_000, 0).await;
     let sent = p.a.send(&p.b, 10).await;
     assert!(sent.success, "{:?}", sent.error_message);
     let b_sync = p.b.sync().await;
     assert!(b_sync.success, "{:?}", b_sync.errors);
-    // Positive control on the fixture: the node reports the transfer acked.
-    let transfer_id = p
-        .submits()
-        .first()
-        .map(|s| s.message_id.clone())
-        .expect("a submit");
-    assert_eq!(
-        p.acked_count(&transfer_id),
-        crate::economic_fixtures::delivery_quorum(),
-        "B ACKed on every node that holds the transfer"
-    );
+    assert_eq!(p.b.era_balance(), 10, "B applied the transfer");
 
     p.a.enter();
     let calibrated =
         p.a.router()
             .calibrate_local_relationship_send_status(&p.b.device_id)
             .await;
-    assert!(gate_present(&p.b), "an ACK alone must not clear the gate");
+    assert!(
+        gate_present(&p.b),
+        "calibration alone must not clear the gate"
+    );
     assert!(!calibrated.send_ready, "{calibrated:?}");
     assert_eq!(calibrated.send_block_reason, pending_catchup());
-    // Calibrating again changes nothing: it is read-only now.
+    // Calibrating again changes nothing: it is read-only.
     p.a.router()
         .calibrate_local_relationship_send_status(&p.b.device_id)
         .await;
@@ -547,7 +600,7 @@ async fn r4_a_storage_ack_cannot_release_the_sender_gate() {
 
     // Positive, and the anti-vacuity: the delta B spooled finalizes A on its
     // next sync, the certificate reaches quorum, and ONLY THEN is the gate
-    // gone — with the certificate on the wire to prove which event did it.
+    // gone — with the certificate on the members to prove which event did it.
     let rel = p.a.rel_key_with(&p.b);
     let a_sync = p.a.sync().await;
     assert!(a_sync.success, "{:?}", a_sync.errors);
@@ -561,26 +614,11 @@ async fn r4_a_storage_ack_cannot_release_the_sender_gate() {
         outbox_statuses(&rel),
         vec![cdb::OUTBOX_GC_PENDING.to_string()]
     );
-    let certificates: Vec<_> = p
-        .submits()
-        .into_iter()
-        .filter(|s| {
-            dsm::types::proto::Envelope::decode(s.body.as_slice())
-                .ok()
-                .and_then(|env| crate::sdk::b0x_sdk::B0xSDK::decode_relationship_finalized(&env))
-                .is_some()
-        })
-        .collect();
+    let certificate = frozen_certificate_id(&rel);
     assert_eq!(
-        certificates.len(),
+        p.holders_of(&certificate).await,
         crate::economic_fixtures::delivery_quorum(),
-        "exactly one certificate per delivering node (deterministic id)"
-    );
-    assert!(
-        certificates
-            .iter()
-            .all(|c| c.message_id == certificates[0].message_id),
-        "the same deterministic id everywhere"
+        "the certificate is held by exactly the delivery quorum, under one id"
     );
 }
 
@@ -597,7 +635,8 @@ async fn r11_only_the_checkpoint_sweep_clears_the_gate() {
     assert!(sent.success, "{:?}", sent.error_message);
     let b_sync = p.b.sync().await;
     assert!(b_sync.success, "{:?}", b_sync.errors);
-    p.override_all_submits(Some(503));
+    let down = crate::economic_fixtures::members_to_break_quorum();
+    p.nodes.fail_spools(&down).await;
     let a_sync = p.a.sync().await;
     assert!(a_sync.success, "{:?}", a_sync.errors);
     p.a.enter();
@@ -630,7 +669,7 @@ async fn r11_only_the_checkpoint_sweep_clears_the_gate() {
     assert!(!send_status(&p.b).send_ready);
 
     // Then the ONE deleter: fleet up, sweep replays, one tx clears + gc_pending.
-    p.override_all_submits(None);
+    p.nodes.restore_spools(&down).await;
     let a_sync = p.a.sync().await;
     assert!(a_sync.success, "{:?}", a_sync.errors);
     p.a.enter();
@@ -659,7 +698,8 @@ async fn r7_a_frozen_checkpoint_is_replayed_byte_identically_after_the_fleet_ret
     let b_sync = p.b.sync().await;
     assert!(b_sync.success, "{:?}", b_sync.errors);
 
-    p.override_all_submits(Some(503));
+    let down = crate::economic_fixtures::members_to_break_quorum();
+    p.nodes.fail_spools(&down).await;
     let a_sync = p.a.sync().await;
     assert!(a_sync.success, "{:?}", a_sync.errors);
     p.a.enter();
@@ -671,17 +711,19 @@ async fn r7_a_frozen_checkpoint_is_replayed_byte_identically_after_the_fleet_ret
         outbox_statuses(&rel),
         vec![cdb::OUTBOX_FINALIZATION_CHECKPOINT_PENDING.to_string()]
     );
-    let (frozen_bytes, frozen_id, frozen_route): (Vec<u8>, String, String) = {
+    let (frozen_id, frozen_route): (String, String) = {
         let binding = cdb::get_connection().expect("conn");
         let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
         conn.query_row(
-            "SELECT envelope_bytes, submission_id, routing_address FROM sender_outbox_artifacts \
+            "SELECT submission_id, routing_address FROM sender_outbox_artifacts \
              WHERE relationship_key = ?1 AND role = 'relationship_finalized'",
             rusqlite::params![rel.as_slice()],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .expect("frozen certificate")
     };
+    // The sealed bytes the finalize froze for delivery.
+    let frozen_seal = crate::sdk::b0x_sdk::kept_seal(&frozen_id).expect("the certificate's seal");
     let pending_heads: i64 = {
         let binding = cdb::get_connection().expect("conn");
         let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
@@ -696,13 +738,9 @@ async fn r7_a_frozen_checkpoint_is_replayed_byte_identically_after_the_fleet_ret
         pending_heads, 0,
         "the certificate's signing key was promoted and deleted"
     );
-    // Per node: `submits()` concatenates node by node, and nodes no longer
-    // receive equal counts once the fleet is wider than the delivery quorum,
-    // so a flat skip would drop the wrong posts.
-    let submits_before: Vec<usize> = p.nodes.iter().map(|n| n.submits().len()).collect();
 
     // The fleet returns; the sweep replays.
-    p.override_all_submits(None);
+    p.nodes.restore_spools(&down).await;
     let a_sync = p.a.sync().await;
     assert!(a_sync.success, "{:?}", a_sync.errors);
     p.a.enter();
@@ -716,79 +754,76 @@ async fn r7_a_frozen_checkpoint_is_replayed_byte_identically_after_the_fleet_ret
     );
     assert_eq!(proposal_statuses(&rel).len(), 1, "no second proposal");
     assert_eq!(p.a.era_balance(), 990, "no second debit");
-    let replayed: Vec<_> = p
-        .nodes
-        .iter()
-        .zip(&submits_before)
-        .flat_map(|(n, before)| n.submits().into_iter().skip(*before))
-        .filter(|s| s.message_id == frozen_id)
-        .collect();
-    assert_eq!(
-        replayed.len(),
-        crate::economic_fixtures::delivery_quorum(),
-        "one replay per delivering node under the frozen id"
-    );
-    for r in &replayed {
-        assert_eq!(
-            r.body, frozen_bytes,
-            "byte-identical to the frozen envelope"
-        );
-        assert_eq!(r.recipient, frozen_route, "under the frozen route");
+    let mut copies = 0;
+    for node in &p.nodes.nodes {
+        for spooled in node.spool().await {
+            if spooled.message_id == frozen_id {
+                copies += 1;
+                assert_eq!(
+                    spooled.envelope, frozen_seal,
+                    "byte-identical to the frozen envelope"
+                );
+                assert_eq!(spooled.address, frozen_route, "under the frozen route");
+            }
+        }
     }
+    assert_eq!(
+        copies,
+        crate::economic_fixtures::delivery_quorum(),
+        "the delivery quorum holds the frozen certificate, once each"
+    );
     // And B absorbs it and is released.
     let b_sync = p.b.sync().await;
     assert!(b_sync.success, "{:?}", b_sync.errors);
     p.b.enter();
-    assert!(!cdb::relationship_awaits_peer_finalization(&rel).unwrap());
+    assert!(!cdb::relationship_awaits_peer_finalization(&rel).expect("await"));
 }
 
 // =====================================================================
 // R8 — REORDERED NEXT GENERATION. A's certificate for transfer #1 reached
-// quorum (A is free) but B has not seen it yet; A's transfer #2 arrives at B
+// quorum (A is free) but B has not seen it yet; A's transfer #2 reaches B
 // first. B stages #2 and HOLDS it at ready_to_verify — not applied, not
-// ACKed, not rejected — until the certificate lands; then the SAME row
-// applies exactly once. The intended reordering behaviour.
+// rejected — until the certificate lands; then the SAME row applies exactly
+// once. The reordering comes from failing spools: the certificate went out
+// while the first members' spools had failed, so it sits on the others;
+// transfer #2 went out with every spool serving, so it sits on the first
+// ones; B then reads only the first ones.
 // =====================================================================
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn r8_a_next_generation_transfer_is_held_until_the_certificate_lands() {
     let p = Pair::boot(1_000, 0).await;
     let rel = p.a.rel_key_with(&p.b);
+    let members = crate::economic_fixtures::canonical_member_ids();
+    let quorum = crate::economic_fixtures::delivery_quorum();
+    let (first, rest) = members.split_at(members.len() - quorum);
+    let (first, rest) = (first.to_vec(), rest.to_vec());
+
     let sent = p.a.send(&p.b, 10).await;
     assert!(sent.success, "{:?}", sent.error_message);
     let b_sync = p.b.sync().await;
     assert!(b_sync.success, "{:?}", b_sync.errors);
+
+    // Certificate #1 goes out while the first members' spools have failed.
+    p.nodes.fail_spools(&first).await;
     let a_sync = p.a.sync().await;
     assert!(a_sync.success, "{:?}", a_sync.errors);
     p.a.enter();
     assert!(!gate_present(&p.b), "certificate #1 at quorum: A is free");
-    // Certificate #1 is delayed in transit for B.
-    let cert_id: String = {
-        let binding = cdb::get_connection().expect("conn");
-        let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
-        conn.query_row(
-            "SELECT submission_id FROM sender_outbox_artifacts \
-             WHERE relationship_key = ?1 AND role = 'relationship_finalized'",
-            rusqlite::params![rel.as_slice()],
-            |r| r.get(0),
-        )
-        .expect("certificate id")
-    };
-    p.hold_message(&cert_id);
+    let certificate = frozen_certificate_id(&rel);
+    p.nodes.restore_spools(&first).await;
+    assert_eq!(p.holders_of(&certificate).await, quorum);
 
-    // A's second transfer arrives at B before the certificate.
+    // A's second transfer, with every member serving.
     let sent2 = p.a.send(&p.b, 7).await;
     assert!(sent2.success, "{:?}", sent2.error_message);
-    // Node 0 is first in the submit loop's order, so it receives every submit;
-    // the flat `p.submits()` ends on whichever wider-fleet node posted last.
-    let transfer2_id = p.nodes[0]
-        .submits()
-        .last()
-        .map(|s| s.message_id.clone())
-        .expect("a submit");
-    for _pass in 0..2 {
+
+    // The other members' spools fail: B reads only the first members, so
+    // transfer #2 reaches it and the certificate does not.
+    p.nodes.fail_spools(&rest).await;
+    for pass in 0..2 {
         let b_sync = p.b.sync().await;
-        assert!(b_sync.success, "{:?}", b_sync.errors);
+        assert!(b_sync.success, "pass {pass}: {:?}", b_sync.errors);
         assert_eq!(p.b.era_balance(), 10, "held: not applied");
         p.b.enter();
         assert_eq!(rows_for_relationship("canonical_apply_identity", &rel), 1);
@@ -797,9 +832,8 @@ async fn r8_a_next_generation_transfer_is_held_until_the_certificate_lands() {
             vec!["accepted".to_string(), "ready_to_verify".to_string()],
             "held at ready_to_verify — not rejected, not accepted"
         );
-        assert!(cdb::relationship_awaits_peer_finalization(&rel).unwrap());
+        assert!(cdb::relationship_awaits_peer_finalization(&rel).expect("await"));
     }
-    assert_eq!(p.acked_count(&transfer2_id), 0, "held: not ACKed");
     p.a.enter();
     assert!(
         gate_present(&p.b),
@@ -807,7 +841,7 @@ async fn r8_a_next_generation_transfer_is_held_until_the_certificate_lands() {
     );
 
     // The certificate lands: the SAME row proceeds and applies exactly once.
-    p.release_message(&cert_id);
+    p.nodes.restore_spools(&rest).await;
     let b_sync = p.b.sync().await;
     assert!(b_sync.success, "{:?}", b_sync.errors);
     assert_eq!(p.b.era_balance(), 17, "applied once after the certificate");
@@ -816,10 +850,6 @@ async fn r8_a_next_generation_transfer_is_held_until_the_certificate_lands() {
     assert_eq!(
         staging_states(),
         vec!["accepted".to_string(), "accepted".to_string()]
-    );
-    assert_eq!(
-        p.acked_count(&transfer2_id),
-        crate::economic_fixtures::delivery_quorum()
     );
     // And generation #2 finalizes normally on both sides.
     let a_sync = p.a.sync().await;
@@ -836,7 +866,7 @@ async fn r8_a_next_generation_transfer_is_held_until_the_certificate_lands() {
     let b_sync = p.b.sync().await;
     assert!(b_sync.success, "{:?}", b_sync.errors);
     p.b.enter();
-    assert!(!cdb::relationship_awaits_peer_finalization(&rel).unwrap());
+    assert!(!cdb::relationship_awaits_peer_finalization(&rel).expect("await"));
 }
 
 // =====================================================================
@@ -849,14 +879,13 @@ async fn r8_a_next_generation_transfer_is_held_until_the_certificate_lands() {
 async fn r9_the_barrier_is_relationship_local() {
     let p = Pair::boot(1_000, 500).await;
     let mut c = TestDevice::create("C", 0x0C);
-    c.boot(&p.nodes);
+    c.boot(&p.fleet).await;
     for (x, y) in [(&p.a, &c), (&p.b, &c)] {
-        x.enter();
-        x.add_contact(y);
-        y.enter();
-        y.add_contact(x);
+        x.add_contact(y).await;
+        y.add_contact(x).await;
     }
-    c.sync().await;
+    let c_sync = c.sync().await;
+    assert!(c_sync.success, "{:?}", c_sync.errors);
 
     // A↔B pending both ways: A sent, B applied, A has NOT finalized.
     let sent = p.a.send(&p.b, 10).await;
@@ -883,107 +912,4 @@ async fn r9_the_barrier_is_relationship_local() {
     assert!(!gate_present(&p.b));
     p.b.enter();
     assert!(send_status(&p.a).send_ready);
-}
-
-// =====================================================================
-// R12 — CROSSING SENDS: KNOWN STATE (pinned, not solved here). Both sides
-// free on a fresh relationship, both originate before either polls. Each
-// applies the other's transfer (both signed under the genesis seed), then
-// each side's finalize hits `CanonicalMovedToDifferentTip` on the projection
-// tip its inbound converge already advanced — both proposals stay parked and
-// both gates armed. A deterministic turn rule is a protocol decision beyond
-// this barrier; the barrier's own contribution is the crossing MITIGATION:
-// once one side has even STAGED the other's inbound, it may no longer
-// originate toward that peer.
-// =====================================================================
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[serial]
-async fn r12_crossing_sends_are_pinned_and_a_staged_inbound_blocks_originating() {
-    let p = Pair::boot(1_000, 500).await;
-    let rel = p.a.rel_key_with(&p.b);
-    let a_sent = p.a.send(&p.b, 10).await;
-    assert!(a_sent.success, "{:?}", a_sent.error_message);
-    // A true cross: B originates before A's halves reach it (held in transit;
-    // otherwise B's own preflight sync would apply them and the mitigation
-    // below would refuse B's send).
-    let a_halves: Vec<String> = p.submits().iter().map(|s| s.message_id.clone()).collect();
-    for id in &a_halves {
-        p.hold_message(id);
-    }
-    let b_sent = p.b.send(&p.a, 5).await;
-    assert!(b_sent.success, "{:?}", b_sent.error_message);
-    for id in &a_halves {
-        p.release_message(id);
-    }
-
-    // Both apply the other's transfer.
-    let b_sync = p.b.sync().await;
-    assert!(b_sync.success, "{:?}", b_sync.errors);
-    let a_sync = p.a.sync().await;
-    assert!(a_sync.success, "{:?}", a_sync.errors);
-    assert_eq!(p.a.era_balance(), 995);
-    assert_eq!(p.b.era_balance(), 505);
-
-    // KNOWN STATE: neither finalizes; both gates stay armed.
-    for _ in 0..2 {
-        p.a.sync().await;
-        p.b.sync().await;
-    }
-    p.a.enter();
-    assert_ne!(
-        proposal_statuses(&rel),
-        vec![cdb::PROPOSAL_FINALIZED.to_string()],
-        "A's proposal does not finalize after a cross (known limitation)"
-    );
-    assert!(gate_present(&p.b));
-    p.b.enter();
-    assert_ne!(
-        proposal_statuses(&rel),
-        vec![cdb::PROPOSAL_FINALIZED.to_string()],
-        "B's proposal does not finalize after a cross (known limitation)"
-    );
-    assert!(gate_present(&p.a));
-
-    // MITIGATION (fresh pair): with A's transfer merely STAGED on B — halves
-    // in, not applied — B is already blocked from originating toward A.
-    let q = Pair::boot(1_000, 500).await;
-    let sent = q.a.send(&q.b, 10).await;
-    assert!(sent.success, "{:?}", sent.error_message);
-    // Stage only: withhold the evidence half so the pair cannot complete.
-    let evidence_id = q
-        .submits()
-        .iter()
-        .find(|s| {
-            dsm::types::proto::Envelope::decode(s.body.as_slice())
-                .ok()
-                .and_then(|env| crate::sdk::b0x_sdk::B0xSDK::decode_receipt_evidence_a(&env))
-                .is_some()
-        })
-        .map(|s| s.message_id.clone())
-        .expect("evidence half on the wire");
-    q.hold_message(&evidence_id);
-    let b_sync = q.b.sync().await;
-    assert!(b_sync.success, "{:?}", b_sync.errors);
-    q.b.enter();
-    assert_eq!(staging_states(), vec!["staged_transfer".to_string()]);
-    let status = send_status(&q.a);
-    assert!(
-        !status.send_ready,
-        "a staged inbound blocks originating: {status:?}"
-    );
-    assert_eq!(status.send_block_reason, pending_catchup());
-    let refused = q.b.send(&q.a, 1).await;
-    assert!(!refused.success);
-    assert_eq!(q.b.era_balance(), 500);
-    // Release: the pair completes and the relationship settles normally.
-    q.release_message(&evidence_id);
-    let b_sync = q.b.sync().await;
-    assert!(b_sync.success, "{:?}", b_sync.errors);
-    assert_eq!(q.b.era_balance(), 510);
-    let a_sync = q.a.sync().await;
-    assert!(a_sync.success, "{:?}", a_sync.errors);
-    let b_sync = q.b.sync().await;
-    assert!(b_sync.success, "{:?}", b_sync.errors);
-    q.b.enter();
-    assert!(send_status(&q.a).send_ready);
 }

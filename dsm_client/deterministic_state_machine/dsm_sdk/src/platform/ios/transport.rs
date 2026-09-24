@@ -18,7 +18,6 @@ use crate::generated::{
     IngressRequest, IngressResponse, InitializeIdentityContextOp, InitializeSdkOp,
     SetStorageBaseDirOp, StartupRequest, StartupResponse,
 };
-use crate::util::deterministic_time;
 
 /// Process envelope with protobuf-native transport (iOS/Swift optimized)
 ///
@@ -356,13 +355,10 @@ pub extern "C" fn dsm_initialize_sdk_context(
 /// Process envelope with native protobuf handling (internal function)
 fn process_envelope_native(input_bytes: &[u8]) -> Vec<u8> {
     // 1) Decode Envelope from raw protobuf bytes
-    let message_id = match crate::envelope::from_canonical_bytes(input_bytes) {
-        Ok(envelope_in) => envelope_in.message_id,
-        Err(e) => {
-            error!("iOS transport: Envelope decode failed: {}", e);
-            return create_error_envelope_bytes(&format!("Envelope decode failed: {}", e));
-        }
-    };
+    if let Err(e) = crate::envelope::from_canonical_bytes(input_bytes) {
+        error!("iOS transport: Envelope decode failed: {}", e);
+        return create_error_envelope_bytes(&format!("Envelope decode failed: {}", e));
+    }
 
     // 2) Ensure storage is loaded (critical for iOS)
     crate::sdk::app_state::AppState::ensure_storage_loaded();
@@ -390,7 +386,7 @@ fn process_envelope_native(input_bytes: &[u8]) -> Vec<u8> {
         }
         Some(ingress_response::Result::Error(err)) => {
             error!("iOS transport: ingress failed: {}", err.message);
-            create_error_envelope(message_id, err.code, &err.message).encode_to_vec()
+            create_error_envelope(err.code, &err.message).encode_to_vec()
         }
         None => {
             error!("iOS transport: ingress returned empty response");
@@ -399,75 +395,23 @@ fn process_envelope_native(input_bytes: &[u8]) -> Vec<u8> {
     }
 }
 
-/// Create error envelope from message
+/// The local answer for a request this shim could not take.
 fn create_error_envelope_bytes(message: &str) -> Vec<u8> {
-    let tick = deterministic_time::tick();
-    let mut message_id = Vec::with_capacity(16);
-    message_id.extend_from_slice(&tick.to_be_bytes());
-    message_id.extend_from_slice(&tick.to_be_bytes());
-    let envelope = create_error_envelope(message_id, 1, message);
-
-    envelope.encode_to_vec()
+    create_error_envelope(1, message).encode_to_vec()
 }
 
-fn hash32(domain: &str, preimage: &[u8]) -> Vec<u8> {
-    dsm::crypto::blake3::domain_hash(domain, preimage)
-        .as_bytes()
-        .to_vec()
-}
-
-fn bytes32_or_hash(value: Option<Vec<u8>>, domain: &str, preimage: &[u8]) -> Vec<u8> {
-    value
-        .filter(|bytes| bytes.len() == 32)
-        .unwrap_or_else(|| hash32(domain, preimage))
-}
-
-fn canonical_message_id(input: Vec<u8>, preimage: &[u8]) -> Vec<u8> {
-    if input.len() == 16 {
-        input
-    } else {
-        hash32("DSM/ios/error/message-id", preimage)[..16].to_vec()
-    }
-}
-
-/// Create strict Envelope v3 error response.
-fn create_error_envelope(message_id: Vec<u8>, code: u32, message: &str) -> Envelope {
-    use prost::bytes::Bytes;
-
-    let mut preimage = Vec::new();
-    preimage.extend_from_slice(&code.to_le_bytes());
-    preimage.extend_from_slice(message.as_bytes());
-    preimage.extend_from_slice(&message_id);
-
-    Envelope {
-        version: 3,
-        headers: Some(crate::generated::Headers {
-            device_id: bytes32_or_hash(
-                crate::sdk::app_state::AppState::get_device_id(),
-                "DSM/ios/error/device",
-                &preimage,
-            ),
-            chain_tip: hash32("DSM/ios/error/chain-tip", &preimage),
-            genesis_hash: bytes32_or_hash(
-                crate::sdk::app_state::AppState::get_genesis_hash(),
-                "DSM/ios/error/genesis",
-                &preimage,
-            ),
-            seq: code as u64,
-        }),
-        message_id: canonical_message_id(message_id, &preimage),
-        payload: Some(crate::generated::envelope::Payload::Error(
-            crate::generated::Error {
-                code,
-                message: message.to_string(),
-                context: Bytes::new().to_vec(),
-                source_tag: 0,
-                is_recoverable: false,
-                debug_b32: String::new(),
-            },
-        )),
-        ..Default::default()
-    }
+/// A local answer carrying an error: no sender headers, no message id.
+fn create_error_envelope(code: u32, message: &str) -> Envelope {
+    crate::envelope::local_answer(crate::generated::envelope::Payload::Error(
+        crate::generated::Error {
+            code,
+            message: message.to_string(),
+            context: Vec::new(),
+            source_tag: 0,
+            is_recoverable: false,
+            debug_b32: String::new(),
+        },
+    ))
 }
 
 #[cfg(test)]
@@ -477,12 +421,11 @@ mod tests {
 
     #[test]
     fn test_error_envelope_creation() {
-        let message_id = vec![1; 16];
-        let envelope = create_error_envelope(message_id.clone(), 500, "test error");
+        let envelope = create_error_envelope(500, "test error");
 
         assert_eq!(envelope.version, 3);
-        assert_eq!(envelope.message_id, message_id);
-        assert!(envelope.headers.is_some());
+        assert!(envelope.message_id.is_empty());
+        assert!(envelope.headers.is_none());
 
         if let Some(envelope::Payload::Error(err)) = envelope.payload {
             assert_eq!(err.code, 500);
@@ -501,7 +444,7 @@ mod tests {
         // Should return error envelope bytes
         assert!(!result.is_empty());
 
-        let decoded = match crate::envelope::from_canonical_bytes(&result[..]) {
+        let decoded = match crate::envelope::local_answer_from_canonical_bytes(&result[..]) {
             Ok(v) => v,
             Err(e) => panic!("Should decode to error envelope: {e}"),
         };

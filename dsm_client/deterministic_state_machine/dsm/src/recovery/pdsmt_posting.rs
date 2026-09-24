@@ -64,10 +64,8 @@ fn fixed32(b: &[u8], field: &str) -> Result<[u8; 32], DsmError> {
 /// Verify a single `SparseMerkleTree` inclusion: the `proof_bytes` must decode, be for
 /// exactly `key`, carry exactly `Some(value)`, and recompute `root`. Both the PDSMT
 /// (`pd_smt_root`) and the leaf index (`leaf_index_root`) are `SparseMerkleTree`s, so
-/// both use this verifier (format: `SmtInclusionProof::to_bytes`). NOTE: this is a
-/// distinct proof system from `verification::proof_primitives::verify_smt_inclusion_proof_bytes`
-/// (protobuf `SmtProof`, used for cross-device receipt proofs); the two are not
-/// interchangeable. We pin to `SparseMerkleTree` here because `pd_smt_root` IS a
+/// both use this verifier (format: `SmtInclusionProof::to_bytes`, the same
+/// encoding receipt relationship paths use), because `pd_smt_root` IS a
 /// `SparseMerkleTree` root (`device_state.rs`).
 ///
 /// `pub(crate)` so the recovery-evidence path
@@ -470,11 +468,7 @@ pub fn build_pdsmt_snapshot(
             inclusion_proof_to_pd_smt_root: Vec::new(),
             inclusion_proof_to_leaf_index_root: Vec::new(),
         };
-        index
-            .update_leaf(rel_key, &leaf.committed_digest())
-            .map_err(|e| {
-                DsmError::invalid_operation(format!("pdsmt snapshot: leaf index update: {e}"))
-            })?;
+        index.update_leaf(rel_key, &leaf.committed_digest());
         leaves.push(leaf);
     }
     let leaf_index_root = *index.root();
@@ -682,13 +676,13 @@ mod tests {
     fn leaf_with_real_proofs() -> (PostedPdsmtLeafRecord, [u8; 32], [u8; 32]) {
         let mut l = leaf(ValueCapability::Yes);
         let mut pd = SparseMerkleTree::new();
-        pd.update_leaf(&l.rel_key, &l.current_tip).unwrap();
+        pd.update_leaf(&l.rel_key, &l.current_tip);
         let pd_root = *pd.root();
         let tip_proof = pd.get_inclusion_proof(&l.rel_key, 256).unwrap().to_bytes();
 
         let cd = l.committed_digest();
         let mut idx = SparseMerkleTree::new();
-        idx.update_leaf(&l.rel_key, &cd).unwrap();
+        idx.update_leaf(&l.rel_key, &cd);
         let idx_root = *idx.root();
         let idx_proof = idx.get_inclusion_proof(&l.rel_key, 256).unwrap().to_bytes();
 
@@ -785,9 +779,7 @@ mod tests {
 
     #[test]
     fn build_pdsmt_snapshot_from_real_device_state_end_to_end() {
-        use crate::core::bilateral_transaction_manager::{
-            compute_smt_key, initial_chain_tip_from_device_ids,
-        };
+        use crate::core::bilateral_transaction_manager::compute_smt_key;
         use crate::types::device_state::{BalanceDelta, BalanceDirection, DeviceState};
         use crate::types::operations::Operation;
         use crate::types::token_types::Balance;
@@ -807,11 +799,13 @@ mod tests {
         let c_yes = [0xC1; 32];
         let rk_yes = compute_smt_key(&owner, &c_yes);
         let dev = dev
+            .establish_relationship(c_yes)
+            .expect("establish")
             .advance(
                 rk_yes,
                 c_yes,
                 Operation::Burn {
-                    amount: Balance::from_state(10, [0u8; 32]),
+                    amount: Balance::amount(10),
                     token_id: b"ERA".to_vec(),
                     policy_commit: [0xF1; 32],
                     proof_of_ownership: vec![],
@@ -822,7 +816,6 @@ mod tests {
                     direction: BalanceDirection::Debit,
                     amount: 10,
                 }],
-                Some(initial_chain_tip_from_device_ids(&owner, &c_yes)),
                 None,
                 None,
             )
@@ -833,6 +826,8 @@ mod tests {
         let c_no = [0xC2; 32];
         let rk_no = compute_smt_key(&owner, &c_no);
         let dev = dev
+            .establish_relationship(c_no)
+            .expect("establish")
             .advance(
                 rk_no,
                 c_no,
@@ -843,7 +838,6 @@ mod tests {
                     signature: vec![],
                 },
                 &[],
-                Some(initial_chain_tip_from_device_ids(&owner, &c_no)),
                 None,
                 None,
             )

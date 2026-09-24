@@ -3,8 +3,8 @@
 //! Formal verification & property-test infrastructure for DSM (issue #162 split).
 //!
 //! Issue #162 carved this out of the top-level `verification.rs` so the
-//! production verification namespace (`proof_primitives`, `receipt_verification`,
-//! `smt_replace_witness`) is no longer mixed with proptest scaffolding and
+//! production verification namespace (`proof_primitives`, `receipt_verification`)
+//! is no longer mixed with proptest scaffolding and
 //! invariant-checking machinery. Nothing in this module is on a runtime
 //! protocol path — it exists for:
 //!

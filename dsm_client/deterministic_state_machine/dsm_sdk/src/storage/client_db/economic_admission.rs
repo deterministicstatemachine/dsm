@@ -69,7 +69,6 @@ pub fn put_pending_admission_with_conn(
     tx: &Transaction<'_>,
     device_id: &[u8; 32],
     pending: &PendingEconomicAdmission,
-    now: i64,
 ) -> Result<()> {
     // `Prepared` is never durable: before acceptance nothing changed, so
     // recovery has nothing to finish — and a Prepared record has no
@@ -86,8 +85,8 @@ pub fn put_pending_admission_with_conn(
              device_id, kind, fenced_asset, lifecycle_state, economic_position,
              pre_economic_root, post_economic_root, operation_digest,
              accepted_substrate_addr, admission_manifest_addr, c_dsm_plus,
-             embedded_parent, updated_at)
-         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)
+             embedded_parent)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
          ON CONFLICT(device_id) DO UPDATE SET
              kind=excluded.kind,
              fenced_asset=excluded.fenced_asset,
@@ -99,8 +98,7 @@ pub fn put_pending_admission_with_conn(
              accepted_substrate_addr=excluded.accepted_substrate_addr,
              admission_manifest_addr=excluded.admission_manifest_addr,
              c_dsm_plus=excluded.c_dsm_plus,
-             embedded_parent=excluded.embedded_parent,
-             updated_at=excluded.updated_at",
+             embedded_parent=excluded.embedded_parent",
         params![
             device_id.as_slice(),
             kind_code(&pending.kind),
@@ -114,7 +112,6 @@ pub fn put_pending_admission_with_conn(
             coords.admission_manifest_addr.as_slice(),
             coords.c_dsm_plus.as_slice(),
             coords.embedded_parent.as_slice(),
-            now,
         ],
     )?;
     Ok(())

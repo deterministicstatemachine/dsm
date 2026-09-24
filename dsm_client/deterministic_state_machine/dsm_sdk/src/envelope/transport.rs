@@ -20,8 +20,31 @@ pub fn validate_envelope_v3(env: &Envelope) -> Result<(), String> {
     Ok(())
 }
 
+/// Decode the bytes of an addressed envelope (from a sender to a receiver).
 pub fn from_canonical_bytes(bytes: &[u8]) -> Result<Envelope, String> {
     dsm::envelope::validate_canonical_envelope_v3_bytes(bytes).map_err(|e| e.to_string())?;
+    decode_validated(bytes)
+}
+
+/// Decode a local answer: unframed Envelope v3 bytes this device's Core or
+/// SDK returned to its own caller, with no headers and no message id.
+pub fn local_answer_from_canonical_bytes(bytes: &[u8]) -> Result<Envelope, String> {
+    dsm::envelope::validate_local_answer_v3_bytes(bytes).map_err(|e| e.to_string())?;
+    decode_validated(bytes)
+}
+
+/// A local answer carrying `payload`. It makes no sender claim and names no
+/// message, so it carries no headers and no message id.
+pub fn local_answer(payload: crate::generated::envelope::Payload) -> Envelope {
+    Envelope {
+        version: 3,
+        headers: None,
+        message_id: Vec::new(),
+        payload: Some(payload),
+    }
+}
+
+fn decode_validated(bytes: &[u8]) -> Result<Envelope, String> {
     let env = Envelope::decode(bytes).map_err(|e| format!("Failed to decode envelope: {e}"))?;
     validate_envelope_v3(&env)?;
     if env.encode_to_vec() != bytes {
@@ -30,8 +53,8 @@ pub fn from_canonical_bytes(bytes: &[u8]) -> Result<Envelope, String> {
     Ok(env)
 }
 
-/// The error code carried by a transport envelope, or `None` for anything that
-/// is not an Error envelope.
+/// The error code carried by a local answer, or `None` for anything that is
+/// not an Error local answer.
 ///
 /// Envelopes cross the JNI boundary FRAMED: a leading `0x03` byte precedes the
 /// canonical v3 bytes (`processEnvelopeV3` returns the ingress response framed,
@@ -47,7 +70,7 @@ pub fn error_code_of_transport_bytes(bytes: &[u8]) -> Option<u32> {
     } else {
         bytes
     };
-    match from_canonical_bytes(bytes) {
+    match local_answer_from_canonical_bytes(bytes) {
         Ok(env) => match env.payload {
             Some(crate::generated::envelope::Payload::Error(e)) => Some(e.code),
             _ => None,
@@ -66,24 +89,14 @@ mod tests {
     #[test]
     fn an_error_envelope_is_detected_framed_and_bare() {
         use crate::generated as pb;
-        let error_env = Envelope {
-            version: 3,
-            headers: Some(pb::Headers {
-                device_id: vec![1; 32],
-                chain_tip: vec![2; 32],
-                genesis_hash: vec![3; 32],
-                seq: 0,
-            }),
-            message_id: vec![7; 16],
-            payload: Some(pb::envelope::Payload::Error(pb::Error {
-                code: 470,
-                message: "proof too large".to_string(),
-                context: Vec::new(),
-                source_tag: 0,
-                is_recoverable: false,
-                debug_b32: String::new(),
-            })),
-        };
+        let error_env = local_answer(pb::envelope::Payload::Error(pb::Error {
+            code: 470,
+            message: "proof too large".to_string(),
+            context: Vec::new(),
+            source_tag: 0,
+            is_recoverable: false,
+            debug_b32: String::new(),
+        }));
         let bare = to_canonical_bytes(&error_env);
         let mut framed = vec![0x03];
         framed.extend_from_slice(&bare);
@@ -115,9 +128,7 @@ mod tests {
             version: 3,
             headers: Some(Headers {
                 device_id: vec![0x01; 32],
-                chain_tip: vec![0x02; 32],
                 genesis_hash: vec![0x03; 32],
-                seq: 42,
             }),
             message_id: vec![0x04; 16],
             payload: None,
@@ -133,9 +144,7 @@ mod tests {
             version: 2,
             headers: Some(Headers {
                 device_id: vec![0x01; 32],
-                chain_tip: vec![0x02; 32],
                 genesis_hash: vec![0x03; 32],
-                seq: 1,
             }),
             message_id: vec![0x04; 16],
             payload: None,

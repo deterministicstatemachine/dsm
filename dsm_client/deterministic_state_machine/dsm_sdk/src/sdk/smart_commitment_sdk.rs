@@ -140,22 +140,6 @@ impl SmartCommitmentSDK {
                 buf.extend_from_slice(nonce);
                 Self::push_str(&mut buf, message);
             }
-            Operation::Mint {
-                amount,
-                token_id,
-                policy_commit,
-                message,
-            } => {
-                buf.extend_from_slice(b"MINT");
-                Self::push_bytes(&mut buf, token_id);
-                // The asset being minted is part of what is signed; without it
-                // a signature would not say WHICH asset it authorises. Mint
-                // carries no authorization bytes — its authority is the 0x0029
-                // admission evidence, outside the operation by construction.
-                buf.extend_from_slice(policy_commit);
-                buf.extend_from_slice(&amount.value().to_le_bytes());
-                Self::push_str(&mut buf, message);
-            }
             Operation::Burn {
                 amount,
                 token_id,
@@ -263,7 +247,7 @@ impl SmartCommitmentSDK {
         Ok(Operation::Transfer {
             token_id: commitment.token_id.as_bytes().to_vec(),
             policy_commit,
-            amount: Balance::from_state(commitment.amount, [0u8; 32]),
+            amount: Balance::amount(commitment.amount),
             recipient: commitment.recipient.as_bytes().to_vec(),
             to: commitment.recipient.as_bytes().to_vec(),
             message: "Smart commitment transfer".to_string(),
@@ -523,7 +507,7 @@ mod tests {
         Operation::Transfer {
             policy_commit: [0u8; 32],
             to_device_id: b"device_A".to_vec(),
-            amount: Balance::from_state(1000, [0u8; 32]),
+            amount: Balance::amount(1000),
             token_id: b"ROOT".to_vec(),
             mode: TransactionMode::Bilateral,
             nonce: b"nonce1".to_vec(),
@@ -537,18 +521,9 @@ mod tests {
         }
     }
 
-    fn make_mint_op() -> Operation {
-        Operation::Mint {
-            amount: Balance::from_state(500, [0u8; 32]),
-            token_id: b"ROOT".to_vec(),
-            policy_commit: dsm::core::token::builtin_policy_commit_for_token("ERA").unwrap(),
-            message: "mint".to_string(),
-        }
-    }
-
     fn make_burn_op() -> Operation {
         Operation::Burn {
-            amount: Balance::from_state(250, [0u8; 32]),
+            amount: Balance::amount(250),
             token_id: b"ROOT".to_vec(),
             policy_commit: dsm::core::token::builtin_policy_commit_for_token("ERA").unwrap(),
             proof_of_ownership: b"ownership_proof".to_vec(),
@@ -560,7 +535,7 @@ mod tests {
         Operation::Receive {
             token_id: b"ROOT".to_vec(),
             from_device_id: b"sender_dev".to_vec(),
-            amount: Balance::from_state(100, [0u8; 32]),
+            amount: Balance::amount(100),
             recipient: b"recipient".to_vec(),
             message: "receive".to_string(),
             mode: TransactionMode::Bilateral,
@@ -580,12 +555,6 @@ mod tests {
     fn op_fingerprint_transfer_starts_with_xfer_tag() {
         let fp = SmartCommitmentSDK::op_fingerprint(&make_transfer_op());
         assert!(fp.starts_with(b"XFER"));
-    }
-
-    #[test]
-    fn op_fingerprint_mint_starts_with_mint_tag() {
-        let fp = SmartCommitmentSDK::op_fingerprint(&make_mint_op());
-        assert!(fp.starts_with(b"MINT"));
     }
 
     #[test]
@@ -737,11 +706,11 @@ mod tests {
     // ---- execute_commitment ----
 
     fn make_sdk() -> SmartCommitmentSDK {
-        let core = Arc::new(super::CoreSDK::new().unwrap());
-        SmartCommitmentSDK::new(core)
+        SmartCommitmentSDK::new(Arc::new(crate::economic_fixtures::local_device(0x13).1))
     }
 
     #[test]
+    #[serial_test::serial]
     fn execute_commitment_returns_transfer_op() {
         let sdk = make_sdk();
         let commitment = SmartCommitmentSdk {
@@ -776,6 +745,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn execute_commitment_zero_amount() {
         let sdk = make_sdk();
         let commitment = SmartCommitmentSdk {
@@ -805,6 +775,7 @@ mod tests {
     // ---- create_commitment_operation ----
 
     #[test]
+    #[serial_test::serial]
     fn create_commitment_operation_returns_create_variant() {
         let sdk = make_sdk();
         let op = sdk.create_commitment_operation().unwrap();
@@ -819,6 +790,7 @@ mod tests {
     // ---- update_commitment_operation ----
 
     #[test]
+    #[serial_test::serial]
     fn update_commitment_operation_returns_update_variant() {
         let sdk = make_sdk();
         let op = sdk.update_commitment_operation().unwrap();
@@ -833,9 +805,9 @@ mod tests {
     // ---- record_execution ----
 
     #[test]
+    #[serial_test::serial]
     fn record_execution_stores_entry() {
-        let core = Arc::new(super::CoreSDK::new().unwrap());
-        let mut sdk = SmartCommitmentSDK::new(core);
+        let mut sdk = make_sdk();
         assert!(sdk.executed_commitments.is_empty());
 
         let origin_hash = [0u8; 32];
@@ -865,7 +837,7 @@ mod tests {
         let op1 = make_transfer_op();
         let mut op2 = make_transfer_op();
         if let Operation::Transfer { ref mut amount, .. } = op2 {
-            *amount = Balance::from_state(9999, [0u8; 32]);
+            *amount = Balance::amount(9999);
         }
         let fp1 = SmartCommitmentSDK::op_fingerprint(&op1);
         let fp2 = SmartCommitmentSDK::op_fingerprint(&op2);
@@ -878,18 +850,6 @@ mod tests {
         let mut op2 = make_transfer_op();
         if let Operation::Transfer { ref mut nonce, .. } = op2 {
             *nonce = b"different_nonce".to_vec();
-        }
-        let fp1 = SmartCommitmentSDK::op_fingerprint(&op1);
-        let fp2 = SmartCommitmentSDK::op_fingerprint(&op2);
-        assert_ne!(fp1, fp2);
-    }
-
-    #[test]
-    fn op_fingerprint_mint_different_amounts_differ() {
-        let op1 = make_mint_op();
-        let mut op2 = make_mint_op();
-        if let Operation::Mint { ref mut amount, .. } = op2 {
-            *amount = Balance::from_state(9999, [0u8; 32]);
         }
         let fp1 = SmartCommitmentSDK::op_fingerprint(&op1);
         let fp2 = SmartCommitmentSDK::op_fingerprint(&op2);

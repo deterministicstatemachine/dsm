@@ -432,8 +432,6 @@ pub enum DsmError {
     Genesis(String),
     /// Device hierarchy (Device Tree) operation failure.
     DeviceHierarchy(String),
-    /// Forward commitment validation or processing failure.
-    ForwardCommitment(String),
     /// Bilateral relationship management error.
     Relationship(String),
     /// External commitment (cross-chain or DLV) error.
@@ -767,15 +765,13 @@ impl DsmError {
         }
     }
 
-    // ...existing code...
+    /// Creates a new invalid-parameter error
     ///
     /// # Arguments
     /// * `message` - Description of the invalid parameter
     pub fn invalid_parameter(message: impl Into<String>) -> Self {
         DsmError::InvalidParameter(message.into())
     }
-
-    // ...existing code...
 
     /// Creates a new verification error
     ///
@@ -839,14 +835,6 @@ impl DsmError {
     /// * `message` - Description of the device hierarchy error
     pub fn device_hierarchy(message: impl Into<String>) -> Self {
         DsmError::DeviceHierarchy(message.into())
-    }
-
-    /// Creates a new forward commitment error
-    ///
-    /// # Arguments
-    /// * `message` - Description of the forward commitment error
-    pub fn forward_commitment(message: impl Into<String>) -> Self {
-        DsmError::ForwardCommitment(message.into())
     }
 
     /// Creates a new relationship error
@@ -1426,7 +1414,6 @@ impl Display for DsmError {
             DsmError::PreCommitment(msg) => write!(f, "Pre-commitment error: {msg}"),
             DsmError::Genesis(msg) => write!(f, "Genesis error: {msg}"),
             DsmError::DeviceHierarchy(msg) => write!(f, "Device hierarchy error: {msg}"),
-            DsmError::ForwardCommitment(msg) => write!(f, "Forward commitment error: {msg}"),
             DsmError::Relationship(msg) => write!(f, "Relationship error: {msg}"),
             DsmError::ExternalCommitment(msg) => write!(f, "External commitment error: {msg}"),
             DsmError::Identity(msg) => write!(f, "Identity error: {msg}"),
@@ -1710,7 +1697,6 @@ impl Error for DsmError {
             DsmError::PreCommitment(_) => None,
             DsmError::Genesis(_) => None,
             DsmError::DeviceHierarchy(_) => None,
-            DsmError::ForwardCommitment(_) => None,
             DsmError::Relationship(_) => None,
             DsmError::ExternalCommitment(_) => None,
             DsmError::Identity(_) => None,

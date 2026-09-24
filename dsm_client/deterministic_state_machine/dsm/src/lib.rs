@@ -42,7 +42,6 @@
 //! - [`vault`] — Deterministic Limbo Vaults (DLV), asset management, fulfillment
 //! - [`merkle`] — Sparse Merkle Tree (per-device SMT) and Device Trees
 //! - [`emissions`] — DJTE (Deterministic Join-Triggered Emissions), JAP, winner selection
-//! - [`cpta`] — Content-Addressed Token Policy Anchors
 //! - [`bitcoin`] — dBTC tap primitives (HTLC, deep-anchor)
 //! - [`bilateral`] — Bilateral transaction types and protocol definitions
 //! - [`commitments`] — Deterministic, smart, and external commitments
@@ -66,7 +65,7 @@
 //! - `#![forbid(unsafe_code)]` — no unsafe Rust anywhere in this crate
 //! - MPC genesis requires ≥3 storage nodes with threshold ≥3
 //! - All secrets use `Zeroize` + `ZeroizeOnDrop` for memory safety
-//! - Feature-gated optional modules (perf, telemetry, bluetooth)
+//! - Feature-gated optional modules (bluetooth)
 
 pub mod bilateral;
 pub mod ccb; // canonical commit bytes — docs/papers/ccb-object-registry.md
@@ -78,27 +77,23 @@ pub mod storage_cell;
 pub mod storage_object; // Area 4 immutable content addressing — addr(N, P)
                         // pub mod config; // Network detection moved to SDK - no HTTP in core
 pub mod core;
-pub mod cpta;
 pub mod crypto;
 // A separate dead-code attestation module previously lived here
 // (Issue #185 — all 4 findings). It exported types with zero
 // production callers anywhere in `dsm/` or `dsm_sdk/` (verified by
 // source inspection); the audit findings were all on a never-
 // executed path. Module removed entirely.
+pub mod bitcoin;
 pub mod dlv;
 pub mod economic; // the online economic root R_econ
 pub mod emissions;
 pub mod envelope;
 pub mod merkle;
 pub mod pbi;
-// #[cfg(feature = "perf")]
-pub mod bitcoin;
-pub mod performance;
 pub mod prelude;
 pub mod recovery;
 pub mod sofi; // SoFi v8 wire registry and pure derivations (dark)
 pub mod storage;
-pub mod telemetry;
 pub mod types;
 pub mod utils;
 pub mod vault;

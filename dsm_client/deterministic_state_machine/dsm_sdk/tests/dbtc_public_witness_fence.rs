@@ -36,21 +36,12 @@ use dsm_sdk::handlers::AppRouterImpl;
 use dsm_sdk::init::SdkConfig;
 use prost::Message;
 use serial_test::serial;
-use std::path::PathBuf;
 
 /// The exact token every fenced door must emit.
 const FENCE_TOKEN: &str = "DBTC_PUBLIC_WITNESS_FENCED";
 
 fn router() -> AppRouterImpl {
-    std::env::set_var("DSM_SDK_TEST_MODE", "1");
-    let _ = dsm_sdk::storage_utils::set_storage_base_dir(PathBuf::from("./.dsm_testdata"));
-    dsm_sdk::sdk::app_state::AppState::set_identity_info(
-        vec![0xAA; 32],
-        vec![0xBB; 32],
-        vec![0xCC; 32],
-        vec![0xDD; 32],
-    );
-    dsm_sdk::set_wallet_seed_for_testing(vec![0xEE; 32]);
+    dsm_sdk::economic_fixtures::local_device(0xEE);
     AppRouterImpl::new(SdkConfig {
         node_id: "dev-node".to_string(),
         storage_endpoints: vec!["http://127.0.0.1:8080".to_string()],

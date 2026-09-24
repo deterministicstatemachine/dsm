@@ -16,7 +16,6 @@ import * as pb from '../../proto/dsm_app_pb';
 function mockHandleContactQrV3Bytes(bytes: Uint8Array) {
   // Step 1: Build ArgPack with codec=PROTO
   const args = new pb.ArgPack({
-    schemaHash: { v: new Uint8Array(32).fill(0) },
     codec: pb.Codec.PROTO,
     body: bytes as any,
   });
@@ -154,8 +153,8 @@ describe('handleContactQrV3Bytes backend integration', () => {
     const { args } = mockHandleContactQrV3Bytes(bytes);
 
     // Backend expects:
-    // 1. schemaHash (32-byte Hash32)
-    expect(args.schemaHash).toBeDefined();
+    // 1. no schema hash: the pack names no schema
+    expect(args.schemaHash).toBeUndefined();
     
     // 2. codec must be PROTO (not JSON or other)
     expect(args.codec).toBe(pb.Codec.PROTO);

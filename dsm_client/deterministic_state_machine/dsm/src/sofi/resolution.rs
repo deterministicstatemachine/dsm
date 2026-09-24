@@ -144,7 +144,7 @@ pub enum ParentStatus {
 pub fn parent_status(established: Option<[u8; 32]>, claimed: &[u8; 32]) -> ParentStatus {
     match established {
         Some(root) if root == *claimed => ParentStatus::Canonical,
-        Some(_) => ParentStatus::Orphaned,
+        Some(..) => ParentStatus::Orphaned,
         None => ParentStatus::Unavailable,
     }
 }
@@ -555,27 +555,104 @@ pub enum WalkOutcome {
     Continue { cursor: u64 },
 }
 
+/// What an exercise's own bytes refute, before anything is read about it
+/// (MR-DSM-0041, MR-DSM-0042).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefutedInHand {
+    /// `FulfillmentConformance(F) = Invalid` from the exercise alone.
+    Conformance,
+    /// `RouteValidation(P, G, E) = Invalid` from `P` and `P(E)` alone, over
+    /// a route of `legs` legs.
+    Route { legs: usize },
+}
+
+/// How an attempt key classifies when the exercise holding it is refuted in
+/// hand: the answer [`classify_attempt`] gives whatever the other facts are.
+/// `FulfillmentImpossible` decides by its conformance arm, then by
+/// `RouteImpossible`'s first arm, before any other fact is read, and nothing
+/// consumes without both predicates Valid. So a cell final on `E` skips for
+/// that reason, and any other cell is unresolved.
+pub fn skip_in_hand(
+    refuted: RefutedInHand,
+    cell: &CellFact,
+    external_commitment: &[u8; 32],
+) -> (AttemptClass, Option<SkipReason>) {
+    let final_on_e = *cell
+        == CellFact::Held {
+            id: *external_commitment,
+            state: ChainState::Final,
+        };
+    if !final_on_e {
+        return (AttemptClass::Unresolved, None);
+    }
+    let reason = match refuted {
+        RefutedInHand::Conformance => SkipReason::RejectedFinalConformance,
+        RefutedInHand::Route { legs } if legs > 1 => {
+            SkipReason::RejectedFinalRoute(ImpossibleArm::ValidationInvalid)
+        }
+        RefutedInHand::Route { .. } => SkipReason::RejectedFinalSingleLeg,
+    };
+    (AttemptClass::Skipped, Some(reason))
+}
+
+/// The ladder over a position whose exercise is refuted in hand: registration
+/// is the one fact it reads. Unregistered, rung 0 holds. Registered, the
+/// position is Invalid whatever the other facts are — rung 1 when the parent
+/// took another branch, else rung 2 for a non-conforming `F`, else rung 4
+/// for an invalid route, which nothing before it can consume.
+pub fn resolve_refuted_in_hand(registered: bool) -> Result<Resolution, Incomplete> {
+    if registered {
+        Ok(Resolution::Invalid)
+    } else {
+        Err(Incomplete::NotRegistered)
+    }
+}
+
+/// What the walk has for one attempt key.
+#[derive(Debug, Clone, Copy)]
+pub enum KeyFacts<'f> {
+    /// The complete facts of the exercise holding the key, and of the leg
+    /// being walked.
+    Complete(RouteFacts<'f>, LegFacts),
+    /// The exercise holding the key is refuted by its own bytes; `cell` is
+    /// the key's storage fact, read to find it.
+    RefutedInHand {
+        refuted: RefutedInHand,
+        cell: CellFact,
+        external_commitment: [u8; 32],
+    },
+}
+
 /// Walk one DLV parent's attempt keys in ascending order: a skipped key moves
 /// to the next, a consumed key stops, anything else stops as unresolved.
 ///
-/// `keys` supplies the facts for attempt `a`, or `None` past what the caller
-/// has fetched — which is `Unresolved`, never a skip. `budget` bounds the
-/// examined keys only; it never changes the verdict, it only defers it.
+/// `keys` supplies what is known about attempt `a`, or `None` past what the
+/// caller has established — which is `Unresolved`, never a skip. `budget`
+/// bounds the examined keys only; it never changes the verdict, it only
+/// defers it.
 pub fn walk<'f, F>(base_attempt: u64, budget: usize, mut keys: F) -> WalkOutcome
 where
-    F: FnMut(u64) -> Option<(RouteFacts<'f>, LegFacts)>,
+    F: FnMut(u64) -> Option<KeyFacts<'f>>,
 {
     let mut attempt = base_attempt;
-    for _ in 0..budget {
-        match keys(attempt) {
+    let mut examined = 0;
+    while examined < budget {
+        examined += 1;
+        let class = match keys(attempt) {
             None => return WalkOutcome::Unresolved { attempt },
-            Some((facts, leg)) => match classify_attempt(&facts, &leg).0 {
-                AttemptClass::Consumed => return WalkOutcome::Consumed { attempt },
-                AttemptClass::Unresolved => return WalkOutcome::Unresolved { attempt },
-                AttemptClass::Skipped => match next_attempt(attempt) {
-                    Ok(next) => attempt = next,
-                    Err(_) => return WalkOutcome::CounterExhausted { attempt },
-                },
+            Some(KeyFacts::Complete(facts, leg)) => classify_attempt(&facts, &leg).0,
+            Some(KeyFacts::RefutedInHand {
+                refuted,
+                cell,
+                external_commitment,
+            }) => skip_in_hand(refuted, &cell, &external_commitment).0,
+        };
+        match class {
+            AttemptClass::Consumed => return WalkOutcome::Consumed { attempt },
+            AttemptClass::Unresolved => return WalkOutcome::Unresolved { attempt },
+            AttemptClass::Skipped => match next_attempt(attempt) {
+                Ok(next) => attempt = next,
+                Err(..) => return WalkOutcome::CounterExhausted { attempt },
             },
         }
     }
@@ -1353,7 +1430,7 @@ mod tests {
             } else {
                 (&live_legs, good_leg(), E, Valid)
             };
-            Some((
+            Some(KeyFacts::Complete(
                 RouteFacts {
                     external_commitment: e,
                     registered: true,
@@ -1377,6 +1454,129 @@ mod tests {
         assert_eq!(
             walk(cursor, 16, facts_for),
             WalkOutcome::Consumed { attempt: 3 }
+        );
+    }
+
+    /// Every combination of the facts an in-hand refutation does not read,
+    /// over one and two legs, with the walked leg's cell as given.
+    fn around<'l>(
+        legs: &'l [LegFacts],
+        conformance: Validation,
+        validation: Validation,
+    ) -> Vec<RouteFacts<'l>> {
+        let mut out = Vec::new();
+        for registered in [true, false] {
+            for position_lost in [true, false] {
+                for storage_resolved in [true, false] {
+                    for parent in [
+                        ParentPosition::SingleRoot,
+                        ParentPosition::ConditionalSelected { selected_root: PRE },
+                        ParentPosition::ConditionalSelected {
+                            selected_root: OTHER_ROOT,
+                        },
+                        ParentPosition::ConditionalNoRoot,
+                    ] {
+                        out.push(RouteFacts {
+                            external_commitment: E,
+                            registered,
+                            conformance,
+                            position_lost: position_lost && !registered,
+                            parent,
+                            parent_pre_root: PRE,
+                            validation,
+                            storage_resolved,
+                            legs,
+                        });
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// `skip_in_hand` and `resolve_refuted_in_hand` are the ladder's own
+    /// answers: for every value of the facts they do not read, a key and a
+    /// position whose exercise is refuted in hand classify and resolve exactly
+    /// as `classify_attempt` and `resolve_position` do over the complete facts.
+    #[test]
+    fn an_in_hand_refutation_answers_as_the_complete_facts_do() {
+        let other = LegFacts {
+            cell: CellFact::Held {
+                id: OTHER_E,
+                state: ChainState::Final,
+            },
+            ..good_leg()
+        };
+        let held = LegFacts {
+            cell: CellFact::Held {
+                id: E,
+                state: ChainState::LeaderHeld,
+            },
+            ..good_leg()
+        };
+        let orphaned = LegFacts {
+            parent: ParentStatus::Orphaned,
+            ..good_leg()
+        };
+        for walked in [good_leg(), open_leg(), other, held, orphaned] {
+            for legs in [
+                vec![walked],
+                vec![walked, good_leg()],
+                vec![walked, open_leg()],
+            ] {
+                let n = legs.len();
+                for (refuted, conformance, validation) in [
+                    (RefutedInHand::Conformance, Invalid, Valid),
+                    (RefutedInHand::Conformance, Invalid, Invalid),
+                    (RefutedInHand::Route { legs: n }, Valid, Invalid),
+                ] {
+                    for facts in around(&legs, conformance, validation) {
+                        assert_eq!(
+                            classify_attempt(&facts, &walked),
+                            skip_in_hand(refuted, &walked.cell, &E),
+                            "{refuted:?} over {facts:?}"
+                        );
+                        assert_eq!(
+                            resolve_position(&facts),
+                            resolve_refuted_in_hand(facts.registered),
+                            "{refuted:?} over {facts:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// A key whose exercise is refuted in hand skips in the walk with nothing
+    /// else supplied about it.
+    #[test]
+    fn the_walk_skips_a_key_refuted_in_hand() {
+        let final_e = CellFact::Held {
+            id: E,
+            state: ChainState::Final,
+        };
+        let live_legs = [good_leg()];
+        let facts_for = |attempt: u64| match attempt {
+            0 => Some(KeyFacts::RefutedInHand {
+                refuted: RefutedInHand::Conformance,
+                cell: final_e,
+                external_commitment: E,
+            }),
+            1 => Some(KeyFacts::Complete(realized(&live_legs), good_leg())),
+            _ => None,
+        };
+        assert_eq!(walk(0, 16, facts_for), WalkOutcome::Consumed { attempt: 1 });
+        // Refuted, but not final on its E: nothing skips.
+        let open_for = |attempt: u64| {
+            (attempt == 0).then_some(KeyFacts::RefutedInHand {
+                refuted: RefutedInHand::Route { legs: 1 },
+                cell: CellFact::Open,
+                external_commitment: E,
+            })
+        };
+        assert_eq!(
+            walk(0, 16, open_for),
+            WalkOutcome::Unresolved { attempt: 0 }
         );
     }
 
@@ -1440,8 +1640,10 @@ mod tests {
             ..good_leg()
         };
         let legs = [rejected];
-        let facts_for = |_attempt: u64| {
-            Some((
+        // Facts for the top of the counter only: a walk that went anywhere else
+        // would find none and stop Unresolved.
+        let facts_for = |attempt: u64| {
+            (attempt == u64::MAX).then_some(KeyFacts::Complete(
                 RouteFacts {
                     external_commitment: OTHER_E,
                     registered: true,

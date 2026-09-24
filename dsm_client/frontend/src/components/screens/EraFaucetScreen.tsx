@@ -16,7 +16,6 @@ interface FaucetClaimResult {
   success: boolean;
   message?: string;
   tokensReceived?: string | number;
-  nextAvailable?: string | number;
   _debug?: {
     resultBytesLen?: number;
     resultPackCodec?: number;
@@ -72,13 +71,11 @@ export default function EraFaucetScreen(): React.JSX.Element {
       }
 
       const tokensReceivedRaw = result?.tokensReceived;
-      const nextAvailableRaw = result?.nextAvailable ?? result?.nextAvailableIndex;
 
       setLastResult({
         success: Boolean(result?.success),
         message: (result?.message as string) || (result?.success ? 'Claim successful!' : 'Claim failed'),
         tokensReceived: tokensReceivedRaw !== undefined ? String(tokensReceivedRaw) : undefined,
-        nextAvailable: nextAvailableRaw !== undefined ? String(nextAvailableRaw) : undefined,
         _debug: result?._debug,
       });
     } catch (e: any) {
@@ -214,11 +211,6 @@ export default function EraFaucetScreen(): React.JSX.Element {
           {lastResult.tokensReceived !== undefined && (
             <div style={{ marginTop: 8, fontSize: 10, opacity: 0.8 }}>
               Tokens received: <strong>{lastResult.tokensReceived}</strong>
-            </div>
-          )}
-          {lastResult.nextAvailable && (
-            <div style={{ marginTop: 4, fontSize: 10, opacity: 0.8 }}>
-              Next available index: <strong>{lastResult.nextAvailable}</strong>
             </div>
           )}
 

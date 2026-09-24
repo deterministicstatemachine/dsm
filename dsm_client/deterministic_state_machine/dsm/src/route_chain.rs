@@ -741,11 +741,12 @@ where
     })
 }
 
-/// A completion proof (storage spec §9): the prefix of one chain of the value
-/// holding a cell, from position 0 through the chain's third link, each
-/// position a link or an empty, in route order.
+/// A completion proof (storage spec §9): the value it proves final, and the
+/// prefix of one chain of that value from position 0 through the chain's
+/// third link, each position a link or an empty, in route order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompletionProof {
+    pub value: Vec<u8>,
     pub slots: Vec<ChainSlot>,
 }
 
@@ -756,6 +757,8 @@ pub enum ProofInvalid {
     /// The proof does not begin with a link, end with a link, hold exactly
     /// three links, and fit the route.
     NotThreeLinks,
+    /// The proof's value is not the value holding the cell.
+    NotTheValueHoldingTheCell,
     /// The proof's first link is not the cell's leader link.
     NotTheLeaderLink,
     /// The seat at `position` answered and holds no valid copy of the value
@@ -810,7 +813,13 @@ where
     Ok(third.map(|link| {
         let mut slots = link.chain;
         slots.push(ChainSlot::Link(link.record));
-        (leader.object, CompletionProof { slots })
+        (
+            leader.object,
+            CompletionProof {
+                value: leader.value,
+                slots,
+            },
+        )
     }))
 }
 
@@ -835,7 +844,14 @@ where
     }
     let leader = leader_link(cell, ev, recognize)
         .map_err(ProofRefusal::Missing)?
-        .ok_or(ProofRefusal::Invalid(ProofInvalid::NotTheLeaderLink))?;
+        .ok_or(ProofRefusal::Invalid(
+            ProofInvalid::NotTheValueHoldingTheCell,
+        ))?;
+    if proof.value != leader.value {
+        return Err(ProofRefusal::Invalid(
+            ProofInvalid::NotTheValueHoldingTheCell,
+        ));
+    }
     if proof.slots.first() != Some(&ChainSlot::Link(leader.record.clone())) {
         return Err(ProofRefusal::Invalid(ProofInvalid::NotTheLeaderLink));
     }
@@ -878,8 +894,8 @@ where
     Ok(leader.object)
 }
 
-/// The completion digest of a proof for `value` at `cell` (storage spec §9,
-/// the completion proof), computed from the proof's fields:
+/// The completion digest of a proof at `cell` (storage spec §9, the
+/// completion proof), computed from the proof's fields:
 ///
 /// `c = H_dom(DSM/storage/route-completion/v1, len(N) ‖ N ‖ K ‖ d_x ‖ n ‖ s_0 ‖ … ‖ s_(n−1))`
 ///
@@ -889,7 +905,6 @@ where
 /// computes the same digest.
 pub fn completion_digest(
     cell: &RoutedCell,
-    value: &[u8],
     proof: &CompletionProof,
 ) -> Result<[u8; 32], ProofInvalid> {
     if !proof.well_formed() {
@@ -907,7 +922,7 @@ pub fn completion_digest(
     h.update(&cell.key);
     h.update(&crate::crypto::blake3::domain_hash_bytes(
         crate::common::domain_tags::TAG_DSM_STORAGE_ROUTE_VALUE_V1,
-        value,
+        &proof.value,
     ));
     h.update(&[slot_count]);
     for slot in &proof.slots {
@@ -1687,6 +1702,13 @@ mod tests {
             invalid(ProofInvalid::NotThreeLinks)
         );
 
+        let mut other_value = proof.clone();
+        other_value.value = b"ok-y".to_vec();
+        assert_eq!(
+            check(&c.evidence(), &other_value),
+            invalid(ProofInvalid::NotTheValueHoldingTheCell)
+        );
+
         let mut other_leader = proof.clone();
         other_leader.slots[0] = ChainSlot::Link(c.record_at(1, 1));
         assert_eq!(
@@ -1708,6 +1730,7 @@ mod tests {
         let mut longer = cell();
         longer.write(b"ok-x", 3, &[]);
         let rechained = CompletionProof {
+            value: b"ok-x".to_vec(),
             slots: vec![
                 ChainSlot::Link(longer.record_at(0, 1)),
                 ChainSlot::NoResponse,
@@ -1785,17 +1808,19 @@ mod tests {
                 }
             }
         }
-        let digest = completion_digest(&c.routed(), b"ok-x", &proof).expect("a proof");
+        let digest = completion_digest(&c.routed(), &proof).expect("a proof");
         assert_eq!(digest, *h.finalize().as_bytes());
+        let mut other_value = proof.clone();
+        other_value.value = b"ok-y".to_vec();
         assert_ne!(
-            completion_digest(&c.routed(), b"ok-y", &proof).expect("a proof"),
+            completion_digest(&c.routed(), &other_value).expect("a proof"),
             digest,
             "the value is in the digest"
         );
         let mut short = proof.clone();
         short.slots.pop();
         assert_eq!(
-            completion_digest(&c.routed(), b"ok-x", &short),
+            completion_digest(&c.routed(), &short),
             Err(ProofInvalid::NotThreeLinks)
         );
     }

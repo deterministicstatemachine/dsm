@@ -22,8 +22,6 @@ use dsm::types::proto::{AddDeviceAdmissionRequestV1, Message as _};
 use std::sync::Mutex;
 
 use crate::sdk::app_state::AppState;
-use crate::sdk::core_sdk::CoreSDK;
-use crate::sdk::storage_node_sdk::{StorageNodeConfig, StorageNodeSDK};
 
 /// Co-present handshake state (SDK transport state, not protocol state). The admission round-trip
 /// is two BLE messages seconds apart; these hold the small per-side context between them.
@@ -46,13 +44,38 @@ impl DeviceAdmissionSDK {
         })
     }
 
-    async fn storage() -> Result<StorageNodeSDK, DsmError> {
-        let cfg = StorageNodeConfig::from_env_config().await.map_err(|e| {
-            DsmError::storage(format!("storage config: {e}"), None::<std::io::Error>)
-        })?;
-        StorageNodeSDK::new(cfg)
-            .await
-            .map_err(|e| DsmError::storage(format!("storage sdk: {e}"), None::<std::io::Error>))
+    /// The published device tree of `genesis`: its device ids, version and
+    /// root. It lived in the node's overwrite store, which no longer exists;
+    /// where a genesis's device tree is kept now is an open design question
+    /// (CONFORMANCE_GAPS §5A, device tree store). Until it is ruled on and
+    /// built there is no tree to read, and none is assumed.
+    fn published_tree(genesis: &[u8; 32]) -> Result<(Vec<[u8; 32]>, u64, [u8; 32]), DsmError> {
+        Err(DsmError::NotImplemented(format!(
+            "the device tree store for genesis {} is not built yet (owner ruling pending)",
+            crate::util::text_id::encode_base32_crockford(genesis)
+        )))
+    }
+
+    /// Publish the tree `admission` extends by its new device, after
+    /// verifying the admission against the published tree under
+    /// `signer_pubkey`. The same open store as [`Self::published_tree`].
+    fn publish_admitted(
+        admission: &AddDeviceAdmission,
+        signer_pubkey: &[u8],
+    ) -> Result<(), DsmError> {
+        let (device_ids, version, ..) = Self::published_tree(&admission.genesis_hash)?;
+        dsm::common::device_admission::verify_add_device_admission(
+            admission,
+            &admission.genesis_hash,
+            &device_ids,
+            version,
+            signer_pubkey,
+        )?;
+        Err(DsmError::NotImplemented(
+            "publishing an admitted device: the device tree store is not built yet (owner \
+             ruling pending)"
+                .into(),
+        ))
     }
 
     /// NEW device: build the admission request to send to the existing device. `entropy` is 32 bytes
@@ -74,8 +97,7 @@ impl DeviceAdmissionSDK {
         let new_signing_pubkey = AppState::get_public_key().ok_or_else(|| {
             DsmError::InvalidState("admission request: no device signing pubkey".into())
         })?;
-        let core = CoreSDK::new()?;
-        let sig = core.sign_bytes_sphincs(&self_attest_digest(
+        let sig = crate::sdk::signing_authority::sign_bytes(&self_attest_digest(
             &genesis_hash,
             &new_device_id,
             &new_signing_pubkey,
@@ -128,8 +150,7 @@ impl DeviceAdmissionSDK {
         }
 
         let signer_device_id = Self::id32(AppState::get_device_id(), "device_id")?;
-        let storage = Self::storage().await?;
-        let (_ids, version, parent_root) = storage.read_device_tree_state(&genesis).await?;
+        let (.., version, parent_root) = Self::published_tree(&genesis)?;
 
         // Build + gate-sign with this (existing, authorized) device's signing key.
         let mut admission = AddDeviceAdmission {
@@ -142,16 +163,14 @@ impl DeviceAdmissionSDK {
             signature_by_signer_device: Vec::new(),
             signature_by_new_device: req.signature_by_new_device,
         };
-        let core = CoreSDK::new()?;
-        admission.signature_by_signer_device = core.sign_bytes_sphincs(&admission.gate_digest())?;
+        admission.signature_by_signer_device =
+            crate::sdk::signing_authority::sign_bytes(&admission.gate_digest())?;
 
         // Verify (including our own gate signature) + insert + publish the updated tree.
         let signer_pubkey = AppState::get_public_key().ok_or_else(|| {
             DsmError::InvalidState("approve_admission: no device signing pubkey".into())
         })?;
-        storage
-            .apply_admitted_device(&admission, &signer_pubkey)
-            .await?;
+        Self::publish_admitted(&admission, &signer_pubkey)?;
         Ok(admission.to_bytes())
     }
 
@@ -181,10 +200,7 @@ impl DeviceAdmissionSDK {
                 "adopt: new-device self-attestation invalid",
             ));
         }
-        let storage = Self::storage().await?;
-        let (device_ids, _version, root) = storage
-            .read_device_tree_state(&admission.genesis_hash)
-            .await?;
+        let (device_ids, .., root) = Self::published_tree(&admission.genesis_hash)?;
         if !device_ids.contains(&admission.new_device_id) {
             return Err(DsmError::verification(
                 "adopt: new device not present in the published Device Tree",
@@ -194,16 +210,17 @@ impl DeviceAdmissionSDK {
         // Establish this device's identity as a member of the genesis tree.
         let device_id = admission.new_device_id.to_vec();
         let genesis = admission.genesis_hash.to_vec();
-        let public_key = AppState::get_public_key().unwrap_or_default();
+        let public_key = AppState::get_public_key()
+            .ok_or_else(|| DsmError::InvalidState("adopt: no device signing pubkey".into()))?;
         let smt_root = dsm::merkle::sparse_merkle_tree::empty_root(
             dsm::merkle::sparse_merkle_tree::DEFAULT_SMT_HEIGHT,
         )
         .to_vec();
-        AppState::set_identity_info(device_id.clone(), public_key, genesis.clone(), smt_root);
-        AppState::set_has_identity(true);
+        AppState::set_identity_info(device_id.clone(), public_key, genesis.clone(), smt_root)?;
+        AppState::set_has_identity(true)?;
         // Override the single-device root that set_identity_info auto-computes with the real
         // multi-device R_G from the published tree.
-        AppState::set_device_tree_root(root);
+        AppState::set_device_tree_root(root)?;
         crate::initialize_sdk_context(device_id, genesis, entropy.to_vec())?;
 
         Ok((admission.genesis_hash, admission.new_device_id))
@@ -217,10 +234,8 @@ impl DeviceAdmissionSDK {
         genesis: &[u8; 32],
     ) -> Result<Vec<u8>, DsmError> {
         let device_id = Self::id32(AppState::get_device_id(), "device_id")?;
-        let ticks = crate::util::deterministic_time::tick();
-        let env = crate::bluetooth::bilateral_envelope::build_envelope(
-            &device_id, genesis, ticks, None, payload,
-        )?;
+        let env =
+            crate::bluetooth::bilateral_envelope::build_envelope(&device_id, genesis, payload);
         Ok(crate::envelope::transport::to_canonical_bytes(&env))
     }
 

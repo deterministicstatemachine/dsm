@@ -55,8 +55,13 @@ pub const TAG_DSM_RECOVERY_ESTABLISH_RECEIPT: TaggedHashDomain<'static> =
 pub const TAG_DSM_RECOVERY_DBTC_VAULT_INDEX: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/recovery/dbtc-vault-index/v1");
 pub const TAG_DSM_TOMBSTONE: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/tombstone");
-pub const TAG_DSM_TOMBSTONE_NOTIFY: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/tombstone-notify");
+/// Domain tag of the keyed-cell namespace recovery's objects live under
+/// (storage spec §8.3).
+pub const TAG_DSM_RECOVERY_CELL: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/recovery/cell/v1");
+/// Domain tag of a recovery object's keyed-cell key.
+pub const TAG_DSM_RECOVERY_CELL_KEY: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/recovery/cell-key/v1");
 pub const TAG_DSM_TOMBSTONE_SUCCESSION: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/tombstone-succession");
 
@@ -80,6 +85,7 @@ pub(super) const TAGS: &[TaggedHashDomain<'static>] = &[
     TAG_DSM_RECOVERY_ESTABLISH_RECEIPT,
     TAG_DSM_RECOVERY_DBTC_VAULT_INDEX,
     TAG_DSM_TOMBSTONE,
-    TAG_DSM_TOMBSTONE_NOTIFY,
+    TAG_DSM_RECOVERY_CELL,
+    TAG_DSM_RECOVERY_CELL_KEY,
     TAG_DSM_TOMBSTONE_SUCCESSION,
 ];

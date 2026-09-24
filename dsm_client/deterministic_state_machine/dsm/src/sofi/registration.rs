@@ -24,7 +24,8 @@ use std::collections::BTreeMap;
 
 use crate::economic::register::{position_seed, read_root_cell, RootCell};
 use crate::route_chain::{
-    evaluate, CellError, CellEvidence, CellReading, ChainState, Missing, RoutedCell,
+    check_completion_proof, completion_proof, evaluate, CellError, CellEvidence, CellReading,
+    ChainState, CompletionProof, Missing, ProofRefusal, RoutedCell,
 };
 use super::derive;
 use super::publication::{recognize_fulfillment, Signed};
@@ -145,6 +146,66 @@ pub enum Registration {
     Unresolved,
 }
 
+/// A fulfillment recognized at `K_ful(q)`: its entry digest, the signed
+/// fulfillment, and the precommit it names.
+type RecognizedFulfillment = (D32, (Signed<TraderFulfillmentBody>, TraderPrecommitBody));
+
+/// The recognizer of `K_ful(q)`: fulfillment envelopes naming the key
+/// ([`names_fulfillment_key`]), with the precommit each names, identified by
+/// the entry digest of their exact bytes.
+fn fulfillment_at<'a>(
+    cells: &'a PositionCells,
+    precommits: &'a impl PrecommitLookup,
+) -> impl Fn(&[u8]) -> Option<RecognizedFulfillment> + 'a {
+    move |bytes| {
+        let signed = names_fulfillment_key(
+            bytes,
+            cells.root.genesis(),
+            cells.root.device_id(),
+            cells.root.economic_position(),
+            precommits,
+        )?;
+        let precommit = precommits.precommit(signed.body.precommit_id())?.clone();
+        Some((
+            crate::storage_cell::entry_digest(bytes),
+            (signed, precommit),
+        ))
+    }
+}
+
+/// The completion proof of the fulfillment final at `K_ful(q)` (storage spec
+/// §9; SoFi Amendment S10), with the fulfillment; `None` while no chain of
+/// the fulfillment holding the cell has three links.
+pub fn fulfillment_completion(
+    cells: &PositionCells,
+    evidence: &CellEvidence,
+    precommits: &impl PrecommitLookup,
+) -> Result<Option<(Signed<TraderFulfillmentBody>, CompletionProof)>, Missing> {
+    Ok(completion_proof(
+        &cells.fulfillment,
+        evidence,
+        fulfillment_at(cells, precommits),
+    )?
+    .map(|((signed, ..), proof)| (signed, proof)))
+}
+
+/// Check a kept completion proof of `K_ful(q)` against the reads in
+/// `evidence`: the fulfillment it proves final.
+pub fn check_fulfillment_completion(
+    cells: &PositionCells,
+    evidence: &CellEvidence,
+    proof: &CompletionProof,
+    precommits: &impl PrecommitLookup,
+) -> Result<Signed<TraderFulfillmentBody>, ProofRefusal> {
+    check_completion_proof(
+        &cells.fulfillment,
+        evidence,
+        proof,
+        fulfillment_at(cells, precommits),
+    )
+    .map(|(signed, ..)| signed)
+}
+
 /// Derive `FulfillmentRegistered(q)` from the route-chain evidence of the
 /// two position cells: `K_ful(q)` over [`names_fulfillment_key`], `K_root(q)`
 /// over the register reader's rule
@@ -157,17 +218,11 @@ pub fn fulfillment_registered(
     root_evidence: &CellEvidence,
     precommits: &impl PrecommitLookup,
 ) -> Result<Registration, Missing> {
-    let genesis = cells.root.genesis();
-    let device_id = cells.root.device_id();
-    let position = cells.root.economic_position();
-    let fulfillment = evaluate(&cells.fulfillment, fulfillment_evidence, |bytes| {
-        let signed = names_fulfillment_key(bytes, genesis, device_id, position, precommits)?;
-        let precommit = precommits.precommit(signed.body.precommit_id())?.clone();
-        Some((
-            crate::storage_cell::entry_digest(bytes),
-            (signed, precommit),
-        ))
-    })?;
+    let fulfillment = evaluate(
+        &cells.fulfillment,
+        fulfillment_evidence,
+        fulfillment_at(cells, precommits),
+    )?;
     let (signed, precommit) = match fulfillment {
         CellReading::Held {
             object,
@@ -267,6 +322,42 @@ mod tests {
             "without P neither the trader nor C_q is known"
         );
         assert!(names_fulfillment_key(b"not an envelope", &G, &DEV, q, &known).is_none());
+    }
+
+    /// A fulfillment final at `K_ful(q)` has a completion proof built from
+    /// the reads, and the proof checks against them.
+    #[test]
+    fn a_final_fulfillment_has_a_completion_proof_that_checks() {
+        let p = swap_fixture_n(2).precommit;
+        let q = p.position() + 1;
+        let f = fulfillment(&p, q);
+        let bytes = envelope(&f);
+        let known = lookup(&p);
+        let cells = PositionCells::new(
+            &G,
+            &DEV,
+            q,
+            &[0x5E; 32],
+            &committed_set(),
+            &committed_set_id(),
+        )
+        .expect("the committed set");
+        let mut seats = Cell::at(cells.fulfillment());
+        seats.write(&bytes, 1, &[]);
+        assert!(matches!(
+            fulfillment_completion(&cells, &seats.evidence(), &known),
+            Ok(None)
+        ));
+        let mut seats = Cell::at(cells.fulfillment());
+        seats.write(&bytes, ROUTE_LEN - 1, &[]);
+        let Ok(Some((proven, proof))) = fulfillment_completion(&cells, &seats.evidence(), &known)
+        else {
+            panic!("a final fulfillment has a completion proof")
+        };
+        assert_eq!(proven.body, f);
+        let checked = check_fulfillment_completion(&cells, &seats.evidence(), &proof, &known)
+            .expect("the kept proof checks");
+        assert_eq!(checked.body, f);
     }
 
     /// The predicate over the two cells: both final, the root on this F's

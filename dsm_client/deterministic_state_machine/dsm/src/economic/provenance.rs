@@ -100,13 +100,14 @@ pub enum ValidatedPeerTransition {
     /// STILL refused as a debit source: P15-9 rules on lineage, not on whether
     /// resolution happened. A boolean `is_unresolved` would get this wrong.
     ///
-    /// **No production path constructs this today, deliberately (E1c-3).**
-    /// `validate_peer_lineage` refuses every conditional claim, resolved or
-    /// not, because a resolved position's register cell still holds `C_q` —
-    /// resolution is verifier-local and never rewrites the cell. The arm
-    /// exists so that when E2/E3 teaches the walk to traverse a resolved SoFi
-    /// position, the refusal in [`prevalidate_sender_debit`] is already there
-    /// rather than owed at the moment it starts mattering.
+    /// **Nothing constructs this arm (E1c-3).** `validate_peer_lineage`
+    /// refuses every conditional claim, resolved or not, because a resolved
+    /// position's register cell still holds `C_q` — resolution is
+    /// verifier-local and never rewrites the cell. The arm exists so that when
+    /// the walk learns to traverse a resolved SoFi position, the refusal in
+    /// [`prevalidate_sender_debit`] is already there; until then no input can
+    /// reach that refusal, and it has no test that performs the forbidden
+    /// debit.
     ResolvedSofi(PeerTransitionFacts),
 }
 
@@ -174,73 +175,6 @@ impl ValidatedPeerTransition {
             embedded_parent,
             verified_operation,
             admission_manifest_addr,
-        })
-    }
-
-    /// A single-root transition assembled directly, for FIXTURES ONLY.
-    ///
-    /// Gated on the `testing` feature, which both this crate and `dsm_sdk`
-    /// enable only through a dev-dependency, so it cannot reach a production
-    /// artifact. It exists because `tests/*.rs` are external consumers that
-    /// deliberately bypass the walk.
-    #[cfg(feature = "testing")]
-    #[allow(clippy::too_many_arguments)]
-    pub fn single_root_for_test(
-        peer_genesis: [u8; 32],
-        peer_devid: [u8; 32],
-        validated_root: ValidatedEconomicRoot,
-        witness: EconomicTransitionWitness,
-        proven_ak: Vec<u8>,
-        c_dsm_plus: [u8; 32],
-        embedded_parent: [u8; 32],
-        verified_operation: crate::types::operations::Operation,
-    ) -> Self {
-        Self::single_root_from_walk(
-            peer_genesis,
-            peer_devid,
-            validated_root,
-            witness,
-            proven_ak,
-            c_dsm_plus,
-            embedded_parent,
-            verified_operation,
-            [0u8; 32],
-        )
-    }
-
-    /// A resolved-SoFi transition, for MUTATION TESTS ONLY.
-    ///
-    /// This is the one way a `ResolvedSofi` value comes into existence
-    /// anywhere, and it is unreachable from production by construction —
-    /// `testing` is a dev-dependency-only feature. Without it the P15-9
-    /// refusal could not be exercised at all today, because no production path
-    /// yet produces a SoFi-lineage transition; with it, removing the refusal
-    /// turns a named test red.
-    ///
-    /// When E2/E3 adds the authoritative production derivation, it adds a
-    /// constructor beside `single_root_from_walk`. It does not change P15-9.
-    #[cfg(feature = "testing")]
-    #[allow(clippy::too_many_arguments)]
-    pub fn resolved_sofi_for_test(
-        peer_genesis: [u8; 32],
-        peer_devid: [u8; 32],
-        validated_root: ValidatedEconomicRoot,
-        witness: EconomicTransitionWitness,
-        proven_ak: Vec<u8>,
-        c_dsm_plus: [u8; 32],
-        embedded_parent: [u8; 32],
-        verified_operation: crate::types::operations::Operation,
-    ) -> Self {
-        Self::ResolvedSofi(PeerTransitionFacts {
-            peer_genesis,
-            peer_devid,
-            validated_root,
-            witness,
-            proven_ak,
-            c_dsm_plus,
-            embedded_parent,
-            verified_operation,
-            admission_manifest_addr: [0u8; 32],
         })
     }
 

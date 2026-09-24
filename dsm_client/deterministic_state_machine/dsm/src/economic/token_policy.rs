@@ -372,9 +372,12 @@ mod tests {
         assert!(p.allowlist_device_ids.is_empty());
     }
 
+    /// A named edit that breaks one rule of a policy's bytes.
+    type Violation = (&'static str, Box<dyn Fn(&mut Vec<u8>)>);
+
     #[test]
     fn every_rule_refuses_its_violation() {
-        let cases: Vec<(&str, Box<dyn Fn(&mut Vec<u8>)>)> = vec![
+        let cases: Vec<Violation> = vec![
             ("version", Box::new(|b| b[0] = 2)),
             ("kind", Box::new(|b| b[1] = 1)),
             (

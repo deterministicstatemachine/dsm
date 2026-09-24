@@ -19,7 +19,6 @@ jest.mock("../../dsm/index", () => ({
   acceptOfflineTransfer: jest.fn(),
   commitOfflineTransfer: jest.fn(),
   rejectOfflineTransfer: jest.fn(),
-  getLogicalTick: jest.fn(),
   getWalletHistory: jest.fn(),
 }));
 

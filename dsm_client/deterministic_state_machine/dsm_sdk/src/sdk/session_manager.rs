@@ -103,21 +103,24 @@ impl Default for SessionManager {
 }
 
 impl SessionManager {
-    fn read_pref(key: &str) -> String {
-        AppState::ensure_storage_loaded();
-        AppState::handle_app_state_request(key, "get", "")
+    fn read_pref(key: &str) -> Option<String> {
+        AppState::get_pref(key)
     }
 
-    fn write_pref(key: &str, value: &str) {
-        AppState::ensure_storage_loaded();
-        let _ = AppState::handle_app_state_request(key, "set", value);
+    fn write_pref(key: &str, value: &str) -> Result<(), dsm::types::error::DsmError> {
+        AppState::set_pref(key, value)
     }
 
-    fn parse_pref_bool(raw: &str, default: bool) -> bool {
-        match raw {
-            "true" => true,
-            "false" => false,
-            _ => default,
+    /// A stored lock flag, or `current` when none is stored. A stored value
+    /// that is neither `true` nor `false` is an error, never read as `current`.
+    fn pref_bool(key: &str, current: bool) -> Result<bool, dsm::types::error::DsmError> {
+        match Self::read_pref(key).as_deref() {
+            None => Ok(current),
+            Some("true") => Ok(true),
+            Some("false") => Ok(false),
+            Some(other) => Err(dsm::types::error::DsmError::InvalidState(format!(
+                "lock setting {key} holds {other:?}, not true or false"
+            ))),
         }
     }
 
@@ -130,74 +133,80 @@ impl SessionManager {
         }
     }
 
-    pub fn configure_lock(&mut self, enabled: bool, method: &str, lock_on_pause: bool) {
+    pub fn configure_lock(
+        &mut self,
+        enabled: bool,
+        method: &str,
+        lock_on_pause: bool,
+    ) -> Result<(), dsm::types::error::DsmError> {
         self.lock_enabled = enabled;
         self.lock_method = Self::sanitize_lock_method(enabled, method);
         self.lock_on_pause = lock_on_pause;
-        if !enabled {
-            self.lock_locked = false;
-            self.persist_lock_state_to_app_state();
+        if enabled {
+            Ok(())
+        } else {
+            self.set_locked(false)
         }
     }
 
-    pub fn set_locked(&mut self, locked: bool) {
-        self.lock_locked = self.lock_enabled && locked;
-        self.persist_lock_state_to_app_state();
-    }
-
-    pub fn lock_now(&mut self) {
-        self.set_locked(true);
-    }
-
-    pub fn unlock_now(&mut self) {
-        self.set_locked(false);
-    }
-
-    pub fn sync_lock_config_from_app_state(&mut self) {
-        let enabled = Self::parse_pref_bool(&Self::read_pref(LOCK_ENABLED_KEY), self.lock_enabled);
-        let method_raw = Self::read_pref(LOCK_METHOD_KEY);
-        let method = if method_raw.is_empty() {
-            self.lock_method.clone()
+    /// Lock or unlock. A lock takes effect in memory even if it cannot be
+    /// persisted (the error is still returned); an unlock takes effect only
+    /// once it is persisted.
+    pub fn set_locked(&mut self, locked: bool) -> Result<(), dsm::types::error::DsmError> {
+        if self.lock_enabled && locked {
+            self.lock_locked = true;
+            Self::write_pref(LOCK_LOCKED_KEY, "true")
         } else {
-            method_raw
-        };
-        let lock_on_pause =
-            Self::parse_pref_bool(&Self::read_pref(LOCK_ON_PAUSE_KEY), self.lock_on_pause);
-        self.configure_lock(enabled, &method, lock_on_pause);
+            Self::write_pref(LOCK_LOCKED_KEY, "false")?;
+            self.lock_locked = false;
+            Ok(())
+        }
+    }
+
+    pub fn lock_now(&mut self) -> Result<(), dsm::types::error::DsmError> {
+        self.set_locked(true)
+    }
+
+    pub fn unlock_now(&mut self) -> Result<(), dsm::types::error::DsmError> {
+        self.set_locked(false)
+    }
+
+    /// Bring the lock configuration and state in from the stored settings. A
+    /// setting never stored keeps the manager's own.
+    pub fn sync_lock_config_from_app_state(&mut self) -> Result<(), dsm::types::error::DsmError> {
+        let enabled = Self::pref_bool(LOCK_ENABLED_KEY, self.lock_enabled)?;
+        let method = Self::read_pref(LOCK_METHOD_KEY).unwrap_or_else(|| self.lock_method.clone());
+        let lock_on_pause = Self::pref_bool(LOCK_ON_PAUSE_KEY, self.lock_on_pause)?;
+        self.configure_lock(enabled, &method, lock_on_pause)?;
         if !self.lock_state_initialized {
             self.lock_state_initialized = true;
-            if self.lock_enabled {
-                // Fresh process start: an enabled lock must come back locked instead of
-                // silently inheriting an unlocked in-memory session from a dead process.
-                self.lock_now();
+            // Fresh process start: an enabled lock must come back locked instead of
+            // silently inheriting an unlocked in-memory session from a dead process.
+            return if self.lock_enabled {
+                self.lock_now()
             } else {
-                self.unlock_now();
-            }
-            return;
+                self.unlock_now()
+            };
         }
-        let persisted_locked =
-            Self::parse_pref_bool(&Self::read_pref(LOCK_LOCKED_KEY), self.lock_locked);
+        let persisted_locked = Self::pref_bool(LOCK_LOCKED_KEY, self.lock_locked)?;
         self.lock_locked = self.lock_enabled && persisted_locked;
+        Ok(())
     }
 
-    pub fn persist_lock_config_to_app_state(&self) {
+    pub fn persist_lock_config_to_app_state(&self) -> Result<(), dsm::types::error::DsmError> {
         Self::write_pref(
             LOCK_ENABLED_KEY,
             if self.lock_enabled { "true" } else { "false" },
-        );
-        Self::write_pref(LOCK_METHOD_KEY, &self.lock_method);
+        )?;
+        Self::write_pref(LOCK_METHOD_KEY, &self.lock_method)?;
         Self::write_pref(
             LOCK_ON_PAUSE_KEY,
             if self.lock_on_pause { "true" } else { "false" },
-        );
-        self.persist_lock_state_to_app_state();
-    }
-
-    pub fn persist_lock_state_to_app_state(&self) {
+        )?;
         Self::write_pref(
             LOCK_LOCKED_KEY,
             if self.lock_locked { "true" } else { "false" },
-        );
+        )
     }
 
     /// Compute the current session phase by reading from authoritative Rust sources.
@@ -269,7 +278,15 @@ impl SessionManager {
             return false;
         };
         let device_id_b32 = crate::util::text_id::encode_base32_crockford(&device_id);
-        let ready = crate::sdk::identity_publication::is_identity_ready(&device_id_b32);
+        // Readiness is a recorded fact; a row that cannot be read establishes
+        // none, so the identity is not ready yet.
+        let ready = match crate::sdk::identity_publication::is_identity_ready(&device_id_b32) {
+            Ok(ready) => ready,
+            Err(e) => {
+                log::warn!("session: identity publication state unreadable: {e}");
+                false
+            }
+        };
         if ready {
             IDENTITY_PUBLISHED.store(true, Ordering::SeqCst);
         }
@@ -296,7 +313,10 @@ impl SessionManager {
     }
 
     /// Apply hardware facts from Kotlin's `SessionHardwareFactsProto`.
-    pub fn apply_hardware_facts(&mut self, facts: &generated::SessionHardwareFactsProto) {
+    pub fn apply_hardware_facts(
+        &mut self,
+        facts: &generated::SessionHardwareFactsProto,
+    ) -> Result<(), dsm::types::error::DsmError> {
         self.hardware.app_foreground = facts.app_foreground;
         self.hardware.ble_enabled = facts.ble_enabled;
         self.hardware.ble_permissions = facts.ble_permissions;
@@ -316,10 +336,11 @@ impl SessionManager {
                     "SessionManager: skipped auto-lock on app background because QR scanner is active"
                 );
             } else {
-                self.lock_now();
+                self.lock_now()?;
                 log::info!("SessionManager: auto-locked on app background (lock_on_pause policy)");
             }
         }
+        Ok(())
     }
 
     /// Build the full `AppSessionStateProto` snapshot.
@@ -362,29 +383,18 @@ impl SessionManager {
 /// Encode an `AppSessionStateProto` as FramedEnvelopeV3: `[0x03][Envelope(payload=SessionStateResponse)]`.
 /// All session state bytes leaving Rust are envelope-wrapped — Invariant #1.
 fn envelope_wrap_snapshot(snapshot: generated::AppSessionStateProto) -> Vec<u8> {
-    let envelope = generated::Envelope {
-        version: 3,
-        headers: Some(generated::Headers {
-            device_id: vec![0u8; 32],
-            chain_tip: vec![0u8; 32],
-            genesis_hash: vec![0u8; 32],
-            seq: 0,
-        }),
-        message_id: vec![0u8; 16],
-        payload: Some(generated::envelope::Payload::SessionStateResponse(snapshot)),
-    };
-    let mut buf = Vec::with_capacity(1 + envelope.encoded_len());
-    buf.push(0x03); // Framing byte for Envelope v3
-    envelope.encode(&mut buf).unwrap_or(());
-    buf
+    crate::handlers::response_helpers::frame_local_envelope(
+        generated::envelope::Payload::SessionStateResponse(snapshot),
+    )
 }
 
 /// Acquire the global session manager lock and return envelope-wrapped snapshot bytes.
 /// Returns `[0x03][Envelope(SessionStateResponse)]` — Kotlin relays untouched to WebView.
-pub fn get_session_snapshot_bytes() -> Vec<u8> {
+pub fn get_session_snapshot_bytes() -> Result<Vec<u8>, String> {
     let mut mgr = SESSION_MANAGER.lock().unwrap_or_else(|p| p.into_inner());
-    mgr.sync_lock_config_from_app_state();
-    envelope_wrap_snapshot(mgr.compute_snapshot())
+    mgr.sync_lock_config_from_app_state()
+        .map_err(|e| format!("session lock settings: {e}"))?;
+    Ok(envelope_wrap_snapshot(mgr.compute_snapshot()))
 }
 
 /// Update hardware facts and return the new envelope-wrapped snapshot bytes.
@@ -393,51 +403,58 @@ pub fn update_hardware_and_snapshot(facts_bytes: &[u8]) -> Result<Vec<u8>, Strin
     let facts = generated::SessionHardwareFactsProto::decode(facts_bytes)
         .map_err(|e| format!("decode SessionHardwareFactsProto failed: {e}"))?;
     let mut mgr = SESSION_MANAGER.lock().unwrap_or_else(|p| p.into_inner());
-    mgr.sync_lock_config_from_app_state();
-    mgr.apply_hardware_facts(&facts);
+    mgr.sync_lock_config_from_app_state()
+        .map_err(|e| format!("session lock settings: {e}"))?;
+    mgr.apply_hardware_facts(&facts)
+        .map_err(|e| format!("session lock: {e}"))?;
     Ok(envelope_wrap_snapshot(mgr.compute_snapshot()))
 }
 
 /// Set a fatal error on the session manager and return envelope-wrapped snapshot bytes.
 /// Used by Kotlin to report pre-bootstrap failures (env config errors).
-pub fn set_fatal_error_and_snapshot(message: &str) -> Vec<u8> {
+pub fn set_fatal_error_and_snapshot(message: &str) -> Result<Vec<u8>, String> {
     let mut mgr = SESSION_MANAGER.lock().unwrap_or_else(|p| p.into_inner());
-    mgr.sync_lock_config_from_app_state();
+    mgr.sync_lock_config_from_app_state()
+        .map_err(|e| format!("session lock settings: {e}"))?;
     mgr.fatal_error = Some(message.to_string());
     log::error!("session_manager::set_fatal_error: {message}");
-    envelope_wrap_snapshot(mgr.compute_snapshot())
+    Ok(envelope_wrap_snapshot(mgr.compute_snapshot()))
 }
 
 /// Clear fatal error and return envelope-wrapped snapshot bytes.
-pub fn clear_fatal_error_and_snapshot() -> Vec<u8> {
+pub fn clear_fatal_error_and_snapshot() -> Result<Vec<u8>, String> {
     let mut mgr = SESSION_MANAGER.lock().unwrap_or_else(|p| p.into_inner());
-    mgr.sync_lock_config_from_app_state();
+    mgr.sync_lock_config_from_app_state()
+        .map_err(|e| format!("session lock settings: {e}"))?;
     mgr.fatal_error = None;
     log::info!("session_manager::clear_fatal_error");
-    envelope_wrap_snapshot(mgr.compute_snapshot())
+    Ok(envelope_wrap_snapshot(mgr.compute_snapshot()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
-    /// Mutex to serialize tests that touch shared global state (SDK_READY, HAS_IDENTITY).
-    static TEST_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
-
-    /// Helper: set up test mode, acquire the global lock, and reset shared state.
-    fn setup_test_env() -> std::sync::MutexGuard<'static, ()> {
-        let guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        std::env::set_var("DSM_SDK_TEST_MODE", "1");
-        let _ =
-            crate::storage_utils::set_storage_base_dir(std::path::PathBuf::from("./.dsm_testdata"));
-        AppState::reset_memory_for_testing();
+    /// A fresh store and fresh session globals. Every test here is serial:
+    /// they share `SDK_READY`, the identity flags and the state file.
+    fn setup_test_env() {
+        crate::economic_fixtures::use_test_storage_dir();
+        AppState::reset_for_testing();
         AppState::ensure_storage_loaded();
         SDK_READY.store(false, Ordering::SeqCst);
         // The publication latch is process-global and monotonic. Reset it here
         // so one test marking an identity published cannot leak into the next.
         IDENTITY_PUBLISHED.store(false, Ordering::SeqCst);
-        guard
+    }
+
+    /// The session snapshot inside a local answer's framing.
+    fn decode_snapshot(bytes: &[u8]) -> generated::AppSessionStateProto {
+        assert_eq!(bytes[0], 0x03, "must have 0x03 framing byte");
+        let envelope = generated::Envelope::decode(&bytes[1..]).expect("envelope");
+        match envelope.payload {
+            Some(generated::envelope::Payload::SessionStateResponse(s)) => s,
+            other => panic!("expected SessionStateResponse, got {:?}", other),
+        }
     }
 
     /// Mark the identity as published for tests whose subject is a LATER phase
@@ -450,7 +467,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn default_phase_is_runtime_loading() {
-        let _g = setup_test_env();
+        setup_test_env();
         // SDK_READY already reset to false by setup_test_env
         let mgr = SessionManager::default();
         let snap = mgr.compute_snapshot();
@@ -461,7 +478,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn phase_needs_genesis_when_ready_but_no_identity() {
-        let _g = setup_test_env();
+        setup_test_env();
         SDK_READY.store(true, Ordering::SeqCst);
 
         let mgr = SessionManager::default();
@@ -473,9 +490,9 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn phase_locked_when_lock_set() {
-        let _g = setup_test_env();
+        setup_test_env();
         SDK_READY.store(true, Ordering::SeqCst);
-        AppState::set_has_identity(true);
+        AppState::set_has_identity(true).expect("identity mark");
         mark_identity_published_for_test();
 
         let mgr = SessionManager {
@@ -490,11 +507,11 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn phase_is_publication_pending_when_identity_is_not_published() {
-        let _g = setup_test_env();
+        setup_test_env();
         SDK_READY.store(true, Ordering::SeqCst);
         // Genesis committed locally -- the device HAS an identity -- but no node
         // has been read-back verified, so it is not resolvable by peers.
-        AppState::set_has_identity(true);
+        AppState::set_has_identity(true).expect("identity mark");
 
         let mgr = SessionManager::default();
         let snap = mgr.compute_snapshot();
@@ -512,7 +529,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn fatal_error_overrides_phase() {
-        let _g = setup_test_env();
+        setup_test_env();
         SDK_READY.store(true, Ordering::SeqCst);
         let mgr = SessionManager {
             fatal_error: Some("test error".to_string()),
@@ -524,10 +541,9 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn auto_lock_on_background() {
-        // Without this the test depends on some earlier test having set the
-        // storage base dir, and panics when run in isolation.
-        let _g = setup_test_env();
+        setup_test_env();
         let mut mgr = SessionManager {
             lock_enabled: true,
             lock_on_pause: true,
@@ -538,12 +554,14 @@ mod tests {
             app_foreground: false,
             ..Default::default()
         };
-        mgr.apply_hardware_facts(&facts);
+        mgr.apply_hardware_facts(&facts).expect("apply facts");
         assert!(mgr.lock_locked);
     }
 
     #[test]
+    #[serial_test::serial]
     fn no_auto_lock_when_policy_disabled() {
+        setup_test_env();
         let mut mgr = SessionManager {
             lock_enabled: true,
             lock_on_pause: false,
@@ -554,12 +572,14 @@ mod tests {
             app_foreground: false,
             ..Default::default()
         };
-        mgr.apply_hardware_facts(&facts);
+        mgr.apply_hardware_facts(&facts).expect("apply facts");
         assert!(!mgr.lock_locked);
     }
 
     #[test]
+    #[serial_test::serial]
     fn no_auto_lock_while_qr_scanner_active() {
+        setup_test_env();
         let mut mgr = SessionManager {
             lock_enabled: true,
             lock_on_pause: true,
@@ -571,14 +591,14 @@ mod tests {
             qr_active: true,
             ..Default::default()
         };
-        mgr.apply_hardware_facts(&facts);
+        mgr.apply_hardware_facts(&facts).expect("apply facts");
         assert!(!mgr.lock_locked);
     }
 
     #[test]
     #[serial_test::serial]
     fn hardware_facts_round_trip() {
-        let _g = setup_test_env();
+        setup_test_env();
         // SDK_READY already reset to false by setup_test_env
 
         let facts = generated::SessionHardwareFactsProto {
@@ -594,20 +614,11 @@ mod tests {
             battery_level_percent: 100,
         };
         let bytes = facts.encode_to_vec();
-        let result = update_hardware_and_snapshot(&bytes);
-        assert!(result.is_ok());
-
-        // Return is envelope-wrapped: [0x03][Envelope(SessionStateResponse)]
-        let envelope_bytes = result.unwrap();
-        assert_eq!(envelope_bytes[0], 0x03, "must have 0x03 framing byte");
-        let envelope = dsm::envelope::from_canonical_bytes(&envelope_bytes[1..]).unwrap();
-        let snap = match envelope.payload {
-            Some(generated::envelope::Payload::SessionStateResponse(s)) => s,
-            other => panic!("expected SessionStateResponse, got {:?}", other),
-        };
-        let hw = snap.hardware_status.unwrap();
+        let envelope_bytes = update_hardware_and_snapshot(&bytes).expect("snapshot");
+        let snap = decode_snapshot(&envelope_bytes);
+        let hw = snap.hardware_status.expect("hardware status");
         assert!(hw.app_foreground);
-        let ble = hw.ble.unwrap();
+        let ble = hw.ble.expect("ble status");
         assert!(ble.enabled);
         assert!(ble.advertising);
         assert!(!ble.scanning);
@@ -616,13 +627,14 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn sync_lock_config_reads_native_prefs() {
-        let _g = setup_test_env();
-        AppState::handle_app_state_request(LOCK_ENABLED_KEY, "set", "true");
-        AppState::handle_app_state_request(LOCK_METHOD_KEY, "set", "combo");
-        AppState::handle_app_state_request(LOCK_ON_PAUSE_KEY, "set", "false");
+        setup_test_env();
+        AppState::set_pref(LOCK_ENABLED_KEY, "true").expect("pref");
+        AppState::set_pref(LOCK_METHOD_KEY, "combo").expect("pref");
+        AppState::set_pref(LOCK_ON_PAUSE_KEY, "false").expect("pref");
 
         let mut mgr = SessionManager::default();
-        mgr.sync_lock_config_from_app_state();
+        mgr.sync_lock_config_from_app_state()
+            .expect("lock settings");
 
         assert!(mgr.lock_enabled);
         assert_eq!(mgr.lock_method, "combo");
@@ -633,64 +645,75 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn cold_start_with_enabled_lock_defaults_to_locked() {
-        let _g = setup_test_env();
-        AppState::handle_app_state_request(LOCK_ENABLED_KEY, "set", "true");
-        AppState::handle_app_state_request(LOCK_METHOD_KEY, "set", "pin");
-        AppState::handle_app_state_request(LOCK_ON_PAUSE_KEY, "set", "true");
-        AppState::handle_app_state_request(LOCK_LOCKED_KEY, "set", "false");
+        setup_test_env();
+        AppState::set_pref(LOCK_ENABLED_KEY, "true").expect("pref");
+        AppState::set_pref(LOCK_METHOD_KEY, "pin").expect("pref");
+        AppState::set_pref(LOCK_ON_PAUSE_KEY, "true").expect("pref");
+        AppState::set_pref(LOCK_LOCKED_KEY, "false").expect("pref");
 
         let mut mgr = SessionManager::default();
-        mgr.sync_lock_config_from_app_state();
+        mgr.sync_lock_config_from_app_state()
+            .expect("lock settings");
 
         assert!(mgr.lock_enabled);
         assert!(mgr.lock_locked);
-        assert_eq!(
-            AppState::handle_app_state_request(LOCK_LOCKED_KEY, "get", ""),
-            "true"
-        );
+        assert_eq!(AppState::get_pref(LOCK_LOCKED_KEY).as_deref(), Some("true"));
     }
 
     #[test]
     #[serial_test::serial]
     fn runtime_unlock_persists_until_next_process_start() {
-        let _g = setup_test_env();
-        AppState::handle_app_state_request(LOCK_ENABLED_KEY, "set", "true");
-        AppState::handle_app_state_request(LOCK_METHOD_KEY, "set", "pin");
-        AppState::handle_app_state_request(LOCK_ON_PAUSE_KEY, "set", "true");
+        setup_test_env();
+        AppState::set_pref(LOCK_ENABLED_KEY, "true").expect("pref");
+        AppState::set_pref(LOCK_METHOD_KEY, "pin").expect("pref");
+        AppState::set_pref(LOCK_ON_PAUSE_KEY, "true").expect("pref");
 
         let mut mgr = SessionManager::default();
-        mgr.sync_lock_config_from_app_state();
+        mgr.sync_lock_config_from_app_state()
+            .expect("lock settings");
         assert!(mgr.lock_locked);
 
-        mgr.unlock_now();
+        mgr.unlock_now().expect("unlock");
         assert_eq!(
-            AppState::handle_app_state_request(LOCK_LOCKED_KEY, "get", ""),
-            "false"
+            AppState::get_pref(LOCK_LOCKED_KEY).as_deref(),
+            Some("false")
         );
 
-        mgr.sync_lock_config_from_app_state();
+        mgr.sync_lock_config_from_app_state()
+            .expect("lock settings");
         assert!(!mgr.lock_locked);
 
         let mut restarted = SessionManager::default();
-        restarted.sync_lock_config_from_app_state();
+        restarted
+            .sync_lock_config_from_app_state()
+            .expect("lock settings");
         assert!(restarted.lock_locked);
     }
 
     #[test]
     #[serial_test::serial]
     fn snapshot_bytes_are_envelope_wrapped() {
-        let _g = setup_test_env();
+        setup_test_env();
         SDK_READY.store(true, Ordering::SeqCst);
 
-        let bytes = get_session_snapshot_bytes();
-        assert!(!bytes.is_empty());
-        assert_eq!(bytes[0], 0x03, "must have 0x03 framing byte");
-        let envelope = dsm::envelope::from_canonical_bytes(&bytes[1..]).unwrap();
-        match envelope.payload {
-            Some(generated::envelope::Payload::SessionStateResponse(s)) => {
-                assert!(!s.phase.is_empty());
-            }
-            other => panic!("expected SessionStateResponse, got {:?}", other),
-        }
+        let bytes = get_session_snapshot_bytes().expect("snapshot");
+        assert!(!decode_snapshot(&bytes).phase.is_empty());
+    }
+
+    /// A stored lock setting that is neither `true` nor `false` is an error,
+    /// never read as the manager's own setting: a corrupted "lock enabled"
+    /// must not quietly become "disabled".
+    #[test]
+    #[serial_test::serial]
+    fn a_malformed_lock_setting_is_an_error_not_a_default() {
+        setup_test_env();
+        AppState::set_pref(LOCK_ENABLED_KEY, "yes").expect("pref");
+        let mut mgr = SessionManager {
+            lock_enabled: true,
+            ..SessionManager::default()
+        };
+        let refused = mgr.sync_lock_config_from_app_state();
+        assert!(refused.is_err(), "a malformed setting is reported");
+        assert!(mgr.lock_enabled, "the manager's setting is untouched");
     }
 }

@@ -1,25 +1,25 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! THE legitimate funding path for economic tests, reachable from integration
-//! tests.
+//! The funding path for economic tests, reachable from integration tests.
 //!
 //! Every balance an economic test holds must have been produced by the protocol
-//! that produces it in the real system. This module is the only sanctioned way
-//! for a test to obtain one:
+//! that produces it on a device. This module is the only sanctioned way for a
+//! test to obtain one:
 //!
 //! ```text
-//! ERA          real faucet admission                    0x0030
-//! user asset   token.create + token.mint                0x0029 -> 0x0023
+//! identity     the steps system.createGenesisV2 installs a wallet with
+//! ERA          the faucet admission
+//! user asset   token.create: the genesis supply released to its creator
 //! ```
 //!
-//! There is deliberately no way here to set a balance, a reserve or an
+//! There is deliberately no way here to set a balance, a reserve, a head or an
 //! admission directly. A balance with no economic lineage is one no admission
 //! can debit, so a test holding one proves nothing about the real path.
 //!
-//! Why fabrication is not harmless here: debits are deliberately NOT fenced in
-//! core (a raw local debit is self-harm), so a fabricated balance does not sit
-//! below the acceptance boundary — it CROSSES it the moment it is spent,
-//! producing a real chain tip, a real SMT root and a real receipt.
+//! Storage is the storage node's own code on Postgres (`test_support/nodes.rs`,
+//! which the SDK's unit and integration tests both run); [`point_sdk_at`]
+//! writes the device's environment config for a node set, as a deployed
+//! device's config names its fleet.
 //!
 //! Gated `any(test, feature = "test-utils")`. `test-utils` is non-default and
 //! reaches the build only through dev-dependencies, which `cargo build` does not
@@ -36,26 +36,92 @@ use crate::handlers::app_router_impl::AppRouterImpl;
 use crate::init::SdkConfig;
 use crate::storage::client_db;
 
+/// Set this process's storage base directory — where the device database and
+/// `AppState` live — to a directory of its own under the system temp dir, as a
+/// device's startup sets it. The first call in the process empties it, so no
+/// earlier run's files are read; later calls find it set. Every test that
+/// touches device storage calls this first.
+pub fn use_test_storage_dir() {
+    static EMPTIED: std::sync::Once = std::sync::Once::new();
+    let dir = std::env::temp_dir().join(format!("dsm_sdk_test_{}", std::process::id()));
+    EMPTIED.call_once(|| {
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir).expect("empty the test storage dir");
+        }
+    });
+    crate::storage_utils::set_storage_base_dir(dir.clone()).expect("create the test storage dir");
+    assert_eq!(
+        crate::storage_utils::get_storage_base_dir().as_ref(),
+        Some(&dir),
+        "the storage base dir was set to another directory first"
+    );
+}
+
 /// The beta network — the only one whose root-register profile resolves.
 /// An unknown network fails closed by design, so a fixture pinned to anything
 /// else can never produce an admitted position.
 pub const NETWORK: &[u8] = b"dsm-testnet";
 
-/// Restores the hermetic default fleet on drop, so a test that chose a fleet
-/// does not hand it to every test that runs after it.
-pub struct FleetGuard;
+/// The device's environment config, pointed at one node set. Dropping it
+/// removes the config, so a later test that forgets to point the SDK at its
+/// own nodes fails to load a config rather than reaching this set's.
+pub struct FleetGuard {
+    config_path: std::path::PathBuf,
+}
 
-impl Drop for FleetGuard {
-    fn drop(&mut self) {
-        std::env::remove_var("DSM_ENV_CONFIG_PATH");
+impl FleetGuard {
+    /// The endpoints the config names, in pin order.
+    pub fn endpoints(&self) -> Vec<String> {
+        crate::network::NetworkConfigLoader::load_env_config()
+            .expect("the fleet config loads")
+            .nodes
+            .into_iter()
+            .map(|n| n.endpoint)
+            .collect()
     }
 }
 
+impl Drop for FleetGuard {
+    fn drop(&mut self) {
+        if let Err(e) = std::fs::remove_file(&self.config_path) {
+            eprintln!(
+                "fleet config {} was not removed: {e}",
+                self.config_path.display()
+            );
+        }
+    }
+}
+
+/// Write the device's environment config for a node set: each member as
+/// `(member id, endpoint, register incarnation)`, in pin order — what
+/// `NodeSet::members` reports. The config lives at one path for the process;
+/// the loader reads it on every load, so each test's nodes replace the last.
+pub fn point_sdk_at(members: &[(String, String, [u8; 32])]) -> FleetGuard {
+    let config_path =
+        std::env::temp_dir().join(format!("dsm_sdk_fleet_{}.toml", std::process::id()));
+    let mut cfg = String::from(
+        "protocol = \"http\"\nlan_ip = \"127.0.0.1\"\nallow_localhost = true\n\
+         bitcoin_network = \"signet\"\n",
+    );
+    for (member_id, endpoint, incarnation) in members {
+        cfg.push_str(&format!(
+            "\n[[nodes]]\nname = \"{member_id}\"\nendpoint = \"{endpoint}\"\n\
+             register_incarnation = \"{}\"\n",
+            crate::util::text_id::encode_base32_crockford(incarnation)
+        ));
+    }
+    std::fs::write(&config_path, cfg).expect("write env config");
+    let path_text = config_path.to_string_lossy().into_owned();
+    crate::network::set_env_config_path(path_text.clone());
+    assert_eq!(
+        crate::network::get_env_config_path(),
+        Some(path_text.as_str()),
+        "the env config path was set to another file first"
+    );
+    FleetGuard { config_path }
+}
+
 /// The network's PINNED root-register member ids, in pin order.
-///
-/// Every fixture fleet is derived from this rather than restating a member
-/// count, so re-pinning the register cannot leave a fixture resolving to a set
-/// the network no longer commits to.
 pub fn canonical_member_ids() -> Vec<String> {
     dsm::economic::register::pinned_root_register_members(NETWORK)
         .expect("the beta network is pinned")
@@ -72,7 +138,6 @@ pub fn canonical_quorum() -> usize {
 
 /// How many nodes one b0x submit lands on: the submit loop stops at `q`
 /// successes, so a fleet of `n > q` holds a message on `q` nodes, not all `n`.
-/// "Every node" only held while the fleet was exactly `q` wide.
 pub fn delivery_quorum() -> usize {
     canonical_quorum().min(canonical_member_ids().len())
 }
@@ -85,286 +150,231 @@ pub fn members_to_break_quorum() -> Vec<String> {
     ids[canonical_quorum() - 1..].to_vec()
 }
 
-/// Point the loader at a fleet whose member NAMES are the pinned register
-/// members.
-///
-/// The profile resolves its set by RE-HASHING member ids, so the default
-/// `test-1..3` fleet can never satisfy it. The endpoints are irrelevant: all
-/// register I/O is faked under `cfg(test)`.
-pub fn install_canonical_fleet() -> FleetGuard {
-    let cfg_path = std::env::temp_dir().join(format!(
-        "dsm_sdk_econ_fixture_env_{}.toml",
-        std::process::id()
-    ));
-    let mut cfg = String::from(
-        "protocol = \"http\"\nlan_ip = \"127.0.0.1\"\nallow_localhost = true\nports = [8080]\n",
-    );
-    for (i, id) in canonical_member_ids().iter().enumerate() {
-        let inc = fixture_register_incarnation(id);
-        let port = 8081 + i;
-        cfg.push_str(&format!(
-            "\n[[nodes]]\nname = \"{id}\"\nendpoint = \"http://127.0.0.1:{port}\"\n\
-             register_incarnation = \"{inc}\"\n"
-        ));
+/// The BIP39 mnemonic a test device `seed` is created from: 24 words over the
+/// entropy `[seed; 32]`, so a device is the same device in every run.
+pub fn test_mnemonic(seed: u8) -> String {
+    bip39::Mnemonic::from_entropy(&[seed; 32])
+        .expect("32 bytes of entropy make a mnemonic")
+        .to_string()
+}
+
+/// A device identity created by [`create_identity`].
+pub struct TestIdentity {
+    pub device_id: [u8; 32],
+    pub genesis: [u8; 32],
+    pub ak_public_key: Vec<u8>,
+    pub smt_root: [u8; 32],
+    /// The BIP39 wallet seed the mnemonic unlocks.
+    pub wallet_seed: Vec<u8>,
+}
+
+impl TestIdentity {
+    /// The device's signing keypair, derived as production derives it.
+    pub fn signing_keypair(&self) -> dsm::crypto::signatures::SignatureKeyPair {
+        crate::init::derive_device_signing_keypair(&self.wallet_seed, &self.genesis)
+            .expect("device signing keypair")
     }
-    std::fs::write(&cfg_path, cfg).expect("write env config");
-    crate::network::set_env_config_path(cfg_path.to_string_lossy().into_owned());
-    std::env::set_var("DSM_ENV_CONFIG_PATH", &cfg_path);
-    FleetGuard
 }
 
-/// A real seed-rooted v3 identity on the beta network, with its genesis record
-/// persisted so the admission flow can read the committed network back.
-///
-/// Returns `(public_key, devid, genesis)`.
-pub fn install_testnet_identity(seed: u8) -> (Vec<u8>, [u8; 32], [u8; 32]) {
-    let (keypair, devid, genesis) = install_testnet_identity_with_keypair(seed);
-    (keypair.public_key().to_vec(), devid, genesis)
-}
-
-/// As [`install_testnet_identity`], also handing back the device's signing
-/// keypair — for a test that drives a protocol handler directly (the BLE
-/// bilateral handler, say) and must sign as the SAME device whose head the
-/// router funded. Returns `(keypair, devid, genesis)`.
-pub fn install_testnet_identity_with_keypair(
-    seed: u8,
-) -> (
-    dsm::crypto::signatures::SignatureKeyPair,
-    [u8; 32],
-    [u8; 32],
-) {
-    let wallet_seed = vec![seed; 64];
-    let aph = dsm::core::identity::genesis_session::genesis_authority_policy_hash();
-    let genesis = dsm::core::identity::genesis_v3::derive_genesis_v3_self_attested(
+/// Create a device identity on the beta network the way wallet creation does:
+/// unlock the mnemonic (the wallet seed cached for the session), derive the
+/// canonical Genesis v3 under `system.createGenesisV2`'s inputs, and install
+/// it — genesis state and head, public genesis record, wallet state, AppState
+/// and the SDK context ([`crate::handlers::system_routes::install_wallet_genesis`]).
+/// Any identity this process held before is replaced: this is a new device.
+pub fn create_identity(seed: u8) -> TestIdentity {
+    crate::reset_sdk_context_for_testing();
+    let mnemonic = test_mnemonic(seed);
+    crate::sdk::recovery_sdk::RecoverySDK::derive_and_cache_key(&mnemonic)
+        .expect("unlock the mnemonic");
+    let wallet_seed = crate::sdk::recovery_sdk::RecoverySDK::get_cached_wallet_seed()
+        .expect("the unlocked wallet seed");
+    let inputs = crate::sdk::identity_presentation::OwnerIdentityInputs::beta(NETWORK);
+    let outcome = dsm::core::identity::genesis::create_genesis_v3_self_attested(
         &wallet_seed,
-        NETWORK,
-        0,
-        0,
-        3,
-        &aph,
+        inputs.network_id,
+        inputs.wallet_index,
+        inputs.device_slot,
+        inputs.genesis_version,
+        &dsm::core::identity::genesis_session::genesis_authority_policy_hash(),
     )
     .expect("v3 genesis");
-    let device_id = genesis.devid.to_vec();
-    let genesis_hash = genesis.g.to_vec();
-    crate::sdk::signing_authority::clear_binding_key_for_testing();
-    let keypair = crate::sdk::signing_authority::derive_signing_keypair_for_testing(
-        &device_id,
-        &genesis_hash,
-        &wallet_seed,
-    )
-    .expect("derive signing keypair");
-    let public_key = keypair.public_key().to_vec();
-    crate::sdk::signing_authority::set_binding_key_for_testing(wallet_seed);
-    client_db::store_genesis_record_with_verification(&client_db::GenesisRecord {
-        genesis_id: crate::util::text_id::encode_base32_crockford(&genesis.g),
-        device_id: crate::util::text_id::encode_base32_crockford(&genesis.devid),
-        mpc_proof: String::new(),
-        device_birth_binding: String::new(),
-        merkle_root: crate::util::text_id::encode_base32_crockford(&[0u8; 32]),
-        participant_count: 0,
-        progress_marker: "genesis".to_string(),
-        publication_hash: crate::util::text_id::encode_base32_crockford(&genesis.g),
-        storage_nodes: Vec::new(),
-        entropy_hash: crate::util::text_id::encode_base32_crockford(&genesis.genesis_nonce),
-        protocol_version: "genesis-v3".to_string(),
-        hash_chain_proof: None,
-        smt_proof: None,
-        verification_step: None,
-        genesis_nonce: crate::util::text_id::encode_base32_crockford(&genesis.genesis_nonce),
-        genesis_profile: "MnemonicV3".to_string(),
-        network_id: "dsm-testnet".to_string(),
-    })
-    .expect("store genesis record");
-    crate::sdk::app_state::AppState::set_identity_info(
-        device_id,
-        public_key,
-        genesis_hash,
-        vec![0u8; 32],
-    );
-    crate::sdk::app_state::AppState::set_has_identity(true);
-    (keypair, genesis.devid, genesis.g)
+    let network = String::from_utf8(NETWORK.to_vec()).expect("network id is UTF-8");
+    let installed =
+        crate::handlers::system_routes::install_wallet_genesis(&outcome, &wallet_seed, &network)
+            .unwrap_or_else(|e| panic!("install the genesis: {e}"));
+    TestIdentity {
+        device_id: installed.device_id,
+        genesis: installed.genesis,
+        ak_public_key: installed.ak_public_key,
+        smt_root: installed.smt_root,
+        wallet_seed,
+    }
 }
 
-/// A router on a real testnet identity, holding NOTHING.
-///
-/// Position 0 with the real `(G, DevID)` is the only state that can become
-/// position 1: admissions re-derive and re-verify everything from the identity,
-/// so a lazily-bootstrapped zero-genesis head cannot admit; and `activate`
-/// refuses to self-root a head that already holds value it never admitted.
-pub fn empty_router(seed: u8) -> (AppRouterImpl, FleetGuard) {
-    let (router, keypair, guard) = empty_router_with(seed, false);
-    drop(keypair);
-    (router, guard)
+/// A `CoreSDK` for `identity`, built as the router builds its own: over the
+/// device id and AK the genesis installed, restoring the head genesis wrote.
+pub fn core_sdk_for(identity: &TestIdentity) -> crate::sdk::core_sdk::CoreSDK {
+    crate::sdk::core_sdk::CoreSDK::new_with_device(dsm::types::state_types::DeviceInfo::new(
+        identity.device_id,
+        identity.ak_public_key.clone(),
+    ))
+    .expect("CoreSDK")
 }
 
-/// As [`empty_router`], with the router's offline (bilateral-storage) mode
-/// chosen by the caller, and the identity's signing keypair handed back — for
-/// a test that drives a protocol handler directly and must sign as the SAME
-/// device whose head the router will fund.
-///
-/// Returns `(router, keypair, guard)`.
-pub fn empty_router_with(
-    seed: u8,
-    enable_offline: bool,
-) -> (
-    AppRouterImpl,
-    dsm::crypto::signatures::SignatureKeyPair,
-    FleetGuard,
-) {
-    std::env::set_var("DSM_SDK_TEST_MODE", "1");
-    let guard = install_canonical_fleet();
+/// A device with a fresh database and a new identity, and its `CoreSDK`: for
+/// tests of code that needs a device but no network.
+pub fn local_device(seed: u8) -> (TestIdentity, crate::sdk::core_sdk::CoreSDK) {
+    use_test_storage_dir();
     client_db::reset_database_for_tests();
     client_db::init_database().expect("init db");
-    crate::sdk::storage_io::fake_registers::reset();
-    crate::sdk::storage_io::fake_fleet::reset();
-    // The binding register is a THIRD process-global store, alongside the object
-    // fleet and the economic-root registers. It must be reset here for the same
-    // reason they are: a previous test's records — or worse, a stale
-    // (member_id, incarnation) echo — make a later vault's binding key answer
-    // for the wrong fleet, and `ensure_registered` will not correct an entry
-    // that already exists.
-    let (keypair, devid, genesis) = install_testnet_identity_with_keypair(seed);
+    let identity = create_identity(seed);
+    let core = core_sdk_for(&identity);
+    (identity, core)
+}
+
+/// Publish this device's directory entry on the fleet and require it held by
+/// enough members to count as published — what a device's genesis session
+/// (and its startup retry) does before anyone can resolve it.
+pub async fn publish_identity(device_id: &[u8; 32], genesis: &[u8; 32]) {
+    let device_b32 = crate::util::text_id::encode_base32_crockford(device_id);
+    let genesis_b32 = crate::util::text_id::encode_base32_crockford(genesis);
+    let report = crate::sdk::identity_publication::publish_identity_now(&device_b32, &genesis_b32)
+        .await
+        .expect("publish the directory entry");
+    assert!(
+        report.is_published(),
+        "{}/{} members hold the directory entry; {} needed",
+        report.holders,
+        report.members,
+        report.required
+    );
+}
+
+/// The router a device builds once its identity exists, with the durable
+/// policy resolver production bring-up installs beside it.
+fn device_router(fleet: &FleetGuard, node_id: &str, enable_offline: bool) -> AppRouterImpl {
     let router = AppRouterImpl::new(SdkConfig {
-        node_id: "econ-fixture".to_string(),
-        storage_endpoints: Vec::new(),
+        node_id: node_id.to_string(),
+        storage_endpoints: fleet.endpoints(),
         enable_offline,
     })
     .expect("router");
+    router.install_policy_resolver();
     router
-        .core_sdk
-        .set_device_head_for_testing(dsm::types::device_state::DeviceState::new(
-            genesis,
-            devid,
-            keypair.public_key().to_vec(),
-        ));
-    (router, keypair, guard)
 }
 
-/// Claim ERA through the REAL faucet admission (0x005D). Returns the admitted
-/// economic position.
-pub fn claim_era(router: &AppRouterImpl) -> u64 {
-    crate::runtime::get_runtime()
-        .block_on(crate::sdk::faucet_claim_flow::claim_era_faucet(
-            &router.core_sdk,
-            NETWORK,
-        ))
+/// A router on a new device identity, holding NOTHING, its directory entry
+/// published on the fleet.
+pub async fn empty_router(fleet: &FleetGuard, seed: u8) -> AppRouterImpl {
+    empty_router_with(fleet, seed, false).await.0
+}
+
+/// As [`empty_router`], with the router's offline (bilateral-storage) mode
+/// chosen by the caller, and the identity handed back — for a test that drives
+/// a protocol handler directly and must sign as the SAME device.
+pub async fn empty_router_with(
+    fleet: &FleetGuard,
+    seed: u8,
+    enable_offline: bool,
+) -> (AppRouterImpl, TestIdentity) {
+    use_test_storage_dir();
+    client_db::reset_database_for_tests();
+    client_db::init_database().expect("init db");
+    let identity = create_identity(seed);
+    let router = device_router(fleet, "econ-fixture", enable_offline);
+    publish_identity(&identity.device_id, &identity.genesis).await;
+    (router, identity)
+}
+
+/// Claim ERA through the faucet admission. Returns the admitted economic
+/// position.
+pub async fn claim_era(router: &AppRouterImpl) -> u64 {
+    crate::sdk::faucet_claim_flow::claim_era_faucet(&router.core_sdk, NETWORK)
+        .await
         .expect("faucet claim must admit")
         .economic_position
 }
 
-/// A router funded with ERA through a real faucet admission.
-///
-/// The ERA amount is the faucet's own payout, so balance assertions written
-/// against a hard-coded 100 hold unchanged.
-pub fn funded_router(seed: u8) -> (AppRouterImpl, FleetGuard) {
-    let (router, guard) = empty_router(seed);
-    let position = claim_era(&router);
+/// A router funded with ERA through one faucet admission.
+pub async fn funded_router(fleet: &FleetGuard, seed: u8) -> AppRouterImpl {
+    let router = empty_router(fleet, seed).await;
+    let position = claim_era(&router).await;
     assert_eq!(position, 1, "the faucet claim must be economic position 1");
-    (router, guard)
+    router
 }
 
 /// A SECOND router over the same identity and the same database — a restart.
 ///
-/// Deliberately does not reset storage, reinstall the identity, or fund
+/// Deliberately does not reset storage, recreate the identity, or fund
 /// anything: the point of a cold-start test is that durable state survives, so
 /// re-seeding it would destroy the property under test. The head is whatever
 /// was persisted.
-pub fn restart_router() -> AppRouterImpl {
+pub fn restart_router(fleet: &FleetGuard) -> AppRouterImpl {
     // A new PROCESS: the startup-admission record belongs to the process that
     // is being modeled as gone.
     crate::sdk::core_sdk::CoreSDK::forget_process_startup_admissions_for_testing();
-    AppRouterImpl::new(SdkConfig {
-        node_id: "econ-fixture-restart".to_string(),
-        storage_endpoints: Vec::new(),
-        enable_offline: false,
-    })
-    .expect("router")
+    device_router(fleet, "econ-fixture-restart", false)
 }
 
-/// Create a user asset and mint `amount` of it, both ADMITTED — the legitimate
-/// second-asset origin (0x0029 authorized issuance, consumed by the 0x0023 arm).
+/// Create a user asset through `token.create`: its whole genesis supply
+/// released to this device in the creating transition (SoFi §51). Returns the
+/// token's policy commit, which does not exist until the token does.
 ///
-/// Returns the token's policy commit, which does not exist until the token does:
-/// `token.create` binds the creator's own key as the policy signer, so a commit
-/// computed any other way names a policy no device can issue under.
-///
-/// The router must already hold ERA for the creation fee — call `funded_router`
-/// or `claim_era` first.
-pub fn mint_asset(router: &AppRouterImpl, ticker: &str, decimals: u32, amount: u64) -> [u8; 32] {
-    mint_asset_with_icon(router, ticker, decimals, amount, "")
-}
-
-/// [`mint_asset`] with the policy's icon field set, for tests of what a token's policy carries to
-/// the wallet (its coin artwork).
-pub fn mint_asset_with_icon(
+/// The router must already hold ERA for the creation fee — call
+/// `funded_router` or `claim_era` first.
+pub async fn create_asset(
     router: &AppRouterImpl,
     ticker: &str,
     decimals: u32,
-    amount: u64,
+    genesis_supply: u128,
+) -> [u8; 32] {
+    create_asset_with_icon(router, ticker, decimals, genesis_supply, "").await
+}
+
+/// [`create_asset`] with the policy's icon field set, for tests of what a
+/// token's policy carries to the wallet (its coin artwork).
+pub async fn create_asset_with_icon(
+    router: &AppRouterImpl,
+    ticker: &str,
+    decimals: u32,
+    genesis_supply: u128,
     icon_url: &str,
 ) -> [u8; 32] {
     use crate::bridge::{AppInvoke, AppRouter};
     use dsm::types::proto as generated;
-    use prost::Message as _;
+    use prost::Message as ProstMessage;
 
-    let pack = |body: Vec<u8>| {
-        generated::ArgPack {
-            schema_hash: Some(generated::Hash32 { v: vec![0u8; 32] }),
-            codec: generated::Codec::Proto as i32,
-            body,
+    let args = generated::ArgPack {
+        codec: generated::Codec::Proto as i32,
+        body: generated::TokenCreateRequest {
+            ticker: ticker.into(),
+            alias: format!("{ticker} Fixture Asset"),
+            decimals,
+            genesis_supply_u128: genesis_supply.to_be_bytes().to_vec(),
+            burn_enabled: true,
+            transferable: true,
+            threshold: 1,
+            description: String::new(),
+            icon_url: icon_url.into(),
+            allowlist_device_ids: Vec::new(),
         }
-        .encode_to_vec()
-    };
+        .encode_to_vec(),
+        ..Default::default()
+    }
+    .encode_to_vec();
 
-    crate::runtime::get_runtime().block_on(async {
-        let created = router
-            .invoke(AppInvoke {
-                method: "token.create".into(),
-                args: pack(
-                    generated::TokenCreateRequest {
-                        ticker: ticker.into(),
-                        alias: format!("{ticker} Fixture Asset"),
-                        decimals,
-                        max_supply_u128: 0u128.to_be_bytes().to_vec(),
-                        initial_alloc_u128: 0u128.to_be_bytes().to_vec(),
-                        mint_burn_enabled: true,
-                        transferable: true,
-                        unlimited_supply: true,
-                        mint_burn_threshold: 1,
-                        description: String::new(),
-                        icon_url: icon_url.into(),
-                        allowlist_device_ids: Vec::new(),
-                    }
-                    .encode_to_vec(),
-                ),
-            })
-            .await;
-        assert!(
-            created.success,
-            "fixture: token.create {ticker}: {:?}",
-            created.error_message
-        );
-        if amount > 0 {
-            let minted = router
-                .invoke(AppInvoke {
-                    method: "token.mint".into(),
-                    args: pack(
-                        generated::TokenMintRequest {
-                            token_id: ticker.into(),
-                            amount,
-                            message: String::new(),
-                        }
-                        .encode_to_vec(),
-                    ),
-                })
-                .await;
-            assert!(
-                minted.success,
-                "fixture: token.mint {ticker} {amount}: {:?}",
-                minted.error_message
-            );
-        }
-    });
+    let created = router
+        .invoke(AppInvoke {
+            method: "token.create".into(),
+            args,
+        })
+        .await;
+    assert!(
+        created.success,
+        "fixture: token.create {ticker}: {:?}",
+        created.error_message
+    );
 
     client_db::token_registry::get_token_by_ticker(ticker)
         .expect("registry read")
@@ -372,53 +382,30 @@ pub fn mint_asset_with_icon(
         .policy_commit
 }
 
-/// Take the register fleet down, so no admission can reach quorum.
-///
-/// This simulates an OUTAGE — a transport condition — and fabricates nothing:
-/// the device's balance is still whatever the protocol legitimately gave it,
-/// and the operation under test still builds its real write set and witness.
-/// It exists so a fail-closed property ("an operation that cannot be admitted
-/// must burn nothing and advance nothing") stays reachable without reaching for
-/// an unfunded or fabricated head.
-pub fn take_register_offline() {
-    for id in canonical_member_ids() {
-        crate::sdk::storage_io::fake_registers::fail_member(&id, true);
-    }
-}
-
-/// Bring the register fleet back up.
-pub fn bring_register_online() {
-    for id in canonical_member_ids() {
-        crate::sdk::storage_io::fake_registers::fail_member(&id, false);
-    }
-}
-
-/// Resume a pending economic admission — the real recovery path.
+/// Resume a pending economic admission — the recovery path.
 ///
 /// Returns the admitted economic position. This is what a later admitted
 /// operation would trigger on its own (`stage_admission` resumes first); the
 /// fixture exposes it so a recovery property can be asserted directly instead
 /// of being inferred from a side effect.
-pub fn resume_pending(router: &AppRouterImpl) -> u64 {
+pub async fn resume_pending(router: &AppRouterImpl) -> u64 {
     let pending = router
         .core_sdk
         .device_head()
         .and_then(|h| h.pending_economic_admission().cloned())
         .expect("resume_pending: no pending admission on the head");
-    crate::runtime::get_runtime()
-        .block_on(
-            crate::sdk::economic_admission_flow::resume_pending_admission(
-                &router.core_sdk,
-                NETWORK,
-                pending,
-            ),
-        )
-        .expect("the pending admission must resume once the register is reachable")
-        .economic_position
+    crate::sdk::economic_admission_flow::resume_pending_admission(
+        &router.core_sdk,
+        NETWORK,
+        pending,
+    )
+    .await
+    .expect("the pending admission must resume once the register is reachable")
+    .economic_position
 }
 
 /// The device's ADMITTED economic position, or `None` before activation.
-pub fn admitted_position(_router: &AppRouterImpl) -> Option<u64> {
+pub fn admitted_position() -> Option<u64> {
     client_db::economic_lineage::get_admitted()
         .expect("read admitted lineage")
         .map(|admitted| admitted.economic_position())
@@ -433,39 +420,4 @@ pub fn pending_state(
         .device_head()
         .and_then(|h| h.pending_economic_admission().cloned())
         .map(|p| p.state)
-}
-
-/// A test fleet member's register incarnation, derived from its name so every
-/// fixture and every assertion agree without threading the value.
-///
-/// Production derives nothing: a node's incarnation is random at its first
-/// init and lives only in its own database. This stands in for "the value
-/// that node reported to whoever wrote the catalog".
-pub fn fixture_register_incarnation(member_id: &str) -> String {
-    crate::util::text_id::encode_base32_crockford(&fixture_register_incarnation_bytes(member_id))
-}
-
-/// The same value as bytes, for fixtures that build the COMMITTED set.
-///
-/// One derivation for both sides on purpose: a committed set whose
-/// incarnations differ from the catalog's resolves to a different set id, and
-/// the vault's own storage set stops being resolvable — which is correct
-/// behaviour and a useless test failure.
-pub fn fixture_register_incarnation_bytes(member_id: &str) -> [u8; 32] {
-    // A PINNED member gets its pinned incarnation: a fixture fleet must
-    // resolve to the network's real committed register, or every economic
-    // path in the fixture fails closed for the right reason and the test
-    // proves nothing. Non-members (extra fake nodes) get a derived value —
-    // they cannot be in the pinned set by construction.
-    dsm::economic::register::pinned_root_register_members(b"dsm-testnet")
-        .ok()
-        .and_then(|pinned| {
-            pinned
-                .iter()
-                .find(|(id, _)| *id == member_id.as_bytes())
-                .map(|(_, inc)| *inc)
-        })
-        .unwrap_or_else(|| {
-            *blake3::hash(format!("dsm-test-incarnation/{member_id}").as_bytes()).as_bytes()
-        })
 }

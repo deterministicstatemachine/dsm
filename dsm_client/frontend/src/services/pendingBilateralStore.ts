@@ -114,12 +114,6 @@ function mapStatusFromNative(args: {
   }
 }
 
-function parseSeq(value?: string): number {
-  if (!value) return 0;
-  const n = Number(value);
-  return Number.isFinite(n) ? n : 0;
-}
-
 export async function refreshPendingBilateralFromNative(): Promise<void> {
   const { transactions } = await getPendingBilateralListStrict();
   const next: PendingBilateralRecordV1[] = [];
@@ -141,7 +135,8 @@ export async function refreshPendingBilateralFromNative(): Promise<void> {
     if (!counterpartyDeviceIdB32) continue;
 
     const id = makePendingId(commitmentHashB32, counterpartyDeviceIdB32);
-    const seq = parseSeq(String(metadata.createdAtStep || '')) || __nativeSeq++;
+    // The native list arrives in order; its position is the only order there is.
+    const seq = __nativeSeq++;
 
     next.push({
       version: 1,

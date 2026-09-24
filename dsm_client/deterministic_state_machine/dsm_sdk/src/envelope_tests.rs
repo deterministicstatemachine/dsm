@@ -16,9 +16,7 @@ fn envelope_roundtrip_preserves_fields() {
         version: 3,
         headers: Some(Headers {
             device_id: vec![0x01; 32],
-            chain_tip: vec![0x02; 32],
             genesis_hash: vec![0x03; 32],
-            seq: 42,
         }),
         message_id: vec![0x04; 16],
         payload: None, // Test with minimal payload
@@ -29,12 +27,10 @@ fn envelope_roundtrip_preserves_fields() {
 
     assert_eq!(parsed.version, 3);
     assert_eq!(parsed.headers.as_ref().unwrap().device_id, &[0x01; 32]);
-    assert_eq!(parsed.headers.as_ref().unwrap().chain_tip, &[0x02; 32]);
     assert_eq!(
         parsed.headers.as_ref().unwrap().genesis_hash.as_slice(),
         &[0x03; 32]
     );
-    assert_eq!(parsed.headers.as_ref().unwrap().seq, 42);
     assert_eq!(parsed.message_id, vec![0x04; 16]);
 }
 
@@ -44,9 +40,7 @@ fn envelope_v3_validation() {
         version: 3,
         headers: Some(Headers {
             device_id: vec![0x01; 32],
-            chain_tip: vec![0x02; 32],
             genesis_hash: vec![0x03; 32],
-            seq: 1,
         }),
         message_id: vec![0x04; 16],
         payload: None,
@@ -71,9 +65,7 @@ fn envelope_v3_validation() {
         version: 3,
         headers: Some(Headers {
             device_id: vec![0x01; 16],
-            chain_tip: vec![0x02; 32],
             genesis_hash: vec![0x03; 32],
-            seq: 1,
         }),
         message_id: vec![0x04; 16],
         payload: None,
@@ -98,13 +90,9 @@ fn anchor_disclosure_roundtrips_on_bilateral_confirm() {
     let confirm = BilateralConfirmRequest {
         commitment_hash: None,
         sender_signature: Vec::new(),
-        sender_smt_root: vec![0; 32],
-        rel_proof_parent: Vec::new(),
-        rel_proof_child: Vec::new(),
         stitched_receipt: Vec::new(),
         shared_chain_tip_new: None,
         pre_entropy: Vec::new(),
-        sender_smt_root_before: vec![0; 32],
         offline_release: Vec::new(),
         anchor_disclosure: Some(disclosure),
     };

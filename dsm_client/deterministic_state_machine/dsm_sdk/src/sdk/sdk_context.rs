@@ -21,8 +21,6 @@ pub struct SdkContext {
     genesis_hash: Arc<RwLock<[u8; 32]>>,
     /// Whether the context has been initialized with valid identity
     initialized: Arc<RwLock<bool>>,
-    /// Sequence number for operations
-    sequence_number: Arc<RwLock<u64>>,
     /// Device entropy for cryptographic operations
     device_entropy: Arc<RwLock<Vec<u8>>>,
 }
@@ -35,7 +33,6 @@ impl SdkContext {
             chain_tip: Arc::new(RwLock::new([0u8; 32])),
             genesis_hash: Arc::new(RwLock::new([0u8; 32])),
             initialized: Arc::new(RwLock::new(false)),
-            sequence_number: Arc::new(RwLock::new(0)),
             device_entropy: Arc::new(RwLock::new(vec![0; 32])),
         }
     }
@@ -121,11 +118,6 @@ impl SdkContext {
         *self.chain_tip.read()
     }
 
-    /// Get the current sequence number
-    pub fn sequence_number(&self) -> u64 {
-        *self.sequence_number.read()
-    }
-
     /// Get device entropy
     pub fn device_entropy(&self) -> Vec<u8> {
         self.device_entropy.read().clone()
@@ -150,18 +142,6 @@ impl SdkContext {
         Ok(())
     }
 
-    /// Increment and return the next sequence number
-    pub fn next_sequence_number(&self) -> u64 {
-        let mut seq = self.sequence_number.write();
-        *seq += 1;
-        *seq
-    }
-
-    /// Reset sequence number (for testing)
-    pub fn reset_sequence_number(&self) {
-        *self.sequence_number.write() = 0;
-    }
-
     /// Check if context is properly initialized
     pub fn is_initialized(&self) -> bool {
         *self.initialized.read()
@@ -174,7 +154,6 @@ impl SdkContext {
         *self.chain_tip.write() = [0u8; 32];
         *self.genesis_hash.write() = [0u8; 32];
         *self.initialized.write() = false;
-        *self.sequence_number.write() = 0;
         *self.device_entropy.write() = vec![0; 32];
     }
 }
@@ -211,15 +190,6 @@ mod tests {
         assert_eq!(context.device_id(), device_id);
         assert_eq!(context.genesis_hash(), genesis_hash.clone());
         assert_eq!(context.chain_tip(), genesis_hash.clone()); // Chain tip should be set to genesis
-    }
-
-    #[test]
-    fn test_sequence_number_increment() {
-        let context = SdkContext::new();
-
-        assert_eq!(context.sequence_number(), 0);
-        assert_eq!(context.next_sequence_number(), 1);
-        assert_eq!(context.sequence_number(), 1);
     }
 
     #[test]

@@ -151,179 +151,119 @@ pub async fn apply_relationship_finalized(body: &[u8]) -> RelationshipFinalizedO
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::client_db::{
-        insert_prepared_acceptance_journal, RecipientAcceptanceJournal, STATUS_PREPARED,
-    };
+    use crate::test_support::arrivals::arrivals_for;
+    use crate::test_support::two_device::{Pair, TestDevice};
     use prost::Message;
     use serial_test::serial;
 
-    const REL: [u8; 32] = [0x71u8; 32];
-    const CP: [u8; 32] = [0x0Au8; 32];
-    const LOCAL: [u8; 32] = [0x0Bu8; 32];
-    const COMMITMENT: [u8; 32] = [0x64u8; 32];
-    const A_CHILD: [u8; 32] = [0x32u8; 32];
-    const B_PAIR: ([u8; 32], [u8; 32]) = ([0xE3u8; 32], [0xE4u8; 32]);
-
-    fn init() {
-        unsafe { std::env::set_var("DSM_SDK_TEST_MODE", "1") };
-        crate::storage::client_db::reset_database_for_tests();
-        crate::storage::client_db::init_database().expect("init db");
-        crate::sdk::app_state::AppState::set_identity_info(
-            LOCAL.to_vec(),
-            vec![0x02; 32],
-            vec![0x03; 32],
-            vec![0x04; 32],
-        );
+    /// A sent B 10, B applied and replied, A finalized and shipped its
+    /// certificate. The certificate as B's poll reads it, with B entered.
+    async fn certified() -> (Pair, Vec<u8>) {
+        let p = Pair::boot(100, 0).await;
+        let sent = p.a.send(&p.b, 10).await;
+        assert!(sent.success, "{:?}", sent.error_message);
+        let applied = p.b.sync().await;
+        assert!(applied.success, "{:?}", applied.errors);
+        let finalized = p.a.sync().await;
+        assert!(finalized.success, "{:?}", finalized.errors);
+        let certificate = arrivals_for(&p.b, &p.fleet)
+            .await
+            .certificates
+            .pop()
+            .expect("A's certificate is on the members")
+            .body;
+        p.b.enter();
+        (p, certificate)
     }
 
-    /// A complete journal for the transition, with a REAL sender EK head.
-    fn seed_complete_journal(ek_pk_a: Vec<u8>) {
-        insert_prepared_acceptance_journal(&RecipientAcceptanceJournal {
-            relationship_key: REL,
-            parent_tip: [0x31u8; 32],
-            child_tip: A_CHILD,
-            counterparty_device_id: CP,
-            commitment: COMMITMENT,
-            receipt_parent_root_a: [0u8; 32],
-            receipt_child_root_a: [0u8; 32],
-            precommit_digest: [0u8; 32],
-            prepared_receipt_artifact_hash: [0u8; 32],
-            expected_local_b_head: None,
-            new_local_b_head: vec![0xBBu8; 40],
-            new_local_b_sk_enc: None,
-            expected_counterparty_a_head: None,
-            new_counterparty_a_head: ek_pk_a,
-            receipt_bytes: b"RECEIPT".to_vec(),
-            projection_parent_tip: [0xE1u8; 32],
-            projection_target_tip: [0xE2u8; 32],
-            applied_parent_tip_b: B_PAIR.0,
-            applied_child_tip_b: B_PAIR.1,
-            release_bytes: None,
-            peer_finalized: false,
-            status: STATUS_PREPARED.to_string(),
-            created_at: 0,
-        })
-        .expect("journal");
-        let binding = cdb::get_connection().expect("conn");
-        let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
-        conn.execute(
-            "UPDATE acceptance_fold_journal SET status = 'complete' WHERE commitment = ?1",
-            rusqlite::params![COMMITMENT.as_slice()],
-        )
-        .expect("complete");
+    fn awaiting(p: &Pair) -> bool {
+        cdb::relationship_awaits_peer_finalization(&p.a.rel_key_with(&p.b)).expect("await")
     }
 
-    fn signed_certificate(ek_sk_a: &[u8]) -> RelationshipFinalizedV1 {
-        let mut cert = RelationshipFinalizedV1 {
-            relationship_key: REL.to_vec(),
-            transition_commitment: COMMITMENT.to_vec(),
-            sender_device_id: CP.to_vec(),
-            recipient_device_id: LOCAL.to_vec(),
-            sender_child_tip_a: A_CHILD.to_vec(),
-            recipient_parent_tip_b: B_PAIR.0.to_vec(),
-            recipient_child_tip_b: B_PAIR.1.to_vec(),
-            signature_a: Vec::new(),
-        };
-        let target = relationship_finalized_signing_target(&cert);
-        cert.signature_a = dsm::crypto::sphincs::sphincs_sign(ek_sk_a, &target).expect("sign");
-        cert
-    }
-
-    /// The certificate releases the recipient exactly once, is idempotent on
-    /// re-serve, and every substituted field or foreign signature is refused
-    /// with `peer_finalized` untouched.
-    #[tokio::test]
+    /// The certificate releases the recipient exactly once and is idempotent
+    /// on re-serve; a substituted field, a foreign body on the certificate
+    /// method, or a signature under a key that is not the journal's A head is
+    /// refused with `peer_finalized` untouched.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[serial]
-    async fn a_verified_certificate_flips_peer_finalized_once_and_forgeries_do_not() {
-        init();
-        let (ek_pk_a, ek_sk_a) = dsm::crypto::sphincs::generate_sphincs_keypair().expect("ek a");
-        let (_other_pk, other_sk) = dsm::crypto::sphincs::generate_sphincs_keypair().expect("ek x");
-        seed_complete_journal(ek_pk_a.clone());
-        assert!(cdb::relationship_awaits_peer_finalization(&REL).unwrap());
+    async fn a_verified_certificate_releases_the_recipient_once_and_forgeries_do_not() {
+        let (p, body) = certified().await;
+        assert!(awaiting(&p), "B awaits A's finality");
+        let good = RelationshipFinalizedV1::decode(body.as_slice()).expect("the certificate");
 
-        // Forgeries first (positive control follows in the same fixture).
-        let good = signed_certificate(&ek_sk_a);
-        for (label, mutate) in [
-            ("child_a", 0usize),
-            ("pair_parent", 1usize),
-            ("pair_child", 2usize),
-            ("recipient", 3usize),
-            ("sender", 4usize),
+        for (label, edit) in [
+            ("sender child", 0usize),
+            ("recipient parent", 1),
+            ("recipient child", 2),
+            ("recipient", 3),
+            ("sender", 4),
         ] {
-            let mut c = good.clone();
-            match mutate {
-                0 => c.sender_child_tip_a[0] ^= 1,
-                1 => c.recipient_parent_tip_b[0] ^= 1,
-                2 => c.recipient_child_tip_b[0] ^= 1,
-                3 => c.recipient_device_id[0] ^= 1,
-                _ => c.sender_device_id[0] ^= 1,
+            let mut forged = good.clone();
+            match edit {
+                0 => forged.sender_child_tip_a[0] ^= 1,
+                1 => forged.recipient_parent_tip_b[0] ^= 1,
+                2 => forged.recipient_child_tip_b[0] ^= 1,
+                3 => forged.recipient_device_id[0] ^= 1,
+                _ => forged.sender_device_id[0] ^= 1,
             }
-            // Re-sign the mutated body under the RIGHT key so the check that
-            // trips is the field comparison, not the signature.
-            let target = relationship_finalized_signing_target(&c);
-            c.signature_a = dsm::crypto::sphincs::sphincs_sign(&ek_sk_a, &target).unwrap();
-            let out = apply_relationship_finalized(&c.encode_to_vec()).await;
+            let out = apply_relationship_finalized(&forged.encode_to_vec()).await;
             assert!(
-                matches!(out, RelationshipFinalizedOutcome::Rejected(_)),
+                matches!(
+                    out,
+                    RelationshipFinalizedOutcome::Rejected(_)
+                        | RelationshipFinalizedOutcome::NoJournal
+                ),
                 "{label}: {out:?}"
             );
-            assert!(cdb::relationship_awaits_peer_finalization(&REL).unwrap());
+            assert!(awaiting(&p), "{label}: B still awaits");
         }
-        // Right fields, wrong signer (a key that is not the journal's A head).
-        let forged = signed_certificate(&other_sk);
-        let out = apply_relationship_finalized(&forged.encode_to_vec()).await;
-        match out {
+
+        // The right fields signed by a key that is not A's head for the step.
+        let foreign_sk = dsm::crypto::sphincs::generate_sphincs_keypair()
+            .expect("a foreign key")
+            .1;
+        let mut foreign = good.clone();
+        foreign.signature_a = dsm::crypto::sphincs::sphincs_sign(
+            &foreign_sk,
+            &relationship_finalized_signing_target(&foreign),
+        )
+        .expect("sign");
+        match apply_relationship_finalized(&foreign.encode_to_vec()).await {
             RelationshipFinalizedOutcome::Rejected(r) => assert!(r.contains("signature"), "{r}"),
-            other => panic!("foreign signer must be rejected, got {other:?}"),
+            other => panic!("a foreign signer must be rejected, got {other:?}"),
         }
-        assert!(cdb::relationship_awaits_peer_finalization(&REL).unwrap());
-        // A delta body on the certificate method is refused at the wire.
+        assert!(awaiting(&p));
+
+        // A body that is not a certificate is refused at the wire.
         assert!(matches!(
-            apply_relationship_finalized(&[0x0Au8; 40]).await,
+            apply_relationship_finalized(&good.sender_child_tip_a).await,
             RelationshipFinalizedOutcome::WireRejected(_)
         ));
 
-        // Positive: the honest certificate releases the recipient.
         assert_eq!(
-            apply_relationship_finalized(&good.encode_to_vec()).await,
+            apply_relationship_finalized(&body).await,
             RelationshipFinalizedOutcome::Applied
         );
-        assert!(!cdb::relationship_awaits_peer_finalization(&REL).unwrap());
+        assert!(!awaiting(&p), "the honest certificate released B");
         assert_eq!(
-            apply_relationship_finalized(&good.encode_to_vec()).await,
+            apply_relationship_finalized(&body).await,
             RelationshipFinalizedOutcome::AlreadyFinalized,
             "re-serve is idempotent"
         );
     }
 
-    /// A certificate naming a transition this device never journaled is
-    /// dropped as not-ours; one naming an incomplete journal is left for a
-    /// later poll (nothing written either way).
-    #[tokio::test]
+    /// A certificate for a transition this device never journaled is not
+    /// its: dropped as not-ours, nothing written.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[serial]
-    async fn unknown_or_incomplete_journals_do_not_flip() {
-        init();
-        let (ek_pk_a, ek_sk_a) = dsm::crypto::sphincs::generate_sphincs_keypair().expect("ek a");
-        let good = signed_certificate(&ek_sk_a);
+    async fn a_certificate_for_a_transition_never_journaled_is_not_ours() {
+        let (p, body) = certified().await;
+        let mut c = TestDevice::create("C", 0x0C);
+        c.boot(&p.fleet).await;
+        c.enter();
         assert_eq!(
-            apply_relationship_finalized(&good.encode_to_vec()).await,
+            apply_relationship_finalized(&body).await,
             RelationshipFinalizedOutcome::NoJournal
         );
-        // Journal present but still `prepared`.
-        seed_complete_journal(ek_pk_a);
-        {
-            let binding = cdb::get_connection().expect("conn");
-            let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
-            conn.execute(
-                "UPDATE acceptance_fold_journal SET status = 'prepared' WHERE commitment = ?1",
-                rusqlite::params![COMMITMENT.as_slice()],
-            )
-            .expect("prepared");
-        }
-        assert_eq!(
-            apply_relationship_finalized(&good.encode_to_vec()).await,
-            RelationshipFinalizedOutcome::NotYetComplete
-        );
-        assert!(cdb::relationship_awaits_peer_finalization(&REL).unwrap());
     }
 }

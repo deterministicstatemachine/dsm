@@ -7,8 +7,7 @@
 //! and dispatched to the appropriate handler:
 //!
 //! - **Queries** are routed to the installed [`AppRouter`] (or handled inline for
-//!   special-case paths like `system.genesis` and `sys.tick`).
-//! - **Unilateral invocations** (`unilateral.*`) are dispatched to the [`UnilateralHandler`].
+//!   special-case paths like `system.genesis`).
 //! - **Bilateral invocations** (`bilateral.*`) are decoded into their specific protobuf
 //!   request types and forwarded to the [`BilateralHandler`].
 //! - **Recovery operations** are delegated to the [`RecoveryHandler`].
@@ -29,8 +28,6 @@ use crate::DsmError;
 
 /// Core app router storage. Uses RwLock to allow replacement (bootstrap → full router).
 static APP_ROUTER: Lazy<RwLock<Option<Arc<dyn AppRouter>>>> = Lazy::new(|| RwLock::new(None));
-static UNILATERAL_HANDLER: Lazy<RwLock<Option<Arc<dyn UnilateralHandler>>>> =
-    Lazy::new(|| RwLock::new(None));
 static BILATERAL_HANDLER: Lazy<RwLock<Option<Arc<dyn BilateralHandler>>>> =
     Lazy::new(|| RwLock::new(None));
 static RECOVERY_HANDLER: Lazy<RwLock<Option<Arc<dyn RecoveryHandler>>>> =
@@ -39,7 +36,7 @@ static RECOVERY_HANDLER: Lazy<RwLock<Option<Arc<dyn RecoveryHandler>>>> =
 /// Application-level routing trait for query and invoke dispatch.
 ///
 /// Implementors handle application-specific operations that are not part of the
-/// core bilateral, unilateral, or recovery subsystems. The SDK installs an `AppRouter`
+/// core bilateral or recovery subsystems. The SDK installs an `AppRouter`
 /// to service frontend queries (e.g., balance lookups, wallet history) and application
 /// invocations (e.g., faucet claims, token creation).
 ///
@@ -58,20 +55,6 @@ pub trait AppRouter: Send + Sync {
     /// of the post-invocation state. If `post_state_hash_bytes.len() != 32`, it is
     /// ignored by the caller.
     fn handle_invoke(&self, method: &str, args_proto: &[u8]) -> Result<(Vec<u8>, Vec<u8>), String>;
-}
-
-/// Handler trait for unilateral state transitions.
-///
-/// Unilateral operations modify a single device's hash chain without requiring
-/// counterparty participation. The SDK implements this trait to process `unilateral.*`
-/// method invocations received through the envelope dispatcher.
-pub trait UnilateralHandler: Send + Sync {
-    /// Process a unilateral invoke operation and return the result.
-    ///
-    /// The `operation` contains the method name, arguments, and any required
-    /// signatures. The handler is responsible for verifying authorization and
-    /// applying the state transition.
-    fn handle_unilateral_invoke(&self, operation: gp::Invoke) -> Result<gp::OpResult, String>;
 }
 
 /// Handler trait for the three-phase bilateral transfer protocol.
@@ -155,22 +138,6 @@ pub fn get_app_router() -> Option<Arc<dyn AppRouter>> {
     APP_ROUTER.read().ok()?.clone()
 }
 
-/// Install a unilateral operation handler for core unilateral transaction processing.
-pub fn install_unilateral_handler(handler: Arc<dyn UnilateralHandler>) {
-    let mut guard = match UNILATERAL_HANDLER.write() {
-        Ok(g) => g,
-        Err(_) => {
-            log::warn!("[CORE] Unilateral handler lock poisoned");
-            return;
-        }
-    };
-    if guard.is_none() {
-        *guard = Some(handler);
-    } else {
-        log::warn!("[CORE] Unilateral handler already installed (idempotent call)");
-    }
-}
-
 /// Install a bilateral operation handler for core bilateral transaction processing.
 pub fn install_bilateral_handler(handler: Arc<dyn BilateralHandler>) {
     let mut guard = match BILATERAL_HANDLER.write() {
@@ -211,11 +178,6 @@ fn app_router() -> Option<Arc<dyn AppRouter>> {
 }
 
 #[inline]
-fn unilateral_handler() -> Option<Arc<dyn UnilateralHandler>> {
-    UNILATERAL_HANDLER.read().ok()?.clone()
-}
-
-#[inline]
 fn bilateral_handler() -> Option<Arc<dyn BilateralHandler>> {
     let handler = BILATERAL_HANDLER.read().ok()?.clone();
     if handler.is_none() {
@@ -240,38 +202,12 @@ fn recovery_handler() -> Option<Arc<dyn RecoveryHandler>> {
     RECOVERY_HANDLER.read().ok()?.clone()
 }
 
-/// Reset all bridge handlers for testing.
-///
-/// This is compiled only when the `testing` feature is enabled in `dsm`.
-#[cfg(feature = "testing")]
-pub fn reset_bridge_handlers_for_tests() {
-    if let Ok(mut guard) = APP_ROUTER.write() {
-        *guard = None;
-    }
-    if let Ok(mut guard) = UNILATERAL_HANDLER.write() {
-        *guard = None;
-    }
-    if let Ok(mut guard) = BILATERAL_HANDLER.write() {
-        *guard = None;
-    }
-    if let Ok(mut guard) = RECOVERY_HANDLER.write() {
-        *guard = None;
-    }
-}
-
-#[inline]
-fn zero_hash32_vec() -> Vec<u8> {
-    vec![0u8; 32]
-}
-
 #[inline]
 fn op_error(op_id: Option<gp::Hash32>, code: u32, message: &str) -> gp::OpResult {
     gp::OpResult {
         op_id,
         accepted: false,
-        post_state_hash: Some(gp::Hash32 {
-            v: zero_hash32_vec(),
-        }),
+        post_state_hash: None,
         result: None,
         error: Some(gp::Error {
             code,
@@ -296,9 +232,7 @@ fn op_success(
     gp::OpResult {
         op_id,
         accepted: true,
-        post_state_hash: Some(post_state_hash.unwrap_or_else(|| gp::Hash32 {
-            v: zero_hash32_vec(),
-        })),
+        post_state_hash,
         result: Some(gp::ResultPack {
             schema_hash,
             codec: codec as i32,
@@ -308,41 +242,18 @@ fn op_success(
     }
 }
 
+/// The local answer for a request the bridge could not take.
 #[inline]
 fn envelope_error(code: u32, message: &str) -> gp::Envelope {
-    let error_context = format!("error:{}:{}", code, message);
-    let device_hash = crate::crypto::blake3::domain_hash(
-        crate::common::domain_tags::TAG_DSM_ERROR_ENVELOPE_DEVICE,
-        error_context.as_bytes(),
-    );
-    let chain_hash = crate::crypto::blake3::domain_hash(
-        crate::common::domain_tags::TAG_DSM_ERROR_ENVELOPE_CHAIN,
-        error_context.as_bytes(),
-    );
-    let genesis_hash = crate::crypto::blake3::domain_hash(
-        crate::common::domain_tags::TAG_DSM_ERROR_ENVELOPE_GENESIS,
-        error_context.as_bytes(),
-    );
-
-    gp::Envelope {
-        version: 3,
-        headers: Some(gp::Headers {
-            device_id: device_hash.as_bytes().to_vec(),
-            chain_tip: chain_hash.as_bytes().to_vec(),
-            genesis_hash: genesis_hash.as_bytes().to_vec(),
-            seq: code as u64,
-        }),
-        message_id: device_hash.as_bytes()[..16].to_vec(),
-        payload: Some(gp::envelope::Payload::Error(gp::Error {
-            code,
-            message: message.to_string(),
-            context: vec![],
-            // Stable category tag: core bridge failures are validation/unsupported routing.
-            source_tag: 10,
-            is_recoverable: false,
-            debug_b32: "".to_string(),
-        })),
-    }
+    crate::envelope::local_answer(gp::envelope::Payload::Error(gp::Error {
+        code,
+        message: message.to_string(),
+        context: vec![],
+        // Stable category tag: core bridge failures are validation/unsupported routing.
+        source_tag: 10,
+        is_recoverable: false,
+        debug_b32: "".to_string(),
+    }))
 }
 
 /// Handle universal envelopes within the core crate.
@@ -357,8 +268,6 @@ pub fn handle_envelope_universal(env_bytes: &[u8]) -> Vec<u8> {
                 .encode_to_vec()
         }
     };
-
-    let message_id = envelope.message_id.clone();
 
     let payload = match envelope.payload {
         // ==== REQUEST PATHS ====
@@ -377,23 +286,7 @@ pub fn handle_envelope_universal(env_bytes: &[u8]) -> Vec<u8> {
                             query.path.len(),
                             query.path.as_bytes()
                         );
-                        if query.path == "sys.tick" {
-                            // Deterministic, protobuf-only logical clock exposed even if the SDK
-                            // app router has not been installed yet. This keeps the WebView intro
-                            // flow unblocked during early bootstrap and avoids the "not
-                            // implemented" error when routing is still wiring up.
-                            let tick = crate::performance::mono_commit_height();
-                            let body = tick.to_le_bytes().to_vec();
-                            op_success(
-                                op_id,
-                                body,
-                                None,
-                                Some(gp::Hash32 {
-                                    v: zero_hash32_vec(),
-                                }),
-                                gp::Codec::Proto,
-                            )
-                        } else if let Some(router) = app_router() {
+                        if let Some(router) = app_router() {
                             let params_bytes = query
                                 .params
                                 .as_ref()
@@ -449,29 +342,10 @@ pub fn handle_envelope_universal(env_bytes: &[u8]) -> Vec<u8> {
                         }
                     }
 
-                    // -------- Invoke routing (unilateral / bilateral / app) --------
+                    // -------- Invoke routing (bilateral / app) --------
                     Some(gp::universal_op::Kind::Invoke(invoke)) => {
-                        // Unilateral goes to the core-installed UnilateralHandler.
-                        if invoke.method.starts_with("unilateral.") {
-                            if let Some(handler) = unilateral_handler() {
-                                match handler.handle_unilateral_invoke(invoke) {
-                                    Ok(ok) => ok,
-                                    Err(e) => op_error(
-                                        op_id,
-                                        500,
-                                        &format!("Unilateral operation failed: {e}"),
-                                    ),
-                                }
-                            } else {
-                                op_error(
-                                    op_id,
-                                    501,
-                                    "Unilateral operations require a handler to be installed",
-                                )
-                            }
-
                         // Bilateral methods are decoded here then forwarded to the BilateralHandler.
-                        } else if invoke.method.starts_with("bilateral.") {
+                        if invoke.method.starts_with("bilateral.") {
                             if let Some(handler) = bilateral_handler() {
                                 let args_bytes: Vec<u8> = invoke
                                     .args
@@ -545,7 +419,7 @@ pub fn handle_envelope_universal(env_bytes: &[u8]) -> Vec<u8> {
                                 )
                             }
 
-                        // Application invocations (non-unilateral/bilateral) go to AppRouter.
+                        // Application invocations (non-bilateral) go to AppRouter.
                         } else if let Some(router) = app_router() {
                             // Pass the FULL ArgPack bytes to the AppRouter (protobuf-only boundary).
                             let args_bytes: Vec<u8> = invoke
@@ -1143,274 +1017,7 @@ pub fn handle_envelope_universal(env_bytes: &[u8]) -> Vec<u8> {
         }),
     };
 
-    gp::Envelope {
-        version: 3,
-        headers: Some(gp::Headers {
-            device_id: crate::crypto::blake3::domain_hash(
-                crate::common::domain_tags::TAG_DSM_ERROR_ENVELOPE,
-                &message_id,
-            )
-            .as_bytes()
-            .to_vec(), // Hash of message_id for device_id
-            chain_tip: crate::crypto::blake3::domain_hash(
-                crate::common::domain_tags::TAG_DSM_ERROR_ENVELOPE,
-                b"ERROR_CHAIN_TIP",
-            )
-            .as_bytes()
-            .to_vec(), // Fixed error chain tip
-            genesis_hash: crate::crypto::blake3::domain_hash(
-                crate::common::domain_tags::TAG_DSM_ERROR_ENVELOPE,
-                b"DSM_ERROR_GENESIS",
-            )
-            .as_bytes()
-            .to_vec(), // Fixed error genesis
-            seq: 0, // Error sequence
-        }),
-        message_id,
-        payload: Some(payload),
-    }
-    .encode_to_vec()
-}
-
-/// Offline bilateral send handler (canonical path entry from JNI)
-///
-/// Performs lightweight structural validation on the provided v3 Envelope
-/// containing a UniversalTx with one or more BilateralPrepare ops.
-///
-/// Validation rules (phase 1 + deterministic commitment):
-/// * Envelope decodes
-/// * Headers present and device_id length == 32 and not all zero
-/// * Payload is UniversalTx
-/// * Each op kind BilateralPrepare has non-empty operation_data
-///
-/// On success, returns a new Envelope containing UniversalRx with
-/// BilateralPrepareResponse results, each embedding a BLAKE3 commitment to the
-/// raw operation_data. Signatures and state hashes are left for higher layers.
-pub fn handle_bilateral_offline_send(env_bytes: &[u8], ble_address: &str) -> Vec<u8> {
-    let envelope = match crate::envelope::from_canonical_bytes(env_bytes) {
-        Ok(env) => env,
-        Err(e) => {
-            log::error!("[BRIDGE:offline_send] decode failed: {e}");
-            return envelope_error(460, &format!("invalid envelope: {e}")).encode_to_vec();
-        }
-    };
-
-    // Basic header validation
-    let headers = match envelope.headers.as_ref() {
-        Some(h) => h,
-        None => {
-            return envelope_error(461, "missing headers").encode_to_vec();
-        }
-    };
-    if headers.device_id.len() != 32 {
-        return envelope_error(462, "device_id must be 32 bytes").encode_to_vec();
-    }
-    if headers.device_id.iter().all(|b| *b == 0) {
-        return envelope_error(463, "device_id cannot be all zero").encode_to_vec();
-    }
-
-    // Ensure UniversalTx payload
-    let uni_tx = match envelope.payload.as_ref() {
-        Some(gp::envelope::Payload::UniversalTx(tx)) => tx,
-        _ => return envelope_error(464, "payload must be UniversalTx").encode_to_vec(),
-    };
-
-    // Validate BilateralPrepare ops (ignore other op kinds for now)
-    for op in &uni_tx.ops {
-        if let Some(gp::universal_op::Kind::Invoke(invoke)) = op.kind.as_ref() {
-            if invoke.method == "bilateral.prepare" {
-                let args_bytes = invoke
-                    .args
-                    .as_ref()
-                    .map(|a| a.body.clone())
-                    .unwrap_or_default();
-                if let Ok(prep) = gp::BilateralPrepareRequest::decode(args_bytes.as_slice()) {
-                    if prep.operation_data.is_empty() {
-                        return envelope_error(465, "BilateralPrepare.operation_data empty")
-                            .encode_to_vec();
-                    }
-                    // Offline send must be bound to a concrete peer address.
-                    if ble_address.is_empty() {
-                        return envelope_error(466, "ble_address missing").encode_to_vec();
-                    }
-                    // Guard: request's ble_address must match the connection address used by JNI.
-                    // This prevents replaying a prepare intended for one peer onto another.
-                    if prep.ble_address != ble_address {
-                        return envelope_error(467, "BilateralPrepare.ble_address mismatch")
-                            .encode_to_vec();
-                    }
-                    // Basic sanity: counterparty id must be present and 32 bytes.
-                    if prep.counterparty_device_id.len() != 32 {
-                        return envelope_error(468, "counterparty_device_id must be 32 bytes")
-                            .encode_to_vec();
-                    }
-                }
-            }
-        }
-    }
-
-    log::info!(
-        "[BRIDGE:offline_send] envelope validated (ops={}, bytes={})",
-        uni_tx.ops.len(),
-        env_bytes.len()
-    );
-
-    // If a bilateral handler is installed, delegate prepare ops to it so the
-    // SDK BLE coordinator can transmit chunks on Android.
-    if let Some(handler) = bilateral_handler() {
-        let mut results: Vec<gp::OpResult> = Vec::with_capacity(uni_tx.ops.len());
-        for op in uni_tx.ops.iter() {
-            let op_id = op.op_id.clone();
-            match op.kind.as_ref() {
-                Some(gp::universal_op::Kind::Invoke(invoke))
-                    if invoke.method == "bilateral.prepare" =>
-                {
-                    let args_bytes = invoke
-                        .args
-                        .as_ref()
-                        .map(|a| a.body.clone())
-                        .unwrap_or_default();
-                    match gp::BilateralPrepareRequest::decode(args_bytes.as_slice()) {
-                        Ok(req) => match handler.handle_bilateral_prepare(req) {
-                            Ok(mut ok) => {
-                                if ok.op_id.is_none() {
-                                    ok.op_id = op_id;
-                                }
-                                results.push(ok)
-                            }
-                            Err(e) => results.push(op_error(
-                                op_id,
-                                500,
-                                &format!("Bilateral operation failed: {e}"),
-                            )),
-                        },
-                        Err(e) => results.push(op_error(
-                            op_id,
-                            400,
-                            &format!("Failed to decode BilateralPrepareRequest: {e}"),
-                        )),
-                    }
-                }
-                _ => results.push(op_error(op_id, 501, "unsupported op kind for offline send")),
-            }
-        }
-
-        let op_count = results.len();
-        let rx_payload = gp::envelope::Payload::UniversalRx(gp::UniversalRx { results });
-        let response_env = gp::Envelope {
-            version: 3,
-            headers: Some(gp::Headers {
-                device_id: headers.device_id.clone(),
-                chain_tip: headers.chain_tip.clone(),
-                genesis_hash: headers.genesis_hash.clone(),
-                seq: headers.seq,
-            }),
-            message_id: envelope.message_id.clone(),
-            payload: Some(rx_payload),
-        };
-
-        let encoded = response_env.encode_to_vec();
-        log::info!(
-            "[BRIDGE:offline_send] produced response envelope bytes={} ops={} (handler)",
-            encoded.len(),
-            op_count
-        );
-        return encoded;
-    }
-
-    // Produce a UniversalRx with deterministic BilateralPrepareResponse results
-    let mut results: Vec<gp::OpResult> = Vec::with_capacity(uni_tx.ops.len());
-    for op in uni_tx.ops.iter() {
-        let op_id = op.op_id.clone();
-        match op.kind.as_ref() {
-            Some(gp::universal_op::Kind::Invoke(invoke))
-                if invoke.method == "bilateral.prepare" =>
-            {
-                let args_bytes = invoke
-                    .args
-                    .as_ref()
-                    .map(|a| a.body.clone())
-                    .unwrap_or_default();
-                if let Ok(prep) = gp::BilateralPrepareRequest::decode(args_bytes.as_slice()) {
-                    // Deterministic commitment over a domain-separated framing that binds
-                    // offline-transport context to prevent cross-transport/peer replay.
-                    //
-                    // IMPORTANT: This is a lightweight "prepare" commitment only. Higher layers
-                    // still sign canonical commit bytes for protocol acceptance.
-                    let mut commit_preimage = Vec::with_capacity(
-                        32 + prep.operation_data.len() + prep.ble_address.len() + 8 + 64,
-                    );
-                    commit_preimage.extend_from_slice(b"DSM/bilateral/prepare-offline\0");
-                    commit_preimage.extend_from_slice(prep.ble_address.as_bytes());
-                    // Bind validity_iterations (u64 little-endian)
-                    commit_preimage.extend_from_slice(&prep.validity_iterations.to_le_bytes());
-                    // Bind expected hashes if present (32B each), else bind 32 zero bytes.
-                    match prep.expected_genesis_hash.as_ref() {
-                        Some(h) if h.v.len() == 32 => commit_preimage.extend_from_slice(&h.v),
-                        _ => commit_preimage.extend_from_slice(&[0u8; 32]),
-                    }
-                    match prep.expected_counterparty_state_hash.as_ref() {
-                        Some(h) if h.v.len() == 32 => commit_preimage.extend_from_slice(&h.v),
-                        _ => commit_preimage.extend_from_slice(&[0u8; 32]),
-                    }
-                    // Finally bind the raw operation_data bytes
-                    commit_preimage.extend_from_slice(&prep.operation_data);
-                    let commitment = crate::crypto::blake3::domain_hash(
-                        crate::common::domain_tags::TAG_DSM_BILATERAL_COMMIT,
-                        &commit_preimage,
-                    );
-                    let response = gp::BilateralPrepareResponse {
-                        commitment_hash: Some(gp::Hash32 {
-                            v: commitment.as_bytes().to_vec(),
-                        }),
-                        local_signature: vec![], // Signatures produced later by SDK
-                        expires_iterations: prep.validity_iterations,
-                        counterparty_state_hash: None, // Populated by higher layers if needed
-                        local_state_hash: None,        // Populated by higher layers if needed
-                        responder_signing_public_key: vec![], // Populated by BLE handler with local signing key
-                        receiver_challenge: vec![], // r_R: set by the BLE receiver path for bearer transfers
-                        responder_kyber_public_key: vec![], // Populated by BLE handler with local Kyber key
-                        responder_kyber_binding_sig: vec![], // Populated by BLE handler (ADR 0002 detached binding)
-                    };
-                    let body = response.encode_to_vec();
-                    results.push(op_success(op_id, body, None, None, gp::Codec::Proto));
-                } else {
-                    results.push(op_error(
-                        op_id,
-                        500,
-                        "failed to decode BilateralPrepareRequest",
-                    ));
-                }
-            }
-            // Non-bilateral operations are not supported in this offline send path
-            _ => {
-                results.push(op_error(op_id, 501, "unsupported op kind for offline send"));
-            }
-        }
-    }
-
-    let op_count = results.len();
-    let rx_payload = gp::envelope::Payload::UniversalRx(gp::UniversalRx { results });
-
-    let response_env = gp::Envelope {
-        version: 3,
-        headers: Some(gp::Headers {
-            device_id: headers.device_id.clone(),
-            chain_tip: headers.chain_tip.clone(),
-            genesis_hash: headers.genesis_hash.clone(),
-            seq: headers.seq, // mirror incoming seq
-        }),
-        message_id: envelope.message_id.clone(), // reuse message_id for correlation
-        payload: Some(rx_payload),
-    };
-
-    let encoded = response_env.encode_to_vec();
-    log::info!(
-        "[BRIDGE:offline_send] produced response envelope bytes={} ops={}",
-        encoded.len(),
-        op_count
-    );
-    encoded
+    crate::envelope::local_answer(payload).encode_to_vec()
 }
 
 #[cfg(test)]
@@ -1419,151 +1026,7 @@ mod tests {
     use prost::Message;
 
     fn decode_response_envelope(bytes: &[u8]) -> gp::Envelope {
-        crate::envelope::from_canonical_bytes(bytes).expect("decode response envelope")
-    }
-
-    #[test]
-    fn offline_send_valid_prepare_yields_commitment_response() {
-        // Build a minimal BilateralPrepare operation
-        let prep = gp::BilateralPrepareRequest {
-            counterparty_device_id: vec![0x11; 32],
-            operation_data: vec![1, 2, 3, 4],
-            validity_iterations: 42,
-            expected_genesis_hash: Some(gp::Hash32 { v: vec![0; 32] }),
-            expected_counterparty_state_hash: Some(gp::Hash32 { v: vec![0; 32] }),
-            ble_address: String::from("AA:BB:CC:DD:EE:FF"),
-            sender_device_id: vec![0xAA; 32],
-            sender_genesis_hash: Some(gp::Hash32 { v: vec![0xBB; 32] }),
-            sender_signing_public_key: vec![0xCC; 32],
-            sender_chain_tip: Some(gp::Hash32 { v: vec![0xDD; 32] }),
-            ..Default::default()
-        };
-        let op = gp::UniversalOp {
-            op_id: Some(gp::Hash32 { v: vec![9; 32] }),
-            actor: vec![2; 32],
-            genesis_hash: vec![3; 32],
-            kind: Some(gp::universal_op::Kind::Invoke(gp::Invoke {
-                method: "bilateral.prepare".to_string(),
-                args: Some(gp::ArgPack {
-                    body: prep.encode_to_vec(),
-                    ..Default::default()
-                }),
-                program: None,
-                pre_state_hash: None,
-                post_state_hash: None,
-                cosigners: vec![],
-                evidence: None,
-                nonce: None,
-            })),
-        };
-        let env = gp::Envelope {
-            version: 3,
-            headers: Some(gp::Headers {
-                device_id: vec![0xAB; 32],
-                chain_tip: vec![7; 32],
-                genesis_hash: vec![0; 32],
-                seq: 5,
-            }),
-            message_id: vec![8; 16],
-            payload: Some(gp::envelope::Payload::UniversalTx(gp::UniversalTx {
-                ops: vec![op],
-                atomic: true,
-            })),
-        };
-        let bytes = env.encode_to_vec();
-        let resp_bytes = handle_bilateral_offline_send(&bytes, "AA:BB:CC:DD:EE:FF");
-        let resp_env = decode_response_envelope(resp_bytes.as_slice());
-        match resp_env.payload {
-            Some(gp::envelope::Payload::UniversalRx(rx)) => {
-                assert_eq!(rx.results.len(), 1);
-                let r = &rx.results[0];
-                assert!(r.error.is_none(), "unexpected error result");
-                let pack = r.result.as_ref().expect("result pack present");
-                let body = &pack.body;
-                let prep_resp = gp::BilateralPrepareResponse::decode(body.as_slice())
-                    .expect("prep response decodes");
-                let mut preimage = Vec::new();
-                preimage.extend_from_slice(b"DSM/bilateral/prepare-offline\0");
-                preimage.extend_from_slice(b"AA:BB:CC:DD:EE:FF");
-                preimage.extend_from_slice(&42u64.to_le_bytes());
-                preimage.extend_from_slice(&[0u8; 32]);
-                preimage.extend_from_slice(&[0u8; 32]);
-                preimage.extend_from_slice(&[1, 2, 3, 4]);
-                let commitment = crate::crypto::blake3::domain_hash(
-                    crate::common::domain_tags::TAG_DSM_BILATERAL_COMMIT,
-                    &preimage,
-                );
-                assert_eq!(
-                    prep_resp.commitment_hash.unwrap().v,
-                    commitment.as_bytes().to_vec()
-                );
-                assert_eq!(prep_resp.expires_iterations, 42);
-            }
-            other => panic!("unexpected payload variant: {:?}", other),
-        }
-    }
-
-    #[test]
-    fn offline_send_rejects_empty_operation_data() {
-        let prep = gp::BilateralPrepareRequest {
-            counterparty_device_id: vec![0x22; 32],
-            operation_data: vec![], // empty -> invalid
-            validity_iterations: 1,
-            expected_genesis_hash: None,
-            expected_counterparty_state_hash: None,
-            ble_address: String::new(),
-            sender_device_id: vec![0xAA; 32],
-            sender_genesis_hash: Some(gp::Hash32 { v: vec![0xBB; 32] }),
-            sender_signing_public_key: vec![0xCC; 32],
-            sender_chain_tip: None,
-            ..Default::default()
-        };
-        let op = gp::UniversalOp {
-            op_id: Some(gp::Hash32 { v: vec![0; 32] }),
-            actor: vec![0x33; 32],
-            genesis_hash: vec![0x44; 32],
-            kind: Some(gp::universal_op::Kind::Invoke(gp::Invoke {
-                method: "bilateral.prepare".to_string(),
-                args: Some(gp::ArgPack {
-                    body: prep.encode_to_vec(),
-                    ..Default::default()
-                }),
-                program: None,
-                pre_state_hash: None,
-                post_state_hash: None,
-                cosigners: vec![],
-                evidence: None,
-                nonce: None,
-            })),
-        };
-        let env = gp::Envelope {
-            version: 3,
-            headers: Some(gp::Headers {
-                device_id: vec![0x55; 32],
-                chain_tip: vec![0x66; 32],
-                genesis_hash: vec![0; 32],
-                seq: 1,
-            }),
-            message_id: vec![1; 16],
-            payload: Some(gp::envelope::Payload::UniversalTx(gp::UniversalTx {
-                ops: vec![op],
-                atomic: false,
-            })),
-        };
-        let bytes = env.encode_to_vec();
-        let resp_bytes = handle_bilateral_offline_send(&bytes, "ZZ");
-        let resp_env = decode_response_envelope(resp_bytes.as_slice());
-        match resp_env.payload {
-            Some(gp::envelope::Payload::Error(err)) => {
-                assert_eq!(err.code, 465);
-                assert!(
-                    err.message.contains("operation_data empty"),
-                    "unexpected message: {}",
-                    err.message
-                );
-            }
-            other => panic!("expected error envelope, got {:?}", other),
-        }
+        crate::envelope::local_answer_from_canonical_bytes(bytes).expect("decode the local answer")
     }
 
     #[test]
@@ -1572,9 +1035,7 @@ mod tests {
             version: 2,
             headers: Some(gp::Headers {
                 device_id: vec![4u8; 32],
-                chain_tip: vec![5u8; 32],
                 genesis_hash: vec![3u8; 32],
-                seq: 1,
             }),
             message_id: vec![6u8; 16],
             payload: Some(gp::envelope::Payload::UniversalTx(gp::UniversalTx {
@@ -1600,134 +1061,10 @@ mod tests {
     }
 
     #[test]
-    fn offline_send_rejects_ble_address_mismatch() {
-        let prep = gp::BilateralPrepareRequest {
-            counterparty_device_id: vec![0x11; 32],
-            operation_data: vec![1, 2, 3, 4],
-            validity_iterations: 1,
-            expected_genesis_hash: None,
-            expected_counterparty_state_hash: None,
-            ble_address: String::from("AA:BB:CC"),
-            sender_device_id: vec![0xAA; 32],
-            sender_genesis_hash: Some(gp::Hash32 { v: vec![0xBB; 32] }),
-            sender_signing_public_key: vec![0xCC; 32],
-            sender_chain_tip: None,
-            ..Default::default()
-        };
-        let op = gp::UniversalOp {
-            op_id: Some(gp::Hash32 { v: vec![0; 32] }),
-            actor: vec![0x33; 32],
-            genesis_hash: vec![0x44; 32],
-            kind: Some(gp::universal_op::Kind::Invoke(gp::Invoke {
-                method: "bilateral.prepare".to_string(),
-                args: Some(gp::ArgPack {
-                    body: prep.encode_to_vec(),
-                    ..Default::default()
-                }),
-                program: None,
-                pre_state_hash: None,
-                post_state_hash: None,
-                cosigners: vec![],
-                evidence: None,
-                nonce: None,
-            })),
-        };
-        let env = gp::Envelope {
-            version: 3,
-            headers: Some(gp::Headers {
-                device_id: vec![0x55; 32],
-                chain_tip: vec![0x66; 32],
-                genesis_hash: vec![0; 32],
-                seq: 1,
-            }),
-            message_id: vec![1; 16],
-            payload: Some(gp::envelope::Payload::UniversalTx(gp::UniversalTx {
-                ops: vec![op],
-                atomic: false,
-            })),
-        };
-        let bytes = env.encode_to_vec();
-        let resp_bytes = handle_bilateral_offline_send(&bytes, "DD:EE:FF");
-        let resp_env = decode_response_envelope(resp_bytes.as_slice());
-        match resp_env.payload {
-            Some(gp::envelope::Payload::Error(err)) => {
-                assert_eq!(err.code, 467);
-                assert!(err.message.contains("mismatch"));
-            }
-            other => panic!("expected error envelope, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn offline_send_rejects_all_zero_device_id() {
-        let prep = gp::BilateralPrepareRequest {
-            counterparty_device_id: vec![0xCC; 32],
-            operation_data: vec![1, 2, 3, 4],
-            validity_iterations: 10,
-            expected_genesis_hash: None,
-            expected_counterparty_state_hash: None,
-            ble_address: String::new(),
-            sender_device_id: vec![0xAA; 32],
-            sender_genesis_hash: Some(gp::Hash32 { v: vec![0xBB; 32] }),
-            sender_signing_public_key: vec![0xCC; 32],
-            sender_chain_tip: None,
-            ..Default::default()
-        };
-        let op = gp::UniversalOp {
-            op_id: Some(gp::Hash32 { v: vec![0; 32] }),
-            actor: vec![0x99; 32],
-            genesis_hash: vec![0x88; 32],
-            kind: Some(gp::universal_op::Kind::Invoke(gp::Invoke {
-                method: "bilateral.prepare".to_string(),
-                args: Some(gp::ArgPack {
-                    body: prep.encode_to_vec(),
-                    ..Default::default()
-                }),
-                program: None,
-                pre_state_hash: None,
-                post_state_hash: None,
-                cosigners: vec![],
-                evidence: None,
-                nonce: None,
-            })),
-        };
-
-        let env = gp::Envelope {
-            version: 3,
-            headers: Some(gp::Headers {
-                device_id: vec![0; 32], // all zero -> invalid
-                chain_tip: vec![0x77; 32],
-                genesis_hash: vec![0; 32],
-                seq: 2,
-            }),
-            message_id: vec![2; 16],
-            payload: Some(gp::envelope::Payload::UniversalTx(gp::UniversalTx {
-                ops: vec![op],
-                atomic: false,
-            })),
-        };
-        let bytes = env.encode_to_vec();
-        let resp_bytes = handle_bilateral_offline_send(&bytes, "AA:BB:CC");
-        let resp_env = decode_response_envelope(resp_bytes.as_slice());
-        match resp_env.payload {
-            Some(gp::envelope::Payload::Error(err)) => {
-                assert_eq!(err.code, 463);
-                assert!(
-                    err.message.contains("all zero"),
-                    "unexpected message: {}",
-                    err.message
-                );
-            }
-            other => panic!("expected error envelope, got {:?}", other),
-        }
-    }
-
-    #[test]
     fn universal_bilateral_without_handler_requires_handler() {
         let prep = gp::BilateralPrepareRequest {
             counterparty_device_id: vec![0xAA; 32],
             operation_data: vec![1, 2, 3],
-            validity_iterations: 60,
             expected_genesis_hash: Some(gp::Hash32 { v: vec![0; 32] }),
             expected_counterparty_state_hash: Some(gp::Hash32 { v: vec![0; 32] }),
             ble_address: String::new(),
@@ -1748,8 +1085,6 @@ mod tests {
                     ..Default::default()
                 }),
                 program: None,
-                pre_state_hash: None,
-                post_state_hash: None,
                 cosigners: vec![],
                 evidence: None,
                 nonce: None,
@@ -1760,9 +1095,7 @@ mod tests {
             version: 3,
             headers: Some(gp::Headers {
                 device_id: vec![0; 32],
-                chain_tip: vec![0; 32],
                 genesis_hash: vec![0; 32],
-                seq: 0,
             }),
             message_id: vec![1; 16],
             payload: Some(gp::envelope::Payload::UniversalTx(gp::UniversalTx {

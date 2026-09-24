@@ -19,26 +19,24 @@ use dsm::economic::lineage::AdmittedEconomicPosition;
 use super::get_connection;
 
 fn digest32(v: Vec<u8>, what: &str) -> Result<[u8; 32]> {
-    <[u8; 32]>::try_from(v.as_slice()).map_err(|_| anyhow!("{what} is not 32 bytes"))
+    <[u8; 32]>::try_from(v.as_slice()).map_err(|e| anyhow!("{what} is not 32 bytes: {e}"))
 }
 
 pub fn put_frozen_root_claim(
     economic_position: u64,
     k_root: &[u8; 32],
     envelope: &[u8],
-    now: i64,
 ) -> Result<()> {
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
     conn.execute(
         "INSERT OR IGNORE INTO economic_root_claim_local
-           (economic_position, k_root, envelope, created_at)
-         VALUES (?1, ?2, ?3, ?4)",
+           (economic_position, k_root, envelope)
+         VALUES (?1, ?2, ?3)",
         params![
-            i64::try_from(economic_position).map_err(|_| anyhow!("position overflow"))?,
+            i64::try_from(economic_position).map_err(|e| anyhow!("position overflow: {e}"))?,
             k_root.as_slice(),
             envelope,
-            now
         ],
     )?;
     Ok(())
@@ -52,7 +50,9 @@ pub fn get_frozen_root_claim(economic_position: u64) -> Result<Option<([u8; 32],
         .query_row(
             "SELECT k_root, envelope FROM economic_root_claim_local
               WHERE economic_position = ?1",
-            params![i64::try_from(economic_position).map_err(|_| anyhow!("position overflow"))?],
+            params![
+                i64::try_from(economic_position).map_err(|e| anyhow!("position overflow: {e}"))?
+            ],
             |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Vec<u8>>(1)?)),
         )
         .optional()?;
@@ -67,10 +67,15 @@ type AdmittedRow = (
     Option<Vec<u8>>,
     Option<Vec<u8>>,
     Option<Vec<u8>>,
+    Option<Vec<u8>>,
 );
 
 const SELECT_ADMITTED: &str = "SELECT economic_position, claim_kind, economic_root, \
-     fulfillment_id, realize_root, void_root FROM economic_admitted_v2 WHERE id = 1";
+     fulfillment_id, realize_root, void_root, claim_ref FROM economic_admitted_v2 WHERE id = 1";
+
+const SELECT_ADMITTED_AT: &str = "SELECT economic_position, claim_kind, economic_root, \
+     fulfillment_id, realize_root, void_root, claim_ref FROM economic_admitted_history \
+     WHERE economic_position = ?1";
 
 fn read_admitted_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<AdmittedRow> {
     Ok((
@@ -80,6 +85,7 @@ fn read_admitted_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<AdmittedRow> {
         r.get::<_, Option<Vec<u8>>>(3)?,
         r.get::<_, Option<Vec<u8>>>(4)?,
         r.get::<_, Option<Vec<u8>>>(5)?,
+        r.get::<_, Option<Vec<u8>>>(6)?,
     ))
 }
 
@@ -90,8 +96,9 @@ fn read_admitted_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<AdmittedRow> {
 /// builds its whole lineage on, and a guess here is a guess about which root
 /// the lineage selected.
 fn admitted_from_row(row: AdmittedRow) -> Result<AdmittedEconomicPosition> {
-    let (position, kind, root, fulfillment, realize, void) = row;
-    let economic_position = u64::try_from(position).map_err(|_| anyhow!("position negative"))?;
+    let (position, kind, root, fulfillment, realize, void, claim_ref) = row;
+    let economic_position =
+        u64::try_from(position).map_err(|e| anyhow!("position negative: {e}"))?;
     // EXACT SHAPES, both ways. A missing field for the kind was already
     // refused; an EXTRA one was silently ignored, which is the same defect
     // wearing the other face — a row carrying both a selected root and a
@@ -118,6 +125,10 @@ fn admitted_from_row(row: AdmittedRow) -> Result<AdmittedEconomicPosition> {
                     root.ok_or_else(|| anyhow!("single-root admission has no root"))?,
                     "economic_root",
                 )?,
+                claim_ref: digest32(
+                    claim_ref.ok_or_else(|| anyhow!("single-root admission has no claim"))?,
+                    "claim_ref",
+                )?,
             })
         }
         1 => {
@@ -134,12 +145,17 @@ fn admitted_from_row(row: AdmittedRow) -> Result<AdmittedEconomicPosition> {
                         .ok_or_else(|| anyhow!("resolved SoFi admission has no fulfillment"))?,
                     "fulfillment_id",
                 )?,
+                claim_ref: digest32(
+                    claim_ref.ok_or_else(|| anyhow!("resolved SoFi admission has no claim"))?,
+                    "claim_ref",
+                )?,
             })
         }
         2 => {
             // A selected root here would say the position HAS chosen, which is
             // precisely what an unresolved position has not done.
             forbid("selected root", root.is_some())?;
+            forbid("accepted claim", claim_ref.is_some())?;
             Ok(AdmittedEconomicPosition::UnresolvedSofi {
                 economic_position,
                 fulfillment_id: digest32(
@@ -167,6 +183,19 @@ pub fn get_admitted() -> Result<Option<AdmittedEconomicPosition>> {
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
     let row = conn
         .query_row(SELECT_ADMITTED, [], read_admitted_row)
+        .optional()?;
+    row.map(admitted_from_row).transpose()
+}
+
+/// The position this device's lineage admitted at `economic_position`, if
+/// it admitted one there — WITH its claim kind.
+pub fn get_admitted_at(economic_position: u64) -> Result<Option<AdmittedEconomicPosition>> {
+    let position =
+        i64::try_from(economic_position).map_err(|e| anyhow!("position overflow: {e}"))?;
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    let row = conn
+        .query_row(SELECT_ADMITTED_AT, params![position], read_admitted_row)
         .optional()?;
     row.map(admitted_from_row).transpose()
 }
@@ -223,23 +252,33 @@ pub fn record_admitted_with_conn(
     tx: &Transaction<'_>,
     admitted: &AdmittedEconomicPosition,
     leaves: &[([u8; 32], [u8; 32], Vec<u8>)],
-    now: i64,
 ) -> Result<()> {
-    let position =
-        i64::try_from(admitted.economic_position()).map_err(|_| anyhow!("position overflow"))?;
-    let (kind, root, fulfillment, realize, void): (
+    let position = i64::try_from(admitted.economic_position())
+        .map_err(|e| anyhow!("position overflow: {e}"))?;
+    let (kind, root, fulfillment, realize, void, claim_ref): (
         i64,
         Option<&[u8]>,
         Option<&[u8]>,
         Option<&[u8]>,
         Option<&[u8]>,
+        Option<&[u8]>,
     ) = match admitted {
-        AdmittedEconomicPosition::SingleRoot { economic_root, .. } => {
-            (0, Some(economic_root.as_slice()), None, None, None)
-        }
+        AdmittedEconomicPosition::SingleRoot {
+            economic_root,
+            claim_ref,
+            ..
+        } => (
+            0,
+            Some(economic_root.as_slice()),
+            None,
+            None,
+            None,
+            Some(claim_ref.as_slice()),
+        ),
         AdmittedEconomicPosition::ResolvedSofi {
             selected_root,
             fulfillment_id,
+            claim_ref,
             ..
         } => (
             1,
@@ -247,6 +286,7 @@ pub fn record_admitted_with_conn(
             Some(fulfillment_id.as_slice()),
             None,
             None,
+            Some(claim_ref.as_slice()),
         ),
         AdmittedEconomicPosition::UnresolvedSofi {
             fulfillment_id,
@@ -259,11 +299,12 @@ pub fn record_admitted_with_conn(
             Some(fulfillment_id.as_slice()),
             Some(realize_root.as_slice()),
             Some(void_root.as_slice()),
+            None,
         ),
     };
     tx.execute(
         "INSERT INTO economic_admitted_v2 (id, economic_position, claim_kind, economic_root, \
-             fulfillment_id, realize_root, void_root, updated_at)
+             fulfillment_id, realize_root, void_root, claim_ref)
          VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)
          ON CONFLICT(id) DO UPDATE SET
              economic_position = excluded.economic_position,
@@ -272,15 +313,28 @@ pub fn record_admitted_with_conn(
              fulfillment_id = excluded.fulfillment_id,
              realize_root = excluded.realize_root,
              void_root = excluded.void_root,
-             updated_at = excluded.updated_at",
-        params![position, kind, root, fulfillment, realize, void, now],
+             claim_ref = excluded.claim_ref",
+        params![position, kind, root, fulfillment, realize, void, claim_ref],
+    )?;
+    tx.execute(
+        "INSERT INTO economic_admitted_history (economic_position, claim_kind, economic_root, \
+             fulfillment_id, realize_root, void_root, claim_ref)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(economic_position) DO UPDATE SET
+             claim_kind = excluded.claim_kind,
+             economic_root = excluded.economic_root,
+             fulfillment_id = excluded.fulfillment_id,
+             realize_root = excluded.realize_root,
+             void_root = excluded.void_root,
+             claim_ref = excluded.claim_ref",
+        params![position, kind, root, fulfillment, realize, void, claim_ref],
     )?;
     tx.execute("DELETE FROM economic_leaf_cache", [])?;
     for (key, value, ccb) in leaves {
         tx.execute(
-            "INSERT INTO economic_leaf_cache (leaf_key, leaf_value, state_ccb, updated_at)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![key.as_slice(), value.as_slice(), ccb, now],
+            "INSERT INTO economic_leaf_cache (leaf_key, leaf_value, state_ccb)
+             VALUES (?1, ?2, ?3)",
+            params![key.as_slice(), value.as_slice(), ccb],
         )?;
     }
     Ok(())
@@ -314,7 +368,7 @@ pub fn best_peer_start(
     peer_genesis: &[u8; 32],
     peer_devid: &[u8; 32],
     target_position: u64,
-) -> Result<Option<(u64, [u8; 32])>> {
+) -> Result<Option<dsm::economic::peer_lineage::ValidatedStart>> {
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
     let row = conn
@@ -325,32 +379,31 @@ pub fn best_peer_start(
             params![
                 peer_genesis.as_slice(),
                 peer_devid.as_slice(),
-                target_position as i64
+                i64::try_from(target_position).map_err(|e| anyhow!("position overflow: {e}"))?
             ],
             |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)),
         )
         .optional()?;
-    Ok(match row {
-        Some((pos, root)) => Some((
-            u64::try_from(pos).map_err(|_| anyhow!("negative cached position"))?,
-            <[u8; 32]>::try_from(root.as_slice())
-                .map_err(|_| anyhow!("cached root is not 32 bytes"))?,
-        )),
-        None => None,
+    row.map(|(position, root)| {
+        Ok(dsm::economic::peer_lineage::ValidatedStart {
+            economic_position: u64::try_from(position)
+                .map_err(|e| anyhow!("cached position {position}: {e}"))?,
+            economic_root: digest32(root, "cached root")?,
+        })
     })
+    .transpose()
 }
 
 /// Record one validated peer coordinate (this verifier's own conclusion).
 pub fn record_peer_validated(
     peer_genesis: &[u8; 32],
     peer_devid: &[u8; 32],
-    validated_position: u64,
-    validated_root: &[u8; 32],
+    start: &dsm::economic::peer_lineage::ValidatedStart,
 ) -> Result<()> {
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
     // OR IGNORE, not REPLACE: re-validating the same coordinate must not
-    // reset `closure_q_durable` (correction 4 — durability is a separate,
+    // reset `closure_stored` (correction 4 — durability is a separate,
     // per-coordinate fact the walk itself never establishes).
     conn.execute(
         "INSERT OR IGNORE INTO peer_economic_lineage(
@@ -359,8 +412,9 @@ pub fn record_peer_validated(
         params![
             peer_genesis.as_slice(),
             peer_devid.as_slice(),
-            validated_position as i64,
-            validated_root.as_slice()
+            i64::try_from(start.economic_position)
+                .map_err(|e| anyhow!("position overflow: {e}"))?,
+            start.economic_root.as_slice()
         ],
     )?;
     Ok(())
@@ -381,8 +435,8 @@ pub fn clear_peer_lineage(peer_genesis: &[u8; 32], peer_devid: &[u8; 32]) -> Res
 // ── q-durability memos (3.5b PR4) ──────────────────────────────────────────
 
 /// Whether the ECONOMIC evidence closure behind this validated coordinate is
-/// q-durable. Economic DAG ONLY — says nothing about EK-step ancestry.
-pub fn peer_closure_q_durable(
+/// Stored. Economic DAG ONLY — says nothing about EK-step ancestry.
+pub fn peer_closure_stored(
     peer_genesis: &[u8; 32],
     peer_devid: &[u8; 32],
     validated_position: u64,
@@ -391,12 +445,12 @@ pub fn peer_closure_q_durable(
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
     let flag: Option<i64> = conn
         .query_row(
-            "SELECT closure_q_durable FROM peer_economic_lineage
+            "SELECT closure_stored FROM peer_economic_lineage
              WHERE peer_genesis = ?1 AND peer_devid = ?2 AND validated_position = ?3",
             params![
                 peer_genesis.as_slice(),
                 peer_devid.as_slice(),
-                validated_position as i64
+                i64::try_from(validated_position).map_err(|e| anyhow!("position: {e}"))?
             ],
             |r| r.get(0),
         )
@@ -404,10 +458,10 @@ pub fn peer_closure_q_durable(
     Ok(flag == Some(1))
 }
 
-/// Mark the economic closure behind a validated coordinate q-durable — and
+/// Mark the economic closure behind a validated coordinate Stored — and
 /// everything below it (a validation at N consumed the closure of N's whole
 /// ancestry).
-pub fn mark_peer_closure_q_durable(
+pub fn mark_peer_closure_stored(
     peer_genesis: &[u8; 32],
     peer_devid: &[u8; 32],
     validated_position: u64,
@@ -415,26 +469,26 @@ pub fn mark_peer_closure_q_durable(
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
     conn.execute(
-        "UPDATE peer_economic_lineage SET closure_q_durable = 1
+        "UPDATE peer_economic_lineage SET closure_stored = 1
          WHERE peer_genesis = ?1 AND peer_devid = ?2 AND validated_position <= ?3",
         params![
             peer_genesis.as_slice(),
             peer_devid.as_slice(),
-            validated_position as i64
+            i64::try_from(validated_position).map_err(|e| anyhow!("position: {e}"))?
         ],
     )?;
     Ok(())
 }
 
-/// Whether ONE exact immutable object is known q-durable on the canonical
+/// Whether ONE exact immutable object is known Stored on the canonical
 /// set. Per exact address, NEVER inferred from an economic-position
 /// watermark: EK ancestry advances independently of `R_econ`.
-pub fn is_addr_q_durable(namespace: &str, addr: &[u8; 32]) -> Result<bool> {
+pub fn is_addr_stored(namespace: &str, addr: &[u8; 32]) -> Result<bool> {
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
     let hit: Option<i64> = conn
         .query_row(
-            "SELECT 1 FROM immutable_q_durable_memo WHERE namespace = ?1 AND addr = ?2",
+            "SELECT 1 FROM immutable_stored_memo WHERE namespace = ?1 AND addr = ?2",
             params![namespace, addr.as_slice()],
             |r| r.get(0),
         )
@@ -442,13 +496,13 @@ pub fn is_addr_q_durable(namespace: &str, addr: &[u8; 32]) -> Result<bool> {
     Ok(hit.is_some())
 }
 
-/// Record one exact immutable object as q-durable (verified on q members or
-/// republished to q by this verifier, member-attributed).
-pub fn record_addr_q_durable(namespace: &str, addr: &[u8; 32]) -> Result<()> {
+/// Record one exact immutable object as read back `Stored` on the canonical
+/// set (storage spec §5 rule 6).
+pub fn record_addr_stored(namespace: &str, addr: &[u8; 32]) -> Result<()> {
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
     conn.execute(
-        "INSERT OR IGNORE INTO immutable_q_durable_memo(namespace, addr) VALUES(?1, ?2)",
+        "INSERT OR IGNORE INTO immutable_stored_memo(namespace, addr) VALUES(?1, ?2)",
         params![namespace, addr.as_slice()],
     )?;
     Ok(())
@@ -489,9 +543,9 @@ pub fn latest_ek_step_with_conn(
         .optional()?;
     Ok(match row {
         Some((ord, addr, pk)) => Some((
-            u64::try_from(ord).map_err(|_| anyhow!("negative step ordinal"))?,
+            u64::try_from(ord).map_err(|e| anyhow!("negative step ordinal: {e}"))?,
             <[u8; 32]>::try_from(addr.as_slice())
-                .map_err(|_| anyhow!("step addr is not 32 bytes"))?,
+                .map_err(|e| anyhow!("step addr is not 32 bytes: {e}"))?,
             pk,
         )),
         None => None,
@@ -509,19 +563,19 @@ pub fn append_ek_step_with_conn(
     ek_pk: &[u8],
 ) -> Result<u64> {
     let latest = latest_ek_step_with_conn(conn, rel_key, signer_devid)?;
-    if let Some((ord, addr, _)) = &latest {
+    if let Some((ord, addr, ..)) = &latest {
         if addr == step_addr {
             return Ok(*ord);
         }
     }
-    let next = latest.map(|(o, _, _)| o + 1).unwrap_or(0);
+    let next = latest.map(|(ordinal, ..)| ordinal + 1).unwrap_or(0);
     conn.execute(
         "INSERT INTO ek_cert_step_chain(rel_key, signer_devid, step_ordinal, step_addr, ek_pk)
          VALUES(?1, ?2, ?3, ?4, ?5)",
         params![
             rel_key.as_slice(),
             signer_devid.as_slice(),
-            next as i64,
+            i64::try_from(next).map_err(|e| anyhow!("step ordinal: {e}"))?,
             step_addr.as_slice(),
             ek_pk
         ],
@@ -538,53 +592,83 @@ mod admitted_row_tests {
     const FID: [u8; 32] = [0xF1; 32];
     const REALIZE: [u8; 32] = [0xA1; 32];
     const VOID: [u8; 32] = [0xB1; 32];
+    const CLAIM: [u8; 32] = [0xD1; 32];
 
-    fn row(
-        kind: i64,
+    /// The columns of one admitted row, by name.
+    #[derive(Clone, Copy, Default)]
+    struct Columns {
         root: Option<[u8; 32]>,
         fid: Option<[u8; 32]>,
         realize: Option<[u8; 32]>,
         void: Option<[u8; 32]>,
-    ) -> AdmittedRow {
+        claim: Option<[u8; 32]>,
+    }
+
+    fn row(kind: i64, c: Columns) -> AdmittedRow {
         (
             7,
             kind,
-            root.map(|r| r.to_vec()),
-            fid.map(|r| r.to_vec()),
-            realize.map(|r| r.to_vec()),
-            void.map(|r| r.to_vec()),
+            c.root.map(|r| r.to_vec()),
+            c.fid.map(|r| r.to_vec()),
+            c.realize.map(|r| r.to_vec()),
+            c.void.map(|r| r.to_vec()),
+            c.claim.map(|r| r.to_vec()),
         )
     }
+
+    const SINGLE: Columns = Columns {
+        root: Some(ROOT),
+        fid: None,
+        realize: None,
+        void: None,
+        claim: Some(CLAIM),
+    };
+    const RESOLVED: Columns = Columns {
+        root: Some(ROOT),
+        fid: Some(FID),
+        realize: None,
+        void: None,
+        claim: Some(CLAIM),
+    };
+    const UNRESOLVED: Columns = Columns {
+        root: None,
+        fid: Some(FID),
+        realize: Some(REALIZE),
+        void: Some(VOID),
+        claim: None,
+    };
 
     /// Each kind has ONE exact shape, and a row is refused both for a missing
     /// field and for an extra one.
     ///
-    /// The missing direction was already enforced; the extra direction was
-    /// silently ignored, which is the same defect wearing the other face. A
-    /// row carrying both a selected root and a realize/void pair makes two
+    /// A row carrying both a selected root and a realize/void pair makes two
     /// disagreeing claims about which root the position holds, and reading
     /// whichever the arm happens to name is the guess this decoder exists to
     /// refuse — on the coordinate a restart rebuilds the entire lineage from.
+    /// An accepted claim belongs to a position that selected a root, and only
+    /// to one.
     #[test]
     fn an_admitted_row_must_match_its_own_claim_kind_exactly() {
         // The three exact shapes are accepted.
         assert_eq!(
-            admitted_from_row(row(0, Some(ROOT), None, None, None)).unwrap(),
+            admitted_from_row(row(0, SINGLE)).unwrap(),
             AdmittedEconomicPosition::SingleRoot {
                 economic_position: 7,
                 economic_root: ROOT,
+                claim_ref: CLAIM,
             }
         );
         assert_eq!(
-            admitted_from_row(row(1, Some(ROOT), Some(FID), None, None)).unwrap(),
+            admitted_from_row(row(1, RESOLVED)).unwrap(),
             AdmittedEconomicPosition::ResolvedSofi {
                 economic_position: 7,
                 selected_root: ROOT,
                 fulfillment_id: FID,
+                claim_ref: CLAIM,
             }
         );
         assert_eq!(
-            admitted_from_row(row(2, None, Some(FID), Some(REALIZE), Some(VOID))).unwrap(),
+            admitted_from_row(row(2, UNRESOLVED)).unwrap(),
             AdmittedEconomicPosition::UnresolvedSofi {
                 economic_position: 7,
                 fulfillment_id: FID,
@@ -593,33 +677,80 @@ mod admitted_row_tests {
             }
         );
 
-        // EXTRA fields — the direction that used to pass.
+        // EXTRA fields.
         let extras = [
             (
                 "single-root with a fulfillment",
-                row(0, Some(ROOT), Some(FID), None, None),
+                row(
+                    0,
+                    Columns {
+                        fid: Some(FID),
+                        ..SINGLE
+                    },
+                ),
             ),
             (
                 "single-root with a realize root",
-                row(0, Some(ROOT), None, Some(REALIZE), None),
+                row(
+                    0,
+                    Columns {
+                        realize: Some(REALIZE),
+                        ..SINGLE
+                    },
+                ),
             ),
             (
                 "single-root with a void root",
-                row(0, Some(ROOT), None, None, Some(VOID)),
+                row(
+                    0,
+                    Columns {
+                        void: Some(VOID),
+                        ..SINGLE
+                    },
+                ),
             ),
             (
                 "resolved with a realize root",
-                row(1, Some(ROOT), Some(FID), Some(REALIZE), None),
+                row(
+                    1,
+                    Columns {
+                        realize: Some(REALIZE),
+                        ..RESOLVED
+                    },
+                ),
             ),
             (
                 "resolved with a void root",
-                row(1, Some(ROOT), Some(FID), None, Some(VOID)),
+                row(
+                    1,
+                    Columns {
+                        void: Some(VOID),
+                        ..RESOLVED
+                    },
+                ),
             ),
-            // The worst of them: an unresolved position that also names a
-            // selected root, i.e. claims both to have chosen and not to have.
+            // An unresolved position that also names a selected root claims
+            // both to have chosen and not to have.
             (
                 "unresolved with a selected root",
-                row(2, Some(ROOT), Some(FID), Some(REALIZE), Some(VOID)),
+                row(
+                    2,
+                    Columns {
+                        root: Some(ROOT),
+                        ..UNRESOLVED
+                    },
+                ),
+            ),
+            // An unresolved position was registered but never accepted.
+            (
+                "unresolved with an accepted claim",
+                row(
+                    2,
+                    Columns {
+                        claim: Some(CLAIM),
+                        ..UNRESOLVED
+                    },
+                ),
             ),
         ];
         for (name, r) in extras {
@@ -629,25 +760,87 @@ mod admitted_row_tests {
             );
         }
 
-        // MISSING fields stay refused.
+        // MISSING fields.
         let missing = [
-            ("single-root with no root", row(0, None, None, None, None)),
+            (
+                "single-root with no root",
+                row(
+                    0,
+                    Columns {
+                        root: None,
+                        ..SINGLE
+                    },
+                ),
+            ),
+            (
+                "single-root with no claim",
+                row(
+                    0,
+                    Columns {
+                        claim: None,
+                        ..SINGLE
+                    },
+                ),
+            ),
             (
                 "resolved with no fulfillment",
-                row(1, Some(ROOT), None, None, None),
+                row(
+                    1,
+                    Columns {
+                        fid: None,
+                        ..RESOLVED
+                    },
+                ),
             ),
-            ("resolved with no root", row(1, None, Some(FID), None, None)),
+            (
+                "resolved with no root",
+                row(
+                    1,
+                    Columns {
+                        root: None,
+                        ..RESOLVED
+                    },
+                ),
+            ),
+            (
+                "resolved with no claim",
+                row(
+                    1,
+                    Columns {
+                        claim: None,
+                        ..RESOLVED
+                    },
+                ),
+            ),
             (
                 "unresolved with no realize root",
-                row(2, None, Some(FID), None, Some(VOID)),
+                row(
+                    2,
+                    Columns {
+                        realize: None,
+                        ..UNRESOLVED
+                    },
+                ),
             ),
             (
                 "unresolved with no void root",
-                row(2, None, Some(FID), Some(REALIZE), None),
+                row(
+                    2,
+                    Columns {
+                        void: None,
+                        ..UNRESOLVED
+                    },
+                ),
             ),
             (
                 "unresolved with no fulfillment",
-                row(2, None, None, Some(REALIZE), Some(VOID)),
+                row(
+                    2,
+                    Columns {
+                        fid: None,
+                        ..UNRESOLVED
+                    },
+                ),
             ),
         ];
         for (name, r) in missing {
@@ -655,6 +848,6 @@ mod admitted_row_tests {
         }
 
         // An unknown kind is refused rather than defaulted.
-        assert!(admitted_from_row(row(3, Some(ROOT), None, None, None)).is_err());
+        assert!(admitted_from_row(row(3, SINGLE)).is_err());
     }
 }

@@ -7,7 +7,6 @@ use rusqlite::params;
 
 use super::get_connection;
 use crate::storage::codecs::hash_blake3_bytes;
-use crate::util::deterministic_time::tick;
 
 /// Check if a nonce has already been spent (replay attack prevention).
 /// Returns true if the nonce is already in the spent_nonces table.
@@ -36,7 +35,6 @@ pub fn mark_nonce_spent(nonce: &[u8], tx_id: &str, sender_id: &[u8], amount: u64
         return Err(anyhow!("Cannot mark empty nonce as spent"));
     }
     let nonce_hash = hash_blake3_bytes(nonce);
-    let now = tick();
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|poisoned| {
         log::warn!("DB lock poisoned in mark_nonce_spent, recovering");
@@ -45,8 +43,8 @@ pub fn mark_nonce_spent(nonce: &[u8], tx_id: &str, sender_id: &[u8], amount: u64
 
     // Use INSERT without OR IGNORE - will fail if nonce already exists (replay attack)
     let result = conn.execute(
-        "INSERT INTO spent_nonces(nonce_hash, tx_id, sender_id, amount, spent_at) VALUES(?1, ?2, ?3, ?4, ?5)",
-        params![&nonce_hash[..], tx_id, sender_id, amount as i64, now as i64],
+        "INSERT INTO spent_nonces(nonce_hash, tx_id, sender_id, amount) VALUES(?1, ?2, ?3, ?4)",
+        params![&nonce_hash[..], tx_id, sender_id, amount as i64],
     );
 
     match result {
@@ -97,10 +95,9 @@ pub fn mark_nonce_spent_with_conn(
         return Err(anyhow!("Cannot mark empty nonce as spent"));
     }
     let nonce_hash = hash_blake3_bytes(nonce);
-    let now = tick();
     let result = conn.execute(
-        "INSERT INTO spent_nonces(nonce_hash, tx_id, sender_id, amount, spent_at) VALUES(?1, ?2, ?3, ?4, ?5)",
-        params![&nonce_hash[..], tx_id, sender_id, amount as i64, now as i64],
+        "INSERT INTO spent_nonces(nonce_hash, tx_id, sender_id, amount) VALUES(?1, ?2, ?3, ?4)",
+        params![&nonce_hash[..], tx_id, sender_id, amount as i64],
     );
     match result {
         Ok(_) => Ok(()),
@@ -119,7 +116,7 @@ mod tests {
     use serial_test::serial;
 
     fn init_test_db() {
-        unsafe { std::env::set_var("DSM_SDK_TEST_MODE", "1") };
+        crate::economic_fixtures::use_test_storage_dir();
         crate::storage::client_db::reset_database_for_tests();
         crate::storage::client_db::init_database().expect("init db");
     }

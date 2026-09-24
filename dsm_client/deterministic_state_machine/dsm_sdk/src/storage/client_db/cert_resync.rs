@@ -42,7 +42,6 @@ use super::cert_chain::{
     cas_advance_local_cert_chain_head_with_conn, CasHeadOutcome,
 };
 use super::get_connection;
-use crate::util::deterministic_time::tick;
 
 /// Ordinary sending is allowed on this relationship.
 pub const RESYNC_CLEAR: i64 = 0;
@@ -104,6 +103,22 @@ pub fn resync_pending_obligation(relationship_key: &[u8; 32]) -> Result<Option<S
     Ok(None)
 }
 
+/// Whether a per-step EK this device signed with waits, pending, for its
+/// transition's finalization on this relationship: the head of a step in
+/// flight, not a lost one.
+pub fn pending_local_head_exists(relationship_key: &[u8; 32]) -> Result<bool> {
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    let found: Option<i64> = conn
+        .query_row(
+            "SELECT 1 FROM pending_local_cert_heads WHERE relationship_key = ?1 LIMIT 1",
+            params![relationship_key.as_slice()],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(found.is_some())
+}
+
 /// True if THIS device previously initiated a send on the relationship — i.e. a
 /// sender proposal exists for it. This is what distinguishes "we sent before and
 /// lost our Local head" (a resync case, like 8XK) from "we have never sent on
@@ -128,12 +143,11 @@ pub fn mark_cert_resync_required(relationship_key: &[u8; 32]) -> Result<()> {
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
     conn.execute(
-        "INSERT INTO cert_resync_state (relationship_key, state, epoch, updated_at)
-         VALUES (?1, ?2, 0, ?3)
+        "INSERT INTO cert_resync_state (relationship_key, state, epoch)
+         VALUES (?1, ?2, 0)
          ON CONFLICT(relationship_key) DO UPDATE SET
-             state = CASE WHEN cert_resync_state.state = 0 THEN ?2 ELSE cert_resync_state.state END,
-             updated_at = ?3",
-        params![relationship_key.as_slice(), RESYNC_REQUIRED, tick() as i64],
+             state = CASE WHEN cert_resync_state.state = 0 THEN ?2 ELSE cert_resync_state.state END",
+        params![relationship_key.as_slice(), RESYNC_REQUIRED],
     )?;
     Ok(())
 }
@@ -154,15 +168,10 @@ pub fn begin_cert_resync(relationship_key: &[u8; 32], proposed_epoch: i64) -> Re
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
     conn.execute(
-        "INSERT INTO cert_resync_state (relationship_key, state, epoch, updated_at)
-         VALUES (?1, ?2, ?3, ?4)
-         ON CONFLICT(relationship_key) DO UPDATE SET state = ?2, epoch = ?3, updated_at = ?4",
-        params![
-            relationship_key.as_slice(),
-            RESYNC_PENDING,
-            proposed_epoch,
-            tick() as i64
-        ],
+        "INSERT INTO cert_resync_state (relationship_key, state, epoch)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(relationship_key) DO UPDATE SET state = ?2, epoch = ?3",
+        params![relationship_key.as_slice(), RESYNC_PENDING, proposed_epoch],
     )?;
     Ok(proposed_epoch)
 }
@@ -362,8 +371,8 @@ pub fn finalize_cert_resync_atomically(
             relationship_key, preserved_acceptance_commitment, accepted_parent_tip,
             accepted_child_tip, joint_auth_hash, epoch, old_local_head,
             old_counterparty_head, new_local_head, new_counterparty_head,
-            reason_code, created_at)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+            reason_code)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
         params![
             relationship_key.as_slice(),
             audit.preserved_acceptance_commitment.as_slice(),
@@ -376,18 +385,16 @@ pub fn finalize_cert_resync_atomically(
             local.pubkey,
             counterparty_new_pubkey,
             audit.reason_code,
-            tick() as i64,
         ],
     )?;
 
     // (4) Clear the send block — only from PENDING at this exact epoch.
     tx.execute(
-        "UPDATE cert_resync_state SET state = ?2, updated_at = ?3
-          WHERE relationship_key = ?1 AND state = ?4 AND epoch = ?5",
+        "UPDATE cert_resync_state SET state = ?2
+          WHERE relationship_key = ?1 AND state = ?3 AND epoch = ?4",
         params![
             relationship_key.as_slice(),
             RESYNC_CLEAR,
-            tick() as i64,
             RESYNC_PENDING,
             epoch
         ],
@@ -478,8 +485,8 @@ pub fn finalize_cert_resync_responder_atomically(
             relationship_key, preserved_acceptance_commitment, accepted_parent_tip,
             accepted_child_tip, joint_auth_hash, epoch, old_local_head,
             old_counterparty_head, new_local_head, new_counterparty_head,
-            reason_code, created_at)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+            reason_code)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
         params![
             relationship_key.as_slice(),
             audit.preserved_acceptance_commitment.as_slice(),
@@ -492,21 +499,15 @@ pub fn finalize_cert_resync_responder_atomically(
             responder_local_head, // new_local_head == same (asymmetric: untouched)
             counterparty_new_pubkey,
             audit.reason_code,
-            tick() as i64,
         ],
     )?;
 
     // Record the epoch (state stays CLEAR — the responder is not blocked).
     tx.execute(
-        "INSERT INTO cert_resync_state (relationship_key, state, epoch, updated_at)
-         VALUES (?1, ?2, ?3, ?4)
-         ON CONFLICT(relationship_key) DO UPDATE SET epoch = ?3, updated_at = ?4",
-        params![
-            relationship_key.as_slice(),
-            RESYNC_CLEAR,
-            epoch,
-            tick() as i64
-        ],
+        "INSERT INTO cert_resync_state (relationship_key, state, epoch)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(relationship_key) DO UPDATE SET epoch = ?3",
+        params![relationship_key.as_slice(), RESYNC_CLEAR, epoch],
     )?;
 
     tx.commit()?;
@@ -753,7 +754,7 @@ mod tests {
     use crate::storage::client_db::cert_chain::{load_cert_chain_head_pubkey, CertChainSide};
 
     fn init() {
-        unsafe { std::env::set_var("DSM_SDK_TEST_MODE", "1") };
+        crate::economic_fixtures::use_test_storage_dir();
         crate::storage::client_db::reset_database_for_tests();
         crate::storage::client_db::init_database().expect("init db");
     }
@@ -1056,7 +1057,6 @@ mod tests {
             amount: 5,
             token_id: "ERA".into(),
             status: crate::storage::client_db::PROPOSAL_PROPOSED.into(),
-            created_at: 0,
         };
         crate::storage::client_db::insert_sender_proposal(&proposal).unwrap();
         assert!(
@@ -1111,8 +1111,8 @@ mod tests {
                 "INSERT INTO sender_outbox (relationship_key, canonical_parent, canonical_child, \
                  commitment, projection_parent, projection_target, routing_address, submission_id, \
                  envelope_bytes, proposal_nonce, local_expected_prev, is_first_ek_step, status, \
-                 message_ids, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'R', 'SID', X'00', ?7, \
-                 NULL, 1, ?8, NULL, 0)",
+                 message_ids) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'R', 'SID', X'00', ?7, \
+                 NULL, 1, ?8, NULL)",
                 rusqlite::params![
                     REL.as_slice(),
                     vec![0x01u8; 32],

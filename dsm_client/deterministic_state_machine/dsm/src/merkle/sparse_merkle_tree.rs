@@ -25,6 +25,7 @@ use std::sync::OnceLock;
 
 use crate::common::domain_tags::{TAG_SMT_LEAF, TAG_SMT_NODE};
 use crate::crypto::blake3::dsm_domain_hasher;
+use crate::types::error::DsmError;
 
 // ───────────────────────────────────────────────────────────────────
 // Constants and free functions (public API for other modules)
@@ -105,6 +106,50 @@ pub fn get_bit(key: &[u8; 32], bit_index: usize) -> u8 {
     (key[byte_index] >> bit_offset) & 1
 }
 
+/// Fold a leaf hash up a leaf-to-root sibling path at `key`: the root that
+/// path commits the leaf under. Directions come from the key (MSB-first,
+/// deepest level first), never from the path.
+fn fold_path(key: &[u8; 32], leaf_hash: [u8; 32], siblings: &[[u8; 32]]) -> [u8; 32] {
+    let mut acc = leaf_hash;
+    for (i, sibling) in siblings.iter().enumerate() {
+        acc = if get_bit(key, 255 - i) == 0 {
+            hash_smt_node(&acc, sibling)
+        } else {
+            hash_smt_node(sibling, &acc)
+        };
+    }
+    acc
+}
+
+/// The relationship-leaf replace (§4.2, Tripwire): the one primitive every
+/// receipt verifier uses.
+///
+/// `siblings` is the full leaf-to-root path at `key`. It must authenticate
+/// `old_value` under `pre_root`; folded with `new_value` it IS the post-state
+/// root, which is returned for the caller to compare with the root it was
+/// given. There is no separate replace witness: a second encoding of the same
+/// path would be a second authority able to disagree with it.
+pub fn verify_smt_replace(
+    pre_root: &[u8; 32],
+    key: &[u8; 32],
+    old_value: &[u8; 32],
+    new_value: &[u8; 32],
+    siblings: &[[u8; 32]],
+) -> Result<[u8; 32], DsmError> {
+    if siblings.len() != DEFAULT_SMT_HEIGHT as usize {
+        return Err(DsmError::invalid_operation(format!(
+            "an SMT path has {DEFAULT_SMT_HEIGHT} siblings, not {}",
+            siblings.len()
+        )));
+    }
+    if fold_path(key, hash_smt_leaf(old_value), siblings) != *pre_root {
+        return Err(DsmError::invalid_operation(
+            "the path does not authenticate the old leaf under the pre-state root",
+        ));
+    }
+    Ok(fold_path(key, hash_smt_leaf(new_value), siblings))
+}
+
 // ───────────────────────────────────────────────────────────────────
 // SparseMerkleTree — the canonical Per-Device SMT (§2.2)
 // ───────────────────────────────────────────────────────────────────
@@ -172,12 +217,11 @@ impl SparseMerkleTree {
     ///
     /// The key must be a 256-bit relationship identifier computed via
     /// `compute_smt_key(DevID_A, DevID_B)`.
-    pub fn update_leaf(&mut self, key: &[u8; 32], value: &[u8; 32]) -> Result<(), &'static str> {
+    pub fn update_leaf(&mut self, key: &[u8; 32], value: &[u8; 32]) {
         self.leaves.insert(*key, *value);
 
         // Recompute root from all leaves
         self.root = self.compute_subtree_hash(0);
-        Ok(())
     }
 
     /// Recursively compute the hash of the subtree rooted at `level`.
@@ -328,30 +372,13 @@ impl SparseMerkleTree {
             None => return false,
         };
 
-        // The SMT is fixed-depth (256 levels), so a valid inclusion proof has at
-        // most 256 siblings. Reject longer proofs up front: otherwise `255 - i`
-        // underflows at i == 256 (debug panic; release wraparound → out-of-bounds
-        // `get_bit` panic), turning an over-long peer-supplied proof into a crash.
-        if proof.siblings.len() > 256 {
+        // The SMT is fixed-depth: a path has exactly 256 siblings. A shorter
+        // one would commit the leaf under a root of some other height (a tree
+        // that is not this one); a longer one would underflow `255 - i`.
+        if proof.siblings.len() != DEFAULT_SMT_HEIGHT as usize {
             return false;
         }
-
-        let mut current_hash = hash_smt_leaf(&value);
-
-        // Siblings are leaf-to-root order: sibling[0] is at the deepest level (255),
-        // sibling[last] is at level 0 (root).
-        for (i, sibling) in proof.siblings.iter().enumerate() {
-            let level = 255 - i;
-            let bit = get_bit(&proof.key, level);
-
-            if bit == 0 {
-                current_hash = hash_smt_node(&current_hash, sibling);
-            } else {
-                current_hash = hash_smt_node(sibling, &current_hash);
-            }
-        }
-
-        current_hash == *expected_root
+        fold_path(&proof.key, hash_smt_leaf(&value), &proof.siblings) == *expected_root
     }
 
     /// Get current root.
@@ -372,11 +399,10 @@ impl SparseMerkleTree {
     /// Atomic SMT-Replace: update leaf from old value to `new_value`,
     /// returning pre/post roots and inclusion proofs for both.
     ///
-    /// This is the canonical §4.2 operation. Hard-fails if update_leaf fails
-    /// (receipt MUST contain valid r'_A).
-    ///
-    /// For first-ever transactions where the key has no prior leaf, the parent
-    /// proof will have `value: None` (ZERO_LEAF / non-inclusion).
+    /// This is the canonical §4.2 operation. A key with no leaf yields a
+    /// parent proof with `value: None` (non-inclusion); a relationship's
+    /// leaf exists from its establishment, so a relationship step always
+    /// replaces a present leaf.
     pub fn smt_replace(
         &mut self,
         key: &[u8; 32],
@@ -390,7 +416,7 @@ impl SparseMerkleTree {
         // receiver can verify π(h_n ∈ r_A) even on the first transaction.
         let parent_proof = self.get_inclusion_proof(key, 256)?;
 
-        self.update_leaf(key, new_value)?;
+        self.update_leaf(key, new_value);
 
         let post_root = self.root;
 
@@ -412,9 +438,9 @@ impl SparseMerkleTree {
 
 /// Result of an atomic SMT-Replace operation (§4.2).
 ///
-/// Contains the pre/post roots and inclusion proofs needed to construct
-/// a ReceiptCommit with valid `parent_root`, `child_root`, `rel_proof_parent`,
-/// and `rel_proof_child` fields.
+/// Contains the pre/post roots and the relationship path needed to construct
+/// a ReceiptCommit with valid `parent_root`, `child_root` and
+/// `rel_proof_parent` fields.
 #[derive(Debug, Clone)]
 pub struct SmtReplaceResult {
     /// SMT root before the update (r_A).
@@ -569,7 +595,7 @@ mod tests {
         let key = [1u8; 32];
         let value = [42u8; 32];
 
-        smt.update_leaf(&key, &value).unwrap();
+        smt.update_leaf(&key, &value);
 
         let proof = smt.get_inclusion_proof(&key, 256).unwrap();
         assert!(smt.verify_inclusion_proof(&proof));
@@ -583,7 +609,7 @@ mod tests {
 
         let key = [7u8; 32];
         let value = [99u8; 32];
-        smt.update_leaf(&key, &value).unwrap();
+        smt.update_leaf(&key, &value);
 
         let proof = smt.get_inclusion_proof(&key, 256).unwrap();
         let root = *smt.root();
@@ -622,7 +648,7 @@ mod tests {
         let values: [[u8; 32]; 3] = [[10u8; 32], [20u8; 32], [30u8; 32]];
 
         for (key, value) in keys.iter().zip(values.iter()) {
-            smt.update_leaf(key, value).unwrap();
+            smt.update_leaf(key, value);
         }
 
         for (key, value) in keys.iter().zip(values.iter()) {
@@ -647,10 +673,10 @@ mod tests {
         let value1 = [42u8; 32];
         let value2 = [99u8; 32];
 
-        smt.update_leaf(&key, &value1).unwrap();
+        smt.update_leaf(&key, &value1);
         let root1 = *smt.root();
 
-        smt.update_leaf(&key, &value2).unwrap();
+        smt.update_leaf(&key, &value2);
         let root2 = *smt.root();
 
         assert_ne!(root1, root2);
@@ -666,7 +692,7 @@ mod tests {
 
         let key = [1u8; 32];
         let value = [42u8; 32];
-        smt.update_leaf(&key, &value).unwrap();
+        smt.update_leaf(&key, &value);
 
         // Request very small proof — should fail
         let result = smt.get_inclusion_proof(&key, 1);

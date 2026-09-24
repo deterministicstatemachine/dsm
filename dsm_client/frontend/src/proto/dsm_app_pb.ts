@@ -247,34 +247,6 @@ proto3.util.setEnumType(StorageNodeStatus, "dsm.StorageNodeStatus", [
 ]);
 
 /**
- * ============================ SMART COMMITMENTS =====================
- *
- * @generated from enum dsm.SmartLogic
- */
-export enum SmartLogic {
-  /**
-   * @generated from enum value: SMART_LOGIC_UNSPECIFIED = 0;
-   */
-  SMART_LOGIC_UNSPECIFIED = 0,
-
-  /**
-   * @generated from enum value: SMART_AND = 1;
-   */
-  SMART_AND = 1,
-
-  /**
-   * @generated from enum value: SMART_OR = 2;
-   */
-  SMART_OR = 2,
-}
-// Retrieve enum metadata with: proto3.getEnumType(SmartLogic)
-proto3.util.setEnumType(SmartLogic, "dsm.SmartLogic", [
-  { no: 0, name: "SMART_LOGIC_UNSPECIFIED" },
-  { no: 1, name: "SMART_AND" },
-  { no: 2, name: "SMART_OR" },
-]);
-
-/**
  * =================== UNIVERSAL ARG/RESULT PACKS =====================
  *
  * @generated from enum dsm.Codec
@@ -770,6 +742,54 @@ proto3.util.setEnumType(BleFrameType, "dsm.BleFrameType", [
   { no: 12, name: "BLE_FRAME_TYPE_BILATERAL_CONFIRM" },
   { no: 13, name: "BLE_FRAME_TYPE_DEVICE_ADMISSION_REQUEST" },
   { no: 14, name: "BLE_FRAME_TYPE_DEVICE_ADMISSION_RESPONSE" },
+]);
+
+/**
+ * Where a trade, route, close or resolve left the device's position.
+ * Predicates are Valid or Invalid only; RETRIES_EXHAUSTED is the separate
+ * network status (the predicates held, the network retries ran out).
+ *
+ * @generated from enum dsm.SofiPositionState
+ */
+export enum SofiPositionState {
+  /**
+   * @generated from enum value: SOFI_POSITION_STATE_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * @generated from enum value: SOFI_POSITION_STATE_REALIZED = 1;
+   */
+  REALIZED = 1,
+
+  /**
+   * nothing executed, no balance moved
+   *
+   * @generated from enum value: SOFI_POSITION_STATE_VOID = 2;
+   */
+  VOID = 2,
+
+  /**
+   * the predicates failed
+   *
+   * @generated from enum value: SOFI_POSITION_STATE_INVALID = 3;
+   */
+  INVALID = 3,
+
+  /**
+   * the network retries ran out
+   *
+   * @generated from enum value: SOFI_POSITION_STATE_RETRIES_EXHAUSTED = 4;
+   */
+  RETRIES_EXHAUSTED = 4,
+}
+// Retrieve enum metadata with: proto3.getEnumType(SofiPositionState)
+proto3.util.setEnumType(SofiPositionState, "dsm.SofiPositionState", [
+  { no: 0, name: "SOFI_POSITION_STATE_UNSPECIFIED" },
+  { no: 1, name: "SOFI_POSITION_STATE_REALIZED" },
+  { no: 2, name: "SOFI_POSITION_STATE_VOID" },
+  { no: 3, name: "SOFI_POSITION_STATE_INVALID" },
+  { no: 4, name: "SOFI_POSITION_STATE_RETRIES_EXHAUSTED" },
 ]);
 
 /**
@@ -6789,95 +6809,6 @@ export class VaultPostProto extends Message<VaultPostProto> {
 }
 
 /**
- * ===== Soft-Vault deterministic export (import must re-derive exactly) =====
- *
- * @generated from message dsm.SoftVaultExportV1
- */
-export class SoftVaultExportV1 extends Message<SoftVaultExportV1> {
-  /**
-   * MUST be 1
-   *
-   * @generated from field: uint32 version = 1;
-   */
-  version = 0;
-
-  /**
-   * canonical vault id (binary)
-   *
-   * @generated from field: bytes vault_id = 2;
-   */
-  vaultId = new Uint8Array(0);
-
-  /**
-   * binary device id used in KDF
-   *
-   * @generated from field: bytes device_id = 3;
-   */
-  deviceId = new Uint8Array(0);
-
-  /**
-   * device binding fingerprint (wallet-seed-rooted)
-   *
-   * @generated from field: bytes binder_hash32 = 4;
-   */
-  binderHash32 = new Uint8Array(0);
-
-  /**
-   * deterministic counter, not time
-   *
-   * @generated from field: uint32 export_seqno = 5;
-   */
-  exportSeqno = 0;
-
-  /**
-   * XChaCha20-Poly1305 nonce
-   *
-   * @generated from field: bytes nonce = 6;
-   */
-  nonce = new Uint8Array(0);
-
-  /**
-   * AEAD(ct || tag), AAD = vault_id
-   *
-   * @generated from field: bytes ciphertext = 7;
-   */
-  ciphertext = new Uint8Array(0);
-
-  constructor(data?: PartialMessage<SoftVaultExportV1>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.SoftVaultExportV1";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "version", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
-    { no: 2, name: "vault_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 3, name: "device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 4, name: "binder_hash32", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 5, name: "export_seqno", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
-    { no: 6, name: "nonce", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 7, name: "ciphertext", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SoftVaultExportV1 {
-    return new SoftVaultExportV1().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): SoftVaultExportV1 {
-    return new SoftVaultExportV1().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): SoftVaultExportV1 {
-    return new SoftVaultExportV1().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: SoftVaultExportV1 | PlainMessage<SoftVaultExportV1> | undefined, b: SoftVaultExportV1 | PlainMessage<SoftVaultExportV1> | undefined): boolean {
-    return proto3.util.equals(SoftVaultExportV1, a, b);
-  }
-}
-
-/**
  * ------------------------------- Contacts ---------------------------------
  *
  * @generated from message dsm.ContactAddV3
@@ -7119,23 +7050,21 @@ export class TokenCreateRequest extends Message<TokenCreateRequest> {
   decimals = 0;
 
   /**
-   * big-endian u128
+   * The whole supply that will ever exist (SoFi §47, §51). User-created
+   * tokens in beta release all of it to the creator at creation.
    *
-   * @generated from field: bytes max_supply_u128 = 4;
+   * big-endian u128, > 0
+   *
+   * @generated from field: bytes genesis_supply_u128 = 4;
    */
-  maxSupplyU128 = new Uint8Array(0);
+  genesisSupplyU128 = new Uint8Array(0);
 
   /**
-   * big-endian u128
+   * governs burns only (§54)
    *
-   * @generated from field: bytes initial_alloc_u128 = 6;
+   * @generated from field: bool burn_enabled = 7;
    */
-  initialAllocU128 = new Uint8Array(0);
-
-  /**
-   * @generated from field: bool mint_burn_enabled = 7;
-   */
-  mintBurnEnabled = false;
+  burnEnabled = false;
 
   /**
    * @generated from field: bool transferable = 8;
@@ -7143,17 +7072,13 @@ export class TokenCreateRequest extends Message<TokenCreateRequest> {
   transferable = false;
 
   /**
-   * @generated from field: bool unlimited_supply = 9;
-   */
-  unlimitedSupply = false;
-
-  /**
-   * 1..=255. Signatures required to authorize a mint or burn. The signer set
-   * itself is filled in by Rust (the creating device), never by the client.
+   * 1..=n. The signer set itself is filled in by Rust (the creating device),
+   * never by the client. It authorizes only what the policy's own rules
+   * name, and never issuance.
    *
-   * @generated from field: uint32 mint_burn_threshold = 10;
+   * @generated from field: uint32 threshold = 10;
    */
-  mintBurnThreshold = 0;
+  threshold = 0;
 
   /**
    * @generated from field: string description = 11;
@@ -7183,12 +7108,10 @@ export class TokenCreateRequest extends Message<TokenCreateRequest> {
     { no: 1, name: "ticker", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 2, name: "alias", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 3, name: "decimals", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
-    { no: 4, name: "max_supply_u128", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 6, name: "initial_alloc_u128", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 7, name: "mint_burn_enabled", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+    { no: 4, name: "genesis_supply_u128", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 7, name: "burn_enabled", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
     { no: 8, name: "transferable", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
-    { no: 9, name: "unlimited_supply", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
-    { no: 10, name: "mint_burn_threshold", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+    { no: 10, name: "threshold", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
     { no: 11, name: "description", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 12, name: "icon_url", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 13, name: "allowlist_device_ids", kind: "scalar", T: 12 /* ScalarType.BYTES */, repeated: true },
@@ -7212,9 +7135,6 @@ export class TokenCreateRequest extends Message<TokenCreateRequest> {
 }
 
 /**
- * Mint additional supply of an existing token. Authority and the supply cap
- * are enforced by the token's committed policy conditions; the client supplies
- * intent only and never an authorization it constructed itself.
  * Drop a token's IDENTITY from this device. Canonical balances are not
  * touched: forgetting is refused unless the balance is zero, because a device
  * must not be able to make an asset it holds unnameable.
@@ -7303,110 +7223,6 @@ export class TokenForgetResponse extends Message<TokenForgetResponse> {
 
   static equals(a: TokenForgetResponse | PlainMessage<TokenForgetResponse> | undefined, b: TokenForgetResponse | PlainMessage<TokenForgetResponse> | undefined): boolean {
     return proto3.util.equals(TokenForgetResponse, a, b);
-  }
-}
-
-/**
- * @generated from message dsm.TokenMintRequest
- */
-export class TokenMintRequest extends Message<TokenMintRequest> {
-  /**
-   * @generated from field: string token_id = 1;
-   */
-  tokenId = "";
-
-  /**
-   * @generated from field: uint64 amount = 2;
-   */
-  amount = protoInt64.zero;
-
-  /**
-   * @generated from field: string message = 3;
-   */
-  message = "";
-
-  constructor(data?: PartialMessage<TokenMintRequest>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.TokenMintRequest";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "token_id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 2, name: "amount", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
-    { no: 3, name: "message", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): TokenMintRequest {
-    return new TokenMintRequest().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): TokenMintRequest {
-    return new TokenMintRequest().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): TokenMintRequest {
-    return new TokenMintRequest().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: TokenMintRequest | PlainMessage<TokenMintRequest> | undefined, b: TokenMintRequest | PlainMessage<TokenMintRequest> | undefined): boolean {
-    return proto3.util.equals(TokenMintRequest, a, b);
-  }
-}
-
-/**
- * @generated from message dsm.TokenMintResponse
- */
-export class TokenMintResponse extends Message<TokenMintResponse> {
-  /**
-   * @generated from field: bool success = 1;
-   */
-  success = false;
-
-  /**
-   * @generated from field: string token_id = 2;
-   */
-  tokenId = "";
-
-  /**
-   * @generated from field: uint64 new_balance = 3;
-   */
-  newBalance = protoInt64.zero;
-
-  /**
-   * @generated from field: string message = 4;
-   */
-  message = "";
-
-  constructor(data?: PartialMessage<TokenMintResponse>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.TokenMintResponse";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "success", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
-    { no: 2, name: "token_id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 3, name: "new_balance", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
-    { no: 4, name: "message", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): TokenMintResponse {
-    return new TokenMintResponse().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): TokenMintResponse {
-    return new TokenMintResponse().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): TokenMintResponse {
-    return new TokenMintResponse().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: TokenMintResponse | PlainMessage<TokenMintResponse> | undefined, b: TokenMintResponse | PlainMessage<TokenMintResponse> | undefined): boolean {
-    return proto3.util.equals(TokenMintResponse, a, b);
   }
 }
 
@@ -9348,151 +9164,6 @@ export class GossipStatusV1 extends Message<GossipStatusV1> {
 }
 
 /**
- * @generated from message dsm.ObjectListItemV1
- */
-export class ObjectListItemV1 extends Message<ObjectListItemV1> {
-  /**
-   * @generated from field: string key = 1;
-   */
-  key = "";
-
-  /**
-   * base32-crockford
-   *
-   * @generated from field: string dlv_id_b32 = 2;
-   */
-  dlvIdB32 = "";
-
-  /**
-   * @generated from field: int64 size_bytes = 3;
-   */
-  sizeBytes = protoInt64.zero;
-
-  constructor(data?: PartialMessage<ObjectListItemV1>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.ObjectListItemV1";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "key", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 2, name: "dlv_id_b32", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 3, name: "size_bytes", kind: "scalar", T: 3 /* ScalarType.INT64 */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ObjectListItemV1 {
-    return new ObjectListItemV1().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ObjectListItemV1 {
-    return new ObjectListItemV1().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ObjectListItemV1 {
-    return new ObjectListItemV1().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: ObjectListItemV1 | PlainMessage<ObjectListItemV1> | undefined, b: ObjectListItemV1 | PlainMessage<ObjectListItemV1> | undefined): boolean {
-    return proto3.util.equals(ObjectListItemV1, a, b);
-  }
-}
-
-/**
- * @generated from message dsm.ObjectListResponseV1
- */
-export class ObjectListResponseV1 extends Message<ObjectListResponseV1> {
-  /**
-   * @generated from field: repeated dsm.ObjectListItemV1 items = 1;
-   */
-  items: ObjectListItemV1[] = [];
-
-  /**
-   * @generated from field: optional string next_cursor = 2;
-   */
-  nextCursor?: string;
-
-  constructor(data?: PartialMessage<ObjectListResponseV1>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.ObjectListResponseV1";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "items", kind: "message", T: ObjectListItemV1, repeated: true },
-    { no: 2, name: "next_cursor", kind: "scalar", T: 9 /* ScalarType.STRING */, opt: true },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ObjectListResponseV1 {
-    return new ObjectListResponseV1().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ObjectListResponseV1 {
-    return new ObjectListResponseV1().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ObjectListResponseV1 {
-    return new ObjectListResponseV1().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: ObjectListResponseV1 | PlainMessage<ObjectListResponseV1> | undefined, b: ObjectListResponseV1 | PlainMessage<ObjectListResponseV1> | undefined): boolean {
-    return proto3.util.equals(ObjectListResponseV1, a, b);
-  }
-}
-
-/**
- * @generated from message dsm.AdminCleanupResponseV1
- */
-export class AdminCleanupResponseV1 extends Message<AdminCleanupResponseV1> {
-  /**
-   * @generated from field: uint64 objects_deleted = 1;
-   */
-  objectsDeleted = protoInt64.zero;
-
-  /**
-   * @generated from field: uint64 spool_deleted = 2;
-   */
-  spoolDeleted = protoInt64.zero;
-
-  /**
-   * deterministic counter (admin only)
-   *
-   * @generated from field: int64 before_iter = 3;
-   */
-  beforeIter = protoInt64.zero;
-
-  constructor(data?: PartialMessage<AdminCleanupResponseV1>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.AdminCleanupResponseV1";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "objects_deleted", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
-    { no: 2, name: "spool_deleted", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
-    { no: 3, name: "before_iter", kind: "scalar", T: 3 /* ScalarType.INT64 */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AdminCleanupResponseV1 {
-    return new AdminCleanupResponseV1().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): AdminCleanupResponseV1 {
-    return new AdminCleanupResponseV1().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): AdminCleanupResponseV1 {
-    return new AdminCleanupResponseV1().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: AdminCleanupResponseV1 | PlainMessage<AdminCleanupResponseV1> | undefined, b: AdminCleanupResponseV1 | PlainMessage<AdminCleanupResponseV1> | undefined): boolean {
-    return proto3.util.equals(AdminCleanupResponseV1, a, b);
-  }
-}
-
-/**
  * @generated from message dsm.AdminMaintenanceResponseV1
  */
 export class AdminMaintenanceResponseV1 extends Message<AdminMaintenanceResponseV1> {
@@ -9534,271 +9205,6 @@ export class AdminMaintenanceResponseV1 extends Message<AdminMaintenanceResponse
 
   static equals(a: AdminMaintenanceResponseV1 | PlainMessage<AdminMaintenanceResponseV1> | undefined, b: AdminMaintenanceResponseV1 | PlainMessage<AdminMaintenanceResponseV1> | undefined): boolean {
     return proto3.util.equals(AdminMaintenanceResponseV1, a, b);
-  }
-}
-
-/**
- * @generated from message dsm.SmartIndex
- */
-export class SmartIndex extends Message<SmartIndex> {
-  /**
-   * @generated from field: uint64 unlock_index = 1;
-   */
-  unlockIndex = protoInt64.zero;
-
-  constructor(data?: PartialMessage<SmartIndex>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.SmartIndex";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "unlock_index", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SmartIndex {
-    return new SmartIndex().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): SmartIndex {
-    return new SmartIndex().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): SmartIndex {
-    return new SmartIndex().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: SmartIndex | PlainMessage<SmartIndex> | undefined, b: SmartIndex | PlainMessage<SmartIndex> | undefined): boolean {
-    return proto3.util.equals(SmartIndex, a, b);
-  }
-}
-
-/**
- * @generated from message dsm.SmartBalance
- */
-export class SmartBalance extends Message<SmartBalance> {
-  /**
-   * @generated from field: uint64 minimum_balance = 1;
-   */
-  minimumBalance = protoInt64.zero;
-
-  /**
-   * @generated from field: string token_id = 2;
-   */
-  tokenId = "";
-
-  constructor(data?: PartialMessage<SmartBalance>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.SmartBalance";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "minimum_balance", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
-    { no: 2, name: "token_id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SmartBalance {
-    return new SmartBalance().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): SmartBalance {
-    return new SmartBalance().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): SmartBalance {
-    return new SmartBalance().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: SmartBalance | PlainMessage<SmartBalance> | undefined, b: SmartBalance | PlainMessage<SmartBalance> | undefined): boolean {
-    return proto3.util.equals(SmartBalance, a, b);
-  }
-}
-
-/**
- * @generated from message dsm.SmartClause
- */
-export class SmartClause extends Message<SmartClause> {
-  /**
-   * @generated from oneof dsm.SmartClause.clause
-   */
-  clause: {
-    /**
-     * @generated from field: dsm.SmartIndex index = 1;
-     */
-    value: SmartIndex;
-    case: "index";
-  } | {
-    /**
-     * @generated from field: dsm.SmartBalance balance = 2;
-     */
-    value: SmartBalance;
-    case: "balance";
-  } | { case: undefined; value?: undefined } = { case: undefined };
-
-  constructor(data?: PartialMessage<SmartClause>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.SmartClause";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "index", kind: "message", T: SmartIndex, oneof: "clause" },
-    { no: 2, name: "balance", kind: "message", T: SmartBalance, oneof: "clause" },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SmartClause {
-    return new SmartClause().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): SmartClause {
-    return new SmartClause().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): SmartClause {
-    return new SmartClause().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: SmartClause | PlainMessage<SmartClause> | undefined, b: SmartClause | PlainMessage<SmartClause> | undefined): boolean {
-    return proto3.util.equals(SmartClause, a, b);
-  }
-}
-
-/**
- * @generated from message dsm.SmartPolicy
- */
-export class SmartPolicy extends Message<SmartPolicy> {
-  /**
-   * @generated from field: uint32 version = 1;
-   */
-  version = 0;
-
-  /**
-   * @generated from field: dsm.SmartLogic logic = 2;
-   */
-  logic = SmartLogic.SMART_LOGIC_UNSPECIFIED;
-
-  /**
-   * @generated from field: repeated dsm.SmartClause clauses = 3;
-   */
-  clauses: SmartClause[] = [];
-
-  constructor(data?: PartialMessage<SmartPolicy>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.SmartPolicy";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "version", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
-    { no: 2, name: "logic", kind: "enum", T: proto3.getEnumType(SmartLogic) },
-    { no: 3, name: "clauses", kind: "message", T: SmartClause, repeated: true },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SmartPolicy {
-    return new SmartPolicy().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): SmartPolicy {
-    return new SmartPolicy().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): SmartPolicy {
-    return new SmartPolicy().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: SmartPolicy | PlainMessage<SmartPolicy> | undefined, b: SmartPolicy | PlainMessage<SmartPolicy> | undefined): boolean {
-    return proto3.util.equals(SmartPolicy, a, b);
-  }
-}
-
-/**
- * @generated from message dsm.ClauseWitness
- */
-export class ClauseWitness extends Message<ClauseWitness> {
-  /**
-   * @generated from field: uint32 idx = 1;
-   */
-  idx = 0;
-
-  /**
-   * @generated from field: bytes proof = 2;
-   */
-  proof = new Uint8Array(0);
-
-  constructor(data?: PartialMessage<ClauseWitness>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.ClauseWitness";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "idx", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
-    { no: 2, name: "proof", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ClauseWitness {
-    return new ClauseWitness().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ClauseWitness {
-    return new ClauseWitness().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ClauseWitness {
-    return new ClauseWitness().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: ClauseWitness | PlainMessage<ClauseWitness> | undefined, b: ClauseWitness | PlainMessage<ClauseWitness> | undefined): boolean {
-    return proto3.util.equals(ClauseWitness, a, b);
-  }
-}
-
-/**
- * @generated from message dsm.SmartProof
- */
-export class SmartProof extends Message<SmartProof> {
-  /**
-   * @generated from field: dsm.Hash32 policy_hash = 1;
-   */
-  policyHash?: Hash32;
-
-  /**
-   * @generated from field: repeated dsm.ClauseWitness witnesses = 2;
-   */
-  witnesses: ClauseWitness[] = [];
-
-  constructor(data?: PartialMessage<SmartProof>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.SmartProof";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "policy_hash", kind: "message", T: Hash32 },
-    { no: 2, name: "witnesses", kind: "message", T: ClauseWitness, repeated: true },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SmartProof {
-    return new SmartProof().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): SmartProof {
-    return new SmartProof().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): SmartProof {
-    return new SmartProof().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: SmartProof | PlainMessage<SmartProof> | undefined, b: SmartProof | PlainMessage<SmartProof> | undefined): boolean {
-    return proto3.util.equals(SmartProof, a, b);
   }
 }
 
@@ -11017,197 +10423,6 @@ export class BalanceDeltaEntry extends Message<BalanceDeltaEntry> {
 }
 
 /**
- * @generated from message dsm.PositionSequenceProto
- */
-export class PositionSequenceProto extends Message<PositionSequenceProto> {
-  /**
-   * sequence of position lists
-   *
-   * @generated from field: repeated dsm.PositionList positions = 1;
-   */
-  positions: PositionList[] = [];
-
-  /**
-   * seed used to generate positions
-   *
-   * @generated from field: bytes seed = 2;
-   */
-  seed = new Uint8Array(0);
-
-  constructor(data?: PartialMessage<PositionSequenceProto>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.PositionSequenceProto";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "positions", kind: "message", T: PositionList, repeated: true },
-    { no: 2, name: "seed", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): PositionSequenceProto {
-    return new PositionSequenceProto().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): PositionSequenceProto {
-    return new PositionSequenceProto().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): PositionSequenceProto {
-    return new PositionSequenceProto().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: PositionSequenceProto | PlainMessage<PositionSequenceProto> | undefined, b: PositionSequenceProto | PlainMessage<PositionSequenceProto> | undefined): boolean {
-    return proto3.util.equals(PositionSequenceProto, a, b);
-  }
-}
-
-/**
- * @generated from message dsm.PositionList
- */
-export class PositionList extends Message<PositionList> {
-  /**
-   * list of positions
-   *
-   * @generated from field: repeated sint32 positions = 1;
-   */
-  positions: number[] = [];
-
-  constructor(data?: PartialMessage<PositionList>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.PositionList";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "positions", kind: "scalar", T: 17 /* ScalarType.SINT32 */, repeated: true },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): PositionList {
-    return new PositionList().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): PositionList {
-    return new PositionList().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): PositionList {
-    return new PositionList().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: PositionList | PlainMessage<PositionList> | undefined, b: PositionList | PlainMessage<PositionList> | undefined): boolean {
-    return proto3.util.equals(PositionList, a, b);
-  }
-}
-
-/**
- * @generated from message dsm.PreCommitmentProto
- */
-export class PreCommitmentProto extends Message<PreCommitmentProto> {
-  /**
-   * @generated from field: string operation_type = 1;
-   */
-  operationType = "";
-
-  /**
-   * sorted by key
-   *
-   * @generated from field: repeated dsm.ParamKV fixed_parameters = 2;
-   */
-  fixedParameters: ParamKV[] = [];
-
-  /**
-   * sorted lexicographically
-   *
-   * @generated from field: repeated string variable_parameters = 3;
-   */
-  variableParameters: string[] = [];
-
-  /**
-   * @generated from field: uint64 min_state_number = 4;
-   */
-  minStateNumber = protoInt64.zero;
-
-  /**
-   * @generated from field: dsm.Hash32 hash = 5;
-   */
-  hash?: Hash32;
-
-  /**
-   * @generated from field: repeated bytes signatures = 6;
-   */
-  signatures: Uint8Array[] = [];
-
-  /**
-   * @generated from field: optional bytes entity_signature = 7;
-   */
-  entitySignature?: Uint8Array;
-
-  /**
-   * @generated from field: optional bytes counterparty_signature = 8;
-   */
-  counterpartySignature?: Uint8Array;
-
-  /**
-   * calculation values
-   *
-   * @generated from field: repeated sint32 value = 9;
-   */
-  value: number[] = [];
-
-  /**
-   * commitment data
-   *
-   * @generated from field: repeated sint32 commitment = 10;
-   */
-  commitment: number[] = [];
-
-  /**
-   * @generated from field: bytes counterparty_id = 11;
-   */
-  counterpartyId = new Uint8Array(0);
-
-  constructor(data?: PartialMessage<PreCommitmentProto>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.PreCommitmentProto";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "operation_type", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 2, name: "fixed_parameters", kind: "message", T: ParamKV, repeated: true },
-    { no: 3, name: "variable_parameters", kind: "scalar", T: 9 /* ScalarType.STRING */, repeated: true },
-    { no: 4, name: "min_state_number", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
-    { no: 5, name: "hash", kind: "message", T: Hash32 },
-    { no: 6, name: "signatures", kind: "scalar", T: 12 /* ScalarType.BYTES */, repeated: true },
-    { no: 7, name: "entity_signature", kind: "scalar", T: 12 /* ScalarType.BYTES */, opt: true },
-    { no: 8, name: "counterparty_signature", kind: "scalar", T: 12 /* ScalarType.BYTES */, opt: true },
-    { no: 9, name: "value", kind: "scalar", T: 17 /* ScalarType.SINT32 */, repeated: true },
-    { no: 10, name: "commitment", kind: "scalar", T: 17 /* ScalarType.SINT32 */, repeated: true },
-    { no: 11, name: "counterparty_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): PreCommitmentProto {
-    return new PreCommitmentProto().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): PreCommitmentProto {
-    return new PreCommitmentProto().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): PreCommitmentProto {
-    return new PreCommitmentProto().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: PreCommitmentProto | PlainMessage<PreCommitmentProto> | undefined, b: PreCommitmentProto | PlainMessage<PreCommitmentProto> | undefined): boolean {
-    return proto3.util.equals(PreCommitmentProto, a, b);
-  }
-}
-
-/**
  * @generated from message dsm.StateTransitionProto
  */
 export class StateTransitionProto extends Message<StateTransitionProto> {
@@ -11299,123 +10514,6 @@ export class StateTransitionProto extends Message<StateTransitionProto> {
 }
 
 /**
- * Canonical state transition for internal commitments (replaces custom binary format)
- *
- * @generated from message dsm.CanonicalStateTransitionProto
- */
-export class CanonicalStateTransitionProto extends Message<CanonicalStateTransitionProto> {
-  /**
-   * canonical operation bytes
-   *
-   * @generated from field: bytes operation = 1;
-   */
-  operation = new Uint8Array(0);
-
-  /**
-   * @generated from field: optional bytes new_entropy = 2;
-   */
-  newEntropy?: Uint8Array;
-
-  /**
-   * @generated from field: optional bytes encapsulated_entropy = 3;
-   */
-  encapsulatedEntropy?: Uint8Array;
-
-  /**
-   * @generated from field: bytes device_id = 4;
-   */
-  deviceId = new Uint8Array(0);
-
-  /**
-   * sorted lexicographically
-   *
-   * @generated from field: repeated string flags = 5;
-   */
-  flags: string[] = [];
-
-  /**
-   * @generated from field: optional dsm.PositionSequenceProto position_sequence = 6;
-   */
-  positionSequence?: PositionSequenceProto;
-
-  /**
-   * sorted by token_id
-   *
-   * @generated from field: repeated dsm.TokenBalanceEntry token_balances = 7;
-   */
-  tokenBalances: TokenBalanceEntry[] = [];
-
-  /**
-   * @generated from field: optional dsm.PreCommitmentProto forward_commitment = 8;
-   */
-  forwardCommitment?: PreCommitmentProto;
-
-  /**
-   * @generated from field: optional bytes prev_state_hash = 9;
-   */
-  prevStateHash?: Uint8Array;
-
-  /**
-   * @generated from field: optional bytes entity_signature = 10;
-   */
-  entitySignature?: Uint8Array;
-
-  /**
-   * @generated from field: optional bytes counterparty_signature = 11;
-   */
-  counterpartySignature?: Uint8Array;
-
-  /**
-   * @generated from field: bytes proof_of_authorization = 12;
-   */
-  proofOfAuthorization = new Uint8Array(0);
-
-  /**
-   * @generated from field: bytes signature = 13;
-   */
-  signature = new Uint8Array(0);
-
-  constructor(data?: PartialMessage<CanonicalStateTransitionProto>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.CanonicalStateTransitionProto";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "operation", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 2, name: "new_entropy", kind: "scalar", T: 12 /* ScalarType.BYTES */, opt: true },
-    { no: 3, name: "encapsulated_entropy", kind: "scalar", T: 12 /* ScalarType.BYTES */, opt: true },
-    { no: 4, name: "device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 5, name: "flags", kind: "scalar", T: 9 /* ScalarType.STRING */, repeated: true },
-    { no: 6, name: "position_sequence", kind: "message", T: PositionSequenceProto, opt: true },
-    { no: 7, name: "token_balances", kind: "message", T: TokenBalanceEntry, repeated: true },
-    { no: 8, name: "forward_commitment", kind: "message", T: PreCommitmentProto, opt: true },
-    { no: 9, name: "prev_state_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */, opt: true },
-    { no: 10, name: "entity_signature", kind: "scalar", T: 12 /* ScalarType.BYTES */, opt: true },
-    { no: 11, name: "counterparty_signature", kind: "scalar", T: 12 /* ScalarType.BYTES */, opt: true },
-    { no: 12, name: "proof_of_authorization", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 13, name: "signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): CanonicalStateTransitionProto {
-    return new CanonicalStateTransitionProto().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): CanonicalStateTransitionProto {
-    return new CanonicalStateTransitionProto().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): CanonicalStateTransitionProto {
-    return new CanonicalStateTransitionProto().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: CanonicalStateTransitionProto | PlainMessage<CanonicalStateTransitionProto> | undefined, b: CanonicalStateTransitionProto | PlainMessage<CanonicalStateTransitionProto> | undefined): boolean {
-    return proto3.util.equals(CanonicalStateTransitionProto, a, b);
-  }
-}
-
-/**
  * Deterministic params (no maps in canonical preimages).
  *
  * @generated from message dsm.ParamKV
@@ -11498,7 +10596,7 @@ export class TransactionParamsProto extends Message<TransactionParamsProto> {
 }
 
 /**
- * Canonical token metadata (no wall-clock markers; deterministic index).
+ * Canonical token metadata.
  *
  * @generated from message dsm.MetadataField
  */
@@ -11601,11 +10699,6 @@ export class TokenMetadataProto extends Message<TokenMetadataProto> {
    */
   fields: MetadataField[] = [];
 
-  /**
-   * @generated from field: uint64 creation_index = 12;
-   */
-  creationIndex = protoInt64.zero;
-
   constructor(data?: PartialMessage<TokenMetadataProto>) {
     super();
     proto3.util.initPartial(data, this);
@@ -11625,7 +10718,6 @@ export class TokenMetadataProto extends Message<TokenMetadataProto> {
     { no: 9, name: "icon_url", kind: "scalar", T: 9 /* ScalarType.STRING */, opt: true },
     { no: 10, name: "policy_anchor", kind: "scalar", T: 9 /* ScalarType.STRING */, opt: true },
     { no: 11, name: "fields", kind: "message", T: MetadataField, repeated: true },
-    { no: 12, name: "creation_index", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): TokenMetadataProto {
@@ -12421,43 +11513,6 @@ export class RegisterDeviceRequest extends Message<RegisterDeviceRequest> {
 }
 
 /**
- * @generated from message dsm.RegisterDeviceResponse
- */
-export class RegisterDeviceResponse extends Message<RegisterDeviceResponse> {
-  /**
-   * @generated from field: bytes token = 1;
-   */
-  token = new Uint8Array(0);
-
-  constructor(data?: PartialMessage<RegisterDeviceResponse>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.RegisterDeviceResponse";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "token", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): RegisterDeviceResponse {
-    return new RegisterDeviceResponse().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): RegisterDeviceResponse {
-    return new RegisterDeviceResponse().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): RegisterDeviceResponse {
-    return new RegisterDeviceResponse().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: RegisterDeviceResponse | PlainMessage<RegisterDeviceResponse> | undefined, b: RegisterDeviceResponse | PlainMessage<RegisterDeviceResponse> | undefined): boolean {
-    return proto3.util.equals(RegisterDeviceResponse, a, b);
-  }
-}
-
-/**
  * ================= Bilateral Operations (binary IDs) =================
  *
  * @generated from message dsm.BilateralPrepareRequest
@@ -12472,11 +11527,6 @@ export class BilateralPrepareRequest extends Message<BilateralPrepareRequest> {
    * @generated from field: bytes operation_data = 2;
    */
   operationData = new Uint8Array(0);
-
-  /**
-   * @generated from field: uint64 validity_iterations = 3;
-   */
-  validityIterations = protoInt64.zero;
 
   /**
    * @generated from field: dsm.Hash32 expected_genesis_hash = 4;
@@ -12589,7 +11639,6 @@ export class BilateralPrepareRequest extends Message<BilateralPrepareRequest> {
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
     { no: 1, name: "counterparty_device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 2, name: "operation_data", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 3, name: "validity_iterations", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
     { no: 4, name: "expected_genesis_hash", kind: "message", T: Hash32 },
     { no: 5, name: "expected_counterparty_state_hash", kind: "message", T: Hash32 },
     { no: 6, name: "ble_address", kind: "scalar", T: 9 /* ScalarType.STRING */ },
@@ -12716,11 +11765,6 @@ export class BilateralPrepareResponse extends Message<BilateralPrepareResponse> 
   localSignature = new Uint8Array(0);
 
   /**
-   * @generated from field: uint64 expires_iterations = 3;
-   */
-  expiresIterations = protoInt64.zero;
-
-  /**
    * @generated from field: dsm.Hash32 counterparty_state_hash = 4;
    */
   counterpartyStateHash?: Hash32;
@@ -12778,7 +11822,6 @@ export class BilateralPrepareResponse extends Message<BilateralPrepareResponse> 
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
     { no: 1, name: "commitment_hash", kind: "message", T: Hash32 },
     { no: 2, name: "local_signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 3, name: "expires_iterations", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
     { no: 4, name: "counterparty_state_hash", kind: "message", T: Hash32 },
     { no: 5, name: "local_state_hash", kind: "message", T: Hash32 },
     { no: 6, name: "responder_signing_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
@@ -13431,27 +12474,6 @@ export class BilateralConfirmRequest extends Message<BilateralConfirmRequest> {
   senderSignature = new Uint8Array(0);
 
   /**
-   * r'_A (post-update root)
-   *
-   * @generated from field: bytes sender_smt_root = 3;
-   */
-  senderSmtRoot = new Uint8Array(0);
-
-  /**
-   * π(h_n ∈ r_A) — verified against sender_smt_root_before (§4.3); required
-   *
-   * @generated from field: bytes rel_proof_parent = 4;
-   */
-  relProofParent = new Uint8Array(0);
-
-  /**
-   * π(h_{n+1} ∈ r'_A)
-   *
-   * @generated from field: bytes rel_proof_child = 5;
-   */
-  relProofChild = new Uint8Array(0);
-
-  /**
    * complete receipt, both sigs; enforced ≤128 KiB (§11.1)
    *
    * @generated from field: bytes stitched_receipt = 6;
@@ -13471,13 +12493,6 @@ export class BilateralConfirmRequest extends Message<BilateralConfirmRequest> {
    * @generated from field: bytes pre_entropy = 8;
    */
   preEntropy = new Uint8Array(0);
-
-  /**
-   * r_A (pre-update root) — enables full §4.3 π_rel_parent verification by receiver
-   *
-   * @generated from field: bytes sender_smt_root_before = 9;
-   */
-  senderSmtRootBefore = new Uint8Array(0);
 
   /**
    * Canonical offline-bearer release (Software-Authority / Hardware-Identity v2): the prost-encoded
@@ -13510,13 +12525,9 @@ export class BilateralConfirmRequest extends Message<BilateralConfirmRequest> {
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
     { no: 1, name: "commitment_hash", kind: "message", T: Hash32 },
     { no: 2, name: "sender_signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 3, name: "sender_smt_root", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 4, name: "rel_proof_parent", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 5, name: "rel_proof_child", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 6, name: "stitched_receipt", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 7, name: "shared_chain_tip_new", kind: "message", T: Hash32 },
     { no: 8, name: "pre_entropy", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 9, name: "sender_smt_root_before", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 12, name: "offline_release", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 15, name: "anchor_disclosure", kind: "message", T: AnchorDisclosure },
   ]);
@@ -13595,19 +12606,12 @@ export class ReceiptCommit extends Message<ReceiptCommit> {
 
   /**
    * Proof fields are capped to enforce the 128 KiB strict-fail invariant end-to-end.
-   *
-   * pi_rel(h_n in r_A)
+   * pi_rel: the ONE relationship path. It authenticates h_n under r_A, and the
+   * same siblings folded with h_{n+1} are r_A' — there is no second proof.
    *
    * @generated from field: bytes rel_proof_parent = 8;
    */
   relProofParent = new Uint8Array(0);
-
-  /**
-   * pi'_rel(h_{n+1} in r_A')
-   *
-   * @generated from field: bytes rel_proof_child = 9;
-   */
-  relProofChild = new Uint8Array(0);
 
   /**
    * pi_dev(DevID_A in R_G)
@@ -13617,16 +12621,8 @@ export class ReceiptCommit extends Message<ReceiptCommit> {
   devProof = new Uint8Array(0);
 
   /**
-   * Tripwire-critical witness material: MUST be committed into ReceiptCommit.
-   * Verifiers recompute child_root from parent_root by applying a single-leaf replace.
-   *
-   * @generated from field: bytes rel_replace_witness = 11;
-   */
-  relReplaceWitness = new Uint8Array(0);
-
-  /**
    * Dual SPHINCS+ signatures. These are the receipt challenge responses.
-   * The challenge is the proposed transition context carried by fields 1-11
+   * The challenge is the proposed transition context carried by fields 1-8, 10 and 21
    * plus the bilateral session binding. Each response signs that context with
    * the fresh EK key derived from Smaster, chain_id, h_n, C_pre, and k_step.
    * NOT part of canonical commit preimage.
@@ -13747,9 +12743,7 @@ export class ReceiptCommit extends Message<ReceiptCommit> {
     { no: 6, name: "parent_root", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 7, name: "child_root", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 8, name: "rel_proof_parent", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 9, name: "rel_proof_child", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 10, name: "dev_proof", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 11, name: "rel_replace_witness", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 12, name: "sig_a", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 13, name: "sig_b", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 14, name: "ek_cert_a", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
@@ -17512,20 +16506,6 @@ export class Invoke extends Message<Invoke> {
   args?: ArgPack;
 
   /**
-   * MUST equal caller’s current tip
-   *
-   * @generated from field: dsm.Hash32 pre_state_hash = 4;
-   */
-  preStateHash?: Hash32;
-
-  /**
-   * expected effects commitment
-   *
-   * @generated from field: dsm.Hash32 post_state_hash = 5;
-   */
-  postStateHash?: Hash32;
-
-  /**
    * optional required parties
    *
    * @generated from field: repeated bytes cosigners = 6;
@@ -17557,8 +16537,6 @@ export class Invoke extends Message<Invoke> {
     { no: 1, name: "program", kind: "message", T: ProgramRef },
     { no: 2, name: "method", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 3, name: "args", kind: "message", T: ArgPack },
-    { no: 4, name: "pre_state_hash", kind: "message", T: Hash32 },
-    { no: 5, name: "post_state_hash", kind: "message", T: Hash32 },
     { no: 6, name: "cosigners", kind: "scalar", T: 12 /* ScalarType.BYTES */, repeated: true },
     { no: 7, name: "evidence", kind: "message", T: Evidence },
     { no: 8, name: "nonce", kind: "message", T: Hash16 },
@@ -18195,6 +17173,8 @@ export class SequencedBatchEnvelope extends Message<SequencedBatchEnvelope> {
 
 /**
  * =============================== ENVELOPE ============================
+ * The sender of an addressed envelope. A local answer (this device's Core or
+ * SDK answering its own caller) makes no sender claim and carries no Headers.
  *
  * @generated from message dsm.Headers
  */
@@ -18207,25 +17187,11 @@ export class Headers extends Message<Headers> {
   deviceId = new Uint8Array(0);
 
   /**
-   * RESERVED/IGNORED: SDK always emits zeros; frontend must never read or supply this
-   *
-   * @generated from field: bytes chain_tip = 2;
-   */
-  chainTip = new Uint8Array(0);
-
-  /**
    * REQUIRED: genesis anchor (mandatory per DSM spec)
    *
    * @generated from field: bytes genesis_hash = 3;
    */
   genesisHash = new Uint8Array(0);
-
-  /**
-   * transport-local only (deterministic counter)
-   *
-   * @generated from field: uint64 seq = 4;
-   */
-  seq = protoInt64.zero;
 
   constructor(data?: PartialMessage<Headers>) {
     super();
@@ -18236,9 +17202,7 @@ export class Headers extends Message<Headers> {
   static readonly typeName = "dsm.Headers";
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
     { no: 1, name: "device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 2, name: "chain_tip", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 3, name: "genesis_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 4, name: "seq", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): Headers {
@@ -18882,12 +17846,6 @@ export class Envelope extends Message<Envelope> {
      * Local-only responses: never routed through a storage node, so they sit
      * above the nodes' compiled-in payload allowlist without needing a redeploy.
      *
-     * @generated from field: dsm.TokenMintResponse token_mint_response = 115;
-     */
-    value: TokenMintResponse;
-    case: "tokenMintResponse";
-  } | {
-    /**
      * @generated from field: dsm.TokenBurnResponse token_burn_response = 116;
      */
     value: TokenBurnResponse;
@@ -18898,6 +17856,47 @@ export class Envelope extends Message<Envelope> {
      */
     value: TokenFeeScheduleResponse;
     case: "tokenFeeScheduleResponse";
+  } | {
+    /**
+     * SoFi routes (SoFi §27), local-only like the token responses.
+     *
+     * @generated from field: dsm.SofiVaultCreatedResponse sofi_vault_created_response = 120;
+     */
+    value: SofiVaultCreatedResponse;
+    case: "sofiVaultCreatedResponse";
+  } | {
+    /**
+     * @generated from field: dsm.SofiSetupResponse sofi_setup_response = 121;
+     */
+    value: SofiSetupResponse;
+    case: "sofiSetupResponse";
+  } | {
+    /**
+     * @generated from field: dsm.SofiFindRouteResponse sofi_find_route_response = 122;
+     */
+    value: SofiFindRouteResponse;
+    case: "sofiFindRouteResponse";
+  } | {
+    /**
+     * @generated from field: dsm.SofiPositionResponse sofi_position_response = 123;
+     */
+    value: SofiPositionResponse;
+    case: "sofiPositionResponse";
+  } | {
+    /**
+     * @generated from field: dsm.SofiRelayResponse sofi_relay_response = 124;
+     */
+    value: SofiRelayResponse;
+    case: "sofiRelayResponse";
+  } | {
+    /**
+     * A sealed spool payload (DSM Amendment A7). The envelope that carries it
+     * has a message id and nothing else a node could read: no headers.
+     *
+     * @generated from field: dsm.SealedEnvelopeV1 sealed = 125;
+     */
+    value: SealedEnvelopeV1;
+    case: "sealed";
   } | {
     /**
      * Reply to `token.forget`.
@@ -19019,9 +18018,14 @@ export class Envelope extends Message<Envelope> {
     { no: 109, name: "device_admission", kind: "message", T: AddDeviceAdmissionV1, oneof: "payload" },
     { no: 112, name: "anchor_status_response", kind: "message", T: AnchorStatusResponse, oneof: "payload" },
     { no: 113, name: "offline_cash_response", kind: "message", T: OfflineCashResponse, oneof: "payload" },
-    { no: 115, name: "token_mint_response", kind: "message", T: TokenMintResponse, oneof: "payload" },
     { no: 116, name: "token_burn_response", kind: "message", T: TokenBurnResponse, oneof: "payload" },
     { no: 117, name: "token_fee_schedule_response", kind: "message", T: TokenFeeScheduleResponse, oneof: "payload" },
+    { no: 120, name: "sofi_vault_created_response", kind: "message", T: SofiVaultCreatedResponse, oneof: "payload" },
+    { no: 121, name: "sofi_setup_response", kind: "message", T: SofiSetupResponse, oneof: "payload" },
+    { no: 122, name: "sofi_find_route_response", kind: "message", T: SofiFindRouteResponse, oneof: "payload" },
+    { no: 123, name: "sofi_position_response", kind: "message", T: SofiPositionResponse, oneof: "payload" },
+    { no: 124, name: "sofi_relay_response", kind: "message", T: SofiRelayResponse, oneof: "payload" },
+    { no: 125, name: "sealed", kind: "message", T: SealedEnvelopeV1, oneof: "payload" },
     { no: 118, name: "token_forget_response", kind: "message", T: TokenForgetResponse, oneof: "payload" },
     { no: 119, name: "token_adoption_qr_response", kind: "message", T: TokenAdoptionQrResponse, oneof: "payload" },
   ]);
@@ -19040,6 +18044,861 @@ export class Envelope extends Message<Envelope> {
 
   static equals(a: Envelope | PlainMessage<Envelope> | undefined, b: Envelope | PlainMessage<Envelope> | undefined): boolean {
     return proto3.util.equals(Envelope, a, b);
+  }
+}
+
+/**
+ * ===================== Sealed spool payloads (DSM Amendment A7) =====================
+ * Everything a relationship sends through the spool is sealed end to end. The
+ * recipient decapsulates `kem_ciphertext` with its own Kyber secret; the shared
+ * secret and the envelope's message id give the one key the inner envelope is
+ * sealed under (`dsm::crypto::spool_seal`). For a transfer step the Kyber
+ * exchange is the step's own; for a message it is one made for it.
+ *
+ * @generated from message dsm.SealedEnvelopeV1
+ */
+export class SealedEnvelopeV1 extends Message<SealedEnvelopeV1> {
+  /**
+   * ML-KEM-768 ciphertext to the recipient
+   *
+   * @generated from field: bytes kem_ciphertext = 1;
+   */
+  kemCiphertext = new Uint8Array(0);
+
+  /**
+   * XChaCha20-Poly1305 over the inner envelope bytes
+   *
+   * @generated from field: bytes ciphertext = 2;
+   */
+  ciphertext = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<SealedEnvelopeV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.SealedEnvelopeV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "kem_ciphertext", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "ciphertext", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SealedEnvelopeV1 {
+    return new SealedEnvelopeV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): SealedEnvelopeV1 {
+    return new SealedEnvelopeV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): SealedEnvelopeV1 {
+    return new SealedEnvelopeV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: SealedEnvelopeV1 | PlainMessage<SealedEnvelopeV1> | undefined, b: SealedEnvelopeV1 | PlainMessage<SealedEnvelopeV1> | undefined): boolean {
+    return proto3.util.equals(SealedEnvelopeV1, a, b);
+  }
+}
+
+/**
+ * ===================== Device directory (owner, 2026-09-23) =====================
+ * Each device writes its own entry, signed with its AK, to the keyed cell
+ * H(DSM/device-directory-key/v1, genesis, device_id) under the namespace
+ * DSM/device-directory/v1. Nodes store every entry and check nothing; a reader
+ * keeps the entry whose AK hashes (with AttA) to the device id and whose
+ * signature verifies, highest counter first (dsm::core::identity::directory).
+ *
+ * @generated from message dsm.DeviceDirectoryEntryBodyV1
+ */
+export class DeviceDirectoryEntryBodyV1 extends Message<DeviceDirectoryEntryBodyV1> {
+  /**
+   * @generated from field: bytes genesis = 1;
+   */
+  genesis = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes device_id = 2;
+   */
+  deviceId = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes ak_public_key = 3;
+   */
+  akPublicKey = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes att_a = 4;
+   */
+  attA = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes kyber_public_key = 5;
+   */
+  kyberPublicKey = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint64 counter = 6;
+   */
+  counter = protoInt64.zero;
+
+  constructor(data?: PartialMessage<DeviceDirectoryEntryBodyV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.DeviceDirectoryEntryBodyV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "genesis", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "ak_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "att_a", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "kyber_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 6, name: "counter", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): DeviceDirectoryEntryBodyV1 {
+    return new DeviceDirectoryEntryBodyV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): DeviceDirectoryEntryBodyV1 {
+    return new DeviceDirectoryEntryBodyV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): DeviceDirectoryEntryBodyV1 {
+    return new DeviceDirectoryEntryBodyV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: DeviceDirectoryEntryBodyV1 | PlainMessage<DeviceDirectoryEntryBodyV1> | undefined, b: DeviceDirectoryEntryBodyV1 | PlainMessage<DeviceDirectoryEntryBodyV1> | undefined): boolean {
+    return proto3.util.equals(DeviceDirectoryEntryBodyV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.DeviceDirectoryEntryV1
+ */
+export class DeviceDirectoryEntryV1 extends Message<DeviceDirectoryEntryV1> {
+  /**
+   * @generated from field: dsm.DeviceDirectoryEntryBodyV1 body = 1;
+   */
+  body?: DeviceDirectoryEntryBodyV1;
+
+  /**
+   * SPHINCS+ by AK over the body digest
+   *
+   * @generated from field: bytes signature = 2;
+   */
+  signature = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<DeviceDirectoryEntryV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.DeviceDirectoryEntryV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "body", kind: "message", T: DeviceDirectoryEntryBodyV1 },
+    { no: 2, name: "signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): DeviceDirectoryEntryV1 {
+    return new DeviceDirectoryEntryV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): DeviceDirectoryEntryV1 {
+    return new DeviceDirectoryEntryV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): DeviceDirectoryEntryV1 {
+    return new DeviceDirectoryEntryV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: DeviceDirectoryEntryV1 | PlainMessage<DeviceDirectoryEntryV1> | undefined, b: DeviceDirectoryEntryV1 | PlainMessage<DeviceDirectoryEntryV1> | undefined): boolean {
+    return proto3.util.equals(DeviceDirectoryEntryV1, a, b);
+  }
+}
+
+/**
+ * sofi.createVault (§28). The beta market family is constant product with
+ * exact input and the beta release family is the owner's full close, so the
+ * owner chooses the pair, the reserves and the fee. The storage set is the
+ * network's pinned set, never chosen (DSM Amendment A5).
+ *
+ * @generated from message dsm.SofiCreateVaultRequest
+ */
+export class SofiCreateVaultRequest extends Message<SofiCreateVaultRequest> {
+  /**
+   * token_a < token_b, bytewise
+   *
+   * @generated from field: bytes token_a_policy_commit = 1;
+   */
+  tokenAPolicyCommit = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes token_b_policy_commit = 2;
+   */
+  tokenBPolicyCommit = new Uint8Array(0);
+
+  /**
+   * > 0
+   *
+   * @generated from field: uint64 reserve_a = 3;
+   */
+  reserveA = protoInt64.zero;
+
+  /**
+   * > 0
+   *
+   * @generated from field: uint64 reserve_b = 4;
+   */
+  reserveB = protoInt64.zero;
+
+  /**
+   * < 10000
+   *
+   * @generated from field: uint32 fee_bps = 5;
+   */
+  feeBps = 0;
+
+  constructor(data?: PartialMessage<SofiCreateVaultRequest>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.SofiCreateVaultRequest";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "token_a_policy_commit", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "token_b_policy_commit", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "reserve_a", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 4, name: "reserve_b", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 5, name: "fee_bps", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SofiCreateVaultRequest {
+    return new SofiCreateVaultRequest().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): SofiCreateVaultRequest {
+    return new SofiCreateVaultRequest().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): SofiCreateVaultRequest {
+    return new SofiCreateVaultRequest().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: SofiCreateVaultRequest | PlainMessage<SofiCreateVaultRequest> | undefined, b: SofiCreateVaultRequest | PlainMessage<SofiCreateVaultRequest> | undefined): boolean {
+    return proto3.util.equals(SofiCreateVaultRequest, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.SofiVaultCreatedResponse
+ */
+export class SofiVaultCreatedResponse extends Message<SofiVaultCreatedResponse> {
+  /**
+   * @generated from field: bytes vault_id = 1;
+   */
+  vaultId = new Uint8Array(0);
+
+  /**
+   * the owner's economic position that carries the creation
+   *
+   * @generated from field: uint64 position = 2;
+   */
+  position = protoInt64.zero;
+
+  constructor(data?: PartialMessage<SofiVaultCreatedResponse>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.SofiVaultCreatedResponse";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "vault_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "position", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SofiVaultCreatedResponse {
+    return new SofiVaultCreatedResponse().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): SofiVaultCreatedResponse {
+    return new SofiVaultCreatedResponse().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): SofiVaultCreatedResponse {
+    return new SofiVaultCreatedResponse().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: SofiVaultCreatedResponse | PlainMessage<SofiVaultCreatedResponse> | undefined, b: SofiVaultCreatedResponse | PlainMessage<SofiVaultCreatedResponse> | undefined): boolean {
+    return proto3.util.equals(SofiVaultCreatedResponse, a, b);
+  }
+}
+
+/**
+ * sofi.setup (§29): set up with a vault once, before trading against it.
+ *
+ * @generated from message dsm.SofiSetupRequest
+ */
+export class SofiSetupRequest extends Message<SofiSetupRequest> {
+  /**
+   * @generated from field: bytes vault_id = 1;
+   */
+  vaultId = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<SofiSetupRequest>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.SofiSetupRequest";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "vault_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SofiSetupRequest {
+    return new SofiSetupRequest().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): SofiSetupRequest {
+    return new SofiSetupRequest().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): SofiSetupRequest {
+    return new SofiSetupRequest().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: SofiSetupRequest | PlainMessage<SofiSetupRequest> | undefined, b: SofiSetupRequest | PlainMessage<SofiSetupRequest> | undefined): boolean {
+    return proto3.util.equals(SofiSetupRequest, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.SofiSetupResponse
+ */
+export class SofiSetupResponse extends Message<SofiSetupResponse> {
+  /**
+   * ρ
+   *
+   * @generated from field: bytes setup_ref = 1;
+   */
+  setupRef = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint64 position = 2;
+   */
+  position = protoInt64.zero;
+
+  constructor(data?: PartialMessage<SofiSetupResponse>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.SofiSetupResponse";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "setup_ref", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "position", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SofiSetupResponse {
+    return new SofiSetupResponse().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): SofiSetupResponse {
+    return new SofiSetupResponse().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): SofiSetupResponse {
+    return new SofiSetupResponse().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: SofiSetupResponse | PlainMessage<SofiSetupResponse> | undefined, b: SofiSetupResponse | PlainMessage<SofiSetupResponse> | undefined): boolean {
+    return proto3.util.equals(SofiSetupResponse, a, b);
+  }
+}
+
+/**
+ * sofi.findRoute (§30, §27): path search over walked vault heads. A hop list
+ * carries no authority.
+ *
+ * @generated from message dsm.SofiFindRouteRequest
+ */
+export class SofiFindRouteRequest extends Message<SofiFindRouteRequest> {
+  /**
+   * @generated from field: bytes token_in_policy_commit = 1;
+   */
+  tokenInPolicyCommit = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes token_out_policy_commit = 2;
+   */
+  tokenOutPolicyCommit = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint64 amount_in = 3;
+   */
+  amountIn = protoInt64.zero;
+
+  constructor(data?: PartialMessage<SofiFindRouteRequest>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.SofiFindRouteRequest";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "token_in_policy_commit", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "token_out_policy_commit", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "amount_in", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SofiFindRouteRequest {
+    return new SofiFindRouteRequest().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): SofiFindRouteRequest {
+    return new SofiFindRouteRequest().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): SofiFindRouteRequest {
+    return new SofiFindRouteRequest().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: SofiFindRouteRequest | PlainMessage<SofiFindRouteRequest> | undefined, b: SofiFindRouteRequest | PlainMessage<SofiFindRouteRequest> | undefined): boolean {
+    return proto3.util.equals(SofiFindRouteRequest, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.SofiHopV1
+ */
+export class SofiHopV1 extends Message<SofiHopV1> {
+  /**
+   * @generated from field: bytes vault_id = 1;
+   */
+  vaultId = new Uint8Array(0);
+
+  /**
+   * the walked head the hop prices against
+   *
+   * @generated from field: bytes parent_root = 2;
+   */
+  parentRoot = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes token_in_policy_commit = 3;
+   */
+  tokenInPolicyCommit = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes token_out_policy_commit = 4;
+   */
+  tokenOutPolicyCommit = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint64 amount_in = 5;
+   */
+  amountIn = protoInt64.zero;
+
+  /**
+   * @generated from field: uint64 amount_out = 6;
+   */
+  amountOut = protoInt64.zero;
+
+  constructor(data?: PartialMessage<SofiHopV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.SofiHopV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "vault_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "parent_root", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "token_in_policy_commit", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "token_out_policy_commit", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "amount_in", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 6, name: "amount_out", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SofiHopV1 {
+    return new SofiHopV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): SofiHopV1 {
+    return new SofiHopV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): SofiHopV1 {
+    return new SofiHopV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: SofiHopV1 | PlainMessage<SofiHopV1> | undefined, b: SofiHopV1 | PlainMessage<SofiHopV1> | undefined): boolean {
+    return proto3.util.equals(SofiHopV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.SofiFindRouteResponse
+ */
+export class SofiFindRouteResponse extends Message<SofiFindRouteResponse> {
+  /**
+   * empty when no route exists
+   *
+   * @generated from field: repeated dsm.SofiHopV1 hops = 1;
+   */
+  hops: SofiHopV1[] = [];
+
+  constructor(data?: PartialMessage<SofiFindRouteResponse>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.SofiFindRouteResponse";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "hops", kind: "message", T: SofiHopV1, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SofiFindRouteResponse {
+    return new SofiFindRouteResponse().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): SofiFindRouteResponse {
+    return new SofiFindRouteResponse().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): SofiFindRouteResponse {
+    return new SofiFindRouteResponse().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: SofiFindRouteResponse | PlainMessage<SofiFindRouteResponse> | undefined, b: SofiFindRouteResponse | PlainMessage<SofiFindRouteResponse> | undefined): boolean {
+    return proto3.util.equals(SofiFindRouteResponse, a, b);
+  }
+}
+
+/**
+ * sofi.trade (§31): one hop against one vault.
+ *
+ * @generated from message dsm.SofiTradeRequest
+ */
+export class SofiTradeRequest extends Message<SofiTradeRequest> {
+  /**
+   * @generated from field: bytes vault_id = 1;
+   */
+  vaultId = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes token_in_policy_commit = 2;
+   */
+  tokenInPolicyCommit = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint64 amount_in = 3;
+   */
+  amountIn = protoInt64.zero;
+
+  /**
+   * @generated from field: uint64 min_amount_out = 4;
+   */
+  minAmountOut = protoInt64.zero;
+
+  constructor(data?: PartialMessage<SofiTradeRequest>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.SofiTradeRequest";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "vault_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "token_in_policy_commit", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "amount_in", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 4, name: "min_amount_out", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SofiTradeRequest {
+    return new SofiTradeRequest().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): SofiTradeRequest {
+    return new SofiTradeRequest().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): SofiTradeRequest {
+    return new SofiTradeRequest().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: SofiTradeRequest | PlainMessage<SofiTradeRequest> | undefined, b: SofiTradeRequest | PlainMessage<SofiTradeRequest> | undefined): boolean {
+    return proto3.util.equals(SofiTradeRequest, a, b);
+  }
+}
+
+/**
+ * sofi.route (§31): a multihop route, all or none, through distinct vaults in
+ * hop order (at most ROUTE_MAX_LEGS).
+ *
+ * @generated from message dsm.SofiRouteRequest
+ */
+export class SofiRouteRequest extends Message<SofiRouteRequest> {
+  /**
+   * @generated from field: repeated bytes vault_ids = 1;
+   */
+  vaultIds: Uint8Array[] = [];
+
+  /**
+   * @generated from field: bytes token_in_policy_commit = 2;
+   */
+  tokenInPolicyCommit = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint64 amount_in = 3;
+   */
+  amountIn = protoInt64.zero;
+
+  /**
+   * @generated from field: uint64 min_amount_out = 4;
+   */
+  minAmountOut = protoInt64.zero;
+
+  constructor(data?: PartialMessage<SofiRouteRequest>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.SofiRouteRequest";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "vault_ids", kind: "scalar", T: 12 /* ScalarType.BYTES */, repeated: true },
+    { no: 2, name: "token_in_policy_commit", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "amount_in", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 4, name: "min_amount_out", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SofiRouteRequest {
+    return new SofiRouteRequest().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): SofiRouteRequest {
+    return new SofiRouteRequest().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): SofiRouteRequest {
+    return new SofiRouteRequest().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: SofiRouteRequest | PlainMessage<SofiRouteRequest> | undefined, b: SofiRouteRequest | PlainMessage<SofiRouteRequest> | undefined): boolean {
+    return proto3.util.equals(SofiRouteRequest, a, b);
+  }
+}
+
+/**
+ * sofi.close (§32): the owner closes its own vault under its release policy.
+ *
+ * @generated from message dsm.SofiCloseRequest
+ */
+export class SofiCloseRequest extends Message<SofiCloseRequest> {
+  /**
+   * @generated from field: bytes vault_id = 1;
+   */
+  vaultId = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<SofiCloseRequest>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.SofiCloseRequest";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "vault_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SofiCloseRequest {
+    return new SofiCloseRequest().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): SofiCloseRequest {
+    return new SofiCloseRequest().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): SofiCloseRequest {
+    return new SofiCloseRequest().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: SofiCloseRequest | PlainMessage<SofiCloseRequest> | undefined, b: SofiCloseRequest | PlainMessage<SofiCloseRequest> | undefined): boolean {
+    return proto3.util.equals(SofiCloseRequest, a, b);
+  }
+}
+
+/**
+ * sofi.resolve (§27): resolve and advance the device's pending position.
+ *
+ * @generated from message dsm.SofiResolveRequest
+ */
+export class SofiResolveRequest extends Message<SofiResolveRequest> {
+  constructor(data?: PartialMessage<SofiResolveRequest>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.SofiResolveRequest";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SofiResolveRequest {
+    return new SofiResolveRequest().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): SofiResolveRequest {
+    return new SofiResolveRequest().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): SofiResolveRequest {
+    return new SofiResolveRequest().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: SofiResolveRequest | PlainMessage<SofiResolveRequest> | undefined, b: SofiResolveRequest | PlainMessage<SofiResolveRequest> | undefined): boolean {
+    return proto3.util.equals(SofiResolveRequest, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.SofiPositionResponse
+ */
+export class SofiPositionResponse extends Message<SofiPositionResponse> {
+  /**
+   * @generated from field: uint64 position = 1;
+   */
+  position = protoInt64.zero;
+
+  /**
+   * @generated from field: dsm.SofiPositionState state = 2;
+   */
+  state = SofiPositionState.UNSPECIFIED;
+
+  constructor(data?: PartialMessage<SofiPositionResponse>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.SofiPositionResponse";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "position", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 2, name: "state", kind: "enum", T: proto3.getEnumType(SofiPositionState) },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SofiPositionResponse {
+    return new SofiPositionResponse().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): SofiPositionResponse {
+    return new SofiPositionResponse().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): SofiPositionResponse {
+    return new SofiPositionResponse().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: SofiPositionResponse | PlainMessage<SofiPositionResponse> | undefined, b: SofiPositionResponse | PlainMessage<SofiPositionResponse> | undefined): boolean {
+    return proto3.util.equals(SofiPositionResponse, a, b);
+  }
+}
+
+/**
+ * sofi.relay (§33): complete any registered fulfillment whose hops are not all
+ * final. Needs nothing from the trader beyond naming the position.
+ *
+ * @generated from message dsm.SofiRelayRequest
+ */
+export class SofiRelayRequest extends Message<SofiRelayRequest> {
+  /**
+   * @generated from field: bytes trader_genesis = 1;
+   */
+  traderGenesis = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes trader_device_id = 2;
+   */
+  traderDeviceId = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint64 position = 3;
+   */
+  position = protoInt64.zero;
+
+  constructor(data?: PartialMessage<SofiRelayRequest>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.SofiRelayRequest";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "trader_genesis", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "trader_device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "position", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SofiRelayRequest {
+    return new SofiRelayRequest().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): SofiRelayRequest {
+    return new SofiRelayRequest().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): SofiRelayRequest {
+    return new SofiRelayRequest().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: SofiRelayRequest | PlainMessage<SofiRelayRequest> | undefined, b: SofiRelayRequest | PlainMessage<SofiRelayRequest> | undefined): boolean {
+    return proto3.util.equals(SofiRelayRequest, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.SofiRelayResponse
+ */
+export class SofiRelayResponse extends Message<SofiRelayResponse> {
+  /**
+   * @generated from field: uint32 cells_written = 1;
+   */
+  cellsWritten = 0;
+
+  constructor(data?: PartialMessage<SofiRelayResponse>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.SofiRelayResponse";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "cells_written", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SofiRelayResponse {
+    return new SofiRelayResponse().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): SofiRelayResponse {
+    return new SofiRelayResponse().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): SofiRelayResponse {
+    return new SofiRelayResponse().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: SofiRelayResponse | PlainMessage<SofiRelayResponse> | undefined, b: SofiRelayResponse | PlainMessage<SofiRelayResponse> | undefined): boolean {
+    return proto3.util.equals(SofiRelayResponse, a, b);
   }
 }
 
@@ -19926,11 +19785,6 @@ export class TombstoneReceiptProto extends Message<TombstoneReceiptProto> {
   oldRollupHash = new Uint8Array(0);
 
   /**
-   * @generated from field: uint64 tick = 5;
-   */
-  tick = protoInt64.zero;
-
-  /**
    * SPX256f = 49_856 bytes
    *
    * @generated from field: bytes signature = 6;
@@ -19954,7 +19808,6 @@ export class TombstoneReceiptProto extends Message<TombstoneReceiptProto> {
     { no: 2, name: "old_smt_root", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 3, name: "old_counter", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
     { no: 4, name: "old_rollup_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 5, name: "tick", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
     { no: 6, name: "signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 7, name: "tombstone_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
@@ -19973,6 +19826,61 @@ export class TombstoneReceiptProto extends Message<TombstoneReceiptProto> {
 
   static equals(a: TombstoneReceiptProto | PlainMessage<TombstoneReceiptProto> | undefined, b: TombstoneReceiptProto | PlainMessage<TombstoneReceiptProto> | undefined): boolean {
     return proto3.util.equals(TombstoneReceiptProto, a, b);
+  }
+}
+
+/**
+ * Internal codec for `dsm::recovery::tombstone::ContactTombstoneAck` — a
+ * contact's acknowledgement that it recorded a device's tombstone, signed by
+ * the contact's AK over H(DSM/recovery-ack; tombstone_hash || device_id).
+ *
+ * @generated from message dsm.ContactTombstoneAckProto
+ */
+export class ContactTombstoneAckProto extends Message<ContactTombstoneAckProto> {
+  /**
+   * @generated from field: bytes tombstone_hash = 1;
+   */
+  tombstoneHash = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes acknowledging_device_id = 2;
+   */
+  acknowledgingDeviceId = new Uint8Array(0);
+
+  /**
+   * SPX256f = 49_856 bytes
+   *
+   * @generated from field: bytes signature = 3;
+   */
+  signature = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<ContactTombstoneAckProto>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ContactTombstoneAckProto";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "tombstone_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "acknowledging_device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ContactTombstoneAckProto {
+    return new ContactTombstoneAckProto().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ContactTombstoneAckProto {
+    return new ContactTombstoneAckProto().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ContactTombstoneAckProto {
+    return new ContactTombstoneAckProto().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ContactTombstoneAckProto | PlainMessage<ContactTombstoneAckProto> | undefined, b: ContactTombstoneAckProto | PlainMessage<ContactTombstoneAckProto> | undefined): boolean {
+    return proto3.util.equals(ContactTombstoneAckProto, a, b);
   }
 }
 
@@ -20326,11 +20234,6 @@ export class SuccessionReceiptProto extends Message<SuccessionReceiptProto> {
   newDeviceCommitment = new Uint8Array(0);
 
   /**
-   * @generated from field: uint64 tick = 4;
-   */
-  tick = protoInt64.zero;
-
-  /**
    * SPX256f
    *
    * @generated from field: bytes signature = 5;
@@ -20353,7 +20256,6 @@ export class SuccessionReceiptProto extends Message<SuccessionReceiptProto> {
     { no: 1, name: "device_id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 2, name: "tombstone_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 3, name: "new_device_commitment", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 4, name: "tick", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
     { no: 5, name: "signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 6, name: "succession_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
@@ -21072,11 +20974,6 @@ export class ContactAddResponse extends Message<ContactAddResponse> {
   chainTip?: Hash32;
 
   /**
-   * @generated from field: optional dsm.SmtProof chain_tip_smt_proof = 5;
-   */
-  chainTipSmtProof?: SmtProof;
-
-  /**
    * @generated from field: optional bytes alias_binding = 6;
    */
   aliasBinding?: Uint8Array;
@@ -21085,20 +20982,6 @@ export class ContactAddResponse extends Message<ContactAddResponse> {
    * @generated from field: bool genesis_verified_online = 7;
    */
   genesisVerifiedOnline = false;
-
-  /**
-   * deterministic counter (no time)
-   *
-   * @generated from field: uint64 verify_counter = 8;
-   */
-  verifyCounter = protoInt64.zero;
-
-  /**
-   * deterministic counter (no time)
-   *
-   * @generated from field: uint64 added_counter = 9;
-   */
-  addedCounter = protoInt64.zero;
 
   /**
    * @generated from field: repeated string verifying_storage_nodes = 10;
@@ -21136,11 +21019,8 @@ export class ContactAddResponse extends Message<ContactAddResponse> {
     { no: 2, name: "device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 3, name: "genesis_hash", kind: "message", T: Hash32 },
     { no: 4, name: "chain_tip", kind: "message", T: Hash32, opt: true },
-    { no: 5, name: "chain_tip_smt_proof", kind: "message", T: SmtProof, opt: true },
     { no: 6, name: "alias_binding", kind: "scalar", T: 12 /* ScalarType.BYTES */, opt: true },
     { no: 7, name: "genesis_verified_online", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
-    { no: 8, name: "verify_counter", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
-    { no: 9, name: "added_counter", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
     { no: 10, name: "verifying_storage_nodes", kind: "scalar", T: 9 /* ScalarType.STRING */, repeated: true },
     { no: 11, name: "ble_address", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 12, name: "signing_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
@@ -21218,11 +21098,6 @@ export class FaucetClaimResponse extends Message<FaucetClaimResponse> {
   tokensReceived = protoInt64.zero;
 
   /**
-   * @generated from field: uint64 next_available_index = 3;
-   */
-  nextAvailableIndex = protoInt64.zero;
-
-  /**
    * @generated from field: string message = 4;
    */
   message = "";
@@ -21237,7 +21112,6 @@ export class FaucetClaimResponse extends Message<FaucetClaimResponse> {
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
     { no: 1, name: "success", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
     { no: 2, name: "tokens_received", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
-    { no: 3, name: "next_available_index", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
     { no: 4, name: "message", kind: "scalar", T: 9 /* ScalarType.STRING */ },
   ]);
 
@@ -21308,20 +21182,6 @@ export class OnlineTransferRequest extends Message<OnlineTransferRequest> {
   fromDeviceId = new Uint8Array(0);
 
   /**
-   * RESERVED/IGNORED: SDK derives bilateral tip from SQLite; frontend must never supply this
-   *
-   * @generated from field: bytes chain_tip = 8;
-   */
-  chainTip = new Uint8Array(0);
-
-  /**
-   * REQUIRED: deterministic sequence counter
-   *
-   * @generated from field: uint64 seq = 9;
-   */
-  seq = protoInt64.zero;
-
-  /**
    * §4.2.1 Canonical unsigned Operation bytes (signing preimage).
    * Sender populates with signing_op.to_bytes() (signature field empty).
    * Receiver MUST use these bytes directly for SPHINCS+ verification and
@@ -21382,8 +21242,6 @@ export class OnlineTransferRequest extends Message<OnlineTransferRequest> {
     { no: 5, name: "signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 6, name: "nonce", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 7, name: "from_device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 8, name: "chain_tip", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 9, name: "seq", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
     { no: 11, name: "canonical_operation_bytes", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 12, name: "receipt_evidence_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 13, name: "sender_economic_position", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
@@ -21776,9 +21634,11 @@ export class OnlineTransferResponse extends Message<OnlineTransferResponse> {
   message = "";
 
   /**
-   * @generated from field: uint64 new_balance = 4;
+   * absent when the post-send balance could not be read
+   *
+   * @generated from field: optional uint64 new_balance = 4;
    */
-  newBalance = protoInt64.zero;
+  newBalance?: bigint;
 
   constructor(data?: PartialMessage<OnlineTransferResponse>) {
     super();
@@ -21791,7 +21651,7 @@ export class OnlineTransferResponse extends Message<OnlineTransferResponse> {
     { no: 1, name: "success", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
     { no: 2, name: "transaction_hash", kind: "message", T: Hash32 },
     { no: 3, name: "message", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 4, name: "new_balance", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 4, name: "new_balance", kind: "scalar", T: 4 /* ScalarType.UINT64 */, opt: true },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): OnlineTransferResponse {
@@ -21854,13 +21714,6 @@ export class OnlineMessageRequest extends Message<OnlineMessageRequest> {
    */
   chainTip = new Uint8Array(0);
 
-  /**
-   * deterministic sequence counter
-   *
-   * @generated from field: uint64 seq = 8;
-   */
-  seq = protoInt64.zero;
-
   constructor(data?: PartialMessage<OnlineMessageRequest>) {
     super();
     proto3.util.initPartial(data, this);
@@ -21876,7 +21729,6 @@ export class OnlineMessageRequest extends Message<OnlineMessageRequest> {
     { no: 5, name: "nonce", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 6, name: "from_device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 7, name: "chain_tip", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 8, name: "seq", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): OnlineMessageRequest {
@@ -22373,13 +22225,6 @@ export class TransactionInfo extends Message<TransactionInfo> {
   fee = protoInt64.zero;
 
   /**
-   * device-local counter
-   *
-   * @generated from field: uint64 logical_index = 7;
-   */
-  logicalIndex = protoInt64.zero;
-
-  /**
    * @generated from field: bytes tx_hash = 8;
    */
   txHash = new Uint8Array(0);
@@ -22420,13 +22265,6 @@ export class TransactionInfo extends Message<TransactionInfo> {
   stitchedReceipt = new Uint8Array(0);
 
   /**
-   * DISPLAY-ONLY: unix wall-clock seconds for UI history ordering. MUST NOT be used in hash preimages, ReceiptCommit fields, acceptance predicates, or protocol ordering.
-   *
-   * @generated from field: uint64 created_at = 14;
-   */
-  createdAt = protoInt64.zero;
-
-  /**
    * optional memo/note
    *
    * @generated from field: string memo = 15;
@@ -22462,14 +22300,12 @@ export class TransactionInfo extends Message<TransactionInfo> {
     { no: 4, name: "token_id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 5, name: "amount", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
     { no: 6, name: "fee", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
-    { no: 7, name: "logical_index", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
     { no: 8, name: "tx_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 9, name: "amount_signed", kind: "scalar", T: 18 /* ScalarType.SINT64 */ },
     { no: 10, name: "tx_type", kind: "enum", T: proto3.getEnumType(TransactionType) },
     { no: 11, name: "status", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 12, name: "recipient", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 13, name: "stitched_receipt", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 14, name: "created_at", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
     { no: 15, name: "memo", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 16, name: "receipt_verified", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
     { no: 17, name: "display_amount", kind: "scalar", T: 9 /* ScalarType.STRING */ },
@@ -22643,13 +22479,6 @@ export class InboxItem extends Message<InboxItem> {
   preview = "";
 
   /**
-   * deterministic counter (transport only)
-   *
-   * @generated from field: uint64 tick = 3;
-   */
-  tick = protoInt64.zero;
-
-  /**
    * @generated from field: optional string sender_id = 4;
    */
   senderId?: string;
@@ -22676,7 +22505,6 @@ export class InboxItem extends Message<InboxItem> {
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
     { no: 1, name: "id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 2, name: "preview", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 3, name: "tick", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
     { no: 4, name: "sender_id", kind: "scalar", T: 9 /* ScalarType.STRING */, opt: true },
     { no: 5, name: "payload", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 6, name: "is_stale_route", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
@@ -24794,22 +24622,10 @@ export class PolicyConditionProto extends Message<PolicyConditionProto> {
     case: "identityConstraint";
   } | {
     /**
-     * @generated from field: dsm.VaultEnforcementProto vault_enforcement = 2;
-     */
-    value: VaultEnforcementProto;
-    case: "vaultEnforcement";
-  } | {
-    /**
      * @generated from field: dsm.OperationRestrictionProto operation_restriction = 3;
      */
     value: OperationRestrictionProto;
     case: "operationRestriction";
-  } | {
-    /**
-     * @generated from field: dsm.LogicalTimeConstraintProto logical_time_constraint = 4;
-     */
-    value: LogicalTimeConstraintProto;
-    case: "logicalTimeConstraint";
   } | {
     /**
      * @generated from field: dsm.EmissionsScheduleProto emissions_schedule = 5;
@@ -24860,9 +24676,7 @@ export class PolicyConditionProto extends Message<PolicyConditionProto> {
   static readonly typeName = "dsm.PolicyConditionProto";
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
     { no: 1, name: "identity_constraint", kind: "message", T: IdentityConstraintProto, oneof: "kind" },
-    { no: 2, name: "vault_enforcement", kind: "message", T: VaultEnforcementProto, oneof: "kind" },
     { no: 3, name: "operation_restriction", kind: "message", T: OperationRestrictionProto, oneof: "kind" },
-    { no: 4, name: "logical_time_constraint", kind: "message", T: LogicalTimeConstraintProto, oneof: "kind" },
     { no: 5, name: "emissions_schedule", kind: "message", T: EmissionsScheduleProto, oneof: "kind" },
     { no: 6, name: "credit_bundle_policy", kind: "message", T: CreditBundlePolicyProto, oneof: "kind" },
     { no: 7, name: "custom", kind: "message", T: CustomConstraintProto, oneof: "kind" },
@@ -25025,43 +24839,6 @@ export class IdentityConstraintProto extends Message<IdentityConstraintProto> {
 }
 
 /**
- * @generated from message dsm.VaultEnforcementProto
- */
-export class VaultEnforcementProto extends Message<VaultEnforcementProto> {
-  /**
-   * @generated from field: dsm.VaultConditionProto condition = 1;
-   */
-  condition?: VaultConditionProto;
-
-  constructor(data?: PartialMessage<VaultEnforcementProto>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.VaultEnforcementProto";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "condition", kind: "message", T: VaultConditionProto },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): VaultEnforcementProto {
-    return new VaultEnforcementProto().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): VaultEnforcementProto {
-    return new VaultEnforcementProto().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): VaultEnforcementProto {
-    return new VaultEnforcementProto().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: VaultEnforcementProto | PlainMessage<VaultEnforcementProto> | undefined, b: VaultEnforcementProto | PlainMessage<VaultEnforcementProto> | undefined): boolean {
-    return proto3.util.equals(VaultEnforcementProto, a, b);
-  }
-}
-
-/**
  * @generated from message dsm.OperationRestrictionProto
  */
 export class OperationRestrictionProto extends Message<OperationRestrictionProto> {
@@ -25095,49 +24872,6 @@ export class OperationRestrictionProto extends Message<OperationRestrictionProto
 
   static equals(a: OperationRestrictionProto | PlainMessage<OperationRestrictionProto> | undefined, b: OperationRestrictionProto | PlainMessage<OperationRestrictionProto> | undefined): boolean {
     return proto3.util.equals(OperationRestrictionProto, a, b);
-  }
-}
-
-/**
- * @generated from message dsm.LogicalTimeConstraintProto
- */
-export class LogicalTimeConstraintProto extends Message<LogicalTimeConstraintProto> {
-  /**
-   * @generated from field: uint64 min_tick = 1;
-   */
-  minTick = protoInt64.zero;
-
-  /**
-   * @generated from field: uint64 max_tick = 2;
-   */
-  maxTick = protoInt64.zero;
-
-  constructor(data?: PartialMessage<LogicalTimeConstraintProto>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.LogicalTimeConstraintProto";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "min_tick", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
-    { no: 2, name: "max_tick", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): LogicalTimeConstraintProto {
-    return new LogicalTimeConstraintProto().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): LogicalTimeConstraintProto {
-    return new LogicalTimeConstraintProto().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): LogicalTimeConstraintProto {
-    return new LogicalTimeConstraintProto().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: LogicalTimeConstraintProto | PlainMessage<LogicalTimeConstraintProto> | undefined, b: LogicalTimeConstraintProto | PlainMessage<LogicalTimeConstraintProto> | undefined): boolean {
-    return proto3.util.equals(LogicalTimeConstraintProto, a, b);
   }
 }
 
@@ -25373,70 +25107,6 @@ export class CustomConstraintProto extends Message<CustomConstraintProto> {
 }
 
 /**
- * @generated from message dsm.VaultConditionProto
- */
-export class VaultConditionProto extends Message<VaultConditionProto> {
-  /**
-   * @generated from oneof dsm.VaultConditionProto.kind
-   */
-  kind: {
-    /**
-     * @generated from field: bytes hash = 1;
-     */
-    value: Uint8Array;
-    case: "hash";
-  } | {
-    /**
-     * @generated from field: uint64 minimum_balance = 2;
-     */
-    value: bigint;
-    case: "minimumBalance";
-  } | {
-    /**
-     * @generated from field: string vault_type = 3;
-     */
-    value: string;
-    case: "vaultType";
-  } | {
-    /**
-     * @generated from field: bytes smart_policy = 4;
-     */
-    value: Uint8Array;
-    case: "smartPolicy";
-  } | { case: undefined; value?: undefined } = { case: undefined };
-
-  constructor(data?: PartialMessage<VaultConditionProto>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.VaultConditionProto";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "hash", kind: "scalar", T: 12 /* ScalarType.BYTES */, oneof: "kind" },
-    { no: 2, name: "minimum_balance", kind: "scalar", T: 4 /* ScalarType.UINT64 */, oneof: "kind" },
-    { no: 3, name: "vault_type", kind: "scalar", T: 9 /* ScalarType.STRING */, oneof: "kind" },
-    { no: 4, name: "smart_policy", kind: "scalar", T: 12 /* ScalarType.BYTES */, oneof: "kind" },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): VaultConditionProto {
-    return new VaultConditionProto().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): VaultConditionProto {
-    return new VaultConditionProto().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): VaultConditionProto {
-    return new VaultConditionProto().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: VaultConditionProto | PlainMessage<VaultConditionProto> | undefined, b: VaultConditionProto | PlainMessage<VaultConditionProto> | undefined): boolean {
-    return proto3.util.equals(VaultConditionProto, a, b);
-  }
-}
-
-/**
  * @generated from message dsm.CanonicalPolicy
  */
 export class CanonicalPolicy extends Message<CanonicalPolicy> {
@@ -25500,13 +25170,6 @@ export class StoredPolicy extends Message<StoredPolicy> {
   revision = "";
 
   /**
-   * deterministic tick (UI/ops only)
-   *
-   * @generated from field: uint64 created_tick = 3;
-   */
-  createdTick = protoInt64.zero;
-
-  /**
    * @generated from field: string author = 4;
    */
   author = "";
@@ -25541,7 +25204,6 @@ export class StoredPolicy extends Message<StoredPolicy> {
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
     { no: 1, name: "name", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 2, name: "revision", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 3, name: "created_tick", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
     { no: 4, name: "author", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 5, name: "description", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 6, name: "conditions", kind: "message", T: PolicyConditionProto, repeated: true },
@@ -28646,6 +28308,181 @@ export class ArrivalRecordsV1 extends Message<ArrivalRecordsV1> {
 
   static equals(a: ArrivalRecordsV1 | PlainMessage<ArrivalRecordsV1> | undefined, b: ArrivalRecordsV1 | PlainMessage<ArrivalRecordsV1> | undefined): boolean {
     return proto3.util.equals(ArrivalRecordsV1, a, b);
+  }
+}
+
+/**
+ * What a writer puts at each seat of a cell's route (storage spec §9, §14
+ * keyed-cell formats item 5). The same value goes to every seat; what differs
+ * is the seat, its route position, and the chain collected so far. A node
+ * stores these bytes and returns their arrival record; it never reads them.
+ *
+ * @generated from message dsm.RouteEntryV1
+ */
+export class RouteEntryV1 extends Message<RouteEntryV1> {
+  /**
+   * @generated from field: bytes namespace = 1;
+   */
+  namespace = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes key = 2;
+   */
+  key = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes value = 3;
+   */
+  value = new Uint8Array(0);
+
+  /**
+   * the seat at `position`, as the set commits it
+   *
+   * @generated from field: bytes seat_member_id = 4;
+   */
+  seatMemberId = new Uint8Array(0);
+
+  /**
+   * 0 = the leader, up to 4
+   *
+   * @generated from field: uint32 position = 5;
+   */
+  position = 0;
+
+  /**
+   * one slot per earlier position, in route order
+   *
+   * @generated from field: repeated dsm.ChainSlotV1 chain = 6;
+   */
+  chain: ChainSlotV1[] = [];
+
+  constructor(data?: PartialMessage<RouteEntryV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.RouteEntryV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "namespace", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "value", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "seat_member_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "position", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+    { no: 6, name: "chain", kind: "message", T: ChainSlotV1, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): RouteEntryV1 {
+    return new RouteEntryV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): RouteEntryV1 {
+    return new RouteEntryV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): RouteEntryV1 {
+    return new RouteEntryV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: RouteEntryV1 | PlainMessage<RouteEntryV1> | undefined, b: RouteEntryV1 | PlainMessage<RouteEntryV1> | undefined): boolean {
+    return proto3.util.equals(RouteEntryV1, a, b);
+  }
+}
+
+/**
+ * One earlier position of a route chain: the link that seat returned, or an
+ * empty recording why there is none. An empty never counts as a link.
+ *
+ * @generated from message dsm.ChainSlotV1
+ */
+export class ChainSlotV1 extends Message<ChainSlotV1> {
+  /**
+   * @generated from oneof dsm.ChainSlotV1.kind
+   */
+  kind: {
+    /**
+     * the seat's arrival record for this value
+     *
+     * @generated from field: dsm.ArrivalRecordV1 link = 1;
+     */
+    value: ArrivalRecordV1;
+    case: "link";
+  } | {
+    /**
+     * the seat's arrival record showing another value's chain first
+     *
+     * @generated from field: dsm.ArrivalRecordV1 taken = 2;
+     */
+    value: ArrivalRecordV1;
+    case: "taken";
+  } | {
+    /**
+     * recorded, proves nothing
+     *
+     * @generated from field: dsm.NoResponseV1 no_response = 3;
+     */
+    value: NoResponseV1;
+    case: "noResponse";
+  } | { case: undefined; value?: undefined } = { case: undefined };
+
+  constructor(data?: PartialMessage<ChainSlotV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ChainSlotV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "link", kind: "message", T: ArrivalRecordV1, oneof: "kind" },
+    { no: 2, name: "taken", kind: "message", T: ArrivalRecordV1, oneof: "kind" },
+    { no: 3, name: "no_response", kind: "message", T: NoResponseV1, oneof: "kind" },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ChainSlotV1 {
+    return new ChainSlotV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ChainSlotV1 {
+    return new ChainSlotV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ChainSlotV1 {
+    return new ChainSlotV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ChainSlotV1 | PlainMessage<ChainSlotV1> | undefined, b: ChainSlotV1 | PlainMessage<ChainSlotV1> | undefined): boolean {
+    return proto3.util.equals(ChainSlotV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.NoResponseV1
+ */
+export class NoResponseV1 extends Message<NoResponseV1> {
+  constructor(data?: PartialMessage<NoResponseV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.NoResponseV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): NoResponseV1 {
+    return new NoResponseV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): NoResponseV1 {
+    return new NoResponseV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): NoResponseV1 {
+    return new NoResponseV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: NoResponseV1 | PlainMessage<NoResponseV1> | undefined, b: NoResponseV1 | PlainMessage<NoResponseV1> | undefined): boolean {
+    return proto3.util.equals(NoResponseV1, a, b);
   }
 }
 

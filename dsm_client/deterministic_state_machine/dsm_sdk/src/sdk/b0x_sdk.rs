@@ -2,20 +2,25 @@
 
 //! # B0x SDK — Unilateral Envelope Transport
 //!
-//! Deterministic, protobuf-only client for the b0x spool protocol.
-//! Handles device registration (including 409 Already Registered recovery),
-//! Envelope v3 submission, retrieval, and acknowledgement against the
-//! storage-node `/api/v2/b0x/*` endpoints.
+//! Deterministic, protobuf-only client for the b0x spool: Envelope v3
+//! submission to, and retrieval from, the storage-node `/api/v2/b0x/*`
+//! endpoints. A node's spool is append-only and checks no writer or reader
+//! (DSM Amendment A3): there is no registration, token or acknowledgement,
+//! and what this device consumed is its own state (`client_db::b0x_consumed`).
 //!
-//! Authorization uses `DSM <device_id>:<token>` headers with Base32
-//! Crockford device identifiers. No wall clocks, no JSON, no hex in
-//! protocol logic.
+//! Every payload is sealed end to end (DSM Amendment A7): a node holds an
+//! outer envelope carrying only the message id and a `SealedEnvelopeV1` — an
+//! ML-KEM encapsulation to the recipient's Kyber key and the inner envelope
+//! sealed under its shared secret (`dsm::crypto::spool_seal`). A message is
+//! sealed once and its bytes are kept by message id (`client_db::b0x_sealed`),
+//! so every member and every retry gets the same bytes. No wall clocks, no
+//! JSON, no hex in protocol logic.
 
 use dsm::types::error::DsmError;
 use dsm::types::operations::Operation;
 
 use crate::sdk::core_sdk::CoreSDK;
-use crate::util::{deterministic_time as dt, text_id};
+use crate::util::text_id;
 // blake3 usage: all calls go through dsm::crypto::blake3::dsm_domain_hasher() for domain separation
 
 use log::{info, warn, debug};
@@ -24,32 +29,12 @@ use rand::rngs::OsRng;
 use reqwest;
 use std::collections::HashMap;
 use std::sync::Arc;
-use dsm::utils::time::Duration;
-use std::sync::atomic::{AtomicU64, Ordering};
-
-// ...existing code...
-
-fn looks_like_dotted_decimal_bytes(s: &str) -> bool {
-    // Very small heuristic: 32 dot-separated u8-ish segments.
-    // This is only for diagnostics; do NOT make protocol decisions based on this.
-    let parts: Vec<&str> = s.split('.').collect();
-    if parts.len() != 32 {
-        return false;
-    }
-    parts.iter().all(|p| p.parse::<u8>().is_ok())
-}
 
 fn base32_decodes_to_32_bytes(s: &str) -> bool {
     match crate::util::text_id::decode_base32_crockford(s) {
         Some(b) => b.len() == 32,
         None => false,
     }
-}
-
-fn is_canonical_auth_device_id(device_id_b32: &str) -> bool {
-    // Protocol invariant: Authorization device_id must be base32 decoding to exactly 32 bytes.
-    // Reject dotted-decimal ("N.N.N..." 32 segments) and anything malformed.
-    base32_decodes_to_32_bytes(device_id_b32) && !looks_like_dotted_decimal_bytes(device_id_b32)
 }
 
 /// Validate the canonical rotated b0x routing key.
@@ -88,32 +73,129 @@ fn decode_base32_32(label: &str, value: &str) -> Result<[u8; 32], DsmError> {
     Ok(out)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AckStatusSummary {
-    Acked,
-    NotAcked,
-    Unavailable,
+fn storage_err(what: &str, e: impl core::fmt::Display) -> DsmError {
+    DsmError::storage(format!("{what}: {e}"), None::<std::io::Error>)
 }
 
-fn summarize_ack_status(
-    acked_count: usize,
-    quorum: usize,
-    seen_unacked: bool,
-    saw_authoritative_status: bool,
-) -> AckStatusSummary {
-    if acked_count >= quorum {
-        return AckStatusSummary::Acked;
+fn message_id_bytes(
+    message_id_b32: &str,
+) -> Result<[u8; dsm::crypto::spool_seal::MESSAGE_ID_LEN], DsmError> {
+    text_id::decode_base32_crockford(message_id_b32)
+        .and_then(|raw| <[u8; dsm::crypto::spool_seal::MESSAGE_ID_LEN]>::try_from(raw).ok())
+        .ok_or_else(|| {
+            DsmError::invalid_parameter(format!(
+                "spool message id {message_id_b32} is not base32 of {} bytes",
+                dsm::crypto::spool_seal::MESSAGE_ID_LEN
+            ))
+        })
+}
+
+/// The recipient's Kyber key, as its contact holds it: the key its verified
+/// directory entry carries (`sdk::device_directory`), signed by its AK.
+fn recipient_kyber_key(recipient_device: &[u8; 32]) -> Result<Vec<u8>, DsmError> {
+    let contact = crate::storage::client_db::get_contact_by_device_id(recipient_device)
+        .map_err(|e| storage_err("recipient contact", e))?
+        .ok_or_else(|| {
+            DsmError::invalid_operation("the recipient is not a contact: nothing to seal for")
+        })?;
+    if contact.kyber_public_key.len() != dsm::crypto::kyber::public_key_bytes() {
+        return Err(DsmError::invalid_operation(
+            "the recipient's Kyber key is not in hand yet: its directory entry has not been \
+             read into the contact",
+        ));
     }
-    if seen_unacked {
-        return AckStatusSummary::NotAcked;
+    Ok(contact.kyber_public_key)
+}
+
+/// Seal `inner` — the exact bytes of an inner envelope — for
+/// `recipient_device` under `message_id_b32` (DSM Amendment A7), and keep the
+/// sealed bytes: an outer Envelope v3 carrying only the message id and a
+/// `SealedEnvelopeV1` — a fresh ML-KEM encapsulation to the recipient's Kyber
+/// key and the inner bytes sealed under its shared secret. A message id is
+/// sealed once: a later call returns the bytes kept by the first
+/// (`client_db::b0x_sealed`).
+pub(crate) fn seal_for(
+    recipient_device: &[u8; 32],
+    message_id_b32: &str,
+    inner: &[u8],
+) -> Result<Vec<u8>, DsmError> {
+    if let Some(kept) = crate::storage::client_db::b0x_sealed::get_sealed(message_id_b32)
+        .map_err(|e| storage_err("sealed spool bytes", e))?
+    {
+        return Ok(kept);
     }
-    if acked_count > 0 {
-        return AckStatusSummary::Unavailable;
+    let message_id = message_id_bytes(message_id_b32)?;
+    let (shared_secret, kem_ciphertext) =
+        dsm::crypto::kyber::kyber_encapsulate(&recipient_kyber_key(recipient_device)?)?;
+    let ciphertext = dsm::crypto::spool_seal::seal(&shared_secret, &message_id, inner)
+        .map_err(|e| DsmError::crypto(format!("spool seal: {e}"), None::<std::io::Error>))?;
+    let outer = dsm::types::proto::Envelope {
+        version: 3,
+        headers: None,
+        message_id: message_id.to_vec(),
+        payload: Some(dsm::types::proto::envelope::Payload::Sealed(
+            dsm::types::proto::SealedEnvelopeV1 {
+                kem_ciphertext,
+                ciphertext,
+            },
+        )),
+    };
+    let bytes = outer.encode_to_vec();
+    crate::storage::client_db::b0x_sealed::put_sealed(message_id_b32, &bytes)
+        .map_err(|e| storage_err("keep sealed spool bytes", e))?;
+    Ok(bytes)
+}
+
+/// The sealed bytes kept for `message_id_b32` when its envelope was frozen
+/// ([`seal_for`]).
+pub(crate) fn kept_seal(message_id_b32: &str) -> Result<Vec<u8>, DsmError> {
+    crate::storage::client_db::b0x_sealed::get_sealed(message_id_b32)
+        .map_err(|e| storage_err("sealed spool bytes", e))?
+        .ok_or_else(|| {
+            DsmError::invalid_operation(format!(
+                "spool message {message_id_b32} was frozen without its seal"
+            ))
+        })
+}
+
+/// This device's Kyber secret, re-derived from `Smaster` under `DSM/kyber\0` —
+/// the key pair whose public half its directory entry publishes
+/// (`kyber_identity::local_kyber_public_key`). Never kept.
+fn local_kyber_secret() -> Result<Vec<u8>, DsmError> {
+    let smaster = crate::init::current_smaster()?;
+    let (.., secret) =
+        dsm::crypto::kyber::generate_kyber_keypair_from_entropy(&smaster, "DSM/kyber\0")?;
+    Ok(secret)
+}
+
+/// Open a spooled envelope (DSM Amendment A7): the inner envelope its seal
+/// carries, once this device's Kyber secret decapsulates the encapsulation and
+/// the seal opens under the outer message id. The inner envelope carries the
+/// same message id; anything else did not come sealed for this device.
+pub(crate) fn open_sealed(
+    env: &dsm::types::proto::Envelope,
+) -> Result<dsm::types::proto::Envelope, DsmError> {
+    let Some(dsm::types::proto::envelope::Payload::Sealed(sealed)) = &env.payload else {
+        return Err(DsmError::invalid_operation("the envelope is not sealed"));
+    };
+    let message_id =
+        <[u8; dsm::crypto::spool_seal::MESSAGE_ID_LEN]>::try_from(env.message_id.as_slice())
+            .map_err(|_| {
+                DsmError::invalid_operation("the sealed envelope's message id is malformed")
+            })?;
+    let shared_secret =
+        dsm::crypto::kyber::kyber_decapsulate(&local_kyber_secret()?, &sealed.kem_ciphertext)?;
+    let inner_bytes =
+        dsm::crypto::spool_seal::open(&shared_secret, &message_id, &sealed.ciphertext)
+            .map_err(|e| DsmError::invalid_operation(format!("spool seal: {e}")))?;
+    let inner = dsm::envelope::from_canonical_bytes(&inner_bytes)
+        .map_err(|e| DsmError::invalid_operation(format!("sealed inner envelope: {e}")))?;
+    if inner.message_id != env.message_id {
+        return Err(DsmError::invalid_operation(
+            "the sealed inner envelope carries another message id",
+        ));
     }
-    if saw_authoritative_status {
-        return AckStatusSummary::NotAcked;
-    }
-    AckStatusSummary::Unavailable
+    Ok(inner)
 }
 
 /// Retry configuration for b0x operations
@@ -153,19 +235,11 @@ pub struct B0xEntry {
     // Textual fields are base32-encoded (Crockford: 0-9,A-H,J-K,M-N,P-T,V-Z with substitutions)
     pub sender_device_id: String,
     pub sender_genesis_hash: String,
-    pub sender_chain_tip: String,
-    /// Next chain tip (base32) anchoring this online transition.
-    /// If unknown at decode time, fall back to sender_chain_tip.
-    pub next_chain_tip: String,
     pub recipient_device_id: String,
     pub transaction: Operation,
     pub signature: Vec<u8>,
     /// Sender's SPHINCS+ public key (optional, embedded in envelope evidence)
     pub sender_signing_public_key: Vec<u8>,
-    pub tick: u64,
-    pub ttl_seconds: u64,
-    // Envelope v3 signing context (AF-2 remediation)
-    pub seq: u64,
     /// §4.2.1 Canonical unsigned Operation bytes (signing preimage).
     /// Receiver uses these directly for SPHINCS+ verification and tip computation.
     pub canonical_operation_bytes: Vec<u8>,
@@ -218,12 +292,6 @@ pub struct B0xSubmissionParams {
     pub sender_chain_tip: String,    // base32 of 32-byte tip
     /// Sender's SPHINCS+ public key (optional, embedded for verification hints)
     pub sender_signing_public_key: Vec<u8>,
-    /// TTL is ignored in the clockless protocol; keep for wire compatibility, always 0.
-    pub ttl_seconds: u64,
-    /// Sequence number for canonical signing (AF-2 remediation)
-    pub seq: u64,
-    /// Next chain tip bytes (32) anchoring this online transition (optional).
-    pub next_chain_tip: Option<Vec<u8>>,
     /// Tip-scoped b0x routing address (§16.4).
     /// Computed via `B0xSDK::compute_b0x_address(recipient_genesis, recipient_device, chain_tip)`.
     pub routing_address: String,
@@ -254,33 +322,15 @@ pub struct B0xSubmissionParams {
     pub sender_debit_mutation_index: u32,
 }
 
-fn anchor_tick_from_tip(tip: &[u8]) -> u64 {
-    if tip.len() != 32 {
-        return 0;
-    }
-    let mut hasher =
-        dsm::crypto::blake3::dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_ANCHOR_TICK);
-    hasher.update(tip);
-    let h = hasher.finalize();
-    let mut out = [0u8; 8];
-    out.copy_from_slice(&h.as_bytes()[..8]);
-    u64::from_le_bytes(out)
-}
-
 pub struct B0xSDK {
     // Device ID in base32 textual form for HTTP auth; decode to bytes for protobuf fields
     pub(crate) device_id: String,
     core_sdk: Arc<CoreSDK>,
     pub(crate) storage_node_endpoints: Vec<String>,
     http_client: reqwest::Client,
-    pub(crate) request_timeout: Duration,
-    pub(crate) max_retries: usize,
-    pub(crate) retry_delay: Duration,
     circuit_breaker: CircuitBreaker,
     salt_genesis: [u8; 32],
     salt_device: [u8; 32],
-    /// Per-endpoint tokens (tokens are node-specific). Persisted in client_db as well.
-    tokens_by_endpoint: tokio::sync::RwLock<HashMap<String, String>>, // (endpoint|genesis|device) -> token
     /// Write quorum K for multi-node ops (submit/ack). Default 3.
     quorum_k: usize,
     /// ADR 0003 B-side countersign deltas decoded during the most recent
@@ -334,58 +384,29 @@ pub struct CountersignDelta {
     pub body: Vec<u8>,
 }
 
-static MSG_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
-
-/// A persisted token can only be trusted if it was stored for the *same* canonical
-/// device_id string that we will place into `Authorization: DSM <device_id>:<token>`.
-///
-/// If we see any evidence that the current `AppState` contains a non-canonical dotted-decimal
-/// textual id ("N.N.N..."), we must *not* adopt cached tokens, because they will
-/// guarantee 401 loops on v2 retrieve/ack.
-fn app_state_device_id_is_canonical_base32() -> bool {
-    match crate::sdk::app_state::AppState::get_device_id() {
-        Some(b) if b.len() == 32 => {
-            let b32 = crate::util::text_id::encode_base32_crockford(&b);
-            base32_decodes_to_32_bytes(&b32)
-        }
-        _ => false,
-    }
-}
-
+/// Members whose last request failed. A failed member stays failed until a
+/// request to it succeeds; callers ask healthy members first and failed ones
+/// last, so a failed member is still reachable. No clock decides recovery.
 #[derive(Clone)]
 struct CircuitBreaker {
-    failed_nodes: Arc<tokio::sync::RwLock<HashMap<String, u64>>>, // ticks
-    failure_threshold: Duration,
+    failed_nodes: Arc<tokio::sync::RwLock<std::collections::HashSet<String>>>,
 }
 
 impl CircuitBreaker {
     fn new() -> Self {
         Self {
-            failed_nodes: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            // Clockless: ticks-only threshold. The numeric magnitude is policy (not wall-clock).
-            failure_threshold: Duration::from_ticks(300),
+            failed_nodes: Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new())),
         }
     }
     async fn is_node_healthy(&self, endpoint: &str) -> bool {
-        let failed = self.failed_nodes.read().await;
-        if let Some(&t) = failed.get(endpoint) {
-            let now = dt::peek() as i64;
-            // Healthy again once the failure threshold window has elapsed.
-            // NOTE: previous logic was inverted and would keep nodes unhealthy forever.
-            (now - t as i64) as u64 >= self.failure_threshold.as_secs()
-        } else {
-            true
-        }
+        !self.failed_nodes.read().await.contains(endpoint)
     }
     async fn mark_node_failed(&self, endpoint: &str) {
-        self.failed_nodes
-            .write()
-            .await
-            .insert(endpoint.to_string(), dt::peek());
+        self.failed_nodes.write().await.insert(endpoint.to_string());
         warn!("CircuitBreaker: marked failed {}", endpoint);
     }
     async fn mark_node_healthy(&self, endpoint: &str) {
-        if self.failed_nodes.write().await.remove(endpoint).is_some() {
+        if self.failed_nodes.write().await.remove(endpoint) {
             info!("CircuitBreaker: {} back to healthy", endpoint);
         }
     }
@@ -481,23 +502,6 @@ impl B0xSDK {
         *hasher.finalize().as_bytes()
     }
 
-    /// Compose the current auth binding components: (genesis_b32, device_id, cache_key)
-    async fn auth_binding_key(&self, endpoint: &str) -> Result<(String, String, String), DsmError> {
-        let genesis_bytes = self.core_sdk.local_genesis_hash().await?;
-        let genesis_b32 = crate::util::text_id::encode_base32_crockford(&genesis_bytes);
-        let cache_key = format!("{}|{}|{}", endpoint, genesis_b32, self.device_id);
-        Ok((genesis_b32, self.device_id.clone(), cache_key))
-    }
-
-    /// Test-only: build the SDK for a register whose quorum differs from the
-    /// pinned one, so a test can watch the fan-out follow K rather than the
-    /// fleet size or a literal. Production has exactly one K: the profile's.
-    #[cfg(test)]
-    pub(crate) fn with_delivery_quorum(mut self, quorum_k: usize) -> Self {
-        self.quorum_k = quorum_k;
-        self
-    }
-
     /// The delivery quorum this SDK fans out to.
     pub fn delivery_quorum(&self) -> usize {
         self.quorum_k
@@ -526,16 +530,16 @@ impl B0xSDK {
                 None::<std::io::Error>,
             ));
         }
-        if !is_canonical_auth_device_id(&device_id_b32) {
+        if !base32_decodes_to_32_bytes(&device_id_b32) {
             return Err(DsmError::internal(
-                "B0xSDK::new: device_id is not canonical base32(32) for Authorization",
+                "B0xSDK::new: device_id is not canonical base32(32)",
                 None::<std::io::Error>,
             ));
         }
 
         // Clockless: do not set wall-clock request timeouts here.
         // Cancellation/limits are owned by the caller task lifetime.
-        let http_client = crate::sdk::storage_node_sdk::build_ca_aware_client();
+        let http_client = crate::sdk::storage_node_sdk::build_ca_aware_client()?;
 
         // The delivery fan-out stops at K acknowledging members. K is the
         // register quorum of the network this device is built for — resolved
@@ -562,15 +566,9 @@ impl B0xSDK {
             core_sdk,
             storage_node_endpoints: storage_endpoints,
             http_client,
-            // Clockless: deterministic tick budget marker only; not used to enforce wall-clock.
-            request_timeout: Duration::from_ticks(0),
-            max_retries: 3,
-            // Clockless: do not sleep between retries. Keep as metadata only.
-            retry_delay: Duration::from_ticks(0),
             circuit_breaker: CircuitBreaker::new(),
             salt_genesis: Self::derive_salt(b"DSM/b0x-salt-G", &decoded),
             salt_device: Self::derive_salt(b"DSM/b0x-salt-D", &decoded),
-            tokens_by_endpoint: tokio::sync::RwLock::new(HashMap::new()), // (endpoint|genesis|device) -> token
             quorum_k,
             pending_countersign_deltas: Vec::new(),
             pending_relationship_finalized: Vec::new(),
@@ -578,8 +576,6 @@ impl B0xSDK {
             pending_cert_resync: Vec::new(),
         };
 
-        // Token loading is now lazy - happens on first use via ensure_token()
-        // This avoids blocking in the constructor and works in both sync and async contexts
         Ok(sdk)
     }
 
@@ -758,123 +754,6 @@ impl B0xSDK {
     // Device registration / token management
     // ------------------------------------------------------------------------
 
-    /// Attempt to load persisted tokens into memory map for all configured endpoints.
-    async fn hydrate_tokens_from_disk(&self) {
-        let mut map = self.tokens_by_endpoint.write().await;
-
-        // Root-cause guard: if the local identity binding has changed (device_id/genesis),
-        // purge persisted tokens so we never attempt to use stale tokens that will 401.
-        // This is intentionally best-effort; failure here should not prevent startup.
-        let genesis_b32 = match self.core_sdk.local_genesis_hash().await {
-            Ok(gen_bytes) => crate::util::text_id::encode_base32_crockford(&gen_bytes),
-            Err(e) => {
-                warn!("🔐 hydrate_tokens_from_disk: unable to load genesis hash: {e}");
-                return;
-            }
-        };
-        if let Err(e) = crate::storage::client_db::ensure_auth_tokens_bound_to_identity(
-            self.device_id.trim(),
-            genesis_b32.trim(),
-        ) {
-            warn!("🔐 ensure_auth_tokens_bound_to_identity failed: {e}");
-        }
-
-        // If the running build is somehow feeding a dotted-decimal device id into the
-        // auth layer, adopting any persisted tokens will *only* create an infinite 401 loop.
-        // In that case, force a clean re-registration instead.
-        if !app_state_device_id_is_canonical_base32() {
-            warn!(
-                "🔐 Refusing to hydrate persisted auth tokens: AppState device_id is not canonical base32(32). Will re-register instead."
-            );
-            map.clear();
-            return;
-        }
-
-        for ep in &self.storage_node_endpoints {
-            let cache_key = format!("{}|{}|{}", ep, genesis_b32, self.device_id);
-
-            if let Ok(Some(tok)) =
-                crate::storage::client_db::get_auth_token(ep, &self.device_id, &genesis_b32)
-            {
-                map.insert(cache_key.clone(), tok);
-                continue;
-            }
-        }
-    }
-
-    pub async fn purge_persisted_token_for_endpoint(&self, endpoint: &str) {
-        if let Ok((genesis_b32, device_id_b32, cache_key)) = self.auth_binding_key(endpoint).await {
-            // Drop in-memory token
-            self.tokens_by_endpoint.write().await.remove(&cache_key);
-            // Drop persisted token for this (endpoint, device_id, genesis)
-            let _ = crate::storage::client_db::delete_auth_token(
-                endpoint,
-                &device_id_b32,
-                &genesis_b32,
-            );
-        }
-    }
-
-    /// Ensure a token exists for the specific endpoint. Attempts persisted load, then single-endpoint register.
-    pub async fn ensure_token_for_endpoint(&self, endpoint: &str) -> Result<String, DsmError> {
-        // If device_id is non-canonical, nothing we do with tokens can succeed.
-        if !is_canonical_auth_device_id(self.device_id.trim()) {
-            return Err(DsmError::unauthorized(
-                "ensure_token: device_id is not canonical base32(32) for Authorization",
-                None::<std::io::Error>,
-            ));
-        }
-        let (genesis_b32, device_id_b32, cache_key) = self.auth_binding_key(endpoint).await?;
-
-        if let Some(tok) = self
-            .tokens_by_endpoint
-            .read()
-            .await
-            .get(&cache_key)
-            .cloned()
-        {
-            return Ok(tok);
-        }
-        // Try persisted
-        if let Ok(Some(tok)) =
-            crate::storage::client_db::get_auth_token(endpoint, &device_id_b32, &genesis_b32)
-        {
-            // IMPORTANT: do not immediately trust persisted tokens if they are actively failing.
-            // We'll use it once; if it yields 401, the caller must purge + re-register.
-            self.tokens_by_endpoint
-                .write()
-                .await
-                .insert(cache_key.clone(), tok.clone());
-            return Ok(tok);
-        }
-        // If there is a token persisted for this endpoint/device but under a different genesis, hard-fail with a deterministic error.
-        if let Ok(Some(other_gen)) = crate::storage::client_db::get_mismatched_genesis(
-            endpoint,
-            &device_id_b32,
-            &genesis_b32,
-        ) {
-            let msg = format!(
-                "GENESIS_INBOX_MISMATCH: stored token bound to genesis {} differs from local {}",
-                other_gen, genesis_b32
-            );
-            return Err(DsmError::InboxTokenInvalid(msg));
-        }
-        // Register on this endpoint
-        let tok = self.register_device_on(endpoint).await?;
-        self.tokens_by_endpoint
-            .write()
-            .await
-            .insert(cache_key, tok.clone());
-        // Persist under (endpoint, device_id, genesis)
-        let _ = crate::storage::client_db::store_auth_token(
-            endpoint,
-            &device_id_b32,
-            &genesis_b32,
-            &tok,
-        );
-        Ok(tok)
-    }
-
     // ------------------------------------------------------------------------
     // §16.6 reply window (Envelope v3 over HTTP)
     // ------------------------------------------------------------------------
@@ -992,7 +871,6 @@ impl B0xSDK {
     pub(crate) fn build_relationship_finalized_envelope(
         local_device_id: &[u8; 32],
         local_genesis: &[u8; 32],
-        recipient_route_tip: &[u8; 32],
         certificate_wire: &[u8],
         certificate_digest: &[u8; 32],
         message_id_b32: &str,
@@ -1010,12 +888,10 @@ impl B0xSDK {
             program: None,
             method: RELATIONSHIP_FINALIZED_METHOD.to_string(),
             args: Some(dsm::types::proto::ArgPack {
-                schema_hash: Some(dsm::types::proto::Hash32 { v: vec![0u8; 32] }),
+                schema_hash: None,
                 codec: dsm::types::proto::Codec::Proto as i32,
                 body: certificate_wire.to_vec(),
             }),
-            pre_state_hash: None,
-            post_state_hash: None,
             cosigners: vec![],
             evidence: None,
             nonce: None,
@@ -1033,8 +909,6 @@ impl B0xSDK {
             headers: Some(dsm::types::proto::Headers {
                 device_id: local_device_bytes,
                 genesis_hash: local_genesis.to_vec(),
-                chain_tip: recipient_route_tip.to_vec(),
-                seq: 0,
             }),
             message_id: msg_id_bytes,
             payload: Some(dsm::types::proto::envelope::Payload::UniversalTx(
@@ -1210,12 +1084,10 @@ impl B0xSDK {
             program: None,
             method: RECEIPT_COUNTERSIGN_B_METHOD.to_string(),
             args: Some(dsm::types::proto::ArgPack {
-                schema_hash: Some(dsm::types::proto::Hash32 { v: vec![0u8; 32] }),
+                schema_hash: None,
                 codec: dsm::types::proto::Codec::Proto as i32,
                 body,
             }),
-            pre_state_hash: None,
-            post_state_hash: None,
             cosigners: vec![],
             evidence: None,
             nonce: None,
@@ -1235,8 +1107,6 @@ impl B0xSDK {
                 genesis_hash: local_genesis.to_vec(),
                 // The tip this artifact is ADDRESSED to (the sender's projection
                 // parent), so the receiving side can correlate the route it polled.
-                chain_tip: sender_projection_tip.to_vec(),
-                seq: 0,
             }),
             message_id: message_id_bytes,
             payload: Some(dsm::types::proto::envelope::Payload::UniversalTx(
@@ -1320,75 +1190,94 @@ impl B0xSDK {
             b_pair,
             release_bytes,
         )?;
-        self.post_reply_envelope(&routing_key, &built).await
+        self.post_reply_envelope(&routing_key, sender_device_id, &built)
+            .await
     }
 
-    /// POST an already-built reply envelope to every endpoint; success is
-    /// `quorum_k` (capped at the fleet size) endpoints answering 204.
+    /// Seal an already-built reply envelope for `recipient_device` and deliver
+    /// it; success is `quorum_k` members answering 204.
     async fn post_reply_envelope(
         &mut self,
         routing_key: &str,
+        recipient_device: &[u8; 32],
         built: &BuiltEnvelope,
     ) -> Result<String, DsmError> {
-        let auth_device_id = self.device_id.clone();
-        let message_id_b32 = built.message_id_b32.clone();
-        let mut last_err: Option<String> = None;
-        let mut delivered = 0usize;
-        let quorum = self.quorum_k.min(self.storage_node_endpoints.len()).max(1);
-        // DSM Amendment A7: a node only ever holds the sealed form. A message
-        // is sealed ONCE, and its sealed bytes are kept by message id, so every
-        // node and every retry gets identical bytes.
-        let sealed = self.sealed_bytes_for(routing_key, &message_id_b32, &built.bytes)?;
+        let sealed = seal_for(recipient_device, &built.message_id_b32, &built.bytes)?;
+        self.deliver(
+            routing_key,
+            &built.message_id_b32,
+            &sealed,
+            &B0xRetryConfig::default(),
+        )
+        .await
+        .map_err(|e| {
+            DsmError::network(format!("§16.6 reply delivery: {e}"), None::<std::io::Error>)
+        })?;
+        Ok(built.message_id_b32.clone())
+    }
 
-        for endpoint in self.storage_node_endpoints.clone() {
-            let token = match self.ensure_token_for_endpoint(&endpoint).await {
-                Ok(t) => t,
-                Err(e) => {
-                    last_err = Some(format!("token for {endpoint}: {e}"));
-                    continue;
-                }
-            };
-            let url = format!("{}/api/v2/b0x/submit", endpoint);
-            let resp = self
-                .http_client
-                .post(&url)
-                .header("Content-Type", "application/protobuf")
-                .header("Authorization", format!("DSM {}:{}", auth_device_id, token))
-                .header("x-dsm-message-id", message_id_b32.clone())
-                .header("x-dsm-recipient", routing_key.to_string())
-                .body(sealed.clone())
-                .send()
-                .await;
-            match resp {
-                Ok(r) if r.status() == reqwest::StatusCode::NO_CONTENT => {
-                    delivered += 1;
-                    info!(
-                        "§16.6 reply delivered -> {} route={}.. msg={}.. ({} bytes)",
-                        endpoint,
-                        &routing_key[..8.min(routing_key.len())],
-                        &message_id_b32[..8.min(message_id_b32.len())],
-                        built.bytes.len(),
-                    );
-                }
-                Ok(r) => {
-                    last_err = Some(format!("{endpoint} HTTP {}", r.status()));
-                }
-                Err(e) => {
-                    last_err = Some(format!("{endpoint}: {e}"));
-                }
-            }
-        }
-
-        if delivered < quorum {
+    /// Deliver sealed spool bytes under `routing_key` until `quorum_k`
+    /// members answered 204. Every member may be asked — those the circuit
+    /// breaker marks failed last — so the bar is the register quorum whatever
+    /// the breaker holds: a member the breaker skipped would otherwise lower
+    /// the count delivery must reach.
+    async fn deliver(
+        &mut self,
+        routing_key: &str,
+        message_id_b32: &str,
+        sealed: &[u8],
+        retry_config: &B0xRetryConfig,
+    ) -> Result<(), DsmError> {
+        let quorum = self.quorum_k;
+        let total = self.storage_node_endpoints.len();
+        if total < quorum {
             return Err(DsmError::network(
                 format!(
-                    "§16.6 reply delivery below quorum: {delivered}/{quorum} endpoints took it: {}",
-                    last_err.unwrap_or_else(|| "no endpoints configured".into())
+                    "delivery needs {quorum} members and the fleet names {total};                      msg_id={message_id_b32}"
                 ),
                 None::<std::io::Error>,
             ));
         }
-        Ok(message_id_b32)
+        let mut healthy = Vec::with_capacity(total);
+        let mut marked_failed = Vec::new();
+        for endpoint in &self.storage_node_endpoints {
+            if self.circuit_breaker.is_node_healthy(endpoint).await {
+                healthy.push(endpoint.clone());
+            } else {
+                marked_failed.push(endpoint.clone());
+            }
+        }
+        let mut delivered = 0usize;
+        let mut errors: Vec<String> = Vec::new();
+        for endpoint in healthy.into_iter().chain(marked_failed) {
+            match self
+                .submit_with_retry(&endpoint, sealed, routing_key, message_id_b32, retry_config)
+                .await
+            {
+                Ok(()) => {
+                    delivered += 1;
+                    if delivered >= quorum {
+                        info!(
+                            "✅ delivered {}.. to {}/{} (K={}) route={}..",
+                            &message_id_b32[..8.min(message_id_b32.len())],
+                            delivered,
+                            total,
+                            quorum,
+                            &routing_key[..8.min(routing_key.len())]
+                        );
+                        return Ok(());
+                    }
+                }
+                Err(e) => errors.push(format!("{endpoint}: {e}")),
+            }
+        }
+        Err(DsmError::network(
+            format!(
+                "delivery below quorum: {delivered}/{total} (K={quorum}); msg_id={message_id_b32}; \
+                 errors={errors:?}"
+            ),
+            None::<std::io::Error>,
+        ))
     }
 
     /// Submit a cert-resync control message (an explicit `invoke.method` with the
@@ -1423,7 +1312,7 @@ impl B0xSDK {
                         "submit_cert_resync: local device_id not base32(32)",
                     )
                 })?;
-        let local_genesis = crate::sdk::app_state::AppState::get_genesis_hash().unwrap_or_default();
+        let local_genesis = self.resolve_local_genesis().await?.to_vec();
 
         let invoke = dsm::types::proto::Invoke {
             program: None,
@@ -1433,8 +1322,6 @@ impl B0xSDK {
                 codec: 0,
                 body,
             }),
-            pre_state_hash: None,
-            post_state_hash: None,
             cosigners: vec![],
             evidence: None,
             nonce: None,
@@ -1452,8 +1339,6 @@ impl B0xSDK {
             headers: Some(dsm::types::proto::Headers {
                 device_id: local_device_bytes,
                 genesis_hash: local_genesis,
-                chain_tip: recipient_tip.to_vec(),
-                seq: 0,
             }),
             message_id: message_id_bytes,
             payload: Some(dsm::types::proto::envelope::Payload::UniversalTx(
@@ -1470,56 +1355,20 @@ impl B0xSDK {
                 None::<std::io::Error>,
             )
         })?;
-        // DSM Amendment A7: a node only ever holds the sealed form. A message
-        // is sealed ONCE, and its sealed bytes are kept by message id, so every
-        // node and every retry gets identical bytes.
-        let buf = self.sealed_bytes_for(&routing_key, &message_id_b32, &buf)?;
-
-        let auth_device_id = self.device_id.clone();
-        let mut delivered = 0usize;
-        let mut last_err: Option<String> = None;
-        for endpoint in self.storage_node_endpoints.clone() {
-            let token = match self.ensure_token_for_endpoint(&endpoint).await {
-                Ok(t) => t,
-                Err(e) => {
-                    last_err = Some(format!("token for {endpoint}: {e}"));
-                    continue;
-                }
-            };
-            let url = format!("{}/api/v2/b0x/submit", endpoint);
-            match self
-                .http_client
-                .post(&url)
-                .header("Content-Type", "application/protobuf")
-                .header("Authorization", format!("DSM {}:{}", auth_device_id, token))
-                .header("x-dsm-message-id", message_id_b32.clone())
-                .header("x-dsm-recipient", routing_key.clone())
-                .body(buf.clone())
-                .send()
-                .await
-            {
-                Ok(r) if r.status() == reqwest::StatusCode::NO_CONTENT => {
-                    delivered += 1;
-                    info!(
-                        "cert-resync {} delivered -> {} route={}..",
-                        method,
-                        endpoint,
-                        &routing_key[..8.min(routing_key.len())]
-                    );
-                }
-                Ok(r) => last_err = Some(format!("{endpoint} HTTP {}", r.status())),
-                Err(e) => last_err = Some(format!("{endpoint}: {e}")),
-            }
-        }
-        if delivered == 0 {
-            return Err(DsmError::network(
-                format!(
-                    "cert-resync delivery failed on all endpoints: {}",
-                    last_err.unwrap_or_else(|| "none".into())
-                ),
+        let sealed = seal_for(recipient_device, &message_id_b32, &buf)?;
+        self.deliver(
+            &routing_key,
+            &message_id_b32,
+            &sealed,
+            &B0xRetryConfig::default(),
+        )
+        .await
+        .map_err(|e| {
+            DsmError::network(
+                format!("cert-resync {method} delivery: {e}"),
                 None::<std::io::Error>,
-            ));
-        }
+            )
+        })?;
         Ok(message_id_b32)
     }
 
@@ -1531,18 +1380,8 @@ impl B0xSDK {
     /// anything. Used by the send path to freeze the exact wire artifact into
     /// the durable outbox before any network call.
     pub async fn submit_to_b0x(&mut self, params: B0xSubmissionParams) -> Result<String, DsmError> {
-        if std::env::var("DSM_SDK_TEST_MODE").is_ok() {
-            let test_retry = B0xRetryConfig {
-                max_retries: 0,
-                base_delay_ms: 0,
-                max_delay_ms: 0,
-                backoff_multiplier: 1.0,
-            };
-            self.submit_to_b0x_with_retry(params, &test_retry).await
-        } else {
-            self.submit_to_b0x_with_retry(params, &B0xRetryConfig::default())
-                .await
-        }
+        self.submit_to_b0x_with_retry(params, &B0xRetryConfig::default())
+            .await
     }
 
     /// Submit to b0x with configurable retry logic and enhanced validation
@@ -1633,7 +1472,7 @@ impl B0xSDK {
         })?;
 
         let arg_pack = dsm::types::proto::ArgPack {
-            schema_hash: Some(dsm::types::proto::Hash32 { v: vec![0u8; 32] }),
+            schema_hash: None,
             codec: dsm::types::proto::Codec::Proto as i32,
             body: body_bytes,
         };
@@ -1641,8 +1480,6 @@ impl B0xSDK {
             program: None,
             method: RECEIPT_EVIDENCE_A_METHOD.to_string(),
             args: Some(arg_pack),
-            pre_state_hash: None,
-            post_state_hash: None,
             cosigners: vec![],
             evidence: None,
             nonce: None,
@@ -1651,9 +1488,7 @@ impl B0xSDK {
             version: 3,
             headers: Some(dsm::types::proto::Headers {
                 device_id: self_device_bytes.clone(),
-                chain_tip: vec![0u8; 32],
                 genesis_hash: genesis_bytes,
-                seq: 0,
             }),
             message_id: msg_id_bytes,
             payload: Some(dsm::types::proto::envelope::Payload::UniversalTx(
@@ -1717,8 +1552,7 @@ impl B0xSDK {
         //
         // MESSAGE ID. A caller-supplied deterministic id WINS and short-circuits
         // the random derivation entirely — the fallback is never evaluated, so a
-        // deterministic send consumes no OS entropy and does not bump the
-        // process-global counter. The supplied id comes from the receipt
+        // deterministic send consumes no OS entropy. The supplied id comes from the receipt
         // commitment (`sender_outbox::derive_submission_id`), so it is known
         // before the send is committed locally and is identical on every retry;
         // storage nodes enforce `UNIQUE(message_id)`, making a resend collapse
@@ -1748,13 +1582,8 @@ impl B0xSDK {
                         None::<std::io::Error>,
                     )
                 })?;
-                let mut msgid_buf = Vec::with_capacity(11 + 16 + 8 + self.device_id.len());
-                msgid_buf.extend_from_slice(b"DSM/b0x-msgid\0");
+                let mut msgid_buf = Vec::with_capacity(16 + self.device_id.len());
                 msgid_buf.extend_from_slice(&rand_bytes);
-                msgid_buf.extend_from_slice(&dt::tick().to_le_bytes());
-                msgid_buf.extend_from_slice(&std::process::id().to_le_bytes());
-                let ctr = MSG_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
-                msgid_buf.extend_from_slice(&ctr.to_le_bytes());
                 msgid_buf.extend_from_slice(self.device_id.as_bytes());
                 let full = dsm::crypto::blake3::domain_hash(
                     dsm::common::domain_tags::TAG_DSM_B0X_MSGID,
@@ -1766,10 +1595,6 @@ impl B0xSDK {
                 (b, b32)
             }
         };
-        if std::env::var("DSM_SDK_TEST_MODE").is_ok() {
-            log::debug!("[B0X] submit msg_id={}", message_id_b32);
-        }
-
         let actor_device_bytes = crate::util::text_id::decode_base32_crockford(&self.device_id)
             .ok_or_else(|| {
                 DsmError::internal("device_id base32 decode failed", None::<std::io::Error>)
@@ -1838,20 +1663,19 @@ impl B0xSDK {
                                 None::<std::io::Error>,
                             )
                         })?;
-                let mut from_arr = [0u8; 32];
-                if actor_device_bytes.len() == 32 {
-                    from_arr.copy_from_slice(&actor_device_bytes);
-                }
-                let mut to_arr = [0u8; 32];
-                if to_device_id_bytes.len() == 32 {
-                    to_arr.copy_from_slice(&to_device_id_bytes);
-                }
-                let mut tip_arr = [0u8; 32];
-                if sender_tip_bytes.len() == 32 {
-                    tip_arr.copy_from_slice(&sender_tip_bytes);
-                }
+                let exact_32 = |bytes: &[u8], what: &str| -> Result<[u8; 32], DsmError> {
+                    <[u8; 32]>::try_from(bytes).map_err(|_| {
+                        DsmError::invalid_parameter(format!(
+                            "submit_to_b0x: {what} is {} bytes, not 32",
+                            bytes.len()
+                        ))
+                    })
+                };
+                let from_arr = exact_32(&actor_device_bytes, "the sender device id")?;
+                let to_arr = exact_32(&to_device_id_bytes, "the recipient device id")?;
+                let tip_arr = exact_32(&sender_tip_bytes, "the sender chain tip")?;
                 let nonce_arr = dsm::envelope::compute_online_message_nonce_v3(
-                    &from_arr, &to_arr, &tip_arr, params.seq, data, message,
+                    &from_arr, &to_arr, &tip_arr, data, message,
                 );
                 SubmitOp::Message {
                     to_device_id_bytes,
@@ -1884,17 +1708,14 @@ impl B0xSDK {
                     signature: params.signature.clone(),
                     nonce: nonce_bytes.clone(),
                     from_device_id: actor_device_bytes.clone(),
-                    chain_tip: sender_tip_bytes.clone(),
-                    seq: params.seq,
                     canonical_operation_bytes: params.canonical_operation_bytes.clone(),
                     receipt_evidence_digest: params.receipt_evidence_digest.clone(),
                     sender_economic_position: params.sender_economic_position,
                     sender_debit_mutation_index: params.sender_debit_mutation_index,
                 };
                 info!(
-                    "submit_to_b0x: transfer req context from_device_id(first4)={:?} seq={}",
+                    "submit_to_b0x: transfer req context from_device_id(first4)={:?}",
                     &transfer_req.from_device_id[..4.min(transfer_req.from_device_id.len())],
-                    transfer_req.seq
                 );
 
                 let mut transfer_req_bytes = Vec::with_capacity(transfer_req.encoded_len());
@@ -1905,7 +1726,7 @@ impl B0xSDK {
                     )
                 })?;
                 let arg_pack = dsm::types::proto::ArgPack {
-                    schema_hash: Some(dsm::types::proto::Hash32 { v: vec![0u8; 32] }),
+                    schema_hash: None,
                     codec: dsm::types::proto::Codec::Proto as i32,
                     body: transfer_req_bytes.clone(),
                 };
@@ -1945,7 +1766,6 @@ impl B0xSDK {
                     nonce: nonce_bytes.clone(),
                     from_device_id: actor_device_bytes.clone(),
                     chain_tip: sender_tip_bytes.clone(),
-                    seq: params.seq,
                 };
                 let mut msg_req_bytes = Vec::with_capacity(msg_req.encoded_len());
                 msg_req.encode(&mut msg_req_bytes).map_err(|e| {
@@ -1955,7 +1775,7 @@ impl B0xSDK {
                     )
                 })?;
                 let arg_pack = dsm::types::proto::ArgPack {
-                    schema_hash: Some(dsm::types::proto::Hash32 { v: vec![0u8; 32] }),
+                    schema_hash: None,
                     codec: dsm::types::proto::Codec::Proto as i32,
                     body: msg_req_bytes.clone(),
                 };
@@ -2039,17 +1859,10 @@ impl B0xSDK {
             None
         };
 
-        let post_state_hash = match params.next_chain_tip.as_ref() {
-            Some(t) if t.len() == 32 => Some(dsm::types::proto::Hash32 { v: t.clone() }),
-            _ => None,
-        };
-
         let invoke = dsm::types::proto::Invoke {
             program: None,
             method: invoke_method,
             args: Some(arg_pack),
-            pre_state_hash: Some(dsm::types::proto::Hash32 { v: vec![0u8; 32] }),
-            post_state_hash,
             cosigners: vec![],
             evidence,
             nonce: None,
@@ -2091,9 +1904,6 @@ impl B0xSDK {
             headers: Some(dsm::types::proto::Headers {
                 device_id: actor_device_bytes,
                 genesis_hash: local_genesis_bytes.to_vec(),
-                // chain_tip in headers must be the live relationship parent tip used for addressing
-                chain_tip: sender_tip_bytes,
-                seq: 0,
             }),
             message_id: message_id_bytes.to_vec(),
             payload: Some(dsm::types::proto::envelope::Payload::UniversalTx(
@@ -2141,143 +1951,34 @@ impl B0xSDK {
             to_device_id_bytes,
         } = self.build_envelope_for_submission(&params)?;
 
-        // Signature is embedded in the request body only (canonical path).
-        // Avoid duplicating into EvidenceOracle.signature to keep payload bounded.
-        if !params.signature.is_empty() {
-            info!(
-                "submit_to_b0x: embedded sender signature in request (len={})",
-                params.signature.len()
-            );
-        }
-
-        // 3) Replicate to multiple endpoints; require quorum_k successes.
-        let auth_device_id = self.device_id.clone(); // base32 textual id for auth header
-
-        // Derive recipient routing key from the *validated* params (base32(32) string).
-        // This avoids accidental mismatches if the Operation payload was constructed incorrectly.
-        let recipient_device_id_b32 = params.recipient_device_id.trim().to_string();
-        let recipient_device_id_from_op = text_id::encode_base32_crockford(&to_device_id_bytes);
-        if recipient_device_id_b32 != recipient_device_id_from_op {
-            warn!(
-                "submit_to_b0x: recipient_device_id mismatch: params={} op={} (using params)",
-                &recipient_device_id_b32[..16.min(recipient_device_id_b32.len())],
-                &recipient_device_id_from_op[..16.min(recipient_device_id_from_op.len())]
-            );
-        }
-
-        // §16.4 Tip-scoped b0x address rotation:
-        // The inbox key is always the explicit rotated address.
-        let routing_key = params.routing_address.clone();
-        info!(
-            "🔄 submit_to_b0x: using rotated b0x address = {}... (tip-scoped §16.4)",
-            &routing_key[..16.min(routing_key.len())]
-        );
-        if std::env::var("DSM_SDK_TEST_MODE").is_ok() {
-            println!(
-                "submit route debug: routing={} recipient_device_id={} recipient_genesis_hash={} sender_chain_tip={}",
-                routing_key,
-                params.recipient_device_id,
-                params.recipient_genesis_hash,
-                params.sender_chain_tip,
-            );
-        }
-
-        // DEBUG: Log the routing key prefix to diagnose mismatch issues
-        info!(
-            "🔍 submit_to_b0x: recipient routing key = {} (op_bytes_len={})",
-            &routing_key[..16.min(routing_key.len())],
-            to_device_id_bytes.len()
-        );
-
-        // 🔎 Instrument outgoing auth device id format (NO token leakage)
-        // If this ever logs dotted=true or base32_32=false, we will get retrieve/submit mismatches.
-        let auth_device_id_diag = auth_device_id.trim();
-        info!(
-            "🔐 submit_to_b0x auth_device_id diag: len={} prefix={}... base32_32={} dotted={}",
-            auth_device_id_diag.len(),
-            &auth_device_id_diag[..8.min(auth_device_id_diag.len())],
-            base32_decodes_to_32_bytes(auth_device_id_diag),
-            looks_like_dotted_decimal_bytes(auth_device_id_diag)
-        );
-
-        // Get healthy endpoints for submission
-        let endpoints: Vec<String> = self
-            .storage_node_endpoints
-            .iter()
-            .filter(|ep| futures::executor::block_on(self.circuit_breaker.is_node_healthy(ep)))
-            .cloned()
-            .collect();
-
-        if endpoints.is_empty() {
-            return Err(DsmError::internal(
-                "No healthy endpoints available for submission",
-                None::<std::io::Error>,
+        // The recipient the operation names is the one the envelope is sealed
+        // for and addressed to; params naming another is a malformed send.
+        let recipient = decode_base32_32("recipient_device_id", params.recipient_device_id.trim())?;
+        if recipient.as_slice() != to_device_id_bytes.as_slice() {
+            return Err(DsmError::invalid_operation(
+                "submit_to_b0x: the recipient the params name is not the one the operation names",
             ));
         }
-
-        let total = endpoints.len();
-        let quorum = self.quorum_k.min(total);
-        let mut successes = 0usize;
-        let mut submit_errors: Vec<String> = Vec::new();
-
-        // Submit to endpoints with enhanced retry logic
-        for epc in endpoints {
-            match self
-                .submit_with_retry(
-                    &epc,
-                    &buf,
-                    &auth_device_id,
-                    &routing_key,
-                    &message_id_b32,
-                    retry_config,
-                )
-                .await
-            {
-                Ok(()) => {
-                    successes += 1;
-                    if successes >= quorum {
-                        break;
-                    }
-                }
-                Err(e) => {
-                    warn!("Failed to submit to endpoint {}: {}", epc, e);
-                    submit_errors.push(format!("{}: {}", epc, e));
-                    // Continue to next endpoint
-                }
-            }
-        }
-
-        if successes >= quorum {
-            info!(
-                "✅ submit quorum satisfied: {}/{} (K={})",
-                successes, total, quorum
-            );
-            return Ok(message_id_b32);
-        }
-
-        Err(DsmError::internal(
-            format!(
-                "submit quorum not met: {}/{} (K={}); msg_id={}; errors={:?}",
-                successes, total, quorum, message_id_b32, submit_errors
-            ),
-            None::<std::io::Error>,
-        ))
+        // §16.4: the inbox key is always the explicit rotated address.
+        let routing_key = params.routing_address.clone();
+        let sealed = seal_for(&recipient, &message_id_b32, &buf)?;
+        self.deliver(&routing_key, &message_id_b32, &sealed, retry_config)
+            .await?;
+        Ok(message_id_b32)
     }
 
-    /// §16.6 defect zero — submit the EXACT bytes frozen in the durable outbox.
-    ///
-    /// Replays a stored artifact verbatim: no envelope reconstruction, so retry
-    /// identity cannot drift if envelope-building code changes across upgrades,
-    /// and the deterministic `message_id` makes the node collapse duplicates
-    /// onto one spool row (`UNIQUE(message_id)` + `ON CONFLICT DO NOTHING`).
+    /// §16.6 defect zero — submit the EXACT bytes frozen in the durable outbox:
+    /// the seal the send path made and kept when it froze them
+    /// ([`seal_for`]). No envelope reconstruction, so retry identity cannot
+    /// drift if envelope-building code changes across upgrades, and the
+    /// deterministic `message_id` makes the node collapse duplicates onto one
+    /// spool row.
     pub async fn submit_stored_envelope(
         &mut self,
-        envelope_bytes: &[u8],
         routing_address: &str,
         message_id_b32: &str,
     ) -> Result<(), DsmError> {
         self.submit_stored_envelope_with_retry(
-            envelope_bytes,
             routing_address,
             message_id_b32,
             &B0xRetryConfig::default(),
@@ -2320,50 +2021,13 @@ impl B0xSDK {
     /// is what bounds the call — see `stored_envelope_deadline`.
     pub async fn submit_stored_envelope_with_retry(
         &mut self,
-        envelope_bytes: &[u8],
         routing_address: &str,
         message_id_b32: &str,
         retry: &B0xRetryConfig,
     ) -> Result<(), DsmError> {
-        let auth_device_id = self.device_id.clone();
-        let endpoints: Vec<String> = self.storage_node_endpoints.clone();
-        let total = endpoints.len();
-        let quorum = self.quorum_k.min(total.max(1));
-        let mut successes = 0usize;
-        let mut errors: Vec<String> = Vec::new();
-
-        for endpoint in endpoints {
-            match self
-                .submit_with_retry(
-                    &endpoint,
-                    envelope_bytes,
-                    &auth_device_id,
-                    routing_address,
-                    message_id_b32,
-                    retry,
-                )
-                .await
-            {
-                Ok(()) => {
-                    successes += 1;
-                    if successes >= quorum {
-                        info!(
-                            "✅ stored-envelope resubmit quorum satisfied: {}/{} (K={})",
-                            successes, total, quorum
-                        );
-                        return Ok(());
-                    }
-                }
-                Err(e) => errors.push(format!("{endpoint}: {e}")),
-            }
-        }
-        Err(DsmError::internal(
-            format!(
-                "stored-envelope resubmit quorum not met: {successes}/{total} (K={quorum}); \
-                 msg_id={message_id_b32}; errors={errors:?}"
-            ),
-            None::<std::io::Error>,
-        ))
+        let sealed = kept_seal(message_id_b32)?;
+        self.deliver(routing_address, message_id_b32, &sealed, retry)
+            .await
     }
 
     /// Deliver ONE frozen logical send — the transfer envelope plus every
@@ -2405,22 +2069,17 @@ impl B0xSDK {
     ) -> Result<FrozenSendDelivery, DsmError> {
         let route = outbox.routing_address.as_str();
 
-        self.submit_stored_envelope_with_retry(
-            &outbox.envelope_bytes,
-            route,
-            &outbox.submission_id,
-            retry,
-        )
-        .await
-        .map_err(|e| {
-            DsmError::internal(
-                format!(
-                    "frozen send {}: transfer half not delivered: {e}",
-                    outbox.submission_id
-                ),
-                None::<std::io::Error>,
-            )
-        })?;
+        self.submit_stored_envelope_with_retry(route, &outbox.submission_id, retry)
+            .await
+            .map_err(|e| {
+                DsmError::internal(
+                    format!(
+                        "frozen send {}: transfer half not delivered: {e}",
+                        outbox.submission_id
+                    ),
+                    None::<std::io::Error>,
+                )
+            })?;
 
         let mut artifact_ids = Vec::with_capacity(artifacts.len());
         for artifact in artifacts {
@@ -2438,24 +2097,19 @@ impl B0xSDK {
                     None::<std::io::Error>,
                 ));
             }
-            self.submit_stored_envelope_with_retry(
-                &artifact.envelope_bytes,
-                route,
-                &artifact.submission_id,
-                retry,
-            )
-            .await
-            .map_err(|e| {
-                DsmError::internal(
-                    format!(
-                        "frozen send {}: {} artifact {} not delivered: {e}",
-                        outbox.submission_id,
-                        artifact.role.as_str(),
-                        artifact.submission_id
-                    ),
-                    None::<std::io::Error>,
-                )
-            })?;
+            self.submit_stored_envelope_with_retry(route, &artifact.submission_id, retry)
+                .await
+                .map_err(|e| {
+                    DsmError::internal(
+                        format!(
+                            "frozen send {}: {} artifact {} not delivered: {e}",
+                            outbox.submission_id,
+                            artifact.role.as_str(),
+                            artifact.submission_id
+                        ),
+                        None::<std::io::Error>,
+                    )
+                })?;
             artifact_ids.push(artifact.submission_id.clone());
         }
 
@@ -2471,178 +2125,72 @@ impl B0xSDK {
         })
     }
 
-    /// Submit envelope to a single endpoint with retry logic
+    /// Submit sealed spool bytes to a single endpoint with retry logic. The
+    /// node answers 204 once it holds them; a replay of a held message id
+    /// answers the same.
     async fn submit_with_retry(
         &mut self,
         endpoint: &str,
-        envelope_buf: &[u8],
-        auth_device_id: &str,
+        sealed: &[u8],
         routing_key: &str,
         message_id_b32: &str,
         retry_config: &B0xRetryConfig,
     ) -> Result<(), DsmError> {
+        let url = format!("{}/api/v2/b0x/submit", endpoint);
         let mut attempt = 0;
         let mut delay = std::time::Duration::from_millis(retry_config.base_delay_ms);
-        // DSM Amendment A7: a node only ever holds the sealed form. A message
-        // is sealed ONCE, and its sealed bytes are kept by message id, so every
-        // node and every retry gets identical bytes.
-        let sealed = self.sealed_bytes_for(routing_key, message_id_b32, envelope_buf)?;
-
         loop {
-            // Ensure token for this endpoint
-            let token = match self.ensure_token_for_endpoint(endpoint).await {
-                Ok(t) => t,
-                Err(e) => {
-                    self.circuit_breaker.mark_node_failed(endpoint).await;
-                    return Err(DsmError::internal(
-                        format!("Failed to get token for endpoint {}: {}", endpoint, e),
-                        None::<std::io::Error>,
-                    ));
-                }
-            };
-
-            let url = format!("{}/api/v2/b0x/submit", endpoint);
-            if attempt == 0 {
-                info!(
-                    "🚀 submit -> {} (recipient={}...)",
-                    url,
-                    &routing_key[..8.min(routing_key.len())]
-                );
-            } else {
-                info!("🔄 retry submit -> {} (attempt {})", url, attempt + 1);
-            }
-
-            let mut req = self
+            let resp = self
                 .http_client
                 .post(&url)
                 .header("Content-Type", "application/protobuf")
-                .header("Authorization", format!("DSM {}:{}", auth_device_id, token))
                 .header("x-dsm-message-id", message_id_b32)
                 .header("x-dsm-recipient", routing_key)
-                .body(sealed.clone());
-
-            if std::env::var("DSM_SDK_TEST_MODE").is_ok() {
-                req = req.timeout(std::time::Duration::from_secs(2));
-            }
-
-            let resp = req.send().await;
-
-            match resp {
+                .body(sealed.to_vec())
+                .send()
+                .await;
+            let retryable = match resp {
                 Ok(r) if r.status() == reqwest::StatusCode::NO_CONTENT => {
-                    if std::env::var("DSM_SDK_TEST_MODE").is_ok() {
-                        println!(
-                            "submit success debug: endpoint={} route={} msg_id={}",
-                            endpoint, routing_key, message_id_b32
-                        );
-                    }
                     self.circuit_breaker.mark_node_healthy(endpoint).await;
                     return Ok(());
-                }
-                Ok(r) if r.status() == reqwest::StatusCode::CONFLICT => {
-                    // Idempotent replay: treat as success since the message_id was already accepted.
-                    if std::env::var("DSM_SDK_TEST_MODE").is_ok() {
-                        println!(
-                            "submit conflict debug: endpoint={} route={} msg_id={}",
-                            endpoint, routing_key, message_id_b32
-                        );
-                    }
-                    self.circuit_breaker.mark_node_healthy(endpoint).await;
-                    return Ok(());
-                }
-                Ok(r) if r.status() == reqwest::StatusCode::UNAUTHORIZED => {
-                    if attempt == 0 {
-                        warn!("⚠️ 401 Unauthorized at {}; refreshing token...", endpoint);
-                        self.purge_persisted_token_for_endpoint(endpoint).await;
-                        // Try to re-register immediately
-                        if let Ok(tok) = self.register_device_on(endpoint).await {
-                            if let Ok((genesis_b32, device_id_b32, cache_key)) =
-                                self.auth_binding_key(endpoint).await
-                            {
-                                self.tokens_by_endpoint
-                                    .write()
-                                    .await
-                                    .insert(cache_key, tok.clone());
-                                let _ = crate::storage::client_db::store_auth_token(
-                                    endpoint,
-                                    &device_id_b32,
-                                    &genesis_b32,
-                                    &tok,
-                                );
-                                // Continue to next attempt (retry)
-                                attempt += 1;
-                                if attempt < retry_config.max_retries {
-                                    tokio::time::sleep(delay).await;
-                                    delay = std::cmp::min(
-                                        delay.mul_f64(retry_config.backoff_multiplier),
-                                        std::time::Duration::from_millis(retry_config.max_delay_ms),
-                                    );
-                                    continue;
-                                }
-                            }
-                        }
-                        warn!("❌ Token refresh failed at {}", endpoint);
-                        self.circuit_breaker.mark_node_failed(endpoint).await;
-                        return Err(DsmError::internal(
-                            format!("Token refresh failed at {}", endpoint),
-                            None::<std::io::Error>,
-                        ));
-                    } else {
-                        warn!("❌ 401 Unauthorized persists at {} after refresh", endpoint);
-                        self.circuit_breaker.mark_node_failed(endpoint).await;
-                        return Err(DsmError::internal(
-                            format!("401 Unauthorized persists at {} after refresh", endpoint),
-                            None::<std::io::Error>,
-                        ));
-                    }
                 }
                 Ok(r) => {
                     let status = r.status();
-                    let body_txt = r.text().await.unwrap_or_default();
-                    warn!("Submit failed {} via {}: {}", status, endpoint, body_txt);
+                    let body = match r.text().await {
+                        Ok(text) => text,
+                        Err(e) => format!("(body unreadable: {e})"),
+                    };
+                    warn!("Submit failed {} via {}: {}", status, endpoint, body);
                     self.circuit_breaker.mark_node_failed(endpoint).await;
-
-                    // Check if this is a retryable error
-                    if Self::is_retryable_error(status) && attempt < retry_config.max_retries {
-                        attempt += 1;
-                        tokio::time::sleep(delay).await;
-                        delay = std::cmp::min(
-                            delay.mul_f64(retry_config.backoff_multiplier),
-                            std::time::Duration::from_millis(retry_config.max_delay_ms),
-                        );
-                        continue;
-                    } else {
-                        return Err(DsmError::internal(
-                            format!("Submit failed {} via {}: {}", status, endpoint, body_txt),
+                    if !Self::is_retryable_error(status) {
+                        return Err(DsmError::network(
+                            format!("Submit failed {status} via {endpoint}: {body}"),
                             None::<std::io::Error>,
                         ));
                     }
+                    format!("{status}: {body}")
                 }
                 Err(e) => {
                     warn!("HTTP error via {}: {}", endpoint, e);
                     self.circuit_breaker.mark_node_failed(endpoint).await;
-
-                    // Network errors are retryable
-                    if attempt < retry_config.max_retries {
-                        attempt += 1;
-                        tokio::time::sleep(delay).await;
-                        delay = std::cmp::min(
-                            delay.mul_f64(retry_config.backoff_multiplier),
-                            std::time::Duration::from_millis(retry_config.max_delay_ms),
-                        );
-                        continue;
-                    } else {
-                        return Err(DsmError::internal(
-                            format!(
-                                "HTTP error via {} after {} attempts: {}",
-                                endpoint,
-                                attempt + 1,
-                                e
-                            ),
-                            None::<std::io::Error>,
-                        ));
-                    }
+                    e.to_string()
                 }
+            };
+            if attempt >= retry_config.max_retries {
+                return Err(DsmError::network(
+                    format!(
+                        "submit via {endpoint} failed after {} attempts: {retryable}",
+                        attempt + 1
+                    ),
+                    None::<std::io::Error>,
+                ));
             }
+            attempt += 1;
+            tokio::time::sleep(delay).await;
+            delay = std::cmp::min(
+                delay.mul_f64(retry_config.backoff_multiplier),
+                std::time::Duration::from_millis(retry_config.max_delay_ms),
+            );
         }
     }
 
@@ -2655,7 +2203,7 @@ impl B0xSDK {
                 None::<std::io::Error>,
             ));
         }
-        if !is_canonical_auth_device_id(&params.recipient_device_id) {
+        if !base32_decodes_to_32_bytes(&params.recipient_device_id) {
             return Err(DsmError::internal(
                 "recipient_device_id must be valid base32 encoding of 32 bytes",
                 None::<std::io::Error>,
@@ -2816,7 +2364,6 @@ impl B0xSDK {
     pub async fn retrieve_from_b0x_v2(
         &mut self,
         b0x_address: &str,
-        _limit: usize,
     ) -> Result<Vec<B0xEntry>, DsmError> {
         use crate::storage::client_db::b0x_consumed;
         let local = |e: anyhow::Error| {
@@ -2831,14 +2378,17 @@ impl B0xSDK {
         }
         validate_b0x_address(b0x_address)?;
 
-        let endpoints: Vec<String> = self
-            .storage_node_endpoints
-            .iter()
-            .filter(|ep| futures::executor::block_on(self.circuit_breaker.is_node_healthy(ep)))
-            .cloned()
-            .collect();
+        let mut endpoints: Vec<String> = Vec::new();
+        for endpoint in &self.storage_node_endpoints {
+            if self.circuit_breaker.is_node_healthy(endpoint).await {
+                endpoints.push(endpoint.clone());
+            }
+        }
         if endpoints.is_empty() {
-            return Ok(vec![]);
+            return Err(DsmError::network(
+                "b0x retrieve: every storage node is marked failed",
+                None::<std::io::Error>,
+            ));
         }
 
         let mut map: HashMap<String, dsm::types::proto::Envelope> = HashMap::new();
@@ -2851,7 +2401,9 @@ impl B0xSDK {
             let mut cursor = position;
             let mut consumed_run = true;
             let mut failed = false;
-            for _ in 0..Self::MAX_RETRIEVE_PAGES_PER_NODE {
+            let mut pages = 0;
+            while pages < Self::MAX_RETRIEVE_PAGES_PER_NODE {
+                pages += 1;
                 let url = format!("{}/api/v2/b0x/retrieve/{}", epc, cursor);
                 let resp = self
                     .http_client
@@ -2896,6 +2448,11 @@ impl B0xSDK {
                 }
                 for sequenced in batch.envelopes {
                     let Some(env) = sequenced.envelope else {
+                        warn!(
+                            "b0x retrieve from {}: seq {} carries no envelope",
+                            epc, sequenced.seq_num
+                        );
+                        consumed_run = false;
                         continue;
                     };
                     let id = text_id::encode_base32_crockford(&env.message_id);
@@ -2908,7 +2465,7 @@ impl B0xSDK {
                         // DSM Amendment A7: open the seal before anything reads
                         // the envelope. What does not open is not from this
                         // relationship's counterparty and is skipped.
-                        match self.open_sealed(b0x_address, &env) {
+                        match open_sealed(&env) {
                             Ok(inner) => {
                                 map.entry(envelope_merge_key(&inner)).or_insert(inner);
                             }
@@ -2927,7 +2484,7 @@ impl B0xSDK {
         }
 
         let mut entries = Vec::new();
-        for (_, env) in map.into_iter() {
+        for env in map.into_values() {
             // §16.6 reply window: an acceptance artifact is NOT a forward transfer and
             // has no B0xEntry shape. It is discriminated by the EXPLICIT invoke method
             // (never a trial-decode) and buffered for the sender-finalization path;
@@ -3000,7 +2557,12 @@ impl B0xSDK {
         }
         validate_b0x_address(b0x_address)?;
         crate::storage::client_db::b0x_consumed::record_consumed(b0x_address, &message_ids).map_err(
-            |e| DsmError::storage(format!("record consumed b0x messages: {e}"), None::<std::io::Error>),
+            |e| {
+                DsmError::storage(
+                    format!("record consumed b0x messages: {e}"),
+                    None::<std::io::Error>,
+                )
+            },
         )
     }
 
@@ -3010,14 +2572,12 @@ impl B0xSDK {
 
     fn envelope_to_b0x_entry(&self, env: dsm::types::proto::Envelope) -> Option<B0xEntry> {
         let tid = text_id::encode_base32_crockford(&env.message_id);
-        let (sender_dev, genesis_b32, chain_tip_text) = match &env.headers {
-            Some(h) => {
-                let dev = crate::util::text_id::encode_base32_crockford(&h.device_id);
-                let gen_b32 = text_id::encode_base32_crockford(&h.genesis_hash);
-                let tip_txt = crate::util::text_id::encode_base32_crockford(&h.chain_tip);
-                (dev, gen_b32, tip_txt)
-            }
-            None => (String::new(), String::new(), String::new()),
+        let (sender_dev, genesis_b32) = match &env.headers {
+            Some(h) => (
+                crate::util::text_id::encode_base32_crockford(&h.device_id),
+                text_id::encode_base32_crockford(&h.genesis_hash),
+            ),
+            None => (String::new(), String::new()),
         };
 
         if let Some(dsm::types::proto::envelope::Payload::UniversalTx(tx)) = &env.payload {
@@ -3035,17 +2595,6 @@ impl B0xSDK {
                                     );
                                 }
 
-                                let _balance_tick = if transfer_req.nonce.len() >= 8 {
-                                    let mut tick_bytes = [0u8; 8];
-                                    tick_bytes.copy_from_slice(&transfer_req.nonce[..8]);
-                                    u64::from_le_bytes(tick_bytes)
-                                } else {
-                                    0
-                                };
-                                let balance_anchor = dsm::crypto::blake3::domain_hash(
-                                    dsm::common::domain_tags::TAG_DSM_BALANCE_ANCHOR,
-                                    &[],
-                                );
                                 let recipient_id =
                                     text_id::encode_base32_crockford(&transfer_req.to_device_id);
                                 // Prefer an explicit signature embedded in the OnlineTransferRequest
@@ -3084,9 +2633,8 @@ impl B0xSDK {
 
                                 let transfer_op = Operation::Transfer {
                                     to_device_id: transfer_req.to_device_id.clone(),
-                                    amount: dsm::types::token_types::Balance::from_state(
+                                    amount: dsm::types::token_types::Balance::amount(
                                         transfer_req.amount,
-                                        *balance_anchor.as_bytes(),
                                     ),
                                     token_id: if transfer_req.token_id.is_empty() {
                                         b"ERA".to_vec()
@@ -3117,25 +2665,7 @@ impl B0xSDK {
                                     None => Vec::new(),
                                 };
 
-                                info!("📥 envelope_to_b0x_entry: extracted Transfer (amount={}, to={}, sig_len={}, seq={})", transfer_req.amount, recipient_id, sig.len(), transfer_req.seq);
-                                let next_tip_bytes = invoke
-                                    .post_state_hash
-                                    .as_ref()
-                                    .map(|h| h.v.clone())
-                                    .filter(|v| v.len() == 32)
-                                    .unwrap_or_default();
-                                let next_tip_text = if next_tip_bytes.len() == 32 {
-                                    text_id::encode_base32_crockford(&next_tip_bytes)
-                                } else {
-                                    chain_tip_text.clone()
-                                };
-                                let tick_anchor_bytes = if next_tip_bytes.len() == 32 {
-                                    next_tip_bytes.clone()
-                                } else {
-                                    crate::util::text_id::decode_base32_crockford(&chain_tip_text)
-                                        .filter(|b| b.len() == 32)
-                                        .unwrap_or_else(|| vec![0u8; 32])
-                                };
+                                info!("📥 envelope_to_b0x_entry: extracted Transfer (amount={}, to={}, sig_len={})", transfer_req.amount, recipient_id, sig.len());
                                 return Some(B0xEntry {
                                     // Verbatim, from the SAME buffer the decode read.
                                     transfer_wire_bytes: arg_pack.body.clone(),
@@ -3146,15 +2676,10 @@ impl B0xSDK {
                                     inbox_key: String::new(),
                                     sender_device_id: sender_dev,
                                     sender_genesis_hash: genesis_b32,
-                                    sender_chain_tip: chain_tip_text,
-                                    next_chain_tip: next_tip_text,
                                     recipient_device_id: recipient_id,
                                     transaction: transfer_op,
                                     signature: sig,
                                     sender_signing_public_key: sender_pk,
-                                    tick: anchor_tick_from_tip(&tick_anchor_bytes),
-                                    ttl_seconds: 0,
-                                    seq: transfer_req.seq,
                                     canonical_operation_bytes: transfer_req
                                         .canonical_operation_bytes
                                         .clone(),
@@ -3199,30 +2724,11 @@ impl B0xSDK {
                                 };
 
                                 info!(
-                                    "📥 envelope_to_b0x_entry: extracted OnlineMessage (payload_len={}, to={}, sig_len={}, seq={})",
+                                    "📥 envelope_to_b0x_entry: extracted OnlineMessage (payload_len={}, to={}, sig_len={})",
                                     msg_req.payload.len(),
                                     recipient_id,
                                     sig.len(),
-                                    msg_req.seq
                                 );
-                                let next_tip_bytes = invoke
-                                    .post_state_hash
-                                    .as_ref()
-                                    .map(|h| h.v.clone())
-                                    .filter(|v| v.len() == 32)
-                                    .unwrap_or_default();
-                                let next_tip_text = if next_tip_bytes.len() == 32 {
-                                    text_id::encode_base32_crockford(&next_tip_bytes)
-                                } else {
-                                    chain_tip_text.clone()
-                                };
-                                let tick_anchor_bytes = if next_tip_bytes.len() == 32 {
-                                    next_tip_bytes.clone()
-                                } else {
-                                    crate::util::text_id::decode_base32_crockford(&chain_tip_text)
-                                        .filter(|b| b.len() == 32)
-                                        .unwrap_or_else(|| vec![0u8; 32])
-                                };
                                 return Some(B0xEntry {
                                     // This branch decoded an OnlineMessageRequest, not a
                                     // transfer: there is no transfer half and no evidence
@@ -3234,15 +2740,10 @@ impl B0xSDK {
                                     inbox_key: String::new(),
                                     sender_device_id: sender_dev,
                                     sender_genesis_hash: genesis_b32,
-                                    sender_chain_tip: chain_tip_text,
-                                    next_chain_tip: next_tip_text,
                                     recipient_device_id: recipient_id,
                                     transaction: msg_op,
                                     signature: sig,
                                     sender_signing_public_key: sender_pk,
-                                    tick: anchor_tick_from_tip(&tick_anchor_bytes),
-                                    ttl_seconds: 0,
-                                    seq: msg_req.seq,
                                     canonical_operation_bytes: Vec::new(),
                                 });
                             }
@@ -3253,214 +2754,6 @@ impl B0xSDK {
         }
 
         None
-    }
-}
-
-impl B0xSDK {
-    /// Push any pending bilateral messages that were persisted for reliability.
-    ///
-    /// Deterministic rules:
-    /// - Only sessions that are not terminal (committed/rejected/failed) are considered.
-    /// - A message is constructed from the persisted operation bytes and signatures.
-    /// - Signatures: prefer counterparty_signature, otherwise local_signature; if neither
-    ///   exists, the record is skipped (fail-closed, no alternate-path signing).
-    /// - Recipient genesis hash must be found in the contact store; otherwise skip.
-    /// - Sender signing public key is sourced from CoreSDK device identity.
-    pub async fn push_pending_bilateral_messages(
-        device_id_b32: String,
-        core_sdk: Arc<CoreSDK>,
-        storage_endpoints: Vec<String>,
-    ) -> Result<usize, DsmError> {
-        // Ensure DB is ready; ignore init failure and continue with empty result
-        let _ = crate::storage::client_db::init_database();
-
-        let sessions = match crate::storage::client_db::get_all_bilateral_sessions() {
-            Ok(v) => v,
-            Err(e) => {
-                warn!(
-                    "[B0xSDK] push_pending_bilateral_messages: failed to list sessions: {}",
-                    e
-                );
-                return Ok(0);
-            }
-        };
-
-        if sessions.is_empty() {
-            return Ok(0);
-        }
-
-        let sender_genesis_hash = core_sdk
-            .local_genesis_hash()
-            .await
-            .map(|v| text_id::encode_base32_crockford(&v))?;
-        let sender_chain_tip = core_sdk
-            .local_chain_tip()
-            .await
-            .map(|v| text_id::encode_base32_crockford(&v))?;
-        // Use signing_authority to match the key used by
-        // wallet.sign_operation_bytes — see submit_to_b0x for rationale.
-        let sender_signing_public_key = crate::sdk::signing_authority::current_public_key()
-            .unwrap_or_else(|_| core_sdk.get_device_identity().public_key);
-
-        let mut sdk = B0xSDK::new(device_id_b32, core_sdk.clone(), storage_endpoints)?;
-        let mut pushed = 0usize;
-
-        for record in sessions {
-            // Skip terminal states
-            if record.phase == "committed" || record.phase == "rejected" || record.phase == "failed"
-            {
-                continue;
-            }
-
-            if record.counterparty_device_id.len() != 32 {
-                warn!(
-                    "[B0xSDK] push_pending_bilateral_messages: skipping record with invalid counterparty id len {}",
-                    record.counterparty_device_id.len()
-                );
-                continue;
-            }
-
-            // Deserialize operation strictly
-            let operation = match crate::storage::client_db::deserialize_operation(
-                &record.operation_bytes,
-            ) {
-                Ok(op) => op,
-                Err(e) => {
-                    warn!(
-                        "[B0xSDK] push_pending_bilateral_messages: failed to deserialize operation: {}",
-                        e
-                    );
-                    continue;
-                }
-            };
-
-            // Choose signature deterministically
-            let signature = if let Some(sig) = record.counterparty_signature.clone() {
-                sig
-            } else if let Some(sig) = record.local_signature.clone() {
-                sig
-            } else {
-                warn!(
-                    "[B0xSDK] push_pending_bilateral_messages: no signature present, commitment prefix={:02x}{:02x}{:02x}{:02x}",
-                    record.commitment_hash.first().copied().unwrap_or(0),
-                    record.commitment_hash.get(1).copied().unwrap_or(0),
-                    record.commitment_hash.get(2).copied().unwrap_or(0),
-                    record.commitment_hash.get(3).copied().unwrap_or(0)
-                );
-                continue;
-            };
-
-            // Resolve recipient genesis hash, preferring the persisted session binding.
-            let recipient_genesis_hash = if let Some(g) = record.counterparty_genesis_hash.as_ref()
-            {
-                if g.len() == 32 {
-                    text_id::encode_base32_crockford(g)
-                } else {
-                    warn!(
-                        "[B0xSDK] push_pending_bilateral_messages: stored counterparty genesis has invalid length {}",
-                        g.len()
-                    );
-                    continue;
-                }
-            } else {
-                match crate::storage::client_db::get_contact_by_device_id(
-                    &record.counterparty_device_id,
-                ) {
-                    Ok(Some(c)) => text_id::encode_base32_crockford(&c.genesis_hash),
-                    Ok(None) => {
-                        warn!(
-                            "[B0xSDK] push_pending_bilateral_messages: contact not found for counterparty"
-                        );
-                        continue;
-                    }
-                    Err(e) => {
-                        warn!(
-                            "[B0xSDK] push_pending_bilateral_messages: contact lookup failed: {}",
-                            e
-                        );
-                        continue;
-                    }
-                }
-            };
-
-            let recipient_device_id =
-                text_id::encode_base32_crockford(&record.counterparty_device_id);
-            let sender_chain_tip_arr = match decode_base32_32("sender_chain_tip", &sender_chain_tip)
-            {
-                Ok(v) => v,
-                Err(e) => {
-                    warn!(
-                        "[B0xSDK] push_pending_bilateral_messages: sender chain tip invalid: {}",
-                        e
-                    );
-                    continue;
-                }
-            };
-            let recipient_genesis_arr =
-                match decode_base32_32("recipient_genesis_hash", &recipient_genesis_hash) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        warn!(
-                        "[B0xSDK] push_pending_bilateral_messages: recipient genesis invalid: {}",
-                        e
-                    );
-                        continue;
-                    }
-                };
-            let routing_address = match B0xSDK::compute_b0x_address(
-                &recipient_genesis_arr,
-                &record.counterparty_device_id,
-                &sender_chain_tip_arr,
-            ) {
-                Ok(addr) => addr,
-                Err(e) => {
-                    warn!(
-                        "[B0xSDK] push_pending_bilateral_messages: routing address computation failed: {}",
-                        e
-                    );
-                    continue;
-                }
-            };
-
-            let params = B0xSubmissionParams {
-                submission_id: None,
-                recipient_device_id,
-                recipient_genesis_hash,
-                transaction: operation,
-                signature,
-                sender_signing_public_key: sender_signing_public_key.clone(),
-                sender_genesis_hash: sender_genesis_hash.clone(),
-                sender_chain_tip: sender_chain_tip.clone(),
-                ttl_seconds: 0,
-                // AF-2 remediation: seq participates in canonical signing bytes.
-                // We currently do not persist a per-session seq in the SQLite schema
-                // (BilateralSessionRecord). Use a deterministic non-zero default so
-                // we do not emit new submissions with seq=0.
-                // NOTE: This is a stopgap until session rows capture the canonical seq.
-                seq: std::cmp::max(1, record.created_at_step),
-                next_chain_tip: None,
-                routing_address,
-                canonical_operation_bytes: Vec::new(),
-                receipt_evidence_digest: Vec::new(),
-                sender_economic_position: 0,
-                sender_debit_mutation_index: 0,
-            };
-
-            match sdk.submit_to_b0x(params).await {
-                Ok(msg_id) => {
-                    pushed += 1;
-                    info!("[B0xSDK] ✅ pushed pending bilateral (msg_id={})", msg_id);
-                }
-                Err(e) => {
-                    warn!(
-                        "[B0xSDK] push_pending_bilateral_messages: submit failed: {}",
-                        e
-                    );
-                }
-            }
-        }
-
-        Ok(pushed)
     }
 }
 
@@ -3577,9 +2870,7 @@ mod tests {
             version: 3,
             headers: Some(dsm::types::proto::Headers {
                 device_id: vec![0x11; 32],
-                chain_tip: vec![0u8; 32],
                 genesis_hash: vec![content; 32],
-                seq: 0,
             }),
             message_id: message_id.to_vec(),
             payload: None,
@@ -3611,22 +2902,19 @@ mod tests {
     }
     use super::*;
 
-    /// Ensure the storage base dir is set. `CoreSDK::new` reads app state, which
-    /// panics outright when it is unset, so any test touching it is otherwise
-    /// order-dependent: it passes only when some earlier test happened to set it.
-    fn ensure_test_storage_dir() {
-        unsafe {
-            std::env::set_var("DSM_SDK_TEST_MODE", "1");
-        }
-        let _ =
-            crate::storage_utils::set_storage_base_dir(std::path::PathBuf::from("./.dsm_testdata"));
+    /// A device with a real identity, over a fresh database: its device id
+    /// and its `CoreSDK`.
+    /// A device created as wallet creation creates it, with its fleet
+    /// running and configured.
+    fn test_device() -> (String, Arc<CoreSDK>, crate::test_support::one_device::Fleet) {
+        let (identity, core) = crate::economic_fixtures::local_device(0x11);
+        (
+            crate::util::text_id::encode_base32_crockford(&identity.device_id),
+            Arc::new(core),
+            crate::test_support::one_device::Fleet::start(),
+        )
     }
 
-    fn dev_id32_b32() -> String {
-        // Deterministic 32-byte device id for tests.
-        // Must satisfy B0xSDK::new base32(32 bytes) invariant.
-        crate::util::text_id::encode_base32_crockford(&[0x11u8; 32])
-    }
     use std::sync::Arc;
 
     #[test]
@@ -3783,34 +3071,6 @@ mod tests {
         assert!(validate_b0x_address(legacy).is_err());
     }
 
-    #[test]
-    fn test_summarize_ack_status_requires_quorum_for_success() {
-        assert_eq!(
-            summarize_ack_status(1, 3, false, true),
-            AckStatusSummary::Unavailable
-        );
-        assert_eq!(
-            summarize_ack_status(3, 3, false, true),
-            AckStatusSummary::Acked
-        );
-    }
-
-    #[test]
-    fn test_summarize_ack_status_conflict_blocks_sender_progress() {
-        assert_eq!(
-            summarize_ack_status(0, 3, true, true),
-            AckStatusSummary::NotAcked
-        );
-    }
-
-    #[test]
-    fn test_summarize_ack_status_without_authoritative_responses_is_unavailable() {
-        assert_eq!(
-            summarize_ack_status(0, 3, false, false),
-            AckStatusSummary::Unavailable
-        );
-    }
-
     #[tokio::test]
     async fn test_circuit_breaker() {
         let cb = CircuitBreaker::new();
@@ -3823,31 +3083,28 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_sdk_new_scans_tokens() {
         // Construct without endpoints just to call new()
-        let core = Arc::new(CoreSDK::new().expect("CoreSDK"));
-        let device_id = dev_id32_b32();
-        let sdk = B0xSDK::new(device_id.clone(), core, vec![]).unwrap();
+        let (device_id, core, fleet) = test_device();
+        let sdk = B0xSDK::new(device_id.clone(), core, fleet.endpoints()).unwrap();
         assert_eq!(sdk.device_id(), &device_id);
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_sdk_new_rejects_dotted_decimal_device_id() {
-        let core = Arc::new(CoreSDK::new().expect("CoreSDK"));
-        let res = B0xSDK::new(
-            "1.2.3.4".to_string(),
-            core,
-            vec!["http://127.0.0.1:8080".to_string()],
-        );
+        let device = test_device();
+        let res = B0xSDK::new("1.2.3.4".to_string(), device.1, device.2.endpoints());
         assert!(res.is_err());
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn test_envelope_to_b0x_entry_preserves_signature(
     ) -> Result<(), Box<dyn std::error::Error>> {
-        ensure_test_storage_dir();
-        let core = Arc::new(CoreSDK::new().expect("CoreSDK"));
-        let sdk = B0xSDK::new(dev_id32_b32(), core, vec![]).unwrap();
+        let (device_b32, core, fleet) = test_device();
+        let sdk = B0xSDK::new(device_b32, core, fleet.endpoints()).unwrap();
 
         // Build an OnlineTransferRequest with an embedded signature
         let transfer_req = dsm::types::proto::OnlineTransferRequest {
@@ -3858,8 +3115,6 @@ mod tests {
             signature: vec![1, 2, 3, 4, 5],
             nonce: vec![0xAA; 32],
             from_device_id: vec![0x22; 32],
-            chain_tip: vec![0x33; 32],
-            seq: 1,
             canonical_operation_bytes: vec![],
             receipt_evidence_digest: Vec::new(),
             sender_economic_position: 0,
@@ -3875,7 +3130,7 @@ mod tests {
 
         // Build ArgPack directly (not serialized - passed as struct)
         let arg_pack = dsm::types::proto::ArgPack {
-            schema_hash: Some(dsm::types::proto::Hash32 { v: vec![0u8; 32] }),
+            schema_hash: None,
             codec: dsm::types::proto::Codec::Proto as i32,
             body: transfer_req_bytes.clone(),
         };
@@ -3884,8 +3139,6 @@ mod tests {
             program: None,
             method: "wallet.send".to_string(),
             args: Some(arg_pack),
-            pre_state_hash: Some(dsm::types::proto::Hash32 { v: vec![0u8; 32] }),
-            post_state_hash: Some(dsm::types::proto::Hash32 { v: vec![0u8; 32] }),
             cosigners: vec![],
             evidence: None,
             nonce: None,
@@ -3902,9 +3155,7 @@ mod tests {
             version: 3,
             headers: Some(dsm::types::proto::Headers {
                 device_id: vec![0xAB; 32],
-                chain_tip: vec![7; 32],
                 genesis_hash: vec![0; 32],
-                seq: 5,
             }),
             message_id: vec![8; 16],
             payload: Some(dsm::types::proto::envelope::Payload::UniversalTx(
@@ -3923,11 +3174,11 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn test_envelope_to_b0x_entry_prefers_transfer_sig_but_falls_back_to_evidence(
     ) -> Result<(), Box<dyn std::error::Error>> {
-        ensure_test_storage_dir();
-        let core = Arc::new(CoreSDK::new().expect("CoreSDK"));
-        let sdk = B0xSDK::new(dev_id32_b32(), core, vec![]).unwrap();
+        let (device_b32, core, fleet) = test_device();
+        let sdk = B0xSDK::new(device_b32, core, fleet.endpoints()).unwrap();
 
         // Build an OnlineTransferRequest WITHOUT an embedded signature
         let transfer_req = dsm::types::proto::OnlineTransferRequest {
@@ -3938,8 +3189,6 @@ mod tests {
             signature: vec![],
             nonce: vec![0xBB; 32],
             from_device_id: vec![0x44; 32],
-            chain_tip: vec![0x55; 32],
-            seq: 2,
             canonical_operation_bytes: vec![],
             receipt_evidence_digest: Vec::new(),
             sender_economic_position: 0,
@@ -3954,7 +3203,7 @@ mod tests {
         })?;
 
         let arg_pack = dsm::types::proto::ArgPack {
-            schema_hash: Some(dsm::types::proto::Hash32 { v: vec![0u8; 32] }),
+            schema_hash: None,
             codec: dsm::types::proto::Codec::Proto as i32,
             body: transfer_req_bytes.clone(),
         };
@@ -3973,8 +3222,6 @@ mod tests {
             program: None,
             method: "wallet.send".to_string(),
             args: Some(arg_pack),
-            pre_state_hash: Some(dsm::types::proto::Hash32 { v: vec![0u8; 32] }),
-            post_state_hash: Some(dsm::types::proto::Hash32 { v: vec![0u8; 32] }),
             cosigners: vec![],
             evidence,
             nonce: None,
@@ -3991,9 +3238,7 @@ mod tests {
             version: 3,
             headers: Some(dsm::types::proto::Headers {
                 device_id: vec![0xAB; 32],
-                chain_tip: vec![7; 32],
                 genesis_hash: vec![0; 32],
-                seq: 5,
             }),
             message_id: vec![8; 16],
             payload: Some(dsm::types::proto::envelope::Payload::UniversalTx(
@@ -4012,11 +3257,11 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn test_envelope_to_b0x_entry_online_message_payload_and_signature(
     ) -> Result<(), Box<dyn std::error::Error>> {
-        ensure_test_storage_dir();
-        let core = Arc::new(CoreSDK::new().expect("CoreSDK"));
-        let sdk = B0xSDK::new(dev_id32_b32(), core, vec![]).unwrap();
+        let (device_b32, core, fleet) = test_device();
+        let sdk = B0xSDK::new(device_b32, core, fleet.endpoints()).unwrap();
 
         let payload = vec![1, 2, 3, 4, 5, 6];
         let memo = "hello".to_string();
@@ -4028,7 +3273,6 @@ mod tests {
             nonce: vec![0xAA; 32],
             from_device_id: vec![0x22; 32],
             chain_tip: vec![0x33; 32],
-            seq: 7,
         };
         let mut msg_req_bytes = Vec::with_capacity(msg_req.encoded_len());
         msg_req.encode(&mut msg_req_bytes).map_err(|e| {
@@ -4039,7 +3283,7 @@ mod tests {
         })?;
 
         let arg_pack = dsm::types::proto::ArgPack {
-            schema_hash: Some(dsm::types::proto::Hash32 { v: vec![0u8; 32] }),
+            schema_hash: None,
             codec: dsm::types::proto::Codec::Proto as i32,
             body: msg_req_bytes,
         };
@@ -4048,8 +3292,6 @@ mod tests {
             program: None,
             method: "message.send".to_string(),
             args: Some(arg_pack),
-            pre_state_hash: Some(dsm::types::proto::Hash32 { v: vec![0u8; 32] }),
-            post_state_hash: Some(dsm::types::proto::Hash32 { v: vec![0u8; 32] }),
             cosigners: vec![],
             evidence: None,
             nonce: None,
@@ -4066,9 +3308,7 @@ mod tests {
             version: 3,
             headers: Some(dsm::types::proto::Headers {
                 device_id: vec![0xAB; 32],
-                chain_tip: vec![7; 32],
                 genesis_hash: vec![0; 32],
-                seq: 5,
             }),
             message_id: vec![8; 16],
             payload: Some(dsm::types::proto::envelope::Payload::UniversalTx(
@@ -4102,90 +3342,6 @@ mod tests {
             }
             other => panic!("expected Generic op, got {other:?}"),
         }
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_envelope_to_b0x_entry_uses_post_state_hash_as_next_tip(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        ensure_test_storage_dir();
-        let core = Arc::new(CoreSDK::new().expect("CoreSDK"));
-        let sdk = B0xSDK::new(dev_id32_b32(), core, vec![]).unwrap();
-
-        let post_tip = vec![0x42; 32];
-        let transfer_req = dsm::types::proto::OnlineTransferRequest {
-            token_id: "ERA".to_string(),
-            to_device_id: vec![0x11; 32],
-            amount: 7,
-            memo: "tip".to_string(),
-            signature: vec![1, 2, 3],
-            nonce: vec![0xAA; 32],
-            from_device_id: vec![0x22; 32],
-            chain_tip: vec![0x33; 32],
-            seq: 9,
-            canonical_operation_bytes: vec![],
-            receipt_evidence_digest: Vec::new(),
-            sender_economic_position: 0,
-            sender_debit_mutation_index: 0,
-        };
-        let mut transfer_req_bytes = Vec::with_capacity(transfer_req.encoded_len());
-        transfer_req.encode(&mut transfer_req_bytes).map_err(|e| {
-            DsmError::internal(
-                format!("OnlineTransferRequest encode failed: {e}"),
-                None::<std::io::Error>,
-            )
-        })?;
-
-        let arg_pack = dsm::types::proto::ArgPack {
-            schema_hash: Some(dsm::types::proto::Hash32 { v: vec![0u8; 32] }),
-            codec: dsm::types::proto::Codec::Proto as i32,
-            body: transfer_req_bytes,
-        };
-
-        let invoke = dsm::types::proto::Invoke {
-            program: None,
-            method: "wallet.send".to_string(),
-            args: Some(arg_pack),
-            pre_state_hash: Some(dsm::types::proto::Hash32 { v: vec![0u8; 32] }),
-            post_state_hash: Some(dsm::types::proto::Hash32 {
-                v: post_tip.clone(),
-            }),
-            cosigners: vec![],
-            evidence: None,
-            nonce: None,
-        };
-
-        let op = dsm::types::proto::UniversalOp {
-            op_id: Some(dsm::types::proto::Hash32 { v: vec![9; 32] }),
-            actor: vec![2; 32],
-            genesis_hash: vec![3; 32],
-            kind: Some(dsm::types::proto::universal_op::Kind::Invoke(invoke)),
-        };
-
-        let env = dsm::types::proto::Envelope {
-            version: 3,
-            headers: Some(dsm::types::proto::Headers {
-                device_id: vec![0xAB; 32],
-                chain_tip: vec![7; 32],
-                genesis_hash: vec![0; 32],
-                seq: 5,
-            }),
-            message_id: vec![8; 16],
-            payload: Some(dsm::types::proto::envelope::Payload::UniversalTx(
-                dsm::types::proto::UniversalTx {
-                    ops: vec![op],
-                    atomic: true,
-                },
-            )),
-        };
-
-        let entry = sdk
-            .envelope_to_b0x_entry(env)
-            .expect("should extract B0xEntry");
-
-        let post_b32 = crate::util::text_id::encode_base32_crockford(&post_tip);
-        assert_eq!(entry.next_chain_tip, post_b32);
 
         Ok(())
     }
@@ -4230,7 +3386,6 @@ mod tests {
     /// production values, not guesses, is the whole point of this budget.
     const REL_PROOF_LEN: usize = 8_261;
     const DEV_PROOF_LEN: usize = 9;
-    const REPLACE_WITNESS_LEN: usize = 4;
     const KYBER_CT_LEN: usize = 1_088;
     const EK_PK_LEN: usize = 64;
     const CANONICAL_OP_LEN: usize = 303;
@@ -4250,9 +3405,7 @@ mod tests {
             // entropy, required at the wire since #934.
             transition_entropy: vec![0x0C; 32],
             rel_proof_parent: vec![0x08; REL_PROOF_LEN],
-            rel_proof_child: vec![0x09; REL_PROOF_LEN],
             dev_proof: vec![0x0A; DEV_PROOF_LEN],
-            rel_replace_witness: vec![0x0B; REPLACE_WITNESS_LEN],
             sig_a: vec![0xAA; sig],
             ek_cert_a: vec![0xCC; sig],
             ek_pk_a: vec![0xDD; EK_PK_LEN],
@@ -4288,7 +3441,7 @@ mod tests {
             recipient_genesis_hash: crate::util::text_id::encode_base32_crockford(&[0x55u8; 32]),
             transaction: dsm::types::operations::Operation::Transfer {
                 to_device_id: vec![0x44; 32],
-                amount: dsm::types::token_types::Balance::from_state(100, [0u8; 32]),
+                amount: dsm::types::token_types::Balance::amount(100),
                 token_id: b"ERA".to_vec(),
                 policy_commit: [0x0F; 32],
                 mode: dsm::types::operations::TransactionMode::Unilateral,
@@ -4305,9 +3458,6 @@ mod tests {
             sender_genesis_hash: crate::util::text_id::encode_base32_crockford(&[0x66u8; 32]),
             sender_chain_tip: crate::util::text_id::encode_base32_crockford(&[0x77u8; 32]),
             sender_signing_public_key: vec![0x88; EK_PK_LEN],
-            ttl_seconds: 0,
-            seq: 1,
-            next_chain_tip: Some(vec![0x99; 32]),
             routing_address: crate::util::text_id::encode_base32_crockford(&[0xABu8; 32]),
             canonical_operation_bytes: vec![0xCD; CANONICAL_OP_LEN],
             receipt_evidence_digest: Vec::new(),
@@ -4317,165 +3467,124 @@ mod tests {
         }
     }
 
-    /// A loopback member that records which endpoint each `POST` hit and
-    /// answers `204 No Content`. Returns its base URL.
-    fn spawn_ack_recorder(
-        hits: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
-    ) -> std::io::Result<String> {
-        use std::io::{Read as _, Write as _};
-        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
-        let base = format!("http://{}", listener.local_addr()?);
-        let me = base.clone();
-        std::thread::spawn(move || {
-            for stream in listener.incoming() {
-                let Ok(mut stream) = stream else { continue };
-                let mut buf = vec![0u8; 65536];
-                let n = stream.read(&mut buf).unwrap_or(0);
-                let head = String::from_utf8_lossy(&buf[..n]).to_string();
-                if head.starts_with("POST") {
-                    hits.lock()
-                        .unwrap_or_else(|p| p.into_inner())
-                        .push(me.clone());
-                }
-                let _ = stream.write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n");
-            }
-        });
-        Ok(base)
-    }
-
-    /// THE FAN-OUT FOLLOWS THE REGISTER QUORUM — not the fleet size and not
-    /// a literal beside it (#867). `new` used to carry `quorum_k: 3`, which
-    /// agreed with the 5/3 pin by coincidence and silently diverged from the
-    /// 3/2 one. Now K is the resolved profile's quorum: with more members than
-    /// K, exactly K distinct members receive a submit, and an SDK built for a
-    /// register with a different K fans out to exactly that K. (While the pin
-    /// is 3, a re-introduced literal 3 is indistinguishable here — deriving it
-    /// is what makes the fan-out move with the pin instead of drifting.)
+    /// THE FAN-OUT FOLLOWS THE REGISTER QUORUM, not the fleet size (#867): a
+    /// send's transfer and its evidence each land on exactly K members of the
+    /// pinned set, K the resolved profile's quorum, never on all of them.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[serial_test::serial]
-    async fn the_delivery_fan_out_follows_the_register_quorum_not_the_fleet_size() {
-        ensure_test_storage_dir();
-        crate::storage::client_db::reset_database_for_tests();
-        crate::storage::client_db::init_database().expect("db");
-
+    async fn a_send_lands_on_exactly_the_register_quorum_of_members() {
         let profile = dsm::economic::register::resolve_root_register_profile(
             dsm::economic::register::BETA_NETWORK_ID,
         )
         .expect("beta profile");
         let k = crate::storage::client_db::publication::quorum_for(profile.members.len()) as usize;
-        let hits = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
-        // Strictly more members than K, so "reached K" and "reached all" differ.
-        let endpoints: Vec<String> = (0..k + 2)
-            .map(|_| spawn_ack_recorder(hits.clone()).expect("recorder"))
-            .collect();
-
-        // The submitting identity, its genesis record and a token per member
-        // (the same seeding the storage-route recorder tests use), so the
-        // only thing under test is the fan-out.
-        let device_id = vec![0x0Au8; 32];
-        let genesis_hash = vec![0x31u8; 32];
-        let binding_key = vec![0x41u8; 32];
-        let (public_key, _sk) = crate::sdk::signing_authority::derive_signing_keys_for_testing(
-            &device_id,
-            &genesis_hash,
-            &binding_key,
-        )
-        .expect("signing keypair");
-        crate::sdk::signing_authority::set_binding_key_for_testing(binding_key);
-        crate::sdk::app_state::AppState::set_identity_info(
-            device_id,
-            public_key,
-            genesis_hash,
-            dsm::merkle::sparse_merkle_tree::empty_root(
-                dsm::merkle::sparse_merkle_tree::DEFAULT_SMT_HEIGHT,
-            )
-            .to_vec(),
+        assert!(
+            k < profile.members.len(),
+            "the set is wider than its quorum, so reaching K and reaching all differ"
         );
-        crate::sdk::app_state::AppState::set_has_identity(true);
-        let sender_b32 = crate::util::text_id::encode_base32_crockford(&[0x0Au8; 32]);
-        let genesis_b32 = crate::util::text_id::encode_base32_crockford(&[0x31u8; 32]);
-        crate::storage::client_db::store_genesis_record_with_verification(
-            &crate::storage::client_db::GenesisRecord {
-                genesis_id: genesis_b32.clone(),
-                device_id: sender_b32.clone(),
-                mpc_proof: "test".to_string(),
-                device_birth_binding: String::new(),
-                merkle_root: String::new(),
-                participant_count: 3,
-                progress_marker: String::new(),
-                publication_hash: String::new(),
-                storage_nodes: endpoints.clone(),
-                entropy_hash: String::new(),
-                protocol_version: "v1".to_string(),
-                hash_chain_proof: None,
-                smt_proof: None,
-                verification_step: None,
-                genesis_nonce: String::new(),
-                genesis_profile: "MnemonicV2".to_string(),
-                network_id: "dsm-test".into(),
-            },
-        )
-        .expect("seed genesis record");
-        for ep in &endpoints {
-            crate::storage::client_db::store_auth_token(
-                ep,
-                &sender_b32,
-                &genesis_b32,
-                "test-token",
-            )
-            .expect("seed auth token");
-        }
-        let distinct = |hits: &std::sync::Arc<std::sync::Mutex<Vec<String>>>| {
-            hits.lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .iter()
-                .cloned()
-                .collect::<std::collections::BTreeSet<String>>()
-                .len()
+
+        let p = crate::test_support::two_device::Pair::boot(100, 0).await;
+        let sent = p.a.send(&p.b, 10).await;
+        assert!(sent.success, "{:?}", sent.error_message);
+
+        p.a.enter();
+        let submission_ids: Vec<String> = {
+            let binding = crate::storage::client_db::get_connection().expect("conn");
+            let conn = binding
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut ids = Vec::new();
+            for sql in [
+                "SELECT submission_id FROM sender_outbox",
+                "SELECT submission_id FROM sender_outbox_artifacts",
+            ] {
+                let mut stmt = conn.prepare(sql).expect("prepare");
+                ids.extend(
+                    stmt.query_map([], |row| row.get::<_, String>(0))
+                        .expect("query")
+                        .map(|row| row.expect("row")),
+                );
+            }
+            ids
         };
-
-        // Built for the pinned register: K is the profile's quorum, and a
-        // submit reaches exactly K of the k+2 members.
-        let core = Arc::new(CoreSDK::new().expect("CoreSDK"));
-        let mut sdk =
-            B0xSDK::new(sender_b32.clone(), core.clone(), endpoints.clone()).expect("B0xSDK");
         assert_eq!(
-            sdk.delivery_quorum(),
-            k,
-            "K is the resolved profile's quorum, not a literal"
-        );
-        sdk.submit_to_b0x_with_retry(params_split_shape(), &B0xRetryConfig::default())
-            .await
-            .expect("submit at K");
-        assert_eq!(
-            distinct(&hits),
-            k,
-            "exactly K distinct members receive the submit"
+            submission_ids.len(),
+            2,
+            "a send freezes its transfer and its evidence"
         );
 
-        // A register with a different quorum: the fan-out follows it.
-        for other_k in [2usize, 1] {
-            hits.lock().unwrap_or_else(|p| p.into_inner()).clear();
-            let mut sdk = B0xSDK::new(sender_b32.clone(), core.clone(), endpoints.clone())
-                .expect("B0xSDK")
-                .with_delivery_quorum(other_k);
-            let mut params = params_split_shape();
-            params.seq = 10 + other_k as u64;
-            sdk.submit_to_b0x_with_retry(params, &B0xRetryConfig::default())
-                .await
-                .expect("submit at other K");
+        let mut spools = Vec::new();
+        for node in 0..p.nodes.nodes.len() {
+            spools.push(p.spooled_message_ids(node).await);
+        }
+        for id in &submission_ids {
+            let holders = spools.iter().filter(|spool| spool.contains(id)).count();
             assert_eq!(
-                distinct(&hits),
-                other_k,
-                "the fan-out follows the register quorum it was built for (K={other_k})"
+                holders, k,
+                "{id} is held by {holders} members; the register quorum is {k}"
             );
         }
     }
 
+    /// DELIVERY NEVER COUNTS FEWER THAN THE QUORUM. With n − q + 1 members
+    /// down, a frozen send cannot reach K. A second attempt — once the circuit
+    /// breaker has marked those members failed — must refuse exactly as the
+    /// first did, never deliver to the q − 1 still answering and report done.
+    /// With the members back, the same bytes reach the quorum.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn delivery_below_the_quorum_is_refused_however_many_members_are_marked_failed() {
+        let mut p = crate::test_support::two_device::Pair::boot(100, 0).await;
+        let sent = p.a.send(&p.b, 10).await;
+        assert!(sent.success, "{:?}", sent.error_message);
+
+        p.a.enter();
+        let (route, id): (String, String) = {
+            let binding = crate::storage::client_db::get_connection().expect("conn");
+            let conn = binding
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            conn.query_row(
+                "SELECT routing_address, submission_id FROM sender_outbox",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("the frozen transfer")
+        };
+        let down = crate::economic_fixtures::members_to_break_quorum();
+        p.nodes.take_down(&down).await;
+        let mut sdk = B0xSDK::new(
+            crate::util::text_id::encode_base32_crockford(&p.a.device_id),
+            p.a.router().core_sdk.clone(),
+            p.fleet.endpoints(),
+        )
+        .expect("B0xSDK");
+        let once = B0xRetryConfig {
+            max_retries: 0,
+            base_delay_ms: 0,
+            max_delay_ms: 0,
+            backoff_multiplier: 1.0,
+        };
+        for attempt in 1..=2 {
+            let err = sdk
+                .submit_stored_envelope_with_retry(&route, &id, &once)
+                .await
+                .expect_err("q − 1 members cannot hold a delivery");
+            assert!(
+                err.to_string().contains("delivery below quorum"),
+                "attempt {attempt}: {err}"
+            );
+        }
+
+        p.nodes.bring_up(&down).await;
+        sdk.submit_stored_envelope_with_retry(&route, &id, &once)
+            .await
+            .expect("with the members back, the same bytes reach the quorum");
+    }
+
     fn encode_via_production_path(params: &B0xSubmissionParams) -> usize {
-        ensure_test_storage_dir();
-        let core = Arc::new(CoreSDK::new().expect("CoreSDK"));
-        let sdk = B0xSDK::new(dev_id32_b32(), core, vec![]).expect("B0xSDK");
+        let (device_b32, core, fleet) = test_device();
+        let sdk = B0xSDK::new(device_b32, core, fleet.endpoints()).expect("B0xSDK");
         sdk.build_envelope_for_submission(params)
             .expect("build envelope")
             .bytes
@@ -4485,6 +3594,7 @@ mod tests {
     /// ADR 0003 shape 1, as PRODUCTION now builds it: no inline receipt, a
     /// 32-byte role-separated reference in field 12.
     #[test]
+    #[serial_test::serial]
     fn adr0003_transfer_envelope_fits_the_node_cap() {
         let params = params_split_shape();
         assert_eq!(
@@ -4512,10 +3622,10 @@ mod tests {
     /// not cheerfully build an oversized artifact and discover it as a 413 that
     /// no retry can clear.
     #[test]
+    #[serial_test::serial]
     fn the_evidence_builder_refuses_to_build_over_the_cap() {
-        ensure_test_storage_dir();
-        let core = Arc::new(CoreSDK::new().expect("CoreSDK"));
-        let sdk = B0xSDK::new(dev_id32_b32(), core, vec![]).expect("B0xSDK");
+        let (device_b32, core, fleet) = test_device();
+        let sdk = B0xSDK::new(device_b32, core, fleet.endpoints()).expect("B0xSDK");
 
         // A receipt larger than the cap on its own.
         let oversized = vec![0xAB; MAX_B0X_ENVELOPE_BYTES + 1];
@@ -4544,10 +3654,10 @@ mod tests {
     /// would produce an artifact that can never satisfy the transfer's
     /// reference.
     #[test]
+    #[serial_test::serial]
     fn the_evidence_builder_rejects_a_digest_that_does_not_match_its_bytes() {
-        ensure_test_storage_dir();
-        let core = Arc::new(CoreSDK::new().expect("CoreSDK"));
-        let sdk = B0xSDK::new(dev_id32_b32(), core, vec![]).expect("B0xSDK");
+        let (device_b32, core, fleet) = test_device();
+        let sdk = B0xSDK::new(device_b32, core, fleet.endpoints()).expect("B0xSDK");
 
         let receipt = production_sized_receipt_a();
         let wrong_digest = [0x00u8; 32];
@@ -4571,10 +3681,10 @@ mod tests {
     /// the digest was derived from, and carries that digest for self-
     /// identification before a recipient has paired it with a transfer.
     #[test]
+    #[serial_test::serial]
     fn the_evidence_artifact_carries_the_exact_bytes_its_digest_binds() {
-        ensure_test_storage_dir();
-        let core = Arc::new(CoreSDK::new().expect("CoreSDK"));
-        let sdk = B0xSDK::new(dev_id32_b32(), core, vec![]).expect("B0xSDK");
+        let (device_b32, core, fleet) = test_device();
+        let sdk = B0xSDK::new(device_b32, core, fleet.endpoints()).expect("B0xSDK");
 
         let receipt = production_sized_receipt_a();
         let digest = crate::storage::client_db::evidence_content_digest(
@@ -4621,6 +3731,7 @@ mod tests {
     /// bytes, so instability here would mean a retry submits a DIFFERENT
     /// artifact under the same deterministic id.
     #[test]
+    #[serial_test::serial]
     fn the_split_transfer_encoding_is_byte_stable_across_attempts() {
         let d1 = evidence_content_digest_for_test();
         let d2 = evidence_content_digest_for_test();
@@ -4636,9 +3747,8 @@ mod tests {
         // ...and the evidence artifact must be byte-IDENTICAL, not merely the
         // same length: a retry replays frozen bytes under a deterministic id,
         // so instability would submit a different artifact under the same id.
-        ensure_test_storage_dir();
-        let core = Arc::new(CoreSDK::new().expect("CoreSDK"));
-        let sdk = B0xSDK::new(dev_id32_b32(), core, vec![]).expect("B0xSDK");
+        let (device_b32, core, fleet) = test_device();
+        let sdk = B0xSDK::new(device_b32, core, fleet.endpoints()).expect("B0xSDK");
         let receipt = production_sized_receipt_a();
         let build = || {
             sdk.build_evidence_envelope(
@@ -4669,11 +3779,11 @@ mod tests {
     /// field 10 empty, field 12 exactly 32 bytes. Asserting on the params would
     /// only prove what was passed in, not what went on the wire.
     #[test]
+    #[serial_test::serial]
     fn the_encoded_transfer_envelope_carries_the_reference_not_the_receipt() {
         let params = params_split_shape();
-        let core = Arc::new(CoreSDK::new().expect("CoreSDK"));
-        ensure_test_storage_dir();
-        let sdk = B0xSDK::new(dev_id32_b32(), core, vec![]).expect("B0xSDK");
+        let (device_b32, core, fleet) = test_device();
+        let sdk = B0xSDK::new(device_b32, core, fleet.endpoints()).expect("B0xSDK");
         let built = sdk
             .build_envelope_for_submission(&params)
             .expect("build envelope");
@@ -4736,15 +3846,20 @@ mod tests {
             .expect("overlay");
         let bytes = full.to_full_protobuf().expect("encode");
         // The 5GN specimen was 218,541 bytes; canonical field 21 (a two-byte
-        // key varint, one length byte, 32 bytes of value) adds 35.
-        assert_eq!(bytes.len(), 218_576, "the 5GN specimen size plus field 21");
+        // key varint, one length byte, 32 bytes of value) adds 35, and the
+        // dropped child proof (field 9, 8,261 + 3) and replace witness
+        // (field 11, 4 + 2) remove 8,270.
+        assert_eq!(
+            bytes.len(),
+            210_306,
+            "the 5GN specimen size plus field 21, without fields 9 and 11"
+        );
         bytes
     }
 
     fn test_reply_sdk() -> B0xSDK {
-        ensure_test_storage_dir();
-        let core = Arc::new(CoreSDK::new().expect("CoreSDK"));
-        B0xSDK::new(dev_id32_b32(), core, vec![]).expect("B0xSDK")
+        let (device_b32, core, fleet) = test_device();
+        B0xSDK::new(device_b32, core, fleet.endpoints()).expect("B0xSDK")
     }
 
     /// The recipient's canonical pair the reply builder carries (delta-only
@@ -4768,6 +3883,7 @@ mod tests {
     /// breaks it. Adding one is a transport-design change, not a schema
     /// extension.
     #[test]
+    #[serial_test::serial]
     fn adr0003_b_side_countersign_delta_fits_the_node_cap() {
         let full = production_sized_full_countersigned_receipt();
         let sdk = test_reply_sdk();
@@ -4831,6 +3947,7 @@ mod tests {
     /// The recipient-derived A digest equals the digest the sender computed at
     /// send over the SAME bytes — the delta names exactly what was countersigned.
     #[test]
+    #[serial_test::serial]
     fn the_countersign_reply_names_the_exact_a_side_bytes() {
         let a_bytes = production_sized_receipt_a();
         let full = production_sized_full_countersigned_receipt();
@@ -4862,6 +3979,7 @@ mod tests {
     /// Two builds from the same inputs are byte-identical — required because
     /// the reply id is deterministic and the node keeps the first body per id.
     #[test]
+    #[serial_test::serial]
     fn the_countersign_reply_is_byte_stable_across_attempts() {
         let full = production_sized_full_countersigned_receipt();
         let sdk = test_reply_sdk();
@@ -4877,6 +3995,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn the_countersign_builder_refuses_what_it_must() {
         let sdk = test_reply_sdk();
         let full = production_sized_full_countersigned_receipt();
@@ -4960,7 +4079,7 @@ mod tests {
     /// framed as the production submit path frames it.
     fn test_invoke_envelope(method: &str, body: Vec<u8>) -> dsm::types::proto::Envelope {
         let arg_pack = dsm::types::proto::ArgPack {
-            schema_hash: Some(dsm::types::proto::Hash32 { v: vec![0u8; 32] }),
+            schema_hash: None,
             codec: dsm::types::proto::Codec::Proto as i32,
             body,
         };
@@ -4968,8 +4087,6 @@ mod tests {
             program: None,
             method: method.to_string(),
             args: Some(arg_pack),
-            pre_state_hash: Some(dsm::types::proto::Hash32 { v: vec![0u8; 32] }),
-            post_state_hash: Some(dsm::types::proto::Hash32 { v: vec![0u8; 32] }),
             cosigners: vec![],
             evidence: None,
             nonce: Some(dsm::types::proto::Hash16 { v: vec![0u8; 16] }),
@@ -4978,9 +4095,7 @@ mod tests {
             version: 3,
             headers: Some(dsm::types::proto::Headers {
                 device_id: vec![0x11; 32],
-                chain_tip: vec![0x22; 32],
                 genesis_hash: vec![0x33; 32],
-                seq: 1,
             }),
             message_id: vec![0x44; 16],
             payload: Some(dsm::types::proto::envelope::Payload::UniversalTx(
@@ -5003,6 +4118,7 @@ mod tests {
     /// method are both `None` here, and the legacy one is not a transfer either
     /// — it matches no discriminator and is dropped, never consumed.
     #[test]
+    #[serial_test::serial]
     fn retrieve_discriminates_a_countersign_delta_by_its_method_only() {
         let body = vec![0xB0u8; 96];
         let delta = test_invoke_envelope(RECEIPT_COUNTERSIGN_B_METHOD, body.clone());
@@ -5015,9 +4131,8 @@ mod tests {
         let legacy = test_invoke_envelope("wallet.acceptanceReceipt", body);
         assert!(B0xSDK::decode_countersign_b(&legacy).is_none());
         assert!(B0xSDK::decode_receipt_evidence_a(&legacy).is_none());
-        ensure_test_storage_dir();
-        let core = Arc::new(CoreSDK::new().expect("CoreSDK"));
-        let sdk = B0xSDK::new(dev_id32_b32(), core, vec![]).expect("B0xSDK");
+        let (device_b32, core, fleet) = test_device();
+        let sdk = B0xSDK::new(device_b32, core, fleet.endpoints()).expect("B0xSDK");
         assert!(
             sdk.envelope_to_b0x_entry(legacy).is_none(),
             "a legacy full-receipt reply is not a transfer and must be dropped, not consumed"

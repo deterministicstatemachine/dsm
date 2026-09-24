@@ -34,12 +34,9 @@ pub const TAG_DSM_DLV_OPEN: TaggedHashDomain<'static> = crate::tagged_domain!(b"
 pub const TAG_DSM_DLV_PARAMS: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/dlv-params");
 pub const TAG_DSM_DLV_PARTITION: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/dlv-partition");
-pub const TAG_DSM_DLV_POLICY: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/dlv-policy");
 /// The DLV-POLICY DIGEST: `BLAKE3(this || CCB(ReleasePolicy) || CCB(FeePolicy))`,
 /// a deterministic view of the two DLV-layer members the creator-signed
-/// `VaultStateV2` already commits (members 8 and 9). Distinct from
-/// `TAG_DSM_DLV_POLICY`, which hashes a `SmartPolicy` proto — a different
-/// preimage under a different domain, never the same one.
+/// `VaultStateV2` already commits (members 8 and 9).
 pub const TAG_DSM_DLV_POLICY_DIGEST: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/dlv-policy-digest");
 pub const TAG_DSM_DLV_PROOF: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/dlv-proof");
@@ -48,16 +45,6 @@ pub const TAG_DSM_DLV_UNLOCK: TaggedHashDomain<'static> = crate::tagged_domain!(
 pub const TAG_DSM_DLV_VAULT_ID: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/dlv-vault-id");
 pub const TAG_DSM_VAULT_AD: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/vault-ad");
-pub const TAG_DSM_VAULT_COMMITMENT_V2: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/vault-commitment-v2");
-pub const TAG_DSM_VAULT_ENVELOPE_V2: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/vault-envelope-v2");
-pub const TAG_DSM_VAULT_KEK_V2: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/Vault/KEK/v2");
-pub const TAG_DSM_VAULT_KEY_TYPE: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/vault-key-type");
-pub const TAG_DSM_VAULT_NONCE_V2: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/Vault/Nonce/v2");
 pub const TAG_DSM_WITHDRAWAL: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/withdrawal");
 
 #[cfg(test)]
@@ -80,17 +67,11 @@ pub(super) const TAGS: &[TaggedHashDomain<'static>] = &[
     TAG_DSM_DLV_OPEN,
     TAG_DSM_DLV_PARAMS,
     TAG_DSM_DLV_PARTITION,
-    TAG_DSM_DLV_POLICY,
     TAG_DSM_DLV_POLICY_DIGEST,
     TAG_DSM_DLV_PROOF,
     TAG_DSM_DLV_REFUND,
     TAG_DSM_DLV_UNLOCK,
     TAG_DSM_DLV_VAULT_ID,
     TAG_DSM_VAULT_AD,
-    TAG_DSM_VAULT_COMMITMENT_V2,
-    TAG_DSM_VAULT_ENVELOPE_V2,
-    TAG_DSM_VAULT_KEK_V2,
-    TAG_DSM_VAULT_KEY_TYPE,
-    TAG_DSM_VAULT_NONCE_V2,
     TAG_DSM_WITHDRAWAL,
 ];

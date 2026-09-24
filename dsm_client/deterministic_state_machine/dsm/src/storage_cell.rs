@@ -603,9 +603,7 @@ mod tests {
         );
         let mut incremental = SparseMerkleTree::new();
         for (k, h) in keys.iter().zip(&hashes) {
-            incremental
-                .update_leaf(&leaf_key(&ns, k), &leaf_value(3, h))
-                .expect("insert");
+            incremental.update_leaf(&leaf_key(&ns, k), &leaf_value(3, h));
         }
         assert_eq!(tree.root(), incremental.root());
         let proof =

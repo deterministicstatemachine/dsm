@@ -62,6 +62,20 @@ pub struct OwnerIdentityInputs<'a> {
     pub genesis_version: u32,
 }
 
+impl<'a> OwnerIdentityInputs<'a> {
+    /// The beta wallet on `network_id`: wallet index 0, device slot 0,
+    /// Genesis v3 — the inputs `system.createGenesisV2` creates the genesis
+    /// under.
+    pub fn beta(network_id: &'a [u8]) -> Self {
+        Self {
+            network_id,
+            wallet_index: 0,
+            device_slot: 0,
+            genesis_version: 3,
+        }
+    }
+}
+
 /// The owner's derived authority facts: the identity, the device, and the
 /// authority position a `V_n` must commit (field 13). This is what an
 /// owner-side state CONSTRUCTOR needs — the presentation builder re-derives

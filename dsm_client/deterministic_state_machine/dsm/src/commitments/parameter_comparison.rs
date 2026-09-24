@@ -598,38 +598,6 @@ pub fn verify_operation_parameters(
     Ok(true)
 }
 
-/// Deterministic field-order encoding of forward-commitment-related parameters for comparison
-pub fn encode_forward_commitment_params(
-    fixed_parameters: &HashMap<String, Vec<u8>>,
-    variable_parameters: &[String],
-) -> Vec<u8> {
-    // Sort keys and variables deterministically and length-prefix all fields
-    let mut out = Vec::new();
-    let mut keys: Vec<_> = fixed_parameters.keys().collect();
-    keys.sort();
-    out.extend_from_slice(&(keys.len() as u32).to_le_bytes());
-    for k in keys {
-        let kb = k.as_bytes();
-        out.extend_from_slice(&(kb.len() as u32).to_le_bytes());
-        out.extend_from_slice(kb);
-        #[allow(clippy::expect_used)]
-        let vb = fixed_parameters
-            .get(k)
-            .expect("key should exist as collected from keys iterator");
-        out.extend_from_slice(&(vb.len() as u32).to_le_bytes());
-        out.extend_from_slice(vb);
-    }
-    let mut vars: Vec<String> = variable_parameters.to_owned();
-    vars.sort();
-    out.extend_from_slice(&(vars.len() as u32).to_le_bytes());
-    for v in vars {
-        let vb = v.as_bytes();
-        out.extend_from_slice(&(vb.len() as u32).to_le_bytes());
-        out.extend_from_slice(vb);
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -718,41 +686,6 @@ mod tests {
         assert!(!verify_operation_parameters(&invalid_op, &fixed_params)?);
 
         Ok(())
-    }
-
-    #[test]
-    fn test_encode_forward_commitment_params_order_invariance() {
-        // Prepare fixed parameters and variables in a deterministic seed
-        let mut fixed1: HashMap<String, Vec<u8>> = HashMap::new();
-        fixed1.insert("alpha".into(), vec![1, 2]);
-        fixed1.insert("beta".into(), vec![3]);
-        fixed1.insert("gamma".into(), vec![4, 5, 6]);
-
-        let mut vars2 = vec!["v2".into(), "v2".into(), "v3".into()];
-
-        // Encode baseline
-        let baseline = encode_forward_commitment_params(&fixed1, &vars2);
-
-        // Shuffle order and re-encode; bytes MUST match
-        let mut rng = StdRng::seed_from_u64(0xC0FFEE);
-
-        // Shuffle fixed map insertion by rebuilding from shuffled keys
-        let mut keys: Vec<_> = fixed1.keys().cloned().collect();
-        keys.shuffle(&mut rng);
-        let mut fixed2: HashMap<String, Vec<u8>> = HashMap::new();
-        for k in keys {
-            fixed2.insert(k.clone(), fixed1.get(&k).unwrap().clone());
-        }
-
-        // Shuffle vars
-        vars2.shuffle(&mut rng);
-        let vars2 = vars2.clone();
-
-        let bytes2 = encode_forward_commitment_params(&fixed2, &vars2);
-        assert_eq!(
-            baseline, bytes2,
-            "encode_forward_commitment_params must be order-invariant"
-        );
     }
 
     #[test]

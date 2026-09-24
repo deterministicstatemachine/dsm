@@ -15,32 +15,18 @@ use tracing::{info, error};
 
 use crate::core::contact_manager::DsmContactManager;
 use crate::commitments::precommit::PreCommitment as CanonicalPreCommitment;
-use crate::core::chain_tip_store::{noop_chain_tip_store, ChainTipStore};
-use crate::core::state_machine::bilateral::BilateralStateManager;
+use crate::core::chain_tip_store::ChainTipStore;
 use crate::crypto::canonical_lp;
 use crate::crypto::signatures::SignatureKeyPair;
-use crate::merkle::sparse_merkle_tree::{empty_leaf, SmtReplaceResult, SparseMerkleTree};
-use crate::types::contact_types::{ChainTipSmtProof, DsmVerifiedContact};
+use crate::merkle::sparse_merkle_tree::empty_leaf;
+use crate::types::contact_types::DsmVerifiedContact;
 use crate::types::device_state::BalanceDelta;
 use crate::types::error::{DeterministicSafetyClass, DsmError};
 use crate::types::operations::Operation;
-use crate::types::state_types::{PreCommitment, State};
 use crate::core::utility::labeling;
 use crate::common::domain_tags::{
     TAG_BILATERAL_SESSION, TAG_FUSED_ANCHOR_STATE_LEAF, TAG_SMT_KEY, TAG_TIP,
 };
-
-// -------------------- Cryptographic Progress (strictly increasing, clockless) --------------------
-#[inline]
-fn mono_commit_height() -> u64 {
-    crate::utils::deterministic_time::current_commit_height_blocking()
-}
-
-/// Public wrapper for clockless monotone commit height (used by BLE handler for SMT proof fields).
-#[inline]
-pub fn mono_commit_height_pub() -> u64 {
-    crate::utils::deterministic_time::current_commit_height_blocking()
-}
 
 // -------------------- Relationship Anchor (bytes-only, single shared tip) --------------------
 /// Per whitepaper §16.6: "For each {i,j} ∈ Rel there exists a forward-only chain C_{i,j}"
@@ -52,14 +38,9 @@ pub struct BilateralRelationshipAnchor {
     pub local_genesis_hash: [u8; 32],
     pub remote_device_id: [u8; 32],
     pub remote_genesis_hash: [u8; 32],
-    pub mutual_anchor_hash: [u8; 32],
     /// h_n^{A↔B} — THE single shared relationship chain tip.
     /// Both parties MUST agree on this value. Divergence = Tripwire.
     pub chain_tip: [u8; 32],
-    /// SMT inclusion proof for this relationship's chain tip
-    pub smt_proof: Option<ChainTipSmtProof>,
-    pub established_at: u64,
-    pub last_sync_at: u64,
 }
 impl BilateralRelationshipAnchor {
     pub fn new(
@@ -68,47 +49,25 @@ impl BilateralRelationshipAnchor {
         remote_device_id: [u8; 32],
         remote_genesis_hash: [u8; 32],
     ) -> Self {
-        let mutual_anchor_hash =
-            Self::generate_mutual_anchor_hash(&local_genesis_hash, &remote_genesis_hash);
-        let now = mono_commit_height();
         Self {
             local_device_id,
             local_genesis_hash,
             remote_device_id,
             remote_genesis_hash,
-            mutual_anchor_hash,
             chain_tip: empty_leaf(),
-            smt_proof: None,
-            established_at: now,
-            last_sync_at: now,
         }
-    }
-    /// Order-independent mutual anchor = H("DSM_BILATERAL_ANCHOR" || min(genesis) || max(genesis))
-    pub fn generate_mutual_anchor_hash(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
-        let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
-        let mut h = dsm_domain_hasher(TAG_BILATERAL_SESSION);
-        canonical_lp::write_lp(&mut h, lo);
-        canonical_lp::write_lp(&mut h, hi);
-        let out = h.finalize();
-        let mut bytes = [0u8; 32];
-        bytes.copy_from_slice(out.as_bytes());
-        bytes
-    }
-    #[inline]
-    pub fn is_synchronized(&self) -> bool {
-        self.chain_tip != empty_leaf() && self.smt_proof.is_some()
     }
 }
 
-fn initial_relationship_chain_tip(
+/// `h_0` of a relationship: `H(DSM/bilateral-session; G_lo ‖ DevID_lo ‖ G_hi ‖ DevID_hi)`,
+/// ordered by device id, so both parties derive the same value. The one
+/// definition; every caller uses this.
+pub fn initial_relationship_chain_tip(
     local_device_id: &[u8; 32],
     local_genesis_hash: &[u8; 32],
     remote_device_id: &[u8; 32],
     remote_genesis_hash: &[u8; 32],
 ) -> [u8; 32] {
-    // h_0 = hasher(TAG_BILATERAL_SESSION) || sorted(G_A, DevID_A, G_B, DevID_B)
-    // Lexicographic ordering ensures identical output regardless of initiator.
-    // compute_initial_chain_tip() in contact_sdk.rs MUST use the same hasher and tag.
     let (genesis_a, device_a, genesis_b, device_b) = if local_device_id < remote_device_id {
         (
             local_genesis_hash,
@@ -227,8 +186,7 @@ pub fn set_anchor_state_leaf_value(
     leaf: &[u8; 32],
 ) -> Result<Vec<u8>, DsmError> {
     let key = anchor_state_leaf_key(bundle);
-    smt.update_leaf(&key, leaf)
-        .map_err(|e| DsmError::invalid_operation(format!("anchor-state leaf update: {e}")))?;
+    smt.update_leaf(&key, leaf);
     let proof = smt
         .get_inclusion_proof(&key, 256)
         .map_err(|e| DsmError::invalid_operation(format!("anchor-state proof: {e}")))?;
@@ -249,125 +207,31 @@ pub fn operation_requires_offline_bearer(op: &crate::types::operations::Operatio
 // -------------------- Bilateral Pre-Commitment (bytes-only) --------------------
 #[derive(Clone, Debug)]
 pub struct BilateralPreCommitment {
-    pub local_commitment: PreCommitment,
-    pub remote_commitment: PreCommitment,
+    /// `H(DSM/bilateral-session; lp(h_n) ‖ lp(op))`: the step this
+    /// precommitment proposes, bound to the relationship tip it extends.
     pub bilateral_commitment_hash: [u8; 32],
-    pub local_signature: Vec<u8>,
-    pub remote_signature: Vec<u8>,
-    pub target_state_number: u64,
     pub operation: Operation,
-    pub created_at: u64,
-    pub expires_at: u64,
-    /// Local chain tip at creation time (Tripwire enforcement: DSM Whitepaper Section 6.1).
-    /// At finalize, current tip must match this; otherwise parent was already consumed.
-    pub local_chain_tip_at_creation: Option<[u8; 32]>,
+    /// The relationship tip `h_n` the step extends (Tripwire, §6.1). At
+    /// finalize the current tip must still be this one; otherwise the parent
+    /// was already consumed.
+    pub parent_tip: [u8; 32],
 }
 impl BilateralPreCommitment {
-    pub fn new(
-        local_commitment: PreCommitment,
-        remote_commitment: PreCommitment,
-        operation: Operation,
-        target_state_number: u64,
-        validity_duration: u64,
-        local_chain_tip: Option<[u8; 32]>,
-    ) -> Result<Self, DsmError> {
-        let now = mono_commit_height();
-        let bilateral_commitment_hash =
-            Self::generate_bilateral_hash(&local_commitment, &remote_commitment, &operation)?;
-        Ok(Self {
-            local_commitment,
-            remote_commitment,
-            bilateral_commitment_hash,
-            local_signature: Vec::new(),
-            remote_signature: Vec::new(),
-            target_state_number,
-            operation,
-            created_at: now,
-            expires_at: now.saturating_add(validity_duration),
-            local_chain_tip_at_creation: local_chain_tip,
-        })
-    }
-    fn generate_bilateral_hash(
-        local: &PreCommitment,
-        remote: &PreCommitment,
-        op: &Operation,
-    ) -> Result<[u8; 32], DsmError> {
+    pub fn new(parent_tip: [u8; 32], operation: Operation) -> Self {
         let mut h = dsm_domain_hasher(TAG_BILATERAL_SESSION);
-        canonical_lp::write_lp(&mut h, &local.hash);
-        canonical_lp::write_lp(&mut h, &remote.hash);
-        canonical_lp::write_lp(&mut h, &op.to_bytes());
-        let out = h.finalize();
-        let mut bytes = [0u8; 32];
-        bytes.copy_from_slice(out.as_bytes());
-        Ok(bytes)
-    }
-    pub fn sign_local(&mut self, kp: &SignatureKeyPair) -> Result<(), DsmError> {
-        let msg = self.signing_message()?;
-        self.local_signature = kp.sign(&msg)?;
-        Ok(())
-    }
-    pub fn set_remote_signature(&mut self, sig: Vec<u8>) {
-        self.remote_signature = sig;
-    }
-    fn signing_message(&self) -> Result<Vec<u8>, DsmError> {
-        let mut m = Vec::new();
-        m.extend_from_slice(b"DSM/bilateral-pre-commitment\0");
-
-        // Canonical LP delimiting for variable-length fields.
-        // NOTE: Vec encoding must match canonical LP: u32-le length prefix + bytes.
-        // We inline it here to avoid introducing new exported helpers.
-        fn push_lp(out: &mut Vec<u8>, bytes: &[u8]) {
-            let len = bytes.len() as u32;
-            out.extend_from_slice(&len.to_le_bytes());
-            out.extend_from_slice(bytes);
+        canonical_lp::write_lp(&mut h, &parent_tip);
+        canonical_lp::write_lp(&mut h, &operation.to_bytes());
+        let mut bilateral_commitment_hash = [0u8; 32];
+        bilateral_commitment_hash.copy_from_slice(h.finalize().as_bytes());
+        Self {
+            bilateral_commitment_hash,
+            operation,
+            parent_tip,
         }
-
-        push_lp(&mut m, &self.bilateral_commitment_hash);
-        push_lp(&mut m, &self.local_commitment.hash);
-        push_lp(&mut m, &self.remote_commitment.hash);
-        push_lp(&mut m, &self.operation.to_bytes());
-        m.extend_from_slice(&self.target_state_number.to_le_bytes());
-        m.extend_from_slice(&self.created_at.to_le_bytes());
-        m.extend_from_slice(&self.expires_at.to_le_bytes());
-        Ok(m)
-    }
-    pub fn verify_local_signature(&self, pk: &[u8]) -> Result<bool, DsmError> {
-        crate::crypto::signatures::SignatureKeyPair::verify_raw(
-            &self.signing_message()?,
-            &self.local_signature,
-            pk,
-        )
-    }
-    pub fn verify_remote_signature(&self, pk: &[u8]) -> Result<bool, DsmError> {
-        crate::crypto::signatures::SignatureKeyPair::verify_raw(
-            &self.signing_message()?,
-            &self.remote_signature,
-            pk,
-        )
-    }
-    pub fn verify(&self) -> Result<bool, DsmError> {
-        let now = mono_commit_height();
-        if now > self.expires_at {
-            return Ok(false);
-        }
-        Ok(Self::generate_bilateral_hash(
-            &self.local_commitment,
-            &self.remote_commitment,
-            &self.operation,
-        )? == self.bilateral_commitment_hash)
     }
 }
 
 // -------------------- Transaction Manager --------------------
-#[derive(Clone, Debug)]
-pub struct BilateralTransactionResult {
-    pub local_state: State,
-    pub remote_state: State,
-    pub relationship_anchor: BilateralRelationshipAnchor,
-    pub transaction_hash: [u8; 32],
-    pub completed_offline: bool,
-}
-
 /// Prepared bilateral advance — handoff from the tripwire-verified
 /// precommitment path to the canonical Per-Device SMT advance (§2.2).
 ///
@@ -412,7 +276,6 @@ pub struct PreparedBilateralAdvance {
 #[derive(Debug)]
 pub struct BilateralTransactionManager {
     contact_manager: DsmContactManager,
-    bilateral_state_manager: BilateralStateManager,
     relationships: HashMap<[u8; 32], BilateralRelationshipAnchor>, // key = remote_device_id
     pending_commitments: HashMap<[u8; 32], BilateralPreCommitment>, // key = bilateral_commitment_hash
     signature_keypair: SignatureKeyPair,
@@ -421,26 +284,8 @@ pub struct BilateralTransactionManager {
     chain_tip_store: std::sync::Arc<dyn ChainTipStore>,
 }
 
-const PROOF_MAX_AGE_COMMIT_HEIGHTS: u64 = 86_400;
-
 impl BilateralTransactionManager {
     pub fn new(
-        contact_manager: DsmContactManager,
-        signature_keypair: SignatureKeyPair,
-        local_device_id: [u8; 32],
-        local_genesis_hash: [u8; 32],
-    ) -> Self {
-        let chain_tip_store = noop_chain_tip_store();
-        Self::new_with_chain_tip_store(
-            contact_manager,
-            signature_keypair,
-            local_device_id,
-            local_genesis_hash,
-            chain_tip_store,
-        )
-    }
-
-    pub fn new_with_chain_tip_store(
         contact_manager: DsmContactManager,
         signature_keypair: SignatureKeyPair,
         local_device_id: [u8; 32],
@@ -449,7 +294,6 @@ impl BilateralTransactionManager {
     ) -> Self {
         Self {
             contact_manager,
-            bilateral_state_manager: BilateralStateManager::new(),
             relationships: HashMap::new(),
             pending_commitments: HashMap::new(),
             signature_keypair,
@@ -512,11 +356,6 @@ impl BilateralTransactionManager {
     /// atomically here so no caller can leave them asymmetric — otherwise the
     /// intra-device consistency tripwire inside `prepare_bilateral_advance`
     /// fires as a self-inflicted wound.
-    ///
-    /// The SMT proof on the contact is cleared because this raw-tip sync carries
-    /// no proof material; a fresh proof is recorded on the next authoritative
-    /// bilateral commit (update_contact_chain_tip_bilateral) or unilateral send
-    /// (update_contact_chain_tip_unilateral).
     pub fn advance_chain_tip(&mut self, remote_device_id: &[u8; 32], new_tip: [u8; 32]) {
         // log::info! (NOT tracing!) so this appears in Android logcat for
         // deployment verification — the dsm crate's tracing events are not
@@ -544,87 +383,10 @@ impl BilateralTransactionManager {
                 labeling::hash_to_short_id(&new_tip)
             );
             anchor.chain_tip = new_tip;
-            anchor.last_sync_at = mono_commit_height();
         }
         if let Some(contact_mut) = self.contact_manager.get_contact_mut(remote_device_id) {
             contact_mut.chain_tip = Some(new_tip);
-            contact_mut.chain_tip_smt_proof = None;
         }
-    }
-
-    /// Remove pending commitment (testing / reconciliation helper)
-    pub fn remove_pending_commitment(
-        &mut self,
-        commitment_hash: &[u8; 32],
-    ) -> Option<BilateralPreCommitment> {
-        self.pending_commitments.remove(commitment_hash)
-    }
-
-    pub fn get_current_ticks(&self) -> u64 {
-        mono_commit_height()
-    }
-
-    /// Update anchor from a real SMT-Replace result (§4.2).
-    ///
-    /// The `replace_result` MUST come from `commit_bilateral_smt_update()` for the
-    /// same transition. Validates the result matches before mutating state.
-    pub fn update_anchor_from_replace_public(
-        &mut self,
-        remote_device_id: &[u8; 32],
-        anchor: &mut BilateralRelationshipAnchor,
-        new_chain_tip: [u8; 32],
-        replace_result: &SmtReplaceResult,
-    ) -> Result<(), DsmError> {
-        self.update_anchor_from_replace(remote_device_id, anchor, new_chain_tip, replace_result)
-    }
-
-    /// Update anchor in-memory from a real SMT-Replace result (§4.2).
-    ///
-    /// Same validation as `update_anchor_from_replace_public` but skips SQLite.
-    /// Caller MUST persist atomically with balance writes afterward.
-    /// The `replace_result` MUST come from `commit_bilateral_smt_update()`.
-    pub fn update_anchor_in_memory_from_replace_public(
-        &mut self,
-        remote_device_id: &[u8; 32],
-        anchor: &mut BilateralRelationshipAnchor,
-        new_chain_tip: [u8; 32],
-        replace_result: &SmtReplaceResult,
-    ) -> Result<(), DsmError> {
-        self.update_anchor_in_memory_from_replace(
-            remote_device_id,
-            anchor,
-            new_chain_tip,
-            replace_result,
-        )
-    }
-
-    /// Store real Per-Device SMT proof in the relationship anchor after BLE SMT-Replace.
-    /// Called by BLE handler after computing the genuine inclusion proof (§B3).
-    /// Perform atomic SMT-Replace for a bilateral relationship (§4.2).
-    ///
-    /// Pure SMT mutation: computes the relationship key, calls `smt_replace`,
-    /// and returns the result. No anchor updates, no proof storage, no side
-    /// effects. The caller consumes the `SmtReplaceResult` via
-    /// `update_anchor_from_replace()` to advance anchor/contact state.
-    pub fn commit_bilateral_smt_update(
-        &mut self,
-        smt: &mut SparseMerkleTree,
-        remote_device_id: &[u8; 32],
-        new_chain_tip: &[u8; 32],
-    ) -> Result<SmtReplaceResult, DsmError> {
-        let smt_key = compute_smt_key(&self.local_device_id, remote_device_id);
-
-        smt.smt_replace(&smt_key, new_chain_tip)
-            .map_err(|e| DsmError::merkle(format!("SMT-Replace failed (§4.2): {e}")))
-    }
-
-    /// Compute transaction hash from state pair (public wrapper for receiver-side finalize)
-    pub fn tx_hash_public(
-        &self,
-        local_state: &State,
-        remote_state: &State,
-    ) -> Result<[u8; 32], DsmError> {
-        self.tx_hash(local_state, remote_state)
     }
 
     #[inline]
@@ -746,14 +508,9 @@ impl BilateralTransactionManager {
         // Capture chain_tip before contact borrow ends
         let contact_chain_tip = contact.chain_tip;
         let contact_genesis_hash = contact.genesis_hash;
-        let remote_pk = Self::extract_contact_signing_key(contact)?; // strict: must exist
-        self.bilateral_state_manager
-            .ensure_relationship_initialized_bytes(
-                &self.local_device_id,
-                remote_device_id,
-                self.signature_keypair.public_key().to_vec(),
-                remote_pk,
-            )?;
+        // Strict: a relationship established for bilateral transfer needs the
+        // counterparty's signing key, which verifies its acceptance proofs.
+        Self::require_signing_key(contact)?;
         let mut anchor = BilateralRelationshipAnchor::new(
             self.local_device_id,
             self.local_genesis_hash,
@@ -778,20 +535,24 @@ impl BilateralTransactionManager {
             contact_chain_tip.is_some()
         );
         anchor.chain_tip = tip;
-        self.relationships.insert(*remote_device_id, anchor.clone());
 
-        // Seed the chain tip store only when no chain tip exists yet.
-        // contact_sdk may have already persisted the initial tip during
-        // add_contact, in which case contact_chain_tip is Some(...) and the
-        // CAS with expected_parent=[0u8;32] would fail (SQLite already
-        // stores tip, not zeros). Skip the redundant write to avoid the
-        // rejected-CAS warning.
-        if contact_chain_tip.is_none() {
-            let _ = self
+        // Seed the chain tip store only when the contact record holds no tip.
+        // A store already at h_0 accepts the write; a store holding any other
+        // tip disagrees with the contact record, and the relationship is not
+        // established over that disagreement.
+        if contact_chain_tip.is_none()
+            && !self
                 .chain_tip_store
-                .set_contact_chain_tip(remote_device_id, [0u8; 32], tip);
+                .set_contact_chain_tip(remote_device_id, [0u8; 32], tip)?
+        {
+            return Err(DsmError::InvalidState(format!(
+                "relationship {}: the contact record holds no chain tip, but the chain-tip \
+                 store holds one other than h_0",
+                labeling::hash_to_short_id(remote_device_id)
+            )));
         }
 
+        self.relationships.insert(*remote_device_id, anchor.clone());
         Ok(anchor)
     }
 
@@ -814,18 +575,6 @@ impl BilateralTransactionManager {
             .contact_manager
             .get_contact(remote_device_id)
             .ok_or_else(|| DsmError::ContactNotFound("remote device".into()))?;
-
-        // Derive remote public key if available; otherwise allow empty vec
-        let remote_pk = contact.public_key.clone();
-
-        // Initialize underlying bilateral state manager relationship (idempotent)
-        self.bilateral_state_manager
-            .ensure_relationship_initialized_bytes(
-                &self.local_device_id,
-                remote_device_id,
-                self.signature_keypair.public_key().to_vec(),
-                remote_pk.clone(),
-            )?;
 
         // Build anchor similar to establish_relationship but tolerant of missing signing key
         let mut anchor = BilateralRelationshipAnchor::new(
@@ -852,232 +601,39 @@ impl BilateralTransactionManager {
         &mut self,
         remote_device_id: &[u8; 32],
         operation: Operation,
-        validity_duration_ticks: u64,
     ) -> Result<BilateralPreCommitment, DsmError> {
         let relationship = self
             .relationships
             .get(remote_device_id)
             .ok_or_else(|| DsmError::RelationshipNotFound("remote device".into()))?;
-        // Capture shared chain tip at creation for Tripwire enforcement (DSM Whitepaper Section 6.1)
-        let local_chain_tip_at_creation = Some(relationship.chain_tip);
+        // The step extends the relationship's current tip (Tripwire, §6.1).
+        let parent_tip = relationship.chain_tip;
         // Strict protocol: a bilateral precommitment requires the counterparty's
-        // signing public key to exist in the verified contact record. Do not
-        // silently fall back to an empty key — callers should perform contact
-        // exchange/online verification before attempting offline prepare.
-        let remote_pk = self.require_contact_signing_key(remote_device_id)?;
-        self.bilateral_state_manager
-            .ensure_relationship_initialized_bytes(
-                &self.local_device_id,
-                remote_device_id,
-                self.signature_keypair.public_key().to_vec(),
-                remote_pk,
-            )?;
-        let local_state = self
-            .bilateral_state_manager
-            .get_relationship_state_bytes(&self.local_device_id, remote_device_id)?;
-        let remote_state = self
-            .bilateral_state_manager
-            .get_relationship_state_bytes(remote_device_id, &self.local_device_id)?;
-        let local_commitment = PreCommitment {
-            operation_type: operation.get_operation_type().to_string(),
-            fixed_parameters: HashMap::new(),
-            variable_parameters: std::collections::HashSet::new(),
-            min_state_number: 1,
-            hash: PreCommitment::generate_hash(&local_state.hash, &operation, &[])?,
-            signatures: Vec::new(),
-            entity_signature: None,
-            counterparty_signature: None,
-            value: Vec::new(),
-            commitment: Vec::new(),
-            counterparty_id: *remote_device_id,
-        };
-        let remote_commitment = PreCommitment {
-            operation_type: operation.get_operation_type().to_string(),
-            fixed_parameters: HashMap::new(),
-            variable_parameters: std::collections::HashSet::new(),
-            min_state_number: 1,
-            hash: PreCommitment::generate_hash(&remote_state.hash, &operation, &[])?,
-            signatures: Vec::new(),
-            entity_signature: None,
-            counterparty_signature: None,
-            value: Vec::new(),
-            commitment: Vec::new(),
-            counterparty_id: self.local_device_id,
-        };
-        let mut bilateral = BilateralPreCommitment::new(
-            local_commitment,
-            remote_commitment,
-            operation,
-            local_state.hash[0] as u64 + 1,
-            validity_duration_ticks,
-            local_chain_tip_at_creation,
-        )?;
-        // Sign the pre-commitment locally so acceptance proof can be transported over BLE
-        bilateral.sign_local(&self.signature_keypair)?;
+        // signing public key in the verified contact record — it verifies the
+        // acceptance proof this step finalizes on. Contact exchange / online
+        // verification comes before an offline prepare.
+        self.require_contact_signing_key(remote_device_id)?;
+        let bilateral = BilateralPreCommitment::new(parent_tip, operation);
         self.pending_commitments
             .insert(bilateral.bilateral_commitment_hash, bilateral.clone());
         Ok(bilateral)
     }
 
-    /// Update anchor from a real `SmtReplaceResult` (§4.2).
-    ///
-    /// The replace result MUST come from `commit_bilateral_smt_update()` for the
-    /// same transition. This method validates the result matches the expected
-    /// transition before mutating anchor/contact state.
-    fn update_anchor_from_replace(
-        &mut self,
-        remote_device_id: &[u8; 32],
-        anchor: &mut BilateralRelationshipAnchor,
-        new_chain_tip: [u8; 32],
-        replace_result: &SmtReplaceResult,
-    ) -> Result<(), DsmError> {
-        let expected_parent_tip = anchor.chain_tip;
-        let expected_key = compute_smt_key(&self.local_device_id, remote_device_id);
-
-        // Validate the replace result matches this transition — invariant with teeth
-        if replace_result.child_proof.value != Some(new_chain_tip) {
-            return Err(DsmError::merkle(
-                "SmtReplaceResult child value != new_chain_tip",
-            ));
-        }
-        if replace_result.child_proof.key != expected_key {
-            return Err(DsmError::merkle("SmtReplaceResult key != expected smt_key"));
-        }
-
-        // Build proof from the real replace result
-        let smt_proof = ChainTipSmtProof {
-            smt_root: replace_result.post_root,
-            state_hash: new_chain_tip,
-            smt_key: expected_key,
-            proof_path: replace_result.child_proof.siblings.clone(),
-            state_index: mono_commit_height_pub(),
-            proof_commit_height: mono_commit_height_pub(),
-        };
-
-        // Update contact manager with real proof
-        self.contact_manager
-            .update_contact_chain_tip_bilateral(remote_device_id, new_chain_tip, smt_proof.clone())
-            .map_err(|e| DsmError::InvalidContact(format!("{e:?}")))?;
-
-        anchor.chain_tip = new_chain_tip;
-        anchor.last_sync_at = mono_commit_height();
-        anchor.smt_proof = Some(smt_proof);
-        self.relationships.insert(*remote_device_id, anchor.clone());
-
-        // Persist chain tip (forward-only)
-        match self.chain_tip_store.set_contact_chain_tip(
-            remote_device_id,
-            expected_parent_tip,
-            new_chain_tip,
-        )? {
-            true => {}
-            false => {
-                return Err(DsmError::deterministic_safety(
-                    DeterministicSafetyClass::ParentConsumed,
-                    "Tripwire: finalized relationship chain tip parent no longer matches storage",
-                ));
-            }
-        }
-        Ok(())
-    }
-
-    /// Update anchor in-memory from a real `SmtReplaceResult` (§4.2).
-    ///
-    /// Same as `update_anchor_from_replace` but skips SQLite persistence.
-    /// Caller MUST persist the chain tip to SQLite atomically with balance writes
-    /// via the atomic persistence helper.
-    fn update_anchor_in_memory_from_replace(
-        &mut self,
-        remote_device_id: &[u8; 32],
-        anchor: &mut BilateralRelationshipAnchor,
-        new_chain_tip: [u8; 32],
-        replace_result: &SmtReplaceResult,
-    ) -> Result<(), DsmError> {
-        let expected_key = compute_smt_key(&self.local_device_id, remote_device_id);
-
-        // Validate the replace result
-        if replace_result.child_proof.value != Some(new_chain_tip) {
-            return Err(DsmError::merkle(
-                "SmtReplaceResult child value != new_chain_tip",
-            ));
-        }
-        if replace_result.child_proof.key != expected_key {
-            return Err(DsmError::merkle("SmtReplaceResult key != expected smt_key"));
-        }
-
-        let smt_proof = ChainTipSmtProof {
-            smt_root: replace_result.post_root,
-            state_hash: new_chain_tip,
-            smt_key: expected_key,
-            proof_path: replace_result.child_proof.siblings.clone(),
-            state_index: mono_commit_height_pub(),
-            proof_commit_height: mono_commit_height_pub(),
-        };
-
-        self.contact_manager
-            .update_contact_chain_tip_bilateral(remote_device_id, new_chain_tip, smt_proof.clone())
-            .map_err(|e| DsmError::InvalidContact(format!("{e:?}")))?;
-
-        anchor.chain_tip = new_chain_tip;
-        anchor.last_sync_at = mono_commit_height();
-        anchor.smt_proof = Some(smt_proof);
-        self.relationships.insert(*remote_device_id, anchor.clone());
-        // Intentionally skip chain_tip_store.set_contact_chain_tip() —
-        // caller persists atomically with balance write.
-        Ok(())
-    }
-
-    fn require_contact_signing_key(
-        &self,
-        remote_device_id: &[u8; 32],
-    ) -> Result<Vec<u8>, DsmError> {
+    fn require_contact_signing_key(&self, remote_device_id: &[u8; 32]) -> Result<(), DsmError> {
         let c = self
             .contact_manager
             .get_contact(remote_device_id)
             .ok_or_else(|| DsmError::RelationshipNotFound("remote device".into()))?;
-        Self::extract_contact_signing_key(c)
+        Self::require_signing_key(c)
     }
 
-    fn extract_contact_signing_key(contact: &DsmVerifiedContact) -> Result<Vec<u8>, DsmError> {
-        if !contact.public_key.is_empty() {
-            Ok(contact.public_key.clone())
-        } else {
-            Err(DsmError::InvalidContact(
+    fn require_signing_key(contact: &DsmVerifiedContact) -> Result<(), DsmError> {
+        if contact.public_key.is_empty() {
+            return Err(DsmError::InvalidContact(
                 "Missing remote signing public key".into(),
-            ))
+            ));
         }
-    }
-
-    fn tx_hash(&self, local_state: &State, remote_state: &State) -> Result<[u8; 32], DsmError> {
-        let mut h = dsm_domain_hasher(TAG_BILATERAL_SESSION);
-        h.update(&local_state.hash()?);
-        h.update(&remote_state.hash()?);
-        let out = h.finalize();
-        Ok(bytes32(out.as_bytes()))
-    }
-
-    pub fn verify_relationship_integrity(
-        &self,
-        remote_device_id: &[u8; 32],
-    ) -> Result<bool, DsmError> {
-        let r = self
-            .relationships
-            .get(remote_device_id)
-            .ok_or_else(|| DsmError::RelationshipNotFound("remote device".into()))?;
-        let expected = BilateralRelationshipAnchor::generate_mutual_anchor_hash(
-            &r.local_genesis_hash,
-            &r.remote_genesis_hash,
-        );
-        if expected != r.mutual_anchor_hash {
-            return Ok(false);
-        }
-        if let Some(proof) = &r.smt_proof {
-            let now = mono_commit_height();
-            if now.saturating_sub(proof.proof_commit_height) > PROOF_MAX_AGE_COMMIT_HEIGHTS {
-                return Ok(false);
-            }
-        }
-        Ok(true)
+        Ok(())
     }
 
     fn verify_receiver_acceptance_proof(
@@ -1125,10 +681,9 @@ impl BilateralTransactionManager {
         &mut self,
         remote_device_id: &[u8; 32],
         operation: Operation,
-        validity_duration_ticks: u64,
     ) -> Result<BilateralPreCommitment, DsmError> {
         info!("Phase 1: prepare offline");
-        self.create_bilateral_precommitment(remote_device_id, operation, validity_duration_ticks)
+        self.create_bilateral_precommitment(remote_device_id, operation)
             .await
     }
 
@@ -1142,7 +697,7 @@ impl BilateralTransactionManager {
     ///
     /// Body:
     ///   1. Refresh shared chain tip from persistent store.
-    ///   2. §6.1 tripwire: anchor tip must equal `local_chain_tip_at_creation`.
+    ///   2. §6.1 tripwire: anchor tip must equal the precommitment's `parent_tip`.
     ///   3. Tripwire: anchor tip must equal persisted contact tip.
     ///   4. Emit `PreparedBilateralAdvance`.
     ///
@@ -1190,7 +745,6 @@ impl BilateralTransactionManager {
             }
             if let Some(contact_mut) = self.contact_manager.get_contact_mut(remote_device_id) {
                 contact_mut.chain_tip = Some(tip);
-                contact_mut.chain_tip_smt_proof = None;
             }
             anchor.chain_tip = tip;
         }
@@ -1199,23 +753,19 @@ impl BilateralTransactionManager {
         // Parent tip at precommit creation must equal current anchor tip; else
         // another transition already consumed the parent hash and finalizing
         // would violate the Tripwire theorem.
-        if Some(anchor.chain_tip) != pre.local_chain_tip_at_creation {
+        if anchor.chain_tip != pre.parent_tip {
             let class = DeterministicSafetyClass::ParentConsumed;
             log::warn!(
                 "[BTM][TRIPWIRE:precommit-parent-consumed] anchor={} precommit_tip={} class={}",
                 labeling::hash_to_short_id(&anchor.chain_tip),
-                pre.local_chain_tip_at_creation
-                    .map(|t| labeling::hash_to_short_id(&t))
-                    .unwrap_or_else(|| "None".to_string()),
+                labeling::hash_to_short_id(&pre.parent_tip),
                 class.as_str()
             );
             error!(
                 "[BTM] Deterministic safety rejection [{}]: chain_tip={} precommit_tip={}",
                 class.as_str(),
                 labeling::hash_to_short_id(&anchor.chain_tip),
-                pre.local_chain_tip_at_creation
-                    .map(|t| labeling::hash_to_short_id(&t))
-                    .unwrap_or_else(|| "None".to_string())
+                labeling::hash_to_short_id(&pre.parent_tip)
             );
             return Err(DsmError::deterministic_safety(
                 class,
@@ -1231,9 +781,7 @@ impl BilateralTransactionManager {
                         "[BTM][TRIPWIRE:prepare] anchor={} contact={} precommit_tip={} store={}",
                         labeling::hash_to_short_id(&anchor.chain_tip),
                         labeling::hash_to_short_id(&contact_tip),
-                        pre.local_chain_tip_at_creation
-                            .map(|t| labeling::hash_to_short_id(&t))
-                            .unwrap_or_else(|| "None".to_string()),
+                        labeling::hash_to_short_id(&pre.parent_tip),
                         self.chain_tip_store
                             .get_contact_chain_tip(remote_device_id)
                             .map(|t| labeling::hash_to_short_id(&t))
@@ -1265,11 +813,14 @@ impl BilateralTransactionManager {
         })
     }
 
-    /// Drop a precommitment from the pending set after its associated
-    /// bilateral advance has committed successfully. Call this after
-    /// `AppRouter::execute_on_relationship_for_bilateral` returns Ok.
-    pub fn consume_pre_commitment(&mut self, pre_commitment_hash: &[u8; 32]) {
-        self.pending_commitments.remove(pre_commitment_hash);
+    /// Drop a precommitment from the pending set — after its bilateral
+    /// advance commits, or when its session ends without one — returning it
+    /// if it was pending.
+    pub fn consume_pre_commitment(
+        &mut self,
+        pre_commitment_hash: &[u8; 32],
+    ) -> Option<BilateralPreCommitment> {
+        self.pending_commitments.remove(pre_commitment_hash)
     }
 }
 
@@ -1390,11 +941,8 @@ mod tests {
     }
 
     fn make_manager() -> (BilateralTransactionManager, SignatureKeyPair) {
-        // Initialize progress context for test
-        crate::utils::deterministic_time::reset_for_tests();
-
         let (local_device_id, local_genesis_hash) = make_manager_ids();
-        let contact_manager = DsmContactManager::new(local_device_id, vec![]);
+        let contact_manager = DsmContactManager::new(local_device_id);
         // Generate proper cryptographic keypair based on device and genesis identity
         let key_entropy = [local_device_id.as_slice(), local_genesis_hash.as_slice()].concat();
         let kp = SignatureKeyPair::generate_from_entropy(&key_entropy)
@@ -1405,6 +953,7 @@ mod tests {
             kp.clone(),
             local_device_id,
             local_genesis_hash,
+            std::sync::Arc::new(crate::core::chain_tip_store::memory::InMemoryChainTipStore::new()),
         );
         (manager, kp)
     }
@@ -1429,13 +978,8 @@ mod tests {
             } else {
                 Vec::new()
             },
-            genesis_material: vec![0x42; 64],
             chain_tip: None,
-            chain_tip_smt_proof: None,
             genesis_verified_online: genesis_verified,
-            verified_at_commit_height: 1,
-            added_at_commit_height: 1,
-            last_updated_commit_height: 1,
             verifying_storage_nodes: vec![],
             ble_address: None,
         }
@@ -1446,7 +990,7 @@ mod tests {
             policy_commit: [0u8; 32],
             token_id: b"ERA".to_vec(),
             to_device_id: vec![9u8; 32],
-            amount: Balance::from_state(1, [0u8; 32]),
+            amount: Balance::amount(1),
             mode: TransactionMode::Bilateral,
             nonce: vec![nonce; 8],
             verification: VerificationType::Standard,
@@ -1471,7 +1015,6 @@ mod tests {
         let (manager, _kp) = make_manager();
         assert_eq!(manager.list_relationships().len(), 0);
         assert_eq!(manager.list_pending_commitments().len(), 0);
-        assert!(manager.get_current_ticks() > 0);
         assert_eq!(manager.local_genesis_hash(), make_manager_ids().1);
     }
 
@@ -1491,6 +1034,40 @@ mod tests {
         manager.add_verified_contact(contact.clone()).expect("add");
         let res = manager.establish_relationship(&contact.device_id).await;
         assert!(matches!(res, Err(DsmError::InvalidContact(_))));
+    }
+
+    /// A contact record without a tip, over a chain-tip store that already
+    /// holds a tip other than h_0: the two disagree, and no relationship is
+    /// established over the disagreement.
+    #[tokio::test]
+    async fn establish_relationship_refuses_a_store_tip_the_contact_record_does_not_hold() {
+        let (local_device_id, local_genesis_hash) = make_manager_ids();
+        let key_entropy = [local_device_id.as_slice(), local_genesis_hash.as_slice()].concat();
+        let kp = SignatureKeyPair::generate_from_entropy(&key_entropy).unwrap();
+        let store =
+            std::sync::Arc::new(crate::core::chain_tip_store::memory::InMemoryChainTipStore::new());
+        let mut manager = BilateralTransactionManager::new(
+            DsmContactManager::new(local_device_id),
+            kp,
+            local_device_id,
+            local_genesis_hash,
+            store.clone(),
+        );
+        let contact = make_verified_contact("Bob", true, true);
+        let remote_id = contact.device_id;
+        manager.add_verified_contact(contact).expect("add");
+        assert!(store
+            .set_contact_chain_tip(&remote_id, [0u8; 32], [0x5A; 32])
+            .unwrap());
+
+        assert!(
+            manager.establish_relationship(&remote_id).await.is_err(),
+            "a store tip the contact record does not hold must refuse the relationship"
+        );
+        assert!(
+            manager.get_relationship(&remote_id).is_none(),
+            "a refused relationship leaves no anchor behind"
+        );
     }
 
     #[tokio::test]
@@ -1518,15 +1095,8 @@ mod tests {
             &remote_genesis,
         );
         assert_eq!(anchor.chain_tip, initial_tip);
-        let expected = BilateralRelationshipAnchor::generate_mutual_anchor_hash(
-            &anchor.local_genesis_hash,
-            &anchor.remote_genesis_hash,
-        );
-        assert_eq!(expected, anchor.mutual_anchor_hash);
 
-        // Stored in manager and integrity verifies
         assert!(manager.get_relationship(&remote_id).is_some());
-        assert!(manager.verify_relationship_integrity(&remote_id).unwrap());
     }
 
     #[tokio::test]
@@ -1534,7 +1104,7 @@ mod tests {
         let (mut manager, _kp) = make_manager();
         let op = signed_transfer_op(&manager.signature_keypair, "m", 1);
         let res = manager
-            .create_bilateral_precommitment(&make_remote_ids().0, op, 100)
+            .create_bilateral_precommitment(&make_remote_ids().0, op)
             .await;
         assert!(matches!(res, Err(DsmError::RelationshipNotFound(_))));
     }
@@ -1552,14 +1122,10 @@ mod tests {
 
         let op = signed_transfer_op(&manager.signature_keypair, "m", 2);
         let pre = manager
-            .create_bilateral_precommitment(&remote_id, op.clone(), 300)
+            .create_bilateral_precommitment(&remote_id, op.clone())
             .await
             .expect("pre");
         assert!(manager.has_pending_commitment(&pre.bilateral_commitment_hash));
-        assert!(pre.verify().unwrap());
-        assert!(pre
-            .verify_local_signature(manager.signature_keypair.public_key())
-            .unwrap());
     }
 
     #[tokio::test]
@@ -1588,9 +1154,7 @@ mod tests {
 
         // But creating a precommitment must require the signing key and therefore fail
         let op = signed_transfer_op(&manager.signature_keypair, "m", 5);
-        let res = manager
-            .create_bilateral_precommitment(&remote_id, op, 100)
-            .await;
+        let res = manager.create_bilateral_precommitment(&remote_id, op).await;
         assert!(matches!(res, Err(DsmError::InvalidContact(_))));
     }
 

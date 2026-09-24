@@ -8,7 +8,33 @@ use rusqlite::{params, OptionalExtension};
 use super::get_connection;
 use super::types::{SystemPeerEvent, SystemPeerRecord, SystemPeerType};
 use crate::storage::codecs::{meta_from_blob, meta_to_blob};
-use crate::util::deterministic_time::tick;
+
+/// A stored peer type, exactly as `SystemPeerType::as_str` wrote it.
+fn peer_type_column(row: &rusqlite::Row<'_>, i: usize) -> rusqlite::Result<SystemPeerType> {
+    let s: String = row.get(i)?;
+    s.parse().map_err(|()| {
+        rusqlite::Error::FromSqlConversionFailure(
+            i,
+            rusqlite::types::Type::Text,
+            format!("unknown system peer type {s:?}").into(),
+        )
+    })
+}
+
+/// A stored metadata map. A blob that does not decode is a corrupt row.
+fn metadata_column(
+    row: &rusqlite::Row<'_>,
+    i: usize,
+) -> rusqlite::Result<std::collections::HashMap<String, Vec<u8>>> {
+    let blob: Vec<u8> = row.get(i)?;
+    meta_from_blob(&blob).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(
+            i,
+            rusqlite::types::Type::Blob,
+            format!("system peer metadata: {e}").into(),
+        )
+    })
+}
 
 /// Store a system peer record if it does not already exist.
 ///
@@ -43,17 +69,14 @@ pub fn store_system_peer(peer: &SystemPeerRecord) -> Result<()> {
         poisoned.into_inner()
     });
 
-    let existing: Option<(Vec<u8>, String)> = conn
+    let existing: Option<(Vec<u8>, SystemPeerType)> = conn
         .query_row(
             "SELECT device_id, peer_type FROM system_peers WHERE peer_key = ?1",
             params![peer.peer_key],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, peer_type_column(row, 1)?)),
         )
         .optional()?;
-    if let Some((device_id, peer_type)) = existing {
-        let stored_peer_type = peer_type
-            .parse::<SystemPeerType>()
-            .unwrap_or(SystemPeerType::Protocol);
+    if let Some((device_id, stored_peer_type)) = existing {
         return Err(anyhow!(
             "System peer {} already exists (device_id_match={}, stored_type={})",
             peer.peer_key,
@@ -62,21 +85,17 @@ pub fn store_system_peer(peer: &SystemPeerRecord) -> Result<()> {
         ));
     }
 
-    let now = tick();
     conn.execute(
         "INSERT INTO system_peers (
-            peer_key, device_id, display_name, peer_type, chain_tip,
-            created_at, updated_at, metadata
-        ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+            peer_key, device_id, display_name, peer_type, chain_tip, metadata
+        ) VALUES (?1,?2,?3,?4,?5,?6)",
         params![
             peer.peer_key,
             peer.device_id,
             peer.display_name,
             peer.peer_type.as_str(),
             peer.current_chain_tip.as_ref(),
-            peer.created_at as i64,
-            now as i64,
-            meta_to_blob(&peer.metadata),
+            meta_to_blob(&peer.metadata)
         ],
     )?;
     info!("System peer stored: {}", peer.peer_key);
@@ -86,17 +105,13 @@ pub fn store_system_peer(peer: &SystemPeerRecord) -> Result<()> {
 fn parse_event_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SystemPeerEvent> {
     Ok(SystemPeerEvent {
         peer_key: row.get(0)?,
-        peer_type: row
-            .get::<_, String>(1)?
-            .parse::<SystemPeerType>()
-            .unwrap_or(SystemPeerType::Protocol),
+        peer_type: peer_type_column(row, 1)?,
         parent_tip: row.get(2)?,
         child_tip: row.get(3)?,
         transition_digest: row.get(4)?,
         source_state_hash: row.get(5)?,
         source_state_number: row.get::<_, i64>(6)? as u64,
         payload_bytes: row.get(7)?,
-        created_at: row.get::<_, i64>(8)? as u64,
     })
 }
 
@@ -142,19 +157,16 @@ pub fn advance_system_chain_tip(
     });
     let tx = conn.transaction()?;
 
-    let row: Option<(String, Option<Vec<u8>>)> = tx
+    let row: Option<(SystemPeerType, Option<Vec<u8>>)> = tx
         .query_row(
             "SELECT peer_type, chain_tip FROM system_peers WHERE peer_key = ?1",
             params![peer_key],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((peer_type_column(row, 0)?, row.get(1)?)),
         )
         .optional()?;
 
     let (stored_peer_type, current_tip) =
         row.ok_or_else(|| anyhow!("System peer not found: {}", peer_key))?;
-    let stored_peer_type = stored_peer_type
-        .parse::<SystemPeerType>()
-        .unwrap_or(SystemPeerType::Protocol);
     if stored_peer_type != peer_type {
         return Err(anyhow!(
             "System peer type mismatch for {}: stored={} requested={}",
@@ -188,7 +200,7 @@ pub fn advance_system_chain_tip(
             "SELECT child_tip
                FROM system_peer_events
               WHERE peer_key = ?1
-              ORDER BY created_at DESC, rowid DESC
+              ORDER BY rowid DESC
               LIMIT 1",
             params![peer_key],
             |row| row.get(0),
@@ -244,13 +256,10 @@ pub fn advance_system_chain_tip(
         hasher.update(&transition_digest);
         hasher.finalize().as_bytes().to_vec()
     };
-    let now = tick();
-
     tx.execute(
         "INSERT INTO system_peer_events (
             peer_key, peer_type, parent_tip, child_tip, transition_digest,
-            source_state_hash, source_state_number, payload_bytes, created_at
-        ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+            source_state_hash, source_state_number, payload_bytes) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
         params![
             peer_key,
             peer_type.as_str(),
@@ -259,24 +268,21 @@ pub fn advance_system_chain_tip(
             &transition_digest,
             source_state_hash,
             source_state_number as i64,
-            payload_bytes,
-            now as i64,
-        ],
-    )?;
+            payload_bytes])?;
 
     let updated_rows = if had_current_tip {
         tx.execute(
             "UPDATE system_peers
-                SET chain_tip = ?1, updated_at = ?2
-              WHERE peer_key = ?3 AND chain_tip = ?4",
-            params![&child_tip, now as i64, peer_key, &parent_tip],
+                SET chain_tip = ?1
+              WHERE peer_key = ?2 AND chain_tip = ?3",
+            params![&child_tip, peer_key, &parent_tip],
         )?
     } else {
         tx.execute(
             "UPDATE system_peers
-                SET chain_tip = ?1, updated_at = ?2
-              WHERE peer_key = ?3 AND chain_tip IS NULL",
-            params![&child_tip, now as i64, peer_key],
+                SET chain_tip = ?1
+              WHERE peer_key = ?2 AND chain_tip IS NULL",
+            params![&child_tip, peer_key],
         )?
     };
 
@@ -298,7 +304,6 @@ pub fn advance_system_chain_tip(
         source_state_hash: source_state_hash.to_vec(),
         source_state_number,
         payload_bytes: payload_bytes.to_vec(),
-        created_at: now,
     })
 }
 
@@ -311,24 +316,17 @@ pub fn get_system_peer(peer_key: &str) -> Result<Option<SystemPeerRecord>> {
     });
 
     let result = conn.query_row(
-        "SELECT peer_key, device_id, display_name, peer_type, chain_tip,
-                created_at, updated_at, metadata
+        "SELECT peer_key, device_id, display_name, peer_type, chain_tip, metadata
            FROM system_peers WHERE peer_key = ?1",
         params![peer_key],
         |row| {
-            let meta_blob: Vec<u8> = row.get(7)?;
-            let metadata = meta_from_blob(&meta_blob).unwrap_or_default();
+            let metadata = metadata_column(row, 5)?;
             Ok(SystemPeerRecord {
                 peer_key: row.get(0)?,
                 device_id: row.get(1)?,
                 display_name: row.get(2)?,
-                peer_type: row
-                    .get::<_, String>(3)?
-                    .parse::<SystemPeerType>()
-                    .unwrap_or(SystemPeerType::Protocol),
+                peer_type: peer_type_column(row, 3)?,
                 current_chain_tip: row.get(4)?,
-                created_at: row.get::<_, i64>(5)? as u64,
-                updated_at: row.get::<_, i64>(6)? as u64,
                 metadata,
             })
         },
@@ -354,24 +352,17 @@ pub fn get_system_peer_by_device_id(device_id: &[u8]) -> Result<Option<SystemPee
     });
 
     let result = conn.query_row(
-        "SELECT peer_key, device_id, display_name, peer_type, chain_tip,
-                created_at, updated_at, metadata
+        "SELECT peer_key, device_id, display_name, peer_type, chain_tip, metadata
            FROM system_peers WHERE device_id = ?1",
         params![device_id],
         |row| {
-            let meta_blob: Vec<u8> = row.get(7)?;
-            let metadata = meta_from_blob(&meta_blob).unwrap_or_default();
+            let metadata = metadata_column(row, 5)?;
             Ok(SystemPeerRecord {
                 peer_key: row.get(0)?,
                 device_id: row.get(1)?,
                 display_name: row.get(2)?,
-                peer_type: row
-                    .get::<_, String>(3)?
-                    .parse::<SystemPeerType>()
-                    .unwrap_or(SystemPeerType::Protocol),
+                peer_type: peer_type_column(row, 3)?,
                 current_chain_tip: row.get(4)?,
-                created_at: row.get::<_, i64>(5)? as u64,
-                updated_at: row.get::<_, i64>(6)? as u64,
                 metadata,
             })
         },
@@ -394,10 +385,10 @@ pub fn get_system_peer_events(peer_key: &str) -> Result<Vec<SystemPeerEvent>> {
 
     let mut stmt = conn.prepare(
         "SELECT peer_key, peer_type, parent_tip, child_tip, transition_digest,
-                source_state_hash, source_state_number, payload_bytes, created_at
+                source_state_hash, source_state_number, payload_bytes
            FROM system_peer_events
           WHERE peer_key = ?1
-          ORDER BY created_at ASC, rowid ASC",
+          ORDER BY rowid ASC",
     )?;
 
     let iter = stmt.query_map(params![peer_key], parse_event_row)?;
@@ -417,25 +408,18 @@ pub fn get_all_system_peers() -> Result<Vec<SystemPeerRecord>> {
     });
 
     let mut stmt = conn.prepare(
-        "SELECT peer_key, device_id, display_name, peer_type, chain_tip,
-                created_at, updated_at, metadata
-           FROM system_peers ORDER BY created_at ASC",
+        "SELECT peer_key, device_id, display_name, peer_type, chain_tip, metadata
+           FROM system_peers ORDER BY rowid ASC",
     )?;
 
     let iter = stmt.query_map([], |row| {
-        let meta_blob: Vec<u8> = row.get(7)?;
-        let metadata = meta_from_blob(&meta_blob).unwrap_or_default();
+        let metadata = metadata_column(row, 5)?;
         Ok(SystemPeerRecord {
             peer_key: row.get(0)?,
             device_id: row.get(1)?,
             display_name: row.get(2)?,
-            peer_type: row
-                .get::<_, String>(3)?
-                .parse::<SystemPeerType>()
-                .unwrap_or(SystemPeerType::Protocol),
+            peer_type: peer_type_column(row, 3)?,
             current_chain_tip: row.get(4)?,
-            created_at: row.get::<_, i64>(5)? as u64,
-            updated_at: row.get::<_, i64>(6)? as u64,
             metadata,
         })
     })?;
@@ -453,7 +437,7 @@ mod tests {
     use serial_test::serial;
 
     fn init_test_db() {
-        unsafe { std::env::set_var("DSM_SDK_TEST_MODE", "1") };
+        crate::economic_fixtures::use_test_storage_dir();
         crate::storage::client_db::reset_database_for_tests();
         crate::storage::client_db::init_database().expect("init db");
     }
@@ -465,8 +449,6 @@ mod tests {
             display_name: format!("Test {}", peer_key),
             peer_type,
             current_chain_tip: None,
-            created_at: 0,
-            updated_at: 0,
             metadata: std::collections::HashMap::new(),
         }
     }
@@ -662,7 +644,7 @@ mod tests {
         let e2 = advance_system_chain_tip(
             "faucet",
             SystemPeerType::Faucet,
-            &e1.child_tip.clone().try_into().unwrap_or([0u8; 32]),
+            &e1.child_tip,
             b"step-2",
             &[0xCC; 32],
             2,
