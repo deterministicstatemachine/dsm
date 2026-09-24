@@ -1,19 +1,18 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! Mint/burn authority and supply cap — real enforcement, not policy decoration.
+//! Burn and creation authority and the supply cap — real enforcement, not
+//! policy decoration.
 //!
 //! Before this, the wizard collected a k-of-N threshold that was parsed and
 //! immediately discarded, and there was no signer set ANYWHERE in the data
 //! model — so the "N" was undefined and the "k" could not be checked against
-//! anything. The only authority verifiers that existed were dead code, and the
-//! mint one was unbound anyway: it took the verifying public key from the
+//! anything. The only authority verifiers that existed were dead code, and one
+//! of them was unbound anyway: it took the verifying public key from the
 //! caller's OWN proof, which authorises anybody able to sign with a key they
 //! generated themselves.
 //!
-//! Since the 0x0029 producer cut, `TokenAuthority` gates BURN and
-//! CREATE_TOKEN only: a mint's authority is the policy-signed issuance
-//! evidence verified during economic admission, so the mechanism tests here
-//! run against "burn" — the operation that still carries the embedded
-//! witness — and one test pins the severance itself.
+//! There is no minting after genesis (SoFi §48), so `TokenAuthority` gates
+//! BURN and CREATE_TOKEN only; the mechanism tests here run against "burn",
+//! and one test pins that nothing else is gated by it.
 //!
 //! These tests exercise the enforcer directly, because that is where the
 //! guarantee lives. Each pins a property that the old design failed:
@@ -194,25 +193,26 @@ async fn missing_authorization_is_denied() {
     assert!(!check(&cond, &c).await);
 }
 
-/// THE SEVERANCE PIN. `TokenAuthority` does NOT gate "mint" any more: a mint
-/// with no witness at all passes this CONDITION, because a mint's authority is
-/// the 0x0029 issuance evidence verified during economic admission — and a
-/// second, embedded channel beside it is exactly what the producer cut
-/// deleted. (The mint itself is still gated: the accepting layer requires the
-/// attached admission, whose source the economic verifier proves.)
+/// `TokenAuthority` gates burn and creation and nothing else: a transfer is
+/// the holder's to make, and carries no issuer witness for it to check.
 #[tokio::test]
-async fn token_authority_does_not_gate_mint() {
+async fn token_authority_gates_only_burn_and_creation() {
     let (pk, _sk) = keypair(1);
     let cond = PolicyCondition::TokenAuthority {
         signers: vec![pk],
         threshold: 1,
     };
-    let mut c = ctx("mint", 10, Vec::new());
+    let mut c = ctx("transfer", 10, Vec::new());
     c.data.remove(witness_keys::AUTHORIZATIONS);
     assert!(
         check(&cond, &c).await,
-        "TokenAuthority must not demand a witness from an operation whose \
-         authorization channel is the 0x0029 admission evidence"
+        "TokenAuthority must not demand an issuer witness from a transfer"
+    );
+    let mut c = ctx("burn", 10, Vec::new());
+    c.data.remove(witness_keys::AUTHORIZATIONS);
+    assert!(
+        !check(&cond, &c).await,
+        "a burn with no authorization must be refused"
     );
 }
 
@@ -233,42 +233,34 @@ fn supply_ctx(op: &str, amount: u64, circulating: u64) -> EnforcementContext {
 
 #[tokio::test]
 async fn supply_cap_allows_up_to_and_including_the_cap() {
-    let cond = PolicyCondition::SupplyCap {
-        max_supply: 1_000,
-        unlimited: false,
-    };
-    assert!(check(&cond, &supply_ctx("mint", 100, 500)).await);
+    let cond = PolicyCondition::SupplyCap { max_supply: 1_000 };
+    assert!(check(&cond, &supply_ctx("create_token", 100, 500)).await);
     // Exactly at the cap is permitted — the ceiling is inclusive.
-    assert!(check(&cond, &supply_ctx("mint", 500, 500)).await);
+    assert!(check(&cond, &supply_ctx("create_token", 500, 500)).await);
 }
 
 #[tokio::test]
-async fn supply_cap_denies_a_mint_that_would_exceed_it() {
-    let cond = PolicyCondition::SupplyCap {
-        max_supply: 1_000,
-        unlimited: false,
-    };
-    assert!(!check(&cond, &supply_ctx("mint", 501, 500)).await);
+async fn supply_cap_denies_a_creation_that_would_exceed_it() {
+    let cond = PolicyCondition::SupplyCap { max_supply: 1_000 };
+    assert!(!check(&cond, &supply_ctx("create_token", 501, 500)).await);
 }
 
+/// Only creation brings supply into being (SoFi §48): a transfer or a burn
+/// moves or destroys units that already exist, so the cap does not gate them.
 #[tokio::test]
-async fn unlimited_supply_ignores_the_cap() {
-    let cond = PolicyCondition::SupplyCap {
-        max_supply: 0,
-        unlimited: true,
-    };
-    assert!(check(&cond, &supply_ctx("mint", u64::MAX, 0)).await);
+async fn supply_cap_gates_only_creation() {
+    let cond = PolicyCondition::SupplyCap { max_supply: 1_000 };
+    assert!(check(&cond, &supply_ctx("transfer", 5_000, 1_000)).await);
+    assert!(check(&cond, &supply_ctx("burn", 5_000, 1_000)).await);
+    assert!(!check(&cond, &supply_ctx("create_token", 5_000, 1_000)).await);
 }
 
 /// Without the derived circulating supply the cap cannot be evaluated, so it
 /// must fail closed — guessing would enforce the cap against the wrong number.
 #[tokio::test]
 async fn supply_cap_fails_closed_without_circulating_supply() {
-    let cond = PolicyCondition::SupplyCap {
-        max_supply: 1_000,
-        unlimited: false,
-    };
-    let mut c = supply_ctx("mint", 1, 0);
+    let cond = PolicyCondition::SupplyCap { max_supply: 1_000 };
+    let mut c = supply_ctx("create_token", 1, 0);
     c.data.remove(witness_keys::CIRCULATING);
     assert!(!check(&cond, &c).await);
 }

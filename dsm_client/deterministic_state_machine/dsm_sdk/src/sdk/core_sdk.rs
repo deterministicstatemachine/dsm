@@ -1350,7 +1350,7 @@ impl CoreSDK {
             if let Some(pc) = context.get(witness_keys::POLICY_COMMIT).cloned() {
                 if let Ok(commit) = <[u8; 32]>::try_from(pc.as_slice()) {
                     // Absent, not zero, when the history is incomplete — the
-                    // enforcer refuses a capped mint it cannot evaluate.
+                    // enforcer refuses a capped creation it cannot evaluate.
                     if let Some(circulating) = self.derive_circulating_supply(&commit) {
                         context.insert(
                             witness_keys::CIRCULATING.to_string(),

@@ -575,10 +575,6 @@ pub enum DsmError {
     Crypto(CryptoError),
     /// OS-level system error (file permissions, resource limits).
     SystemError(String),
-    /// Token minting is not allowed on this network configuration.
-    MintNotAllowed,
-    /// Token burning is not allowed on this network configuration.
-    BurnNotAllowed,
     /// The faucet has been administratively disabled.
     FaucetDisabled,
     /// The faucet is not available on this network (e.g., mainnet).
@@ -1540,8 +1536,6 @@ impl Display for DsmError {
                 Ok(())
             }
             DsmError::SystemError(msg) => write!(f, "System error: {msg}"),
-            DsmError::MintNotAllowed => write!(f, "Minting not allowed on this network"),
-            DsmError::BurnNotAllowed => write!(f, "Burning not allowed on this network"),
             DsmError::FaucetDisabled => write!(f, "Faucet is currently disabled"),
             DsmError::FaucetNotAvailable => write!(f, "Faucet is not available on this network"),
             DsmError::ClockDrift {
@@ -1745,8 +1739,6 @@ impl Error for DsmError {
             DsmError::AlreadyExists(_) => None,
             DsmError::InvalidState(_) => None,
             DsmError::SystemError(_) => None,
-            DsmError::MintNotAllowed => None,
-            DsmError::BurnNotAllowed => None,
             DsmError::FaucetDisabled => None,
             DsmError::FaucetNotAvailable => None,
             DsmError::ClockDrift { .. } => None,
@@ -2182,14 +2174,6 @@ mod tests {
         assert_eq!(
             format!("{}", DsmError::InvalidIndex),
             "Invalid or out-of-bounds index"
-        );
-        assert_eq!(
-            format!("{}", DsmError::MintNotAllowed),
-            "Minting not allowed on this network"
-        );
-        assert_eq!(
-            format!("{}", DsmError::BurnNotAllowed),
-            "Burning not allowed on this network"
         );
         assert_eq!(
             format!("{}", DsmError::FaucetDisabled),

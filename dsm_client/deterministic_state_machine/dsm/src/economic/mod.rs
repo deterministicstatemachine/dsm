@@ -45,11 +45,10 @@
 //! Credit provenance is a separate and **conjunctive** obligation: a closed
 //! write set proves *what changed*, never *why a credit may appear*, and a
 //! verifier that checked only the mutations would accept a trader crediting
-//! itself from nothing. The `CreditSource` algebra (classes `0x0023`,
-//! `0x0025`, `0x0028` and `0x0030`) lives in [`provenance`], and class
-//! `0x0029` (`IssuanceAuthorizationBody`, [`issuance`]) is the policy-signed
-//! predicate the `0x0023` arm resolves — the producer is `token.mint`'s
-//! economic admission.
+//! itself from nothing. The `CreditSource` algebra (a peer's validated debit
+//! `0x0025`, a native-reserve release `0x005D`, a genesis release `0x005F`)
+//! lives in [`provenance`]. Nothing is minted after genesis (SoFi §48): a
+//! token's supply is released at creation or from its reserve.
 
 pub mod admission;
 pub mod authority_evidence;

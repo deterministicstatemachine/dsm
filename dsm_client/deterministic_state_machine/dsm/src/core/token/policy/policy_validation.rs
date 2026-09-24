@@ -320,20 +320,11 @@ impl PolicyValidator {
                     }
                 }
 
-                PolicyCondition::SupplyCap {
-                    max_supply,
-                    unlimited,
-                } => {
-                    if *unlimited && *max_supply != 0 {
-                        errors.push(ValidationError::InvalidValue(
-                            format!("condition[{index}].SupplyCap"),
-                            "is both unlimited and capped".into(),
-                        ));
-                    }
-                    if !*unlimited && *max_supply == 0 {
+                PolicyCondition::SupplyCap { max_supply } => {
+                    if *max_supply == 0 {
                         errors.push(ValidationError::InvalidValue(
                             format!("condition[{index}].SupplyCap.max_supply"),
-                            "a capped supply of 0 can never mint".into(),
+                            "a zero supply is not a token (SoFi §50)".into(),
                         ));
                     }
                 }
@@ -670,6 +661,35 @@ mod tests {
             .errors
             .iter()
             .any(|e| matches!(e, ValidationError::MissingField(_))));
+    }
+
+    /// A zero supply is not a token (SoFi §50), and no supply is unlimited
+    /// (§54), so a SupplyCap of 0 has no reading that validates.
+    #[tokio::test]
+    async fn a_zero_supply_cap_does_not_validate() {
+        let validator = PolicyValidator::new();
+        let cap = |max_supply| {
+            let mut p = PolicyFile::new("Test Policy", "1.0.0", "test_author");
+            p.add_condition(PolicyCondition::SupplyCap { max_supply });
+            p
+        };
+        let zero = cap(0);
+        let result = validator
+            .validate_policy(&ValidationContext::new("test_token", &zero))
+            .await
+            .unwrap();
+        assert!(!result.is_valid);
+        assert!(result.errors.iter().any(|e| matches!(
+            e,
+            ValidationError::InvalidValue(field, _) if field.ends_with("SupplyCap.max_supply")
+        )));
+
+        let one = cap(1);
+        let result = validator
+            .validate_policy(&ValidationContext::new("test_token", &one))
+            .await
+            .unwrap();
+        assert!(result.is_valid, "{:?}", result.errors);
     }
 
     #[tokio::test]

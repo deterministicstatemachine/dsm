@@ -244,7 +244,6 @@ pub(crate) fn derive_policy_file(
     // after it.
     pf.add_condition(PolicyCondition::SupplyCap {
         max_supply: parsed.genesis_supply,
-        unlimited: false,
     });
     if !parsed.transferable {
         // A non-transferable token never moves between holders; its holder

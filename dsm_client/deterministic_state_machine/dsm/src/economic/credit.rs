@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! The credit-source descriptors — CCB classes `0x0023`–`0x0028`, `0x0030` and
-//! `0x0035`.
+//! The credit-source descriptors — CCB classes `0x0025`, `0x005D` and
+//! `0x005F`.
 //!
 //! ## Why these are inline, not addressed
 //!
@@ -34,7 +34,7 @@
 //!
 //! ## No `Custom` arm
 //!
-//! The algebra is closed. A credit that names none of these eight is unfunded,
+//! The algebra is closed. A credit that names none of these three is unfunded,
 //! and there is deliberately no escape hatch — an open arm would be where
 //! every future "just this once" credit went.
 //!

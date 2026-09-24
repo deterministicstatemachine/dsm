@@ -276,7 +276,7 @@ pub fn domain_hash_bytes(tag: TaggedHashDomain<'_>, data: &[u8]) -> [u8; 32] {
 ///
 /// # Arguments
 /// * `policy_commit` - 32-byte CPTA anchor hash (the token's policy identity)
-/// * `verb` - Operation type (e.g., "transfer", "mint", "burn", "balance-key")
+/// * `verb` - Operation type (e.g., "transfer", "lock", "burn", "balance-key")
 ///
 /// # Panics
 /// Panics if `verb` is empty or contains NUL or `/` characters.
@@ -301,7 +301,7 @@ pub fn token_domain_hasher(policy_commit: &[u8; 32], verb: &str) -> Hasher {
 ///
 /// # Arguments
 /// * `policy_commit` - 32-byte CPTA anchor hash
-/// * `verb` - Operation type (e.g., "transfer", "mint", "burn")
+/// * `verb` - Operation type (e.g., "transfer", "lock", "burn")
 /// * `data` - Payload to hash
 pub fn token_domain_hash(policy_commit: &[u8; 32], verb: &str, data: &[u8]) -> Hash {
     let mut hasher = token_domain_hasher(policy_commit, verb);
@@ -349,7 +349,7 @@ mod tests_token_domain {
         let pc = test_policy_a();
         let data = b"some payload";
         let h1 = token_domain_hash(&pc, "transfer", data);
-        let h2 = token_domain_hash(&pc, "mint", data);
+        let h2 = token_domain_hash(&pc, "burn", data);
         assert_ne!(h1.as_bytes(), h2.as_bytes());
     }
 

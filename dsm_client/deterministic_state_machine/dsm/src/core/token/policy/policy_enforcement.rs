@@ -131,7 +131,7 @@ impl EnforcementContext {
 #[derive(Debug, Default)]
 pub struct PolicyEnforcer;
 
-/// Canonical preimage a mint/burn authorisation signs.
+/// Canonical preimage a burn or creation authorisation signs.
 ///
 /// SINGLE definition, used by both the signer and the verifier. If each built
 /// its own, a drift between them would either reject honest operations or —
@@ -163,7 +163,7 @@ pub fn token_authorization_preimage(
         .to_vec()
 }
 
-/// Context keys carrying the mint/burn authorisation witness.
+/// Context keys carrying the burn or creation authorisation witness.
 pub mod witness_keys {
     /// Concatenated `(u32 pk_len, pk, u32 sig_len, sig)` records.
     pub const AUTHORIZATIONS: &str = "token_authorizations";
@@ -297,15 +297,10 @@ impl PolicyEnforcer {
             }
 
             PolicyCondition::TokenAuthority { signers, threshold } => {
-                // Gates burn and create_token, which still authorize through
-                // the embedded `token_authorization_preimage` witness. MINT IS
-                // DELIBERATELY EXCLUDED: since the 0x0029 producer cut, mint
-                // authorization is the policy-signed issuance evidence bundle
-                // verified during economic admission — the operation carries
-                // no witness for this condition to check, and gating it here
-                // would resurrect the second authorization channel that was
-                // deleted. Other operations are governed by their own
-                // conditions.
+                // Gates burn and create_token, which authorize through the
+                // embedded `token_authorization_preimage` witness. There is
+                // no minting after genesis (SoFi §48). Other operations are
+                // governed by their own conditions.
                 if !matches!(ctx.operation_type.as_str(), "burn" | "create_token") {
                     return Ok(EnforcementResult::allowed(
                         "TokenAuthority does not gate this operation",
@@ -314,7 +309,7 @@ impl PolicyEnforcer {
 
                 let Some(blob) = ctx.data.get(witness_keys::AUTHORIZATIONS) else {
                     return Ok(EnforcementResult::denied(
-                        "No mint/burn authorization presented",
+                        "No burn or creation authorization presented",
                     ));
                 };
                 let (Some(pc), Some(token_id), Some(amount_le), Some(authorized_by)) = (
@@ -370,26 +365,22 @@ impl PolicyEnforcer {
 
                 if satisfied.len() as u32 >= *threshold {
                     Ok(EnforcementResult::allowed(
-                        "Mint/burn authority threshold satisfied",
+                        "Burn or creation authority threshold satisfied",
                     ))
                 } else {
                     Ok(EnforcementResult::denied(
-                        "Mint/burn authority threshold not satisfied",
+                        "Burn or creation authority threshold not satisfied",
                     ))
                 }
             }
 
-            PolicyCondition::SupplyCap {
-                max_supply,
-                unlimited,
-            } => {
-                if !matches!(ctx.operation_type.as_str(), "mint" | "create_token") {
+            PolicyCondition::SupplyCap { max_supply } => {
+                // Only creation brings supply into being: nothing is minted
+                // after genesis (SoFi §48).
+                if ctx.operation_type != "create_token" {
                     return Ok(EnforcementResult::allowed(
                         "SupplyCap does not gate this operation",
                     ));
-                }
-                if *unlimited {
-                    return Ok(EnforcementResult::allowed("Supply is uncapped"));
                 }
                 let (Some(amount_le), Some(circ_le)) = (
                     ctx.data.get(witness_keys::AMOUNT),
@@ -414,7 +405,7 @@ impl PolicyEnforcer {
                     Ok(EnforcementResult::allowed("Within supply cap"))
                 } else {
                     Ok(EnforcementResult::denied(
-                        "Mint would exceed the token's maximum supply",
+                        "Creation would exceed the token's maximum supply",
                     ))
                 }
             }

@@ -407,12 +407,35 @@ pub enum CellFact {
 }
 
 /// A seat's committed state for the cell: a ByteCommit obtained from a
-/// mirror, and the seat's own proof that it commits the cell's latest entry
-/// as of that cycle (§14). A link counts only once such evidence verifies.
+/// mirror, the member's previous ByteCommit as the same mirrors hold it, and
+/// the seat's own proof that it commits the cell's latest entry as of that
+/// cycle (§14). A link counts only once such evidence verifies — the chain
+/// link and the root both (§14 rule 3).
 #[derive(Debug, Clone)]
 pub struct CommittedAt {
     pub commit: ByteCommit,
+    /// The member's ByteCommit at `commit.cycle_index - 1`; `None` at cycle
+    /// 1, whose parent is the zero digest.
+    pub parent: Option<ByteCommit>,
     pub proof: CellCommitProof,
+}
+
+impl CommittedAt {
+    /// §14 rule 3, the chain link: at cycle 1 the parent digest is zero;
+    /// after it, the ByteCommit follows the member's previous one — same
+    /// member, the next cycle, its digest as the parent. The root is checked
+    /// by the proof ([`crate::storage_cell::record_is_committed`]).
+    pub fn chain_link_holds(&self) -> bool {
+        match &self.parent {
+            None => self.commit.cycle_index == 1 && self.commit.parent_digest == [0u8; 32],
+            Some(parent) => self.commit.follows(parent),
+        }
+    }
+
+    fn commits(&self, record: &ArrivalRecord, log: &[Vec<u8>]) -> bool {
+        self.chain_link_holds()
+            && crate::storage_cell::record_is_committed(record, log, &self.commit, &self.proof)
+    }
 }
 
 /// Everything a verifier holds about one seat of a cell's route.
@@ -539,8 +562,7 @@ pub fn leader_copy_record(
 /// Whether `commit` is a ByteCommit of `record`'s seat that commits the
 /// record against the values read from that seat (§14).
 fn committed_by(record: &ArrivalRecord, log: &[Vec<u8>], commit: Option<&CommittedAt>) -> bool {
-    commit
-        .is_some_and(|c| crate::storage_cell::record_is_committed(record, log, &c.commit, &c.proof))
+    commit.is_some_and(|c| c.commits(record, log))
 }
 
 /// Whether a route entry is this cell's copy for route position `position`:
@@ -633,13 +655,7 @@ fn leader_seen_at(
         return false;
     };
     seat.leader_seen.as_ref().is_some_and(|c| {
-        c.commit.member_id.as_slice() == cell.route.leader()
-            && crate::storage_cell::record_is_committed(
-                leader_record,
-                leader_log,
-                &c.commit,
-                &c.proof,
-            )
+        c.commit.member_id.as_slice() == cell.route.leader() && c.commits(leader_record, leader_log)
     })
 }
 
@@ -1108,6 +1124,7 @@ pub(crate) mod fixtures {
                     bytes_used: log.iter().map(|v| v.len() as u64).sum(),
                     parent_digest: [0u8; 32],
                 },
+                parent: None,
                 proof,
             })
         }
@@ -1462,6 +1479,70 @@ mod tests {
             evaluate(&c.routed(), &ev, recognize_ok),
             Err(Missing::LeaderLinkUncommitted),
             "a ByteCommit closed before the value arrived commits nothing of it"
+        );
+    }
+
+    /// `at` re-closed as the member's second cycle: the same root and proof,
+    /// its parent the member's cycle-1 ByteCommit.
+    fn at_cycle_two(at: &CommittedAt) -> CommittedAt {
+        let first = ByteCommit {
+            member_id: at.commit.member_id.clone(),
+            cycle_index: 1,
+            smt_root: [0x11; 32],
+            bytes_used: 0,
+            parent_digest: [0u8; 32],
+        };
+        CommittedAt {
+            commit: ByteCommit {
+                cycle_index: 2,
+                parent_digest: first.digest(),
+                ..at.commit.clone()
+            },
+            parent: Some(first),
+            proof: at.proof.clone(),
+        }
+    }
+
+    /// §14 rule 3: a ByteCommit backs a link only when its chain link holds.
+    /// A later cycle that follows the member's previous ByteCommit backs it;
+    /// the same ByteCommit with only its parent digest changed — root, cell
+    /// proof, member, cycle and arrival log all still valid — backs nothing,
+    /// and neither does one presented without the ByteCommit it follows.
+    #[test]
+    fn a_byte_commit_backs_a_link_only_when_it_follows_its_parent() {
+        let mut c = cell();
+        c.write(b"ok-x", ROUTE_LEN - 1, &[]);
+        let mut ev = c.evidence();
+        for seat in &mut ev.seats {
+            seat.committed = seat.committed.as_ref().map(at_cycle_two);
+            seat.leader_seen = seat.leader_seen.as_ref().map(at_cycle_two);
+        }
+        assert_eq!(
+            evaluate(&c.routed(), &ev, recognize_ok),
+            held(ChainState::Final, b"ok-x"),
+            "cycle-two ByteCommits that follow their parents back every link"
+        );
+
+        let mut bent = ev.clone();
+        if let Some(committed) = bent.seats[0].committed.as_mut() {
+            committed.commit.parent_digest[0] ^= 0x01;
+        }
+        assert_eq!(
+            evaluate(&c.routed(), &bent, recognize_ok),
+            Err(Missing::LeaderLinkUncommitted),
+            "a leader ByteCommit whose parent digest is not its parent's backs nothing"
+        );
+
+        let mut orphan = ev.clone();
+        for seat in &mut orphan.seats[1..] {
+            if let Some(committed) = seat.committed.as_mut() {
+                committed.parent = None;
+            }
+        }
+        assert_eq!(
+            evaluate(&c.routed(), &orphan, recognize_ok),
+            held(ChainState::LeaderHeld, b"ok-x"),
+            "a later cycle presented without its parent backs no later link"
         );
     }
 

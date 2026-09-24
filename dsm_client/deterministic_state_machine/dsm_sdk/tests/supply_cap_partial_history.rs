@@ -27,20 +27,17 @@ async fn allowed(cond: &PolicyCondition, c: &EnforcementContext) -> bool {
         .allowed
 }
 
-/// THE FAIL-OPEN, CLOSED. With circulating supply absent, a capped mint is
-/// denied — it is not treated as though nothing had ever been minted.
+/// THE FAIL-OPEN, CLOSED. With circulating supply absent, a capped creation
+/// is denied — it is not treated as though nothing had ever been created.
 ///
 /// Before the fix, an unreadable chain yielded `circulating = 0`, which for a
-/// 1000-cap token authorised a mint of the entire supply on a device whose
-/// history said otherwise.
+/// 1000-cap token authorised creating the entire supply again on a device
+/// whose history said otherwise.
 #[tokio::test]
 async fn absent_circulating_supply_denies_instead_of_granting_full_headroom() {
-    let cond = PolicyCondition::SupplyCap {
-        max_supply: 1_000,
-        unlimited: false,
-    };
+    let cond = PolicyCondition::SupplyCap { max_supply: 1_000 };
 
-    let mut ctx = EnforcementContext::new("mint");
+    let mut ctx = EnforcementContext::new("create_token");
     ctx.data.insert(
         witness_keys::AMOUNT.to_string(),
         1_000u64.to_le_bytes().to_vec(),
@@ -48,7 +45,7 @@ async fn absent_circulating_supply_denies_instead_of_granting_full_headroom() {
     // No CIRCULATING witness: the device could not read its own history.
     assert!(
         !allowed(&cond, &ctx).await,
-        "a mint must be refused when circulating supply cannot be established"
+        "a creation must be refused when circulating supply cannot be established"
     );
 
     // And the same request with a truthful figure of 0 IS allowed — proving the
@@ -59,21 +56,19 @@ async fn absent_circulating_supply_denies_instead_of_granting_full_headroom() {
     );
     assert!(
         allowed(&cond, &ctx).await,
-        "with a known circulating supply of 0, minting exactly the cap is fine"
+        "with a known circulating supply of 0, creating exactly the cap is fine"
     );
 }
 
-/// An under-counted total is what a dropped Mint row produces. Pin that the cap
-/// arithmetic itself is inclusive and exact, so the only way to wrongly allow
-/// is to feed it a wrong number — which is what refusing partial history stops.
+/// An under-counted total is what a dropped CreateToken row produces. Pin that
+/// the cap arithmetic itself is inclusive and exact, so the only way to wrongly
+/// allow is to feed it a wrong number — which is what refusing partial history
+/// stops.
 #[tokio::test]
 async fn cap_is_exact_so_an_undercount_is_the_only_way_through() {
-    let cond = PolicyCondition::SupplyCap {
-        max_supply: 1_000,
-        unlimited: false,
-    };
+    let cond = PolicyCondition::SupplyCap { max_supply: 1_000 };
     let ctx = |circulating: u64, amount: u64| {
-        let mut c = EnforcementContext::new("mint");
+        let mut c = EnforcementContext::new("create_token");
         c.data.insert(
             witness_keys::AMOUNT.to_string(),
             amount.to_le_bytes().to_vec(),
@@ -85,11 +80,12 @@ async fn cap_is_exact_so_an_undercount_is_the_only_way_through() {
         c
     };
 
-    // Truth: 900 already minted, 101 more would exceed the cap.
+    // Truth: 900 already in circulation, 101 more would exceed the cap.
     assert!(!allowed(&cond, &ctx(900, 101)).await);
     // Exactly on the cap is permitted.
     assert!(allowed(&cond, &ctx(900, 100)).await);
-    // An undercount of 200 (one dropped Mint) would have let the 101 through.
+    // An undercount of 200 (one dropped CreateToken) would have let the 101
+    // through.
     assert!(
         allowed(&cond, &ctx(700, 101)).await,
         "demonstrates the hazard: the cap is only as honest as the total it is given"

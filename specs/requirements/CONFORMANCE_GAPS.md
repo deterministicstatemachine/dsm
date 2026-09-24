@@ -554,6 +554,28 @@ Owner rulings #4 (remove `min_state_number`), #6 (a field no receiver verifies d
 | `frontend` · src/vectors (`externalCommitV2`, `uiVectors`, `index`) | No importer. |
 | `frontend` · `WebViewBridge.framing.test.ts` (`describe.skip`), `bridgeDecoding.integration.test.ts` (`it.skip`) | Skipped tests report nothing (frontend sweep). |
 
+### 6.13 ByteCommit ancestry in route-chain evidence, one write per missing value, no mint after genesis (branch `fix/route-chain-evidence`, 2026-09-24)
+
+Auditor findings on `61d273a3`: the ByteCommit's parent link was not part of the evidence (1), the mirror evidence threshold was unstated (2), `from_leader` rewrote values the leader held (3), and post-genesis mint vocabulary and branches remained (5).
+
+**Resolved**
+
+| Location | Finding | State |
+|---|---|---|
+| `dsm` · route_chain.rs · `CommittedAt`, `committed_by`, `leader_seen_at` (MR-DSM-0079, MR-STOR-0094) | A ByteCommit backed a link when the record was included under its root; its chain link was never checked, so a ByteCommit with any `parent_digest` counted. | `CommittedAt` carries the member's ByteCommit at the previous cycle (`None` at cycle 1). `chain_link_holds` requires a zero parent digest at cycle 1 and `follows(parent)` after it, and is part of `commits`, the one check both readers use. `dsm_sdk` · sdk/route_seats.rs · `committed_at` fetches the parent from the same mirrors. Test: `route_chain::tests::a_byte_commit_backs_a_link_only_when_it_follows_its_parent` (valid → Final; bent `parent_digest` → `LeaderLinkUncommitted`; orphan at cycle 2 → not Final). Chain-link check removed → red. |
+| `dsm_sdk` · sdk/route_seats.rs · `agreed` (storage spec §3, §14 rule 3) | The number of mirrors whose agreement makes a ByteCommit evidence was not stated. | Not a threshold: the storage fault model is crash-only (§3: a node never equivocates or alters what it stores), and a ByteCommit is never accepted by counting mirrors (§14 rule 3). One mirror's copy is taken and the verifier checks its chain link and root. Stated at `agreed`. |
+| `dsm_sdk` · sdk/route_seats.rs · `from_leader` (MR-DSM-0083, MR-DSM-0213) | The batch to the leader rewrote every value, including those the leader already held. | Only the values with no link at the leader are written. Test: `a_value_the_leader_already_holds_is_not_written_there_again` (node-backed; the full batch restored → red). |
+| `dsm` · core/token/era_token.rs, init.rs; types/error.rs (MR-DSM-0197, MR-SOFI-0307) | `EraTokenManager` minted without limit on testnet and refused on mainnet; `initialize_root_token*`; `DsmError::MintNotAllowed` / `BurnNotAllowed`, constructed only there. No caller outside the module. | Deleted. |
+| `dsm` · types/policy_types.rs, core/token/policy/policy_validation.rs, policy_enforcement.rs; `proto` · `SupplyCapProto` (MR-SOFI-0306, SoFi §54) | SupplyCap carried an `unlimited` flag and an unlimited branch, and gated `"mint"`; `TokenAuthority` was documented and reported as mint authority. | Field 2 reserved; `SupplyCap { max_supply }`; validation refuses 0 (§50); enforcement gates `create_token` only; `TokenAuthority` gates burn and creation. Tests: `a_zero_supply_cap_does_not_validate`, `supply_cap_denies_a_creation_that_would_exceed_it`, `supply_cap_gates_only_creation`, `token_authority_gates_only_burn_and_creation`. Zero check removed → red; gate opened to every operation → red; gate closed to creation → red. |
+| `dsm` · economic/mod.rs, credit.rs, decode.rs, witness.rs, write_set.rs; `dsm_sdk` · sdk/token_sdk.rs | Documentation named burned classes `0x0023`/`0x0029` as live credit sources, an issuance write-set arm that no longer exists, and a `token.mint` route that does not exist. | Rewritten to the three credit sources (`0x0025`, `0x005D`, `0x005F`) and to no minting after genesis. |
+
+**Open**
+
+| Location | Finding |
+|---|---|
+| `frontend` · DevPolicyScreen.tsx, AccountsScreen.tsx | User-visible copy still describes a mint/burn authority and a mint/burn role (frontend sweep). |
+| `specs/requirements` · status | Requirement status is written by hand; §5A checkboxes and `MASTER_REQUIREMENTS.md` status prose lag the code (auditor finding 4). |
+
 ## 7 Totals
 
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |

@@ -3852,7 +3852,7 @@ message PolicyConditionProto {
   reserved "vault_enforcement";
 }
 
-// Who may mint or burn this token, and how many of them must co-sign.
+// Who may burn this token or create it, and how many of them must co-sign.
 // `signers` are raw SPHINCS+ public keys; the verifier takes the key from
 // HERE, never from the caller's own proof.
 message TokenAuthorityProto {
@@ -3860,11 +3860,12 @@ message TokenAuthorityProto {
   uint32 threshold       = 2;
 }
 
-// Hard ceiling on circulating supply. `unlimited` and `max_supply` are
-// mutually exclusive; the policy parser enforces one canonical encoding.
+// The whole supply a token is created with. Nothing is minted after genesis
+// (SoFi §48) and no supply is unlimited (§54): 2 was the unlimited flag.
 message SupplyCapProto {
   bytes max_supply_u128 = 1 [(dsm_max_len)=16];
-  bool  unlimited       = 2;
+  reserved 2;
+  reserved "unlimited";
 }
 
 message IdentityConstraintProto { repeated string allowed_identities = 1; bool allow_derived = 2; }

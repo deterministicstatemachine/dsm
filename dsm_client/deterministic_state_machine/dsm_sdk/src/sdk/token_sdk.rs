@@ -697,22 +697,15 @@ impl TokenSDK {
                 Ok(new_state)
             }
             TokenOperation::Mint { token_id, .. } => {
-                // OWNER RULING (0x0029 producer cut): token.mint is the ONE
-                // mint producer. This surface used to sign the legacy
-                // `mint|v2|` self-authorization and advance a raw credit via
-                // `execute_on_relationship` — a positive mint with NO economic
-                // admission, which the accepting layer refuses since the
-                // producer cut. Its remaining caller chain is the Bitcoin/dBTC
-                // deposit completion, and dBTC is a BUILTIN whose issuance is
-                // not self-authorizable at all: that success path was already
-                // structurally impossible, and it becomes honest here. dBTC
-                // issuance into R_econ arrives with the Bitcoin tap
-                // integration; user-token issuance goes through `token.mint`.
+                // Nothing is minted after genesis (SoFi §48). The only
+                // caller chain here is the Bitcoin/dBTC deposit completion,
+                // and dBTC is a builtin whose issuance is tied to a proven
+                // lock under its backing rule (§54), which this surface does
+                // not carry.
                 Err(DsmError::invalid_operation(format!(
-                    "TokenSDK mint of {token_id} is not a producer: a positive mint enters \
-                     canonical state only through token.mint's economic admission, whose \
-                     0x0029 issuance evidence a verifier reruns — and builtin dBTC issuance \
-                     arrives with the Bitcoin tap integration"
+                    "TokenSDK mint of {token_id} is not a producer: nothing is minted after \
+                     genesis, and builtin dBTC issuance is tied to a proven lock this \
+                     surface does not carry"
                 )))
             }
             TokenOperation::Burn {

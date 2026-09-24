@@ -296,7 +296,7 @@ mod state_machine_tests {
         let head = test_head();
         let device_id = head.devid();
         // SMT-advance mechanics test: a non-balance op carries no deltas. The
-        // conservation guard requires Transfer/Mint/Burn deltas to match the op;
+        // conservation guard requires balance-bearing deltas to match the op;
         // balance-bearing advances are covered by the device_state guard tests.
         let op = Operation::Generic {
             operation_type: b"test.post-genesis".to_vec(),

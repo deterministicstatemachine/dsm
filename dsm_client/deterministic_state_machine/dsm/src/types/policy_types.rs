@@ -165,29 +165,22 @@ pub enum PolicyCondition {
         min_confirmations: u64,
     },
 
-    /// Who may mint or burn this token, and how many must co-sign.
+    /// Who may burn this token or create it, and how many must co-sign.
     ///
-    /// The `signers` list is the "N" in k-of-N — it did not exist anywhere in
-    /// the data model before, which is why the threshold the wizard collected
-    /// could never be enforced against anything. Verification takes the public
-    /// key from HERE; taking it from the caller's own proof (as the deleted
-    /// legacy mint verifier did) authorises anyone able to sign with a key
-    /// they generated themselves. Mint itself no longer uses this condition —
-    /// its authority is the 0x0029 issuance evidence — so this gates burn and
-    /// create_token.
+    /// The `signers` list is the "N" in k-of-N. Verification takes the public
+    /// key from HERE, never from the caller's own proof, which would authorise
+    /// anyone able to sign with a key they generated themselves. There is no
+    /// minting after genesis (SoFi §48); this gates burn and create_token.
     TokenAuthority {
-        /// Raw SPHINCS+ public keys permitted to mint/burn.
+        /// Raw SPHINCS+ public keys permitted to burn or create.
         signers: Vec<Vec<u8>>,
         /// Distinct signers required (`k`).
         threshold: u32,
     },
 
-    /// Hard ceiling on circulating supply.
-    SupplyCap {
-        max_supply: u128,
-        /// Mutually exclusive with a non-zero `max_supply`.
-        unlimited: bool,
-    },
+    /// The whole supply the token is created with: nothing is minted after
+    /// genesis (SoFi §48), and no supply is unlimited (§54).
+    SupplyCap { max_supply: u128 },
 }
 
 /// Role-based access control for token policies.
@@ -463,12 +456,8 @@ impl From<&PolicyCondition> for crate::types::proto::PolicyConditionProto {
                     threshold: *threshold,
                 })
             }
-            PolicyCondition::SupplyCap {
-                max_supply,
-                unlimited,
-            } => Kind::SupplyCap(SupplyCapProto {
+            PolicyCondition::SupplyCap { max_supply } => Kind::SupplyCap(SupplyCapProto {
                 max_supply_u128: max_supply.to_be_bytes().to_vec(),
-                unlimited: *unlimited,
             }),
         };
 
@@ -527,7 +516,7 @@ impl TryFrom<&crate::types::proto::PolicyConditionProto> for PolicyCondition {
                 }
                 if p.threshold == 0 || p.threshold as usize > p.signers.len() {
                     // An unsatisfiable threshold would permanently freeze
-                    // mint/burn; reject rather than materialise it.
+                    // burn and creation; reject rather than materialise it.
                     return Err(DsmError::SerializationError(
                         "TokenAuthority threshold must be 1..=signers.len()".into(),
                     ));
@@ -547,15 +536,7 @@ impl TryFrom<&crate::types::proto::PolicyConditionProto> for PolicyCondition {
                 for b in &p.max_supply_u128 {
                     max_supply = (max_supply << 8) | (*b as u128);
                 }
-                if p.unlimited && max_supply != 0 {
-                    return Err(DsmError::SerializationError(
-                        "SupplyCap: unlimited and a non-zero cap are mutually exclusive".into(),
-                    ));
-                }
-                Ok(PolicyCondition::SupplyCap {
-                    max_supply,
-                    unlimited: p.unlimited,
-                })
+                Ok(PolicyCondition::SupplyCap { max_supply })
             }
             None => Err(DsmError::SerializationError(
                 "Missing policy condition kind".into(),
@@ -630,7 +611,7 @@ mod tests {
     fn anchor_is_stable_and_ignores_display_fields() {
         let mut p1 = PolicyFile::new("Name", "v2", "authorX");
         p1.add_condition(PolicyCondition::OperationRestriction {
-            allowed_operations: vec!["transfer".into(), "mint".into()],
+            allowed_operations: vec!["transfer".into(), "lock".into()],
         });
         p1.roles.push(PolicyRole {
             id: "admin".into(),
@@ -654,13 +635,13 @@ mod tests {
     fn sets_are_sorted_in_canonical_bytes() {
         let mut p1 = PolicyFile::new("n", "v", "a");
         p1.add_condition(PolicyCondition::OperationRestriction {
-            allowed_operations: vec!["transfer".into(), "mint".into(), "burn".into()],
+            allowed_operations: vec!["transfer".into(), "lock".into(), "burn".into()],
         });
         let b1 = p1.canonical_bytes().unwrap();
 
         let mut p2 = PolicyFile::new("n", "v", "a");
         p2.add_condition(PolicyCondition::OperationRestriction {
-            allowed_operations: vec!["burn".into(), "transfer".into(), "mint".into()],
+            allowed_operations: vec!["burn".into(), "transfer".into(), "lock".into()],
         });
         let b2 = p2.canonical_bytes().unwrap();
 
