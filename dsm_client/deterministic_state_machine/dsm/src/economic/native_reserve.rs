@@ -614,43 +614,47 @@ pub enum WalkStop {
 /// `read`, which takes the parent and returns what its cell established.
 /// Every final release advances the state; `visit` sees each one, in order,
 /// with the parent it succeeded, so a caller can memoise validated states.
+/// An error from either stops the walk and is returned as it is: a reader
+/// that could not read reports that, never a reading.
 ///
 /// Finality is permanent (Part II §8), so a state reached through final
 /// releases is a sound start for any later walk.
-pub fn walk_lineage<R, V>(
+pub fn walk_lineage<R, V, E>(
     start: NativeReserveState,
     budget: usize,
     mut read: R,
     mut visit: V,
-) -> WalkStop
+) -> Result<WalkStop, E>
 where
-    R: FnMut(&NativeReserveState) -> SuccessorRead,
-    V: FnMut(&NativeReserveState, &VerifiedRelease, &NativeReserveState),
+    R: FnMut(&NativeReserveState) -> Result<SuccessorRead, E>,
+    V: FnMut(&NativeReserveState, &VerifiedRelease, &NativeReserveState) -> Result<(), E>,
 {
     let mut state = start;
-    for _ in 0..budget {
-        match read(&state) {
+    let mut remaining = budget;
+    while remaining > 0 {
+        remaining -= 1;
+        match read(&state)? {
             SuccessorRead::Final { release, child } => {
-                visit(&state, &release, &child);
+                visit(&state, &release, &child)?;
                 state = child;
             }
             SuccessorRead::LeaderHeld { release, child } => {
-                return WalkStop::LeaderHeld {
+                return Ok(WalkStop::LeaderHeld {
                     settled: state,
                     release,
                     child,
-                }
+                })
             }
-            SuccessorRead::Open => return WalkStop::Head(state),
+            SuccessorRead::Open => return Ok(WalkStop::Head(state)),
             SuccessorRead::Unavailable(missing) => {
-                return WalkStop::Unavailable {
+                return Ok(WalkStop::Unavailable {
                     last: state,
                     missing,
-                }
+                })
             }
         }
     }
-    WalkStop::BudgetExhausted(state)
+    Ok(WalkStop::BudgetExhausted(state))
 }
 
 #[cfg(test)]
@@ -995,8 +999,8 @@ mod tests {
         let stop = walk_lineage(
             r0,
             16,
-            |parent| {
-                if parent.root() == r0.root() {
+            |parent| -> Result<SuccessorRead, core::convert::Infallible> {
+                Ok(if parent.root() == r0.root() {
                     SuccessorRead::Final {
                         release: Box::new(rel1.clone()),
                         child: r1,
@@ -1008,13 +1012,14 @@ mod tests {
                     }
                 } else {
                     SuccessorRead::Open
-                }
+                })
             },
             |parent, release, child| {
-                visited.push((parent.generation, release.body.generation, child.generation))
+                visited.push((parent.generation, release.body.generation, child.generation));
+                Ok(())
             },
         );
-        assert_eq!(stop, WalkStop::Head(r2));
+        assert_eq!(stop, Ok(WalkStop::Head(r2)));
         assert_eq!(visited, vec![(0, 1, 1), (1, 2, 2)]);
         assert_eq!(r2.remaining_supply, ERA_RESERVE_GENESIS_SUPPLY - 107);
     }
@@ -1027,20 +1032,21 @@ mod tests {
             walk_lineage(
                 r0,
                 16,
-                |parent| {
+                |parent| -> Result<SuccessorRead, core::convert::Infallible> {
                     assert_eq!(parent.generation, 0, "the walk reads R_0's cell first");
-                    SuccessorRead::Unavailable(Missing::LeaderUnread)
+                    Ok(SuccessorRead::Unavailable(Missing::LeaderUnread))
                 },
                 |parent, release, child| {
                     visited += 1;
                     assert_eq!(parent.generation + 1, release.body.generation);
                     assert_eq!(release.body.generation, child.generation);
+                    Ok(())
                 },
             ),
-            WalkStop::Unavailable {
+            Ok(WalkStop::Unavailable {
                 last: r0,
                 missing: Missing::LeaderUnread
-            }
+            })
         );
         assert_eq!(visited, 0, "nothing final was read");
         let rel1 = signed(&r0, 100);
@@ -1048,21 +1054,37 @@ mod tests {
         let stop = walk_lineage(
             r0,
             1,
-            |parent| {
-                if parent.root() == r0.root() {
+            |parent| -> Result<SuccessorRead, core::convert::Infallible> {
+                Ok(if parent.root() == r0.root() {
                     SuccessorRead::Final {
                         release: Box::new(rel1.clone()),
                         child: r1,
                     }
                 } else {
                     SuccessorRead::Open
-                }
+                })
             },
             |parent, release, child| {
                 assert_eq!(parent.generation + 1, release.body.generation);
                 assert_eq!(release.body.generation, child.generation);
+                Ok(())
             },
         );
-        assert_eq!(stop, WalkStop::BudgetExhausted(r1));
+        assert_eq!(stop, Ok(WalkStop::BudgetExhausted(r1)));
+
+        // A reader that could not read stops the walk with its error.
+        assert_eq!(
+            walk_lineage(
+                r0,
+                16,
+                |parent| Err(parent.generation),
+                |parent, release, child| {
+                    assert_eq!(parent.generation + 1, release.body.generation);
+                    assert_eq!(release.body.generation, child.generation);
+                    Ok(())
+                },
+            ),
+            Err(0)
+        );
     }
 }

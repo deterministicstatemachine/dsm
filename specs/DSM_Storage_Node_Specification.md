@@ -193,6 +193,43 @@ The node does not verify who is writing, not even that the writer is one of the 
 4. If the leader is unreachable, the cell waits. No other member stands in.
 5. Three links are not a quorum and do not vote. They are three positions of one route: the leader fixes the order, and the two later links carry the proof of that order to seats that survive the leader.
 
+**Rule — the leader first, one chain in route order, and the completion proof (Owner decision, 2026-09-23)**
+
+Positions are numbered 0 to 4 in route order. Position 0 is always the leader.
+
+*The leader first*
+
+1. A write begins at the leader. Nothing is written to a later seat until the leader has returned its arrival record for the value, because that record is the leader link and every later copy carries it.
+2. A writer whose leader stored the value but whose answer was lost recovers the leader link from the leader's arrival log: it is the record of the value's first position-0 copy. The writer never writes the value to the leader a second time, because a second copy's record is not the leader link and no chain built on it counts.
+3. The only race is for the leader link. The value that holds it has the cell and no other value ever can. Nobody races it for the later seats; its writer only has to finish.
+
+*One chain, in route order*
+
+4. Links and empties are appended strictly in route order. While the writer is at a position it may retry that seat, or record an empty and advance to the next position.
+5. Once a later position is recorded, every earlier position is closed for that chain and is never written again.
+6. A writer that records empties at positions 1 and 2 needs links at both 3 and 4. If either fails, the value stays short of `Final`, and the writer cannot go back to a closed position to recover.
+7. `Final(K, x)` holds when one chain of `x` has three links: the leader link and two further links, at any two of positions 1 to 4.
+
+*The completion proof*
+
+8. The **completion proof** of `x` at `K` is the prefix of one chain of `x`, from position 0 through the chain's third link: for every position in that range, in route order, either the link recorded there or an empty. A seat passed over appears as the empty in its place.
+9. A completion proof is checked online. The verifier reads the seats itself and accepts the proof only if:
+   - every link in it is valid under the route-chain rules above;
+   - the copy that holds the third link carries exactly the proof's earlier positions.
+
+   The proof carries no seat logs.
+10. The **completion digest** is computed from the proof's fields, never from a transport encoding:
+
+    `c = H_dom(DSM/storage/route-completion/v1, len(N) ‖ N ‖ K ‖ d_x ‖ n ‖ s_0 ‖ … ‖ s_(n−1))`
+
+    - `d_x = H_dom(DSM/storage/route-value/v1, x)`;
+    - `n` is the number of positions in the proof;
+    - a link at position `j` is encoded `s_j = 0x01 ‖ i ‖ h_i`, the arrival index and running hash its seat returned. The seat's member id, `N` and `K` are fixed by the position and the cell.
+    - an empty is encoded `s_j = 0x00`;
+    - `len(N)` is 2 bytes; `n` is 1 byte; `i` is 8 bytes, big-endian.
+
+    The digest excludes the ByteCommits that make the links checkable, because a verifier may obtain them at different cycles. Every verifier of the same proof computes the same digest.
+
 **Invariant — historical routes are fixed (Owner decision)**
 
 A cell's route, and so its leader, is a function of the set committed when the cell was seeded. It MUST NOT be re-derived over any later set, registry, or binding. Changing who serves a role (§12) never changes which role holds which position of a cell's route.
@@ -595,3 +632,4 @@ No safety property, and no party's liveness other than the owner's own, may depe
 | 12 | The minimum network size: a set needs five distinct operators, and replacements need more to draw from (§12). |
 | 13 | Whether opting out of a member should carry a cost (§12.4). |
 | 14 | The registry growth ranking, its genesis commit-reveal anchor, and the Up and Down capacity-signal computations, now referenced from the October 2025 spec outside this corpus (§13, §14). |
+| 15 | Which object commits a completion digest (§9), and the wire form of a completion proof. |

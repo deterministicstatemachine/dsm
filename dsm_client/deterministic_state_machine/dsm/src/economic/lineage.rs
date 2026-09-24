@@ -152,6 +152,18 @@ impl ValidatedEconomicRoot {
         }
     }
 
+    /// A peer coordinate THIS verifier validated on an earlier walk and
+    /// recorded (`peer_lineage::ValidatedStart`). **Only the peer lineage
+    /// walker may call this**, as the start of a walk; a walk that fails
+    /// `Invalid` from such a start is retried from the activation root, so
+    /// the memo is never authority over what the register holds.
+    pub(crate) fn from_verifier_memo(economic_position: u64, economic_root: [u8; 32]) -> Self {
+        Self {
+            economic_position,
+            economic_root,
+        }
+    }
+
     pub fn economic_position(&self) -> u64 {
         self.economic_position
     }

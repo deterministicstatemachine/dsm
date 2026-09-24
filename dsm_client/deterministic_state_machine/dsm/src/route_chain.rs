@@ -114,6 +114,8 @@ impl Route {
 pub struct RoutedCell {
     namespace: Vec<u8>,
     key: [u8; 32],
+    seed: [u8; 32],
+    committed_set_id: [u8; 32],
     route: Route,
 }
 
@@ -129,6 +131,10 @@ pub enum CellError {
     /// The members offered do not form a set id at all.
     SetId(CcbError),
     Route(RouteError),
+    /// The namespace is empty or longer than [`MAX_NAMESPACE_LEN`].
+    Namespace {
+        len: usize,
+    },
 }
 
 impl RoutedCell {
@@ -143,6 +149,11 @@ impl RoutedCell {
         members: &StorageSetMembers,
         committed_set_id: &[u8; 32],
     ) -> Result<Self, CellError> {
+        if namespace.is_empty() || namespace.len() > MAX_NAMESPACE_LEN {
+            return Err(CellError::Namespace {
+                len: namespace.len(),
+            });
+        }
         let derived = crate::ccb::storage_set_id(members).map_err(CellError::SetId)?;
         if derived != *committed_set_id {
             return Err(CellError::NotTheCommittedSet {
@@ -153,12 +164,25 @@ impl RoutedCell {
         Ok(Self {
             namespace: namespace.to_vec(),
             key,
+            seed: *seed,
+            committed_set_id: *committed_set_id,
             route: Route::of(seed, members).map_err(CellError::Route)?,
         })
     }
 
     pub fn namespace(&self) -> &[u8] {
         &self.namespace
+    }
+
+    /// The seed the route was drawn from.
+    pub fn seed(&self) -> &[u8; 32] {
+        &self.seed
+    }
+
+    /// The set id the seeding state commits, which the route's members
+    /// re-derive.
+    pub fn committed_set_id(&self) -> &[u8; 32] {
+        &self.committed_set_id
     }
 
     pub fn key(&self) -> &[u8; 32] {
@@ -450,6 +474,15 @@ pub enum Missing {
     /// The leader holds a recognized value first, but no closed ByteCommit of
     /// the leader's covering its arrival record is in hand yet (§9 rule 7).
     LeaderLinkUncommitted,
+    /// A completion proof names a link at this position, and that seat has
+    /// not been read.
+    SeatUnread { position: usize },
+    /// A completion proof names a link at this position, and no closed
+    /// ByteCommit of that seat covering it is in hand yet.
+    LinkUncommitted { position: usize },
+    /// A completion proof names a link at this position, and that seat's own
+    /// mirror of the leader's ByteCommits does not yet cover the leader link.
+    LeaderLinkUnseen { position: usize },
 }
 
 /// The arrival record a seat returned for the last value of `log`, where
@@ -474,6 +507,35 @@ fn record_of(seat: &[u8], namespace: &[u8], key: &[u8; 32], log: &[Vec<u8>]) -> 
     }
 }
 
+/// The leader's arrival record for the first position-0 copy of `value` at
+/// `cell`, recomputed from the leader's arrival log: the record the leader
+/// returned when it took that copy. `None` when the log holds no such copy.
+///
+/// The leader's record is the first link and every later copy carries it, so
+/// a writer whose leader took the value but whose answer was lost recovers
+/// the record here. Writing the value to the leader again would add a second
+/// copy, whose record is not the one a chain must begin with.
+pub fn leader_copy_record(
+    cell: &RoutedCell,
+    value: &[u8],
+    leader_log: &[Vec<u8>],
+) -> Option<ArrivalRecord> {
+    let copy = RouteEntry::at_leader(
+        cell.namespace.clone(),
+        cell.key,
+        value.to_vec(),
+        &cell.route,
+    )
+    .encode();
+    let n = leader_log.iter().position(|bytes| *bytes == copy)?;
+    Some(record_of(
+        cell.route.leader(),
+        &cell.namespace,
+        &cell.key,
+        &leader_log[..=n],
+    ))
+}
+
 /// Whether `commit` is a ByteCommit of `record`'s seat that commits the
 /// record against the values read from that seat (§14).
 fn committed_by(record: &ArrivalRecord, log: &[Vec<u8>], commit: Option<&CommittedAt>) -> bool {
@@ -491,22 +553,172 @@ fn is_cell_copy_at(entry: &RouteEntry, cell: &RoutedCell, position: usize) -> bo
         && entry.fits(&cell.route)
 }
 
-/// Evaluate `cell`'s route chains (storage spec §9) over the reads in `ev`,
-/// one per route position of `cell`. `recognize` returns the
-/// id of a value that is a recognized object naming the cell, with what it
-/// recognized, and `None` for anything else; unrecognized bytes never count,
-/// wherever they arrived.
+/// The leader link of a cell: the first recognized value in the leader's
+/// arrival log, stored there as the cell's position-0 copy, with the record
+/// the leader returned for it (§9 route chains, rule 3).
+struct LeaderLink<T> {
+    value: Vec<u8>,
+    id: [u8; 32],
+    object: T,
+    record: ArrivalRecord,
+}
+
+/// The leader link of `cell`, or `None` when the leader holds no recognized
+/// value. `Missing` when the leader is unread, or when no closed ByteCommit
+/// of the leader's covers the record yet (§9 rule 7).
+fn leader_link<T, F>(
+    cell: &RoutedCell,
+    ev: &CellEvidence,
+    recognize: F,
+) -> Result<Option<LeaderLink<T>>, Missing>
+where
+    F: Fn(&[u8]) -> Option<([u8; 32], T)>,
+{
+    let leader = ev.seats.first().ok_or(Missing::LeaderUnread)?;
+    let log = leader.values.as_ref().ok_or(Missing::LeaderUnread)?;
+    for (n, bytes) in log.iter().enumerate() {
+        let Some(entry) = RouteEntry::decode(bytes) else {
+            continue;
+        };
+        if !is_cell_copy_at(&entry, cell, 0) {
+            continue;
+        }
+        let Some((id, object)) = recognize(&entry.value) else {
+            continue;
+        };
+        let record = record_of(cell.route.leader(), &cell.namespace, &cell.key, &log[..=n]);
+        if !committed_by(&record, log, leader.committed.as_ref()) {
+            return Err(Missing::LeaderLinkUncommitted);
+        }
+        return Ok(Some(LeaderLink {
+            value: entry.value,
+            id,
+            object,
+            record,
+        }));
+    }
+    Ok(None)
+}
+
+/// One valid link after the leader: the position it holds, the record its
+/// seat returned, and the chain its copy carries for the earlier positions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Link {
+    position: usize,
+    record: ArrivalRecord,
+    chain: Vec<ChainSlot>,
+}
+
+impl Link {
+    /// The links of the one chain this link ends: itself and every link it
+    /// carries, the leader link included.
+    fn chain_links(&self) -> usize {
+        1 + self
+            .chain
+            .iter()
+            .filter(|slot| matches!(slot, ChainSlot::Link(..)))
+            .count()
+    }
+}
+
+/// Whether the seat at `position` has seen the leader link: its own mirror
+/// of the leader's ByteCommits covers the record (§9 route chains, rule 4).
+fn leader_seen_at(
+    cell: &RoutedCell,
+    ev: &CellEvidence,
+    seat: &SeatEvidence,
+    leader_record: &ArrivalRecord,
+) -> bool {
+    let Some(leader_log) = ev.seats.first().and_then(|leader| leader.values.as_ref()) else {
+        return false;
+    };
+    seat.leader_seen.as_ref().is_some_and(|c| {
+        c.commit.member_id.as_slice() == cell.route.leader()
+            && crate::storage_cell::record_is_committed(
+                leader_record,
+                leader_log,
+                &c.commit,
+                &c.proof,
+            )
+    })
+}
+
+/// Every valid link of the value holding `leader`, in route order and, at
+/// each seat, in arrival order. A copy at position `i` is a link only when:
 ///
-/// 1. The leader link is valid for the first recognized value in the
-///    leader's arrival log, stored as the cell's position-0 copy at the
-///    leader, and only once the leader's ByteCommit commits its record.
-/// 2. A later link at position `i` is an arrival record seat `r_i` returned
-///    for the same value's position-`i` copy, whose carried chain begins with
-///    the leader link and carries no link that is not itself valid; the
-///    record is committed by that seat's ByteCommit; and the seat's own
-///    mirror of the leader's ByteCommits covers the leader link (§9 rule 4).
-///    The position is the route's, so it is higher than every carried link's.
-/// 3. The value's state is its count of positions with a valid link.
+/// - it is this cell's position-`i` copy of the same value;
+/// - its carried chain begins with the leader link;
+/// - every link it carries is itself a valid link whose own copy carries
+///   exactly the positions before it, so that together they are ONE chain;
+/// - its seat's ByteCommit commits its record;
+/// - its seat's own mirror of the leader's ByteCommits covers the leader link.
+fn valid_links<T>(cell: &RoutedCell, ev: &CellEvidence, leader: &LeaderLink<T>) -> Vec<Link> {
+    let leader_slot = ChainSlot::Link(leader.record.clone());
+    let mut links: Vec<Link> = Vec::new();
+    for (position, seat_id) in cell.route.seats().iter().enumerate().skip(1) {
+        let Some(seat) = ev.seats.get(position) else {
+            continue;
+        };
+        let Some(log) = seat.values.as_ref() else {
+            continue;
+        };
+        if !leader_seen_at(cell, ev, seat, &leader.record) {
+            continue;
+        }
+        for (m, bytes) in log.iter().enumerate() {
+            let Some(entry) = RouteEntry::decode(bytes) else {
+                continue;
+            };
+            if !is_cell_copy_at(&entry, cell, position)
+                || entry.value != leader.value
+                || entry.chain.first() != Some(&leader_slot)
+            {
+                continue;
+            }
+            // An empty is never a link (§9 rule 5): it neither counts nor
+            // invalidates. Every carried link must be a valid link whose own
+            // copy carried exactly the positions before it.
+            let one_chain =
+                entry
+                    .chain
+                    .iter()
+                    .enumerate()
+                    .skip(1)
+                    .all(|(earlier, slot)| match slot {
+                        ChainSlot::Link(record) => links.iter().any(|link| {
+                            link.position == earlier
+                                && link.record == *record
+                                && link.chain.as_slice() == &entry.chain[..earlier]
+                        }),
+                        ChainSlot::Taken(..) | ChainSlot::NoResponse => true,
+                    });
+            if !one_chain {
+                continue;
+            }
+            let record = record_of(seat_id, &cell.namespace, &cell.key, &log[..=m]);
+            if committed_by(&record, log, seat.committed.as_ref()) {
+                links.push(Link {
+                    position,
+                    record,
+                    chain: entry.chain,
+                });
+            }
+        }
+    }
+    links
+}
+
+/// Evaluate `cell`'s route chains (storage spec §9) over the reads in `ev`,
+/// one per route position of `cell`. `recognize` returns the id of a value
+/// that is a recognized object naming the cell, with what it recognized, and
+/// `None` for anything else; unrecognized bytes never count, wherever they
+/// arrived.
+///
+/// The value holding the cell is the one with the leader link: the first
+/// recognized value in the leader's arrival log, once the leader's
+/// ByteCommit commits its record. Its state is the number of links of its
+/// longest chain ([`valid_links`]): the leader link alone is `LeaderHeld`,
+/// one further link `Preserved`, two or more `Final` (§9 rule 7).
 pub fn evaluate<T, F>(
     cell: &RoutedCell,
     ev: &CellEvidence,
@@ -515,95 +727,202 @@ pub fn evaluate<T, F>(
 where
     F: Fn(&[u8]) -> Option<([u8; 32], T)>,
 {
-    let leader = ev.seats.first().ok_or(Missing::LeaderUnread)?;
-    let leader_log = leader.values.as_ref().ok_or(Missing::LeaderUnread)?;
-
-    let mut first = None;
-    for (n, bytes) in leader_log.iter().enumerate() {
-        let Some(entry) = RouteEntry::decode(bytes) else {
-            continue;
-        };
-        if !is_cell_copy_at(&entry, cell, 0) {
-            continue;
-        }
-        if let Some((id, object)) = recognize(&entry.value) {
-            first = Some((n, entry.value, id, object));
-            break;
-        }
-    }
-    let Some((n, value, id, object)) = first else {
+    let Some(leader) = leader_link(cell, ev, recognize)? else {
         return Ok(CellReading::Open);
     };
-    let leader_link = record_of(
-        cell.route.leader(),
-        &cell.namespace,
-        &cell.key,
-        &leader_log[..=n],
-    );
-    if !committed_by(&leader_link, leader_log, leader.committed.as_ref()) {
-        return Err(Missing::LeaderLinkUncommitted);
-    }
-
-    // `links[i]` holds every valid link of this value at route position `i`.
-    let mut links: Vec<Vec<ArrivalRecord>> = vec![Vec::new(); cell.route.seats().len()];
-    links[0].push(leader_link.clone());
-    let leader_slot = ChainSlot::Link(leader_link.clone());
-    for (position, seat_id) in cell.route.seats().iter().enumerate().skip(1) {
-        let Some(seat) = ev.seats.get(position) else {
-            continue;
-        };
-        let Some(log) = seat.values.as_ref() else {
-            continue;
-        };
-        let leader_seen = seat.leader_seen.as_ref().is_some_and(|c| {
-            c.commit.member_id.as_slice() == cell.route.leader()
-                && crate::storage_cell::record_is_committed(
-                    &leader_link,
-                    leader_log,
-                    &c.commit,
-                    &c.proof,
-                )
-        });
-        if !leader_seen {
-            continue;
-        }
-        for (m, bytes) in log.iter().enumerate() {
-            let Some(entry) = RouteEntry::decode(bytes) else {
-                continue;
-            };
-            if !is_cell_copy_at(&entry, cell, position)
-                || entry.value != value
-                || entry.chain.first() != Some(&leader_slot)
-            {
-                continue;
-            }
-            // An empty is never a link (§9 rule 5): it neither counts nor
-            // invalidates. Every carried link must be a valid one.
-            let carries_only_valid_links =
-                entry
-                    .chain
-                    .iter()
-                    .enumerate()
-                    .all(|(earlier, slot)| match slot {
-                        ChainSlot::Link(record) => links[earlier].contains(record),
-                        ChainSlot::Taken(..) | ChainSlot::NoResponse => true,
-                    });
-            if !carries_only_valid_links {
-                continue;
-            }
-            let link = record_of(seat_id, &cell.namespace, &cell.key, &log[..=m]);
-            if committed_by(&link, log, seat.committed.as_ref()) {
-                links[position].push(link);
-            }
-        }
-    }
-
-    let further = links.iter().skip(1).filter(|at| !at.is_empty()).count();
+    let longest = valid_links(cell, ev, &leader)
+        .iter()
+        .map(Link::chain_links)
+        .fold(1, usize::max);
     Ok(CellReading::Held {
-        object,
-        id,
-        state: ChainState::with_further_links(further),
+        object: leader.object,
+        id: leader.id,
+        state: ChainState::with_further_links(longest - 1),
     })
+}
+
+/// A completion proof (storage spec §9): the prefix of one chain of the value
+/// holding a cell, from position 0 through the chain's third link, each
+/// position a link or an empty, in route order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompletionProof {
+    pub slots: Vec<ChainSlot>,
+}
+
+/// Why a completion proof is not the prefix of one chain of the value holding
+/// the cell. Each is provable from the reads in hand.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProofInvalid {
+    /// The proof does not begin with a link, end with a link, hold exactly
+    /// three links, and fit the route.
+    NotThreeLinks,
+    /// The proof's first link is not the cell's leader link.
+    NotTheLeaderLink,
+    /// The seat at `position` answered and holds no valid copy of the value
+    /// that returned the proof's record there while carrying exactly the
+    /// proof's earlier positions.
+    NoSuchLink { position: usize },
+}
+
+/// Why a completion proof is not accepted: the reads in hand do not show it
+/// yet (a network status, retried), or they show it is not a proof.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProofRefusal {
+    Missing(Missing),
+    Invalid(ProofInvalid),
+}
+
+impl CompletionProof {
+    /// Whether the proof has the shape of a completion proof: at most one
+    /// slot per route position, a link first and last, three links in all.
+    fn well_formed(&self) -> bool {
+        let links = self
+            .slots
+            .iter()
+            .filter(|slot| matches!(slot, ChainSlot::Link(..)))
+            .count();
+        self.slots.len() <= ROUTE_LEN
+            && links == FINAL_LINKS
+            && matches!(self.slots.first(), Some(ChainSlot::Link(..)))
+            && matches!(self.slots.last(), Some(ChainSlot::Link(..)))
+    }
+}
+
+/// The completion proof of the value holding `cell`, built from the reads in
+/// `ev`, with what `recognize` made of the value; `None` while no chain of
+/// it has three links. Of the chains that do, the proof is the one whose
+/// third link is at the lowest position, earliest in that seat's arrival
+/// order.
+pub fn completion_proof<T, F>(
+    cell: &RoutedCell,
+    ev: &CellEvidence,
+    recognize: F,
+) -> Result<Option<(T, CompletionProof)>, Missing>
+where
+    F: Fn(&[u8]) -> Option<([u8; 32], T)>,
+{
+    let Some(leader) = leader_link(cell, ev, recognize)? else {
+        return Ok(None);
+    };
+    let third = valid_links(cell, ev, &leader)
+        .into_iter()
+        .find(|link| link.chain_links() == FINAL_LINKS);
+    Ok(third.map(|link| {
+        let mut slots = link.chain;
+        slots.push(ChainSlot::Link(link.record));
+        (leader.object, CompletionProof { slots })
+    }))
+}
+
+/// Check a completion proof against the reads in `ev` (storage spec §9, the
+/// completion proof). The proof is accepted only if its first link is the
+/// cell's leader link, and at every later position that holds a link the
+/// seat returned that record for a copy of the same value that carries
+/// exactly the proof's earlier positions, is committed by the seat's
+/// ByteCommit, and was made after the seat saw the leader link. Returns what
+/// `recognize` made of the value.
+pub fn check_completion_proof<T, F>(
+    cell: &RoutedCell,
+    ev: &CellEvidence,
+    proof: &CompletionProof,
+    recognize: F,
+) -> Result<T, ProofRefusal>
+where
+    F: Fn(&[u8]) -> Option<([u8; 32], T)>,
+{
+    if !proof.well_formed() {
+        return Err(ProofRefusal::Invalid(ProofInvalid::NotThreeLinks));
+    }
+    let leader = leader_link(cell, ev, recognize)
+        .map_err(ProofRefusal::Missing)?
+        .ok_or(ProofRefusal::Invalid(ProofInvalid::NotTheLeaderLink))?;
+    if proof.slots.first() != Some(&ChainSlot::Link(leader.record.clone())) {
+        return Err(ProofRefusal::Invalid(ProofInvalid::NotTheLeaderLink));
+    }
+    for (position, slot) in proof.slots.iter().enumerate().skip(1) {
+        let ChainSlot::Link(record) = slot else {
+            continue;
+        };
+        let seat = ev
+            .seats
+            .get(position)
+            .ok_or(ProofRefusal::Missing(Missing::SeatUnread { position }))?;
+        let log = seat
+            .values
+            .as_ref()
+            .ok_or(ProofRefusal::Missing(Missing::SeatUnread { position }))?;
+        let seat_id = cell
+            .route
+            .seat(position)
+            .ok_or(ProofRefusal::Invalid(ProofInvalid::NotThreeLinks))?;
+        let returned_here = log.iter().enumerate().any(|(m, bytes)| {
+            RouteEntry::decode(bytes).is_some_and(|entry| {
+                is_cell_copy_at(&entry, cell, position)
+                    && entry.value == leader.value
+                    && entry.chain.as_slice() == &proof.slots[..position]
+                    && record_of(seat_id, &cell.namespace, &cell.key, &log[..=m]) == *record
+            })
+        });
+        if !returned_here {
+            return Err(ProofRefusal::Invalid(ProofInvalid::NoSuchLink { position }));
+        }
+        if !committed_by(record, log, seat.committed.as_ref()) {
+            return Err(ProofRefusal::Missing(Missing::LinkUncommitted { position }));
+        }
+        if !leader_seen_at(cell, ev, seat, &leader.record) {
+            return Err(ProofRefusal::Missing(Missing::LeaderLinkUnseen {
+                position,
+            }));
+        }
+    }
+    Ok(leader.object)
+}
+
+/// The completion digest of a proof for `value` at `cell` (storage spec §9,
+/// the completion proof), computed from the proof's fields:
+///
+/// `c = H_dom(DSM/storage/route-completion/v1, len(N) ‖ N ‖ K ‖ d_x ‖ n ‖ s_0 ‖ … ‖ s_(n−1))`
+///
+/// with `d_x = H_dom(DSM/storage/route-value/v1, x)`, a link encoded
+/// `0x01 ‖ i ‖ h_i` and an empty `0x00`. The ByteCommits that make the links
+/// checkable are not part of it, so every verifier of the same proof
+/// computes the same digest.
+pub fn completion_digest(
+    cell: &RoutedCell,
+    value: &[u8],
+    proof: &CompletionProof,
+) -> Result<[u8; 32], ProofInvalid> {
+    if !proof.well_formed() {
+        return Err(ProofInvalid::NotThreeLinks);
+    }
+    // Exact: `RoutedCell::new` bounds the namespace by MAX_NAMESPACE_LEN and
+    // `well_formed` bounds the slots by ROUTE_LEN.
+    let namespace_len = cell.namespace.len() as u16;
+    let slot_count = proof.slots.len() as u8;
+    let mut h = crate::crypto::blake3::dsm_domain_hasher(
+        crate::common::domain_tags::TAG_DSM_STORAGE_ROUTE_COMPLETION_V1,
+    );
+    h.update(&namespace_len.to_be_bytes());
+    h.update(&cell.namespace);
+    h.update(&cell.key);
+    h.update(&crate::crypto::blake3::domain_hash_bytes(
+        crate::common::domain_tags::TAG_DSM_STORAGE_ROUTE_VALUE_V1,
+        value,
+    ));
+    h.update(&[slot_count]);
+    for slot in &proof.slots {
+        match slot {
+            ChainSlot::Link(record) => {
+                h.update(&[0x01]);
+                h.update(&record.index.to_be_bytes());
+                h.update(&record.running_hash);
+            }
+            ChainSlot::Taken(..) | ChainSlot::NoResponse => {
+                h.update(&[0x00]);
+            }
+        }
+    }
+    Ok(*h.finalize().as_bytes())
 }
 
 /// A cell written the way storage spec §9 describes, for tests across Core:
@@ -636,6 +955,8 @@ pub(crate) mod fixtures {
     pub(crate) struct Cell {
         pub(crate) namespace: Vec<u8>,
         pub(crate) key: [u8; 32],
+        pub(crate) seed: [u8; 32],
+        pub(crate) committed_set_id: [u8; 32],
         pub(crate) route: Route,
         /// Each seat's arrival log at the cell, by route position.
         pub(crate) logs: Vec<Vec<Vec<u8>>>,
@@ -655,6 +976,8 @@ pub(crate) mod fixtures {
             Self {
                 namespace: cell.namespace().to_vec(),
                 key: *cell.key(),
+                seed: *cell.seed(),
+                committed_set_id: *cell.committed_set_id(),
                 route: cell.route().clone(),
                 logs: vec![Vec::new(); ROUTE_LEN],
             }
@@ -665,6 +988,8 @@ pub(crate) mod fixtures {
             RoutedCell {
                 namespace: self.namespace.clone(),
                 key: self.key,
+                seed: self.seed,
+                committed_set_id: self.committed_set_id,
                 route: self.route.clone(),
             }
         }
@@ -1215,6 +1540,263 @@ mod tests {
         assert_eq!(
             evaluate(&c.routed(), &c.evidence(), recognize_ok),
             held(ChainState::LeaderHeld, b"ok-x")
+        );
+    }
+
+    /// A lost leader answer is recovered from the leader's log: the record of
+    /// the value's FIRST position-0 copy, which is the record a chain must
+    /// begin with, whatever arrived before or after it.
+    #[test]
+    fn the_leader_record_of_a_value_is_recovered_from_the_leader_log() {
+        let mut c = cell();
+        c.put(0, b"not a route entry".to_vec());
+        let copy = RouteEntry::at_leader(NS.to_vec(), c.key, b"ok-x".to_vec(), &c.route).encode();
+        let first = c.put(0, copy.clone());
+        c.put(0, copy);
+        assert_eq!(
+            leader_copy_record(&c.routed(), b"ok-x", &c.logs[0]),
+            Some(first),
+            "the first copy's record, not the second's"
+        );
+        assert_eq!(
+            leader_copy_record(&c.routed(), b"ok-y", &c.logs[0]),
+            None,
+            "no copy of another value"
+        );
+        assert_eq!(leader_copy_record(&c.routed(), b"ok-x", &[]), None);
+    }
+
+    /// Put a copy of `value` at `position` carrying `chain`, as a writer does,
+    /// and return the record the seat gives for it.
+    fn put_copy(
+        c: &mut Cell,
+        value: &[u8],
+        position: usize,
+        chain: Vec<ChainSlot>,
+    ) -> ArrivalRecord {
+        let entry = RouteEntry {
+            namespace: NS.to_vec(),
+            key: c.key,
+            value: value.to_vec(),
+            seat: c.route.seats()[position].clone(),
+            position,
+            chain,
+        };
+        c.put(position, entry.encode())
+    }
+
+    /// Rule 7: `Final` is three links of ONE chain. Links at three positions
+    /// that belong to two chains are two chains of two.
+    #[test]
+    fn only_links_of_one_chain_count_toward_final() {
+        let mut c = cell();
+        c.write(b"ok-x", 1, &[]);
+        let leader = ChainSlot::Link(c.record_at(0, 1));
+        put_copy(&mut c, b"ok-x", 2, vec![leader, ChainSlot::NoResponse]);
+        assert_eq!(
+            evaluate(&c.routed(), &c.evidence(), recognize_ok),
+            held(ChainState::Preserved, b"ok-x"),
+            "positions 1 and 2 each hold a link, on two different chains"
+        );
+    }
+
+    /// A copy whose carried links do not form one chain with it — here it
+    /// claims a link at position 1 while the link it carries at position 2
+    /// was made with position 1 empty — is not a link at all.
+    #[test]
+    fn a_copy_whose_carried_links_are_not_one_chain_does_not_count() {
+        let mut c = cell();
+        c.write(b"ok-x", 1, &[]);
+        let leader = ChainSlot::Link(c.record_at(0, 1));
+        let first = ChainSlot::Link(c.record_at(1, 1));
+        let second = put_copy(
+            &mut c,
+            b"ok-x",
+            2,
+            vec![leader.clone(), ChainSlot::NoResponse],
+        );
+        put_copy(
+            &mut c,
+            b"ok-x",
+            3,
+            vec![leader, first, ChainSlot::Link(second)],
+        );
+        assert_eq!(
+            evaluate(&c.routed(), &c.evidence(), recognize_ok),
+            held(ChainState::Preserved, b"ok-x")
+        );
+    }
+
+    /// The completion proof is the chain's prefix through its third link,
+    /// with every position it passed as an empty in its place, and it checks
+    /// against the seats it was read from.
+    #[test]
+    fn a_completion_proof_is_the_chain_through_its_third_link() {
+        let mut c = cell();
+        c.write(b"ok-x", 1, &[]);
+        assert_eq!(
+            completion_proof(&c.routed(), &c.evidence(), recognize_ok),
+            Ok(None),
+            "two links are not final: there is no completion proof yet"
+        );
+        let mut c = cell();
+        c.write(b"ok-x", ROUTE_LEN - 1, &[1]);
+        let Ok(Some((object, proof))) = completion_proof(&c.routed(), &c.evidence(), recognize_ok)
+        else {
+            panic!("a final value has a completion proof")
+        };
+        assert_eq!(object, b"ok-x".to_vec());
+        assert_eq!(
+            proof.slots,
+            vec![
+                ChainSlot::Link(c.record_at(0, 1)),
+                ChainSlot::NoResponse,
+                ChainSlot::Link(c.record_at(2, 1)),
+                ChainSlot::Link(c.record_at(3, 1)),
+            ]
+        );
+        assert_eq!(
+            check_completion_proof(&c.routed(), &c.evidence(), &proof, recognize_ok),
+            Ok(b"ok-x".to_vec())
+        );
+    }
+
+    /// Every conjunct of the check: the shape, the leader link, the copy each
+    /// seat returned the record for, its seat's ByteCommit, and the seat's
+    /// view of the leader link. What the reads cannot show yet is missing;
+    /// what they contradict is invalid.
+    #[test]
+    fn a_completion_proof_is_checked_against_the_seats() {
+        let mut c = cell();
+        c.write(b"ok-x", 2, &[]);
+        let Ok(Some((object, proof))) = completion_proof(&c.routed(), &c.evidence(), recognize_ok)
+        else {
+            panic!("a final value has a completion proof")
+        };
+        assert_eq!(object, b"ok-x".to_vec());
+        let check = |ev: &CellEvidence, proof: &CompletionProof| {
+            check_completion_proof(&c.routed(), ev, proof, recognize_ok)
+        };
+        let invalid = |why| Err(ProofRefusal::Invalid(why));
+        let missing = |what| Err(ProofRefusal::Missing(what));
+
+        let mut short = proof.clone();
+        short.slots.pop();
+        assert_eq!(
+            check(&c.evidence(), &short),
+            invalid(ProofInvalid::NotThreeLinks)
+        );
+
+        let mut other_leader = proof.clone();
+        other_leader.slots[0] = ChainSlot::Link(c.record_at(1, 1));
+        assert_eq!(
+            check(&c.evidence(), &other_leader),
+            invalid(ProofInvalid::NotTheLeaderLink)
+        );
+
+        let mut forged = proof.clone();
+        let mut record = c.record_at(2, 1);
+        record.index += 1;
+        forged.slots[2] = ChainSlot::Link(record);
+        assert_eq!(
+            check(&c.evidence(), &forged),
+            invalid(ProofInvalid::NoSuchLink { position: 2 })
+        );
+
+        // A proof whose earlier positions are not the ones the copy at its
+        // link carried: seat 2's copy carried a link at position 1.
+        let mut longer = cell();
+        longer.write(b"ok-x", 3, &[]);
+        let rechained = CompletionProof {
+            slots: vec![
+                ChainSlot::Link(longer.record_at(0, 1)),
+                ChainSlot::NoResponse,
+                ChainSlot::Link(longer.record_at(2, 1)),
+                ChainSlot::Link(longer.record_at(3, 1)),
+            ],
+        };
+        assert_eq!(
+            check_completion_proof(
+                &longer.routed(),
+                &longer.evidence(),
+                &rechained,
+                recognize_ok
+            ),
+            invalid(ProofInvalid::NoSuchLink { position: 2 })
+        );
+
+        let mut ev = c.evidence();
+        ev.seats[2].values = None;
+        assert_eq!(
+            check(&ev, &proof),
+            missing(Missing::SeatUnread { position: 2 })
+        );
+
+        let mut ev = c.evidence();
+        ev.seats[2].committed = None;
+        assert_eq!(
+            check(&ev, &proof),
+            missing(Missing::LinkUncommitted { position: 2 })
+        );
+
+        let mut ev = c.evidence();
+        ev.seats[2].leader_seen = None;
+        assert_eq!(
+            check(&ev, &proof),
+            missing(Missing::LeaderLinkUnseen { position: 2 })
+        );
+
+        assert_eq!(check(&c.evidence(), &proof), Ok(b"ok-x".to_vec()));
+    }
+
+    /// The completion digest is the proof's fields, byte for byte (§9): the
+    /// cell, the value, and each position's link or empty.
+    #[test]
+    fn the_completion_digest_is_the_proofs_fields() {
+        let mut c = cell();
+        c.write(b"ok-x", ROUTE_LEN - 1, &[1]);
+        let Ok(Some((object, proof))) = completion_proof(&c.routed(), &c.evidence(), recognize_ok)
+        else {
+            panic!("a final value has a completion proof")
+        };
+        assert_eq!(object, b"ok-x".to_vec());
+        let mut h = crate::crypto::blake3::dsm_domain_hasher(
+            crate::common::domain_tags::TAG_DSM_STORAGE_ROUTE_COMPLETION_V1,
+        );
+        h.update(&(NS.len() as u16).to_be_bytes());
+        h.update(NS);
+        h.update(&c.key);
+        h.update(&crate::crypto::blake3::domain_hash_bytes(
+            crate::common::domain_tags::TAG_DSM_STORAGE_ROUTE_VALUE_V1,
+            b"ok-x",
+        ));
+        h.update(&[4u8]);
+        for (position, slot) in proof.slots.iter().enumerate() {
+            match slot {
+                ChainSlot::Link(record) => {
+                    assert_eq!(record, &c.record_at(position, 1));
+                    h.update(&[0x01]);
+                    h.update(&record.index.to_be_bytes());
+                    h.update(&record.running_hash);
+                }
+                ChainSlot::Taken(..) | ChainSlot::NoResponse => {
+                    assert_eq!(position, 1);
+                    h.update(&[0x00]);
+                }
+            }
+        }
+        let digest = completion_digest(&c.routed(), b"ok-x", &proof).expect("a proof");
+        assert_eq!(digest, *h.finalize().as_bytes());
+        assert_ne!(
+            completion_digest(&c.routed(), b"ok-y", &proof).expect("a proof"),
+            digest,
+            "the value is in the digest"
+        );
+        let mut short = proof.clone();
+        short.slots.pop();
+        assert_eq!(
+            completion_digest(&c.routed(), b"ok-x", &short),
+            Err(ProofInvalid::NotThreeLinks)
         );
     }
 

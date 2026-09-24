@@ -38,8 +38,8 @@ use crate::economic::authority_evidence::{verify_authority_evidence, AuthorityEv
 use crate::economic::claim::AdmissionSubstrate;
 use crate::economic::decode::decode_admission_manifest;
 use crate::economic::lineage::{
-    AdmittedEconomicPosition, activate, advance_validated, AcceptedSubstrate,
-    EconomicActivationSnapshot, EconomicValidationError, ValidatedEconomicRoot,
+    activate, advance_validated, AcceptedSubstrate, EconomicActivationSnapshot,
+    EconomicValidationError, ValidatedEconomicRoot,
 };
 use crate::economic::provenance::{
     PeerLineageFailure, ProvenanceResolver, ReserveReleaseWin, ValidatedPeerTransition,
@@ -107,8 +107,6 @@ pub trait PeerEvidenceFetcher {
 pub struct ValidatedStart {
     pub economic_position: u64,
     pub economic_root: [u8; 32],
-    /// The digest of the claim this verifier accepted at that position.
-    pub claim_ref: [u8; 32],
 }
 
 /// One walk's shared state.
@@ -372,14 +370,7 @@ fn walk_positions(
         // only conclude at a position that produced a validated root, and it
         // refuses a conditional one (`Unresolved`) before ever getting there.
         Some(s) => (
-            ValidatedEconomicRoot::rehydrate_from_admitted_store(
-                AdmittedEconomicPosition::SingleRoot {
-                    economic_position: s.economic_position,
-                    economic_root: s.economic_root,
-                    claim_ref: s.claim_ref,
-                },
-            )
-            .map_err(|e| invalid(format!("memoized start: {e}")))?,
+            ValidatedEconomicRoot::from_verifier_memo(s.economic_position, s.economic_root),
             s.economic_position + 1,
         ),
         None => (
@@ -701,7 +692,6 @@ mod tests {
             Some(ValidatedStart {
                 economic_position: position - 1,
                 economic_root: [0x77; 32],
-                claim_ref: [0x78; 32],
             }),
         )
         .expect_err("a conditional position cannot produce a validated transition");
@@ -756,7 +746,6 @@ mod tests {
                 Some(ValidatedStart {
                     economic_position: position - 1,
                     economic_root: [0x77; 32],
-                    claim_ref: [0x78; 32],
                 }),
             )
         };
@@ -797,7 +786,6 @@ mod tests {
                 Some(ValidatedStart {
                     economic_position: position - 1,
                     economic_root: [0x77; 32],
-                    claim_ref: [0x78; 32],
                 }),
             );
             assert!(
@@ -883,7 +871,6 @@ mod tests {
             Some(ValidatedStart {
                 economic_position: position - 1,
                 economic_root: [0x77; 32],
-                claim_ref: [0x78; 32],
             }),
         );
         let err = outcome.expect_err("no validated transition");
