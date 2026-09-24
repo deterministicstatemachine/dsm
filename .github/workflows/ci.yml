@@ -184,7 +184,7 @@ jobs:
   # --------------------------------------------------------------------------
   # Rust tests, one job per crate group, in parallel. The union of the three
   # groups is exactly `cargo test --workspace --exclude dsm_storage_node`
-  # plus the storage node's local-dev suite — the same board as before, split.
+  # plus the storage node's suite on Postgres — the same board, split.
   # No path-scoping here: every PR runs every group. Scoping comes later and
   # only once the dependency mapping is shown to be conservative.
   # --------------------------------------------------------------------------
@@ -193,6 +193,25 @@ jobs:
     needs: [select]
     if: needs.select.outputs.rust_matrix != '[]'
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: dsm_node_test
+        ports:
+          - 5432:5432
+        # Without a health check the job races the container's first accept().
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    # The storage node's store is Postgres, and the SDK suites run their nodes
+    # on it: every node-backed test needs this server.
+    env:
+      DSM_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/dsm_node_test
     strategy:
       fail-fast: false
       # The groups and their commands come from ci/layers.toml via the
@@ -248,6 +267,25 @@ jobs:
     name: Rust board (main)
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: dsm_node_test
+        ports:
+          - 5432:5432
+        # Without a health check the job races the container's first accept().
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    # The storage node's store is Postgres, and the SDK suites run their nodes
+    # on it: every node-backed test needs this server.
+    env:
+      DSM_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/dsm_node_test
     steps:
       - uses: actions/checkout@v7
 
@@ -273,27 +311,14 @@ jobs:
       - name: Test (whole workspace)
         run: |
           cargo test --locked --workspace --exclude dsm_storage_node --release -- --nocapture --test-threads=1
-          cargo test --locked -p dsm_storage_node --release --no-default-features --features local-dev,strict -- --nocapture
+          cargo test --locked -p dsm_storage_node --release -- --nocapture --test-threads=1
 
   # --------------------------------------------------------------------------
-  # Storage node on POSTGRES — the backend the fleet actually deploys.
+  # Storage node on Postgres — its only store, the one the fleet deploys.
   #
-  # The `rust` job above runs the storage node with
-  # `--no-default-features --features local-dev,strict`, i.e. SQLite. That
-  # meant the node's keyed cells and indexes — what a member owes the client
-  # (Part II §12) — had their properties asserted only against a backend
-  # nobody deploys. A safety property is not proven on a backend that never
-  # executed it, so this job runs the node's DEFAULT features
-  # (`strict,postgres`) against a real server.
-  #
-  # The property tests refuse to run without `DSM_TEST_DATABASE_URL` rather
+  # The node's tests refuse to run without `DSM_TEST_DATABASE_URL` rather
   # than skipping, so a job that lost its service container fails loudly
   # instead of reporting a green board that executed nothing.
-  #
-  # NOT enabled here: the legacy `DSM_RUN_DB_TESTS=1` suites
-  # (device_api, b0x, bytecommit_chain). Those skip themselves by default and
-  # do not pass against Postgres today; resurrecting them is separate work and
-  # would make this board red for reasons unrelated to the registers.
   # --------------------------------------------------------------------------
   storage-node-postgres:
     name: Storage Node (Postgres)
@@ -316,17 +341,8 @@ jobs:
           --health-timeout 5s
           --health-retries 20
     env:
-      # TWO names, ONE database, and they are not redundant:
-      #   DSM_TEST_DATABASE_URL is what the cell and index properties
-      #   read. On a Postgres build its ABSENCE makes them fail rather than
-      #   skip, which is the whole point of this job.
-      #   DSM_DATABASE_URL is the node's own config variable, which
-      #   `build_app_for_tests` and the integration suites read. On a Postgres
-      #   build its default is a placeholder host that was never meant to
-      #   resolve ("callers must supply DSM_DATABASE_URL"), so the suites that
-      #   build a real app need it pointed at this container.
+      # What every node test reads; its absence makes them fail, not skip.
       DSM_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/dsm_node_test
-      DSM_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/dsm_node_test
     steps:
       - uses: actions/checkout@v7
 
@@ -718,7 +734,7 @@ jobs:
       - name: Kernel-check every module, sorry-free
         run: |
           set -euo pipefail
-          expected=16
+          expected=17
           found=$(ls lean4/*.lean | wc -l)
           if [ "$found" -ne "$expected" ]; then
             echo "::error::lean4/ has $found modules, expected $expected."

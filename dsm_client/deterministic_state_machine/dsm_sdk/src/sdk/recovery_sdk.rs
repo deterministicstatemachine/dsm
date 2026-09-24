@@ -313,24 +313,6 @@ impl RecoverySDK {
         WALLET_SEED_CACHE.lock().ok().and_then(|g| g.clone())
     }
 
-    /// Seed the wallet-seed session cache directly (tests only). Replaces the legacy
-    /// C-DBRW binding-key fixtures: derivations re-root on this seed exactly as production
-    /// re-roots on the mnemonic-derived seed.
-    #[cfg(not(target_os = "android"))]
-    pub fn set_cached_wallet_seed_for_testing(seed: Vec<u8>) {
-        if let Ok(mut guard) = WALLET_SEED_CACHE.lock() {
-            *guard = Some(seed);
-        }
-    }
-
-    /// Clear the wallet-seed session cache (tests only / wallet lock).
-    #[cfg(not(target_os = "android"))]
-    pub fn clear_cached_wallet_seed_for_testing() {
-        if let Ok(mut guard) = WALLET_SEED_CACHE.lock() {
-            *guard = None;
-        }
-    }
-
     /// Derive recovery key from mnemonic and cache it in memory.
     ///
     /// Key derivation: S_mn = Argon2id("DSM/recovery-ring\0", mnemonic)
@@ -488,194 +470,221 @@ impl RecoverySDK {
         })
     }
 
-    /// The dedicated, genesis-keyed bind-once endpoint path for a recovery-authority
-    /// anchor (matches the storage-node route `/api/v2/recovery/authority-anchor/{genesis}`).
-    /// Keyed by genesis ONLY — the device is carried inside the anchor — so the
-    /// storage-node single-assignment store binds one authority per genesis. Base32
-    /// Crockford (no hex). Returned without a leading slash for the fan-out helpers.
-    pub fn authority_anchor_endpoint_path(genesis_id: &[u8; 32]) -> String {
-        format!(
-            "api/v2/recovery/authority-anchor/{}",
-            crate::util::text_id::encode_base32_crockford(genesis_id),
-        )
-    }
-
-    /// Build THIS device's recovery-authority anchor and publish it to the dedicated
-    /// bind-once endpoint on every storage node. Returns the number of nodes that
-    /// accepted the write (2xx).
-    ///
-    /// Bind-once is enforced server-side per genesis: the FIRST anchor wins; an
-    /// identical replay is idempotent (2xx); a DIFFERENT anchor for the same genesis
-    /// is rejected 409. A 409 here therefore means a conflicting authority is already
-    /// bound for this genesis — this call returns an error rather than masking it.
-    pub async fn publish_authority_anchor() -> Result<usize, DsmError> {
-        let anchor = Self::build_authority_anchor()?;
-        let path = Self::authority_anchor_endpoint_path(&anchor.genesis_id);
-        let r = crate::sdk::storage_io::put_to_all_nodes_path(&path, &anchor.to_bytes()).await?;
-        if r.conflict > 0 {
-            return Err(DsmError::InvalidState(format!(
-                "recovery anchor publish: {}/{} nodes report a DIFFERENT authority anchor already \
-                 bound for this genesis (bind-once conflict); refusing to treat as published",
-                r.conflict, r.total
-            )));
-        }
-        if r.ok == 0 {
-            return Err(DsmError::storage(
-                format!(
-                    "recovery anchor publish: no node accepted the write ({} failed of {})",
-                    r.failed, r.total
-                ),
-                None::<std::io::Error>,
-            ));
-        }
-        Ok(r.ok)
-    }
-
-    /// Fetch a device's recovery-authority anchor from the dedicated endpoint by genesis.
-    ///
-    /// Availability-only fetch + protobuf decode; it does NOT authenticate the anchor.
-    /// The caller MUST verify it client-side via [`dsm::recovery::RecoveryAuthorityAnchor::verify`]
-    /// using the device's genesis-authenticated signing pubkey (device-tree quorum) and
-    /// the candidate authority pubkey carried by the recovery bundle (storage = availability;
-    /// verification = client-side).
-    pub async fn fetch_authority_anchor(
+    /// The recovery-authority anchor `device_id` bound for `genesis_id`, read
+    /// from the genesis's anchor cell and checked against `device_ak`: the one
+    /// distinct anchor whose genesis binding verifies. Bind-once is this rule —
+    /// two such anchors are the device declaring two authorities, and none is
+    /// anchored. `None` while none of the device's is there.
+    async fn bound_anchor_under(
         genesis_id: &[u8; 32],
-    ) -> Result<dsm::recovery::RecoveryAuthorityAnchor, DsmError> {
-        let path = Self::authority_anchor_endpoint_path(genesis_id);
-        let bytes = crate::sdk::storage_io::get_from_any_node_path(&path).await?;
-        dsm::recovery::RecoveryAuthorityAnchor::from_bytes(&bytes)
+        device_id: &[u8; 32],
+        device_ak: &[u8],
+    ) -> Result<Option<dsm::recovery::RecoveryAuthorityAnchor>, DsmError> {
+        let cell = dsm::recovery::RecoveryCell::AuthorityAnchor {
+            genesis: *genesis_id,
+        };
+        let mut bound: Vec<dsm::recovery::RecoveryAuthorityAnchor> = Vec::new();
+        for bytes in crate::sdk::recovery_store::entries(&cell).await? {
+            // Anyone can write a cell: bytes that are not an anchor are nothing.
+            let Ok(anchor) = dsm::recovery::RecoveryAuthorityAnchor::from_bytes(&bytes) else {
+                continue;
+            };
+            if anchor
+                .verify_genesis_binding(genesis_id, device_id, device_ak)
+                .is_ok()
+                && !bound.contains(&anchor)
+            {
+                bound.push(anchor);
+            }
+        }
+        match bound.len() {
+            0 | 1 => Ok(bound.pop()),
+            n => Err(DsmError::verification(format!(
+                "recovery anchor: {n} distinct anchors bind this genesis and device; the device \
+                 declared more than one authority and none is anchored"
+            ))),
+        }
     }
 
-    /// Fetch a device's recovery-authority anchor AND authenticate it end-to-end:
-    /// its genesis-binding signature is verified against the device's
-    /// genesis-authenticated signing pubkey (device-tree quorum), and
-    /// `candidate_authority_pubkey` is bound to the anchored commitment. On success the
-    /// caller may treat `candidate_authority_pubkey` as the genesis-anchored recovery
-    /// authority for `(genesis_id, device_id)` and use it to verify tombstone/succession.
-    ///
-    /// `candidate_authority_pubkey` comes from the recovery bundle (which carries
-    /// `K_A_pub` alongside the tombstone/succession); this checks `H(it)` equals the
-    /// anchored commitment, the device signing key signed the anchor, and `K_A` proved
-    /// possession. Fail-closed: any fetch, quorum, genesis-mismatch, or verify failure
-    /// returns an error and yields NO authority.
+    /// Build THIS device's recovery-authority anchor and put it in its
+    /// genesis's anchor cell. An anchor of this device's that is already bound
+    /// and is not this one is a conflict, refused rather than masked. Returns
+    /// how many members took the write.
+    pub async fn publish_authority_anchor() -> Result<u32, DsmError> {
+        let anchor = Self::build_authority_anchor()?;
+        let device_ak = crate::sdk::signing_authority::current_public_key()?;
+        if let Some(bound) =
+            Self::bound_anchor_under(&anchor.genesis_id, &anchor.device_id, &device_ak).await?
+        {
+            if bound != anchor {
+                return Err(DsmError::InvalidState(
+                    "recovery anchor publish: this device already bound a different authority \
+                     for its genesis (bind-once conflict)"
+                        .into(),
+                ));
+            }
+        }
+        crate::sdk::recovery_store::put(
+            &dsm::recovery::RecoveryCell::AuthorityAnchor {
+                genesis: anchor.genesis_id,
+            },
+            &anchor.to_bytes(),
+        )
+        .await
+    }
+
+    /// The recovery-authority anchor `device_id` bound for `genesis_id`,
+    /// authenticated end to end: its genesis binding verifies under the device's
+    /// AK (from its self-proving directory entry), and
+    /// `candidate_authority_pubkey` is the anchored authority with its
+    /// possession proof. On success the caller may treat
+    /// `candidate_authority_pubkey` as the genesis-anchored recovery authority.
     pub async fn fetch_and_verify_authority_anchor(
         genesis_id: &[u8; 32],
         device_id: &[u8; 32],
         candidate_authority_pubkey: &[u8],
     ) -> Result<dsm::recovery::RecoveryAuthorityAnchor, DsmError> {
-        let anchor = Self::fetch_authority_anchor(genesis_id).await?;
-
-        // Genesis-authenticated device signing pubkey via the device-tree quorum.
-        let config = crate::sdk::storage_node_sdk::StorageNodeConfig::from_env_config()
-            .await
-            .map_err(|e| {
-                DsmError::storage(
-                    format!("load storage node config: {e}"),
-                    None::<std::io::Error>,
+        let device_ak = crate::sdk::recovery_store::device_ak(genesis_id, device_id).await?;
+        let anchor = Self::bound_anchor_under(genesis_id, device_id, &device_ak)
+            .await?
+            .ok_or_else(|| {
+                DsmError::verification(
+                    "authority anchor: the device has bound no recovery authority for the genesis",
                 )
             })?;
-        let qid = crate::handlers::app_router_impl::fetch_quorum_device_identity(
-            &config.node_urls,
-            *device_id,
-        )
-        .await
-        .map_err(|e| {
-            DsmError::verification(format!(
-                "authority anchor: device identity quorum failed: {e}"
-            ))
-        })?;
-        if &qid.genesis_hash != genesis_id {
-            return Err(DsmError::verification(
-                "authority anchor: quorum device identity genesis_hash != genesis under recovery",
-            ));
-        }
-
         anchor.verify(
             genesis_id,
             device_id,
-            &qid.public_key,
+            &device_ak,
             candidate_authority_pubkey,
         )?;
         Ok(anchor)
     }
 
-    /// Endpoint path for a device's append-only PDSMT head chain (R4 layer 1).
-    /// Device-keyed (the PDSMT is device-scoped). Base32 Crockford; no leading slash.
-    pub fn pdsmt_head_chain_endpoint_path(device_id: &[u8; 32]) -> String {
-        format!(
-            "api/v2/tips/{}/head-chain",
-            crate::util::text_id::encode_base32_crockford(device_id),
-        )
-    }
-
-    /// Publish a PDSMT head to the append-only chain on every node. Returns the
-    /// accepted-node count. A 409 from any node means the head does not link the current
-    /// chain tip (fork/gap/stale) — this errors so the caller re-fetches the tip and
-    /// re-chains rather than treating it as published.
+    /// Put a PDSMT head in the device's head cell. Returns how many members
+    /// took it. Which heads form the chain is the reader's rule
+    /// ([`Self::pdsmt_head_chain`]).
     pub async fn publish_pdsmt_head(
         head: &dsm::recovery::PostedPdsmtHead,
-    ) -> Result<usize, DsmError> {
-        let path = Self::pdsmt_head_chain_endpoint_path(&head.device_id);
-        let r = crate::sdk::storage_io::put_to_all_nodes_path(&path, &head.to_bytes()).await?;
-        if r.conflict > 0 {
-            return Err(DsmError::InvalidState(format!(
-                "pdsmt head publish: {}/{} nodes report a chain conflict (head does not link the \
-                 current tip); re-fetch the tip and re-chain",
-                r.conflict, r.total
-            )));
-        }
-        if r.ok == 0 {
-            return Err(DsmError::storage(
-                format!(
-                    "pdsmt head publish: no node accepted the write ({} failed of {})",
-                    r.failed, r.total
-                ),
-                None::<std::io::Error>,
-            ));
-        }
-        Ok(r.ok)
-    }
-
-    /// Fetch the latest PDSMT head for a device (availability-only fetch + decode).
-    /// The caller MUST verify it client-side (`PostedPdsmtHead::verify` + authority
-    /// chained to G via the anchor + device ∈ genesis device tree).
-    pub async fn fetch_pdsmt_head_latest(
-        device_id: &[u8; 32],
-    ) -> Result<dsm::recovery::PostedPdsmtHead, DsmError> {
-        let path = Self::pdsmt_head_chain_endpoint_path(device_id);
-        let bytes = crate::sdk::storage_io::get_from_any_node_path(&path).await?;
-        dsm::recovery::PostedPdsmtHead::from_bytes(&bytes)
-    }
-
-    /// Fetch a specific PDSMT head by chain position (e.g. the head at/before the
-    /// recovery snapshot). Availability-only fetch + decode; caller verifies.
-    pub async fn fetch_pdsmt_head_at(
-        device_id: &[u8; 32],
-        head_number: u64,
-    ) -> Result<dsm::recovery::PostedPdsmtHead, DsmError> {
-        let path = format!(
-            "{}/{}",
-            Self::pdsmt_head_chain_endpoint_path(device_id),
-            head_number
-        );
-        let bytes = crate::sdk::storage_io::get_from_any_node_path(&path).await?;
-        dsm::recovery::PostedPdsmtHead::from_bytes(&bytes)
-    }
-
-    /// Storage key for a device's posted PDSMT leaf set at a given head number (generic
-    /// content-addressed object store; availability-only — the head's signed
-    /// `leaf_index_root` is the authority). Base32 Crockford (no hex).
-    pub fn pdsmt_leaves_storage_key(
-        genesis_id: &[u8; 32],
-        device_id: &[u8; 32],
-        head_number: u64,
-    ) -> String {
-        format!(
-            "recovery/pdsmt-leaves/v1/{}/{}/{}",
-            crate::util::text_id::encode_base32_crockford(genesis_id),
-            crate::util::text_id::encode_base32_crockford(device_id),
-            head_number,
+    ) -> Result<u32, DsmError> {
+        crate::sdk::recovery_store::put(
+            &dsm::recovery::RecoveryCell::PdsmtHead {
+                device_id: head.device_id,
+            },
+            &head.to_bytes(),
         )
+        .await
+    }
+
+    /// The chain of `device_id`'s PDSMT heads signed under `authority_pubkey`:
+    /// from the genesis head, each head the one verified head that links its
+    /// predecessor at the next number. Two verified heads at one position are a
+    /// fork, and the chain is refused. Empty while no genesis head is there.
+    pub async fn pdsmt_head_chain(
+        device_id: &[u8; 32],
+        authority_pubkey: &[u8],
+    ) -> Result<Vec<dsm::recovery::PostedPdsmtHead>, DsmError> {
+        let commit = dsm::recovery::compute_authority_pubkey_commit(authority_pubkey);
+        let cell = dsm::recovery::RecoveryCell::PdsmtHead {
+            device_id: *device_id,
+        };
+        let mut verified: Vec<dsm::recovery::PostedPdsmtHead> = Vec::new();
+        for bytes in crate::sdk::recovery_store::entries(&cell).await? {
+            let Ok(head) = dsm::recovery::PostedPdsmtHead::from_bytes(&bytes) else {
+                continue;
+            };
+            if &head.device_id == device_id
+                && head.authority_pubkey == authority_pubkey
+                && head.verify(&commit).is_ok()
+                && !verified.contains(&head)
+            {
+                verified.push(head);
+            }
+        }
+        let mut chain: Vec<dsm::recovery::PostedPdsmtHead> = Vec::new();
+        loop {
+            let next: Vec<&dsm::recovery::PostedPdsmtHead> = match chain.last() {
+                None => verified
+                    .iter()
+                    .filter(|head| head.is_genesis_head())
+                    .collect(),
+                Some(tip) => verified
+                    .iter()
+                    .filter(|head| {
+                        Some(head.head_number) == tip.head_number.checked_add(1)
+                            && head.parent_head_hash == tip.head_hash()
+                    })
+                    .collect(),
+            };
+            match next.as_slice() {
+                [] => return Ok(chain),
+                [head] => chain.push((*head).clone()),
+                forks => {
+                    return Err(DsmError::verification(format!(
+                        "pdsmt head chain: {} verified heads at position {}; a fork has no \
+                         single chain",
+                        forks.len(),
+                        chain.len()
+                    )))
+                }
+            }
+        }
+    }
+
+    /// `device_id`'s latest PDSMT head under its genesis-anchored authority,
+    /// with that authority: of the authorities its posted heads name (under
+    /// `genesis_id` when given), the one the device anchored, and the tip of
+    /// the chain signed under it.
+    pub async fn anchored_pdsmt_head(
+        genesis_id: Option<&[u8; 32]>,
+        device_id: &[u8; 32],
+    ) -> Result<dsm::recovery::PostedPdsmtHead, DsmError> {
+        let cell = dsm::recovery::RecoveryCell::PdsmtHead {
+            device_id: *device_id,
+        };
+        let mut candidates: Vec<([u8; 32], Vec<u8>)> = Vec::new();
+        for bytes in crate::sdk::recovery_store::entries(&cell).await? {
+            let Ok(head) = dsm::recovery::PostedPdsmtHead::from_bytes(&bytes) else {
+                continue;
+            };
+            let candidate = (head.genesis_id, head.authority_pubkey);
+            let named = match genesis_id {
+                Some(genesis) => candidate.0 == *genesis,
+                None => true,
+            };
+            if named && !candidates.contains(&candidate) {
+                candidates.push(candidate);
+            }
+        }
+        let mut anchored = Vec::new();
+        for (genesis, authority) in candidates {
+            if Self::fetch_and_verify_authority_anchor(&genesis, device_id, &authority)
+                .await
+                .is_ok()
+            {
+                anchored.push(authority);
+            }
+        }
+        let authority = match anchored.as_slice() {
+            [one] => one.clone(),
+            [] => {
+                return Err(DsmError::verification(
+                    "pdsmt head: no posted head names an authority the device anchored",
+                ))
+            }
+            many => {
+                return Err(DsmError::verification(format!(
+                    "pdsmt head: {} anchored authorities; none is the device's",
+                    many.len()
+                )))
+            }
+        };
+        Self::pdsmt_head_chain(device_id, &authority)
+            .await?
+            .pop()
+            .ok_or_else(|| {
+                DsmError::verification("pdsmt head: no chain from a genesis head is posted")
+            })
     }
 
     /// Build THIS device's PDSMT snapshot (head + enumerable leaf set) from the live
@@ -684,7 +693,7 @@ impl RecoverySDK {
     /// head-chain endpoint (append-only, R4 layer 1). Returns the accepted-node count for
     /// the head. Fail-closed: requires identity, a cached `K_A`, and a live device head;
     /// a head-chain conflict errors (re-fetch the tip and re-chain).
-    pub async fn build_and_publish_pdsmt_head() -> Result<usize, DsmError> {
+    pub async fn build_and_publish_pdsmt_head() -> Result<u32, DsmError> {
         let device_id = Self::require_self_id32(
             crate::sdk::app_state::AppState::get_device_id(),
             "device_id",
@@ -708,19 +717,32 @@ impl RecoverySDK {
             )
             })?;
 
-        // Chain position: extend the latest valid head, or start the genesis head.
-        let (parent_head_hash, head_number) = match Self::fetch_pdsmt_head_latest(&device_id).await
-        {
-            Ok(prev) => (prev.head_hash(), prev.head_number.saturating_add(1)),
-            Err(_) => (dsm::recovery::GENESIS_PARENT_HEAD_HASH, 0),
-        };
+        // Chain position: extend this device's chain under its authority, or
+        // start the genesis head.
+        let (parent_head_hash, head_number) =
+            match Self::pdsmt_head_chain(&device_id, &authority_pk)
+                .await?
+                .pop()
+            {
+                Some(prev) => (
+                    prev.head_hash(),
+                    prev.head_number.checked_add(1).ok_or_else(|| {
+                        DsmError::InvalidState("pdsmt head chain: head number exhausted".into())
+                    })?,
+                ),
+                None => (dsm::recovery::GENESIS_PARENT_HEAD_HASH, 0),
+            };
 
-        let cp_genesis = |cp: &[u8; 32]| -> Option<[u8; 32]> {
-            crate::storage::client_db::get_contact_by_device_id(cp)
-                .ok()
-                .flatten()
-                .and_then(|c| <[u8; 32]>::try_from(c.genesis_hash.as_slice()).ok())
-        };
+        let mut contact_genesis = std::collections::BTreeMap::new();
+        for record in crate::storage::client_db::get_all_contacts()
+            .map_err(|e| DsmError::storage(format!("load contacts: {e}"), None::<std::io::Error>))?
+        {
+            let contact = record
+                .to_verified_contact()
+                .map_err(|e| DsmError::storage(format!("contact: {e}"), None::<std::io::Error>))?;
+            contact_genesis.insert(contact.device_id, contact.genesis_hash);
+        }
+        let cp_genesis = |cp: &[u8; 32]| -> Option<[u8; 32]> { contact_genesis.get(cp).copied() };
 
         let (head, leaves) = dsm::recovery::build_pdsmt_snapshot(
             &device_state,
@@ -731,27 +753,45 @@ impl RecoverySDK {
             cp_genesis,
         )?;
 
-        // Publish the enumerable leaf set FIRST (availability), so the head's committed
-        // leaf_index_root is backed by fetchable leaves once the head is accepted.
-        let leaves_key = Self::pdsmt_leaves_storage_key(&head.genesis_id, &device_id, head_number);
-        crate::sdk::storage_io::put_bytes(&leaves_key, &dsm::recovery::encode_leaf_set(&leaves))
-            .await?;
-
-        // Publish the signed head onto the append-only chain (errors on chain conflict).
+        // The enumerable leaf set FIRST, so the head's committed leaf_index_root
+        // is backed by fetchable leaves once the head is read.
+        crate::sdk::recovery_store::put(
+            &dsm::recovery::RecoveryCell::PdsmtLeaves {
+                genesis: head.genesis_id,
+                device_id,
+                head_number,
+            },
+            &dsm::recovery::encode_leaf_set(&leaves),
+        )
+        .await?;
         Self::publish_pdsmt_head(&head).await
     }
 
-    /// Fetch a device's posted PDSMT leaf set at a head number (availability-only fetch +
-    /// decode). The caller MUST verify each leaf against the head's signed
-    /// `leaf_index_root` via `verify_head_with_leaves` (storage = availability).
-    pub async fn fetch_pdsmt_leaves(
-        genesis_id: &[u8; 32],
-        device_id: &[u8; 32],
-        head_number: u64,
+    /// The leaf set `head` commits: of the sets posted for the head's device and
+    /// number, the one that verifies against the head under the anchored
+    /// authority commit.
+    pub async fn pdsmt_leaves(
+        head: &dsm::recovery::PostedPdsmtHead,
+        anchored_authority_commit: &[u8; 32],
     ) -> Result<Vec<dsm::recovery::PostedPdsmtLeafRecord>, DsmError> {
-        let key = Self::pdsmt_leaves_storage_key(genesis_id, device_id, head_number);
-        let bytes = crate::sdk::storage_io::get_bytes(&key).await?;
-        dsm::recovery::decode_leaf_set(&bytes)
+        let cell = dsm::recovery::RecoveryCell::PdsmtLeaves {
+            genesis: head.genesis_id,
+            device_id: head.device_id,
+            head_number: head.head_number,
+        };
+        for bytes in crate::sdk::recovery_store::entries(&cell).await? {
+            let Ok(leaves) = dsm::recovery::decode_leaf_set(&bytes) else {
+                continue;
+            };
+            if dsm::recovery::verify_head_with_leaves(head, anchored_authority_commit, &leaves)
+                .is_ok()
+            {
+                return Ok(leaves);
+            }
+        }
+        Err(DsmError::verification(
+            "pdsmt leaves: no posted leaf set verifies against the head",
+        ))
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -765,23 +805,6 @@ impl RecoverySDK {
     // BLOCK recovery, never advance it. The orchestrator (Phase D step 2) additionally binds
     // current_tip to C's genesis-authenticated PDSMT head and floor_tip to the capsule.
     // ─────────────────────────────────────────────────────────────────────────
-
-    /// Storage key for a posted ancestry segment, keyed by the device-pair `rel_key`
-    /// (symmetric — both parties derive the same key). Base32 Crockford; no hex.
-    pub fn rel_chain_segment_storage_key(rel_key: &[u8; 32]) -> String {
-        format!(
-            "recovery/rel-segment/v1/{}",
-            crate::util::text_id::encode_base32_crockford(rel_key),
-        )
-    }
-
-    /// Storage key for the new `(A_new,C)` establishment receipt, keyed by `new_rel_key`.
-    pub fn establishment_receipt_storage_key(new_rel_key: &[u8; 32]) -> String {
-        format!(
-            "recovery/establish-receipt/v1/{}",
-            crate::util::text_id::encode_base32_crockford(new_rel_key),
-        )
-    }
 
     /// Assemble the forward-ancestry segment for `rel_key` from this device's BCR chain-state
     /// archive, covering `floor_tip` (EXCLUSIVE) -> `current_tip` (INCLUSIVE). Walks by
@@ -869,64 +892,92 @@ impl RecoverySDK {
         Ok(seg)
     }
 
-    /// Publish a relationship-chain ancestry segment (availability-only). Self-verifies
-    /// FIRST — an object that won't verify is never posted.
+    /// Put a relationship-chain ancestry segment in its relationship's cell.
+    /// Self-verifies FIRST — an object that won't verify is never posted.
     pub async fn publish_rel_chain_segment(
         seg: &dsm::recovery::RelationshipChainSegment,
     ) -> Result<(), DsmError> {
         seg.verify()?;
-        let key = Self::rel_chain_segment_storage_key(&seg.rel_key);
-        crate::sdk::storage_io::put_bytes(&key, &seg.to_bytes()).await?;
+        crate::sdk::recovery_store::put(
+            &dsm::recovery::RecoveryCell::RelChainSegment {
+                rel_key: seg.rel_key,
+            },
+            &seg.to_bytes(),
+        )
+        .await?;
         Ok(())
     }
 
-    /// Fetch + VERIFY a counterparty's ancestry segment for `rel_key`. Fail-closed: a
-    /// missing, undecodable, wrong-key, or non-self-consistent segment errors.
-    pub async fn fetch_rel_chain_segment(
+    /// Every ancestry segment posted for `rel_key` that is for that
+    /// relationship and verifies. The caller binds the one it needs by its
+    /// floor and current tips.
+    pub async fn rel_chain_segments(
         rel_key: &[u8; 32],
-    ) -> Result<dsm::recovery::RelationshipChainSegment, DsmError> {
-        let key = Self::rel_chain_segment_storage_key(rel_key);
-        let bytes = crate::sdk::storage_io::get_bytes(&key).await?;
-        let seg = dsm::recovery::RelationshipChainSegment::from_bytes(&bytes)?;
-        if &seg.rel_key != rel_key {
-            return Err(DsmError::verification(
-                "fetch_rel_chain_segment: fetched rel_key != requested",
-            ));
+    ) -> Result<Vec<dsm::recovery::RelationshipChainSegment>, DsmError> {
+        let cell = dsm::recovery::RecoveryCell::RelChainSegment { rel_key: *rel_key };
+        let mut out = Vec::new();
+        for bytes in crate::sdk::recovery_store::entries(&cell).await? {
+            let Ok(segment) = dsm::recovery::RelationshipChainSegment::from_bytes(&bytes) else {
+                continue;
+            };
+            if &segment.rel_key == rel_key && segment.verify().is_ok() {
+                out.push(segment);
+            }
         }
-        seg.verify()?;
-        Ok(seg)
+        Ok(out)
     }
 
-    /// Publish the new `(A_new,C)` establishment receipt (availability-only). Self-verifies
-    /// FIRST against `(A_new, C)` — never posts an object that won't verify.
+    /// Put the new `(A_new,C)` establishment receipt in its relationship's
+    /// cell. Self-verifies FIRST against `(A_new, C)`.
     pub async fn publish_establishment_receipt(
         receipt: &dsm::recovery::RecoveryEstablishmentReceipt,
         a_new: &[u8; 32],
         c: &[u8; 32],
     ) -> Result<(), DsmError> {
         receipt.verify(a_new, c)?;
-        let key = Self::establishment_receipt_storage_key(&receipt.rel_key);
-        crate::sdk::storage_io::put_bytes(&key, &receipt.to_bytes()).await?;
+        crate::sdk::recovery_store::put(
+            &dsm::recovery::RecoveryCell::EstablishmentReceipt {
+                new_rel_key: receipt.rel_key,
+            },
+            &receipt.to_bytes(),
+        )
+        .await?;
         Ok(())
     }
 
-    /// Fetch + VERIFY the new `(A_new,C)` establishment receipt for `new_rel_key`.
-    /// Fail-closed: a missing, undecodable, wrong-key, or non-first-state receipt errors.
+    /// The `(A_new,C)` establishment receipt for `new_rel_key`: the one distinct
+    /// receipt posted for that relationship that verifies as its first state.
     pub async fn fetch_establishment_receipt(
         new_rel_key: &[u8; 32],
         a_new: &[u8; 32],
         c: &[u8; 32],
     ) -> Result<dsm::recovery::RecoveryEstablishmentReceipt, DsmError> {
-        let key = Self::establishment_receipt_storage_key(new_rel_key);
-        let bytes = crate::sdk::storage_io::get_bytes(&key).await?;
-        let receipt = dsm::recovery::RecoveryEstablishmentReceipt::from_bytes(&bytes)?;
-        if &receipt.rel_key != new_rel_key {
-            return Err(DsmError::verification(
-                "fetch_establishment_receipt: fetched rel_key != requested",
-            ));
+        let cell = dsm::recovery::RecoveryCell::EstablishmentReceipt {
+            new_rel_key: *new_rel_key,
+        };
+        let mut verified: Vec<dsm::recovery::RecoveryEstablishmentReceipt> = Vec::new();
+        for bytes in crate::sdk::recovery_store::entries(&cell).await? {
+            let Ok(receipt) = dsm::recovery::RecoveryEstablishmentReceipt::from_bytes(&bytes)
+            else {
+                continue;
+            };
+            if &receipt.rel_key == new_rel_key
+                && receipt.verify(a_new, c).is_ok()
+                && !verified
+                    .iter()
+                    .any(|held| held.to_bytes() == receipt.to_bytes())
+            {
+                verified.push(receipt);
+            }
         }
-        receipt.verify(a_new, c)?;
-        Ok(receipt)
+        match verified.len() {
+            0 | 1 => verified.pop().ok_or_else(|| {
+                DsmError::verification("establishment receipt: none posted verifies")
+            }),
+            n => Err(DsmError::verification(format!(
+                "establishment receipt: {n} distinct receipts verify as the first state"
+            ))),
+        }
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -935,15 +986,6 @@ impl RecoverySDK {
     // set for reconcile_dbtc_asset. Availability-only; verified client-side. Enumeration
     // completeness is not a safety property (per-vault Bitcoin backing is the unlock gate).
     // ─────────────────────────────────────────────────────────────────────────
-
-    /// Storage key for a device's posted dBTC vault index (Base32 Crockford; no hex).
-    pub fn dbtc_vault_index_storage_key(genesis_id: &[u8; 32], device_id: &[u8; 32]) -> String {
-        format!(
-            "recovery/dbtc-vault-index/v1/{}/{}",
-            crate::util::text_id::encode_base32_crockford(genesis_id),
-            crate::util::text_id::encode_base32_crockford(device_id),
-        )
-    }
 
     /// Build (from THIS device's local vault store) + sign + publish the dBTC vault index.
     /// Fail-closed: requires identity + a cached `K_A`. Returns the vault-id count posted.
@@ -973,28 +1015,41 @@ impl RecoverySDK {
             &authority_pk,
             &authority_sk,
         )?;
-        let key = Self::dbtc_vault_index_storage_key(&genesis_id, &device_id);
-        crate::sdk::storage_io::put_bytes(&key, &index.to_bytes()).await?;
+        crate::sdk::recovery_store::put(
+            &dsm::recovery::RecoveryCell::DbtcVaultIndex {
+                genesis: genesis_id,
+                device_id,
+            },
+            &index.to_bytes(),
+        )
+        .await?;
         Ok(n)
     }
 
-    /// Fetch + VERIFY a device's dBTC vault index against the genesis-anchored authority
-    /// commit. Fail-closed: missing/undecodable/unverifiable → error (dBTC stays locked).
-    pub async fn fetch_dbtc_vault_index(
+    /// Every dBTC vault index posted for the device that names it and verifies
+    /// against the genesis-anchored authority commit.
+    pub async fn fetch_dbtc_vault_indexes(
         genesis_id: &[u8; 32],
         device_id: &[u8; 32],
         anchored_authority_commit: &[u8; 32],
-    ) -> Result<dsm::recovery::PostedDbtcVaultIndex, DsmError> {
-        let key = Self::dbtc_vault_index_storage_key(genesis_id, device_id);
-        let bytes = crate::sdk::storage_io::get_bytes(&key).await?;
-        let index = dsm::recovery::PostedDbtcVaultIndex::from_bytes(&bytes)?;
-        if &index.genesis_id != genesis_id || &index.device_id != device_id {
-            return Err(DsmError::verification(
-                "fetch_dbtc_vault_index: fetched index genesis/device != requested",
-            ));
+    ) -> Result<Vec<dsm::recovery::PostedDbtcVaultIndex>, DsmError> {
+        let cell = dsm::recovery::RecoveryCell::DbtcVaultIndex {
+            genesis: *genesis_id,
+            device_id: *device_id,
+        };
+        let mut out = Vec::new();
+        for bytes in crate::sdk::recovery_store::entries(&cell).await? {
+            let Ok(index) = dsm::recovery::PostedDbtcVaultIndex::from_bytes(&bytes) else {
+                continue;
+            };
+            if &index.genesis_id == genesis_id
+                && &index.device_id == device_id
+                && index.verify(anchored_authority_commit).is_ok()
+            {
+                out.push(index);
+            }
         }
-        index.verify(anchored_authority_commit)?;
-        Ok(index)
+        Ok(out)
     }
 
     /// Auto-source candidate dBTC vault ids for recovery: fetch + verify the posted vault
@@ -1025,8 +1080,23 @@ impl RecoverySDK {
         // Genesis-anchor A_old's authority (this identity's K_A) before trusting its index.
         Self::fetch_and_verify_authority_anchor(&genesis, &a_old, &ka_pub).await?;
         let anchored = dsm::recovery::compute_authority_pubkey_commit(&ka_pub);
-        let index = Self::fetch_dbtc_vault_index(&genesis, &a_old, &anchored).await?;
-        Ok(index.vault_ids)
+        let indexes = Self::fetch_dbtc_vault_indexes(&genesis, &a_old, &anchored).await?;
+        if indexes.is_empty() {
+            return Err(DsmError::verification(
+                "auto_dbtc_vault_candidates: no posted dBTC vault index verifies",
+            ));
+        }
+        // Enumeration completeness is not a safety property: every vault any
+        // verified index names is a candidate.
+        let mut vault_ids: Vec<String> = Vec::new();
+        for index in indexes {
+            for vault_id in index.vault_ids {
+                if !vault_ids.contains(&vault_id) {
+                    vault_ids.push(vault_id);
+                }
+            }
+        }
+        Ok(vault_ids)
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -1439,20 +1509,6 @@ impl RecoverySDK {
     // + tombstone/succession) is posted as a `RecoverySuccessionProof` and fetched by C.
     // ─────────────────────────────────────────────────────────────────────────
 
-    /// Storage key for A_new's posted recovery succession proof (Base32 Crockford; no hex).
-    /// Keyed by `(genesis_under_recovery, a_new)` — the recovering identity's genesis (shared
-    /// with A_old) and the successor device.
-    pub fn recovery_succession_proof_storage_key(
-        genesis_id: &[u8; 32],
-        a_new: &[u8; 32],
-    ) -> String {
-        format!(
-            "recovery/succession-proof/v1/{}/{}",
-            crate::util::text_id::encode_base32_crockford(genesis_id),
-            crate::util::text_id::encode_base32_crockford(a_new),
-        )
-    }
-
     /// A_new posts its [`dsm::recovery::RecoverySuccessionProof`] (authority pubkey +
     /// tombstone/succession) so a counterparty can run its accept-guard before co-signing.
     /// Availability-only; the receiver genesis-anchors the authority + verifies the receipts.
@@ -1464,20 +1520,50 @@ impl RecoverySDK {
             tombstone,
             succession,
         };
-        let key = Self::recovery_succession_proof_storage_key(&ctx.genesis_id, &ctx.a_new);
-        crate::sdk::storage_io::put_bytes(&key, &proof.to_bytes()).await?;
+        crate::sdk::recovery_store::put(
+            &dsm::recovery::RecoveryCell::SuccessionProof {
+                genesis: ctx.genesis_id,
+                a_new: ctx.a_new,
+            },
+            &proof.to_bytes(),
+        )
+        .await?;
         Ok(())
     }
 
-    /// Fetch + decode A_new's posted recovery succession proof. Fail-closed decode only; the
-    /// CALLER MUST genesis-anchor `authority_pubkey` and run the accept-guard before trusting it.
+    /// A_new's posted recovery succession proof under `authority_pubkey`: the one
+    /// distinct proof that names that authority. The CALLER runs the
+    /// accept-guard over its receipts before trusting it.
     pub async fn fetch_recovery_succession_proof(
         genesis_id: &[u8; 32],
         a_new: &[u8; 32],
+        authority_pubkey: &[u8],
     ) -> Result<dsm::recovery::RecoverySuccessionProof, DsmError> {
-        let key = Self::recovery_succession_proof_storage_key(genesis_id, a_new);
-        let bytes = crate::sdk::storage_io::get_bytes(&key).await?;
-        dsm::recovery::RecoverySuccessionProof::from_bytes(&bytes)
+        let cell = dsm::recovery::RecoveryCell::SuccessionProof {
+            genesis: *genesis_id,
+            a_new: *a_new,
+        };
+        let mut named: Vec<dsm::recovery::RecoverySuccessionProof> = Vec::new();
+        for bytes in crate::sdk::recovery_store::entries(&cell).await? {
+            let Ok(proof) = dsm::recovery::RecoverySuccessionProof::from_bytes(&bytes) else {
+                continue;
+            };
+            if proof.authority_pubkey == authority_pubkey
+                && !named.iter().any(|held| held.to_bytes() == proof.to_bytes())
+            {
+                named.push(proof);
+            }
+        }
+        match named.len() {
+            0 | 1 => named.pop().ok_or_else(|| {
+                DsmError::verification(
+                    "recovery succession proof: none posted names the anchored authority",
+                )
+            }),
+            n => Err(DsmError::verification(format!(
+                "recovery succession proof: {n} distinct proofs name the anchored authority"
+            ))),
+        }
     }
 
     /// A_new side: build the recovery-establish `CreateRelationship` operation for counterparty
@@ -1508,9 +1594,14 @@ impl RecoverySDK {
         let old_rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(&ctx.a_old, c);
         let new_rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(&ctx.a_new, c);
 
-        // C's current (A_old,C) tip from its posted PDSMT leaf.
-        let c_head = Self::fetch_pdsmt_head_latest(c).await?;
-        let c_leaves = Self::fetch_pdsmt_leaves(&c_head.genesis_id, c, c_head.head_number).await?;
+        // C's current (A_old,C) tip from its posted PDSMT leaf, under C's
+        // genesis-anchored authority.
+        let c_head = Self::anchored_pdsmt_head(None, c).await?;
+        let c_leaves = Self::pdsmt_leaves(
+            &c_head,
+            &dsm::recovery::compute_authority_pubkey_commit(&c_head.authority_pubkey),
+        )
+        .await?;
         let t_old_current = c_leaves
             .iter()
             .find(|l| l.rel_key == old_rel_key && l.counterparty_device_id == ctx.a_old)
@@ -1565,24 +1656,18 @@ impl RecoverySDK {
             "device_id",
         )?;
 
-        // A_new's genesis + recovery authority, from A_new's posted head (genesis-anchored).
-        let a_new_head = Self::fetch_pdsmt_head_latest(a_new).await?;
+        // A_new's genesis + recovery authority, from A_new's posted head under
+        // its genesis-anchored authority.
+        let a_new_head = Self::anchored_pdsmt_head(None, a_new).await?;
         let a_new_genesis = a_new_head.genesis_id;
-        Self::fetch_and_verify_authority_anchor(
+
+        // The pre-co-sign succession proof, under the SAME anchored authority.
+        let proof = Self::fetch_recovery_succession_proof(
             &a_new_genesis,
             a_new,
             &a_new_head.authority_pubkey,
         )
         .await?;
-
-        // The pre-co-sign succession proof, bound to the SAME anchored authority.
-        let proof = Self::fetch_recovery_succession_proof(&a_new_genesis, a_new).await?;
-        if proof.authority_pubkey != a_new_head.authority_pubkey {
-            return Err(DsmError::verification(
-                "recovery reestablish: succession-proof authority != A_new's genesis-anchored \
-                 head authority",
-            ));
-        }
 
         // A_old is the tombstoned predecessor (authenticated by the receipts under K_A).
         let a_old_v = crate::util::text_id::decode_base32_crockford(&proof.tombstone.device_id)
@@ -1657,15 +1742,17 @@ impl RecoverySDK {
 
         // A_old's posted head + leaves. A_old's recovery authority IS this identity's K_A
         // (per-identity, re-derived from the mnemonic) — the posted head must be signed by it.
-        let a_old_head = Self::fetch_pdsmt_head_latest(&ctx.a_old).await?;
-        if a_old_head.authority_pubkey != ka_pub {
-            return Err(DsmError::verification(
-                "build_and_activate_recovery: A_old head authority_pubkey != this identity's K_A",
-            ));
-        }
+        let a_old_head = Self::pdsmt_head_chain(&ctx.a_old, &ka_pub)
+            .await?
+            .pop()
+            .ok_or_else(|| {
+                DsmError::verification(
+                    "build_and_activate_recovery: A_old posted no head chain under this \
+                     identity's K_A",
+                )
+            })?;
         let a_old_authority_commit = dsm::recovery::compute_authority_pubkey_commit(&ka_pub);
-        let a_old_leaves =
-            Self::fetch_pdsmt_leaves(&ctx.genesis_id, &ctx.a_old, a_old_head.head_number).await?;
+        let a_old_leaves = Self::pdsmt_leaves(&a_old_head, &a_old_authority_commit).await?;
 
         // Candidate counterparties: A_old's posted leaves ∪ the capsule's floor set.
         let mut candidates: BTreeSet<[u8; 32]> = a_old_leaves
@@ -1687,27 +1774,17 @@ impl RecoverySDK {
                 );
                 continue;
             };
-            let head = match Self::fetch_pdsmt_head_latest(c).await {
+            // C's head under C's genesis-anchored authority.
+            let head = match Self::anchored_pdsmt_head(None, c).await {
                 Ok(h) => h,
                 Err(e) => {
-                    log::debug!("[RECOVERY] no posted head for a candidate: {e}; skipping");
+                    log::debug!("[RECOVERY] no anchored head for a candidate: {e}; skipping");
                     continue;
                 }
             };
-            let c_genesis = head.genesis_id;
-            // Genesis-anchor C's authority: binds H(head.authority_pubkey) to C's anchored
-            // commit, quorum-verifies C ∈ c_genesis device tree, and checks c_genesis is real.
-            if let Err(e) =
-                Self::fetch_and_verify_authority_anchor(&c_genesis, c, &head.authority_pubkey).await
-            {
-                log::debug!(
-                    "[RECOVERY] counterparty authority not genesis-anchored: {e}; skipping"
-                );
-                continue;
-            }
             let authority_commit =
                 dsm::recovery::compute_authority_pubkey_commit(&head.authority_pubkey);
-            let leaves = match Self::fetch_pdsmt_leaves(&c_genesis, c, head.head_number).await {
+            let leaves = match Self::pdsmt_leaves(&head, &authority_commit).await {
                 Ok(l) => l,
                 Err(e) => {
                     log::debug!("[RECOVERY] no posted leaves for a counterparty: {e}; skipping");
@@ -1718,12 +1795,31 @@ impl RecoverySDK {
                 dsm::core::bilateral_transaction_manager::compute_smt_key(&ctx.a_old, c);
             let new_rel_key =
                 dsm::core::bilateral_transaction_manager::compute_smt_key(&ctx.a_new, c);
-            let old_segment = match Self::fetch_rel_chain_segment(&old_rel_key).await {
-                Ok(s) => s,
+            // The segment from the capsule floor to the tip C posted for
+            // (A_old, C).
+            let Some(old_current) = leaves
+                .iter()
+                .find(|leaf| {
+                    leaf.rel_key == old_rel_key && leaf.counterparty_device_id == ctx.a_old
+                })
+                .map(|leaf| leaf.current_tip)
+            else {
+                log::debug!("[RECOVERY] counterparty posted no (A_old,C) leaf; skipping");
+                continue;
+            };
+            let segments = match Self::rel_chain_segments(&old_rel_key).await {
+                Ok(segments) => segments,
                 Err(e) => {
-                    log::debug!("[RECOVERY] no ancestry segment for a counterparty: {e}; skipping");
+                    log::debug!("[RECOVERY] ancestry segments unreadable: {e}; skipping");
                     continue;
                 }
+            };
+            let Some(old_segment) = segments
+                .into_iter()
+                .find(|segment| segment.floor_tip == h_cap && segment.current_tip == old_current)
+            else {
+                log::debug!("[RECOVERY] no ancestry segment from the floor to C's tip; skipping");
+                continue;
             };
             let establishment =
                 match Self::fetch_establishment_receipt(&new_rel_key, &ctx.a_new, c).await {
@@ -1768,32 +1864,16 @@ impl RecoverySDK {
 
         // Fail-closed chokepoint. Needs A's authority anchor + A_old's genesis-authenticated
         // device signing pubkey (device-tree quorum) to bind K_A to the genesis.
-        let a_old_anchor = Self::fetch_authority_anchor(&ctx.genesis_id).await?;
-        let config = crate::sdk::storage_node_sdk::StorageNodeConfig::from_env_config()
-            .await
-            .map_err(|e| {
-                DsmError::storage(
-                    format!("load storage node config: {e}"),
-                    None::<std::io::Error>,
-                )
-            })?;
-        let qid = crate::handlers::app_router_impl::fetch_quorum_device_identity(
-            &config.node_urls,
-            ctx.a_old,
-        )
-        .await
-        .map_err(|e| {
-            DsmError::verification(format!(
-                "recovery: A_old device identity quorum failed: {e}"
-            ))
-        })?;
+        let a_old_ak = crate::sdk::recovery_store::device_ak(&ctx.genesis_id, &ctx.a_old).await?;
+        let a_old_anchor =
+            Self::fetch_and_verify_authority_anchor(&ctx.genesis_id, &ctx.a_old, &ka_pub).await?;
 
         Self::verify_and_record_activation(
             &assembled.seal,
             &assembled.gate_set,
             &assembled.evidence,
             &a_old_anchor,
-            &qid.public_key,
+            &a_old_ak,
             &ka_pub,
         )
     }
@@ -2068,10 +2148,11 @@ impl RecoverySDK {
             .map_err(|_| DsmError::InvalidState("Database lock poisoned".into()))?;
         let mut stmt = conn
             .prepare(
-                // Rebuild the rollup from deterministic transaction ordering only.
-                "SELECT tx_id, from_device, to_device, chain_height, proof_data
+                // The rollup folds receipts in the order this device accepted
+                // them: history insertion order.
+                "SELECT tx_id, from_device, to_device, proof_data
                  FROM transactions
-                 ORDER BY step_index ASC, tx_id ASC",
+                 ORDER BY rowid ASC",
             )
             .map_err(|e| {
                 DsmError::InvalidState(format!("Failed to query transaction history: {e}"))
@@ -2083,8 +2164,7 @@ impl RecoverySDK {
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
-                    row.get::<_, i64>(3)? as u64,
-                    row.get::<_, Option<Vec<u8>>>(4)?,
+                    row.get::<_, Option<Vec<u8>>>(3)?,
                 ))
             })
             .map_err(|e| {
@@ -2092,9 +2172,13 @@ impl RecoverySDK {
             })?;
 
         let mut rollup = ReceiptRollup::new();
+        // ht'_i, the relationship's height after a receipt: the number of that
+        // peer's receipts this device accepted, up to and including it. DSM
+        // keeps no height counter, so the rollup derives it from the history.
+        let mut heights: HashMap<String, u64> = HashMap::new();
 
         for row in rows {
-            let (tx_id, from_device, to_device, chain_height, proof_data) = row.map_err(|e| {
+            let (tx_id, from_device, to_device, proof_data) = row.map_err(|e| {
                 DsmError::InvalidState(format!("Failed to decode transaction row: {e}"))
             })?;
 
@@ -2115,12 +2199,14 @@ impl RecoverySDK {
                 dsm::crypto::blake3::dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_RECEIPT);
             receipt_hasher.update(&receipt_bytes);
             let receipt_hash = *receipt_hasher.finalize().as_bytes();
+            let height = heights.entry(counterparty_id.clone()).or_insert(0);
+            *height += 1;
             update_rollup(
                 &mut rollup,
                 tx_id.as_bytes(),
                 &receipt_hash,
                 &counterparty_id,
-                chain_height,
+                *height,
             )?;
         }
 
@@ -2190,89 +2276,6 @@ mod tests {
     use dsm::recovery::ReceiptRollup;
 
     #[test]
-    fn test_recovery_sdk_creation() {
-        let _sdk = RecoverySDK::new();
-        // SDK instance created successfully
-    }
-
-    #[test]
-    fn dbtc_vault_index_storage_key_is_deterministic_genesis_device_keyed_crockford() {
-        let g = [0x6E; 32];
-        let d = [0xA0; 32];
-        let k = RecoverySDK::dbtc_vault_index_storage_key(&g, &d);
-        assert_eq!(k, RecoverySDK::dbtc_vault_index_storage_key(&g, &d));
-        assert!(k.starts_with("recovery/dbtc-vault-index/v1/"));
-        assert!(!k.starts_with('/'));
-        // Keyed by BOTH genesis and device.
-        assert_ne!(
-            k,
-            RecoverySDK::dbtc_vault_index_storage_key(&[0x6F; 32], &d)
-        );
-        assert_ne!(
-            k,
-            RecoverySDK::dbtc_vault_index_storage_key(&g, &[0xA1; 32])
-        );
-        // Base32 Crockford only — no hex (repo invariant).
-        assert!(!k.contains("0x"));
-    }
-
-    #[test]
-    fn recovery_succession_proof_storage_key_is_deterministic_genesis_anew_keyed_crockford() {
-        let g = [0x6E; 32];
-        let a_new = [0xA1; 32];
-        let k = RecoverySDK::recovery_succession_proof_storage_key(&g, &a_new);
-        assert_eq!(
-            k,
-            RecoverySDK::recovery_succession_proof_storage_key(&g, &a_new)
-        );
-        assert!(k.starts_with("recovery/succession-proof/v1/"));
-        assert!(!k.starts_with('/'));
-        // Keyed by BOTH genesis and the successor device.
-        assert_ne!(
-            k,
-            RecoverySDK::recovery_succession_proof_storage_key(&[0x6F; 32], &a_new)
-        );
-        assert_ne!(
-            k,
-            RecoverySDK::recovery_succession_proof_storage_key(&g, &[0xA2; 32])
-        );
-        // Base32 Crockford only — no hex (repo invariant).
-        assert!(!k.contains("0x"));
-    }
-
-    #[test]
-    fn authority_anchor_endpoint_path_is_deterministic_genesis_keyed_crockford() {
-        let g = [0x6E; 32];
-        let p = RecoverySDK::authority_anchor_endpoint_path(&g);
-        // Deterministic + stable route prefix, NO leading slash (fan-out helpers join it).
-        assert_eq!(p, RecoverySDK::authority_anchor_endpoint_path(&g));
-        assert!(p.starts_with("api/v2/recovery/authority-anchor/"));
-        assert!(!p.starts_with('/'));
-        // Keyed by genesis only (one authority per genesis — matches server bind-once).
-        assert_ne!(p, RecoverySDK::authority_anchor_endpoint_path(&[0x6F; 32]));
-        // Base32 Crockford only — no '0x' prefix (repo invariant: no hex encoding).
-        let suffix = p.trim_start_matches("api/v2/recovery/authority-anchor/");
-        assert!(!suffix.contains("0x"));
-        assert!(suffix.chars().all(|c| c.is_ascii_alphanumeric()));
-    }
-
-    #[test]
-    fn pdsmt_head_chain_endpoint_path_is_device_keyed_crockford() {
-        let d = [0xD0; 32];
-        let p = RecoverySDK::pdsmt_head_chain_endpoint_path(&d);
-        assert_eq!(p, RecoverySDK::pdsmt_head_chain_endpoint_path(&d));
-        assert!(p.starts_with("api/v2/tips/"));
-        assert!(p.ends_with("/head-chain"));
-        assert!(!p.starts_with('/'));
-        assert_ne!(p, RecoverySDK::pdsmt_head_chain_endpoint_path(&[0xD1; 32]));
-        let mid = p
-            .trim_start_matches("api/v2/tips/")
-            .trim_end_matches("/head-chain");
-        assert!(!mid.contains("0x"));
-        assert!(mid.chars().all(|c| c.is_ascii_alphanumeric()));
-    }
-
-    #[test]
     fn test_rollup_operations_via_sdk() -> Result<(), DsmError> {
         let mut rollup = ReceiptRollup::new();
         let initial_hash = rollup.current_hash();
@@ -2287,5 +2290,53 @@ mod tests {
         assert!(RecoverySDK::verify_rollup(&rollup, &rollup.current_hash()));
 
         Ok(())
+    }
+
+    /// ht'_i is the peer's receipt count in acceptance order: two receipts
+    /// with A then one with B give A heights 1 and 2 and B height 1, and a
+    /// history row without a receipt counts for nobody.
+    #[test]
+    #[serial_test::serial]
+    fn the_rollup_derives_each_peers_height_from_the_history() {
+        crate::economic_fixtures::use_test_storage_dir();
+        crate::storage::client_db::reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("init db");
+        let me = "LOCAL";
+        let row = |id: &str, from: &str, to: &str, receipt: Option<Vec<u8>>| {
+            crate::storage::client_db::store_transaction(
+                &crate::storage::client_db::TransactionRecord {
+                    tx_id: id.to_string(),
+                    tx_hash: format!("h-{id}"),
+                    from_device: from.to_string(),
+                    to_device: to.to_string(),
+                    amount: 1,
+                    tx_type: "online".to_string(),
+                    status: "confirmed".to_string(),
+                    commitment_hash: None,
+                    proof_data: receipt,
+                    metadata: std::collections::HashMap::new(),
+                },
+            )
+            .expect("store");
+        };
+        row("a1", me, "PEER-A", Some(vec![0x01]));
+        row("n1", me, "PEER-A", None);
+        row("b1", "PEER-B", me, Some(vec![0x02]));
+        row("a2", "PEER-A", me, Some(vec![0x03]));
+
+        let rollup = RecoverySDK::derive_recovery_rollup(me).expect("rollup");
+        let heights: Vec<(Vec<u8>, u64)> = rollup
+            .entries()
+            .iter()
+            .map(|e| (e.receipt_id.clone(), e.new_height))
+            .collect();
+        assert_eq!(
+            heights,
+            vec![
+                (b"a1".to_vec(), 1),
+                (b"b1".to_vec(), 1),
+                (b"a2".to_vec(), 2)
+            ]
+        );
     }
 }

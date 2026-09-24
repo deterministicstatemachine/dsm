@@ -220,7 +220,6 @@ describe('storageNodeService', () => {
       const cached = storageNodeService.getCachedHealth();
 
       expect(cached).toHaveLength(config.nodes.length);
-      expect(cached.every((h) => typeof h.lastPing === 'number' && displayOnlyNumberToNumber(h.lastPing!) === 0)).toBe(true);
     });
 
     it('keeps configured ordering when bridge returns nodes out of order', async () => {
@@ -344,7 +343,6 @@ describe('storageNodeService', () => {
 
       const bundle = await storageNodeService.collectDiagnostics();
 
-      expect(bundle.tick).toBe(0);
       expect(bundle.nodesConfig).toBeDefined();
       expect(bundle.nodeHealth).toHaveLength(config.nodes.length);
       expect(bundle.systemInfo.platform).toBeDefined();

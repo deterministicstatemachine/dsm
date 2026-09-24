@@ -59,7 +59,7 @@ fn sign_for(sk: &[u8], op: &str, amount: u64) -> Vec<u8> {
 }
 
 fn ctx(op: &str, amount: u64, authorizations: Vec<u8>) -> EnforcementContext {
-    let mut c = EnforcementContext::new(op, 0);
+    let mut c = EnforcementContext::new(op);
     c.data
         .insert(witness_keys::POLICY_COMMIT.to_string(), PC.to_vec());
     c.data
@@ -76,11 +76,7 @@ fn ctx(op: &str, amount: u64, authorizations: Vec<u8>) -> EnforcementContext {
 }
 
 async fn check(cond: &PolicyCondition, c: &EnforcementContext) -> bool {
-    use std::sync::Arc;
-    let cache = Arc::new(dsm::core::token::policy::policy_cache::PolicyCache::new(
-        dsm::core::token::policy::policy_cache::PolicyCacheConfig::default(),
-    ));
-    PolicyEnforcer::new(cache)
+    PolicyEnforcer::new()
         .check_condition(cond, c)
         .await
         .expect("enforcement runs")
@@ -223,7 +219,7 @@ async fn token_authority_does_not_gate_mint() {
 // ── supply cap ──────────────────────────────────────────────────────────────
 
 fn supply_ctx(op: &str, amount: u64, circulating: u64) -> EnforcementContext {
-    let mut c = EnforcementContext::new(op, 0);
+    let mut c = EnforcementContext::new(op);
     c.data.insert(
         witness_keys::AMOUNT.to_string(),
         amount.to_le_bytes().to_vec(),

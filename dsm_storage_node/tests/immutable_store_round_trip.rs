@@ -1,34 +1,32 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! POSITIVE CONTROL for the demolition: the surviving immutable store still
 //! does the one thing a member does with an object — take bytes, return the
-//! same bytes. Driven through the real routers the binary serves, on the
-//! in-memory backend so it never skips.
+//! same bytes. Driven through the routers the binary serves, on a Postgres
+//! database of its own per test.
 //!
 //! The node computes the address from the bytes and interprets nothing. A
 //! read recomputes the address from the stored tuple and refuses to serve a
 //! row that no longer hashes to its own key. Neither side decodes the payload,
 //! so the payload here is deliberately arbitrary: not a protocol object.
 
-// The in-memory harness is the SQLite backend; under the Postgres feature
-// `db::create_pool` is the Postgres pool and `:memory:` is not a DSN.
-#![cfg(feature = "local-dev")]
 #![allow(clippy::disallowed_methods)]
+
+mod common;
 
 use std::sync::Arc;
 
 use axum::{body::Body, http::Request, http::StatusCode, Router};
 use dsm_sdk::util::text_id;
 use dsm_storage_node::{
-    db,
     replication::{ReplicationConfig, ReplicationManager},
     AppState,
 };
 use tower::ServiceExt;
 
-async fn member() -> Router {
+/// One member on a fresh store named `store`.
+async fn member(store: &str) -> Router {
     let endpoint = "http://member.local:8080".to_string();
-    let pool = Arc::new(db::create_pool(":memory:", true).expect("pool"));
-    db::init_db(&pool).await.expect("init db");
+    let pool = common::fresh_store(store).await;
     let rm = Arc::new(
         ReplicationManager::new_for_tests(
             ReplicationConfig {
@@ -96,7 +94,7 @@ async fn get(app: &Router, addr: &str) -> (StatusCode, Option<String>, Vec<u8>) 
 /// reader that recomputes it from the returned bytes lands on the same key.
 #[tokio::test]
 async fn bytes_put_into_the_immutable_store_come_back_byte_identical() {
-    let app = member().await;
+    let app = member("immutable_round_trip").await;
     let payload: Vec<u8> = (0u8..=255).cycle().take(3_001).collect();
     let namespace = "DSM/demolition-positive-control";
 
@@ -127,7 +125,7 @@ async fn bytes_put_into_the_immutable_store_come_back_byte_identical() {
 /// nothing about what a reader gets.
 #[tokio::test]
 async fn re_putting_identical_bytes_acks_and_the_read_is_unchanged() {
-    let app = member().await;
+    let app = member("immutable_re_put").await;
     let payload = b"the same object, twice".to_vec();
     let namespace = "DSM/demolition-positive-control";
 
@@ -148,7 +146,7 @@ async fn re_putting_identical_bytes_acks_and_the_read_is_unchanged() {
 /// to the write router in `storage_contract_router` turns this test red.
 #[tokio::test]
 async fn a_put_with_no_authorization_is_taken_on_the_served_assembly() {
-    let app = member().await;
+    let app = member("immutable_no_authorization").await;
     let (status, addr) = put(
         &app,
         "DSM/demolition-positive-control",
@@ -164,7 +162,7 @@ async fn a_put_with_no_authorization_is_taken_on_the_served_assembly() {
 /// An address nothing was put under is absent, not invented.
 #[tokio::test]
 async fn an_unknown_address_is_not_found() {
-    let app = member().await;
+    let app = member("immutable_unknown_address").await;
     let never = text_id::encode_base32_crockford(&[0x5Eu8; 32]);
     let (status, _, got) = get(&app, &never).await;
     assert_eq!(status, StatusCode::NOT_FOUND);

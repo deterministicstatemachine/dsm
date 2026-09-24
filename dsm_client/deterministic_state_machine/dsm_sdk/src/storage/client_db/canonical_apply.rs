@@ -18,7 +18,6 @@
 //! completion.
 
 use super::get_connection;
-use crate::util::deterministic_time::tick;
 use anyhow::{anyhow, Result};
 use rusqlite::{params, OptionalExtension};
 
@@ -168,8 +167,8 @@ pub fn insert_canonical_apply_identity_with_conn(
             canonical_apply_id, relationship_key, parent_tip, child_tip,
             precommit_digest, operation_digest, sender_device, recipient_device,
             nonce_hash, applied_parent_root_b, applied_child_root_b,
-            applied_parent_tip_b, applied_child_tip_b, record_hash, created_at
-         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
+            applied_parent_tip_b, applied_child_tip_b, record_hash
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
         params![
             id.as_slice(),
             rec.relationship_key.as_slice(),
@@ -185,7 +184,6 @@ pub fn insert_canonical_apply_identity_with_conn(
             rec.applied_parent_tip_b.as_slice(),
             rec.applied_child_tip_b.as_slice(),
             record_hash.as_slice(),
-            tick() as i64,
         ],
     ) {
         Ok(_) => Ok(CanonicalApplyInsertOutcome::Inserted),
@@ -445,7 +443,7 @@ mod tests {
     use serial_test::serial;
 
     fn init_test_db() {
-        unsafe { std::env::set_var("DSM_SDK_TEST_MODE", "1") };
+        crate::economic_fixtures::use_test_storage_dir();
         crate::storage::client_db::reset_database_for_tests();
         crate::storage::client_db::init_database().expect("init db");
     }

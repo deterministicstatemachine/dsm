@@ -49,15 +49,12 @@ tracing-log = "0.2"
 # HTTP Client
 reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls"] }
 
-# Database (PostgreSQL — default)
-tokio-postgres = { version = "0.7.17", default-features = false, features = ["runtime"], optional = true }
-deadpool-postgres = { version = "0.14.1", optional = true }
-tokio-postgres-rustls = { version = "0.14", optional = true }
+# Database (PostgreSQL)
+tokio-postgres = { version = "0.7.17", default-features = false, features = ["runtime"] }
+deadpool-postgres = "0.14.1"
+tokio-postgres-rustls = "0.14"
 rustls-native-certs = "0.8"      # use system roots (optional)
 webpki-roots = "1.0.7"
-
-# Database (SQLite — local-dev only)
-rusqlite = { version = "0.40.1", features = ["bundled"], optional = true }
 
 # Async traits for health checks
 async-trait = "0.1"
@@ -75,28 +72,11 @@ prost = "0.14"
 metrics = "0.24"
 once_cell = "1.19"
 
-[features]
-default = ["strict", "postgres"]
-strict = []
-postgres = ["dep:tokio-postgres", "dep:deadpool-postgres", "dep:tokio-postgres-rustls"]
-local-dev = ["dep:rusqlite"]
-dev-genesis = []
-dev-vault = []
-dev-inbox-blinded = []
-dev-discovery = []
-unilateral = []
-dev-replication = []
-benchmarking = []
-
 [[bin]]
 name = "storage_node"
 path = "src/main.rs"
 
 [dev-dependencies]
-# The contract suites drive this node's real routers with the SDK's
-# test-only doubles (gated `test-utils`). Same package edge as the normal
-# dependency above; only the feature is unified onto the test build.
-dsm_sdk = { version = "0.1.0-beta.3", path = "../dsm_client/deterministic_state_machine/dsm_sdk", features = ["test-utils"] }
 hyper = { version = "1.10", features = ["full"] }
 prost = "0.14"
 serial_test = "3"

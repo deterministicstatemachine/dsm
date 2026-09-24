@@ -86,7 +86,7 @@ describe('E2E: Unilateral Transaction Flow', () => {
   });
 
   test('transaction history uses correct property names', () => {
-    // Verify TransactionInfo: amount/fee/logicalIndex are uint64 (bigint in TS)
+    // Verify TransactionInfo: amount/fee are uint64 (bigint in TS)
     const historyProto = new pb.WalletHistoryResponse({
       transactions: [
         {
@@ -96,7 +96,6 @@ describe('E2E: Unilateral Transaction Flow', () => {
           tokenId: 'ROOT',
           amount: 200000000n, // uint64 = bigint
           fee: 0n,
-          logicalIndex: 1n,
           txHash: new Uint8Array(32).fill(88),
         },
       ] as any,

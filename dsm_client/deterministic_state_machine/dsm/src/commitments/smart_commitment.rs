@@ -20,14 +20,9 @@ use crate::core::state_machine::random_walk::algorithms::{
 
 use crate::{
     crypto::kyber,
-    types::{
-        error::DsmError,
-        operations::{Operation, TransactionMode, VerificationType},
-        token_types::Balance,
-    },
+    types::{error::DsmError, operations::Operation},
 };
 
-// const HASH_LEN: usize = 32;
 const WIRE_MAGIC: &[u8] = b"DSM_SMART_COMMIT_V2\0";
 
 /// Commitment types for smart commitments
@@ -332,35 +327,18 @@ impl SmartCommitment {
         Ok(())
     }
 
-    /// New conditional commitment:
+    /// New conditional commitment over `operation`, the operation it commits:
     /// - `condition` is the statement to be oracle-signed for executability.
     /// - `oracle_pubkey` is the required key (also used for signature verification in is_executable()).
     pub fn new_conditional(
         origin_hash: &[u8; 32],
         origin_entropy: &[u8],
-        recipient: Vec<u8>,
-        amount: u64,
+        operation: Operation,
         condition: String,
         oracle_pubkey: Vec<u8>,
     ) -> Result<Self, DsmError> {
         let origin_state_hash = *origin_hash;
-
-        let op = Operation::Transfer {
-            to_device_id: Vec::new(),
-            amount: Balance::zero(),
-            recipient: recipient.clone(),
-            token_id: Vec::new(),
-            // Placeholder commitment scaffolding op (empty token, zero amount).
-            policy_commit: [0u8; 32],
-            to: recipient.clone(),
-            message: String::new(),
-            mode: TransactionMode::Bilateral,
-            nonce: vec![],
-            verification: VerificationType::Standard,
-            pre_commit: None,
-            signature: Vec::new(),
-            authority_policy: None,
-        };
+        let (recipient, amount) = Self::extract_recipient_and_amount(&operation)?;
 
         let cond = CommitmentCondition::MultiSignature {
             required_keys: vec![oracle_pubkey.clone()],
@@ -374,7 +352,7 @@ impl SmartCommitment {
 
         let commitment_hash = Self::compute_commitment_hash(
             &origin_state_hash,
-            &op,
+            &operation,
             &recipient,
             amount,
             &ctype,
@@ -387,7 +365,7 @@ impl SmartCommitment {
             origin_state_hash,
             commitment_hash,
             conditions: cond,
-            operation: op,
+            operation,
             verification_positions: Vec::new(),
             commitment_type: ctype,
             recipient,
@@ -401,16 +379,16 @@ impl SmartCommitment {
         Ok(c)
     }
 
-    /// New compound (AND) commitment
+    /// New compound (AND) commitment over `operation`, the operation it commits.
     pub fn new_compound(
         origin_hash: &[u8; 32],
         origin_entropy: &[u8],
-        recipient: Vec<u8>,
-        amount: u64,
+        operation: Operation,
         conditions: Vec<CommitmentCondition>,
         name: &str,
     ) -> Result<Self, DsmError> {
         let origin_state_hash = *origin_hash;
+        let (recipient, amount) = Self::extract_recipient_and_amount(&operation)?;
 
         if conditions.is_empty() {
             return Err(DsmError::invalid_operation(
@@ -424,27 +402,10 @@ impl SmartCommitment {
             CommitmentCondition::And(conditions)
         };
 
-        let op = Operation::Transfer {
-            to_device_id: Vec::new(),
-            amount: Balance::zero(),
-            recipient: recipient.clone(),
-            token_id: Vec::new(),
-            // Placeholder commitment scaffolding op (empty token, zero amount).
-            policy_commit: [0u8; 32],
-            to: recipient.clone(),
-            message: String::new(),
-            mode: TransactionMode::Bilateral,
-            nonce: vec![],
-            verification: VerificationType::Standard,
-            pre_commit: None,
-            signature: Vec::new(),
-            authority_policy: None,
-        };
-
         let ctype = Self::determine_compound_type(&compound);
         let commitment_hash = Self::compute_commitment_hash(
             &origin_state_hash,
-            &op,
+            &operation,
             &recipient,
             amount,
             &ctype,
@@ -457,7 +418,7 @@ impl SmartCommitment {
             origin_state_hash,
             commitment_hash,
             conditions: compound,
-            operation: op,
+            operation,
             verification_positions: Vec::new(),
             commitment_type: ctype,
             recipient,
@@ -471,16 +432,16 @@ impl SmartCommitment {
         Ok(s)
     }
 
-    /// New compound (OR) commitment
+    /// New compound (OR) commitment over `operation`, the operation it commits.
     pub fn new_compound_or(
         origin_hash: &[u8; 32],
         origin_entropy: &[u8],
-        recipient: Vec<u8>,
-        amount: u64,
+        operation: Operation,
         conditions: Vec<CommitmentCondition>,
         name: &str,
     ) -> Result<Self, DsmError> {
         let origin_state_hash = *origin_hash;
+        let (recipient, amount) = Self::extract_recipient_and_amount(&operation)?;
 
         if conditions.is_empty() {
             return Err(DsmError::invalid_operation(
@@ -494,27 +455,10 @@ impl SmartCommitment {
             CommitmentCondition::Or(conditions)
         };
 
-        let op = Operation::Transfer {
-            to_device_id: Vec::new(),
-            amount: Balance::zero(),
-            recipient: recipient.clone(),
-            token_id: Vec::new(),
-            // Placeholder commitment scaffolding op (empty token, zero amount).
-            policy_commit: [0u8; 32],
-            to: recipient.clone(),
-            message: String::new(),
-            mode: TransactionMode::Bilateral,
-            nonce: vec![],
-            verification: VerificationType::Standard,
-            pre_commit: None,
-            signature: Vec::new(),
-            authority_policy: None,
-        };
-
         let ctype = Self::determine_compound_type(&compound);
         let commitment_hash = Self::compute_commitment_hash(
             &origin_state_hash,
-            &op,
+            &operation,
             &recipient,
             amount,
             &ctype,
@@ -527,7 +471,7 @@ impl SmartCommitment {
             origin_state_hash,
             commitment_hash,
             conditions: compound,
-            operation: op,
+            operation,
             verification_positions: Vec::new(),
             commitment_type: ctype,
             recipient,
@@ -1421,6 +1365,8 @@ fn dec_str(d: &mut &[u8]) -> Result<String, ()> {
 mod tests {
     use super::*;
     use crate::crypto::sphincs::{generate_sphincs_keypair, sphincs_sign};
+    use crate::types::operations::{TransactionMode, VerificationType};
+    use crate::types::token_types::Balance;
 
     /// Test fixture: deterministic (hash, entropy) pair standing in for a real
     /// origin state. Tests only exercise the commitment API's hash+entropy
@@ -1433,6 +1379,44 @@ mod tests {
             0, 0, 0,
         ];
         (hash, entropy)
+    }
+
+    /// A signed transfer of `amount` ERA to `recipient`: the operation a
+    /// commitment commits.
+    fn era_transfer(recipient: Vec<u8>, amount: u64) -> Operation {
+        let sender = crate::crypto::signatures::SignatureKeyPair::generate_from_entropy(
+            b"smart-commitment-test-sender",
+        )
+        .expect("sender keypair");
+        let mut nonce_hasher =
+            crate::crypto::blake3::dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_SDK_HASH);
+        nonce_hasher.update(&recipient);
+        nonce_hasher.update(&amount.to_le_bytes());
+        let mut op = Operation::Transfer {
+            to_device_id: recipient.clone(),
+            amount: Balance::amount(amount),
+            recipient: recipient.clone(),
+            token_id: b"ERA".to_vec(),
+            policy_commit: crate::core::token::token_state_manager::era_policy_commit(),
+            to: recipient,
+            message: String::new(),
+            mode: TransactionMode::Bilateral,
+            nonce: nonce_hasher.finalize().as_bytes().to_vec(),
+            verification: VerificationType::Standard,
+            pre_commit: None,
+            signature: Vec::new(),
+            authority_policy: None,
+        };
+        let signature = sender
+            .sign(&op.with_cleared_signature().to_bytes())
+            .expect("sign the transfer");
+        if let Operation::Transfer {
+            signature: held, ..
+        } = &mut op
+        {
+            *held = signature;
+        }
+        op
     }
 
     fn signed_update(identity_id: &str, data: Vec<u8>, message: &str) -> Operation {
@@ -1516,8 +1500,7 @@ mod tests {
         let c = SmartCommitment::new_conditional(
             &origin_hash,
             &origin_entropy,
-            recipient.clone(),
-            amount,
+            era_transfer(recipient.clone(), amount),
             "ok".to_string(),
             vec![1, 2, 3],
         )?;
@@ -1543,8 +1526,7 @@ mod tests {
         let and_c = SmartCommitment::new_compound(
             &origin_hash,
             &origin_entropy,
-            recipient.clone(),
-            amount,
+            era_transfer(recipient.clone(), amount),
             vec![v.clone()],
             "test_compound",
         )?;
@@ -1555,8 +1537,7 @@ mod tests {
         let or_c = SmartCommitment::new_compound_or(
             &origin_hash,
             &origin_entropy,
-            recipient.clone(),
-            amount,
+            era_transfer(recipient.clone(), amount),
             vec![v],
             "test_or_compound",
         )?;
@@ -1572,7 +1553,7 @@ mod tests {
         let mut op = Operation::Transfer {
             policy_commit: [0u8; 32],
             to_device_id: b"recipient".to_vec(),
-            amount: Balance::from_state(100, [0u8; 32]),
+            amount: Balance::amount(100),
             recipient: b"abcd".to_vec(),
             token_id: b"token123".to_vec(),
             to: b"abcd".to_vec(),
@@ -1718,8 +1699,7 @@ mod tests {
         let c = SmartCommitment::new_conditional(
             &origin_hash,
             &origin_entropy,
-            vec![1, 2, 3, 4],
-            100,
+            era_transfer(vec![1, 2, 3, 4], 100),
             condition.clone(),
             kp.public_key().to_vec(),
         )
@@ -1741,8 +1721,7 @@ mod tests {
         let c = SmartCommitment::new_conditional(
             &origin_hash,
             &origin_entropy,
-            vec![5, 6, 7, 8],
-            200,
+            era_transfer(vec![5, 6, 7, 8], 200),
             condition.clone(),
             kp.public_key().to_vec(),
         )
@@ -1770,8 +1749,7 @@ mod tests {
         let c1 = SmartCommitment::new_conditional(
             &origin_hash,
             &origin_entropy,
-            vec![1; 4],
-            100,
+            era_transfer(vec![1; 4], 100),
             condition.clone(),
             kp.public_key().to_vec(),
         )
@@ -1779,8 +1757,7 @@ mod tests {
         let c2 = SmartCommitment::new_conditional(
             &origin_hash,
             &origin_entropy,
-            vec![2; 4], // different recipient → different commitment_hash
-            100,
+            era_transfer(vec![2; 4], 100), // different recipient → different commitment_hash
             condition.clone(),
             kp.public_key().to_vec(),
         )

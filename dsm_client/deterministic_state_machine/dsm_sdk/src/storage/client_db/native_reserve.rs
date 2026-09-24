@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Durable client state for the native ERA reserve (client-DB schema v15).
+//! Durable client state for the native ERA reserve.
 //!
-//! Three kinds of state, three disciplines:
+//! Two kinds of state, two disciplines:
 //!
 //! - **Frozen releases**: the exact signed bytes this device wrote at one
 //!   parent root, `INSERT OR IGNORE`d before the first member write so a
@@ -12,9 +12,9 @@
 //!   state it succeeded. Finality is permanent, so a memoised state is a
 //!   sound start for the next walk. A cache of Core's conclusions, never
 //!   authority over a cell.
-//! - **The carry queue**: every successor this device wrote, with the members
-//!   that hold it, until all of them do (owner ruling: all-member
-//!   replication, asynchronous, never a condition of finality).
+//!
+//! The write of a release along its successor cell's route is recorded like
+//! every route-chain write (`client_db::route_writes`).
 
 use anyhow::{anyhow, Result};
 use rusqlite::{params, OptionalExtension};
@@ -25,11 +25,11 @@ use dsm::economic::provenance::ReserveReleaseWin;
 use super::get_connection;
 
 fn u64_of(v: i64, what: &str) -> Result<u64> {
-    u64::try_from(v).map_err(|_| anyhow!("{what} is negative"))
+    u64::try_from(v).map_err(|e| anyhow!("{what} is negative: {e}"))
 }
 
 fn i64_of(v: u64, what: &str) -> Result<i64> {
-    i64::try_from(v).map_err(|_| anyhow!("{what} overflows"))
+    i64::try_from(v).map_err(|e| anyhow!("{what} overflows: {e}"))
 }
 
 // ── Frozen releases ──────────────────────────────────────────────────────────
@@ -40,15 +40,14 @@ pub fn put_frozen_release(
     reserve_id: &[u8; 32],
     parent_root: &[u8; 32],
     envelope: &[u8],
-    now: i64,
 ) -> Result<()> {
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
     conn.execute(
         "INSERT OR IGNORE INTO native_reserve_release_local
-           (reserve_id, parent_root, envelope, created_at)
-         VALUES (?1, ?2, ?3, ?4)",
-        params![reserve_id.as_slice(), parent_root.as_slice(), envelope, now],
+           (reserve_id, parent_root, envelope)
+         VALUES (?1, ?2, ?3)",
+        params![reserve_id.as_slice(), parent_root.as_slice(), envelope],
     )?;
     Ok(())
 }
@@ -143,11 +142,20 @@ pub fn release_at(
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?;
-    Ok(row.map(|(parent_remaining, envelope)| ReserveReleaseWin {
+    let Some((parent_remaining, envelope)) = row else {
+        return Ok(None);
+    };
+    // A memo row that does not decode is corrupt storage, never a release: a
+    // parent supply read as zero, or a parent generation below the genesis,
+    // would be evidence this device invented.
+    let parent_generation = generation
+        .checked_sub(1)
+        .ok_or_else(|| anyhow!("native_reserve_lineage_memo: generation 0 has no parent"))?;
+    Ok(Some(ReserveReleaseWin {
         envelope_bytes: envelope,
         parent: NativeReserveState {
-            generation: generation - 1,
-            remaining_supply: u64_of(parent_remaining, "parent remaining").unwrap_or(0),
+            generation: parent_generation,
+            remaining_supply: u64_of(parent_remaining, "parent remaining")?,
             ..*genesis
         },
     }))
@@ -183,95 +191,54 @@ pub fn release_for_recipient(
         .transpose()
 }
 
-// ── The carry queue ──────────────────────────────────────────────────────────
+#[cfg(test)]
+#[allow(clippy::disallowed_methods)]
+mod tests {
+    use super::*;
+    use serial_test::serial;
 
-/// One queued successor and the members already holding it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PendingCarry {
-    pub cell_key: [u8; 32],
-    pub namespace: Vec<u8>,
-    pub value: Vec<u8>,
-    pub carried: Vec<String>,
-}
-
-/// Queue the exact bytes written at `cell_key` for the background carry.
-pub fn record_carry(cell_key: &[u8; 32], namespace: &[u8], value: &[u8]) -> Result<()> {
-    let binding = get_connection()?;
-    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
-    conn.execute(
-        "INSERT OR IGNORE INTO native_reserve_carry (cell_key, namespace, value)
-         VALUES (?1, ?2, ?3)",
-        params![cell_key.as_slice(), namespace, value],
-    )?;
-    Ok(())
-}
-
-/// Record that `member_id` holds the bytes queued at `cell_key`.
-pub fn record_carried(cell_key: &[u8; 32], member_id: &str) -> Result<()> {
-    let binding = get_connection()?;
-    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
-    conn.execute(
-        "INSERT OR IGNORE INTO native_reserve_carry_member (cell_key, member_id) VALUES (?1, ?2)",
-        params![cell_key.as_slice(), member_id],
-    )?;
-    Ok(())
-}
-
-/// The members recorded as holding the bytes queued at `cell_key`.
-pub fn carried_members(cell_key: &[u8; 32]) -> Result<Vec<String>> {
-    let binding = get_connection()?;
-    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
-    let mut stmt =
-        conn.prepare("SELECT member_id FROM native_reserve_carry_member WHERE cell_key = ?1")?;
-    let rows = stmt.query_map(params![cell_key.as_slice()], |r| r.get::<_, String>(0))?;
-    Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
-}
-
-/// Up to `limit` queued successors, oldest first, each with its holders.
-pub fn pending_carries(limit: u32) -> Result<Vec<PendingCarry>> {
-    let binding = get_connection()?;
-    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
-    let mut stmt = conn.prepare(
-        "SELECT cell_key, namespace, value FROM native_reserve_carry ORDER BY rowid ASC LIMIT ?1",
-    )?;
-    let rows = stmt.query_map(params![limit], |r| {
-        Ok((
-            r.get::<_, Vec<u8>>(0)?,
-            r.get::<_, Vec<u8>>(1)?,
-            r.get::<_, Vec<u8>>(2)?,
-        ))
-    })?;
-    let mut out = Vec::new();
-    for row in rows {
-        let (key, namespace, value) = row?;
-        let cell_key = <[u8; 32]>::try_from(key.as_slice())
-            .map_err(|_| anyhow!("carry cell key is not 32 bytes"))?;
-        let mut holders =
-            conn.prepare("SELECT member_id FROM native_reserve_carry_member WHERE cell_key = ?1")?;
-        let carried = holders
-            .query_map(params![cell_key.as_slice()], |r| r.get::<_, String>(0))?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        out.push(PendingCarry {
-            cell_key,
-            namespace,
-            value,
-            carried,
-        });
+    fn memo_row(genesis: &NativeReserveState, generation: i64, parent_remaining: i64) {
+        let binding = get_connection().expect("connection");
+        let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+        conn.execute(
+            "INSERT INTO native_reserve_lineage_memo
+               (reserve_id, generation, parent_remaining, remaining, recipient_genesis,
+                recipient_devid, recipient_position, envelope)
+             VALUES (?1, ?2, ?3, 0, ?4, ?5, 0, ?6)",
+            params![
+                genesis.reserve_id.as_slice(),
+                generation,
+                parent_remaining,
+                [0x61u8; 32].as_slice(),
+                [0x62u8; 32].as_slice(),
+                [0x63u8; 8].as_slice(),
+            ],
+        )
+        .expect("memo row");
     }
-    Ok(out)
-}
 
-/// Drop a successor from the queue once every member holds it.
-pub fn clear_carry(cell_key: &[u8; 32]) -> Result<()> {
-    let binding = get_connection()?;
-    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
-    conn.execute(
-        "DELETE FROM native_reserve_carry_member WHERE cell_key = ?1",
-        params![cell_key.as_slice()],
-    )?;
-    conn.execute(
-        "DELETE FROM native_reserve_carry WHERE cell_key = ?1",
-        params![cell_key.as_slice()],
-    )?;
-    Ok(())
+    /// A memoised release reads back as the release it recorded; a row whose
+    /// parent supply is negative is corrupt storage and an error — never a
+    /// release with an invented parent supply.
+    #[test]
+    #[serial]
+    fn a_corrupt_memo_row_is_an_error_not_a_release() {
+        crate::economic_fixtures::use_test_storage_dir();
+        super::super::reset_database_for_tests();
+        super::super::init_database().expect("init");
+        let genesis = NativeReserveState::genesis(b"memo-test", [0x5E; 32]);
+
+        memo_row(&genesis, 3, 900);
+        let win = release_at(&genesis, 3).expect("read").expect("recorded");
+        assert_eq!(win.parent.generation, 2);
+        assert_eq!(win.parent.remaining_supply, 900);
+
+        memo_row(&genesis, 4, -1);
+        assert!(
+            release_at(&genesis, 4).is_err(),
+            "a negative parent supply is corrupt"
+        );
+
+        assert!(release_at(&genesis, 9).expect("read").is_none());
+    }
 }

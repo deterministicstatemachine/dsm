@@ -9,30 +9,20 @@ terraform {
 }
 
 provider "google" {
-  alias   = "us_east1"
   project = var.gcp_project
-  region  = "us-east1"
+  region  = "us-central1"
 }
 
-provider "google" {
-  alias   = "europe_west1"
-  project = var.gcp_project
-  region  = "europe-west1"
-}
+# The beta fleet is FIVE nodes in one region. Quorum is 3 of 5 and every settle
+# waits on it, so the members sit next to each other rather than across
+# continents: an intercontinental hop would be on the critical path of every
+# quorum-bound operation the rig performs.
+module "us_central1" {
+  source = "./modules/region"
 
-provider "google" {
-  alias   = "asia_southeast1"
-  project = var.gcp_project
-  region  = "asia-southeast1"
-}
-
-module "us_east1" {
-  source    = "./modules/region"
-  providers = { google = google.us_east1 }
-
-  region             = "us-east1"
+  region             = "us-central1"
   gcp_project        = var.gcp_project
-  node_count         = 2
+  node_count         = 5
   machine_type       = var.machine_type
   disk_size_gb       = var.disk_size_gb
   ssh_public_key     = var.ssh_public_key
@@ -40,36 +30,4 @@ module "us_east1" {
   allowed_ssh_cidr   = var.allowed_ssh_cidr
   project_tag        = var.project_tag
   global_node_offset = 0
-}
-
-module "europe_west1" {
-  source    = "./modules/region"
-  providers = { google = google.europe_west1 }
-
-  region             = "europe-west1"
-  gcp_project        = var.gcp_project
-  node_count         = 2
-  machine_type       = var.machine_type
-  disk_size_gb       = var.disk_size_gb
-  ssh_public_key     = var.ssh_public_key
-  ssh_username       = var.ssh_username
-  allowed_ssh_cidr   = var.allowed_ssh_cidr
-  project_tag        = var.project_tag
-  global_node_offset = 2
-}
-
-module "asia_southeast1" {
-  source    = "./modules/region"
-  providers = { google = google.asia_southeast1 }
-
-  region             = "asia-southeast1"
-  gcp_project        = var.gcp_project
-  node_count         = 2
-  machine_type       = var.machine_type
-  disk_size_gb       = var.disk_size_gb
-  ssh_public_key     = var.ssh_public_key
-  ssh_username       = var.ssh_username
-  allowed_ssh_cidr   = var.allowed_ssh_cidr
-  project_tag        = var.project_tag
-  global_node_offset = 4
 }

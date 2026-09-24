@@ -59,7 +59,6 @@ pub mod classifier;
 pub mod credit;
 pub mod decode;
 pub mod issuance;
-pub mod token_policy;
 pub mod keys;
 pub mod lineage;
 pub mod mutation;
@@ -71,6 +70,7 @@ pub mod register;
 pub mod release;
 pub mod state;
 pub mod successor_evidence;
+pub mod token_policy;
 pub mod tree;
 pub mod witness;
 pub mod write_set;
@@ -82,9 +82,7 @@ pub use claim::{
 pub use decode::{
     decode_credit_source, decode_leaf_mutation, decode_leaf_state, decode_transition_witness,
 };
-pub use credit::{
-    CreditSource, CreditSourceGenesisRelease, CreditSourceValidatedPeerDebit,
-};
+pub use credit::{CreditSource, CreditSourceGenesisRelease, CreditSourceValidatedPeerDebit};
 pub use classifier::{
     check_tripwire, classify, EconomicEffect, EconomicTripwire, ObservedEconomicChange,
 };

@@ -11,7 +11,8 @@ set -euo pipefail
 # `sofi::lineage::advance_resolved`. Each is a place where the conjunction that
 # earns a validated root is stated; a second caller would be a second,
 # unreviewed definition of "validated", which is exactly the fabrication the
-# private fields exist to prevent.
+# private fields exist to prevent. The peer lineage walker's memo start,
+# `from_verifier_memo`, is a third, for a coordinate this verifier validated.
 
 echo "=== ValidatedEconomicRoot: constructors stay where their proofs are ==="
 
@@ -44,12 +45,57 @@ if [[ "$callers" != "$sofi_lineage" ]]; then
   echo "       callers found: ${callers:-none}"
   exit 1
 fi
+for ty in ValidatedEconomicRoot AcceptedClaim; do
+  count=$(grep -c "${ty}::from_resolved_sofi_position" "$sofi_lineage")
+  if [[ "$count" -ne 1 ]]; then
+    echo "[FAIL] $sofi_lineage calls ${ty}::from_resolved_sofi_position $count times; exactly one call earns it"
+    exit 1
+  fi
+done
 count=$(grep -c 'from_resolved_sofi_position' "$sofi_lineage")
-if [[ "$count" -ne 1 ]]; then
-  echo "[FAIL] $sofi_lineage references the constructor $count times; exactly one call earns it"
+if [[ "$count" -ne 2 ]]; then
+  echo "[FAIL] $sofi_lineage references the SoFi constructors $count times; one per type earns them"
   exit 1
 fi
-echo "  ✓ one caller, inside advance_resolved"
+echo "  ✓ one caller per type, inside advance_resolved"
+
+# 2a. The peer-memo puncture is crate-private and called from exactly one
+#     place: the peer lineage walker, as the start of a walk.
+peer_lineage="$core/dsm/src/economic/peer_lineage.rs"
+if ! grep -q 'pub(crate) fn from_verifier_memo' "$lineage"; then
+  echo "[FAIL] from_verifier_memo is not pub(crate) in $lineage"
+  exit 1
+fi
+callers=$(grep -rln 'from_verifier_memo' "$core/dsm/src" | grep -v "economic/lineage.rs" || true)
+if [[ "$callers" != "$peer_lineage" ]]; then
+  echo "[FAIL] from_verifier_memo must be called only from $peer_lineage"
+  echo "       callers found: ${callers:-none}"
+  exit 1
+fi
+count=$(grep -c 'from_verifier_memo' "$peer_lineage")
+if [[ "$count" -ne 1 ]]; then
+  echo "[FAIL] $peer_lineage calls from_verifier_memo $count times; the walk's start is one call"
+  exit 1
+fi
+echo "  ✓ one caller of the memo start, inside the peer walk"
+
+# 2b. `AcceptedClaim` (SoFi Amendment S9) is verifier-derived on the same
+#     terms: private fields, so a caller cannot name a claim it never accepted.
+body=$(awk '/^pub struct AcceptedClaim \{/{f=1} f{print} f&&/^\}/{exit}' "$lineage")
+[[ -n "$body" ]] || {
+  echo "[FAIL] AcceptedClaim is not where this gate expects it"
+  exit 1
+}
+if grep -qE '^\s+pub(\(| )' <<<"$body"; then
+  echo "[FAIL] AcceptedClaim has a public field — a caller could build one directly:"
+  grep -nE '^\s+pub(\(| )' <<<"$body"
+  exit 1
+fi
+if ! grep -q 'pub(crate) fn from_resolved_sofi_position' <(awk '/^impl AcceptedClaim \{/{f=1} f{print} f&&/^\}/{exit}' "$lineage"); then
+  echo "[FAIL] AcceptedClaim::from_resolved_sofi_position is not pub(crate)"
+  exit 1
+fi
+echo "  ✓ accepted-claim fields are private"
 
 # 3. `RegisteredEconomicRoot` has no public field either, and exactly one
 #    constructor — one that takes a VERIFIED claim.

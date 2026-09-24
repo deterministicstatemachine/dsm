@@ -105,25 +105,6 @@ fn sofi_operations_have_distinct_canonical_tags() {
     assert_eq!(seen.len(), 3);
 }
 
-/// A signed operation with no signature is refused at the authorization gate,
-/// so an unsigned SoFi transition cannot advance a chain.
-#[test]
-fn an_unsigned_sofi_operation_is_refused_authorization() {
-    for unsigned in sofi_operations() {
-        let name = unsigned.get_operation_type();
-        assert!(
-            dsm::core::state_machine::transition::enforce_operation_authorization(&unsigned)
-                .is_err(),
-            "{name}: an unsigned SoFi operation must not be authorized"
-        );
-        let signed = unsigned.with_signature(SIG.to_vec());
-        assert!(
-            dsm::core::state_machine::transition::enforce_operation_authorization(&signed).is_ok(),
-            "{name}: a signed one must pass"
-        );
-    }
-}
-
 /// The economic classification of each SoFi operation, and the egress gate's
 /// own invariant over them.
 #[test]
@@ -218,7 +199,6 @@ fn beta_admission_is_the_cap_not_the_codec() {
 /// be unobservable, and the member and the device could disagree forever.
 #[test]
 fn each_sofi_operation_signs_its_own_rule_and_not_the_other() {
-    use dsm::core::state_machine::transition::operation_signing_bytes;
     use dsm::crypto::sphincs::{generate_sphincs_keypair, sphincs_sign};
     use dsm::sofi::derive;
     use dsm::sofi::signature::{verify_operation, SignatureError};
@@ -274,7 +254,7 @@ fn each_sofi_operation_signs_its_own_rule_and_not_the_other() {
         ),
         (
             &unsigned_create,
-            operation_signing_bytes(&unsigned_create),
+            unsigned_create.signing_bytes(),
             "SofiVaultCreate",
         ),
     ] {
@@ -294,7 +274,7 @@ fn each_sofi_operation_signs_its_own_rule_and_not_the_other() {
         (&unsigned_fulfill, "SofiFulfill"),
     ] {
         let over_the_operation =
-            unsigned.with_signature(sphincs_sign(&sk, &operation_signing_bytes(unsigned)).unwrap());
+            unsigned.with_signature(sphincs_sign(&sk, &unsigned.signing_bytes()).unwrap());
         assert_eq!(
             verify_operation(&over_the_operation, &pk),
             Err(SignatureError::DoesNotVerify { what: name }),
@@ -307,7 +287,7 @@ fn each_sofi_operation_signs_its_own_rule_and_not_the_other() {
     let create_over_a_digest = unsigned_create.with_signature(
         sphincs_sign(
             &sk,
-            dsm::crypto::blake3::hash_blake3(&operation_signing_bytes(&unsigned_create)).as_bytes(),
+            dsm::crypto::blake3::hash_blake3(&unsigned_create.signing_bytes()).as_bytes(),
         )
         .unwrap(),
     );

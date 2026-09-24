@@ -4,100 +4,162 @@
 //! Enforces the invariant:
 //!
 //! > **local genesis durable != identity ready**
-//! > **published and read-back verified by quorum = identity ready**
+//! > **own directory entry read back from the set = identity ready**
 //!
 //! `LocalGenesisCommitted -> PublicationPending -> Published`
 //!
 //! Genesis produces a durable local state machine. That alone leaves the device
-//! unreachable: peers resolve a device by looking it up on the storage fleet, so
-//! an unpublished identity cannot receive online sends and every authenticated
-//! write 401s. Publication is therefore a precondition of "identity created",
-//! not a best-effort side effect of it.
+//! unreachable: a peer reaches a device through its directory entry
+//! (`sdk::device_directory`) — its AK, its birth attestation and its Kyber key,
+//! signed with the AK — so an unpublished identity cannot receive online
+//! sends. Publication writes this device's own entry to its directory cell on
+//! every member of the network's pinned set and reads it back; the identity is
+//! published once [`STORAGE_FINALITY_COUNT`] members hold the exact entry that
+//! a reader keeps.
 //!
 //! Failure never destroys local genesis. The device parks in
 //! `PublicationPending` and [`retry_pending_publications`] resumes it on the
-//! next startup — the storage screen is not, and must not be, the recovery
-//! mechanism.
+//! next startup.
 
+use dsm::core::identity::directory::DirectoryEntry;
+use dsm::sofi::wire::STORAGE_FINALITY_COUNT;
 use dsm::types::error::DsmError;
 
-use crate::sdk::storage_node_sdk::{PublicationReport, StorageNodeConfig, StorageNodeSDK};
-use crate::storage::client_db::publication::{
-    self, quorum_for, upsert_publication_state, PublicationState,
-};
+use crate::sdk::device_directory::{build_own_entry, publish_entry, read_entry};
+use crate::sdk::identity_presentation::OwnerIdentityInputs;
+use crate::storage::client_db::publication::{self, upsert_publication_state, PublicationState};
 
-/// Publish an identity now and record the resulting lifecycle state.
-///
-/// Returns the report so callers can log/branch; the persisted state is the
-/// authority consulted later by [`is_identity_ready`].
+fn storage_err(what: &str, e: impl core::fmt::Display) -> DsmError {
+    DsmError::storage(format!("{what}: {e}"), None::<std::io::Error>)
+}
+
+fn d32(text: &str, what: &str) -> Result<[u8; 32], DsmError> {
+    crate::util::text_id::decode_base32_crockford(text)
+        .and_then(|raw| <[u8; 32]>::try_from(raw).ok())
+        .ok_or_else(|| DsmError::invalid_parameter(format!("{what} is not a 32-byte id")))
+}
+
+/// What one publication established.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DirectoryPublication {
+    /// Members whose directory cell holds this device's exact entry, as a
+    /// reader keeps it.
+    pub holders: u32,
+    /// Members the set has.
+    pub members: u32,
+    /// Holders needed to call the identity published.
+    pub required: u32,
+}
+
+impl DirectoryPublication {
+    pub fn is_published(&self) -> bool {
+        self.holders >= self.required
+    }
+}
+
+/// This device's own directory entry: the one it signed before, while it still
+/// names this identity and this device's current Kyber key; otherwise a new
+/// one at the next counter, re-derived from the wallet seed and kept.
+fn own_entry(
+    network_id: &[u8],
+    genesis: &[u8; 32],
+    device_id: &[u8; 32],
+) -> Result<DirectoryEntry, DsmError> {
+    let kyber_public_key = crate::sdk::kyber_identity::local_kyber_public_key()?;
+    let previous = match crate::storage::client_db::own_directory_entry::load()
+        .map_err(|e| storage_err("own directory entry", e))?
+    {
+        Some(bytes) => Some(
+            DirectoryEntry::decode(&bytes)
+                .map_err(|e| storage_err("own directory entry", format!("{e:?}")))?,
+        ),
+        None => None,
+    };
+    let counter = match &previous {
+        Some(entry)
+            if entry.body.genesis == *genesis
+                && entry.body.device_id == *device_id
+                && entry.body.kyber_public_key == kyber_public_key =>
+        {
+            return Ok(entry.clone())
+        }
+        Some(entry) => entry.body.counter.checked_add(1).ok_or_else(|| {
+            DsmError::invalid_operation("own directory entry: the counter is exhausted")
+        })?,
+        None => 1,
+    };
+    let wallet_seed = crate::fetch_wallet_seed()
+        .map_err(|e| DsmError::invalid_operation(format!("wallet locked: {e}")))?;
+    let entry = build_own_entry(
+        &wallet_seed,
+        OwnerIdentityInputs::beta(network_id),
+        genesis,
+        kyber_public_key,
+        counter,
+    )?;
+    if entry.body.device_id != *device_id {
+        return Err(DsmError::invalid_operation(
+            "own directory entry: the re-derived device id is not this device's",
+        ));
+    }
+    crate::storage::client_db::own_directory_entry::store(&entry.encode())
+        .map_err(|e| storage_err("keep own directory entry", e))?;
+    Ok(entry)
+}
+
+/// Publish this device's directory entry now, read it back, and record the
+/// resulting lifecycle state.
 pub async fn publish_identity_now(
     device_id_b32: &str,
-    pubkey_b32: &str,
     genesis_hash_b32: &str,
-) -> Result<PublicationReport, DsmError> {
-    let cfg = match StorageNodeConfig::from_env_config().await {
-        Ok(c) => c,
-        Err(e) => {
-            let msg = format!("storage-node config load failed: {e:?}");
-            record_pending(device_id_b32, genesis_hash_b32, 0, &msg);
-            return Err(DsmError::storage(msg, None::<std::io::Error>));
-        }
-    };
-    let required = quorum_for(cfg.node_urls.len());
-
-    let sdk = match StorageNodeSDK::new(cfg).await {
-        Ok(s) => s,
-        Err(e) => {
-            let msg = format!("storage-node SDK init failed: {e:?}");
-            record_pending(device_id_b32, genesis_hash_b32, required, &msg);
-            return Err(DsmError::storage(msg, None::<std::io::Error>));
-        }
-    };
-
-    let report = match sdk
-        .publish_identity(device_id_b32, pubkey_b32, genesis_hash_b32)
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            record_pending(
-                device_id_b32,
-                genesis_hash_b32,
-                required,
-                &format!("publish: {e}"),
-            );
-            return Err(e);
-        }
-    };
-
-    if report.is_published() {
-        match upsert_publication_state(
+) -> Result<DirectoryPublication, DsmError> {
+    let required =
+        u32::try_from(STORAGE_FINALITY_COUNT).map_err(|e| storage_err("finality count", e))?;
+    let outcome = async {
+        let device_id = d32(device_id_b32, "device id")?;
+        let genesis = d32(genesis_hash_b32, "genesis")?;
+        let network = crate::sdk::economic_admission_flow::committed_network_id()?;
+        let set = crate::sdk::storage_set::canonical_set(&network)?;
+        let entry = own_entry(&network, &genesis, &device_id)?;
+        publish_entry(&set, &entry).await?;
+        let holders = match read_entry(&set, &genesis, &device_id).await? {
+            Some(read) if read.entry == entry => read.holders.len(),
+            Some(..) | None => 0,
+        };
+        Ok::<_, DsmError>(DirectoryPublication {
+            holders: u32::try_from(holders).map_err(|e| storage_err("holders", e))?,
+            members: u32::try_from(set.len()).map_err(|e| storage_err("members", e))?,
+            required,
+        })
+    }
+    .await;
+    match &outcome {
+        Ok(report) if report.is_published() => match upsert_publication_state(
             device_id_b32,
             genesis_hash_b32,
             PublicationState::Published,
-            report.required,
+            required,
             "",
         ) {
             // The write is what makes the identity ready, so the session
-            // refresh goes out beside it. Publication runs in the background
-            // after genesis; the host computed the session phase while this
-            // was still pending, and nothing else tells it to recompute.
+            // refresh goes out beside it.
             Ok(()) => push_session_refresh(),
             Err(e) => {
                 log::warn!("identity_publication: failed to persist Published state: {e}")
             }
-        }
-    } else {
-        let summary = report
-            .failures
-            .iter()
-            .map(|(node, err)| format!("{node}: {err}"))
-            .collect::<Vec<_>>()
-            .join("; ");
-        record_pending(device_id_b32, genesis_hash_b32, report.required, &summary);
+        },
+        Ok(report) => record_pending(
+            device_id_b32,
+            genesis_hash_b32,
+            required,
+            &format!(
+                "{}/{} members hold the entry; {} needed",
+                report.holders, report.members, report.required
+            ),
+        ),
+        Err(e) => record_pending(device_id_b32, genesis_hash_b32, required, &e.to_string()),
     }
-
-    Ok(report)
+    outcome
 }
 
 fn record_pending(device_id_b32: &str, genesis_hash_b32: &str, required: u32, err: &str) {
@@ -127,31 +189,18 @@ fn push_session_refresh() {
 #[cfg(not(all(target_os = "android", feature = "jni")))]
 fn push_session_refresh() {}
 
-/// Whether this device's identity is ready to use — i.e. a quorum of nodes has
-/// been read-back verified. A durable local genesis record does NOT satisfy
-/// this.
-pub fn is_identity_ready(device_id_b32: &str) -> bool {
-    publication::is_published(device_id_b32).unwrap_or(false)
+/// Whether this device's identity is ready to use: its directory entry was
+/// read back from enough members. A durable local genesis record does NOT
+/// satisfy this.
+pub fn is_identity_ready(device_id_b32: &str) -> Result<bool, DsmError> {
+    publication::is_published(device_id_b32).map_err(|e| storage_err("publication state", e))
 }
 
-/// Resume publication for every device that has not reached quorum.
+/// Resume publication for every device that has not been read back yet.
 ///
 /// Called on startup. Idempotent: devices already published are skipped, and a
-/// device that is already registered on a node reconciles through the node's
-/// 409 path rather than failing.
+/// republished entry is the same bytes the members already hold.
 pub async fn retry_pending_publications() {
-    // Identities created before the publication table existed have no row, so
-    // they would be invisible here while still reporting unpublished — parked
-    // in `publication_pending` with nothing driving them out. Backfill first so
-    // the retry actually covers them.
-    match publication::backfill_publication_rows_for_local_identities() {
-        Ok(0) => {}
-        Ok(n) => log::info!(
-            "identity_publication: backfilled {n} pre-existing identity/identities for publication"
-        ),
-        Err(e) => log::warn!("identity_publication: backfill failed: {e}"),
-    }
-
     let pending = match publication::list_unpublished() {
         Ok(p) => p,
         Err(e) => {
@@ -159,64 +208,22 @@ pub async fn retry_pending_publications() {
             return;
         }
     };
-    if pending.is_empty() {
-        return;
-    }
-
-    log::info!(
-        "identity_publication: {} identity/identities awaiting publication — retrying",
-        pending.len()
-    );
-
     for rec in pending {
-        // The AK is read from the local genesis record rather than carried in
-        // the publication row, so the retry republishes exactly the identity
-        // that was committed locally.
-        let pubkey_b32 = match local_pubkey_b32(&rec.device_id) {
-            Some(pk) => pk,
-            None => {
-                log::warn!(
-                    "identity_publication: no local public key for device={} — cannot retry",
-                    &rec.device_id[..8.min(rec.device_id.len())]
-                );
-                continue;
-            }
-        };
-
-        match publish_identity_now(&rec.device_id, &pubkey_b32, &rec.genesis_hash).await {
-            Ok(report) if report.is_published() => {
-                log::info!(
-                    "identity_publication: device={} now PUBLISHED ({}/{} verified)",
-                    &rec.device_id[..8.min(rec.device_id.len())],
-                    report.verified,
-                    report.total_nodes
-                );
-            }
-            Ok(report) => {
-                log::warn!(
-                    "identity_publication: device={} still pending ({}/{} verified, quorum {})",
-                    &rec.device_id[..8.min(rec.device_id.len())],
-                    report.verified,
-                    report.total_nodes,
-                    report.required
-                );
-            }
-            Err(e) => {
-                log::warn!(
-                    "identity_publication: retry failed for device={}: {e}",
-                    &rec.device_id[..8.min(rec.device_id.len())]
-                );
-            }
+        let short = &rec.device_id[..8.min(rec.device_id.len())];
+        match publish_identity_now(&rec.device_id, &rec.genesis_hash).await {
+            Ok(report) if report.is_published() => log::info!(
+                "identity_publication: device={short} now PUBLISHED ({}/{} members hold the entry)",
+                report.holders,
+                report.members
+            ),
+            Ok(report) => log::warn!(
+                "identity_publication: device={short} still pending ({}/{} members hold the \
+                 entry, {} needed)",
+                report.holders,
+                report.members,
+                report.required
+            ),
+            Err(e) => log::warn!("identity_publication: retry failed for device={short}: {e}"),
         }
     }
-}
-
-/// Resolve the device's own AK from the canonical local head, Base32-encoded.
-fn local_pubkey_b32(device_id_b32: &str) -> Option<String> {
-    let raw = crate::util::text_id::decode_base32_crockford(device_id_b32)?;
-    let device_id: [u8; 32] = raw.try_into().ok()?;
-    let head = crate::storage::client_db::bcr::load_bcr_device_head(&device_id).ok()??;
-    Some(crate::util::text_id::encode_base32_crockford(
-        head.public_key(),
-    ))
 }

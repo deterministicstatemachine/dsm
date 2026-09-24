@@ -69,7 +69,9 @@ pub fn read_position(address: &str, endpoint: &str) -> Result<u64> {
         .optional()?;
     match pos {
         None => Ok(0),
-        Some(p) => u64::try_from(p).map_err(|_| anyhow!("b0x_read_position holds a negative position")),
+        Some(p) => {
+            u64::try_from(p).map_err(|_| anyhow!("b0x_read_position holds a negative position"))
+        }
     }
 }
 
@@ -105,7 +107,10 @@ mod tests {
         assert!(is_consumed("INBOX-A", "M1").unwrap());
         assert!(is_consumed("INBOX-A", "M2").unwrap());
         assert!(!is_consumed("INBOX-A", "M3").unwrap());
-        assert!(!is_consumed("INBOX-B", "M1").unwrap(), "another inbox is its own record");
+        assert!(
+            !is_consumed("INBOX-B", "M1").unwrap(),
+            "another inbox is its own record"
+        );
     }
 
     #[test]
@@ -116,7 +121,11 @@ mod tests {
         advance_read_position("INBOX-A", "https://n1", 7).unwrap();
         advance_read_position("INBOX-A", "https://n1", 3).unwrap();
         assert_eq!(read_position("INBOX-A", "https://n1").unwrap(), 7);
-        assert_eq!(read_position("INBOX-A", "https://n2").unwrap(), 0, "each node numbers its own spool");
+        assert_eq!(
+            read_position("INBOX-A", "https://n2").unwrap(),
+            0,
+            "each node numbers its own spool"
+        );
         advance_read_position("INBOX-A", "https://n1", 9).unwrap();
         assert_eq!(read_position("INBOX-A", "https://n1").unwrap(), 9);
     }

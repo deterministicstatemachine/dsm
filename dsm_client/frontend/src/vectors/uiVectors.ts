@@ -56,6 +56,19 @@ function isErrorPayload(env: pb.Envelope): boolean {
   return env.payload.case === 'error';
 }
 
+/** A decimal string as a big-endian u128 (16 bytes). */
+function u128BeFromDecimal(value: string): Uint8Array<ArrayBuffer> {
+  let n = BigInt(value.trim());
+  if (n < 0n) throw new Error('u128 must be non-negative');
+  const out = new Uint8Array(new ArrayBuffer(16));
+  for (let i = 15; i >= 0; i -= 1) {
+    out[i] = Number(n & 0xffn);
+    n >>= 8n;
+  }
+  if (n !== 0n) throw new Error('value exceeds u128');
+  return out;
+}
+
 export async function runUiVectors(): Promise<UiVectorRunReport> {
   const results: UiVectorResult[] = [];
   const cfg: any = (globalThis as any).__DSM_UI_VECTOR_CONFIG__ ?? {};
@@ -66,7 +79,7 @@ export async function runUiVectors(): Promise<UiVectorRunReport> {
         ticker: 'a',
         alias: 'Bad Token',
         decimals: 255,
-        maxSupplyU128: new Uint8Array(16),
+        genesisSupplyU128: new Uint8Array(16),
       });
 
       const env = await invokeAndDecode('token.create', req.toBinary());
@@ -146,22 +159,14 @@ export async function runUiVectors(): Promise<UiVectorRunReport> {
     results.push(
       await runCase('token.create happy path', async () => {
         const tc = cfg.tokenCreate;
-        const maxSupplyHex = typeof tc.maxSupplyU128Hex === 'string' ? tc.maxSupplyU128Hex : '01';
-        const hex = maxSupplyHex.startsWith('0x') ? maxSupplyHex.slice(2) : maxSupplyHex;
-        const padded = hex.padStart(32, '0');
-        if (padded.length !== 32) {
-          throw new Error('token.create happy path maxSupplyU128Hex must be 16 bytes (32 hex chars)');
-        }
-        const maxSupply = new Uint8Array(16);
-        for (let i = 0; i < 16; i += 1) {
-          maxSupply[i] = parseInt(padded.slice(i * 2, i * 2 + 2), 16);
-        }
+        const genesisSupply = u128BeFromDecimal(String(tc.genesisSupply ?? '1'));
 
         const req = new pb.TokenCreateRequest({
           ticker: String(tc.ticker || 'TEST'),
           alias: String(tc.alias || 'Test Token'),
           decimals: Number(tc.decimals ?? 0),
-          maxSupplyU128: maxSupply,
+          genesisSupplyU128: genesisSupply,
+          threshold: 1,
         });
 
         const env = await invokeAndDecode('token.create', req.toBinary());
@@ -220,19 +225,14 @@ export async function runUiVectors(): Promise<UiVectorRunReport> {
     results.push(
       await runCase('token.create + balance verify', async () => {
         const tc = cfg.tokenCreateVerify;
-        const maxSupplyHex = typeof tc.maxSupplyU128Hex === 'string' ? tc.maxSupplyU128Hex : '01';
-        const hex = maxSupplyHex.startsWith('0x') ? maxSupplyHex.slice(2) : maxSupplyHex;
-        const padded = hex.padStart(32, '0');
-        const maxSupply = new Uint8Array(16);
-        for (let i = 0; i < 16; i += 1) {
-          maxSupply[i] = parseInt(padded.slice(i * 2, i * 2 + 2), 16);
-        }
+        const genesisSupply = u128BeFromDecimal(String(tc.genesisSupply ?? '1'));
 
         const req = new pb.TokenCreateRequest({
           ticker: String(tc.ticker || 'UIVEC'),
           alias: String(tc.alias || 'UI Vector Token'),
           decimals: Number(tc.decimals ?? 0),
-          maxSupplyU128: maxSupply,
+          genesisSupplyU128: genesisSupply,
+          threshold: 1,
         });
 
         // Step 1: Create token

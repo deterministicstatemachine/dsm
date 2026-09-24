@@ -24,11 +24,10 @@ interface WizardState {
   /** Cut out the image's background instead of its logo. */
   artworkInvert: boolean;
   decimals: number;
-  unlimitedSupply: boolean;
-  maxSupply: string;
-  initialAlloc: string;
-  mintBurnEnabled: boolean;
-  mintBurnThreshold: number;
+  /** The whole supply, in base units; fixed at creation and released to the creator. */
+  genesisSupply: string;
+  /** Whether holders may burn their own units. */
+  burnEnabled: boolean;
   allowlistKind: AllowlistKind;
   allowlistData: string;
 }
@@ -41,11 +40,8 @@ const DEFAULT: WizardState = {
   iconUrl: '',
   artworkInvert: false,
   decimals: 2,
-  unlimitedSupply: false,
-  maxSupply: '1000000',
-  initialAlloc: '0',
-  mintBurnEnabled: false,
-  mintBurnThreshold: 1,
+  genesisSupply: '1000000',
+  burnEnabled: false,
   allowlistKind: 'NONE',
   allowlistData: '',
 };
@@ -60,21 +56,8 @@ function validateStep1(s: WizardState): string | null {
 }
 
 function validateStep2(s: WizardState): string | null {
-  if (!s.unlimitedSupply) {
-    const raw = s.maxSupply.trim();
-    if (!/^[0-9]+$/.test(raw) || raw === '0') return 'Max supply must be a positive integer';
-    try {
-      const supply = BigInt(raw);
-      const allocRaw = s.initialAlloc.trim() || '0';
-      if (!/^[0-9]*$/.test(allocRaw)) return 'Initial allocation must be a non-negative integer';
-      const alloc = BigInt(allocRaw || '0');
-      if (alloc > supply) return 'Initial allocation cannot exceed max supply';
-    } catch {
-      return 'Max supply must be a valid integer';
-    }
-  }
-  if (s.mintBurnEnabled && (s.mintBurnThreshold < 1 || s.mintBurnThreshold > 255))
-    return 'Threshold must be 1–255';
+  const raw = s.genesisSupply.trim();
+  if (!/^[0-9]+$/.test(raw) || /^0+$/.test(raw)) return 'Total supply must be a positive integer';
   return null;
 }
 
@@ -325,73 +308,27 @@ function Step2({
 
       <div className="tcd-section-title">Supply</div>
 
-      <div className="tcd-toggle-row">
-        <div className="tcd-toggle-info">
-          <span className="tcd-toggle-name">Unlimited Supply</span>
-          <span className="tcd-toggle-sub">No hard cap — tokens can always be issued if mint is enabled</span>
-        </div>
-        <Toggle id="tcd-unlimited" checked={state.unlimitedSupply} onChange={v => set({ unlimitedSupply: v })} />
+      <div className="tcd-field">
+        <label className="tcd-label" htmlFor="tcd-supply">Total Supply</label>
+        <input
+          id="tcd-supply"
+          className="tcd-input"
+          placeholder="1000000"
+          value={state.genesisSupply}
+          onChange={e => set({ genesisSupply: e.target.value.replace(/[^0-9]/g, '') })}
+        />
+        <span className="tcd-hint">The whole supply, fixed at creation. All of it is released to your wallet; no more can ever be issued.</span>
       </div>
-
-      {!state.unlimitedSupply && (
-        <>
-          <div className="tcd-field">
-            <label className="tcd-label" htmlFor="tcd-supply">Max Supply</label>
-            <input
-              id="tcd-supply"
-              className="tcd-input"
-              placeholder="1000000"
-              value={state.maxSupply}
-              onChange={e => set({ maxSupply: e.target.value.replace(/[^0-9]/g, '') })}
-            />
-          </div>
-
-          <div className="tcd-field">
-            <label className="tcd-label" htmlFor="tcd-alloc">
-              Initial Allocation <span className="tcd-optional">(optional)</span>
-            </label>
-            <input
-              id="tcd-alloc"
-              className="tcd-input"
-              placeholder="0"
-              value={state.initialAlloc}
-              onChange={e => set({ initialAlloc: e.target.value.replace(/[^0-9]/g, '') })}
-            />
-            <span className="tcd-hint">Tokens minted immediately to your wallet. Must be ≤ max supply.</span>
-          </div>
-        </>
-      )}
 
       <div className="tcd-section-title">Permissions</div>
 
       <div className="tcd-toggle-row">
         <div className="tcd-toggle-info">
-          <span className="tcd-toggle-name">Mint / Burn Authority</span>
-          <span className="tcd-toggle-sub">Allow authorised signers to issue or destroy tokens post-launch</span>
+          <span className="tcd-toggle-name">Burn</span>
+          <span className="tcd-toggle-sub">Allow holders to destroy their own units</span>
         </div>
-        <Toggle id="tcd-mintburn" checked={state.mintBurnEnabled} onChange={v => set({ mintBurnEnabled: v })} />
+        <Toggle id="tcd-burn" checked={state.burnEnabled} onChange={v => set({ burnEnabled: v })} />
       </div>
-
-      {state.mintBurnEnabled && (
-        <div className="tcd-subpanel">
-          <div className="tcd-field" style={{ marginBottom: 0 }}>
-            <label className="tcd-label" htmlFor="tcd-threshold">Signatures Required</label>
-            <div className="tcd-slider-row">
-              <input
-                id="tcd-threshold"
-                type="range"
-                className="tcd-slider"
-                min={1}
-                max={10}
-                value={state.mintBurnThreshold}
-                onChange={e => set({ mintBurnThreshold: Number(e.target.value) })}
-              />
-              <span className="tcd-slider-val">{state.mintBurnThreshold}</span>
-            </div>
-            <span className="tcd-hint">{state.mintBurnThreshold}-of-N authority must co-sign any mint or burn.</span>
-          </div>
-        </div>
-      )}
 
     </div>
   );
@@ -408,8 +345,7 @@ function Step3({
   /** Authoritative fee from Rust; `undefined` until the query returns. */
   creationFeeEra?: bigint;
 }) {
-  const supplyLine = state.unlimitedSupply ? 'Unlimited' : Number(state.maxSupply || '0').toLocaleString();
-  const allocLine  = state.unlimitedSupply ? '—' : Number(state.initialAlloc || '0').toLocaleString();
+  const supplyLine = state.genesisSupply ? BigInt(state.genesisSupply).toLocaleString() : '—';
 
   return (
     <div>
@@ -475,18 +411,12 @@ function Step3({
           <span className="tcd-review-val">{effectiveDecimals}</span>
         </div>
         <div className="tcd-review-row">
-          <span className="tcd-review-key">Max Supply</span>
+          <span className="tcd-review-key">Total Supply</span>
           <span className="tcd-review-val">{supplyLine}</span>
         </div>
         <div className="tcd-review-row">
-          <span className="tcd-review-key">Initial Alloc</span>
-          <span className="tcd-review-val">{allocLine}</span>
-        </div>
-        <div className="tcd-review-row">
-          <span className="tcd-review-key">Mint / Burn</span>
-          <span className="tcd-review-val">
-            {state.mintBurnEnabled ? `Enabled (threshold ${state.mintBurnThreshold})` : 'Disabled'}
-          </span>
+          <span className="tcd-review-key">Burn</span>
+          <span className="tcd-review-val">{state.burnEnabled ? 'Enabled' : 'Disabled'}</span>
         </div>
         <div className="tcd-review-row">
           <span className="tcd-review-key">Transferable</span>
@@ -641,14 +571,13 @@ export const TokenCreationDialog: React.FC<{ onClose: () => void; onSuccess?: ()
         ticker:             s.ticker.trim().toUpperCase(),
         alias:              s.alias.trim(),
         decimals:           effectiveDecimals,
-        maxSupply:          s.unlimitedSupply ? '0' : s.maxSupply,
-        kind:               s.kind,
+        genesisSupply:      s.genesisSupply,
+        burnEnabled:        s.burnEnabled,
+        // The policy's signer set is this device alone (Rust fills it in),
+        // so 1-of-1 is the only threshold it can satisfy.
+        threshold:          1,
         description:        s.description.trim() || undefined,
         iconUrl:            s.iconUrl.trim()      || undefined,
-        unlimitedSupply:    s.unlimitedSupply,
-        initialAlloc:       s.initialAlloc || '0',
-        mintBurnEnabled:    s.mintBurnEnabled,
-        mintBurnThreshold:  s.mintBurnThreshold,
         transferable:       effectiveTransferable,
         allowlistKind:      s.allowlistKind,
         allowlistData:      s.allowlistKind === 'INLINE' ? s.allowlistData : undefined,
@@ -696,14 +625,13 @@ export const TokenCreationDialog: React.FC<{ onClose: () => void; onSuccess?: ()
           ticker:             s.ticker.trim().toUpperCase(),
           alias:              s.alias.trim(),
           decimals:           effectiveDecimals,
-          maxSupply:          s.unlimitedSupply ? '0' : s.maxSupply,
-          kind:               s.kind,
+          genesisSupply:      s.genesisSupply,
+          burnEnabled:        s.burnEnabled,
+          // The policy's signer set is this device alone (Rust fills it in),
+          // so 1-of-1 is the only threshold it can satisfy.
+          threshold:          1,
           description:        s.description.trim() || undefined,
           iconUrl:            s.iconUrl.trim()      || undefined,
-          unlimitedSupply:    s.unlimitedSupply,
-          initialAlloc:       s.initialAlloc || '0',
-          mintBurnEnabled:    s.mintBurnEnabled,
-          mintBurnThreshold:  s.mintBurnThreshold,
           transferable:       effectiveTransferable,
           allowlistKind:      s.allowlistKind,
           allowlistData:      s.allowlistKind === 'INLINE' ? s.allowlistData : undefined,

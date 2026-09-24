@@ -10,7 +10,8 @@
 //! - Canonical Protobuf encoding (deterministic, per whitepaper Sec. 4.2.1)
 //! - Domain-separated BLAKE3 hashing
 //! - Dual SPHINCS+ signatures (both parties)
-//! - Inclusion proofs for old/new leaves and device binding
+//! - One relationship path (old leaf under the pre-state root; the same path
+//!   folds the new leaf to the post-state root) and the device binding
 //! - Per-step receipt response through EK derivation and cert chaining
 
 use crate::common::domain_tags::TAG_RECEIPT_COMMIT;
@@ -19,10 +20,7 @@ use std::collections::HashMap;
 
 /// Canonical Stitched Receipt V2
 ///
-/// This structure matches the whitepaper specification (Sec. "Receipt Construction").
-/// It contains exactly 10 fields plus signatures, all encoded deterministically.
-///
-/// Fields correspond to the canonical commit form:
+/// Fields of the canonical commit form (the `ReceiptCommit` field numbers):
 /// 1. genesis (32B)
 /// 2. devid_a (32B)
 /// 3. devid_b (32B)
@@ -30,9 +28,12 @@ use std::collections::HashMap;
 /// 5. child_tip (32B)
 /// 6. parent_root (32B)
 /// 7. child_root (32B)
-/// 8. rel_proof_parent (variable bstr)
-/// 9. rel_proof_child (variable bstr)
+/// 8. rel_proof_parent (variable bstr): the one relationship path
 /// 10. dev_proof (variable bstr)
+/// 21. transition_entropy (32B)
+///
+/// Fields 9 and 11 are reserved: a child inclusion proof and a separate replace
+/// witness were second encodings of the path field 8 carries.
 #[derive(Clone, Debug)]
 pub struct StitchedReceiptV2 {
     /// Genesis hash (32 bytes)
@@ -67,28 +68,14 @@ pub struct StitchedReceiptV2 {
     /// name. Wire field 21, exactly 32 bytes, required.
     pub transition_entropy: [u8; 32],
 
-    /// Inclusion proof for parent_tip in parent_root (variable length)
+    /// The relationship path at `compute_smt_key(devid_a, devid_b)`, in the
+    /// tree's own encoding (`SmtInclusionProof::to_bytes`): it authenticates
+    /// `parent_tip` under `parent_root`, and the same siblings folded with
+    /// `child_tip` are `child_root`.
     pub rel_proof_parent: Vec<u8>,
-
-    /// Inclusion proof for child_tip in child_root (variable length)
-    pub rel_proof_child: Vec<u8>,
 
     /// Inclusion proof for devid_a in Device Tree root R_G (variable length)
     pub dev_proof: Vec<u8>,
-
-    /// Canonical SMT replace witness for relationship leaf update.
-    ///
-    /// This witness MUST allow a verifier to recompute `child_root` from `parent_root`
-    /// by applying a single-leaf replace at the canonical relationship key.
-    ///
-    /// Encoding (deterministic, bytes-only):
-    /// - `path` is an ordered list of sibling node hashes from leaf-level upward.
-    /// - For each step i, `path[i].sibling` is 32 bytes.
-    /// - `path[i].is_left` indicates whether the current hash is the left child (true)
-    ///   or right child (false) when combining with sibling at that level.
-    ///
-    /// Domain separation for node hashing lives in the SMT verifier.
-    pub rel_replace_witness: Vec<u8>,
 
     /// SPHINCS+ response from party A for this receipt challenge.
     ///
@@ -510,7 +497,6 @@ impl StitchedReceiptV2 {
         parent_root: [u8; 32],
         child_root: [u8; 32],
         rel_proof_parent: Vec<u8>,
-        rel_proof_child: Vec<u8>,
         dev_proof: Vec<u8>,
     ) -> Self {
         Self {
@@ -523,9 +509,7 @@ impl StitchedReceiptV2 {
             child_root,
             transition_entropy: [0u8; 32],
             rel_proof_parent,
-            rel_proof_child,
             dev_proof,
-            rel_replace_witness: Vec::new(),
             sig_a: Vec::new(),
             sig_b: Vec::new(),
             ek_cert_a: Vec::new(),
@@ -544,18 +528,11 @@ impl StitchedReceiptV2 {
         self.fork_witness = Some(witness);
     }
 
-    /// Set the relationship SMT replace witness bytes.
-    pub fn set_rel_replace_witness(&mut self, w: Vec<u8>) {
-        self.rel_replace_witness = w;
-    }
-
-    /// Convert to prost-generated `ReceiptCommit` (canonical form, no sigs).
-    /// Proto3 omits empty bytes → encode_to_vec() produces fields 1-11 only.
-    /// Per §4.2.1 the canonical commit form is FROZEN at 10 fields plus the
-    /// rel_replace_witness (field 11). Signatures (12, 13), ephemeral-key
-    /// certs (14, 15), EK pubkeys (16, 17), Kyber cts (18, 19), and the
-    /// fork-aware finalization witness (20) live in the envelope only and
-    /// are explicitly absent here.
+    /// Convert to prost-generated `ReceiptCommit` (canonical form, no sigs):
+    /// fields 1–8, 10 and 21. Signatures (12, 13), ephemeral-key certs
+    /// (14, 15), EK pubkeys (16, 17), Kyber cts (18, 19) and the fork-aware
+    /// finalization witness (20) live in the envelope only and are explicitly
+    /// absent here.
     fn to_proto_canonical(&self) -> crate::types::proto::ReceiptCommit {
         crate::types::proto::ReceiptCommit {
             genesis: self.genesis.to_vec(),
@@ -567,9 +544,7 @@ impl StitchedReceiptV2 {
             child_root: self.child_root.to_vec(),
             transition_entropy: self.transition_entropy.to_vec(),
             rel_proof_parent: self.rel_proof_parent.clone(),
-            rel_proof_child: self.rel_proof_child.clone(),
             dev_proof: self.dev_proof.clone(),
-            rel_replace_witness: self.rel_replace_witness.clone(),
             sig_a: vec![],
             sig_b: vec![],
             ek_cert_a: vec![],
@@ -620,10 +595,8 @@ impl StitchedReceiptV2 {
             copy32(&rc.parent_root, "parent_root")?,
             copy32(&rc.child_root, "child_root")?,
             rc.rel_proof_parent,
-            rc.rel_proof_child,
             rc.dev_proof,
         );
-        receipt.set_rel_replace_witness(rc.rel_replace_witness);
         receipt.set_transition_entropy(copy32(&rc.transition_entropy, "transition_entropy")?);
         if !rc.sig_a.is_empty() {
             receipt.add_sig_a(rc.sig_a);
@@ -678,7 +651,7 @@ impl StitchedReceiptV2 {
 
     /// Returns the canonical protobuf bytes for hashing/signing.
     ///
-    /// Encodes fields 1-11 only (no signatures) via prost `ReceiptCommit`.
+    /// Encodes the canonical fields only (no signatures) via prost `ReceiptCommit`.
     /// Proto3 omits empty bytes fields, so sig_a/sig_b are excluded.
     /// Format: ReceiptCommit message as specified in whitepaper Sec. 4.2.1
     pub fn to_canonical_protobuf(&self) -> Result<Vec<u8>, DsmError> {
@@ -688,7 +661,7 @@ impl StitchedReceiptV2 {
 
     /// Returns the full wire protobuf bytes including signatures.
     ///
-    /// Fields 1-11 are identical to `to_canonical_protobuf()` (the commitment
+    /// The canonical fields are identical to `to_canonical_protobuf()` (the commitment
     /// preimage). Fields 12 (sig_a) and 13 (sig_b) are included when non-empty.
     /// Use this for transport; use `to_canonical_protobuf()` for commitment hashing.
     pub fn to_full_protobuf(&self) -> Result<Vec<u8>, DsmError> {
@@ -904,7 +877,8 @@ pub struct ReceiptVerificationContext {
     /// Authenticated local commitment used to validate `π_dev: DevID ∈ R_G`.
     pub device_tree_commitment: DeviceTreeAcceptanceCommitment,
 
-    /// Expected parent Per-Device SMT root
+    /// The sender's pre-state root this verifier expects the step to start
+    /// from; a receipt over any other root is not this step.
     pub expected_parent_root: [u8; 32],
 
     /// SPHINCS+ public key for party A (the per-step EK_pk for this receipt).
@@ -928,9 +902,6 @@ pub struct ReceiptVerificationContext {
     /// Per-relationship cert chain head for party B.
     /// Same semantics as `chain_head_pubkey_a`.
     pub chain_head_pubkey_b: Option<Vec<u8>>,
-
-    /// Set of previously consumed parent tips (for uniqueness check)
-    pub consumed_parents: std::collections::HashSet<[u8; 32]>,
 }
 
 impl ReceiptVerificationContext {
@@ -947,7 +918,6 @@ impl ReceiptVerificationContext {
             pubkey_b,
             chain_head_pubkey_a: None,
             chain_head_pubkey_b: None,
-            consumed_parents: std::collections::HashSet::new(),
         }
     }
 
@@ -962,16 +932,6 @@ impl ReceiptVerificationContext {
     pub fn with_chain_head_b(mut self, pubkey: Vec<u8>) -> Self {
         self.chain_head_pubkey_b = Some(pubkey);
         self
-    }
-
-    /// Mark a parent tip as consumed
-    pub fn mark_consumed(&mut self, parent_tip: [u8; 32]) {
-        self.consumed_parents.insert(parent_tip);
-    }
-
-    /// Check if parent has been consumed
-    pub fn is_consumed(&self, parent_tip: &[u8; 32]) -> bool {
-        self.consumed_parents.contains(parent_tip)
     }
 }
 
@@ -1021,7 +981,6 @@ impl ParentConsumptionTracker {
         Self::default()
     }
 
-    #[allow(dead_code)]
     pub fn with_capacity(_capacity: usize) -> Self {
         Self::new()
     }
@@ -1103,7 +1062,6 @@ mod tests {
             [0x66; 32],
             Vec::new(),
             Vec::new(),
-            Vec::new(),
         );
         receipt.ek_pk_b = vec![0xE1u8; 64];
         receipt.ek_cert_b = vec![0xE2u8; 128];
@@ -1141,28 +1099,8 @@ mod tests {
         assert_eq!(
             from_canonical.compute_commitment().expect("c1"),
             from_full.compute_commitment().expect("c2"),
-            "the commitment covers only fields 1-11, so it is blind to the loss"
+            "the commitment covers only the canonical fields, so it is blind to the loss"
         );
-    }
-
-    #[test]
-    fn test_canonical_protobuf_includes_rel_replace_witness_field_11() {
-        let mut receipt = StitchedReceiptV2::new(
-            [0x00; 32],
-            [0x11; 32],
-            [0x22; 32],
-            [0x33; 32],
-            [0x44; 32],
-            [0x55; 32],
-            [0x66; 32],
-            vec![1, 2, 3],
-            vec![4, 5],
-            vec![6],
-        );
-        receipt.set_rel_replace_witness(vec![9, 9, 9, 9]);
-        let pb = receipt.to_canonical_protobuf().expect("protobuf");
-        // Field 11 tag = (11 << 3) | 2 = 0x5a. Ensure it exists.
-        assert!(pb.contains(&0x5a), "missing field 11 tag");
     }
 
     #[test]
@@ -1175,7 +1113,6 @@ mod tests {
             [0x44; 32],
             [0x55; 32],
             [0x66; 32],
-            vec![],
             vec![],
             vec![],
         );
@@ -1241,7 +1178,7 @@ mod tests {
 
     #[test]
     fn test_prost_canonical_roundtrip() {
-        let mut receipt = StitchedReceiptV2::new(
+        let receipt = StitchedReceiptV2::new(
             [1u8; 32],
             [2u8; 32],
             [3u8; 32],
@@ -1250,10 +1187,8 @@ mod tests {
             [6u8; 32],
             [7u8; 32],
             vec![8u8; 64],
-            vec![9u8; 64],
             vec![10u8; 16],
         );
-        receipt.set_rel_replace_witness(vec![0, 0, 0, 0]);
 
         let canonical = receipt.to_canonical_protobuf().unwrap();
         let decoded = StitchedReceiptV2::from_canonical_protobuf(&canonical).unwrap();
@@ -1265,9 +1200,7 @@ mod tests {
         assert_eq!(decoded.parent_root, receipt.parent_root);
         assert_eq!(decoded.child_root, receipt.child_root);
         assert_eq!(decoded.rel_proof_parent, receipt.rel_proof_parent);
-        assert_eq!(decoded.rel_proof_child, receipt.rel_proof_child);
         assert_eq!(decoded.dev_proof, receipt.dev_proof);
-        assert_eq!(decoded.rel_replace_witness, receipt.rel_replace_witness);
         assert!(decoded.sig_a.is_empty());
         assert!(decoded.sig_b.is_empty());
 
@@ -1288,10 +1221,8 @@ mod tests {
             [6u8; 32],
             [7u8; 32],
             vec![8u8; 64],
-            vec![9u8; 64],
             vec![10u8; 16],
         );
-        receipt.set_rel_replace_witness(vec![0, 0, 0, 0]);
         receipt.add_sig_a(vec![0xAA; 128]);
         receipt.add_sig_b(vec![0xBB; 128]);
 
@@ -1325,7 +1256,6 @@ mod tests {
             [7u8; 32],
             vec![],
             vec![],
-            vec![],
         );
         let mut bytes = receipt.to_canonical_protobuf().unwrap();
         bytes.extend_from_slice(&[0xA2, 0x01, 0x01, 0x00]); // tag 20, len 1
@@ -1344,7 +1274,6 @@ mod tests {
             [5u8; 32],
             [6u8; 32],
             [7u8; 32],
-            vec![],
             vec![],
             vec![],
         );
@@ -1378,7 +1307,6 @@ mod tests {
             [7u8; 32],
             vec![],
             vec![],
-            vec![],
         );
         let mut bytes = receipt.to_canonical_protobuf().unwrap();
         bytes[1] = 0xA0;
@@ -1400,7 +1328,6 @@ mod tests {
             [7u8; 32],
             vec![],
             vec![],
-            vec![],
         );
         let bytes = receipt.to_canonical_protobuf().unwrap();
         let mut reordered = bytes[34..].to_vec();
@@ -1414,7 +1341,7 @@ mod tests {
 
     #[test]
     fn test_prost_encoding_tag_format() {
-        let mut receipt = StitchedReceiptV2::new(
+        let receipt = StitchedReceiptV2::new(
             [0x42u8; 32],
             [2u8; 32],
             [3u8; 32],
@@ -1423,10 +1350,8 @@ mod tests {
             [6u8; 32],
             [7u8; 32],
             vec![8u8; 4],
-            vec![9u8; 4],
             vec![10u8; 4],
         );
-        receipt.set_rel_replace_witness(vec![0, 0, 0, 0]);
 
         let bytes = receipt.to_canonical_protobuf().unwrap();
         // Tag 1, wire type 2 (length-delimited) = (1 << 3) | 2 = 0x0A
@@ -1449,7 +1374,6 @@ mod tests {
             [0; 32],
             vec![],
             vec![],
-            vec![],
         );
 
         // Small receipt should pass
@@ -1457,7 +1381,7 @@ mod tests {
 
         // Add huge proofs to exceed cap
         receipt.rel_proof_parent = vec![0u8; 64 * 1024]; // 64 KiB
-        receipt.rel_proof_child = vec![0u8; 64 * 1024]; // 64 KiB
+        receipt.dev_proof = vec![0u8; 64 * 1024]; // 64 KiB
 
         // Should exceed 128 KiB cap
         assert!(receipt.validate_size_cap().is_err());
@@ -1475,7 +1399,6 @@ mod tests {
             [4; 32],
             [5; 32],
             [6; 32],
-            vec![],
             vec![],
             vec![],
         );
@@ -1500,7 +1423,6 @@ mod tests {
             [6; 32],
             vec![],
             vec![],
-            vec![],
         );
         assert!(!receipt.is_fully_signed());
     }
@@ -1515,7 +1437,6 @@ mod tests {
             [0; 32],
             [0; 32],
             [0; 32],
-            vec![],
             vec![],
             vec![],
         );
@@ -1537,7 +1458,6 @@ mod tests {
             [0; 32],
             vec![],
             vec![],
-            vec![],
         );
         assert_eq!(receipt.t(), 42);
     }
@@ -1552,7 +1472,6 @@ mod tests {
             [0; 32],
             [0; 32],
             [0; 32],
-            vec![],
             vec![],
             vec![],
         );
@@ -1575,7 +1494,6 @@ mod tests {
             [6; 32],
             vec![],
             vec![],
-            vec![],
         );
         let a = receipt.compute_commitment().unwrap();
         let b = receipt.canonical_commit().unwrap();
@@ -1594,7 +1512,6 @@ mod tests {
             [6; 32],
             vec![],
             vec![],
-            vec![],
         );
         let r2 = StitchedReceiptV2::new(
             [0xFF; 32],
@@ -1604,7 +1521,6 @@ mod tests {
             [4; 32],
             [5; 32],
             [6; 32],
-            vec![],
             vec![],
             vec![],
         );
@@ -1672,10 +1588,8 @@ mod tests {
             [0x06; 32],
             [0x07; 32],
             vec![0x08; 8_261],
-            vec![0x09; 8_261],
             vec![0x0A; 9],
         );
-        r.rel_replace_witness = vec![0x0B; 4];
         r.add_sig_a(vec![0xAA; SIG]);
         r.set_ek_cert_a(vec![0xCA; SIG]);
         r.set_ek_pk_a(vec![0xEA; 64]);
@@ -1722,9 +1636,10 @@ mod tests {
     fn split_then_overlay_reproduces_the_full_wire_bytes_exactly() {
         let a_side = production_shaped_a_side();
         let a_bytes = a_side.to_full_protobuf().unwrap();
-        // The A side is what the sender ships and retains: 118 KB class.
+        // The A side is what the sender ships and retains: 109 KB class (one
+        // relationship path; the child proof and replace witness are gone).
         assert!(
-            (117_000..119_000).contains(&a_bytes.len()),
+            (108_000..110_000).contains(&a_bytes.len()),
             "{}",
             a_bytes.len()
         );
@@ -1736,8 +1651,10 @@ mod tests {
         let full_bytes = full.to_full_protobuf().unwrap();
         // The observed 5GN specimen was 218,541 bytes with these exact shapes;
         // canonical field 21 (`transition_entropy`: a two-byte key varint, one
-        // length byte and 32 bytes of value) adds 35.
-        assert_eq!(full_bytes.len(), 218_576, "full countersigned receipt size");
+        // length byte and 32 bytes of value) adds 35, and dropping field 9 (an
+        // 8,261-byte child proof with its 3-byte header) and field 11 (a 4-byte
+        // witness with its 2-byte header) removes 8,270.
+        assert_eq!(full_bytes.len(), 210_306, "full countersigned receipt size");
 
         // Recipient at reply time: decode its stored bytes and split.
         let decoded = StitchedReceiptV2::from_canonical_protobuf(&full_bytes).unwrap();
@@ -2026,17 +1943,6 @@ mod tests {
         }
     }
 
-    // --- ReceiptVerificationContext ---
-
-    #[test]
-    fn verification_context_mark_and_check_consumed() {
-        let mut ctx = ReceiptVerificationContext::new([0; 32], [1; 32], vec![2; 64], vec![3; 64]);
-        let tip = [0xAA; 32];
-        assert!(!ctx.is_consumed(&tip));
-        ctx.mark_consumed(tip);
-        assert!(ctx.is_consumed(&tip));
-    }
-
     // --- ParentConsumptionTracker ---
 
     #[test]
@@ -2076,12 +1982,4 @@ mod tests {
         let err = tracker.try_consume(parent, child).unwrap_err();
         assert!(format!("{err}").contains("replay"));
     }
-}
-
-#[cfg(test)]
-#[test]
-fn print_test_vector_hash_for_spec() {
-    // Intentionally empty. We do not print hex or canonical bytes from core tests.
-    // Canonical commit fixtures should live as byte-exact Protobuf files alongside
-    // expected digests, not as debug-print output.
 }

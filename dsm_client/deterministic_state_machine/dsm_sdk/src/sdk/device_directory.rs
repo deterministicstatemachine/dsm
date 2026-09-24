@@ -17,12 +17,8 @@ use dsm::core::identity::genesis_v3::derive_genesis_v3_self_attested;
 use dsm::types::error::DsmError;
 
 use crate::sdk::identity_presentation::OwnerIdentityInputs;
-use crate::sdk::storage_node_sdk::StorageNodeSDK;
+use crate::sdk::storage_node_sdk::SetClient;
 use crate::sdk::storage_set::StorageSet;
-
-fn cell_key_b32(genesis: &[u8; 32], device_id: &[u8; 32]) -> String {
-    crate::util::text_id::encode_base32_crockford(&directory_cell_key(genesis, device_id))
-}
 
 /// Build and sign this device's own entry. Everything is re-derived from the
 /// wallet seed, as the anchor presentation is: nothing identity-bearing is
@@ -64,45 +60,56 @@ pub fn build_own_entry(
     Ok(entry)
 }
 
-/// Write `entry` to its directory cell on every member of `set`. Returns how
-/// many members took it. A member keeps what it is given, so writing again is
-/// harmless.
-pub async fn publish_entry(
-    storage: &StorageNodeSDK,
-    set: &StorageSet,
-    entry: &DirectoryEntry,
-) -> u32 {
-    let key = cell_key_b32(&entry.body.genesis, &entry.body.device_id);
-    let bytes = entry.encode();
-    let mut taken = 0u32;
-    for member in 0..set.len() {
-        match storage
-            .put_cell_to_member(set, member, DIRECTORY_NAMESPACE, &key, &bytes)
-            .await
-        {
-            Ok(_) => taken += 1,
-            Err(e) => log::warn!("device directory: member {member} did not take the entry: {e}"),
-        }
-    }
-    taken
+/// Write `entry` to its directory cell on every member of `set`. Which
+/// members hold it is read back (`read_entry`), never inferred from the
+/// write. A member keeps what it is given, so writing again is harmless.
+pub async fn publish_entry(set: &StorageSet, entry: &DirectoryEntry) -> Result<(), DsmError> {
+    let key = directory_cell_key(&entry.body.genesis, &entry.body.device_id);
+    let taken = SetClient::new(set)?
+        .put_cell(DIRECTORY_NAMESPACE, &key, &entry.encode())
+        .await;
+    log::debug!(
+        "device directory: {taken}/{} members took the entry",
+        set.len()
+    );
+    Ok(())
+}
+
+/// A directory entry that proves itself, and the members whose cell holds its
+/// exact bytes.
+#[derive(Debug, Clone)]
+pub struct DirectoryRead {
+    pub entry: DirectoryEntry,
+    pub holders: Vec<String>,
 }
 
 /// Read `device_id`'s directory cell from every member of `set` and keep the
-/// entry that proves itself, highest counter first. `None` when no member
-/// holds one that does.
+/// entry that proves itself, highest counter first, with the members that
+/// hold it. `None` when no member holds one that does.
 pub async fn read_entry(
-    storage: &StorageNodeSDK,
     set: &StorageSet,
     genesis: &[u8; 32],
     device_id: &[u8; 32],
-) -> Option<DirectoryEntry> {
-    let key = cell_key_b32(genesis, device_id);
-    let reads = storage.get_cell_all(set, DIRECTORY_NAMESPACE, &key).await;
-    let values: Vec<Vec<u8>> = reads
-        .into_iter()
+) -> Result<Option<DirectoryRead>, DsmError> {
+    let key = directory_cell_key(genesis, device_id);
+    let client = SetClient::new(set)?;
+    let reads = client.get_cell(DIRECTORY_NAMESPACE, &key).await;
+    let values: Vec<&[u8]> = reads
+        .iter()
         .flatten()
         .flatten()
-        .map(|(value, _record)| value)
+        .map(Vec::as_slice)
         .collect();
-    select_entry(genesis, device_id, values.iter().map(Vec::as_slice))
+    let Some(entry) = select_entry(genesis, device_id, values) else {
+        return Ok(None);
+    };
+    let bytes = entry.encode();
+    let holders = client
+        .members()
+        .iter()
+        .zip(&reads)
+        .filter(|(.., read)| read.as_ref().is_some_and(|held| held.contains(&bytes)))
+        .map(|(member, ..)| member.member_id().to_string())
+        .collect();
+    Ok(Some(DirectoryRead { entry, holders }))
 }

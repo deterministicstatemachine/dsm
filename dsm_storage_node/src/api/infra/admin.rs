@@ -10,14 +10,12 @@ use axum::{
     Router,
 };
 use dsm::types::proto as pb;
-use log::info;
 use prost::Message;
 use std::env;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use subtle::ConstantTimeEq;
 
-use crate::db;
 use crate::AppState;
 
 const ADMIN_TOKEN_HEADER: &str = "x-dsm-admin-token";
@@ -171,6 +169,7 @@ pub fn admin_surface(state: Arc<AppState>) -> Router<()> {
 #[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
+    use crate::db;
     use axum::http::StatusCode;
 
     /// EVERY `/admin` route refuses an unauthenticated caller, and lets an
@@ -197,12 +196,9 @@ mod tests {
         // The auth layer refuses before any handler touches the database, and
         // every authenticated request below is rejected by its handler on
         // input validation, so this pool is never queried. It exists because
-        // `AppState` requires one — on either backend, without a server.
-        #[cfg(feature = "local-dev")]
-        let pool = db::create_pool(":memory:", true).expect("pool");
-        #[cfg(not(feature = "local-dev"))]
+        // `AppState` requires one, and a lazy pool needs no server.
         let pool =
-            db::create_pool("postgresql://127.0.0.1:5432/dsm-admin-auth-test", true).expect("pool");
+            db::create_pool("postgresql://127.0.0.1:5432/dsm-admin-auth-test").expect("pool");
 
         let rm = Arc::new(
             crate::replication::ReplicationManager::new_for_tests(
@@ -229,9 +225,7 @@ mod tests {
 
         // Every route this node serves under /admin, and a body each handler
         // will reject if — and only if — the request reaches it.
-        let routes = [
-            ("/admin/maintenance", ""),
-        ];
+        let routes = [("/admin/maintenance", "")];
 
         for (path, body) in routes {
             let unauthenticated = app
@@ -378,5 +372,4 @@ mod tests {
     fn parse_tick_query_negative() {
         assert_eq!(parse_tick_query(Some("tick=-5")), Ok(-5));
     }
-
 }

@@ -102,16 +102,14 @@ pub fn store_accepted_anchor_root(
     let conn = binding
         .lock()
         .map_err(|_| anyhow!("anchor_accepted_roots: db lock poisoned"))?;
-    let now = crate::util::deterministic_time::tick() as i64;
     conn.execute(
         "INSERT OR REPLACE INTO anchor_accepted_roots
-            (device_id, accepted_root, next_anchor_counter, updated_at)
-         VALUES (?1, ?2, ?3, ?4)",
+            (device_id, accepted_root, next_anchor_counter)
+         VALUES (?1, ?2, ?3)",
         params![
             device_id.as_slice(),
             accepted_root.as_slice(),
             next_anchor_counter as i64,
-            now
         ],
     )?;
     Ok(())

@@ -7,20 +7,15 @@
 //! according to DSM Content-Addressed Token Policy Anchor (CTPA) standards.
 //!
 //! Determinism rules:
-//! - No wall-clock.
-//! - “Time” means deterministic ticks only.
+//! - No time of any kind.
 //! - No string encodings for binary anchors/hashes in logs or comparisons.
 
 use std::collections::{HashMap, HashSet};
 
 use crate::types::{
     error::DsmError,
-    policy_types::{PolicyCondition, PolicyFile, PolicyRole, VaultCondition},
-    token_types::TokenMetadata,
+    policy_types::{PolicyCondition, PolicyFile, PolicyRole},
 };
-use crate::utils::deterministic_time as dt;
-use prost::Message;
-use base32; // Add base32 import
 
 /// Validation result for policy checks
 #[derive(Debug, Clone)]
@@ -33,31 +28,27 @@ pub struct ValidationResult {
     pub errors: Vec<ValidationError>,
     /// List of validation warnings
     pub warnings: Vec<ValidationWarning>,
-    /// Deterministic tick at which validation was produced (for logging/audit only)
-    pub tick: u64,
     /// Additional validation context
     pub context: HashMap<String, String>,
 }
 
 impl ValidationResult {
-    pub fn valid(message: &str, tick: u64) -> Self {
+    pub fn valid(message: &str) -> Self {
         Self {
             is_valid: true,
             message: message.to_string(),
             errors: Vec::new(),
             warnings: Vec::new(),
-            tick,
             context: HashMap::new(),
         }
     }
 
-    pub fn invalid(message: &str, errors: Vec<ValidationError>, tick: u64) -> Self {
+    pub fn invalid(message: &str, errors: Vec<ValidationError>) -> Self {
         Self {
             is_valid: false,
             message: message.to_string(),
             errors,
             warnings: Vec::new(),
-            tick,
             context: HashMap::new(),
         }
     }
@@ -88,9 +79,7 @@ pub enum ValidationError {
     MissingField(String),
     InvalidValue(String, String),
     ConflictingConditions(String),
-    InvalidTimeConstraint(String),
     InvalidIdentityConstraint(String),
-    InvalidVaultCondition(String),
     InvalidOperationRestriction(String),
     InvalidCustomConstraint(String),
     PolicyTooComplex(String),
@@ -104,9 +93,7 @@ impl ValidationError {
             ValidationError::MissingField(msg) => msg,
             ValidationError::InvalidValue(_, msg) => msg,
             ValidationError::ConflictingConditions(msg) => msg,
-            ValidationError::InvalidTimeConstraint(msg) => msg,
             ValidationError::InvalidIdentityConstraint(msg) => msg,
-            ValidationError::InvalidVaultCondition(msg) => msg,
             ValidationError::InvalidOperationRestriction(msg) => msg,
             ValidationError::InvalidCustomConstraint(msg) => msg,
             ValidationError::PolicyTooComplex(msg) => msg,
@@ -140,8 +127,6 @@ impl ValidationWarning {
 pub struct ValidationContext {
     pub token_id: String,
     pub policy_file: PolicyFile,
-    /// Deterministic tick the caller wants this validation bound to
-    pub current_tick: u64,
     pub parameters: HashMap<String, Vec<u8>>,
     pub validation_mode: ValidationMode,
 }
@@ -157,11 +142,9 @@ pub enum ValidationMode {
 
 impl ValidationContext {
     pub fn new(token_id: &str, policy_file: &PolicyFile) -> Self {
-        let (_, t) = dt::peek();
         Self {
             token_id: token_id.to_string(),
             policy_file: policy_file.clone(),
-            current_tick: t,
             parameters: HashMap::new(),
             validation_mode: ValidationMode::Strict,
         }
@@ -174,11 +157,6 @@ impl ValidationContext {
 
     pub fn with_parameter(mut self, key: &str, value: Vec<u8>) -> Self {
         self.parameters.insert(key.to_string(), value);
-        self
-    }
-
-    pub fn with_tick(mut self, tick: u64) -> Self {
-        self.current_tick = tick;
         self
     }
 }
@@ -216,11 +194,11 @@ impl PolicyValidator {
         let mut errors = Vec::new();
         let mut warnings = Vec::new();
 
-        self.validate_basic_structure(&context.policy_file, &mut errors, &mut warnings);
+        self.validate_basic_structure(&context.policy_file, &mut errors);
         self.validate_conditions(&context.policy_file.conditions, &mut errors, &mut warnings);
         self.validate_roles(&context.policy_file.roles, &mut errors, &mut warnings);
         self.validate_complexity(&context.policy_file, &mut errors, &mut warnings);
-        self.validate_mode_specific(context, &mut errors, &mut warnings);
+        self.validate_mode_specific(context, &mut warnings);
 
         let is_valid = errors.is_empty();
         let message = if is_valid {
@@ -230,9 +208,9 @@ impl PolicyValidator {
         };
 
         let mut result = if is_valid {
-            ValidationResult::valid(&message, context.current_tick)
+            ValidationResult::valid(&message)
         } else {
-            ValidationResult::invalid(&message, errors, context.current_tick)
+            ValidationResult::invalid(&message, errors)
         };
 
         for warning in warnings {
@@ -247,73 +225,7 @@ impl PolicyValidator {
         Ok(result)
     }
 
-    #[allow(clippy::unused_async)]
-    pub async fn validate_token_metadata(
-        &self,
-        context: &ValidationContext,
-        metadata: &TokenMetadata,
-    ) -> Result<ValidationResult, DsmError> {
-        let mut errors = Vec::new();
-        let mut warnings = Vec::new();
-
-        // Policy anchor in TokenMetadata must be a Base32-encoded 32-byte hash.
-        if let Some(ref policy_anchor_str) = metadata.policy_anchor {
-            // Remove "dsm:policy:" prefix if present
-            let clean_policy_anchor_str = policy_anchor_str
-                .strip_prefix("dsm:policy:")
-                .unwrap_or(policy_anchor_str);
-
-            match base32::decode(base32::Alphabet::Crockford, clean_policy_anchor_str) {
-                Some(bytes) => {
-                    if bytes.len() != 32 {
-                        errors.push(ValidationError::InvalidValue(
-                            "policy_anchor".to_string(),
-                            format!("Policy anchor must decode to 32 bytes, got {}", bytes.len()),
-                        ));
-                    }
-                }
-                None => {
-                    errors.push(ValidationError::InvalidValue(
-                        "policy_anchor".to_string(),
-                        "Policy anchor is not valid Base32".to_string(),
-                    ));
-                }
-            }
-        }
-
-        self.validate_token_type_compatibility(&context.policy_file, metadata, &mut errors);
-        self.validate_metadata_fields(&context.policy_file, metadata, &mut errors, &mut warnings);
-        self.validate_owner_constraints(&context.policy_file, metadata, &mut errors);
-
-        let is_valid = errors.is_empty();
-        let message = if is_valid {
-            "Token metadata validation successful".to_string()
-        } else {
-            format!(
-                "Token metadata validation failed with {} errors",
-                errors.len()
-            )
-        };
-
-        let mut result = if is_valid {
-            ValidationResult::valid(&message, context.current_tick)
-        } else {
-            ValidationResult::invalid(&message, errors, context.current_tick)
-        };
-
-        for warning in warnings {
-            result = result.with_warning(warning);
-        }
-
-        Ok(result)
-    }
-
-    fn validate_basic_structure(
-        &self,
-        policy: &PolicyFile,
-        errors: &mut Vec<ValidationError>,
-        warnings: &mut Vec<ValidationWarning>,
-    ) {
+    fn validate_basic_structure(&self, policy: &PolicyFile, errors: &mut Vec<ValidationError>) {
         if policy.name.is_empty() {
             errors.push(ValidationError::MissingField(
                 "Policy name is required".to_string(),
@@ -334,14 +246,6 @@ impl PolicyValidator {
             errors.push(ValidationError::InvalidValue(
                 "version".to_string(),
                 "Version must follow semantic versioning (e.g., 1.0.0)".to_string(),
-            ));
-        }
-
-        // created_tick is optional in a deterministic/clockless system; warn if missing.
-        if policy.created_tick == 0 {
-            warnings.push(ValidationWarning::BestPractice(
-                "Policy created_tick is unset (0). Consider setting a deterministic tick at creation."
-                    .to_string(),
             ));
         }
     }
@@ -385,10 +289,6 @@ impl PolicyValidator {
                             )));
                         }
                     }
-                }
-
-                PolicyCondition::VaultEnforcement { condition } => {
-                    self.validate_vault_condition(condition, index, errors, warnings);
                 }
 
                 PolicyCondition::TokenAuthority { signers, threshold } => {
@@ -457,14 +357,6 @@ impl PolicyValidator {
                                 )));
                             }
                         }
-                    }
-                }
-
-                PolicyCondition::LogicalTimeConstraint { min_tick, max_tick } => {
-                    if min_tick > max_tick {
-                        errors.push(ValidationError::InvalidTimeConstraint(format!(
-                            "Condition {index}: min_tick {min_tick} > max_tick {max_tick}"
-                        )));
                     }
                 }
 
@@ -577,66 +469,6 @@ impl PolicyValidator {
         self.check_condition_conflicts(conditions, errors);
     }
 
-    fn validate_vault_condition(
-        &self,
-        vault_condition: &VaultCondition,
-        condition_index: usize,
-        errors: &mut Vec<ValidationError>,
-        warnings: &mut Vec<ValidationWarning>,
-    ) {
-        match vault_condition {
-            VaultCondition::Hash(hash) => {
-                if hash.is_empty() {
-                    errors.push(ValidationError::InvalidVaultCondition(format!(
-                        "Condition {condition_index}: Vault hash cannot be empty"
-                    )));
-                } else if hash.len() != 32 {
-                    errors.push(ValidationError::InvalidVaultCondition(format!(
-                        "Condition {condition_index}: Vault hash must be 32 bytes"
-                    )));
-                }
-            }
-
-            VaultCondition::MinimumBalance(balance) => {
-                if *balance == 0 {
-                    warnings.push(ValidationWarning::BestPractice(format!(
-                        "Condition {condition_index}: Zero minimum balance is effectively no restriction"
-                    )));
-                }
-            }
-
-            VaultCondition::VaultType(vault_type) => {
-                if vault_type.is_empty() {
-                    errors.push(ValidationError::InvalidVaultCondition(format!(
-                        "Condition {condition_index}: Vault type cannot be empty"
-                    )));
-                }
-            }
-
-            VaultCondition::SmartPolicy(policy_bytes) => {
-                match crate::types::proto::SmartPolicy::decode(&policy_bytes[..]) {
-                    Ok(policy) => {
-                        if policy.clauses.is_empty() {
-                            errors.push(ValidationError::InvalidVaultCondition(format!(
-                            "Condition {condition_index}: SmartPolicy must have at least one clause"
-                        )));
-                        }
-                        if policy.version == 0 {
-                            warnings.push(ValidationWarning::BestPractice(format!(
-                                "Condition {condition_index}: SmartPolicy version should be > 0"
-                            )));
-                        }
-                    }
-                    Err(e) => {
-                        errors.push(ValidationError::InvalidVaultCondition(format!(
-                            "Condition {condition_index}: Invalid SmartPolicy protobuf: {e}"
-                        )));
-                    }
-                }
-            }
-        }
-    }
-
     fn validate_roles(
         &self,
         roles: &[PolicyRole],
@@ -710,7 +542,6 @@ impl PolicyValidator {
         for c in &policy.conditions {
             match c {
                 PolicyCondition::Custom { .. } => score += 10,
-                PolicyCondition::VaultEnforcement { .. } => score += 8,
                 PolicyCondition::OperationRestriction { allowed_operations } => {
                     score += allowed_operations.len() as u32 * 2;
                 }
@@ -729,7 +560,6 @@ impl PolicyValidator {
     fn validate_mode_specific(
         &self,
         context: &ValidationContext,
-        _errors: &mut [ValidationError],
         warnings: &mut Vec<ValidationWarning>,
     ) {
         match context.validation_mode {
@@ -763,39 +593,6 @@ impl PolicyValidator {
             }
             ValidationMode::Permissive => {}
         }
-
-        // If there are errors already, no extra action needed.
-        if !_errors.is_empty() {
-            // return;
-        }
-    }
-
-    fn validate_token_type_compatibility(
-        &self,
-        _policy: &PolicyFile,
-        _metadata: &TokenMetadata,
-        _errors: &mut [ValidationError],
-    ) {
-        // Hook point for future hard restrictions. Kept permissive for now.
-    }
-
-    fn validate_metadata_fields(
-        &self,
-        _policy: &PolicyFile,
-        _metadata: &TokenMetadata,
-        _errors: &mut [ValidationError],
-        _warnings: &mut [ValidationWarning],
-    ) {
-        // Hook point for required/typed metadata fields.
-    }
-
-    fn validate_owner_constraints(
-        &self,
-        _policy: &PolicyFile,
-        _metadata: &TokenMetadata,
-        _errors: &mut [ValidationError],
-    ) {
-        // Hook point for owner / issuer constraints.
     }
 
     fn check_condition_conflicts(

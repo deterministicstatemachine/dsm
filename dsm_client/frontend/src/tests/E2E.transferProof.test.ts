@@ -23,7 +23,6 @@ import { decodeFramedEnvelopeV3 } from '../dsm/decoding';
 const DEVICE_A = new Uint8Array(32).fill(0xAA); // sender
 const DEVICE_B = new Uint8Array(32).fill(0xBB); // recipient
 const GENESIS_A = new Uint8Array(32).fill(0x11);
-const CHAIN_TIP_A = new Uint8Array(32).fill(0xCC); // non-zero required for online
 const SIGNING_KEY = new Uint8Array(64).fill(0x5A); // 64-byte SPHINCS+ SPX256s
 const COMMITMENT_HASH = new Uint8Array(32).fill(0xDD);
 const COUNTERPARTY_TIP = new Uint8Array(32).fill(0xFF);
@@ -135,7 +134,6 @@ function makeOnlineResponseEnvelope(success: boolean, message: string, newBalanc
     version: 3,
     headers: new pb.Headers({
       deviceId: DEVICE_A as any,
-      chainTip: CHAIN_TIP_A as any,
       genesisHash: GENESIS_A as any,
     } as any),
     payload: { case: 'onlineTransferResponse', value: resp },
@@ -143,12 +141,10 @@ function makeOnlineResponseEnvelope(success: boolean, message: string, newBalanc
   return frameEnvelope(env); // 0x03-framed, matching routerInvokeBin output
 }
 
-function makeHeaders(overrides?: Partial<{ deviceId: Uint8Array; genesisHash: Uint8Array; chainTip: Uint8Array; seq: bigint }>): pb.Headers {
+function makeHeaders(overrides?: Partial<{ deviceId: Uint8Array; genesisHash: Uint8Array }>): pb.Headers {
   return new pb.Headers({
     deviceId: overrides?.deviceId || DEVICE_A,
     genesisHash: (overrides?.genesisHash || GENESIS_A) as any,
-    chainTip: (overrides?.chainTip || CHAIN_TIP_A) as any,
-    seq: (overrides?.seq ?? 1n) as any,
   } as any);
 }
 
@@ -411,23 +407,6 @@ describe('Online Transfer — Input Validation', () => {
     expect(res.accepted).toBe(true);
   });
 
-  test('zero chain_tip no longer blocks online transfer (SDK-owned state)', async () => {
-    // chain_tip is no longer supplied by the frontend; the SDK derives it from SQLite.
-    // Keep this regression test to ensure an all-zero transport header tip does not break send.
-    const origCallBin = (global as any).window.DsmBridge.__callBin;
-    (global as any).window.DsmBridge.__callBin = async (reqBytes: Uint8Array) => {
-      const { method } = decodeBridgeReq(reqBytes);
-      if (method === 'getTransportHeadersV3Bin') {
-        const headers = makeHeaders({ chainTip: new Uint8Array(32) /* all zeros */ });
-        return wrapSuccess(headers.toBinary());
-      }
-      return origCallBin(reqBytes);
-    };
-
-    const res = await dsm.sendOnlineTransfer({ to: encodeBase32Crockford(DEVICE_B), amount: BigInt(8000 + testIndex), tokenId: 'ERA' });
-    expect(res.accepted).toBe(true);
-  });
-
   test('missing from_device_id (bridge returns short headers) → error', async () => {
     // Override getTransportHeadersV3Bin to return empty device_id
     const origCallBin = (global as any).window.DsmBridge.__callBin;
@@ -437,8 +416,6 @@ describe('Online Transfer — Input Validation', () => {
         const headers = new pb.Headers({
           deviceId: new Uint8Array(0) as any,
           genesisHash: GENESIS_A as any,
-          chainTip: CHAIN_TIP_A as any,
-          seq: 1n as any,
         } as any);
         return wrapSuccess(headers.toBinary());
       }
@@ -465,8 +442,6 @@ describe('Online Transfer — Proto Fidelity', () => {
       nonce: new Uint8Array(0),
       signature: new Uint8Array(0),
       fromDeviceId: DEVICE_A as any,
-      chainTip: CHAIN_TIP_A as any,
-      seq: 7n as any,
     } as any);
 
     const bytes = req.toBinary();
@@ -479,9 +454,6 @@ describe('Online Transfer — Proto Fidelity', () => {
     expect(decoded.memo).toBe('test memo');
     expect(decoded.fromDeviceId).toEqual(DEVICE_A);
     expect(decoded.fromDeviceId).toHaveLength(32);
-    expect(decoded.chainTip).toEqual(CHAIN_TIP_A);
-    expect(decoded.chainTip).toHaveLength(32);
-    expect(decoded.seq).toBe(7n);
   });
 
   test('Envelope v3 wraps UniversalTx → UniversalOp → Invoke(wallet.send) → ArgPack', () => {
@@ -490,8 +462,6 @@ describe('Online Transfer — Proto Fidelity', () => {
       toDeviceId: DEVICE_B as any,
       amount: 10n as any,
       fromDeviceId: DEVICE_A as any,
-      chainTip: CHAIN_TIP_A as any,
-      seq: 1n as any,
     } as any);
 
     const argPack = new pb.ArgPack({
@@ -539,7 +509,7 @@ describe('Online Transfer — Proto Fidelity', () => {
   });
 
   test('headers carry correct identity (deviceId, genesisHash, chainTip, seq)', () => {
-    const headers = makeHeaders({ seq: 42n });
+    const headers = makeHeaders();
     const env = new pb.Envelope({
       version: 3,
       headers,
@@ -549,8 +519,6 @@ describe('Online Transfer — Proto Fidelity', () => {
     const decoded = pb.Envelope.fromBinary(env.toBinary());
     expect(decoded.headers?.deviceId).toEqual(DEVICE_A);
     expect(decoded.headers?.genesisHash).toEqual(GENESIS_A);
-    expect(decoded.headers?.chainTip).toEqual(CHAIN_TIP_A);
-    expect(decoded.headers?.seq).toBe(42n);
   });
 });
 
@@ -632,7 +600,6 @@ describe('Offline Transfer — Full Cycle', () => {
     expect(capturedPrepReq!.counterpartyDeviceId).toHaveLength(32);
     expect(capturedPrepReq!.counterpartyDeviceId[0]).toBe(0xBB); // matches DEVICE_B
     expect(capturedPrepReq!.bleAddress).toBe('AA:BB:CC:DD:EE:FF');
-    expect(capturedPrepReq!.validityIterations).toBe(100n);
     expect(capturedPrepReq!.transferAmountDisplay).toBe(String(11000 + testIndex));
   });
 
@@ -745,7 +712,6 @@ describe('Offline Transfer — Proto Constraints', () => {
     const prepReq = new pb.BilateralPrepareRequest({
       counterpartyDeviceId: DEVICE_B as any,
       operationData: new Uint8Array(100) as any,
-      validityIterations: 100n as any,
       expectedGenesisHash: new pb.Hash32({ v: COUNTERPARTY_GENESIS } as any),
       expectedCounterpartyStateHash: new pb.Hash32({ v: COUNTERPARTY_TIP } as any),
       bleAddress: 'AA:BB:CC:DD:EE:FF',
@@ -779,8 +745,6 @@ describe('Offline Transfer — Proto Constraints', () => {
       amount: 42n as any,
       memo: 'test',
       fromDeviceId: DEVICE_A as any,
-      chainTip: CHAIN_TIP_A as any,
-      seq: 1n as any,
     };
 
     const req1 = new pb.OnlineTransferRequest(params as any);
@@ -796,7 +760,6 @@ describe('Offline Transfer — Proto Constraints', () => {
     const resp = new pb.BilateralPrepareResponse({
       commitmentHash: new pb.Hash32({ v: COMMITMENT_HASH } as any),
       localSignature: new Uint8Array(64).fill(0xEE),
-      expiresIterations: 100n as any,
       counterpartyStateHash: new pb.Hash32({ v: new Uint8Array(32).fill(0x11) } as any),
       localStateHash: new pb.Hash32({ v: new Uint8Array(32).fill(0x22) } as any),
       responderSigningPublicKey: new Uint8Array(64).fill(0x33) as any,

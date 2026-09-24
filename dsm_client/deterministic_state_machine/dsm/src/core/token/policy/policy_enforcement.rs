@@ -5,25 +5,15 @@
 //!
 //! Enforces token policy constraints (CTPA).
 //! Determinism rules:
-//! - No wall-clock.
-//! - Require an explicit tick witness from context_data under key "tick" (u64 LE).
+//! - No time of any kind.
 //! - No alternate paths.
 
 use std::collections::HashMap;
-use std::sync::Arc;
-
-use prost::Message;
 
 use crate::types::{
     error::DsmError,
-    policy_types::{PolicyCondition, PolicyRole, TokenPolicy, VaultCondition},
+    policy_types::{PolicyCondition, PolicyRole, TokenPolicy},
 };
-use crate::verification::proof_primitives::{
-    amount_witness_u64, rate_limit_witness_u64, smart_policy_witness_present,
-    tick_from_context_data, vault_balance_witness_u64,
-};
-
-use super::policy_cache::PolicyCache;
 
 /// Minimal error type for policy enforcement failures that are not simply allow/deny decisions
 #[derive(Debug)]
@@ -45,29 +35,26 @@ pub struct EnforcementResult {
     pub allowed: bool,
     pub reason: String,
     pub conditions: Vec<String>,
-    pub tick: u64,
     pub context: HashMap<String, String>,
 }
 
 impl EnforcementResult {
     #[inline]
-    pub fn allowed(reason: &str, tick: u64) -> Self {
+    pub fn allowed(reason: &str) -> Self {
         Self {
             allowed: true,
             reason: reason.to_string(),
             conditions: Vec::new(),
-            tick,
             context: HashMap::new(),
         }
     }
 
     #[inline]
-    pub fn denied(reason: &str, tick: u64) -> Self {
+    pub fn denied(reason: &str) -> Self {
         Self {
             allowed: false,
             reason: reason.to_string(),
             conditions: Vec::new(),
-            tick,
             context: HashMap::new(),
         }
     }
@@ -92,35 +79,22 @@ pub struct IdentityContext {
     pub derivation_path: Option<Vec<String>>,
 }
 
-/// Vault enforcement context (optional structured fields)
-#[derive(Debug, Clone)]
-pub struct VaultEnforcementContext {
-    pub vault_state: String,
-    pub min_balance: Option<u64>,
-    pub vault_type: Option<String>,
-    pub custom_data: HashMap<String, String>,
-}
-
 /// Policy enforcement context (constructed from operation + caller-provided binary data)
 #[derive(Debug, Clone)]
 pub struct EnforcementContext {
     pub operation_type: String,
-    pub tick: u64,
     pub identity: Option<IdentityContext>,
     pub region: Option<String>,
     pub data: HashMap<String, Vec<u8>>,
-    pub vault_context: Option<VaultEnforcementContext>,
 }
 
 impl EnforcementContext {
-    pub fn new(operation_type: &str, tick: u64) -> Self {
+    pub fn new(operation_type: &str) -> Self {
         Self {
             operation_type: operation_type.to_string(),
-            tick,
             identity: None,
             region: None,
             data: HashMap::new(),
-            vault_context: None,
         }
     }
 
@@ -143,29 +117,19 @@ impl EnforcementContext {
         self
     }
 
-    pub fn with_vault_context(mut self, v: VaultEnforcementContext) -> Self {
-        self.vault_context = Some(v);
-        self
-    }
-
-    /// Rate-limit witness lookup:
-    /// key format: "rate_limit::`<op>`.last_k::`<N>`" -> u64 LE count
-    pub fn rate_limit_witness(&self, op: &str, last_k: u64) -> Option<u64> {
-        rate_limit_witness_u64(&self.data, op, last_k)
-    }
-
-    /// Amount witness:
-    /// Require "amount_u64" -> u64 LE.
+    /// The operation's amount, derived by the SDK from the operation itself:
+    /// `amount_u64`, exactly 8 bytes little-endian.
     pub fn amount_witness(&self) -> Option<u64> {
-        amount_witness_u64(&self.data)
+        let bytes = self.data.get("amount_u64")?;
+        <[u8; 8]>::try_from(bytes.as_slice())
+            .ok()
+            .map(u64::from_le_bytes)
     }
 }
 
 /// Policy enforcement engine
-#[derive(Debug)]
-pub struct PolicyEnforcer {
-    policy_cache: Arc<PolicyCache>,
-}
+#[derive(Debug, Default)]
+pub struct PolicyEnforcer;
 
 /// Canonical preimage a mint/burn authorisation signs.
 ///
@@ -238,8 +202,8 @@ fn parse_authorizations(blob: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
 }
 
 impl PolicyEnforcer {
-    pub fn new(policy_cache: Arc<PolicyCache>) -> Self {
-        Self { policy_cache }
+    pub fn new() -> Self {
+        Self
     }
 
     pub async fn enforce_policy(
@@ -248,15 +212,7 @@ impl PolicyEnforcer {
         operation_type: &str,
         context_data: &HashMap<String, Vec<u8>>,
     ) -> Result<EnforcementResult, DsmError> {
-        // Advisory: check cache coherence by anchor; does not affect allow/deny.
-        let _ = self.policy_cache.get_policy(&policy.anchor).await?;
-
-        // Require explicit tick witness: key "tick" -> u64 LE.
-        let tick = tick_from_context_data(context_data).ok_or_else(|| {
-            DsmError::InvalidOperation("policy enforcement requires tick witness".to_string())
-        })?;
-
-        let mut ctx = EnforcementContext::new(operation_type, tick);
+        let mut ctx = EnforcementContext::new(operation_type);
 
         for (k, v) in context_data {
             ctx = ctx.with_data(k, v.clone());
@@ -287,14 +243,12 @@ impl PolicyEnforcer {
             if !ok {
                 return Ok(EnforcementResult::denied(
                     "Operation not permitted by role-based access control",
-                    tick,
                 ));
             }
         }
 
         Ok(EnforcementResult::allowed(
             "All policy conditions satisfied",
-            tick,
         ))
     }
 
@@ -306,8 +260,6 @@ impl PolicyEnforcer {
         condition: &PolicyCondition,
         ctx: &EnforcementContext,
     ) -> Result<EnforcementResult, DsmError> {
-        let tick = ctx.tick;
-
         match condition {
             PolicyCondition::IdentityConstraint {
                 allowed_identities,
@@ -315,22 +267,15 @@ impl PolicyEnforcer {
             } => {
                 if let Some(ref id) = ctx.identity {
                     if allowed_identities.iter().any(|s| s == &id.id) {
-                        return Ok(EnforcementResult::allowed("Identity authorized", tick));
+                        return Ok(EnforcementResult::allowed("Identity authorized"));
                     }
                     if *allow_derived && self.is_derived_identity(id, allowed_identities).await {
-                        return Ok(EnforcementResult::allowed(
-                            "Derived identity authorized",
-                            tick,
-                        ));
+                        return Ok(EnforcementResult::allowed("Derived identity authorized"));
                     }
-                    Ok(EnforcementResult::denied("Identity not authorized", tick))
+                    Ok(EnforcementResult::denied("Identity not authorized"))
                 } else {
-                    Ok(EnforcementResult::denied("No identity provided", tick))
+                    Ok(EnforcementResult::denied("No identity provided"))
                 }
-            }
-
-            PolicyCondition::VaultEnforcement { condition } => {
-                self.check_vault_condition(condition, ctx).await
             }
 
             PolicyCondition::OperationRestriction { allowed_operations } => {
@@ -345,23 +290,9 @@ impl PolicyEnforcer {
                     .iter()
                     .any(|op| op == &ctx.operation_type);
                 if allowed {
-                    Ok(EnforcementResult::allowed("Operation permitted", tick))
+                    Ok(EnforcementResult::allowed("Operation permitted"))
                 } else {
-                    Ok(EnforcementResult::denied("Operation not permitted", tick))
-                }
-            }
-
-            PolicyCondition::LogicalTimeConstraint { min_tick, max_tick } => {
-                if ctx.tick >= *min_tick && ctx.tick <= *max_tick {
-                    Ok(EnforcementResult::allowed(
-                        "Within allowed tick range",
-                        tick,
-                    ))
-                } else {
-                    Ok(EnforcementResult::denied(
-                        "Outside allowed tick range",
-                        tick,
-                    ))
+                    Ok(EnforcementResult::denied("Operation not permitted"))
                 }
             }
 
@@ -378,14 +309,12 @@ impl PolicyEnforcer {
                 if !matches!(ctx.operation_type.as_str(), "burn" | "create_token") {
                     return Ok(EnforcementResult::allowed(
                         "TokenAuthority does not gate this operation",
-                        tick,
                     ));
                 }
 
                 let Some(blob) = ctx.data.get(witness_keys::AUTHORIZATIONS) else {
                     return Ok(EnforcementResult::denied(
                         "No mint/burn authorization presented",
-                        tick,
                     ));
                 };
                 let (Some(pc), Some(token_id), Some(amount_le), Some(authorized_by)) = (
@@ -396,20 +325,15 @@ impl PolicyEnforcer {
                 ) else {
                     return Ok(EnforcementResult::denied(
                         "Authorization context incomplete",
-                        tick,
                     ));
                 };
                 let Ok(policy_commit) = <[u8; 32]>::try_from(pc.as_slice()) else {
                     return Ok(EnforcementResult::denied(
                         "Authorization policy_commit malformed",
-                        tick,
                     ));
                 };
                 let Ok(amount_bytes) = <[u8; 8]>::try_from(amount_le.as_slice()) else {
-                    return Ok(EnforcementResult::denied(
-                        "Authorization amount malformed",
-                        tick,
-                    ));
+                    return Ok(EnforcementResult::denied("Authorization amount malformed"));
                 };
                 let amount = u64::from_le_bytes(amount_bytes);
 
@@ -447,12 +371,10 @@ impl PolicyEnforcer {
                 if satisfied.len() as u32 >= *threshold {
                     Ok(EnforcementResult::allowed(
                         "Mint/burn authority threshold satisfied",
-                        tick,
                     ))
                 } else {
                     Ok(EnforcementResult::denied(
                         "Mint/burn authority threshold not satisfied",
-                        tick,
                     ))
                 }
             }
@@ -464,11 +386,10 @@ impl PolicyEnforcer {
                 if !matches!(ctx.operation_type.as_str(), "mint" | "create_token") {
                     return Ok(EnforcementResult::allowed(
                         "SupplyCap does not gate this operation",
-                        tick,
                     ));
                 }
                 if *unlimited {
-                    return Ok(EnforcementResult::allowed("Supply is uncapped", tick));
+                    return Ok(EnforcementResult::allowed("Supply is uncapped"));
                 }
                 let (Some(amount_le), Some(circ_le)) = (
                     ctx.data.get(witness_keys::AMOUNT),
@@ -479,23 +400,21 @@ impl PolicyEnforcer {
                     // against the wrong number.
                     return Ok(EnforcementResult::denied(
                         "Supply cap cannot be evaluated without circulating supply",
-                        tick,
                     ));
                 };
                 let (Ok(a), Ok(c)) = (
                     <[u8; 8]>::try_from(amount_le.as_slice()),
                     <[u8; 8]>::try_from(circ_le.as_slice()),
                 ) else {
-                    return Ok(EnforcementResult::denied("Supply context malformed", tick));
+                    return Ok(EnforcementResult::denied("Supply context malformed"));
                 };
                 let amount = u64::from_le_bytes(a) as u128;
                 let circulating = u64::from_le_bytes(c) as u128;
                 if circulating.saturating_add(amount) <= *max_supply {
-                    Ok(EnforcementResult::allowed("Within supply cap", tick))
+                    Ok(EnforcementResult::allowed("Within supply cap"))
                 } else {
                     Ok(EnforcementResult::denied(
                         "Mint would exceed the token's maximum supply",
-                        tick,
                     ))
                 }
             }
@@ -510,18 +429,12 @@ impl PolicyEnforcer {
 
             PolicyCondition::EmissionsSchedule { .. } => {
                 // Configuration-only; does not deny operations directly.
-                Ok(EnforcementResult::allowed(
-                    "Emissions schedule parameter",
-                    tick,
-                ))
+                Ok(EnforcementResult::allowed("Emissions schedule parameter"))
             }
 
             PolicyCondition::CreditBundlePolicy { .. } => {
                 // Configuration-only; does not deny operations directly.
-                Ok(EnforcementResult::allowed(
-                    "Credit bundle policy parameter",
-                    tick,
-                ))
+                Ok(EnforcementResult::allowed("Credit bundle policy parameter"))
             }
 
             PolicyCondition::BitcoinTapConstraint { .. } => {
@@ -529,97 +442,7 @@ impl PolicyEnforcer {
                 // and fractional exit time, not during generic policy enforcement.
                 Ok(EnforcementResult::allowed(
                     "Bitcoin tap constraint parameter",
-                    tick,
                 ))
-            }
-        }
-    }
-
-    #[allow(clippy::unused_async)]
-    async fn check_vault_condition(
-        &self,
-        cond: &VaultCondition,
-        ctx: &EnforcementContext,
-    ) -> Result<EnforcementResult, DsmError> {
-        let tick = ctx.tick;
-
-        match cond {
-            VaultCondition::Hash(expected) => {
-                if let Some(actual) = ctx.data.get("vault.hash") {
-                    if actual.as_slice() == expected.as_slice() {
-                        Ok(EnforcementResult::allowed("Vault hash satisfied", tick))
-                    } else {
-                        Ok(EnforcementResult::denied("Vault hash mismatch", tick))
-                    }
-                } else {
-                    Ok(EnforcementResult::denied("Vault hash not provided", tick))
-                }
-            }
-
-            VaultCondition::MinimumBalance(min_balance) => {
-                // Prefer deterministic witness in ctx.data: "vault.balance_u64" -> u64 LE.
-                let current = vault_balance_witness_u64(&ctx.data)
-                    .or_else(|| ctx.vault_context.as_ref().and_then(|v| v.min_balance));
-
-                match current {
-                    Some(v) if v >= *min_balance => Ok(EnforcementResult::allowed(
-                        "Minimum balance satisfied",
-                        tick,
-                    )),
-                    Some(_) => Ok(EnforcementResult::denied(
-                        "Insufficient vault balance",
-                        tick,
-                    )),
-                    None => Ok(EnforcementResult::denied("No vault balance provided", tick)),
-                }
-            }
-
-            VaultCondition::VaultType(required) => {
-                let vt = ctx
-                    .data
-                    .get("vault.type")
-                    .and_then(|b| String::from_utf8(b.clone()).ok())
-                    .or_else(|| {
-                        ctx.vault_context
-                            .as_ref()
-                            .and_then(|v| v.vault_type.clone())
-                    });
-
-                match vt {
-                    Some(v) if v == *required => {
-                        Ok(EnforcementResult::allowed("Vault type verified", tick))
-                    }
-                    Some(_) => Ok(EnforcementResult::denied("Vault type mismatch", tick)),
-                    None => Ok(EnforcementResult::denied("No vault type provided", tick)),
-                }
-            }
-
-            VaultCondition::SmartPolicy(bytes) => {
-                // Deterministic rule:
-                // - Policy must parse as SmartPolicy protobuf.
-                // - Caller must provide a non-empty witness under "smart_policy_witness".
-                // This prevents “parse-only allow” and keeps enforcement deterministic.
-                let parse_ok = crate::types::proto::SmartPolicy::decode(bytes.as_slice()).is_ok();
-                if !parse_ok {
-                    return Ok(EnforcementResult::denied(
-                        "Invalid SmartPolicy protobuf",
-                        tick,
-                    ));
-                }
-
-                let witness_ok = smart_policy_witness_present(&ctx.data);
-
-                if witness_ok {
-                    Ok(EnforcementResult::allowed(
-                        "SmartPolicy witness satisfied",
-                        tick,
-                    ))
-                } else {
-                    Ok(EnforcementResult::denied(
-                        "SmartPolicy witness missing",
-                        tick,
-                    ))
-                }
             }
         }
     }
@@ -630,65 +453,28 @@ impl PolicyEnforcer {
         parameters: &HashMap<String, String>,
         ctx: &EnforcementContext,
     ) -> Result<EnforcementResult, DsmError> {
-        let tick = ctx.tick;
-
         match constraint_type {
-            "rate_limit" => {
-                let max_n = parameters
-                    .get("max_n")
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .unwrap_or(0);
-                let last_k = parameters
-                    .get("last_k")
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .unwrap_or(0);
-
-                if max_n == 0 || last_k == 0 {
-                    return Ok(EnforcementResult::denied(
-                        "rate_limit not configured (max_n/last_k missing)",
-                        tick,
-                    ));
-                }
-
-                match ctx.rate_limit_witness(&ctx.operation_type, last_k) {
-                    Some(count) if count >= max_n => {
-                        Ok(EnforcementResult::denied("rate_limit exceeded", tick))
-                    }
-                    Some(_) => Ok(EnforcementResult::allowed("rate_limit satisfied", tick)),
-                    None => Ok(EnforcementResult::denied(
-                        "rate_limit witness missing",
-                        tick,
-                    )),
-                }
-            }
-
             "amount_limit" => {
                 let max_amount = parameters
                     .get("max_amount")
                     .and_then(|s| s.parse::<u64>().ok());
 
                 let Some(max_amount) = max_amount else {
-                    return Ok(EnforcementResult::denied(
-                        "Missing/invalid max_amount",
-                        tick,
-                    ));
+                    return Ok(EnforcementResult::denied("Missing/invalid max_amount"));
                 };
 
                 match ctx.amount_witness() {
                     Some(v) if v <= max_amount => {
-                        Ok(EnforcementResult::allowed("Amount limit satisfied", tick))
+                        Ok(EnforcementResult::allowed("Amount limit satisfied"))
                     }
-                    Some(_) => Ok(EnforcementResult::denied("Amount exceeds limit", tick)),
-                    None => Ok(EnforcementResult::denied(
-                        "No amount witness provided",
-                        tick,
-                    )),
+                    Some(_) => Ok(EnforcementResult::denied("Amount exceeds limit")),
+                    None => Ok(EnforcementResult::denied("No amount witness provided")),
                 }
             }
 
             _ => {
                 // Production-safe default: unknown custom constraint DENIES unless explicitly waived.
-                Ok(EnforcementResult::denied("Unknown custom constraint", tick))
+                Ok(EnforcementResult::denied("Unknown custom constraint"))
             }
         }
     }
@@ -743,13 +529,11 @@ impl PolicyEnforcer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::policy_types::{PolicyCondition, PolicyFile, TokenPolicy, VaultCondition};
-    use crate::core::token::policy::policy_cache::{PolicyCache, PolicyCacheConfig};
+    use crate::types::policy_types::{PolicyCondition, PolicyFile, TokenPolicy};
 
     #[tokio::test]
     async fn identity_constraint_denies() -> Result<(), Box<dyn std::error::Error>> {
-        let cache = Arc::new(PolicyCache::new(PolicyCacheConfig::default()));
-        let enforcer = PolicyEnforcer::new(cache);
+        let enforcer = PolicyEnforcer::new();
 
         let mut pf = PolicyFile::new("ID", "1.0.0", "a");
         pf.add_condition(PolicyCondition::IdentityConstraint {
@@ -760,34 +544,9 @@ mod tests {
 
         let mut ctx = HashMap::new();
         ctx.insert("identity".into(), b"unauthorized_user".to_vec());
-        ctx.insert("tick".into(), 2_u64.to_le_bytes().to_vec());
 
         let res = enforcer.enforce_policy(&pol, "transfer", &ctx).await?;
         assert!(!res.allowed);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn vault_min_balance_needs_witness() -> Result<(), Box<dyn std::error::Error>> {
-        let cache = Arc::new(PolicyCache::new(PolicyCacheConfig::default()));
-        let enforcer = PolicyEnforcer::new(cache);
-
-        let mut pf = PolicyFile::new("VB", "1.0.0", "a");
-        pf.add_condition(PolicyCondition::VaultEnforcement {
-            condition: VaultCondition::MinimumBalance(100),
-        });
-        let pol = TokenPolicy::new(pf)?;
-
-        let mut ctx = HashMap::new();
-        ctx.insert("tick".into(), 3_u64.to_le_bytes().to_vec());
-
-        let res = enforcer.enforce_policy(&pol, "transfer", &ctx).await?;
-        assert!(!res.allowed);
-
-        ctx.insert("vault.balance_u64".into(), 150_u64.to_le_bytes().to_vec());
-        let res = enforcer.enforce_policy(&pol, "transfer", &ctx).await?;
-        assert!(res.allowed);
-
         Ok(())
     }
 
@@ -799,8 +558,7 @@ mod tests {
 
     #[tokio::test]
     async fn operation_restriction_is_case_sensitive() -> Result<(), Box<dyn std::error::Error>> {
-        let cache = Arc::new(PolicyCache::new(PolicyCacheConfig::default()));
-        let enforcer = PolicyEnforcer::new(cache);
+        let enforcer = PolicyEnforcer::new();
 
         let mut pf = PolicyFile::new("OP", "1.0.0", "a");
         pf.add_condition(PolicyCondition::OperationRestriction {
@@ -808,8 +566,7 @@ mod tests {
         });
         let pol = TokenPolicy::new(pf)?;
 
-        let mut ctx = HashMap::new();
-        ctx.insert("tick".into(), 1_u64.to_le_bytes().to_vec());
+        let ctx = HashMap::new();
 
         // Exact-case match — must allow.
         let res = enforcer.enforce_policy(&pol, "transfer", &ctx).await?;

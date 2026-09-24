@@ -166,7 +166,6 @@ src/
 │   ├── object_store.rs  # Generic object storage
 │   ├── unilateral_api.rs # b0x unilateral transport
 │   ├── recovery_capsule.rs # Recovery capsule CRUD
-│   ├── rate_limit.rs    # Transport-layer rate limiting
 │   ├── hardening.rs     # Request validation, size limits
 │   └── network_config.rs # Auto-detection of network topology
 ├── auth/                # Token-based gossip auth

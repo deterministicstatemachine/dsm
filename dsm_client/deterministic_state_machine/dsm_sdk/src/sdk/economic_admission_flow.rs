@@ -24,7 +24,7 @@ use dsm::economic::lineage::{
     activate, advance_validated, AcceptedSubstrate, EconomicActivationSnapshot,
     ValidatedEconomicRoot,
 };
-use dsm::economic::register::{resolve_root_register_profile, RegisteredEconomicRoot};
+use dsm::economic::register::RegisteredEconomicRoot;
 use dsm::economic::tree::EconomicSmt;
 use dsm::economic::witness::EconomicTransitionWitness;
 use dsm::economic::write_set::{build_write_set, CreditSourceFacts};
@@ -35,19 +35,21 @@ use dsm::types::operations::Operation;
 
 use crate::sdk::core_sdk::CoreSDK;
 use crate::sdk::economic_registers::{register_economic_root, LiveRegisterResolver};
-use crate::sdk::storage_set::{StorageSet, StorageSetCatalog};
+use crate::sdk::storage_set::{canonical_set, StorageSet};
 use crate::storage::client_db;
 use crate::storage::client_db::economic_lineage;
-use crate::util::deterministic_time::tick;
 
 /// The claimant's committed network, from the STORED genesis record — the
 /// same value Genesis v3 committed. Fail closed: no record, no admission.
 /// The caller never chooses the network.
 pub(crate) fn committed_network_id() -> Result<Vec<u8>, DsmError> {
-    let g_vec = crate::sdk::app_state::AppState::get_genesis_hash().unwrap_or_default();
-    let g: [u8; 32] = g_vec.as_slice().try_into().map_err(|_| {
+    let g_vec = crate::sdk::app_state::AppState::get_genesis_hash().ok_or_else(|| {
         DsmError::storage("no genesis identity".to_string(), None::<std::io::Error>)
     })?;
+    let g: [u8; 32] = g_vec
+        .as_slice()
+        .try_into()
+        .map_err(|e| storage_err("genesis identity", e))?;
     let genesis_b32 = crate::util::text_id::encode_base32_crockford(&g);
     match crate::storage::client_db::get_genesis_record_by_id(&genesis_b32) {
         Ok(Some(rec)) => Ok(rec.network_id.into_bytes()),
@@ -76,37 +78,6 @@ fn storage_err(what: &str, e: impl core::fmt::Display) -> DsmError {
 pub struct ClaimOutcome {
     pub tokens_received: u64,
     pub economic_position: u64,
-}
-
-/// Resolve the canonical register set for `network_id`, fail-closed, through
-/// the catalog (never `sole_set` — consumers RESOLVE).
-pub(crate) fn canonical_set(network_id: &[u8]) -> Result<StorageSet, DsmError> {
-    let profile = resolve_root_register_profile(network_id)
-        .map_err(|e| storage_err("resolve root register", e))?;
-    let catalog =
-        StorageSetCatalog::from_env_config().map_err(|e| storage_err("load storage catalog", e))?;
-    // The set id is a function of `(member_id, register_incarnation_id)`
-    // pairs, so it cannot be asked for by name: the catalog offers candidates
-    // and `verify_candidate` refuses any that does not re-derive the pinned id.
-    // A member that rebuilt its register therefore stops resolving here
-    // rather than silently serving the register it used to.
-    catalog
-        .sets()
-        .iter()
-        .find(|s| {
-            crate::sdk::storage_set::as_ccb_members(s)
-                .ok()
-                .and_then(|m| profile.verify_candidate(&m).ok())
-                .is_some()
-        })
-        .cloned()
-        .ok_or_else(|| {
-            DsmError::storage(
-                "the canonical register set is not resolvable from the local catalog — fail closed"
-                    .to_string(),
-                None::<std::io::Error>,
-            )
-        })
 }
 
 /// The validated economic root this device holds, or a fresh activation.
@@ -221,19 +192,20 @@ pub(crate) fn producer_tree_and_pre_state(
             // here for the same reason and one more: its `pre` is required to
             // be `None`, so a pre-state that carried it would contradict the
             // shape its own write-set arm enforces.
-            dsm::economic::state::EconomicLeafState::ConsumedSource(_) => {}
+            dsm::economic::state::EconomicLeafState::ConsumedSource(..) => {}
             // A SoFi relationship leaf IS a predecessor a write set reads —
             // its whole content is the base `hʲ` the next operation advances
             // from — but the reader is `sofi::validation`, which fetches it by
             // key with the vault's own evidence. This pre-state map exists for
             // the bilateral write sets and has no slot it belongs in; adding a
             // half-slot here would be a second place for the base to live.
-            dsm::economic::state::EconomicLeafState::Relationship(_) => {}
-            // A creation record is write-once and insert-only: a write set
-            // that found one in its pre-state would be creating a vault that
-            // already exists, which its own arm refuses. Nothing reads it as a
-            // predecessor.
-            dsm::economic::state::EconomicLeafState::VaultCreation(_) => {}
+            dsm::economic::state::EconomicLeafState::Relationship(..) => {}
+            // Creation records are write-once and insert-only: a write set
+            // that found one would be creating a vault or a token that
+            // already exists, which its own arm refuses by reading the tree.
+            // Nothing reads one as a predecessor.
+            dsm::economic::state::EconomicLeafState::VaultCreation(..)
+            | dsm::economic::state::EconomicLeafState::TokenCreation(..) => {}
         }
     }
     if tree.root() != validated.economic_root() {
@@ -269,12 +241,7 @@ pub(crate) fn authority_material(
         })?;
     let (bytes, position) = crate::sdk::identity_presentation::build_authority_evidence(
         &wallet_seed,
-        crate::sdk::identity_presentation::OwnerIdentityInputs {
-            network_id,
-            wallet_index: 0,
-            device_slot: 0,
-            genesis_version: 3,
-        },
+        crate::sdk::identity_presentation::OwnerIdentityInputs::beta(network_id),
         genesis,
     )?;
     let addr = dsm::economic::authority_evidence::authority_evidence_addr(&bytes);
@@ -337,8 +304,8 @@ pub(crate) fn build_dsm_admission(
     // that scan names one arbitrary leg. So it is structurally confined to the
     // shape it is sound for: every other operation yields `None`, and a caller
     // needing a locator for one of them gets no answer rather than a wrong one.
-    let debit_mutation_index = match operation {
-        Operation::Transfer { .. } => built
+    let debit_mutation_index = if matches!(operation, Operation::Transfer { .. }) {
+        built
             .mutations
             .iter()
             .position(|m| {
@@ -354,8 +321,11 @@ pub(crate) fn build_dsm_admission(
                     .unwrap_or(0);
                 post < pre
             })
-            .map(|i| i as u32),
-        _ => None,
+            .map(u32::try_from)
+            .transpose()
+            .map_err(|e| storage_err("debit mutation index", e))?
+    } else {
+        None
     };
 
     let witness = EconomicTransitionWitness::new(
@@ -375,8 +345,9 @@ pub(crate) fn build_dsm_admission(
         &witness_bytes,
     );
 
-    let (_pk, sk) = crate::sdk::signing_authority::current_keypair()
-        .map_err(|e| storage_err("signing authority", e))?;
+    let sk = crate::sdk::signing_authority::current_keypair()
+        .map_err(|e| storage_err("signing authority", e))?
+        .1;
     let successor_bytes = dsm::economic::successor_evidence::sign_dsm_successor_evidence(
         &chain_state.rel_key,
         &chain_state.embedded_parent,
@@ -481,7 +452,6 @@ pub(crate) struct StagedAdmission {
     pub tree: EconomicSmt,
     pub pre_state: AdmittedPreState,
     pub authority: AuthorityMaterial,
-    pub target_position: u64,
     pub facts: CreditSourceFacts,
     pub extra_artifacts: Vec<(String, Vec<u8>, &'static str)>,
     pub prepared: PendingEconomicAdmission,
@@ -495,12 +465,8 @@ pub(crate) struct StagedAdmission {
 pub(crate) async fn stage_admission(
     core: &CoreSDK,
     operation: &Operation,
-    facts_for_position: impl FnOnce(
-        u64,
-    ) -> Result<
-        (CreditSourceFacts, Vec<(String, Vec<u8>, &'static str)>),
-        DsmError,
-    >,
+    facts: CreditSourceFacts,
+    extra_artifacts: Vec<(String, Vec<u8>, &'static str)>,
 ) -> Result<StagedAdmission, DsmError> {
     let network_id = committed_network_id()?;
     if let Some(pending) = core
@@ -520,7 +486,6 @@ pub(crate) async fn stage_admission(
     let authority = authority_material(&network_id, &genesis)?;
     let target_position = validated.economic_position() + 1;
     let op_digest = dsm::economic::admission::dsm_operation_digest(&operation.to_bytes());
-    let (facts, extra_artifacts) = facts_for_position(target_position)?;
     let prepared = PendingEconomicAdmission::prepared(
         dsm::economic::admission::PendingAdmissionKind::DsmBacked,
         target_position,
@@ -536,40 +501,32 @@ pub(crate) async fn stage_admission(
         tree,
         pre_state,
         authority,
-        target_position,
         facts,
         extra_artifacts,
         prepared,
     })
 }
 
-/// One ADMITTED self-loop operation (Burn, CreateToken fee, Mint), end to
-/// end: resume any pending admission, assemble prerequisites, run the fence-
+/// One ADMITTED self-loop operation (Burn, CreateToken), end to end, with the
+/// balance deltas its conservation rule takes — one debit for a burn; the ERA
+/// fee debit and the genesis-supply credit for a creation: resume any pending
+/// admission, assemble prerequisites, run the fence-
 /// coupled advance through the generalized seam, publish/register/validate,
 /// admit. The route gets the advance outcome back for its response
 /// projection. The operation registers BEFORE the route reports success.
 ///
-/// `facts_for_position` supplies the operation's credit-source facts plus any
-/// extra evidence artifacts, given the TARGET ECONOMIC POSITION this
-/// admission will occupy. It runs after the position and operation digest are
-/// fixed and before anything durable — a Mint builds and signs its `0x0029`
-/// authorization here, binding the signed body to exactly the position the
-/// admission seam CAS-checks. Pure operations pass
-/// `|_| Ok((CreditSourceFacts::None, Vec::new()))`. The returned artifacts
-/// are frozen in the SAME transaction as the advance and the pending
-/// admission, so the crash invariant holds: either the operation never
-/// became locally accepted, or the operation, its pending admission and its
-/// exact evidence bytes all exist durably.
+/// `facts` are the operation's credit-source facts, and `extra_artifacts` any
+/// evidence objects beside them. The artifacts are frozen in the SAME
+/// transaction as the advance and the pending admission, so the crash
+/// invariant holds: either the operation never became locally accepted, or
+/// the operation, its pending admission and its exact evidence bytes all
+/// exist durably.
 pub(crate) async fn admitted_self_loop_operation(
     core: &CoreSDK,
     operation: Operation,
-    delta: dsm::types::device_state::BalanceDelta,
-    facts_for_position: impl FnOnce(
-        u64,
-    ) -> Result<
-        (CreditSourceFacts, Vec<(String, Vec<u8>, &'static str)>),
-        DsmError,
-    >,
+    deltas: &[dsm::types::device_state::BalanceDelta],
+    facts: CreditSourceFacts,
+    extra_artifacts: Vec<(String, Vec<u8>, &'static str)>,
     in_tx_extra: Option<
         &(dyn Fn(
             &rusqlite::Transaction<'_>,
@@ -591,11 +548,11 @@ pub(crate) async fn admitted_self_loop_operation(
         extra_artifacts,
         prepared,
         ..
-    } = stage_admission(core, &operation, facts_for_position).await?;
+    } = stage_admission(core, &operation, facts, extra_artifacts).await?;
     let mut built: Option<DsmAdmissionParts> = None;
-    let (outcome, pending) = core.faucet_claim_advance(
+    let (outcome, pending) = core.admitted_advance(
         operation.clone(),
-        &delta,
+        deltas,
         prepared,
         |chain_state| {
             let parts = build_dsm_admission(
@@ -684,12 +641,16 @@ fn admission_already_finished(
         Some(dsm::economic::lineage::AdmittedEconomicPosition::SingleRoot {
             economic_position: position,
             economic_root: root,
+            ..
         }) if position == pending.economic_position && root == coords.post_economic_root => {
             Ok(Some(AdmittedOutcome {
                 economic_position: position,
             }))
         }
-        _ => Err(DsmError::storage(
+        Some(dsm::economic::lineage::AdmittedEconomicPosition::SingleRoot { .. })
+        | Some(dsm::economic::lineage::AdmittedEconomicPosition::ResolvedSofi { .. })
+        | Some(dsm::economic::lineage::AdmittedEconomicPosition::UnresolvedSofi { .. })
+        | None => Err(DsmError::storage(
             format!(
                 "the pending admission at position {} is no longer this device's to finish: \
                  the head carries another or none, and it is not the admitted coordinate",
@@ -710,7 +671,7 @@ pub(crate) async fn finish_admission(
     witness: EconomicTransitionWitness,
     manifest: EconomicAdmissionManifest,
     operation: Operation,
-    mut pending: PendingEconomicAdmission,
+    pending: PendingEconomicAdmission,
     // Frozen only in the ADMIT transaction (the RELEASE object): nothing
     // here may reach the network before ECON_ADMITTED.
     post_admit_artifacts: Vec<(String, Vec<u8>, &'static str)>,
@@ -718,7 +679,36 @@ pub(crate) async fn finish_admission(
     // SERIALIZED COMPARE-AND-FINISH: one finish at a time, and only of the
     // admission the head still carries. A duplicate returns the admitted
     // outcome; a superseded one refuses before anything is signed or written.
-    let _one_finish = admission_finish_lock().lock().await;
+    let finishing = admission_finish_lock().lock().await;
+    let outcome = finish_locked(
+        core,
+        network_id,
+        set,
+        validated,
+        witness,
+        manifest,
+        operation,
+        pending,
+        post_admit_artifacts,
+    )
+    .await;
+    drop(finishing);
+    outcome
+}
+
+/// [`finish_admission`]'s work, run while the finish lock is held.
+#[allow(clippy::too_many_arguments)]
+async fn finish_locked(
+    core: &CoreSDK,
+    network_id: &[u8],
+    set: &StorageSet,
+    validated: &ValidatedEconomicRoot,
+    witness: EconomicTransitionWitness,
+    manifest: EconomicAdmissionManifest,
+    operation: Operation,
+    mut pending: PendingEconomicAdmission,
+    post_admit_artifacts: Vec<(String, Vec<u8>, &'static str)>,
+) -> Result<AdmittedOutcome, DsmError> {
     if let Some(outcome) = admission_already_finished(core, &pending)? {
         return Ok(outcome);
     }
@@ -734,24 +724,24 @@ pub(crate) async fn finish_admission(
     let coords = *pending
         .accepted_coords()
         .map_err(|e| DsmError::invalid_operation(e.to_string()))?;
-    // Evidence to q members, attributed. The republish sweep carries the
-    // EXACT frozen bytes.
+    // The evidence the claim names, put to the set and read back `Stored`
+    // (storage spec §5 rule 6) before the claim is registered: a root whose
+    // evidence nobody holds would be registered but unwalkable. The sweep
+    // carries the EXACT frozen bytes. Anything not yet `Stored` holds the
+    // admission for resume; the next pass re-runs the sweep.
     crate::handlers::artifact_republish::republish_unpublished_artifacts()
         .await
         .map_err(|e| storage_err("publish admission evidence", e))?;
-    // ECON_EVIDENCE_PUBLISHED is a QUORUM fact, not a best-effort pass: the
-    // sweep returns Ok while leaving below-quorum rows PublicationPending, so
-    // require the frozen backlog to be EMPTY before the state advances — a
-    // root registered ahead of q-durable evidence would be resolvable but
-    // permanently unwalkable if the accepting minority died. Held-for-resume
-    // is the correct outcome; the next resume re-runs the sweep.
     let unpublished =
         crate::storage::client_db::frozen_publication_artifact::list_unpublished_artifacts(1)
-            .map_err(|e| storage_err("check evidence durability", e))?;
-    if !unpublished.is_empty() {
+            .map_err(|e| storage_err("check evidence", e))?;
+    if let Some(row) = unpublished.first() {
         return Err(storage_err(
             "publish admission evidence",
-            "frozen evidence is below storage quorum — the admission stays held for resume",
+            format!(
+                "{} is not Stored yet ({}) — the admission stays held for resume",
+                row.object_key, row.last_error
+            ),
         ));
     }
     pending.state = EconomicAdmissionState::EvidencePublished;
@@ -782,13 +772,8 @@ pub(crate) async fn finish_admission(
             .map_err(|e| storage_err("root claim body", e))?;
             let bytes = sign_economic_root_claim(&body, &secret_key)
                 .map_err(|e| storage_err("sign root claim", e))?;
-            economic_lineage::put_frozen_root_claim(
-                pending.economic_position,
-                &k_root,
-                &bytes,
-                tick() as i64,
-            )
-            .map_err(|e| storage_err("freeze root claim", e))?;
+            economic_lineage::put_frozen_root_claim(pending.economic_position, &k_root, &bytes)
+                .map_err(|e| storage_err("freeze root claim", e))?;
             economic_lineage::get_frozen_root_claim(pending.economic_position)
                 .map_err(|e| storage_err("re-read frozen root claim", e))?
                 .map(|(_, b)| b)
@@ -800,21 +785,51 @@ pub(crate) async fn finish_admission(
                 })?
         }
     };
-    // Leader first (Part II §8): the seed of position `q` takes the root this
-    // device validated at `q - 1`, so nothing about where the race is decided
-    // is chosen here.
-    register_economic_root(
+    // The claim goes along the root cell's route, leader first. The route's
+    // seed takes the root this device validated at `q - 1`, so nothing about
+    // where the race is decided is chosen here.
+    let cell = crate::sdk::economic_registers::root_cell(
         set,
+        network_id,
         &genesis,
         &devid,
         pending.economic_position,
         &validated.economic_root(),
-        &frozen_root,
-    )
-    .await
-    .map_err(|e| storage_err("root register", e))?;
+    )?;
+    let write = register_economic_root(set, &cell, &frozen_root).await?;
+    if !write.reached_leader() {
+        return Err(storage_err(
+            "root register",
+            "the root cell's leader did not answer — the admission stays held for resume",
+        ));
+    }
     pending.state = EconomicAdmissionState::Registered;
     core.update_pending_admission_state(&pending)?;
+    // The position is this device's only once its claim is FINAL at the
+    // cell. Another claim holding the leader link — this trader's own SoFi
+    // `C_q`, for one — takes the position, and this admission never lands.
+    match crate::sdk::economic_registers::root_claim_settlement(set, &cell, &frozen_root).await? {
+        crate::sdk::economic_registers::RootClaimSettlement::Final => {}
+        crate::sdk::economic_registers::RootClaimSettlement::Lost { holder } => {
+            let taken_by = match holder.single_root() {
+                Ok(claim) => format!(
+                    "another root claim, for root {}",
+                    crate::util::text_id::encode_base32_crockford(&claim.body().post_economic_root)
+                ),
+                Err(conditional) => conditional.to_string(),
+            };
+            return Err(DsmError::invalid_operation(format!(
+                "position {} is held by {taken_by}: this admission cannot land there",
+                pending.economic_position
+            )));
+        }
+        crate::sdk::economic_registers::RootClaimSettlement::Pending(why) => {
+            return Err(storage_err(
+                "root register",
+                format!("the claim is not final yet ({why}) — the admission stays held for resume"),
+            ));
+        }
+    }
 
     // The VERIFIER's answer — the same predicate any foreign device runs, from
     // the same object. This device decodes and verifies the EXACT envelope it
@@ -840,7 +855,7 @@ pub(crate) async fn finish_admission(
         runtime: tokio::runtime::Handle::current(),
         expected_network_id: network_id.to_vec(),
     };
-    let (new_validated, _funded) = advance_validated(
+    let advanced = advance_validated(
         validated,
         &registered,
         &manifest,
@@ -909,17 +924,21 @@ pub(crate) async fn finish_admission(
     // that same root before the bytes exist.
 
     let had_post_admit = !post_admit_artifacts.is_empty();
+    log::debug!(
+        "[economic admission] position {} funds {} credit(s)",
+        advanced.root.economic_position(),
+        advanced.funded.len()
+    );
     core.admit_economic_position(
         dsm::economic::lineage::AdmittedEconomicPosition::SingleRoot {
-            economic_position: new_validated.economic_position(),
-            economic_root: new_validated.economic_root(),
+            economic_position: advanced.root.economic_position(),
+            economic_root: advanced.root.economic_root(),
+            claim_ref: advanced.claim.claim_ref(),
         },
         &operation_digest,
         &leaves,
         &set.id(),
         &post_admit_artifacts,
-        // An ordinary admission selects no vault head.
-        &[],
     )?;
     if had_post_admit {
         // Land the post-admission objects (the release) on the fleet NOW —
@@ -935,7 +954,7 @@ pub(crate) async fn finish_admission(
     }
 
     Ok(AdmittedOutcome {
-        economic_position: new_validated.economic_position(),
+        economic_position: advanced.root.economic_position(),
     })
 }
 
@@ -978,27 +997,13 @@ pub(crate) async fn resume_pending_admission(
         return Ok(outcome);
     }
 
-    // The validated PREDECESSOR: the admitted coordinate, or activation-shape
-    // for a first admission. Its root must equal the pending pre-root — a
-    // mismatch means the local store is incoherent, which is a stop, not a
-    // guess.
-    let admitted =
-        match economic_lineage::get_admitted().map_err(|e| storage_err("load admitted", e))? {
-            Some(admitted) => admitted,
-            // No admitted row: this is a first admission, whose predecessor is
-            // the pending pre-root by definition and is therefore ordinary.
-            None => dsm::economic::lineage::AdmittedEconomicPosition::SingleRoot {
-                economic_position: pending.economic_position - 1,
-                economic_root: pending.pre_economic_root,
-            },
-        };
-    // RESUMING PAST AN UNDECIDED PREDECESSOR IS THE CRASH CASE THIS FENCES.
-    // A device that crashed between a fulfillment's registration and its
-    // route's resolution comes back with exactly this shape, and the resume
-    // would otherwise rebuild a predecessor from whichever root the store
-    // held and carry on.
-    let validated = ValidatedEconomicRoot::rehydrate_from_admitted_store(admitted)
-        .map_err(|e| DsmError::invalid_operation(format!("resume: {e}")))?;
+    // The validated PREDECESSOR: the admitted coordinate, or the activation
+    // root before a first admission. Its root must equal the pending
+    // pre-root — a mismatch means the local store is incoherent, which is a
+    // stop, not a guess. An admitted position that has selected no root
+    // stops here too: a device that crashed between a fulfillment's
+    // registration and its route's resolution comes back with that shape.
+    let validated = validated_root_or_activate(core)?;
     if validated.economic_root() != pending.pre_economic_root
         || validated.economic_position() + 1 != pending.economic_position
     {
@@ -1081,12 +1086,7 @@ pub(crate) async fn resume_pending_admission(
         })?;
     let authority_position = crate::sdk::identity_presentation::derive_own_authority_context(
         &wallet_seed,
-        crate::sdk::identity_presentation::OwnerIdentityInputs {
-            network_id,
-            wallet_index: 0,
-            device_slot: 0,
-            genesis_version: 3,
-        },
+        crate::sdk::identity_presentation::OwnerIdentityInputs::beta(network_id),
     )?
     .position;
     let manifest = EconomicAdmissionManifest::new(
@@ -1158,8 +1158,9 @@ pub(crate) async fn resume_pending_admission(
             None::<std::io::Error>,
         ));
     }
-    let (own_pk, _own_sk) = crate::sdk::signing_authority::current_keypair()
-        .map_err(|e| storage_err("signing authority", e))?;
+    let own_pk = crate::sdk::signing_authority::current_keypair()
+        .map_err(|e| storage_err("signing authority", e))?
+        .0;
     let verified_successor = dsm::economic::successor_evidence::verify_dsm_successor_evidence(
         &successor_bytes,
         &genesis,
@@ -1184,18 +1185,19 @@ pub(crate) async fn resume_pending_admission(
         crate::storage::client_db::recipient_receipt_fold::find_release_bytes_for_manifest_addr(
             &coords.admission_manifest_addr,
         )
-        .map_err(|e| storage_err("release lookup", e))?
-        .map(|bytes| {
-            vec![(
-                crate::sdk::economic_registers::immutable_object_key(
-                    dsm::common::domain_tags::TAG_DSM_RECIPIENT_ECONOMIC_RELEASE,
-                    &bytes,
-                ),
-                bytes,
-                "recipient-economic-release",
-            )]
-        })
-        .unwrap_or_default();
+        .map_err(|e| storage_err("release lookup", e))?;
+    // Only a recipient admission has a release; a sender's has none.
+    let post_admit = match post_admit {
+        Some(bytes) => vec![(
+            crate::sdk::economic_registers::immutable_object_key(
+                dsm::common::domain_tags::TAG_DSM_RECIPIENT_ECONOMIC_RELEASE,
+                &bytes,
+            ),
+            bytes,
+            "recipient-economic-release",
+        )],
+        None => Vec::new(),
+    };
     finish_admission(
         core, network_id, &set, &validated, witness, manifest, operation, pending, post_admit,
     )
@@ -1206,11 +1208,11 @@ pub(crate) async fn resume_pending_admission(
 // Recipient-side admission (3.5b PR4)
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// How recipient prevalidation refused — the taxonomy decides the staging
-/// row's fate: `Terminal` ⇒ TerminalReject (a hostile or impossible transfer,
-/// refused BEFORE any durable econ state); `Quarantined` ⇒ terminal with the
-/// register-divergence reason recorded; `Incomplete` ⇒ the row stays
-/// `ReadyToVerify` and retries next poll (an outage is never an attack).
+/// How recipient prevalidation refused. `Terminal` (a hostile or impossible
+/// transfer) and `Quarantined` (a divergent register cell) refuse it BEFORE
+/// any durable economic state, and nothing negative is recorded
+/// (MR-DSM-0018); `Incomplete` leaves the row `ReadyToVerify` to retry next
+/// poll (an outage is never an attack).
 #[derive(Debug)]
 pub(crate) enum PrevalidationRefusal {
     Terminal(String),
@@ -1229,7 +1231,7 @@ impl core::fmt::Display for PrevalidationRefusal {
 }
 
 /// Everything the SYNC accept closure needs, established BEFORE the fence
-/// exists: the validated sender debit, the q-durable foreign closure, and
+/// exists: the validated sender debit, the Stored foreign closure, and
 /// this device's own admission prerequisites. No awaits remain past here.
 pub(crate) struct RecipientAdmissionPrereqs {
     pub peer_genesis: [u8; 32],
@@ -1252,7 +1254,7 @@ pub(crate) struct RecipientAdmissionPrereqs {
 /// (owner corrections 3+8): resolve and validate the sender's debit via the
 /// PR2 walker (wire locators as untrusted hints), bind the wire bytes to the
 /// validated operation, require EK-ancestry portability, establish the
-/// q-durable evidence closure (correction 5, recorded at the ACTUAL fetch
+/// Stored evidence closure (correction 5, recorded at the ACTUAL fetch
 /// boundary — correction 2), and assemble this device's own admission
 /// prerequisites.
 pub(crate) async fn prevalidate_incoming_transfer_admission(
@@ -1315,7 +1317,7 @@ pub(crate) async fn prevalidate_incoming_transfer_admission(
     // it, walk from the activation root so the recorder observes the FULL
     // closure this validation depends on (correction 4: durability is never
     // inferred).
-    let closure_durable = client_db::economic_lineage::peer_closure_q_durable(
+    let closure_durable = client_db::economic_lineage::peer_closure_stored(
         peer_genesis,
         peer_devid,
         sender_economic_position,
@@ -1410,19 +1412,21 @@ pub(crate) async fn prevalidate_incoming_transfer_admission(
         }
     }
 
-    // ── q-durability of the exact recorded closure (correction 5) ──────────
+    // ── The exact recorded closure, Stored on the set ──────────────────────
     if !closure_durable {
         // Take the recorded closure OUT before awaiting — a RefCell borrow
         // must never live across an await point.
         let closure = std::mem::take(&mut *recorder.recorded.borrow_mut());
-        crate::handlers::artifact_republish::ensure_immutable_closure_on_quorum(&set, &closure)
+        crate::handlers::artifact_republish::ensure_closure_stored(&set, &closure)
             .await
             .map_err(incomplete)?;
-        let _ = client_db::economic_lineage::mark_peer_closure_q_durable(
+        if let Err(e) = client_db::economic_lineage::mark_peer_closure_stored(
             peer_genesis,
             peer_devid,
             sender_economic_position,
-        );
+        ) {
+            log::warn!("peer closure memo: not recorded: {e}");
+        }
     }
 
     // ── The prepared admission for the exact signed op the apply will see ──
@@ -1495,9 +1499,10 @@ pub(crate) fn build_recipient_admission(
         &b_artifacts.receipt_bytes,
     )
     .map_err(|e| DsmError::invalid_operation(format!("countersigned receipt: {e}")))?;
-    let (_a_side, b) = receipt
+    let b = receipt
         .split_countersign_b()
-        .map_err(|e| DsmError::invalid_operation(format!("countersign split: {e}")))?;
+        .map_err(|e| DsmError::invalid_operation(format!("countersign split: {e}")))?
+        .1;
     let evidence_digest_a = dsm::crypto::blake3::domain_hash_bytes(
         dsm::common::domain_tags::TAG_DSM_RECEIPT_EVIDENCE_A,
         evidence_bytes,
@@ -1602,8 +1607,9 @@ pub(crate) fn build_recipient_admission(
 
     // ── The RELEASE: every field an output of THIS build, signed now,
     // frozen in the accept tx, deliverable only at ECON_ADMITTED ───────────
-    let (_pk, sk) = crate::sdk::signing_authority::current_keypair()
-        .map_err(|e| storage_err("signing authority", e))?;
+    let sk = crate::sdk::signing_authority::current_keypair()
+        .map_err(|e| storage_err("signing authority", e))?
+        .1;
     let release_bytes = dsm::economic::release::sign_recipient_economic_release(
         &dsm::economic::release::ReleaseFacts {
             receipt_commitment: b_artifacts.commitment,
@@ -1691,7 +1697,7 @@ pub(crate) async fn verify_release_against_register(
 /// publication debt through the generic frozen-artifact backlog — fully
 /// offline; the republish sweep publishes them when connectivity returns. A
 /// later ONLINE acceptance bundle may not depend on these predecessors until
-/// that exact closure is q-durable (prevalidation checks per exact address).
+/// that exact closure is Stored (prevalidation checks per exact address).
 ///
 /// Idempotent: re-recording the same step (same content address) is a no-op,
 /// so crash-replay and both directions of the sweep converge.

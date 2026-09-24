@@ -53,7 +53,6 @@ CI publishes the storage-node binary, the frontend bundle, and the SBOM; the APK
 |---|---|---|
 | Identity and genesis (mnemonic-rooted, self-attested, published to the fleet) | proven on hardware | 4 devices wiped and re-created against the live fleet 2026-09-13, each identity accepted by all 5 nodes |
 | Bilateral transfers, offline cash load/unload | proven on hardware | two-device end-to-end 2026-08-24; byte-identical state on both sides |
-| BLE command path (`ble.command`, protobuf-only) | proven on hardware | phone-to-phone over BLE through the Android backend |
 | SoFi: DLV markets, routing, routed unlock, reconcile, close, receipts | proven on hardware | full lifecycle on 4 phones 2026-09-13, see [Sovereign Finance](#sovereign-finance-sofi) |
 | Token surface: create, mint, burn, adopt, policy; faucet | proven on hardware | same run; capped issuance stays fenced in beta |
 | Storage fleet: 5 nodes, quorum 3 of 5, write-once registers | proven on hardware | the live fleet every run above wrote to; `BETA_ROOT_REGISTER_MEMBERS` pins the 5 members |
@@ -186,7 +185,7 @@ Offline bearer transfer needs one thing software cannot provide: a way to tell a
 
 ## Android app and frontend
 
-The wallet is a four-layer stack and no layer skips another: **React frontend → Kotlin container → JNI/SDK (Rust) → core (Rust)**. The frontend is pure rendering; every rule lives in Rust, and the Kotlin layer carries bytes. The container loads `libdsm_sdk.so` (built with cargo-ndk for every ABI and staged by the Gradle `refreshDsmJniLibs` task), serves the React bundle from the APK's assets through a WebView asset loader, and bridges UI and SDK over a binary MessagePort channel carrying Envelope v3 protobuf bytes. BLE commands travel the same way through `ble.command`; the USB anchor appliance is attached through the same bridge seam.
+The wallet is a four-layer stack and no layer skips another: **React frontend → Kotlin container → JNI/SDK (Rust) → core (Rust)**. The frontend is pure rendering; every rule lives in Rust, and the Kotlin layer carries bytes. The container loads `libdsm_sdk.so` (built with cargo-ndk for every ABI and staged by the Gradle `refreshDsmJniLibs` task), serves the React bundle from the APK's assets through a WebView asset loader, and bridges UI and SDK over a binary MessagePort channel carrying Envelope v3 protobuf bytes. The USB anchor appliance is attached through the same bridge seam.
 
 ```bash
 make android        # rebuild JNI libs, rebuild and copy the frontend bundle, clean Gradle assemble

@@ -47,10 +47,98 @@ const ENVELOPE_MESSAGE_ID_TAG: u32 = 3;
 // rejected by the canonical validator, never routed.
 const RESERVED_PAYLOAD_TAGS: &[u32] = &[13, 14, 33, 110, 111];
 const ALLOWED_PAYLOAD_TAGS: &[u32] = &[
-    10, 11, 12, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 27, 28, 29, 31, 32, 34, 35, 36, 37, 38,
-    39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62,
-    63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86,
-    87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106,
+    10,
+    11,
+    12,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24,
+    25,
+    27,
+    28,
+    29,
+    31,
+    32,
+    34,
+    35,
+    36,
+    37,
+    38,
+    39,
+    40,
+    41,
+    42,
+    43,
+    44,
+    45,
+    46,
+    47,
+    48,
+    49,
+    50,
+    51,
+    52,
+    53,
+    54,
+    55,
+    56,
+    57,
+    58,
+    59,
+    60,
+    61,
+    62,
+    63,
+    64,
+    65,
+    66,
+    67,
+    68,
+    69,
+    70,
+    71,
+    72,
+    73,
+    74,
+    75,
+    76,
+    77,
+    78,
+    79,
+    80,
+    81,
+    82,
+    83,
+    84,
+    85,
+    86,
+    87,
+    88,
+    89,
+    90,
+    91,
+    92,
+    93,
+    94,
+    95,
+    96,
+    97,
+    98,
+    99,
+    100,
+    101,
+    102,
+    103,
+    104,
+    105,
+    106,
     SEALED_PAYLOAD_TAG,
 ];
 
@@ -136,94 +224,93 @@ fn skip_field(bytes: &[u8], cursor: &mut usize, wire_type: u64) -> Result<(), Ds
     }
 }
 
-#[derive(Default)]
-struct HeaderScan {
-    device_id_seen: bool,
-    chain_tip_seen: bool,
-}
+/// Tags of `Envelope.headers` that were removed and must never be read again:
+/// 2 was a chain tip and 4 a sequence counter, neither verified by a receiver.
+const RESERVED_HEADER_TAGS: &[u32] = &[2, 4];
+const HEADER_DEVICE_ID_TAG: u32 = 1;
+const HEADER_GENESIS_HASH_TAG: u32 = 3;
 
-fn validate_headers_wire(bytes: &[u8]) -> Result<HeaderScan, DsmError> {
+/// `Envelope.headers` names the sender of an addressed envelope: exactly its
+/// device id and genesis hash, 32 bytes each, both present.
+fn validate_headers_wire(bytes: &[u8]) -> Result<(), DsmError> {
     let mut cursor = 0usize;
-    let mut seen = [false; 5];
-    let mut scan = HeaderScan::default();
+    let mut device_id_seen = false;
+    let mut genesis_hash_seen = false;
 
     while cursor < bytes.len() {
         let key = read_varint(bytes, &mut cursor)?;
         let field = u32::try_from(key >> 3).map_err(|_| parsing_error("field tag overflow"))?;
         let wire_type = key & 0x07;
 
-        if !(1..=4).contains(&field) {
+        if RESERVED_HEADER_TAGS.contains(&field) {
             return Err(parsing_error(format!(
-                "unknown Envelope.headers field {field}"
+                "Envelope.headers field {field} is reserved"
             )));
         }
-        if seen[field as usize] {
+        let (name, seen) = match field {
+            HEADER_DEVICE_ID_TAG => ("device_id", &mut device_id_seen),
+            HEADER_GENESIS_HASH_TAG => ("genesis_hash", &mut genesis_hash_seen),
+            _ => {
+                return Err(parsing_error(format!(
+                    "unknown Envelope.headers field {field}"
+                )))
+            }
+        };
+        if *seen {
             return Err(parsing_error(format!(
-                "duplicate Envelope.headers field {field}"
+                "duplicate Envelope.headers.{name} field"
             )));
         }
-        seen[field as usize] = true;
-
-        match field {
-            1..=3 => {
-                if wire_type != 2 {
-                    return Err(parsing_error(format!(
-                        "Envelope.headers field {field} must be bytes"
-                    )));
-                }
-                let value = read_len(bytes, &mut cursor)?;
-                match field {
-                    1 if value.len() != 32 => {
-                        return Err(parsing_error(format!(
-                            "Envelope.headers.device_id must be 32 bytes, got {}",
-                            value.len()
-                        )));
-                    }
-                    2 if value.len() != 32 => {
-                        return Err(parsing_error(format!(
-                            "Envelope.headers.chain_tip must be 32 bytes, got {}",
-                            value.len()
-                        )));
-                    }
-                    3 if value.len() != 32 => {
-                        return Err(parsing_error(format!(
-                            "Envelope.headers.genesis_hash must be 32 bytes, got {}",
-                            value.len()
-                        )));
-                    }
-                    _ => {}
-                }
-                if field == 1 {
-                    scan.device_id_seen = true;
-                } else if field == 2 {
-                    scan.chain_tip_seen = true;
-                }
-            }
-            4 => {
-                if wire_type != 0 {
-                    return Err(parsing_error("Envelope.headers.seq must be a varint"));
-                }
-                read_varint(bytes, &mut cursor)?;
-            }
-            _ => unreachable!(),
+        *seen = true;
+        if wire_type != 2 {
+            return Err(parsing_error(format!(
+                "Envelope.headers.{name} must be bytes"
+            )));
+        }
+        let value = read_len(bytes, &mut cursor)?;
+        if value.len() != 32 {
+            return Err(parsing_error(format!(
+                "Envelope.headers.{name} must be 32 bytes, got {}",
+                value.len()
+            )));
         }
     }
 
-    if !scan.device_id_seen {
+    if !device_id_seen {
         return Err(parsing_error("Envelope.headers.device_id is required"));
     }
-    if !scan.chain_tip_seen {
-        return Err(parsing_error("Envelope.headers.chain_tip is required"));
+    if !genesis_hash_seen {
+        return Err(parsing_error("Envelope.headers.genesis_hash is required"));
     }
-
-    Ok(scan)
+    Ok(())
 }
 
-/// Validate raw Envelope v3 protobuf bytes before prost decoding.
+/// Who an envelope is from, which decides what it must carry.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EnvelopeForm {
+    /// From a sender to a receiver: open with headers and a message id, or
+    /// sealed (the headers then ride inside the seal).
+    Addressed,
+    /// This device's Core or SDK answering its own caller. It makes no sender
+    /// claim and names no message: no headers, no message id, never sealed.
+    LocalAnswer,
+}
+
+/// Validate the raw bytes of an addressed Envelope v3 before prost decoding.
 ///
 /// This catches unknown or reserved fields and malformed required byte lengths
 /// that prost would otherwise drop or coerce into defaults.
 pub fn validate_canonical_envelope_v3_bytes(bytes: &[u8]) -> Result<(), DsmError> {
+    validate_envelope_v3_wire(bytes, EnvelopeForm::Addressed)
+}
+
+/// Validate the raw bytes of a local answer before prost decoding: no
+/// headers, no message id, never sealed, one payload.
+pub fn validate_local_answer_v3_bytes(bytes: &[u8]) -> Result<(), DsmError> {
+    validate_envelope_v3_wire(bytes, EnvelopeForm::LocalAnswer)
+}
+
+fn validate_envelope_v3_wire(bytes: &[u8], form: EnvelopeForm) -> Result<(), DsmError> {
     let mut cursor = 0usize;
     let mut last_field = 0u32;
     let mut version_seen = false;
@@ -314,16 +401,34 @@ pub fn validate_canonical_envelope_v3_bytes(bytes: &[u8]) -> Result<(), DsmError
     if !version_seen {
         return Err(parsing_error("Envelope.version is required"));
     }
-    // A sealed envelope carries its headers inside the seal; an open one
-    // carries them outside. Never both, never neither.
-    if sealed_seen && headers_seen {
-        return Err(parsing_error("a sealed Envelope must not carry headers"));
-    }
-    if !sealed_seen && !headers_seen {
-        return Err(parsing_error("Envelope.headers is required"));
-    }
-    if !message_id_seen {
-        return Err(parsing_error("Envelope.message_id is required"));
+    match form {
+        EnvelopeForm::Addressed => {
+            // A sealed envelope carries its headers inside the seal; an open
+            // one carries them outside. Never both, never neither.
+            if sealed_seen && headers_seen {
+                return Err(parsing_error("a sealed Envelope must not carry headers"));
+            }
+            if !sealed_seen && !headers_seen {
+                return Err(parsing_error("Envelope.headers is required"));
+            }
+            if !message_id_seen {
+                return Err(parsing_error("Envelope.message_id is required"));
+            }
+        }
+        EnvelopeForm::LocalAnswer => {
+            if headers_seen {
+                return Err(parsing_error("a local answer carries no headers"));
+            }
+            if message_id_seen {
+                return Err(parsing_error("a local answer carries no message id"));
+            }
+            if sealed_seen {
+                return Err(parsing_error("a local answer is never sealed"));
+            }
+            if !payload_seen {
+                return Err(parsing_error("a local answer carries a payload"));
+            }
+        }
     }
 
     Ok(())
@@ -334,9 +439,30 @@ pub fn to_canonical_bytes(envelope: &Envelope) -> Vec<u8> {
     envelope.encode_to_vec()
 }
 
-/// Decode transport protobuf bytes to an Envelope
+/// Decode the transport protobuf bytes of an addressed Envelope.
 pub fn from_canonical_bytes(bytes: &[u8]) -> Result<Envelope, DsmError> {
-    validate_canonical_envelope_v3_bytes(bytes)?;
+    decode_envelope_v3(bytes, EnvelopeForm::Addressed)
+}
+
+/// Decode a local answer: the unframed Envelope v3 bytes this device's Core
+/// or SDK returned to its own caller. An addressed envelope is not a local
+/// answer, and a local answer is not an addressed envelope.
+pub fn local_answer_from_canonical_bytes(bytes: &[u8]) -> Result<Envelope, DsmError> {
+    decode_envelope_v3(bytes, EnvelopeForm::LocalAnswer)
+}
+
+/// A local answer carrying `payload`: no headers, no message id.
+pub fn local_answer(payload: crate::types::proto::envelope::Payload) -> Envelope {
+    Envelope {
+        version: 3,
+        headers: None,
+        message_id: Vec::new(),
+        payload: Some(payload),
+    }
+}
+
+fn decode_envelope_v3(bytes: &[u8], form: EnvelopeForm) -> Result<Envelope, DsmError> {
+    validate_envelope_v3_wire(bytes, form)?;
 
     let envelope = Envelope::decode(bytes).map_err(|e| {
         DsmError::parsing(
@@ -355,53 +481,16 @@ pub fn from_canonical_bytes(bytes: &[u8]) -> Result<Envelope, DsmError> {
     require_envelope_v3(envelope)
 }
 
-/// Compute canonical signing bytes for Envelope v3 transfers.
-/// This ensures both sender and receiver use identical byte preimages for signing/verification.
-///
-/// Required invariants:
-/// 1. The signed preimage must be derivable from received protobuf bytes without reconstruction
-/// 2. Must include from_device_id (32 bytes) so receiver can select correct signer public key
-/// 3. Must exclude signature fields (no self-referential encoding)
-/// 4. Verification must fail with precise reasons (missing fields → REJECT_MISSING_SIGNING_CONTEXT)
-#[allow(clippy::too_many_arguments)]
-pub fn compute_transfer_signing_bytes_v3(
-    from_device_id: &[u8; 32],
-    to_device_id: &[u8; 32],
-    token_id: &str,
-    amount: u64,
-    chain_tip: &[u8; 32],
-    seq: u64,
-    nonce: &[u8],
-    memo: &str,
-) -> Vec<u8> {
-    // Domain separation for transfer signing
-    let mut hasher = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_TRANSFER_V3);
-
-    // Include all signing context in deterministic order
-    hasher.update(from_device_id);
-    hasher.update(to_device_id);
-    hasher.update(token_id.as_bytes());
-    hasher.update(&amount.to_le_bytes());
-    hasher.update(chain_tip);
-    hasher.update(&seq.to_le_bytes());
-    hasher.update(nonce);
-    hasher.update(memo.as_bytes());
-
-    hasher.finalize().as_bytes().to_vec()
-}
-
 /// Compute canonical signing bytes for Envelope v3 online messages.
 ///
-/// Required invariants mirror transfers:
+/// Required invariants:
 /// 1. Preimage derivable from received protobuf bytes
 /// 2. Includes from_device_id (signer selection)
 /// 3. Excludes signature fields
-#[allow(clippy::too_many_arguments)]
 pub fn compute_online_message_signing_bytes_v3(
     from_device_id: &[u8; 32],
     to_device_id: &[u8; 32],
     chain_tip: &[u8; 32],
-    seq: u64,
     nonce: &[u8],
     payload: &[u8],
     memo: &str,
@@ -410,7 +499,6 @@ pub fn compute_online_message_signing_bytes_v3(
     hasher.update(from_device_id);
     hasher.update(to_device_id);
     hasher.update(chain_tip);
-    hasher.update(&seq.to_le_bytes());
     hasher.update(nonce);
     hasher.update(payload);
     hasher.update(memo.as_bytes());
@@ -422,7 +510,6 @@ pub fn compute_online_message_nonce_v3(
     from_device_id: &[u8; 32],
     to_device_id: &[u8; 32],
     chain_tip: &[u8; 32],
-    seq: u64,
     payload: &[u8],
     memo: &str,
 ) -> [u8; 32] {
@@ -430,7 +517,6 @@ pub fn compute_online_message_nonce_v3(
     hasher.update(from_device_id);
     hasher.update(to_device_id);
     hasher.update(chain_tip);
-    hasher.update(&seq.to_le_bytes());
     hasher.update(payload);
     hasher.update(memo.as_bytes());
     let digest = hasher.finalize();
@@ -450,9 +536,7 @@ mod tests {
             version: 3,
             headers: Some(crate::types::proto::Headers {
                 device_id: vec![1; 32],
-                chain_tip: vec![2; 32],
                 genesis_hash: vec![3; 32],
-                seq: 42,
             }),
             message_id: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
             payload: Some(envelope::Payload::Error(Error {
@@ -485,9 +569,7 @@ mod tests {
             version: 3,
             headers: Some(crate::types::proto::Headers {
                 device_id: vec![1; 32],
-                chain_tip: vec![2; 32],
                 genesis_hash: vec![3; 32],
-                seq: 42,
             }),
             message_id: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
             payload: Some(envelope::Payload::Error(Error {
@@ -500,25 +582,10 @@ mod tests {
             })),
         };
         let mut bytes = to_canonical_bytes(&original);
-        // Corrupt the length prefix of device_id (first field in Headers)
-        // Protobuf encoding: field tag + length + data
-        // Corrupting early bytes is more likely to break structure
-        if bytes.len() > 3 {
-            bytes[3] ^= 0xFF; // Corrupt a byte in the field tag/length area
-        }
-        let result = from_canonical_bytes(&bytes);
-        // Prost may succeed and return a default Envelope, so check required fields
-        match result {
-            Err(_) => {}
-            Ok(env) => {
-                // Accept prost's default output if headers are missing or required fields are invalid
-                let invalid = env
-                    .headers
-                    .as_ref()
-                    .is_none_or(|h| h.device_id.len() != 32 || h.chain_tip.len() != 32);
-                assert!(invalid, "Corrupted bytes should not yield valid headers");
-            }
-        }
+        // bytes[3] is the length of Envelope.headers; flipping it breaks the
+        // framing of everything after it.
+        bytes[3] ^= 0xFF;
+        from_canonical_bytes(&bytes).expect_err("a corrupted headers length is refused");
     }
 
     #[test]
@@ -527,9 +594,7 @@ mod tests {
             version: 3,
             headers: Some(crate::types::proto::Headers {
                 device_id: vec![1; 32],
-                chain_tip: vec![2; 32],
                 genesis_hash: vec![3; 32],
-                seq: 42,
             }),
             message_id: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
             payload: Some(envelope::Payload::Error(Error {
@@ -577,9 +642,7 @@ mod tests {
             version: 3,
             headers: Some(crate::types::proto::Headers {
                 device_id: vec![1; 32],
-                chain_tip: vec![2; 32],
                 genesis_hash: vec![3; 32],
-                seq: 42,
             }),
             message_id: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
             payload: Some(envelope::Payload::Error(Error {
@@ -609,9 +672,7 @@ mod tests {
             version: 99, // Unexpected version
             headers: Some(crate::types::proto::Headers {
                 device_id: vec![1; 32],
-                chain_tip: vec![2; 32],
                 genesis_hash: vec![3; 32],
-                seq: 42,
             }),
             message_id: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
             payload: Some(envelope::Payload::Error(Error {
@@ -633,49 +694,14 @@ mod tests {
     }
 
     #[test]
-    fn transfer_signing_bytes_v3_is_deterministic() {
-        let from = [1u8; 32];
-        let to = [2u8; 32];
-        let tip = [3u8; 32];
-        let a =
-            compute_transfer_signing_bytes_v3(&from, &to, "tok", 100, &tip, 1, b"nonce", "memo");
-        let b =
-            compute_transfer_signing_bytes_v3(&from, &to, "tok", 100, &tip, 1, b"nonce", "memo");
-        assert_eq!(a, b);
-        assert_eq!(a.len(), 32);
-    }
-
-    #[test]
-    fn transfer_signing_bytes_v3_different_amounts_differ() {
-        let from = [1u8; 32];
-        let to = [2u8; 32];
-        let tip = [3u8; 32];
-        let a = compute_transfer_signing_bytes_v3(&from, &to, "tok", 100, &tip, 1, b"n", "");
-        let b = compute_transfer_signing_bytes_v3(&from, &to, "tok", 200, &tip, 1, b"n", "");
-        assert_ne!(a, b);
-    }
-
-    #[test]
-    fn transfer_signing_bytes_v3_different_token_ids_differ() {
-        let from = [1u8; 32];
-        let to = [2u8; 32];
-        let tip = [3u8; 32];
-        let a = compute_transfer_signing_bytes_v3(&from, &to, "tok_a", 100, &tip, 1, b"n", "");
-        let b = compute_transfer_signing_bytes_v3(&from, &to, "tok_b", 100, &tip, 1, b"n", "");
-        assert_ne!(a, b);
-    }
-
-    #[test]
     fn online_message_signing_bytes_v3_is_deterministic() {
         let from = [10u8; 32];
         let to = [20u8; 32];
         let tip = [30u8; 32];
-        let a = compute_online_message_signing_bytes_v3(
-            &from, &to, &tip, 5, b"nonce", b"payload", "hi",
-        );
-        let b = compute_online_message_signing_bytes_v3(
-            &from, &to, &tip, 5, b"nonce", b"payload", "hi",
-        );
+        let a =
+            compute_online_message_signing_bytes_v3(&from, &to, &tip, b"nonce", b"payload", "hi");
+        let b =
+            compute_online_message_signing_bytes_v3(&from, &to, &tip, b"nonce", b"payload", "hi");
         assert_eq!(a, b);
         assert_eq!(a.len(), 32);
     }
@@ -685,8 +711,8 @@ mod tests {
         let from = [10u8; 32];
         let to = [20u8; 32];
         let tip = [30u8; 32];
-        let a = compute_online_message_signing_bytes_v3(&from, &to, &tip, 5, b"n", b"alpha", "");
-        let b = compute_online_message_signing_bytes_v3(&from, &to, &tip, 5, b"n", b"beta", "");
+        let a = compute_online_message_signing_bytes_v3(&from, &to, &tip, b"n", b"alpha", "");
+        let b = compute_online_message_signing_bytes_v3(&from, &to, &tip, b"n", b"beta", "");
         assert_ne!(a, b);
     }
 
@@ -695,18 +721,18 @@ mod tests {
         let from = [0xAAu8; 32];
         let to = [0xBBu8; 32];
         let tip = [0xCCu8; 32];
-        let a = compute_online_message_nonce_v3(&from, &to, &tip, 7, b"data", "m");
-        let b = compute_online_message_nonce_v3(&from, &to, &tip, 7, b"data", "m");
+        let a = compute_online_message_nonce_v3(&from, &to, &tip, b"data", "m");
+        let b = compute_online_message_nonce_v3(&from, &to, &tip, b"data", "m");
         assert_eq!(a, b);
     }
 
     #[test]
-    fn online_message_nonce_v3_different_seq_differ() {
+    fn online_message_nonce_v3_different_payloads_differ() {
         let from = [0xAAu8; 32];
         let to = [0xBBu8; 32];
         let tip = [0xCCu8; 32];
-        let a = compute_online_message_nonce_v3(&from, &to, &tip, 1, b"d", "");
-        let b = compute_online_message_nonce_v3(&from, &to, &tip, 2, b"d", "");
+        let a = compute_online_message_nonce_v3(&from, &to, &tip, b"d1", "");
+        let b = compute_online_message_nonce_v3(&from, &to, &tip, b"d2", "");
         assert_ne!(a, b);
     }
 
@@ -732,9 +758,7 @@ mod tests {
             version: 3,
             headers: Some(crate::types::proto::Headers {
                 device_id: vec![1; 32],
-                chain_tip: vec![2; 32],
                 genesis_hash: vec![3; 32],
-                seq: 42,
             }),
             message_id: vec![4; 16],
             payload: None,
@@ -755,9 +779,7 @@ mod tests {
             version: 3,
             headers: Some(crate::types::proto::Headers {
                 device_id: vec![1; 32],
-                chain_tip: vec![2; 32],
                 genesis_hash: vec![3; 32],
-                seq: 7,
             }),
             message_id: vec![4; 16],
             payload: None,
@@ -773,15 +795,95 @@ mod tests {
         );
     }
 
+    /// The removed header tags (2, a chain tip; 4, a counter) are refused, so
+    /// no sender can put either back on the wire and have it read.
+    #[test]
+    fn strict_decode_refuses_the_reserved_header_tags() {
+        let open = |extra: &[u8]| {
+            let mut headers = crate::types::proto::Headers {
+                device_id: vec![1; 32],
+                genesis_hash: vec![3; 32],
+            }
+            .encode_to_vec();
+            headers.extend_from_slice(extra);
+            let mut bytes = vec![0x08, 0x03, 0x12, headers.len() as u8];
+            bytes.extend_from_slice(&headers);
+            bytes.extend_from_slice(&[0x1a, 0x10]);
+            bytes.extend_from_slice(&[4u8; 16]);
+            bytes
+        };
+        let mut tip = vec![0x12, 0x20];
+        tip.extend_from_slice(&[2u8; 32]);
+        let err = from_canonical_bytes(&open(&tip)).expect_err("header tag 2 is refused");
+        assert!(
+            err.to_string().contains("headers field 2 is reserved"),
+            "{err}"
+        );
+        let err = from_canonical_bytes(&open(&[0x20, 0x2a])).expect_err("header tag 4 is refused");
+        assert!(
+            err.to_string().contains("headers field 4 is reserved"),
+            "{err}"
+        );
+        from_canonical_bytes(&open(&[])).expect("the same headers without them decode");
+    }
+
+    #[test]
+    fn strict_decode_requires_the_genesis_hash() {
+        let env = Envelope {
+            version: 3,
+            headers: Some(crate::types::proto::Headers {
+                device_id: vec![1; 32],
+                genesis_hash: Vec::new(),
+            }),
+            message_id: vec![4; 16],
+            payload: None,
+        };
+        let err = from_canonical_bytes(&to_canonical_bytes(&env))
+            .expect_err("headers without a genesis hash are refused");
+        assert!(
+            err.to_string().contains("genesis_hash is required"),
+            "{err}"
+        );
+    }
+
+    /// A local answer and an addressed envelope are different forms, and
+    /// neither decoder takes the other's.
+    #[test]
+    fn a_local_answer_and_an_addressed_envelope_do_not_cross() {
+        let answer = to_canonical_bytes(&local_answer(envelope::Payload::Error(Error {
+            code: 7,
+            ..Default::default()
+        })));
+        let decoded = local_answer_from_canonical_bytes(&answer).expect("a local answer decodes");
+        assert!(decoded.headers.is_none() && decoded.message_id.is_empty());
+        let err = from_canonical_bytes(&answer).expect_err("a local answer is not addressed");
+        assert!(err.to_string().contains("headers is required"), "{err}");
+
+        let addressed = to_canonical_bytes(&Envelope {
+            version: 3,
+            headers: Some(crate::types::proto::Headers {
+                device_id: vec![1; 32],
+                genesis_hash: vec![3; 32],
+            }),
+            message_id: vec![4; 16],
+            payload: Some(envelope::Payload::Error(Error {
+                code: 7,
+                ..Default::default()
+            })),
+        });
+        from_canonical_bytes(&addressed).expect("an addressed envelope decodes");
+        let err = local_answer_from_canonical_bytes(&addressed)
+            .expect_err("an addressed envelope is not a local answer");
+        assert!(err.to_string().contains("carries no headers"), "{err}");
+    }
+
     #[test]
     fn strict_decode_rejects_bad_header_lengths() {
         let env = Envelope {
             version: 3,
             headers: Some(crate::types::proto::Headers {
                 device_id: vec![1; 31],
-                chain_tip: vec![2; 32],
                 genesis_hash: vec![3; 32],
-                seq: 42,
             }),
             message_id: vec![4; 16],
             payload: None,
@@ -790,18 +892,5 @@ mod tests {
         let err = from_canonical_bytes(&to_canonical_bytes(&env))
             .expect_err("short device_id must reject");
         assert!(err.to_string().contains("device_id must be 32 bytes"));
-    }
-
-    #[test]
-    fn transfer_and_online_message_signing_bytes_differ_same_inputs() {
-        let from = [1u8; 32];
-        let to = [2u8; 32];
-        let tip = [3u8; 32];
-        let transfer = compute_transfer_signing_bytes_v3(&from, &to, "", 0, &tip, 0, b"", "");
-        let online = compute_online_message_signing_bytes_v3(&from, &to, &tip, 0, b"", b"", "");
-        assert_ne!(
-            transfer, online,
-            "Different domain tags must produce different hashes"
-        );
     }
 }

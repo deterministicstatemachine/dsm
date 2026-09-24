@@ -28,7 +28,6 @@ use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
 
 use super::get_connection;
-use crate::util::deterministic_time::tick;
 
 /// A token as recorded at creation time.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,41 +37,48 @@ pub struct TokenRegistryRow {
     pub ticker: String,
     pub alias: String,
     pub decimals: u32,
-    /// Big-endian u128. `0` together with the policy's unlimited flag means
-    /// "uncapped"; the policy bytes remain the authority on that distinction.
-    pub max_supply: u128,
-    pub owner_device_id: [u8; 32],
+    /// The whole supply the policy fixes at creation (SoFi §51).
+    pub genesis_supply: u128,
+    /// The device the policy names as the token's creator (SoFi Amendment S8).
+    pub creator_device_id: [u8; 32],
+}
+
+/// A column that must hold exactly `N` bytes, or the row is refused.
+fn fixed<const N: usize>(r: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<[u8; N]> {
+    let bytes: Vec<u8> = r.get(index)?;
+    let len = bytes.len();
+    <[u8; N]>::try_from(bytes).map_err(|_| {
+        rusqlite::Error::FromSqlConversionFailure(
+            index,
+            rusqlite::types::Type::Blob,
+            Box::new(std::io::Error::other(format!(
+                "token_registry column {index} holds {len} bytes, not {N}"
+            ))),
+        )
+    })
 }
 
 fn row_to_registry(r: &rusqlite::Row<'_>) -> rusqlite::Result<TokenRegistryRow> {
-    let commit: Vec<u8> = r.get(1)?;
-    let owner: Vec<u8> = r.get(6)?;
-    let max_supply_be: Vec<u8> = r.get(5)?;
-    let mut commit32 = [0u8; 32];
-    let mut owner32 = [0u8; 32];
-    if commit.len() == 32 {
-        commit32.copy_from_slice(&commit);
-    }
-    if owner.len() == 32 {
-        owner32.copy_from_slice(&owner);
-    }
-    let mut max_supply = 0u128;
-    for b in &max_supply_be {
-        max_supply = (max_supply << 8) | (*b as u128);
-    }
+    let decimals: i64 = r.get(4)?;
     Ok(TokenRegistryRow {
         token_id: r.get(0)?,
-        policy_commit: commit32,
+        policy_commit: fixed::<32>(r, 1)?,
         ticker: r.get(2)?,
         alias: r.get(3)?,
-        decimals: r.get::<_, i64>(4)? as u32,
-        max_supply,
-        owner_device_id: owner32,
+        decimals: u32::try_from(decimals).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(
+                4,
+                rusqlite::types::Type::Integer,
+                Box::new(e),
+            )
+        })?,
+        genesis_supply: u128::from_be_bytes(fixed::<16>(r, 5)?),
+        creator_device_id: fixed::<32>(r, 6)?,
     })
 }
 
 const SELECT_COLS: &str =
-    "token_id, policy_commit, ticker, alias, decimals, max_supply, owner_device_id";
+    "token_id, policy_commit, ticker, alias, decimals, genesis_supply, creator_device_id";
 
 // ── policies ────────────────────────────────────────────────────────────────
 
@@ -87,10 +93,10 @@ pub fn upsert_policy_with_conn(
     policy_bytes: &[u8],
 ) -> Result<()> {
     conn.execute(
-        "INSERT INTO token_policies(policy_commit, policy_bytes, created_at)
-         VALUES (?1, ?2, ?3)
+        "INSERT INTO token_policies(policy_commit, policy_bytes)
+         VALUES (?1, ?2)
          ON CONFLICT(policy_commit) DO NOTHING",
-        params![policy_commit.as_slice(), policy_bytes, tick() as i64],
+        params![policy_commit.as_slice(), policy_bytes],
     )?;
     Ok(())
 }
@@ -173,18 +179,17 @@ pub fn all_policies() -> Result<Vec<([u8; 32], Vec<u8>)>> {
 pub fn insert_token_with_conn(conn: &Connection, row: &TokenRegistryRow) -> Result<()> {
     conn.execute(
         "INSERT INTO token_registry(
-             token_id, policy_commit, ticker, alias, decimals, max_supply,
-             owner_device_id, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+             token_id, policy_commit, ticker, alias, decimals, genesis_supply,
+             creator_device_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         params![
             row.token_id,
             row.policy_commit.as_slice(),
             row.ticker,
             row.alias,
             row.decimals as i64,
-            row.max_supply.to_be_bytes().to_vec(),
-            row.owner_device_id.as_slice(),
-            tick() as i64,
+            row.genesis_supply.to_be_bytes().to_vec(),
+            row.creator_device_id.as_slice(),
         ],
     )?;
     Ok(())
@@ -262,7 +267,7 @@ pub fn all_tokens() -> Result<Vec<TokenRegistryRow>> {
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
     let mut stmt = conn.prepare(&format!(
-        "SELECT {SELECT_COLS} FROM token_registry ORDER BY created_at"
+        "SELECT {SELECT_COLS} FROM token_registry ORDER BY rowid"
     ))?;
     let rows = stmt.query_map([], row_to_registry)?;
     let mut out = Vec::new();
@@ -293,8 +298,8 @@ mod tests {
             ticker: ticker.to_string(),
             alias: "Test Token".into(),
             decimals: 8,
-            max_supply: 1_000_000,
-            owner_device_id: [0xAA; 32],
+            genesis_supply: 1_000_000,
+            creator_device_id: [0xAA; 32],
         }
     }
 

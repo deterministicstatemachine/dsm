@@ -9,7 +9,8 @@
 //!
 //! [`recipient_staging::stage_transfer_half`] is first-writer-wins on the
 //! correlation key: the first bytes to arrive own the slot, a divergent copy is
-//! refused, and `TerminalReject` is sticky. That is the correct invariant — one
+//! refused, and a half that does not bind the staged one is not staged. That
+//! is the correct invariant — one
 //! correlation key names one commitment — but it makes ARRIVAL ORDER decide the
 //! outcome if unverified bytes are allowed to stage.
 //!
@@ -168,7 +169,7 @@ where
     if state != StagingState::ReadyToVerify {
         return Ok(None);
     }
-    let (_verified, acceptance) = verify_and_accept(correlation_key, sender_ak_pk, apply)?;
+    let acceptance = verify_and_accept(correlation_key, sender_ak_pk, apply)?.1;
     Ok(Some(acceptance))
 }
 
@@ -184,7 +185,7 @@ pub enum AckDecision {
     /// idempotent convergence path and must never mint a second value result.
     Ack(Acceptance),
     /// Not ACK-able, with the reason. Covers every non-accepted state — a single
-    /// half, `ready_to_verify` before apply, and `terminal_reject`.
+    /// half, and `ready_to_verify` before apply.
     DoNotAck(String),
 }
 
@@ -248,438 +249,230 @@ pub fn may_ack(correlation_key: &str) -> Result<bool, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::handlers::recipient_accept::tests::{
-        setup, signed_receipt_bytes, signed_transfer_bytes, stub_advance,
-    };
-    use crate::storage::client_db::{evidence_content_digest, ArtifactRole};
-    use dsm::crypto::ephemeral_key::generate_ephemeral_keypair;
+    use crate::test_support::arrivals::{the_one_transfer, OneTransfer};
+    use crate::test_support::two_device::Pair;
     use serial_test::serial;
 
-    /// Build an honest pair plus a TAMPERED copy of each half.
-    /// Returns `(ak_pk, transfer, evidence, tampered_transfer, tampered_evidence)`.
-    #[allow(clippy::type_complexity)]
-    fn pair() -> (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>) {
-        setup();
-        let (ak_pk, ak_sk) = generate_ephemeral_keypair(&[0xC4; 32]).expect("ak");
-        let evidence = signed_receipt_bytes(&ak_pk, &ak_sk);
-        let digest = evidence_content_digest(ArtifactRole::EvidenceA, &evidence);
-        let transfer = signed_transfer_bytes(&ak_sk, &digest);
-
-        // A middlebox flips bytes in each half. Neither can be re-signed without
-        // the sender's AK, which is exactly what the candidate gate tests.
-        let mut bad_transfer = transfer.clone();
-        let n = bad_transfer.len();
-        bad_transfer[n / 2] ^= 0xFF;
-        let mut bad_evidence = evidence.clone();
-        let m = bad_evidence.len();
-        bad_evidence[m / 2] ^= 0xFF;
-
-        (ak_pk, transfer, evidence, bad_transfer, bad_evidence)
+    /// A sends B 10; B has not polled. The transfer's halves as B's poll
+    /// reads them, with B entered.
+    async fn sent() -> (Pair, OneTransfer) {
+        let p = Pair::boot(100, 0).await;
+        let sent = p.a.send(&p.b, 10).await;
+        assert!(sent.success, "{:?}", sent.error_message);
+        let one = the_one_transfer(&p.b, &p.fleet).await;
+        p.b.enter();
+        (p, one)
     }
 
-    fn evidence_artifact(key: &str, bytes: &[u8]) -> dsm::types::proto::ReceiptEvidenceA {
-        dsm::types::proto::ReceiptEvidenceA {
-            transfer_submission_id: key.to_string(),
-            receipt_evidence_digest: evidence_content_digest(ArtifactRole::EvidenceA, bytes)
-                .to_vec(),
-            full_receipt_bytes: bytes.to_vec(),
-        }
+    fn flipped(bytes: &[u8]) -> Vec<u8> {
+        let mut out = bytes.to_vec();
+        let middle = out.len() / 2;
+        out[middle] ^= 0xFF;
+        out
     }
 
-    /// THE ARRIVAL-ORDER PROOF.
-    ///
-    /// Staging is first-writer-wins and terminal rejection is sticky, so if an
-    /// unverified copy could stage, whichever copy arrived first would decide the
-    /// outcome. Divergent copies now BOTH arrive by design (the cross-endpoint
-    /// merge stopped collapsing them). A tampered copy arriving FIRST must not be
-    /// able to take the slot and lock out the honest copy behind it.
-    #[test]
+    fn state(key: &str) -> StagingState {
+        recipient_staging::staging_state(key).expect("staging state")
+    }
+
+    /// THE ARRIVAL-ORDER PROOF. Staging is first-writer-wins and terminal
+    /// rejection is sticky, so if an unverified copy could stage, whichever
+    /// copy arrived first would decide the outcome. A tampered copy of the
+    /// transfer arriving FIRST cannot take the slot: it is discarded and
+    /// leaves no staging state, and the honest copy behind it stages and
+    /// applies.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[serial]
-    fn a_tampered_transfer_arriving_first_cannot_lock_out_the_honest_copy() {
-        let key = "DISP-ORDER-T";
-        let (ak_pk, transfer, evidence, bad_transfer, _) = pair();
-
-        // Tampered copy arrives FIRST.
-        let out =
-            dispatch_transfer_half(key, &bad_transfer, &ak_pk, "TESTROUTE").expect("dispatch");
-        assert!(
-            matches!(out, DispatchOutcome::DiscardedCandidate(ref r) if r.contains("SIG A")
-                || r.contains("does not decode")),
-            "a copy that cannot prove itself must be discarded, got {out:?}"
-        );
-        assert_eq!(
-            recipient_staging::staging_state(key).expect("state"),
-            StagingState::Absent,
-            "a discarded candidate must leave NO staging state -- not even a rejection"
-        );
-
-        // The honest copy, right behind it in the same batch, still stages.
-        assert!(matches!(
-            dispatch_transfer_half(key, &transfer, &ak_pk, "TESTROUTE").expect("dispatch"),
-            DispatchOutcome::Staged(_)
-        ));
-        assert!(matches!(
-            dispatch_evidence_half(&evidence_artifact(key, &evidence), &ak_pk, "TESTROUTE")
-                .expect("dispatch"),
-            DispatchOutcome::Staged(StagingState::ReadyToVerify)
-        ));
-    }
-
-    /// Same property for the evidence half, whose gate is the receipt's own SIG A
-    /// rather than the artifact's self-declared digest (an attacker who rewrites
-    /// the bytes rewrites that field too, so it authenticates nothing).
-    #[test]
-    #[serial]
-    fn a_tampered_evidence_arriving_first_cannot_lock_out_the_honest_copy() {
-        let key = "DISP-ORDER-E";
-        let (ak_pk, transfer, evidence, _, bad_evidence) = pair();
-
-        let out =
-            dispatch_evidence_half(&evidence_artifact(key, &bad_evidence), &ak_pk, "TESTROUTE")
-                .expect("d");
+    async fn a_tampered_transfer_arriving_first_cannot_lock_out_the_honest_copy() {
+        let (p, one) = sent().await;
+        let out = dispatch_transfer_half(
+            &one.key,
+            &flipped(&one.transfer_bytes),
+            &p.a.ak_pk,
+            &one.route,
+        )
+        .expect("dispatch");
         assert!(
             matches!(out, DispatchOutcome::DiscardedCandidate(_)),
-            "a tampered evidence copy must be discarded, got {out:?}"
+            "a copy that cannot prove itself is discarded, got {out:?}"
         );
         assert_eq!(
-            recipient_staging::staging_state(key).expect("state"),
-            StagingState::Absent
+            state(&one.key),
+            StagingState::Absent,
+            "not even a rejection is recorded"
         );
 
+        let applied = p.b.sync().await;
+        assert!(applied.success, "{:?}", applied.errors);
+        assert_eq!(p.b.era_balance(), 10, "the honest copy staged and applied");
+    }
+
+    /// The same for the evidence half, whose gate is the receipt's own SIG A
+    /// — never the artifact's self-declared digest, which an attacker who
+    /// rewrites the bytes rewrites too.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial]
+    async fn a_tampered_evidence_arriving_first_cannot_lock_out_the_honest_copy() {
+        let (p, one) = sent().await;
+        let out = dispatch_evidence_half(
+            &one.evidence_with(flipped(&one.evidence.full_receipt_bytes)),
+            &p.a.ak_pk,
+            &one.evidence_route,
+        )
+        .expect("dispatch");
+        assert!(
+            matches!(out, DispatchOutcome::DiscardedCandidate(_)),
+            "a tampered evidence copy is discarded, got {out:?}"
+        );
+        assert_eq!(state(&one.key), StagingState::Absent);
+
+        let applied = p.b.sync().await;
+        assert!(applied.success, "{:?}", applied.errors);
+        assert_eq!(p.b.era_balance(), 10, "the honest copy staged and applied");
+    }
+
+    /// RAW-BYTE FREEZE: staging holds byte-for-byte what the dispatcher was
+    /// handed, a re-read returns the same bytes, and that frozen pair is what
+    /// verification and the apply consume.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial]
+    async fn staging_freezes_the_exact_bytes_and_the_frozen_pair_is_what_applies() {
+        let (p, one) = sent().await;
         assert!(matches!(
-            dispatch_evidence_half(&evidence_artifact(key, &evidence), &ak_pk, "TESTROUTE")
-                .expect("d"),
-            DispatchOutcome::Staged(_)
+            dispatch_transfer_half(&one.key, &one.transfer_bytes, &p.a.ak_pk, &one.route)
+                .expect("transfer"),
+            DispatchOutcome::Staged(StagingState::StagedTransfer)
         ));
         assert!(matches!(
-            dispatch_transfer_half(key, &transfer, &ak_pk, "TESTROUTE").expect("d"),
+            dispatch_evidence_half(&one.evidence, &p.a.ak_pk, &one.evidence_route)
+                .expect("evidence"),
             DispatchOutcome::Staged(StagingState::ReadyToVerify)
         ));
-    }
-
-    /// The happy path end to end through dispatch, and the ACK gate.
-    #[test]
-    #[serial]
-    fn an_honest_pair_dispatches_verifies_and_becomes_ack_able() {
-        let key = "DISP-OK";
-        let (ak_pk, transfer, evidence, _, _) = pair();
-
-        dispatch_transfer_half(key, &transfer, &ak_pk, "TESTROUTE").expect("t");
-        dispatch_evidence_half(&evidence_artifact(key, &evidence), &ak_pk, "TESTROUTE").expect("e");
-
-        assert!(
-            !may_ack(key).expect("ack gate"),
-            "not ACK-able before accept"
-        );
-
-        let acceptance = try_complete(key, &ak_pk, |_| {
-            Ok(ApplyOutcome::AlreadyAppliedSameOperation {
-                record: crate::storage::client_db::CanonicalApplyRecord {
-                    relationship_key: [0x01; 32],
-                    parent_tip: [0x02; 32],
-                    child_tip: [0x03; 32],
-                    precommit_digest: [0x04; 32],
-                    operation_digest: [0x05; 32],
-                    sender_device: [0x06; 32],
-                    recipient_device: [0x07; 32],
-                    nonce_hash: [0x08; 32],
-                    applied_parent_root_b: [0x09; 32],
-                    applied_child_root_b: [0x0A; 32],
-                    applied_parent_tip_b: [0x0Bu8; 32],
-                    applied_child_tip_b: [0x0Cu8; 32],
-                },
-            })
-        })
-        .expect("complete")
-        .expect("ready");
-        assert_eq!(acceptance, Acceptance::AcceptedDuplicate);
-        assert!(
-            may_ack(key).expect("ack gate"),
-            "ACK-able only after accept"
-        );
-    }
-
-    /// A stub apply that records whether it ran, so "no second apply" is an
-    /// assertion about EXECUTION, not merely about the returned label.
-    fn counting_apply(
-        ran: &std::cell::Cell<u32>,
-        outcome: ApplyOutcome,
-    ) -> impl FnOnce(
-        &crate::handlers::recipient_accept::VerifiedTransfer,
-    ) -> Result<ApplyOutcome, String>
-           + '_ {
-        move |_| {
-            ran.set(ran.get() + 1);
-            Ok(outcome)
-        }
-    }
-
-    fn fresh_outcome() -> ApplyOutcome {
-        ApplyOutcome::AlreadyAppliedSameOperation {
-            record: crate::storage::client_db::CanonicalApplyRecord {
-                relationship_key: [0x01; 32],
-                parent_tip: [0x02; 32],
-                child_tip: [0x03; 32],
-                precommit_digest: [0x04; 32],
-                operation_digest: [0x05; 32],
-                sender_device: [0x06; 32],
-                recipient_device: [0x07; 32],
-                nonce_hash: [0x08; 32],
-                applied_parent_root_b: [0x09; 32],
-                applied_child_root_b: [0x0A; 32],
-                applied_parent_tip_b: [0x0Bu8; 32],
-                applied_child_tip_b: [0x0Cu8; 32],
-            },
-        }
-    }
-
-    /// RAW-BYTE FREEZE: what staging stores is byte-for-byte what was handed to
-    /// the dispatcher, and it survives a restart unchanged.
-    ///
-    /// This is the property the whole verification chain rests on: SIG A and the
-    /// evidence digest are checked against the FROZEN copy, so if staging held a
-    /// re-encode rather than the original, verification would be checking bytes
-    /// the sender never signed. Asserting equality here means the question of
-    /// whether prost round-trips byte-identically never has to be asked.
-    #[test]
-    #[serial]
-    fn staging_freezes_the_exact_bytes_and_a_restart_preserves_them() {
-        let (ak_pk, transfer, evidence, _, _) = pair();
-        let key = "MX-FREEZE";
-
-        dispatch_transfer_half(key, &transfer, &ak_pk, "TESTROUTE").expect("t");
-        let staged = recipient_staging::get_staging(key)
-            .expect("load")
-            .expect("row")
-            .transfer_bytes
-            .expect("transfer half");
-        assert_eq!(
-            staged, transfer,
-            "staging must hold the EXACT bytes it was handed, not a re-encode"
-        );
-
-        dispatch_evidence_half(&evidence_artifact(key, &evidence), &ak_pk, "TESTROUTE").expect("e");
-        let row = recipient_staging::get_staging(key)
+        let row = recipient_staging::get_staging(&one.key)
             .expect("load")
             .expect("row");
-        assert_eq!(row.evidence_bytes.as_deref(), Some(evidence.as_slice()));
+        assert_eq!(
+            row.transfer_bytes.as_deref(),
+            Some(one.transfer_bytes.as_slice()),
+            "the EXACT bytes, not a re-encode"
+        );
+        assert_eq!(
+            row.evidence_bytes.as_deref(),
+            Some(one.evidence.full_receipt_bytes.as_slice())
+        );
+        assert_eq!(row.state, StagingState::ReadyToVerify);
 
-        // "Restart": staging is durable, so re-reading is what the next poll tick
-        // does. The frozen bytes must be identical, not merely equivalent.
-        let after = recipient_staging::get_staging(key)
-            .expect("reload")
-            .expect("row");
-        assert_eq!(after.transfer_bytes.as_deref(), Some(transfer.as_slice()));
-        assert_eq!(after.evidence_bytes.as_deref(), Some(evidence.as_slice()));
-
-        // ...and the frozen copy is what verification consumes.
-        let ran = std::cell::Cell::new(0);
-        assert!(matches!(
-            decide_ack(key, &ak_pk, counting_apply(&ran, fresh_outcome())).expect("d"),
-            AckDecision::Ack(_)
-        ));
-        assert_eq!(ran.get(), 1);
+        let applied = p.b.sync().await;
+        assert!(applied.success, "{:?}", applied.errors);
+        assert_eq!(p.b.era_balance(), 10);
+        p.b.enter();
+        assert_eq!(state(&one.key), StagingState::Accepted);
     }
 
-    /// MATRIX 1-3: the three never-ACK states, asserted through the same
-    /// decision function the live loop uses.
-    #[test]
+    /// A single half never completes, and evidence the transfer does not name
+    /// is not staged: neither pair can reach the apply.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[serial]
-    fn a_single_half_ready_to_verify_and_terminal_reject_never_ack() {
-        let (ak_pk, transfer, evidence, _, bad_evidence) = pair();
-
-        // (1) one half only
-        let k1 = "MX-ONE-HALF";
-        dispatch_transfer_half(k1, &transfer, &ak_pk, "TESTROUTE").expect("t");
-        let ran = std::cell::Cell::new(0);
+    async fn a_single_half_or_an_unbound_half_never_completes() {
+        let (p, one) = sent().await;
         assert!(matches!(
-            decide_ack(k1, &ak_pk, counting_apply(&ran, fresh_outcome())).expect("d"),
-            AckDecision::DoNotAck(_)
+            dispatch_transfer_half(&one.key, &one.transfer_bytes, &p.a.ak_pk, &one.route)
+                .expect("transfer"),
+            DispatchOutcome::Staged(StagingState::StagedTransfer)
         ));
-        assert_eq!(ran.get(), 0, "apply must not run for a single half");
-
-        // (2) ready_to_verify, before any apply, is not ACK-able on its own:
-        // proven by an apply that FAILS, leaving the pair ready and un-ACKed.
-        let k2 = "MX-READY";
-        dispatch_transfer_half(k2, &transfer, &ak_pk, "TESTROUTE").expect("t");
-        dispatch_evidence_half(&evidence_artifact(k2, &evidence), &ak_pk, "TESTROUTE").expect("e");
         assert_eq!(
-            recipient_staging::staging_state(k2).expect("s"),
-            StagingState::ReadyToVerify
-        );
-        assert!(!may_ack(k2).expect("ack"), "ready_to_verify must never ACK");
-        assert!(decide_ack(k2, &ak_pk, |_| Err("disk on fire".into())).is_err());
-        assert!(
-            !may_ack(k2).expect("ack"),
-            "a failed apply must still not ACK"
-        );
-
-        // (3) terminal_reject never ACKs. Reached by a digest that does not bind.
-        let k3 = "MX-REJECT";
-        let wrong_digest = evidence_content_digest(ArtifactRole::EvidenceA, &bad_evidence);
-        let (_, ak_sk2) = generate_ephemeral_keypair(&[0xC4; 32]).expect("ak");
-        let mismatched = signed_transfer_bytes(&ak_sk2, &wrong_digest);
-        dispatch_transfer_half(k3, &mismatched, &ak_pk, "TESTROUTE").expect("t");
-        dispatch_evidence_half(&evidence_artifact(k3, &evidence), &ak_pk, "TESTROUTE").expect("e");
-        let st = recipient_staging::staging_state(k3).expect("s");
-        assert_eq!(st, StagingState::TerminalReject, "digest must not bind");
-        assert!(!may_ack(k3).expect("ack"), "terminal_reject must never ACK");
-        assert!(matches!(
-            decide_ack(k3, &ak_pk, counting_apply(&ran, fresh_outcome())).expect("d"),
-            AckDecision::DoNotAck(_)
-        ));
-    }
-
-    /// MATRIX 4: the two acceptance kinds stay distinct all the way out of the
-    /// decision function -- never collapsed into one "ok to ACK".
-    #[test]
-    #[serial]
-    fn fresh_and_duplicate_stay_distinct_through_the_decision() {
-        let (ak_pk, transfer, evidence, _, _) = pair();
-        let k = "MX-FRESH";
-        dispatch_transfer_half(k, &transfer, &ak_pk, "TESTROUTE").expect("t");
-        dispatch_evidence_half(&evidence_artifact(k, &evidence), &ak_pk, "TESTROUTE").expect("e");
-
-        let decision = decide_ack(k, &ak_pk, |_| {
-            Ok(ApplyOutcome::Applied {
-                record: match fresh_outcome() {
-                    ApplyOutcome::AlreadyAppliedSameOperation { record } => record,
-                    _ => unreachable!(),
-                },
-                advance: Box::new(stub_advance()),
-            })
-        })
-        .expect("decide");
-        assert_eq!(decision, AckDecision::Ack(Acceptance::AcceptedFresh));
-        assert_ne!(
-            decision,
-            AckDecision::Ack(Acceptance::AcceptedDuplicate),
-            "a fresh acceptance must never read as a duplicate"
-        );
-    }
-
-    /// MATRIX 5-6: order independence. A tampered replica first still converges,
-    /// and so do evidence-first and transfer-first.
-    #[test]
-    #[serial]
-    fn every_arrival_order_converges() {
-        let (ak_pk, transfer, evidence, bad_transfer, _) = pair();
-
-        // transfer-first
-        let k1 = "MX-ORD-T";
-        dispatch_transfer_half(k1, &transfer, &ak_pk, "TESTROUTE").expect("t");
-        dispatch_evidence_half(&evidence_artifact(k1, &evidence), &ak_pk, "TESTROUTE").expect("e");
-        assert_eq!(
-            recipient_staging::staging_state(k1).expect("s"),
-            StagingState::ReadyToVerify
-        );
-
-        // evidence-first
-        let k2 = "MX-ORD-E";
-        dispatch_evidence_half(&evidence_artifact(k2, &evidence), &ak_pk, "TESTROUTE").expect("e");
-        dispatch_transfer_half(k2, &transfer, &ak_pk, "TESTROUTE").expect("t");
-        assert_eq!(
-            recipient_staging::staging_state(k2).expect("s"),
-            StagingState::ReadyToVerify
-        );
-
-        // tampered replica FIRST, honest second
-        let k3 = "MX-ORD-BAD";
-        assert!(matches!(
-            dispatch_transfer_half(k3, &bad_transfer, &ak_pk, "TESTROUTE").expect("bad"),
-            DispatchOutcome::DiscardedCandidate(_)
-        ));
-        dispatch_transfer_half(k3, &transfer, &ak_pk, "TESTROUTE").expect("t");
-        dispatch_evidence_half(&evidence_artifact(k3, &evidence), &ak_pk, "TESTROUTE").expect("e");
-        assert_eq!(
-            recipient_staging::staging_state(k3).expect("s"),
-            StagingState::ReadyToVerify,
-            "a poisoned replica arriving first must not block convergence"
-        );
-    }
-
-    /// MATRIX 7-8: restart after ONE half persists, and after BOTH halves stage
-    /// but before apply. Staging is durable, so a restart is modelled by
-    /// re-reading it -- which is what the poll loop does on the next tick.
-    #[test]
-    #[serial]
-    fn restart_after_either_half_and_before_apply_converges() {
-        let (ak_pk, transfer, evidence, _, _) = pair();
-
-        // restart with only the transfer half persisted
-        let k1 = "MX-RESTART-HALF";
-        dispatch_transfer_half(k1, &transfer, &ak_pk, "TESTROUTE").expect("t");
-        assert_eq!(
-            recipient_staging::staging_state(k1).expect("reload"),
-            StagingState::StagedTransfer
-        );
-        dispatch_evidence_half(&evidence_artifact(k1, &evidence), &ak_pk, "TESTROUTE").expect("e");
-        let ran = std::cell::Cell::new(0);
-        assert_eq!(
-            decide_ack(k1, &ak_pk, counting_apply(&ran, fresh_outcome())).expect("d"),
-            AckDecision::Ack(Acceptance::AcceptedDuplicate)
-        );
-        assert_eq!(ran.get(), 1);
-
-        // restart with BOTH halves staged but no apply yet
-        let k2 = "MX-RESTART-READY";
-        dispatch_transfer_half(k2, &transfer, &ak_pk, "TESTROUTE").expect("t");
-        dispatch_evidence_half(&evidence_artifact(k2, &evidence), &ak_pk, "TESTROUTE").expect("e");
-        assert_eq!(
-            recipient_staging::staging_state(k2).expect("reload"),
-            StagingState::ReadyToVerify
-        );
-        let ran2 = std::cell::Cell::new(0);
-        assert!(matches!(
-            decide_ack(k2, &ak_pk, counting_apply(&ran2, fresh_outcome())).expect("d"),
-            AckDecision::Ack(_)
-        ));
-        assert_eq!(ran2.get(), 1, "the apply runs exactly once");
-    }
-
-    /// MATRIX 9: restart AFTER apply but BEFORE the ACK went out. Must re-ACK so
-    /// the sender converges, must report Duplicate, and must NOT apply again.
-    #[test]
-    #[serial]
-    fn restart_after_apply_before_ack_reacks_as_duplicate_without_reapplying() {
-        let (ak_pk, transfer, evidence, _, _) = pair();
-        let k = "MX-CRASH-ACK";
-        dispatch_transfer_half(k, &transfer, &ak_pk, "TESTROUTE").expect("t");
-        dispatch_evidence_half(&evidence_artifact(k, &evidence), &ak_pk, "TESTROUTE").expect("e");
-
-        let ran = std::cell::Cell::new(0);
-        assert!(matches!(
-            decide_ack(k, &ak_pk, counting_apply(&ran, fresh_outcome())).expect("d"),
-            AckDecision::Ack(_)
-        ));
-        assert_eq!(ran.get(), 1);
-
-        // ...the process dies before the ACK is emitted. Next poll tick:
-        let ran2 = std::cell::Cell::new(0);
-        let again = decide_ack(k, &ak_pk, counting_apply(&ran2, fresh_outcome())).expect("d");
-        assert_eq!(
-            again,
-            AckDecision::Ack(Acceptance::AcceptedDuplicate),
-            "a re-ACK after a crash must converge, and must be a DUPLICATE"
-        );
-        assert_eq!(
-            ran2.get(),
-            0,
-            "THE POINT: no second apply -- the canonical apply must not run again"
-        );
-    }
-
-    /// A single half never completes and never becomes ACK-able.
-    #[test]
-    #[serial]
-    fn one_half_never_completes_and_never_acks() {
-        let key = "DISP-HALF";
-        let (ak_pk, transfer, _, _, _) = pair();
-        dispatch_transfer_half(key, &transfer, &ak_pk, "TESTROUTE").expect("t");
-        assert_eq!(
-            try_complete(key, &ak_pk, |_| panic!("apply must never run")).expect("complete"),
+            try_complete(&one.key, &p.a.ak_pk, |_| panic!("apply must never run"))
+                .expect("complete"),
             None
         );
-        assert!(!may_ack(key).expect("ack gate"));
+        assert!(!may_ack(&one.key).expect("gate"));
+
+        // Evidence bytes the transfer does not name: the digest the transfer
+        // commits to is over other bytes.
+        let unbound = dispatch_evidence_half(
+            &one.evidence_with(flipped(&one.evidence.full_receipt_bytes)),
+            &p.a.ak_pk,
+            &one.evidence_route,
+        );
+        assert!(
+            !matches!(
+                unbound,
+                Ok(DispatchOutcome::Staged(StagingState::ReadyToVerify))
+            ),
+            "evidence the transfer does not name never completes the pair, got {unbound:?}"
+        );
+        assert_eq!(
+            state(&one.key),
+            StagingState::StagedTransfer,
+            "nothing negative recorded"
+        );
+        assert!(matches!(
+            decide_ack(&one.key, &p.a.ak_pk, |_| panic!("apply must never run")).expect("decide"),
+            AckDecision::DoNotAck(_)
+        ));
+    }
+
+    /// Order independence: evidence-first and transfer-first both reach
+    /// ready_to_verify, and so does a poisoned transfer replica arriving
+    /// ahead of the honest pair. Each order starts from an empty staging
+    /// table on the same honest halves.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial]
+    async fn every_arrival_order_converges() {
+        let (p, one) = sent().await;
+        let clear = || {
+            let binding = crate::storage::client_db::get_connection().expect("conn");
+            let conn = binding
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            conn.execute("DELETE FROM recipient_staging", [])
+                .expect("empty the staging table");
+        };
+        let transfer = || {
+            let out = dispatch_transfer_half(&one.key, &one.transfer_bytes, &p.a.ak_pk, &one.route)
+                .expect("transfer");
+            assert!(matches!(out, DispatchOutcome::Staged(_)), "{out:?}");
+        };
+        let evidence = || {
+            let out = dispatch_evidence_half(&one.evidence, &p.a.ak_pk, &one.evidence_route)
+                .expect("evidence");
+            assert!(matches!(out, DispatchOutcome::Staged(_)), "{out:?}");
+        };
+
+        transfer();
+        evidence();
+        assert_eq!(
+            state(&one.key),
+            StagingState::ReadyToVerify,
+            "transfer first"
+        );
+
+        clear();
+        evidence();
+        transfer();
+        assert_eq!(
+            state(&one.key),
+            StagingState::ReadyToVerify,
+            "evidence first"
+        );
+
+        clear();
+        assert!(matches!(
+            dispatch_transfer_half(
+                &one.key,
+                &flipped(&one.transfer_bytes),
+                &p.a.ak_pk,
+                &one.route
+            )
+            .expect("poisoned"),
+            DispatchOutcome::DiscardedCandidate(_)
+        ));
+        transfer();
+        evidence();
+        assert_eq!(
+            state(&one.key),
+            StagingState::ReadyToVerify,
+            "a poisoned replica arriving first does not block convergence"
+        );
     }
 }

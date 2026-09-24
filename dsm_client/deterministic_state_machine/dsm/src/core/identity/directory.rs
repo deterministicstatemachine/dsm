@@ -85,10 +85,10 @@ pub struct DirectoryEntry {
 
 /// Why an entry does not prove itself. None of these is a node's decision:
 /// every reader reaches the same one from the same bytes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DirectoryError {
-    /// Not the one canonical encoding of an entry.
-    Malformed,
+    /// Not the one canonical encoding of an entry: why.
+    Malformed(String),
     /// A key has the wrong length.
     KeyLength,
     /// `H(AK ‖ AttA)` is not the device id the entry names.
@@ -100,7 +100,7 @@ pub enum DirectoryError {
 impl core::fmt::Display for DirectoryError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::Malformed => write!(f, "directory entry is malformed"),
+            Self::Malformed(why) => write!(f, "directory entry is malformed: {why}"),
             Self::KeyLength => write!(f, "directory entry key has the wrong length"),
             Self::NotThisDevicesKey => write!(f, "directory entry's AK is not the device's"),
             Self::SignatureDoesNotVerify => write!(f, "directory entry signature does not verify"),
@@ -112,7 +112,10 @@ impl std::error::Error for DirectoryError {}
 
 impl DirectoryEntry {
     /// Sign `body` with the device's AK secret key.
-    pub fn sign(body: DirectoryEntryBody, ak_secret_key: &[u8]) -> Result<Self, crate::types::error::DsmError> {
+    pub fn sign(
+        body: DirectoryEntryBody,
+        ak_secret_key: &[u8],
+    ) -> Result<Self, crate::types::error::DsmError> {
         let signature = sphincs::sphincs_sign(ak_secret_key, &body.signing_digest())?;
         Ok(Self { body, signature })
     }
@@ -128,12 +131,19 @@ impl DirectoryEntry {
 
     /// Decode cell bytes: only the one canonical encoding of an entry.
     pub fn decode(bytes: &[u8]) -> Result<Self, DirectoryError> {
-        let p = proto::DeviceDirectoryEntryV1::decode(bytes).map_err(|_| DirectoryError::Malformed)?;
+        let p = proto::DeviceDirectoryEntryV1::decode(bytes)
+            .map_err(|e| DirectoryError::Malformed(e.to_string()))?;
         if p.encode_to_vec() != bytes {
-            return Err(DirectoryError::Malformed);
+            return Err(DirectoryError::Malformed(
+                "not the canonical encoding".to_string(),
+            ));
         }
-        let b = p.body.ok_or(DirectoryError::Malformed)?;
-        let d32 = |v: &[u8]| <[u8; 32]>::try_from(v).map_err(|_| DirectoryError::Malformed);
+        let b = p
+            .body
+            .ok_or_else(|| DirectoryError::Malformed("no body".to_string()))?;
+        let d32 = |v: &[u8]| {
+            <[u8; 32]>::try_from(v).map_err(|e| DirectoryError::Malformed(e.to_string()))
+        };
         Ok(Self {
             body: DirectoryEntryBody {
                 genesis: d32(&b.genesis)?,
@@ -161,7 +171,7 @@ impl DirectoryEntry {
         }
         match sphincs::sphincs_verify(&b.ak_public_key, &b.signing_digest(), &self.signature) {
             Ok(true) => Ok(()),
-            _ => Err(DirectoryError::SignatureDoesNotVerify),
+            Ok(false) | Err(..) => Err(DirectoryError::SignatureDoesNotVerify),
         }
     }
 }
@@ -198,7 +208,7 @@ pub fn select_entry<'a>(
             best = Some((entry, bytes.to_vec()));
         }
     }
-    best.map(|(e, _)| e)
+    best.map(|(entry, ..)| entry)
 }
 
 #[cfg(test)]
@@ -206,9 +216,10 @@ mod tests {
     use super::*;
 
     fn device(seed: u8) -> (Vec<u8>, Vec<u8>, [u8; 32], [u8; 32]) {
-        let (pk, sk) = sphincs::generate_keypair_from_seed(sphincs::SphincsVariant::SPX256f, &[seed; 32])
-            .map(|kp| (kp.public_key.clone(), kp.secret_key.clone()))
-            .expect("keypair");
+        let (pk, sk) =
+            sphincs::generate_keypair_from_seed(sphincs::SphincsVariant::SPX256f, &[seed; 32])
+                .map(|kp| (kp.public_key.clone(), kp.secret_key.clone()))
+                .expect("keypair");
         let att_a = [seed.wrapping_add(1); 32];
         let device_id = derive_devid(&pk, &att_a);
         (pk, sk, att_a, device_id)
@@ -233,16 +244,21 @@ mod tests {
 
         // A squatter knows the device id, and even the AK and AttA, but signs
         // with its own key: the signature does not verify.
-        let (_, squat_sk, _, _) = device(2);
-        let squat = DirectoryEntry::sign(body(&pk, att_a, id, 99), &squat_sk).unwrap();
+        let squatter = device(2);
+        let squat = DirectoryEntry::sign(body(&pk, att_a, id, 99), &squatter.1).unwrap();
         assert_eq!(squat.verify(), Err(DirectoryError::SignatureDoesNotVerify));
 
         // A squatter with its own AK cannot make it hash to this device id.
-        let (spk, ssk, satt, _) = device(3);
+        let (spk, ssk, satt, ..) = device(3);
         let foreign = DirectoryEntry::sign(body(&spk, satt, id, 99), &ssk).unwrap();
         assert_eq!(foreign.verify(), Err(DirectoryError::NotThisDevicesKey));
 
-        let values = [squat.encode(), foreign.encode(), b"junk".to_vec(), own.encode()];
+        let values = [
+            squat.encode(),
+            foreign.encode(),
+            b"junk".to_vec(),
+            own.encode(),
+        ];
         let chosen = select_entry(&[9u8; 32], &id, values.iter().map(Vec::as_slice));
         assert_eq!(chosen, Some(own));
     }
@@ -269,8 +285,13 @@ mod tests {
     #[test]
     fn only_the_canonical_encoding_decodes() {
         let (pk, sk, att_a, id) = device(6);
-        let mut bytes = DirectoryEntry::sign(body(&pk, att_a, id, 1), &sk).unwrap().encode();
+        let mut bytes = DirectoryEntry::sign(body(&pk, att_a, id, 1), &sk)
+            .unwrap()
+            .encode();
         bytes.extend_from_slice(&[0x10, 0x01]); // a repeated field appended
-        assert_eq!(DirectoryEntry::decode(&bytes), Err(DirectoryError::Malformed));
+        assert!(matches!(
+            DirectoryEntry::decode(&bytes),
+            Err(DirectoryError::Malformed(..))
+        ));
     }
 }

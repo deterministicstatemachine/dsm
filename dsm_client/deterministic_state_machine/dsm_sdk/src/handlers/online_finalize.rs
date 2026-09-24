@@ -149,8 +149,10 @@ pub fn verify_acceptance_receipt(
     // From the SENDER's viewpoint the recipient (B) is the Counterparty. At
     // relationship genesis (no Counterparty head yet) ek_cert_b chains back to
     // the recipient's AK — its legitimate predecessor.
-    let rel_key =
-        dsm::verification::smt_replace_witness::compute_smt_key(&receipt.devid_a, &receipt.devid_b);
+    let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
+        &receipt.devid_a,
+        &receipt.devid_b,
+    );
     let expected_prev_pk_b = load_cert_chain_head_pubkey(&rel_key, CertChainSide::Counterparty)
         .ok()
         .flatten()
@@ -349,7 +351,6 @@ mod tests {
             [0u8; 32], // child_root
             Vec::new(),
             Vec::new(),
-            Vec::new(),
         )
     }
 
@@ -368,7 +369,7 @@ mod tests {
         commitment: [u8; 32],
     ) -> SenderOnlineProposal {
         SenderOnlineProposal {
-            relationship_key: dsm::verification::smt_replace_witness::compute_smt_key(
+            relationship_key: dsm::core::bilateral_transaction_manager::compute_smt_key(
                 &[0x11u8; 32],
                 &cp,
             ),
@@ -386,7 +387,6 @@ mod tests {
             amount: 0,
             token_id: "ERA".to_string(),
             status: "submitted".to_string(),
-            created_at: 0,
         }
     }
 

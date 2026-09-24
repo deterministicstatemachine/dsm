@@ -108,9 +108,7 @@ mod tests {
             version: 3,
             headers: Some(pb::Headers {
                 device_id: vec![1; 32],
-                chain_tip: vec![2; 32],
                 genesis_hash: vec![3; 32],
-                seq: 0,
             }),
             message_id: vec![4; 16],
             payload: None,

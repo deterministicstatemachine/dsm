@@ -103,16 +103,6 @@ impl AppRouterImpl {
             .await;
     }
 
-    /// Format inbox-related errors into a concise, actionable message for the UI.
-    pub(crate) fn format_inbox_error(&self, e: &crate::types::error::DsmError) -> String {
-        use crate::types::error::DsmError;
-        if let DsmError::InboxTokenInvalid(msg) = e {
-            format!("Inbox token invalid: {msg}. This device's inbox is bound to its genesis and cannot be re-registered. Please re-bind the device or contact support.")
-        } else {
-            format!("inbox.pull: retrieve failed: {e}")
-        }
-    }
-
     pub(crate) async fn ensure_withdrawal_bridge_sync(&self, route: &str) -> Result<(), String> {
         for _ in 0..WITHDRAWAL_BRIDGE_SYNC_MAX_PASSES {
             #[cfg(test)]
@@ -289,32 +279,14 @@ impl AppRouterImpl {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     use serial_test::serial;
 
     use crate::init::SdkConfig;
 
-    fn install_test_identity(device_id: Vec<u8>, genesis_hash: Vec<u8>, binding_key: Vec<u8>) {
-        crate::reset_sdk_context_for_testing();
-        crate::sdk::app_state::AppState::reset_memory_for_testing();
-        crate::sdk::app_state::AppState::prime_memory_for_testing();
-        crate::sdk::signing_authority::clear_binding_key_for_testing();
-        let (public_key, _secret_key) =
-            crate::sdk::signing_authority::derive_signing_keys_for_testing(
-                &device_id,
-                &genesis_hash,
-                &binding_key,
-            )
-            .expect("derive canonical signing keypair");
-        crate::sdk::signing_authority::set_binding_key_for_testing(binding_key);
-        crate::sdk::app_state::AppState::set_identity_info(
-            device_id,
-            public_key,
-            genesis_hash,
-            vec![0u8; 32],
-        );
-        crate::sdk::app_state::AppState::set_has_identity(true);
+    /// A device created as wallet creation creates it, in a fresh database.
+    fn install_test_identity(seed: u8) {
+        crate::economic_fixtures::local_device(seed);
     }
 
     fn sync_response(
@@ -332,15 +304,13 @@ mod tests {
     }
 
     fn init_bridge_sync_test_router(test_name: &str) -> AppRouterImpl {
+        crate::economic_fixtures::use_test_storage_dir();
         unsafe {
-            std::env::set_var("DSM_SDK_TEST_MODE", "1");
             std::env::remove_var("DSM_ENV_CONFIG_PATH");
         }
         crate::storage::client_db::reset_database_for_tests();
-        let _ = crate::storage_utils::set_storage_base_dir(PathBuf::from(format!(
-            "./.dsm_testdata_{test_name}"
-        )));
-        install_test_identity(vec![0x21; 32], vec![0x41; 32], vec![0x51; 32]);
+        crate::economic_fixtures::use_test_storage_dir();
+        install_test_identity(0x21);
         crate::storage::client_db::init_database().expect("init db");
         set_withdrawal_bridge_sync_test_results(Vec::new());
 

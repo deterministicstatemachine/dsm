@@ -9,7 +9,6 @@ import type {
   StorageNodeEndpoint,
   NodeHealthMetrics,
   StorageNodesConfig,
-  ObjectMetadata,
   DiagnosticsBundle,
 } from '../types/storage';
 import { asDisplayOnlyNumber } from '../types/storage';
@@ -211,13 +210,13 @@ class StorageNodeService {
       const resp = await getNodeHealth([url]);
       const node = resp.nodes.find(n => n.url === url);
       if (!node) {
-        return { url, status: 'down', lastPing: asDisplayOnlyNumber(0), lastError: 'Not in response' };
+        return { url, status: 'down', lastError: 'Not in response' };
       }
       return this.statsToMetrics(node);
     } catch (e: any) {
       const errorMsg = e?.message ?? 'unknown error';
       this.logError('checkNodeHealth', errorMsg, url);
-      return { url, status: 'down', lastPing: asDisplayOnlyNumber(0), lastError: errorMsg };
+      return { url, status: 'down', lastError: errorMsg };
     }
   }
 
@@ -239,7 +238,6 @@ class StorageNodeService {
       return config.nodes.map(n => ({
         url: n.url,
         status: 'down' as const,
-        lastPing: asDisplayOnlyNumber(0),
         lastError: e?.message ?? 'Bridge call failed',
       }));
     }
@@ -259,7 +257,6 @@ class StorageNodeService {
         name: cfgNode.name,
         region: cfgNode.region,
         status: 'down' as const,
-        lastPing: asDisplayOnlyNumber(0),
         lastError: 'Not in response',
       };
     });
@@ -277,7 +274,6 @@ class StorageNodeService {
       name: node.name || configuredNode?.name || undefined,
       region: node.region || configuredNode?.region || undefined,
       status: (node.status as 'healthy' | 'degraded' | 'down') || 'down',
-      lastPing: asDisplayOnlyNumber(0),
       latencyMs: asDisplayOnlyNumber(Number(node.latencyMs ?? 0)),
       lastError: node.lastError || undefined,
       objectsPutTotal: asDisplayOnlyNumber(Number(node.objectsPutTotal ?? 0)),
@@ -351,32 +347,6 @@ class StorageNodeService {
     return Array.from(this.healthCache.values());
   }
 
-  // ========== Object browser ==========
-
-  async listObjects(nodeUrl: string, prefix?: string): Promise<ObjectMetadata[]> {
-    try {
-      const url = new URL(`${nodeUrl.replace(/\/$/, '')}/api/v2/object/list`);
-      if (prefix) url.searchParams.set('prefix', prefix);
-      url.searchParams.set('limit', '200');
-      const resp = await fetch(url.toString(), {
-        method: 'GET',
-        headers: this.buildHeaders({ url: nodeUrl, isPrimary: false }),
-      });
-      if (!resp.ok) {
-        return [];
-      }
-      const bytes = new Uint8Array(await resp.arrayBuffer());
-      const decoded = pb.ObjectListResponseV1.fromBinary(bytes);
-      return decoded.items.map((item) => ({
-        key: item.key,
-        size: Number(item.sizeBytes ?? 0),
-        nodes: [nodeUrl],
-      }));
-    } catch {
-      return [];
-    }
-  }
-
   async getObject(key: string): Promise<{ data: Uint8Array; contentType?: string } | null> {
     const config = this.getNodesConfig();
     const node = config.nodes[0]; // use first available node
@@ -426,7 +396,6 @@ class StorageNodeService {
     const health = await this.checkAllNodesHealth();
     const config = this.getNodesConfig();
     return {
-      tick: 0,
       nodesConfig: config,
       nodeHealth: health,
       recentErrors: this.errorLog.slice(),

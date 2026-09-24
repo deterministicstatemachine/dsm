@@ -94,4 +94,4 @@ run = "cargo test --locked -p dsm_sdk --release --lib -- --nocapture --test-thre
 
 [groups.workspace-rest]
 when = ["CORE", "STORAGE", "FORMAL"]
-run = "cargo test --locked --workspace --exclude dsm_storage_node --exclude dsm --exclude dsm_sdk --release -- --nocapture --test-threads=1\ncargo test --locked -p dsm_storage_node --release --no-default-features --features local-dev,strict -- --nocapture"
+run = "cargo test --locked --workspace --exclude dsm_storage_node --exclude dsm --exclude dsm_sdk --release -- --nocapture --test-threads=1\ncargo test --locked -p dsm_storage_node --release -- --nocapture --test-threads=1"

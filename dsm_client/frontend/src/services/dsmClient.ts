@@ -78,12 +78,6 @@ export class DsmClient {
     }
     return { transactions: (v as any).transactions };
   }
-  async getLogicalTick(): Promise<bigint> {
-    if (!(await this.isReady())) throw new Error('Identity not initialized');
-
-    return dsm.getLogicalTick();
-  }
-
   // Contacts
   async getContacts(): Promise<ContactsResponse> {
     if (!(await this.isReady())) {

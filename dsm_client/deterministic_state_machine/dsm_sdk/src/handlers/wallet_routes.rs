@@ -1,4 +1,3 @@
-#![allow(unused_variables)]
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! Wallet and balance route handlers for AppRouterImpl.
 //!
@@ -9,70 +8,9 @@ use dsm::types::proto as generated;
 use prost::Message;
 
 use crate::bridge::{AppInvoke, AppQuery, AppResult};
-use super::app_router_impl::{relationship_tip_for_contact_restore, AppRouterImpl};
+use super::app_router_impl::AppRouterImpl;
 use super::relationship_status::status_message;
 use super::response_helpers::{pack_envelope_ok, err};
-
-#[derive(Debug, Clone)]
-struct CachedPolicyMetadata {
-    ticker: String,
-    alias: String,
-    decimals: u32,
-}
-
-fn parse_cached_policy_metadata(policy_bytes: &[u8]) -> Option<CachedPolicyMetadata> {
-    let policy = generated::TokenPolicyV3::decode(policy_bytes).ok()?;
-    let bytes = policy.policy_bytes;
-    if bytes.is_empty() {
-        return None;
-    }
-
-    let mut off = 0usize;
-    let version = *bytes.get(off)?;
-    off += 1;
-
-    match version {
-        1 => {
-            let ticker_len = *bytes.get(off)? as usize;
-            off += 1;
-            let ticker = String::from_utf8(bytes.get(off..off + ticker_len)?.to_vec()).ok()?;
-            off += ticker_len;
-
-            let alias_len = ((*bytes.get(off)? as usize) << 8) | (*bytes.get(off + 1)? as usize);
-            off += 2;
-            let alias = String::from_utf8(bytes.get(off..off + alias_len)?.to_vec()).ok()?;
-            off += alias_len;
-
-            let decimals = *bytes.get(off)? as u32;
-            Some(CachedPolicyMetadata {
-                ticker,
-                alias,
-                decimals,
-            })
-        }
-        2 => {
-            off += 3; // kind + flags + threshold
-
-            let ticker_len = *bytes.get(off)? as usize;
-            off += 1;
-            let ticker = String::from_utf8(bytes.get(off..off + ticker_len)?.to_vec()).ok()?;
-            off += ticker_len;
-
-            let alias_len = ((*bytes.get(off)? as usize) << 8) | (*bytes.get(off + 1)? as usize);
-            off += 2;
-            let alias = String::from_utf8(bytes.get(off..off + alias_len)?.to_vec()).ok()?;
-            off += alias_len;
-
-            let decimals = *bytes.get(off)? as u32;
-            Some(CachedPolicyMetadata {
-                ticker,
-                alias,
-                decimals,
-            })
-        }
-        _ => None,
-    }
-}
 
 /// The token's decimal places, from the authority for that token.
 ///
@@ -501,7 +439,7 @@ impl AppRouterImpl {
 
                 // Use the wallet lane router, which prefers validated canonical projection rows
                 // for non-ERA tokens and falls back to canonical state.
-                match self.wallet.get_balance(Some(token_for_query)) {
+                match self.wallet.get_balance(token_for_query) {
                     Ok(bal) => {
                         let mut reply = generated::BalanceGetResponse {
                             token_id: token_for_query.to_string(),
@@ -641,12 +579,16 @@ impl AppRouterImpl {
                             id: safe_id,
                             // Protocol/UI contract: device ids are binary 32-byte values.
                             // We store canonical base32 in SQLite for indexing, but must return bytes here.
-                            from_device_id: crate::util::text_id::decode_base32_crockford(&t.from_device)
-                                .filter(|b| b.len() == 32)
-                                .unwrap_or_default(),
-                            to_device_id: crate::util::text_id::decode_base32_crockford(&t.to_device)
-                                .filter(|b| b.len() == 32)
-                                .unwrap_or_default(),
+                            from_device_id: crate::util::text_id::decode_base32_crockford(
+                                &t.from_device,
+                            )
+                            .filter(|b| b.len() == 32)
+                            .unwrap_or_default(),
+                            to_device_id: crate::util::text_id::decode_base32_crockford(
+                                &t.to_device,
+                            )
+                            .filter(|b| b.len() == 32)
+                            .unwrap_or_default(),
                             token_id: canonicalize_token_id(
                                 &t.metadata
                                     .get("token_id")
@@ -655,7 +597,6 @@ impl AppRouterImpl {
                             ),
                             amount: t.amount,
                             fee: 0,
-                            logical_index: t.chain_height,
                             // tx_hash is stored as canonical base32 text in SQLite.
                             tx_hash: crate::util::text_id::decode_base32_crockford(&t.tx_hash)
                                 .filter(|b| b.len() == 32)
@@ -669,7 +610,6 @@ impl AppRouterImpl {
                             } else {
                                 t.proof_data.clone().unwrap_or_default()
                             },
-                            created_at: t.created_at,
                             memo: t
                                 .metadata
                                 .get("memo")
@@ -683,15 +623,7 @@ impl AppRouterImpl {
                             } else {
                                 t.proof_data
                                     .as_ref()
-                                    .map(|b| {
-                                        let r_g = dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(b)
-                                            .ok()
-                                            .map(|r| crate::sdk::receipts::DeviceTreeAcceptanceCommitment::from_root(
-                                                dsm::common::device_tree::DeviceTree::single(r.devid_a).root(),
-                                            ));
-                                        crate::sdk::receipts::verify_receipt_bytes(b, r_g)
-                                    })
-                                    .unwrap_or(false)
+                                    .is_some_and(|b| receipt_state_holds(b))
                             },
                         }
                     })
@@ -972,67 +904,41 @@ impl AppRouterImpl {
 
                 #[cfg(all(target_os = "android", feature = "bluetooth", feature = "jni"))]
                 {
-                    let validity_iterations = if req.validity_iterations == 0 {
-                        100
-                    } else {
-                        req.validity_iterations
-                    };
                     // Try to get the adapter; if not yet injected, trigger on-demand
                     // injection via ensure_bluetooth_manager_and_sync_contact. This
                     // handles the race where the frontend fires sendOffline immediately
                     // after pairing finalized but before the Kotlin-side 15s pairing
                     // timeout fires the bilateral preconditions check.
+                    let contact = match crate::storage::client_db::get_contact_by_device_id(
+                        &counterparty_device_id,
+                    ) {
+                        Ok(Some(record)) => match record.to_verified_contact() {
+                            Ok(contact) => contact,
+                            Err(e) => return err(format!("wallet.sendOffline: {e}")),
+                        },
+                        Ok(None) => {
+                            return err(
+                                "wallet.sendOffline: the counterparty is not a contact".into()
+                            )
+                        }
+                        Err(e) => return err(format!("wallet.sendOffline: contact lookup: {e}")),
+                    };
                     let transport_adapter = match crate::bridge::get_ble_transport_adapter().await {
                         Ok(adapter) => adapter,
-                        Err(_) => {
+                        Err(missing) => {
                             log::warn!(
-                                "[wallet.sendOffline] BLE transport adapter not yet injected; attempting on-demand injection"
+                                "[wallet.sendOffline] BLE transport adapter not yet injected ({missing}); attempting on-demand injection"
                             );
-                            // Build a minimal contact from SQLite to trigger late-init
-                            match crate::storage::client_db::get_contact_by_device_id(
-                                &counterparty_device_id,
-                            ) {
-                                Ok(Some(contact_record)) => {
-                                    let verified_contact =
-                                        dsm::types::contact_types::DsmVerifiedContact {
-                                            alias: contact_record.alias.clone(),
-                                            device_id: counterparty_device_id,
-                                            genesis_hash: {
-                                                let mut gh = [0u8; 32];
-                                                if contact_record.genesis_hash.len() == 32 {
-                                                    gh.copy_from_slice(
-                                                        &contact_record.genesis_hash,
-                                                    );
-                                                }
-                                                gh
-                                            },
-                                            public_key: contact_record.public_key.clone(),
-                                            genesis_material: Vec::new(),
-                                            chain_tip: None,
-                                            chain_tip_smt_proof: None,
-                                            genesis_verified_online: true,
-                                            verified_at_commit_height: 0,
-                                            added_at_commit_height: 0,
-                                            last_updated_commit_height: 0,
-                                            verifying_storage_nodes: Vec::new(),
-                                            ble_address: contact_record.ble_address.clone(),
-                                        };
-                                    if let Err(e) =
-                                        crate::bluetooth::ensure_bluetooth_manager_and_sync_contact(
-                                            verified_contact,
-                                        )
-                                        .await
-                                    {
-                                        log::warn!(
-                                            "[wallet.sendOffline] On-demand BLE init failed: {e}"
-                                        );
-                                    }
-                                }
-                                _ => {
-                                    log::warn!("[wallet.sendOffline] Cannot trigger on-demand BLE init: contact not found in SQLite");
-                                }
+                            if let Err(e) =
+                                crate::bluetooth::ensure_bluetooth_manager_and_sync_contact(
+                                    contact.clone(),
+                                )
+                                .await
+                            {
+                                return err(format!(
+                                    "wallet.sendOffline: on-demand BLE init failed: {e}"
+                                ));
                             }
-                            // Retry after on-demand injection
                             match crate::bridge::get_ble_transport_adapter().await {
                                 Ok(adapter) => adapter,
                                 Err(e) => {
@@ -1045,9 +951,8 @@ impl AppRouterImpl {
                     };
                     let coordinator = match crate::bridge::get_ble_coordinator().await {
                         Ok(c) => c,
-                        Err(_) => {
-                            // Same pattern: coordinator should have been injected alongside adapter
-                            log::warn!("[wallet.sendOffline] BLE coordinator not yet injected; retrying after brief yield");
+                        Err(missing) => {
+                            log::warn!("[wallet.sendOffline] BLE coordinator not yet injected ({missing}); retrying after brief yield");
                             tokio::task::yield_now().await;
                             match crate::bridge::get_ble_coordinator().await {
                                 Ok(c) => c,
@@ -1059,52 +964,25 @@ impl AppRouterImpl {
                             }
                         }
                     };
-                    // Just-in-time contact sync: if the BTM doesn't have this contact
-                    // but SQLite does, load it now. This covers cases where the init-time
-                    // sync was missed (e.g., race between contacts.add and BLE init).
+                    // Just-in-time contact sync: the BLE handler may have missed
+                    // the init-time sync (a race between contacts.add and BLE init).
                     if !transport_adapter
                         .bilateral_handler()
                         .has_verified_contact(&counterparty_device_id)
                         .await
                     {
-                        log::warn!(
-                            "[wallet.sendOffline] Contact not in BTM — attempting just-in-time sync from SQLite"
-                        );
-                        if let Ok(Some(record)) =
-                            crate::storage::client_db::get_contact_by_device_id(
-                                &counterparty_device_id,
-                            )
+                        if let Err(e) = transport_adapter
+                            .bilateral_handler()
+                            .add_verified_contact(contact)
+                            .await
                         {
-                            if let Some(verified) = record.to_verified_contact() {
-                                match transport_adapter
-                                    .bilateral_handler()
-                                    .add_verified_contact(verified)
-                                    .await
-                                {
-                                    Ok(_) => log::warn!(
-                                        "[wallet.sendOffline] ✅ Just-in-time contact sync succeeded"
-                                    ),
-                                    Err(e) => log::error!(
-                                        "[wallet.sendOffline] ❌ Just-in-time contact sync failed: {e}"
-                                    ),
-                                }
-                            } else {
-                                log::error!(
-                                    "[wallet.sendOffline] Contact in SQLite but to_verified_contact() returned None (bad field lengths)"
-                                );
-                            }
-                        } else {
-                            log::error!(
-                                "[wallet.sendOffline] Contact not found in SQLite either — user must add contact first"
-                            );
+                            return err(format!(
+                                "wallet.sendOffline: just-in-time contact sync failed: {e}"
+                            ));
                         }
                     }
                     let (prepare_envelope, commitment_hash) = match transport_adapter
-                        .create_prepare_message_with_commitment(
-                            counterparty_device_id,
-                            operation,
-                            validity_iterations,
-                        )
+                        .create_prepare_message_with_commitment(counterparty_device_id, operation)
                         .await
                     {
                         Ok(v) => v,
@@ -1192,7 +1070,6 @@ impl AppRouterImpl {
                         commitment_hash: Some(generated::Hash32 {
                             v: commitment_hash.to_vec(),
                         }),
-                        expires_iterations: validity_iterations,
                         ..Default::default()
                     };
                     pack_envelope_ok(generated::envelope::Payload::BilateralPrepareResponse(resp))
@@ -1255,116 +1132,34 @@ impl AppRouterImpl {
                     }
                 };
 
-                // 2. Resolve Chain Tip from Contact
-                let local_genesis: [u8; 32] = match self
-                    .core_sdk
-                    .local_genesis_hash()
-                    .await
-                    .ok()
-                    .and_then(|v| v.as_slice().try_into().ok())
-                {
-                    Some(genesis) => genesis,
-                    None => {
-                        return err(
-                            "wallet.sendSmart: local genesis unavailable for canonical relationship routing"
-                                .into(),
-                        )
-                    }
-                };
-                let chain_tip_vec =
-                    match crate::storage::client_db::get_contact_by_device_id(&to_device_id_vec) {
-                        Ok(Some(c)) => match relationship_tip_for_contact_restore(
-                            self.device_id_bytes,
-                            local_genesis,
-                            &c,
-                        ) {
-                            Some(tip) => tip.to_vec(),
-                            None => {
-                                return err(
-                                    "wallet.sendSmart: recipient relationship tip is unavailable or invalid"
-                                        .into(),
-                                )
-                            }
-                        },
-                        Ok(None) => {
-                            return err(
-                                "wallet.sendSmart: recipient must be an added contact before online send"
-                                    .into(),
-                            )
-                        }
-                        Err(e) => {
-                            return err(format!(
-                                "wallet.sendSmart: failed to load recipient contact: {e}"
-                            ))
-                        }
-                    };
-
-                // 3. Parse display amount into canonical base units in the backend.
-                let canonical_token_id = canonicalize_token_id(&smart_req.token_id);
-                let token_decimals = resolve_token_decimals(&canonical_token_id);
+                // 2. Parse display amount into canonical base units in the backend.
+                // The token is named exactly: an omitted token is not ERA.
+                let token_id = smart_req.token_id.clone();
+                if token_id.is_empty() {
+                    return err("wallet.sendSmart: the request names no token".into());
+                }
+                let token_decimals = resolve_token_decimals(&token_id);
                 let amount: u64 =
                     match parse_display_amount_to_base_units(&smart_req.amount, token_decimals) {
                         Ok(v) => v,
                         Err(e) => return err(format!("Invalid amount: {}", e)),
                     };
 
-                // 4. Per §4.3 there's no state_number sequence; use deterministic
-                // tick as a per-request monotonic identifier (not in any hash).
-                let seq = match self.core_sdk.get_current_state() {
-                    Ok(_s) => crate::util::deterministic_time::tick(),
-                    _ => 1,
-                };
-
-                // 5. Construct OnlineTransferRequest with deterministic nonce
-                let mut inner_req = generated::OnlineTransferRequest {
-                    token_id: canonical_token_id,
+                // 3. The request process_online_transfer_logic signs. It derives
+                // the relationship tip and the nonce itself.
+                let inner_req = generated::OnlineTransferRequest {
+                    token_id,
                     to_device_id: to_device_id_vec.clone(),
                     amount,
                     memo: smart_req.memo,
-                    nonce: vec![], // Deterministic nonce computed below from request content
+                    nonce: vec![],
                     signature: vec![],
                     from_device_id: self.device_id_bytes.to_vec(),
-                    chain_tip: chain_tip_vec.clone(),
-                    seq,
                     canonical_operation_bytes: Vec::new(),
                     receipt_evidence_digest: Vec::new(),
                     sender_economic_position: 0,
                     sender_debit_mutation_index: 0,
                 };
-
-                // Compute deterministic nonce: Hash(domain || sender_id || receiver_id || prev_tip || seq || payload_digest)
-                let mut payload_bytes = Vec::new();
-                if let Err(e) = inner_req.encode(&mut payload_bytes) {
-                    return err(format!(
-                        "Failed to encode OnlineTransferRequest for nonce computation: {e}"
-                    ));
-                }
-                let payload_digest = dsm::crypto::blake3::domain_hash(
-                    dsm::common::domain_tags::TAG_DSM_PAYLOAD_DIGEST,
-                    &payload_bytes,
-                );
-
-                let sender_id = match <[u8; 32]>::try_from(&self.device_id_bytes[..]) {
-                    Ok(v) => v,
-                    Err(_) => return err("Invalid sender device ID length".into()),
-                };
-                let receiver_id = match <[u8; 32]>::try_from(&to_device_id_vec[..]) {
-                    Ok(v) => v,
-                    Err(_) => return err("Invalid receiver device ID length".into()),
-                };
-                let prev_tip = match <[u8; 32]>::try_from(&chain_tip_vec[..]) {
-                    Ok(v) => v,
-                    Err(_) => return err("Invalid chain tip length".into()),
-                };
-
-                let nonce = dsm::crypto::generate_online_transfer_nonce(
-                    &sender_id,
-                    &receiver_id,
-                    &prev_tip,
-                    seq,
-                    payload_digest.as_bytes(),
-                );
-                inner_req.nonce = nonce.to_vec();
 
                 self.process_online_transfer_logic(inner_req).await
             }
@@ -1374,16 +1169,75 @@ impl AppRouterImpl {
     }
 }
 
+/// Whether a stored receipt's state rules hold against the sender's
+/// AUTHENTICATED Device Tree commitment: this device's own, or the one kept
+/// for the contact. A root derived from the receipt itself is never used, so
+/// a receipt from a sender with no kept commitment is not shown as verified.
+fn receipt_state_holds(receipt_bytes: &[u8]) -> bool {
+    let Ok(receipt) =
+        dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(receipt_bytes)
+    else {
+        return false;
+    };
+    let own = crate::sdk::app_state::AppState::get_device_id()
+        .is_some_and(|id| id.as_slice() == receipt.devid_a.as_slice());
+    let commitment = if own {
+        crate::sdk::app_state::AppState::get_device_tree_commitment()
+    } else {
+        match crate::storage::client_db::get_contact_device_tree_root(&receipt.devid_a) {
+            Ok(root) => {
+                root.map(dsm::types::receipt_types::DeviceTreeAcceptanceCommitment::from_root)
+            }
+            Err(e) => {
+                log::error!("[wallet] receipt verification: the sender's Device Tree root is unreadable: {e}");
+                return false;
+            }
+        }
+    };
+    commitment.is_some_and(|c| {
+        dsm::verification::receipt_verification::verify_receipt_state(&receipt, &c).is_ok()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         canonicalize_token_id, encode_offline_transfer_operation_canonical,
-        ensure_default_visible_balances, merge_balance_projections,
+        ensure_default_visible_balances, format_base_units_for_display,
+        format_signed_base_units_for_display, merge_balance_projections,
         parse_display_amount_to_base_units,
     };
     use crate::storage::client_db::BalanceProjectionRecord;
     use dsm::types::proto as generated;
     use dsm::types::operations::Operation;
+
+    /// Rendering is exact at the magnitudes a hand-rolled conversion gets
+    /// wrong, in both directions of sign.
+    #[test]
+    fn rendering_is_exact_at_the_awkward_magnitudes() {
+        // Fewer digits than decimals: the leading zeros are produced.
+        assert_eq!(format_base_units_for_display(5, 8), "0.00000005");
+        assert_eq!(format_base_units_for_display(0, 2), "0.00");
+        assert_eq!(format_base_units_for_display(100, 2), "1.00");
+        // No fractional part is still written out, so the scale is visible.
+        assert_eq!(format_base_units_for_display(100_000, 2), "1000.00");
+        // Whole-unit tokens get no decimal point.
+        assert_eq!(format_base_units_for_display(750, 0), "750");
+        assert_eq!(
+            format_base_units_for_display(u64::MAX, 2),
+            "184467440737095516.15"
+        );
+        assert_eq!(
+            format_signed_base_units_for_display(-100_000, 2),
+            "-1000.00"
+        );
+        assert_eq!(format_signed_base_units_for_display(0, 2), "0.00");
+        // i64::MIN cannot be negated in place.
+        assert_eq!(
+            format_signed_base_units_for_display(i64::MIN, 0),
+            "-9223372036854775808"
+        );
+    }
 
     /// A projection row as `build_balance_projection_from_device_head` writes it:
     /// `source_state_hash` is the device head root `r_A`, NOT a `State::hash()`.
@@ -1398,7 +1252,6 @@ mod tests {
             // A device head root. Nothing in the read path may compare this to a
             // legacy `State::hash()` — they digest different structures.
             source_state_hash: "HEADROOT0000000000000000000000000".to_string(),
-            updated_at: 7,
         }
     }
 

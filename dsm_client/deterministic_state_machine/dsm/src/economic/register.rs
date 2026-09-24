@@ -19,9 +19,10 @@
 //!
 //! A member checks nothing (Part II §9, §12): it keeps every value it is
 //! given at `K_root(q)`, in arrival order, and decides nothing. The writer
-//! computes the cell's leader from `s(q)` over the committed set and writes
-//! there first; Core derives `LeaderHeld` and `Final` from the raw reads
-//! (`sofi::arith`). No P0–P6, no transition validation, no economics, and no
+//! and Core compute the cell's route from `s(q)` over the committed set
+//! ([`RootCell`]); the writer writes along it leader first, and Core
+//! evaluates the route chains from the raw reads (`route_chain`, storage
+//! spec §9). No P0–P6, no transition validation, no economics, and no
 //! attribution: a claim carries its own authority, the claimant's signature
 //! over its exact bytes, and a claim in a victim's name that the victim never
 //! signed is not an object naming the victim's cell — it counts as nothing
@@ -47,6 +48,11 @@ use crate::common::domain_tags::{
     TAG_DSM_ECONOMIC_POSITION_SEED, TAG_DSM_TRADER_ECONOMIC_ROOT_REGISTER_KEY,
 };
 use crate::crypto::blake3::dsm_domain_hasher;
+use crate::economic::claim_envelope::RegisteredEconomicClaim;
+use crate::route_chain::{
+    check_completion_proof, completion_proof, evaluate, CellError, CellEvidence, CellReading,
+    CompletionProof, Missing, ProofRefusal, RoutedCell,
+};
 
 /// `K_root = H_dom(DSM/trader-economic-root-register-key/v1,
 /// G ‖ DevID ‖ u64_be(economic_position))`.
@@ -65,6 +71,115 @@ pub fn economic_root_register_key(
     h.update(device_id);
     h.update(&economic_position.to_be_bytes());
     *h.finalize().as_bytes()
+}
+
+/// An object naming `K_root`: a registered economic claim — a trader's
+/// signed root claim, or a conditional SoFi claim — whose own coordinates
+/// derive `k_root`. Anything else at the cell counts as nothing.
+pub fn root_claim_naming(bytes: &[u8], k_root: &[u8; 32]) -> Option<RegisteredEconomicClaim> {
+    let claim = crate::economic::claim_envelope::decode_registered_economic_claim(bytes).ok()?;
+    let (genesis, device_id) = claim.trader();
+    (economic_root_register_key(&genesis, &device_id, claim.economic_position()) == *k_root)
+        .then_some(claim)
+}
+
+/// The namespace of economic root cells at a member: the key domain's own
+/// bytes.
+pub fn economic_root_namespace() -> &'static [u8] {
+    TAG_DSM_TRADER_ECONOMIC_ROOT_REGISTER_KEY.source_bytes()
+}
+
+/// `K_root(q)` of a trader as Core derives it: the key, and the route seeded
+/// by `s(q)` over the register's committed set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RootCell {
+    genesis: [u8; 32],
+    device_id: [u8; 32],
+    economic_position: u64,
+    cell: RoutedCell,
+}
+
+impl RootCell {
+    /// `parent_root` is the root the verifier validated at `q - 1` (the
+    /// activation root before the first position). `members` must
+    /// re-derive `committed_set_id`, the register's pinned set id.
+    pub fn new(
+        genesis: &[u8; 32],
+        device_id: &[u8; 32],
+        economic_position: u64,
+        parent_root: &[u8; 32],
+        members: &StorageSetMembers,
+        committed_set_id: &[u8; 32],
+    ) -> Result<Self, CellError> {
+        let cell = RoutedCell::new(
+            economic_root_namespace(),
+            economic_root_register_key(genesis, device_id, economic_position),
+            &position_seed(genesis, device_id, economic_position, parent_root),
+            members,
+            committed_set_id,
+        )?;
+        Ok(Self {
+            genesis: *genesis,
+            device_id: *device_id,
+            economic_position,
+            cell,
+        })
+    }
+
+    pub fn genesis(&self) -> &[u8; 32] {
+        &self.genesis
+    }
+
+    pub fn device_id(&self) -> &[u8; 32] {
+        &self.device_id
+    }
+
+    pub fn economic_position(&self) -> u64 {
+        self.economic_position
+    }
+
+    pub fn routed(&self) -> &RoutedCell {
+        &self.cell
+    }
+}
+
+/// The route-chain reading of a root cell over claims naming its key
+/// ([`root_claim_naming`]). What holds the cell is the claim; its id is the
+/// entry digest of the exact bytes it arrived in.
+pub fn read_root_cell(
+    cell: &RootCell,
+    evidence: &CellEvidence,
+) -> Result<CellReading<RegisteredEconomicClaim>, Missing> {
+    evaluate(&cell.cell, evidence, claim_at(cell))
+}
+
+/// The recognizer of a root cell: claims naming its key, identified by the
+/// entry digest of their exact bytes.
+fn claim_at(cell: &RootCell) -> impl Fn(&[u8]) -> Option<([u8; 32], RegisteredEconomicClaim)> + '_ {
+    move |bytes| {
+        root_claim_naming(bytes, cell.cell.key())
+            .map(|claim| (crate::storage_cell::entry_digest(bytes), claim))
+    }
+}
+
+/// The completion proof of the claim final at a root cell (storage spec
+/// §9), with the claim; `None` while no chain of the claim holding the cell
+/// has three links.
+pub fn root_completion(
+    cell: &RootCell,
+    evidence: &CellEvidence,
+) -> Result<Option<(RegisteredEconomicClaim, CompletionProof)>, Missing> {
+    completion_proof(&cell.cell, evidence, claim_at(cell))
+}
+
+/// Check a kept completion proof of a root cell against the reads in
+/// `evidence`: the claim it proves final.
+pub fn check_root_completion(
+    cell: &RootCell,
+    evidence: &CellEvidence,
+    proof: &CompletionProof,
+) -> Result<RegisteredEconomicClaim, ProofRefusal> {
+    check_completion_proof(&cell.cell, evidence, proof, claim_at(cell))
 }
 
 /// `s(q)` — the seed of a trader's position cells (Part II §7.2), consumed
@@ -410,6 +525,8 @@ pub struct RegisteredEconomicRoot {
     post_economic_root: [u8; 32],
     admission_manifest_addr: [u8; 32],
     storage_set_id: [u8; 32],
+    /// `ClaimRef`: the digest of the exact envelope the claim arrived in.
+    claim_ref: [u8; 32],
 }
 
 impl RegisteredEconomicRoot {
@@ -430,7 +547,13 @@ impl RegisteredEconomicRoot {
             post_economic_root: body.post_economic_root,
             admission_manifest_addr: body.admission_manifest_addr,
             storage_set_id: body.root_register_storage_set_id,
+            claim_ref: crate::sofi::derive::claim_ref(claim.envelope_bytes()),
         }
+    }
+
+    /// The digest of the exact claim envelope this root was registered in.
+    pub fn claim_ref(&self) -> [u8; 32] {
+        self.claim_ref
     }
 
     pub fn trader_genesis(&self) -> [u8; 32] {
@@ -536,5 +659,45 @@ mod registered_root_construction_tests {
         // second path: `RegisteredEconomicRoot` has no public fields and no
         // other constructor.
         assert!(decoded.single_root().is_err());
+    }
+
+    /// A claim final at its root cell has a completion proof built from the
+    /// reads, and the proof checks against them; a claim held at the leader
+    /// alone has none.
+    #[test]
+    fn a_final_root_claim_has_a_completion_proof_that_checks() {
+        use crate::route_chain::fixtures::{committed_set, committed_set_id, Cell};
+        use crate::route_chain::ROUTE_LEN;
+        let claim = crate::sofi::wire::SofiResolutionClaim {
+            genesis: [0x11; 32],
+            device_id: [0x22; 32],
+            position: 9,
+            fulfillment_id: [0xF1; 32],
+            realize_root: [0xA1; 32],
+            void_root: [0xB1; 32],
+        };
+        let bytes = claim.encode();
+        let cell = RootCell::new(
+            &[0x11; 32],
+            &[0x22; 32],
+            9,
+            &[0x5E; 32],
+            &committed_set(),
+            &committed_set_id(),
+        )
+        .expect("the committed set");
+        let mut held = Cell::at(cell.routed());
+        held.write(&bytes, 0, &[]);
+        assert_eq!(root_completion(&cell, &held.evidence()), Ok(None));
+        let mut seats = Cell::at(cell.routed());
+        seats.write(&bytes, ROUTE_LEN - 1, &[]);
+        let Ok(Some((proven, proof))) = root_completion(&cell, &seats.evidence()) else {
+            panic!("a final claim has a completion proof")
+        };
+        assert_eq!(proven, decode_registered_economic_claim(&bytes).unwrap());
+        assert_eq!(
+            check_root_completion(&cell, &seats.evidence(), &proof),
+            Ok(proven)
+        );
     }
 }

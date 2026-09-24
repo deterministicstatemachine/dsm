@@ -32,20 +32,12 @@ export interface Transaction {
   counterpartyDeviceId?: string;
   stitchedReceipt?: Uint8Array;
   receiptVerified?: boolean;
-  localReceivedAt?: number; // Deterministic local counter when first observed
-  createdAt?: number;      // unix unix_ts (seconds) from backend
   memo?: string;           // optional memo/note
   tokenId?: string;        // token identifier from backend (e.g. "ERA", "dBTC")
   /** Signed display form rendered by Rust. Never computed in this layer; a row
    *  without it falls back to printing base units, which is not what the token
    *  holds. */
   displayAmount?: string;
-}
-
-let localReceivedCounter = 0;
-function nextLocalReceivedCounter(): number {
-  localReceivedCounter = (localReceivedCounter + 1) >>> 0;
-  return localReceivedCounter;
 }
 
 export interface TransferInput {
@@ -64,7 +56,6 @@ type GetTxHistory = () => Promise<{
     type: TransactionType;
     amount: string | number | bigint;
     recipient: string;
-    createdAt?: number;
     memo?: string;
     status: TransactionStatus;
     syncStatus?: SyncStatus;
@@ -183,16 +174,15 @@ export function useTransactions() {
       throw new Error('STRICT: backend did not return { transactions: [...] }');
     }
 
-    const mapped: Transaction[] = data.transactions.map((t, idx) => {
+    const mapped: Transaction[] = data.transactions.map((t) => {
       // Strict but robust mapping: derive safe defaults for faucet/system entries.
       const anyT: any = t as any;
 
-      // tx_id derivation: id, logical_index or idx-based (proto uses 'id' not 'tx_id')
-      const txId: string = (anyT.id || t.txId)
-        ? String(anyT.id || t.txId)
-        : (anyT.logicalIndex !== undefined || anyT.logical_index !== undefined
-            ? `tx:${String(anyT.logicalIndex ?? anyT.logical_index)}`
-            : `tx:${idx}`);
+      // Every history row carries its id (proto 'id').
+      if (!(anyT.id || t.txId)) {
+        throw new Error('STRICT: backend returned a transaction without an id');
+      }
+      const txId = String(anyT.id || t.txId);
 
       // type: ALWAYS infer from tx_type first (more reliable), then fall back to explicit type field
       // Proto uses camelCase 'txType', but backend may send snake_case 'tx_type'
@@ -229,15 +219,6 @@ export function useTransactions() {
 
       // status default: 'confirmed'
       const status: TransactionStatus = (anyT.status as TransactionStatus) ?? 'confirmed';
-
-      // Parse created_at unix_ts (proto camelCase)
-      let createdAtNum: number | undefined;
-      const createdAtRaw = anyT.createdAt ?? anyT.created_at;
-      if (createdAtRaw !== undefined && createdAtRaw !== null) {
-        if (typeof createdAtRaw === 'bigint') createdAtNum = Number(createdAtRaw);
-        else if (typeof createdAtRaw === 'number') createdAtNum = createdAtRaw;
-        else if (typeof createdAtRaw === 'string') createdAtNum = parseInt(createdAtRaw, 10) || undefined;
-      }
 
       // Parse memo
       const memoRaw = anyT.memo;
@@ -397,8 +378,6 @@ export function useTransactions() {
         counterpartyDeviceId,
         stitchedReceipt,
         receiptVerified: !!anyT.receiptVerified,
-        localReceivedAt: nextLocalReceivedCounter(),
-        createdAt: createdAtNum,
         memo,
         tokenId,
         displayAmount,

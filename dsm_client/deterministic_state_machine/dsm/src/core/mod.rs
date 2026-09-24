@@ -8,9 +8,9 @@
 //! - **State machine engine** ([`state_machine`]): Forward-only hash chain evolution,
 //!   deterministic entropy derivation, pre-commitment verification, and batch processing.
 //! - **Bridge traits** ([`bridge`]): Envelope routing and handler installation for
-//!   dispatching protobuf-encoded operations to the appropriate subsystem (unilateral,
-//!   bilateral, recovery, bootstrap, or application queries).
-//! - **Bilateral management** ([`bilateral_relationship_manager`], [`bilateral_transaction_manager`]):
+//!   dispatching protobuf-encoded operations to the appropriate subsystem (bilateral,
+//!   recovery, bootstrap, or application queries).
+//! - **Bilateral management** ([`bilateral_transaction_manager`]):
 //!   Isolated bilateral state pairs with cross-chain continuity verification, forward-linked
 //!   commitments, and chain-tip tracking as described in whitepaper Section 3.4.
 //! - **Identity lifecycle** ([`identity`]): Genesis state creation via MPC, hierarchical
@@ -25,7 +25,6 @@
 //!   bilateral state synchronization.
 //! - **Error types** ([`error`]): Structured error hierarchy for all core operations.
 
-pub mod bilateral_relationship_manager;
 pub mod bilateral_transaction_manager;
 pub mod bridge;
 pub mod chain_tip_store;
@@ -46,12 +45,11 @@ pub mod identity;
 pub mod state_machine;
 pub mod token;
 pub mod utility;
-pub mod verification; // Expose core bridge interfaces for SDK integration
 
 pub use error::DsmCoreError;
 
 // Re-export bridge types for convenience
 pub use bridge::{
-    AppRouter, UnilateralHandler, BilateralHandler, install_app_router, install_unilateral_handler,
-    install_bilateral_handler, handle_envelope_universal,
+    AppRouter, BilateralHandler, install_app_router, install_bilateral_handler,
+    handle_envelope_universal,
 };

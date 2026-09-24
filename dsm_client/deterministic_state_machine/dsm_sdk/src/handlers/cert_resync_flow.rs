@@ -114,8 +114,6 @@ impl super::app_router_impl::AppRouterImpl {
             })?;
         let commitment = proposal.commitment;
         let agreed_tip = proposal.projection_target; // the address both sides converge on
-        let accepted_parent = proposal.canonical_parent;
-        let accepted_child = proposal.canonical_child;
 
         let epoch = cert_resync_status(&rel_key)
             .map_err(|e| DsmError::internal(format!("resync status: {e}"), None::<std::io::Error>))?
@@ -128,7 +126,6 @@ impl super::app_router_impl::AppRouterImpl {
         let (ek_pk_a, _ek_sk_a) = derive_resync_ek(&rel_key, &agreed_tip, &joint, epoch)?;
         let (_ak_pk, ak_sk) = self.wallet.ak_keypair_for_cert_chain()?;
         let intent_sig = sphincs_sign(&ak_sk, &cert_resync_signing_target(&joint, &ek_pk_a))?;
-        let _ = (accepted_parent, accepted_child); // carried by the responder's audit lookup
 
         let (peer_device, peer_genesis, _peer_ak) =
             peer_for_relationship(&self.device_id_bytes, &rel_key)?;

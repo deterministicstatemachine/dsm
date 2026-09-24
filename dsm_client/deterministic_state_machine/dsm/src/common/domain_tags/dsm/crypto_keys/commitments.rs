@@ -13,14 +13,10 @@ pub const TAG_DSM_EXTERNAL_COMMIT_HASH: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/external-commit-hash");
 pub const TAG_DSM_EXTERNAL_COMMIT_ID: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/external-commit-id");
-pub const TAG_DSM_FLC_HASH_V2: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/flc/hash/v2");
 pub const TAG_DSM_MERKLE_PATH: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/merkle-path");
 pub const TAG_DSM_NETWORK_HASH: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/network-hash");
-pub const TAG_DSM_PAYLOAD_DIGEST: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/payload-digest");
 pub const TAG_DSM_PK_HASH: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/pk-hash");
 pub const TAG_DSM_PRECOMMIT: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/precommit");
 pub const TAG_DSM_PRECOMMIT_INVALIDATION_PROOF_V2: TaggedHashDomain<'static> =

@@ -5,13 +5,43 @@
 
 #![allow(clippy::disallowed_methods)] // unwrap/expect usage acceptable in deterministic integration tests
 
-use dsm::core::bilateral_relationship_manager::ContactEstablishmentRequest;
 use dsm::core::bilateral_transaction_manager::BilateralTransactionManager;
 use dsm::core::contact_manager::DsmContactManager;
 use dsm::crypto::signatures::SignatureKeyPair;
-use dsm::types::identifiers::NodeId;
 use dsm::types::operations::{Operation, TransactionMode, VerificationType};
 use dsm::types::token_types::Balance;
+
+/// Relationship chain tips over process memory, with the store trait's
+/// compare-and-set: an update applies only on the expected parent, and an
+/// absent tip reads as the zero parent a relationship starts from.
+#[derive(Default)]
+struct MemoryTips {
+    tips: std::sync::Mutex<std::collections::HashMap<[u8; 32], [u8; 32]>>,
+}
+
+impl dsm::core::chain_tip_store::ChainTipStore for MemoryTips {
+    fn get_contact_chain_tip(&self, device_id: &[u8; 32]) -> Option<[u8; 32]> {
+        self.tips
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(device_id)
+            .copied()
+    }
+
+    fn set_contact_chain_tip(
+        &self,
+        device_id: &[u8; 32],
+        expected_parent_tip: [u8; 32],
+        new_tip: [u8; 32],
+    ) -> Result<bool, dsm::types::error::DsmError> {
+        let mut tips = self.tips.lock().unwrap_or_else(|p| p.into_inner());
+        if tips.get(device_id).copied().unwrap_or([0u8; 32]) != expected_parent_tip {
+            return Ok(false);
+        }
+        tips.insert(*device_id, new_tip);
+        Ok(true)
+    }
+}
 
 #[tokio::test]
 async fn test_bilateral_transaction_manager_creation() {
@@ -23,8 +53,7 @@ async fn test_bilateral_transaction_manager_creation() {
         a.copy_from_slice(h.as_bytes());
         a
     };
-    let contact_manager =
-        DsmContactManager::new(device_id_arr, vec![NodeId::new("storage_node_1")]);
+    let contact_manager = DsmContactManager::new(device_id_arr);
 
     let local_genesis_arr: [u8; 32] = {
         let h = blake3::hash(b"local_genesis");
@@ -38,6 +67,7 @@ async fn test_bilateral_transaction_manager_creation() {
         keypair,
         device_id_arr,
         local_genesis_arr,
+        std::sync::Arc::new(MemoryTips::default()),
     );
 
     assert_eq!(
@@ -48,48 +78,7 @@ async fn test_bilateral_transaction_manager_creation() {
 }
 
 #[tokio::test]
-async fn test_contact_establishment_request_creation() {
-    let keypair = SignatureKeyPair::generate_from_entropy(b"it/contact").expect("keygen");
-
-    let dev_arr: [u8; 32] = {
-        let h = blake3::hash(b"device_123");
-        let mut a = [0u8; 32];
-        a.copy_from_slice(h.as_bytes());
-        a
-    };
-    let gen_arr: [u8; 32] = {
-        let h = blake3::hash(b"genesis_abc");
-        let mut a = [0u8; 32];
-        a.copy_from_slice(h.as_bytes());
-        a
-    };
-
-    let request = ContactEstablishmentRequest::new(
-        dev_arr,
-        gen_arr,
-        keypair.public_key().to_vec(),
-        "TestUser".to_string(),
-        Some("Hello!".to_string()),
-        &keypair,
-    )
-    .expect("create request");
-
-    assert_eq!(request.local_device_id, dev_arr);
-    assert_eq!(request.contact_alias, "TestUser");
-    assert!(!request.signature.is_empty(), "Request should be signed");
-
-    assert!(
-        request
-            .verify_signature(keypair.public_key())
-            .expect("verify"),
-        "Request signature should be valid"
-    );
-}
-
-#[tokio::test]
 async fn test_bilateral_relationship_anchor_generation() {
-    use dsm::core::bilateral_transaction_manager::BilateralRelationshipAnchor;
-
     let dev_a: [u8; 32] = {
         let h = blake3::hash(b"device_a");
         let mut a = [0u8; 32];
@@ -115,16 +104,22 @@ async fn test_bilateral_relationship_anchor_generation() {
         a
     };
 
-    let anchor1 = BilateralRelationshipAnchor::new(dev_a, gen_a, dev_b, gen_b);
-    let anchor2 = BilateralRelationshipAnchor::new(dev_b, gen_b, dev_a, gen_a);
-
-    assert_eq!(
-        anchor1.mutual_anchor_hash, anchor2.mutual_anchor_hash,
-        "Mutual anchors must be deterministic and order-independent"
+    let h0_seen_by_a = dsm::core::bilateral_transaction_manager::initial_relationship_chain_tip(
+        &dev_a, &gen_a, &dev_b, &gen_b,
     );
-    assert!(
-        !anchor1.is_synchronized(),
-        "New anchor should not start synchronized"
+    let h0_seen_by_b = dsm::core::bilateral_transaction_manager::initial_relationship_chain_tip(
+        &dev_b, &gen_b, &dev_a, &gen_a,
+    );
+    assert_eq!(
+        h0_seen_by_a, h0_seen_by_b,
+        "both devices derive one h_0 for their relationship"
+    );
+    let other_genesis = dsm::core::bilateral_transaction_manager::initial_relationship_chain_tip(
+        &dev_a, &gen_b, &dev_b, &gen_a,
+    );
+    assert_ne!(
+        h0_seen_by_a, other_genesis,
+        "h_0 binds each device to its own genesis"
     );
 }
 

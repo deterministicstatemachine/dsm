@@ -5,7 +5,6 @@ import * as pb from '../proto/dsm_app_pb';
 import { decodeBase32Crockford, encodeBase32Crockford } from '../utils/textId';
 import { decodeFramedEnvelopeV3 } from './decoding';
 import {
-    routerQueryBin,
     routerInvokeBin,
     getDeviceIdBinBridgeAsync,
     getSigningPublicKeyBinBridgeAsync,
@@ -139,11 +138,6 @@ export async function sendOnlineTransfer(transfer: GenericTransaction): Promise<
     if (fromDeviceId.length !== 32) {
       throw new Error('from_device_id must be 32 bytes (bridge headers missing)');
     }
-    const seq = typeof (headers as any).seq === 'bigint'
-      ? (headers as any).seq
-      : BigInt((headers as any).seq ?? 0);
-    const safeSeq = seq > 0n ? seq : 1n;
-
     // chain_tip is protocol state owned by the SDK (per-relationship bilateral tip, §4).
     // The SDK derives it from SQLite; the frontend never supplies it.
     const req = new pb.OnlineTransferRequest({
@@ -154,7 +148,6 @@ export async function sendOnlineTransfer(transfer: GenericTransaction): Promise<
       nonce: new Uint8Array(0),
       signature: new Uint8Array(0),
       fromDeviceId: fromDeviceId as any,
-      seq: safeSeq as any,
     } as any);
 
     // Route through AppRouter via routerInvokeBin('wallet.send').
@@ -274,7 +267,6 @@ export async function offlineSend(transfer: GenericTransaction): Promise<Generic
 
     const prepReq = new pb.BilateralPrepareRequest({
       counterpartyDeviceId: toBytes as any,
-      validityIterations: BigInt(100),
       bleAddress: normalizeBleAddress(String(transfer.bleAddress || '')) || '',
       transferAmountDisplay,
       tokenIdHint: canonicalizeTransferTokenId(transfer.tokenId),
@@ -581,17 +573,6 @@ export async function rejectOfflineTransfer(args: { commitmentHash: Uint8Array, 
    return { success: true };
 }
 
-export async function getLogicalTick(): Promise<bigint> {
-  const resBytes = await routerQueryBin('sys.tick');
-  const pack = pb.ArgPack.fromBinary(resBytes);
-  const tickBytes = pack.body;
-  if (tickBytes.length !== 8) {
-    throw new Error(`getLogicalTick: expected 8-byte LE u64, got ${tickBytes.length} bytes`);
-  }
-  const view = new DataView(tickBytes.buffer, tickBytes.byteOffset, tickBytes.byteLength);
-  return view.getBigUint64(0, true);
-}
-
 export async function sendOnlineMessage(recipientId: string, payload: any): Promise<boolean> {
   try {
     let toBytes: Uint8Array;
@@ -612,11 +593,6 @@ export async function sendOnlineMessage(recipientId: string, payload: any): Prom
     if (fromDeviceId.length !== 32) {
       throw new Error('from_device_id must be 32 bytes (bridge headers missing)');
     }
-    const seq = typeof (headers as any).seq === 'bigint'
-      ? (headers as any).seq
-      : BigInt((headers as any).seq ?? 0);
-    const safeSeq = seq > 0n ? seq : 1n;
-
     const memo = typeof payload?.memo === 'string' ? payload.memo : '';
     const rawPayload = payload?.data ?? payload;
     let payloadBytes: Uint8Array;
@@ -638,7 +614,6 @@ export async function sendOnlineMessage(recipientId: string, payload: any): Prom
       nonce: new Uint8Array(0),
       fromDeviceId: fromDeviceId as any,
       // chain_tip is RESERVED/IGNORED: SDK derives bilateral tip from SQLite
-      seq: safeSeq as any,
     } as any);
 
     const argPack = new pb.ArgPack({
@@ -742,7 +717,7 @@ export async function acceptBilateral(payload: any): Promise<boolean> {
   }
 }
 
-export async function claimFaucet(policyId: string): Promise<{ success: boolean; message: string; tokensReceived: number; nextAvailable?: number; humanScaled?: boolean; _debug?: any }> {
+export async function claimFaucet(policyId: string): Promise<{ success: boolean; message: string; tokensReceived: number; humanScaled?: boolean; _debug?: any }> {
   void policyId;
   try {
     const deviceId = await getDeviceIdBinBridgeAsync();
@@ -798,7 +773,6 @@ export async function claimFaucet(policyId: string): Promise<{ success: boolean;
       success: Boolean(resp.success),
       message: resp.success ? 'Faucet claim ok' : 'Faucet claim failed',
       tokensReceived: Number(resp.tokensReceived ?? 0),
-      nextAvailable: Number(resp.nextAvailableIndex ?? 0),
       humanScaled: true,
       _debug,
     };

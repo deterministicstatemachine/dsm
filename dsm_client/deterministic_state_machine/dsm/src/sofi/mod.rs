@@ -39,7 +39,6 @@ pub mod conformance;
 pub mod derive;
 pub mod exercise;
 pub mod fisher_yates;
-pub mod leader;
 pub mod lineage;
 pub mod publication;
 pub mod registration;

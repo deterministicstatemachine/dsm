@@ -6,7 +6,6 @@ pub mod era_token;
 pub mod init;
 pub mod policy;
 pub mod token_factory;
-pub mod token_registry;
 pub mod token_state_manager;
 
 // Optional modules (enable via Cargo features)
@@ -22,10 +21,9 @@ pub use token_factory::{
     create_token_genesis, derive_sub_token_genesis, ParticipantId, TokenContribution, TokenGenesis,
 };
 
-pub use token_registry::TokenRegistry;
 pub use token_state_manager::{
     builtin_policy_commit_for_token, builtin_token_id_for_policy_commit,
     canonical_balance_key_for_commit, register_policy_commit_ticker, TOKEN_CREATION_FEE_ERA,
     resolve_ticker_for_policy_commit, derive_canonical_balance_key, resolve_policy_commit,
-    PolicyCommitResolver, TokenStateManager, TokenTransfer,
+    PolicyCommitResolver,
 };

@@ -190,40 +190,6 @@ impl AssetManager {
 
         Ok(key_pair)
     }
-
-    /// Validate a token transfer
-    pub fn validate_transfer(&self, token_id: &str, amount: u64) -> Result<(), DsmError> {
-        // Get the token asset
-        let token_asset = self
-            .get_asset(token_id)?
-            .ok_or_else(|| DsmError::not_found("Token", Some(token_id.to_string())))?;
-
-        // Check if it's a token type
-        if token_asset.asset_type != AssetType::Token {
-            return Err(DsmError::invalid_operation(format!(
-                "Asset with ID {token_id} is not a token"
-            )));
-        }
-
-        // For now, assume the asset data contains balance information as metadata
-        // In a real implementation, you would have a proper token balance structure
-        let available_balance = token_asset
-            .metadata
-            .get("balance")
-            .and_then(|b| b.parse::<u64>().ok())
-            .unwrap_or(0);
-
-        // Check if balance is sufficient
-        if available_balance < amount {
-            return Err(DsmError::InsufficientBalance {
-                token_id: token_id.to_string(),
-                available: available_balance,
-                requested: amount,
-            });
-        }
-
-        Ok(())
-    }
 }
 
 impl Default for AssetManager {
@@ -235,11 +201,6 @@ impl Default for AssetManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn make_token(id: &str, balance: u64) -> DigitalAsset {
-        DigitalAsset::new(id.to_string(), AssetType::Token, vec![])
-            .with_metadata("balance", &balance.to_string())
-    }
 
     #[test]
     fn new_creates_empty_manager() {
@@ -384,55 +345,6 @@ mod tests {
         let mgr = AssetManager::new();
         let err = mgr.update_asset_data("missing", vec![1]).unwrap_err();
         assert!(format!("{err}").contains("missing"));
-    }
-
-    #[test]
-    fn validate_transfer_sufficient_balance_succeeds() {
-        let mgr = AssetManager::new();
-        mgr.add_asset(make_token("tok1", 1000)).unwrap();
-        mgr.validate_transfer("tok1", 500).unwrap();
-    }
-
-    #[test]
-    fn validate_transfer_insufficient_balance_fails() {
-        let mgr = AssetManager::new();
-        mgr.add_asset(make_token("tok2", 100)).unwrap();
-        let err = mgr.validate_transfer("tok2", 200).unwrap_err();
-        match err {
-            DsmError::InsufficientBalance {
-                token_id,
-                available,
-                requested,
-            } => {
-                assert_eq!(token_id, "tok2");
-                assert_eq!(available, 100);
-                assert_eq!(requested, 200);
-            }
-            other => panic!("Expected InsufficientBalance, got: {other}"),
-        }
-    }
-
-    #[test]
-    fn validate_transfer_non_token_asset_fails() {
-        let mgr = AssetManager::new();
-        mgr.add_asset(DigitalAsset::new(
-            "notok".into(),
-            AssetType::BinaryData,
-            vec![],
-        ))
-        .unwrap();
-        let err = mgr.validate_transfer("notok", 1).unwrap_err();
-        assert!(format!("{err}").contains("not a token"));
-    }
-
-    #[test]
-    fn validate_transfer_missing_asset_fails() {
-        let mgr = AssetManager::new();
-        let err = mgr.validate_transfer("ghost", 1).unwrap_err();
-        match err {
-            DsmError::NotFound { .. } => {}
-            other => panic!("Expected NotFound, got: {other}"),
-        }
     }
 
     #[test]

@@ -10,30 +10,42 @@ use crate::types::error::DsmError;
 
 #[derive(Debug, Clone)]
 pub struct PolicyCacheConfig {
+    /// The most policies held; beyond it the least recently used is evicted.
+    /// A policy is content-addressed and immutable, so an entry never goes
+    /// stale — eviction only bounds memory.
     pub max_entries: usize,
-    /// Maximum age in deterministic ticks before an entry is eligible for LRU eviction.
-    /// Uses `crate::utils::deterministic_time::tick_index()` — not wall-clock time.
-    pub ttl_ticks: u64,
 }
 
 impl Default for PolicyCacheConfig {
     fn default() -> Self {
-        Self {
-            max_entries: 1000,
-            ttl_ticks: 10_000, // deterministic ticks
-        }
+        Self { max_entries: 1000 }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct PolicyCacheEntry {
     pub policy: TokenPolicy,
-    pub last_accessed: u64, // Ticks
+    /// This cache's access sequence at the entry's last use.
+    pub last_access: u64,
+}
+
+#[derive(Debug, Default)]
+struct Entries {
+    by_anchor: HashMap<PolicyAnchor, PolicyCacheEntry>,
+    /// Incremented on every access; orders entries by recency.
+    access_seq: u64,
+}
+
+impl Entries {
+    fn next_access(&mut self) -> u64 {
+        self.access_seq += 1;
+        self.access_seq
+    }
 }
 
 #[derive(Debug)]
 pub struct PolicyCache {
-    entries: RwLock<HashMap<PolicyAnchor, PolicyCacheEntry>>,
+    entries: RwLock<Entries>,
     token_index: RwLock<HashMap<String, PolicyAnchor>>,
     config: PolicyCacheConfig,
 }
@@ -41,7 +53,7 @@ pub struct PolicyCache {
 impl PolicyCache {
     pub fn new(config: PolicyCacheConfig) -> Self {
         Self {
-            entries: RwLock::new(HashMap::new()),
+            entries: RwLock::new(Entries::default()),
             token_index: RwLock::new(HashMap::new()),
             config,
         }
@@ -49,47 +61,36 @@ impl PolicyCache {
 
     pub async fn get_policy(&self, anchor: &PolicyAnchor) -> Result<Option<TokenPolicy>, DsmError> {
         let mut entries = self.entries.write();
-        let now = crate::utils::deterministic_time::tick_index();
-
-        let is_expired = entries
-            .get(anchor)
-            .map(|entry| now.saturating_sub(entry.last_accessed) > self.config.ttl_ticks)
-            .unwrap_or(false);
-
-        if is_expired {
-            entries.remove(anchor);
-            return Ok(None);
-        }
-
-        if let Some(entry) = entries.get_mut(anchor) {
-            entry.last_accessed = now;
-            return Ok(Some(entry.policy.clone()));
-        }
-        Ok(None)
+        let access = entries.next_access();
+        Ok(entries.by_anchor.get_mut(anchor).map(|entry| {
+            entry.last_access = access;
+            entry.policy.clone()
+        }))
     }
 
     pub fn store_policy(&self, anchor: PolicyAnchor, policy: TokenPolicy) {
         let mut entries = self.entries.write();
-        let now = crate::utils::deterministic_time::tick_index();
+        let access = entries.next_access();
 
-        entries.retain(|_, entry| now.saturating_sub(entry.last_accessed) <= self.config.ttl_ticks);
-
-        // LRU eviction: remove the least-recently-accessed entry when at capacity.
-        if entries.len() >= self.config.max_entries && !entries.contains_key(&anchor) {
+        // LRU eviction: remove the least-recently-used entry when at capacity.
+        if entries.by_anchor.len() >= self.config.max_entries
+            && !entries.by_anchor.contains_key(&anchor)
+        {
             if let Some(k) = entries
+                .by_anchor
                 .iter()
-                .min_by_key(|(_, e)| e.last_accessed)
+                .min_by_key(|(_, e)| e.last_access)
                 .map(|(k, _)| k.clone())
             {
-                entries.remove(&k);
+                entries.by_anchor.remove(&k);
             }
         }
 
-        entries.insert(
+        entries.by_anchor.insert(
             anchor,
             PolicyCacheEntry {
                 policy,
-                last_accessed: now,
+                last_access: access,
             },
         );
     }
@@ -104,11 +105,11 @@ impl PolicyCache {
     }
 
     pub fn len(&self) -> usize {
-        self.entries.read().len()
+        self.entries.read().by_anchor.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.entries.read().is_empty()
+        self.entries.read().by_anchor.is_empty()
     }
 }
 
@@ -152,10 +153,7 @@ mod tests {
 
     #[test]
     fn test_lru_eviction_at_capacity() {
-        let config = PolicyCacheConfig {
-            max_entries: 2,
-            ttl_ticks: 100_000,
-        };
+        let config = PolicyCacheConfig { max_entries: 2 };
         let cache = PolicyCache::new(config);
 
         let p1 = make_policy("author-p1");
@@ -172,7 +170,7 @@ mod tests {
 
         cache.store_policy(a3.clone(), p3);
         assert_eq!(cache.len(), 2);
-        assert!(cache.entries.read().contains_key(&a3));
+        assert!(cache.entries.read().by_anchor.contains_key(&a3));
     }
 
     #[test]
@@ -198,7 +196,6 @@ mod tests {
     fn test_default_config_values() {
         let config = PolicyCacheConfig::default();
         assert_eq!(config.max_entries, 1000);
-        assert_eq!(config.ttl_ticks, 10_000);
     }
 
     #[test]
@@ -217,10 +214,7 @@ mod tests {
 
     #[test]
     fn test_overwrite_same_anchor() {
-        let config = PolicyCacheConfig {
-            max_entries: 2,
-            ttl_ticks: 100_000,
-        };
+        let config = PolicyCacheConfig { max_entries: 2 };
         let cache = PolicyCache::new(config);
 
         let policy = make_policy("author-same");

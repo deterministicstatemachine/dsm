@@ -1,53 +1,43 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Stage 9 of §31 and the walk of §30, rebuild step R12: consumption and
-//! resolution over raw reads.
+//! resolution over the cells' route chains.
 //!
 //! Core decides; this module only fetches. For one exercise at one key it
-//! builds the facts the ladder reads (`RouteFacts`): registration from the
-//! position pair (R10), `FulfillmentConformance` and `RouteValidation` from
-//! acquired evidence (R5, R7), each leg's cell from its successor key (R11),
-//! attempt liveness from the walk over the earlier keys of that leg's chain,
-//! and the trader parent from the claims this verifier resolved itself. Then
+//! first asks Core what the exercise's own bytes refute (MR-DSM-0041): a
+//! refuted exercise is classified with nothing more read. Otherwise it builds
+//! the facts the ladder reads (`RouteFacts`): registration from the position
+//! pair (R10), `FulfillmentConformance` and `RouteValidation` over acquired
+//! evidence (R5, R7), each leg's cell at its successor key (R11), attempt
+//! liveness from the walk over the earlier keys of that leg's chain, and the
+//! trader parent from the positions this verifier resolved itself. Then
 //! Core's `walk` classifies the keys and `resolve_position` the position.
 //!
-//! Nothing here is defaulted. A fact the verifier has not established is
-//! its unestablished value — an unread cell is `Unresolved`, an unwalked
-//! parent is `ParentStatus::Unavailable`, an unresolved conditional parent
-//! is `ConditionalPending` — and every such value keeps the walk unresolved
-//! and the position Pending.
-//!
-//! ORPHANING is produced here now, and it took a CHAIN to produce it. This
-//! verifier used to hold the `(vault, root)` pairs it had walked to, and a
-//! set of pairs carries no generation — so the fact that refutes a parent, a
-//! DIFFERENT root at the SAME generation, was not in it, and every defeated
-//! route waited instead of being defeated. It now holds a `VaultChain` per
-//! vault, and the generation each leg's parent sits at is recomputed from the
-//! evidence (`vault_post_states`) rather than asserted by the operation that
-//! names it.
-//!
-//! What did NOT change is the direction of the default. A vault with no
-//! chain, or a parent no generation places, is still `Unavailable` and still
-//! waits. Absence refutes nothing: a chain may simply be short, and a head is
-//! open precisely so that the next root can still arrive.
+//! Core resolves only over complete facts (Amendment S7). A fact this
+//! verifier has not established is never handed to Core in another fact's
+//! place: it is returned as [`NotEstablished`], named, and the caller reads
+//! and relays again. The one three-valued fact is a leg's parent status,
+//! whose `Unavailable` is Core's own value for a parent the verifier's chain
+//! has not reached.
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
 
-use dsm::sofi::arith::CellResolution;
+use dsm::route_chain::{CellFact, ChainState, Missing as CellMissing};
 use dsm::sofi::conformance::{
-    conformance_in_hand, fulfillment_conformance, FulfillmentConformance, Validation,
+    conformance_invalid_in_hand, fulfillment_conformance, ConformanceMissing, Validation,
 };
 use dsm::sofi::exercise::{recognize_exercise, RecognizedExercise};
 use dsm::sofi::registration::Registration;
 use dsm::sofi::resolution::{
-    effect_of, resolve_position, walk, LegFacts, ParentPosition, ParentStatus, PositionEffect,
-    Resolution, RouteFacts, VaultChain, WalkOutcome,
+    effect_of, resolve_position, resolve_refuted_in_hand, walk, Incomplete, KeyFacts, LegFacts,
+    ParentPosition, ParentStatus, PositionEffect, RefutedInHand, Resolution, RouteFacts,
+    VaultChain, WalkOutcome,
 };
-use dsm::sofi::validation::{route_validation, vault_post_states};
+use dsm::sofi::validation::{route_invalid_in_hand, route_validation, vault_post_states, Missing};
 use dsm::sofi::wire::{ParentClaimRef, SofiExercise, ValidationRef};
 use dsm::types::error::DsmError;
 
-use crate::sdk::sofi_evidence::{acquire_evidence, LocalLeaves};
+use crate::sdk::sofi_evidence::{acquire_evidence, Acquired, LocalLeaves};
 use crate::sdk::sofi_exercise::read_attempt_cell;
 use crate::sdk::sofi_register::{acquire_conformance_evidence, read_registration, InstallRequest};
 use crate::sdk::storage_set::StorageSet;
@@ -62,8 +52,8 @@ pub const WALK_BUDGET: usize = 16;
 /// How far the facts of one exercise reach into the chains of its OTHER legs:
 /// a two-leg route's liveness at leg 2 is a walk over leg 2's earlier keys,
 /// whose exercises may themselves be routes. Past this depth a leg's
-/// liveness is unestablished, which keeps its route unresolved — never a
-/// skip, never a consumption.
+/// liveness is not established, and the facts of the exercise are not
+/// complete.
 pub const CHAIN_DEPTH: usize = 2;
 
 /// What the verifier brings to a resolution: the committed set, its own
@@ -72,49 +62,88 @@ pub const CHAIN_DEPTH: usize = 2;
 /// trusted because somebody sent it.
 pub struct Resolver<'a> {
     pub set: &'a StorageSet,
-    /// The verifier's own `R_econ` leaves, for the trader-leaf pre values
-    /// `RouteValidation` reads.
+    /// This device's own `R_econ` leaves, for the trader-leaf pre values of
+    /// its own routes.
     pub local: &'a LocalLeaves,
-    /// The conditional positions this verifier has resolved (stage 0 of §31),
-    /// by the fulfillment that installed them: what each selected. A
-    /// conditional parent absent here has not been resolved by this
-    /// verifier, and the position built on it waits (`ConditionalPending`).
+    /// The conditional positions this verifier resolved, by the fulfillment
+    /// that installed them: what each selected, or that it selected none. A
+    /// conditional parent absent here is not resolved by this verifier.
     pub parents: &'a BTreeMap<D32, ParentPosition>,
     /// The canonical chain this verifier established for each vault it needs
-    /// one for (Section 30), built by `sofi_chain::ChainWalker`.
-    ///
-    /// A CHAIN, not a set of pairs. The distinction is what makes
-    /// [`ParentStatus::Orphaned`] producible at all: orphaning means a
-    /// DIFFERENT root was established for that vault at THAT GENERATION, and
-    /// a set of pairs carries no generation, so a verifier holding one could
-    /// only ever answer `Canonical` or `Unavailable` and a permanently
-    /// refuted route waited forever instead of being defeated.
-    ///
-    /// A vault with no chain here is `Unavailable` for every leg naming it.
+    /// one for (Section 30), built by `sofi_chain::ChainWalker`. A chain
+    /// carries generations, which is what lets a parent be refuted
+    /// ([`ParentStatus::Orphaned`]) rather than only waited on. A vault with
+    /// no chain here is `Unavailable` for every leg naming it.
     pub chains: &'a BTreeMap<D32, VaultChain>,
 }
 
-/// One trader position, resolved (stage 9 of §31).
+/// A fact the ladder reads that this verifier has not established. Never a
+/// result and never recorded: the caller reads, relays and retries.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Resolved {
-    pub resolution: Resolution,
-    /// What `advance_resolved` (R13) does with it.
-    pub effect: PositionEffect,
-    pub registered: bool,
-    pub conformance: Validation,
-    pub validation: Validation,
+pub enum NotEstablished {
+    /// The reads of the position pair do not decide registration yet.
+    Registration(CellMissing),
+    /// Conformance evidence not in hand after the retry budget.
+    ConformanceEvidence(Vec<ConformanceMissing>),
+    /// Route evidence not in hand after the retry budget.
+    RouteEvidence(Vec<Missing>),
+    /// Route evidence with no source this verifier can acquire it from: the
+    /// leaf pre values of another trader's route (`sofi_evidence`).
+    RouteEvidenceHasNoSource(Vec<Missing>),
+    /// `P` names a conditional parent this verifier has not resolved.
+    ParentUnresolved { fulfillment_id: D32 },
+    /// A leg's attempt cell is not decided by its reads yet.
+    AttemptCell {
+        vault_id: D32,
+        attempt: u64,
+        missing: CellMissing,
+    },
+    /// A leg's earlier keys were not all classified: past the walk budget or
+    /// the chain depth, or a key among them is not resolved.
+    AttemptLiveness { vault_id: D32, attempt: u64 },
+}
+
+/// One trader position, as far as this verifier can take it (stage 9 of
+/// §31).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PositionOutcome {
+    /// Core resolved the position over complete facts. Permanent.
+    Resolved {
+        resolution: Resolution,
+        /// What `advance_resolved` (R13) does with it.
+        effect: PositionEffect,
+    },
+    /// The facts are complete and the ladder does not resolve the position
+    /// yet (Amendment S7).
+    NotYet(Incomplete),
+    /// A fact the ladder reads is not established.
+    NotEstablished(NotEstablished),
+}
+
+impl PositionOutcome {
+    fn of(ladder: Result<Resolution, Incomplete>) -> Self {
+        match ladder {
+            Ok(resolution) => Self::Resolved {
+                resolution,
+                effect: effect_of(resolution),
+            },
+            Err(incomplete) => Self::NotYet(incomplete),
+        }
+    }
 }
 
 /// Where a walk over one parent's attempt chain ended, with the exercise
-/// that consumed the parent when one did: its consumed route's `V°` post
-/// root is the next parent (Section 30, step 3).
+/// that consumed the parent when one did — its consumed route's `V°` post
+/// root is the next parent (Section 30, step 3) — and, when it stopped
+/// unresolved at a key it could not classify, why.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Walked {
     pub outcome: WalkOutcome,
     pub consumed: Option<RecognizedExercise>,
+    pub not_established: Option<NotEstablished>,
 }
 
-/// The facts of one exercise, fetched; `RouteFacts` borrows them.
+/// The complete facts of one exercise; `RouteFacts` borrows them.
 struct Fetched {
     external_commitment: D32,
     registered: bool,
@@ -127,7 +156,6 @@ struct Fetched {
     legs: Vec<LegFacts>,
     /// The index in `legs` of the leg whose key is being walked.
     walked_leg: usize,
-    exercise: RecognizedExercise,
 }
 
 impl Fetched {
@@ -146,16 +174,68 @@ impl Fetched {
     }
 }
 
-/// A reserved key permanently resolved for the route bound to `e`: final on
-/// anything, or lost at its leader to another commitment (`LeaderHeld`
-/// settles the loss before the copies arrive). A key held on `e` itself is
-/// not resolved yet.
-fn permanently_resolved(cell: CellResolution, e: &D32) -> bool {
-    match cell {
-        CellResolution::Final(_) => true,
-        CellResolution::LeaderHeld(x) => x != *e,
-        CellResolution::Unresolved => false,
+/// What this verifier knows about one exercise.
+enum Known {
+    /// Refuted by its own bytes: nothing else was read.
+    RefutedInHand(RefutedInHand),
+    /// The complete facts the ladder reads.
+    Facts(Fetched),
+}
+
+/// One key the walk classified, with the exercise holding it.
+struct KeyKnown {
+    cell: CellFact,
+    known: Known,
+    exercise: RecognizedExercise,
+}
+
+impl KeyKnown {
+    fn key_facts(&self) -> KeyFacts<'_> {
+        match &self.known {
+            Known::Facts(fetched) => {
+                KeyFacts::Complete(fetched.facts(), fetched.legs[fetched.walked_leg])
+            }
+            Known::RefutedInHand(refuted) => KeyFacts::RefutedInHand {
+                refuted: *refuted,
+                cell: self.cell,
+                external_commitment: self.exercise.external_commitment,
+            },
+        }
     }
+}
+
+/// A reserved key permanently resolved for the route bound to `e`: final on
+/// anything, or its leader link held by another commitment, which no later
+/// value can take from it. A key held on `e` itself and not final is not
+/// resolved yet.
+fn permanently_resolved(cell: &CellFact, e: &D32) -> bool {
+    match cell {
+        CellFact::Held {
+            state: ChainState::Final,
+            ..
+        } => true,
+        CellFact::Held { id, .. } => id != e,
+        CellFact::Open => false,
+    }
+}
+
+/// What the exercise's own bytes refute, before any read (MR-DSM-0041).
+fn refuted_in_hand(exercise: &RecognizedExercise) -> Option<RefutedInHand> {
+    if let Some(why) = conformance_invalid_in_hand(
+        &exercise.precommit,
+        &exercise.fulfillment.body,
+        &exercise.fulfillment.signature,
+        &exercise.preimage,
+        &exercise.closure,
+    ) {
+        log::info!("[sofi resolve] F is refuted in hand: {why:?}");
+        return Some(RefutedInHand::Conformance);
+    }
+    let why = route_invalid_in_hand(&exercise.precommit.body, &exercise.preimage)?;
+    log::info!("[sofi resolve] the route is refuted in hand: {why:?}");
+    Some(RefutedInHand::Route {
+        legs: exercise.precommit.body.legs().len(),
+    })
 }
 
 /// The key of one leg being walked: vault, parent, attempt, and the cell as
@@ -165,17 +245,17 @@ struct WalkedKey {
     vault_id: D32,
     parent_root: D32,
     attempt: u64,
-    cell: CellResolution,
+    cell: CellFact,
 }
 
-type Fut<'s, T> = Pin<Box<dyn Future<Output = Result<T, DsmError>> + 's>>;
+type Fut<'s, T> = Pin<Box<dyn Future<Output = Result<T, DsmError>> + Send + 's>>;
 
 impl Resolver<'_> {
     /// Section 30, step 2: walk the attempt keys of `vault_id` at
-    /// `parent_root` from `cursor`, reading each cell raw, building the facts
-    /// of the exercise it holds and letting Core classify it. A skipped key
-    /// moves on, a consumed key stops with its exercise, anything else is
-    /// unresolved; a spent budget hands back a cursor.
+    /// `parent_root` from `cursor`, reading each cell, establishing what is
+    /// known about the exercise it holds and letting Core classify it. A
+    /// skipped key moves on, a consumed key stops with its exercise, anything
+    /// else is unresolved; a spent budget hands back a cursor.
     pub async fn walk_parent(
         &self,
         vault_id: &D32,
@@ -187,12 +267,12 @@ impl Resolver<'_> {
             .await
     }
 
-    /// Stage 9 of §31: the trader's own position, resolved from raw reads over
-    /// the exercise it built (R11). The ladder's answer and its effect.
+    /// Stage 9 of §31: the trader's own position, resolved over the exercise
+    /// it built (R11).
     pub async fn resolve_trader_position(
         &self,
         exercise: &SofiExercise,
-    ) -> Result<Resolved, DsmError> {
+    ) -> Result<PositionOutcome, DsmError> {
         let recognized = recognize_exercise(&exercise.encode()).ok_or_else(|| {
             DsmError::verification("resolve: the bytes are not one operation's exercise")
         })?;
@@ -201,19 +281,43 @@ impl Resolver<'_> {
 
     /// The same, over an exercise already recognized — the one read back from
     /// a leg's cell (`read_attempt_cell`), which is how the device finds its
-    /// own exercise again after a restart (R13).
+    /// own exercise again after a restart (R13). A refuted exercise reads
+    /// only its registration, the one fact the ladder asks of it.
     pub async fn resolve_recognized(
         &self,
         recognized: RecognizedExercise,
-    ) -> Result<Resolved, DsmError> {
-        let fetched = self.facts_of(recognized, None, CHAIN_DEPTH).await?;
-        let resolution = resolve_position(&fetched.facts());
-        Ok(Resolved {
-            resolution,
-            effect: effect_of(resolution),
-            registered: fetched.registered,
-            conformance: fetched.conformance,
-            validation: fetched.validation,
+    ) -> Result<PositionOutcome, DsmError> {
+        let precommit = &recognized.precommit.body;
+        let fulfillment = &recognized.fulfillment.body;
+        let known = match self.facts_of(&recognized, None, CHAIN_DEPTH).await? {
+            Ok(known) => known,
+            Err(why) => return Ok(PositionOutcome::NotEstablished(why)),
+        };
+        Ok(match known {
+            Known::Facts(fetched) => PositionOutcome::of(resolve_position(&fetched.facts())),
+            Known::RefutedInHand(..) => {
+                let registration = match read_registration(
+                    self.set,
+                    precommit.genesis(),
+                    precommit.device_id(),
+                    fulfillment.position(),
+                    precommit.void_root(),
+                )
+                .await?
+                {
+                    Ok(registration) => registration,
+                    Err(missing) => {
+                        return Ok(PositionOutcome::NotEstablished(
+                            NotEstablished::Registration(missing),
+                        ))
+                    }
+                };
+                let registered = matches!(
+                    &registration,
+                    Registration::Registered(signed) if signed.body == *fulfillment
+                );
+                PositionOutcome::of(resolve_refuted_in_hand(registered))
+            }
         })
     }
 
@@ -227,47 +331,81 @@ impl Resolver<'_> {
     ) -> Fut<'_, Walked> {
         Box::pin(async move {
             // Core's walk asks for keys in order and stops on the first it
-            // cannot classify; a key it asks for that is not fetched yet is
-            // fetched, and the walk resumes. The chunking is invisible to the
-            // answer (`walk_chunking_preserves_result`).
-            let mut fetched: BTreeMap<u64, Fetched> = BTreeMap::new();
+            // cannot classify; a key it asks for that is not read yet is read,
+            // and the walk resumes. The chunking is invisible to the answer.
+            let mut known: BTreeMap<u64, KeyKnown> = BTreeMap::new();
             loop {
                 let outcome = walk(cursor, budget, |attempt| {
-                    fetched
-                        .get(&attempt)
-                        .map(|f| (f.facts(), f.legs[f.walked_leg]))
+                    known.get(&attempt).map(KeyKnown::key_facts)
                 });
                 match outcome {
-                    WalkOutcome::Unresolved { attempt } if !fetched.contains_key(&attempt) => {
-                        let (cell, exercise) =
-                            read_attempt_cell(self.set, &vault_id, &parent_root, attempt).await?;
-                        let Some(exercise) = exercise else {
-                            // Open, or the leader unread: unresolved, and
-                            // never a skip (no key is ever dead).
+                    WalkOutcome::Unresolved { attempt } if !known.contains_key(&attempt) => {
+                        let read =
+                            match read_attempt_cell(self.set, &vault_id, &parent_root, attempt)
+                                .await?
+                            {
+                                Ok(read) => read,
+                                Err(missing) => {
+                                    return Ok(Walked {
+                                        outcome,
+                                        consumed: None,
+                                        not_established: Some(NotEstablished::AttemptCell {
+                                            vault_id,
+                                            attempt,
+                                            missing,
+                                        }),
+                                    })
+                                }
+                            };
+                        // An open key is unresolved, never a skip: no key is
+                        // ever dead.
+                        let Some(exercise) = read.exercise else {
                             return Ok(Walked {
                                 outcome,
                                 consumed: None,
+                                not_established: None,
                             });
                         };
                         let key = WalkedKey {
                             vault_id,
                             parent_root,
                             attempt,
-                            cell,
+                            cell: read.fact,
                         };
-                        let facts = self.facts_of(exercise, Some(key), depth).await?;
-                        fetched.insert(attempt, facts);
+                        match self.facts_of(&exercise, Some(key), depth).await? {
+                            Ok(facts) => {
+                                known.insert(
+                                    attempt,
+                                    KeyKnown {
+                                        cell: read.fact,
+                                        known: facts,
+                                        exercise,
+                                    },
+                                );
+                            }
+                            Err(why) => {
+                                return Ok(Walked {
+                                    outcome,
+                                    consumed: None,
+                                    not_established: Some(why),
+                                })
+                            }
+                        }
                     }
                     WalkOutcome::Consumed { attempt } => {
                         return Ok(Walked {
                             outcome,
-                            consumed: fetched.get(&attempt).map(|f| f.exercise.clone()),
+                            consumed: known.remove(&attempt).map(|key| key.exercise),
+                            not_established: None,
                         })
                     }
-                    other => {
+                    WalkOutcome::Unresolved { .. }
+                    | WalkOutcome::CounterExhausted { .. }
+                    | WalkOutcome::Continue { .. } => {
                         return Ok(Walked {
-                            outcome: other,
+                            outcome,
                             consumed: None,
+                            not_established: None,
                         })
                     }
                 }
@@ -275,47 +413,39 @@ impl Resolver<'_> {
         })
     }
 
-    /// The facts of one exercise, as the ladder reads them, from raw reads.
-    /// `walked` is the key the exercise was found at, whose cell is in hand
-    /// and whose liveness the walk established by reaching it.
-    fn facts_of(
-        &self,
-        exercise: RecognizedExercise,
+    /// What is known about one exercise: refuted by its own bytes, or the
+    /// complete facts the ladder reads. `walked` is the key the exercise was
+    /// found at, whose cell is in hand and whose liveness the walk
+    /// established by reaching it.
+    fn facts_of<'s>(
+        &'s self,
+        exercise: &'s RecognizedExercise,
         walked: Option<WalkedKey>,
         depth: usize,
-    ) -> Fut<'_, Fetched> {
+    ) -> Fut<'s, Result<Known, NotEstablished>> {
         Box::pin(async move {
+            if let Some(refuted) = refuted_in_hand(exercise) {
+                return Ok(Ok(Known::RefutedInHand(refuted)));
+            }
             let precommit = &exercise.precommit.body;
             let fulfillment = &exercise.fulfillment.body;
             let e = exercise.external_commitment;
 
-            // Evidence in hand first (MR-DSM-0041, MR-DSM-0042, MR-STOR-0045):
-            // every conformance check decidable from the exercise itself — P,
-            // F, their signatures, P(E) and the closure objects the exercise
-            // carries — runs before any read. Invalid here is Invalid with no
-            // network access: no register cell, no evidence fetch.
-            if let FulfillmentConformance::Invalid(reason) = conformance_in_hand(
-                &exercise.precommit,
-                fulfillment,
-                &exercise.fulfillment.signature,
-                &exercise.preimage,
-                &exercise.closure,
-            ) {
-                return Ok(Fetched::invalid_in_hand(exercise, walked, reason));
-            }
-
             // Registration from the position pair (R10). The pair decides
-            // for every F at q at once: a root cell final on another claim,
-            // or a fulfillment cell final on another F of this trader, is
+            // for every F at q at once: a position held by another claim is
             // this F's position lost (Section 21.1) — arm (v).
-            let registration = read_registration(
+            let registration = match read_registration(
                 self.set,
                 precommit.genesis(),
                 precommit.device_id(),
                 fulfillment.position(),
                 precommit.void_root(),
             )
-            .await?;
+            .await?
+            {
+                Ok(registration) => registration,
+                Err(missing) => return Ok(Err(NotEstablished::Registration(missing))),
+            };
             let (registered, position_lost) = match &registration {
                 Registration::Registered(signed) => {
                     let ours = signed.body == *fulfillment;
@@ -325,9 +455,24 @@ impl Resolver<'_> {
                 Registration::Unresolved => (false, false),
             };
 
+            // The trader parent: P names it; what it selected is this
+            // verifier's own resolution of p.
+            let parent = match precommit.parent_claim_ref() {
+                ParentClaimRef::SingleRoot { .. } => ParentPosition::SingleRoot,
+                ParentClaimRef::Conditional { fulfillment_id } => {
+                    match self.parents.get(fulfillment_id) {
+                        Some(parent) => *parent,
+                        None => {
+                            return Ok(Err(NotEstablished::ParentUnresolved {
+                                fulfillment_id: *fulfillment_id,
+                            }))
+                        }
+                    }
+                }
+            };
+
             // FulfillmentConformance over acquired evidence (R7), the
-            // exercise supplying the objects only its trader held, and the
-            // earlier attempt keys F skips past resolved from their cells.
+            // exercise supplying the objects only its trader held.
             let own: BTreeMap<ValidationRef, Vec<u8>> = exercise
                 .preimage
                 .settlement()
@@ -345,48 +490,68 @@ impl Resolver<'_> {
                 fulfillment_signature: &exercise.fulfillment.signature,
                 own_objects: &own,
             };
-            // Item 5's cells come from the one shared acquisition (R9/R12,
-            // owner ruling §44.4), so the producer and the verifier read the
-            // same keys the same way and cannot disagree about what an
-            // attempt skipped past.
-            let evidence = acquire_conformance_evidence(self.set, &request).await?;
-            let conformance =
-                fulfillment_conformance(fulfillment, &exercise.fulfillment.signature, &evidence)
-                    .verdict();
+            let conformance = match acquire_conformance_evidence(self.set, &request).await? {
+                Acquired::Complete(evidence) => {
+                    match fulfillment_conformance(
+                        fulfillment,
+                        &exercise.fulfillment.signature,
+                        &evidence,
+                    ) {
+                        Ok(verdict) => verdict.verdict(),
+                        Err(missing) => {
+                            return Ok(Err(NotEstablished::ConformanceEvidence(vec![missing])))
+                        }
+                    }
+                }
+                Acquired::Exhausted(missing) | Acquired::NoSource(missing) => {
+                    return Ok(Err(NotEstablished::ConformanceEvidence(missing)))
+                }
+            };
 
             // RouteValidation over acquired evidence (R5).
-            let evidence = acquire_evidence(self.set, &exercise.preimage, self.local).await?;
-            let validation = route_validation(precommit, &exercise.preimage, &evidence);
+            let evidence = match acquire_evidence(
+                self.set,
+                precommit,
+                &exercise.preimage,
+                self.local,
+            )
+            .await?
+            {
+                Acquired::Complete(evidence) => evidence,
+                Acquired::Exhausted(missing) => {
+                    return Ok(Err(NotEstablished::RouteEvidence(missing)))
+                }
+                Acquired::NoSource(missing) => {
+                    return Ok(Err(NotEstablished::RouteEvidenceHasNoSource(missing)))
+                }
+            };
+            let validation = match route_validation(precommit, &exercise.preimage, &evidence) {
+                Ok(validation) => validation,
+                Err(missing) => return Ok(Err(NotEstablished::RouteEvidence(vec![missing]))),
+            };
 
             // The GENERATION each leg's parent sits at, recomputed from the
             // pre states the evidence holds rather than asserted by the
-            // operation that names the parent. It is bound to the root:
-            // `acquire_evidence` serves a vault only at its genesis or at a
-            // root this verifier recorded. Without it a parent cannot be
-            // refuted, only waited on, so a vault missing here is
+            // operation that names the parent. Without it a parent cannot be
+            // refuted, only placed positively, so a vault missing here is
             // `Unavailable` and never `Orphaned`.
             let generations: BTreeMap<D32, u64> =
-                vault_post_states(precommit, &exercise.preimage, &evidence)
-                    .map(|posts| {
-                        posts
-                            .into_iter()
-                            .map(|p| (p.vault_id, p.pre_generation))
-                            .collect()
-                    })
-                    .unwrap_or_default();
+                match vault_post_states(precommit, &exercise.preimage, &evidence) {
+                    Ok(posts) => posts
+                        .into_iter()
+                        .map(|post| (post.vault_id, post.pre_generation))
+                        .collect(),
+                    Err(refusal) => {
+                        log::info!(
+                            "[sofi resolve] the legs' generations are not recomputable: \
+                             {refusal:?}"
+                        );
+                        BTreeMap::new()
+                    }
+                };
 
-            // The trader parent: P names it; what it selected is this
-            // verifier's own resolution of p, or nothing yet.
-            let parent = match precommit.parent_claim_ref() {
-                ParentClaimRef::SingleRoot { .. } => ParentPosition::SingleRoot,
-                ParentClaimRef::Conditional { fulfillment_id } => self
-                    .parents
-                    .get(fulfillment_id)
-                    .copied()
-                    .unwrap_or(ParentPosition::ConditionalPending),
-            };
-
-            // Every leg of P at the attempt F fixed for it.
+            // Every leg of P at the attempt F fixed for it. The attempts cover
+            // the legs exactly: that is conformance item 4, decided in hand.
             let mut legs = Vec::with_capacity(precommit.legs().len());
             let mut walked_leg = 0;
             for (j, leg) in precommit.legs().iter().enumerate() {
@@ -395,75 +560,93 @@ impl Resolver<'_> {
                 if here.is_some() {
                     walked_leg = j;
                 }
-                let Some(attempt) = fulfillment
+                let attempt = fulfillment
                     .attempts()
                     .iter()
                     .find(|a| a.vault_id == leg.vault_id)
                     .map(|a| a.attempt)
-                else {
-                    // F names no attempt for this leg: conformance item 4
-                    // refuses it; the leg has no key to read.
-                    legs.push(LegFacts {
-                        cell: CellResolution::Unresolved,
-                        parent: ParentStatus::Unavailable,
-                        attempt_live: false,
-                        parent_consumed_elsewhere: false,
-                    });
-                    continue;
-                };
-                let at_walked_key = here.is_some_and(|k| k.attempt == attempt);
-                let cell = match here {
-                    Some(k) if at_walked_key => k.cell,
-                    _ => {
-                        read_attempt_cell(self.set, &leg.vault_id, &leg.parent_root, attempt)
+                    .ok_or_else(|| {
+                        DsmError::verification(
+                            "resolve: F names no attempt for a leg of P, past its in-hand check",
+                        )
+                    })?;
+                let at_walked_key = here.filter(|k| k.attempt == attempt);
+                let cell = match at_walked_key {
+                    Some(key) => key.cell,
+                    None => {
+                        match read_attempt_cell(self.set, &leg.vault_id, &leg.parent_root, attempt)
                             .await?
-                            .0
+                        {
+                            Ok(read) => read.fact,
+                            Err(missing) => {
+                                return Ok(Err(NotEstablished::AttemptCell {
+                                    vault_id: leg.vault_id,
+                                    attempt,
+                                    missing,
+                                }))
+                            }
+                        }
                     }
                 };
-                // The walk is AT this key for this leg, so the root it is
-                // standing on is one it established: canonical by the same
-                // induction that produced it. Otherwise the chain decides,
-                // three-valued, at the generation the evidence places it.
+                // The walk is AT this leg, so the root it is standing on is
+                // one it established: canonical by the same induction that
+                // produced it. Otherwise the chain decides, three-valued, at
+                // the generation the evidence places it.
                 let parent = if here.is_some() {
                     ParentStatus::Canonical
                 } else {
-                    match self.chains.get(&leg.vault_id) {
-                        Some(chain) => match generations.get(&leg.vault_id) {
-                            Some(generation) => chain.status_of(*generation, &leg.parent_root),
-                            // No generation for it: the chain can still
-                            // establish the root positively, but it cannot
-                            // refute one it has not placed.
-                            None if chain.names(&leg.parent_root) => ParentStatus::Canonical,
-                            None => ParentStatus::Unavailable,
-                        },
-                        None => ParentStatus::Unavailable,
+                    match (
+                        self.chains.get(&leg.vault_id),
+                        generations.get(&leg.vault_id),
+                    ) {
+                        (Some(chain), Some(generation)) => {
+                            chain.status_of(*generation, &leg.parent_root)
+                        }
+                        // No generation for it: the chain can still establish
+                        // the root positively, but it cannot refute one it has
+                        // not placed.
+                        (Some(chain), None) if chain.names(&leg.parent_root) => {
+                            ParentStatus::Canonical
+                        }
+                        (Some(..), None) | (None, Some(..)) | (None, None) => {
+                            ParentStatus::Unavailable
+                        }
                     }
                 };
                 // `AttemptLive`: every earlier key of this leg's chain is
                 // skipped. The walk established it for the key it reached;
                 // any other leg's chain is walked over its earlier keys.
-                let (attempt_live, parent_consumed_elsewhere) = if at_walked_key || attempt == 0 {
-                    (true, false)
-                } else if depth == 0 {
-                    (false, false)
-                } else {
-                    let earlier = usize::try_from(attempt)
-                        .unwrap_or(usize::MAX)
-                        .min(WALK_BUDGET);
-                    let chain = self
-                        .walk_chain(leg.vault_id, leg.parent_root, 0, earlier, depth - 1)
-                        .await?;
-                    match chain.outcome {
-                        WalkOutcome::Continue { cursor } => (cursor == attempt, false),
-                        WalkOutcome::Consumed { .. } => (
-                            false,
-                            chain.consumed.is_some_and(|x| x.external_commitment != e),
-                        ),
-                        WalkOutcome::Unresolved { .. } | WalkOutcome::CounterExhausted { .. } => {
-                            (false, false)
+                let (attempt_live, parent_consumed_elsewhere) =
+                    if at_walked_key.is_some() || attempt == 0 {
+                        (true, false)
+                    } else {
+                        let not_live = NotEstablished::AttemptLiveness {
+                            vault_id: leg.vault_id,
+                            attempt,
+                        };
+                        let Some(below) = depth.checked_sub(1) else {
+                            return Ok(Err(not_live));
+                        };
+                        let earlier =
+                            usize::try_from(attempt).map_or(WALK_BUDGET, |a| a.min(WALK_BUDGET));
+                        let chain = self
+                            .walk_chain(leg.vault_id, leg.parent_root, 0, earlier, below)
+                            .await?;
+                        match chain.outcome {
+                            WalkOutcome::Continue { cursor } if cursor == attempt => (true, false),
+                            WalkOutcome::Consumed { .. } => (
+                                false,
+                                chain
+                                    .consumed
+                                    .is_some_and(|other| other.external_commitment != e),
+                            ),
+                            WalkOutcome::Continue { .. }
+                            | WalkOutcome::Unresolved { .. }
+                            | WalkOutcome::CounterExhausted { .. } => {
+                                return Ok(Err(chain.not_established.unwrap_or(not_live)))
+                            }
                         }
-                    }
-                };
+                    };
                 legs.push(LegFacts {
                     cell,
                     parent,
@@ -472,8 +655,8 @@ impl Resolver<'_> {
                 });
             }
             let storage_resolved =
-                registered && legs.iter().all(|l| permanently_resolved(l.cell, &e));
-            Ok(Fetched {
+                registered && legs.iter().all(|l| permanently_resolved(&l.cell, &e));
+            Ok(Ok(Known::Facts(Fetched {
                 external_commitment: e,
                 registered,
                 conformance,
@@ -484,269 +667,7 @@ impl Resolver<'_> {
                 storage_resolved,
                 legs,
                 walked_leg,
-                exercise,
-            })
+            })))
         })
-    }
-}
-
-#[cfg(test)]
-#[allow(clippy::disallowed_methods)] // test asserts; a failure here is the signal
-mod tests {
-    use dsm::common::domain_tags::TAG_DSM_SOFI_FULFILLMENT;
-    use dsm::sofi::derive;
-    use dsm::sofi::resolution::ImpossibleArm;
-    use dsm::sofi::wire::{AttemptEntry, TraderFulfillmentBody};
-    use serial_test::serial;
-
-    use super::*;
-    use crate::sdk::economic_registers::economic_root_namespace;
-    use crate::sdk::sofi_exercise::{build_exercise, write_exercise};
-    use crate::sdk::sofi_register::{install_fulfillment, position_of};
-    use crate::sdk::sofi_test_fixtures::{
-        block_on, install_request, pair_bytes, signed_route, trader_keys, SignedRoute, SIG_ALG,
-    };
-    use crate::sdk::storage_io::{fake_registers, leader_index, write_cells_leader_first};
-
-    /// The route's exercise over the evidence its conformance was decided
-    /// on, written to every leg's key.
-    fn exercised(r: &SignedRoute) -> SofiExercise {
-        let req = install_request(r);
-        let ev = block_on(acquire_conformance_evidence(&r.set, &req)).unwrap();
-        let x = build_exercise(&req, &ev).unwrap();
-        let recognized = recognize_exercise(&x.encode()).unwrap();
-        block_on(write_exercise(&r.set, &x, &recognized)).unwrap();
-        x
-    }
-
-    /// The heads the trader walked to: the parents its legs name.
-    /// Every leg's vault, with the one-generation chain that makes its parent
-    /// canonical. The fixture's vaults are at their genesis, so each chain is
-    /// `[R_0]` and each leg's parent sits at generation zero.
-    fn walked_heads(r: &SignedRoute) -> BTreeMap<D32, VaultChain> {
-        r.precommit
-            .legs()
-            .iter()
-            .map(|l| {
-                (
-                    l.vault_id,
-                    VaultChain {
-                        roots: vec![l.parent_root],
-                    },
-                )
-            })
-            .collect()
-    }
-
-    /// Stage 9: a registered, conforming, valid route whose exercise is
-    /// final at every leg resolves Realized with the realize-root effect, and
-    /// the walk over each parent finds the key consumed by that exercise.
-    #[test]
-    #[serial]
-    fn a_registered_and_completed_route_is_realized_and_consumes_every_parent() {
-        let r = signed_route(true);
-        block_on(install_fulfillment(&r.set, &install_request(&r))).unwrap();
-        let x = exercised(&r);
-        let parents = BTreeMap::new();
-        let canonical = walked_heads(&r);
-        let resolver = Resolver {
-            set: &r.set,
-            local: &r.local,
-            parents: &parents,
-            chains: &canonical,
-        };
-        assert_eq!(
-            block_on(resolver.resolve_trader_position(&x)).unwrap(),
-            Resolved {
-                resolution: Resolution::Realized,
-                effect: PositionEffect::InstallRealizeRoot,
-                registered: true,
-                conformance: Validation::Valid,
-                validation: Validation::Valid,
-            }
-        );
-        for leg in r.precommit.legs() {
-            let walked =
-                block_on(resolver.walk_parent(&leg.vault_id, &leg.parent_root, 0, WALK_BUDGET))
-                    .unwrap();
-            assert_eq!(walked.outcome, WalkOutcome::Consumed { attempt: 0 });
-            assert_eq!(
-                walked.consumed.map(|c| c.fulfillment.body),
-                Some(r.fulfillment.clone())
-            );
-        }
-    }
-
-    /// A leg whose parent this verifier has NOT walked to is
-    /// [`ParentStatus::Unavailable`], so the route WAITS. Everything else is
-    /// in place — registered, conforming, statically valid, every cell final
-    /// on this `E` — and the position is still Pending. It is not Void
-    /// either: a parent nobody established is not a parent that was refuted.
-    ///
-    /// THIS TEST EXISTS BECAUSE ITS MUTATION WAS GREEN. Reporting an unwalked
-    /// parent as `Canonical` — the reading the pair of booleans gave, where
-    /// `canonical_parent: false` sat beside `parent_orphaned: false` and the
-    /// ladder saw "not refuted" — passed every resolver test in this module,
-    /// because each of them walks to every leg. The mapping was never
-    /// exercised at the only boundary where it decides anything.
-    #[test]
-    #[serial]
-    fn a_leg_whose_parent_this_verifier_never_walked_to_waits() {
-        let r = signed_route(true);
-        block_on(install_fulfillment(&r.set, &install_request(&r))).unwrap();
-        let x = exercised(&r);
-        let parents = BTreeMap::new();
-
-        // Every chain this verifier established EXCEPT the first leg's vault.
-        let mut partial = walked_heads(&r);
-        partial.remove(&r.precommit.legs()[0].vault_id);
-        assert_eq!(partial.len(), r.precommit.legs().len() - 1);
-        let waiting = Resolver {
-            set: &r.set,
-            local: &r.local,
-            parents: &parents,
-            chains: &partial,
-        };
-        let resolved = block_on(waiting.resolve_trader_position(&x)).unwrap();
-        assert!(resolved.registered);
-        assert_eq!(resolved.conformance, Validation::Valid);
-        assert_eq!(resolved.validation, Validation::Valid);
-        assert_eq!(
-            resolved.resolution,
-            Resolution::Pending,
-            "an unestablished parent waits; it does not consume and does not defeat"
-        );
-        assert_eq!(resolved.effect, PositionEffect::None);
-
-        // The same bytes, the same fleet, the same everything — once the
-        // verifier has walked to that head, the route realizes.
-        let walked = walked_heads(&r);
-        let complete = Resolver {
-            set: &r.set,
-            local: &r.local,
-            parents: &parents,
-            chains: &walked,
-        };
-        assert_eq!(
-            block_on(complete.resolve_trader_position(&x))
-                .unwrap()
-                .resolution,
-            Resolution::Realized,
-            "the only difference is what this verifier established"
-        );
-    }
-
-    /// Lean `realized_requires_conformance`, TLA `_ConformanceDropped`, at
-    /// the resolver: a route whose pair is final at the position and whose
-    /// exercise is final at every leg — registered, statically Valid — does
-    /// not realize while its conformance is undecided. Here a leg's setup was
-    /// never published, so item 6 is Unavailable: Pending, and the walk sees
-    /// the key as open business, not consumed and not skipped.
-    #[test]
-    #[serial]
-    fn a_registered_route_whose_setup_is_unpublished_is_pending_not_realized() {
-        let r = signed_route(false);
-        // The pair, written directly: the producer's gate (install) refuses
-        // this route, and a verifier must not need the producer to have
-        // behaved to read the position correctly.
-        let at = position_of(&r.precommit, &r.fulfillment);
-        let (f_bytes, claim) = pair_bytes(&r);
-        block_on(write_cells_leader_first(
-            &r.set,
-            &at.seed,
-            &[
-                (
-                    TAG_DSM_SOFI_FULFILLMENT.source_bytes().to_vec(),
-                    at.k_ful,
-                    f_bytes,
-                ),
-                (economic_root_namespace().to_vec(), at.k_root, claim),
-            ],
-        ))
-        .unwrap();
-        let x = exercised(&r);
-        let parents = BTreeMap::new();
-        let canonical = walked_heads(&r);
-        let resolver = Resolver {
-            set: &r.set,
-            local: &r.local,
-            parents: &parents,
-            chains: &canonical,
-        };
-        let resolved = block_on(resolver.resolve_trader_position(&x)).unwrap();
-        assert!(resolved.registered, "the pair is final at the position");
-        assert_eq!(resolved.validation, Validation::Valid);
-        assert_eq!(resolved.conformance, Validation::Unavailable);
-        assert_eq!(resolved.resolution, Resolution::Pending);
-        assert_eq!(resolved.effect, PositionEffect::None);
-        let leg = &r.precommit.legs()[0];
-        let walked =
-            block_on(resolver.walk_parent(&leg.vault_id, &leg.parent_root, 0, WALK_BUDGET))
-                .unwrap();
-        assert_eq!(walked.outcome, WalkOutcome::Unresolved { attempt: 0 });
-        assert!(walked.consumed.is_none());
-    }
-
-    /// TLA `LostPosition` (`_LostPositionDropped`), Lean
-    /// `a_lost_position_makes_a_final_route_skippable`, at the resolver: a
-    /// claim first at the leader of `K_root(q)` settles that this F never
-    /// registers. Its exercise, final at `K^(0)`, is then skipped — the walk
-    /// moves to attempt 1 instead of stranding the parent — and the position
-    /// stays Pending through this F: it resolves through the claim that took
-    /// it.
-    #[test]
-    #[serial]
-    fn an_exercise_whose_fulfillment_lost_its_position_is_skipped_not_stranded() {
-        let r = signed_route(true);
-        let at = position_of(&r.precommit, &r.fulfillment);
-        let leader = leader_index(&r.set, &at.seed).unwrap();
-        let rival = TraderFulfillmentBody::new(
-            *r.fulfillment.precommit_id(),
-            r.fulfillment.policy_fulfillment_set().to_vec(),
-            r.fulfillment
-                .attempts()
-                .iter()
-                .map(|a| AttemptEntry {
-                    vault_id: a.vault_id,
-                    attempt: a.attempt + 1,
-                })
-                .collect(),
-            r.fulfillment.position(),
-            SIG_ALG,
-            &trader_keys().0,
-        )
-        .unwrap();
-        let rival_claim = derive::resolution_claim(&r.precommit, &rival).encode();
-        fake_registers::put_cell(
-            &r.set,
-            leader,
-            economic_root_namespace(),
-            &at.k_root,
-            &rival_claim,
-        );
-        block_on(install_fulfillment(&r.set, &install_request(&r))).unwrap();
-        let x = exercised(&r);
-        let parents = BTreeMap::new();
-        let canonical = walked_heads(&r);
-        let resolver = Resolver {
-            set: &r.set,
-            local: &r.local,
-            parents: &parents,
-            chains: &canonical,
-        };
-        let resolved = block_on(resolver.resolve_trader_position(&x)).unwrap();
-        assert!(!resolved.registered);
-        assert_eq!(resolved.resolution, Resolution::Pending);
-        let leg = &r.precommit.legs()[0];
-        let walked =
-            block_on(resolver.walk_parent(&leg.vault_id, &leg.parent_root, 0, WALK_BUDGET))
-                .unwrap();
-        assert_eq!(
-            walked.outcome,
-            WalkOutcome::Unresolved { attempt: 1 },
-            "attempt 0 is skipped as {:?}; attempt 1 is live and open",
-            ImpossibleArm::PositionLost
-        );
-        assert!(walked.consumed.is_none());
     }
 }

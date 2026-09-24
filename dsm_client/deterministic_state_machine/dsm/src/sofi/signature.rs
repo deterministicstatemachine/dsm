@@ -22,7 +22,7 @@
 //! A vault creation has no protocol object of its own to sign: `R_0` and the
 //! `vault_id` are derivations of a preimage the operation carries, so what it
 //! signs is the operation, by the one frozen rule in
-//! [`operation_signing_bytes`](crate::core::state_machine::transition::operation_signing_bytes).
+//! [`Operation::signing_bytes`](crate::types::operations::Operation::signing_bytes).
 //!
 //! ## The key is never taken on the object's word
 //!
@@ -264,7 +264,7 @@ pub fn verify_operation(
             "SofiVaultCreate",
             sigalg::SPHINCS_PLUS_SPX256F,
             device_public_key,
-            &crate::core::state_machine::transition::operation_signing_bytes(operation),
+            &operation.signing_bytes(),
             signature,
         ),
         // Not a SoFi operation. Refused rather than silently passed: a caller
@@ -355,11 +355,7 @@ mod tests {
 
         // The OPERATION's bytes are a different message, and a signature over
         // them is not what this rule accepts.
-        let over_the_operation = sphincs_sign(
-            &sk,
-            &crate::core::state_machine::transition::operation_signing_bytes(&operation),
-        )
-        .unwrap();
+        let over_the_operation = sphincs_sign(&sk, &operation.signing_bytes()).unwrap();
         assert_eq!(
             verify_setup(&body, &over_the_operation, &pk),
             Err(SignatureError::DoesNotVerify { what: "SofiSetup" })
@@ -400,7 +396,7 @@ mod tests {
             funding_b_policy_commit: [0x5D; 32],
             signature: Vec::new(),
         };
-        let bytes = crate::core::state_machine::transition::operation_signing_bytes(&operation);
+        let bytes = operation.signing_bytes();
         let signed = Operation::SofiVaultCreate {
             genesis_preimage: vec![0x01, 0x02],
             creation: vec![0x03, 0x04],
@@ -415,7 +411,7 @@ mod tests {
     /// THE CARRIED MARKET POLICY IS UNDER THE SIGNATURE, and asserting it is
     /// not tautological.
     ///
-    /// Coverage is structural — `operation_signing_bytes` is the whole
+    /// Coverage is structural — `Operation::signing_bytes` is the whole
     /// canonical encoding with the signature cleared — but only while the
     /// field is IN that encoding. Deleting its line from `Operation::to_bytes`
     /// would silently take it back out from under the signature, leaving the
@@ -433,10 +429,7 @@ mod tests {
             signature,
         };
         let honest = vec![0x00, 0x07, 0x00, 0x01];
-        let bytes = crate::core::state_machine::transition::operation_signing_bytes(&build(
-            honest.clone(),
-            Vec::new(),
-        ));
+        let bytes = (build(honest.clone(), Vec::new())).signing_bytes();
         let signature = sphincs_sign(&sk, &bytes).unwrap();
         assert_eq!(
             verify_operation(&build(honest.clone(), signature.clone()), &pk),

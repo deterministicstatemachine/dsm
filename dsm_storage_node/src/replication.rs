@@ -137,8 +137,6 @@ fn create_pinned_client(
 pub struct ReplicationManager {
     config: ReplicationConfig,
     local_node_id: StorageNodeId,
-    #[allow(dead_code)]
-    local_address: String,
     node_states: Arc<std::sync::RwLock<HashMap<String, pb::StorageNodeInfoV1>>>,
     client: Client,
 }
@@ -181,7 +179,6 @@ impl ReplicationManager {
         Ok(Self {
             config,
             local_node_id,
-            local_address,
             node_states: Arc::new(std::sync::RwLock::new(node_states)),
             client: create_pinned_client(cert_path)?,
         })
@@ -206,7 +203,6 @@ impl ReplicationManager {
         Ok(Self {
             config,
             local_node_id,
-            local_address,
             node_states: Arc::new(std::sync::RwLock::new(node_states)),
             client,
         })

@@ -37,8 +37,6 @@ struct Opts {
     node_index: Option<usize>,
     #[clap(long, help = "Use automatic network detection instead of config file")]
     auto_detect: bool,
-    #[clap(long, help = "Disable rate limiting for throughput benchmarking")]
-    benchmark_mode: bool,
 }
 
 struct ServerConfig {
@@ -241,7 +239,6 @@ fn load_server_config(opts: &Opts) -> Result<ServerConfig> {
     })
 }
 
-
 // Ensure a rustls CryptoProvider is installed once per-process (required by rustls >= 0.23)
 fn ensure_rustls_provider_installed() {
     static INIT: Once = Once::new();
@@ -291,7 +288,7 @@ async fn async_main() -> Result<()> {
     // Initialize database
     info!("Initializing database connection pool...");
     let db_pool = Arc::new(
-        db::create_pool(&server_config.database_url, false)
+        db::create_pool(&server_config.database_url)
             .context("failed to create database connection pool")?,
     );
 
@@ -422,7 +419,6 @@ async fn async_main() -> Result<()> {
         dsm_storage_node::AppLimits {
             body_limit_bytes: server_config.body_limit_bytes,
             concurrency_limit: server_config.concurrency_limit,
-            benchmark_mode: opts.benchmark_mode,
         },
     );
 

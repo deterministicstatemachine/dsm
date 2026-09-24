@@ -242,6 +242,52 @@ impl StorageSetCatalog {
     }
 }
 
+/// Resolve the canonical register set for `network_id`, fail-closed, through
+/// the catalog (never `sole_set` — consumers RESOLVE).
+pub fn canonical_set(network_id: &[u8]) -> Result<StorageSet, DsmError> {
+    let profile =
+        dsm::economic::register::resolve_root_register_profile(network_id).map_err(|e| {
+            DsmError::storage(
+                format!("root register profile: {e}"),
+                None::<std::io::Error>,
+            )
+        })?;
+    let catalog = StorageSetCatalog::from_env_config()?;
+    // The set id is a function of `(member_id, register_incarnation_id)`
+    // pairs, so it cannot be asked for by name: the catalog offers candidates
+    // and `verify_candidate` refuses any that does not re-derive the pinned id.
+    // A member that rebuilt its register therefore stops resolving here
+    // rather than silently serving the register it used to.
+    catalog
+        .sets()
+        .iter()
+        .find(|s| {
+            as_ccb_members(s)
+                .ok()
+                .and_then(|m| profile.verify_candidate(&m).ok())
+                .is_some()
+        })
+        .cloned()
+        .ok_or_else(|| {
+            DsmError::storage(
+                "the canonical register set is not resolvable from the local catalog — fail closed"
+                    .to_string(),
+                None::<std::io::Error>,
+            )
+        })
+}
+
+/// The endpoints of this device's committed network's pinned set, in member
+/// order: where its spool traffic goes.
+pub fn pinned_endpoints() -> Result<Vec<String>, DsmError> {
+    let network = crate::sdk::economic_admission_flow::committed_network_id()?;
+    Ok(canonical_set(&network)?
+        .members()
+        .iter()
+        .map(|member| member.endpoint.clone())
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

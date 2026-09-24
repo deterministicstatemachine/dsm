@@ -349,9 +349,7 @@ mod tests {
             version: 3,
             headers: Some(generated::Headers {
                 device_id: vec![1; 32],
-                chain_tip: vec![2; 32],
                 genesis_hash: vec![3; 32],
-                seq: 0,
             }),
             message_id: vec![0u8; 16],
             payload: Some(generated::envelope::Payload::StorageSyncResponse(sync_resp)),
@@ -379,9 +377,7 @@ mod tests {
             version: 3,
             headers: Some(generated::Headers {
                 device_id: vec![1; 32],
-                chain_tip: vec![2; 32],
                 genesis_hash: vec![3; 32],
-                seq: 0,
             }),
             message_id: vec![0u8; 16],
             payload: Some(generated::envelope::Payload::StorageSyncResponse(sync_resp)),
@@ -442,9 +438,7 @@ mod tests {
             version: 3,
             headers: Some(generated::Headers {
                 device_id: vec![1; 32],
-                chain_tip: vec![2; 32],
                 genesis_hash: vec![3; 32],
-                seq: 0,
             }),
             message_id: vec![0u8; 16],
             payload: Some(generated::envelope::Payload::StorageSyncResponse(sync_resp)),
@@ -509,9 +503,7 @@ mod tests {
             version: 3,
             headers: Some(generated::Headers {
                 device_id: vec![1; 32],
-                chain_tip: vec![2; 32],
                 genesis_hash: vec![3; 32],
-                seq: 0,
             }),
             message_id: vec![0u8; 16],
             payload: Some(generated::envelope::Payload::StorageSyncResponse(sync_resp)),
@@ -535,9 +527,7 @@ mod tests {
             version: 3,
             headers: Some(generated::Headers {
                 device_id: vec![1; 32],
-                chain_tip: vec![2; 32],
                 genesis_hash: vec![3; 32],
-                seq: 0,
             }),
             message_id: vec![0u8; 16],
             payload: Some(generated::envelope::Payload::StorageSyncResponse(sync_resp)),

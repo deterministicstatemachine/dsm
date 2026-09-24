@@ -25,7 +25,8 @@ pub const TAG_DSM_KYBER_RECIPIENT_PUB_V1: TaggedHashDomain<'static> =
 pub const TAG_DSM_KYBER_SS: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/kyber-ss");
 /// The key a spool payload is sealed under (DSM Amendment A7):
 /// `K = H(tag ‖ 0x00 ‖ shared_secret ‖ message_id)`, one per payload.
-pub const TAG_DSM_SPOOL_SEAL: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/spool-seal/v1");
+pub const TAG_DSM_SPOOL_SEAL: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/spool-seal/v1");
 /// The cell a device's directory entries live in: `H(tag ‖ 0x00 ‖ genesis ‖ device_id)`.
 pub const TAG_DSM_DEVICE_DIRECTORY_KEY: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/device-directory-key/v1");

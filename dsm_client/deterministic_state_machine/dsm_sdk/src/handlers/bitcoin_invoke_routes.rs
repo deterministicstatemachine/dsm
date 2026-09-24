@@ -66,11 +66,7 @@ fn decode_internal_envelope(result: AppResult, route: &str) -> Result<generated:
             .error_message
             .unwrap_or_else(|| format!("{route}: internal invoke failed")));
     }
-    let payload = result
-        .data
-        .strip_prefix(&[0x03])
-        .ok_or_else(|| format!("{route}: missing envelope v3 framing"))?;
-    dsm::envelope::from_canonical_bytes(payload)
+    super::response_helpers::decode_local_envelope(&result.data)
         .map_err(|e| format!("{route}: failed to decode envelope: {e}"))
 }
 
@@ -138,7 +134,6 @@ fn sync_dbtc_projection_from_state(
             available: spendable,
             locked: locked_sats,
             source_state_hash: crate::util::text_id::encode_base32_crockford(&state_hash),
-            updated_at: crate::util::deterministic_time::tick(),
         },
     )
     .map_err(|e| format!("{route}: failed to persist dBTC canonical projection row: {e}"))?;
@@ -247,7 +242,6 @@ struct WithdrawalLegParams<'a> {
 
 #[allow(clippy::too_many_arguments)]
 fn persist_withdrawal_leg(params: &WithdrawalLegParams<'_>) -> Result<(), String> {
-    let now = crate::util::deterministic_time::tick();
     crate::storage::client_db::upsert_withdrawal_leg(
         &crate::storage::client_db::InFlightWithdrawalLeg {
             withdrawal_id: params.withdrawal_id.to_string(),
@@ -263,8 +257,6 @@ fn persist_withdrawal_leg(params: &WithdrawalLegParams<'_>) -> Result<(), String
             exit_vault_op_id: params.exit_vault_op_id.map(str::to_string),
             state: "broadcast".to_string(),
             proof_digest: None,
-            created_at: now,
-            updated_at: now,
         },
     )
     .map_err(|e| format!("withdrawal leg persistence failed: {e}"))
@@ -587,7 +579,7 @@ impl AppRouterImpl {
             let dbtc_id = crate::sdk::bitcoin_tap_sdk::DBTC_TOKEN_ID;
             let current_dbtc = self
                 .wallet
-                .get_balance(Some(dbtc_id))
+                .get_balance(dbtc_id)
                 .map(|bal| bal.available())
                 .unwrap_or_else(|e| {
                     log::error!("[{route}] failed to read canonical dBTC balance: {e}");
@@ -663,7 +655,6 @@ impl AppRouterImpl {
         preimage.extend_from_slice(device_str.as_bytes());
         preimage.extend_from_slice(&amount_sats.to_le_bytes());
         preimage.extend_from_slice(dest.as_bytes());
-        preimage.extend_from_slice(&crate::util::deterministic_time::tick().to_le_bytes());
         let id_hash = dsm::crypto::blake3::domain_hash(
             dsm::common::domain_tags::TAG_DSM_WITHDRAWAL,
             &preimage,
@@ -773,7 +764,6 @@ impl AppRouterImpl {
             preimage.extend_from_slice(&self.device_id_bytes);
             preimage.extend_from_slice(&plan.requested_net_sats.to_le_bytes());
             preimage.extend_from_slice(req.destination_address.as_bytes());
-            preimage.extend_from_slice(&crate::util::deterministic_time::tick().to_le_bytes());
             let id_hash = dsm::crypto::blake3::domain_hash(
                 dsm::common::domain_tags::TAG_DSM_WITHDRAWAL,
                 &preimage,
@@ -1372,9 +1362,21 @@ impl AppRouterImpl {
                 summary.finalized += 1;
             } else {
                 // Not yet confirmed — increment poll counter and check for refund threshold.
-                let poll_count =
-                    crate::storage::client_db::increment_settlement_poll_count(&wd.withdrawal_id)
-                        .unwrap_or(0);
+                let poll_count = match crate::storage::client_db::increment_settlement_poll_count(
+                    &wd.withdrawal_id,
+                ) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        log::warn!(
+                            "[{}] failed to increment poll count for ρ={}: {}",
+                            log_prefix,
+                            wd.withdrawal_id,
+                            e
+                        );
+                        summary.pending += 1;
+                        continue;
+                    }
+                };
 
                 if poll_count > crate::sdk::bitcoin_tap_sdk::DBTC_MAX_SETTLEMENT_POLLS {
                     log::warn!(
@@ -1444,7 +1446,6 @@ impl AppRouterImpl {
                 };
 
                 let account_id = Self::bitcoin_account_id(&import_kind, &req.secret, req.network);
-                let now = crate::util::deterministic_time::tick();
                 let account = crate::storage::client_db::BitcoinAccountRecord {
                     account_id: account_id.clone(),
                     label: if req.label.trim().is_empty() {
@@ -1458,8 +1459,6 @@ impl AppRouterImpl {
                     first_address: Some(first_address.clone()),
                     active: true,
                     active_receive_index: start_index,
-                    created_at: now,
-                    updated_at: now,
                 };
 
                 if let Err(e) = crate::storage::client_db::upsert_bitcoin_account(&account) {
@@ -1559,7 +1558,6 @@ impl AppRouterImpl {
 
                 let account_id =
                     Self::bitcoin_account_id("mnemonic", &mnemonic_phrase, req.network);
-                let now = crate::util::deterministic_time::tick();
                 let account = crate::storage::client_db::BitcoinAccountRecord {
                     account_id: account_id.clone(),
                     label,
@@ -1569,8 +1567,6 @@ impl AppRouterImpl {
                     first_address: Some(first_address.clone()),
                     active: true,
                     active_receive_index: 0,
-                    created_at: now,
-                    updated_at: now,
                 };
 
                 if let Err(e) = crate::storage::client_db::upsert_bitcoin_account(&account) {
@@ -1969,15 +1965,11 @@ impl AppRouterImpl {
                             let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
                                 &device_id, &vault_id,
                             );
-                            let init_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-                                &device_id, &vault_id,
-                            );
                             let unlock_applied_state = match self.core_sdk.execute_on_relationship(
                                 rel_key,
                                 vault_id,
                                 signed_unlock_op,
                                 &[],
-                                Some(init_tip),
                             ) {
                                 Ok((s, _)) => s,
                                 Err(e) => {
@@ -2121,12 +2113,9 @@ impl AppRouterImpl {
                                 amount,
                                 tx_type: tx_type_str.to_string(),
                                 status: "completed".to_string(),
-                                chain_height: applied_state.hash[0] as u64,
-                                step_index: 0,
                                 commitment_hash: Some(prep.protocol_transition_commitment.to_vec()),
                                 proof_data: None,
                                 metadata,
-                                created_at: crate::util::deterministic_time::tick(),
                             };
                             if let Err(e) = crate::storage::client_db::store_transaction(&rec) {
                                 log::warn!(
@@ -2719,7 +2708,7 @@ impl AppRouterImpl {
                 // Read dBTC balance early — gate check runs after burn_amount is known.
                 let current_dbtc = self
                     .wallet
-                    .get_balance(Some(dbtc_id))
+                    .get_balance(dbtc_id)
                     .map(|b| b.available())
                     .unwrap_or(0);
 
@@ -3121,7 +3110,7 @@ impl AppRouterImpl {
                 // Gate 1: verify dBTC balance covers the vault amount
                 let current_dbtc = self
                     .wallet
-                    .get_balance(Some(dbtc_id))
+                    .get_balance(dbtc_id)
                     .map(|b| b.available())
                     .unwrap_or(0);
                 if let Err(message) =
@@ -4071,7 +4060,10 @@ impl AppRouterImpl {
                         ))
                     }
                 };
-                let base_height = status.block_height.unwrap_or(0);
+                let base_height = match status.block_height {
+                    Some(bh) => bh,
+                    None => return err("bitcoin.deposit.await_and_complete: tx is confirmed but has no block height".to_string()),
+                };
                 let extra = effective_min_conf.saturating_sub(1);
                 header_chain = match mempool.fetch_header_chain(base_height + 1, extra).await {
                     Ok(h) => h,
@@ -4152,11 +4144,8 @@ impl AppRouterImpl {
                             let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
                                 &device_id, &vault_id,
                             );
-                            let init_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-                                &device_id, &vault_id,
-                            );
                             let unlock_applied_state = match self.core_sdk.execute_on_relationship(
-                                rel_key, vault_id, signed_unlock_op, &[], Some(init_tip),
+                                rel_key, vault_id, signed_unlock_op, &[],
                             ) {
                                 Ok((s, _)) => s,
                                 Err(e) => return err(format!("bitcoin.deposit.await_and_complete: failed to apply DLV unlock op: {e}")),
@@ -4312,14 +4301,11 @@ impl AppRouterImpl {
                                     amount,
                                     tx_type: tx_type_str.to_string(),
                                     status: "completed".to_string(),
-                                    chain_height: applied_state.hash[0] as u64,
-                                    step_index: 0,
                                     commitment_hash: Some(
                                         prep.protocol_transition_commitment.to_vec(),
                                     ),
                                     proof_data: None,
                                     metadata,
-                                    created_at: crate::util::deterministic_time::tick(),
                                 };
                                 if let Err(e) = crate::storage::client_db::store_transaction(&rec) {
                                     log::warn!(
@@ -5028,7 +5014,6 @@ pub(super) async fn try_claim_full_sweep_exit(
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
 
     use prost::Message;
     use serial_test::serial;
@@ -5039,38 +5024,19 @@ mod tests {
     use crate::init::SdkConfig;
     use crate::storage::client_db;
 
-    fn install_test_identity(device_id: Vec<u8>, genesis_hash: Vec<u8>, binding_key: Vec<u8>) {
-        crate::reset_sdk_context_for_testing();
-        crate::sdk::app_state::AppState::reset_memory_for_testing();
-        crate::sdk::app_state::AppState::prime_memory_for_testing();
-        crate::sdk::signing_authority::clear_binding_key_for_testing();
-        let (public_key, _secret_key) =
-            crate::sdk::signing_authority::derive_signing_keys_for_testing(
-                &device_id,
-                &genesis_hash,
-                &binding_key,
-            )
-            .expect("derive canonical signing keypair");
-        crate::sdk::signing_authority::set_binding_key_for_testing(binding_key);
-        crate::sdk::app_state::AppState::set_identity_info(
-            device_id,
-            public_key,
-            genesis_hash,
-            vec![0u8; 32],
-        );
-        crate::sdk::app_state::AppState::set_has_identity(true);
+    /// A device created as wallet creation creates it, in a fresh database.
+    fn install_test_identity(seed: u8) {
+        crate::economic_fixtures::local_device(seed);
     }
 
     fn init_withdrawal_invoke_test_router(test_name: &str) -> AppRouterImpl {
+        crate::economic_fixtures::use_test_storage_dir();
         unsafe {
-            std::env::set_var("DSM_SDK_TEST_MODE", "1");
             std::env::remove_var("DSM_ENV_CONFIG_PATH");
         }
         client_db::reset_database_for_tests();
-        let _ = crate::storage_utils::set_storage_base_dir(PathBuf::from(format!(
-            "./.dsm_testdata_{test_name}"
-        )));
-        install_test_identity(vec![0xA1; 32], vec![0xC1; 32], vec![0xD1; 32]);
+        crate::economic_fixtures::use_test_storage_dir();
+        install_test_identity(0xA1);
         client_db::init_database().expect("init db");
         set_withdrawal_bridge_sync_test_results(Vec::new());
         crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::reset_dbtc_storage_test_state();
@@ -5103,8 +5069,6 @@ mod tests {
             exit_vault_op_id: None,
             state: "broadcast".to_string(),
             proof_digest: None,
-            created_at: 0,
-            updated_at: 0,
         }
     }
 
@@ -5203,9 +5167,7 @@ mod tests {
     }
 
     fn decode_framed_envelope(bytes: &[u8], route: &str) -> generated::Envelope {
-        assert!(!bytes.is_empty(), "{route}: empty response bytes");
-        assert_eq!(bytes[0], 0x03, "{route}: expected FramedEnvelopeV3 prefix");
-        dsm::envelope::from_canonical_bytes(&bytes[1..])
+        crate::handlers::response_helpers::decode_local_envelope(bytes)
             .unwrap_or_else(|e| panic!("{route}: failed to decode envelope: {e}"))
     }
 
@@ -5633,7 +5595,7 @@ mod tests {
         assert_eq!(execute_resp.executed_legs[0].status, "broadcast");
         assert_eq!(execute_resp.executed_legs[0].sweep_txid, "txid-1");
 
-        let device_id_b32 = crate::util::text_id::encode_base32_crockford(&[0xA1; 32]);
+        let device_id_b32 = crate::util::text_id::encode_base32_crockford(&router.device_id_bytes);
         let unresolved = crate::storage::client_db::list_unresolved_withdrawals(&device_id_b32)
             .expect("list unresolved withdrawals");
         assert_eq!(unresolved.len(), 1, "expected one persisted withdrawal row");
@@ -5794,7 +5756,7 @@ mod tests {
         );
 
         // The persisted withdrawal row must carry the plan's policy_commit, not a hardcoded constant.
-        let device_id_b32 = crate::util::text_id::encode_base32_crockford(&[0xA1; 32]);
+        let device_id_b32 = crate::util::text_id::encode_base32_crockford(&router.device_id_bytes);
         let unresolved = client_db::list_unresolved_withdrawals(&device_id_b32)
             .expect("list unresolved withdrawals");
         assert_eq!(unresolved.len(), 1);

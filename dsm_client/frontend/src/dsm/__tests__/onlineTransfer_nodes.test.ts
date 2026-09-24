@@ -15,9 +15,7 @@ function makeOkEnvelope(): pb.Envelope {
     version: 3,
     headers: new pb.Headers({
       deviceId: devId,
-      chainTip: chainTip,
       genesisHash: gh,
-      seq: 1,
     } as any),
     payload: {
       case: 'onlineTransferResponse',
@@ -81,8 +79,7 @@ describe('online send node fan-out', () => {
           // Return valid Headers protobuf bytes
           const headers = new pb.Headers({
             deviceId: devId,
-            genesisHash: gh,
-            chainTip: new Uint8Array(32).fill(0xff), // Non-zero chain tip
+            genesisHash: gh, // Non-zero chain tip
             seq: 1n,
           } as any);
           return wrapSuccessRaw(headers.toBinary());
@@ -104,7 +101,6 @@ describe('online send node fan-out', () => {
             version: 3,
             headers: new pb.Headers({
               deviceId: devId,
-              chainTip: new Uint8Array(32).fill(0xff),
               genesisHash: gh,
             } as any),
             payload: {
@@ -150,7 +146,7 @@ describe('online send node fan-out', () => {
       const method = req.method || '';
       const p = req.payload?.case === 'bytes' ? req.payload.value.data : new Uint8Array(0);
       if (method === 'getTransportHeadersV3Bin') {
-        const headers = new pb.Headers({ deviceId: devId, chainTip: new Uint8Array(32).fill(0xff), genesisHash: gh, seq: 1n } as any);
+        const headers = new pb.Headers({ deviceId: devId, genesisHash: gh,} as any);
         return wrapSuccessRaw(headers.toBinary());
       }
 
@@ -159,7 +155,7 @@ describe('online send node fan-out', () => {
         if (ingressRequest.operation.case === 'routerQuery') {
           const path = ingressRequest.operation.value.method;
           if (path === '/transport/headersV3') {
-            const headers = new pb.Headers({ deviceId: devId, chainTip: new Uint8Array(32), genesisHash: gh, seq: 1n } as any);
+            const headers = new pb.Headers({ deviceId: devId, genesisHash: gh,} as any);
             return wrapIngressOk(headers.toBinary());
           }
           return wrapIngressOk(new Uint8Array(0));

@@ -18,9 +18,7 @@ fn error_contains(msg: &Option<String>, needle: &str) -> bool {
 
 fn init_test_storage() {
     // Hermetic: route any storage usage to a deterministic per-test dir.
-    std::env::set_var("DSM_SDK_TEST_MODE", "1");
-    let _ =
-        dsm_sdk::storage_utils::set_storage_base_dir(std::path::PathBuf::from("./.dsm_testdata"));
+    dsm_sdk::economic_fixtures::use_test_storage_dir();
 }
 
 /// Create a test SDK config
@@ -76,7 +74,6 @@ async fn biimpl_prepare_validates_empty_operation_data() {
     let req = pb::BilateralPrepareRequest {
         counterparty_device_id: vec![1, 2, 3],
         operation_data: vec![], // Empty - should fail
-        validity_iterations: 100,
         expected_genesis_hash: None,
         expected_counterparty_state_hash: None,
         ble_address: String::new(),
@@ -111,7 +108,6 @@ async fn biimpl_prepare_validates_operation_data_format() {
     let req = pb::BilateralPrepareRequest {
         counterparty_device_id: vec![1, 2, 3],
         operation_data: vec![0xFF, 0xFF, 0xFF], // Would be invalid on Android
-        validity_iterations: 100,
         expected_genesis_hash: None,
         expected_counterparty_state_hash: None,
         ble_address: String::new(),
@@ -145,7 +141,6 @@ async fn biimpl_prepare_validates_device_id_length() {
     let req = pb::BilateralPrepareRequest {
         counterparty_device_id: vec![1; 3], // invalid length (ignored on non-Android)
         operation_data: vec![1, 2, 3, 4],
-        validity_iterations: 100,
         expected_genesis_hash: None,
         expected_counterparty_state_hash: None,
         ble_address: String::new(),
@@ -178,7 +173,6 @@ async fn biimpl_prepare_computes_deterministic_commitment() {
     let req = pb::BilateralPrepareRequest {
         counterparty_device_id: vec![0xBB; 32],
         operation_data: operation_data.clone(),
-        validity_iterations: 100,
         expected_genesis_hash: None,
         expected_counterparty_state_hash: None,
         ble_address: String::new(),
@@ -599,7 +593,6 @@ async fn commitment_is_deterministic_across_handlers() {
         let req = pb::BilateralPrepareRequest {
             counterparty_device_id: vec![0x99; 32],
             operation_data: operation_data.clone(),
-            validity_iterations: 200,
             expected_genesis_hash: None,
             expected_counterparty_state_hash: None,
             ble_address: String::new(),

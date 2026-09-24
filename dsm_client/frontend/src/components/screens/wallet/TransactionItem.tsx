@@ -2,7 +2,6 @@
 // Reusable transaction row component for overview and history tabs.
 import React from 'react';
 import { txTypeLabel, txTypeDetail, txTypeNumber, formatTxAmount, b32, resolveAlias } from './helpers';
-import { formatTimeAgo, formatDateTime } from '../../../utils/time';
 import ArrowIcon from '../../icons/ArrowIcon';
 import { TokenMark } from '../../TokenMark';
 import StitchedReceiptDetails from '../../receipts/StitchedReceiptDetails';
@@ -24,7 +23,6 @@ function TransactionItemInner({ tx, idx, expandedTxId, onToggle, aliasLookup, sh
   const absAmt = isOutgoing ? -amtBI : amtBI;
   const magnitude = formatTxAmount(tx, absAmt);
   const txTypeVal = txTypeNumber(tx);
-  const createdAt = tx.createdAt ?? 0;
   const memo = (tx.memo?.length ?? 0) > 0 ? tx.memo : undefined;
   const recipient = (tx.recipient?.length ?? 0) > 0 ? tx.recipient : undefined;
   const statusStr = (tx.status?.length ?? 0) > 0 ? tx.status : 'confirmed';
@@ -76,19 +74,10 @@ function TransactionItemInner({ tx, idx, expandedTxId, onToggle, aliasLookup, sh
           <span className="transaction-recipient-label">{isOutgoing ? 'To' : 'From'}</span>
           <span className="transaction-recipient-value">{counterparty}</span>
         </div>
-        {createdAt > 0 && (
-          <div className="transaction-time">{formatTimeAgo(createdAt)}</div>
-        )}
       </div>
 
       {isExpanded && (
         <div className="transaction-expanded-details">
-          {createdAt > 0 && (
-            <div className="detail-row">
-              <span className="detail-label">Date</span>
-              <span className="detail-value">{formatDateTime(createdAt)}</span>
-            </div>
-          )}
           {memo && (
             <div className="detail-row">
               <span className="detail-label">Memo</span>

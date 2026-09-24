@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Keyed-cell and index properties, ON WHICHEVER BACKEND IS COMPILED.
+//! Keyed-cell and index properties of the node's store (Postgres).
 //!
 //! A member keeps what it is given. Every argument the client builds on a
 //! cell read assumes the same things of the store beneath it:
@@ -19,73 +19,15 @@
 //!    and each running hash is exactly what a verifier replays from the
 //!    values it reads.
 //!
-//! The pool comes from `DSM_TEST_DATABASE_URL`, so CI runs this file against
-//! a real Postgres server as well as the in-memory default; a property of the
-//! shipped store is not proven on a backend that never executed it.
+//! They run on the Postgres database `DSM_TEST_DATABASE_URL` names
+//! ([`super::test_store`]).
 
 #![allow(clippy::disallowed_methods)] // unwrap/expect acceptable in deterministic tests
 
+use super::test_store::{fresh_pool, test_pool, unique_key};
 use crate::db;
 
-/// The backend under test.
-///
-/// SQLite has an in-process default (`:memory:`), so a plain `cargo test`
-/// behaves as before. Postgres has none: a Postgres build with no server is
-/// not a backend, and a suite that quietly passed without one would report a
-/// green board that never executed the shipped store. So the Postgres build
-/// REFUSES rather than skips.
-pub(crate) fn test_pool() -> db::DBPool {
-    db::create_pool(&test_database_url(), true).expect("pool")
-}
-
-#[cfg(feature = "local-dev")]
-fn test_database_url() -> String {
-    std::env::var("DSM_TEST_DATABASE_URL").unwrap_or_else(|_| ":memory:".to_string())
-}
-
-#[cfg(not(feature = "local-dev"))]
-fn test_database_url() -> String {
-    std::env::var("DSM_TEST_DATABASE_URL").expect(
-        "DSM_TEST_DATABASE_URL must name a Postgres database: these are the cell and index \
-         properties for the SHIPPED backend, and skipping them would report a green board \
-         that never executed it",
-    )
-}
-
-/// A pool that can be closed and re-opened over the SAME durable store — a
-/// temp file on SQLite, the configured server on Postgres. The restart
-/// property needs both opens to see one store; on Postgres the path is
-/// ignored because the server IS the store.
-#[cfg(feature = "local-dev")]
-pub(crate) fn reopenable_pool(path: &str) -> db::DBPool {
-    db::create_pool(path, true).expect("pool")
-}
-
-#[cfg(not(feature = "local-dev"))]
-pub(crate) fn reopenable_pool(_path: &str) -> db::DBPool {
-    test_pool()
-}
-
-/// A cell key unique to this test process and call site. Postgres keeps ONE
-/// database for the whole run, so a fixed key would make two tests contend
-/// for one cell and pass or fail by ordering.
-pub(crate) fn unique_key(tag: u8) -> [u8; 32] {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    let mut id = [0u8; 32];
-    id[0] = tag;
-    id[1..5].copy_from_slice(&std::process::id().to_le_bytes()[..4]);
-    id[5..13].copy_from_slice(&NEXT.fetch_add(1, Ordering::Relaxed).to_le_bytes());
-    id
-}
-
 const NS: &[u8] = b"DSM/cell-properties";
-
-async fn fresh_pool() -> db::DBPool {
-    let pool = test_pool();
-    db::init_db(&pool).await.expect("init");
-    pool
-}
 
 #[tokio::test]
 async fn every_value_put_at_a_key_is_held_in_arrival_order() {
@@ -255,27 +197,22 @@ async fn concurrent_writers_on_one_key_lose_nothing() {
     );
 }
 
-/// Restart persistence: after the store is re-opened — a fresh SQLite
-/// connection on the same file, a fresh pool on the same Postgres database —
-/// the cell and the index still hold what this node acknowledged.
+/// Restart persistence: after the store is re-opened — a fresh pool on the
+/// same database — the cell and the index still hold what this node
+/// acknowledged.
 #[tokio::test]
 async fn held_values_and_index_entries_survive_reopening_the_store() {
     let key = unique_key(0x36);
     let locator = unique_key(0x37);
-    let path = std::env::temp_dir()
-        .join("dsm-cell-properties-reopen")
-        .to_string_lossy()
-        .to_string();
-    let _ = std::fs::remove_file(&path);
     {
-        let pool = reopenable_pool(&path);
+        let pool = test_pool();
         db::init_db(&pool).await.expect("init");
         db::put_cell(&pool, NS, &key, b"kept").await.expect("put");
         db::append_index(&pool, &locator, &[0xB1; 32])
             .await
             .expect("append");
     }
-    let pool = reopenable_pool(&path);
+    let pool = test_pool();
     db::init_db(&pool).await.expect("init");
     assert_eq!(
         db::get_cell_values(&pool, NS, &key).await.expect("read"),
@@ -284,7 +221,6 @@ async fn held_values_and_index_entries_survive_reopening_the_store() {
     let page = db::read_index(&pool, &locator, 0, 10).await.expect("page");
     assert_eq!(page.len(), 1);
     assert_eq!(page[0].1, vec![0xB1u8; 32]);
-    let _ = std::fs::remove_file(&path);
 }
 
 /// Arrival records: what a put returns is what a get reports, and both are

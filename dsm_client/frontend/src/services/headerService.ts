@@ -7,11 +7,10 @@ import * as pb from '../proto/dsm_app_pb';
 import { queryTransportHeadersV3 } from '../dsm/WebViewBridge';
 import { checkIdentityState } from '../utils/identity';
 
+/** The sender of an addressed envelope: this device's id and genesis hash. */
 export interface TransportHeaders {
   deviceId: Uint8Array;
-  chainTip: Uint8Array;
-  genesisHash: Uint8Array | null;
-  seq: string; // u64 as string
+  genesisHash: Uint8Array;
 }
 
 function cloneU8(src: Uint8Array): Uint8Array {
@@ -74,15 +73,13 @@ class HeaderService {
     if (!headers.deviceId || headers.deviceId.length !== 32) {
       throw new Error('DSM: invalid deviceId length');
     }
-    if (!headers.chainTip || headers.chainTip.length !== 32) {
-      throw new Error('DSM: invalid chainTip length');
+    if (!headers.genesisHash || headers.genesisHash.length !== 32) {
+      throw new Error('DSM: invalid genesisHash length');
     }
 
     const dto: TransportHeaders = {
       deviceId: cloneU8(headers.deviceId as Uint8Array),
-      chainTip: cloneU8(headers.chainTip as Uint8Array),
-      genesisHash: headers.genesisHash ? cloneU8(headers.genesisHash as Uint8Array) : null,
-      seq: headers.seq ? headers.seq.toString() : '0',
+      genesisHash: cloneU8(headers.genesisHash as Uint8Array),
     };
 
     this.cached = dto;
@@ -94,10 +91,7 @@ class HeaderService {
     // Construct via class ctor (no .create() in protoc-gen-es)
     return new pb.Headers({
       deviceId: toU8AB(h.deviceId),
-      chainTip: toU8AB(h.chainTip),
-      genesisHash: h.genesisHash ? toU8AB(h.genesisHash) : undefined,
-      // seq is u64 in proto → bigint in TS
-      seq: BigInt(h.seq),
+      genesisHash: toU8AB(h.genesisHash),
     });
   }
 }

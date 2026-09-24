@@ -3,16 +3,24 @@
 #
 # Modes:
 #   --local   (default)  Generate localhost config + adb reverse ports (dev nodes)
+#   --gcp-beta          Push the LIVE 5-node GCP beta fleet config (us-central1) + CA
 #   --aws               Push pre-built AWS config + self-signed CA cert (production nodes)
-#   --gcp               Push pre-built GCP config + self-signed CA cert (production nodes)
-#   --alibaba           Push pre-built Alibaba config + self-signed CA cert (production nodes)
+#   --gcp               REFUSED: the 6-node 3-region fleet is dead (see below)
+#
+# The Alibaba fleet and its CA were DELETED on 2026-09-12 — the config, the
+# scripts/ca.crt it used, and this script's --alibaba mode all went in one cut.
 #
 # Usage:
 #   ./push_env_override.sh             # local dev nodes (default)
 #   ./push_env_override.sh --local     # same as above, explicit
+#   ./push_env_override.sh --gcp-beta  # LIVE 5-node GCP beta fleet (us-central1)
 #   ./push_env_override.sh --aws       # AWS storage nodes
-#   ./push_env_override.sh --gcp       # GCP storage nodes
-#   ./push_env_override.sh --alibaba   # Alibaba Cloud storage nodes (3 nodes, us-west-1)
+#
+# WHY --gcp IS REFUSED: dsm_env_config.gcp.toml describes the 6-node,
+# 3-region fleet from 2026-03-31. Those hosts are gone. It was never updated
+# when the beta fleet moved to 5 nodes in us-central1, so --gcp would push a
+# config naming dead endpoints AND the wrong member ids, deriving a storage set
+# id no node belongs to. The live fleet is --gcp-beta.
 
 set -e
 
@@ -25,16 +33,21 @@ PORTS=(8080 8081 8082 8083 8084)
 MODE="local"
 for arg in "$@"; do
   case "$arg" in
-    --aws)     MODE="aws" ;;
-    --gcp)     MODE="gcp" ;;
-    --alibaba) MODE="alibaba" ;;
-    --local)   MODE="local" ;;
+    --aws)      MODE="aws" ;;
+    --gcp-beta) MODE="gcp-beta" ;;
+    --local)    MODE="local" ;;
+    --gcp)
+      echo "REFUSED: --gcp names the RETIRED 6-node, 3-region fleet (2026-03-31)." >&2
+      echo "Those hosts are dead and its member ids derive a storage set no node belongs to." >&2
+      echo "The live beta fleet is 5 nodes in us-central1: use --gcp-beta." >&2
+      exit 1
+      ;;
     --help|-h)
-      echo "Usage: $0 [--local|--aws|--gcp|--alibaba]"
-      echo "  --local    (default) Local dev nodes via adb reverse"
-      echo "  --aws      AWS storage nodes (6 nodes, 3 regions)"
-      echo "  --gcp      GCP storage nodes (6 nodes, 3 regions)"
-      echo "  --alibaba  Alibaba Cloud storage nodes (3 nodes, us-west-1)"
+      echo "Usage: $0 [--local|--gcp-beta|--aws]"
+      echo "  --local     (default) Local dev nodes via adb reverse"
+      echo "  --gcp-beta  LIVE GCP beta fleet (5 nodes, us-central1, q=3)"
+      echo "  --aws       AWS storage nodes (6 nodes, 3 regions)"
+      echo "  --gcp       REFUSED — dead 6-node fleet; use --gcp-beta"
       exit 0
       ;;
     *) echo "Unknown argument: $arg"; exit 1 ;;
@@ -45,19 +58,19 @@ echo "Mode: $MODE"
 
 # --- Remote config paths ---
 AWS_CONFIG="$REPO_ROOT/scripts/dsm_env_config.aws.toml"
-GCP_CONFIG="$REPO_ROOT/scripts/dsm_env_config.gcp.toml"
-ALIBABA_CONFIG="$REPO_ROOT/scripts/dsm_env_config.alibaba.toml"
+GCP_BETA_CONFIG="$REPO_ROOT/scripts/dsm_env_config.gcp_beta.toml"
+# ONE CA path, no fallback. The old second candidate (scripts/ca.crt) was the
+# Alibaba CA — same subject CN=DSM-Storage-CA, different key — so the fallback
+# could silently push a CA that verifies nothing and turn a fleet move into an
+# unexplained TLS outage. It is deleted; the deployment's CA is the only source.
 CA_CERT="$REPO_ROOT/dsm_storage_node/deploy/nodes/ca/ca.crt"
-CA_CERT_SCRIPTS="$REPO_ROOT/scripts/ca.crt"
 
 # Resolve REMOTE_CONFIG and CA cert based on mode
 REMOTE_CONFIG=""
 if [[ "$MODE" == "aws" ]]; then
   REMOTE_CONFIG="$AWS_CONFIG"
-elif [[ "$MODE" == "gcp" ]]; then
-  REMOTE_CONFIG="$GCP_CONFIG"
-elif [[ "$MODE" == "alibaba" ]]; then
-  REMOTE_CONFIG="$ALIBABA_CONFIG"
+elif [[ "$MODE" == "gcp-beta" ]]; then
+  REMOTE_CONFIG="$GCP_BETA_CONFIG"
 fi
 
 if [[ -n "$REMOTE_CONFIG" ]]; then
@@ -66,15 +79,11 @@ if [[ -n "$REMOTE_CONFIG" ]]; then
     echo "Run the deployment first (deploy/provision_${MODE}.sh)"
     exit 1
   fi
-  # Try deploy/nodes CA first, fall back to scripts/ca.crt
   if [[ ! -f "$CA_CERT" ]]; then
-    if [[ -f "$CA_CERT_SCRIPTS" ]]; then
-      CA_CERT="$CA_CERT_SCRIPTS"
-    else
-      echo "CA cert not found at $CA_CERT or $CA_CERT_SCRIPTS"
-      echo "Run deploy/generate_node_configs.sh first to generate TLS certs"
-      exit 1
-    fi
+    echo "CA cert not found at $CA_CERT" >&2
+    echo "That is the deployment's CA and the only one this script will push." >&2
+    echo "Restore it from the deployment before pushing to devices." >&2
+    exit 1
   fi
 fi
 
@@ -132,8 +141,8 @@ for d in $transports; do
   # Ensure app-private files dir exists
   adb -t "$d" shell run-as "$APP_PKG" mkdir -p files || true
 
-  if [[ "$MODE" == "aws" || "$MODE" == "gcp" || "$MODE" == "alibaba" ]]; then
-    # --- Remote mode (AWS / GCP / Alibaba) ---
+  if [[ "$MODE" == "aws" || "$MODE" == "gcp-beta" ]]; then
+    # --- Remote mode (AWS / GCP beta) ---
     # MUST write the DEVELOPER OVERRIDE file, not files/dsm_env_config.toml: MainActivity
     # unconditionally re-materializes the bundled asset over files/dsm_env_config.toml on every
     # launch (FileOutputStream ... false), so a push there is clobbered. The override
@@ -196,7 +205,7 @@ for d in $transports; do
 
   echo "Verifying startup logs for $d..."
   sleep 2
-  if [[ "$MODE" == "aws" || "$MODE" == "gcp" || "$MODE" == "alibaba" ]]; then
+  if [[ "$MODE" == "aws" || "$MODE" == "gcp-beta" ]]; then
     adb -t "$d" logcat -d | grep -iE "(storage node|ca cert|6 storage|appState changed to: wallet_ready)" | tail -15 || true
   else
     adb -t "$d" logcat -d | grep -E "(Using 5 storage nodes|appState changed to: wallet_ready|Genesis.*published)" | tail -15 || true

@@ -4,16 +4,12 @@
 //!
 //! Content-Addressed Token Policy Anchors (CTPA).
 //! - Canonical hashing: BLAKE3 over a deterministic byte layout (binary).
-//! - No wall-clock influence on canonical bytes (created_tick is metadata only).
+//! - No time of any kind in a policy.
 //! - Absolutely no hex/json/base64/serde in any Rust path.
 
 use std::collections::HashMap;
 
-use crate::utils::deterministic_time as dt;
-use crate::{
-    crypto::blake3,
-    types::{error::DsmError, operations::VerificationType},
-};
+use crate::{crypto::blake3, types::error::DsmError};
 use prost::Message;
 
 /// Fixed-length digest type for anchors and policy-bound hashes.
@@ -121,19 +117,6 @@ impl PolicyAnchor {
     }
 }
 
-/// Possible vault-level conditions referenced by policies.
-#[derive(Debug, Clone, PartialEq)]
-pub enum VaultCondition {
-    /// Unlock with matching hash challenge (domain-separated upstream).
-    Hash(Vec<u8>),
-    /// Minimum balance required.
-    MinimumBalance(u64),
-    /// Required vault type label.
-    VaultType(String),
-    /// Smart policy (canonical protobuf bytes).
-    SmartPolicy(Vec<u8>),
-}
-
 /// Policy-level conditions that constrain token behavior.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PolicyCondition {
@@ -143,15 +126,8 @@ pub enum PolicyCondition {
         allow_derived: bool,
     },
 
-    /// Delegate enforcement to a vault-level condition.
-    VaultEnforcement { condition: VaultCondition },
-
     /// Restrict allowed operation types (interpreted as a set).
     OperationRestriction { allowed_operations: Vec<String> },
-
-    /// Constrain operation to a specific logical time range (tick numbers).
-    /// Replaces wall-clock time constraints with deterministic tick ranges.
-    LogicalTimeConstraint { min_tick: u64, max_tick: u64 },
 
     /// Emissions schedule parameters (DJTE).
     EmissionsSchedule {
@@ -230,8 +206,6 @@ pub struct PolicyFile {
     pub name: String,
     /// Human-friendly version label (UI/ops only).
     pub version: String,
-    /// Deterministic tick for creation (UI/ops only; EXCLUDED from canonical bytes).
-    pub created_tick: u64,
     /// Author identity (semantic).
     pub author: String,
     /// Optional description (UI/ops only).
@@ -245,12 +219,11 @@ pub struct PolicyFile {
 }
 
 impl PolicyFile {
-    /// Construct a new policy file with deterministic tick for UI/ops.
+    /// Construct a new policy file.
     pub fn new(name: &str, version: &str, author: &str) -> Self {
         Self {
             name: name.to_string(),
             version: version.to_string(),
-            created_tick: dt::tick().1, // UI/ops metadata only
             author: author.to_string(),
             description: None,
             conditions: Vec::new(),
@@ -287,7 +260,7 @@ impl PolicyFile {
     /// Canonical deterministic serialization for hashing (binary).
     ///
     /// Design:
-    /// - **Excluded**: `created_tick`, `metadata`, `description`, `name`, `version`
+    /// - **Excluded**: `metadata`, `description`, `name`, `version`
     ///   (UI/ops only; avoid non-semantic drift).
     /// - **Included**: `author`, `conditions`, `roles` (semantic).
     /// - Set-like fields are **sorted** (regions, identities, operations, role perms).
@@ -314,7 +287,7 @@ impl PolicyFile {
     ///
     /// The canonical encoding contains only the semantic fields: `author`,
     /// `conditions`, and `roles`. Non-semantic fields (`name`, `version`,
-    /// `created_tick`, `description`, `metadata`) are set to defaults.
+    /// `description`, `metadata`) are empty.
     /// This is used when fetching policies from storage nodes, which store
     /// canonical bytes for content-addressed integrity.
     pub fn from_canonical_bytes(bytes: &[u8]) -> Result<Self, DsmError> {
@@ -332,7 +305,6 @@ impl PolicyFile {
         Ok(Self {
             name: String::new(),
             version: String::new(),
-            created_tick: 0,
             author: proto.author,
             description: None,
             conditions,
@@ -356,7 +328,6 @@ impl PolicyFile {
         Ok(Self {
             name: proto.name,
             version: proto.revision,
-            created_tick: proto.created_tick,
             author: proto.author,
             description: if proto.description.is_empty() {
                 None
@@ -375,7 +346,6 @@ impl From<&PolicyFile> for crate::types::proto::StoredPolicy {
         Self {
             name: file.name.clone(),
             revision: file.version.clone(),
-            created_tick: file.created_tick,
             author: file.author.clone(),
             description: file.description.clone().unwrap_or_default(),
             conditions: file.conditions.iter().map(|c| c.into()).collect(),
@@ -412,22 +382,11 @@ impl From<&PolicyCondition> for crate::types::proto::PolicyConditionProto {
                     allow_derived: *allow_derived,
                 })
             }
-            PolicyCondition::VaultEnforcement { condition } => {
-                Kind::VaultEnforcement(VaultEnforcementProto {
-                    condition: Some(condition.into()),
-                })
-            }
             PolicyCondition::OperationRestriction { allowed_operations } => {
                 let mut sorted = allowed_operations.clone();
                 sorted.sort();
                 Kind::OperationRestriction(OperationRestrictionProto {
                     allowed_operations: sorted,
-                })
-            }
-            PolicyCondition::LogicalTimeConstraint { min_tick, max_tick } => {
-                Kind::LogicalTimeConstraint(LogicalTimeConstraintProto {
-                    min_tick: *min_tick,
-                    max_tick: *max_tick,
                 })
             }
             PolicyCondition::EmissionsSchedule {
@@ -528,21 +487,8 @@ impl TryFrom<&crate::types::proto::PolicyConditionProto> for PolicyCondition {
                 allowed_identities: p.allowed_identities.clone(),
                 allow_derived: p.allow_derived,
             }),
-            Some(Kind::VaultEnforcement(p)) => Ok(PolicyCondition::VaultEnforcement {
-                condition: p
-                    .condition
-                    .as_ref()
-                    .ok_or(DsmError::SerializationError(
-                        "Missing vault condition".into(),
-                    ))?
-                    .try_into()?,
-            }),
             Some(Kind::OperationRestriction(p)) => Ok(PolicyCondition::OperationRestriction {
                 allowed_operations: p.allowed_operations.clone(),
-            }),
-            Some(Kind::LogicalTimeConstraint(p)) => Ok(PolicyCondition::LogicalTimeConstraint {
-                min_tick: p.min_tick,
-                max_tick: p.max_tick,
             }),
             Some(Kind::EmissionsSchedule(p)) => Ok(PolicyCondition::EmissionsSchedule {
                 total_supply: p.total_supply,
@@ -618,35 +564,6 @@ impl TryFrom<&crate::types::proto::PolicyConditionProto> for PolicyCondition {
     }
 }
 
-impl From<&VaultCondition> for crate::types::proto::VaultConditionProto {
-    fn from(cond: &VaultCondition) -> Self {
-        use crate::types::proto::vault_condition_proto::Kind;
-        let kind = match cond {
-            VaultCondition::Hash(h) => Kind::Hash(h.clone()),
-            VaultCondition::MinimumBalance(b) => Kind::MinimumBalance(*b),
-            VaultCondition::VaultType(t) => Kind::VaultType(t.clone()),
-            VaultCondition::SmartPolicy(p) => Kind::SmartPolicy(p.clone()),
-        };
-        Self { kind: Some(kind) }
-    }
-}
-
-impl TryFrom<&crate::types::proto::VaultConditionProto> for VaultCondition {
-    type Error = DsmError;
-    fn try_from(proto: &crate::types::proto::VaultConditionProto) -> Result<Self, Self::Error> {
-        use crate::types::proto::vault_condition_proto::Kind;
-        match &proto.kind {
-            Some(Kind::Hash(h)) => Ok(VaultCondition::Hash(h.clone())),
-            Some(Kind::MinimumBalance(b)) => Ok(VaultCondition::MinimumBalance(*b)),
-            Some(Kind::VaultType(t)) => Ok(VaultCondition::VaultType(t.clone())),
-            Some(Kind::SmartPolicy(p)) => Ok(VaultCondition::SmartPolicy(p.clone())),
-            None => Err(DsmError::SerializationError(
-                "Missing vault condition kind".into(),
-            )),
-        }
-    }
-}
-
 impl From<&PolicyRole> for crate::types::proto::PolicyRoleProto {
     fn from(role: &PolicyRole) -> Self {
         let mut sorted_permissions = role.permissions.clone();
@@ -699,48 +616,6 @@ impl TokenPolicy {
     // for the real condition-evaluation path (whitepaper §9.5).
 }
 
-/// Audit record for policy verification operations.
-#[derive(Debug, Clone)]
-pub struct PolicyVerification {
-    pub verification_type: VerificationType,
-    pub parameters: HashMap<String, Vec<u8>>,
-    pub tick: u64, // deterministic tick (UI/ops only)
-    pub result: bool,
-    pub message: Option<String>,
-    pub proof: Option<Vec<u8>>,
-}
-
-impl PolicyVerification {
-    pub fn new(verification_type: VerificationType) -> Self {
-        Self {
-            verification_type,
-            parameters: HashMap::new(),
-            tick: dt::tick().1,
-            result: false,
-            message: None,
-            proof: None,
-        }
-    }
-
-    pub fn success(mut self, message: Option<String>, proof: Option<Vec<u8>>) -> Self {
-        self.result = true;
-        self.message = message;
-        self.proof = proof;
-        self
-    }
-
-    pub fn failure(mut self, message: String) -> Self {
-        self.result = false;
-        self.message = Some(message);
-        self
-    }
-
-    pub fn with_parameter(mut self, key: &str, value: Vec<u8>) -> Self {
-        self.parameters.insert(key.to_string(), value);
-        self
-    }
-}
-
 /// Lightweight policy handle used by some SDK surfaces.
 pub struct Policy {
     pub name: String,
@@ -752,7 +627,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn anchor_is_stable_and_ignores_created_tick() {
+    fn anchor_is_stable_and_ignores_display_fields() {
         let mut p1 = PolicyFile::new("Name", "v2", "authorX");
         p1.add_condition(PolicyCondition::OperationRestriction {
             allowed_operations: vec!["transfer".into(), "mint".into()],
@@ -765,7 +640,6 @@ mod tests {
 
         // Clone and perturb UI/ops fields that must not affect canonical hash
         let mut p2 = p1.clone();
-        p2.created_tick = p1.created_tick + 1_000_000;
         p2.metadata.insert("note".into(), "hello".into());
         p2.description = Some("desc".into());
         p2.name = "Other".into();
@@ -862,9 +736,8 @@ mod tests {
         let mut pf = PolicyFile::new("test", "v1", "alice");
         pf.with_description("A test policy");
         pf.add_metadata("key1", "val1");
-        pf.add_condition(PolicyCondition::LogicalTimeConstraint {
-            min_tick: 0,
-            max_tick: 100,
+        pf.add_condition(PolicyCondition::OperationRestriction {
+            allowed_operations: vec!["transfer".into()],
         });
         pf.add_role(PolicyRole {
             id: "r1".into(),
@@ -921,61 +794,24 @@ mod tests {
         assert!(restored.name.is_empty(), "name excluded from canonical");
     }
 
-    // Issue #183 Finding 2 regression: the removed `is_condition_satisfied`
-    // and `are_time_conditions_satisfied` methods unconditionally returned
-    // `true`. They no longer exist on `TokenPolicy`. The real evaluation
-    // path is `PolicyEnforcer::enforce_policy`, exercised by tests in
-    // `core::token::policy::policy_enforcement` — there is no public
-    // shortcut on `TokenPolicy` that can silently approve a condition.
+    /// A committed policy carrying a vault condition (the reserved
+    /// `vault_enforcement`, field 2) names a fact no verifier derives: it does
+    /// not decode, so no token under it can be adopted or evaluated. A policy
+    /// of evaluable conditions still decodes.
     #[test]
-    fn token_policy_has_no_unconditional_satisfaction_shortcut() {
-        // Compile-time evidence: if a future refactor reintroduces a
-        // `bool`-returning method named `is_condition_satisfied` directly
-        // on `TokenPolicy`, this test still passes (it doesn't reference
-        // the symbol). The point is the API surface no longer offers
-        // anything that LOOKS like a satisfaction check but unconditionally
-        // approves. Reviewer signal: don't add one without delegating to
-        // `PolicyEnforcer`.
-        let pf = PolicyFile::new("tp", "v1", "auth");
-        let tp = TokenPolicy::new(pf).unwrap();
-        // Construction succeeds and exposes no unconditional-satisfaction
-        // shortcut. The `verified` flag this used to assert on was itself a
-        // stand-in: nothing in production set it and nothing read it.
-        let _ = tp;
-    }
+    fn a_policy_carrying_a_vault_condition_does_not_decode() {
+        // CanonicalPolicy { author: "a", conditions: [ { 2: { minimum_balance: 100 } } ] }
+        let vault_condition = [0x12, 0x02, 0x10, 0x64];
+        let mut bytes = vec![0x0A, 0x01, b'a', 0x12, vault_condition.len() as u8];
+        bytes.extend_from_slice(&vault_condition);
+        assert!(PolicyFile::from_canonical_bytes(&bytes).is_err());
 
-    #[test]
-    fn policy_verification_success_and_failure() {
-        let pv = PolicyVerification::new(VerificationType::Standard);
-        assert!(!pv.result);
-        assert!(pv.message.is_none());
-
-        let success = PolicyVerification::new(VerificationType::Standard)
-            .with_parameter("pk", vec![1, 2, 3])
-            .success(Some("ok".into()), Some(vec![9]));
-        assert!(success.result);
-        assert_eq!(success.message.as_deref(), Some("ok"));
-        assert_eq!(success.proof, Some(vec![9]));
-        assert_eq!(success.parameters.get("pk").unwrap(), &vec![1, 2, 3]);
-
-        let fail = PolicyVerification::new(VerificationType::Standard).failure("bad".into());
-        assert!(!fail.result);
-        assert_eq!(fail.message.as_deref(), Some("bad"));
-    }
-
-    #[test]
-    fn vault_condition_proto_roundtrip() {
-        let conditions = vec![
-            VaultCondition::Hash(vec![1, 2, 3]),
-            VaultCondition::MinimumBalance(1000),
-            VaultCondition::VaultType("standard".into()),
-            VaultCondition::SmartPolicy(vec![0xDE, 0xAD]),
-        ];
-        for cond in &conditions {
-            let proto: crate::types::proto::VaultConditionProto = cond.into();
-            let restored = VaultCondition::try_from(&proto).unwrap();
-            assert_eq!(&restored, cond);
-        }
+        let mut evaluable = PolicyFile::new("n", "v", "a");
+        evaluable.add_condition(PolicyCondition::OperationRestriction {
+            allowed_operations: vec!["transfer".into()],
+        });
+        let canonical = evaluable.canonical_bytes().expect("canonical");
+        assert!(PolicyFile::from_canonical_bytes(&canonical).is_ok());
     }
 
     #[test]

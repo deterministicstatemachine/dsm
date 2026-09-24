@@ -3,7 +3,7 @@
 # it identically. Read-only: it opens a TLS connection to each node and reads
 # the certificate subject. Nothing is written, deployed or restarted.
 #
-#   ./verify_storage_set_alignment.sh ../../scripts/dsm_env_config.alibaba.toml IP1 IP2 IP3
+#   ./verify_storage_set_alignment.sh ../../scripts/dsm_env_config.gcp_beta.toml IP1 IP2 IP3 IP4 IP5
 #
 # WHY THIS EXISTS. A client hashes the sorted `[[nodes]] name` entries of its
 # env config into the storage_set_id every vault is born under, and counts a

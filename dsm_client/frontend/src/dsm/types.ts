@@ -71,7 +71,6 @@ export interface ChainTipDTO {
   anchorReceiptId?: string;       // optional external anchor ref
   lastAnchorAttempt?: bigint;     // u64 audit-only counter/index (NOT wall-clock)
   failedAnchorAttempts?: number;  // u32 - defaults to 0
-  auditTickMs?: bigint;           // OPTIONAL, UI-only; never hashed
 }
 
 /**
@@ -83,11 +82,9 @@ export interface BilateralRelationshipDTO {
   publicKey: Uint8Array;          // raw PQ key bytes
   alias: string;            // user label
   genesisHash?: Uint8Array;       // 32 bytes genesis hash (if known)
-  lastSeenTick?: bigint;          // canonical progress indicator (no clocks)
   chainTip?: ChainTipDTO;         // current bilateral tip
   bleAddress?: string;           // BLE MAC address for offline bilateral transfers
   genesisVerifiedOnline?: boolean; // genesis hash verified via storage node
-  addedCounter?: bigint;           // commit height when contact was added
   sendStatus?: pb.RelationshipSendStatus;
 }
 
@@ -117,9 +114,7 @@ export interface TransactionDTO {
   to: Uint8Array;                 // 32 bytes device id
   tokenId: string;                // token id
   fee?: bigint;                   // optional fee in base units
-  logicalIndex?: bigint;          // device-local deterministic counter
   type: 'transfer' | 'mint' | 'burn';
-  auditTickMs?: bigint;           // OPTIONAL UI-only
 }
 
 export interface TransactionHistoryDTO {
@@ -146,7 +141,6 @@ export interface GenesisDTO {
   genesis_hash: Uint8Array;       // 32 bytes
   identity_created: boolean;
   chainIndex?: bigint;            // optional deterministic index
-  auditTickMs?: bigint;           // OPTIONAL UI-only
 }
 
 // Testnet faucet for token distribution.

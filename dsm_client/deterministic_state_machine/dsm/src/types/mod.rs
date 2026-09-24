@@ -9,13 +9,11 @@
 //! - [`state_types`] — Legacy `State` compatibility view (slated for deletion)
 //! - [`token_types`] — [`Token`], [`TokenStatus`], supply parameters, and state context
 //! - [`identifiers`] — Type-safe wrappers: [`NodeId`], [`VaultId`], [`SessionId`], [`TransactionId`], etc.
-//! - [`operations`] — Operation trait hierarchy: [`Ops`], [`TokenOps`]
-//! - [`identity`] — [`IdentityAnchor`] and [`IdentityClaim`] for device identity
+//! - [`operations`] — [`operations::Operation`], every state transition the protocol supports
 //! - [`genesis_types`] — Canonical genesis hash `G` (§2.5) and the contribution type
 //! - [`policy_types`] — [`TokenPolicy`], [`PolicyAnchor`], [`PolicyFile`] for CPTA
 //! - [`receipt_types`] — Stitched receipts and verification contexts
 //! - [`contact_types`] — Verified contact information
-//! - [`general`] — Shared types: [`Commitment`], [`KeyPair`], [`SecurityLevel`]
 //! - [`crypto_error`] — Cryptographic operation errors
 //! - [`serialization`] — Protobuf serialization helpers
 //! - [`proto`] — Generated protobuf types (from `dsm_app.proto`)
@@ -26,10 +24,8 @@ pub mod contact_types;
 pub mod crypto_error;
 pub mod device_state; // §2.2, §4, §8: Per-Device SMT head + relationship chains
 pub mod error;
-pub mod general;
 pub mod genesis_types;
 pub mod identifiers; // New type-safe identifiers
-pub mod identity;
 pub mod offline_allocation_leaf; // offline-cash device-bound allocation leaf (load/unload)
 pub mod operations;
 pub mod policy_types;
@@ -42,10 +38,7 @@ pub mod ui_error;
 pub mod unified_error;
 // Re-export correctly named types
 pub use contact_types::DsmVerifiedContact;
-pub use general::{Commitment, DirectoryEntry, KeyPair, SecurityLevel, VerificationResult};
-pub use identity::{IdentityAnchor, IdentityClaim};
 pub use identifiers::{Entropy, GenesisHash, NodeId, SessionId, Signature, TransactionId, VaultId}; // New type-safe identifiers
-pub use operations::{GenericOps, Ops, TokenOps};
 pub use policy_types::{PolicyAnchor, PolicyFile, TokenPolicy};
 pub use receipt_types::{
     ParentConsumptionTracker, ReceiptAcceptance, ReceiptVerificationContext, StitchedReceiptV2,

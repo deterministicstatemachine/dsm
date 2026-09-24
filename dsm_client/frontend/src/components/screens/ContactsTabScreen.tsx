@@ -564,18 +564,6 @@ const ContactsTabScreen: React.FC<Props> = ({ eraTokenSrc = 'images/logos/era_to
                           <span style={detailLabelStyle}>Verified</span>
                           <span>{c.isVerified ? 'YES' : 'NO'}</span>
                         </div>
-                        {((c.addedCounter !== undefined && c.addedCounter > 0) || (c.verifyCounter !== undefined && c.verifyCounter > 0)) && (
-                          <div style={detailRowStyle}>
-                            <span style={detailLabelStyle}>Counters</span>
-                            <span>Added: {c.addedCounter ?? 0} · Verify: {c.verifyCounter ?? 0}</span>
-                          </div>
-                        )}
-                        {c.chainTipSmtProof && typeof c.chainTipSmtProof?.siblings?.length === 'number' && (
-                          <div style={detailRowStyle}>
-                            <span style={detailLabelStyle}>SMT proof</span>
-                            <span>{c.chainTipSmtProof.siblings.length} siblings</span>
-                          </div>
-                        )}
                       </div>
                       <div style={{ marginTop: 10 }}>
                         <div style={{ fontSize: 8, textTransform: 'uppercase', marginBottom: 6, fontWeight: 'bold' }}>Stitched receipts</div>
@@ -608,12 +596,6 @@ const ContactsTabScreen: React.FC<Props> = ({ eraTokenSrc = 'images/logos/era_to
                                         <span style={detailLabelStyle}>Tx ID</span>
                                         <span>{tx.txId}</span>
                                       </div>
-                                      {tx.createdAt ? (
-                                        <div style={detailRowStyle}>
-                                          <span style={detailLabelStyle}>Date</span>
-                                          <span>{new Date((tx.createdAt as number) * 1000).toLocaleString()}</span>
-                                        </div>
-                                      ) : null}
                                       <div style={detailRowStyle}>
                                         <span style={detailLabelStyle}>Type</span>
                                         <span>{tx.txType || tx.type}</span>

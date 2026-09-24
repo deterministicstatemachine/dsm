@@ -36,18 +36,19 @@ use crate::common::domain_tags::{
 use crate::crypto::domain::TaggedHashDomain;
 use crate::economic::authority_evidence::{verify_authority_evidence, AuthorityEvidenceError};
 use crate::economic::claim::AdmissionSubstrate;
-use crate::economic::claim_envelope::decode_registered_economic_claim;
 use crate::economic::decode::decode_admission_manifest;
 use crate::economic::lineage::{
-    AdmittedEconomicPosition, activate, advance_validated, AcceptedSubstrate,
-    EconomicActivationSnapshot, ValidatedEconomicRoot,
+    activate, advance_validated, AcceptedSubstrate, EconomicActivationSnapshot,
+    EconomicValidationError, ValidatedEconomicRoot,
 };
 use crate::economic::provenance::{
     PeerLineageFailure, ProvenanceResolver, ReserveReleaseWin, ValidatedPeerTransition,
 };
 use crate::economic::register::{
-    economic_root_register_key, position_seed, resolve_for_trader, RegisteredEconomicRoot,
+    read_root_cell, resolve_for_trader, resolve_root_register_profile, RegisteredEconomicRoot,
+    RootCell,
 };
+use crate::route_chain::{CellEvidence, CellReading, ChainState};
 use crate::economic::successor_evidence::verify_dsm_successor_evidence;
 use crate::types::identifiers::encode_crockford;
 use crate::economic::witness::EconomicTransitionWitness;
@@ -58,31 +59,24 @@ const WALK_STEP_BUDGET: usize = 512;
 /// each re-entry is one frame; positions within one identity are a loop.
 const CROSS_IDENTITY_DEPTH_CAP: usize = 32;
 
-/// I/O the walker needs, verified at the boundary: register winners at
-/// quorum, and immutable objects whose bytes re-hash to their address. The
-/// walker re-checks the address anyway — a fetcher cannot substitute bytes.
+/// I/O the walker needs: raw reads of the register cells the walker names,
+/// and immutable objects by address. The fetcher supplies bytes, never a
+/// verdict: the walker evaluates every cell's route chains itself and
+/// re-checks every address.
 pub trait PeerEvidenceFetcher {
-    /// The quorum-agreed winner bytes for one economic-root register cell,
-    /// or `None` when no quorum winner exists (⇒ `Incomplete` upstream).
-    /// Divergent non-identical values must surface as `Quarantined`.
-    /// The FINAL value at `K_root(q)` (Part II §13): the leader's first object
-    /// naming the key, held by two other members. `seed` is `s(q)` from the
-    /// root the walker validated at `q - 1`; the fetcher derives the leader
-    /// from it and never from what it reads. `None` while the cell is open.
-    fn register_cell(
-        &self,
-        k_root: &[u8; 32],
-        seed: &[u8; 32],
-    ) -> Result<Option<Vec<u8>>, PeerLineageFailure>;
+    /// Every seat's reads of `cell` (storage spec §9): the values each seat
+    /// holds, its committed state from a mirror, and each later seat's own
+    /// mirror of the leader. The walker evaluates them.
+    fn register_cell(&self, cell: &RootCell) -> Result<CellEvidence, PeerLineageFailure>;
     /// The release that installed `generation` of the native reserve
-    /// `reserve_id`, established FINAL by a walk of the reserve lineage from
-    /// its genesis state, with the state it succeeded. `None` while the
-    /// lineage has not reached that generation.
+    /// `reserve_id`, established final by a walk of the reserve lineage from
+    /// its genesis state, with the state it succeeded. `Incomplete` while
+    /// the lineage has not reached that generation.
     fn native_reserve_release(
         &self,
         reserve_id: &[u8; 32],
         generation: u64,
-    ) -> Result<Option<ReserveReleaseWin>, PeerLineageFailure>;
+    ) -> Result<ReserveReleaseWin, PeerLineageFailure>;
     /// The network's root-register set as the local catalog resolves it —
     /// CANDIDATE entries the caller must re-derive and check, never authority.
     fn root_register_candidate_set(
@@ -155,11 +149,8 @@ impl ProvenanceResolver for WalkingResolver<'_> {
         &self,
         reserve_id: &[u8; 32],
         generation: u64,
-    ) -> Option<ReserveReleaseWin> {
-        self.fetcher
-            .native_reserve_release(reserve_id, generation)
-            .ok()
-            .flatten()
+    ) -> Result<ReserveReleaseWin, PeerLineageFailure> {
+        self.fetcher.native_reserve_release(reserve_id, generation)
     }
 
     fn root_register_candidate_set(
@@ -210,6 +201,83 @@ pub fn validate_peer_lineage(
         start,
         &mut state,
     )
+}
+
+/// A failure met inside a step, kept in its own class and located at the
+/// position where it was met.
+fn at_position(position: u64, failure: PeerLineageFailure) -> PeerLineageFailure {
+    match failure {
+        PeerLineageFailure::Incomplete(m) => {
+            PeerLineageFailure::Incomplete(format!("at position {position}: {m}"))
+        }
+        PeerLineageFailure::Invalid(m) => {
+            PeerLineageFailure::Invalid(format!("at position {position}: {m}"))
+        }
+        PeerLineageFailure::Quarantined(m) => {
+            PeerLineageFailure::Quarantined(format!("at position {position}: {m}"))
+        }
+        PeerLineageFailure::Unresolved(m) => {
+            PeerLineageFailure::Unresolved(format!("at position {position}: {m}"))
+        }
+    }
+}
+
+/// The class of a step's validation failure. Evidence that verified as
+/// wrong is `Invalid`; evidence that could not be established — a nested
+/// peer's lineage, a reserve release, a token policy, acceptance evidence —
+/// keeps the class it was established in, so an outage anywhere below a step
+/// is retried and never read as a forgery (storage spec §4: a fact that is
+/// not established is never read as its negation).
+fn step_failure(position: u64, e: EconomicValidationError) -> PeerLineageFailure {
+    use crate::economic::provenance::ProvenanceError as P;
+    let invalid_at = |e: &dyn core::fmt::Display| invalid(format!("validation at {position}: {e}"));
+    match e {
+        EconomicValidationError::Provenance(p) => match p {
+            P::GenesisReleasePolicy(failure)
+            | P::PeerTransitionNotValidated { failure, .. }
+            | P::AcceptanceEvidence(failure)
+            | P::OwnerLineage(failure)
+            | P::ReleaseNotEstablished { failure, .. } => at_position(position, failure),
+            P::GenesisReleaseInvalid(..)
+            | P::MarketLegPolicy(..)
+            | P::PeerDebitIsNotAnOnlineTransfer
+            | P::PeerDebitNotAddressedToConsumer
+            | P::PeerDebitIndexIsNotTheOperationDebit
+            | P::PeerWitnessDoesNotMatchValidatedRoot
+            | P::SofiLineageNotEligible
+            | P::PeerMutationIsNotADebit { .. }
+            | P::AssetMismatch { .. }
+            | P::AmountMismatch { .. }
+            | P::IndexOutOfRange { .. }
+            | P::NotACredit { .. }
+            | P::DuplicateSourceId
+            | P::SourceNotRecordedAsConsumed { .. }
+            | P::ConsumedByAnotherOperation
+            | P::NotTheCanonicalReserve { .. }
+            | P::GenerationIsGenesis
+            | P::ReleaseInvalid(..)
+            | P::ReleaseRecipientMismatch
+            | P::ReleaseBindingMismatch
+            | P::ReleaseForeignSet
+            | P::ReleaseEvidenceAddrMismatch
+            | P::RegisterNotResolvable(..) => invalid_at(&p),
+        },
+        EconomicValidationError::PreRootIsNotThePredecessor { .. }
+        | EconomicValidationError::PositionIsNotSuccessor { .. }
+        | EconomicValidationError::RegisteredClaimNamesAnotherTrader
+        | EconomicValidationError::SetupPositionIsNotThePredecessor { .. }
+        | EconomicValidationError::SetupRootIsNotTheDerivedRoot { .. }
+        | EconomicValidationError::RegisteredRootDiffersFromWitness { .. }
+        | EconomicValidationError::Transition(..)
+        | EconomicValidationError::OperationDigestMismatch { .. }
+        | EconomicValidationError::EconomicOperationIdMismatch { .. }
+        | EconomicValidationError::SubstrateKindMismatch
+        | EconomicValidationError::SubstrateEvidenceMismatch { .. }
+        | EconomicValidationError::OfflineBoundaryWriteSetNotYetSpecified
+        | EconomicValidationError::WriteSet(..)
+        | EconomicValidationError::ManifestAddrMismatch { .. }
+        | EconomicValidationError::Manifest(..) => invalid_at(&e),
+    }
 }
 
 fn incomplete(m: impl Into<String>) -> PeerLineageFailure {
@@ -279,24 +347,33 @@ fn walk_positions(
     start: Option<ValidatedStart>,
     state: &mut WalkState,
 ) -> Result<ValidatedPeerTransition, PeerLineageFailure> {
+    // The register's committed set: this network's pinned set, which the
+    // local catalog's candidate must re-derive. Every root cell of the walk
+    // is routed over it. A catalog that offers another set is this
+    // verifier's own fault, never the peer's, so it is not `Invalid`.
+    let profile = resolve_root_register_profile(expected_network_id)
+        .map_err(|e| incomplete(format!("no root register for this network: {e}")))?;
+    let register_set = fetcher.root_register_candidate_set(expected_network_id)?;
+    profile.verify_candidate(&register_set).map_err(|e| {
+        incomplete(format!(
+            "the catalog's root register set is not the pinned one: {e}"
+        ))
+    })?;
+
     // The trusted start: this verifier's own earlier conclusion, or the
     // canonical empty activation root — NEVER anything read from a network.
-    let (mut validated, first_position) = match start {
+    // A memo at or past the target starts nothing.
+    let memo = start.filter(|s| s.economic_position < target_position);
+    let (mut validated, first_position) = match memo {
         // A memo is this verifier's own earlier conclusion about a peer, so it
         // is a settled single-root coordinate by construction: the walk can
         // only conclude at a position that produced a validated root, and it
         // refuses a conditional one (`Unresolved`) before ever getting there.
-        Some(s) if s.economic_position < target_position => (
-            ValidatedEconomicRoot::rehydrate_from_admitted_store(
-                AdmittedEconomicPosition::SingleRoot {
-                    economic_position: s.economic_position,
-                    economic_root: s.economic_root,
-                },
-            )
-            .map_err(|e| invalid(format!("memoized start: {e}")))?,
+        Some(s) => (
+            ValidatedEconomicRoot::from_verifier_memo(s.economic_position, s.economic_root),
             s.economic_position + 1,
         ),
-        _ => (
+        None => (
             activate(EconomicActivationSnapshot::fresh())
                 .map_err(|e| invalid(format!("activation shape: {e}")))?,
             1,
@@ -320,43 +397,50 @@ fn walk_positions(
         }
         state.steps_remaining -= 1;
 
-        // 1. The register winner for this position.
-        let k_root = economic_root_register_key(peer_genesis, peer_devid, position);
-        // The seed takes the root THIS walk validated at the previous position.
-        let seed = position_seed(
+        // 1. The claim final at this position's root cell. The route is seeded
+        // by the root THIS walk validated at the previous position, over the
+        // pinned register set. Only a claim naming `K_root(q)` is recognized
+        // there, and the key is a hash of `(G, DevID, q)`, so the claim that
+        // holds the cell is this trader's at this position; any other bytes
+        // at the cell count as nothing, however early they arrived.
+        let cell = RootCell::new(
             peer_genesis,
             peer_devid,
             position,
             &validated.economic_root(),
-        );
-        let cell = fetcher
-            .register_cell(&k_root, &seed)?
-            .ok_or_else(|| incomplete(format!("position {position} has no final winner")))?;
-        // BY CLASS, and a conditional position is its own answer. Decoding a
-        // `C_q` cell with the single-root decoder fails, and mapping that
-        // failure to `invalid` would report an honest peer mid-route as an
-        // authenticated forgery — permanently, since `Invalid` is terminal.
-        let claim = decode_registered_economic_claim(&cell)
-            .map_err(|e| invalid(format!("register winner at {position}: {e}")))?;
+            &register_set,
+            &profile.storage_set_id,
+        )
+        .map_err(|e| incomplete(format!("root cell at {position}: {e:?}")))?;
+        let evidence = fetcher.register_cell(&cell)?;
+        let claim = match read_root_cell(&cell, &evidence) {
+            Ok(CellReading::Held {
+                object,
+                state: ChainState::Final,
+                ..
+            }) => object,
+            Ok(CellReading::Held {
+                state: ChainState::LeaderHeld | ChainState::Preserved,
+                ..
+            }) => {
+                return Err(incomplete(format!(
+                    "position {position}: the claim holding the root cell is not final yet"
+                )))
+            }
+            Ok(CellReading::Open) => {
+                return Err(incomplete(format!(
+                    "position {position}: no claim holds the root cell"
+                )))
+            }
+            Err(missing) => {
+                return Err(incomplete(format!(
+                    "position {position}: the root cell is not decided yet: {missing:?}"
+                )))
+            }
+        };
 
-        // THE COORDINATES COME FIRST, FOR BOTH ARMS. Checking them only after
-        // narrowing to the single-root arm meant a conditional claim naming
-        // some OTHER trader or position was reported as `Unresolved` — "this
-        // honest peer is mid-route" — when what was actually observed is a
-        // cell holding a claim for coordinates it does not occupy. That is a
-        // forgery, and `Unresolved` invites a retry that can never succeed.
-        let (claim_genesis, claim_devid) = claim.trader();
-        if claim_genesis != *peer_genesis
-            || claim_devid != *peer_devid
-            || claim.economic_position() != position
-        {
-            return Err(invalid(format!(
-                "register winner at {position} names different coordinates"
-            )));
-        }
-
-        // Only now is "conditional" the honest reading: the claim is for this
-        // trader at this position, and it has selected no root.
+        // A conditional position is its own answer: the claim is authentic
+        // and has selected no root, so the peer is mid-route, not forging.
         let claim = claim.single_root().map_err(|conditional| {
             PeerLineageFailure::Unresolved(format!(
                 "peer {}/{} at position {position}: {conditional}",
@@ -398,19 +482,11 @@ fn walk_positions(
         // The committed network must be the one we are validating against,
         // and the register set the claim binds must be that network's
         // canonical set — never sourced from transfer metadata or contacts.
-        let profile = resolve_for_trader(&facts.network_id, expected_network_id)
+        // The pinned id covers every `(member, incarnation)` pair, so a claim
+        // written under a member's old incarnation does not name it.
+        let trader_profile = resolve_for_trader(&facts.network_id, expected_network_id)
             .map_err(|e| invalid(format!("peer network refused: {e}")))?;
-        // The id is re-derived from the resolved `(member, incarnation)`
-        // pairs, and `verify_candidate` refuses a candidate that does not
-        // re-derive this network's PINNED id. A member that rebuilt its register is a
-        // different entry, so a claim written under the old incarnation no
-        // longer names the set this network resolves to.
-        let candidate = fetcher.root_register_candidate_set(&facts.network_id)?;
-        profile
-            .verify_candidate(&candidate)
-            .map_err(|e| invalid(format!("peer register set refused: {e}")))?;
-        let expected_set_id = profile.storage_set_id;
-        if body.root_register_storage_set_id != expected_set_id {
+        if body.root_register_storage_set_id != trader_profile.storage_set_id {
             return Err(invalid(
                 "claim binds a register set that is not the canonical set of the peer's \
                  committed network",
@@ -455,17 +531,14 @@ fn walk_positions(
             successor_addr,
         );
 
-        // 5. The same conjuncts any device runs.
-        // Projected from the verified claim rather than re-assembled from
-        // locals: the coordinates were checked against it above, so a copy
-        // here could only introduce a disagreement.
+        // 5. The same conjuncts any device runs, over the verified claim.
         let registered = RegisteredEconomicRoot::from_verified_single_root(claim);
         let resolver = WalkingResolver {
             fetcher,
             expected_network_id,
             state: std::cell::RefCell::new(&mut *state),
         };
-        let (next, _funded) = advance_validated(
+        let advanced = advance_validated(
             &validated,
             &registered,
             &manifest,
@@ -477,8 +550,8 @@ fn walk_positions(
             &facts.network_id,
             &facts.proven_ak,
         )
-        .map_err(|e| invalid(format!("validation at {position}: {e}")))?;
-        validated = next;
+        .map_err(|e| step_failure(position, e))?;
+        validated = advanced.root;
         last = Some((
             witness,
             facts.proven_ak.clone(),
@@ -521,51 +594,66 @@ mod tests {
     const PEER_D: [u8; 32] = [0x22; 32];
     const NETWORK: &[u8] = b"dsm-testnet";
 
-    /// A fetcher that serves exactly one cell: a conditional SoFi claim at the
-    /// target position. Every other capability refuses, because none of them
-    /// should be reached — the walk has to stop at the claim.
+    /// A fetcher over the network's pinned register set that serves one root
+    /// cell, the one at `position`, holding `writes` written along the cell's
+    /// route in order, each through route position `last`. The leader of every other
+    /// root cell answers holding nothing. Every other capability refuses,
+    /// because none of them should be reached: the walk has to stop at the
+    /// claim.
     struct ConditionalCellFetcher {
         position: u64,
-        claim: Vec<u8>,
+        writes: Vec<Vec<u8>>,
+        last: usize,
     }
 
     impl PeerEvidenceFetcher for ConditionalCellFetcher {
-        fn register_cell(
-            &self,
-            k_root: &[u8; 32],
-            _seed: &[u8; 32],
-        ) -> Result<Option<Vec<u8>>, PeerLineageFailure> {
-            let want = economic_root_register_key(&PEER_G, &PEER_D, self.position);
-            if *k_root == want {
-                return Ok(Some(self.claim.clone()));
+        fn register_cell(&self, cell: &RootCell) -> Result<CellEvidence, PeerLineageFailure> {
+            let mut seats = crate::route_chain::fixtures::Cell::at(cell.routed());
+            if cell.economic_position() == self.position {
+                for value in &self.writes {
+                    seats.write(value, self.last, &[]);
+                }
             }
-            Ok(None)
+            Ok(seats.evidence())
         }
         fn native_reserve_release(
             &self,
-            _reserve_id: &[u8; 32],
-            _generation: u64,
-        ) -> Result<Option<ReserveReleaseWin>, PeerLineageFailure> {
-            Ok(None)
+            reserve_id: &[u8; 32],
+            generation: u64,
+        ) -> Result<ReserveReleaseWin, PeerLineageFailure> {
+            Err(PeerLineageFailure::Incomplete(format!(
+                "no reserve release in this test: {} at {generation}",
+                encode_crockford(reserve_id)
+            )))
         }
         fn root_register_candidate_set(
             &self,
-            _network_id: &[u8],
+            network_id: &[u8],
         ) -> Result<crate::ccb::StorageSetMembers, PeerLineageFailure> {
-            Err(PeerLineageFailure::Incomplete("no set in this test".into()))
+            let pinned = crate::economic::register::pinned_root_register_members(network_id)
+                .map_err(|e| PeerLineageFailure::Incomplete(e.to_string()))?;
+            crate::ccb::StorageSetMembers::new(pinned)
+                .map_err(|e| PeerLineageFailure::Incomplete(format!("{e:?}")))
         }
         fn immutable(
             &self,
-            _namespace: TaggedHashDomain<'static>,
-            _addr: &[u8; 32],
+            namespace: TaggedHashDomain<'static>,
+            addr: &[u8; 32],
         ) -> Result<Vec<u8>, PeerLineageFailure> {
-            Err(PeerLineageFailure::Incomplete("no objects here".into()))
+            Err(PeerLineageFailure::Incomplete(format!(
+                "no objects in this test: {} under {:?}",
+                encode_crockford(addr),
+                namespace.source_bytes()
+            )))
         }
         fn anchored_policy_bytes(
             &self,
-            _policy_commit: &[u8; 32],
+            policy_commit: &[u8; 32],
         ) -> Result<Vec<u8>, PeerLineageFailure> {
-            Err(PeerLineageFailure::Incomplete("no policies here".into()))
+            Err(PeerLineageFailure::Incomplete(format!(
+                "no policies in this test: {}",
+                encode_crockford(policy_commit)
+            )))
         }
     }
 
@@ -592,7 +680,8 @@ mod tests {
         let position = 4;
         let fetcher = ConditionalCellFetcher {
             position,
-            claim: conditional_claim(position).encode(),
+            writes: vec![conditional_claim(position).encode()],
+            last: crate::route_chain::ROUTE_LEN - 1,
         };
         let err = validate_peer_lineage(
             &fetcher,
@@ -623,18 +712,13 @@ mod tests {
         assert!(!matches!(err, PeerLineageFailure::Incomplete(_)));
     }
 
-    /// A CONDITIONAL CLAIM AT THE WRONG COORDINATES IS A FORGERY, not a peer
-    /// mid-route.
-    ///
-    /// The coordinate check used to run AFTER narrowing to the single-root
-    /// arm, so a `C_q` naming some other trader or position was reported as
-    /// `Unresolved` — "come back when their route resolves". Nothing would
-    /// ever resolve it: the cell holds a claim for coordinates it does not
-    /// occupy, which is the definition of the `Invalid` arm.
+    /// A claim naming other coordinates never holds the root cell (storage
+    /// spec §9 rule 3): only a claim whose own coordinates derive `K_root(q)`
+    /// is recognized there, so a foreign claim written first blocks nothing,
+    /// and a cell holding only foreign claims is open.
     #[test]
-    fn a_conditional_claim_at_the_wrong_coordinates_is_invalid() {
+    fn a_claim_naming_other_coordinates_never_holds_the_root_cell() {
         let position = 3;
-        // A well-formed conditional claim — for someone else.
         let foreign = SofiResolutionClaim {
             genesis: [0x99; 32],
             device_id: [0x88; 32],
@@ -643,40 +727,57 @@ mod tests {
             realize_root: [0xA1; 32],
             void_root: [0xB1; 32],
         };
-        let fetcher = ConditionalCellFetcher {
-            position,
-            claim: foreign.encode(),
-        };
-        let err = validate_peer_lineage(
-            &fetcher,
-            NETWORK,
-            &PEER_G,
-            &PEER_D,
-            position,
-            Some(ValidatedStart {
-                economic_position: position - 1,
-                economic_root: [0x77; 32],
-            }),
-        )
-        .expect_err("a claim for other coordinates");
-        assert!(
-            matches!(err, PeerLineageFailure::Invalid(ref m) if m.contains("different coordinates")),
-            "wrong coordinates are a forgery, not an undecided route: {err:?}"
-        );
-
-        // The SAME claim at the right coordinates is Unresolved, so the
-        // distinction is the coordinates and nothing else.
         let ours = SofiResolutionClaim {
             genesis: PEER_G,
             device_id: PEER_D,
             ..foreign
         };
-        let fetcher = ConditionalCellFetcher {
-            position,
-            claim: ours.encode(),
-        };
-        assert!(matches!(
+        let walk = |writes: Vec<Vec<u8>>| {
             validate_peer_lineage(
+                &ConditionalCellFetcher {
+                    position,
+                    writes,
+                    last: crate::route_chain::ROUTE_LEN - 1,
+                },
+                NETWORK,
+                &PEER_G,
+                &PEER_D,
+                position,
+                Some(ValidatedStart {
+                    economic_position: position - 1,
+                    economic_root: [0x77; 32],
+                }),
+            )
+        };
+        assert!(
+            matches!(
+                walk(vec![foreign.encode()]),
+                Err(PeerLineageFailure::Incomplete(ref m)) if m.contains("no claim holds")
+            ),
+            "a cell holding only a foreign claim is open"
+        );
+        assert!(
+            matches!(
+                walk(vec![foreign.encode(), ours.encode()]),
+                Err(PeerLineageFailure::Unresolved(_))
+            ),
+            "the foreign claim first at the leader does not stop this trader's claim"
+        );
+    }
+
+    /// Only a FINAL claim is read (storage spec §9 finality 3): a claim that
+    /// holds the leader link, with fewer than two further links, decides
+    /// nothing yet.
+    #[test]
+    fn a_claim_that_is_not_final_decides_nothing_yet() {
+        let position = 2;
+        for last in [0, 1] {
+            let fetcher = ConditionalCellFetcher {
+                position,
+                writes: vec![conditional_claim(position).encode()],
+                last,
+            };
+            let outcome = validate_peer_lineage(
                 &fetcher,
                 NETWORK,
                 &PEER_G,
@@ -686,8 +787,65 @@ mod tests {
                     economic_position: position - 1,
                     economic_root: [0x77; 32],
                 }),
+            );
+            assert!(
+                matches!(outcome, Err(PeerLineageFailure::Incomplete(ref m)) if m.contains("not final yet")),
+                "written through position {last}: {outcome:?}"
+            );
+        }
+    }
+
+    /// A failure met below a step keeps its class: evidence that could not
+    /// be established is retried, and only evidence that verified as wrong is
+    /// `Invalid` (storage spec §4).
+    #[test]
+    fn a_step_failure_keeps_the_class_it_was_established_in() {
+        use crate::economic::provenance::ProvenanceError as P;
+        let unavailable = |m: &str| PeerLineageFailure::Incomplete(m.to_string());
+        let provenance = |p: P| EconomicValidationError::Provenance(p);
+        assert!(matches!(
+            step_failure(
+                3,
+                provenance(P::ReleaseNotEstablished {
+                    generation: 1,
+                    failure: unavailable("the reserve lineage has not reached generation 1"),
+                })
             ),
-            Err(PeerLineageFailure::Unresolved(_))
+            PeerLineageFailure::Incomplete(_)
+        ));
+        assert!(matches!(
+            step_failure(
+                3,
+                provenance(P::PeerTransitionNotValidated {
+                    peer_economic_position: 2,
+                    failure: PeerLineageFailure::Unresolved("mid-route".into()),
+                })
+            ),
+            PeerLineageFailure::Unresolved(_)
+        ));
+        assert!(matches!(
+            step_failure(
+                3,
+                provenance(P::OwnerLineage(unavailable("no member answered")))
+            ),
+            PeerLineageFailure::Incomplete(_)
+        ));
+        assert!(matches!(
+            step_failure(
+                3,
+                provenance(P::AmountMismatch {
+                    source: 1,
+                    credit: 2
+                })
+            ),
+            PeerLineageFailure::Invalid(_)
+        ));
+        assert!(matches!(
+            step_failure(
+                3,
+                EconomicValidationError::RegisteredClaimNamesAnotherTrader
+            ),
+            PeerLineageFailure::Invalid(_)
         ));
     }
 
@@ -701,7 +859,8 @@ mod tests {
         let claim = conditional_claim(position);
         let fetcher = ConditionalCellFetcher {
             position,
-            claim: claim.encode(),
+            writes: vec![claim.encode()],
+            last: crate::route_chain::ROUTE_LEN - 1,
         };
         let outcome = validate_peer_lineage(
             &fetcher,

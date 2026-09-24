@@ -27,7 +27,6 @@
 //! whichever role learned the next step.
 
 use super::get_connection;
-use crate::util::deterministic_time::tick;
 use anyhow::{anyhow, Result};
 use rusqlite::{params, OptionalExtension};
 
@@ -115,14 +114,13 @@ pub fn cas_advance_counterparty_canonical_head_with_conn(
             conn.execute(
                 "INSERT INTO counterparty_canonical_heads \
                  (relationship_key, counterparty_device_id, head_tip, prev_tip, \
-                  source_commitment, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                  source_commitment) VALUES (?1, ?2, ?3, ?4, ?5)",
                 params![
                     relationship_key.as_slice(),
                     counterparty_device_id.as_slice(),
                     target_child.as_slice(),
                     expected_parent.as_slice(),
                     source_commitment.as_slice(),
-                    tick() as i64,
                 ],
             )?;
             Ok(CasCanonicalHeadOutcome::GenesisInit)
@@ -138,14 +136,13 @@ pub fn cas_advance_counterparty_canonical_head_with_conn(
             }
             let n = conn.execute(
                 "UPDATE counterparty_canonical_heads \
-                 SET head_tip = ?3, prev_tip = ?2, source_commitment = ?4, updated_at = ?5 \
+                 SET head_tip = ?3, prev_tip = ?2, source_commitment = ?4 \
                  WHERE relationship_key = ?1 AND head_tip = ?2",
                 params![
                     relationship_key.as_slice(),
                     expected_parent.as_slice(),
                     target_child.as_slice(),
                     source_commitment.as_slice(),
-                    tick() as i64,
                 ],
             )?;
             if n != 1 {
@@ -164,7 +161,7 @@ mod tests {
     use serial_test::serial;
 
     fn init_test_db() {
-        unsafe { std::env::set_var("DSM_SDK_TEST_MODE", "1") };
+        crate::economic_fixtures::use_test_storage_dir();
         crate::storage::client_db::reset_database_for_tests();
         crate::storage::client_db::init_database().expect("init db");
     }

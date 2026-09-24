@@ -117,13 +117,6 @@ pub(crate) fn derive_local_send_status_for_device_id(
 pub(crate) fn derive_local_send_status_for_contact(
     contact: &ContactRecord,
 ) -> generated::RelationshipSendStatus {
-    if contact.status == "Bricked" {
-        return blocked_status(
-            generated::RelationshipSendBlockReason::StateDivergence,
-            "Relationship is bricked after a Tripwire fork detection",
-        );
-    }
-
     if contact.public_key.is_empty() {
         return blocked_status(
             generated::RelationshipSendBlockReason::InternalError,

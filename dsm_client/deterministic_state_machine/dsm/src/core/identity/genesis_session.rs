@@ -4,7 +4,7 @@
 //! DSM Genesis session (STRICT, bytes-only) — commit-then-reveal entropy aggregation.
 //!
 //! Invariants:
-//! - No wall-clock APIs. Use deterministic ticks (u64) from utils::deterministic_time.
+//! - No time of any kind.
 //! - No hex/base64 in data structures; bytes-only at boundaries.
 //! - ≥3 storage nodes contribute entropy (n-of-n commit-then-reveal).  This is
 //!   not threshold cryptography — `b_1, ..., b_n` in whitepaper §2.5 is index
@@ -26,14 +26,6 @@ use crate::crypto::sphincs;
 use crate::types::error::DsmError;
 use crate::types::genesis_types::{compute_genesis_hash, hash_contribution, MPCContribution};
 use crate::types::identifiers::NodeId;
-use crate::utils::deterministic_time;
-
-// -------------------- Deterministic ticks --------------------
-
-#[inline]
-fn now_tick() -> u64 {
-    deterministic_time::tick_index()
-}
 
 // -------------------- Traits (SDK implements real I/O) --------------------
 
@@ -44,7 +36,6 @@ pub struct SanitizedGenesisPayload {
     pub device_id: [u8; 32],
     pub public_key: Vec<u8>, // SPHINCS+ public key
     pub participants: Vec<NodeId>,
-    pub created_at_ticks: u64,
 }
 
 #[async_trait]
@@ -89,12 +80,10 @@ impl SigningKey {
         })
     }
 
-    #[allow(dead_code)]
     pub fn sign(&self, message: &[u8]) -> Result<Vec<u8>, DsmError> {
         sphincs::sphincs_sign(&self.secret_key, message)
     }
 
-    #[allow(dead_code)]
     pub fn verify(&self, message: &[u8], signature: &[u8]) -> Result<bool, DsmError> {
         sphincs::sphincs_verify(&self.public_key, message, signature)
     }
@@ -148,8 +137,6 @@ pub struct GenesisSession {
     /// Device id (32B). For the root device the canonical invariant is
     /// `device_id = genesis_id` (whitepaper §2.5).
     pub device_id: [u8; 32],
-    /// Deterministic ticks
-    pub created_at_ticks: u64,
 }
 
 impl GenesisSession {
@@ -180,7 +167,6 @@ impl GenesisSession {
             genesis_id: [0u8; 32],
             storage_nodes: Vec::new(),
             device_id: [0u8; 32],
-            created_at_ticks: now_tick(),
         })
     }
 
@@ -709,7 +695,6 @@ mod tests {
         assert_ne!(s.session_id, [0u8; 32]);
         assert_eq!(s.genesis_id, [0u8; 32]);
         assert!(s.storage_nodes.is_empty());
-        assert!(s.created_at_ticks > 0);
     }
 
     #[test]
@@ -1008,7 +993,6 @@ mod tests {
             device_id: s.device_id,
             public_key: mk.sphincs_public.clone(),
             participants: s.storage_nodes.clone(),
-            created_at_ticks: s.created_at_ticks,
         };
 
         // Flatten the payload into a single byte stream (every field
@@ -1020,7 +1004,6 @@ mod tests {
         for n in &payload.participants {
             flat.extend_from_slice(n.as_bytes());
         }
-        flat.extend_from_slice(&payload.created_at_ticks.to_le_bytes());
         // And include the public Kyber key, which would also ship.
         flat.extend_from_slice(&mk.kyber_public);
 

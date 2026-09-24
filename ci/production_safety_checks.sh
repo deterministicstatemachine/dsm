@@ -72,27 +72,8 @@ bash ci/storage_is_dumb.sh
 # Gate G2 (spec §37): SoFi evidence is fetched, never defaulted.
 bash ci/sofi_no_default_evidence.sh
 
-# Run TLA+ model checking for formal verification
-echo "Running TLA+ formal verification..."
-cd tla
-if [[ ! -f "tla2tools.jar" ]]; then
-  echo "INFO: tla2tools.jar not found — skipping TLA+ formal verification."
-  echo "To enable: download https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar into tla/"
-  cd ..
-else
-  # Run the tiny model check (terminating, fast)
-  echo "Checking DSM_tiny.cfg model..."
-  java -cp "tla2tools.jar" tlc2.TLC -config DSM_tiny.cfg DSM.tla -workers 1
-
-  if [[ $? -ne 0 ]]; then
-    echo "ERROR: TLA+ model checking failed!"
-    exit 1
-  fi
-
-  echo ""
-  echo "✓ TLA+ formal verification passed!"
-  cd ..
-fi
+# TLA+ model checking is the Formal Validation job's (ci.yml,
+# `dsm_vertical_validation tla-check`), not this script's.
 
 echo ""
 echo "✓ All production safety checks passed!"

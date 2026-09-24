@@ -5,208 +5,14 @@ use dsm::types::proto as generated;
 use prost::Message;
 
 use crate::bridge::{AppInvoke, AppQuery, AppResult};
-use crate::storage::client_db::export_state_blob;
 use super::app_router_impl::AppRouterImpl;
 use super::response_helpers::{pack_envelope_ok, pack_bytes_ok, err};
-
-pub(crate) fn handle_system_genesis_query(q: AppQuery) -> AppResult {
-    // Decode ArgPack
-    let pack = match generated::ArgPack::decode(&*q.params) {
-        Ok(p) => p,
-        Err(e) => return err(format!("decode ArgPack failed: {e}")),
-    };
-    if pack.codec != generated::Codec::Proto as i32 {
-        return err("system.genesis: ArgPack.codec must be PROTO".into());
-    }
-
-    // Decode SystemGenesisRequest
-    let req = match generated::SystemGenesisRequest::decode(&*pack.body) {
-        Ok(r) => r,
-        Err(e) => return err(format!("decode SystemGenesisRequest failed: {e}")),
-    };
-
-    // Validate entropy before touching the network.
-    let entropy = req.device_entropy.clone();
-    if entropy.len() != 32 {
-        return err("system.genesis: device_entropy must be 32 bytes".into());
-    }
-    // Optional high-assurance / legacy profile: n-of-n commit-reveal multipart-entropy genesis
-    // (GenesisEntropyProfile::CommitRevealMpcV1). No silicon binding and no C-DBRW — the canonical
-    // wallet path is mnemonic-rooted Genesis v2. `req.cdbrw_hw_entropy` / `req.cdbrw_env_fingerprint`
-    // are reserved/ignored legacy fields.
-
-    // Perform MPC-only genesis using storage node SDK.
-    let fut = async move {
-        let cfg = match crate::sdk::storage_node_sdk::StorageNodeConfig::from_env_config().await {
-            Ok(cfg) => cfg,
-            Err(e) => return Err(format!("No storage node config available: {}", e)),
-        };
-        let res = crate::sdk::storage_node_sdk::StorageNodeSDK::new(cfg)
-            .await
-            .map_err(|e| format!("sdk.new: {e}"))?
-            .create_genesis_with_mpc(Some(entropy.clone()))
-            .await
-            .map_err(|e| format!("MPC genesis failed (strict; no alternate path): {e}"))?;
-
-        let device_id = res.genesis_device_id.clone();
-        let genesis_hash = res.genesis_hash.clone().ok_or_else(|| {
-            "system.genesis: storage SDK returned missing genesis_hash".to_string()
-        })?;
-        if genesis_hash.len() != 32 {
-            return Err(format!(
-                "system.genesis: storage SDK returned invalid genesis_hash length {}, expected 32",
-                genesis_hash.len()
-            ));
-        }
-        let public_key = crate::sdk::app_state::AppState::get_public_key().unwrap_or_default();
-        let smt_root = dsm::merkle::sparse_merkle_tree::empty_root(
-            dsm::merkle::sparse_merkle_tree::DEFAULT_SMT_HEIGHT,
-        )
-        .to_vec();
-
-        // ---- Persist genesis record to SQLite so local_genesis_hash() succeeds ----
-        // Without this, storage.sync fails with "no genesis record found" and
-        // bilateral transfers are impossible.
-        let genesis_id_b32 = crate::util::text_id::encode_base32_crockford(&genesis_hash);
-        let device_id_b32 = crate::util::text_id::encode_base32_crockford(&device_id);
-        let genesis_record = crate::storage::client_db::GenesisRecord {
-            genesis_id: genesis_id_b32.clone(),
-            device_id: device_id_b32.clone(),
-            mpc_proof: res.session_id.clone(),
-            // Legacy C-DBRW binding-record column (Genesis v2 has no silicon binding);
-            // retained empty until the GenesisRecord schema column is dropped.
-            device_birth_binding: String::new(),
-            merkle_root: crate::util::text_id::encode_base32_crockford(&[0u8; 32]),
-            participant_count: res.participating_nodes.len() as u32,
-            progress_marker: "genesis".to_string(),
-            publication_hash: genesis_id_b32,
-            storage_nodes: res.participating_nodes.clone(),
-            entropy_hash: crate::util::text_id::encode_base32_crockford(
-                dsm::crypto::blake3::domain_hash(
-                    dsm::common::domain_tags::TAG_DSM_GENESIS_ENTROPY,
-                    &entropy,
-                )
-                .as_bytes(),
-            ),
-            protocol_version: "v3".to_string(),
-            hash_chain_proof: None,
-            smt_proof: None,
-            verification_step: None,
-            // Legacy / optional MPC profile: no public mnemonic nonce.
-            genesis_nonce: String::new(),
-            genesis_profile: "CommitRevealMpcV1".to_string(),
-            // Legacy MPC profile: not a v3 identity, so no GRK derivation
-            // inputs exist to record. Empty marks the row as non-v3.
-            network_id: String::new(),
-        };
-
-        crate::storage::client_db::store_genesis_record_with_verification(&genesis_record)
-            .map_err(|e| format!("system.genesis: failed to store genesis record: {e}"))?;
-        log::info!("system.genesis: genesis record stored successfully");
-
-        crate::storage::client_db::ensure_wallet_state_for_device(&device_id_b32)
-            .map_err(|e| format!("system.genesis: failed to ensure wallet_state: {e}"))?;
-        log::info!(
-            "system.genesis: wallet_state ensured for device={}",
-            &device_id_b32[..8]
-        );
-
-        // Publish the identity to the storage fleet.
-        //
-        // Creating an identity is not complete when the local genesis record is
-        // durable — it is complete when a quorum of storage nodes can be read
-        // back and shown to hold this device's exact identity tuple. Until then
-        // no peer can resolve the device and every authenticated write 401s.
-        //
-        // Genesis is NOT rolled back on failure: the local state machine stays
-        // durable and the device is parked in `PublicationPending`, which
-        // startup retries automatically. What must not happen is reporting the
-        // wallet as ready while it is unreachable.
-        {
-            let genesis_hash_b32 = crate::util::text_id::encode_base32_crockford(&genesis_hash);
-
-            // Mark the local commit first so a crash between here and the
-            // publish attempt still leaves a record for startup to retry.
-            if let Err(e) = crate::storage::client_db::publication::upsert_publication_state(
-                &device_id_b32,
-                &genesis_hash_b32,
-                crate::storage::client_db::publication::PublicationState::LocalGenesisCommitted,
-                0,
-                "",
-            ) {
-                log::warn!("system.genesis: failed to record local-genesis publication state: {e}");
-            }
-
-            match crate::sdk::identity_publication::publish_identity_now(
-                &device_id_b32,
-                &crate::util::text_id::encode_base32_crockford(&public_key),
-                &genesis_hash_b32,
-            )
-            .await
-            {
-                Ok(report) if report.is_published() => {
-                    log::info!(
-                        "system.genesis: identity PUBLISHED for device={} ({}/{} nodes verified, quorum {})",
-                        &device_id_b32[..8],
-                        report.verified,
-                        report.total_nodes,
-                        report.required
-                    );
-                }
-                Ok(report) => {
-                    log::warn!(
-                        "system.genesis: identity NOT published for device={} ({}/{} verified, quorum {}) — \
-                         local genesis is durable and startup will retry. failures: {:?}",
-                        &device_id_b32[..8],
-                        report.verified,
-                        report.total_nodes,
-                        report.required,
-                        report.failures
-                    );
-                }
-                Err(e) => {
-                    log::warn!(
-                        "system.genesis: identity publication failed for device={} \
-                         (local genesis durable, startup will retry): {e}",
-                        &device_id_b32[..8]
-                    );
-                }
-            }
-        }
-
-        let resp = generated::GenesisCreated {
-            device_id: device_id.clone(),
-            genesis_hash: Some(generated::Hash32 {
-                v: genesis_hash.clone(),
-            }),
-            public_key: public_key.clone(),
-            smt_root: Some(generated::Hash32 {
-                v: smt_root.clone(),
-            }),
-            device_entropy: entropy.clone(),
-            session_id: res.session_id,
-            threshold: 3,
-            storage_nodes: res.participating_nodes,
-            network_id: req.network_id.clone(),
-            locale: req.locale.clone(),
-        };
-
-        Ok::<generated::GenesisCreated, String>(resp)
-    };
-
-    let resp = match crate::runtime::get_runtime().block_on(fut) {
-        Ok(r) => r,
-        Err(e) => return err(e),
-    };
-
-    pack_envelope_ok(generated::envelope::Payload::GenesisCreatedResponse(resp))
-}
 
 /// system.generateMnemonic — return a fresh BIP39 mnemonic for display/backup at wallet creation.
 /// Stateless: the wallet seed is derived + cached at `system.createGenesisV2` time.
 pub(crate) fn handle_generate_mnemonic_query() -> AppResult {
     match crate::sdk::recovery_sdk::RecoverySDK::generate_mnemonic() {
-        Ok(m) => pack_bytes_ok(m.into_bytes(), generated::Hash32 { v: vec![0u8; 32] }),
+        Ok(m) => pack_bytes_ok(m.into_bytes()),
         Err(e) => err(format!("system.generateMnemonic: {e}")),
     }
 }
@@ -232,7 +38,7 @@ pub(crate) fn handle_create_genesis_v2_query(q: AppQuery) -> AppResult {
         return err("system.createGenesisV2: mnemonic is required".into());
     }
     let network_id = if req.network_id.is_empty() {
-        "dsm-testnet".to_string()
+        String::from_utf8_lossy(dsm::economic::register::BETA_NETWORK_ID).into_owned()
     } else {
         req.network_id.clone()
     };
@@ -301,12 +107,14 @@ pub(crate) fn handle_create_genesis_v2_query(q: AppQuery) -> AppResult {
 
     // 2. Canonical mnemonic-rooted Genesis v3 (self-attested AttA; G commits the GRK).
     let aph = dsm::core::identity::genesis_session::genesis_authority_policy_hash();
+    let inputs =
+        crate::sdk::identity_presentation::OwnerIdentityInputs::beta(network_id.as_bytes());
     let outcome = match dsm::core::identity::genesis::create_genesis_v3_self_attested(
         &wallet_seed,
-        network_id.as_bytes(),
-        0,
-        0,
-        3,
+        inputs.network_id,
+        inputs.wallet_index,
+        inputs.device_slot,
+        inputs.genesis_version,
         &aph,
     ) {
         Ok(o) => o,
@@ -317,84 +125,29 @@ pub(crate) fn handle_create_genesis_v2_query(q: AppQuery) -> AppResult {
         }
     };
     emit(LifecycleKind::GenesisKindSecuringProgress, 60);
-    let genesis_state = &outcome.state;
-    let devid = match genesis_state.device_id {
-        Some(d) => d,
-        None => return err("system.createGenesisV2: v3 genesis missing device_id".into()),
-    };
-    let g = genesis_state.hash;
-    let ak_pk = genesis_state.signing_key.public_key.clone();
-    let smt_root = genesis_state.merkle_root.unwrap_or([0u8; 32]);
 
-    // 3. Install the genesis state + device head under the canonical v2 identity.
-    let device_info = dsm::types::state_types::DeviceInfo::new(devid, ak_pk.clone());
-    let core = match crate::sdk::core_sdk::CoreSDK::new_with_device(device_info) {
-        Ok(c) => c,
-        Err(e) => return err(format!("system.createGenesisV2: CoreSDK init failed: {e}")),
+    // 3–5. Install the genesis state, persist the public record and install the identity.
+    let installed = match install_wallet_genesis(&outcome, &wallet_seed, &network_id) {
+        Ok(installed) => installed,
+        Err(e) => return err(format!("system.createGenesisV2: {e}")),
     };
-    if let Err(e) = core.install_v2_genesis(genesis_state) {
-        return err(format!(
-            "system.createGenesisV2: genesis install failed: {e}"
-        ));
-    }
-
-    // 4. Persist the public Genesis v2 record (genesis_nonce + profile + version).
+    let devid = installed.device_id;
+    let g = installed.genesis;
+    let ak_pk = installed.ak_public_key;
+    let smt_root = installed.smt_root;
     let device_id_b32 = crate::util::text_id::encode_base32_crockford(&devid);
-    let genesis_id_b32 = crate::util::text_id::encode_base32_crockford(&g);
-    let nonce_b32 = crate::util::text_id::encode_base32_crockford(&outcome.genesis_nonce);
-    let record = crate::storage::client_db::GenesisRecord {
-        genesis_id: genesis_id_b32.clone(),
-        device_id: device_id_b32.clone(),
-        mpc_proof: String::new(),
-        device_birth_binding: String::new(),
-        merkle_root: crate::util::text_id::encode_base32_crockford(&smt_root),
-        participant_count: 0,
-        progress_marker: "genesis".to_string(),
-        publication_hash: genesis_id_b32,
-        storage_nodes: Vec::new(),
-        entropy_hash: nonce_b32.clone(),
-        protocol_version: "genesis-v3".to_string(),
-        hash_chain_proof: None,
-        smt_proof: None,
-        verification_step: None,
-        genesis_nonce: nonce_b32,
-        genesis_profile: "MnemonicV3".to_string(),
-        network_id: network_id.clone(),
-    };
-    if let Err(e) = crate::storage::client_db::store_genesis_record_with_verification(&record) {
-        return err(format!(
-            "system.createGenesisV2: store genesis record failed: {e}"
-        ));
-    }
-    if let Err(e) = crate::storage::client_db::ensure_wallet_state_for_device(&device_id_b32) {
-        return err(format!(
-            "system.createGenesisV2: ensure wallet_state failed: {e}"
-        ));
-    }
-
-    // 5. Install identity into AppState + SDK context (entropy rooted in the wallet seed).
-    crate::sdk::app_state::AppState::set_identity_info(
-        devid.to_vec(),
-        ak_pk.clone(),
-        g.to_vec(),
-        smt_root.to_vec(),
-    );
-    crate::sdk::app_state::AppState::set_has_identity(true);
-    // Any failure AFTER has_identity=true must roll it back before returning the error envelope:
-    // Kotlin publishes a session snapshot after EVERY createGenesisV2 response, and with
-    // has_identity left true a failed genesis would compute phase=wallet_ready — landing the user
-    // on a wallet screen whose router/context never came up (fail-open). Rolled back, the snapshot
+    // Any failure from here on must roll the identity mark back before returning the error
+    // envelope: Kotlin publishes a session snapshot after EVERY createGenesisV2 response, and
+    // with has_identity left true a failed genesis would compute phase=wallet_ready — landing the
+    // user on a wallet screen whose router never came up (fail-open). Rolled back, the snapshot
     // honestly reports needs_genesis and the user can retry.
-    let fail_rolled_back = |msg: String| {
-        crate::sdk::app_state::AppState::set_has_identity(false);
-        err(msg)
-    };
-    let entropy = crate::derive_production_entropy(&devid, &g, &wallet_seed);
-    if let Err(e) = crate::initialize_sdk_context(devid.to_vec(), g.to_vec(), entropy) {
-        return fail_rolled_back(format!(
-            "system.createGenesisV2: SDK context init failed: {e}"
-        ));
-    }
+    let fail_rolled_back =
+        |msg: String| match crate::sdk::app_state::AppState::set_has_identity(false) {
+            Ok(()) => err(msg),
+            Err(rollback) => err(format!(
+                "{msg}; the identity mark was not rolled back: {rollback}"
+            )),
+        };
     emit(LifecycleKind::GenesisKindSecuringProgress, 85);
 
     // 5b. Hot-swap the MinimalBootstrapRouter for the full AppRouter now that the canonical identity
@@ -417,36 +170,16 @@ pub(crate) fn handle_create_genesis_v2_query(q: AppQuery) -> AppResult {
         }
     }
 
-    // 5c. Registry visibility (detached, best-effort): publish auth-registration + the initial
-    //     device tree so counterparties can verify this wallet during contact add. Offline-first —
-    //     genesis NEVER blocks on the network; storage.sync retries until quorum confirms.
-    crate::sdk::storage_node_sdk::StorageNodeSDK::spawn_ensure_genesis_registry_published(
-        "createGenesisV2",
-    );
-
-    // 5d. IDENTITY PUBLICATION — drive it in THIS session.
-    //
-    // This route used to do neither half of what `system.genesis` does: it never
-    // wrote a publication row and never called `publish_identity_now`. On the v2
-    // path publication was therefore driven only by `retry_pending_publications`
-    // at SDK init, so a wallet created in a session stayed in
-    // `publication_pending` until the app was RESTARTED — the user watching
-    // "PUBLISHING IDENTITY…" had no way forward, and a restart is not something
-    // a real user can be asked to do. (5c publishes the device TREE; that is a
-    // different object and does not mark the identity published.)
-    //
-    // Two halves, in order. The row FIRST, so a crash between here and the
-    // publish still leaves something for the startup retry to find — today the
-    // retry only works because `backfill_publication_rows_for_local_identities`
-    // reconstructs the row this route never wrote. Then the publish itself,
-    // SPAWNED: genesis never blocks on the network (same contract as 5c), and a
-    // slow or unreachable fleet must not hold the response. Failure is
-    // non-fatal — local genesis stays durable, the row stays unpublished, and
-    // the startup retry remains the backstop rather than the only driver.
+    // 5c. IDENTITY PUBLICATION, driven in THIS session: this device's own
+    //     directory entry, read back from the network's pinned set
+    //     (`identity_publication`). The row FIRST, so a crash between here and
+    //     the publish still leaves something for the startup retry to find;
+    //     then the publish itself, SPAWNED — genesis never blocks on the
+    //     network. Failure is non-fatal: local genesis stays durable, the row
+    //     stays unpublished, and the startup retry resumes it.
     {
         let dev_b32 = device_id_b32.clone();
         let g_b32 = crate::util::text_id::encode_base32_crockford(&g);
-        let pk_b32 = crate::util::text_id::encode_base32_crockford(&ak_pk);
         if let Err(e) = crate::storage::client_db::publication::upsert_publication_state(
             &dev_b32,
             &g_b32,
@@ -459,31 +192,25 @@ pub(crate) fn handle_create_genesis_v2_query(q: AppQuery) -> AppResult {
             );
         }
         crate::runtime::get_runtime().spawn(async move {
-            match crate::sdk::identity_publication::publish_identity_now(
-                &dev_b32, &pk_b32, &g_b32,
-            )
-            .await
-            {
+            let short = &dev_b32[..8.min(dev_b32.len())];
+            match crate::sdk::identity_publication::publish_identity_now(&dev_b32, &g_b32).await {
                 Ok(report) if report.is_published() => log::info!(
-                    "system.createGenesisV2: identity PUBLISHED for device={} ({}/{} verified, quorum {})",
-                    &dev_b32[..8.min(dev_b32.len())],
-                    report.verified,
-                    report.total_nodes,
-                    report.required
+                    "system.createGenesisV2: identity PUBLISHED for device={short} ({}/{} \
+                     members hold the entry)",
+                    report.holders,
+                    report.members
                 ),
                 Ok(report) => log::warn!(
-                    "system.createGenesisV2: identity NOT published for device={} ({}/{} verified, \
-                     quorum {}) — local genesis is durable and startup will retry. failures: {:?}",
-                    &dev_b32[..8.min(dev_b32.len())],
-                    report.verified,
-                    report.total_nodes,
-                    report.required,
-                    report.failures
+                    "system.createGenesisV2: identity NOT published for device={short} ({}/{} \
+                     members hold the entry, {} needed) — local genesis is durable and startup \
+                     will retry",
+                    report.holders,
+                    report.members,
+                    report.required
                 ),
                 Err(e) => log::warn!(
-                    "system.createGenesisV2: identity publication failed for device={}: {e} \
-                     — local genesis is durable and startup will retry",
-                    &dev_b32[..8.min(dev_b32.len())]
+                    "system.createGenesisV2: identity publication failed for device={short}: {e} \
+                     — local genesis is durable and startup will retry"
                 ),
             }
         });
@@ -512,48 +239,131 @@ pub(crate) fn handle_create_genesis_v2_query(q: AppQuery) -> AppResult {
     pack_envelope_ok(generated::envelope::Payload::GenesisCreatedResponse(resp))
 }
 
-impl AppRouterImpl {
-    /// Dispatch handler for `state.*` and `sys.*` query routes.
-    pub(crate) async fn handle_state_query(&self, q: AppQuery) -> AppResult {
-        match q.path.as_str() {
-            // -------- state.export (QueryOp) --------
-            "state.export" => match export_state_blob() {
-                Ok(bytes) => pack_bytes_ok(bytes, generated::Hash32 { v: vec![0u8; 32] }),
-                Err(e) => err(format!("state.export failed: {e}")),
+/// A wallet identity installed on this device by [`install_wallet_genesis`].
+pub(crate) struct InstalledGenesis {
+    pub(crate) device_id: [u8; 32],
+    pub(crate) genesis: [u8; 32],
+    pub(crate) ak_public_key: Vec<u8>,
+    pub(crate) smt_root: [u8; 32],
+}
+
+/// `[device_id 32][genesis_hash 32]` from the genesis route's local answer:
+/// its `GenesisCreatedResponse`, nothing else. Read by the Android JNI bridge.
+#[cfg(any(test, all(target_os = "android", feature = "jni")))]
+pub(crate) fn genesis_identity_from_answer(framed: &[u8]) -> Result<Vec<u8>, String> {
+    let envelope = super::response_helpers::decode_local_envelope(framed)?;
+    let Some(generated::envelope::Payload::GenesisCreatedResponse(created)) = envelope.payload
+    else {
+        return Err(format!(
+            "the answer is not a GenesisCreatedResponse: {:?}",
+            envelope.payload
+        ));
+    };
+    let genesis = created
+        .genesis_hash
+        .ok_or_else(|| "the genesis answer carries no genesis hash".to_string())?
+        .v;
+    if created.device_id.len() != 32 || genesis.len() != 32 {
+        return Err(format!(
+            "device id {} bytes, genesis hash {} bytes; both must be 32",
+            created.device_id.len(),
+            genesis.len()
+        ));
+    }
+    let mut identity = created.device_id;
+    identity.extend_from_slice(&genesis);
+    Ok(identity)
+}
+
+/// Wallet creation's local install (`system.createGenesisV2` steps 3–5): the
+/// genesis state and device head under the canonical identity, the public
+/// genesis record and wallet state, and the identity in `AppState` and the SDK
+/// context (entropy rooted in `wallet_seed`). A failure after the identity is
+/// marked present rolls the mark back.
+pub(crate) fn install_wallet_genesis(
+    outcome: &dsm::core::identity::genesis::GenesisCreationOutcome,
+    wallet_seed: &[u8],
+    network_id: &str,
+) -> Result<InstalledGenesis, String> {
+    let genesis_state = &outcome.state;
+    let devid = genesis_state
+        .device_id
+        .ok_or_else(|| "v3 genesis missing device_id".to_string())?;
+    let g = genesis_state.hash;
+    let ak_pk = genesis_state.signing_key.public_key.clone();
+
+    // 3. Install the genesis state + device head under the canonical v2 identity.
+    let device_info = dsm::types::state_types::DeviceInfo::new(devid, ak_pk.clone());
+    let core = crate::sdk::core_sdk::CoreSDK::new_with_device(device_info)
+        .map_err(|e| format!("CoreSDK init failed: {e}"))?;
+    core.install_v2_genesis(genesis_state)
+        .map_err(|e| format!("genesis install failed: {e}"))?;
+    // The device's SMT root at genesis is the root of the head just installed.
+    let smt_root = core
+        .device_head()
+        .ok_or_else(|| "genesis install left no device head".to_string())?
+        .root();
+
+    // 4. Persist the public Genesis v2 record (genesis_nonce + profile + version).
+    let device_id_b32 = crate::util::text_id::encode_base32_crockford(&devid);
+    let genesis_id_b32 = crate::util::text_id::encode_base32_crockford(&g);
+    let nonce_b32 = crate::util::text_id::encode_base32_crockford(&outcome.genesis_nonce);
+    let record = crate::storage::client_db::GenesisRecord {
+        genesis_id: genesis_id_b32.clone(),
+        device_id: device_id_b32.clone(),
+        mpc_proof: String::new(),
+        device_birth_binding: String::new(),
+        merkle_root: crate::util::text_id::encode_base32_crockford(&smt_root),
+        participant_count: 0,
+        progress_marker: "genesis".to_string(),
+        publication_hash: genesis_id_b32,
+        storage_nodes: Vec::new(),
+        entropy_hash: nonce_b32.clone(),
+        protocol_version: "genesis-v3".to_string(),
+        hash_chain_proof: None,
+        smt_proof: None,
+        verification_step: None,
+        genesis_nonce: nonce_b32,
+        genesis_profile: "MnemonicV3".to_string(),
+        network_id: network_id.to_string(),
+    };
+    crate::storage::client_db::store_genesis_record_with_verification(&record)
+        .map_err(|e| format!("store genesis record failed: {e}"))?;
+
+    // 5. Install identity into AppState + SDK context (entropy rooted in the wallet seed).
+    crate::sdk::app_state::AppState::set_identity_info(
+        devid.to_vec(),
+        ak_pk.clone(),
+        g.to_vec(),
+        smt_root.to_vec(),
+    )
+    .map_err(|e| format!("persist the identity: {e}"))?;
+    crate::sdk::app_state::AppState::set_has_identity(true)
+        .map_err(|e| format!("persist the identity mark: {e}"))?;
+    let entropy = crate::derive_production_entropy(&devid, &g, wallet_seed);
+    if let Err(e) = crate::initialize_sdk_context(devid.to_vec(), g.to_vec(), entropy) {
+        return Err(
+            match crate::sdk::app_state::AppState::set_has_identity(false) {
+                Ok(()) => format!("SDK context init failed: {e}"),
+                Err(rollback) => format!(
+                "SDK context init failed: {e}; the identity mark was not rolled back: {rollback}"
+            ),
             },
-            // -------- state.info (QueryOp) --------
-            "state.info" => match crate::storage::client_db::export_state_info() {
-                Ok(info) => {
-                    // Convert from generated::StateInfoResponse to dsm::types::proto::StateInfoResponse
-                    // (both are from same proto, just different crate scopes)
-                    let dsm_info = dsm::types::proto::StateInfoResponse {
-                        has_genesis: info.has_genesis,
-                        has_wallet: info.has_wallet,
-                        contacts_count: info.contacts_count,
-                        transactions_count: info.transactions_count,
-                        preferences_count: info.preferences_count,
-                    };
-                    pack_envelope_ok(generated::envelope::Payload::StateInfoResponse(dsm_info))
-                }
-                Err(e) => err(format!("state.info failed: {e}")),
-            },
-            // -------- sys.tick (QueryOp) --------
-            "sys.tick" => {
-                let tick = dsm::performance::mono_commit_height();
-                pack_bytes_ok(
-                    tick.to_le_bytes().to_vec(),
-                    generated::Hash32 { v: vec![0u8; 32] },
-                )
-            }
-            _ => err(format!("unknown state query: {}", q.path)),
-        }
+        );
     }
 
+    Ok(InstalledGenesis {
+        device_id: devid,
+        genesis: g,
+        ak_public_key: ak_pk,
+        smt_root,
+    })
+}
+
+impl AppRouterImpl {
     /// Dispatch handler for `system.*` query routes.
     pub(crate) async fn handle_system_query(&self, q: AppQuery) -> AppResult {
         match q.path.as_str() {
-            // -------- system.genesis (legacy/optional MPC profile) --------
-            "system.genesis" => handle_system_genesis_query(q),
             // -------- canonical mnemonic-rooted Genesis v2 (QueryOp) --------
             "system.generateMnemonic" => handle_generate_mnemonic_query(),
             "system.createGenesisV2" => handle_create_genesis_v2_query(q),
@@ -665,4 +475,51 @@ fn device_ok(key: &str, value: &str) -> AppResult {
             value: Some(value.to_string()),
         },
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sdk::app_state::AppState;
+
+    /// Wallet creation through `system.createGenesisV2`, on a device with no
+    /// identity: the answer names exactly the identity the wallet installed.
+    #[test]
+    #[serial_test::serial]
+    fn the_genesis_answer_names_the_identity_the_wallet_installed() {
+        crate::economic_fixtures::use_test_storage_dir();
+        crate::storage::client_db::reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("init db");
+        crate::reset_sdk_context_for_testing();
+        AppState::reset_for_testing();
+
+        let answer = handle_create_genesis_v2_query(AppQuery {
+            path: "system.createGenesisV2".to_string(),
+            params: generated::ArgPack {
+                codec: generated::Codec::Proto as i32,
+                body: generated::WalletCreateGenesisV2Request {
+                    mnemonic: crate::economic_fixtures::test_mnemonic(0x5B),
+                    locale: String::new(),
+                    network_id: String::from_utf8(crate::economic_fixtures::NETWORK.to_vec())
+                        .expect("the network id is UTF-8"),
+                }
+                .encode_to_vec(),
+                ..Default::default()
+            }
+            .encode_to_vec(),
+        });
+        assert!(answer.success, "{:?}", answer.error_message);
+
+        let identity = genesis_identity_from_answer(&answer.data).expect("the genesis answer");
+        assert_eq!(
+            Some(identity[..32].to_vec()),
+            AppState::get_device_id(),
+            "the device id the wallet installed"
+        );
+        assert_eq!(
+            Some(identity[32..].to_vec()),
+            AppState::get_genesis_hash(),
+            "the genesis the wallet installed"
+        );
+    }
 }

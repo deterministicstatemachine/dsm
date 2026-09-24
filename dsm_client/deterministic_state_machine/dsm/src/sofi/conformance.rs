@@ -23,7 +23,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::route_chain::CellFact;
+use crate::route_chain::{CellFact, ChainState};
 use super::derive::{self, policy_fulfillment_id, precommit_id};
 use super::publication::{recognize_setup, Signed};
 use super::signature::{verify_fulfillment, verify_precommit, SignatureError};
@@ -114,7 +114,9 @@ pub enum FulfillmentConformanceError {
 ///   `MAX_AUTH_ENVELOPES`;
 /// - the unique objects, deduplicated by `ValidationRef`: at most
 ///   `MAX_VALIDATION_FETCH_BYTES` in aggregate.
-pub fn conformance_bounds(evidence: &ConformanceEvidence) -> Result<(), FulfillmentConformanceError> {
+pub fn conformance_bounds(
+    evidence: &ConformanceEvidence,
+) -> Result<(), FulfillmentConformanceError> {
     use super::wire::{MAX_AUTH_ENVELOPES, MAX_CLOSURE_OBJECT_BYTES, MAX_VALIDATION_FETCH_BYTES};
 
     let setups_outside_closure = evidence.setups.iter().filter(|(setup_ref, _)| {
@@ -343,23 +345,31 @@ pub fn check_fulfillment_against_precommit(
 
 // ── The predicate ──────────────────────────────────────────────────────────
 
-/// The per-item results, folded in ITEM order: the first Invalid item names
-/// the reason, else the first Unavailable item names what is missing, else
-/// Valid. Invalid dominates whatever is missing, so a withheld object can
-/// never hide a refusal, and nothing missing is ever read as one.
+/// One item's outcome: a value over the bytes in hand, or the object the
+/// item still needs.
+enum Item {
+    Valid,
+    Invalid(FulfillmentConformanceError),
+    Missing(ConformanceMissing),
+}
+
+/// The per-item outcomes, folded in ITEM order: the first Invalid item names
+/// the reason, else the first missing object is what the acquisition layer
+/// fetches next, else Valid. Invalid dominates whatever is missing, so a
+/// withheld object can never hide a refusal, and nothing missing is ever read
+/// as one.
 #[derive(Default)]
-struct Items(Vec<(u8, FulfillmentConformance)>);
+struct Items(Vec<(u8, Item)>);
 
 impl Items {
     fn valid(&mut self, item: u8) {
-        self.0.push((item, FulfillmentConformance::Valid));
+        self.0.push((item, Item::Valid));
     }
     fn invalid(&mut self, item: u8, why: FulfillmentConformanceError) {
-        self.0.push((item, FulfillmentConformance::Invalid(why)));
+        self.0.push((item, Item::Invalid(why)));
     }
     fn missing(&mut self, item: u8, what: ConformanceMissing) {
-        self.0
-            .push((item, FulfillmentConformance::Unavailable(what)));
+        self.0.push((item, Item::Missing(what)));
     }
     fn note(&mut self, item: u8, r: Result<(), FulfillmentConformanceError>) {
         match r {
@@ -367,17 +377,29 @@ impl Items {
             Err(why) => self.invalid(item, why),
         }
     }
-    fn fold(self) -> FulfillmentConformance {
-        let first = |wanted: Validation| {
-            self.0
-                .iter()
-                .filter(|(_, c)| c.verdict() == wanted)
-                .min_by_key(|(item, _)| *item)
-                .map(|(_, c)| c.clone())
-        };
-        first(Validation::Invalid)
-            .or_else(|| first(Validation::Unavailable))
-            .unwrap_or(FulfillmentConformance::Valid)
+    fn fold(self) -> Result<FulfillmentConformance, ConformanceMissing> {
+        let mut invalid: Option<(u8, FulfillmentConformanceError)> = None;
+        let mut missing: Option<(u8, ConformanceMissing)> = None;
+        for (item, outcome) in self.0 {
+            match outcome {
+                Item::Valid => {}
+                Item::Invalid(why) => {
+                    if invalid.as_ref().is_none_or(|(first, _)| item < *first) {
+                        invalid = Some((item, why));
+                    }
+                }
+                Item::Missing(what) => {
+                    if missing.as_ref().is_none_or(|(first, _)| item < *first) {
+                        missing = Some((item, what));
+                    }
+                }
+            }
+        }
+        match (invalid, missing) {
+            (Some((_, why)), _) => Ok(FulfillmentConformance::Invalid(why)),
+            (None, Some((_, what))) => Err(what),
+            (None, None) => Ok(FulfillmentConformance::Valid),
+        }
     }
 }
 
@@ -422,15 +444,20 @@ fn closure_object_verifies(reference: &ValidationRef, bytes: &[u8]) -> Option<bo
 ///
 /// A producer MUST obtain `Valid` before it publishes `F`; a verifier draws
 /// the same answer from the same bytes. Registration supplies no truth value.
+///
+/// `Err` names an object the evidence does not hold, or holds as bytes that
+/// are not the object named: the predicate is not evaluated yet, and the
+/// acquisition layer fetches what is named (Amendment S3). It is never a
+/// value and is never recorded as one.
 pub fn fulfillment_conformance(
     fulfillment: &TraderFulfillmentBody,
     fulfillment_signature: &[u8],
     evidence: &ConformanceEvidence,
-) -> FulfillmentConformance {
+) -> Result<FulfillmentConformance, ConformanceMissing> {
     // SoFi §18.4: a known bound violation is Invalid, and it is known from
     // the evidence alone.
     if let Err(bound) = conformance_bounds(evidence) {
-        return FulfillmentConformance::Invalid(bound);
+        return Ok(FulfillmentConformance::Invalid(bound));
     }
     let mut items = Items::default();
 
@@ -453,39 +480,33 @@ pub fn fulfillment_conformance(
     // Item 1: the exact referenced P, available and verifying. A fetched
     // object that is not the P F names, or a copy whose envelope does not
     // verify, establishes nothing about P.
-    let precommit = match &evidence.precommit {
-        Some(fetched) if precommit_id(&fetched.body) == *fulfillment.precommit_id() => {
-            match verify_precommit(&fetched.body, &fetched.signature) {
-                Ok(()) => Some(&fetched.body),
-                Err(_) => {
-                    items.missing(1, ConformanceMissing::PrecommitSignature);
-                    None
-                }
-            }
-        }
-        _ => {
-            items.missing(1, ConformanceMissing::Precommit);
-            None
-        }
-    };
-    let Some(precommit) = precommit else {
+    let fetched = &evidence.precommit;
+    if precommit_id(&fetched.body) != *fulfillment.precommit_id() {
+        items.missing(1, ConformanceMissing::Precommit);
         return items.fold();
-    };
+    }
+    if verify_precommit(&fetched.body, &fetched.signature).is_err() {
+        items.missing(1, ConformanceMissing::PrecommitSignature);
+        return items.fold();
+    }
+    let precommit = &fetched.body;
 
     items.note(1, successor_position(precommit, fulfillment));
     items.note(2, key_is_the_precommitted_one(precommit, fulfillment));
     items.note(4, attempts_cover_legs(precommit, fulfillment));
 
     // Item 5: an attempt above zero skips past the key before it, which must
-    // have resolved permanently — final on anything. `LeaderHeld` settles
-    // that no other value will be final there, but is not final; a key never
-    // dies, so this waits and never refuses.
+    // have resolved permanently — final on anything. A chain short of final
+    // is not a resolution; a key never dies, so this waits and never refuses.
     for attempt in fulfillment.attempts() {
         let Some(earlier) = attempt.attempt.checked_sub(1) else {
             continue;
         };
         match evidence.prior_attempts.get(&(attempt.vault_id, earlier)) {
-            Some(CellResolution::Final(_)) => items.valid(5),
+            Some(CellFact::Held {
+                state: ChainState::Final,
+                ..
+            }) => items.valid(5),
             _ => items.missing(
                 5,
                 ConformanceMissing::PriorAttempt {
@@ -541,14 +562,11 @@ pub fn fulfillment_conformance(
     // Item 8: the exact P(E) — the preimage that recomputes the E P commits —
     // and every object 𝒞_E^pre references. Items 3 and 7 read P(E) too: the
     // shadows E commits, and the legs it derives.
-    let preimage = evidence
-        .preimage
-        .as_ref()
-        .filter(|pe| derive::recompute_e(pe).is_ok_and(|e| e == *precommit.external_commitment()));
-    let Some(preimage) = preimage else {
+    let preimage = &evidence.preimage;
+    if !derive::recompute_e(preimage).is_ok_and(|e| e == *precommit.external_commitment()) {
         items.missing(8, ConformanceMissing::Preimage);
         return items.fold();
-    };
+    }
     items.valid(8);
     for reference in preimage.settlement().closure().refs() {
         match evidence
@@ -613,28 +631,67 @@ pub fn fulfillment_conformance(
     items.fold()
 }
 
+/// The conformance items an exercise decides from its own bytes, before any
+/// read (MR-DSM-0041, MR-DSM-0042): `P` and `F` and their signatures,
+/// `P(E)`, the policy-fulfillment set, the attempts, and the closure objects
+/// the exercise carries, in the preimage's reference order. `Some(reason)`
+/// when one of them is Invalid: `F` does not conform whatever storage holds,
+/// and nothing is fetched to know it. `None` when nothing in hand refutes
+/// it; conformance is then decided over fetched evidence.
+///
+/// It is [`fulfillment_conformance`] over this evidence alone. Invalid
+/// dominates whatever is missing, so an item that needs a fetch — a setup,
+/// an earlier attempt key — never hides a refusal and never makes one.
+pub fn conformance_invalid_in_hand(
+    precommit: &PrecommitEnvelope,
+    fulfillment: &TraderFulfillmentBody,
+    fulfillment_signature: &[u8],
+    preimage: &SettlementPreimage,
+    carried_closure: &[Vec<u8>],
+) -> Option<FulfillmentConformanceError> {
+    let closure = preimage
+        .settlement()
+        .closure()
+        .refs()
+        .iter()
+        .copied()
+        .zip(carried_closure.iter().cloned())
+        .collect();
+    let in_hand = ConformanceEvidence {
+        precommit: precommit.clone(),
+        preimage: preimage.clone(),
+        closure,
+        setups: BTreeMap::new(),
+        prior_attempts: BTreeMap::new(),
+    };
+    match fulfillment_conformance(fulfillment, fulfillment_signature, &in_hand) {
+        Ok(FulfillmentConformance::Invalid(why)) => Some(why),
+        Ok(FulfillmentConformance::Valid) | Err(..) => None,
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::disallowed_methods)] // test asserts; a failure here is the signal
 mod tests {
     use std::sync::OnceLock;
 
-    use super::Validation::{Invalid, Unavailable, Valid};
+    use super::Validation::{Invalid, Valid};
     use super::*;
     use crate::ccb::class;
     use crate::crypto::sphincs::{generate_sphincs_keypair, sphincs_sign};
-    use crate::sofi::publication::Publication;
     use crate::sofi::validation::fixtures::{
-        policies, policy_addr, swap_fixture_with, vault_id_of, DEV, G, P_POS, SIG_ALG,
+        policies, policy_addr, setup_body_for, setup_envelope_for, setup_ref_for,
+        swap_fixture_with, swap_fixture_with_setups, trader_keys, vault_id_of, DEV, G, P_POS,
+        SETUP_POS, SIG_ALG,
     };
     use crate::sofi::wire::{AttemptEntry, PreEClosureIndex, PrecommitLeg, SofiSetupBody};
 
     #[test]
-    fn invalid_dominates_and_unavailable_never_becomes_invalid() {
+    fn invalid_dominates_the_conjunction() {
         assert_eq!(Valid.and(Valid), Valid);
-        assert_eq!(Valid.and(Unavailable), Unavailable);
-        assert_eq!(Unavailable.and(Invalid), Invalid);
-        assert_eq!(Invalid.and(Unavailable), Invalid);
-        assert_eq!(Validation::all([Valid, Unavailable, Valid]), Unavailable);
+        assert_eq!(Valid.and(Invalid), Invalid);
+        assert_eq!(Invalid.and(Valid), Invalid);
+        assert_eq!(Validation::all([Valid, Invalid, Valid]), Invalid);
         assert_eq!(Validation::all([]), Valid);
     }
 
@@ -642,15 +699,20 @@ mod tests {
         [byte; 32]
     }
 
-    const SETUP_POS: u64 = P_POS - 1;
     const CLAIM_BYTES: &[u8] = b"the exact registered claim envelope at p";
 
-    /// The whole operation, signed once: two legs, real setup bodies whose ρ
-    /// the legs carry, a closure naming one object of every reference kind,
-    /// P and F signed under one SPHINCS+ key.
+    fn pk() -> &'static [u8] {
+        &trader_keys().0
+    }
+
+    fn sk() -> &'static [u8] {
+        &trader_keys().1
+    }
+
+    /// The whole operation, signed once: two legs, the trader's setups whose
+    /// ρ the legs carry, a closure naming one object of every reference kind,
+    /// P and F signed under the trader's key.
     struct Rig {
-        sk: Vec<u8>,
-        pk: Vec<u8>,
         precommit: TraderPrecommitBody,
         precommit_sig: Vec<u8>,
         preimage: SettlementPreimage,
@@ -662,39 +724,24 @@ mod tests {
         closure: BTreeMap<ValidationRef, Vec<u8>>,
     }
 
-    fn setup_body(pk: &[u8], j: usize, genesis: D32, device: D32, position: u64) -> SofiSetupBody {
+    /// A setup of vault `j` by `(genesis, device)` at `position`, under the
+    /// trader's key.
+    fn setup_at(j: usize, genesis: D32, device: D32, position: u64) -> SofiSetupBody {
         SofiSetupBody::new(
             genesis,
             device,
             position,
             vault_id_of(j),
-            token(0xA0 + j as u8),
-            token(0xB0 + j as u8),
+            token(0xA0),
+            token(0xB0),
             SIG_ALG,
-            pk,
+            pk(),
         )
         .unwrap()
     }
 
-    /// `base` with `legs`, under `pk`: the fixture's P carries a placeholder
-    /// key, and the tests need one that can sign.
-    /// The published form of a setup: its envelope. The signature is not
-    /// what conformance checks (SetupValid is RouteValidation's), so any
-    /// non-empty one carries.
-    fn setup_object(body: &SofiSetupBody) -> Vec<u8> {
-        Publication::Setup {
-            body,
-            signature: &[0x5E; 8],
-        }
-        .object_bytes()
-        .unwrap()
-    }
-
-    fn rebuild(
-        base: &TraderPrecommitBody,
-        pk: &[u8],
-        legs: Vec<PrecommitLeg>,
-    ) -> TraderPrecommitBody {
+    /// `base` with `legs`, under the trader's key.
+    fn rebuild(base: &TraderPrecommitBody, legs: Vec<PrecommitLeg>) -> TraderPrecommitBody {
         TraderPrecommitBody::new(
             *base.genesis(),
             *base.device_id(),
@@ -706,13 +753,17 @@ mod tests {
             *base.void_root(),
             *base.storage_set_id(),
             SIG_ALG,
-            pk,
+            pk(),
         )
         .unwrap()
     }
 
-    fn sign_p(sk: &[u8], p: &TraderPrecommitBody) -> Vec<u8> {
-        sphincs_sign(sk, &derive::precommit_signing_digest(p)).unwrap()
+    fn sign_p(p: &TraderPrecommitBody) -> Vec<u8> {
+        sphincs_sign(sk(), &derive::precommit_signing_digest(p)).unwrap()
+    }
+
+    fn sign_f(f: &TraderFulfillmentBody) -> Vec<u8> {
+        sphincs_sign(sk(), &derive::fulfillment_signing_digest(f)).unwrap()
     }
 
     /// The canonical F of `precommit` over `preimage`, with `attempts`.
@@ -750,16 +801,31 @@ mod tests {
         .unwrap()
     }
 
-    fn sign_f(sk: &[u8], f: &TraderFulfillmentBody) -> Vec<u8> {
-        sphincs_sign(sk, &derive::fulfillment_signing_digest(f)).unwrap()
+    /// `F` with every field of the rig's except `set`, `attempts`, `position`
+    /// and the key, which the caller names.
+    fn fulfillment_with(
+        r: &Rig,
+        set: Vec<D32>,
+        attempts: Vec<AttemptEntry>,
+        position: u64,
+        key: &[u8],
+    ) -> TraderFulfillmentBody {
+        TraderFulfillmentBody::new(
+            *r.fulfillment.precommit_id(),
+            set,
+            attempts,
+            position,
+            SIG_ALG,
+            key,
+        )
+        .unwrap()
     }
 
     fn build_rig() -> Rig {
-        let (pk, sk) = generate_sphincs_keypair().unwrap();
         let setups: Vec<(D32, Vec<u8>)> = (0..2)
             .map(|j| {
-                let body = setup_body(&pk, j, G, DEV, SETUP_POS);
-                (derive::setup_ref(&body), setup_object(&body))
+                let vault = vault_id_of(j);
+                (setup_ref_for(vault), setup_envelope_for(vault))
             })
             .collect();
         let (market, _, _) = policies(0);
@@ -804,9 +870,9 @@ mod tests {
         ]);
         let mut refs: Vec<ValidationRef> = closure.keys().copied().collect();
         refs.sort_by_key(ValidationRef::encode);
-        let f = swap_fixture_with(2, &|j| setups[j].0, PreEClosureIndex::new(refs).unwrap());
-        let precommit = rebuild(&f.precommit, &pk, f.precommit.legs().to_vec());
-        let precommit_sig = sign_p(&sk, &precommit);
+        let f = swap_fixture_with(2, PreEClosureIndex::new(refs).unwrap());
+        let precommit = f.precommit;
+        let precommit_sig = sign_p(&precommit);
         let e = derive::recompute_e(&f.preimage).unwrap();
         // Leg order is vault order; the second leg exercises attempt 1.
         let attempts: Vec<AttemptEntry> = precommit
@@ -819,10 +885,8 @@ mod tests {
             })
             .collect();
         let fulfillment = fulfillment_of(&precommit, &f.preimage, attempts);
-        let fulfillment_sig = sign_f(&sk, &fulfillment);
+        let fulfillment_sig = sign_f(&fulfillment);
         Rig {
-            sk,
-            pk,
             precommit,
             precommit_sig,
             preimage: f.preimage,
@@ -839,24 +903,39 @@ mod tests {
         RIG.get_or_init(build_rig)
     }
 
-    /// Everything fetched: P, P(E), every closure object, both setups, and
+    /// Everything in hand: P, P(E), every closure object, both setups, and
     /// the prior attempt key of the leg that exercises attempt 1, final.
     fn everything(r: &Rig) -> ConformanceEvidence {
         let second = r.precommit.legs()[1].vault_id;
         ConformanceEvidence {
-            precommit: Some(PrecommitEnvelope {
+            precommit: PrecommitEnvelope {
                 body: r.precommit.clone(),
                 signature: r.precommit_sig.clone(),
-            }),
-            preimage: Some(r.preimage.clone()),
+            },
+            preimage: r.preimage.clone(),
             closure: r.closure.clone(),
             setups: r.setups.iter().cloned().collect(),
-            prior_attempts: BTreeMap::from([((second, 0), CellResolution::Final(r.e))]),
+            prior_attempts: BTreeMap::from([(
+                (second, 0),
+                CellFact::Held {
+                    id: r.e,
+                    state: ChainState::Final,
+                },
+            )]),
         }
     }
 
-    fn conformance(r: &Rig, ev: &ConformanceEvidence) -> FulfillmentConformance {
+    fn conformance(
+        r: &Rig,
+        ev: &ConformanceEvidence,
+    ) -> Result<FulfillmentConformance, ConformanceMissing> {
         fulfillment_conformance(&r.fulfillment, &r.fulfillment_sig, ev)
+    }
+
+    fn invalid(
+        why: FulfillmentConformanceError,
+    ) -> Result<FulfillmentConformance, ConformanceMissing> {
+        Ok(FulfillmentConformance::Invalid(why))
     }
 
     #[test]
@@ -864,64 +943,107 @@ mod tests {
         let r = rig();
         assert_eq!(
             conformance(r, &everything(r)),
-            FulfillmentConformance::Valid
+            Ok(FulfillmentConformance::Valid)
         );
-        assert_eq!(conformance(r, &everything(r)).verdict(), Valid);
+        assert_eq!(
+            conformance(r, &everything(r)).map(|c| c.verdict()),
+            Ok(Valid)
+        );
     }
 
     #[test]
-    fn item_1_the_referenced_p_is_available_verifies_and_q_is_its_successor() {
+    fn item_1_the_referenced_p_verifies_and_q_is_its_successor() {
         let r = rig();
-        // Not fetched.
-        let mut ev = everything(r);
-        ev.precommit = None;
-        assert_eq!(
-            conformance(r, &ev),
-            FulfillmentConformance::Unavailable(ConformanceMissing::Precommit)
-        );
-        // Fetched, but not the P F names: a different leg set gives a
-        // different PrecommitId. That is nothing about P, not a refusal.
+        // Not the P F names: a different leg set gives a different
+        // PrecommitId. That is nothing about P, not a refusal.
         let mut ev = everything(r);
         let mut legs = r.precommit.legs().to_vec();
         legs[0].parent_root = token(0x99);
-        ev.precommit = Some(PrecommitEnvelope {
-            body: rebuild(&r.precommit, &r.pk, legs),
+        ev.precommit = PrecommitEnvelope {
+            body: rebuild(&r.precommit, legs),
             signature: r.precommit_sig.clone(),
-        });
-        assert_eq!(
-            conformance(r, &ev),
-            FulfillmentConformance::Unavailable(ConformanceMissing::Precommit)
-        );
+        };
+        assert_eq!(conformance(r, &ev), Err(ConformanceMissing::Precommit));
         // The right P in a copy whose envelope does not verify: another
         // envelope may, so this is missing, not invalid.
         let mut ev = everything(r);
-        ev.precommit.as_mut().unwrap().signature = r.fulfillment_sig.clone();
+        ev.precommit.signature = r.fulfillment_sig.clone();
         assert_eq!(
             conformance(r, &ev),
-            FulfillmentConformance::Unavailable(ConformanceMissing::PrecommitSignature)
+            Err(ConformanceMissing::PrecommitSignature)
         );
         let mut ev = everything(r);
-        ev.precommit.as_mut().unwrap().signature.clear();
+        ev.precommit.signature.clear();
         assert_eq!(
             conformance(r, &ev),
-            FulfillmentConformance::Unavailable(ConformanceMissing::PrecommitSignature)
+            Err(ConformanceMissing::PrecommitSignature)
         );
         // q ≠ p + 1 is a fact about F.
-        let f = TraderFulfillmentBody::new(
-            *r.fulfillment.precommit_id(),
+        let f = fulfillment_with(
+            r,
             r.fulfillment.policy_fulfillment_set().to_vec(),
             r.fulfillment.attempts().to_vec(),
             r.precommit.position() + 2,
-            SIG_ALG,
-            &r.pk,
-        )
-        .unwrap();
+            pk(),
+        );
         assert_eq!(
-            fulfillment_conformance(&f, &sign_f(&r.sk, &f), &everything(r)),
-            FulfillmentConformance::Invalid(FulfillmentConformanceError::PositionNotSuccessor {
+            fulfillment_conformance(&f, &sign_f(&f), &everything(r)),
+            invalid(FulfillmentConformanceError::PositionNotSuccessor {
                 expected: r.precommit.position() + 1,
                 got: r.precommit.position() + 2,
             })
+        );
+    }
+
+    /// The exercise's own bytes, with nothing fetched: the closure objects in
+    /// the preimage's reference order.
+    fn carried(r: &Rig) -> Vec<Vec<u8>> {
+        r.preimage
+            .settlement()
+            .closure()
+            .refs()
+            .iter()
+            .map(|reference| r.closure[reference].clone())
+            .collect()
+    }
+
+    /// MR-DSM-0041: an item decidable from the exercise refuses it with
+    /// nothing fetched; a conforming exercise has nothing refuted in hand,
+    /// though its setups and earlier keys are not.
+    #[test]
+    fn what_the_exercise_decides_alone_is_decided_before_any_read() {
+        let r = rig();
+        let envelope = PrecommitEnvelope {
+            body: r.precommit.clone(),
+            signature: r.precommit_sig.clone(),
+        };
+        assert_eq!(
+            conformance_invalid_in_hand(
+                &envelope,
+                &r.fulfillment,
+                &r.fulfillment_sig,
+                &r.preimage,
+                &carried(r)
+            ),
+            None
+        );
+        let f = fulfillment_with(
+            r,
+            r.fulfillment.policy_fulfillment_set().to_vec(),
+            r.fulfillment.attempts().to_vec(),
+            r.precommit.position() + 2,
+            pk(),
+        );
+        assert_eq!(
+            conformance_invalid_in_hand(&envelope, &f, &sign_f(&f), &r.preimage, &carried(r)),
+            Some(FulfillmentConformanceError::PositionNotSuccessor {
+                expected: r.precommit.position() + 1,
+                got: r.precommit.position() + 2,
+            })
+        );
+        assert_eq!(
+            conformance_invalid_in_hand(&envelope, &r.fulfillment, &[], &r.preimage, &carried(r)),
+            Some(FulfillmentConformanceError::FulfillmentUnsigned)
         );
     }
 
@@ -931,26 +1053,25 @@ mod tests {
         let ev = everything(r);
         assert_eq!(
             fulfillment_conformance(&r.fulfillment, &[], &ev),
-            FulfillmentConformance::Invalid(FulfillmentConformanceError::FulfillmentUnsigned)
+            invalid(FulfillmentConformanceError::FulfillmentUnsigned)
         );
         assert_eq!(
             fulfillment_conformance(&r.fulfillment, &r.precommit_sig, &ev),
-            FulfillmentConformance::Invalid(FulfillmentConformanceError::FulfillmentDoesNotVerify)
+            invalid(FulfillmentConformanceError::FulfillmentDoesNotVerify)
         );
         // Signed, and verifying, under a key that is not the one P committed.
         let (other_pk, other_sk) = generate_sphincs_keypair().unwrap();
-        let f = TraderFulfillmentBody::new(
-            *r.fulfillment.precommit_id(),
+        let f = fulfillment_with(
+            r,
             r.fulfillment.policy_fulfillment_set().to_vec(),
             r.fulfillment.attempts().to_vec(),
             r.fulfillment.position(),
-            SIG_ALG,
             &other_pk,
-        )
-        .unwrap();
+        );
+        let other_sig = sphincs_sign(&other_sk, &derive::fulfillment_signing_digest(&f)).unwrap();
         assert_eq!(
-            fulfillment_conformance(&f, &sign_f(&other_sk, &f), &ev),
-            FulfillmentConformance::Invalid(FulfillmentConformanceError::KeyMismatch)
+            fulfillment_conformance(&f, &other_sig, &ev),
+            invalid(FulfillmentConformanceError::KeyMismatch)
         );
     }
 
@@ -960,20 +1081,16 @@ mod tests {
         let ev = everything(r);
         let ids = r.fulfillment.policy_fulfillment_set().to_vec();
         let with_set = |set: Vec<D32>| {
-            let f = TraderFulfillmentBody::new(
-                *r.fulfillment.precommit_id(),
+            let f = fulfillment_with(
+                r,
                 set,
                 r.fulfillment.attempts().to_vec(),
                 r.fulfillment.position(),
-                SIG_ALG,
-                &r.pk,
-            )
-            .unwrap();
-            fulfillment_conformance(&f, &sign_f(&r.sk, &f), &ev)
+                pk(),
+            );
+            fulfillment_conformance(&f, &sign_f(&f), &ev)
         };
-        let refused = FulfillmentConformance::Invalid(
-            FulfillmentConformanceError::PolicyFulfillmentSetNotCanonical,
-        );
+        let refused = invalid(FulfillmentConformanceError::PolicyFulfillmentSetNotCanonical);
         // A subset, an extra entry, and an id not derived from P.
         assert_eq!(with_set(vec![ids[0]]), refused);
         let mut extra = ids.clone();
@@ -981,14 +1098,6 @@ mod tests {
         extra.sort();
         assert_eq!(with_set(extra), refused);
         assert_eq!(with_set(vec![token(0x01), token(0x02)]), refused);
-        // Without P(E) the shadows E commits are not in hand, so the canonical
-        // set cannot be derived: that waits.
-        let mut without = everything(r);
-        without.preimage = None;
-        assert_eq!(
-            conformance(r, &without),
-            FulfillmentConformance::Unavailable(ConformanceMissing::Preimage)
-        );
     }
 
     #[test]
@@ -996,19 +1105,16 @@ mod tests {
         let r = rig();
         let ev = everything(r);
         let with_attempts = |attempts: Vec<AttemptEntry>| {
-            let f = TraderFulfillmentBody::new(
-                *r.fulfillment.precommit_id(),
+            let f = fulfillment_with(
+                r,
                 r.fulfillment.policy_fulfillment_set().to_vec(),
                 attempts,
                 r.fulfillment.position(),
-                SIG_ALG,
-                &r.pk,
-            )
-            .unwrap();
-            fulfillment_conformance(&f, &sign_f(&r.sk, &f), &ev)
+                pk(),
+            );
+            fulfillment_conformance(&f, &sign_f(&f), &ev)
         };
-        let refused =
-            FulfillmentConformance::Invalid(FulfillmentConformanceError::AttemptsDoNotCoverLegs);
+        let refused = invalid(FulfillmentConformanceError::AttemptsDoNotCoverLegs);
         let legs = r.precommit.legs();
         // A hole: one leg without an attempt.
         assert_eq!(
@@ -1025,10 +1131,10 @@ mod tests {
     }
 
     #[test]
-    fn item_5_an_earlier_attempt_must_have_a_permanent_storage_resolution() {
+    fn item_5_an_earlier_attempt_must_be_final() {
         let r = rig();
         let second = r.precommit.legs()[1].vault_id;
-        let waits = FulfillmentConformance::Unavailable(ConformanceMissing::PriorAttempt {
+        let waits = Err(ConformanceMissing::PriorAttempt {
             vault_id: second,
             attempt: 0,
         });
@@ -1037,18 +1143,29 @@ mod tests {
         ev.prior_attempts.clear();
         assert_eq!(conformance(r, &ev), waits);
         // Read, and open: no key ever dies, so this waits.
-        ev.prior_attempts
-            .insert((second, 0), CellResolution::Unresolved);
+        ev.prior_attempts.insert((second, 0), CellFact::Open);
         assert_eq!(conformance(r, &ev), waits);
-        // Held at the leader but not final: not yet permanent.
-        ev.prior_attempts
-            .insert((second, 0), CellResolution::LeaderHeld(token(0x77)));
-        assert_eq!(conformance(r, &ev), waits);
+        // Held but not final: not yet permanent.
+        for state in [ChainState::LeaderHeld, ChainState::Preserved] {
+            ev.prior_attempts.insert(
+                (second, 0),
+                CellFact::Held {
+                    id: token(0x77),
+                    state,
+                },
+            );
+            assert_eq!(conformance(r, &ev), waits, "{state:?}");
+        }
         // Final on ANOTHER operation's E is a permanent resolution too: the
         // earlier key was lost, which is exactly why F skipped past it.
-        ev.prior_attempts
-            .insert((second, 0), CellResolution::Final(token(0x77)));
-        assert_eq!(conformance(r, &ev), FulfillmentConformance::Valid);
+        ev.prior_attempts.insert(
+            (second, 0),
+            CellFact::Held {
+                id: token(0x77),
+                state: ChainState::Final,
+            },
+        );
+        assert_eq!(conformance(r, &ev), Ok(FulfillmentConformance::Valid));
         // Attempt 0 has no earlier key and reads nothing.
         let mut ev = everything(r);
         ev.prior_attempts.clear();
@@ -1063,25 +1180,17 @@ mod tests {
             .collect();
         let f = fulfillment_of(&r.precommit, &r.preimage, attempts);
         assert_eq!(
-            fulfillment_conformance(&f, &sign_f(&r.sk, &f), &ev),
-            FulfillmentConformance::Valid
+            fulfillment_conformance(&f, &sign_f(&f), &ev),
+            Ok(FulfillmentConformance::Valid)
         );
     }
 
     #[test]
     fn item_6_setup_registered_holds_for_every_leg() {
         let r = rig();
-        let (rho_1, _) = r.setups[1].clone();
-        let leg_1 = r
-            .precommit
-            .legs()
-            .iter()
-            .find(|l| l.setup_ref == rho_1)
-            .unwrap();
-        let missing = FulfillmentConformance::Unavailable(ConformanceMissing::Setup {
-            setup_ref: leg_1.setup_ref,
-        });
-        // Not fetched as Stored.
+        let rho_1 = r.setups[1].0;
+        let missing = Err(ConformanceMissing::Setup { setup_ref: rho_1 });
+        // Not held.
         let mut ev = everything(r);
         ev.setups.remove(&rho_1);
         assert_eq!(conformance(r, &ev), missing);
@@ -1100,101 +1209,86 @@ mod tests {
     fn item_7_identities_and_bounds_hold() {
         let r = rig();
         // An operation whose hop 0 is set up by `body`: P(E) and P carry its
-        // ρ, and the body is Stored under it, so the only question left is
+        // ρ, and the body is held under it, so the only question left is
         // whether it is the setup of this trader for this vault, made before
         // the operation.
-        let with_hop_0_setup = |body: &SofiSetupBody| {
-            let rho = derive::setup_ref(body);
-            let bent = swap_fixture_with(
+        let with_hop_0_setup = |body: SofiSetupBody| {
+            let rho = derive::setup_ref(&body);
+            let bent = swap_fixture_with_setups(
                 2,
-                &|j| if j == 0 { rho } else { r.setups[j].0 },
+                &|j| {
+                    if j == 0 {
+                        body.clone()
+                    } else {
+                        setup_body_for(vault_id_of(j))
+                    }
+                },
                 r.preimage.settlement().closure().clone(),
             );
-            let p = rebuild(&bent.precommit, &r.pk, bent.precommit.legs().to_vec());
+            let p = bent.precommit;
             let f = fulfillment_of(&p, &bent.preimage, r.fulfillment.attempts().to_vec());
             let mut ev = everything(r);
-            ev.precommit = Some(PrecommitEnvelope {
-                signature: sign_p(&r.sk, &p),
+            ev.precommit = PrecommitEnvelope {
+                signature: sign_p(&p),
                 body: p,
-            });
-            ev.preimage = Some(bent.preimage);
-            ev.setups.insert(rho, setup_object(body));
-            (rho, fulfillment_conformance(&f, &sign_f(&r.sk, &f), &ev))
+            };
+            ev.preimage = bent.preimage;
+            ev.setups = bent.evidence.setups;
+            (rho, fulfillment_conformance(&f, &sign_f(&f), &ev))
         };
         // Another trader's setup of this vault.
-        let (rho, verdict) = with_hop_0_setup(&setup_body(&r.pk, 0, token(0x33), DEV, SETUP_POS));
+        let (rho, verdict) = with_hop_0_setup(setup_at(0, token(0x33), DEV, SETUP_POS));
         assert_eq!(
             verdict,
-            FulfillmentConformance::Invalid(
-                FulfillmentConformanceError::SetupNamesAnotherTraderOrVault { setup_ref: rho }
-            )
+            invalid(FulfillmentConformanceError::SetupNamesAnotherTraderOrVault { setup_ref: rho })
         );
         // This trader's setup of another vault.
-        let (rho, verdict) = with_hop_0_setup(&setup_body(&r.pk, 1, G, DEV, SETUP_POS));
+        let (rho, verdict) = with_hop_0_setup(setup_at(1, G, DEV, SETUP_POS));
         assert_eq!(
             verdict,
-            FulfillmentConformance::Invalid(
-                FulfillmentConformanceError::SetupNamesAnotherTraderOrVault { setup_ref: rho }
-            )
+            invalid(FulfillmentConformanceError::SetupNamesAnotherTraderOrVault { setup_ref: rho })
         );
         // The right setup, at the operation's own position: not before it.
-        let (rho, verdict) = with_hop_0_setup(&setup_body(&r.pk, 0, G, DEV, P_POS));
+        let (rho, verdict) = with_hop_0_setup(setup_at(0, G, DEV, P_POS));
         assert_eq!(
             verdict,
-            FulfillmentConformance::Invalid(
-                FulfillmentConformanceError::SetupNotBeforeTheOperation { setup_ref: rho }
-            )
+            invalid(FulfillmentConformanceError::SetupNotBeforeTheOperation { setup_ref: rho })
         );
         // And the bound is strict on the right side: one position before is
         // fine, which the rig itself shows.
         assert_eq!(SETUP_POS + 1, P_POS);
         assert_eq!(
             conformance(r, &everything(r)),
-            FulfillmentConformance::Valid
+            Ok(FulfillmentConformance::Valid)
         );
         // P's legs are not what P(E) derives: same E, another parent root.
         let mut legs = r.precommit.legs().to_vec();
         legs[1].parent_root = token(0x5A);
-        let p = rebuild(&r.precommit, &r.pk, legs);
+        let p = rebuild(&r.precommit, legs);
         let f = fulfillment_of(&p, &r.preimage, r.fulfillment.attempts().to_vec());
         let mut ev = everything(r);
-        ev.precommit = Some(PrecommitEnvelope {
-            signature: sign_p(&r.sk, &p),
+        ev.precommit = PrecommitEnvelope {
+            signature: sign_p(&p),
             body: p,
-        });
+        };
         assert_eq!(
-            fulfillment_conformance(&f, &sign_f(&r.sk, &f), &ev),
-            FulfillmentConformance::Invalid(FulfillmentConformanceError::LegsDoNotMatchPreimage)
+            fulfillment_conformance(&f, &sign_f(&f), &ev),
+            invalid(FulfillmentConformanceError::LegsDoNotMatchPreimage)
         );
     }
 
     #[test]
-    fn item_8_the_preimage_and_closure_are_available_and_verify() {
+    fn item_8_the_preimage_and_closure_verify() {
         let r = rig();
-        // P(E) not fetched.
-        let mut ev = everything(r);
-        ev.preimage = None;
-        assert_eq!(
-            conformance(r, &ev),
-            FulfillmentConformance::Unavailable(ConformanceMissing::Preimage)
-        );
         // A preimage of another E: not P(E), nothing about P.
-        let other = swap_fixture_with(
-            2,
-            &|j| r.setups[j].0,
-            PreEClosureIndex::new(Vec::new()).unwrap(),
-        );
+        let other = swap_fixture_with(2, PreEClosureIndex::new(Vec::new()).unwrap());
         assert_ne!(derive::recompute_e(&other.preimage).unwrap(), r.e);
         let mut ev = everything(r);
-        ev.preimage = Some(other.preimage);
-        assert_eq!(
-            conformance(r, &ev),
-            FulfillmentConformance::Unavailable(ConformanceMissing::Preimage)
-        );
+        ev.preimage = other.preimage;
+        assert_eq!(conformance(r, &ev), Err(ConformanceMissing::Preimage));
         // Every kind of closure reference: withheld, then wrong bytes.
         for reference in r.preimage.settlement().closure().refs() {
-            let missing =
-                FulfillmentConformance::Unavailable(ConformanceMissing::ClosureObject(*reference));
+            let missing = Err(ConformanceMissing::ClosureObject(*reference));
             let mut ev = everything(r);
             ev.closure.remove(reference);
             assert_eq!(conformance(r, &ev), missing, "{reference:?} withheld");
@@ -1210,15 +1304,15 @@ mod tests {
             addr: token(0x01),
         });
         refs.sort_by_key(ValidationRef::encode);
-        let bent = swap_fixture_with(2, &|j| r.setups[j].0, PreEClosureIndex::new(refs).unwrap());
-        let p = rebuild(&bent.precommit, &r.pk, bent.precommit.legs().to_vec());
+        let bent = swap_fixture_with(2, PreEClosureIndex::new(refs).unwrap());
+        let p = bent.precommit;
         let f = fulfillment_of(&p, &bent.preimage, r.fulfillment.attempts().to_vec());
         let mut ev = everything(r);
-        ev.precommit = Some(PrecommitEnvelope {
-            signature: sign_p(&r.sk, &p),
+        ev.precommit = PrecommitEnvelope {
+            signature: sign_p(&p),
             body: p,
-        });
-        ev.preimage = Some(bent.preimage);
+        };
+        ev.preimage = bent.preimage;
         ev.closure.insert(
             ValidationRef::ContentAddr {
                 object_class: 0x7777,
@@ -1227,8 +1321,8 @@ mod tests {
             b"anything".to_vec(),
         );
         assert_eq!(
-            fulfillment_conformance(&f, &sign_f(&r.sk, &f), &ev),
-            FulfillmentConformance::Invalid(
+            fulfillment_conformance(&f, &sign_f(&f), &ev),
+            invalid(
                 FulfillmentConformanceError::ClosureReferenceHasNoAddressingRule {
                     object_class: 0x7777
                 }
@@ -1240,56 +1334,49 @@ mod tests {
     /// anything missing, in item order, and nothing missing is ever reported
     /// as a refusal.
     #[test]
-    fn invalid_dominates_unavailable_in_item_order() {
+    fn invalid_dominates_missing_in_item_order() {
         let r = rig();
-        // Unsigned F with nothing else fetched: item 2 refuses.
+        let mut legs = r.precommit.legs().to_vec();
+        legs[0].parent_root = token(0x99);
+        let mut another_p = everything(r);
+        another_p.precommit = PrecommitEnvelope {
+            body: rebuild(&r.precommit, legs),
+            signature: r.precommit_sig.clone(),
+        };
+        // Unsigned F and not its P in hand: item 2 refuses over item 1.
         assert_eq!(
-            fulfillment_conformance(&r.fulfillment, &[], &ConformanceEvidence::default()),
-            FulfillmentConformance::Invalid(FulfillmentConformanceError::FulfillmentUnsigned)
+            fulfillment_conformance(&r.fulfillment, &[], &another_p),
+            invalid(FulfillmentConformanceError::FulfillmentUnsigned)
         );
-        // A signed F with nothing fetched: everything waits on P.
+        // A signed F without its P in hand: everything waits on P.
         assert_eq!(
-            conformance(r, &ConformanceEvidence::default()),
-            FulfillmentConformance::Unavailable(ConformanceMissing::Precommit)
+            conformance(r, &another_p),
+            Err(ConformanceMissing::Precommit)
         );
-        // P in hand, a hole in the attempts, and P(E) withheld: item 4 refuses
-        // over item 8's absence.
+        // P in hand, a hole in the attempts, and P(E) not the one E names:
+        // item 4 refuses over item 8's missing object.
         let mut ev = everything(r);
-        ev.preimage = None;
-        let f = TraderFulfillmentBody::new(
-            *r.fulfillment.precommit_id(),
+        ev.preimage = swap_fixture_with(2, PreEClosureIndex::new(Vec::new()).unwrap()).preimage;
+        let hole = vec![AttemptEntry {
+            vault_id: r.precommit.legs()[0].vault_id,
+            attempt: 0,
+        }];
+        let f = fulfillment_with(
+            r,
             r.fulfillment.policy_fulfillment_set().to_vec(),
-            vec![AttemptEntry {
-                vault_id: r.precommit.legs()[0].vault_id,
-                attempt: 0,
-            }],
+            hole.clone(),
             r.fulfillment.position(),
-            SIG_ALG,
-            &r.pk,
-        )
-        .unwrap();
+            pk(),
+        );
         assert_eq!(
-            fulfillment_conformance(&f, &sign_f(&r.sk, &f), &ev),
-            FulfillmentConformance::Invalid(FulfillmentConformanceError::AttemptsDoNotCoverLegs)
+            fulfillment_conformance(&f, &sign_f(&f), &ev),
+            invalid(FulfillmentConformanceError::AttemptsDoNotCoverLegs)
         );
         // Two refusals: the earlier item's reason is the one reported.
-        let f = TraderFulfillmentBody::new(
-            *r.fulfillment.precommit_id(),
-            vec![token(0x01)],
-            vec![AttemptEntry {
-                vault_id: r.precommit.legs()[0].vault_id,
-                attempt: 0,
-            }],
-            r.fulfillment.position(),
-            SIG_ALG,
-            &r.pk,
-        )
-        .unwrap();
+        let f = fulfillment_with(r, vec![token(0x01)], hole, r.fulfillment.position(), pk());
         assert_eq!(
-            fulfillment_conformance(&f, &sign_f(&r.sk, &f), &everything(r)),
-            FulfillmentConformance::Invalid(
-                FulfillmentConformanceError::PolicyFulfillmentSetNotCanonical
-            )
+            fulfillment_conformance(&f, &sign_f(&f), &everything(r)),
+            invalid(FulfillmentConformanceError::PolicyFulfillmentSetNotCanonical)
         );
     }
 
@@ -1319,24 +1406,21 @@ mod tests {
         let mut extra = r.fulfillment.policy_fulfillment_set().to_vec();
         extra.push(token(0xFF));
         extra.sort();
-        let f = TraderFulfillmentBody::new(
-            *r.fulfillment.precommit_id(),
+        let f = fulfillment_with(
+            r,
             extra,
             r.fulfillment.attempts().to_vec(),
             r.fulfillment.position(),
-            SIG_ALG,
-            &r.pk,
-        )
-        .unwrap();
+            pk(),
+        );
         let structural = check_fulfillment_against_precommit(&r.precommit, &f, &shadows);
-        let full = fulfillment_conformance(&f, &sign_f(&r.sk, &f), &everything(r));
         assert_eq!(
             structural,
             Err(FulfillmentConformanceError::PolicyFulfillmentSetNotCanonical)
         );
         assert_eq!(
-            full,
-            FulfillmentConformance::Invalid(structural.unwrap_err())
+            fulfillment_conformance(&f, &sign_f(&f), &everything(r)),
+            invalid(FulfillmentConformanceError::PolicyFulfillmentSetNotCanonical)
         );
     }
 }

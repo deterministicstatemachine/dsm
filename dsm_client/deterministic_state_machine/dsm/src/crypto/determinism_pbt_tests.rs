@@ -12,7 +12,6 @@ mod tests {
     use crate::core::identity::genesis_session::derive_smaster;
     use crate::crypto::sphincs::{generate_keypair_from_seed, SphincsVariant};
     use crate::crypto::kyber::generate_kyber_keypair_from_entropy;
-    use crate::crypto::rng::{generate_deterministic_random, mix_entropy};
     use crate::crypto::canonical_lp::{hash_lp1, hash_lp2, hash_lp3};
     use crate::crypto::domain::TaggedHashDomain;
     use crate::crypto::blake3::domain_hash;
@@ -73,28 +72,6 @@ mod tests {
             let kp1 = generate_kyber_keypair_from_entropy(&seed, &context).expect("deterministic kyber keygen must succeed");
             let kp2 = generate_kyber_keypair_from_entropy(&seed, &context).expect("deterministic kyber keygen must succeed");
             prop_assert_eq!(kp1, kp2);
-        }
-
-        #[test]
-        fn pbt_rng_deterministic_random_is_deterministic(seed in any::<[u8;32]>(), len in 1usize..=1024) {
-            let r1 = generate_deterministic_random(&seed, len);
-            let r2 = generate_deterministic_random(&seed, len);
-            prop_assert_eq!(r1.len(), len);
-            prop_assert_eq!(r2.len(), len);
-            prop_assert_eq!(r1, r2);
-        }
-
-        #[test]
-        fn pbt_rng_mix_entropy_is_deterministic(
-            sources in proptest::collection::vec(proptest::collection::vec(any::<u8>(), 1..=64), 1..=8),
-            output_len in 1usize..=1024
-        ) {
-            let sources_refs: Vec<&[u8]> = sources.iter().map(|s| s.as_slice()).collect();
-            let r1 = mix_entropy(&sources_refs, output_len);
-            let r2 = mix_entropy(&sources_refs, output_len);
-            prop_assert_eq!(r1.len(), output_len);
-            prop_assert_eq!(r2.len(), output_len);
-            prop_assert_eq!(r1, r2);
         }
 
         /// The complement of the two `prop_assume!`s below: any generated

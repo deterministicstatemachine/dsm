@@ -158,12 +158,6 @@ object Unified {
     }
 
     /**
-     * Returns the current monotonic tick from the Rust core.
-     * This is the single source of truth for time/ordering in the system.
-     */
-    @Keep @JvmStatic fun nowTick(): Long = UnifiedNativeApi.nowTick()
-
-    /**
      * Ensure the AppRouter is installed (safe to call multiple times; idempotent).
      * Returns true if AppRouter is installed/available, false otherwise.
      * This is critical for wallet/contacts screens to function after app restart.

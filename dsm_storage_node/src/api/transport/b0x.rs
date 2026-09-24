@@ -15,7 +15,6 @@ use std::sync::Arc;
 
 use axum::{
     body::Bytes,
-    extract::Path,
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::{get, post},
@@ -35,7 +34,6 @@ fn valid_spool_key(value: &str) -> bool {
         Some(bytes) if bytes.len() == 32
     )
 }
-
 
 /// The b0x spool: bytes in under a recipient's spool key, bytes out by that
 /// key from a position on. No write authorization and no reader authorization
@@ -110,7 +108,7 @@ async fn submit_b0x_envelope(
     let env = dsm::envelope::from_canonical_bytes(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
 
     // NOTE: Storage nodes are dumb mirrors.
-    // Do NOT validate SmartPolicy / protocol semantics here (clients verify).
+    // Do NOT validate protocol semantics here (clients verify).
 
     // Derive message id string (base32 text-id) for idempotency
     let msg_id_b32 = text_id::encode_base32_crockford(&env.message_id);
@@ -120,13 +118,13 @@ async fn submit_b0x_envelope(
     crate::db::spool_insert(pool, &recipient_spool_key, &msg_id_b32, &body)
         .await
         .map_err(|e| {
-        log::error!(
-            "spool_insert failed for recipient {}: {:?}",
-            recipient_spool_key,
-            e
-        );
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+            log::error!(
+                "spool_insert failed for recipient {}: {:?}",
+                recipient_spool_key,
+                e
+            );
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
     log::info!(
         "📥 b0x envelope stored for recipient {} (msg_id={})",
@@ -167,10 +165,9 @@ async fn retrieve_b0x_batch_from_seq(
     );
 
     let pool = &*app.db_pool;
-    let rows =
-        crate::db::spool_list_from_seq(pool, lookup_key, from_seq, MAX_BATCH_RETRIEVE)
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let rows = crate::db::spool_list_from_seq(pool, lookup_key, from_seq, MAX_BATCH_RETRIEVE)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     if rows.is_empty() {
         log::info!(
@@ -236,52 +233,18 @@ mod tests {
         assert!(!valid_spool_key("b0x[TEST][TEST][TEST]"));
     }
 
-    async fn maybe_state_and_auth() -> Option<(Arc<AppState>, Arc<AuthState>, Router)> {
-        if std::env::var("DSM_RUN_DB_TESTS").ok().as_deref() != Some("1") {
-            return None;
-        }
-        let database_url = std::env::var("DSM_DATABASE_URL")
-            .unwrap_or_else(|_| "postgresql://localhost:5432/dsm_storage".to_string());
-
-        let pool = match crate::db::create_pool(&database_url, false) {
-            Ok(p) => p,
-            Err(_) => return None,
-        };
-        if crate::db::init_db(&pool).await.is_err() {
-            return None;
-        }
-        let db_pool = Arc::new(pool);
-
-        // Insert device
-        let default_dev = [1u8; 32];
-        let device_id_str = dsm_sdk::util::text_id::encode_base32_crockford(&default_dev);
-        let token = "test-token".to_string();
-        let token_hash = blake3::hash(token.as_bytes());
-        let token_hash_vec = token_hash.as_bytes().to_vec();
-        let pubkey_vec = vec![9u8; 32];
-        let genesis_hash = vec![7u8; 32];
-        let _ = crate::db::register_device(
-            &db_pool,
-            &device_id_str,
-            &genesis_hash,
-            &pubkey_vec,
-            &token_hash_vec,
-            &vec![0u8; 1184],
-            &[0u8; 64],
-        )
-        .await
-        .ok()?;
-
-        let replication_config = ReplicationConfig {
-            replication_factor: 3,
-            gossip_interval_ticks: 100,
-            failure_timeout_ticks: 300,
-            gossip_fanout: 3,
-            max_concurrent_jobs: 10,
-        };
+    /// The b0x router on the Postgres test database.
+    async fn spool() -> Router {
+        let pool = Arc::new(crate::db::test_store::fresh_pool().await);
         let replication_manager = Arc::new(
             ReplicationManager::new_for_tests(
-                replication_config,
+                ReplicationConfig {
+                    replication_factor: 3,
+                    gossip_interval_ticks: 100,
+                    failure_timeout_ticks: 300,
+                    gossip_fanout: 3,
+                    max_concurrent_jobs: 10,
+                },
                 "test-node".to_string(),
                 "http://localhost:8080".to_string(),
             )
@@ -291,138 +254,184 @@ mod tests {
             "test-node".to_string(),
             "http://localhost:8080",
             None,
-            db_pool.clone(),
+            pool,
             replication_manager,
         ));
-        let auth_state = Arc::new(AuthState {
-            db_pool: db_pool.clone(),
-        });
-        let app = super::router(app_state.clone(), auth_state.clone());
-        Some((app_state, auth_state, app))
+        super::router(app_state)
     }
 
-    fn make_env(
-        device_id: &[u8; 32],
-        chain_tip: &[u8; 32],
-        msg_id_len: usize,
-    ) -> dsm::types::proto::Envelope {
-        use dsm::types::proto::Headers;
-        dsm::types::proto::Envelope {
+    /// What a device sends (DSM Amendment A7): an inner envelope sealed to a
+    /// recipient's Kyber key, carried by an outer v3 envelope holding only the
+    /// message id and the seal.
+    struct Sent {
+        outer: dsm::types::proto::Envelope,
+        inner: Vec<u8>,
+        recipient: dsm::crypto::kyber::KyberKeyPair,
+    }
+
+    fn sealed_envelope() -> Sent {
+        use dsm::types::proto::{envelope::Payload, Envelope, Headers, SealedEnvelopeV1};
+        let recipient = dsm::crypto::kyber::generate_kyber_keypair().expect("kyber keypair");
+        let message_id: [u8; 16] = rand::random();
+        let inner = Envelope {
             version: 3,
-            message_id: vec![7u8; msg_id_len],
             headers: Some(Headers {
-                device_id: device_id.to_vec(),
-                chain_tip: chain_tip.to_vec(),
-                ..Default::default()
+                device_id: rand::random::<[u8; 32]>().to_vec(),
+                genesis_hash: rand::random::<[u8; 32]>().to_vec(),
             }),
-            ..Default::default()
+            message_id: message_id.to_vec(),
+            payload: None,
+        }
+        .encode_to_vec();
+        let (shared_secret, kem_ciphertext) =
+            dsm::crypto::kyber::kyber_encapsulate(&recipient.public_key).expect("encapsulate");
+        let ciphertext =
+            dsm::crypto::spool_seal::seal(&shared_secret, &message_id, &inner).expect("seal");
+        let outer = Envelope {
+            version: 3,
+            headers: None,
+            message_id: message_id.to_vec(),
+            payload: Some(Payload::Sealed(SealedEnvelopeV1 {
+                kem_ciphertext,
+                ciphertext,
+            })),
+        };
+        Sent {
+            outer,
+            inner,
+            recipient,
         }
     }
 
-    #[tokio::test]
-    async fn v2_b0x_submit_happy() {
-        let Some((_app_state, _auth_state, app)) = maybe_state_and_auth().await else {
-            return;
-        };
-
-        let dev = [1u8; 32];
-        let tip = [2u8; 32];
-        let env = make_env(&dev, &tip, 16);
-        let mut body = Vec::with_capacity(env.encoded_len());
-        env.encode(&mut body)
-            .unwrap_or_else(|e| panic!("encode envelope failed: {e}"));
-
-        let device_id_str = dsm_sdk::util::text_id::encode_base32_crockford(&dev);
-        let token = "test-token";
-        let authz = format!("DSM {}:{}", device_id_str, token);
-        let msg_id_b32 = text_id::encode_base32_crockford(&[7u8; 16]);
-
+    async fn submit(
+        app: &Router,
+        recipient: &str,
+        content_type: &str,
+        body: Vec<u8>,
+    ) -> HttpStatus {
         let req = Request::builder()
             .method("POST")
             .uri("/api/v2/b0x/submit")
-            .header(axum::http::header::CONTENT_TYPE, "application/octet-stream")
-            .header("authorization", authz)
-            .header("x-dsm-message-id", msg_id_b32)
-            // route into recipient spool (recipient header must be base32 for device ids)
-            .header("x-dsm-recipient", text_id::encode_base32_crockford(&dev))
+            .header(axum::http::header::CONTENT_TYPE, content_type)
+            .header("x-dsm-recipient", recipient)
             .body(axum::body::Body::from(body))
+            .unwrap_or_else(|e| panic!("request build failed: {e}"));
+        app.clone()
+            .oneshot(req)
+            .await
+            .unwrap_or_else(|e| panic!("oneshot failed: {e}"))
+            .status()
+    }
+
+    /// What the spool at `address` answers from position `from_seq`.
+    async fn retrieve(app: &Router, address: &str, from_seq: i64) -> (HttpStatus, Vec<u8>) {
+        let req = Request::builder()
+            .method("GET")
+            .uri(format!("/api/v2/b0x/retrieve/{from_seq}"))
+            .header("x-dsm-b0x-address", address)
+            .body(axum::body::Body::empty())
             .unwrap_or_else(|e| panic!("request build failed: {e}"));
         let resp = app
             .clone()
             .oneshot(req)
             .await
             .unwrap_or_else(|e| panic!("oneshot failed: {e}"));
-        assert_eq!(resp.status(), HttpStatus::NO_CONTENT);
+        let status = resp.status();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap_or_else(|e| panic!("read body failed: {e}"));
+        (status, body.to_vec())
+    }
+
+    /// A sealed envelope submitted with no authorization is spooled under its
+    /// recipient's key, read back from position 0 by that key byte for byte,
+    /// and opens with the recipient's Kyber secret.
+    #[tokio::test]
+    async fn a_submitted_envelope_is_read_back_from_its_spool() {
+        use dsm::types::proto::envelope::Payload;
+        let app = spool().await;
+        let spool_key = crate::db::test_store::unique_name(0x61);
+        let sent = sealed_envelope();
+        let body = sent.outer.encode_to_vec();
+        assert_eq!(
+            submit(&app, &spool_key, "application/octet-stream", body.clone()).await,
+            HttpStatus::NO_CONTENT
+        );
+
+        let (status, bytes) = retrieve(&app, &spool_key, 0).await;
+        assert_eq!(status, HttpStatus::OK);
+        let batch =
+            dsm::types::proto::SequencedBatchEnvelope::decode(bytes.as_slice()).expect("batch");
+        assert_eq!(batch.envelopes.len(), 1);
+        let held = batch.envelopes[0].envelope.as_ref().expect("envelope");
+        assert_eq!(
+            held.encode_to_vec(),
+            body,
+            "the spool returns the bytes it was sent"
+        );
+        let Some(Payload::Sealed(seal)) = &held.payload else {
+            panic!("the held envelope is not sealed");
+        };
+        let shared_secret =
+            dsm::crypto::kyber::kyber_decapsulate(&sent.recipient.secret_key, &seal.kem_ciphertext)
+                .expect("decapsulate");
+        let message_id: [u8; 16] = held.message_id.as_slice().try_into().expect("16-byte id");
+        assert_eq!(
+            dsm::crypto::spool_seal::open(&shared_secret, &message_id, &seal.ciphertext)
+                .expect("the recipient opens it"),
+            sent.inner
+        );
+        assert_eq!(batch.next_seq, batch.envelopes[0].seq_num + 1);
+
+        let (status, bytes) = retrieve(&app, &spool_key, batch.next_seq as i64).await;
+        assert_eq!(
+            status,
+            HttpStatus::NO_CONTENT,
+            "nothing after the last position"
+        );
+        assert!(bytes.is_empty());
+    }
+
+    /// A spool nothing was sent to answers with no content.
+    #[tokio::test]
+    async fn an_empty_spool_answers_no_content() {
+        let app = spool().await;
+        let (status, bytes) = retrieve(&app, &crate::db::test_store::unique_name(0x62), 0).await;
+        assert_eq!(status, HttpStatus::NO_CONTENT);
+        assert!(bytes.is_empty());
     }
 
     #[tokio::test]
     async fn v2_b0x_submit_rejects_bad_msg_id_len() {
-        let Some((_app_state, _auth_state, app)) = maybe_state_and_auth().await else {
-            return;
-        };
-
-        let dev = [1u8; 32];
-        let tip = [2u8; 32];
-        let env = make_env(&dev, &tip, 15);
-        let mut body = Vec::with_capacity(env.encoded_len());
-        env.encode(&mut body)
-            .unwrap_or_else(|e| panic!("encode envelope failed: {e}"));
-
-        let device_id_str = dsm_sdk::util::text_id::encode_base32_crockford(&dev);
-        let token = "test-token";
-        let authz = format!("DSM {}:{}", device_id_str, token);
-        let msg_id_b32 = text_id::encode_base32_crockford(&[7u8; 16]);
-
-        let req = Request::builder()
-            .method("POST")
-            .uri("/api/v2/b0x/submit")
-            .header(axum::http::header::CONTENT_TYPE, "application/octet-stream")
-            .header("authorization", authz)
-            .header("x-dsm-message-id", msg_id_b32)
-            .header("x-dsm-recipient", text_id::encode_base32_crockford(&dev))
-            .body(axum::body::Body::from(body))
-            .unwrap_or_else(|e| panic!("request build failed: {e}"));
-        let resp = app
-            .clone()
-            .oneshot(req)
-            .await
-            .unwrap_or_else(|e| panic!("oneshot failed: {e}"));
-        assert_eq!(resp.status(), HttpStatus::BAD_REQUEST);
+        let app = spool().await;
+        let spool_key = crate::db::test_store::unique_name(0x63);
+        let mut sent = sealed_envelope();
+        sent.outer.message_id.truncate(15);
+        assert_eq!(
+            submit(
+                &app,
+                &spool_key,
+                "application/octet-stream",
+                sent.outer.encode_to_vec()
+            )
+            .await,
+            HttpStatus::BAD_REQUEST
+        );
     }
 
     #[tokio::test]
     async fn v2_b0x_submit_rejects_wrong_content_type() {
-        let Some((_app_state, _auth_state, app)) = maybe_state_and_auth().await else {
-            return;
-        };
-
-        let dev = [1u8; 32];
-        let tip = [2u8; 32];
-        let env = make_env(&dev, &tip, 16);
-        let mut body = Vec::with_capacity(env.encoded_len());
-        env.encode(&mut body)
-            .unwrap_or_else(|e| panic!("encode envelope failed: {e}"));
-
-        let device_id_str = dsm_sdk::util::text_id::encode_base32_crockford(&dev);
-        let token = "test-token";
-        let authz = format!("DSM {}:{}", device_id_str, token);
-        let msg_id_b32 = text_id::encode_base32_crockford(&[7u8; 16]);
-
-        let req = Request::builder()
-            .method("POST")
-            .uri("/api/v2/b0x/submit")
-            .header(axum::http::header::CONTENT_TYPE, "text/plain")
-            .header("authorization", authz)
-            .header("x-dsm-message-id", msg_id_b32)
-            .header("x-dsm-recipient", text_id::encode_base32_crockford(&dev))
-            .body(axum::body::Body::from(body))
-            .unwrap_or_else(|e| panic!("request build failed: {e}"));
-        let resp = app
-            .clone()
-            .oneshot(req)
-            .await
-            .unwrap_or_else(|e| panic!("oneshot failed: {e}"));
-        assert_eq!(resp.status(), HttpStatus::UNSUPPORTED_MEDIA_TYPE);
+        let app = spool().await;
+        let spool_key = crate::db::test_store::unique_name(0x64);
+        assert_eq!(
+            submit(
+                &app,
+                &spool_key,
+                "text/plain",
+                sealed_envelope().outer.encode_to_vec()
+            )
+            .await,
+            HttpStatus::UNSUPPORTED_MEDIA_TYPE
+        );
     }
-
 }

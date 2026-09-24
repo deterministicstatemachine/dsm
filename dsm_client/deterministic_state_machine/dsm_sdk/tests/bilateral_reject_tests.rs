@@ -23,40 +23,59 @@ async fn bilateral_reject_session_emits_event_and_updates_phase() {
     // AppState identity. Run in test-isolation mode so AppState uses an in-memory default (empty
     // binding — fine for a reject-flow test) instead of trying to load persisted state, which in
     // production is primed at startup via set_storage_base_dir().
-    unsafe { std::env::set_var("DSM_SDK_TEST_MODE", "1") };
+    dsm_sdk::economic_fixtures::use_test_storage_dir();
+    sdk::storage::client_db::reset_database_for_tests();
+    sdk::storage::client_db::init_database().unwrap();
 
     // Setup local + counterparty identities
     let local_device = fixed_device(0x11);
     let remote_device = fixed_device(0x22);
     let genesis_hash = fixed_device(0x33);
 
+    // The relationship's tips live on the persisted contact, as a contact
+    // added through the wallet is.
+    sdk::storage::client_db::store_contact(&sdk::storage::client_db::ContactRecord {
+        contact_id: "peer".to_string(),
+        device_id: remote_device.to_vec(),
+        alias: "peer".to_string(),
+        genesis_hash: genesis_hash.to_vec(),
+        public_key: vec![0; 32],
+        kyber_public_key: Vec::new(),
+        current_chain_tip: None,
+        verified: true,
+        verification_proof: None,
+        metadata: std::collections::HashMap::new(),
+        ble_address: None,
+        status: "Created".to_string(),
+        needs_online_reconcile: false,
+        previous_chain_tip: None,
+    })
+    .unwrap();
+
     // Build bilateral transaction manager with verified contact & relationship
     let keypair =
         dsm::crypto::signatures::SignatureKeyPair::generate_from_entropy(&[0xAA; 32]).unwrap();
-    let mut contact_manager = dsm::core::contact_manager::DsmContactManager::new(
-        local_device,
-        vec![dsm::types::identifiers::NodeId::new("local")],
-    );
+    let mut contact_manager = dsm::core::contact_manager::DsmContactManager::new(local_device);
 
     let contact = dsm::types::contact_types::DsmVerifiedContact {
         alias: "peer".to_string(),
         device_id: remote_device,
         genesis_hash,
         public_key: vec![0; 32],
-        genesis_material: vec![0; 32],
         chain_tip: None,
-        chain_tip_smt_proof: None,
         genesis_verified_online: true,
-        verified_at_commit_height: 1,
-        added_at_commit_height: 1,
-        last_updated_commit_height: 1,
         verifying_storage_nodes: vec![],
         ble_address: None,
     };
     contact_manager.add_verified_contact(contact).unwrap();
 
-    let mut manager =
-        BilateralTransactionManager::new(contact_manager, keypair, local_device, genesis_hash);
+    let mut manager = BilateralTransactionManager::new(
+        contact_manager,
+        keypair,
+        local_device,
+        genesis_hash,
+        std::sync::Arc::new(dsm_sdk::sdk::chain_tip_store::SqliteChainTipStore::new()),
+    );
     manager
         .establish_relationship(&remote_device)
         .await
@@ -76,7 +95,7 @@ async fn bilateral_reject_session_emits_event_and_updates_phase() {
     // Create a prepared session via normal prepare path (acts as sender side)
     let (_envelope_bytes, commitment_hash) = {
         let h = &handler; // borrow
-        h.prepare_bilateral_transaction(remote_device, Operation::Noop, 100)
+        h.prepare_bilateral_transaction(remote_device, Operation::Noop)
             .await
             .unwrap()
     };

@@ -190,29 +190,3 @@ pub fn generate_deterministic_nonce_32(context: &[u8], counter: u64) -> Vec<u8> 
     let hash = hasher.finalize();
     hash.as_bytes()[..32].to_vec()
 }
-
-/// Generate a deterministic 32-byte nonce for OnlineTransferRequest.
-/// Formula: Hash(domain || sender_id || receiver_id || prev_tip || seq || payload_digest)
-/// - domain: "DSM:OnlineTransferRequest:nonce:v1"
-/// - sender_id: from_device_id (32 bytes)
-/// - receiver_id: to_device_id (32 bytes)  
-/// - prev_tip: chain_tip (32 bytes)
-/// - seq: sequence counter (u64)
-/// - payload_digest: BLAKE3 hash of canonical request body excluding nonce (32 bytes)
-pub fn generate_online_transfer_nonce(
-    sender_id: &[u8; 32],
-    receiver_id: &[u8; 32],
-    prev_tip: &[u8; 32],
-    seq: u64,
-    payload_digest: &[u8; 32],
-) -> [u8; 32] {
-    let mut hasher = crate::crypto::blake3::dsm_domain_hasher(
-        crate::common::domain_tags::TAG_DSM_ONLINETRANSFERREQUEST_NONCE_V1,
-    );
-    hasher.update(sender_id);
-    hasher.update(receiver_id);
-    hasher.update(prev_tip);
-    hasher.update(&seq.to_le_bytes());
-    hasher.update(payload_digest);
-    *hasher.finalize().as_bytes()
-}

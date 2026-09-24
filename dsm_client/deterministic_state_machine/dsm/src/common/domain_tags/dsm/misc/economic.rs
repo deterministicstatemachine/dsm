@@ -44,6 +44,10 @@ pub const TAG_DSM_ECONOMIC_BALANCE_KEY: TaggedHashDomain<'static> =
 /// construction rather than by the tree being private.
 pub const TAG_DSM_ECONOMIC_CONSUMED_SOURCE_KEY: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/economic-consumed-source-key/v1");
+/// `R_econ` key of a token-creation record:
+/// `H_dom(tag, G ‖ DevID ‖ policy_commit)`.
+pub const TAG_DSM_ECONOMIC_TOKEN_CREATION_KEY: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/economic-token-creation-key/v1");
 
 /// The signed preimage of an economic root claim:
 /// `m = H(tag ‖ 0x00 ‖ CCB(EconomicRootClaimBody))`.

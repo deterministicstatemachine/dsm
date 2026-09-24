@@ -24,7 +24,10 @@ use crate::economic::credit::{
     CreditSourceValidatedPeerDebit,
 };
 use crate::economic::mutation::EconomicLeafMutation;
-use crate::economic::state::{EconomicBalanceState, EconomicConsumedSourceState, EconomicLeafState};
+use crate::economic::state::{
+    EconomicBalanceState, EconomicConsumedSourceState, EconomicLeafState,
+    EconomicTokenCreationState,
+};
 use crate::economic::tree::ECONOMIC_SMT_HEIGHT;
 use crate::economic::claim::{AdmissionSubstrate, EconomicAdmissionManifest};
 use crate::economic::witness::EconomicTransitionWitness;
@@ -257,14 +260,16 @@ fn read_leaf_state(c: &mut Cursor<'_>) -> Result<EconomicLeafState, DecodeError>
                 },
             ))
         }
-        class::CREDIT_SOURCE_GENESIS_RELEASE => {
+        class::ECONOMIC_TOKEN_CREATION_STATE => {
             c.envelope(
-                CreditSourceGenesisRelease::CLASS,
-                CreditSourceGenesisRelease::SCHEMA,
+                EconomicTokenCreationState::CLASS,
+                EconomicTokenCreationState::SCHEMA,
             )?;
-            Ok(CreditSource::GenesisRelease(CreditSourceGenesisRelease {
-                credit_mutation_index: c.u32()?,
-            }))
+            Ok(EconomicLeafState::TokenCreation(
+                EconomicTokenCreationState {
+                    policy_commit: c.digest32()?,
+                },
+            ))
         }
         got => Err(DecodeError::WrongClass { got }),
     }
@@ -301,6 +306,15 @@ fn read_credit_source(c: &mut Cursor<'_>) -> Result<CreditSource, DecodeError> {
                     release_evidence_addr: c.digest32()?,
                 },
             ))
+        }
+        class::CREDIT_SOURCE_GENESIS_RELEASE => {
+            c.envelope(
+                CreditSourceGenesisRelease::CLASS,
+                CreditSourceGenesisRelease::SCHEMA,
+            )?;
+            Ok(CreditSource::GenesisRelease(CreditSourceGenesisRelease {
+                credit_mutation_index: c.u32()?,
+            }))
         }
         got => Err(DecodeError::WrongClass { got }),
     }

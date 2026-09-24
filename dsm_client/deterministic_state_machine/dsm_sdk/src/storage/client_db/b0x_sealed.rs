@@ -41,7 +41,9 @@ pub fn put_sealed(message_id: &str, sealed: &[u8]) -> Result<()> {
         |r| r.get(0),
     )?;
     if kept != sealed {
-        return Err(anyhow!("b0x_sealed: {message_id} is already sealed with other bytes"));
+        return Err(anyhow!(
+            "b0x_sealed: {message_id} is already sealed with other bytes"
+        ));
     }
     Ok(())
 }
@@ -57,7 +59,13 @@ mod tests {
         assert_eq!(get_sealed("M1").unwrap(), None);
         put_sealed("M1", b"sealed-a").unwrap();
         put_sealed("M1", b"sealed-a").unwrap();
-        assert!(put_sealed("M1", b"sealed-b").is_err(), "a second, different seal is refused");
-        assert_eq!(get_sealed("M1").unwrap().as_deref(), Some(b"sealed-a".as_slice()));
+        assert!(
+            put_sealed("M1", b"sealed-b").is_err(),
+            "a second, different seal is refused"
+        );
+        assert_eq!(
+            get_sealed("M1").unwrap().as_deref(),
+            Some(b"sealed-a".as_slice())
+        );
     }
 }

@@ -5,49 +5,53 @@
 //!
 //! The writer puts the signed envelope of `F` at `K_ful(q)` and
 //! `C_q = SofiResolutionClaim(G, DevID, q, FulfillmentId, R_realize, R_void)`
-//! at `K_root(q)` in ONE local transaction at the leader of `s(q)`, both or
-//! neither, then the same bytes on the other members. `C_q` is computed from
-//! the verified `P` and `F` and never caller-supplied, so no claim that
-//! disagrees with `F` can be `F`'s claim. The member stores bytes; it
-//! establishes nothing. Whether `F` registered is Core's conclusion from raw
-//! reads (`FulfillmentRegistered`, rebuild step R10), never a fact this
-//! module produces.
+//! at `K_root(q)`: both in one transaction at the leader of `s(q)`, then the
+//! same bytes at each later seat of the route (storage spec §9). `C_q` is
+//! computed from the verified `P` and `F` and never caller-supplied, so no
+//! claim that disagrees with `F` can be `F`'s claim. A member stores bytes;
+//! it establishes nothing. Whether `F` registered is Core's conclusion from
+//! the cells' route chains (`FulfillmentRegistered`, rebuild step R10), never
+//! a fact this module produces.
 //!
 //! Before anything is written the producer obtains
-//! `FulfillmentConformance(F) = Valid` over evidence it acquired from
-//! storage (Section 20.2: "A producer MUST obtain Valid before it publishes
-//! F"). Rule T5 holds here as at the draft: on `Unavailable` nothing is
-//! written and what is missing is named; on `Invalid` the fulfillment is
-//! refused with its reason. A producer that installed a non-conforming `F`
-//! would occupy the trader's one position with an exercise nothing realizes.
+//! `FulfillmentConformance(F) = Valid` over evidence it acquired from storage
+//! (Section 20.2: "A producer MUST obtain Valid before it publishes F"). Rule
+//! T5: while evidence is not in hand nothing is written and what is missing
+//! is named; on `Invalid` the fulfillment is refused with its reason.
 
 use std::collections::BTreeMap;
 
-use dsm::common::domain_tags::TAG_DSM_SOFI_FULFILLMENT;
-use dsm::economic::register::{economic_root_register_key, position_seed};
+use dsm::economic::register::root_completion;
+use dsm::route_chain::{CellFact, Missing as CellMissing};
 use dsm::sofi::conformance::{
     fulfillment_conformance, ConformanceEvidence, ConformanceMissing, FulfillmentConformance,
     FulfillmentConformanceError,
 };
 use dsm::sofi::derive;
-use dsm::sofi::publication::{Publication, Signed};
+use dsm::sofi::publication::{recognize_fulfillment, Publication, Signed};
+use dsm::sofi::registration::{
+    fulfillment_completion, fulfillment_registered, PositionCells, Registration,
+};
 use dsm::sofi::storage::Resolved;
 use dsm::sofi::wire::{
     SettlementPreimage, SofiWireError, TraderFulfillmentBody, TraderPrecommitBody, ValidationRef,
 };
 use dsm::types::error::DsmError;
 
-use dsm::sofi::arith::{resolve_objects, CellResolution};
-use dsm::sofi::registration::{fulfillment_registered, names_fulfillment_key, Registration};
-
-use crate::sdk::economic_registers::{economic_root_namespace, names_root_key};
-use crate::sdk::sofi_evidence::LOCATOR_BUDGET;
+use crate::sdk::route_seats::{
+    keep_completion, read_cell, write_recorded_position, NodeSeats, WriteReport,
+};
+use crate::sdk::sofi_evidence::{Acquired, ACQUIRE_ROUNDS, LOCATOR_BUDGET};
 use crate::sdk::sofi_exercise::read_attempt_cell;
-use crate::sdk::sofi_publish::{fetch_precommit, fetch_setup};
-use crate::sdk::storage_io::{leader_index, read_cell_raw, read_stored_bytes, write_cells_leader_first};
+use crate::sdk::sofi_publish::{fetch_precommit, fetch_setup_bytes};
+use crate::sdk::storage_io::read_stored_bytes;
 use crate::sdk::storage_set::StorageSet;
 
 type D32 = [u8; 32];
+
+fn storage_err(what: &str, e: impl core::fmt::Display) -> DsmError {
+    DsmError::storage(format!("{what}: {e}"), None::<std::io::Error>)
+}
 
 /// Everything an install takes: the exercise the trader signed, the `P` it
 /// names, `P(E)`, and the exact bytes the trader holds for the closure
@@ -66,7 +70,7 @@ pub struct InstallRequest<'a> {
     pub own_objects: &'a BTreeMap<ValidationRef, Vec<u8>>,
 }
 
-/// Why nothing was installed.
+/// Why nothing was installed, or the install stopped before the leader.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InstallError {
     /// The objects do not have canonical bytes in this shape.
@@ -75,14 +79,15 @@ pub enum InstallError {
     /// written: an installed non-conforming `F` would occupy the position
     /// with an exercise nothing realizes.
     NotConforming(FulfillmentConformanceError),
-    /// Rule T5: evidence conformance needs is not in hand. Nothing is
-    /// written; what is missing is named.
-    Unavailable(ConformanceMissing),
-    /// The members could not be read or written.
+    /// Rule T5: after the retry budget, evidence conformance needs is still
+    /// not in hand. Nothing is written; what is missing is named.
+    Unavailable(Vec<ConformanceMissing>),
+    /// The members could not be read or written, or the cells could not be
+    /// derived over the set.
     Storage(String),
-    /// The leader of `s(q)` did not take the pair. The cells wait for it; no
-    /// other member stands in, and the copies that did land are carried.
-    LeaderUnreached { copies: u32 },
+    /// The leader of `s(q)` did not answer with the pair's links. The write
+    /// is recorded and resumes at the leader; no other seat stands in.
+    LeaderUnreached,
 }
 
 impl From<SofiWireError> for InstallError {
@@ -97,45 +102,51 @@ impl From<DsmError> for InstallError {
     }
 }
 
-/// The two cells of position `q` and the seed their leader is drawn from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Position {
-    pub position: u64,
-    pub k_ful: D32,
-    pub k_root: D32,
-    /// `s(q) = H(position-seed; G ‖ DevID ‖ q ‖ R_p)`, with `R_p` the root
-    /// the operation was built on — `P.void_root = T°.pre_economic_root`.
-    pub seed: D32,
+/// The two cells of trader `(genesis, device_id)`'s position `position`,
+/// routed by `s(q)` from `parent_root` over `set`, which must be the
+/// register's committed set.
+pub fn position_cells(
+    set: &StorageSet,
+    genesis: &D32,
+    device_id: &D32,
+    position: u64,
+    parent_root: &D32,
+) -> Result<PositionCells, DsmError> {
+    let members = crate::sdk::storage_set::as_ccb_members(set)?;
+    PositionCells::new(
+        genesis,
+        device_id,
+        position,
+        parent_root,
+        &members,
+        &set.id(),
+    )
+    .map_err(|e| storage_err("position cells", format!("{e:?}")))
 }
 
-/// Where a fulfillment of `precommit` installs. Every input is a field of
-/// the two verified objects.
-pub fn position_of(
+/// The cells a fulfillment of `precommit` installs at: position `F.q`, routed
+/// by the root the operation was built on — `P.void_root = T°.pre_root`.
+pub fn cells_of(
+    set: &StorageSet,
     precommit: &TraderPrecommitBody,
     fulfillment: &TraderFulfillmentBody,
-) -> Position {
-    let q = fulfillment.position();
-    Position {
-        position: q,
-        k_ful: derive::fulfillment_register_key(precommit.genesis(), precommit.device_id(), q),
-        k_root: economic_root_register_key(precommit.genesis(), precommit.device_id(), q),
-        seed: position_seed(
-            precommit.genesis(),
-            precommit.device_id(),
-            q,
-            precommit.void_root(),
-        ),
-    }
+) -> Result<PositionCells, DsmError> {
+    position_cells(
+        set,
+        precommit.genesis(),
+        precommit.device_id(),
+        fulfillment.position(),
+        precommit.void_root(),
+    )
 }
 
-/// What the install established: the pair reached the leader, and how many
-/// other members took it. Registration is not among these — Core derives it
-/// from raw reads (R10).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// What the install wrote: the pair's cells, and what the write produced at
+/// each route position — `K_ful(q)` first, then `K_root(q)`. Registration is
+/// not among these: Core reads it from the cells ([`read_registration`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Installed {
-    pub at: Position,
-    pub leader_reached: bool,
-    pub copies: u32,
+    pub cells: PositionCells,
+    pub reports: [WriteReport; 2],
 }
 
 /// Cells read per leg when acquiring what an attempt skipped past. The same
@@ -144,80 +155,68 @@ pub struct Installed {
 pub const PRIOR_ATTEMPT_BUDGET: usize = crate::sdk::sofi_resolve::WALK_BUDGET;
 
 /// The cells an attempt above zero skips past, read from the committed set:
-/// for every leg the fulfillment names at attempt `a`, the resolution of
+/// for every leg the fulfillment names at attempt `a`, the storage fact at
 /// `K^(0) … K^(a-1)` of that leg's vault at its parent root.
 ///
 /// ONE PATH, SHARED (owner ruling, §44.4). The producer's install (R9) and
 /// the verifier's resolution (R12) read the same cells the same way, because
 /// they answer the same question: conformance item 5 requires the key before
-/// this one to have a permanent storage resolution, and a route's liveness
-/// requires every earlier key to be skipped. A key that could not be read is
-/// simply absent from the map, and conformance answers `Unavailable` for it.
-///
-/// AN EMPTY MAP NEVER MEANS "THERE WERE NO PRIOR ATTEMPTS". It means nothing
-/// was read — which is what the producer's install used to hand conformance
-/// unconditionally, so item 5 answered `Unavailable(PriorAttempt)` for every
-/// attempt above zero and NO RETRY IN THE SYSTEM COULD EVER INSTALL. An
-/// attempt of zero has no earlier key and contributes no entry, which is the
-/// one case where the map is legitimately empty.
-///
-/// `budget` bounds the cells read per leg, as the walk's does: past it the
-/// earlier keys are unread, so they are `Unavailable` and the position waits.
+/// this one to have a permanent storage resolution. A key whose reads do not
+/// decide it yet, or past `budget`, is absent from the map, and conformance
+/// names it missing. An attempt of zero has no earlier key and contributes no
+/// entry.
 pub async fn acquire_prior_attempts(
     set: &StorageSet,
     precommit: &TraderPrecommitBody,
     fulfillment: &TraderFulfillmentBody,
     budget: usize,
-) -> Result<BTreeMap<(D32, u64), CellResolution>, DsmError> {
+) -> Result<BTreeMap<(D32, u64), CellFact>, DsmError> {
+    let reach = u64::try_from(budget).unwrap_or(u64::MAX);
     let mut cells = BTreeMap::new();
     for entry in fulfillment.attempts() {
+        // F naming a leg P does not is conformance item 4's refusal; there is
+        // no parent root to read a cell at.
         let Some(leg) = precommit
             .legs()
             .iter()
             .find(|l| l.vault_id == entry.vault_id)
         else {
-            // F names a leg P does not: conformance item 4 refuses it, and
-            // there is no parent root to read a cell at.
             continue;
         };
-        let reach = usize::try_from(entry.attempt)
-            .unwrap_or(usize::MAX)
-            .min(budget);
-        for earlier in 0..reach as u64 {
-            let (cell, _) =
-                read_attempt_cell(set, &leg.vault_id, &leg.parent_root, earlier).await?;
-            cells.insert((entry.vault_id, earlier), cell);
+        for earlier in 0..entry.attempt.min(reach) {
+            match read_attempt_cell(set, &leg.vault_id, &leg.parent_root, earlier).await? {
+                Ok(read) => {
+                    cells.insert((entry.vault_id, earlier), read.fact);
+                }
+                Err(undecided) => {
+                    log::info!("[sofi register] K^({earlier}) is not decided yet: {undecided:?}")
+                }
+            }
         }
     }
     Ok(cells)
 }
 
-/// Acquire what `FulfillmentConformance(F)` reads, from storage and the
-/// request. Items 1, 2 and 8 come with the request; item 6's setups are
-/// fetched under their `ρ` (R8); the closure objects are fetched by the rule
-/// of each reference kind; item 5's earlier attempt cells come from
-/// [`acquire_prior_attempts`], the one path the verifier uses too. Retries
-/// within the budget; `Complete` only when every item is in hand and
-/// authenticates, otherwise `Exhausted` naming what is missing (Amendment S3).
-pub async fn acquire_conformance_evidence(
+/// One round of fetching what `FulfillmentConformance(F)` reads: `P` and
+/// `P(E)` from the request, every leg's setup under its `ρ` (R8), the
+/// closure objects by the rule of each reference kind, and item 5's earlier
+/// attempt cells from [`acquire_prior_attempts`].
+async fn gather_conformance(
     set: &StorageSet,
     request: &InstallRequest<'_>,
-) -> Result<
-    crate::sdk::sofi_evidence::Acquired<ConformanceEvidence, dsm::sofi::conformance::ConformanceMissing>,
-    DsmError,
-> {
+) -> Result<ConformanceEvidence, DsmError> {
     let mut setups = BTreeMap::new();
     for leg in request.precommit.legs() {
-        if let Resolved::Kept(signed) = fetch_setup(set, &leg.setup_ref).await? {
-            setups.insert(leg.setup_ref, setup_object_bytes(&signed)?);
+        if let Resolved::Kept(bytes) = fetch_setup_bytes(set, &leg.setup_ref).await? {
+            setups.insert(leg.setup_ref, bytes);
         }
     }
     let mut closure = BTreeMap::new();
     for reference in request.preimage.settlement().closure().refs() {
         let bytes = match reference {
             ValidationRef::ContentAddr { addr, .. } => read_stored_bytes(set, addr).await?,
-            ValidationRef::Setup { setup_ref } => match fetch_setup(set, setup_ref).await? {
-                Resolved::Kept(signed) => Some(setup_object_bytes(&signed)?),
+            ValidationRef::Setup { setup_ref } => match fetch_setup_bytes(set, setup_ref).await? {
+                Resolved::Kept(bytes) => Some(bytes),
                 Resolved::None | Resolved::Unavailable => None,
             },
             ValidationRef::SingleRootClaim { .. } | ValidationRef::ConditionalClaim { .. } => {
@@ -229,11 +228,11 @@ pub async fn acquire_conformance_evidence(
         }
     }
     Ok(ConformanceEvidence {
-        precommit: Some(Signed {
+        precommit: Signed {
             body: request.precommit.clone(),
             signature: request.precommit_signature.to_vec(),
-        }),
-        preimage: Some(request.preimage.clone()),
+        },
+        preimage: request.preimage.clone(),
         closure,
         setups,
         prior_attempts: acquire_prior_attempts(
@@ -246,684 +245,145 @@ pub async fn acquire_conformance_evidence(
     })
 }
 
-fn setup_object_bytes(
-    signed: &Signed<dsm::sofi::wire::SofiSetupBody>,
-) -> Result<Vec<u8>, DsmError> {
-    Publication::Setup {
-        body: &signed.body,
-        signature: &signed.signature,
+/// Acquire what `FulfillmentConformance(F)` reads, and ask Core whether it is
+/// complete: `Complete` once conformance reaches a verdict over it,
+/// `Exhausted` naming what Core still misses after the retry budget
+/// (Amendment S3).
+pub async fn acquire_conformance_evidence(
+    set: &StorageSet,
+    request: &InstallRequest<'_>,
+) -> Result<Acquired<ConformanceEvidence, ConformanceMissing>, DsmError> {
+    let mut missing = Vec::new();
+    for round in 1..=ACQUIRE_ROUNDS {
+        let evidence = gather_conformance(set, request).await?;
+        match fulfillment_conformance(
+            request.fulfillment,
+            request.fulfillment_signature,
+            &evidence,
+        ) {
+            Ok(FulfillmentConformance::Valid | FulfillmentConformance::Invalid(..)) => {
+                return Ok(Acquired::Complete(evidence))
+            }
+            Err(what) => {
+                log::info!("[sofi register] round {round}/{ACQUIRE_ROUNDS}: not in hand: {what:?}");
+                missing = vec![what];
+            }
+        }
     }
-    .object_bytes()
-    .map_err(|e| DsmError::verification(format!("setup object: {e}")))
+    Ok(Acquired::Exhausted(missing))
 }
 
 /// Install `F` at its position: conformance first, then the pair at the
-/// leader of `s(q)` and the same bytes on the other members.
+/// leader of `s(q)` and the same bytes at each later seat, continuing an
+/// earlier install of the same pair.
 pub async fn install_fulfillment(
     set: &StorageSet,
     request: &InstallRequest<'_>,
 ) -> Result<Installed, InstallError> {
-    let evidence = acquire_conformance_evidence(set, request).await?;
+    let evidence = match acquire_conformance_evidence(set, request).await? {
+        Acquired::Complete(evidence) => evidence,
+        Acquired::Exhausted(missing) | Acquired::NoSource(missing) => {
+            return Err(InstallError::Unavailable(missing))
+        }
+    };
     match fulfillment_conformance(
         request.fulfillment,
         request.fulfillment_signature,
         &evidence,
     ) {
-        FulfillmentConformance::Valid => {}
-        FulfillmentConformance::Invalid(why) => return Err(InstallError::NotConforming(why)),
-        FulfillmentConformance::Unavailable(what) => return Err(InstallError::Unavailable(what)),
+        Ok(FulfillmentConformance::Valid) => {}
+        Ok(FulfillmentConformance::Invalid(why)) => return Err(InstallError::NotConforming(why)),
+        Err(what) => return Err(InstallError::Unavailable(vec![what])),
     }
-    let at = position_of(request.precommit, request.fulfillment);
+    let cells = cells_of(set, request.precommit, request.fulfillment)?;
     let fulfillment_bytes = Publication::Fulfillment {
         body: request.fulfillment,
         signature: request.fulfillment_signature,
     }
     .object_bytes()?;
     let claim_bytes = derive::resolution_claim(request.precommit, request.fulfillment).encode();
-    let entries = [
-        (
-            TAG_DSM_SOFI_FULFILLMENT.source_bytes().to_vec(),
-            at.k_ful,
-            fulfillment_bytes,
-        ),
-        (economic_root_namespace().to_vec(), at.k_root, claim_bytes),
-    ];
-    let write = write_cells_leader_first(set, &at.seed, &entries).await?;
-    if !write.leader_reached {
-        return Err(InstallError::LeaderUnreached {
-            copies: write.copies,
-        });
+    let reports = write_recorded_position(set, &cells, &fulfillment_bytes, &claim_bytes).await?;
+    let [ful, root] = &reports;
+    if !(ful.reached_leader() && root.reached_leader()) {
+        return Err(InstallError::LeaderUnreached);
     }
-    Ok(Installed {
-        at,
-        leader_reached: true,
-        copies: write.copies,
-    })
+    Ok(Installed { cells, reports })
 }
 
-/// `FulfillmentRegistered` at position `q` of trader `(G, DevID)`, derived
-/// from raw reads of the two cells (Part II §13, rebuild step R10). `parent_root`
-/// is `R_p`, the root the verifier validated itself, from which `s(q)` and
-/// the leader follow. No member computes or writes any of this.
+/// `FulfillmentRegistered` at position `q` of trader `(G, DevID)`, derived by
+/// Core from the route-chain reads of the two cells (Part II §13, rebuild
+/// step R10). `parent_root` is `R_p`, the root the verifier validated itself,
+/// from which `s(q)` and the route follow. No member computes or writes any
+/// of this. Once registered, the completion proofs of both cells are kept
+/// (SoFi Amendment S10).
 ///
-/// The recognized view at `K_ful(q)` needs each candidate's `P`: every
-/// fulfillment envelope any member holds at the key names one, and those are
-/// fetched by id (R8), at most `LOCATOR_BUDGET` of them. A candidate whose
-/// `P` is not in hand names nothing yet — the read answers `Unresolved`, and
-/// a later read can answer.
+/// Recognizing a value at `K_ful(q)` needs the `P` it names: every
+/// fulfillment envelope any seat holds at the key names one, and those are
+/// fetched by id (R8), at most [`LOCATOR_BUDGET`] of them. A `P` the fetch
+/// could not decide leaves the cell undecided — the call fails, and a later
+/// read can answer — so that no later value is read as the first recognized
+/// one while an earlier one's `P` is merely not in hand. The inner `Err` is
+/// what Core names as missing from the reads.
 pub async fn read_registration(
     set: &StorageSet,
     genesis: &D32,
     device_id: &D32,
     position: u64,
     parent_root: &D32,
-) -> Result<Registration, DsmError> {
-    let k_ful = derive::fulfillment_register_key(genesis, device_id, position);
-    let k_root = economic_root_register_key(genesis, device_id, position);
-    let seed = position_seed(genesis, device_id, position, parent_root);
-    let leader = leader_index(set, &seed)?;
-    let ful_reads = read_cell_raw(set, TAG_DSM_SOFI_FULFILLMENT.source_bytes(), &k_ful).await?;
-    let root_reads = read_cell_raw(set, economic_root_namespace(), &k_root).await?;
+) -> Result<Result<Registration, CellMissing>, DsmError> {
+    let cells = position_cells(set, genesis, device_id, position, parent_root)?;
+    let seats = NodeSeats::new(set)?;
+    let ful_evidence = read_cell(&seats, cells.fulfillment()).await;
+    let root_evidence = read_cell(&seats, cells.root().routed()).await;
 
-    // The precommits the candidates name, fetched by id: the only way to
-    // learn whose fulfillment a candidate is, and what its C_q would be.
     let mut precommits: BTreeMap<D32, TraderPrecommitBody> = BTreeMap::new();
-    let mut examined = 0usize;
-    for value in ful_reads.iter().flatten().flatten() {
-        let Some((_, signed)) = dsm::sofi::publication::recognize_fulfillment(value) else {
-            continue;
-        };
-        let pid = *signed.body.precommit_id();
-        if precommits.contains_key(&pid) {
-            continue;
-        }
-        examined += 1;
-        if examined > LOCATOR_BUDGET {
-            break;
-        }
-        if let Resolved::Kept(p) = fetch_precommit(set, &pid).await? {
-            precommits.insert(pid, p.body);
-        }
-    }
-
-    let arity = |e: dsm::sofi::arith::ArityError| DsmError::verification(e.to_string());
-    let fulfillment = resolve_objects(&ful_reads, leader, |bytes| {
-        names_fulfillment_key(bytes, genesis, device_id, position, &precommits).is_some()
-    })
-    .map_err(arity)?;
-    let root = resolve_objects(&root_reads, leader, |bytes| names_root_key(bytes, &k_root))
-        .map_err(arity)?;
-    Ok(fulfillment_registered(
-        &fulfillment,
-        &root,
-        genesis,
-        device_id,
-        position,
-        &precommits,
-    ))
-}
-
-#[cfg(test)]
-#[allow(clippy::disallowed_methods)] // test asserts; a failure here is the signal
-mod tests {
-    use dsm::ccb::sigalg::SPHINCS_PLUS_SPX256F as ALG;
-    use dsm::sofi::wire::SofiResolutionClaim;
-    use serial_test::serial;
-
-    use super::*;
-    use crate::sdk::economic_registers::{read_economic_root_cell, register_economic_root};
-    use crate::sdk::sofi_test_fixtures::{
-        block_on, d, install_request as request, pair_bytes, signed_route as rig,
-        trader_keys as keys, trader_sign as sign, DEV, G,
-    };
-    use crate::sdk::sofi_exercise::{build_exercise, write_exercise};
-    use crate::sdk::sofi_test_fixtures::SignedRoute;
-    use crate::sdk::storage_io::{fake_registers, leader_index};
-    use dsm::sofi::conformance::{fulfillment_conformance, Validation};
-    use dsm::sofi::exercise::recognize_exercise;
-    use dsm::sofi::wire::AttemptEntry;
-
-    fn ful_ns() -> &'static [u8] {
-        TAG_DSM_SOFI_FULFILLMENT.source_bytes()
-    }
-
-    fn all_members(set: &StorageSet) -> Vec<String> {
-        set.members().iter().map(|m| m.member_id.clone()).collect()
-    }
-
-    /// Stage 7 of §31: over evidence acquired from the fleet, conformance is
-    /// Valid, and the pair lands at the leader of `s(q)` — the leader an
-    /// ordinary claim at `q` would race at — and on every other member, both
-    /// halves each. `C_q` is what Core reads as final at `K_root(q)`.
-    #[test]
-    #[serial]
-    fn a_conforming_fulfillment_installs_both_halves_at_the_leader_of_its_position() {
-        let r = rig(true);
-        let installed = block_on(install_fulfillment(&r.set, &request(&r))).unwrap();
-        assert!(installed.leader_reached);
-        assert_eq!(installed.copies, 4);
-        let at = installed.at;
-        assert_eq!(at.position, r.precommit.position() + 1);
-        assert_eq!(
-            at.seed,
-            position_seed(&G, &DEV, at.position, r.precommit.void_root()),
-            "the seed consumes the root the operation was built on"
-        );
-        let (f_bytes, c_bytes) = pair_bytes(&r);
-        assert_eq!(
-            fake_registers::holders(&r.set, ful_ns(), &at.k_ful, &f_bytes),
-            all_members(&r.set)
-        );
-        assert_eq!(
-            fake_registers::holders(&r.set, economic_root_namespace(), &at.k_root, &c_bytes),
-            all_members(&r.set)
-        );
-        // The claim is computed from the two verified objects, never supplied.
-        let claim = SofiResolutionClaim::decode(&c_bytes).unwrap();
-        assert_eq!(claim.fulfillment_id, derive::fulfillment_id(&r.fulfillment));
-        assert_eq!(&claim.realize_root, r.precommit.realize_root());
-        assert_eq!(&claim.void_root, r.precommit.void_root());
-        // Final at K_root(q), as the register reader derives it (leader first,
-        // two copies): the object naming the key is C_q.
-        assert_eq!(
-            block_on(read_economic_root_cell(&r.set, &at.k_root, &at.seed)).unwrap(),
-            Some(c_bytes)
-        );
-        let _ = leader_index(&r.set, &at.seed).unwrap();
-    }
-
-    /// Rule T5 at the install: with the setups unpublished, conformance waits
-    /// on exactly them, and nothing is written anywhere.
-    #[test]
-    #[serial]
-    fn nothing_is_installed_while_conformance_waits() {
-        let r = rig(false);
-        let at = position_of(&r.precommit, &r.fulfillment);
-        assert_eq!(
-            block_on(install_fulfillment(&r.set, &request(&r))),
-            Err(InstallError::Unavailable(ConformanceMissing::Setup {
-                setup_ref: r.precommit.legs()[0].setup_ref,
-            }))
-        );
-        for reads in [
-            fake_registers::get_cells(&r.set, ful_ns(), &at.k_ful),
-            fake_registers::get_cells(&r.set, economic_root_namespace(), &at.k_root),
-        ] {
-            assert!(
-                reads.iter().all(|m| m.as_deref() == Some(&[][..])),
-                "no member holds anything"
-            );
-        }
-        let _ = &r.setups;
-    }
-
-    /// A fulfillment conformance refuses is refused before anything is
-    /// written: the position stays open for the exercise that conforms.
-    #[test]
-    #[serial]
-    fn a_non_conforming_fulfillment_is_refused_before_anything_is_written() {
-        let r = rig(true);
-        let wrong = TraderFulfillmentBody::new(
-            *r.fulfillment.precommit_id(),
-            r.fulfillment.policy_fulfillment_set().to_vec(),
-            r.fulfillment.attempts().to_vec(),
-            r.fulfillment.position() + 1,
-            ALG,
-            &keys().0,
-        )
-        .unwrap();
-        let wrong_sig = sign(&derive::fulfillment_signing_digest(&wrong));
-        let mut req = request(&r);
-        req.fulfillment = &wrong;
-        req.fulfillment_signature = &wrong_sig;
-        assert_eq!(
-            block_on(install_fulfillment(&r.set, &req)),
-            Err(InstallError::NotConforming(
-                FulfillmentConformanceError::PositionNotSuccessor {
-                    expected: r.precommit.position() + 1,
-                    got: r.precommit.position() + 2,
-                }
-            ))
-        );
-        let at = position_of(&r.precommit, &wrong);
-        assert!(fake_registers::get_cells(&r.set, ful_ns(), &at.k_ful)
-            .iter()
-            .all(|m| m.as_deref() == Some(&[][..])));
-    }
-
-    /// PositionPairAtomic (TLA `DSM_SofiSuccessorCells`, Lean
-    /// `position_pair_atomic`): no member ever holds one half of a position.
-    /// A member that is down takes neither; a member that cannot take
-    /// `K_root(q)` takes neither, because the pair is one transaction.
-    /// Mutation: the pair written as two single puts — the member that
-    /// refused `K_root(q)` then holds `F` alone.
-    #[test]
-    #[serial]
-    fn no_member_ever_holds_one_half_of_a_position() {
-        let r = rig(true);
-        let at = position_of(&r.precommit, &r.fulfillment);
-        let leader = leader_index(&r.set, &at.seed).unwrap();
-        let others: Vec<&str> = r
-            .set
-            .members()
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| *i != leader)
-            .map(|(_, m)| m.member_id.as_str())
-            .collect();
-        fake_registers::fail_member(others[0], true);
-        fake_registers::fail_cell(others[1], economic_root_namespace(), &at.k_root);
-        let installed = block_on(install_fulfillment(&r.set, &request(&r))).unwrap();
-        assert!(installed.leader_reached);
-        assert_eq!(installed.copies, 2);
-        let (f_bytes, c_bytes) = pair_bytes(&r);
-        let holds_f = fake_registers::holders(&r.set, ful_ns(), &at.k_ful, &f_bytes);
-        let holds_c =
-            fake_registers::holders(&r.set, economic_root_namespace(), &at.k_root, &c_bytes);
-        assert_eq!(holds_f, holds_c, "both halves or neither, at every member");
-        assert_eq!(holds_f.len(), 3);
-        assert!(!holds_f.iter().any(|m| m == others[0]));
-        assert!(!holds_f.iter().any(|m| m == others[1]));
-    }
-
-    /// §7.2: one seed serves both — an ordinary claim at the same `q` races
-    /// at the same leader, and the member keeps what it is given. `C_q`, the
-    /// leader's first object naming the key, stays what Core reads as final;
-    /// the later claim is held, not refused, and is nothing at the cell.
-    #[test]
-    #[serial]
-    fn an_ordinary_claim_at_the_same_position_races_at_the_same_leader_and_is_kept() {
-        let r = rig(true);
-        let installed = block_on(install_fulfillment(&r.set, &request(&r))).unwrap();
-        let at = installed.at;
-        let later = b"an ordinary claim envelope, arriving second".to_vec();
-        let claimed = block_on(register_economic_root(
-            &r.set,
-            &G,
-            &DEV,
-            at.position,
-            r.precommit.void_root(),
-            &later,
-        ))
-        .unwrap();
-        assert_eq!(claimed.accepted(), 5, "kept everywhere, refused nowhere");
-        assert_eq!(
-            fake_registers::holders(&r.set, economic_root_namespace(), &at.k_root, &later).len(),
-            5
-        );
-        let (_, c_bytes) = pair_bytes(&r);
-        assert_eq!(
-            block_on(read_economic_root_cell(&r.set, &at.k_root, &at.seed)).unwrap(),
-            Some(c_bytes),
-            "the first object naming the key at the leader is what is final"
-        );
-    }
-
-    // ── R10: FulfillmentRegistered, derived from the two cells ─────────────
-
-    /// Part II §13: after the install, the two cells' final values ARE the
-    /// registration — nothing else was written anywhere, and the reader
-    /// derives the fact from raw reads with the same leader an install used.
-    #[test]
-    #[serial]
-    fn a_registration_is_derived_from_the_two_cells_and_no_member_writes_it() {
-        let r = rig(true);
-        let at = position_of(&r.precommit, &r.fulfillment);
-        assert_eq!(
-            block_on(read_registration(
-                &r.set,
-                &G,
-                &DEV,
-                at.position,
-                r.precommit.void_root()
-            ))
-            .unwrap(),
-            Registration::Unresolved,
-            "an open position"
-        );
-        block_on(install_fulfillment(&r.set, &request(&r))).unwrap();
-        assert_eq!(
-            block_on(read_registration(
-                &r.set,
-                &G,
-                &DEV,
-                at.position,
-                r.precommit.void_root()
-            ))
-            .unwrap(),
-            Registration::Registered(Signed {
-                body: r.fulfillment.clone(),
-                signature: r.f_sig.clone(),
-            })
-        );
-        // Exactly the two values, one per cell, at every member: no
-        // registration record exists to be read.
-        for reads in [
-            fake_registers::get_cells(&r.set, ful_ns(), &at.k_ful),
-            fake_registers::get_cells(&r.set, economic_root_namespace(), &at.k_root),
-        ] {
-            assert!(reads.iter().all(|m| m.as_ref().map(|v| v.len()) == Some(1)));
-        }
-    }
-
-    /// `LeaderHeld` is not `Final`: the pair at the leader and one copy is
-    /// not a registration, and becomes one once two other members hold it.
-    #[test]
-    #[serial]
-    fn held_at_the_leader_but_not_copied_is_not_registered() {
-        let r = rig(true);
-        let at = position_of(&r.precommit, &r.fulfillment);
-        let leader = leader_index(&r.set, &at.seed).unwrap();
-        let others: Vec<String> = r
-            .set
-            .members()
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| *i != leader)
-            .map(|(_, m)| m.member_id.clone())
-            .collect();
-        for m in &others[..3] {
-            fake_registers::fail_member(m, true);
-        }
-        let installed = block_on(install_fulfillment(&r.set, &request(&r))).unwrap();
-        assert_eq!(installed.copies, 1);
-        let read = || {
-            block_on(read_registration(
-                &r.set,
-                &G,
-                &DEV,
-                at.position,
-                r.precommit.void_root(),
-            ))
-            .unwrap()
-        };
-        assert_eq!(read(), Registration::Unresolved, "one copy is not final");
-        for m in &others[..3] {
-            fake_registers::fail_member(m, false);
-        }
-        // Anyone may carry the same bytes to the members not reached — one
-        // half at a time here, so that each cell's finality is isolated.
-        let (f_bytes, c_bytes) = pair_bytes(&r);
-        let carry_to: Vec<usize> = r
-            .set
-            .members()
-            .iter()
-            .enumerate()
-            .filter(|(_, m)| others[..2].contains(&m.member_id))
-            .map(|(i, _)| i)
-            .collect();
-        for i in &carry_to {
-            fake_registers::put_cell_to_member(
-                &r.set,
-                *i,
-                economic_root_namespace(),
-                &at.k_root,
-                &c_bytes,
-            )
-            .unwrap();
-        }
-        assert_eq!(
-            read(),
-            Registration::Unresolved,
-            "K_root(q) final beside a merely leader-held F is not a registration"
-        );
-        for i in &carry_to {
-            fake_registers::put_cell_to_member(&r.set, *i, ful_ns(), &at.k_ful, &f_bytes).unwrap();
-        }
-        assert_eq!(
-            read(),
-            Registration::Registered(Signed {
-                body: r.fulfillment.clone(),
-                signature: r.f_sig.clone(),
-            }),
-            "leader plus two copies at both cells"
-        );
-    }
-
-    /// The route's own exercise, written to every leg's key, so the cells
-    /// `K^(a)` the next attempt skips past are Final.
-    fn exercise_at(r: &SignedRoute, fulfillment: &TraderFulfillmentBody, signature: &[u8]) {
-        let req = InstallRequest {
-            precommit: &r.precommit,
-            precommit_signature: &r.p_sig,
-            preimage: &r.preimage,
-            fulfillment,
-            fulfillment_signature: signature,
-            own_objects: &r.own,
-        };
-        let evidence = block_on(acquire_conformance_evidence(&r.set, &req)).unwrap();
-        let exercise = build_exercise(&req, &evidence).unwrap();
-        let recognized = recognize_exercise(&exercise.encode()).unwrap();
-        block_on(write_exercise(&r.set, &exercise, &recognized)).unwrap();
-    }
-
-    /// The same `P`, exercised at `attempt` on every leg, signed by the trader.
-    fn fulfillment_at(r: &SignedRoute, attempt: u64) -> (TraderFulfillmentBody, Vec<u8>) {
-        let f = TraderFulfillmentBody::new(
-            *r.fulfillment.precommit_id(),
-            r.fulfillment.policy_fulfillment_set().to_vec(),
-            r.fulfillment
-                .attempts()
-                .iter()
-                .map(|a| AttemptEntry {
-                    vault_id: a.vault_id,
-                    attempt,
-                })
-                .collect(),
-            r.fulfillment.position(),
-            ALG,
-            &keys().0,
-        )
-        .unwrap();
-        let signature = sign(&derive::fulfillment_signing_digest(&f));
-        (f, signature)
-    }
-
-    fn request_at<'a>(
-        r: &'a SignedRoute,
-        f: &'a TraderFulfillmentBody,
-        signature: &'a [u8],
-    ) -> InstallRequest<'a> {
-        InstallRequest {
-            precommit: &r.precommit,
-            precommit_signature: &r.p_sig,
-            preimage: &r.preimage,
-            fulfillment: f,
-            fulfillment_signature: signature,
-            own_objects: &r.own,
-        }
-    }
-
-    /// A RETRY INSTALLS. Conformance item 5 requires the key before this one
-    /// to have a permanent storage resolution, and the acquisition now reads
-    /// it. Before this change `prior_attempts` was handed to conformance
-    /// empty, so every attempt above zero answered
-    /// `Unavailable(PriorAttempt)` and no retry in the system could install.
-    ///
-    /// Executed at attempt 1 AND attempt 2 (owner ruling §44.4): the second
-    /// proves the acquisition reads the whole run `K^(0) … K^(a-1)` and not
-    /// just the key immediately before.
-    #[test]
-    #[serial]
-    fn an_attempt_above_zero_installs_once_the_keys_it_skips_are_final() {
-        let r = rig(true);
-        block_on(install_fulfillment(&r.set, &request(&r))).unwrap();
-        exercise_at(&r, &r.fulfillment, &r.f_sig);
-
-        // Attempt 1: K^(0) is final on every leg.
-        let (f1, s1) = fulfillment_at(&r, 1);
-        let req1 = request_at(&r, &f1, &s1);
-        let ev1 = block_on(acquire_conformance_evidence(&r.set, &req1)).unwrap();
-        for leg in r.precommit.legs() {
-            assert!(
-                matches!(
-                    ev1.prior_attempts.get(&(leg.vault_id, 0)),
-                    Some(CellResolution::Final(_))
-                ),
-                "the acquisition reads K^(0) of every leg, not an empty map"
-            );
-        }
-        assert_eq!(
-            fulfillment_conformance(&f1, &s1, &ev1).verdict(),
-            Validation::Valid
-        );
-        assert!(block_on(install_fulfillment(&r.set, &req1)).is_ok());
-        exercise_at(&r, &f1, &s1);
-
-        // Attempt 2: the whole run 0..=1, not just the key before.
-        let (f2, s2) = fulfillment_at(&r, 2);
-        let req2 = request_at(&r, &f2, &s2);
-        let ev2 = block_on(acquire_conformance_evidence(&r.set, &req2)).unwrap();
-        for leg in r.precommit.legs() {
-            for earlier in 0..2u64 {
-                assert!(
-                    matches!(
-                        ev2.prior_attempts.get(&(leg.vault_id, earlier)),
-                        Some(CellResolution::Final(_))
-                    ),
-                    "K^({earlier}) of every leg is read at attempt 2"
-                );
+    let mut named: Vec<D32> = Vec::new();
+    for value in crate::sdk::route_seats::carried_values(&ful_evidence) {
+        if let Some((.., signed)) = recognize_fulfillment(&value) {
+            let id = *signed.body.precommit_id();
+            if !named.contains(&id) {
+                named.push(id);
             }
         }
-        assert_eq!(
-            fulfillment_conformance(&f2, &s2, &ev2).verdict(),
-            Validation::Valid
-        );
-        assert!(block_on(install_fulfillment(&r.set, &req2)).is_ok());
     }
-
-    /// An unread or unresolved earlier key is `Unavailable`, never a pass:
-    /// the same attempt 1 with `K^(0)` still open waits, and nothing is
-    /// installed. An empty map means nothing was read — never that there
-    /// were no prior attempts.
-    #[test]
-    #[serial]
-    fn an_attempt_whose_earlier_key_is_open_waits_and_installs_nothing() {
-        let r = rig(true);
-        let (f1, s1) = fulfillment_at(&r, 1);
-        let req1 = request_at(&r, &f1, &s1);
-        let ev1 = block_on(acquire_conformance_evidence(&r.set, &req1)).unwrap();
-        let leg = &r.precommit.legs()[0];
-        assert_eq!(
-            ev1.prior_attempts.get(&(leg.vault_id, 0)),
-            Some(&CellResolution::Unresolved),
-            "the key was read and is open — present, and not Final"
-        );
-        assert_eq!(
-            fulfillment_conformance(&f1, &s1, &ev1).verdict(),
-            Validation::Unavailable
-        );
-        assert!(matches!(
-            block_on(install_fulfillment(&r.set, &req1)),
-            Err(InstallError::Unavailable(
-                ConformanceMissing::PriorAttempt { attempt: 0, .. }
-            ))
+    if named.len() > LOCATOR_BUDGET {
+        return Err(storage_err(
+            "fulfillment register",
+            format!(
+                "{} precommits are named at K_ful({position}), past the budget of {LOCATOR_BUDGET}",
+                named.len()
+            ),
         ));
-        // An attempt of zero has no earlier key and contributes no entry:
-        // the one case where the map is legitimately empty.
-        let ev0 = block_on(acquire_conformance_evidence(&r.set, &request(&r))).unwrap();
-        assert!(ev0.prior_attempts.is_empty());
-        assert_eq!(
-            fulfillment_conformance(&r.fulfillment, &r.f_sig, &ev0).verdict(),
-            Validation::Valid
-        );
     }
-
-    /// PairMutualExclusion: a claim that reached the leader of `K_root(q)`
-    /// first — here another fulfillment's `C_q'`, standing for any ordinary
-    /// transition at `q` — settles that this `F` is never registered, even
-    /// though `F` itself is final at `K_ful(q)`.
-    #[test]
-    #[serial]
-    fn a_claim_first_at_the_root_cell_settles_that_the_fulfillment_never_registers() {
-        let r = rig(true);
-        let at = position_of(&r.precommit, &r.fulfillment);
-        let leader = leader_index(&r.set, &at.seed).unwrap();
-        let rival_f = TraderFulfillmentBody::new(
-            *r.fulfillment.precommit_id(),
-            r.fulfillment.policy_fulfillment_set().to_vec(),
-            r.fulfillment
-                .attempts()
-                .iter()
-                .map(|a| dsm::sofi::wire::AttemptEntry {
-                    vault_id: a.vault_id,
-                    attempt: a.attempt + 1,
-                })
-                .collect(),
-            r.fulfillment.position(),
-            ALG,
-            &keys().0,
-        )
-        .unwrap();
-        let rival_claim = derive::resolution_claim(&r.precommit, &rival_f).encode();
-        fake_registers::put_cell(
-            &r.set,
-            leader,
-            economic_root_namespace(),
-            &at.k_root,
-            &rival_claim,
-        );
-        block_on(install_fulfillment(&r.set, &request(&r))).unwrap();
-        assert_eq!(
-            block_on(read_registration(
-                &r.set,
-                &G,
-                &DEV,
-                at.position,
-                r.precommit.void_root()
-            ))
-            .unwrap(),
-            Registration::NeverRegistered {
-                fulfillment: Signed {
-                    body: r.fulfillment.clone(),
-                    signature: r.f_sig.clone(),
-                },
-                settled_at: dsm::sofi::registration::PositionCell::Root,
+    for id in named {
+        match fetch_precommit(set, &id).await? {
+            Resolved::Kept(precommit) => {
+                precommits.insert(id, precommit.body);
             }
-        );
+            Resolved::None => {}
+            Resolved::Unavailable => {
+                return Err(storage_err(
+                    "fulfillment register",
+                    "a precommit a candidate names could not be fetched",
+                ))
+            }
+        }
     }
 
-    /// Bytes that are not an object naming `K_ful(q)` — garbage, and a
-    /// well-formed fulfillment of a precommit nobody published — are nothing
-    /// at the cell, however early they arrived at the leader: the trader's
-    /// own `F` is the leader's first RECOGNIZED object and registers.
-    #[test]
-    #[serial]
-    fn a_fulfillment_that_names_no_published_precommit_is_nothing_at_the_key() {
-        let r = rig(true);
-        let at = position_of(&r.precommit, &r.fulfillment);
-        let leader = leader_index(&r.set, &at.seed).unwrap();
-        fake_registers::put_cell(&r.set, leader, ful_ns(), &at.k_ful, b"not an envelope");
-        let orphan = TraderFulfillmentBody::new(
-            d(0x0F),
-            r.fulfillment.policy_fulfillment_set().to_vec(),
-            r.fulfillment.attempts().to_vec(),
-            r.fulfillment.position(),
-            ALG,
-            &keys().0,
-        )
-        .unwrap();
-        let orphan_bytes = Publication::Fulfillment {
-            body: &orphan,
-            signature: &sign(&derive::fulfillment_signing_digest(&orphan)),
-        }
-        .object_bytes()
-        .unwrap();
-        fake_registers::put_cell(&r.set, leader, ful_ns(), &at.k_ful, &orphan_bytes);
-        block_on(install_fulfillment(&r.set, &request(&r))).unwrap();
-        assert_eq!(
-            block_on(read_registration(
-                &r.set,
-                &G,
-                &DEV,
-                at.position,
-                r.precommit.void_root()
-            ))
-            .unwrap(),
-            Registration::Registered(Signed {
-                body: r.fulfillment.clone(),
-                signature: r.f_sig.clone(),
-            })
-        );
+    let registration =
+        match fulfillment_registered(&cells, &ful_evidence, &root_evidence, &precommits) {
+            Ok(registration) => registration,
+            Err(missing) => return Ok(Err(missing)),
+        };
+    if let Registration::Registered(..) = &registration {
+        let (.., ful_proof) = fulfillment_completion(&cells, &ful_evidence, &precommits)
+            .map_err(|missing| storage_err("fulfillment completion", format!("{missing:?}")))?
+            .ok_or_else(|| storage_err("fulfillment completion", "a final value has no proof"))?;
+        keep_completion(cells.fulfillment(), &ful_proof)?;
+        let (.., root_proof) = root_completion(cells.root(), &root_evidence)
+            .map_err(|missing| storage_err("root claim completion", format!("{missing:?}")))?
+            .ok_or_else(|| storage_err("root claim completion", "a final value has no proof"))?;
+        keep_completion(cells.root().routed(), &root_proof)?;
     }
+    Ok(Ok(registration))
 }

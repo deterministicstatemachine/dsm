@@ -111,7 +111,7 @@ export async function getTransactions(): Promise<any[]> {
   return history.transactions;
 }
 
-export async function getInbox(limit = 50): Promise<{ items: Array<{ id: string; preview: string; sender_id?: string; tick?: bigint; payload?: Uint8Array; isStaleRoute: boolean }> }> {
+export async function getInbox(limit = 50): Promise<{ items: Array<{ id: string; preview: string; sender_id?: string; payload?: Uint8Array; isStaleRoute: boolean }> }> {
   try {
     const responseBytes = await getInboxStrictBridge({ limit });
     
@@ -140,7 +140,6 @@ export async function getInbox(limit = 50): Promise<{ items: Array<{ id: string;
       id: item.id || '',
       preview: item.preview || '',
       sender_id: item.senderId,
-      tick: item.tick,
       payload: item.payload,
       isStaleRoute: item.isStaleRoute,
     }));
@@ -157,7 +156,6 @@ export async function listB0xMessages(): Promise<any[]> {
   return inbox.items.map(item => ({
     id: item.id,
     preview: item.preview,
-    tick: item.tick,
     senderId: item.sender_id,
     payload: item.payload,
     isStaleRoute: item.isStaleRoute ?? false,

@@ -12,8 +12,7 @@ set -euo pipefail
 # production reference to a test-only constructor, or a consumer path that
 # reimplements the sender conjuncts instead of sharing them.
 #
-# Five source checks and one artifact check. The artifact check is the
-# load-bearing one, because it asks the compiler rather than the text.
+# Six source checks.
 
 echo "=== peer debit: lineage is authoritative, not asserted ==="
 
@@ -37,37 +36,35 @@ if grep -qE '^\s+pub(\(| )' <<<"$body"; then
 fi
 echo "  ✓ the payload cannot be assembled outside its module"
 
-# 2. The SoFi arm is constructed in exactly ONE place, and that place is
-#    test-gated. This is what makes "no production path produces a SoFi-kind
-#    transition" a fact about the build rather than a claim in a comment.
-echo "[2/6] ResolvedSofi is constructed once, under the testing feature..."
+# 2. Nothing constructs the SoFi arm. The walk refuses every conditional
+#    claim, so no path produces a SoFi-kind transition; the refusal in
+#    prevalidate_sender_debit is in place for when one does. A construction
+#    site appearing here is that change, and it must bring the refusal's
+#    test (one that performs the forbidden debit) with it.
+echo "[2/6] nothing constructs ResolvedSofi..."
 sofi_ctors=$(grep -n 'Self::ResolvedSofi(PeerTransitionFacts {' "$prov" || true)
-n=$(grep -c . <<<"${sofi_ctors:-}" || true)
-[[ -n "$sofi_ctors" ]] || { echo "[FAIL] nothing constructs ResolvedSofi; this gate has lost its subject"; exit 1; }
-if [[ "$n" -ne 1 ]]; then
-  echo "[FAIL] ResolvedSofi is constructed in $n places; exactly one is allowed"
+if [[ -n "$sofi_ctors" ]]; then
+  echo "[FAIL] ResolvedSofi is constructed:"
   echo "$sofi_ctors"
+  echo "       A SoFi-kind transition now exists; P15-9's refusal must be"
+  echo "       exercised by a test that attempts the debit, and this gate updated."
   exit 1
 fi
-echo "  ✓ one construction site"
+echo "  ✓ no construction site"
 
-# 3. Both test-only constructors carry the testing gate. `testing` is enabled
-#    only through a dev-dependency in dsm and dsm_sdk, so it never reaches a
-#    production artifact (check 6 proves that rather than trusting it).
-echo "[3/6] the test-only constructors are feature-gated..."
-for ctor in single_root_for_test resolved_sofi_for_test; do
-  grep -q "fn $ctor" "$prov" || { echo "[FAIL] $ctor is not declared in $prov"; exit 1; }
-  while IFS=: read -r line _; do
-    window=$(sed -n "$((line > 4 ? line - 4 : 1)),$((line - 1))p" "$prov")
-    if ! grep -q 'cfg(feature = "testing")' <<<"$window"; then
-      echo "[FAIL] $prov:$line declares $ctor without #[cfg(feature = \"testing\")]"
-      echo "       above it. A fixture constructor compiled into production"
-      echo "       would let any caller forge a lineage."
-      exit 1
-    fi
-  done < <(grep -n "fn $ctor" "$prov")
-  echo "  ✓ $ctor"
-done
+# 3. No constructor assembles a transition outside the walk. dsm has no
+#    `testing` feature, so no gate can put one in any artifact.
+echo "[3/6] no test-only constructor, and no testing feature..."
+if grep -nE 'fn [a-z_]+_for_test\(' "$prov"; then
+  echo "[FAIL] a test-only constructor is declared in $prov — it would assert"
+  echo "       a lineage instead of establishing one."
+  exit 1
+fi
+if grep -nE '^testing *=' "$core/dsm/Cargo.toml"; then
+  echo "[FAIL] dsm declares a testing feature again."
+  exit 1
+fi
+echo "  ✓ only the walk assembles a peer transition"
 
 # 4. The walk's constructor has exactly one caller, and it is the walk. A
 #    second caller would be asserting a lineage instead of establishing one.
@@ -106,34 +103,16 @@ if [[ "$seam_callers" != "$expected" ]]; then
 fi
 echo "  ✓ one seam, both consumer paths"
 
-# 6. No production artifact contains either fixture constructor. A default
-#    `cargo build` resolves no dev-dependencies, so `testing` is off and the
-#    public items' names are absent from the rlib's metadata.
-echo "[6/6] the default-feature rlib contains neither fixture constructor..."
-command -v cargo &>/dev/null || { echo "[FAIL] cargo unavailable; cannot prove the artifact"; exit 1; }
-rlibs=$(cd "$core" && cargo build -p dsm --message-format=json 2>/dev/null |
-  python3 -c '
-import json, sys
-for line in sys.stdin:
-    try:
-        m = json.loads(line)
-    except ValueError:
-        continue
-    if m.get("reason") == "compiler-artifact" and m.get("target", {}).get("name") == "dsm":
-        for f in m.get("filenames", []):
-            if f.endswith(".rlib"):
-                print(f)
-')
-[[ -n "$rlibs" ]] || { echo "[FAIL] no dsm rlib reported by cargo; cannot prove the artifact"; exit 1; }
-for rlib in $rlibs; do
-  for ctor in single_root_for_test resolved_sofi_for_test; do
-    if grep -aq "$ctor" "$rlib"; then
-      echo "[FAIL] $ctor is present in a default-feature artifact: $rlib"
-      echo "       production can forge a peer-transition lineage"
-      exit 1
-    fi
-  done
-done
-echo "  ✓ absent from $(wc -w <<<"$rlibs" | tr -d ' ') default-feature artifact(s)"
+# 6. No source anywhere in dsm or dsm_sdk gates code on a `testing` feature:
+#    a helper behind one is a real method on the type, shipped to whoever
+#    enables it.
+echo "[6/6] nothing is gated on a testing feature..."
+gated=$(grep -rn 'feature = "testing"' "$core/dsm/src" "$core/dsm_sdk/src" || true)
+if [[ -n "$gated" ]]; then
+  echo "[FAIL] code gated on a testing feature:"
+  echo "$gated"
+  exit 1
+fi
+echo "  ✓ none"
 
 echo "✓ only an ordinary single-root lineage can become an eligible peer debit"

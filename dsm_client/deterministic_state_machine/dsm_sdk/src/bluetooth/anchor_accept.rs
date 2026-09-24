@@ -144,9 +144,9 @@ impl DsmVerifier for DsmStateVerifier<'_> {
         // hook to re-check from its arguments.
         //
         // What Def. 12 step 12 actually asks for is `σ^DSM` over the transition plus the whole-state
-        // consumption `R_i → R_{i+1}`. That CANNOT be verified here: the relationship proofs
-        // (`rel_proof_parent`, `rel_proof_child`) are not carried in the OfflineRelease. The
-        // bilateral handler verifies them, together with the §C1 `h_{n+1}` recompute, and
+        // consumption `R_i → R_{i+1}`. That CANNOT be verified here: the relationship path is not
+        // carried in the OfflineRelease — it rides in the stitched receipt. The bilateral handler
+        // verifies the receipt's state rules, together with the §C1 `h_{n+1}` recompute, and
         // `accept_offline_release` refuses before running the predicate unless the cert's device
         // roots equal the ones the handler verified (anchor_accept.rs:251-257).
         //
@@ -269,7 +269,7 @@ pub fn accept_offline_release(
     let pinned = pinned.ok_or(OfflineRecover::AnchorNotEnrolled)?;
 
     // Tie the cert's device roots to the roots the handler INDEPENDENTLY verified from the confirm
-    // (rel_proof_parent/child + §C1 recompute). The predicate checks Π against the CERT roots; if
+    // (the stitched receipt's relationship path + §C1 recompute). The predicate checks Π against the CERT roots; if
     // the cert roots were not the actual verified device roots, the sender could sign an arbitrary
     // parallel tree — reject before running the predicate.
     if rel.cert.sender_device_root_before != *expected_sender_device_root_before

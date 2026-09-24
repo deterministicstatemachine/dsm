@@ -39,18 +39,6 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::RwLock;
 
-/// Deterministic mock-anchor seed from a device id (mock-anchor feature only). Both the sender
-/// (wiring its own transport) and the receiver (deriving a counterparty's mock identity) derive the
-/// SAME seed, so a device's mock anchor identity is reproducible from its device id with no hardware
-/// and no pairing exchange — the test shortcut that stands in for the Safe 7 element + admission.
-#[cfg(feature = "mock-anchor")]
-pub fn mock_anchor_seed(device_id: &[u8; 32]) -> [u8; 32] {
-    let mut h =
-        dsm::crypto::blake3::dsm_domain_hasher(dsm::tagged_domain!(b"DSM/mock-anchor-seed/v1"));
-    h.update(device_id);
-    *h.finalize().as_bytes()
-}
-
 /// Global pairing orchestrator
 static PAIRING_ORCHESTRATOR: RwLock<Option<Arc<pairing_orchestrator::PairingOrchestrator>>> =
     RwLock::new(None);
@@ -105,9 +93,6 @@ pub struct BluetoothManager {
     transport_adapter: Arc<BilateralTransportAdapter>,
     /// Android BLE bridge
     android_bridge: Arc<android_ble_bridge::AndroidBleBridge>,
-    /// Local device information
-    local_device_id: String,
-    device_id_bytes: [u8; 32],
 }
 
 impl BluetoothManager {
@@ -120,8 +105,6 @@ impl BluetoothManager {
             >,
         >,
     ) -> Self {
-        let device_id = crate::util::text_id::encode_base32_crockford(&device_id_bytes);
-
         #[allow(unused_mut)]
         let mut bilateral_handler = BilateralBleHandler::new(bilateral_tx_manager, device_id_bytes);
 
@@ -205,8 +188,6 @@ impl BluetoothManager {
             frame_coordinator,
             transport_adapter,
             android_bridge,
-            local_device_id: device_id,
-            device_id_bytes,
         }
     }
 }
@@ -323,12 +304,9 @@ pub async fn ensure_bluetooth_manager_and_sync_contact(
     // Create the BluetoothManager
     use dsm::core::contact_manager::DsmContactManager;
     use dsm::core::bilateral_transaction_manager::BilateralTransactionManager;
-    // Note: Health state tracking removed - always proceed
     use tokio::sync::RwLock as TokioRwLock;
 
-    let storage_nodes: Vec<dsm::types::identifiers::NodeId> =
-        vec![dsm::types::identifiers::NodeId::new("n")];
-    let contact_manager = DsmContactManager::new(dev_fixed, storage_nodes);
+    let contact_manager = DsmContactManager::new(dev_fixed);
     // The bilateral σ signer MUST be the device identity AK — the same key the QR pins and σ is
     // verified against (`derive_device_ak_keypair(seed, genesis, 0, policy)`), NEVER a random
     // keypair. This late-init manager can win the global-signer `OnceLock` race (first-writer-wins)
@@ -348,7 +326,7 @@ pub async fn ensure_bluetooth_manager_and_sync_contact(
         }
     };
     let chain_tip_store = Arc::new(crate::sdk::chain_tip_store::SqliteChainTipStore::new());
-    let manager = BilateralTransactionManager::new_with_chain_tip_store(
+    let manager = BilateralTransactionManager::new(
         contact_manager,
         keypair,
         dev_fixed,
@@ -396,15 +374,6 @@ pub async fn ensure_bluetooth_manager_and_sync_contact(
     Ok(true)
 }
 
-/// Non-Android stub for ensure_bluetooth_manager_and_sync_contact
-#[cfg(not(all(target_os = "android", feature = "bluetooth")))]
-pub async fn ensure_bluetooth_manager_and_sync_contact(
-    _contact: dsm::types::contact_types::DsmVerifiedContact,
-) -> Result<bool, String> {
-    log::debug!("[BLE] ensure_bluetooth_manager_and_sync_contact: not on Android, skipping");
-    Ok(false)
-}
-
 /// Resync ALL contacts from SQLite to BluetoothManager.
 /// This is called when forceBleCoordinatorInit detects an existing BluetoothManager
 /// to ensure contacts are loaded even if the initial sync was missed.
@@ -424,29 +393,14 @@ pub async fn resync_all_contacts_to_bluetooth_manager() -> Result<usize, String>
 
     let mut synced_count = 0;
     for c in contacts {
-        let Some(verified_contact) = c.to_verified_contact() else {
-            log::warn!("[BLE] resync_all_contacts: ⚠️ Skipping contact with invalid lengths");
-            continue;
-        };
-        log::warn!(
-            "[BLE] resync_all_contacts: contact alias={} public_key_len={}",
-            c.alias,
-            c.public_key.len()
-        );
-
-        match bt_mgr.add_verified_contact(verified_contact).await {
-            Ok(_) => {
-                log::warn!("[BLE] resync_all_contacts: ✅ Synced contact {}", c.alias);
-                synced_count += 1;
-            }
-            Err(e) => {
-                log::warn!(
-                    "[BLE] resync_all_contacts: ❌ Failed to sync contact {}: {}",
-                    c.alias,
-                    e
-                );
-            }
-        }
+        let verified_contact = c
+            .to_verified_contact()
+            .map_err(|e| format!("resync_all_contacts: {e}"))?;
+        bt_mgr
+            .add_verified_contact(verified_contact)
+            .await
+            .map_err(|e| format!("resync_all_contacts: contact {}: {e}", c.alias))?;
+        synced_count += 1;
     }
 
     log::warn!(

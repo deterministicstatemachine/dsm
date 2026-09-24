@@ -38,12 +38,9 @@ export type DomainContact = {
   deviceId: string;
   genesisHash: string;
   chainTip?: string;
-  chainTipSmtProof?: unknown;
   bleAddress?: string;
   status?: string;
   genesisVerifiedOnline?: boolean;
-  verifyCounter?: number;
-  addedCounter?: number;
   verifyingStorageNodes?: number;
   signingPublicKey?: string;  // base32 Crockford encoded
   sendReady?: boolean;
@@ -57,7 +54,6 @@ export type DomainTransaction = {
   type: 'online' | 'offline';
   amount: bigint;
   recipient: string;
-  createdAt?: number;
   memo?: string;
   status: 'pending' | 'confirmed' | 'failed';
   syncStatus?: 'synced' | 'syncing' | 'unsynced' | undefined;

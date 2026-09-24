@@ -60,9 +60,7 @@ const wrapExternalCommit = (ec: pb.ExternalCommit) => {
     version: 3,
     headers: new pb.Headers({
       deviceId: new Uint8Array(32) as any,
-      chainTip: new Uint8Array(32) as any,
       genesisHash: new Uint8Array(32) as any,
-      seq: 1n,
     }),
     messageId: new Uint8Array(16) as any,
     payload: { case: 'universalTx', value: tx } as any,

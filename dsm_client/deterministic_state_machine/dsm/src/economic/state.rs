@@ -101,6 +101,31 @@ impl EconomicConsumedSourceState {
     }
 }
 
+/// `0x0060` schema 1 — the creator's record that the native token under
+/// `policy_commit` was created on this lineage (SoFi Amendment S8).
+///
+/// Insert-only: presence is the whole meaning. The creating transition proves
+/// the leaf was ZERO before it wrote, so a second creation of the same commit
+/// on this lineage cannot produce a valid pre-state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EconomicTokenCreationState {
+    pub policy_commit: [u8; 32],
+}
+
+impl CcbObject for EconomicTokenCreationState {
+    const CLASS: u16 = class::ECONOMIC_TOKEN_CREATION_STATE;
+    const SCHEMA: u16 = 1;
+}
+
+impl EconomicTokenCreationState {
+    fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        push_envelope::<Self>(&mut out);
+        push_digest32(&mut out, &self.policy_commit); // 1
+        out
+    }
+}
+
 /// Any leaf of `R_econ`.
 ///
 /// The offline device-bound allocation is deliberately **not** a variant. It
@@ -126,6 +151,8 @@ pub enum EconomicLeafState {
     /// leaf is never rewritten, which is what makes its presence under a
     /// validated root a proof that the creation happened on that lineage.
     VaultCreation(crate::sofi::wire::VaultCreation),
+    /// The creator's token-creation record, insert-only (SoFi Amendment S8).
+    TokenCreation(EconomicTokenCreationState),
 }
 
 impl EconomicLeafState {
@@ -137,6 +164,7 @@ impl EconomicLeafState {
             Self::ConsumedSource(_) => EconomicConsumedSourceState::CLASS,
             Self::Relationship(_) => crate::ccb::class::SOFI_TRADER_RELATIONSHIP_LEAF,
             Self::VaultCreation(_) => crate::ccb::class::SOFI_VAULT_CREATION,
+            Self::TokenCreation(_) => EconomicTokenCreationState::CLASS,
         }
     }
 
@@ -147,6 +175,7 @@ impl EconomicLeafState {
             Self::ConsumedSource(s) => s.encode(),
             Self::Relationship(s) => Ok(s.encode()),
             Self::VaultCreation(s) => Ok(s.encode()),
+            Self::TokenCreation(s) => Ok(s.encode()),
         }
     }
 
@@ -174,7 +203,10 @@ impl EconomicLeafState {
             | Self::Relationship(_)
             // A creation record is a RECORD: the funding it names was debited
             // by the same write set, so the record itself credits nothing.
-            | Self::VaultCreation(_) => None,
+            | Self::VaultCreation(_)
+            // A token-creation record credits nothing either: the supply is
+            // the release credit beside it.
+            | Self::TokenCreation(_) => None,
         }
     }
 
@@ -190,6 +222,7 @@ impl EconomicLeafState {
             Self::ConsumedSource(s) => (self.class(), vec![s.source_id]),
             Self::Relationship(s) => (self.class(), vec![s.vault_id]),
             Self::VaultCreation(s) => (self.class(), vec![s.vault_id]),
+            Self::TokenCreation(s) => (self.class(), vec![s.policy_commit]),
         }
     }
 
@@ -210,6 +243,9 @@ impl EconomicLeafState {
             // anyway because every economic key names the tree it lives in.
             Self::VaultCreation(s) => {
                 crate::sofi::derive::vault_creation_key(genesis, device_id, &s.vault_id)
+            }
+            Self::TokenCreation(s) => {
+                keys::token_creation_key(genesis, device_id, &s.policy_commit)
             }
         }
     }

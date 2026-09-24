@@ -23,11 +23,6 @@ export interface Contact {
   notes?: string;
   bleAddress?: string;
   chainTip?: string;
-  addedCounter?: number;
-  verifyCounter?: number;
-  chainTipSmtProof?: { siblings: Uint8Array[] };
-  createdAt: number;
-  updatedAt: number;
 }
 
 export interface ContactsState {

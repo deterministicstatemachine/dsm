@@ -145,12 +145,30 @@ pub fn rebuild_head_from_checkpoint(
         // must reproduce the stored one exactly, entropy included.
         let deltas = deltas_for_transition(state, &head.devid());
 
+        // A relationship's first preserved state extends the h_0 its
+        // establishment committed; establish it on the rebuilt head first. A
+        // first state that names any other parent diverges below.
+        if head.chain_tip(&state.rel_key).is_none() {
+            head = match head.establish_relationship(state.counterparty_devid) {
+                Ok(established) => established,
+                Err(e) => {
+                    return Ok(RebuildReport {
+                        head,
+                        applied,
+                        stop: RebuildStop::Rejected {
+                            rel_key: state.rel_key,
+                            reason: e.to_string(),
+                        },
+                    })
+                }
+            };
+        }
+
         let outcome = match head.advance(
             state.rel_key,
             state.counterparty_devid,
             state.operation.clone(),
             &deltas,
-            Some(state.embedded_parent),
             None,
             None,
         ) {
@@ -215,18 +233,6 @@ fn deltas_for_transition(
                 amount: amount.value(),
             }]
         }
-        // `Mint` carries its own `policy_commit` (the mint-repair work made it
-        // mandatory), and the chain state no longer carries a balance witness
-        // to second-guess it from — the commitment is balance-free by design.
-        Operation::Mint {
-            amount,
-            policy_commit,
-            ..
-        } => vec![BalanceDelta {
-            policy_commit: *policy_commit,
-            direction: BalanceDirection::Credit,
-            amount: amount.value(),
-        }],
         // Non-value operations carry no delta; conservation rejects anything else.
         _ => Vec::new(),
     }
@@ -260,7 +266,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     fn checkpoint() -> DeviceState {
-        DeviceState::new([0x01u8; 32], [0x02u8; 32], vec![0xAAu8; 32], 16)
+        DeviceState::new([0x01u8; 32], [0x02u8; 32], vec![0xAAu8; 32])
     }
 
     /// A preserved state that claims `parent` on `rel`, carrying a witness so the
@@ -404,7 +410,6 @@ mod tests {
                 signature: Vec::new(),
             },
             &[],
-            Some([0x33u8; 32]),
             None,
             None,
         );

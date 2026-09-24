@@ -685,10 +685,7 @@ mod tests {
         Arc<BleFrameCoordinator>,
         AndroidBleBridge,
     ) {
-        let contact_manager = dsm::core::contact_manager::DsmContactManager::new(
-            device_id,
-            vec![dsm::types::identifiers::NodeId::new("n")],
-        );
+        let contact_manager = dsm::core::contact_manager::DsmContactManager::new(device_id);
         let keypair = dsm::crypto::SignatureKeyPair::generate_from_entropy(
             &[device_id.as_slice(), genesis_hash.as_slice()].concat(),
         )
@@ -699,6 +696,7 @@ mod tests {
                 keypair,
                 device_id,
                 genesis_hash,
+                std::sync::Arc::new(crate::sdk::chain_tip_store::SqliteChainTipStore::new()),
             ),
         ));
         let handler = Arc::new(BilateralBleHandler::new(
@@ -813,12 +811,7 @@ mod tests {
     #[serial_test::serial]
     async fn pairing_smoke_event_ordering() {
         // Initialize environment for AppState (Global singleton)
-        // We leak the tempdir path so it persists for other tests if they share the singleton.
-        let temp_dir = tempfile::Builder::new()
-            .prefix("dsm_test_bridge")
-            .tempdir()
-            .expect("tempdir");
-        let _ = crate::storage_utils::set_storage_base_dir(temp_dir.keep());
+        crate::economic_fixtures::use_test_storage_dir();
 
         // Ensure device ID is available using idempotent bootstrap
         crate::sdk::app_state::AppState::set_identity_info_if_empty(
@@ -826,7 +819,8 @@ mod tests {
             vec![0xBB; 32],
             vec![0xCC; 32],
             vec![0x00; 32],
-        );
+        )
+        .expect("AppState identity");
 
         // Fresh DB + orchestrator for deterministic behavior
         client_db::reset_database_for_tests();
@@ -851,11 +845,8 @@ mod tests {
             ble_address: None,
             status: "Created".to_string(),
             needs_online_reconcile: false,
-            last_seen_online_counter: 0,
-            last_seen_ble_counter: 0,
             public_key: Vec::new(),
             kyber_public_key: Vec::new(),
-            added_at: 1,
             previous_chain_tip: None,
         };
         client_db::store_contact(&rec).expect("store contact");
@@ -985,11 +976,8 @@ mod tests {
             ble_address: None,
             status: "Created".to_string(),
             needs_online_reconcile: false,
-            last_seen_online_counter: 0,
-            last_seen_ble_counter: 0,
             public_key: Vec::new(),
             kyber_public_key: Vec::new(),
-            added_at: 1,
             previous_chain_tip: None,
         };
         client_db::store_contact(&rec).expect("store contact");
@@ -1077,11 +1065,8 @@ mod tests {
             ble_address: None,
             status: "Created".to_string(),
             needs_online_reconcile: false,
-            last_seen_online_counter: 0,
-            last_seen_ble_counter: 0,
             public_key: Vec::new(),
             kyber_public_key: Vec::new(),
-            added_at: 1,
             previous_chain_tip: None,
         };
         client_db::store_contact(&rec).expect("store contact");
@@ -1186,13 +1171,8 @@ mod tests {
                     device_id: counterparty,
                     genesis_hash: mgr.local_genesis_hash(),
                     public_key: vec![7u8; 32],
-                    genesis_material: vec![],
                     chain_tip: Some([1u8; 32]),
-                    chain_tip_smt_proof: None,
                     genesis_verified_online: true,
-                    verified_at_commit_height: 1,
-                    added_at_commit_height: 1,
-                    last_updated_commit_height: 1,
                     verifying_storage_nodes: vec![],
                     ble_address: Some("AA:BB".to_string()),
                 };
@@ -1206,7 +1186,7 @@ mod tests {
         // Create a prepare message chunks directly via coordinator (simulate receiving from counterparty)
         let op = dsm::types::operations::Operation::Noop;
         let prepare_envelope = transport_adapter
-            .create_prepare_message(counterparty, op, 50)
+            .create_prepare_message(counterparty, op)
             .await
             .expect("prepare envelope");
         let chunks = coord
@@ -1264,13 +1244,8 @@ mod tests {
                 device_id: cp,
                 genesis_hash: [1u8; 32],
                 public_key: vec![7u8; 32],
-                genesis_material: vec![5u8; 32],
                 chain_tip: Some([0u8; 32]),
-                chain_tip_smt_proof: None,
                 genesis_verified_online: true,
-                verified_at_commit_height: 1,
-                added_at_commit_height: 1,
-                last_updated_commit_height: 1,
                 ble_address: Some(String::new()),
                 verifying_storage_nodes: vec![],
             };
@@ -1292,11 +1267,10 @@ mod tests {
 
         // Test that we can create prepare message chunks directly from coordinator
         let op = dsm::types::operations::Operation::Noop;
-        let prepare_envelope =
-            match rt.block_on(transport_adapter.create_prepare_message(cp, op, 100)) {
-                Ok(payload) => payload,
-                Err(e) => panic!("create_prepare_message failed in test: {}", e),
-            };
+        let prepare_envelope = match rt.block_on(transport_adapter.create_prepare_message(cp, op)) {
+            Ok(payload) => payload,
+            Err(e) => panic!("create_prepare_message failed in test: {}", e),
+        };
         let chunks = match coord.encode_message(BleFrameType::BilateralPrepare, &prepare_envelope) {
             Ok(c) => c,
             Err(e) => panic!("encode_message failed in test: {}", e),

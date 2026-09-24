@@ -20,45 +20,9 @@ use prost::Message;
 
 use super::app_router_impl::AppRouterImpl;
 use super::response_helpers::{err, pack_envelope_ok};
-use crate::bridge::{AppInvoke, AppQuery, AppResult};
+use crate::bridge::{AppInvoke, AppResult};
 
 impl AppRouterImpl {
-    /// `faucet.check_nearby`: whether a claim is currently possible. There is
-    /// no "nearby" and no cooldown — availability is "the flow is wired and
-    /// the device has an identity".
-    pub(crate) async fn handle_faucet_query(&self, q: AppQuery) -> AppResult {
-        match q.path.as_str() {
-            "faucet.check_nearby" => {
-                let pack = match generated::ArgPack::decode(&q.params[..]) {
-                    Ok(p) => p,
-                    Err(e) => return err(format!("faucet.check_nearby: bad ArgPack: {e}")),
-                };
-                if pack.codec != generated::Codec::Proto as i32 {
-                    return err("faucet.check_nearby: params must be PROTO".to_string());
-                }
-                let req = match generated::FaucetClaimRequest::decode(&pack.body[..]) {
-                    Ok(r) => r,
-                    Err(e) => return err(format!("faucet.check_nearby: bad request: {e}")),
-                };
-                if req.device_id.len() != 32 {
-                    return err("faucet.check_nearby: device_id must be 32 bytes".to_string());
-                }
-                let resp = generated::FaucetClaimResponse {
-                    success: true,
-                    tokens_received: 0,
-                    next_available_index: 0,
-                    message: format!(
-                        "ERA faucet available: {} per claim, released from the network's native \
-                         reserve",
-                        dsm::economic::native_reserve::ERA_FAUCET_PAYOUT
-                    ),
-                };
-                pack_envelope_ok(generated::envelope::Payload::FaucetClaimResponse(resp))
-            }
-            other => err(format!("unknown faucet query: {other}")),
-        }
-    }
-
     pub(crate) async fn handle_faucet_invoke(&self, i: AppInvoke) -> AppResult {
         match i.method.as_str() {
             "faucet.claim" => {
@@ -73,8 +37,14 @@ impl AppRouterImpl {
                     Ok(r) => r,
                     Err(e) => return err(format!("faucet.claim: bad request: {e}")),
                 };
-                if req.device_id.len() != 32 {
-                    return err("faucet.claim: device_id must be 32 bytes".to_string());
+                // A claim releases to the device that makes it: the request
+                // names this device, or it is not this device's claim.
+                if req.device_id.as_slice() != self.device_id_bytes.as_slice() {
+                    return err(
+                        "faucet.claim: the request names another device — a device claims only \
+                         for itself"
+                            .to_string(),
+                    );
                 }
 
                 // The claimant's committed network, from the stored genesis
@@ -105,7 +75,6 @@ impl AppRouterImpl {
                         let resp = generated::FaucetClaimResponse {
                             success: true,
                             tokens_received: outcome.tokens_received,
-                            next_available_index: 0,
                             message: format!(
                                 "claimed {} ERA (economic position {})",
                                 outcome.tokens_received, outcome.economic_position

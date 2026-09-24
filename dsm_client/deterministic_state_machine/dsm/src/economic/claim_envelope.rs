@@ -326,8 +326,8 @@ impl RegisteredEconomicClaim {
 /// other, because "whichever parses" is not a canonical rule.
 ///
 /// The conditional arm has no signature to check and none to fake: `C_q` is
-/// derived by the member in the same transaction that accepts `F`, and `F`'s
-/// own signature is the attribution. A caller never supplies these bytes.
+/// a derived object, recomputed from `(P, F)` by whoever reads it, and `F`'s
+/// own signature is the attribution.
 pub fn decode_registered_economic_claim(
     cell_bytes: &[u8],
 ) -> Result<RegisteredEconomicClaim, ClaimEnvelopeError> {

@@ -54,65 +54,58 @@ pub(crate) fn current_secret_key() -> Result<Vec<u8>, DsmError> {
     Ok(derive_current_signing_keypair()?.secret_key().to_vec())
 }
 
-/// Whether signing is possible right now, WITHOUT handing back a key.
+/// Sign `payload` with this device's signing key (SPHINCS+).
+pub(crate) fn sign_bytes(payload: &[u8]) -> Result<Vec<u8>, DsmError> {
+    let sk = current_secret_key()?;
+    dsm::crypto::sphincs::sphincs_sign(&sk, payload).map_err(|e| {
+        DsmError::crypto(
+            format!("SPHINCS+ byte signing failed: {e}"),
+            None::<std::io::Error>,
+        )
+    })
+}
+
+/// A token creation or burn authorization by this device: the witness record
+/// `(u32 pk_len, pk, u32 sig_len, sig)` over `token_authorization_preimage`.
 ///
-/// For callers that need to decide "is there any point starting this work?"
-/// but must not hold signing material while doing the part that precedes
-/// signing. Binding a key just to test for its presence puts the capability in
-/// scope for everything that follows, which is exactly what some boundaries
-/// exist to prevent.
-pub(crate) fn can_sign() -> bool {
-    match derive_current_signing_keypair() {
-        Ok(kp) => !kp.public_key().is_empty() && !kp.secret_key().is_empty(),
-        Err(_) => false,
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Test helpers.
-//
-// Legacy fixtures passed a deterministic 32-byte "binding key"; under Genesis v2 that
-// fixture is simply the wallet seed the derivation re-roots on. `device_id` is no longer
-// an input to the derivation and is retained only for call-site compatibility.
-// ---------------------------------------------------------------------------
-
-#[cfg(any(test, feature = "test-utils"))]
-pub(crate) fn derive_signing_keypair_for_testing(
-    _device_id: &[u8],
-    genesis_hash: &[u8],
-    wallet_seed: &[u8],
-) -> Result<SignatureKeyPair, DsmError> {
-    if genesis_hash.len() != 32 {
-        return Err(DsmError::invalid_parameter(format!(
-            "genesis_hash must be 32 bytes, got {}",
-            genesis_hash.len()
-        )));
-    }
-    let mut genesis = [0u8; 32];
-    genesis.copy_from_slice(genesis_hash);
-    crate::init::derive_device_signing_keypair(wallet_seed, &genesis)
-}
-
-#[cfg(any(test, feature = "test-utils"))]
-pub(crate) fn derive_signing_keys_for_testing(
-    device_id: &[u8],
-    genesis_hash: &[u8],
-    wallet_seed: &[u8],
-) -> Result<(Vec<u8>, Vec<u8>), DsmError> {
-    let keypair = derive_signing_keypair_for_testing(device_id, genesis_hash, wallet_seed)?;
-    Ok((keypair.public_key().to_vec(), keypair.secret_key().to_vec()))
-}
-
-#[cfg(any(test, feature = "test-utils"))]
-#[cfg(not(all(target_os = "android", feature = "jni")))]
-pub(crate) fn set_binding_key_for_testing(wallet_seed: Vec<u8>) {
-    crate::sdk::recovery_sdk::RecoverySDK::set_cached_wallet_seed_for_testing(wallet_seed);
-}
-
-#[cfg(any(test, feature = "test-utils"))]
-#[cfg(not(all(target_os = "android", feature = "jni")))]
-pub(crate) fn clear_binding_key_for_testing() {
-    crate::sdk::recovery_sdk::RecoverySDK::clear_cached_wallet_seed_for_testing();
+/// That preimage is what the policy's `TokenAuthority` condition rebuilds from
+/// the operation it gates, and the key is matched against the policy's signer
+/// list, so the witness authorizes that operation and nothing else.
+/// `authorized_by` MUST equal what the enforcement context carries for the
+/// operation; a mismatch is indistinguishable from a forged signature, which is
+/// how it should behave.
+pub(crate) fn token_authorization_witness(
+    policy_commit: &[u8; 32],
+    op: &str,
+    token_id: &[u8],
+    amount: u64,
+    authorized_by: &[u8],
+) -> Result<Vec<u8>, DsmError> {
+    let preimage = dsm::core::token::policy::policy_enforcement::token_authorization_preimage(
+        policy_commit,
+        op,
+        token_id,
+        amount,
+        authorized_by,
+    );
+    let keypair = derive_current_signing_keypair()?;
+    let pk = keypair.public_key();
+    let sig = dsm::crypto::sphincs::sphincs_sign(keypair.secret_key(), &preimage).map_err(|e| {
+        DsmError::crypto(
+            format!("token {op} authorization signing failed: {e}"),
+            None::<std::io::Error>,
+        )
+    })?;
+    let pk_len = u32::try_from(pk.len())
+        .map_err(|_| DsmError::invalid_operation("signing key too large for a witness record"))?;
+    let sig_len = u32::try_from(sig.len())
+        .map_err(|_| DsmError::invalid_operation("signature too large for a witness record"))?;
+    let mut witness = Vec::with_capacity(8 + pk.len() + sig.len());
+    witness.extend_from_slice(&pk_len.to_le_bytes());
+    witness.extend_from_slice(pk);
+    witness.extend_from_slice(&sig_len.to_le_bytes());
+    witness.extend_from_slice(&sig);
+    Ok(witness)
 }
 
 /// Both halves of the device signing keypair, for callers that sign and embed

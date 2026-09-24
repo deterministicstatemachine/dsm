@@ -10,22 +10,6 @@ use crate::bridge::{AppQuery, AppResult};
 use super::app_router_impl::AppRouterImpl;
 use super::response_helpers::{pack_envelope_ok, err};
 use super::app_router_impl::{collect_tagged_inbox_addresses, RouteFreshness};
-#[cfg(feature = "dev-discovery")]
-use crate::sdk::network_detection::get_network_gate;
-
-fn decode_canonical_b32_32(label: &str, value: &str) -> Result<[u8; 32], String> {
-    let bytes = crate::util::text_id::decode_base32_crockford(value)
-        .ok_or_else(|| format!("{label} is not valid base32"))?;
-    if bytes.len() != 32 {
-        return Err(format!(
-            "{label} must decode to exactly 32 bytes, got {}",
-            bytes.len()
-        ));
-    }
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&bytes);
-    Ok(out)
-}
 
 #[cfg(all(target_os = "android", feature = "jni"))]
 fn emit_authoritative_wallet_refresh() {
@@ -80,12 +64,9 @@ fn record_accepted_split_history(
         amount,
         tx_type: "online".to_string(),
         status: "confirmed".to_string(),
-        chain_height: 0,
-        step_index: 0,
         commitment_hash: None,
         proof_data: receipt.to_full_protobuf().ok(),
         metadata: meta,
-        created_at: 0,
     };
     if let Err(e) = crate::storage::client_db::store_transaction(&rec) {
         log::warn!("[storage.sync] ADR 0003 store_transaction failed for {correlation_key}: {e} (non-fatal)");
@@ -94,23 +75,6 @@ fn record_accepted_split_history(
         router.sync_balance_cache();
     }
     emit_authoritative_wallet_refresh();
-}
-
-fn record_observed_remote_tip_and_refresh(device_id: &[u8], observed_tip: &[u8; 32]) {
-    match crate::storage::client_db::record_observed_remote_chain_tip(
-        device_id,
-        observed_tip,
-        crate::storage::client_db::ObservedRemoteTipSource::DeferredInbox,
-    ) {
-        Ok(()) => emit_authoritative_wallet_refresh(),
-        Err(e) => {
-            log::warn!(
-                "[storage.sync] failed to record observed remote relationship tip for {} bytes of device id: {}",
-                device_id.len(),
-                e
-            );
-        }
-    }
 }
 
 /// Verify an inbound stitched receipt's sender authorization (`sig_a`) the way
@@ -175,8 +139,10 @@ pub(crate) fn verify_inbound_receipt_sig_a(
 ) -> Result<(), String> {
     use crate::storage::client_db::{load_cert_chain_head_pubkey, CertChainSide};
 
-    let rel_key =
-        dsm::verification::smt_replace_witness::compute_smt_key(&receipt.devid_a, &receipt.devid_b);
+    let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
+        &receipt.devid_a,
+        &receipt.devid_b,
+    );
     // From the receiver's viewpoint the SENDER (A-side) is the Counterparty.
     // At relationship genesis (no Counterparty head yet) the sender's ek_cert_a
     // chains back to the sender's AK — the legitimate predecessor.
@@ -200,73 +166,68 @@ pub(crate) fn verify_inbound_receipt_sig_a(
 /// A valid relationship can exist locally while its cached ML-KEM capability is
 /// absent; the B-side receipt encapsulates `kyber_ct_b` to the sender's key, so
 /// that gap fail-closes every inbound acceptance. This hydrates the missing
-/// capability from the registry under strict rules:
+/// capability from the sender's own directory entry:
 ///
-///   * runs ONLY when the local key is missing (caller-enforced, re-asserted here);
+///   * runs ONLY when the local key is missing (a present key is returned as-is);
 ///   * NEVER replaces a nonempty locally-bound key — persist is first-write-wins;
-///   * verifies the registry binding against the STORED pairing AK, device id,
-///     and genesis (never wire evidence, never the registry record itself);
-///   * conflicting or ambiguous registry data fails closed;
-///   * a registry failure returns an error and NEVER degrades into an insecure
-///     fallback — the acceptance simply stays fail-closed and retries later.
+///   * the entry must prove itself for the contact's genesis and device, and its
+///     AK must be the STORED pairing AK;
+///   * at least the finality count of the pinned set's members must hold it.
 ///
 /// Nothing is persisted on any error path.
 async fn hydrate_missing_sender_kyber_capability(
-    storage_endpoints: &[String],
     sender_device_id: [u8; 32],
     contact: &crate::storage::client_db::ContactRecord,
 ) -> Result<Vec<u8>, String> {
-    // Re-assert the precondition at the boundary: hydration is only ever for an
-    // ABSENT capability. A present key is authoritative and is returned as-is.
     if !contact.kyber_public_key.is_empty() {
         return Ok(contact.kyber_public_key.clone());
     }
-    if contact.public_key.is_empty() {
+    let contact_genesis = <[u8; 32]>::try_from(contact.genesis_hash.as_slice())
+        .map_err(|e| format!("contact genesis_hash is not 32 bytes: {e}"))?;
+    let network = crate::sdk::economic_admission_flow::committed_network_id()
+        .map_err(|e| format!("no committed network: {e}"))?;
+    let set = crate::sdk::storage_set::canonical_set(&network)
+        .map_err(|e| format!("no pinned storage set: {e}"))?;
+    let read = crate::sdk::device_directory::read_entry(&set, &contact_genesis, &sender_device_id)
+        .await
+        .map_err(|e| format!("directory read failed: {e}"))?
+        .ok_or_else(|| {
+            "no member of the pinned set holds a directory entry for the sender that proves \
+             itself"
+                .to_string()
+        })?;
+    if read.entry.body.ak_public_key != contact.public_key {
         return Err(
-            "contact has no pairing-established AK to verify the Kyber binding".to_string(),
+            "the sender's directory entry names another AK than the pairing-established \
+             contact AK"
+                .to_string(),
         );
     }
-    let contact_genesis: [u8; 32] = contact
-        .genesis_hash
-        .as_slice()
-        .try_into()
-        .map_err(|_| "contact genesis_hash is not 32 bytes".to_string())?;
-
-    // Quorum lookup: a single equivocating node cannot decide this. Any transport
-    // or agreement failure propagates as an error (no fallback).
-    let identity = crate::handlers::app_router_impl::fetch_quorum_device_identity(
-        storage_endpoints,
-        sender_device_id,
-    )
-    .await?;
-    if identity.device_id != sender_device_id {
-        return Err("registry device_id diverges from the relationship counterparty".to_string());
+    let required = dsm::sofi::wire::STORAGE_FINALITY_COUNT;
+    if read.holders.len() < required {
+        return Err(format!(
+            "{} members hold the sender's directory entry; {required} needed",
+            read.holders.len()
+        ));
     }
-    if identity.genesis_hash != contact_genesis {
-        return Err("registry genesis diverges from the pairing-established genesis".to_string());
-    }
-    crate::sdk::kyber_identity::verify_kyber_identity_binding(
-        &sender_device_id,
-        &contact_genesis,
-        &identity.kyber_public_key,
-        &identity.kyber_binding_sig,
-        &contact.public_key,
-    )
-    .map_err(|e| format!("sender Kyber identity binding invalid: {e}"))?;
+    let kyber_public_key = read.entry.body.kyber_public_key;
 
     // First-write-wins. Losing the race means another path bound a key
     // concurrently; that stored key is authoritative and is used instead.
     let bound = crate::storage::client_db::bind_contact_kyber_key_if_absent(
         &sender_device_id,
-        &identity.kyber_public_key,
+        &kyber_public_key,
     )
     .map_err(|e| format!("failed to persist verified sender Kyber key: {e}"))?;
     if bound {
-        return Ok(identity.kyber_public_key);
+        return Ok(kyber_public_key);
     }
     match crate::storage::client_db::get_contact_by_device_id(&sender_device_id) {
-        Ok(Some(c)) if !c.kyber_public_key.is_empty() => Ok(c.kyber_public_key),
-        _ => Err("Kyber capability vanished between bind and read — failing closed".to_string()),
+        Ok(Some(stored)) if !stored.kyber_public_key.is_empty() => Ok(stored.kyber_public_key),
+        Ok(Some(..)) | Ok(None) => {
+            Err("Kyber capability vanished between bind and read — failing closed".to_string())
+        }
+        Err(e) => Err(format!("contact lookup after the Kyber bind failed: {e}")),
     }
 }
 
@@ -290,11 +251,13 @@ pub(crate) fn route_polled_entry(entry: &crate::sdk::b0x_sdk::B0xEntry) -> Polle
     if !entry.receipt_evidence_digest.is_empty() {
         return PolledEntryRoute::SplitTransferHalf;
     }
-    match entry.transaction {
-        dsm::types::operations::Operation::Transfer { .. } => {
-            PolledEntryRoute::TransferWithoutEvidence
-        }
-        _ => PolledEntryRoute::NotATransfer,
+    if matches!(
+        entry.transaction,
+        dsm::types::operations::Operation::Transfer { .. }
+    ) {
+        PolledEntryRoute::TransferWithoutEvidence
+    } else {
+        PolledEntryRoute::NotATransfer
     }
 }
 
@@ -638,7 +601,14 @@ async fn finalize_from_countersign_delta(
     // Fetch the exact release bytes by content address (re-hash verified by
     // the fetch boundary). Not-yet-published is an outage shape, not an
     // attack: the recipient's post-admit publish may still be in flight.
-    let release_bytes = match crate::sdk::storage_io::fetch_immutable_payload(
+    let set = match crate::sdk::economic_admission_flow::committed_network_id()
+        .and_then(|network| crate::sdk::storage_set::canonical_set(&network))
+    {
+        Ok(set) => set,
+        Err(e) => return CountersignOutcome::Unverifiable(format!("no pinned storage set: {e}")),
+    };
+    let release_bytes = match crate::sdk::storage_io::fetch_immutable(
+        &set,
         dsm::common::domain_tags::TAG_DSM_RECIPIENT_ECONOMIC_RELEASE,
         &release_addr,
     )
@@ -684,12 +654,15 @@ async fn finalize_from_countersign_delta(
     // cell under a different genesis.
     match crate::storage::client_db::get_contact_by_device_id(&proposal.counterparty_device_id) {
         Ok(Some(c)) if c.genesis_hash.as_slice() == release.recipient_genesis.as_slice() => {}
-        _ => {
+        Ok(Some(..)) | Ok(None) => {
             let reason =
                 "recipient economic release names a genesis that is not the pinned contact's"
                     .to_string();
             park_awaiting_valid_reply(&proposal, &short, &reason);
             return CountersignOutcome::Rejected(reason);
+        }
+        Err(e) => {
+            return CountersignOutcome::Unverifiable(format!("contact lookup failed: {e}"));
         }
     }
     match crate::sdk::economic_admission_flow::verify_release_against_register(&release).await {
@@ -1010,12 +983,19 @@ fn build_relationship_finalized_artifact(
     let built = crate::sdk::b0x_sdk::B0xSDK::build_relationship_finalized_envelope(
         self_device_id,
         &local_genesis,
-        &proposal.projection_target,
         &wire,
         &content_digest,
         &submission_id,
     )
     .map_err(|e| format!("certificate envelope: {e}"))?;
+    // DSM Amendment A7: the spool carries it sealed to the recipient, sealed
+    // once here and kept, so every delivery sends the same bytes.
+    crate::sdk::b0x_sdk::seal_for(
+        &proposal.counterparty_device_id,
+        &submission_id,
+        &built.bytes,
+    )
+    .map_err(|e| format!("certificate seal: {e}"))?;
 
     Ok(SenderOutboxArtifact {
         relationship_key: proposal.relationship_key,
@@ -1095,21 +1075,24 @@ async fn deliver_pending_finalization_checkpoints(
         };
         let proposal = match get_sender_proposal_by_commitment(&row.commitment) {
             Ok(Some(p)) => p,
-            _ => {
+            Ok(None) => {
                 log::error!(
                     "[storage.sync] checkpoint sweep: no proposal for {} — leaving for inspection",
                     row.submission_id
                 );
                 continue;
             }
+            Err(e) => {
+                log::warn!(
+                    "[storage.sync] checkpoint sweep: proposal lookup for {} failed; retry next \
+                     sweep: {e}",
+                    row.submission_id
+                );
+                continue;
+            }
         };
         match b0x
-            .submit_stored_envelope_with_retry(
-                &checkpoint.envelope_bytes,
-                route,
-                &checkpoint.submission_id,
-                &retry,
-            )
+            .submit_stored_envelope_with_retry(route, &checkpoint.submission_id, &retry)
             .await
         {
             Ok(()) => {}
@@ -1247,7 +1230,8 @@ async fn deliver_pending_acceptance_replies(
             }
             Err(e) => {
                 log::error!(
-                    "[storage.sync] §16.6 reply for commitment {}.. could not be built from the                      stored receipt ({} bytes) — local defect, left unmarked: {e}",
+                    "[storage.sync] §16.6 reply for commitment {}.. could not be built from the \
+                     stored receipt ({} bytes) — local defect, left unmarked: {e}",
                     crate::util::text_id::encode_base32_crockford(&reply.commitment[..4]),
                     reply.receipt_bytes.len(),
                 );
@@ -1405,12 +1389,18 @@ impl AppRouterImpl {
                         );
                     }
                     if row.message_ids.is_none() {
-                        let _ = bind_sender_outbox_message_ids(
+                        if let Err(e) = bind_sender_outbox_message_ids(
                             &row.relationship_key,
                             &row.canonical_parent,
                             &row.proposal_nonce,
                             &row.submission_id,
-                        );
+                        ) {
+                            log::warn!(
+                                "[storage.sync] outbox resubmit: {} message-id bind failed \
+                                 (spool cleanup metadata only): {e}",
+                                row.submission_id
+                            );
+                        }
                     }
                 }
                 Err(e) => {
@@ -1475,7 +1465,6 @@ impl AppRouterImpl {
     /// ACKs succeed.
     pub(crate) async fn complete_ready_split_transfers(
         &self,
-        storage_endpoints: &[String],
     ) -> (Vec<(String, String)>, Vec<String>) {
         use crate::handlers::recipient_dispatch::{decide_ack, AckDecision};
         use crate::handlers::recipient_receipt as rr;
@@ -1577,7 +1566,7 @@ impl AppRouterImpl {
             // it is running for a genuinely `ready_to_verify` pair.
             if row.state != StagingState::Accepted {
                 // ---- async prerequisites, resolved BEFORE the sync closure ----
-                let rel_key = dsm::verification::smt_replace_witness::compute_smt_key(
+                let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
                     &sender_device,
                     &self_device,
                 );
@@ -1629,12 +1618,8 @@ impl AppRouterImpl {
                             if !c.kyber_public_key.is_empty() {
                                 (c.kyber_public_key.clone(), genesis)
                             } else {
-                                match hydrate_missing_sender_kyber_capability(
-                                    storage_endpoints,
-                                    sender_device,
-                                    &c,
-                                )
-                                .await
+                                match hydrate_missing_sender_kyber_capability(sender_device, &c)
+                                    .await
                                 {
                                     Ok(k) => (k, genesis),
                                     Err(e) => {
@@ -1653,7 +1638,7 @@ impl AppRouterImpl {
                 // ── PREVALIDATION (3.5b PR4, corrections 3+5+8): every foreign
                 // dependency that CAN be established before local acceptance IS
                 // established here — the sender's validated debit, the wire
-                // binding, EK portability, and the q-durable evidence closure —
+                // binding, EK portability, and the Stored evidence closure —
                 // async, BEFORE the relationship lock, before any durable econ
                 // state. A hostile sender is refused terminally; an outage
                 // holds the row.
@@ -1679,11 +1664,7 @@ impl AppRouterImpl {
                             PR::Terminal(m) | PR::Quarantined(m) => {
                                 log::warn!(
                                     "[storage.sync] ADR 0003 completion: {key} REFUSED before \
-                                     any durable state — {refusal}"
-                                );
-                                let _ = crate::storage::client_db::recipient_staging::mark_rejected(
-                                    &key,
-                                    &format!("economic prevalidation: {m}"),
+                                     any durable state — economic prevalidation: {m}"
                                 );
                             }
                             PR::Incomplete(m) => {
@@ -2067,12 +2048,8 @@ impl AppRouterImpl {
                 .unwrap_or_else(|| "storage.sync failed".to_string()));
         }
 
-        let payload = result
-            .data
-            .strip_prefix(&[0x03])
-            .ok_or_else(|| "storage.sync missing envelope v3 framing".to_string())?;
-        let env = dsm::envelope::from_canonical_bytes(payload)
-            .map_err(|e| format!("storage.sync envelope decode failed: {e}"))?;
+        let env = super::response_helpers::decode_local_envelope(&result.data)
+            .map_err(|e| format!("storage.sync answer: {e}"))?;
         match env.payload {
             Some(generated::envelope::Payload::StorageSyncResponse(resp)) => Ok(resp),
             Some(generated::envelope::Payload::Error(err_payload)) => Err(err_payload.message),
@@ -2084,55 +2061,39 @@ impl AppRouterImpl {
     pub(crate) async fn handle_storage_query(&self, q: AppQuery) -> AppResult {
         match q.path.as_str() {
             "storage.status" => {
-                log::info!("[DSM_SDK] storage.status called");
-
-                // Decode request (optional, but good for validation)
-                if let Ok(pack) = generated::ArgPack::decode(&*q.params) {
-                    if pack.codec == generated::Codec::Proto as i32 {
-                        let _ = generated::StorageStatusRequest::decode(&*pack.body);
-                    }
+                if let Err(e) = decode_proto_request::<generated::StorageStatusRequest>(
+                    &q.params,
+                    "storage.status",
+                ) {
+                    return err(e);
                 }
-
-                let endpoints = self._config.storage_endpoints.clone();
-                let total_nodes = endpoints.len() as u32;
-
-                // Real connectivity check — probe /api/v2/health on each node concurrently
-                let client = crate::sdk::storage_node_sdk::build_ca_aware_client();
-                let mut connected_nodes = 0u32;
-                let mut handles = Vec::new();
-                for ep in &endpoints {
-                    let c = client.clone();
-                    let url = format!("{ep}/api/v2/health");
-                    handles.push(tokio::spawn(async move {
-                        matches!(tokio::time::timeout(
-                            std::time::Duration::from_secs(5),
-                            c.get(&url).send(),
-                        ).await, Ok(Ok(resp)) if resp.status().is_success())
-                    }));
-                }
-                for handle in handles {
-                    if let Ok(true) = handle.await {
-                        connected_nodes += 1;
-                    }
-                }
-
-                // Get DB size
-                let data_size = match crate::storage::client_db::get_db_size() {
-                    Ok(size) => {
-                        if size > 1024 * 1024 {
-                            format!("{:.1} MB", size as f64 / (1024.0 * 1024.0))
-                        } else {
-                            format!("{:.1} KB", size as f64 / 1024.0)
-                        }
-                    }
-                    Err(_) => "Unknown".to_string(),
+                let set = match crate::sdk::economic_admission_flow::committed_network_id()
+                    .and_then(|network| crate::sdk::storage_set::canonical_set(&network))
+                {
+                    Ok(set) => set,
+                    Err(e) => return err(format!("storage.status: no pinned storage set: {e}")),
                 };
-
-                // Real sync counter from transaction history
-                let last_sync_iter =
-                    crate::storage::client_db::get_transaction_count().unwrap_or(0);
-
-                // Real backup status from NFC recovery SDK
+                let client = match crate::sdk::storage_node_sdk::SetClient::new(&set) {
+                    Ok(client) => client,
+                    Err(e) => return err(format!("storage.status: storage client: {e}")),
+                };
+                let probes = futures::future::join_all(
+                    client.members().iter().map(|member| member.check_health()),
+                )
+                .await;
+                let connected_nodes = probes.iter().filter(|probe| probe.is_ok()).count() as u32;
+                let data_size = match crate::storage::client_db::get_db_size() {
+                    Ok(size) if size > 1024 * 1024 => {
+                        format!("{:.1} MB", size as f64 / (1024.0 * 1024.0))
+                    }
+                    Ok(size) => format!("{:.1} KB", size as f64 / 1024.0),
+                    Err(e) => return err(format!("storage.status: database size: {e}")),
+                };
+                let last_sync_iter = match crate::storage::client_db::storage_sync_runs::completed()
+                {
+                    Ok(completed) => completed,
+                    Err(e) => return err(format!("storage.status: sync count: {e}")),
+                };
                 let backup_status = {
                     let rs = crate::sdk::recovery_sdk::RecoverySDK::get_recovery_status();
                     if !rs.enabled {
@@ -2148,1008 +2109,147 @@ impl AppRouterImpl {
                         "Enabled (no capsule)".to_string()
                     }
                 };
-
                 let resp = generated::StorageStatusResponse {
-                    total_nodes,
+                    total_nodes: set.len() as u32,
                     connected_nodes,
                     last_sync_iter,
                     data_size,
                     backup_status,
                 };
-                // NEW: Return as Envelope.storageStatusResponse (field 47)
                 pack_envelope_ok(generated::envelope::Payload::StorageStatusResponse(resp))
             }
 
             // -------- storage.sync (QueryOp) --------
             "storage.sync" => {
-                log::info!("[DSM_SDK] storage.sync called");
-
-                // Registry-visibility heal (detached, best-effort, latched on success): wallets
-                // created offline — and pre-fix Genesis v2 wallets that never published — become
-                // verifiable by counterparties on the first sync with reachable storage nodes.
-                crate::sdk::storage_node_sdk::StorageNodeSDK::spawn_ensure_genesis_registry_published(
-                    "storage.sync",
-                );
-
-                // Check network connectivity before attempting sync
-                #[cfg(feature = "dev-discovery")]
-                let network_gate = get_network_gate();
-                #[cfg(feature = "dev-discovery")]
-                if network_gate.should_disable_network_features() {
-                    log::warn!("[DSM_SDK] storage.sync: Network features disabled due to repeated failures");
-                    return err("Network connectivity disabled due to repeated failures. Please restart the app.".into());
-                }
-
-                // Decode StorageSyncRequest
-                let (pull_inbox, push_pending, limit) = match generated::ArgPack::decode(&*q.params)
-                {
-                    Ok(pack) if pack.codec == generated::Codec::Proto as i32 => {
-                        match generated::StorageSyncRequest::decode(&*pack.body) {
-                            Ok(req) => (
-                                req.pull_inbox,
-                                req.push_pending,
-                                req.limit.clamp(1, 200) as usize,
-                            ),
-                            Err(_) => (true, true, 100), // default: do everything
-                        }
-                    }
-                    _ => (true, true, 100), // default
+                let request = match decode_storage_sync_request(&q.params) {
+                    Ok(request) => request,
+                    Err(e) => return err(e),
                 };
-
-                let mut pulled = 0u32;
-                let processed = 0u32;
-                #[allow(unused_mut)]
-                let mut pushed = 0u32;
-                let mut errors: Vec<String> = Vec::new();
-
-                // Get storage endpoints
-                let storage_endpoints =
-                    match crate::sdk::storage_node_sdk::StorageNodeConfig::from_env_config().await {
-                        Ok(cfg) => cfg.node_urls,
-                        Err(e) => {
-                            let resp = generated::StorageSyncResponse {
-                                success: false,
-                                pulled: 0,
-                                processed: 0,
-                                pushed: 0,
-                                errors: vec![format!("No storage node config available: {}", e)],
-                            };
-                            // NEW: Return as Envelope.storageSyncResponse (field 35)
-                            return pack_envelope_ok(
-                                generated::envelope::Payload::StorageSyncResponse(resp),
-                            );
-                        }
-                    };
-                if storage_endpoints.is_empty() {
-                    let resp = generated::StorageSyncResponse {
+                let response = match self.storage_sync(request).await {
+                    Ok(report) => generated::StorageSyncResponse {
+                        success: true,
+                        pulled: report.pulled,
+                        processed: report.processed,
+                        pushed: report.pushed,
+                        errors: report.errors,
+                    },
+                    Err(failure) => generated::StorageSyncResponse {
                         success: false,
-                        pulled: 0,
-                        processed: 0,
-                        pushed: 0,
-                        errors: vec!["No storage endpoints configured".to_string()],
-                    };
-                    // NEW: Return as Envelope.storageSyncResponse (field 35)
-                    return pack_envelope_ok(generated::envelope::Payload::StorageSyncResponse(
-                        resp,
-                    ));
-                }
-
-                let device_id_b32 =
-                    crate::util::text_id::encode_base32_crockford(&self.device_id_bytes);
-                // Canonical textual device id for auth/storage keys is base32(32 bytes).
-                // (Older code used dotted-decimal in some paths; never use that for auth.)
-                log::info!(
-                    "[DSM_SDK] storage.sync device_id: prefix={}..., len={}, base32_32={}",
-                    &device_id_b32[..8.min(device_id_b32.len())],
-                    device_id_b32.len(),
-                    crate::util::text_id::decode_base32_crockford(&device_id_b32)
-                        .map(|b| b.len() == 32)
-                        .unwrap_or(false)
-                );
-
-                // Pull from inbox if requested
-                if pull_inbox {
-                    match crate::sdk::b0x_sdk::B0xSDK::new(
-                        device_id_b32.clone(),
-                        self.core_sdk.clone(),
-                        storage_endpoints.clone(),
-                    ) {
-                        Ok(mut b0x_sdk) => {
-                            // Proactively register this device on all storage endpoints to ensure valid tokens
-                            // before attempting any inbox retrieval. This avoids 401/InboxTokenInvalid cases
-                            // when storage nodes have been reset or tokens have expired.
-                            let reg_res = if let Ok(handle) = tokio::runtime::Handle::try_current()
-                            {
-                                tokio::task::block_in_place(|| {
-                                    handle.block_on(b0x_sdk.register_device())
-                                })
-                            } else if let Ok(rt) = tokio::runtime::Runtime::new() {
-                                rt.block_on(b0x_sdk.register_device())
-                            } else {
-                                Err(dsm::types::error::DsmError::internal(
-                                    "runtime failed",
-                                    None::<std::io::Error>,
-                                ))
-                            };
-                            match reg_res {
-                                Ok(_) => log::info!("[DSM_SDK] storage.sync: device registration succeeded on storage endpoints"),
-                                Err(e) => log::warn!("[DSM_SDK] storage.sync: device registration failed (continuing): {}", e),
-                            }
-
-                            // §16.4: Compute per-contact rotated b0x addresses for inbox polling.
-                            // Each contact uses a tip-scoped routing key derived from
-                            // domain-separated genesis/device/tip components.
-                            let my_genesis = match self.core_sdk.local_genesis_hash().await {
-                                Ok(genesis) if genesis.len() == 32 => {
-                                    let mut arr = [0u8; 32];
-                                    arr.copy_from_slice(&genesis);
-                                    arr
-                                }
-                                Ok(genesis) => {
-                                    let resp = generated::StorageSyncResponse {
-                                        success: false,
-                                        pulled: 0,
-                                        processed: 0,
-                                        pushed: 0,
-                                        errors: vec![format!(
-                                            "storage.sync: local genesis must be 32 bytes, got {}",
-                                            genesis.len()
-                                        )],
-                                    };
-                                    return pack_envelope_ok(
-                                        generated::envelope::Payload::StorageSyncResponse(resp),
-                                    );
-                                }
-                                Err(e) => {
-                                    let resp = generated::StorageSyncResponse {
-                                        success: false,
-                                        pulled: 0,
-                                        processed: 0,
-                                        pushed: 0,
-                                        errors: vec![format!(
-                                            "storage.sync: missing local genesis for rotated inbox routing: {e}"
-                                        )],
-                                    };
-                                    return pack_envelope_ok(
-                                        generated::envelope::Payload::StorageSyncResponse(resp),
-                                    );
-                                }
-                            };
-
-                            let contacts =
-                                crate::storage::client_db::get_all_contacts().unwrap_or_default();
-                            // §5.2: Use tagged addresses to distinguish current vs stale-route items.
-                            let tagged_addresses = collect_tagged_inbox_addresses(
-                                my_genesis,
-                                self.device_id_bytes,
-                                &contacts,
-                            );
-
-                            let mut all_items = Vec::new();
-                            // Already-accepted stale-route duplicates (see §5.2) collected for a
-                            // DIRECT ACK: they must not re-enter the verify+apply pipeline (their
-                            // sig_a no longer chains back to our advanced cert head), but they must
-                            // still be ACKed to release the sender's pending online gate.
-                            let mut stale_dup_acks: Vec<(String, String)> = Vec::new();
-                            for tagged_addr in tagged_addresses {
-                                if all_items.len() >= limit {
-                                    break;
-                                }
-                                let remaining = limit - all_items.len();
-
-                                log::info!(
-                                    "[storage.sync] polling addr={}.. freshness={:?}",
-                                    &tagged_addr.address[..16.min(tagged_addr.address.len())],
-                                    tagged_addr.freshness,
-                                );
-                                let entries_res =
-                                    match tokio::runtime::Handle::try_current() {
-                                        Ok(handle) => tokio::task::block_in_place(|| {
-                                            handle.block_on(b0x_sdk.retrieve_from_b0x_v2(
-                                                &tagged_addr.address,
-                                                remaining,
-                                            ))
-                                        }),
-                                        Err(_) => {
-                                            if let Ok(rt) = tokio::runtime::Runtime::new() {
-                                                rt.block_on(b0x_sdk.retrieve_from_b0x_v2(
-                                                    &tagged_addr.address,
-                                                    remaining,
-                                                ))
-                                            } else {
-                                                Err(dsm::types::error::DsmError::internal(
-                                                    "runtime failed",
-                                                    None::<std::io::Error>,
-                                                ))
-                                            }
-                                        }
-                                    };
-                                // §16.6 SENDER FINALIZATION: drain any acceptance artifacts
-                                // this poll decoded. They ride the same spool as forward
-                                // transfers but are a distinct payload variant, so they are
-                                // discriminated structurally rather than trial-decoded.
-                                // Draining happens regardless of `entries_res` — a poll that
-                                // yields no forward transfers can still carry the reply that
-                                // releases this device's pending gate.
-                                // A delta this device has finalized on (now or earlier) is
-                                // ACKed on the route it was pulled from, so the spool stops
-                                // re-serving it every poll. Durable idempotency lives in the
-                                // proposal's terminal status, not in this ACK — a lost ACK
-                                // costs one more `AlreadyFinalized` pass, nothing else.
-                                let mut consumed_deltas: Vec<String> = Vec::new();
-                                for delta in b0x_sdk.take_countersign_deltas() {
-                                    let outcome = finalize_from_countersign_delta(&delta).await;
-                                    log::info!(
-                                        "[storage.sync] ADR 0003 countersign delta {} -> {:?}",
-                                        delta.message_id,
-                                        outcome
-                                    );
-                                    if matches!(
-                                        outcome,
-                                        CountersignOutcome::Finalized
-                                            | CountersignOutcome::AlreadyFinalized
-                                    ) {
-                                        consumed_deltas.push(delta.message_id.clone());
-                                    }
-                                }
-                                if !consumed_deltas.is_empty() {
-                                    let n = consumed_deltas.len();
-                                    match b0x_sdk
-                                        .record_consumed_b0x(&tagged_addr.address, consumed_deltas)
-                                        .await
-                                    {
-                                        Ok(_) => log::info!(
-                                            "[storage.sync] ADR 0003 ACKed {n} consumed countersign delta(s) on {}..",
-                                            &tagged_addr.address[..tagged_addr.address.len().min(12)]
-                                        ),
-                                        Err(e) => log::warn!(
-                                            "[storage.sync] ADR 0003 countersign delta ACK failed on {}.. (re-served next poll): {e}",
-                                            &tagged_addr.address[..tagged_addr.address.len().min(12)]
-                                        ),
-                                    }
-                                }
-                                // Finality certificates (finality barrier), processed BEFORE
-                                // split-transfer completion in this same poll so a next-
-                                // generation pair held behind them can proceed in one pass.
-                                let mut consumed_checkpoints: Vec<String> = Vec::new();
-                                for checkpoint in b0x_sdk.take_relationship_finalized() {
-                                    let outcome =
-                                        crate::handlers::relationship_finalized::apply_relationship_finalized(
-                                            &checkpoint.body,
-                                        )
-                                        .await;
-                                    log::info!(
-                                        "[storage.sync] finality checkpoint {} -> {:?}",
-                                        checkpoint.message_id,
-                                        outcome
-                                    );
-                                    use crate::handlers::relationship_finalized::RelationshipFinalizedOutcome as O;
-                                    if matches!(
-                                        outcome,
-                                        O::Applied | O::AlreadyFinalized | O::NoJournal
-                                    ) {
-                                        consumed_checkpoints.push(checkpoint.message_id.clone());
-                                    }
-                                }
-                                if !consumed_checkpoints.is_empty() {
-                                    let n = consumed_checkpoints.len();
-                                    match b0x_sdk
-                                        .record_consumed_b0x(&tagged_addr.address, consumed_checkpoints)
-                                        .await
-                                    {
-                                        Ok(_) => log::info!(
-                                            "[storage.sync] ACKed {n} finality checkpoint(s) on {}..",
-                                            &tagged_addr.address[..tagged_addr.address.len().min(12)]
-                                        ),
-                                        Err(e) => log::warn!(
-                                            "[storage.sync] finality checkpoint ACK failed on {}.. (re-served next poll): {e}",
-                                            &tagged_addr.address[..tagged_addr.address.len().min(12)]
-                                        ),
-                                    }
-                                }
-                                // ADR 0003 evidence halves ride the same spool under their
-                                // own explicit method. Glue only: resolve the trust root,
-                                // hand the artifact to the dispatcher, log. No verification
-                                // or acceptance logic lives here.
-                                for evidence in b0x_sdk.take_evidence_artifacts() {
-                                    stage_polled_evidence_half(&evidence, &tagged_addr.address);
-                                }
-                                // Cert-resync control messages ride the same spool,
-                                // discriminated by their explicit method. Dispatch each
-                                // to the matching leg; errors are logged, never fatal to
-                                // the poll (a malformed/foreign message must not wedge sync).
-                                for (method, rbody) in b0x_sdk.take_cert_resync_messages() {
-                                    let outcome = if method
-                                        == crate::storage::client_db::CERT_RESYNC_REQUEST_METHOD
-                                    {
-                                        self.handle_cert_resync_request(
-                                            &rbody,
-                                            storage_endpoints.clone(),
-                                        )
-                                        .await
-                                    } else {
-                                        self.handle_cert_resync_ack(&rbody).await
-                                    };
-                                    if let Err(e) = outcome {
-                                        log::warn!("[cert-resync] {method} handling errored: {e}");
-                                    }
-                                }
-
-                                // Auto-initiate: any relationship the send-gate marked
-                                // REQUIRED gets its resync request sent here (which moves
-                                // it to PENDING, so it is not re-sent every poll). This is
-                                // what turns a blocked send into an actual recovery.
-                                if let Ok(rels) =
-                                    crate::storage::client_db::relationships_requiring_resync()
-                                {
-                                    for rel in rels {
-                                        match crate::handlers::cert_resync_flow::peer_device_for_relationship(
-                                            &self.device_id_bytes,
-                                            &rel,
-                                        ) {
-                                            Some(peer) => {
-                                                if let Err(e) = self
-                                                    .initiate_cert_resync(peer, storage_endpoints.clone())
-                                                    .await
-                                                {
-                                                    log::warn!("[cert-resync] auto-initiate failed: {e}");
-                                                }
-                                            }
-                                            None => log::warn!(
-                                                "[cert-resync] REQUIRED relationship has no resolvable peer"
-                                            ),
-                                        }
-                                    }
-                                }
-
-                                match entries_res {
-                                    Ok(items) => {
-                                        // §5.2: Items from PreviousTip addresses that are non-adjacent
-                                        // must NOT enter the mutating apply pipeline. Filter them here
-                                        // so Tripwire is defense-in-depth, not the primary gate.
-                                        if tagged_addr.freshness == RouteFreshness::PreviousTip {
-                                            for item in items {
-                                                let chain_tip_opt =
-                                                    crate::util::text_id::decode_base32_crockford(
-                                                        &item.sender_chain_tip,
-                                                    );
-                                                let from_device_opt =
-                                                    crate::util::text_id::decode_base32_crockford(
-                                                        &item.sender_device_id,
-                                                    );
-                                                let is_adjacent = match (
-                                                    chain_tip_opt,
-                                                    from_device_opt,
-                                                ) {
-                                                    (Some(ct), Some(fd))
-                                                        if ct.len() == 32 && fd.len() >= 32 =>
-                                                    {
-                                                        let mut chain_tip_arr = [0u8; 32];
-                                                        chain_tip_arr.copy_from_slice(&ct);
-                                                        match crate::storage::client_db::get_contact_chain_tip_raw(
-                                                            &fd[..32],
-                                                        ) {
-                                                            Some(stored) if stored != [0u8; 32] => stored == chain_tip_arr,
-                                                            _ => true, // No stored tip or zero tip — allow
-                                                        }
-                                                    }
-                                                    _ => true, // Decode failure — let apply pipeline handle it
-                                                };
-                                                if is_adjacent {
-                                                    all_items.push(item);
-                                                } else if crate::storage::client_db::transaction_exists(&item.transaction_id) {
-                                                    // Already-accepted duplicate re-delivered on a stale
-                                                    // (previous-tip) route: non-adjacent only because our
-                                                    // tip already advanced PAST it, but we DID accept it
-                                                    // (a transaction row exists). It must NOT re-enter the
-                                                    // verify+apply pipeline: accepting it already advanced
-                                                    // our Counterparty cert-chain head, so its per-step-EK
-                                                    // sig_a no longer chains back to expected_prev_pk over
-                                                    // h_n and verification REJECTS it WITHOUT an ACK, which
-                                                    // re-strands the sender forever ("delivered but already
-                                                    // accepted, won't refresh"). Since the stored
-                                                    // transaction row proves acceptance, ACK it DIRECTLY
-                                                    // (delete from the storage node) so the sender's pending
-                                                    // online gate finalizes. Idempotent.
-                                                    log::info!(
-                                                        "[storage.sync] §5.2: stale-route item {} is an already-accepted duplicate; ACKing directly to release sender gate",
-                                                        item.transaction_id,
-                                                    );
-                                                    stale_dup_acks.push((
-                                                        item.inbox_key.clone(),
-                                                        item.transaction_id.clone(),
-                                                    ));
-                                                } else {
-                                                    log::info!(
-                                                        "[storage.sync] §5.2: stale-route item {} skipped pre-apply (non-adjacent, from previous-tip address)",
-                                                        item.transaction_id,
-                                                    );
-                                                }
-                                            }
-                                        } else {
-                                            all_items.extend(items);
-                                        }
-                                    }
-                                    Err(e) => {
-                                        // Record network failure for connectivity monitoring
-                                        #[cfg(feature = "dev-discovery")]
-                                        network_gate.record_network_failure();
-
-                                        // Use centralized mapping for inbox errors so all code paths
-                                        // produce consistent, actionable messages.
-                                        let formatted = self.format_inbox_error(&e);
-                                        log::warn!("[storage.sync] Error encountered: {:?} -> Formatted: {}", e, formatted);
-                                        errors.push(format!("inbox pull failed: {}", formatted));
-                                    }
-                                }
-                            }
-
-                            // Enter the apply+ACK block when there are items to apply OR
-                            // already-accepted stale-route duplicates to ACK directly (§5.2). The
-                            // latter carry no apply work — the loop below is a no-op for an empty
-                            // `all_items` — but their direct ACK (further down) MUST run, else a
-                            // cycle that pulled only a stale duplicate would skip the ACK and leave
-                            // the sender's gate stranded forever.
-                            if !all_items.is_empty() || !stale_dup_acks.is_empty() {
-                                let items = all_items;
-                                pulled = items.len() as u32;
-
-                                for entry in items.iter().cloned() {
-                                    // §4.2.1 (issue #446): `entry.transaction` is a field-by-field
-                                    // reconstruction from UNTRUSTED protobuf and is used here ONLY as
-                                    // a routing hint; the dispatcher reads every value-bearing field
-                                    // from the signed canonical operation it verifies itself.
-                                    // ADR 0003 SPLIT TRANSFER: the transfer half carries the
-                                    // evidence reference; the receipt travels as its own artifact.
-                                    // Glue only: require the retained wire bytes, resolve the trust
-                                    // root, hand off. The dispatcher decides everything else.
-                                    match route_polled_entry(&entry) {
-                                        PolledEntryRoute::SplitTransferHalf => {
-                                            stage_polled_transfer_half(&entry);
-                                        }
-                                        PolledEntryRoute::TransferWithoutEvidence => {
-                                            // Not applied, not ACKed: the sender learns nothing false
-                                            // and the bytes stay on the node as the record of what
-                                            // was attempted.
-                                            log::error!(
-                                                "[storage.sync] REJECTING tx {}: transfer carries no \
-                                                 receipt-evidence reference; nothing to accept",
-                                                entry.transaction_id
-                                            );
-                                            errors.push(format!(
-                                                "transfer {} has no receipt-evidence reference; refused",
-                                                entry.transaction_id
-                                            ));
-                                        }
-                                        PolledEntryRoute::NotATransfer => {}
-                                    }
-                                }
-
-                                // §5.2 direct ACKs: already-accepted stale-route duplicates are
-                                // ACKed here so a stranded sender gate can finalize; the split
-                                // pairs themselves are ACKed by the completion pass below.
-                                if !stale_dup_acks.is_empty() {
-                                    let mut ack_groups: std::collections::BTreeMap<
-                                        String,
-                                        Vec<String>,
-                                    > = std::collections::BTreeMap::new();
-                                    for (inbox_key, tx_id) in stale_dup_acks.clone() {
-                                        ack_groups.entry(inbox_key).or_default().push(tx_id);
-                                    }
-
-                                    let mut acked_total = 0usize;
-                                    for (inbox_key, tx_ids) in ack_groups {
-                                        let ack_res =
-                                            match tokio::runtime::Handle::try_current() {
-                                                Ok(handle) => tokio::task::block_in_place(|| {
-                                                    handle.block_on(b0x_sdk.record_consumed_b0x(
-                                                        &inbox_key,
-                                                        tx_ids.clone(),
-                                                    ))
-                                                }),
-                                                Err(_) => {
-                                                    if let Ok(rt) = tokio::runtime::Runtime::new() {
-                                                        rt.block_on(b0x_sdk.record_consumed_b0x(
-                                                            &inbox_key,
-                                                            tx_ids.clone(),
-                                                        ))
-                                                    } else {
-                                                        Err(dsm::types::error::DsmError::internal(
-                                                            "runtime failed",
-                                                            None::<std::io::Error>,
-                                                        ))
-                                                    }
-                                                }
-                                            };
-
-                                        match ack_res {
-                                            Ok(_) => {
-                                                acked_total += tx_ids.len();
-                                            }
-                                            Err(e) => {
-                                                #[cfg(feature = "dev-discovery")]
-                                                network_gate.record_network_failure();
-
-                                                log::warn!(
-                                                    "[storage.sync] ⚠️ Ack failed for {}: {}",
-                                                    inbox_key,
-                                                    e
-                                                );
-                                                errors.push(format!(
-                                                    "acknowledge failed for {}: {}",
-                                                    inbox_key, e
-                                                ));
-                                            }
-                                        }
-                                    }
-                                    if acked_total > 0 {
-                                        log::info!(
-                                            "[storage.sync] ✅ Acknowledged {} inbox entries",
-                                            acked_total
-                                        );
-                                    }
-                                }
-
-                                // NOTE: Post-batch chain tip update loop REMOVED.
-                                // The per-entry §4.3 finalize path that CAS-advances the
-                                // canonical bilateral tip with independently recomputed expected_h_next
-                                // is authoritative. The old loop
-                                // overwrote the correct relationship tip h_{n+1} with the state-machine entity
-                                // hash (entry.sender_chain_tip), breaking fork-exclusion detection.
-
-                                // §5.4 outbox sweep runs unconditionally below the
-                                // if/else — see post-else block.
-
-                                // Auto-push any pending bilateral messages if enabled
-                                if push_pending {
-                                    let push_res = crate::sdk::b0x_sdk::B0xSDK::push_pending_bilateral_messages(
-                                        device_id_b32.clone(),
-                                        self.core_sdk.clone(),
-                                        storage_endpoints.clone(),
-                                    ).await;
-                                    match push_res {
-                                        Ok(count) => {
-                                            pushed = count as u32;
-                                            log::info!(
-                                                "[DSM_SDK] ✅ Pushed {} pending bilateral messages",
-                                                count
-                                            );
-                                        }
-                                        Err(e) => {
-                                            // Record network failure for connectivity monitoring
-                                            #[cfg(feature = "dev-discovery")]
-                                            network_gate.record_network_failure();
-
-                                            log::warn!(
-                                                "[DSM_SDK] ⚠️ Failed to push pending messages: {}",
-                                                e
-                                            );
-                                            errors.push(format!(
-                                                "push pending messages failed: {}",
-                                                e
-                                            ));
-                                        }
-                                    }
-                                }
-                            } else {
-                                log::info!("[DSM_SDK] No new inbox items to process");
-                            }
-
-                            // ═══════════════════════════════════════════════════════════
-                            // ADR 0003 SPLIT-TRANSFER COMPLETION — every poll, from durable
-                            // staging rows, regardless of whether anything was pulled above.
-                            //
-                            // Deliberately OUTSIDE the `if !all_items.is_empty()` block: a
-                            // pair whose halves both landed on earlier polls, or a pair that
-                            // was applied but died before its ACK, needs driving forward on
-                            // a poll that pulls nothing. The database says what is unfinished;
-                            // this invocation's item list does not.
-                            //
-                            // ACKs for BOTH halves go out on the retained route, and the
-                            // route is released ONLY after the ACK succeeded — an ACK failure
-                            // leaves it in place for the next pass to re-ACK.
-                            // ═══════════════════════════════════════════════════════════
-                            {
-                                let (split_acks, release_keys) = self
-                                    .complete_ready_split_transfers(&storage_endpoints)
-                                    .await;
-                                if !split_acks.is_empty() {
-                                    let mut groups: std::collections::BTreeMap<
-                                        String,
-                                        Vec<String>,
-                                    > = std::collections::BTreeMap::new();
-                                    for (route, id) in &split_acks {
-                                        groups.entry(route.clone()).or_default().push(id.clone());
-                                    }
-                                    let mut all_acked = true;
-                                    for (route, ids) in groups {
-                                        match b0x_sdk.record_consumed_b0x(&route, ids.clone()).await {
-                                            Ok(_) => log::info!(
-                                                "[storage.sync] ADR 0003 ACKed {} id(s) on retained route {}..",
-                                                ids.len(),
-                                                &route[..route.len().min(12)]
-                                            ),
-                                            Err(e) => {
-                                                all_acked = false;
-                                                log::warn!(
-                                                    "[storage.sync] ADR 0003 ACK failed on {}.. (route retained, will re-ACK): {e}",
-                                                    &route[..route.len().min(12)]
-                                                );
-                                                errors.push(format!("ADR 0003 ack failed: {e}"));
-                                            }
-                                        }
-                                    }
-                                    // Release only when every ACK for this pass landed. A
-                                    // partial failure keeps every route: re-ACKing an
-                                    // already-acked id is idempotent at the node, and a
-                                    // released route on an un-ACKed id is a stranded sender.
-                                    if all_acked {
-                                        for key in release_keys {
-                                            match crate::storage::client_db::recipient_staging::release_retained_route(&key) {
-                                                Ok(true) => log::info!("[storage.sync] ADR 0003 released retained route for {key}"),
-                                                Ok(false) => {}
-                                                Err(e) => log::warn!("[storage.sync] ADR 0003 route release failed for {key}: {e}"),
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            // §16.6 ON-ACCESS acceptance recovery: once per poll, finish any
-                            // applied-but-incomplete acceptance journals from the durable
-                            // CanonicalApplyRecord — no redelivery required. Fail-closed skip
-                            // when the wallet is locked (wrap key underivable).
-                            match crate::init::current_chain_head_at_rest_key() {
-                                Ok(wrap_key) => {
-                                    if let Err(e) =
-                                        crate::handlers::recipient_receipt::recover_incomplete_acceptances(&wrap_key).await
-                                    {
-                                        log::warn!("[storage.sync] §16.6 acceptance recovery sweep errored (non-fatal): {e}");
-                                    }
-                                }
-                                Err(_) => {
-                                    log::debug!("[storage.sync] §16.6 acceptance recovery skipped (wallet locked)");
-                                }
-                            }
-
-                            // §16.6 REPLY WINDOW: deliver every countersigned acceptance
-                            // receipt that is durably persisted but not yet handed to the
-                            // sender. Store-before-send + repost-until-delivered: the row
-                            // survives crashes and an offline sender, and the bytes are
-                            // byte-identical on every attempt (signed once, at prepare).
-                            if let Err(e) = deliver_pending_acceptance_replies(
-                                &storage_endpoints,
-                                self.core_sdk.clone(),
-                            )
-                            .await
-                            {
-                                log::warn!("[storage.sync] §16.6 reply delivery sweep errored (non-fatal): {e}");
-                            }
-
-                            // §5.4 OUTBOX COLLECTION. A row reaches `gc_pending` only
-                            // after the recipient's verified countersigned acceptance
-                            // finalized it (`finalize_on_acceptance_atomically`): that
-                            // acceptance is the proof the recipient consumed the
-                            // transfer. Nothing is asked of a storage node — a spool
-                            // is append-only and holds no read state (storage spec
-                            // §4) — so the row completes here.
-                            if let Ok(collectable) =
-                                crate::storage::client_db::gc_pending_sender_outbox()
-                            {
-                                for row in &collectable {
-                                    match crate::storage::client_db::set_sender_outbox_status(
-                                        &row.relationship_key,
-                                        &row.canonical_parent,
-                                        &row.proposal_nonce,
-                                        crate::storage::client_db::OUTBOX_COMPLETE,
-                                    ) {
-                                        Ok(_) => log::info!(
-                                            "[storage.sync] §5.4: outbox row {} complete",
-                                            row.submission_id
-                                        ),
-                                        Err(e) => log::warn!(
-                                            "[storage.sync] §5.4: could not mark outbox row {} complete: {e}",
-                                            row.submission_id
-                                        ),
-                                    }
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            // Record network failure for connectivity monitoring
-                            #[cfg(feature = "dev-discovery")]
-                            network_gate.record_network_failure();
-
-                            log::warn!("[DSM_SDK] inbox.pull: B0xSDK retrieve failed: {}", e);
-                            return err(format!("inbox.pull: B0xSDK retrieve failed: {}", e));
-                        }
-                    }
-                }
-
-                // =============================================================
-                // §16.6 / ADR 0003 — SENDER OUTBOX RESUBMIT SWEEP.
-                //
-                // The liveness half of the durable outbox. A send that entered
-                // the network with an unknown outcome is retained as
-                // `submission_uncertain` with its exact wire bytes and every
-                // frozen artifact, and the user is told it "will be retried
-                // automatically". This is that retry.
-                //
-                // Placement is deliberate: OUTSIDE `if pull_inbox`, gated only on
-                // `push_pending`. An idle sender pulls nothing, and the recovery
-                // gate test drives `push_pending` alone; a sweep nested in the
-                // inbox branch would silently never run for either.
-                //
-                // Every row is re-driven through the SAME primitive the first
-                // attempt used, over the same frozen bytes, ids and route, so
-                // recovery cannot drift from delivery. All-or-nothing per row.
-                // =============================================================
-                if push_pending {
-                    match self
-                        .resubmit_unsettled_sender_outbox(&device_id_b32, &storage_endpoints)
-                        .await
-                    {
-                        Ok(n) => pushed += n,
-                        Err(e) => {
-                            log::warn!("[storage.sync] outbox resubmit sweep errored: {e}");
-                            errors.push(format!("outbox resubmit sweep failed: {e}"));
-                        }
-                    }
-                    // Finality barrier: replay frozen certificates until quorum,
-                    // then release the sender's gate — the ONE deleter. Same
-                    // placement rule as the resubmit sweep: outside `if pull_inbox`.
-                    match deliver_pending_finalization_checkpoints(
-                        &storage_endpoints,
-                        self.core_sdk.clone(),
-                    )
-                    .await
-                    {
-                        Ok(n) => pushed += n,
-                        Err(e) => {
-                            log::warn!("[storage.sync] checkpoint sweep errored: {e}");
-                            errors.push(format!("checkpoint sweep failed: {e}"));
-                        }
-                    }
-                    // Frozen publication artifacts (vault birth/terminal proof
-                    // sets, and whatever else a canonical advance froze): replay
-                    // the exact bytes to the set they were frozen for until
-                    // quorum. Same placement rule; purpose-agnostic; never signs.
-                    match crate::handlers::artifact_republish::republish_unpublished_artifacts()
-                        .await
-                    {
-                        Ok(n) => pushed += n,
-                        Err(e) => {
-                            log::warn!("[storage.sync] artifact republish sweep errored: {e}");
-                            errors.push(format!("artifact republish sweep failed: {e}"));
-                        }
-                    }
-                    // A PENDING ECONOMIC ADMISSION STRANDED BY A CRASH (3.5b PR4;
-                    // ownership ruled 2026-09-15). An advance whose admission never
-                    // finished has not produced its post-admission artifacts. For a
-                    // market settle those are the trader acceptance and its locator
-                    // (2c-D §14, D-c), so no vault walk can certify the settlement
-                    // and the completion resume below stays pending. Finished here
-                    // from frozen state, but ONLY when the head already carried it
-                    // when this process restored it: an admission created after
-                    // startup belongs to the handler that created it. An
-                    // unfinished one (fleet or register unreachable) stays pending
-                    // and retries on a later sync.
-                    if let Some(pending) = self
-                        .core_sdk
-                        .device_head()
-                        .and_then(|h| h.pending_economic_admission().cloned())
-                        .filter(|p| self.core_sdk.admission_predates_startup(p))
-                    {
-                        let position = pending.economic_position;
-                        let resumed =
-                            match crate::sdk::economic_admission_flow::committed_network_id() {
-                                Ok(net) => {
-                                    crate::sdk::economic_admission_flow::resume_pending_admission(
-                                        &self.core_sdk,
-                                        &net,
-                                        pending,
-                                    )
-                                    .await
-                                }
-                                Err(e) => Err(e),
-                            };
-                        match resumed {
-                            Ok(_) => {
-                                log::info!(
-                                    "[storage.sync] stranded economic admission at position \
-                                     {position} finished"
-                                );
-                                pushed += 1;
-                            }
-                            Err(e) => {
-                                log::warn!(
-                                    "[storage.sync] stranded economic admission at position \
-                                     {position} not finished this pass: {e}"
-                                );
-                                errors.push(format!("stranded admission resume failed: {e}"));
-                            }
-                        }
-                    }
-                }
-
-                // Record network success for connectivity monitoring
-                #[cfg(feature = "dev-discovery")]
-                network_gate.record_network_success();
-
-                let resp = generated::StorageSyncResponse {
-                    success: true,
-                    pulled,
-                    processed,
-                    pushed,
-                    errors,
+                        pulled: failure.report.pulled,
+                        processed: failure.report.processed,
+                        pushed: failure.report.pushed,
+                        errors: failure.report.errors,
+                    },
                 };
-                // NEW: Return as Envelope.storageSyncResponse (field 35)
-                pack_envelope_ok(generated::envelope::Payload::StorageSyncResponse(resp))
+                pack_envelope_ok(generated::envelope::Payload::StorageSyncResponse(response))
             }
 
             // -------- storage.nodeHealth --------
-            // Queries each configured storage node for health + Prometheus metrics.
-            // Returns StorageNodeStatsResponse via Envelope.
+            // Each named storage node's health and Prometheus metrics: the
+            // endpoints the request names, else the pinned set's members.
             "storage.nodeHealth" => {
-                log::info!("[DSM_SDK] storage.nodeHealth called");
-
-                // Get endpoints from request or fall back to configured ones
-                let endpoints = match generated::ArgPack::decode(&*q.params) {
-                    Ok(pack) if pack.codec == generated::Codec::Proto as i32 => {
-                        match generated::StorageNodeStatsRequest::decode(&*pack.body) {
-                            Ok(req) if !req.endpoints.is_empty() => req.endpoints,
-                            _ => crate::network::list_storage_endpoints().unwrap_or_default(),
-                        }
-                    }
-                    _ => crate::network::list_storage_endpoints().unwrap_or_default(),
+                let request = match decode_proto_request::<generated::StorageNodeStatsRequest>(
+                    &q.params,
+                    "storage.nodeHealth",
+                ) {
+                    Ok(request) => request,
+                    Err(e) => return err(e),
                 };
-
-                let client = crate::sdk::storage_node_sdk::build_ca_aware_client();
-                let mut node_stats = Vec::with_capacity(endpoints.len());
-                let mut healthy_count = 0u32;
-
-                // Query each endpoint concurrently
-                let mut handles = Vec::new();
-                for ep in &endpoints {
-                    let c = client.clone();
-                    let ep_owned = ep.clone();
-                    handles.push(tokio::spawn(async move {
-                        check_single_node_stats(&c, &ep_owned).await
-                    }));
-                }
-
-                for handle in handles {
-                    match handle.await {
-                        Ok(stats) => {
-                            if stats.status == "healthy" {
-                                healthy_count += 1;
-                            }
-                            node_stats.push(stats);
-                        }
-                        Err(e) => {
-                            log::warn!("[storage.nodeHealth] task join error: {}", e);
-                        }
+                let nodes: Vec<(String, String)> = if request.endpoints.is_empty() {
+                    match pinned_members() {
+                        Ok(members) => members,
+                        Err(e) => return err(format!("storage.nodeHealth: {e}")),
                     }
-                }
-
+                } else {
+                    request
+                        .endpoints
+                        .into_iter()
+                        .map(|endpoint| (endpoint.clone(), endpoint))
+                        .collect()
+                };
+                let client = match crate::sdk::storage_node_sdk::build_ca_aware_client() {
+                    Ok(client) => client,
+                    Err(e) => return err(format!("storage.nodeHealth: storage client: {e}")),
+                };
+                let node_stats = futures::future::join_all(
+                    nodes
+                        .iter()
+                        .map(|(name, endpoint)| check_single_node_stats(&client, name, endpoint)),
+                )
+                .await;
+                let healthy_nodes = node_stats
+                    .iter()
+                    .filter(|stats| stats.status == "healthy")
+                    .count() as u32;
                 let resp = generated::StorageNodeStatsResponse {
+                    total_nodes: node_stats.len() as u32,
                     nodes: node_stats,
-                    total_nodes: endpoints.len() as u32,
-                    healthy_nodes: healthy_count,
+                    healthy_nodes,
                 };
                 pack_envelope_ok(generated::envelope::Payload::StorageNodeStatsResponse(resp))
             }
 
             // -------- storage.connectivity --------
-            // Diagnostic route: tests TLS handshake + device registration against each
-            // configured storage node. Reports CA cert status, per-node reachability,
-            // and auth token validity. Use to diagnose why online transfers fail.
+            // Diagnostic route: the TLS handshake and HTTP answer of each
+            // member of the pinned set, with the CA certificates loaded.
             "storage.connectivity" => {
-                log::info!("[DSM_SDK] storage.connectivity called");
-
                 let ca_certs = crate::sdk::storage_node_sdk::ca_certs_loaded_count();
-                let endpoints = crate::network::list_storage_endpoints().unwrap_or_default();
-                let client = crate::sdk::storage_node_sdk::build_ca_aware_client();
-                let device_id_b32 =
-                    crate::util::text_id::encode_base32_crockford(&self.device_id_bytes);
-
-                let mut node_stats = Vec::with_capacity(endpoints.len());
-                let mut healthy_count = 0u32;
-
-                for ep in &endpoints {
+                let nodes = match pinned_members() {
+                    Ok(members) => members,
+                    Err(e) => return err(format!("storage.connectivity: {e}")),
+                };
+                let client = match crate::sdk::storage_node_sdk::build_ca_aware_client() {
+                    Ok(client) => client,
+                    Err(e) => return err(format!("storage.connectivity: storage client: {e}")),
+                };
+                let mut node_stats = Vec::with_capacity(nodes.len());
+                let mut healthy_nodes = 0u32;
+                for (name, endpoint) in &nodes {
                     let start = std::time::Instant::now();
-                    let health_url = format!("{ep}/api/v2/health");
-                    let (tls_ok, http_status, tls_error) =
-                        match client.get(&health_url).send().await {
-                            Ok(resp) => {
-                                let code = resp.status().as_u16();
-                                (true, code.to_string(), String::new())
+                    let (status, diag) =
+                        match client.get(format!("{endpoint}/api/v2/health")).send().await {
+                            Ok(resp) if resp.status().is_success() => {
+                                healthy_nodes += 1;
+                                (
+                                    "healthy",
+                                    format!("tls=OK http={} ca_certs={ca_certs}", resp.status()),
+                                )
                             }
-                            Err(e) => {
-                                let msg = format!("{e}");
-                                let is_tls = msg.contains("certificate")
-                                    || msg.contains("ssl")
-                                    || msg.contains("tls")
-                                    || msg.contains("InvalidCertificate")
-                                    || msg.contains("UnknownIssuer");
-                                let label = if is_tls {
-                                    "TLS_CERT_REJECTED"
-                                } else if msg.contains("connect") || msg.contains("timeout") {
-                                    "NETWORK_UNREACHABLE"
-                                } else {
-                                    "REQUEST_FAILED"
-                                };
-                                (false, label.to_string(), msg)
-                            }
+                            Ok(resp) => (
+                                "down",
+                                format!("tls=OK http={} ca_certs={ca_certs}", resp.status()),
+                            ),
+                            Err(e) => (
+                                "down",
+                                format!(
+                                    "tls={} ca_certs={ca_certs} err={e}",
+                                    if e.is_connect() || e.is_timeout() {
+                                        "UNREACHABLE"
+                                    } else {
+                                        "FAIL"
+                                    }
+                                ),
+                            ),
                         };
-                    let latency_ms = start.elapsed().as_millis() as u32;
-
-                    // Try device registration if TLS passed
-                    let reg_status = if tls_ok {
-                        match crate::sdk::b0x_sdk::B0xSDK::new(
-                            device_id_b32.clone(),
-                            self.core_sdk.clone(),
-                            vec![ep.clone()],
-                        ) {
-                            Ok(sdk) => match sdk.register_device().await {
-                                Ok(_) => "AUTH_OK".to_string(),
-                                Err(e) => format!("AUTH_FAIL:{e}"),
-                            },
-                            Err(e) => format!("SDK_INIT_FAIL:{e}"),
-                        }
-                    } else {
-                        "SKIPPED_TLS_FAIL".to_string()
-                    };
-
-                    let status = if tls_ok
-                        && http_status.parse::<u16>().map(|c| c < 500).unwrap_or(false)
-                        && reg_status == "AUTH_OK"
-                    {
-                        healthy_count += 1;
-                        "healthy".to_string()
-                    } else {
-                        "down".to_string()
-                    };
-
-                    // Encode diagnostic details into last_error as a structured string.
-                    let diag = format!(
-                        "tls={} http={} auth={} ca_certs={}{}",
-                        if tls_ok { "OK" } else { "FAIL" },
-                        http_status,
-                        reg_status,
-                        ca_certs,
-                        if tls_error.is_empty() {
-                            String::new()
-                        } else {
-                            format!(" err={}", tls_error)
-                        }
-                    );
-
-                    let (name, region) = name_and_region_from_endpoint(ep);
-
                     node_stats.push(generated::StorageNodeStats {
-                        url: ep.clone(),
-                        name,
-                        region,
-                        status,
-                        latency_ms,
+                        url: endpoint.clone(),
+                        name: name.clone(),
+                        region: String::new(),
+                        status: status.to_string(),
+                        latency_ms: start.elapsed().as_millis() as u32,
                         last_error: diag,
-                        ..Default::default()
+                        objects_put_total: 0,
+                        objects_get_total: 0,
+                        bytes_written_total: 0,
+                        bytes_read_total: 0,
+                        cleanup_runs_total: 0,
+                        replication_failures: 0,
                     });
                 }
-
-                log::info!(
-                    "[storage.connectivity] ca_certs={} nodes={} healthy={}/{}",
-                    ca_certs,
-                    endpoints.len(),
-                    healthy_count,
-                    endpoints.len()
-                );
-
                 let resp = generated::StorageNodeStatsResponse {
+                    total_nodes: node_stats.len() as u32,
                     nodes: node_stats,
-                    total_nodes: endpoints.len() as u32,
-                    healthy_nodes: healthy_count,
+                    healthy_nodes,
                 };
                 pack_envelope_ok(generated::envelope::Payload::StorageNodeStatsResponse(resp))
             }
@@ -3257,94 +2357,589 @@ impl AppRouterImpl {
             other => err(format!("unknown storage query: {other}")),
         }
     }
+}
 
-    /// `diagnostics.metrics` — return a plain-text metrics snapshot.
-    ///
-    /// Snapshot format: newline-delimited `key=value` lines (no JSON/hex/base64).
-    /// Appends `db_bytes=N` from SQLite before returning so callers have storage
-    /// context without embedding DB logic in the pure `dsm` crate.
-    pub(crate) async fn handle_diagnostics_query(&self, q: AppQuery) -> AppResult {
-        match q.path.as_str() {
-            "diagnostics.metrics" => {
-                let mut snapshot = dsm::telemetry::get_global_metrics_snapshot();
-                let db_bytes = crate::storage::client_db::get_db_size().unwrap_or(0);
-                snapshot.extend_from_slice(format!("db_bytes={db_bytes}\n").as_bytes());
+/// `StorageSyncRequest.limit` when the request leaves it 0 (the wire
+/// contract's default).
+const STORAGE_SYNC_DEFAULT_LIMIT: usize = 100;
+/// The most inbox items one sync pulls.
+const STORAGE_SYNC_MAX_LIMIT: u32 = 200;
 
-                // Encode snapshot as UTF-8 string in AppStateResponse.value so
-                // the frontend can read it without a new proto field.
-                let text = String::from_utf8_lossy(&snapshot).into_owned();
-                let resp = generated::AppStateResponse {
-                    key: "diagnostics.metrics".to_string(),
-                    value: Some(text),
-                };
-                pack_envelope_ok(generated::envelope::Payload::AppStateResponse(resp))
+/// A decoded `storage.sync` request.
+struct StorageSyncRequestV {
+    pull_inbox: bool,
+    push_pending: bool,
+    limit: usize,
+}
+
+fn decode_storage_sync_request(params: &[u8]) -> Result<StorageSyncRequestV, String> {
+    let pack = generated::ArgPack::decode(params)
+        .map_err(|e| format!("storage.sync: decode ArgPack failed: {e}"))?;
+    if pack.codec != generated::Codec::Proto as i32 {
+        return Err("storage.sync: ArgPack.codec must be PROTO".to_string());
+    }
+    let request = generated::StorageSyncRequest::decode(&*pack.body)
+        .map_err(|e| format!("storage.sync: decode StorageSyncRequest failed: {e}"))?;
+    let limit = match request.limit {
+        0 => STORAGE_SYNC_DEFAULT_LIMIT,
+        n if n <= STORAGE_SYNC_MAX_LIMIT => n as usize,
+        n => {
+            return Err(format!(
+                "storage.sync: limit {n} exceeds {STORAGE_SYNC_MAX_LIMIT}"
+            ))
+        }
+    };
+    Ok(StorageSyncRequestV {
+        pull_inbox: request.pull_inbox,
+        push_pending: request.push_pending,
+        limit,
+    })
+}
+
+/// What one sync did: items pulled from the spool, items processed to a
+/// durable outcome (transfers completed, deltas finalized on, checkpoints
+/// applied), objects pushed, and what failed along the way.
+struct StorageSyncReport {
+    pulled: u32,
+    processed: u32,
+    pushed: u32,
+    errors: Vec<String>,
+}
+
+/// A sync that could not run to its end, with what it did before it stopped.
+struct StorageSyncFailure {
+    report: StorageSyncReport,
+}
+
+impl StorageSyncReport {
+    fn stop(mut self, why: String) -> StorageSyncFailure {
+        self.errors.push(why);
+        StorageSyncFailure { report: self }
+    }
+}
+
+fn short_route(route: &str) -> &str {
+    &route[..route.len().min(12)]
+}
+
+impl AppRouterImpl {
+    /// One `storage.sync`: pull and process the inbox, then push what is
+    /// owed. A completed run is counted.
+    async fn storage_sync(
+        &self,
+        request: StorageSyncRequestV,
+    ) -> Result<StorageSyncReport, StorageSyncFailure> {
+        let mut report = StorageSyncReport {
+            pulled: 0,
+            processed: 0,
+            pushed: 0,
+            errors: Vec::new(),
+        };
+        let storage_endpoints = match crate::sdk::storage_set::pinned_endpoints() {
+            Ok(endpoints) => endpoints,
+            Err(e) => return Err(report.stop(format!("no pinned storage set: {e}"))),
+        };
+        let device_id_b32 = crate::util::text_id::encode_base32_crockford(&self.device_id_bytes);
+        if request.pull_inbox {
+            report = self
+                .pull_and_process_inbox(report, &storage_endpoints, &device_id_b32, request.limit)
+                .await?;
+        }
+        if request.push_pending {
+            self.push_owed(&mut report, &storage_endpoints, &device_id_b32)
+                .await;
+        }
+        if let Err(e) = crate::storage::client_db::storage_sync_runs::record_completed() {
+            return Err(report.stop(format!("could not count the completed sync: {e}")));
+        }
+        Ok(report)
+    }
+
+    /// Pull every rotated inbox route, process what arrived, and drive the
+    /// durable completion passes that do not depend on this pull.
+    async fn pull_and_process_inbox(
+        &self,
+        mut report: StorageSyncReport,
+        storage_endpoints: &[String],
+        device_id_b32: &str,
+        limit: usize,
+    ) -> Result<StorageSyncReport, StorageSyncFailure> {
+        let mut b0x_sdk = match crate::sdk::b0x_sdk::B0xSDK::new(
+            device_id_b32.to_string(),
+            self.core_sdk.clone(),
+            storage_endpoints.to_vec(),
+        ) {
+            Ok(sdk) => sdk,
+            Err(e) => return Err(report.stop(format!("b0x init failed: {e}"))),
+        };
+        // §16.4: the per-contact rotated routes, tagged current or previous tip.
+        let my_genesis = match self.core_sdk.local_genesis_hash().await {
+            Ok(genesis) => match <[u8; 32]>::try_from(genesis.as_slice()) {
+                Ok(genesis) => genesis,
+                Err(e) => return Err(report.stop(format!("local genesis is not 32 bytes: {e}"))),
+            },
+            Err(e) => return Err(report.stop(format!("local genesis unavailable: {e}"))),
+        };
+        let contacts = match crate::storage::client_db::get_all_contacts() {
+            Ok(contacts) => contacts,
+            Err(e) => return Err(report.stop(format!("load contacts failed: {e}"))),
+        };
+        let tagged_addresses =
+            collect_tagged_inbox_addresses(my_genesis, self.device_id_bytes, &contacts);
+
+        let mut items = Vec::new();
+        // Already-accepted stale-route duplicates (§5.2), consumed directly:
+        // they must not re-enter verify+apply (their sig_a no longer chains to
+        // the advanced cert head), yet the sender's gate waits on them.
+        let mut stale_duplicates: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
+        for tagged in tagged_addresses {
+            if items.len() >= limit {
+                break;
             }
+            let retrieved = b0x_sdk.retrieve_from_b0x_v2(&tagged.address).await;
+            // Replies ride the same spool as forward transfers, as distinct
+            // payloads; they are drained whether or not this route yielded
+            // transfers, since a reply alone can release a pending gate.
+            self.process_countersign_deltas(&mut b0x_sdk, &tagged.address, &mut report)
+                .await;
+            self.process_finality_checkpoints(&mut b0x_sdk, &tagged.address, &mut report)
+                .await;
+            for evidence in b0x_sdk.take_evidence_artifacts() {
+                stage_polled_evidence_half(&evidence, &tagged.address);
+            }
+            for (method, body) in b0x_sdk.take_cert_resync_messages() {
+                let outcome = if method == crate::storage::client_db::CERT_RESYNC_REQUEST_METHOD {
+                    self.handle_cert_resync_request(&body, storage_endpoints.to_vec())
+                        .await
+                } else {
+                    self.handle_cert_resync_ack(&body).await
+                };
+                if let Err(e) = outcome {
+                    report.errors.push(format!("cert resync {method}: {e}"));
+                }
+            }
+            self.initiate_required_cert_resyncs(storage_endpoints, &mut report)
+                .await;
 
-            other => err(format!("diagnostics: unknown route '{other}'")),
+            let polled = match retrieved {
+                Ok(polled) => polled,
+                Err(e) => {
+                    report.errors.push(format!(
+                        "inbox pull failed on {}..: {e}",
+                        short_route(&tagged.address)
+                    ));
+                    continue;
+                }
+            };
+            let remaining = limit - items.len();
+            if tagged.freshness != RouteFreshness::PreviousTip {
+                items.extend(polled.into_iter().take(remaining));
+                continue;
+            }
+            // §5.2: the route fixes the tip an item was composed on — the
+            // inbox address hashes the relationship's tip (storage node spec
+            // §8). Every item on a previous-tip route steps from a tip this
+            // device has already advanced past: not adjacent, never applied.
+            // One this device already accepted is consumed so the sender's
+            // gate releases; any other is skipped.
+            for item in polled.into_iter().take(remaining) {
+                if crate::storage::client_db::transaction_exists(&item.transaction_id) {
+                    stale_duplicates
+                        .entry(item.inbox_key.clone())
+                        .or_default()
+                        .push(item.transaction_id.clone());
+                } else {
+                    log::info!(
+                        "[storage.sync] §5.2: stale-route item {} skipped pre-apply",
+                        item.transaction_id,
+                    );
+                }
+            }
+        }
+        // At most `limit`, which the request bounds by STORAGE_SYNC_MAX_LIMIT.
+        report.pulled = items.len() as u32;
+
+        for entry in &items {
+            // §4.2.1: `entry.transaction` is an untrusted reconstruction, a
+            // routing hint only; the dispatcher reads every value-bearing
+            // field from the signed canonical operation it verifies itself.
+            match route_polled_entry(entry) {
+                PolledEntryRoute::SplitTransferHalf => stage_polled_transfer_half(entry),
+                PolledEntryRoute::TransferWithoutEvidence => report.errors.push(format!(
+                    "transfer {} has no receipt-evidence reference; refused",
+                    entry.transaction_id
+                )),
+                PolledEntryRoute::NotATransfer => {}
+            }
+        }
+        for (route, ids) in stale_duplicates {
+            if let Err(e) = b0x_sdk.record_consumed_b0x(&route, ids).await {
+                report.errors.push(format!(
+                    "consume stale duplicates on {}..: {e}",
+                    short_route(&route)
+                ));
+            }
+        }
+
+        self.complete_split_transfers(&mut b0x_sdk, &mut report)
+            .await;
+
+        // §16.6 on-access acceptance recovery, from the durable apply record.
+        match crate::init::current_chain_head_at_rest_key() {
+            Ok(wrap_key) => {
+                if let Err(e) =
+                    crate::handlers::recipient_receipt::recover_incomplete_acceptances(&wrap_key)
+                        .await
+                {
+                    report.errors.push(format!("acceptance recovery: {e}"));
+                }
+            }
+            Err(locked) => log::info!(
+                "[storage.sync] §16.6 acceptance recovery waits for the wallet: {locked}"
+            ),
+        }
+        // §16.6 reply window: every countersigned receipt persisted but not
+        // yet delivered to its sender.
+        if let Err(e) =
+            deliver_pending_acceptance_replies(storage_endpoints, self.core_sdk.clone()).await
+        {
+            report
+                .errors
+                .push(format!("acceptance reply delivery: {e}"));
+        }
+        // §5.4: a row reaches gc_pending only once the recipient's verified
+        // countersigned acceptance finalized it; nothing is asked of a node.
+        match crate::storage::client_db::gc_pending_sender_outbox() {
+            Ok(collectable) => {
+                for row in &collectable {
+                    if let Err(e) = crate::storage::client_db::set_sender_outbox_status(
+                        &row.relationship_key,
+                        &row.canonical_parent,
+                        &row.proposal_nonce,
+                        crate::storage::client_db::OUTBOX_COMPLETE,
+                    ) {
+                        report.errors.push(format!(
+                            "outbox row {} not marked complete: {e}",
+                            row.submission_id
+                        ));
+                    }
+                }
+            }
+            Err(e) => report.errors.push(format!("outbox collection: {e}")),
+        }
+        Ok(report)
+    }
+
+    /// §16.6 sender finalization from the countersign deltas this poll
+    /// decoded. A delta finalized on (now or earlier) is consumed.
+    async fn process_countersign_deltas(
+        &self,
+        b0x_sdk: &mut crate::sdk::b0x_sdk::B0xSDK,
+        route: &str,
+        report: &mut StorageSyncReport,
+    ) {
+        let mut consumed = Vec::new();
+        for delta in b0x_sdk.take_countersign_deltas() {
+            let outcome = finalize_from_countersign_delta(&delta).await;
+            log::info!(
+                "[storage.sync] ADR 0003 countersign delta {} -> {:?}",
+                delta.message_id,
+                outcome
+            );
+            match outcome {
+                CountersignOutcome::Finalized => {
+                    report.processed += 1;
+                    consumed.push(delta.message_id.clone());
+                }
+                CountersignOutcome::AlreadyFinalized => consumed.push(delta.message_id.clone()),
+                other => report
+                    .errors
+                    .push(format!("countersign delta {}: {other:?}", delta.message_id)),
+            }
+        }
+        if !consumed.is_empty() {
+            if let Err(e) = b0x_sdk.record_consumed_b0x(route, consumed).await {
+                report.errors.push(format!(
+                    "consume countersign deltas on {}..: {e}",
+                    short_route(route)
+                ));
+            }
+        }
+    }
+
+    /// Finality certificates (the finality barrier), before split-transfer
+    /// completion so a pair held behind one proceeds in the same pass.
+    async fn process_finality_checkpoints(
+        &self,
+        b0x_sdk: &mut crate::sdk::b0x_sdk::B0xSDK,
+        route: &str,
+        report: &mut StorageSyncReport,
+    ) {
+        use crate::handlers::relationship_finalized::RelationshipFinalizedOutcome as O;
+        let mut consumed = Vec::new();
+        for checkpoint in b0x_sdk.take_relationship_finalized() {
+            let outcome = crate::handlers::relationship_finalized::apply_relationship_finalized(
+                &checkpoint.body,
+            )
+            .await;
+            log::info!(
+                "[storage.sync] finality checkpoint {} -> {:?}",
+                checkpoint.message_id,
+                outcome
+            );
+            match outcome {
+                O::Applied => {
+                    report.processed += 1;
+                    consumed.push(checkpoint.message_id.clone());
+                }
+                O::AlreadyFinalized | O::NoJournal => consumed.push(checkpoint.message_id.clone()),
+                other => report.errors.push(format!(
+                    "finality checkpoint {}: {other:?}",
+                    checkpoint.message_id
+                )),
+            }
+        }
+        if !consumed.is_empty() {
+            if let Err(e) = b0x_sdk.record_consumed_b0x(route, consumed).await {
+                report.errors.push(format!(
+                    "consume finality checkpoints on {}..: {e}",
+                    short_route(route)
+                ));
+            }
+        }
+    }
+
+    /// Every relationship the send gate marked REQUIRED gets its resync
+    /// request sent (which moves it to PENDING).
+    async fn initiate_required_cert_resyncs(
+        &self,
+        storage_endpoints: &[String],
+        report: &mut StorageSyncReport,
+    ) {
+        let relationships = match crate::storage::client_db::relationships_requiring_resync() {
+            Ok(relationships) => relationships,
+            Err(e) => {
+                report.errors.push(format!("cert resync lookup: {e}"));
+                return;
+            }
+        };
+        for relationship in relationships {
+            match crate::handlers::cert_resync_flow::peer_device_for_relationship(
+                &self.device_id_bytes,
+                &relationship,
+            ) {
+                Some(peer) => {
+                    if let Err(e) = self
+                        .initiate_cert_resync(peer, storage_endpoints.to_vec())
+                        .await
+                    {
+                        report.errors.push(format!("cert resync initiate: {e}"));
+                    }
+                }
+                None => report
+                    .errors
+                    .push("a relationship requiring resync has no resolvable peer".to_string()),
+            }
+        }
+    }
+
+    /// ADR 0003 split-transfer completion, every sync, from the durable
+    /// staging rows. Both halves are consumed on the retained route, and the
+    /// route is released only once every consume of the pass landed.
+    async fn complete_split_transfers(
+        &self,
+        b0x_sdk: &mut crate::sdk::b0x_sdk::B0xSDK,
+        report: &mut StorageSyncReport,
+    ) {
+        let (split_acks, release_keys) = self.complete_ready_split_transfers().await;
+        // Each release key is one transfer this pass completed.
+        report.processed += release_keys.len() as u32;
+        let mut groups: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
+        for (route, id) in split_acks {
+            groups.entry(route).or_default().push(id);
+        }
+        let mut all_consumed = true;
+        for (route, ids) in groups {
+            if let Err(e) = b0x_sdk.record_consumed_b0x(&route, ids).await {
+                all_consumed = false;
+                report.errors.push(format!(
+                    "ADR 0003 consume on {}.. failed (route retained): {e}",
+                    short_route(&route)
+                ));
+            }
+        }
+        if !all_consumed {
+            return;
+        }
+        for key in release_keys {
+            if let Err(e) =
+                crate::storage::client_db::recipient_staging::release_retained_route(&key)
+            {
+                report
+                    .errors
+                    .push(format!("ADR 0003 route release failed for {key}: {e}"));
+            }
+        }
+    }
+
+    /// The liveness sweeps: resubmit uncertain sends, replay frozen
+    /// certificates and publication artifacts, and finish an economic
+    /// admission a crash stranded.
+    async fn push_owed(
+        &self,
+        report: &mut StorageSyncReport,
+        storage_endpoints: &[String],
+        device_id_b32: &str,
+    ) {
+        match self
+            .resubmit_unsettled_sender_outbox(device_id_b32, storage_endpoints)
+            .await
+        {
+            Ok(n) => report.pushed += n,
+            Err(e) => report
+                .errors
+                .push(format!("outbox resubmit sweep failed: {e}")),
+        }
+        match deliver_pending_finalization_checkpoints(storage_endpoints, self.core_sdk.clone())
+            .await
+        {
+            Ok(n) => report.pushed += n,
+            Err(e) => report.errors.push(format!("checkpoint sweep failed: {e}")),
+        }
+        match crate::handlers::artifact_republish::republish_unpublished_artifacts().await {
+            Ok(n) => report.pushed += n,
+            Err(e) => report
+                .errors
+                .push(format!("artifact republish sweep failed: {e}")),
+        }
+        // An admission the head already carried when this process restored
+        // it; one created after startup belongs to the handler that created it.
+        let stranded = self
+            .core_sdk
+            .device_head()
+            .and_then(|head| head.pending_economic_admission().cloned())
+            .filter(|pending| self.core_sdk.admission_predates_startup(pending));
+        if let Some(pending) = stranded {
+            let position = pending.economic_position;
+            let resumed = match crate::sdk::economic_admission_flow::committed_network_id() {
+                Ok(network) => {
+                    crate::sdk::economic_admission_flow::resume_pending_admission(
+                        &self.core_sdk,
+                        &network,
+                        pending,
+                    )
+                    .await
+                }
+                Err(e) => Err(e),
+            };
+            match resumed {
+                Ok(..) => report.pushed += 1,
+                Err(e) => report.errors.push(format!(
+                    "stranded admission at position {position} not finished: {e}"
+                )),
+            }
         }
     }
 }
 
-/// Check a single storage node's health and scrape its Prometheus metrics.
-/// Uses `Instant::now()` for display-only latency measurement (permitted for
-/// non-authoritative operational purposes per Hard Invariant §4).
+/// Decode a proto request carried in a PROTO ArgPack.
+fn decode_proto_request<M: Message + Default>(params: &[u8], route: &str) -> Result<M, String> {
+    let pack = generated::ArgPack::decode(params)
+        .map_err(|e| format!("{route}: decode ArgPack failed: {e}"))?;
+    if pack.codec != generated::Codec::Proto as i32 {
+        return Err(format!("{route}: ArgPack.codec must be PROTO"));
+    }
+    M::decode(&*pack.body).map_err(|e| format!("{route}: decode request failed: {e}"))
+}
+
+/// `(member id, endpoint)` for every member of the pinned set.
+fn pinned_members() -> Result<Vec<(String, String)>, String> {
+    let network = crate::sdk::economic_admission_flow::committed_network_id()
+        .map_err(|e| format!("no committed network: {e}"))?;
+    let set = crate::sdk::storage_set::canonical_set(&network)
+        .map_err(|e| format!("no pinned storage set: {e}"))?;
+    Ok(set
+        .members()
+        .iter()
+        .map(|member| (member.member_id.clone(), member.endpoint.clone()))
+        .collect())
+}
+
+/// One storage node's health and its Prometheus counters. Uses
+/// `Instant::now()` for display-only latency (non-authoritative operational
+/// data). A counter the node does not expose, or a scrape that fails, is
+/// named in `last_error`; the proto field is then absent (zero).
 async fn check_single_node_stats(
     client: &reqwest::Client,
+    name: &str,
     endpoint: &str,
 ) -> dsm::types::proto::StorageNodeStats {
-    use dsm::types::proto::StorageNodeStats;
-    use std::collections::HashMap;
-
     let start = std::time::Instant::now();
-    let health_url = format!("{endpoint}/api/v2/health");
-
-    // 1. Health check
-    let (status, last_error) = match client.get(&health_url).send().await {
-        Ok(resp) if resp.status().is_success() => ("healthy".to_string(), String::new()),
-        Ok(resp) => {
-            let code = resp.status();
-            ("degraded".to_string(), format!("HTTP {code}"))
-        }
-        Err(e) => ("down".to_string(), format!("{e}")),
+    let (status, mut problems) = match client.get(format!("{endpoint}/api/v2/health")).send().await
+    {
+        Ok(resp) if resp.status().is_success() => ("healthy", Vec::new()),
+        Ok(resp) => ("degraded", vec![format!("HTTP {}", resp.status())]),
+        Err(e) => ("down", vec![e.to_string()]),
     };
     let latency_ms = start.elapsed().as_millis() as u32;
 
-    // 2. Prometheus metrics (best-effort, skip if node is down)
-    let prom = if status != "down" {
-        let metrics_url = format!("{endpoint}/metrics");
-        match client.get(&metrics_url).send().await {
+    let prom = if status == "down" {
+        std::collections::HashMap::new()
+    } else {
+        match client.get(format!("{endpoint}/metrics")).send().await {
             Ok(resp) if resp.status().is_success() => match resp.text().await {
                 Ok(text) => parse_prometheus_text(&text),
-                Err(_) => HashMap::new(),
+                Err(e) => {
+                    problems.push(format!("metrics body: {e}"));
+                    std::collections::HashMap::new()
+                }
             },
-            _ => HashMap::new(),
+            Ok(resp) => {
+                problems.push(format!("metrics HTTP {}", resp.status()));
+                std::collections::HashMap::new()
+            }
+            Err(e) => {
+                problems.push(format!("metrics: {e}"));
+                std::collections::HashMap::new()
+            }
         }
-    } else {
-        HashMap::new()
     };
+    let mut counter = |key: &str| match prom.get(key) {
+        Some(value) => *value as u64,
+        None => {
+            if status != "down" {
+                problems.push(format!("{key} not exposed"));
+            }
+            0
+        }
+    };
+    let objects_put_total = counter("dsm_storage_objects_put_total");
+    let objects_get_total = counter("dsm_storage_objects_get_total");
+    let bytes_written_total = counter("dsm_storage_bytes_written_total");
+    let bytes_read_total = counter("dsm_storage_bytes_read_total");
+    let cleanup_runs_total = counter("dsm_storage_cleanup_runs_total");
+    let replication_failures = counter("dsm_replication_outbox_failures_total");
 
-    // 3. Derive name/region from endpoint heuristic (IP-to-region mapping)
-    let (name, region) = name_and_region_from_endpoint(endpoint);
-
-    StorageNodeStats {
+    dsm::types::proto::StorageNodeStats {
         url: endpoint.to_string(),
-        name,
-        region,
-        status,
+        name: name.to_string(),
+        region: String::new(),
+        status: status.to_string(),
         latency_ms,
-        last_error,
-        objects_put_total: prom_u64(&prom, "dsm_storage_objects_put_total"),
-        objects_get_total: prom_u64(&prom, "dsm_storage_objects_get_total"),
-        bytes_written_total: prom_u64(&prom, "dsm_storage_bytes_written_total"),
-        bytes_read_total: prom_u64(&prom, "dsm_storage_bytes_read_total"),
-        cleanup_runs_total: prom_u64(&prom, "dsm_storage_cleanup_runs_total"),
-        replication_failures: prom_u64(&prom, "dsm_replication_outbox_failures_total"),
+        last_error: problems.join("; "),
+        objects_put_total,
+        objects_get_total,
+        bytes_written_total,
+        bytes_read_total,
+        cleanup_runs_total,
+        replication_failures,
     }
 }
 
-/// Parse Prometheus exposition text format into metric_name → value map.
-/// Handles simple gauge/counter lines: `metric_name value [unix_ts]`.
-/// This is display-only operational data — not protocol.
+/// Parse Prometheus exposition text into metric name → value. Handles
+/// `name value [ts]` and `name{labels} value [ts]`; display-only data.
 fn parse_prometheus_text(text: &str) -> std::collections::HashMap<String, f64> {
     let mut metrics = std::collections::HashMap::new();
     for line in text.lines() {
@@ -3352,73 +2947,37 @@ fn parse_prometheus_text(text: &str) -> std::collections::HashMap<String, f64> {
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
-        // Handle optional label sets: e.g. metric_name{label="val"} 42
-        let metric_part = if let Some(brace_idx) = trimmed.find('{') {
-            if let Some(close_idx) = trimmed.find('}') {
-                // metric_name{...} value
-                let name = &trimmed[..brace_idx];
-                let rest = trimmed[close_idx + 1..].trim();
-                if let Some(val_str) = rest.split_whitespace().next() {
-                    if let Ok(val) = val_str.parse::<f64>() {
-                        metrics.insert(name.to_string(), val);
-                    }
-                }
-                continue;
-            }
-            trimmed
-        } else {
-            trimmed
+        let (name, rest) = match (trimmed.find('{'), trimmed.find('}')) {
+            (Some(open), Some(close)) if open < close => (&trimmed[..open], &trimmed[close + 1..]),
+            (Some(..), Some(..)) | (Some(..), None) | (None, Some(..)) => continue,
+            (None, None) => match trimmed.split_once(char::is_whitespace) {
+                Some((name, rest)) => (name, rest),
+                None => continue,
+            },
         };
-        let mut parts = metric_part.split_whitespace();
-        if let (Some(name), Some(val_str)) = (parts.next(), parts.next()) {
-            if let Ok(val) = val_str.parse::<f64>() {
-                metrics.insert(name.to_string(), val);
-            }
+        if let Some(value) = rest
+            .split_whitespace()
+            .next()
+            .and_then(|value| value.parse::<f64>().ok())
+        {
+            metrics.insert(name.to_string(), value);
         }
     }
     metrics
 }
 
-/// Extract a u64 from Prometheus metrics map (display-only).
-fn prom_u64(prom: &std::collections::HashMap<String, f64>, key: &str) -> u64 {
-    prom.get(key).copied().unwrap_or(0.0) as u64
-}
-
-/// Derive human-readable name and region from a storage node endpoint URL.
-/// Uses the hardcoded production IP→region mapping.
-fn name_and_region_from_endpoint(endpoint: &str) -> (String, String) {
-    // GCP 6-node production cluster (must match dsm_env_config.toml)
-    let ip_region_map: &[(&str, &str, &str)] = &[
-        ("34.73.141.32", "us-east1-a", "us-east1"),
-        ("35.243.157.151", "us-east1-b", "us-east1"),
-        ("35.205.9.157", "europe-west1-a", "europe-west1"),
-        ("34.53.251.120", "europe-west1-b", "europe-west1"),
-        ("34.21.157.56", "asia-southeast1-a", "asia-southeast1"),
-        ("34.87.93.29", "asia-southeast1-b", "asia-southeast1"),
-    ];
-    for &(ip, name, region) in ip_region_map {
-        if endpoint.contains(ip) {
-            return (name.to_string(), region.to_string());
-        }
-    }
-    // Unknown node — derive a short name from the URL
-    let short = endpoint
-        .trim_start_matches("https://")
-        .trim_start_matches("http://")
-        .split(':')
-        .next()
-        .unwrap_or(endpoint);
-    (
-        format!("node-{}", &short[..short.len().min(12)]),
-        String::new(),
-    )
-}
-
 #[cfg(test)]
 mod tests {
-    use super::resolve_trusted_sender_ak;
-
-    use super::{route_polled_entry, PolledEntryRoute};
+    use super::{finalize_from_countersign_delta, CountersignOutcome};
+    use super::{resolve_trusted_sender_ak, route_polled_entry, PolledEntryRoute};
+    use crate::sdk::b0x_sdk::CountersignDelta;
+    use crate::storage::client_db;
+    use crate::storage::client_db::sender_proposal::{
+        get_sender_proposal_by_commitment, PROPOSAL_AWAITING_VALID_REPLY, PROPOSAL_FINALIZED,
+        PROPOSAL_SUBMITTED,
+    };
+    use crate::test_support::two_device::Pair;
+    use prost::Message;
 
     fn polled_entry(
         transaction: dsm::types::operations::Operation,
@@ -3429,15 +2988,10 @@ mod tests {
             inbox_key: "ROUTE".to_string(),
             sender_device_id: crate::util::text_id::encode_base32_crockford(&[0x0Au8; 32]),
             sender_genesis_hash: crate::util::text_id::encode_base32_crockford(&[0xAAu8; 32]),
-            sender_chain_tip: crate::util::text_id::encode_base32_crockford(&[0x31u8; 32]),
-            next_chain_tip: crate::util::text_id::encode_base32_crockford(&[0x32u8; 32]),
             recipient_device_id: crate::util::text_id::encode_base32_crockford(&[0x0Bu8; 32]),
             transaction,
             signature: vec![0xA5; 8],
             sender_signing_public_key: vec![0x88; 64],
-            tick: 0,
-            ttl_seconds: 0,
-            seq: 1,
             canonical_operation_bytes: vec![0xCD; 16],
             transfer_wire_bytes: vec![0xEE; 16],
             receipt_evidence_digest,
@@ -3447,7 +3001,7 @@ mod tests {
     fn transfer_op() -> dsm::types::operations::Operation {
         dsm::types::operations::Operation::Transfer {
             to_device_id: vec![0x0B; 32],
-            amount: dsm::types::token_types::Balance::from_state(5, [0u8; 32]),
+            amount: dsm::types::token_types::Balance::amount(5),
             token_id: b"ERA".to_vec(),
             policy_commit: [0x0F; 32],
             mode: dsm::types::operations::TransactionMode::Unilateral,
@@ -3489,2763 +3043,305 @@ mod tests {
 
     // =====================================================================
     // TRUST ROOT (issue #656): the online inbox must not verify an entry
-    // against a key that entry supplied.
-    //
-    // The drain previously preferred `entry.sender_signing_public_key` over
-    // the contact book and then passed it to `decode_and_bind_signed`. An
-    // attacker who could place an inbox entry therefore supplied BOTH the key
-    // and a signature made with the matching secret, and SIG A verified
-    // against the attacker's own root.
+    // against a key that entry supplied. An attacker who can place an inbox
+    // entry supplies BOTH a key and a signature made with its secret; the
+    // key verification roots in is the one the contact book holds.
     // =====================================================================
 
-    fn trust_root_test_db() {
-        unsafe {
-            std::env::set_var("DSM_SDK_TEST_MODE", "1");
-        }
-        let _ =
-            crate::storage_utils::set_storage_base_dir(std::path::PathBuf::from("./.dsm_testdata"));
-        crate::storage::client_db::reset_database_for_tests();
-        crate::storage::client_db::init_database().expect("init db");
-    }
-
-    fn seed_sender_contact(devid: [u8; 32], ak: Vec<u8>) -> String {
-        seed_sender_contact_with_genesis(devid, [0xAAu8; 32], ak)
-    }
-
-    fn seed_sender_contact_with_genesis(devid: [u8; 32], genesis: [u8; 32], ak: Vec<u8>) -> String {
-        let c = crate::storage::client_db::ContactRecord {
-            contact_id: "cid-trust-root".to_string(),
-            device_id: devid.to_vec(),
-            alias: "sender".to_string(),
-            genesis_hash: genesis.to_vec(),
-            public_key: ak,
-            kyber_public_key: vec![0xCCu8; 1184],
-            current_chain_tip: None,
-            added_at: 1,
-            verified: true,
-            verification_proof: None,
-            metadata: std::collections::HashMap::new(),
-            ble_address: None,
-            status: "Created".to_string(),
-            needs_online_reconcile: false,
-            last_seen_online_counter: 0,
-            last_seen_ble_counter: 0,
-            previous_chain_tip: None,
-        };
-        crate::storage::client_db::store_contact(&c).expect("seed contact");
-        crate::util::text_id::encode_base32_crockford(&devid)
-    }
-
-    /// 1. Stored AK present, no wire key -> the stored AK is used.
-    #[test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[serial_test::serial]
-    fn stored_ak_is_used_when_no_wire_key_is_embedded() {
-        trust_root_test_db();
-        let stored = vec![0xBBu8; 64];
-        let dev = seed_sender_contact([0x51u8; 32], stored.clone());
+    async fn the_sender_ak_is_the_one_the_contact_book_holds_never_the_wires() {
+        let p = Pair::boot(0, 0).await;
+        let attacker_pk = dsm::crypto::sphincs::generate_sphincs_keypair()
+            .expect("the attacker's own key")
+            .0;
+        p.b.enter();
+        let a_b32 = crate::util::text_id::encode_base32_crockford(&p.a.device_id);
 
-        let resolved = resolve_trusted_sender_ak(&dev, &[]).expect("stored AK must resolve");
-        assert_eq!(resolved, stored);
-    }
-
-    /// 2. THE ATTACK. An attacker embeds their own key; verification must NOT
-    ///    root in it. Before the fix this returned the attacker's key, so a
-    ///    signature made with the attacker's secret verified.
-    #[test]
-    #[serial_test::serial]
-    fn an_attacker_supplied_wire_key_is_never_trusted() {
-        trust_root_test_db();
-        let stored = vec![0xBBu8; 64];
-        let dev = seed_sender_contact([0x52u8; 32], stored.clone());
-
-        let attacker = vec![0xEEu8; 64];
-        let resolved = resolve_trusted_sender_ak(&dev, &attacker).expect("resolve");
         assert_eq!(
-            resolved, stored,
-            "verification must root in the STORED AK, never the wire-supplied key"
+            resolve_trusted_sender_ak(&a_b32, &[]).expect("the stored AK resolves"),
+            p.a.ak_pk,
+            "no wire key: the stored AK"
         );
-        assert_ne!(
-            resolved, attacker,
-            "the attacker's key must never become the verification root"
+        assert_eq!(
+            resolve_trusted_sender_ak(&a_b32, &attacker_pk).expect("resolve"),
+            p.a.ak_pk,
+            "an attacker's wire key is never the verification root"
         );
-    }
-
-    /// 3. Wire key disagrees with the stored AK -> the wire value is ignored and
-    ///    verification still roots in the stored one.
-    #[test]
-    #[serial_test::serial]
-    fn a_disagreeing_wire_key_is_ignored_not_preferred() {
-        trust_root_test_db();
-        let stored = vec![0x01u8; 64];
-        let dev = seed_sender_contact([0x53u8; 32], stored.clone());
-
-        let resolved = resolve_trusted_sender_ak(&dev, &[0x02u8; 64]).expect("resolve");
-        assert_eq!(resolved, stored);
-    }
-
-    /// 4. No stored AK -> FAIL CLOSED. Never fall back to the wire value.
-    ///    Establishing an AK for an unknown sender needs its own authenticated
-    ///    identity rule; transfer verification must not bootstrap trust from the
-    ///    message it is authenticating.
-    #[test]
-    #[serial_test::serial]
-    fn no_stored_ak_fails_closed_and_never_falls_back_to_the_wire() {
-        trust_root_test_db();
-        let unknown = crate::util::text_id::encode_base32_crockford(&[0x54u8; 32]);
-
-        let err = resolve_trusted_sender_ak(&unknown, &[0xEEu8; 64])
-            .expect_err("an unknown sender must fail closed");
-        assert!(
-            err.contains("no locally trusted sender AK"),
-            "unexpected error: {err}"
-        );
+        let unknown = crate::util::text_id::encode_base32_crockford(&p.b.device_id);
+        let err = resolve_trusted_sender_ak(&unknown, &attacker_pk)
+            .expect_err("a sender with no stored AK fails closed");
+        assert!(err.contains("no locally trusted sender AK"), "{err}");
     }
 
     // =====================================================================
-    // #658 RECOVERY E2E — poisoned reply -> awaiting_valid_reply -> honest
-    // copy for the same step -> finalized.
+    // SENDER FINALIZATION FROM A RECIPIENT'S DELTA (#658, R5, 3.5b PR4).
     //
-    // WHY THIS TEST EXISTS AND WHY IT DRIVES THE HANDLER.
-    //
-    // `sender_proposal.rs` already proves the DB state machine ALLOWS this
-    // path, but it does so by calling `mark_sender_proposal_awaiting_valid_
-    // reply` and `mark_sender_proposal_finalized_by_canonical` directly. That
-    // test stays green even if `finalize_from_acceptance_artifact` never makes
-    // the transition at all — it measures the storage layer, not the decision.
-    //
-    // The defect being guarded is a stranded sender: `finalized` is the only
-    // other state reachable from `submitted`, and reaching it requires the very
-    // reply that was just refused. One bad artifact therefore pinned the step
-    // forever. That is a property of the HANDLER, so the handler is what runs
-    // here.
-    //
-    // The poisoning is the real attack shape, not a synthetic one. Receipt
-    // fields 12-20 sit outside every signature, and the delta's `commitment`
-    // is an unsigned reference the handler uses for proposal lookup. So a
-    // middlebox can address a delta at a genuine proposal while carrying B
-    // material minted over a different receipt. The poisoned delta below does
-    // exactly that: the honest commitment and A digest, and B fields whose
-    // per-step EK countersignature genuinely verifies — over a forged child.
+    // Every step is a real send from A to B on the nodes. B's real delta is
+    // read from the members exactly as A's poll reads it; hostile variants
+    // are that delta with fields a middlebox or a malicious recipient can
+    // change, handed to the handler A's poll hands deltas to. Receipt fields
+    // 12-20 sit outside every signature and the delta's commitment is an
+    // unsigned lookup reference, so each of these is a delta that arrives.
     // =====================================================================
 
-    /// Mint a B-side receipt whose per-step EK artifacts genuinely verify, with
-    /// `b_ak_sk` acting as the relationship-genesis predecessor.
-    ///
-    /// Ordering matters: everything the commitment covers is set BEFORE the
-    /// commitment is computed, and `sig_b` — which signs a target derived from
-    /// that commitment — is attached last.
-    /// The recipient's canonical pair every fixture in this module signs
-    /// under (B-canonical target) and carries in its delta: the relationship's
-    /// genesis seed (what the sender pins before any step is learned) → an
-    /// opaque first child.
-    fn b_pair_for(a: &[u8; 32], b: &[u8; 32]) -> ([u8; 32], [u8; 32]) {
-        (
-            dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(a, b),
-            [0x72u8; 32],
-        )
+    /// A sends `amount` to B and B applies and replies: B's delta for the
+    /// step, read from the members, and the step's commitment.
+    async fn step_with_reply(p: &Pair, amount: u64) -> (CountersignDelta, [u8; 32]) {
+        let sent = p.a.send(&p.b, amount).await;
+        assert!(sent.success, "{:?}", sent.error_message);
+        let applied = p.b.sync().await;
+        assert!(applied.success, "{:?}", applied.errors);
+        let delta = crate::test_support::arrivals::arrivals_for(&p.a, &p.fleet)
+            .await
+            .deltas
+            .pop()
+            .expect("B's delta is on the members");
+        let commitment: [u8; 32] = wire(&delta)
+            .commitment
+            .as_slice()
+            .try_into()
+            .expect("a 32-byte commitment");
+        (delta, commitment)
     }
 
-    fn signed_b_receipt(
-        a: [u8; 32],
-        b: [u8; 32],
-        parent: [u8; 32],
-        child: [u8; 32],
-        b_ak_sk: &[u8],
-    ) -> dsm::types::receipt_types::StitchedReceiptV2 {
-        use crate::sdk::receipts::compute_receipt_b_canonical_target;
-        use dsm::crypto::ephemeral_key::sign_ek_cert;
-        use dsm::crypto::sphincs::{generate_sphincs_keypair, sphincs_sign};
-
-        let mut r = dsm::types::receipt_types::StitchedReceiptV2::new(
-            [0u8; 32],
-            a,
-            b,
-            parent,
-            child,
-            [0u8; 32],
-            [0u8; 32],
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-        );
-
-        let (ek_pk_b, ek_sk_b) = generate_sphincs_keypair().expect("per-step EK keypair");
-        r.ek_pk_b = ek_pk_b.clone();
-        // Structural rule: ek_pk_b present => kyber_ct_b present.
-        r.kyber_ct_b = vec![0x5Au8; 1088];
-        // h_n is the receipt's own parent_tip, matching the verifier.
-        r.ek_cert_b = sign_ek_cert(b_ak_sk, &ek_pk_b, &parent).expect("ek_cert_b");
-
-        let commitment = r.compute_commitment().expect("commitment");
-        // Online B side: sig_b authenticates the recipient's canonical pair.
-        let target = compute_receipt_b_canonical_target(
-            &commitment,
-            &commitment,
-            &b_pair_for(&a, &b).0,
-            &b_pair_for(&a, &b).1,
-        );
-        r.sig_b = sphincs_sign(&ek_sk_b, &target).expect("sig_b");
-        r
+    fn wire(delta: &CountersignDelta) -> dsm::types::proto::ReceiptCountersignB {
+        dsm::types::proto::ReceiptCountersignB::decode(delta.body.as_slice())
+            .expect("the delta body")
     }
 
-    /// Freeze the sender's A-side evidence for `proposal` exactly as `wallet.send`
-    /// does: the A-only receipt bytes wrapped by the REAL evidence builder,
-    /// committed atomically with the proposal, outbox row, gate and EK head.
-    /// Returns the evidence content digest — what an honest delta names.
-    fn seed_frozen_send_with_evidence_a(
-        a_side: &dsm::types::receipt_types::StitchedReceiptV2,
-        proposal: &crate::storage::client_db::sender_proposal::SenderOnlineProposal,
-        sender_b32: &str,
-        recipient_b32: &str,
-        ek_a: (&[u8], &[u8]),
-    ) -> [u8; 32] {
-        use crate::storage::client_db::{
-            commit_send_prerequisites_atomically, evidence_content_digest, ArtifactRole,
-            SenderOutboxArtifact, SenderOutboxRecord, OUTBOX_PENDING_SUBMIT,
-        };
-        use std::sync::Arc;
-
-        let a_bytes = a_side.to_full_protobuf().expect("A-side bytes");
-        let digest_a = evidence_content_digest(ArtifactRole::EvidenceA, &a_bytes);
-        let evidence_sid = crate::storage::client_db::derive_artifact_submission_id(&digest_a);
-        let transfer_sid = crate::storage::client_db::derive_submission_id(&proposal.commitment);
-
-        let core = Arc::new(crate::sdk::core_sdk::CoreSDK::new().expect("CoreSDK"));
-        let sdk =
-            crate::sdk::b0x_sdk::B0xSDK::new(sender_b32.to_string(), core, vec![]).expect("B0xSDK");
-        let built = sdk
-            .build_evidence_envelope(
-                recipient_b32,
-                &crate::util::text_id::encode_base32_crockford(&[0xAAu8; 32]),
-                &transfer_sid,
-                &evidence_sid,
-                &digest_a,
-                &a_bytes,
-            )
-            .expect("real evidence envelope");
-
-        let outbox = SenderOutboxRecord {
-            relationship_key: proposal.relationship_key,
-            canonical_parent: proposal.canonical_parent,
-            proposal_nonce: proposal.nonce_hash,
-            canonical_child: proposal.canonical_child,
-            commitment: proposal.commitment,
-            projection_parent: proposal.projection_parent,
-            projection_target: proposal.projection_target,
-            routing_address: "TESTROUTINGADDRESS".to_string(),
-            submission_id: transfer_sid,
-            envelope_bytes: vec![0xC1u8; 512],
-            local_expected_prev: None,
-            is_first_ek_step: true,
-            status: OUTBOX_PENDING_SUBMIT.to_string(),
-            message_ids: None,
-            created_at: 0,
-        };
-        let evidence = SenderOutboxArtifact {
-            relationship_key: proposal.relationship_key,
-            canonical_parent: proposal.canonical_parent,
-            proposal_nonce: proposal.nonce_hash,
-            role: ArtifactRole::EvidenceA,
-            submission_id: evidence_sid,
-            envelope_bytes: built.bytes,
-            content_digest: digest_a,
-            routing_address: None,
-        };
-        // The pending A EK head is stashed under the REAL at-rest key (the
-        // certificate builder decrypts it with the same derivation), holding
-        // the REAL per-step EK the receipt's `ek_pk_a` names.
-        let wrap = crate::init::current_chain_head_at_rest_key().expect("at-rest key");
-        commit_send_prerequisites_atomically(
-            proposal,
-            &outbox,
-            "GATE-658",
-            ek_a.0,
-            ek_a.1,
-            &wrap,
-            true,
-            std::slice::from_ref(&evidence),
-        )
-        .expect("seed frozen send");
-        digest_a
-    }
-
-    /// The recipient's delta for a countersigned receipt, as the sender's poll
-    /// hands it to the handler: the four B fields plus the two references.
-    /// `envelope_bytes` is what the sender persists on finalization; only the
-    /// body is decoded here, so a placeholder envelope keeps this fixture
-    /// honest about what it exercises.
-    fn delta_for(
-        receipt_with_b: &dsm::types::receipt_types::StitchedReceiptV2,
-        commitment: [u8; 32],
-        digest_a: [u8; 32],
-    ) -> crate::sdk::b0x_sdk::CountersignDelta {
-        delta_for_with_release(receipt_with_b, commitment, digest_a, None)
-    }
-
-    fn delta_for_with_release(
-        receipt_with_b: &dsm::types::receipt_types::StitchedReceiptV2,
-        commitment: [u8; 32],
-        digest_a: [u8; 32],
-        release_addr: Option<[u8; 32]>,
-    ) -> crate::sdk::b0x_sdk::CountersignDelta {
-        use prost::Message;
-        let (_, b) = receipt_with_b
-            .split_countersign_b()
-            .expect("receipt carries a countersignature");
-        let body = dsm::types::proto::ReceiptCountersignB {
-            commitment: commitment.to_vec(),
-            receipt_evidence_digest_a: digest_a.to_vec(),
-            sig_b: b.sig_b,
-            ek_cert_b: b.ek_cert_b,
-            ek_pk_b: b.ek_pk_b,
-            kyber_ct_b: b.kyber_ct_b,
-            b_parent_tip: b_pair_for(&receipt_with_b.devid_a, &receipt_with_b.devid_b)
-                .0
-                .to_vec(),
-            b_child_tip: b_pair_for(&receipt_with_b.devid_a, &receipt_with_b.devid_b)
-                .1
-                .to_vec(),
-            recipient_economic_release_addr: release_addr.map(|a| a.to_vec()).unwrap_or_default(),
-        }
-        .encode_to_vec();
-        crate::sdk::b0x_sdk::CountersignDelta {
-            message_id: "TESTDELTA000000000000000000".to_string(),
-            envelope_bytes: vec![0xEDu8; 64],
-            body,
+    /// `delta` with its body edited.
+    fn tampered(
+        delta: &CountersignDelta,
+        edit: impl FnOnce(&mut dsm::types::proto::ReceiptCountersignB),
+    ) -> CountersignDelta {
+        let mut body = wire(delta);
+        edit(&mut body);
+        CountersignDelta {
+            message_id: delta.message_id.clone(),
+            envelope_bytes: delta.envelope_bytes.clone(),
+            body: body.encode_to_vec(),
         }
     }
 
-    struct SeededStep {
-        a: [u8; 32],
-        b: [u8; 32],
-        b_genesis: [u8; 32],
-        b_ak_pk: Vec<u8>,
-        b_ak_sk: Vec<u8>,
-        parent: [u8; 32],
-        honest: dsm::types::receipt_types::StitchedReceiptV2,
-        commitment: [u8; 32],
-        digest_a: [u8; 32],
-        rel_key: [u8; 32],
-        proposal: crate::storage::client_db::sender_proposal::SenderOnlineProposal,
-    }
-
-    /// The process authenticated as ANOTHER device for the duration of one
-    /// register request, restored on drop. A register member attributes a
-    /// claim to the device that authenticated the request; a test that has a
-    /// second party claim must make that party the caller, exactly as a second
-    /// handset would be — never present its envelope from the first party's
-    /// session and rely on a lenient double.
-    struct AsDevice {
-        saved: Option<(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>)>,
-    }
-
-    impl AsDevice {
-        fn enter(device_id: [u8; 32], public_key: Vec<u8>) -> Self {
-            use crate::sdk::app_state::AppState;
-            let saved = match (
-                AppState::get_device_id(),
-                AppState::get_public_key(),
-                AppState::get_genesis_hash(),
-                AppState::get_device_tree_root(),
-            ) {
-                (Some(d), Some(p), Some(g), Some(r)) => Some((d, p, g, r.to_vec())),
-                _ => None,
-            };
-            let genesis = AppState::get_genesis_hash().unwrap_or_else(|| vec![0u8; 32]);
-            let root = AppState::get_device_tree_root()
-                .map(|r| r.to_vec())
-                .unwrap_or_else(|| vec![0u8; 32]);
-            AppState::set_identity_info(device_id.to_vec(), public_key, genesis, root);
-            Self { saved }
-        }
-    }
-
-    impl Drop for AsDevice {
-        fn drop(&mut self) {
-            if let Some((d, p, g, r)) = self.saved.take() {
-                crate::sdk::app_state::AppState::set_identity_info(d, p, g, r);
-            }
-        }
-    }
-
-    /// One submitted step on the sender with its frozen A-side evidence, and
-    /// the honest countersigned receipt the recipient would hold for it.
-    fn seed_submitted_step() -> SeededStep {
-        let (b_ak_pk, b_ak_sk) =
-            dsm::crypto::sphincs::generate_sphincs_keypair().expect("recipient AK");
-        seed_submitted_step_with_recipient_ak(b_ak_pk, b_ak_sk)
-    }
-
-    /// As [`seed_submitted_step`], with the recipient's AK supplied so a
-    /// recipient-side fixture can share it (the AK is the cert-chain genesis
-    /// root both ends verify `ek_cert_b` against).
-    fn seed_submitted_step_with_recipient_ak(b_ak_pk: Vec<u8>, b_ak_sk: Vec<u8>) -> SeededStep {
-        let (ek_pk_a, ek_sk_a) =
-            dsm::crypto::sphincs::generate_sphincs_keypair().expect("sender per-step EK");
-        seed_submitted_step_with_keys(
-            [0x0Bu8; 32],
-            [0xAAu8; 32],
-            b_ak_pk,
-            b_ak_sk,
-            ek_pk_a,
-            ek_sk_a,
-        )
-    }
-
-    /// A REAL recipient: a two-device pair whose B claimed ERA, so B's
-    /// economic lineage at position 1 is registered at its leader, published
-    /// with its manifest and evidence, and walkable by the sender's release
-    /// check. The sender step is then seeded against B's actual identity.
-    struct RealRecipient {
-        pair: crate::test_support::two_device::Pair,
-        position: u64,
-        root: [u8; 32],
-        manifest_addr: [u8; 32],
-    }
-
-    async fn real_recipient() -> RealRecipient {
-        let pair = crate::test_support::two_device::Pair::boot(0, 100).await;
-        pair.b.enter();
-        let (position, root) =
-            crate::storage::client_db::economic_lineage::get_admitted_coordinate()
-                .expect("load admitted")
-                .expect("B's ERA claim is admitted at position 1");
-        let (_, claim_bytes) =
-            crate::storage::client_db::economic_lineage::get_frozen_root_claim(position)
-                .expect("load frozen claim")
-                .expect("B froze its root claim");
-        let claim = dsm::economic::claim_envelope::decode_registered_economic_claim(&claim_bytes)
-            .expect("B's claim decodes");
-        let manifest_addr = claim
-            .single_root()
-            .expect("an ordinary position")
-            .body()
-            .admission_manifest_addr;
-        RealRecipient {
-            pair,
-            position,
-            root,
-            manifest_addr,
-        }
-    }
-
-    /// The sender step against a real recipient: B's device, genesis and AK.
-    fn seed_submitted_step_for(recipient: &RealRecipient) -> SeededStep {
-        let (ek_pk_a, ek_sk_a) =
-            dsm::crypto::sphincs::generate_sphincs_keypair().expect("sender per-step EK");
-        seed_submitted_step_with_keys(
-            recipient.pair.b.device_id,
-            recipient.pair.b.genesis,
-            recipient.pair.b.ak_pk.clone(),
-            recipient.pair.b.ak_sk.clone(),
-            ek_pk_a,
-            ek_sk_a,
-        )
-    }
-
-    /// As [`seed_submitted_step_with_recipient_ak`], with the sender's per-step
-    /// EK supplied so a recipient-side fixture can hold the same `ek_pk_a`
-    /// (the A bytes both halves digest must be identical).
-    fn seed_submitted_step_with_keys(
-        b: [u8; 32],
-        b_genesis: [u8; 32],
-        b_ak_pk: Vec<u8>,
-        b_ak_sk: Vec<u8>,
-        ek_pk_a: Vec<u8>,
-        ek_sk_a: Vec<u8>,
-    ) -> SeededStep {
-        use crate::storage::client_db::sender_proposal::{
-            mark_sender_proposal_submitted, SenderOnlineProposal, PROPOSAL_PROPOSED,
-        };
-
-        trust_root_test_db();
-        let a = [0x0Au8; 32];
-        let (parent, child) = ([0x31u8; 32], [0x32u8; 32]);
-
-        // The recipient's AK is the cert-chain genesis root, and it comes from
-        // the contact book — never from the wire.
-        seed_sender_contact_with_genesis(b, b_genesis, b_ak_pk.clone());
-
-        crate::sdk::app_state::AppState::set_identity_info(
-            a.to_vec(),
-            vec![0x01u8; 32],
-            vec![0xAAu8; 32],
-            vec![0u8; 32],
-        );
-        crate::sdk::app_state::AppState::set_has_identity(true);
-        // The at-rest key that wraps the pending A EK derives from the wallet
-        // seed + genesis; the finalizer re-derives it to sign the certificate.
-        crate::sdk::recovery_sdk::RecoverySDK::set_cached_wallet_seed_for_testing(vec![0x9Cu8; 64]);
-
-        // The honest reply defines the commitment this step is bound to; its A
-        // side is what the sender authored and froze — including the sender's
-        // REAL per-step EK (`ek_pk_a`), which the recipient chains and the
-        // finality certificate is signed with.
-        let mut honest = signed_b_receipt(a, b, parent, child, &b_ak_sk);
-        honest.set_ek_pk_a(ek_pk_a.clone());
-        let commitment = honest.compute_commitment().expect("commitment");
-        let (a_side, _) = honest.split_countersign_b().expect("split");
-
-        let rel_key = dsm::verification::smt_replace_witness::compute_smt_key(&a, &b);
-        let proposal = SenderOnlineProposal {
-            relationship_key: rel_key,
-            canonical_parent: parent,
-            canonical_child: child,
-            // Genesis projection tip: a fresh relationship reads back an
-            // all-zero chain_tip, so this is the real first-transfer shape.
-            // Still deliberately DIVERGENT from the canonical pair — the two
-            // formula spaces must not be conflated, and any check that reads
-            // projection values where it should read canonical ones fails here.
-            projection_parent: [0u8; 32],
-            projection_target: [0xBBu8; 32],
-            commitment,
-            operation_digest: [0u8; 32],
-            nonce_hash: [0x88u8; 32],
-            message_id: None,
-            tx_id: "TX-658".to_string(),
-            counterparty_device_id: b,
-            amount: 7,
-            token_id: "ERA".to_string(),
-            status: PROPOSAL_PROPOSED.to_string(),
-            created_at: 0,
-        };
-        let digest_a = seed_frozen_send_with_evidence_a(
-            &a_side,
-            &proposal,
-            &crate::util::text_id::encode_base32_crockford(&a),
-            &crate::util::text_id::encode_base32_crockford(&b),
-            (&ek_pk_a, &ek_sk_a),
-        );
-        mark_sender_proposal_submitted(&rel_key, &parent, "MSG-658").expect("submit");
-
-        SeededStep {
-            a,
-            b,
-            b_genesis,
-            b_ak_pk,
-            b_ak_sk,
-            parent,
-            honest,
-            commitment,
-            digest_a,
-            rel_key,
-            proposal,
-        }
-    }
-
-    const RELEASE_POSITION: u64 = 1;
-    const RELEASE_POST_ROOT: [u8; 32] = [0x5Au8; 32];
-    const RELEASE_MANIFEST_ADDR: [u8; 32] = [0x5Bu8; 32];
-
-    /// The recipient-signed release for one step — pure (no I/O), so a
-    /// fixture that must insert the reply row before any backing exists can
-    /// still carry the exact bytes the sweep will address.
-    /// The recipient's coordinates a release names: its admitted position,
-    /// the root registered there and the manifest the claim cites.
-    #[derive(Clone, Copy)]
-    struct ReleaseCoords {
-        genesis: [u8; 32],
-        devid: [u8; 32],
-        position: u64,
-        root: [u8; 32],
-        manifest_addr: [u8; 32],
-    }
-
-    impl ReleaseCoords {
-        fn of(recipient: &RealRecipient) -> Self {
-            Self {
-                genesis: recipient.pair.b.genesis,
-                devid: recipient.pair.b.device_id,
-                position: recipient.position,
-                root: recipient.root,
-                manifest_addr: recipient.manifest_addr,
-            }
-        }
-
-        /// A synthetic recipient with no lineage behind it — for fixtures
-        /// whose sender never reaches the release check.
-        fn synthetic(devid: [u8; 32]) -> Self {
-            Self {
-                genesis: [0xAAu8; 32],
-                devid,
-                position: RELEASE_POSITION,
-                root: RELEASE_POST_ROOT,
-                manifest_addr: RELEASE_MANIFEST_ADDR,
-            }
-        }
-    }
-
-    fn release_bytes_for(commitment: [u8; 32], at: ReleaseCoords, b_ak_sk: &[u8]) -> Vec<u8> {
-        dsm::economic::release::sign_recipient_economic_release(
-            &dsm::economic::release::ReleaseFacts {
-                receipt_commitment: commitment,
-                acceptance_evidence_addr: [0xACu8; 32],
-                recipient_genesis: at.genesis,
-                recipient_devid: at.devid,
-                recipient_economic_position: at.position,
-                post_economic_root: at.root,
-                admission_manifest_addr: at.manifest_addr,
-            },
-            b_ak_sk,
-        )
-        .expect("sign release")
-    }
-
-    fn proposal_status(commitment: &[u8; 32]) -> String {
-        crate::storage::client_db::sender_proposal::get_sender_proposal_by_commitment(commitment)
-            .expect("load")
-            .expect("proposal still present")
+    fn status(commitment: &[u8; 32]) -> String {
+        get_sender_proposal_by_commitment(commitment)
+            .expect("load proposal")
+            .expect("A holds the proposal")
             .status
     }
 
-    /// Anti-vacuity: the poisoned B material must be refused for the RIGHT
-    /// reason. Without this, the test above would still pass if the delta were
-    /// rejected for something incidental — an unparseable body, a missing
-    /// field — and it would then prove nothing about a well-formed forgery.
-    #[test]
-    #[serial_test::serial]
-    fn the_poisoned_b_material_is_well_formed_and_fails_only_once_overlaid_on_the_honest_a_side() {
-        trust_root_test_db();
-
-        let (a, b) = ([0x0Au8; 32], [0x0Bu8; 32]);
-        let (parent, child) = ([0x31u8; 32], [0x32u8; 32]);
-        let (b_ak_pk, b_ak_sk) =
-            dsm::crypto::sphincs::generate_sphincs_keypair().expect("recipient AK");
-
-        let poisoned = signed_b_receipt(a, b, parent, [0xEEu8; 32], &b_ak_sk);
-
-        // Its per-step EK countersignature is genuinely valid over the receipt
-        // (and pair) it was minted for ...
-        let poisoned_commitment = poisoned.compute_commitment().expect("commitment");
-        crate::sdk::receipts::verify_per_step_ek_signing_target(
-            &poisoned,
-            crate::sdk::receipts::BilateralSide::B,
-            &b_ak_pk,
-            &poisoned.parent_tip,
-            &crate::sdk::receipts::compute_receipt_b_canonical_target(
-                &poisoned_commitment,
-                &poisoned_commitment,
-                &b_pair_for(&a, &b).0,
-                &b_pair_for(&a, &b).1,
-            ),
-        )
-        .expect("the poisoned receipt must carry a genuinely valid sig_b");
-
-        // ... and its delta survives the exact wire codec the handler uses,
-        // countersignature intact.
-        let (_, poisoned_b) = poisoned.split_countersign_b().expect("split");
-        let delta = delta_for(&poisoned, [0x00u8; 32], [0x00u8; 32]);
-        let decoded = dsm::types::receipt_types::decode_receipt_countersign_b_wire(&delta.body)
-            .expect("the poisoned delta must pass the wire codec");
-        assert_eq!(
-            dsm::types::receipt_types::CountersignB::from_wire(&decoded),
-            poisoned_b,
-            "the countersignature must survive the wire round-trip"
-        );
-
-        // Overlaid onto the HONEST A side, the same material fails on sig_b
-        // and nothing else: ek_cert_b still verifies (same h_n), the shape is
-        // complete, only the countersignature target differs.
-        let honest = signed_b_receipt(a, b, parent, child, &b_ak_sk);
-        let (honest_a, _) = honest.split_countersign_b().expect("split");
-        let reconstructed = honest_a
-            .with_countersign_b(poisoned_b)
-            .expect("overlay is structurally fine");
-        let err = crate::sdk::receipts::verify_per_step_ek_signing(
-            &reconstructed,
-            crate::sdk::receipts::BilateralSide::B,
-            &b_ak_pk,
-            &reconstructed.parent_tip,
-            &reconstructed.compute_commitment().expect("commitment"),
-        )
-        .expect_err("poisoned B material over the honest A side must not verify");
-        assert!(
-            format!("{err}").to_ascii_lowercase().contains("sig_b"),
-            "{err}"
-        );
-        assert_ne!(
-            poisoned.child_tip, child,
-            "the forgery under test is the canonical child, nothing else"
-        );
-    }
-
-    /// The recipient half of the return leg, seeded exactly as the fold leaves
-    /// it: a completed acceptance journal row and its undelivered reply row,
-    /// both holding the FULL countersigned receipt, plus the endpoint auth the
-    /// sweep needs. Returns the receipt, its commitment, and the projection
-    /// parent the reply is addressed to.
-    struct RecipientHalf {
-        a: [u8; 32],
-        b: [u8; 32],
-        b_genesis: [u8; 32],
-        b_ak_pk: Vec<u8>,
-        b_ak_sk: Vec<u8>,
-        /// The sender's per-step EK the receipt names as `ek_pk_a`.
-        ek_pk_a: Vec<u8>,
-        ek_sk_a: Vec<u8>,
-        commitment: [u8; 32],
-        projection_parent: [u8; 32],
-        full_bytes: Vec<u8>,
-        /// The signed post-admission release the reply row carries.
-        release_bytes: Vec<u8>,
-    }
-
-    /// `recipient`: `Some` seeds the half against a REAL B (its device, genesis,
-    /// AK and admitted coordinates), which the sender's release check can walk;
-    /// `None` is the synthetic B for fixtures whose sender never gets there.
-    fn seed_recipient_half(endpoint: &str, recipient: Option<&RealRecipient>) -> RecipientHalf {
-        use crate::storage::client_db::recipient_receipt_fold::{
-            insert_outbound_reply, insert_prepared_acceptance_journal, RecipientAcceptanceJournal,
-        };
-
-        trust_root_test_db();
-        let a = [0x0Au8; 32];
-        let (parent, child) = ([0x31u8; 32], [0x32u8; 32]);
-        let (b, b_genesis, b_ak_pk, b_ak_sk, at) = match recipient {
-            Some(r) => (
-                r.pair.b.device_id,
-                r.pair.b.genesis,
-                r.pair.b.ak_pk.clone(),
-                r.pair.b.ak_sk.clone(),
-                ReleaseCoords::of(r),
-            ),
-            None => {
-                let (pk, sk) =
-                    dsm::crypto::sphincs::generate_sphincs_keypair().expect("recipient AK");
-                let b = [0x0Bu8; 32];
-                (b, [0xB6u8; 32], pk, sk, ReleaseCoords::synthetic(b))
-            }
-        };
-
-        // Identity = B (the recipient). Its contact for A carries A's genesis,
-        // which is what the reply route is computed from.
-        crate::sdk::app_state::AppState::set_identity_info(
-            b.to_vec(),
-            vec![0x02u8; 32],
-            b_genesis.to_vec(),
-            vec![0u8; 32],
-        );
-        crate::sdk::app_state::AppState::set_has_identity(true);
-        seed_sender_contact(a, vec![0xA1u8; 64]);
-
-        // Endpoint auth: the sweep's B0xSDK looks the token up by the exact
-        // (endpoint, device, genesis) triple.
-        let b_b32 = crate::util::text_id::encode_base32_crockford(&b);
-        let genesis_b32 = crate::util::text_id::encode_base32_crockford(&b_genesis);
-        crate::storage::client_db::store_genesis_record_with_verification(
-            &crate::storage::client_db::GenesisRecord {
-                genesis_id: genesis_b32.clone(),
-                device_id: b_b32.clone(),
-                mpc_proof: "test".to_string(),
-                device_birth_binding: String::new(),
-                merkle_root: String::new(),
-                participant_count: 3,
-                progress_marker: String::new(),
-                publication_hash: String::new(),
-                storage_nodes: vec![endpoint.to_string()],
-                entropy_hash: String::new(),
-                protocol_version: "v1".to_string(),
-                hash_chain_proof: None,
-                smt_proof: None,
-                verification_step: None,
-                genesis_nonce: String::new(),
-                genesis_profile: "MnemonicV2".to_string(),
-                network_id: "dsm-test".into(),
-            },
-        )
-        .expect("seed genesis record");
-        crate::storage::client_db::store_auth_token(endpoint, &b_b32, &genesis_b32, "test-token")
-            .expect("seed auth token");
-
-        // The countersigned receipt with REAL per-step EK material (both
-        // sides), stored in full — exactly what the fold persists.
-        let (ek_pk_a, ek_sk_a) =
-            dsm::crypto::sphincs::generate_sphincs_keypair().expect("sender per-step EK");
-        let mut full = signed_b_receipt(a, b, parent, child, &b_ak_sk);
-        full.set_ek_pk_a(ek_pk_a.clone());
-        let full_bytes = full.to_full_protobuf().expect("full receipt");
-        let commitment = full.compute_commitment().expect("commitment");
-        let rel = dsm::verification::smt_replace_witness::compute_smt_key(&a, &b);
-        let projection_parent = [0u8; 32];
-        // The post-admission release the reply carries (3.5b PR4) — signed
-        // now (pure); its network backing is seeded by the sender-half test.
-        let release_bytes = release_bytes_for(commitment, at, &b_ak_sk);
-        let rec = RecipientAcceptanceJournal {
-            relationship_key: rel,
-            parent_tip: parent,
-            child_tip: child,
-            counterparty_device_id: a,
-            commitment,
-            receipt_parent_root_a: [0u8; 32],
-            receipt_child_root_a: [0u8; 32],
-            precommit_digest: [0u8; 32],
-            prepared_receipt_artifact_hash: [0u8; 32],
-            expected_local_b_head: None,
-            new_local_b_head: full.ek_pk_b.clone(),
-            new_local_b_sk_enc: None,
-            expected_counterparty_a_head: None,
-            new_counterparty_a_head: ek_pk_a.clone(),
-            receipt_bytes: full_bytes.clone(),
-            projection_parent_tip: projection_parent,
-            projection_target_tip: [0xBBu8; 32],
-            applied_parent_tip_b: b_pair_for(&a, &b).0,
-            applied_child_tip_b: b_pair_for(&a, &b).1,
-            release_bytes: Some(release_bytes.clone()),
-            peer_finalized: false,
-            status: "prepared".to_string(),
-            created_at: 0,
-        };
-        insert_prepared_acceptance_journal(&rec).expect("journal");
-        {
-            // Test-only: the fold's Phase 3 marks the journal complete; the
-            // reply sweep joins on that status.
-            let binding = crate::storage::client_db::get_connection().expect("conn");
-            let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
-            conn.execute(
-                "UPDATE acceptance_fold_journal SET status = 'complete' WHERE commitment = ?1",
-                rusqlite::params![commitment.as_slice()],
-            )
-            .expect("complete");
-        }
-        insert_outbound_reply(
-            &commitment,
-            &rel,
-            &a,
-            &child,
-            &full_bytes,
-            Some(&release_bytes),
-            false,
-        )
-        .expect("reply row");
-        assert_eq!(
-            crate::storage::client_db::pending_outbound_replies()
-                .expect("pending")
-                .len(),
-            1,
-            "fixture must present exactly one undelivered reply"
-        );
-
-        RecipientHalf {
-            a,
-            b,
-            b_genesis,
-            b_ak_pk,
-            b_ak_sk,
-            ek_pk_a,
-            ek_sk_a,
-            commitment,
-            projection_parent,
-            full_bytes,
-            release_bytes,
-        }
-    }
-
-    /// A 413 from every node leaves the reply row for the next sweep — and,
-    /// since the delta is under the cap, documents that such a 413 could only
-    /// come from a node with a smaller cap than the protocol's.
+    /// A poisoned delta — B's countersignature over a DIFFERENT recipient
+    /// pair (R5), or naming A bytes this sender never retained, or carrying
+    /// no release — is refused and PARKS the step in a state it can leave;
+    /// the honest delta for the same step then finalizes it, and a
+    /// redelivered honest delta is an idempotent no-op.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[serial_test::serial]
-    async fn a_413_on_the_delta_leaves_the_reply_row_for_the_next_sweep() {
-        use std::sync::Arc;
-        let log = Arc::new(std::sync::Mutex::new(Vec::<RecordedPost>::new()));
-        let overrides = StatusOverrides::default();
-        let ep = spawn_recorder_with_overrides(log.clone(), overrides.clone()).expect("recorder");
-        let rh = seed_recipient_half(&ep, None);
-        let reply_id = crate::util::text_id::encode_base32_crockford(
-            &crate::sdk::b0x_sdk::reply_message_id(&rh.commitment, &rh.projection_parent),
-        );
-        overrides.lock().unwrap().insert(reply_id, 413);
-
-        let core = Arc::new(crate::sdk::core_sdk::CoreSDK::new().expect("CoreSDK"));
-        super::deliver_pending_acceptance_replies(std::slice::from_ref(&ep), core)
-            .await
-            .expect("sweep returns Ok; the failure is per-row");
-
-        let posts = log.lock().unwrap().clone();
-        assert_eq!(
-            posts
-                .iter()
-                .filter(|p| p.path == "/api/v2/b0x/submit")
-                .count(),
-            1,
-            "the sweep tried once"
-        );
-        assert_eq!(
-            crate::storage::client_db::pending_outbound_replies()
-                .expect("pending")
-                .len(),
-            1,
-            "a rejected delivery leaves the row unmarked for the next sweep"
-        );
-    }
-
-    /// A step with no frozen evidence_a cannot finalize under any delta — that
-    /// is a terminal invariant violation, reported as such, never a retry.
-    #[tokio::test]
-    #[serial_test::serial]
-    async fn a_delta_for_a_step_with_no_retained_evidence_is_a_terminal_invariant_violation() {
-        use super::CountersignOutcome;
-        use crate::storage::client_db::sender_proposal::PROPOSAL_SUBMITTED;
-        let st = seed_submitted_step();
-
-        // Pin the precondition, then remove the row the design depends on.
-        assert!(
-            crate::handlers::online_finalize::load_retained_evidence_a(&st.proposal)
-                .expect("load")
-                .is_some(),
-            "fixture must start WITH the evidence row"
-        );
-        {
-            let binding = crate::storage::client_db::get_connection().expect("conn");
-            let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
-            conn.execute(
-                "DELETE FROM sender_outbox_artifacts WHERE role = 'evidence_a'",
-                [],
-            )
-            .expect("delete evidence_a");
-        }
-        assert!(
-            crate::handlers::online_finalize::load_retained_evidence_a(&st.proposal)
-                .expect("load")
-                .is_none()
-        );
-
-        let good = delta_for(&st.honest, st.commitment, st.digest_a);
-        assert_eq!(
-            super::finalize_from_countersign_delta(&good).await,
-            CountersignOutcome::NoRetainedEvidence
-        );
-        assert_eq!(proposal_status(&st.commitment), PROPOSAL_SUBMITTED);
-    }
-
-    // =====================================================================
-    // RUNTIME RECOVERY OF AN UNCERTAIN SEND
-    //
-    // The durable outbox promises two things. It keeps the SAFETY half today:
-    // a failed send is committed as `submission_uncertain`, the exact wire
-    // bytes are frozen, and a restart neither rebuilds them nor debits again.
-    // Hardware confirmed all of that.
-    //
-    // It also promises LIVENESS — the user is told the send "will be retried
-    // automatically", `unsettled_sender_outbox()` documents itself as driving
-    // "the startup/periodic resubmit sweep", and `StorageSyncRequest` carries
-    // a `push_pending` field commented "submit local pending transactions".
-    //
-    // This test drives the REAL periodic hook — `run_storage_sync_request`,
-    // the same call production makes from three sites — against a seeded
-    // uncertain row. It deliberately does NOT call `unsettled_sender_outbox()`
-    // itself: proving the query returns rows would pass today and would test
-    // the wrong layer entirely. What must be observed is a network submission.
-    //
-    // The recorders are intentionally dumb. They authenticate nothing, parse
-    // no protobuf, and verify no signature — every one of those would give the
-    // test a way to fail for reasons unrelated to the missing wiring.
-    // =====================================================================
-
-    #[derive(Debug, Clone)]
-    struct RecordedPost {
-        endpoint: String,
-        path: String,
-        body: Vec<u8>,
-        /// `x-dsm-recipient` — the route the caller submitted under.
-        recipient: String,
-        /// `x-dsm-message-id` — the deterministic id the caller submitted under.
-        message_id: String,
-    }
-
-    /// Per-message-id HTTP status the recorder should answer with instead of
-    /// 204. Lets a test make ONE artifact fail while the other succeeds.
-    type StatusOverrides = std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, u16>>>;
-
-    /// A loopback listener that records `POST /api/v2/b0x/submit` and answers
-    /// `204 No Content`. Returns its `http://127.0.0.1:PORT` base URL.
-    fn spawn_recorder(
-        log: std::sync::Arc<std::sync::Mutex<Vec<RecordedPost>>>,
-    ) -> std::io::Result<String> {
-        spawn_recorder_with_overrides(log, StatusOverrides::default())
-    }
-
-    fn spawn_recorder_with_overrides(
-        log: std::sync::Arc<std::sync::Mutex<Vec<RecordedPost>>>,
-        overrides: StatusOverrides,
-    ) -> std::io::Result<String> {
-        use std::io::{Read, Write};
-        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
-        let endpoint = format!("http://{}", listener.local_addr()?);
-        let mine = endpoint.clone();
-
-        std::thread::spawn(move || {
-            for stream in listener.incoming() {
-                let Ok(mut s) = stream else { break };
-                let mut buf = Vec::new();
-                let mut chunk = [0u8; 8192];
-                // Read headers, then exactly Content-Length bytes of body.
-                let (mut head_end, mut content_len) = (None, 0usize);
-                while head_end.is_none() {
-                    match s.read(&mut chunk) {
-                        Ok(0) => break,
-                        Ok(n) => {
-                            buf.extend_from_slice(&chunk[..n]);
-                            if let Some(p) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-                                head_end = Some(p + 4);
-                                let head = String::from_utf8_lossy(&buf[..p]).to_lowercase();
-                                for line in head.lines() {
-                                    if let Some(v) = line.strip_prefix("content-length:") {
-                                        content_len = v.trim().parse().unwrap_or(0);
-                                    }
-                                }
-                            }
-                        }
-                        Err(_) => break,
-                    }
-                }
-                let Some(hs) = head_end else { continue };
-                while buf.len() < hs + content_len {
-                    match s.read(&mut chunk) {
-                        Ok(0) => break,
-                        Ok(n) => buf.extend_from_slice(&chunk[..n]),
-                        Err(_) => break,
-                    }
-                }
-                let head = String::from_utf8_lossy(&buf[..hs]).to_string();
-                let path = head
-                    .lines()
-                    .next()
-                    .and_then(|l| l.split_whitespace().nth(1))
-                    .unwrap_or("")
-                    .to_string();
-                let header = |name: &str| -> String {
-                    head.lines()
-                        .find_map(|l| {
-                            let (k, v) = l.split_once(':')?;
-                            k.trim()
-                                .eq_ignore_ascii_case(name)
-                                .then(|| v.trim().to_string())
-                        })
-                        .unwrap_or_default()
-                };
-                let message_id = header("x-dsm-message-id");
-                let status: u16 = overrides
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .get(&message_id)
-                    .copied()
-                    .unwrap_or(204);
-                if head.to_uppercase().starts_with("POST") {
-                    log.lock()
-                        .unwrap_or_else(|p| p.into_inner())
-                        .push(RecordedPost {
-                            endpoint: mine.clone(),
-                            path,
-                            body: buf[hs..].to_vec(),
-                            recipient: header("x-dsm-recipient"),
-                            message_id,
-                        });
-                }
-                let reason = match status {
-                    204 => "No Content",
-                    503 => "Service Unavailable",
-                    500 => "Internal Server Error",
-                    _ => "OK",
-                };
-                let _ = s.write_all(
-                    format!("HTTP/1.1 {status} {reason}\r\nContent-Length: 0\r\n\r\n").as_bytes(),
-                );
-                let _ = s.flush();
-            }
-        });
-        Ok(endpoint)
-    }
-
-    /// Point the runtime's storage-endpoint resolver at the recorders — ONE
-    /// process-wide definition (the OnceLock path cannot be re-set, so every
-    /// test module must write the same file): see `test_support::fake_node`.
-    use crate::test_support::fake_node::point_env_config_at;
-
-    /// A frozen uncertain send: the transfer envelope plus its ADR 0003
-    /// A-side evidence, both already encoded and committed.
-    struct FrozenSend {
-        transfer_submission_id: String,
-        transfer_bytes: Vec<u8>,
-        evidence_submission_id: String,
-        evidence_bytes: Vec<u8>,
-    }
-
-    fn seed_uncertain_send() -> FrozenSend {
-        use crate::storage::client_db::{
-            commit_send_prerequisites_atomically, set_sender_outbox_status, ArtifactRole,
-            SenderOnlineProposal, SenderOutboxArtifact, SenderOutboxRecord, OUTBOX_PENDING_SUBMIT,
-            OUTBOX_SUBMISSION_UNCERTAIN,
-        };
-
-        // The commit path refuses an unknown counterparty, so the relationship
-        // must exist before a send can be frozen against it.
-        seed_sender_contact([0x0Bu8; 32], vec![0xA1u8; 64]);
-
-        let rel =
-            dsm::verification::smt_replace_witness::compute_smt_key(&[0x0Au8; 32], &[0x0Bu8; 32]);
-        let (cp, cc) = ([0x71u8; 32], [0x72u8; 32]);
-        let (pp, pt) = ([0u8; 32], [0x74u8; 32]);
-        let nonce = [0x75u8; 32];
-        let commitment = [0x76u8; 32];
-
-        // Deterministic, byte-exact, and distinguishable from each other.
-        let transfer_submission_id = "TESTTRANSFER0000000000000A".to_string();
-        let evidence_submission_id = "TESTEVIDENCEA000000000000B".to_string();
-        let transfer_bytes = vec![0xC1u8; 4096];
-        let evidence_bytes = vec![0xE1u8; 8192];
-
-        let proposal = SenderOnlineProposal {
-            relationship_key: rel,
-            canonical_parent: cp,
-            canonical_child: cc,
-            projection_parent: pp,
-            projection_target: pt,
-            commitment,
-            operation_digest: [0x77u8; 32],
-            nonce_hash: nonce,
-            message_id: None,
-            tx_id: "tx:recovery-test".to_string(),
-            counterparty_device_id: [0x0Bu8; 32],
-            amount: 5,
-            token_id: "ERA".to_string(),
-            status: "proposed".to_string(),
-            created_at: 0,
-        };
-
-        let outbox = SenderOutboxRecord {
-            relationship_key: rel,
-            canonical_parent: cp,
-            proposal_nonce: nonce,
-            canonical_child: cc,
-            commitment,
-            projection_parent: pp,
-            projection_target: pt,
-            routing_address: "TESTROUTINGADDRESS".to_string(),
-            submission_id: transfer_submission_id.clone(),
-            envelope_bytes: transfer_bytes.clone(),
-            local_expected_prev: None,
-            is_first_ek_step: true,
-            status: OUTBOX_PENDING_SUBMIT.to_string(),
-            message_ids: None,
-            created_at: 0,
-        };
-
-        let evidence = SenderOutboxArtifact {
-            relationship_key: rel,
-            canonical_parent: cp,
-            proposal_nonce: nonce,
-            role: ArtifactRole::EvidenceA,
-            submission_id: evidence_submission_id.clone(),
-            envelope_bytes: evidence_bytes.clone(),
-            content_digest: [0x78u8; 32],
-            routing_address: None,
-        };
-
-        commit_send_prerequisites_atomically(
-            &proposal,
-            &outbox,
-            "GATE-RECOVERY",
-            &[0xD1u8; 64],
-            &[0xD2u8; 64],
-            &[0x42u8; 32],
-            true,
-            std::slice::from_ref(&evidence),
-        )
-        .expect("seed frozen send");
-
-        // The send entered the network and the outcome is unknown — exactly
-        // the state a 402/timeout leaves behind.
-        set_sender_outbox_status(&rel, &cp, &nonce, OUTBOX_SUBMISSION_UNCERTAIN)
-            .expect("mark uncertain");
-
-        FrozenSend {
-            transfer_submission_id,
-            transfer_bytes,
-            evidence_submission_id,
-            evidence_bytes,
-        }
-    }
-
-    // Multi-threaded for the same reason as the scaffold above: once the sweep
-    // is wired this reaches the submit path, which calls `block_in_place` and
-    // panics on a single-threaded runtime. Set BEFORE the wiring so the first
-    // post-fix run cannot fail for a fixture reason and be read as the fix
-    // failing.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    #[serial_test::serial]
-    async fn submission_uncertain_is_replayed_from_frozen_artifacts_on_runtime_recovery() {
-        use crate::storage::client_db::{unsettled_sender_outbox, OUTBOX_SUBMISSION_UNCERTAIN};
-
-        trust_root_test_db();
-
-        // One recorder per pinned member, because the production submit path is
-        // quorum-shaped; one endpoint could not distinguish "called submit" from
-        // "reached K".
-        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::<RecordedPost>::new()));
-        let endpoints: Vec<String> = (0..crate::economic_fixtures::canonical_member_ids().len())
-            .map(|_| spawn_recorder(log.clone()).expect("recorder"))
-            .collect();
-        point_env_config_at(&endpoints);
-
-        let device_id = vec![0x0Au8; 32];
-        let genesis_hash = vec![0x31u8; 32];
-        let binding_key = vec![0x41u8; 32];
-        let (public_key, _sk) = crate::sdk::signing_authority::derive_signing_keys_for_testing(
-            &device_id,
-            &genesis_hash,
-            &binding_key,
-        )
-        .expect("signing keypair");
-        crate::sdk::signing_authority::set_binding_key_for_testing(binding_key);
-        crate::sdk::app_state::AppState::set_identity_info(
-            device_id,
-            public_key,
-            genesis_hash,
-            dsm::merkle::sparse_merkle_tree::empty_root(
-                dsm::merkle::sparse_merkle_tree::DEFAULT_SMT_HEIGHT,
-            )
-            .to_vec(),
-        );
-        crate::sdk::app_state::AppState::set_has_identity(true);
-
-        let sender_b32 = crate::util::text_id::encode_base32_crockford(&[0x0Au8; 32]);
-        let genesis_b32 = crate::util::text_id::encode_base32_crockford(&[0x31u8; 32]);
-
-        // FIXTURE DEBT PAID UP FRONT. Once the sweep is wired this test reaches
-        // `submit_stored_envelope`, which calls `ensure_token_for_endpoint` and
-        // looks up (endpoint, device_id_b32, base32(local_genesis_hash())).
-        // `local_genesis_hash()` reads `genesis_records`, NOT AppState — so the
-        // record below is both the routing genesis and the genesis half of the
-        // token key. Miss either and the SDK falls through to a live
-        // registration handshake the recorders cannot answer.
-        crate::storage::client_db::store_genesis_record_with_verification(
-            &crate::storage::client_db::GenesisRecord {
-                genesis_id: genesis_b32.clone(),
-                device_id: sender_b32.clone(),
-                mpc_proof: "test".to_string(),
-                device_birth_binding: String::new(),
-                merkle_root: String::new(),
-                participant_count: 3,
-                progress_marker: String::new(),
-                publication_hash: String::new(),
-                storage_nodes: endpoints.clone(),
-                entropy_hash: String::new(),
-                protocol_version: "v1".to_string(),
-                hash_chain_proof: None,
-                smt_proof: None,
-                verification_step: None,
-                genesis_nonce: String::new(),
-                genesis_profile: "MnemonicV2".to_string(),
-                network_id: "dsm-test".into(),
-            },
-        )
-        .expect("seed genesis record");
-        for ep in &endpoints {
-            crate::storage::client_db::store_auth_token(
-                ep,
-                &sender_b32,
-                &genesis_b32,
-                "test-token",
-            )
-            .expect("seed auth token");
-        }
-
-        let frozen = seed_uncertain_send();
-
-        // Precondition: the sweep query can see it. If this ever fails the test
-        // is mis-seeded, and the real assertions below would be vacuous.
-        assert_eq!(
-            unsettled_sender_outbox().expect("query").len(),
-            1,
-            "fixture must present exactly one unsettled send"
-        );
-
-        let router = crate::handlers::app_router_impl::AppRouterImpl::new(crate::init::SdkConfig {
-            node_id: "recovery-test".to_string(),
-            storage_endpoints: endpoints.clone(),
-            enable_offline: false,
-        })
-        .expect("router init");
-
-        // THE PRODUCTION HOOK. No wallet.send, no manual resubmit helper.
-        let _ = router
-            .run_storage_sync_request(dsm::types::proto::StorageSyncRequest {
-                pull_inbox: false,
-                push_pending: true,
-                limit: 0,
-            })
-            .await;
-
-        let posts = log.lock().unwrap_or_else(|p| p.into_inner()).clone();
-        let submits: Vec<&RecordedPost> = posts
-            .iter()
-            .filter(|p| p.path.contains("/api/v2/b0x/submit"))
-            .collect();
-
-        // ---- the defect this test exists for ----
-        assert!(
-            !submits.is_empty(),
-            "periodic storage sync with push_pending=true performed ZERO b0x \
-             submissions while a submission_uncertain send was durably stored. \
-             The durable record survives and the UI promises automatic retry, \
-             but nothing re-drives it: unsettled_sender_outbox() has no \
-             production caller, and push_pending sweeps bilateral_sessions \
-             instead of sender_outbox."
-        );
-
-        // ---- exact frozen replay, both halves ----
-        let by_bytes = |want: &[u8]| -> Vec<&&RecordedPost> {
-            submits.iter().filter(|p| p.body == want).collect()
-        };
-        assert!(
-            !by_bytes(&frozen.transfer_bytes).is_empty(),
-            "the transfer half must be replayed BYTE-IDENTICALLY from the frozen \
-             envelope ({} bytes), never rebuilt from current state",
-            frozen.transfer_bytes.len()
-        );
-        assert!(
-            !by_bytes(&frozen.evidence_bytes).is_empty(),
-            "the ADR 0003 A-side evidence must also be replayed byte-identically \
-             ({} bytes). Replaying only the transfer resurrects a send the \
-             recipient can never complete",
-            frozen.evidence_bytes.len()
-        );
-
-        // Each half must reach the same quorum shape production requires.
-        for (label, want) in [
-            ("transfer", &frozen.transfer_bytes),
-            ("evidence_a", &frozen.evidence_bytes),
-        ] {
-            let reached: std::collections::BTreeSet<&str> = submits
-                .iter()
-                .filter(|p| p.body == *want)
-                .map(|p| p.endpoint.as_str())
-                .collect();
-            let k = crate::economic_fixtures::delivery_quorum();
-            assert_eq!(
-                reached.len(),
-                k,
-                "{label} must reach the delivery quorum of {k} nodes; reached {:?}",
-                reached
-            );
-        }
-
-        // ---- nothing was rebuilt, nothing was charged twice ----
-        let rows = unsettled_sender_outbox().expect("query");
-        assert!(
-            rows.len() <= 1,
-            "recovery must not create a second outbox row: {} present",
-            rows.len()
-        );
-        assert_eq!(
-            crate::storage::client_db::get_sender_proposal_by_commitment(&[0x76u8; 32])
-                .expect("load")
-                .expect("proposal")
-                .amount,
-            5,
-            "recovery must not rebuild or re-price the proposal"
-        );
-        assert!(
-            frozen.transfer_submission_id != frozen.evidence_submission_id,
-            "fixture sanity: the two artifacts must carry distinct ids"
-        );
-
-        // ---- lifecycle moves forward only when everything landed ----
-        let still_uncertain = unsettled_sender_outbox()
-            .expect("query")
-            .iter()
-            .any(|r| r.status == OUTBOX_SUBMISSION_UNCERTAIN);
-        assert!(
-            !still_uncertain,
-            "once every frozen artifact reached quorum the logical send must \
-             leave submission_uncertain; leaving it there would replay forever"
-        );
-
-        // ---- the route invariant, observed on the wire ----
-        // Every half rides the OWNING outbox's frozen route, under its own
-        // frozen id. A replay under any other recipient would be silently
-        // discarded by the node's message-id dedup while returning success —
-        // so the route on the wire is what proves no relocation happened.
-        for p in &submits {
-            assert_eq!(
-                p.recipient, "TESTROUTINGADDRESS",
-                "every submission must carry the frozen routing_address as x-dsm-recipient; \
-                 got {:?} for message {}",
-                p.recipient, p.message_id
-            );
-        }
-        let ids: std::collections::BTreeSet<&str> =
-            submits.iter().map(|p| p.message_id.as_str()).collect();
-        assert!(
-            ids.contains(frozen.transfer_submission_id.as_str())
-                && ids.contains(frozen.evidence_submission_id.as_str()),
-            "both frozen ids must appear on the wire verbatim; saw {ids:?}"
-        );
-    }
-
-    /// Partial delivery is NOT delivery. If the transfer reaches quorum but the
-    /// evidence does not, the logical send stays `submission_uncertain`, no
-    /// status advances, and the next sweep replays the WHOLE frozen set — a
-    /// second debit never happens because nothing is rebuilt.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    #[serial_test::serial]
-    async fn a_half_delivered_send_stays_uncertain_and_the_next_sweep_replays_everything() {
-        use crate::storage::client_db::{
-            unsettled_sender_outbox, OUTBOX_SUBMISSION_UNCERTAIN, OUTBOX_SUBMITTED,
-        };
-
-        trust_root_test_db();
-
-        let overrides: StatusOverrides = StatusOverrides::default();
-        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::<RecordedPost>::new()));
-        let endpoints: Vec<String> = (0..crate::economic_fixtures::canonical_member_ids().len())
-            .map(|_| {
-                spawn_recorder_with_overrides(log.clone(), overrides.clone()).expect("recorder")
-            })
-            .collect();
-        point_env_config_at(&endpoints);
-
-        let device_id = vec![0x0Au8; 32];
-        let genesis_hash = vec![0x31u8; 32];
-        let binding_key = vec![0x41u8; 32];
-        let (public_key, _sk) = crate::sdk::signing_authority::derive_signing_keys_for_testing(
-            &device_id,
-            &genesis_hash,
-            &binding_key,
-        )
-        .expect("signing keypair");
-        crate::sdk::signing_authority::set_binding_key_for_testing(binding_key);
-        crate::sdk::app_state::AppState::set_identity_info(
-            device_id,
-            public_key,
-            genesis_hash,
-            dsm::merkle::sparse_merkle_tree::empty_root(
-                dsm::merkle::sparse_merkle_tree::DEFAULT_SMT_HEIGHT,
-            )
-            .to_vec(),
-        );
-        crate::sdk::app_state::AppState::set_has_identity(true);
-        let sender_b32 = crate::util::text_id::encode_base32_crockford(&[0x0Au8; 32]);
-        let genesis_b32 = crate::util::text_id::encode_base32_crockford(&[0x31u8; 32]);
-        crate::storage::client_db::store_genesis_record_with_verification(
-            &crate::storage::client_db::GenesisRecord {
-                genesis_id: genesis_b32.clone(),
-                device_id: sender_b32.clone(),
-                mpc_proof: "test".to_string(),
-                device_birth_binding: String::new(),
-                merkle_root: String::new(),
-                participant_count: 3,
-                progress_marker: String::new(),
-                publication_hash: String::new(),
-                storage_nodes: endpoints.clone(),
-                entropy_hash: String::new(),
-                protocol_version: "v1".to_string(),
-                hash_chain_proof: None,
-                smt_proof: None,
-                verification_step: None,
-                genesis_nonce: String::new(),
-                genesis_profile: "MnemonicV2".to_string(),
-                network_id: "dsm-test".into(),
-            },
-        )
-        .expect("seed genesis record");
-        for ep in &endpoints {
-            crate::storage::client_db::store_auth_token(
-                ep,
-                &sender_b32,
-                &genesis_b32,
-                "test-token",
-            )
-            .expect("seed auth token");
-        }
-
-        let frozen = seed_uncertain_send();
-        let proposal_before =
-            crate::storage::client_db::get_sender_proposal_by_commitment(&[0x76u8; 32])
-                .expect("load")
-                .expect("proposal");
-
-        // The EVIDENCE fails everywhere; the transfer succeeds.
-        overrides
-            .lock()
-            .unwrap()
-            .insert(frozen.evidence_submission_id.clone(), 503);
-
-        let router = crate::handlers::app_router_impl::AppRouterImpl::new(crate::init::SdkConfig {
-            node_id: "partial-test".to_string(),
-            storage_endpoints: endpoints.clone(),
-            enable_offline: false,
-        })
-        .expect("router init");
-        async fn sync(r: &crate::handlers::app_router_impl::AppRouterImpl) {
-            let _ = r
-                .run_storage_sync_request(dsm::types::proto::StorageSyncRequest {
-                    pull_inbox: false,
-                    push_pending: true,
-                    limit: 0,
-                })
-                .await;
-        }
-
-        sync(&router).await;
-
-        // The transfer went out; the evidence was tried and refused. Neither
-        // is a delivery.
-        let posts = log.lock().unwrap().clone();
-        assert!(posts
-            .iter()
-            .any(|p| p.message_id == frozen.transfer_submission_id));
-        assert!(posts
-            .iter()
-            .any(|p| p.message_id == frozen.evidence_submission_id));
-
-        let rows = unsettled_sender_outbox().expect("query");
-        assert_eq!(
-            rows.len(),
-            1,
-            "exactly one row, no duplicate created on partial delivery"
-        );
-        assert_eq!(
-            rows[0].status, OUTBOX_SUBMISSION_UNCERTAIN,
-            "a transfer-only quorum must NOT advance the logical send"
-        );
-        assert_eq!(
-            crate::storage::client_db::get_sender_proposal_by_commitment(&[0x76u8; 32])
-                .expect("load")
-                .expect("proposal")
-                .status,
-            proposal_before.status,
-            "proposal status must not move on partial delivery"
-        );
-
-        // Network heals. The next sweep replays BOTH halves — byte-identical,
-        // same ids — and only now does the send advance.
-        overrides.lock().unwrap().clear();
-        log.lock().unwrap().clear();
-        sync(&router).await;
-
-        let posts = log.lock().unwrap().clone();
-        let replayed_transfer = posts
-            .iter()
-            .filter(|p| p.body == frozen.transfer_bytes)
-            .count();
-        let replayed_evidence = posts
-            .iter()
-            .filter(|p| p.body == frozen.evidence_bytes)
-            .count();
-        assert!(
-            replayed_transfer >= crate::economic_fixtures::delivery_quorum()
-                && replayed_evidence >= crate::economic_fixtures::delivery_quorum(),
-            "the whole frozen set is replayed to full quorum, not just the missing half \
-             (transfer x{replayed_transfer}, evidence x{replayed_evidence})"
-        );
-        let rows = unsettled_sender_outbox().expect("query");
-        assert!(
-            rows.is_empty(),
-            "after full delivery the row leaves the unsettled set; got {:?}",
-            rows.iter().map(|r| r.status.as_str()).collect::<Vec<_>>()
-        );
-        // And it moved to `submitted`, not somewhere else.
-        let all: Vec<String> = {
-            let binding = crate::storage::client_db::get_connection().expect("conn");
-            let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
-            let mut st = conn
-                .prepare("SELECT status FROM sender_outbox")
-                .expect("prep");
-            st.query_map([], |r| r.get::<_, String>(0))
-                .expect("q")
-                .collect::<Result<Vec<_>, _>>()
-                .expect("rows")
-        };
-        assert_eq!(all, vec![OUTBOX_SUBMITTED.to_string()]);
-    }
-
-    /// Settled rows are never replayed. `submitted`, `gc_pending` and
-    /// `complete` produce ZERO submissions.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    #[serial_test::serial]
-    async fn settled_outbox_rows_are_never_resubmitted() {
-        use crate::storage::client_db::{
-            set_sender_outbox_status, OUTBOX_COMPLETE, OUTBOX_GC_PENDING, OUTBOX_SUBMITTED,
-        };
-
-        trust_root_test_db();
-        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::<RecordedPost>::new()));
-        let endpoints: Vec<String> = (0..crate::economic_fixtures::canonical_member_ids().len())
-            .map(|_| spawn_recorder(log.clone()).expect("recorder"))
-            .collect();
-        point_env_config_at(&endpoints);
-        let device_id = vec![0x0Au8; 32];
-        crate::sdk::app_state::AppState::set_identity_info(
-            device_id,
-            vec![0x01u8; 32],
-            vec![0x31u8; 32],
-            vec![0u8; 32],
-        );
-        crate::sdk::app_state::AppState::set_has_identity(true);
-        crate::sdk::recovery_sdk::RecoverySDK::set_cached_wallet_seed_for_testing(vec![0x9Cu8; 64]);
-
-        let _frozen = seed_uncertain_send();
-        let rel =
-            dsm::verification::smt_replace_witness::compute_smt_key(&[0x0Au8; 32], &[0x0Bu8; 32]);
-        let (cp, nonce) = ([0x71u8; 32], [0x75u8; 32]);
-
-        let router = crate::handlers::app_router_impl::AppRouterImpl::new(crate::init::SdkConfig {
-            node_id: "settled-test".to_string(),
-            storage_endpoints: endpoints.clone(),
-            enable_offline: false,
-        })
-        .expect("router init");
-
-        for settled in [OUTBOX_SUBMITTED, OUTBOX_GC_PENDING, OUTBOX_COMPLETE] {
-            set_sender_outbox_status(&rel, &cp, &nonce, settled).expect("set");
-            log.lock().unwrap().clear();
-            let _ = router
-                .run_storage_sync_request(dsm::types::proto::StorageSyncRequest {
-                    pull_inbox: false,
-                    push_pending: true,
-                    limit: 0,
-                })
-                .await;
-            let submits = log
-                .lock()
-                .unwrap()
-                .iter()
-                .filter(|p| p.path.contains("/api/v2/b0x/submit"))
-                .count();
-            assert_eq!(
-                submits, 0,
-                "a `{settled}` row must never be replayed; the sweep replayed it {submits} time(s)"
-            );
-        }
-    }
-
-    // =====================================================================
-    // INITIAL-SEND DELIVERY COMPLETENESS
-    //
-    // A SEPARATE defect from the recovery gate above, on a separate production
-    // path. `wallet.send` builds BOTH halves of an ADR 0003 split send and
-    // commits both durably in one transaction — `sender_outbox` for the
-    // transfer, `sender_outbox_artifacts` for the A-side evidence. It then
-    // submits only the transfer: `app_router_impl.rs` destructures
-    // `extra_artifacts: _` and `submit_stored_envelope` is called once, with
-    // the transfer envelope alone.
-    //
-    // The recipient side is complete and waiting — `recipient_accept` and
-    // `recipient_dispatch` stage and pair both halves — so a send that
-    // delivers only the transfer leaves the recipient holding one half of a
-    // pair whose partner was never sent.
-    //
-    // THE RULE UNDER TEST, stated as the contract rather than as a POST count:
-    //
-    //   wallet.send MUST NOT report success unless the transfer envelope AND
-    //   every frozen A-side artifact have reached quorum.
-    //
-    // Asserting only "two POSTs happened" would pass a future best-effort
-    // implementation that fires the evidence and reports success without
-    // waiting for it. Premature success is the defect, not merely a missing
-    // request.
-    // =====================================================================
-
-    /// Serves the two endpoint families a first-time send touches, and records
-    /// every submission. Deliberately dumb: it authenticates nothing and
-    /// validates no protobuf, so this gate cannot fail for reasons unrelated
-    /// to delivery completeness.
-    fn spawn_send_recorder(
-        log: std::sync::Arc<std::sync::Mutex<Vec<RecordedPost>>>,
-        identity_bytes: std::sync::Arc<Vec<u8>>,
-    ) -> std::io::Result<String> {
-        use std::io::{Read, Write};
-        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
-        let endpoint = format!("http://{}", listener.local_addr()?);
-        let mine = endpoint.clone();
-
-        std::thread::spawn(move || {
-            for stream in listener.incoming() {
-                let Ok(mut s) = stream else { break };
-                let mut buf = Vec::new();
-                let mut chunk = [0u8; 8192];
-                let (mut head_end, mut content_len) = (None, 0usize);
-                while head_end.is_none() {
-                    match s.read(&mut chunk) {
-                        Ok(0) => break,
-                        Ok(n) => {
-                            buf.extend_from_slice(&chunk[..n]);
-                            if let Some(p) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-                                head_end = Some(p + 4);
-                                let head = String::from_utf8_lossy(&buf[..p]).to_lowercase();
-                                for line in head.lines() {
-                                    if let Some(v) = line.strip_prefix("content-length:") {
-                                        content_len = v.trim().parse().unwrap_or(0);
-                                    }
-                                }
-                            }
-                        }
-                        Err(_) => break,
-                    }
-                }
-                let Some(hs) = head_end else { continue };
-                while buf.len() < hs + content_len {
-                    match s.read(&mut chunk) {
-                        Ok(0) => break,
-                        Ok(n) => buf.extend_from_slice(&chunk[..n]),
-                        Err(_) => break,
-                    }
-                }
-                let head = String::from_utf8_lossy(&buf[..hs]).to_string();
-                let mut parts = head.lines().next().unwrap_or("").split_whitespace();
-                let method = parts.next().unwrap_or("").to_uppercase();
-                let path = parts.next().unwrap_or("").to_string();
-
-                let resp: Vec<u8> = if method == "POST" {
-                    let header = |name: &str| -> String {
-                        head.lines()
-                            .find_map(|l| {
-                                let (k, v) = l.split_once(':')?;
-                                k.trim()
-                                    .eq_ignore_ascii_case(name)
-                                    .then(|| v.trim().to_string())
-                            })
-                            .unwrap_or_default()
-                    };
-                    log.lock()
-                        .unwrap_or_else(|p| p.into_inner())
-                        .push(RecordedPost {
-                            endpoint: mine.clone(),
-                            path: path.clone(),
-                            body: buf[hs..].to_vec(),
-                            recipient: header("x-dsm-recipient"),
-                            message_id: header("x-dsm-message-id"),
-                        });
-                    b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n".to_vec()
-                } else if path.contains("/api/v2/device/") {
-                    // Quorum identity lookup. Failure here is FATAL inside
-                    // wallet.send, so it must answer.
-                    let mut r = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\n\r\n",
-                        identity_bytes.len()
-                    )
-                    .into_bytes();
-                    r.extend_from_slice(&identity_bytes);
-                    r
-                } else {
-                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_vec()
-                };
-                let _ = s.write_all(&resp);
-                let _ = s.flush();
-            }
-        });
-        Ok(endpoint)
-    }
-
-    // SCAFFOLD — NOT EVIDENCE YET. Ignored on purpose.
-    //
-    // This does NOT currently prove defect #1. It halts one assertion early, at
-    // its own anti-vacuity guard, because the fixture cannot yet establish the
-    // in-memory bilateral state a first-time send requires: the
-    // BilateralTransactionManager Tripwire rejects with `ParentConsumed`
-    // (`anchor.chain_tip != pre.local_chain_tip_at_creation`), which is
-    // contact_manager state rather than a seedable row.
-    //
-    // Six real production dependencies ARE resolved here and are worth keeping:
-    // genesis via `genesis_records` (NOT AppState); endpoints via
-    // `DSM_ENV_CONFIG_PATH` (`SdkConfig.storage_endpoints` is ignored by
-    // wallet.send); the auth-token triple; the identity GET; a non-empty served
-    // pubkey matching the contact AK byte-for-byte; and a multi-threaded runtime
-    // for `block_in_place`.
-    //
-    // Do not un-ignore this to "see it fail" — a red here means fixture
-    // incompleteness, not the defect. It should be re-sited around the smallest
-    // production orchestration boundary that can prove the contract without
-    // rebuilding the bilateral state machine by hand.
-    //
-    // Multi-threaded on purpose: the send path calls `block_in_place`, which
-    // panics on the single-threaded runtime. Production runs multi-threaded.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    #[serial_test::serial]
-    #[ignore = "scaffold: fixture cannot yet reach ADR 0003 split composition; not evidence for defect #1"]
-    async fn wallet_send_submits_transfer_and_frozen_evidence_a_before_reporting_delivery_success()
-    {
-        use crate::storage::client_db::{load_sender_outbox_artifacts, unsettled_sender_outbox};
-        use prost::Message;
-
-        trust_root_test_db();
-
-        let sender_device = [0x0Au8; 32];
-        let recipient_device = [0x0Bu8; 32];
-        let genesis = [0x31u8; 32];
-        let recipient_kyber = vec![0x9Au8; 1184];
-
-        // The served identity must MATCH the stored contact exactly so
-        // `repair_contact_decision` short-circuits to `Unchanged` and no
-        // SPHINCS+ binding signature has to be minted for this fixture.
-        // `pubkey` cannot be empty: `fetch_quorum_device_identity` rejects an
-        // empty pubkey before `authoritative_ak_permits_repair` is ever
-        // consulted, so the contact AK below is set to this same value.
-        let recipient_ak = vec![0xA1u8; 32];
-        let identity = dsm::types::proto::RegisterDeviceRequest {
-            device_id: recipient_device.to_vec(),
-            pubkey: recipient_ak.clone(),
-            genesis_hash: genesis.to_vec(),
-            kyber_public_key: recipient_kyber.clone(),
-            kyber_binding_sig: vec![0x5Au8; 64],
-        };
-        let identity_bytes = std::sync::Arc::new(identity.encode_to_vec());
-
-        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::<RecordedPost>::new()));
-        let endpoints: Vec<String> = (0..crate::economic_fixtures::canonical_member_ids().len())
-            .map(|_| spawn_send_recorder(log.clone(), identity_bytes.clone()).expect("recorder"))
-            .collect();
-
-        point_env_config_at(&endpoints);
-
-        let binding_key = vec![0x41u8; 32];
-        let (public_key, _sk) = crate::sdk::signing_authority::derive_signing_keys_for_testing(
-            &sender_device,
-            &genesis,
-            &binding_key,
-        )
-        .expect("signing keypair");
-        crate::sdk::signing_authority::set_binding_key_for_testing(binding_key);
-        crate::sdk::app_state::AppState::set_identity_info(
-            sender_device.to_vec(),
-            public_key.clone(),
-            genesis.to_vec(),
-            dsm::merkle::sparse_merkle_tree::empty_root(
-                dsm::merkle::sparse_merkle_tree::DEFAULT_SMT_HEIGHT,
-            )
-            .to_vec(),
-        );
-        crate::sdk::app_state::AppState::set_has_identity(true);
-
-        let sender_b32 = crate::util::text_id::encode_base32_crockford(&sender_device);
-        let genesis_b32 = crate::util::text_id::encode_base32_crockford(&genesis);
-
-        // `wallet.send` routes on `core_sdk.local_genesis_hash()`, which reads
-        // `genesis_records` — NOT AppState. It is also the genesis half of the
-        // auth-token key, so both must come from this one record or the token
-        // lookup misses and falls through to live registration.
-        crate::storage::client_db::store_genesis_record_with_verification(
-            &crate::storage::client_db::GenesisRecord {
-                genesis_id: genesis_b32.clone(),
-                device_id: sender_b32.clone(),
-                mpc_proof: "test".to_string(),
-                device_birth_binding: String::new(),
-                merkle_root: String::new(),
-                participant_count: 3,
-                progress_marker: String::new(),
-                publication_hash: String::new(),
-                storage_nodes: endpoints.clone(),
-                entropy_hash: String::new(),
-                protocol_version: "v1".to_string(),
-                hash_chain_proof: None,
-                smt_proof: None,
-                verification_step: None,
-                genesis_nonce: String::new(),
-                genesis_profile: "MnemonicV2".to_string(),
-                network_id: "dsm-test".into(),
-            },
-        )
-        .expect("seed genesis record");
-
-        // FIXTURE GUARD: `ensure_token_for_endpoint` looks up
-        // (endpoint, self.device_id, base32(core_sdk.local_genesis_hash())).
-        // Miss it and the SDK falls through to a live registration handshake
-        // this recorder cannot satisfy — a setup failure that would look
-        // exactly like the defect.
-        for ep in &endpoints {
-            crate::storage::client_db::store_auth_token(
-                ep,
-                &sender_b32,
-                &genesis_b32,
-                "test-token",
-            )
-            .expect("seed auth token");
-        }
-
-        // Recipient contact, matching the served identity exactly.
-        let mut contact = crate::storage::client_db::ContactRecord {
-            contact_id: "c-gate2".to_string(),
-            device_id: recipient_device.to_vec(),
-            alias: "recipient".to_string(),
-            genesis_hash: genesis.to_vec(),
-            public_key: recipient_ak.clone(),
-            kyber_public_key: recipient_kyber,
-            current_chain_tip: None,
-            added_at: 1,
-            verified: true,
-            verification_proof: None,
-            metadata: std::collections::HashMap::new(),
-            ble_address: None,
-            status: "BleCapable".to_string(),
-            needs_online_reconcile: false,
-            last_seen_online_counter: 0,
-            last_seen_ble_counter: 0,
-            previous_chain_tip: None,
-        };
-        contact.verified = true;
-        crate::storage::client_db::store_contact(&contact).expect("seed contact");
-
-        // No balance is seeded: a projection row is display state, not the
-        // head the send debits, and the head here holds nothing. When this
-        // scaffold is re-sited it funds the sender through the faucet fixture
-        // like every other admitting suite.
-        let router = crate::handlers::app_router_impl::AppRouterImpl::new(crate::init::SdkConfig {
-            node_id: "gate2".to_string(),
-            storage_endpoints: endpoints.clone(),
-            enable_offline: false,
-        })
-        .expect("router init");
-
-        let body = dsm::types::proto::OnlineTransferRequest {
-            token_id: "ERA".to_string(),
-            to_device_id: recipient_device.to_vec(),
-            amount: 5,
-            from_device_id: sender_device.to_vec(),
-            seq: 1,
-            nonce: vec![0x7Eu8; 32],
-            ..Default::default()
-        };
-        let args = dsm::types::proto::ArgPack {
-            codec: dsm::types::proto::Codec::Proto as i32,
-            body: body.encode_to_vec(),
-            ..Default::default()
-        };
-
-        // THE PRODUCTION PATH. An ordinary first-time send.
-        use crate::bridge::AppRouter;
-        let result = router
-            .invoke(crate::bridge::AppInvoke {
-                method: "wallet.send".to_string(),
-                args: args.encode_to_vec(),
-            })
-            .await;
-
-        // What the send FROZE is the ground truth for what it owed the wire.
-        let frozen_artifacts: Vec<_> = unsettled_sender_outbox()
-            .expect("outbox")
-            .into_iter()
-            .flat_map(|r| {
-                load_sender_outbox_artifacts(
-                    &r.relationship_key,
-                    &r.canonical_parent,
-                    &r.proposal_nonce,
+    async fn a_poisoned_delta_parks_the_step_and_the_honest_delta_still_finalizes() {
+        let p = Pair::boot(100, 0).await;
+        let (honest, commitment) = step_with_reply(&p, 10).await;
+        p.a.enter();
+        assert_eq!(status(&commitment), PROPOSAL_SUBMITTED);
+
+        // R5: the recipient pair substituted — sig_b covers the pair it
+        // signed, so it cannot verify over another.
+        let substituted = tampered(&honest, |w| w.b_child_tip = w.b_parent_tip.clone());
+        match finalize_from_countersign_delta(&substituted).await {
+            CountersignOutcome::Rejected(reason) => {
+                assert!(
+                    reason.contains("sig_b"),
+                    "refused on the countersignature: {reason}"
                 )
-                .unwrap_or_default()
-            })
-            .collect();
-
-        let posts = log.lock().unwrap_or_else(|p| p.into_inner()).clone();
-        let submits: Vec<&RecordedPost> = posts
-            .iter()
-            .filter(|p| p.path.contains("/api/v2/b0x/submit"))
-            .collect();
-
-        // Anti-vacuity: if the send never got as far as freezing an evidence
-        // artifact, this test is measuring the wrong thing and must say so
-        // rather than passing quietly.
-        assert!(
-            !frozen_artifacts.is_empty(),
-            "fixture did not reach ADR 0003 split composition — no A-side \
-             artifact was frozen, so delivery completeness cannot be judged. \
-             wallet.send returned success={} error={:?}",
-            result.success,
-            result.error_message
-        );
-
-        for art in &frozen_artifacts {
-            let reached: std::collections::BTreeSet<&str> = submits
-                .iter()
-                .filter(|p| p.body == art.envelope_bytes)
-                .map(|p| p.endpoint.as_str())
-                .collect();
-
-            // THE CONTRACT. Reporting success while a frozen artifact never
-            // reached quorum is the defect — whether it was never sent, or
-            // sent best-effort without waiting.
-            assert!(
-                !(result.success && reached.len() < crate::economic_fixtures::delivery_quorum()),
-                "wallet.send reported success=true while the frozen {:?} \
-                 artifact ({} bytes, submission_id={}) reached only {}/{} \
-                 nodes. A split send whose A-side evidence never reaches \
-                 quorum leaves the recipient holding one half of a pair whose \
-                 partner was never delivered.",
-                art.role,
-                art.envelope_bytes.len(),
-                art.submission_id,
-                reached.len(),
-                endpoints.len()
-            );
-        }
-    }
-
-    // =====================================================================
-    // RECIPIENT COMPLETION IS DRIVEN BY DURABLE STATE, NOT BY THIS POLL.
-    //
-    // The crash-after-apply-before-ACK window: a pair reached durable
-    // `accepted`, and the process died before its ACKs went out. On the next
-    // poll NOTHING is pulled that names this pair — the sender is not
-    // re-sending, and this device's in-memory "touched keys" from the last
-    // invocation are gone. If completion depended on either, the sender's gate
-    // would stay stranded forever. So the pass must find the row in the
-    // database and produce both ACK coordinates from it alone.
-    // =====================================================================
-
-    /// A durably `accepted` split pair with a retained route, and nothing
-    /// polled this invocation, must still yield ACKs for BOTH halves on that
-    /// route — and its route must be released only when told the ACKs landed.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    #[serial_test::serial]
-    async fn an_accepted_but_unacked_pair_is_re_acked_from_the_database_alone() {
-        use crate::storage::client_db::recipient_staging::{
-            get_staging, mark_accepted, release_retained_route, retained_routes_for_polling,
-            stage_evidence_half, stage_transfer_half, StagingState,
-        };
-
-        trust_root_test_db();
-
-        let sender_device = [0x0Au8; 32];
-        let self_device = [0x0Bu8; 32];
-        crate::sdk::app_state::AppState::set_identity_info(
-            self_device.to_vec(),
-            vec![0x01u8; 32],
-            vec![0x31u8; 32],
-            vec![0u8; 32],
-        );
-        crate::sdk::app_state::AppState::set_has_identity(true);
-        // `AppRouterImpl::new` derives signing authority from the cached seed.
-        crate::sdk::recovery_sdk::RecoverySDK::set_cached_wallet_seed_for_testing(vec![0x9Cu8; 64]);
-        // The trust root the pass resolves the sender through.
-        seed_sender_contact(sender_device, vec![0xA1u8; 64]);
-
-        // A receipt naming (sender -> self). Signature validity is not what this
-        // test is about — the pair is already `accepted`, so `decide_ack`
-        // short-circuits without verifying — but the receipt must decode and
-        // must name this device as devid_b, because the pass reads both.
-        let receipt = dsm::types::receipt_types::StitchedReceiptV2::new(
-            [0u8; 32],
-            sender_device,
-            self_device,
-            [0x41u8; 32],
-            [0x42u8; 32],
-            [0u8; 32],
-            [0u8; 32],
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-        );
-        let evidence_bytes = receipt.to_full_protobuf().expect("encode");
-        let evidence_digest = crate::storage::client_db::evidence_content_digest(
-            crate::storage::client_db::ArtifactRole::EvidenceA,
-            &evidence_bytes,
-        );
-
-        let key = "SPLITKEY0000000000000000A1";
-        let route = "RETAINEDROUTEXYZ";
-        // Reach ready_to_verify, then accepted — the state a crash after apply
-        // but before ACK leaves behind.
-        assert_eq!(
-            stage_transfer_half(key, b"transfer-half-bytes", &evidence_digest, route)
-                .expect("stage transfer"),
-            StagingState::StagedTransfer
-        );
-        assert_eq!(
-            stage_evidence_half(key, &evidence_bytes, route).expect("stage evidence"),
-            StagingState::ReadyToVerify
-        );
-        mark_accepted(key).expect("accepted");
-        assert_eq!(
-            get_staging(key)
-                .expect("load")
-                .expect("row")
-                .retained_route
-                .as_deref(),
-            Some(route)
-        );
-
-        let router = crate::handlers::app_router_impl::AppRouterImpl::new(crate::init::SdkConfig {
-            node_id: "completion-test".to_string(),
-            storage_endpoints: vec!["http://127.0.0.1:1".to_string()],
-            enable_offline: false,
-        })
-        .expect("router init");
-
-        // THE PASS, with nothing polled and no touched-key hint. It must find
-        // the row itself.
-        let (acks, release_keys) = router
-            .complete_ready_split_transfers(&["http://127.0.0.1:1".to_string()])
-            .await;
-
-        // Both halves, both on the retained route, ids as the sender derives them.
-        let expected_evidence_id =
-            crate::storage::client_db::derive_artifact_submission_id(&evidence_digest);
-        let mut got = acks.clone();
-        got.sort();
-        let mut want = vec![
-            (route.to_string(), key.to_string()),
-            (route.to_string(), expected_evidence_id.clone()),
-        ];
-        want.sort();
-        assert_eq!(
-            got, want,
-            "an accepted pair must be re-ACKed for BOTH halves on its retained route, from \
-             durable state alone"
-        );
-        assert_eq!(release_keys, vec![key.to_string()]);
-
-        // The pass does NOT release the route itself — the caller does, and only
-        // after the ACKs succeed. Until then the route stays polled.
-        assert!(retained_routes_for_polling()
-            .expect("routes")
-            .contains(&route.to_string()));
-
-        // Simulate the caller's "all ACKs succeeded" step.
-        assert!(release_retained_route(key).expect("release"));
-        assert!(!retained_routes_for_polling()
-            .expect("routes")
-            .contains(&route.to_string()));
-
-        // Idempotent re-entry: the row is still `accepted`; running the pass
-        // again re-derives the same ACKs (re-ACKing is free at the node) and
-        // never touches apply. Route is now None, so the caller would skip.
-        let (acks2, _) = router
-            .complete_ready_split_transfers(&["http://127.0.0.1:1".to_string()])
-            .await;
-        assert!(
-            acks2.is_empty(),
-            "with the route released there is nothing to ACK by route; got {acks2:?}"
-        );
-        assert_eq!(
-            crate::storage::client_db::recipient_staging::staging_state(key).expect("state"),
-            StagingState::Accepted,
-            "re-entry must not disturb the durable acceptance"
-        );
-    }
-
-    /// Publish a signed release as an immutable object and record the sender's
-    /// own genesis (the committed network the release check reads). Returns
-    /// the release's inner address. Nothing about the recipient is seeded
-    /// here: B registered its root for real, and the release check walks it.
-    async fn publish_release(release_bytes: &[u8], sender_devid: [u8; 32]) -> [u8; 32] {
-        let genesis_b32 = crate::util::text_id::encode_base32_crockford(&[0xAAu8; 32]);
-        crate::storage::client_db::store_genesis_record_with_verification(
-            &crate::storage::client_db::GenesisRecord {
-                genesis_id: genesis_b32,
-                device_id: crate::util::text_id::encode_base32_crockford(&sender_devid),
-                mpc_proof: "test".into(),
-                device_birth_binding: String::new(),
-                merkle_root: String::new(),
-                participant_count: 1,
-                progress_marker: String::new(),
-                publication_hash: String::new(),
-                storage_nodes: vec![],
-                entropy_hash: String::new(),
-                protocol_version: "v1".into(),
-                hash_chain_proof: None,
-                smt_proof: None,
-                verification_step: None,
-                genesis_nonce: String::new(),
-                genesis_profile: "MnemonicV2".into(),
-                network_id: "dsm-testnet".into(),
-            },
-        )
-        .expect("genesis record");
-        let network =
-            crate::sdk::economic_admission_flow::committed_network_id().expect("committed network");
-        let set =
-            crate::sdk::economic_admission_flow::canonical_set(&network).expect("canonical set");
-        let inner = dsm::economic::release::recipient_economic_release_addr(release_bytes);
-        let outer = dsm::storage_object::immutable_addr_from_inner(
-            dsm::common::domain_tags::TAG_DSM_RECIPIENT_ECONOMIC_RELEASE,
-            &inner,
-        );
-        crate::sdk::storage_io::put_immutable_to_all_members(
-            &set,
-            core::str::from_utf8(
-                dsm::common::domain_tags::TAG_DSM_RECIPIENT_ECONOMIC_RELEASE.source_bytes(),
-            )
-            .unwrap(),
-            release_bytes,
-            &crate::util::text_id::encode_base32_crockford(&outer),
-        )
-        .await
-        .expect("publish release");
-        inner
-    }
-
-    /// A real recipient, the sender step seeded against it, and its signed
-    /// release published: `(step, release bytes, release inner address,
-    /// recipient)`. The recipient is returned so its fleet outlives the test.
-    async fn seed_step_and_release() -> (SeededStep, Vec<u8>, [u8; 32], RealRecipient) {
-        let recipient = real_recipient().await;
-        let st = seed_submitted_step_for(&recipient);
-        let release_bytes =
-            release_bytes_for(st.commitment, ReleaseCoords::of(&recipient), &st.b_ak_sk);
-        let inner = publish_release(&release_bytes, st.a).await;
-        (st, release_bytes, inner, recipient)
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    #[serial_test::serial]
-    async fn a_poisoned_delta_parks_the_step_and_an_honest_delta_still_finalizes() {
-        use super::CountersignOutcome;
-        use crate::storage::client_db::sender_proposal::{
-            get_sender_proposal_by_commitment, PROPOSAL_AWAITING_VALID_REPLY, PROPOSAL_FINALIZED,
-            PROPOSAL_ROLLED_BACK,
-        };
-        let (st, _rb, release_addr, _recipient) = seed_step_and_release().await;
-
-        // ---- 1. A poisoned delta arrives, addressed at the real proposal ----
-        // B material minted over a receipt with a FORGED canonical child, then
-        // carried in a delta naming the honest commitment and the honest A
-        // digest. Its ek_cert_b genuinely verifies (same h_n); its sig_b was
-        // signed over the forged commitment, so it cannot verify once overlaid
-        // onto the sender's OWN A side.
-        let poisoned_receipt = signed_b_receipt(st.a, st.b, st.parent, [0xEEu8; 32], &st.b_ak_sk);
-        let poisoned = delta_for(&poisoned_receipt, st.commitment, st.digest_a);
-        let outcome = super::finalize_from_countersign_delta(&poisoned).await;
-        match &outcome {
-            CountersignOutcome::Rejected(reason) => assert!(
-                reason.contains("sig_b"),
-                "the forgery must be refused on the countersignature, got: {reason}"
-            ),
-            other => panic!("poisoned delta must be Rejected by the verifier, got {other:?}"),
-        }
-
-        let after_poison = get_sender_proposal_by_commitment(&st.commitment)
-            .expect("load")
-            .expect("proposal still present");
-        assert_eq!(
-            after_poison.status, PROPOSAL_AWAITING_VALID_REPLY,
-            "a rejected artifact must park the step in a state it can leave; \
-             the handler itself must make this transition, not just the DB layer"
-        );
-        assert_ne!(
-            after_poison.status, PROPOSAL_ROLLED_BACK,
-            "NOT a rollback — the recipient may already have applied and credited"
-        );
-        assert_eq!(
-            after_poison.message_id.as_deref(),
-            Some("MSG-658"),
-            "the step keeps its deterministic message id, so the honest copy \
-             addresses the same submitted step rather than a new one"
-        );
-
-        // ---- 2. The honest delta for the SAME step finalizes it ----
-        //
-        // Pin the positive case first: if the "honest" receipt did not actually
-        // verify, the finalize assertion below would be measuring the wrong
-        // thing — a second rejection looks identical to a step that simply
-        // never left `awaiting_valid_reply`.
-        match crate::handlers::online_finalize::verify_acceptance_receipt(
-            &st.a,
-            &st.b,
-            &st.honest,
-            &after_poison,
-            &st.b_ak_pk,
-            None,
-            None,
-            b_pair_for(&st.a, &st.b),
-        )
-        .expect("verification must not error")
-        {
-            crate::handlers::online_finalize::ReceiptVerifyOutcome::Verified { .. } => {}
-            crate::handlers::online_finalize::ReceiptVerifyOutcome::Rejected { reason } => {
-                panic!("the honest replacement must verify, but was rejected: {reason}")
             }
+            other => panic!("a substituted pair must be Rejected, got {other:?}"),
         }
-
-        let good =
-            delta_for_with_release(&st.honest, st.commitment, st.digest_a, Some(release_addr));
         assert_eq!(
-            super::finalize_from_countersign_delta(&good).await,
+            status(&commitment),
+            PROPOSAL_AWAITING_VALID_REPLY,
+            "a rejected artifact parks the step; it is not a rollback"
+        );
+
+        // A-bytes this sender never retained: refused before any signature
+        // work.
+        let foreign_digest = tampered(&honest, |w| {
+            w.receipt_evidence_digest_a = dsm::crypto::blake3::domain_hash_bytes(
+                dsm::common::domain_tags::TAG_DSM_RECEIPT_EVIDENCE_A,
+                &w.commitment,
+            )
+            .to_vec()
+        });
+        assert!(matches!(
+            finalize_from_countersign_delta(&foreign_digest).await,
+            CountersignOutcome::DigestMismatch(..)
+        ));
+        assert_eq!(status(&commitment), PROPOSAL_AWAITING_VALID_REPLY);
+
+        // sig_b is acceptance provenance only: a delta with no recipient
+        // economic release cannot finalize the sender.
+        let no_release = tampered(&honest, |w| w.recipient_economic_release_addr.clear());
+        match finalize_from_countersign_delta(&no_release).await {
+            CountersignOutcome::Rejected(reason) => {
+                assert!(reason.contains("no recipient economic release"), "{reason}")
+            }
+            other => panic!("a delta without a release must be Rejected, got {other:?}"),
+        }
+        assert_eq!(status(&commitment), PROPOSAL_AWAITING_VALID_REPLY);
+
+        // The honest delta for the SAME step finalizes it.
+        assert_eq!(
+            finalize_from_countersign_delta(&honest).await,
             CountersignOutcome::Finalized
         );
+        assert_eq!(status(&commitment), PROPOSAL_FINALIZED);
         assert_eq!(
-            proposal_status(&st.commitment),
-            PROPOSAL_FINALIZED,
-            "recovery is only real if a valid replacement for the same \
-             commitment still finalizes the step through the live handler"
-        );
-        let outbox = crate::storage::client_db::get_sender_outbox_by_commitment(&st.commitment)
-            .expect("outbox")
-            .expect("present");
-        assert_eq!(
-            outbox.status,
-            crate::storage::client_db::OUTBOX_FINALIZATION_CHECKPOINT_PENDING,
+            client_db::get_sender_outbox_by_commitment(&commitment)
+                .expect("outbox")
+                .expect("present")
+                .status,
+            client_db::OUTBOX_FINALIZATION_CHECKPOINT_PENDING,
             "finalized locally; the certificate still has to reach quorum"
         );
-        let retained = crate::storage::client_db::load_sender_outbox_artifacts(
-            &st.rel_key,
-            &st.parent,
-            &st.proposal.nonce_hash,
-        )
-        .expect("artifacts");
-        assert!(
-            retained.iter().any(|a| a.role
-                == crate::storage::client_db::ArtifactRole::CountersignB
-                && a.envelope_bytes == good.envelope_bytes),
-            "the delta the sender finalized on is retained beside its evidence_a"
-        );
-        assert!(
-            retained.iter().any(|a| a.role
-                == crate::storage::client_db::ArtifactRole::RelationshipFinalized
-                && a.routing_address.is_some()),
-            "the finality certificate is frozen with its own route in the same commit"
-        );
-
-        // A redelivered honest delta is an idempotent no-op.
         assert_eq!(
-            super::finalize_from_countersign_delta(&good).await,
-            CountersignOutcome::AlreadyFinalized
+            finalize_from_countersign_delta(&honest).await,
+            CountersignOutcome::AlreadyFinalized,
+            "a redelivered honest delta is an idempotent no-op"
         );
     }
 
-    /// The delta's A-digest is advisory, but a delta naming A bytes this sender
-    /// never retained is refused BEFORE any signature work and parks the step.
-    /// Positive control in the same fixture: the true digest finalizes.
+    /// A replayed release — B's real, signed release of an EARLIER step —
+    /// carried in the delta of a later step is bound to a different
+    /// transition and cannot finalize it.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[serial_test::serial]
-    async fn a_delta_whose_digest_does_not_name_the_retained_evidence_is_rejected() {
-        use super::CountersignOutcome;
-        use crate::storage::client_db::sender_proposal::{
-            PROPOSAL_AWAITING_VALID_REPLY, PROPOSAL_FINALIZED,
-        };
-        let (st, _rb, release_addr, _recipient) = seed_step_and_release().await;
-
-        let mut wrong_digest = st.digest_a;
-        wrong_digest[0] ^= 0x01;
-        let mismatched = delta_for(&st.honest, st.commitment, wrong_digest);
-        match super::finalize_from_countersign_delta(&mismatched).await {
-            CountersignOutcome::DigestMismatch(reason) => {
-                assert!(reason.contains("this sender retained"), "{reason}")
-            }
-            other => panic!("expected DigestMismatch, got {other:?}"),
-        }
+    async fn a_release_of_another_step_cannot_finalize_this_one() {
+        let p = Pair::boot(100, 0).await;
+        let (first, first_commitment) = step_with_reply(&p, 10).await;
+        p.a.enter();
         assert_eq!(
-            proposal_status(&st.commitment),
-            PROPOSAL_AWAITING_VALID_REPLY
-        );
-
-        let good =
-            delta_for_with_release(&st.honest, st.commitment, st.digest_a, Some(release_addr));
-        assert_eq!(
-            super::finalize_from_countersign_delta(&good).await,
+            finalize_from_countersign_delta(&first).await,
             CountersignOutcome::Finalized
         );
-        assert_eq!(proposal_status(&st.commitment), PROPOSAL_FINALIZED);
-    }
+        assert_eq!(status(&first_commitment), PROPOSAL_FINALIZED);
+        let shipped = p.a.sync().await;
+        assert!(shipped.success, "{:?}", shipped.errors);
+        let released = p.b.sync().await;
+        assert!(released.success, "{:?}", released.errors);
 
-    /// R5 — the recipient's canonical pair is covered by `sig_b`. A delta whose
-    /// B material is genuine but whose `b_parent_tip` or `b_child_tip` was
-    /// substituted (a middlebox, or a recipient lying about its lineage) fails
-    /// the countersignature check and finalizes NOTHING; the untouched delta
-    /// then finalizes the same step. Mutation M2 (drop the pair from the
-    /// target) turns this red: the flipped deltas would verify.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    #[serial_test::serial]
-    async fn r5_a_substituted_recipient_pair_fails_sig_b_and_finalizes_nothing() {
-        use super::CountersignOutcome;
-        use crate::storage::client_db::sender_proposal::{
-            PROPOSAL_AWAITING_VALID_REPLY, PROPOSAL_FINALIZED,
-        };
-        use prost::Message;
-        let (st, _rb, release_addr, _recipient) = seed_step_and_release().await;
-        let good =
-            delta_for_with_release(&st.honest, st.commitment, st.digest_a, Some(release_addr));
-
-        for (label, flip) in [("b_parent_tip", 0usize), ("b_child_tip", 1usize)] {
-            let mut body =
-                dsm::types::proto::ReceiptCountersignB::decode(&*good.body).expect("delta");
-            if flip == 0 {
-                body.b_parent_tip[0] ^= 0x01;
-            } else {
-                body.b_child_tip[0] ^= 0x01;
-            }
-            let flipped = crate::sdk::b0x_sdk::CountersignDelta {
-                body: body.encode_to_vec(),
-                ..good.clone()
-            };
-            match super::finalize_from_countersign_delta(&flipped).await {
-                CountersignOutcome::Rejected(reason) => assert!(
-                    reason.contains("sig_b"),
-                    "{label}: a substituted pair must fail on the countersignature, got: {reason}"
-                ),
-                other => panic!("{label}: expected Rejected on sig_b, got {other:?}"),
-            }
-            assert_eq!(
-                proposal_status(&st.commitment),
-                PROPOSAL_AWAITING_VALID_REPLY,
-                "{label}: parked, not finalized"
-            );
-            assert!(
-                crate::storage::client_db::load_cert_chain_head_pubkey(
-                    &st.rel_key,
-                    crate::storage::client_db::CertChainSide::Counterparty,
-                )
-                .expect("head")
-                .is_none(),
-                "{label}: no head advanced"
-            );
+        let (second, second_commitment) = step_with_reply(&p, 5).await;
+        let old_release = wire(&first).recipient_economic_release_addr;
+        let replayed = tampered(&second, |w| w.recipient_economic_release_addr = old_release);
+        p.a.enter();
+        match finalize_from_countersign_delta(&replayed).await {
+            CountersignOutcome::Rejected(reason) => assert!(
+                reason.contains("different transition"),
+                "the release is bound to its own step: {reason}"
+            ),
+            other => panic!("a replayed release must be Rejected, got {other:?}"),
         }
-
-        // Positive control: the untouched delta finalizes the same step.
+        assert_eq!(status(&second_commitment), PROPOSAL_AWAITING_VALID_REPLY);
         assert_eq!(
-            super::finalize_from_countersign_delta(&good).await,
+            finalize_from_countersign_delta(&second).await,
             CountersignOutcome::Finalized
         );
-        assert_eq!(proposal_status(&st.commitment), PROPOSAL_FINALIZED);
     }
 
-    /// A whole countersigned receipt on the countersign method is refused at
-    /// the wire and changes nothing; the same fixture then finalizes on the
-    /// honest delta, so "nothing changed" is not vacuous. (Which tag trips
-    /// first depends on the receipt's shape — this thin fixture carries no
-    /// proofs, so its first tag past the delta's 8 is `sig_a`'s 13; the
-    /// production-shaped receipt fails on tag 8's width. Both are refusals
-    /// of the same wire discriminator.)
+    /// A whole receipt carried on the countersign method is refused at the
+    /// wire: the method's body is a `ReceiptCountersignB`, never a receipt.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[serial_test::serial]
     async fn a_full_receipt_on_the_countersign_method_is_refused_at_the_wire() {
-        use super::CountersignOutcome;
-        use crate::storage::client_db::sender_proposal::{PROPOSAL_FINALIZED, PROPOSAL_SUBMITTED};
-        let (st, _rb, release_addr, _recipient) = seed_step_and_release().await;
-
-        let full_receipt = crate::sdk::b0x_sdk::CountersignDelta {
-            message_id: "TESTFULL0000000000000000000".to_string(),
-            envelope_bytes: vec![0xEDu8; 64],
-            body: st.honest.to_full_protobuf().expect("full receipt"),
-        };
-        match super::finalize_from_countersign_delta(&full_receipt).await {
-            CountersignOutcome::WireRejected(reason) => {
-                assert!(
-                    reason.contains("countersign wire: unknown field 13"),
-                    "{reason}"
-                )
-            }
-            other => panic!("expected WireRejected, got {other:?}"),
-        }
-        assert_eq!(proposal_status(&st.commitment), PROPOSAL_SUBMITTED);
-
-        let good =
-            delta_for_with_release(&st.honest, st.commitment, st.digest_a, Some(release_addr));
-        assert_eq!(
-            super::finalize_from_countersign_delta(&good).await,
-            CountersignOutcome::Finalized
-        );
-        assert_eq!(proposal_status(&st.commitment), PROPOSAL_FINALIZED);
-    }
-
-    /// THE RELEASE GATE (3.5b PR4): bare `sig_b` cannot finalize the sender.
-    /// The delta is fully honest — countersignature verifies — but carries no
-    /// release; the step parks awaiting a valid replacement. MUTATION
-    /// CONTROL: delete the gate in `finalize_from_countersign_delta` and this
-    /// finalizes on provenance alone — red.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    #[serial_test::serial]
-    async fn a_delta_without_a_release_cannot_finalize_the_sender() {
-        use super::CountersignOutcome;
-        use crate::storage::client_db::sender_proposal::PROPOSAL_AWAITING_VALID_REPLY;
-        let (st, _rb, _addr, _recipient) = seed_step_and_release().await;
-
-        let bare = delta_for(&st.honest, st.commitment, st.digest_a);
-        match super::finalize_from_countersign_delta(&bare).await {
-            CountersignOutcome::Rejected(reason) => assert!(
-                reason.contains("bare sig_b"),
-                "the refusal names the missing release, got: {reason}"
-            ),
-            other => panic!("bare sig_b must be Rejected, got {other:?}"),
-        }
-        assert_eq!(
-            proposal_status(&st.commitment),
-            PROPOSAL_AWAITING_VALID_REPLY,
-            "parked, not finalized"
-        );
-    }
-
-    /// The sender's INDEPENDENT half: a release whose named root is not (yet)
-    /// registered DEFERS (an outage is never an attack); a release whose
-    /// named root DISAGREES with the registered claim is REJECTED — a hostile
-    /// recipient's private "admitted" flag is never trusted.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    #[serial_test::serial]
-    async fn a_release_must_match_the_recipient_registered_root() {
-        use super::CountersignOutcome;
-        let (st, release_bytes, release_addr, recipient) = seed_step_and_release().await;
-
-        // Overwrite the register with a DIFFERENT root at the released
-        // position: same coordinates, different post-root — the claim the
-        // quorum holds disagrees with the release.
-        // A release naming a root B's registered lineage never reached: the
-        // sender walks B to the released position and finds another root.
-        let bad = release_bytes_for(
-            st.commitment,
-            ReleaseCoords {
-                root: [0x66u8; 32], // NOT the registered root
-                ..ReleaseCoords::of(&recipient)
-            },
-            &st.b_ak_sk,
-        );
-        let bad_addr = publish_release(&bad, st.a).await;
-        let _ = release_addr;
-
-        let good = delta_for_with_release(&st.honest, st.commitment, st.digest_a, Some(bad_addr));
-        match super::finalize_from_countersign_delta(&good).await {
-            CountersignOutcome::Rejected(reason) => assert!(
-                reason.contains("does not match the registered economic root"),
-                "got: {reason}"
-            ),
-            other => panic!("a register mismatch must be Rejected, got {other:?}"),
-        }
-
-        // And with NO registered root at all: deferred, never rejected.
-        // With the register cells gone the walk cannot reach B's position:
-        // that is unavailability, never a mismatch.
-        crate::sdk::storage_io::fake_registers::reset();
-        let good_addr = publish_release(&release_bytes, st.a).await;
-        let again = delta_for_with_release(&st.honest, st.commitment, st.digest_a, Some(good_addr));
-        match super::finalize_from_countersign_delta(&again).await {
-            CountersignOutcome::Unverifiable(reason) => assert!(
-                reason.contains("release register read"),
-                "an unregistered root defers, got: {reason}"
-            ),
-            other => panic!("an unregistered root must defer, got {other:?}"),
-        }
-    }
-
-    /// Producer -> consumer with REAL per-step EK material: the recipient's
-    /// real builder over its stored full receipt, decoded by the sender's real
-    /// discriminator, finalized by the live handler. What the fixture-built
-    /// deltas above cannot prove — that the two ends agree byte for byte.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    #[serial_test::serial]
-    async fn the_real_delta_builder_output_finalizes_the_sender_through_the_live_handler() {
-        use super::CountersignOutcome;
-        use crate::storage::client_db::sender_proposal::PROPOSAL_FINALIZED;
-        use prost::Message;
-        use std::sync::Arc;
-        let (st, release_bytes, _release_addr, _recipient) = seed_step_and_release().await;
-
-        // Recipient side: identity b, its stored full countersigned receipt.
-        let full_bytes = st.honest.to_full_protobuf().expect("full receipt");
-        let core = Arc::new(crate::sdk::core_sdk::CoreSDK::new().expect("CoreSDK"));
-        let recipient_sdk = crate::sdk::b0x_sdk::B0xSDK::new(
-            crate::util::text_id::encode_base32_crockford(&st.b),
-            core,
-            vec![],
-        )
-        .expect("B0xSDK");
-        let built = recipient_sdk
-            .build_countersign_reply_envelope(
-                &[0xB6u8; 32],
-                &st.proposal.projection_parent,
-                &st.commitment,
-                &full_bytes,
-                b_pair_for(&st.a, &st.b),
-                &release_bytes,
-            )
-            .expect("real delta");
-        assert!(built.bytes.len() < 131_072, "{}", built.bytes.len());
-        assert!(
-            built.bytes.len() > 100_000,
-            "two real SPHINCS objects: {}",
-            built.bytes.len()
-        );
-
-        // Sender side: exactly what the poll does with the spooled envelope.
-        let env = dsm::types::proto::Envelope::decode(&*built.bytes).expect("Envelope");
-        let body = crate::sdk::b0x_sdk::B0xSDK::decode_countersign_b(&env)
-            .expect("discriminated by method");
-        let delta = crate::sdk::b0x_sdk::CountersignDelta {
-            message_id: built.message_id_b32.clone(),
-            envelope_bytes: built.bytes.clone(),
-            body,
-        };
-        assert_eq!(
-            super::finalize_from_countersign_delta(&delta).await,
-            CountersignOutcome::Finalized
-        );
-        assert_eq!(proposal_status(&st.commitment), PROPOSAL_FINALIZED);
-        let retained = crate::storage::client_db::load_sender_outbox_artifacts(
-            &st.rel_key,
-            &st.parent,
-            &st.proposal.nonce_hash,
-        )
-        .expect("artifacts");
-        let kept = retained
-            .iter()
-            .find(|a| a.role == crate::storage::client_db::ArtifactRole::CountersignB)
-            .expect("countersign_b retained");
-        assert_eq!(
-            kept.envelope_bytes, built.bytes,
-            "the exact envelope it finalized on"
-        );
-    }
-
-    /// The whole return leg, end to end, against a dumb recorder: the
-    /// recipient's REAL sweep posts a delta (not the 218 KB receipt) under the
-    /// deterministic reply id to the sender's route; the sender's REAL
-    /// discriminator + handler take that recorded body and finalize. The
-    /// mutations run on the same recorded body BEFORE the positive step, so
-    /// "status unchanged" is measured against a fixture that then finalizes.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    #[serial_test::serial]
-    async fn the_reply_sweep_posts_a_sub_cap_delta_and_the_sender_finalizes_from_it() {
-        use super::CountersignOutcome;
-        use crate::storage::client_db::sender_proposal::{
-            PROPOSAL_AWAITING_VALID_REPLY, PROPOSAL_FINALIZED,
-        };
-        use prost::Message;
-        use std::sync::Arc;
-
-        // ---- recipient half: the sweep puts a delta on the wire ----
-        let log = Arc::new(std::sync::Mutex::new(Vec::<RecordedPost>::new()));
-        let ep = spawn_recorder(log.clone()).expect("recorder");
-        let recipient = real_recipient().await;
-        let rh = seed_recipient_half(&ep, Some(&recipient));
-
-        let core = Arc::new(crate::sdk::core_sdk::CoreSDK::new().expect("CoreSDK"));
-        super::deliver_pending_acceptance_replies(std::slice::from_ref(&ep), core)
-            .await
-            .expect("sweep");
-
-        let posts: Vec<RecordedPost> = log.lock().unwrap().clone();
-        let submits: Vec<&RecordedPost> = posts
-            .iter()
-            .filter(|p| p.path == "/api/v2/b0x/submit")
-            .collect();
-        assert_eq!(submits.len(), 1, "exactly one reply POST; got {posts:?}");
-        let post = submits[0];
-        assert_eq!(
-            post.message_id,
-            crate::util::text_id::encode_base32_crockford(&crate::sdk::b0x_sdk::reply_message_id(
-                &rh.commitment,
-                &rh.projection_parent
-            )),
-            "deterministic reply id"
-        );
-        assert_eq!(
-            post.recipient,
-            crate::sdk::b0x_sdk::B0xSDK::compute_b0x_address(
-                &[0xAAu8; 32],
-                &rh.a,
-                &rh.projection_parent
-            )
-            .expect("route"),
-            "addressed to the tip the SENDER polls"
-        );
-        assert!(
-            post.body.len() < 131_072,
-            "the wire body must be under the node cap, got {}",
-            post.body.len()
-        );
-        assert!(
-            post.body.len() > 100_000,
-            "two real SPHINCS objects must be present, got {}",
-            post.body.len()
-        );
-        assert!(
-            crate::storage::client_db::pending_outbound_replies()
-                .expect("pending")
-                .is_empty(),
-            "the row is marked submitted once one endpoint took it"
-        );
-
-        // ---- sender half: the recorded body finalizes the step ----
-        let st = seed_submitted_step_with_keys(
-            rh.b,
-            rh.b_genesis,
-            rh.b_ak_pk.clone(),
-            rh.b_ak_sk.clone(),
-            rh.ek_pk_a.clone(),
-            rh.ek_sk_a.clone(),
-        );
-        assert_eq!(
-            st.commitment, rh.commitment,
-            "both halves describe the same step"
-        );
-        assert_eq!((st.a, st.b), (rh.a, rh.b));
-        let _inner = publish_release(&rh.release_bytes, st.a).await;
-
-        let env = dsm::types::proto::Envelope::decode(&*post.body).expect("Envelope");
-        let body = crate::sdk::b0x_sdk::B0xSDK::decode_countersign_b(&env)
-            .expect("the sender's discriminator recognises the sweep's output");
-        let recorded = crate::sdk::b0x_sdk::CountersignDelta {
-            message_id: post.message_id.clone(),
-            envelope_bytes: post.body.clone(),
-            body: body.clone(),
-        };
-
-        // m1: one bit of the A digest -> DigestMismatch, parked.
-        let mut m1 = dsm::types::proto::ReceiptCountersignB::decode(&*body).expect("delta");
-        m1.receipt_evidence_digest_a[0] ^= 0x01;
-        let m1 = crate::sdk::b0x_sdk::CountersignDelta {
-            body: m1.encode_to_vec(),
-            ..recorded.clone()
+        let p = Pair::boot(100, 0).await;
+        let (honest, commitment) = step_with_reply(&p, 10).await;
+        p.a.enter();
+        let proposal = get_sender_proposal_by_commitment(&commitment)
+            .expect("load")
+            .expect("A holds the proposal");
+        let full_receipt = crate::handlers::online_finalize::load_retained_evidence_a(&proposal)
+            .expect("load")
+            .expect("A retained its evidence")
+            .full_receipt_bytes;
+        let whole = CountersignDelta {
+            message_id: honest.message_id.clone(),
+            envelope_bytes: honest.envelope_bytes.clone(),
+            body: full_receipt,
         };
         assert!(matches!(
-            super::finalize_from_countersign_delta(&m1).await,
-            CountersignOutcome::DigestMismatch(_)
+            finalize_from_countersign_delta(&whole).await,
+            CountersignOutcome::WireRejected(..)
         ));
-        assert_eq!(
-            proposal_status(&st.commitment),
-            PROPOSAL_AWAITING_VALID_REPLY
-        );
+        assert_eq!(status(&commitment), PROPOSAL_SUBMITTED, "nothing written");
+    }
 
-        // m2: the whole receipt on the countersign method -> refused at the wire.
-        let m2 = crate::sdk::b0x_sdk::CountersignDelta {
-            body: rh.full_bytes.clone(),
-            ..recorded.clone()
-        };
-        match super::finalize_from_countersign_delta(&m2).await {
-            CountersignOutcome::WireRejected(r) => {
-                assert!(r.contains("countersign wire: unknown field 13"), "{r}")
-            }
-            other => panic!("expected WireRejected, got {other:?}"),
-        }
-
-        // m3: kyber_ct_b stripped -> refused at the wire, not by the live gate.
-        let mut m3 = dsm::types::proto::ReceiptCountersignB::decode(&*body).expect("delta");
-        m3.kyber_ct_b.clear();
-        let m3 = crate::sdk::b0x_sdk::CountersignDelta {
-            body: m3.encode_to_vec(),
-            ..recorded.clone()
-        };
-        match super::finalize_from_countersign_delta(&m3).await {
-            CountersignOutcome::WireRejected(r) => {
-                assert!(r.contains("missing required field 6"), "{r}")
-            }
-            other => panic!("expected WireRejected, got {other:?}"),
+    /// A step whose frozen evidence_a is gone cannot finalize under any
+    /// delta: a terminal invariant violation, reported as such, never a
+    /// retry. The evidence goes the way it can go on a device — the row is
+    /// lost from its database.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn a_delta_for_a_step_with_no_retained_evidence_is_a_terminal_invariant_violation() {
+        let p = Pair::boot(100, 0).await;
+        let (honest, commitment) = step_with_reply(&p, 10).await;
+        p.a.enter();
+        {
+            let binding = client_db::get_connection().expect("conn");
+            let conn = binding
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let removed = conn
+                .execute(
+                    "DELETE FROM sender_outbox_artifacts WHERE role = 'evidence_a'",
+                    [],
+                )
+                .expect("lose the evidence row");
+            assert_eq!(removed, 1, "the step had its evidence");
         }
         assert_eq!(
-            proposal_status(&st.commitment),
-            PROPOSAL_AWAITING_VALID_REPLY
+            finalize_from_countersign_delta(&honest).await,
+            CountersignOutcome::NoRetainedEvidence
         );
+        assert_eq!(status(&commitment), PROPOSAL_SUBMITTED);
+    }
 
-        // Positive: the recorded body as-is finalizes the step.
-        assert_eq!(
-            super::finalize_from_countersign_delta(&recorded).await,
-            CountersignOutcome::Finalized
-        );
-        assert_eq!(proposal_status(&st.commitment), PROPOSAL_FINALIZED);
-        let outbox = crate::storage::client_db::get_sender_outbox_by_commitment(&st.commitment)
+    /// A settled outbox row is never resubmitted: once the generation is
+    /// final on both sides, further syncs put no new copy of the transfer on
+    /// any member.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn settled_outbox_rows_are_never_resubmitted() {
+        let p = Pair::boot(100, 0).await;
+        let commitment = step_with_reply(&p, 10).await.1;
+        let finalized = p.a.sync().await;
+        assert!(finalized.success, "{:?}", finalized.errors);
+        p.a.enter();
+        assert_eq!(status(&commitment), PROPOSAL_FINALIZED);
+        let transfer_id = client_db::get_sender_outbox_by_commitment(&commitment)
             .expect("outbox")
-            .expect("present");
-        assert_eq!(
-            outbox.status,
-            crate::storage::client_db::OUTBOX_FINALIZATION_CHECKPOINT_PENDING
-        );
-        let delta = dsm::types::proto::ReceiptCountersignB::decode(&*body).expect("delta");
-        assert_eq!(
-            crate::storage::client_db::load_cert_chain_head_pubkey(
-                &st.rel_key,
-                crate::storage::client_db::CertChainSide::Counterparty,
-            )
-            .expect("head")
-            .expect("advanced"),
-            delta.ek_pk_b,
-            "the counterparty cert head advanced to the recipient's per-step EK"
-        );
+            .expect("present")
+            .submission_id;
+        let holders = p.holders_of(&transfer_id).await;
+        let copies = |spools: Vec<Vec<crate::test_support::nodes::Spooled>>| {
+            spools
+                .iter()
+                .flatten()
+                .filter(|s| s.message_id == transfer_id)
+                .count()
+        };
+        let mut before = Vec::new();
+        for node in &p.nodes.nodes {
+            before.push(node.spool().await);
+        }
+        let before = copies(before);
+
+        for pass in 0..2 {
+            let again = p.a.sync().await;
+            assert!(again.success, "pass {pass}: {:?}", again.errors);
+        }
+        let mut after = Vec::new();
+        for node in &p.nodes.nodes {
+            after.push(node.spool().await);
+        }
+        assert_eq!(copies(after), before, "no resubmission");
+        assert_eq!(p.holders_of(&transfer_id).await, holders);
     }
 }

@@ -2,7 +2,6 @@
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import React, { useState } from 'react';
-import { formatTimeAgo, formatDateTime } from '../utils/time';
 import { useTransactions, Transaction } from '../hooks/useTransactions';
 import { useWalletRefreshListener } from '@/hooks/useWalletRefreshListener';
 import ArrowIcon from './icons/ArrowIcon';
@@ -144,12 +143,6 @@ export const TransactionList: React.FC<TransactionListProps> = ({ className = ''
                       <span className="detail-label">{isOutgoing ? 'To' : 'From'}:</span>
                       <span className="detail-value">{counterparty}</span>
                     </div>
-                    {transaction.createdAt ? (
-                      <div className="detail-row">
-                        <span className="detail-label">Date:</span>
-                        <span className="detail-value">{formatDateTime(transaction.createdAt)}</span>
-                      </div>
-                    ) : null}
                     {transaction.memo ? (
                       <div className="detail-row">
                         <span className="detail-label">Memo:</span>
@@ -216,11 +209,6 @@ export const TransactionList: React.FC<TransactionListProps> = ({ className = ''
                     <div className="transaction-recipient">
                       {isOutgoing ? 'To' : 'From'}: {counterparty.length > 16 ? `${counterparty.slice(0, 16)  }...` : counterparty}
                     </div>
-                    {transaction.createdAt ? (
-                      <div className="transaction-time">
-                        {formatTimeAgo(transaction.createdAt)}
-                      </div>
-                    ) : null}
                   </div>
                 )}
               </div>

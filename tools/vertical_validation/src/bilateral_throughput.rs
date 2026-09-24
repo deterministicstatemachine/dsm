@@ -2,14 +2,14 @@
 
 //! Bilateral Throughput Benchmark
 //!
-//! Measures REAL protocol throughput — actual `StateMachine::execute_transition()`
-//! calls with SPHINCS+ signing, BLAKE3 hashing, entropy evolution, and sparse
-//! index computation.  Reports two modes:
+//! Measures the sender's side of a transfer on the path production runs: a
+//! SPHINCS+-signed `Transfer` and the `DeviceState::advance` that debits it on
+//! the relationship. Reports two modes:
 //!
-//! 1. **With signing**: end-to-end cost (SPHINCS+ sign + transition). Expected
-//!    ~15-20 ops/sec — post-quantum security is the cost.
-//! 2. **Without signing**: pre-signed ops, isolates state machine cost.
-//!    Expected ~1000+ ops/sec — proves the SM is not the bottleneck.
+//! 1. **With signing**: SPHINCS+ sign + advance per transfer — post-quantum
+//!    signing is the cost.
+//! 2. **Without signing**: the transfer is signed before the clock starts,
+//!    isolating the advance.
 
 // Validation harness: panicking on crypto setup failures is correct behavior.
 #![allow(clippy::expect_used)]
@@ -17,13 +17,11 @@
 use instant::Instant;
 use serde::Serialize;
 
-use dsm::core::state_machine::StateMachine;
-use dsm::core::token::{derive_canonical_balance_key, resolve_policy_commit};
 use dsm::crypto::blake3::domain_hash;
 use dsm::crypto::sphincs::{generate_keypair_from_seed, sphincs_sign, SphincsVariant};
-use dsm::types::operations::{Operation, TransactionMode, VerificationType};
-use dsm::types::state_types::{DeviceInfo, State};
-use dsm::types::token_types::Balance;
+use dsm::economic::native_reserve::ERA_FAUCET_PAYOUT;
+
+use crate::live_device::{connect, LiveDevice};
 
 // ---------------------------------------------------------------------------
 // Result types
@@ -42,9 +40,9 @@ pub struct ThroughputDataPoint {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct BilateralThroughputResult {
-    /// End-to-end: SPHINCS+ sign + execute_transition per iteration
+    /// SPHINCS+ sign + sender advance per transfer
     pub with_signing: ThroughputDataPoint,
-    /// Isolated: pre-signed Generic ops, execute_transition only
+    /// Signed before the clock starts: the sender advance only
     pub without_signing: ThroughputDataPoint,
     /// SPHINCS+ keygen cost (single measurement)
     pub keygen_cost_ms: f64,
@@ -59,22 +57,16 @@ pub struct BilateralThroughputResult {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn make_genesis(seed: &[u8; 32], pk: &[u8]) -> (State, StateMachine) {
-    let device_id: [u8; 32] =
-        *domain_hash(dsm::common::domain_tags::TAG_DSM_TEST_DEVICE, seed).as_bytes();
-    let device_info = DeviceInfo::new(device_id, pk.to_vec());
-    let mut state = State::new_genesis(*seed, device_info);
-    if let Ok(h) = state.hash() {
-        state.hash = h;
+/// A sender holding at least `transfers` units of ERA, in faucet payouts, and
+/// its counterparty.
+fn funded_pair(transfers: u64) -> (LiveDevice, LiveDevice) {
+    let mut sender = LiveDevice::new("throughput-sender").expect("sender");
+    for generation in 1..=transfers.div_ceil(ERA_FAUCET_PAYOUT) {
+        sender.claim_faucet(generation).expect("faucet claim");
     }
-    let era_pc = resolve_policy_commit("ERA").expect("ERA policy_commit");
-    let era_key = derive_canonical_balance_key(&era_pc, pk, "ERA");
-    state
-        .token_balances
-        .insert(era_key, Balance::from_state(1_000_000, state.hash));
-    let mut machine = StateMachine::new();
-    machine.set_state(state.clone());
-    (state, machine)
+    let mut receiver = LiveDevice::new("throughput-receiver").expect("receiver");
+    connect(&mut sender, &mut receiver).expect("the two are contacts");
+    (sender, receiver)
 }
 
 fn percentile(sorted: &[f64], p: f64) -> f64 {
@@ -102,7 +94,6 @@ pub fn collect_bilateral_throughput_results(iterations: u64) -> BilateralThrough
     let keygen_cost_ms = keygen_start.elapsed().as_secs_f64() * 1000.0;
     eprintln!("    keygen: {keygen_cost_ms:.1}ms");
 
-    let pk = kp.public_key.clone();
     let sk = kp.secret_key.clone();
 
     // 2. Measure sign cost (average over 5 samples)
@@ -112,7 +103,7 @@ pub fn collect_bilateral_throughput_results(iterations: u64) -> BilateralThrough
     for i in 0..sign_samples {
         let msg = format!("sign_cost_sample_{i}");
         let t = Instant::now();
-        let _sig = sphincs_sign(&sk, msg.as_bytes()).expect("sign");
+        std::hint::black_box(sphincs_sign(&sk, msg.as_bytes()).expect("sign"));
         sign_total_ms += t.elapsed().as_secs_f64() * 1000.0;
     }
     let avg_sign_cost_ms = sign_total_ms / sign_samples as f64;
@@ -123,7 +114,10 @@ pub fn collect_bilateral_throughput_results(iterations: u64) -> BilateralThrough
     let blake3_samples = 10_000u64;
     let blake3_start = Instant::now();
     for i in 0..blake3_samples {
-        let _ = domain_hash(dsm::common::domain_tags::TAG_DSM_BENCH, &i.to_le_bytes());
+        std::hint::black_box(domain_hash(
+            dsm::common::domain_tags::TAG_DSM_BENCH,
+            &i.to_le_bytes(),
+        ));
     }
     let avg_blake3_cost_us =
         blake3_start.elapsed().as_secs_f64() * 1_000_000.0 / blake3_samples as f64;
@@ -131,16 +125,16 @@ pub fn collect_bilateral_throughput_results(iterations: u64) -> BilateralThrough
 
     // 4. Benchmark WITH signing
     eprintln!("  Running {iterations} iterations WITH signing...");
-    let with_signing = benchmark_with_signing(&seed, &pk, &sk, iterations);
+    let with_signing = benchmark_with_signing(iterations);
     eprintln!(
         "    {:.1} ops/sec  P50={:.0}us P95={:.0}us P99={:.0}us",
         with_signing.ops_per_sec, with_signing.p50_us, with_signing.p95_us, with_signing.p99_us
     );
 
-    // 5. Benchmark WITHOUT signing (Generic ops, no SPHINCS+ cost)
-    let without_iterations = iterations * 10; // can run more since no signing
-    eprintln!("  Running {without_iterations} iterations WITHOUT signing (Generic ops)...");
-    let without_signing = benchmark_without_signing(&seed, &pk, without_iterations);
+    // 5. Benchmark WITHOUT signing (signed before the clock starts)
+    let without_iterations = iterations * 10;
+    eprintln!("  Running {without_iterations} iterations WITHOUT signing (pre-signed)...");
+    let without_signing = benchmark_without_signing(without_iterations);
     eprintln!(
         "    {:.1} ops/sec  P50={:.0}us P95={:.0}us P99={:.0}us",
         without_signing.ops_per_sec,
@@ -166,55 +160,19 @@ pub fn collect_bilateral_throughput_results(iterations: u64) -> BilateralThrough
 // Benchmark WITH signing (end-to-end)
 // ---------------------------------------------------------------------------
 
-fn benchmark_with_signing(
-    seed: &[u8; 32],
-    pk: &[u8],
-    sk: &[u8],
-    iterations: u64,
-) -> ThroughputDataPoint {
-    let (mut state, mut machine) = make_genesis(seed, pk);
+fn benchmark_with_signing(iterations: u64) -> ThroughputDataPoint {
+    let (mut sender, receiver) = funded_pair(iterations);
     let mut latencies_us = Vec::with_capacity(iterations as usize);
 
     let bench_start = Instant::now();
 
     for i in 0..iterations {
-        let nonce = i.to_le_bytes().to_vec();
-
         let iter_start = Instant::now();
-
-        // Sign a transfer
-        let mut op = Operation::Transfer {
-            policy_commit: [0u8; 32],
-            token_id: "ERA".into(),
-            to_device_id: vec![0xDD; 32],
-            amount: Balance::from_state(1, state.hash),
-            mode: TransactionMode::Unilateral,
-            nonce,
-            verification: VerificationType::Standard,
-            pre_commit: None,
-            recipient: vec![0xDD; 32],
-            to: "b32bench".into(),
-            message: String::new(),
-            signature: Vec::new(),
-            authority_policy: None,
-        };
-        let bytes = op.to_bytes();
-        let sig = sphincs_sign(sk, &bytes).expect("sign");
-        if let Operation::Transfer { signature, .. } = &mut op {
-            *signature = sig;
-        }
-
-        // Execute transition
-        match crate::compat_shim::machine_execute_transition(&mut machine, op) {
-            Ok(new_state) => {
-                state = new_state;
-            }
-            Err(e) => {
-                eprintln!("    WARNING: transition {i} failed: {e}");
-                break;
-            }
-        }
-
+        let op = sender
+            .transfer(&receiver, 1, &i.to_le_bytes())
+            .expect("sign the transfer");
+        let outcome = sender.send(&receiver, &op).expect("sender advance");
+        sender.install(outcome);
         latencies_us.push(iter_start.elapsed().as_secs_f64() * 1_000_000.0);
     }
 
@@ -229,7 +187,7 @@ fn benchmark_with_signing(
     latencies_us.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
     ThroughputDataPoint {
-        label: "with_signing (SPHINCS+ + SM)".into(),
+        label: "with_signing (SPHINCS+ + advance)".into(),
         iterations: actual_iters,
         total_duration_ms,
         ops_per_sec,
@@ -243,39 +201,20 @@ fn benchmark_with_signing(
 // Benchmark WITHOUT signing (isolated state machine cost)
 // ---------------------------------------------------------------------------
 
-fn benchmark_without_signing(seed: &[u8; 32], pk: &[u8], iterations: u64) -> ThroughputDataPoint {
-    // Pre-generate a signing key so Generic ops satisfy the signature requirement.
-    // The signing cost is excluded from timing below (only execute_transition is timed).
-    let kp = generate_keypair_from_seed(SphincsVariant::SPX256f, seed).expect("keygen");
-    let sk = &kp.secret_key;
-
-    let (_state, mut machine) = make_genesis(seed, pk);
+fn benchmark_without_signing(iterations: u64) -> ThroughputDataPoint {
+    let (mut sender, receiver) = funded_pair(iterations);
     let mut latencies_us = Vec::with_capacity(iterations as usize);
 
     let bench_start = Instant::now();
 
     for i in 0..iterations {
-        let mut op = Operation::Generic {
-            operation_type: "bench".into(),
-            data: i.to_le_bytes().to_vec(),
-            message: String::new(),
-            signature: vec![],
-        };
-        // Sign before timing — we're isolating state machine cost only.
-        let bytes = op.to_bytes();
-        let sig = sphincs_sign(sk, &bytes).expect("sign");
-        if let Operation::Generic { signature, .. } = &mut op {
-            *signature = sig;
-        }
-
+        // Signed before the clock starts: only the advance is timed.
+        let op = sender
+            .transfer(&receiver, 1, &i.to_le_bytes())
+            .expect("sign the transfer");
         let iter_start = Instant::now();
-        match crate::compat_shim::machine_execute_transition(&mut machine, op) {
-            Ok(_) => {}
-            Err(e) => {
-                eprintln!("    WARNING: transition {i} failed: {e}");
-                break;
-            }
-        }
+        let outcome = sender.send(&receiver, &op).expect("sender advance");
+        sender.install(outcome);
         latencies_us.push(iter_start.elapsed().as_secs_f64() * 1_000_000.0);
     }
 
@@ -290,7 +229,7 @@ fn benchmark_without_signing(seed: &[u8; 32], pk: &[u8], iterations: u64) -> Thr
     latencies_us.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
     ThroughputDataPoint {
-        label: "without_signing (SM only)".into(),
+        label: "without_signing (advance only)".into(),
         iterations: actual_iters,
         total_duration_ms,
         ops_per_sec,

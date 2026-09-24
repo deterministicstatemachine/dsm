@@ -94,21 +94,17 @@ pub async fn get_slot(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::disallowed_methods)] // #[tokio::test] expands to a runtime `expect`
     use super::*;
     use axum::{
         body::Body,
         http::{Request, StatusCode},
     };
-    use tower::ServiceExt as _; // for oneshot
+    use tower::ServiceExt; // oneshot
 
-    async fn maybe_app() -> Option<axum::Router> {
-        if std::env::var("DSM_RUN_DB_TESTS").ok().as_deref() != Some("1") {
-            return None;
-        }
-        let database_url = std::env::var("DSM_DATABASE_URL")
-            .unwrap_or_else(|_| "postgresql://localhost:5432/dsm_storage".to_string());
-        let pool = crate::db::create_pool(&database_url, false).ok()?;
-        crate::db::init_db(&pool).await.ok()?;
+    /// The slot router on the Postgres test database.
+    async fn app() -> axum::Router {
+        let pool = crate::db::test_store::fresh_pool().await;
         let replication_config = ReplicationConfig {
             replication_factor: 3,
             gossip_interval_ticks: 100,
@@ -131,56 +127,49 @@ mod tests {
             std::sync::Arc::new(pool),
             replication_manager,
         );
-        Some(create_router(std::sync::Arc::new(state)))
+        create_router(std::sync::Arc::new(state))
     }
 
-    #[test]
-    fn create_and_get_slot_smoke() {
-        let rt = tokio::runtime::Runtime::new()
-            .unwrap_or_else(|e| panic!("failed to create runtime: {e}"));
-        rt.block_on(async {
-            let Some(app) = maybe_app().await else {
-                return;
-            };
-            let dlv = [3u8; 32];
-            let dlv_b32 = text_id::encode_base32_crockford(&dlv);
-            let stake = vec![5u8; 32];
-            let stake_b32 = text_id::encode_base32_crockford(&stake);
+    #[tokio::test]
+    async fn create_and_get_slot_smoke() {
+        let app = app().await;
+        let dlv_b32 = crate::db::test_store::unique_name(0x71);
+        let stake = vec![5u8; 32];
+        let stake_b32 = text_id::encode_base32_crockford(&stake);
 
-            // Create slot
-            let req_put = Request::builder()
-                .method("PUT")
-                .uri(format!("/api/v2/dlv/{}/slot", dlv_b32))
-                .header(HDR_CAPACITY, "1024")
-                .header(HDR_STAKE_HASH, stake_b32)
-                .body(Body::empty())
-                .unwrap_or_else(|e| panic!("request build failed: {e}"));
-            let resp_put = app
-                .clone()
-                .oneshot(req_put)
-                .await
-                .unwrap_or_else(|e| panic!("oneshot failed: {e}"));
-            assert!(matches!(
-                resp_put.status(),
-                StatusCode::OK | StatusCode::CREATED
-            ));
+        // Create slot
+        let req_put = Request::builder()
+            .method("PUT")
+            .uri(format!("/api/v2/dlv/{}/slot", dlv_b32))
+            .header(HDR_CAPACITY, "1024")
+            .header(HDR_STAKE_HASH, stake_b32)
+            .body(Body::empty())
+            .unwrap_or_else(|e| panic!("request build failed: {e}"));
+        let resp_put = app
+            .clone()
+            .oneshot(req_put)
+            .await
+            .unwrap_or_else(|e| panic!("oneshot failed: {e}"));
+        assert!(matches!(
+            resp_put.status(),
+            StatusCode::OK | StatusCode::CREATED
+        ));
 
-            // Get slot
-            let req_get = Request::builder()
-                .method("GET")
-                .uri(format!("/api/v2/dlv/{}/slot", dlv_b32))
-                .body(Body::empty())
-                .unwrap_or_else(|e| panic!("request build failed: {e}"));
-            let resp_get = app
-                .clone()
-                .oneshot(req_get)
-                .await
-                .unwrap_or_else(|e| panic!("oneshot failed: {e}"));
-            assert_eq!(resp_get.status(), StatusCode::OK);
-            let bytes = axum::body::to_bytes(resp_get.into_body(), usize::MAX)
-                .await
-                .unwrap_or_else(|e| panic!("read body failed: {e}"));
-            assert_eq!(bytes.len(), 16);
-        });
+        // Get slot
+        let req_get = Request::builder()
+            .method("GET")
+            .uri(format!("/api/v2/dlv/{}/slot", dlv_b32))
+            .body(Body::empty())
+            .unwrap_or_else(|e| panic!("request build failed: {e}"));
+        let resp_get = app
+            .clone()
+            .oneshot(req_get)
+            .await
+            .unwrap_or_else(|e| panic!("oneshot failed: {e}"));
+        assert_eq!(resp_get.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp_get.into_body(), usize::MAX)
+            .await
+            .unwrap_or_else(|e| panic!("read body failed: {e}"));
+        assert_eq!(bytes.len(), 16);
     }
 }

@@ -81,6 +81,7 @@ fn as_array_32(bytes: &[u8], what: &str) -> Result<[u8; 32], DsmError> {
 /// path re-derives the keypair only to take its public half, and drops the
 /// secret immediately.
 pub fn build_local_kyber_identity_binding() -> Result<(Vec<u8>, Vec<u8>), DsmError> {
+    let kyber_pk = local_kyber_public_key()?;
     let device_id = as_array_32(
         &AppState::get_device_id()
             .ok_or_else(|| DsmError::InvalidState("device_id not initialised".into()))?,
@@ -91,16 +92,26 @@ pub fn build_local_kyber_identity_binding() -> Result<(Vec<u8>, Vec<u8>), DsmErr
             .ok_or_else(|| DsmError::InvalidState("genesis_hash not initialised".into()))?,
         "genesis_hash",
     )?;
+    let ak_sk = crate::sdk::signing_authority::current_secret_key()?;
+    let digest = binding_digest(&device_id, &genesis, &kyber_pk);
+    let sig = sphincs::sphincs_sign(&ak_sk, &digest)?;
+    Ok((kyber_pk, sig))
+}
+
+/// This device's canonical Kyber public key: the cached slot, or — when it is
+/// cold — the key re-derived from `Smaster` under `DSM/kyber\0`, the same
+/// derivation `WalletSDK::init_device_keys` uses, installed into the slot.
+/// Fails closed when the canonical material is unavailable (no seed, no
+/// genesis, wallet locked). The secret half is dropped where it is derived.
+pub fn local_kyber_public_key() -> Result<Vec<u8>, DsmError> {
     let kyber_pk = match crate::bridge::local_kyber_pubkey().filter(|k| !k.is_empty()) {
         Some(pk) => pk,
         None => {
-            // Cold cache — recover the canonical key, then warm the slot so the
-            // rest of the session takes the fast path.
             let smaster = crate::init::current_smaster()?;
-            let (pk, _sk) = kyber::generate_kyber_keypair_from_entropy(&smaster, "DSM/kyber\0")?;
+            let (pk, ..) = kyber::generate_kyber_keypair_from_entropy(&smaster, "DSM/kyber\0")?;
             log::info!(
                 "[kyber_identity] local Kyber public key cache was cold; recovered the canonical \
-                 key from Smaster and installed it (no restart required)"
+                 key from Smaster and installed it"
             );
             crate::bridge::install_local_kyber_pubkey(pk.clone());
             pk
@@ -113,10 +124,7 @@ pub fn build_local_kyber_identity_binding() -> Result<(Vec<u8>, Vec<u8>), DsmErr
             kyber_pk.len()
         )));
     }
-    let ak_sk = crate::sdk::signing_authority::current_secret_key()?;
-    let digest = binding_digest(&device_id, &genesis, &kyber_pk);
-    let sig = sphincs::sphincs_sign(&ak_sk, &digest)?;
-    Ok((kyber_pk, sig))
+    Ok(kyber_pk)
 }
 
 /// Verify a peer's Kyber identity binding before persisting it to a contact.
@@ -174,25 +182,14 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn binding_builds_with_a_cold_cache_and_recovers_the_canonical_key() {
-        std::env::set_var("DSM_SDK_TEST_MODE", "1");
-        let device_id = vec![0x11u8; 32];
-        let genesis = vec![0x22u8; 32];
-        crate::sdk::app_state::AppState::set_identity_info(
-            device_id.clone(),
-            vec![0x33u8; 32],
-            genesis.clone(),
-            vec![0x44u8; 32],
-        );
-        crate::sdk::recovery_sdk::RecoverySDK::set_cached_wallet_seed_for_testing(
-            b"DSM/test/cold-kyber-cache-seed".to_vec(),
-        );
+        let identity = crate::economic_fixtures::local_device(0x33).0;
 
         // What the wallet keystore WOULD hold: the same Smaster derivation
         // `WalletSDK::init_device_keys` uses. This is the canonical answer.
         let smaster = crate::init::current_smaster().expect("smaster from seed + genesis");
-        let (canonical_pk, _sk) =
-            kyber::generate_kyber_keypair_from_entropy(&smaster, "DSM/kyber\0")
-                .expect("canonical kyber derivation");
+        let canonical_pk = kyber::generate_kyber_keypair_from_entropy(&smaster, "DSM/kyber\0")
+            .expect("canonical kyber derivation")
+            .0;
 
         // Cold cache: empty is treated as absent by the getter's filter.
         crate::bridge::install_local_kyber_pubkey(Vec::new());
@@ -219,9 +216,7 @@ mod tests {
         // The binding actually verifies against the device's own AK — proving
         // we produced a publishable artifact, not merely a non-error.
         let ak_pk = crate::sdk::signing_authority::current_public_key().expect("AK public key");
-        let did = as_array_32(&device_id, "device_id").expect("32");
-        let g = as_array_32(&genesis, "genesis").expect("32");
-        verify_kyber_identity_binding(&did, &g, &pk, &sig, &ak_pk)
+        verify_kyber_identity_binding(&identity.device_id, &identity.genesis, &pk, &sig, &ak_pk)
             .expect("the binding built from a cold cache must verify");
     }
 
@@ -232,14 +227,9 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn a_cold_cache_without_canonical_material_fails_closed() {
-        std::env::set_var("DSM_SDK_TEST_MODE", "1");
-        crate::sdk::app_state::AppState::set_identity_info(
-            vec![0x55u8; 32],
-            vec![0x66u8; 32],
-            vec![0x77u8; 32],
-            vec![0x88u8; 32],
-        );
-        crate::sdk::recovery_sdk::RecoverySDK::clear_cached_wallet_seed_for_testing();
+        crate::economic_fixtures::local_device(0x55);
+        // The wallet locks: its seed leaves RAM.
+        crate::sdk::recovery_sdk::RecoverySDK::clear_wallet_seed_cache();
         crate::bridge::install_local_kyber_pubkey(Vec::new());
 
         let err = build_local_kyber_identity_binding()
@@ -276,9 +266,9 @@ mod tests {
         let sig = kp.sign(&digest).expect("sign binding");
 
         // Accepted, twice — a memoizing verifier would also pass this.
-        for _ in 0..2 {
+        for attempt in 0..2 {
             verify_kyber_identity_binding(&device_id, &genesis, &kyber_pk, &sig, kp.public_key())
-                .expect("a valid binding must verify");
+                .unwrap_or_else(|e| panic!("attempt {attempt}: a valid binding must verify: {e}"));
         }
 
         // Same device identity, DIFFERENT Kyber key: the signature no longer

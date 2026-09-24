@@ -7,22 +7,22 @@
 //! carries `F`, which only the trader could sign, and everything else in it
 //! is bound to `F` by hashed preimages, so a relayer adds nothing and can
 //! forge nothing. Each leg's cell is `K^(a_j)` of vault `v_j` at parent
-//! `R_j`, written leader-first under the vault's storage seed (Part II §8);
-//! the member stores bytes and decides nothing. What counts at a key is
-//! Core's (`sofi::exercise::exercise_names_key`): the first exercise at the
-//! leader whose `F` names `(v, a)` and whose `P` names `(v, R_n)`.
+//! `R_j` ([`AttemptCell`]), routed by the vault's storage seed over the
+//! network's pinned set and written along that route, leader first (storage
+//! spec §9); the member stores bytes and decides nothing. What counts at a
+//! key is Core's (`sofi::exercise::exercise_names_key`): the first exercise
+//! at the leader whose `F` names `(v, a)` and whose `P` names `(v, R_n)`.
 
-use dsm::common::domain_tags::TAG_DSM_SOFI_SUCC_CELL_V2;
-use dsm::sofi::arith::{resolve_objects, CellResolution};
+use dsm::route_chain::{CellFact, CellReading};
 use dsm::sofi::conformance::{derive_policy_fulfillments, ConformanceEvidence};
 use dsm::sofi::derive;
-use dsm::sofi::exercise::{attempt_resolution, exercise_names_key, RecognizedExercise};
+use dsm::sofi::exercise::{attempt_completion, attempt_resolution, AttemptCell, RecognizedExercise};
 use dsm::sofi::publication::Publication;
 use dsm::sofi::wire::{DlvPolicyFulfillmentBody, SofiExercise};
 use dsm::types::error::DsmError;
 
+use crate::sdk::route_seats::{read_cell, write_recorded, NodeSeats};
 use crate::sdk::sofi_register::InstallRequest;
-use crate::sdk::storage_io::{read_cell_raw, successor_cell_leader_index, write_cell_leader_first};
 use crate::sdk::storage_set::StorageSet;
 
 type D32 = [u8; 32];
@@ -95,14 +95,28 @@ pub struct LegWrite {
     pub parent_root: D32,
     pub attempt: u64,
     pub key: D32,
-    pub leader_reached: bool,
-    pub copies: u32,
+    /// The leader returned its record: the write got past position 0.
+    pub reached_leader: bool,
+}
+
+/// `K^(attempt)` of `vault_id` at `parent_root`, routed over `set`: the
+/// network's pinned set, as `storage_set::canonical_set` resolved and
+/// checked it.
+pub(crate) fn attempt_cell(
+    set: &StorageSet,
+    vault_id: &D32,
+    parent_root: &D32,
+    attempt: u64,
+) -> Result<AttemptCell, DsmError> {
+    let members = crate::sdk::storage_set::as_ccb_members(set)?;
+    AttemptCell::new(vault_id, parent_root, attempt, &members, &set.id())
+        .map_err(|e| err("attempt cell", format!("{e:?}")))
 }
 
 /// Write `exercise` to every successor key its `F` names — `K^(a_j)` of
-/// `v_j` at the parent `R_j` its `P` names — the leader of each vault's
-/// storage seed first, the other members after. Nothing is checked at the
-/// member; the bytes are the same everywhere.
+/// `v_j` at the parent `R_j` its `P` names — along each cell's route,
+/// continuing an earlier write of the same bytes. The bytes are the same at
+/// every seat.
 pub async fn write_exercise(
     set: &StorageSet,
     exercise: &SofiExercise,
@@ -118,225 +132,76 @@ pub async fn write_exercise(
             .iter()
             .find(|l| l.vault_id == attempt.vault_id)
             .ok_or_else(|| err("exercise", "an attempt names a vault P has no leg for"))?;
-        let key = derive::successor_attempt_key(&leg.vault_id, &leg.parent_root, attempt.attempt);
-        let seed = derive::storage_seed(&leg.vault_id, &leg.parent_root);
-        let write = write_cell_leader_first(
-            set,
-            TAG_DSM_SOFI_SUCC_CELL_V2.source_bytes(),
-            &key,
-            &seed,
-            &bytes,
-        )
-        .await?;
+        let cell = attempt_cell(set, &leg.vault_id, &leg.parent_root, attempt.attempt)?;
+        let write = write_recorded(set, cell.routed(), &bytes).await?;
         writes.push(LegWrite {
             vault_id: leg.vault_id,
             parent_root: leg.parent_root,
             attempt: attempt.attempt,
-            key,
-            leader_reached: write.leader_reached,
-            copies: write.copies,
+            key: *cell.routed().key(),
+            reached_leader: write.reached_leader(),
         });
     }
     Ok(writes)
 }
 
+/// What the ladder reads at one attempt key (Section 23.1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttemptRead {
+    /// The storage fact: open, or which exercise (by its `E`) holds the
+    /// cell and how far its chain has gone.
+    pub fact: CellFact,
+    /// The exercise holding the cell, if any.
+    pub exercise: Option<RecognizedExercise>,
+}
+
 /// `SuccessorResolution(K^(attempt))` of `vault_id` at `parent_root`, as the
-/// ladder reads it (Section 23.1): raw reads of the cell, the leader from the
-/// vault's storage seed over the committed set, the recognized view
-/// (`exercise_names_key`), then the `E` of the exercise that won, final or
-/// leader-held, with the exercise itself. `Unresolved` for an open cell or an
-/// unread leader; no key is ever dead.
+/// ladder reads it (Section 23.1): Core evaluates the cell's route chains
+/// from every seat's reads. An exercise final at the cell has its completion
+/// proof kept (storage spec §9 rule 11). Reads that do not decide the cell
+/// yet — its leader unread, or its leader link not yet committed — are the
+/// inner `Err`, what Core names as missing: a network status for the caller
+/// to retry, never an open cell.
 pub async fn read_attempt_cell(
     set: &StorageSet,
     vault_id: &D32,
     parent_root: &D32,
     attempt: u64,
-) -> Result<(CellResolution, Option<RecognizedExercise>), DsmError> {
-    let key = derive::successor_attempt_key(vault_id, parent_root, attempt);
-    let leader = successor_cell_leader_index(set, vault_id, parent_root)?;
-    let reads = read_cell_raw(set, TAG_DSM_SOFI_SUCC_CELL_V2.source_bytes(), &key).await?;
-    let objects = resolve_objects(&reads, leader, |bytes| {
-        exercise_names_key(bytes, vault_id, parent_root, attempt).is_some()
-    })
-    .map_err(|e| err("cell read", e))?;
-    Ok(attempt_resolution(&objects, vault_id, parent_root, attempt))
+) -> Result<Result<AttemptRead, dsm::route_chain::Missing>, DsmError> {
+    let cell = attempt_cell(set, vault_id, parent_root, attempt)?;
+    let seats = NodeSeats::new(set)?;
+    let evidence = read_cell(&seats, cell.routed()).await;
+    let reading = match attempt_resolution(&cell, &evidence) {
+        Ok(reading) => reading,
+        Err(missing) => return Ok(Err(missing)),
+    };
+    let fact = reading.fact();
+    let exercise = match reading {
+        CellReading::Held { object, .. } => Some(object),
+        CellReading::Open => None,
+    };
+    if let CellFact::Held {
+        state: dsm::route_chain::ChainState::Final,
+        ..
+    } = fact
+    {
+        keep_attempt_completion(&cell, &evidence)?;
+    }
+    Ok(Ok(AttemptRead { fact, exercise }))
 }
 
-#[cfg(test)]
-#[allow(clippy::disallowed_methods)] // test asserts; a failure here is the signal
-mod tests {
-    use dsm::sofi::exercise::recognize_exercise;
-    use serial_test::serial;
-
-    use super::*;
-    use crate::sdk::sofi_register::{acquire_conformance_evidence, install_fulfillment};
-    use crate::sdk::sofi_test_fixtures::{block_on, install_request, signed_route, SignedRoute};
-    use crate::sdk::storage_io::fake_registers;
-
-    fn succ_ns() -> &'static [u8] {
-        TAG_DSM_SOFI_SUCC_CELL_V2.source_bytes()
-    }
-
-    /// The installed route's exercise, built over the evidence its
-    /// conformance was decided on.
-    fn exercise_of(r: &SignedRoute) -> (SofiExercise, RecognizedExercise) {
-        let req = install_request(r);
-        let ev = block_on(acquire_conformance_evidence(&r.set, &req)).unwrap();
-        let x = build_exercise(&req, &ev).unwrap();
-        let recognized = recognize_exercise(&x.encode()).unwrap();
-        (x, recognized)
-    }
-
-    fn members(set: &StorageSet) -> Vec<String> {
-        set.members().iter().map(|m| m.member_id.clone()).collect()
-    }
-
-    /// Stage 8 of §31: after registration, the exercise lands at every leg's
-    /// successor key, the leader of that vault's storage seed first and every
-    /// other member after, and each cell reads back final on the route's
-    /// one `E` with the exercise inside.
-    #[test]
-    #[serial]
-    fn an_exercise_is_written_to_every_successor_key_at_its_leader() {
-        let r = signed_route(true);
-        block_on(install_fulfillment(&r.set, &install_request(&r))).unwrap();
-        let (x, recognized) = exercise_of(&r);
-        let writes = block_on(write_exercise(&r.set, &x, &recognized)).unwrap();
-        assert_eq!(writes.len(), 2, "one cell per leg");
-        let bytes = x.encode();
-        for w in &writes {
-            assert!(w.leader_reached);
-            assert_eq!(w.copies, 4);
-            assert_eq!(
-                w.key,
-                derive::successor_attempt_key(&w.vault_id, &w.parent_root, w.attempt)
-            );
-            assert_eq!(
-                fake_registers::holders(&r.set, succ_ns(), &w.key, &bytes),
-                members(&r.set)
-            );
-            let (res, got) = block_on(read_attempt_cell(
-                &r.set,
-                &w.vault_id,
-                &w.parent_root,
-                w.attempt,
-            ))
-            .unwrap();
-            assert_eq!(
-                res,
-                CellResolution::Final(*r.precommit.external_commitment())
-            );
-            assert_eq!(
-                got.as_ref().map(|g| &g.fulfillment.body),
-                Some(&r.fulfillment)
-            );
-        }
-    }
-
-    /// P1, OnlyExercisesCount: bytes that are not an exercise naming the key
-    /// — garbage, and an exercise whose F names another attempt of this
-    /// vault — count as nothing, however early they reached the leader. The
-    /// route's own exercise is the first RECOGNIZED object and is final.
-    #[test]
-    #[serial]
-    fn only_an_exercise_naming_the_key_counts() {
-        let r = signed_route(true);
-        block_on(install_fulfillment(&r.set, &install_request(&r))).unwrap();
-        let (x, recognized) = exercise_of(&r);
-        let leg = &recognized.precommit.body.legs()[0];
-        let key = derive::successor_attempt_key(&leg.vault_id, &leg.parent_root, 0);
-        let leader = successor_cell_leader_index(&r.set, &leg.vault_id, &leg.parent_root).unwrap();
-        fake_registers::put_cell(&r.set, leader, succ_ns(), &key, b"not an exercise");
-        // An exercise of the same route whose F names attempt 1 of this vault:
-        // it is an exercise, and it names another key.
-        let other = other_attempt(&r, 1);
-        fake_registers::put_cell(&r.set, leader, succ_ns(), &key, &other.encode());
-        let (res, _) = block_on(read_attempt_cell(
-            &r.set,
-            &leg.vault_id,
-            &leg.parent_root,
-            0,
-        ))
-        .unwrap();
-        assert_eq!(
-            res,
-            CellResolution::Unresolved,
-            "nothing naming the key has arrived"
-        );
-        block_on(write_exercise(&r.set, &x, &recognized)).unwrap();
-        let (res, got) = block_on(read_attempt_cell(
-            &r.set,
-            &leg.vault_id,
-            &leg.parent_root,
-            0,
-        ))
-        .unwrap();
-        assert_eq!(
-            res,
-            CellResolution::Final(*r.precommit.external_commitment())
-        );
-        assert_eq!(got.map(|g| g.fulfillment.body), Some(r.fulfillment.clone()));
-    }
-
-    /// An exercise cannot count at a key it does not name: written at
-    /// `K^(1)` of a leg whose attempt it names as 0, it is nothing there.
-    #[test]
-    #[serial]
-    fn an_exercise_cannot_count_at_another_key() {
-        let r = signed_route(true);
-        block_on(install_fulfillment(&r.set, &install_request(&r))).unwrap();
-        let (x, recognized) = exercise_of(&r);
-        let leg = &recognized.precommit.body.legs()[0];
-        let elsewhere = derive::successor_attempt_key(&leg.vault_id, &leg.parent_root, 1);
-        let leader = successor_cell_leader_index(&r.set, &leg.vault_id, &leg.parent_root).unwrap();
-        fake_registers::put_cell(&r.set, leader, succ_ns(), &elsewhere, &x.encode());
-        assert_eq!(
-            fake_registers::holders(&r.set, succ_ns(), &elsewhere, &x.encode()).len(),
-            5,
-            "the member keeps what it is given"
-        );
-        let (res, got) = block_on(read_attempt_cell(
-            &r.set,
-            &leg.vault_id,
-            &leg.parent_root,
-            1,
-        ))
-        .unwrap();
-        assert_eq!(res, CellResolution::Unresolved);
-        assert!(got.is_none());
-    }
-
-    /// The same route, exercised with every leg at `attempt`: another
-    /// fulfillment of the same P, signed by the trader.
-    fn other_attempt(r: &SignedRoute, attempt: u64) -> SofiExercise {
-        use crate::sdk::sofi_test_fixtures::trader_sign;
-        use dsm::sofi::wire::{AttemptEntry, TraderFulfillmentBody};
-        let f = TraderFulfillmentBody::new(
-            *r.fulfillment.precommit_id(),
-            r.fulfillment.policy_fulfillment_set().to_vec(),
-            r.fulfillment
-                .attempts()
-                .iter()
-                .map(|a| AttemptEntry {
-                    vault_id: a.vault_id,
-                    attempt,
-                })
-                .collect(),
-            r.fulfillment.position(),
-            r.fulfillment.signature_alg(),
-            r.fulfillment.claimant_public_key(),
-        )
-        .unwrap();
-        let sig = trader_sign(&derive::fulfillment_signing_digest(&f));
-        let req = InstallRequest {
-            precommit: &r.precommit,
-            precommit_signature: &r.p_sig,
-            preimage: &r.preimage,
-            fulfillment: &f,
-            fulfillment_signature: &sig,
-            own_objects: &r.own,
-        };
-        let ev = block_on(acquire_conformance_evidence(&r.set, &req)).unwrap();
-        build_exercise(&req, &ev).unwrap()
-    }
+/// Keep the completion proof of the exercise final at `cell`.
+fn keep_attempt_completion(
+    cell: &AttemptCell,
+    evidence: &dsm::route_chain::CellEvidence,
+) -> Result<(), DsmError> {
+    let (.., proof) = attempt_completion(cell, evidence)
+        .map_err(|missing| err("attempt completion", format!("{missing:?}")))?
+        .ok_or_else(|| {
+            err(
+                "attempt completion",
+                "a final exercise has no completion proof",
+            )
+        })?;
+    crate::sdk::route_seats::keep_completion(cell.routed(), &proof)
 }

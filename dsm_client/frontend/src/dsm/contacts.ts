@@ -19,7 +19,6 @@ function mapContactToDTO(c: any): BilateralRelationshipDTO {
   // ═══════════════════════════════════════════════════════════════════════
   const deviceId = c.deviceId instanceof Uint8Array ? c.deviceId : new Uint8Array();
   const alias = c.alias || '';
-  const verifyCounter = typeof c.verifyCounter === 'bigint' ? c.verifyCounter : BigInt(c.verifyCounter || 0);
   const signingPublicKey = c.signingPublicKey instanceof Uint8Array ? c.signingPublicKey : new Uint8Array();
 
   const genesisHash = (c.genesisHash instanceof Uint8Array)
@@ -40,11 +39,9 @@ function mapContactToDTO(c: any): BilateralRelationshipDTO {
     publicKey: signingPublicKey,
     alias,
     genesisHash,
-    lastSeenTick: verifyCounter,
     chainTip: tip,
     bleAddress: typeof bleAddr === 'string' && bleAddr.length > 0 ? bleAddr : undefined,
     genesisVerifiedOnline: c.genesisVerifiedOnline === true,
-    addedCounter: typeof c.addedCounter === 'bigint' ? c.addedCounter : BigInt(c.addedCounter || 0),
     sendStatus: c.sendStatus ?? undefined,
   };
 }
@@ -110,7 +107,6 @@ export async function addContact(args: AddContactArgs): Promise<AddContactResult
     });
 
     const argPack = new pb.ArgPack({
-      schemaHash: { v: new Uint8Array(32) },
       codec: pb.Codec.PROTO,
       body: new Uint8Array(req.toBinary()) as any,
     });

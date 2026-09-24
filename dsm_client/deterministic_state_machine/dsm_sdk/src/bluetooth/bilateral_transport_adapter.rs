@@ -106,15 +106,10 @@ impl BilateralTransportAdapter {
         &self,
         counterparty_device_id: [u8; 32],
         operation: dsm::types::operations::Operation,
-        validity_iterations: u64,
     ) -> Result<Vec<u8>, DsmError> {
         let (envelope_bytes, _) = self
             .bilateral_handler
-            .prepare_bilateral_transaction_with_commitment(
-                counterparty_device_id,
-                operation,
-                validity_iterations,
-            )
+            .prepare_bilateral_transaction_with_commitment(counterparty_device_id, operation)
             .await?;
         Ok(envelope_bytes)
     }
@@ -123,14 +118,9 @@ impl BilateralTransportAdapter {
         &self,
         counterparty_device_id: [u8; 32],
         operation: dsm::types::operations::Operation,
-        validity_iterations: u64,
     ) -> Result<(Vec<u8>, [u8; 32]), DsmError> {
         self.bilateral_handler
-            .prepare_bilateral_transaction_with_commitment(
-                counterparty_device_id,
-                operation,
-                validity_iterations,
-            )
+            .prepare_bilateral_transaction_with_commitment(counterparty_device_id, operation)
             .await
     }
 

@@ -2,52 +2,29 @@
 //! The supply cap must not be evaluated against a total derived from history
 //! the device could not fully read.
 //!
-//! `get_bcr_chain_states` skips rows it cannot decode, logging a warning and
-//! carrying on. For rendering a history list that is the right call — one bad
-//! row should not blank the screen. For deriving an AMOUNT it is a fail-open:
-//! a dropped `Mint` lowers the computed circulating supply, and a cap checked
-//! against a total that is too low permits a mint that should be refused.
+//! `get_bcr_chain_states` fails on a row it cannot decode or whose state does
+//! not recompute its stored tip (`bcr::tests::a_corrupt_archived_row_fails_the_load`),
+//! so a history with a row missing never yields a total. `derive_circulating_supply`
+//! reports that as ABSENCE, never as `0` — which would be maximum headroom
+//! exactly when the chain was least trustworthy — and the enforcer refuses a
+//! capped operation whose circulating supply it cannot establish (see
+//! `supply_cap_fails_closed_without_circulating_supply` in
+//! token_authority_enforcement.rs).
 //!
-//! `derive_circulating_supply` used to make this strictly worse by returning
-//! `0` when the history could not be read at all — reporting maximum headroom
-//! exactly when the chain was least trustworthy. It now reports ABSENCE, and
-//! the enforcer already refuses a capped operation whose circulating supply it
-//! cannot establish (see `supply_cap_fails_closed_without_circulating_supply`
-//! in token_authority_enforcement.rs).
-//!
-//! This pins the two halves that make that guarantee real: the loader tells the
-//! truth about what it dropped, and an absent figure denies rather than allows.
+//! This pins the enforcement half: an absent figure denies rather than allows,
+//! and the cap arithmetic is exact, so only a wrong total could get through.
 
 #![allow(clippy::disallowed_methods)]
 
 use dsm::core::token::policy::policy_enforcement::{witness_keys, EnforcementContext, PolicyEnforcer};
 use dsm::types::policy_types::PolicyCondition;
-use dsm_sdk::storage::client_db::{last_load_dropped_rows, reset_database_for_tests};
 
 async fn allowed(cond: &PolicyCondition, c: &EnforcementContext) -> bool {
-    use std::sync::Arc;
-    let cache = Arc::new(dsm::core::token::policy::policy_cache::PolicyCache::new(
-        dsm::core::token::policy::policy_cache::PolicyCacheConfig::default(),
-    ));
-    PolicyEnforcer::new(cache)
+    PolicyEnforcer::new()
         .check_condition(cond, c)
         .await
         .expect("enforcement runs")
         .allowed
-}
-
-/// A clean load reports nothing dropped, so a derived figure is trustworthy.
-#[test]
-#[serial_test::serial]
-fn a_clean_load_reports_no_dropped_rows() {
-    std::env::set_var("DSM_SDK_TEST_MODE", "1");
-    reset_database_for_tests();
-    let _ = dsm_sdk::storage::client_db::get_bcr_chain_states(&[7u8; 32], false);
-    assert_eq!(
-        last_load_dropped_rows(),
-        0,
-        "an empty/clean history must not report dropped rows"
-    );
 }
 
 /// THE FAIL-OPEN, CLOSED. With circulating supply absent, a capped mint is
@@ -63,7 +40,7 @@ async fn absent_circulating_supply_denies_instead_of_granting_full_headroom() {
         unlimited: false,
     };
 
-    let mut ctx = EnforcementContext::new("mint", 0);
+    let mut ctx = EnforcementContext::new("mint");
     ctx.data.insert(
         witness_keys::AMOUNT.to_string(),
         1_000u64.to_le_bytes().to_vec(),
@@ -96,7 +73,7 @@ async fn cap_is_exact_so_an_undercount_is_the_only_way_through() {
         unlimited: false,
     };
     let ctx = |circulating: u64, amount: u64| {
-        let mut c = EnforcementContext::new("mint", 0);
+        let mut c = EnforcementContext::new("mint");
         c.data.insert(
             witness_keys::AMOUNT.to_string(),
             amount.to_le_bytes().to_vec(),

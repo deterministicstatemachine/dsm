@@ -4,12 +4,6 @@
 
 use crate::crypto::domain::TaggedHashDomain;
 
-pub const TAG_DSM_ANCHOR_TICK: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/anchor-tick");
-pub const TAG_DSM_BALANCE_ANCHOR: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/balance-anchor");
-pub const TAG_DSM_CANONICAL_BALANCE: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/canonical-balance");
 pub const TAG_DSM_CANONICAL_LP: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/canonical-lp");
 pub const TAG_DSM_DETERMINISTIC_ID: TaggedHashDomain<'static> =
@@ -19,10 +13,6 @@ pub const TAG_DSM_DETERMINISTIC_TIME: TaggedHashDomain<'static> =
 pub const TAG_DSM_DEV_ENT_V2: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/DEV_ENT/v2");
 pub const TAG_DSM_DJTE_SHARD_MERKLE: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/djte-shard-merkle");
-/// Content digest of a frozen publication artifact (exact bytes replayed to a
-/// storage quorum): `H(tag ‖ 0x00 ‖ object_key ‖ 0x00 ‖ payload)`.
-pub const TAG_DSM_FROZEN_ARTIFACT_V1: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/frozen-artifact/v1");
 pub const TAG_DSM_OP_VERIFY: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/op-verify");
 pub const TAG_DSM_PRE_FINALIZATION: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/pre-finalization");
@@ -88,6 +78,14 @@ pub const TAG_DSM_STORAGE_CELL_LEAF_V1: TaggedHashDomain<'static> =
 /// ByteCommit format).
 pub const TAG_DSM_STORAGE_BYTECOMMIT_V1: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/storage/bytecommit/v1");
+/// Completion digest of a route chain's completion proof (storage spec §9,
+/// the completion proof): `c = H_dom(tag, len(N) ‖ N ‖ K ‖ d_x ‖ n ‖ s_0 ‖ …)`.
+pub const TAG_DSM_STORAGE_ROUTE_COMPLETION_V1: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/storage/route-completion/v1");
+/// The value a completion proof finalizes, `d_x = H_dom(tag, x)` (storage
+/// spec §9, the completion proof).
+pub const TAG_DSM_STORAGE_ROUTE_VALUE_V1: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/storage/route-value/v1");
 /// `k_v = H_dom(DSM/binding-keyset, c_n)` — one settlement resource key from a
 /// vault's committed parent state (Def 6.17). The vault id is NOT restated:
 /// c_n commits it, so supplying both would admit a disagreeing pair.
