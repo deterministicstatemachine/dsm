@@ -50,10 +50,8 @@ describe('contacts.ts', () => {
                 alias: 'Alice',
                 signingPublicKey: signingPk as any,
                 genesisHash: { v: gh } as any,
-                verifyCounter: 5n,
                 bleAddress: 'AA:BB:CC:DD:EE:FF',
                 genesisVerifiedOnline: true,
-                addedCounter: 10n,
               }),
             ],
           }),
@@ -67,10 +65,8 @@ describe('contacts.ts', () => {
       expect(result.contacts[0].alias).toBe('Alice');
       expect(result.contacts[0].deviceId).toEqual(deviceId);
       expect(result.contacts[0].publicKey).toEqual(signingPk);
-      expect(result.contacts[0].lastSeenTick).toBe(5n);
       expect(result.contacts[0].bleAddress).toBe('AA:BB:CC:DD:EE:FF');
       expect(result.contacts[0].genesisVerifiedOnline).toBe(true);
-      expect(result.contacts[0].addedCounter).toBe(10n);
     });
 
     test('returns empty contacts list', async () => {

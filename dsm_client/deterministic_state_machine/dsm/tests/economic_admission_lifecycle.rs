@@ -15,7 +15,7 @@ use dsm::economic::admission::{
 };
 use dsm::economic::claim::{AdmissionSubstrate, EconomicAdmissionManifest};
 use dsm::economic::classifier::EconomicEffect;
-use dsm::economic::credit::{CreditSource, CreditSourceAuthorizedIssuance};
+use dsm::economic::credit::CreditSource;
 use dsm::economic::lineage::{
     activate, advance_validated, AcceptedSubstrate, EconomicActivationSnapshot,
     EconomicValidationError,
@@ -36,7 +36,6 @@ const DEV: [u8; 32] = [0x22; 32];
 const ERA: [u8; 32] = [0xAA; 32];
 
 const SOFI: [u8; 32] = [0xBB; 32];
-const ISSUANCE_ADDR: [u8; 32] = [0xC1; 32];
 
 fn pending(kind: PendingAdmissionKind, state: EconomicAdmissionState) -> PendingEconomicAdmission {
     let prepared = PendingEconomicAdmission::prepared(kind, 4, [1; 32], [3; 32]);
@@ -59,7 +58,7 @@ fn pending(kind: PendingAdmissionKind, state: EconomicAdmissionState) -> Pending
 fn bearer_transfer(policy_commit: [u8; 32]) -> Operation {
     Operation::Transfer {
         to_device_id: vec![1; 32],
-        amount: Balance::from_state(5, [0u8; 32]),
+        amount: Balance::amount(5),
         token_id: b"ERA".to_vec(),
         policy_commit,
         mode: TransactionMode::Bilateral,
@@ -312,45 +311,61 @@ struct OneTicket {
 impl ProvenanceResolver for OneTicket {
     fn root_register_candidate_set(
         &self,
-        _network_id: &[u8],
+        network_id: &[u8],
     ) -> Result<dsm::ccb::StorageSetMembers, dsm::economic::provenance::PeerLineageFailure> {
+        if network_id != dsm::economic::register::BETA_NETWORK_ID {
+            return Err(PeerLineageFailure::Incomplete(format!(
+                "no register set for network {network_id:?} in this fixture"
+            )));
+        }
         Ok(crate::beta_candidate_set())
     }
 
     fn validated_peer_transition(
         &self,
-        _g: &[u8; 32],
-        _d: &[u8; 32],
-        _p: u64,
+        genesis: &[u8; 32],
+        device_id: &[u8; 32],
+        position: u64,
     ) -> Result<ValidatedPeerTransition, PeerLineageFailure> {
-        Err(PeerLineageFailure::Incomplete(
-            "no peer store in this fixture".into(),
-        ))
+        Err(PeerLineageFailure::Incomplete(format!(
+            "no peer store in this fixture: {genesis:?}/{device_id:?} at {position}"
+        )))
     }
-    fn native_reserve_release(&self, _r: &[u8; 32], _g: u64) -> Option<ReserveReleaseWin> {
-        Some(ReserveReleaseWin {
+    fn native_reserve_release(
+        &self,
+        reserve_id: &[u8; 32],
+        generation: u64,
+    ) -> Result<ReserveReleaseWin, PeerLineageFailure> {
+        let parent = reserve_genesis();
+        if *reserve_id != parent.reserve_id || generation != 1 {
+            return Err(PeerLineageFailure::Incomplete(format!(
+                "this fixture's walk reached generation 1 only, not {generation} of {reserve_id:?}"
+            )));
+        }
+        Ok(ReserveReleaseWin {
             envelope_bytes: self.envelope.clone(),
-            parent: reserve_genesis(),
+            parent,
         })
     }
 
     fn immutable_evidence(
         &self,
-        _namespace: dsm::crypto::domain::TaggedHashDomain<'static>,
-        _addr: &[u8; 32],
+        namespace: dsm::crypto::domain::TaggedHashDomain<'static>,
+        addr: &[u8; 32],
     ) -> Result<Vec<u8>, PeerLineageFailure> {
-        Err(PeerLineageFailure::Incomplete(
-            "no evidence store in this fixture".into(),
-        ))
+        Err(PeerLineageFailure::Incomplete(format!(
+            "no evidence store in this fixture: {addr:?} under {:?}",
+            namespace.source_bytes()
+        )))
     }
 
     fn anchored_policy_bytes(
         &self,
-        _policy_commit: &[u8; 32],
+        policy_commit: &[u8; 32],
     ) -> Result<Vec<u8>, PeerLineageFailure> {
-        Err(PeerLineageFailure::Incomplete(
-            "this fixture roots no token anchors".into(),
-        ))
+        Err(PeerLineageFailure::Incomplete(format!(
+            "this fixture roots no token anchors: {policy_commit:?}"
+        )))
     }
 }
 
@@ -395,13 +410,24 @@ fn registered_naming(
     post_root: [u8; 32],
     manifest_addr: [u8; 32],
 ) -> RegisteredEconomicRoot {
+    registered_for_trader(G, DEV, position, post_root, manifest_addr)
+}
+
+/// A registered root of the trader `(genesis, device)`.
+fn registered_for_trader(
+    genesis: [u8; 32],
+    device: [u8; 32],
+    position: u64,
+    post_root: [u8; 32],
+    manifest_addr: [u8; 32],
+) -> RegisteredEconomicRoot {
     static KEYS: std::sync::OnceLock<(Vec<u8>, Vec<u8>)> = std::sync::OnceLock::new();
     let (pk, sk) = KEYS.get_or_init(|| {
         dsm::crypto::sphincs::generate_sphincs_keypair().expect("a claimant keypair")
     });
     let body = dsm::economic::claim::EconomicRootClaimBody::new(
-        G,
-        DEV,
+        genesis,
+        device,
         position,
         post_root,
         manifest_addr,
@@ -427,13 +453,7 @@ fn run(
     manifest: &EconomicAdmissionManifest,
     witness: &EconomicTransitionWitness,
     accepted: &AcceptedSubstrate,
-) -> Result<
-    (
-        dsm::economic::lineage::ValidatedEconomicRoot,
-        Vec<dsm::economic::provenance::FundedCredit>,
-    ),
-    EconomicValidationError,
-> {
+) -> Result<dsm::economic::lineage::ValidatedAdvance, EconomicValidationError> {
     let zero = activate(EconomicActivationSnapshot::fresh()).expect("fresh");
     advance_validated(
         &zero,
@@ -457,10 +477,37 @@ fn a_faucet_claim_transition_advances_the_validated_lineage() {
     let manifest = manifest_for(&fx.witness);
     let registered = registered_for(&manifest, 1, fx.post_root);
     let accepted = accepted_for(&fx.op);
-    let (one, funded) =
-        run(&fx, &registered, &manifest, &fx.witness, &accepted).expect("validates");
-    assert_eq!(one.economic_position(), 1);
-    assert_eq!(funded.len(), 1);
+    let advanced = run(&fx, &registered, &manifest, &fx.witness, &accepted).expect("validates");
+    assert_eq!(advanced.root.economic_position(), 1);
+    assert_eq!(advanced.funded.len(), 1);
+    // The claim accepted at the position is the registered one, of this
+    // trader.
+    assert_eq!(
+        (
+            advanced.claim.genesis(),
+            advanced.claim.device_id(),
+            advanced.claim.economic_position(),
+            advanced.claim.claim_ref()
+        ),
+        (G, DEV, 1, registered.claim_ref())
+    );
+}
+
+/// A registered claim of another trader is not a registration of this
+/// lineage, whatever root it names.
+#[test]
+fn a_registered_claim_of_another_trader_is_refused() {
+    let fx = faucet_fixture(1);
+    let manifest = manifest_for(&fx.witness);
+    let accepted = accepted_for(&fx.op);
+    let addr = manifest.addr().expect("addressable");
+    for (genesis, device) in [([0x99; 32], DEV), (G, [0x98; 32])] {
+        let foreign = registered_for_trader(genesis, device, 1, fx.post_root, addr);
+        assert!(matches!(
+            run(&fx, &foreign, &manifest, &fx.witness, &accepted),
+            Err(EconomicValidationError::RegisteredClaimNamesAnotherTrader)
+        ));
+    }
 }
 
 #[test]
@@ -498,71 +545,6 @@ fn a_witness_that_is_not_the_operations_exact_effect_is_refused() {
     match run(&fx, &registered, &manifest, &forged, &accepted) {
         Err(EconomicValidationError::WriteSet(_)) => {}
         other => panic!("a forged write set must be refused by the write-set conjunct: {other:?}"),
-    }
-}
-
-/// THE BOOTSTRAP FINDING, RESOLVED — and what replaced it.
-///
-/// This test used to pin `IssuancePredicateUndefined`: with no authenticated
-/// issuance predicate, a positive credit could never enter a validated
-/// lineage at all, and the wallet was structurally unfundable except through
-/// the ERA faucet's bootstrap tickets.
-///
-/// Class `0x0029` answers that, so the blanket refusal is gone. What replaced
-/// it is narrower and is what this test now pins: the predicate must be
-/// SATISFIED, not merely defined. A mint whose witness carries no issuance
-/// source — as here — is refused because the credit it claims has no source
-/// of the kind the operation requires. Existence of a predicate never
-/// substitutes for evidence under it.
-#[test]
-fn issuance_requires_its_predicate_to_be_satisfied_not_merely_defined() {
-    let fx = faucet_fixture(1);
-    let (witness, post_root) = build_transition(fx.witness.operation_digest);
-    let mint = Operation::Mint {
-        amount: Balance::from_state(100, [0u8; 32]),
-        token_id: b"ERA".to_vec(),
-        policy_commit: ERA,
-        message: String::new(),
-    };
-    let accepted = AcceptedSubstrate::from_verified_dsm_successor(
-        mint.clone(),
-        C_DSM_PLUS,
-        EMBEDDED_PARENT,
-        SUBSTRATE_ADDR,
-    );
-    // Rebind the witness digest to the mint operation so the refusal comes
-    // from the write-set/source clause, not a digest mismatch.
-    let witness = EconomicTransitionWitness::new(
-        witness.pre_economic_root,
-        witness.post_economic_root,
-        dsm::economic::admission::dsm_economic_operation_id(&G, &DEV, &C_DSM_PLUS),
-        dsm::economic::admission::dsm_operation_digest(&mint.to_bytes()),
-        witness.mutations,
-        witness.credit_sources,
-    )
-    .expect("valid witness");
-    let manifest = manifest_for(&witness);
-    let registered = registered_for(&manifest, 1, post_root);
-    // LAYERING SHIFT (producer cut): the witness DOES carry a 0x0023
-    // descriptor, so the write-set shape check now passes — the missing
-    // verifier arm that used to refuse this as a kind mismatch was one of the
-    // defects the producer cut fixed. The refusal therefore moved DOWN to the
-    // layer that actually resolves the predicate: provenance must fetch the
-    // authorization evidence, and in this fixture no evidence store exists —
-    // the predicate is defined but unsatisfiable, and validation fails closed
-    // exactly there.
-    match run(&fx, &registered, &manifest, &witness, &accepted) {
-        Err(EconomicValidationError::Provenance(e)) => {
-            let msg = e.to_string();
-            assert!(
-                msg.contains("no evidence store in this fixture"),
-                "the refusal must be the unresolvable issuance evidence, got: {msg}"
-            );
-        }
-        other => panic!(
-            "a mint whose issuance predicate cannot be satisfied must be refused at the \
-             provenance layer, got {other:?}"
-        ),
     }
 }
 
@@ -681,37 +663,6 @@ fn a_registered_root_disagreeing_with_the_witness_is_refused() {
         run(&fx, &registered, &manifest, &fx.witness, &accepted),
         Err(EconomicValidationError::RegisteredRootDiffersFromWitness { .. })
     ));
-}
-
-/// The Mint-shaped witness the issuance test pairs with a Mint operation.
-fn build_transition(operation_digest: [u8; 32]) -> (EconomicTransitionWitness, [u8; 32]) {
-    let mut tree = EconomicSmt::new();
-    let pre_root = tree.root();
-
-    let credit = bal(ERA, 100);
-    let key = credit.leaf_key(&G, &DEV);
-    let siblings = tree.siblings(&key).to_vec();
-    let mutation =
-        EconomicLeafMutation::new(None, Some(credit.clone()), siblings).expect("well-formed");
-    assert!(mutation.is_positive_credit());
-    tree.insert(key, credit.leaf_value().expect("encodable"));
-    let post_root = tree.root();
-
-    let witness = EconomicTransitionWitness::new(
-        pre_root,
-        post_root,
-        [0x0E; 32],
-        operation_digest,
-        vec![mutation],
-        vec![CreditSource::AuthorizedIssuance(
-            CreditSourceAuthorizedIssuance {
-                credit_mutation_index: 0,
-                issuance_authorization_addr: ISSUANCE_ADDR,
-            },
-        )],
-    )
-    .expect("valid witness");
-    (witness, post_root)
 }
 
 // ─── The market-leg token-policy conjunct (SoFi Def 4.1 / Req 4.4 / 4.6) ────

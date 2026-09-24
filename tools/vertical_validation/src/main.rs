@@ -33,10 +33,10 @@
 mod adversarial_bilateral;
 mod benchmark;
 mod bilateral_throughput;
-mod compat_shim;
 mod crypto_kat;
 mod implementation_traces;
 mod lean_checker;
+mod live_device;
 mod local_nodes;
 mod proof_runner;
 mod property_tests;
@@ -188,11 +188,11 @@ async fn main() -> anyhow::Result<()> {
         }
 
         Commands::Adversarial => {
-            run_adversarial();
+            run_adversarial()?;
         }
 
         Commands::CryptoKat => {
-            run_crypto_kat();
+            run_crypto_kat()?;
         }
 
         Commands::BilateralThroughput { iterations } => {
@@ -362,16 +362,19 @@ async fn run_tla_check(
 
     print!("{}", report.render_ascii());
 
-    // A violated invariant, or a falsification config that failed to falsify,
-    // must redden CI. `run_all` has already NORMALISED every verdict, including
-    // inverting the expected-to-fail configs, so `passed` here is the gate's
-    // answer and not TLC's raw one.
-    let failing: Vec<String> = results
+    // A violated invariant, a falsification config that failed to falsify, or
+    // a literal, direct or linked Rust trace that fails to replay must redden
+    // CI. `run_all` has already NORMALISED every TLC verdict, including
+    // inverting the expected-to-fail configs; each spec report's `passed`
+    // combines that verdict with its replays and linked traces, and is the
+    // same answer the printed OVERALL VERDICT gives.
+    let failing: Vec<String> = report
+        .tla_results
         .iter()
-        .filter(|(_, r)| !r.passed)
-        .map(|(s, _)| s.label.clone())
+        .filter(|r| !r.passed)
+        .map(|r| r.label.clone())
         .collect();
-    enforce("TLA+ model checking", results.len(), &failing)?;
+    enforce("TLA+ model checking", report.tla_results.len(), &failing)?;
 
     Ok(results)
 }
@@ -448,8 +451,15 @@ fn run_implementation_traces() -> anyhow::Result<()> {
 }
 
 /// Run adversarial tests standalone.
-fn run_adversarial() {
+fn run_adversarial() -> anyhow::Result<()> {
     let results = adversarial_bilateral::collect_adversarial_results();
+    let total = results.attacks.len();
+    let failing: Vec<String> = results
+        .attacks
+        .iter()
+        .filter(|a| !a.passed)
+        .map(|a| a.attack_name.clone())
+        .collect();
     let report = VerticalValidationReport {
         proof_results: Vec::new(),
         tla_results: Vec::new(),
@@ -461,11 +471,19 @@ fn run_adversarial() {
         bilateral_throughput_results: None,
     };
     print!("{}", report.render_ascii());
+    enforce("Adversarial attacks", total, &failing)
 }
 
 /// Run crypto KAT tests standalone.
-fn run_crypto_kat() {
+fn run_crypto_kat() -> anyhow::Result<()> {
     let results = crypto_kat::collect_crypto_kat_results();
+    let total = results.results.len();
+    let failing: Vec<String> = results
+        .results
+        .iter()
+        .filter(|r| !r.passed)
+        .map(|r| format!("{}/{}", r.primitive, r.test_name))
+        .collect();
     let report = VerticalValidationReport {
         proof_results: Vec::new(),
         tla_results: Vec::new(),
@@ -477,6 +495,7 @@ fn run_crypto_kat() {
         bilateral_throughput_results: None,
     };
     print!("{}", report.render_ascii());
+    enforce("Crypto KATs", total, &failing)
 }
 
 /// Run bilateral throughput benchmark standalone.

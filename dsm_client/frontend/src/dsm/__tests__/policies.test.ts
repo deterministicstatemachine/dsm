@@ -56,7 +56,7 @@ describe('policies.ts', () => {
       framed.set(env.toBinary(), 1);
       (routerInvokeBin as jest.Mock).mockResolvedValue(framed);
 
-      const result = await createToken({ ticker: 'X', alias: 'test', decimals: 0, maxSupply: '1000' });
+      const result = await createToken({ ticker: 'X', alias: 'test', decimals: 0, genesisSupply: '1000', burnEnabled: false, transferable: true, threshold: 1 });
       expect(routerInvokeBin).toHaveBeenCalledWith('token.create', expect.any(Uint8Array));
       expect(result.success).toBe(false);
       expect(result.message).toMatch(/ticker must be 2-8/);
@@ -82,14 +82,14 @@ describe('policies.ts', () => {
       framed.set(env.toBinary(), 1);
       (routerInvokeBin as jest.Mock).mockResolvedValue(framed);
 
-      const result = await createToken({ ticker: 'TOK', alias: 'test', decimals: 0, maxSupply: '1000' });
+      const result = await createToken({ ticker: 'TOK', alias: 'test', decimals: 0, genesisSupply: '1000', burnEnabled: false, transferable: true, threshold: 1 });
       expect(result.success).toBe(true);
       expect(result.tokenId).toBe('TOKEN123');
       expect(publishTokenPolicyBytesBridge).not.toHaveBeenCalled();
       expect(routerInvokeBin).toHaveBeenCalledTimes(1);
     });
 
-    test('handles default kind as FUNGIBLE', async () => {
+    test('creates a fungible token', async () => {
       const anchor = new Uint8Array(32).fill(0xCC);
       (publishTokenPolicyBytesBridge as jest.Mock).mockResolvedValue(anchor);
 
@@ -106,7 +106,7 @@ describe('policies.ts', () => {
         ticker: 'FT',
         alias: 'Fungible Token',
         decimals: 2,
-        maxSupply: '5000',
+        genesisSupply: '5000', burnEnabled: false, transferable: true, threshold: 1,
       });
       expect(result.success).toBe(true);
     });
@@ -133,7 +133,7 @@ describe('policies.ts', () => {
         ticker: 'NEW',
         alias: 'New Token',
         decimals: 6,
-        maxSupply: '10000',
+        genesisSupply: '10000', burnEnabled: false, transferable: true, threshold: 1,
       });
       expect(emitWalletRefresh).toHaveBeenCalledTimes(1);
       expect(emitWalletRefresh).toHaveBeenCalledWith(
@@ -167,7 +167,7 @@ describe('policies.ts', () => {
         ticker: 'BAD',
         alias: 'Bad Token',
         decimals: 0,
-        maxSupply: '1',
+        genesisSupply: '1', burnEnabled: false, transferable: true, threshold: 1,
       });
       expect(emitWalletRefresh).not.toHaveBeenCalled();
     });

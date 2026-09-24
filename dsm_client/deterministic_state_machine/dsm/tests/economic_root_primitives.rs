@@ -348,7 +348,7 @@ fn the_offline_bearer_tier_is_classified_by_authority_policy_not_by_variant() {
 
     let online = Operation::Transfer {
         to_device_id: vec![1; 32],
-        amount: Balance::from_state(5, [0u8; 32]),
+        amount: Balance::amount(5),
         token_id: b"ERA".to_vec(),
         policy_commit: ERA,
         mode: TransactionMode::Bilateral,

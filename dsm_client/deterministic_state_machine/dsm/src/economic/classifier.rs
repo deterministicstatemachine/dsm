@@ -72,12 +72,12 @@ pub fn classify(operation: &Operation) -> EconomicEffect {
         DlvUnlock { .. } => None,
 
         // ── Closed write sets ───────────────────────────────────────────
-        Mint { .. } | Burn { .. } | CreateToken { .. } => ClosedWriteSet,
+        Burn { .. } | CreateToken { .. } => ClosedWriteSet,
         // One balance credit of exactly the beta payout, funded by one
         // release of the network's native reserve
-        // (CreditSourceNativeReserveRelease, 0x005D). NOT a mint: the units
-        // leave the fixed genesis supply, and the accepting transition refuses
-        // the operation without a matching pending admission.
+        // (CreditSourceNativeReserveRelease, 0x005D): the units leave the
+        // fixed genesis supply, and the provenance verifier establishes the
+        // release.
         FaucetClaim { .. } => ClosedWriteSet,
         // One role-dependent economic event, not a Transfer fact and a
         // separate Receive fact: the role follows from whether
@@ -136,12 +136,9 @@ pub struct ObservedEconomicChange {
     /// advances a relationship has reached a leaf it has no write set for.
     pub relationships_changed: bool,
     /// A vault-creation record was inserted (P15-12).
-    ///
-    /// Removed in #915 because no leaf class existed and nothing could ever
-    /// set it — a permanently-false flag is decoration. It returns with its
-    /// leaf, and the exhaustive match below is what made that automatic
-    /// rather than remembered.
     pub vault_creations_changed: bool,
+    /// A token-creation record was inserted (SoFi Amendment S8).
+    pub token_creations_changed: bool,
 }
 
 impl ObservedEconomicChange {
@@ -150,6 +147,7 @@ impl ObservedEconomicChange {
             || self.consumed_sources_changed
             || self.relationships_changed
             || self.vault_creations_changed
+            || self.token_creations_changed
     }
 }
 
@@ -185,10 +183,9 @@ impl std::error::Error for EconomicTripwire {}
 /// classification: the witness is the operation's own account of the leaves it
 /// touches, and this reads it without consulting `classify` at all.
 ///
-/// The match is exhaustive on purpose. A new `EconomicLeafState` variant — the
-/// vault-creation record P15-12 still owes — cannot be added without the
-/// compiler demanding an arm here, so no leaf family can become observable
-/// without the tripwire learning to see it.
+/// The match is exhaustive on purpose. A new `EconomicLeafState` variant
+/// cannot be added without the compiler demanding an arm here, so no leaf
+/// family can become observable without the tripwire learning to see it.
 pub fn observed_from_witness(
     witness: &crate::economic::witness::EconomicTransitionWitness,
 ) -> ObservedEconomicChange {
@@ -203,6 +200,7 @@ pub fn observed_from_witness(
                 EconomicLeafState::ConsumedSource(_) => observed.consumed_sources_changed = true,
                 EconomicLeafState::Relationship(_) => observed.relationships_changed = true,
                 EconomicLeafState::VaultCreation(_) => observed.vault_creations_changed = true,
+                EconomicLeafState::TokenCreation(_) => observed.token_creations_changed = true,
             }
         }
     }

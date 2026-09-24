@@ -102,18 +102,6 @@ impl From<CommitmentError> for DsmError {
     }
 }
 
-/// Embedded commitment for state inclusion (compact representation)
-#[derive(Debug, Clone)]
-pub struct EmbeddedCommitment {
-    pub commitment_hash: [u8; 32],
-    pub entity_signature: Vec<u8>,
-    pub counterparty_signature: Vec<u8>,
-    pub variable_parameters: Vec<String>,
-    pub fixed_parameters: HashMap<String, Vec<u8>>,
-    pub counterparty_id: String,
-    pub min_state_number: u64,
-}
-
 /// Format: (fork_id, fixed_parameters, variable_parameters)
 pub type ForkPath = (String, HashMap<String, Vec<u8>>, HashSet<String>);
 
@@ -227,7 +215,6 @@ pub struct PreCommitment {
     pub signatures: HashMap<String, Vec<u8>>,
     pub forks: Vec<PreCommitmentFork>,
     pub selected_fork_id: Option<String>,
-    pub forward_commitment: Option<ForwardLinkedCommitment>,
 
     /// Derived commitment hash (domain-separated)
     pub commitment_hash: [u8; 32],
@@ -235,9 +222,6 @@ pub struct PreCommitment {
     pub fixed_parameters: HashMap<String, Vec<u8>>,
     pub variable_parameters: Vec<String>,
     pub security_params: SecurityParameters,
-
-    #[allow(dead_code)]
-    pub(crate) data: Vec<u8>,
 }
 
 impl PreCommitment {
@@ -450,12 +434,10 @@ impl PreCommitment {
             signatures: HashMap::new(),
             forks: Vec::new(),
             selected_fork_id: None,
-            forward_commitment: None,
             commitment_hash,
             fixed_parameters: HashMap::new(),
             variable_parameters: Vec::new(),
             security_params: SecurityParameters::default(),
-            data: Vec::new(),
         }
     }
 
@@ -466,12 +448,10 @@ impl PreCommitment {
             signatures,
             forks: Vec::new(),
             selected_fork_id: None,
-            forward_commitment: None,
             commitment_hash,
             fixed_parameters: HashMap::new(),
             variable_parameters: Vec::new(),
             security_params: SecurityParameters::default(),
-            data: Vec::new(),
         }
     }
 
@@ -533,12 +513,10 @@ impl PreCommitment {
             signatures: HashMap::new(),
             forks,
             selected_fork_id: None,
-            forward_commitment: None,
             commitment_hash,
             fixed_parameters: all_fixed_parameters,
             variable_parameters: all_variable_parameters,
             security_params,
-            data: Vec::new(),
         })
     }
 
@@ -797,56 +775,6 @@ impl PreCommitment {
         positions
     }
 
-    pub fn add_forward_commitment(&mut self, commitment: ForwardLinkedCommitment) {
-        self.forward_commitment = Some(commitment);
-    }
-
-    pub fn get_forward_commitment(&self) -> Option<&ForwardLinkedCommitment> {
-        self.forward_commitment.as_ref()
-    }
-
-    // PreCommitment::verify(&State) and verify_transition_root(&State, ...)
-    // deleted: zero callers. Both took `&State` purely to read state.hash() —
-    // verify dropped the result entirely (assigned to `_state_hash` with a
-    // comment "kept to preserve callsite expectations"), and verify_transition_root
-    // forwarded to generate_hash which now takes `&[u8; 32]` directly.
-
-    pub fn from_forward_linked_commitment(flc: &ForwardLinkedCommitment) -> Result<Self, DsmError> {
-        let mut signatures = HashMap::new();
-        if let Some(entity_sig) = &flc.entity_signature {
-            signatures.insert("entity".to_string(), entity_sig.clone());
-        }
-        if let Some(counterparty_sig) = &flc.counterparty_signature {
-            signatures.insert("counterparty".to_string(), counterparty_sig.clone());
-        }
-
-        let variable_parameters = flc.variable_parameters.iter().cloned().collect();
-
-        let fork = PreCommitmentFork {
-            fork_id: "default".to_string(),
-            hash: flc.commitment_hash,
-            fixed_params: flc.fixed_parameters.clone(),
-            variable_params: flc.variable_parameters.clone(),
-            positions: Vec::new(),
-            signatures: signatures.clone(),
-            is_selected: true,
-            invalidation_proof: None,
-        };
-
-        Ok(Self {
-            hash: flc.commitment_hash,
-            signatures,
-            forks: vec![fork],
-            selected_fork_id: Some("default".to_string()),
-            forward_commitment: Some(flc.clone()),
-            commitment_hash: flc.commitment_hash,
-            fixed_parameters: flc.fixed_parameters.clone(),
-            variable_parameters,
-            security_params: SecurityParameters::default(),
-            data: Vec::new(),
-        })
-    }
-
     pub fn with_security_params(mut self, params: SecurityParameters) -> Self {
         self.security_params = params;
         self
@@ -900,12 +828,10 @@ impl Default for PreCommitment {
             signatures: HashMap::new(),
             forks: Vec::new(),
             selected_fork_id: None,
-            forward_commitment: None,
             commitment_hash,
             fixed_parameters: HashMap::new(),
             variable_parameters: Vec::new(),
             security_params: SecurityParameters::default(),
-            data: Vec::new(),
         }
     }
 }
@@ -934,16 +860,6 @@ impl Zeroize for PreCommitment {
             }
         }
 
-        if let Some(forward_commitment) = &mut self.forward_commitment {
-            if let Some(ref mut sig) = forward_commitment.entity_signature {
-                sig.zeroize();
-            }
-            if let Some(ref mut sig) = forward_commitment.counterparty_signature {
-                sig.zeroize();
-            }
-            forward_commitment.commitment_hash.zeroize();
-        }
-
         fence(Ordering::SeqCst);
     }
 }
@@ -953,203 +869,6 @@ impl Zeroize for PreCommitment {
 // IMPORTANT: This module must NOT re-define canonical byte encoding logic.
 // All length-prefixing and domain-separated hashing helpers are centralized in
 // `crate::crypto::canonical_lp`.
-
-/// Forward-linked commitment implementing whitepaper Section 7.3
-#[derive(Debug, Clone)]
-pub struct ForwardLinkedCommitment {
-    pub next_state_hash: [u8; 32],
-    pub entity_id: String,
-    pub counterparty_id: String,
-    pub fixed_parameters: HashMap<String, Vec<u8>>,
-    pub variable_parameters: HashSet<String>,
-    pub entity_signature: Option<Vec<u8>>,
-    pub counterparty_signature: Option<Vec<u8>>,
-    pub commitment_hash: [u8; 32],
-    pub min_state_number: u64,
-}
-
-impl ForwardLinkedCommitment {
-    /// C_future = H( DOM || S_{n+1} || counterparty_id || fixed_params || variable_params )
-    pub fn compute_hash(&self) -> Result<[u8; 32], DsmError> {
-        validate_id(&self.counterparty_id, "counterparty_id")?;
-        validate_fixed_params(&self.fixed_parameters)?;
-        validate_variable_params(&self.variable_parameters)?;
-
-        let mut h = crate::crypto::blake3::dsm_domain_hasher(
-            crate::common::domain_tags::TAG_DSM_FLC_HASH_V2,
-        );
-        canonical_lp::write_lp(&mut h, &self.next_state_hash);
-        canonical_lp::write_lp(&mut h, self.counterparty_id.as_bytes());
-
-        // Deterministic map iteration
-        let mut sorted_fixed: Vec<_> = self.fixed_parameters.iter().collect();
-        sorted_fixed.sort_by_key(|(k, _)| *k);
-        for (k, v) in sorted_fixed {
-            canonical_lp::write_lp(&mut h, k.as_bytes());
-            canonical_lp::write_lp(&mut h, v);
-        }
-
-        let mut sorted_vars: Vec<_> = self.variable_parameters.iter().collect();
-        sorted_vars.sort();
-        for v in sorted_vars {
-            canonical_lp::write_lp(&mut h, v.as_bytes());
-        }
-
-        Ok(*h.finalize().as_bytes())
-    }
-
-    pub fn new(
-        next_state_hash: [u8; 32],
-        counterparty_id: String,
-        fixed_parameters: HashMap<String, Vec<u8>>,
-        variable_parameters: HashSet<String>,
-        min_state_number: Option<u64>,
-    ) -> Result<Self, DsmError> {
-        let entity_id = "entity".to_string();
-
-        let mut commitment = Self {
-            next_state_hash,
-            entity_id,
-            counterparty_id,
-            fixed_parameters,
-            variable_parameters,
-            entity_signature: None,
-            counterparty_signature: None,
-            commitment_hash: [0u8; 32],
-            min_state_number: min_state_number.unwrap_or(0),
-        };
-
-        commitment.commitment_hash = commitment.compute_hash()?;
-        Ok(commitment)
-    }
-
-    pub fn sign_as_entity(&mut self, private_key: &[u8]) -> Result<(), DsmError> {
-        let signature =
-            sphincs::sphincs_sign(private_key, &self.commitment_hash).map_err(|_| {
-                CommitmentError::Crypto {
-                    context: "Failed to sign with SPHINCS+".into(),
-                    source: None,
-                }
-            })?;
-        self.entity_signature = Some(signature);
-        Ok(())
-    }
-
-    pub fn sign_as_counterparty(&mut self, private_key: &[u8]) -> Result<(), DsmError> {
-        let signature = sphincs::sphincs_sign(private_key, &self.commitment_hash).map_err(|e| {
-            CommitmentError::Crypto {
-                context: "Failed to sign with SPHINCS+".into(),
-                source: Some(Box::new(e)),
-            }
-        })?;
-        self.counterparty_signature = Some(signature);
-        Ok(())
-    }
-
-    pub fn is_fully_signed(&self) -> bool {
-        self.entity_signature.is_some() && self.counterparty_signature.is_some()
-    }
-
-    pub fn has_signature_from(&self, entity_id: &str) -> bool {
-        if entity_id == self.counterparty_id.as_str() {
-            return self.counterparty_signature.is_some();
-        }
-        self.entity_signature.is_some()
-    }
-
-    pub fn verify_integrity(&self) -> Result<bool, DsmError> {
-        let expected = self.compute_hash()?;
-        Ok(expected.as_slice() == self.commitment_hash.as_slice())
-    }
-
-    pub fn verify_entity_signature(&self, entity_public_key: &[u8]) -> Result<bool, DsmError> {
-        if let Some(ref sig) = self.entity_signature {
-            sphincs::sphincs_verify(entity_public_key, &self.commitment_hash, sig).map_err(|_| {
-                CommitmentError::Crypto {
-                    context: "Error verifying entity signature".into(),
-                    source: None,
-                }
-                .into()
-            })
-        } else {
-            Ok(false)
-        }
-    }
-
-    pub fn verify_counterparty_signature(
-        &self,
-        counterparty_public_key: &[u8],
-    ) -> Result<bool, DsmError> {
-        if let Some(ref sig) = self.counterparty_signature {
-            sphincs::sphincs_verify(counterparty_public_key, &self.commitment_hash, sig).map_err(
-                |_| {
-                    CommitmentError::Crypto {
-                        context: "Error verifying counterparty signature".into(),
-                        source: None,
-                    }
-                    .into()
-                },
-            )
-        } else {
-            Ok(false)
-        }
-    }
-
-    pub fn verify_operation_adherence(&self, operation: &Operation) -> Result<bool, DsmError> {
-        crate::commitments::parameter_comparison::verify_operation_parameters(
-            operation,
-            &self.fixed_parameters,
-        )
-    }
-
-    pub fn try_to_embedded_commitment(&self) -> Result<EmbeddedCommitment, DsmError> {
-        let entity_signature =
-            self.entity_signature
-                .clone()
-                .ok_or_else(|| CommitmentError::Verification {
-                    context: "Entity signature must be present when creating embedded commitment"
-                        .into(),
-                })?;
-
-        let counterparty_signature =
-            self.counterparty_signature
-                .clone()
-                .ok_or_else(|| CommitmentError::Verification {
-                    context:
-                        "Counterparty signature must be present when creating embedded commitment"
-                            .into(),
-                })?;
-
-        Ok(EmbeddedCommitment {
-            commitment_hash: self.commitment_hash,
-            entity_signature,
-            counterparty_signature,
-            variable_parameters: self.variable_parameters.iter().cloned().collect(),
-            fixed_parameters: self.fixed_parameters.clone(),
-            counterparty_id: self.counterparty_id.clone(),
-            min_state_number: self.min_state_number,
-        })
-    }
-}
-
-impl Zeroize for ForwardLinkedCommitment {
-    fn zeroize(&mut self) {
-        self.next_state_hash.zeroize();
-        self.commitment_hash.zeroize();
-
-        if let Some(ref mut sig) = self.entity_signature {
-            sig.zeroize();
-        }
-        if let Some(ref mut sig) = self.counterparty_signature {
-            sig.zeroize();
-        }
-        for v in self.fixed_parameters.values_mut() {
-            v.zeroize();
-        }
-
-        fence(Ordering::SeqCst);
-    }
-}
 
 // --------------------------
 // Internal deterministic helpers

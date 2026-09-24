@@ -39,7 +39,6 @@ jest.mock('../../../services/dsmClient', () => ({
 }));
 
 jest.mock('../../../dsm/policies', () => ({
-  mintToken: jest.fn(),
   burnToken: jest.fn(),
   addTokenByAnchor: jest.fn(),
   forgetToken: jest.fn(),
@@ -81,7 +80,7 @@ jest.mock('../../TokenCreationDialog', () => ({
 }));
 
 import AccountsScreen from '../AccountsScreen';
-import { mintToken, burnToken, addTokenByAnchor, forgetToken, tokenAdoptionQr } from '../../../dsm/policies';
+import { burnToken, addTokenByAnchor, forgetToken, tokenAdoptionQr } from '../../../dsm/policies';
 
 describe('AccountsScreen — the screen TOKENS actually opens', () => {
   beforeEach(() => jest.clearAllMocks());
@@ -110,22 +109,22 @@ describe('AccountsScreen — the screen TOKENS actually opens', () => {
     expect(await screen.findByTestId('create-dialog')).toBeInTheDocument();
   });
 
-  it('exposes MINT and BURN on a token this device created', async () => {
+  it('exposes BURN, and no MINT, on a token this device created', async () => {
     render(<AccountsScreen />);
     fireEvent.click(await screen.findByText('MYTOK'));
-    expect(await screen.findByRole('button', { name: /^MINT$/ })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /^BURN$/ })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: /^BURN$/ })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^MINT$/ })).toBeNull();
   });
 
   /// Being in the DOM is not being reachable. The screen is a fixed-height
-  /// container, and an expanded card pushes MINT / BURN / FORGET below the
+  /// container, and an expanded card pushes BURN / FORGET below the
   /// fold; with overflow hidden on the vertical axis they rendered (so the test
   /// above passed) and could never be scrolled to or tapped on a device.
   it('lets an expanded card scroll its supply actions into reach', async () => {
     render(<AccountsScreen />);
     fireEvent.click(await screen.findByText('MYTOK'));
-    const mint = await screen.findByRole('button', { name: /^MINT$/ });
-    const container = mint.closest('.dsm-content') as HTMLElement | null;
+    const burn = await screen.findByRole('button', { name: /^BURN$/ });
+    const container = burn.closest('.dsm-content') as HTMLElement | null;
     expect(container).not.toBeNull();
     expect(container!.style.overflowY).toBe('auto');
     expect(container!.style.overflowX).toBe('hidden');
@@ -221,21 +220,6 @@ describe('AccountsScreen — the screen TOKENS actually opens', () => {
   });
 
   /// The typed amount reaches Rust unchanged — no client-side rescaling.
-  it('sends the entered amount verbatim to mint', async () => {
-    (mintToken as jest.Mock).mockResolvedValue({ success: true });
-    render(<AccountsScreen />);
-    fireEvent.click(await screen.findByText('MYTOK'));
-    fireEvent.click(await screen.findByRole('button', { name: /^MINT$/ }));
-    fireEvent.change(screen.getByPlaceholderText('0'), { target: { value: '250' } });
-    fireEvent.click(screen.getByRole('button', { name: /CONFIRM/i }));
-
-    await waitFor(() =>
-      expect(mintToken).toHaveBeenCalledWith(
-        expect.objectContaining({ tokenId: 'MYTOK', amount: '250' }),
-      ),
-    );
-  });
-
   it('sends the entered amount verbatim to burn', async () => {
     (burnToken as jest.Mock).mockResolvedValue({ success: true });
     render(<AccountsScreen />);
@@ -253,17 +237,17 @@ describe('AccountsScreen — the screen TOKENS actually opens', () => {
 
   /// A policy refusal is the committed policy's decision and is shown as-is.
   it('surfaces a policy refusal verbatim', async () => {
-    (mintToken as jest.Mock).mockResolvedValue({
+    (burnToken as jest.Mock).mockResolvedValue({
       success: false,
-      message: 'Mint would exceed the token’s maximum supply',
+      message: 'Burn exceeds the holder’s balance',
     });
     render(<AccountsScreen />);
     fireEvent.click(await screen.findByText('MYTOK'));
-    fireEvent.click(await screen.findByRole('button', { name: /^MINT$/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /^BURN$/ }));
     fireEvent.change(screen.getByPlaceholderText('0'), { target: { value: '999999' } });
     fireEvent.click(screen.getByRole('button', { name: /CONFIRM/i }));
 
-    expect(await screen.findByText(/maximum supply/i)).toBeInTheDocument();
+    expect(await screen.findByText(/exceeds the holder/i)).toBeInTheDocument();
   });
 
   /// (2) A successful adoption must appear in the list WITHOUT navigation or

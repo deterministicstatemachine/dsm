@@ -14,7 +14,10 @@
 //! (or a derived one), so the concatenation is unambiguous without length
 //! prefixes.
 
-use crate::common::domain_tags::{TAG_DSM_ECONOMIC_BALANCE_KEY, TAG_DSM_ECONOMIC_CONSUMED_SOURCE_KEY};
+use crate::common::domain_tags::{
+    TAG_DSM_ECONOMIC_BALANCE_KEY, TAG_DSM_ECONOMIC_CONSUMED_SOURCE_KEY,
+    TAG_DSM_ECONOMIC_TOKEN_CREATION_KEY,
+};
 use crate::crypto::blake3::dsm_domain_hasher;
 use crate::crypto::domain::TaggedHashDomain;
 
@@ -37,6 +40,20 @@ fn derive(
 pub fn balance_key(genesis: &[u8; 32], device_id: &[u8; 32], policy_commit: &[u8; 32]) -> [u8; 32] {
     derive(
         TAG_DSM_ECONOMIC_BALANCE_KEY,
+        genesis,
+        device_id,
+        &[policy_commit],
+    )
+}
+
+/// `H_dom(DSM/economic-token-creation-key/v1, G ‖ DevID ‖ policy_commit)`.
+pub fn token_creation_key(
+    genesis: &[u8; 32],
+    device_id: &[u8; 32],
+    policy_commit: &[u8; 32],
+) -> [u8; 32] {
+    derive(
+        TAG_DSM_ECONOMIC_TOKEN_CREATION_KEY,
         genesis,
         device_id,
         &[policy_commit],

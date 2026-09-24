@@ -626,9 +626,8 @@ mod tests {
     // -----------------------------------------------------------------
     // Phase B.4 (issue #275) — `validate_devtree_state` covers CHECK 1–3.
     // CHECK 4 (monotonic version_number) is enforced atomically inside
-    // the DB layer and is exercised by the
-    // `upsert_device_tree_state_if_monotonic` integration test in
-    // `dsm_storage_node::db::sqlite` below.
+    // the DB layer and is exercised by the device-tree tests in
+    // `dsm_storage_node::db::store_properties`.
     // -----------------------------------------------------------------
 
     fn build_state(

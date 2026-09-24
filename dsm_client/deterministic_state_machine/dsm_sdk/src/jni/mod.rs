@@ -13,8 +13,6 @@
 pub mod jni_common;
 #[cfg(target_os = "android")]
 pub mod jni_error;
-#[cfg(target_os = "android")]
-pub mod jni_result;
 
 /// Helper utilities shared by the JNI bridge (Android only)
 #[cfg(target_os = "android")]
@@ -91,8 +89,6 @@ mod tests;
 pub use self::jni_common::{get_java_vm_ptr, set_java_vm};
 #[cfg(target_os = "android")]
 pub use self::jni_error::JniErrorCode;
-#[cfg(target_os = "android")]
-pub use self::jni_result::*;
 
 /// Install JavaVM pointer at library load time so background JNI calls can attach threads safely.
 /// Also caches the app's ClassLoader for use by worker threads.

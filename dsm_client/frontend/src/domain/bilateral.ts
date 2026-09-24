@@ -34,7 +34,6 @@ export interface PendingBilateralDto {
   tokenId: string;
   commitmentHash: string;
   status: 'pending' | 'verified' | 'accepted' | 'committed' | 'failed' | 'rejected';
-  tick: number;
   bleAddress?: string;
   statusMessage?: string;
 }
@@ -57,7 +56,7 @@ export async function decodeOfflinePendingList(bytes: Uint8Array): Promise<Pendi
     items = [] as any;
   }
 
-  return items.map((it: any, idx: number) => {
+  return items.map((it: any) => {
     let statusStr: PendingBilateralDto['status'] = 'pending';
     switch (it.status) {
       case pb.OfflineBilateralTransactionStatus.OFFLINE_TX_CONFIRMED:
@@ -95,7 +94,6 @@ export async function decodeOfflinePendingList(bytes: Uint8Array): Promise<Pendi
       tokenId,
       commitmentHash: encodeBase32Crockford(it.commitmentHash),
       status: statusStr,
-      tick: idx + 1,
       bleAddress: bleAddr,
       statusMessage: statusMessage || undefined,
     };

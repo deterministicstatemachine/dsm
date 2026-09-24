@@ -20,13 +20,8 @@ default = []                     # NO JNI, demos, or HTTP features in core - pur
 bluetooth = ["dep:tokio-stream"]
 storage   = ["rocksdb"]
 threadsafe = []
-test-mock  = []
 jni = ["dep:jni"]                         # JNI feature for Android integration
-examples = []                    # Gate example/demo-only items to avoid prod warnings
 web-stack = ["dep:axum", "dep:tower"]
-perf = []                         # Performance utilities and benchmarks
-# Enable additional test-only APIs and helpers in core when building tests/integration
-testing = []
 sphincs-trace = []                # Enable verbose SPHINCS+ tracing (debug only)
  formal = []
 # Issue #181 Finding 2: NON_PAPER_MODE testnet/signet bypass is OFF by default.
@@ -152,12 +147,6 @@ axum = { version = "0.8", features = ["tracing"], optional = true }
 tower = { version = "0.5.3", features = ["util", "timeout", "load-shed", "limit"], optional = true }
 
 [dev-dependencies]
-# SELF dev-dependency, enabling `testing` for THIS crate's own integration
-# tests (`tests/*.rs`): they are external consumers, so `cfg(test)` is
-# invisible to them and the feature would otherwise never be on. A normal
-# build does not resolve dev-dependencies, so nothing test-only reaches a
-# production artifact.
-dsm = { path = ".", features = ["testing"] }
 mockall = "0.15.0"
 tempfile = "3.10.0"
 test-log = { version = "0.2.21", features = ["trace"] }

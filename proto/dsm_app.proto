@@ -779,17 +779,6 @@ message VaultPostProto {
   bytes vault_data = 7; // encoded LimboVaultProto
 }
 
-// ===== Soft-Vault deterministic export (import must re-derive exactly) =====
-message SoftVaultExportV1 {
-  uint32 version        = 1; // MUST be 1
-  bytes  vault_id       = 2; // canonical vault id (binary)
-  bytes  device_id      = 3; // binary device id used in KDF
-  bytes  binder_hash32  = 4 [(dsm_fixed_len)=32]; // device binding fingerprint (wallet-seed-rooted)
-  uint32 export_seqno   = 5; // deterministic counter, not time
-  bytes  nonce          = 6 [(dsm_fixed_len)=24]; // XChaCha20-Poly1305 nonce
-  bytes  ciphertext     = 7; // AEAD(ct || tag), AAD = vault_id
-}
-
 // ===================== STORAGE-NODE MIRRORED OBJECTS (V3) ==================
 // These objects are mirrored by storage nodes as raw bytes.
 // All authenticity/enforcement is device-side; nodes are dumb mirrors.
@@ -1390,15 +1379,6 @@ message AdminMaintenanceResponseV1 {
   bool  ok   = 2;
 }
 
-// ============================ SMART COMMITMENTS =====================
-enum SmartLogic { SMART_LOGIC_UNSPECIFIED = 0; SMART_AND = 1; SMART_OR = 2; }
-message SmartIndex   { uint64 unlock_index = 1; }     // chain-height delta or iteration index
-message SmartBalance { uint64 minimum_balance = 1; string token_id = 2; }
-message SmartClause  { oneof clause { SmartIndex index = 1; SmartBalance balance = 2; } }
-message SmartPolicy  { uint32 version = 1; SmartLogic logic = 2; repeated SmartClause clauses = 3; }
-message ClauseWitness{ uint32 idx = 1; bytes proof = 2 [(dsm_max_len)=65535]; }
-message SmartProof   { Hash32 policy_hash = 1; repeated ClauseWitness witnesses = 2; }
-
 // =================== UNIVERSAL ARG/RESULT PACKS =====================
 enum Codec { CODEC_UNSPECIFIED = 0; CODEC_PROTO = 1; }   // canonical: PROTO only
 // No artifact body may exceed the storage node's 128 KiB envelope cap; the largest
@@ -1541,29 +1521,6 @@ message StateWire {
 
 message BalanceDeltaEntry { string token_id = 1; S128 delta = 2; } // ordered by token_id
 
-message PositionSequenceProto {
-  repeated PositionList positions = 1; // sequence of position lists
-  bytes seed = 2 [(dsm_max_len)=65535]; // seed used to generate positions
-}
-
-message PositionList {
-  repeated sint32 positions = 1; // list of positions
-}
-
-message PreCommitmentProto {
-  string operation_type = 1;
-  repeated ParamKV fixed_parameters = 2; // sorted by key
-  repeated string variable_parameters = 3; // sorted lexicographically
-  uint64 min_state_number = 4;
-  Hash32 hash = 5;
-  repeated bytes signatures = 6 [(dsm_max_len)=65535];
-  optional bytes entity_signature = 7 [(dsm_max_len)=65535];
-  optional bytes counterparty_signature = 8 [(dsm_max_len)=65535];
-  repeated sint32 value = 9; // calculation values
-  repeated sint32 commitment = 10; // commitment data
-  bytes counterparty_id = 11 [(dsm_fixed_len)=32];
-}
-
 message StateTransitionProto {
   bytes  device_id           = 1 [(dsm_fixed_len)=32];
   bytes  counterparty_id     = 2 [(dsm_fixed_len)=32];
@@ -1577,28 +1534,11 @@ message StateTransitionProto {
   string transaction_direction = 10;
 }
 
-// Canonical state transition for internal commitments (replaces custom binary format)
-message CanonicalStateTransitionProto {
-  bytes operation = 1 [(dsm_max_len)=65535]; // canonical operation bytes
-  optional bytes new_entropy = 2 [(dsm_max_len)=65535];
-  optional bytes encapsulated_entropy = 3 [(dsm_max_len)=65535];
-  bytes device_id = 4 [(dsm_fixed_len)=32];
-  repeated string flags = 5; // sorted lexicographically
-  optional PositionSequenceProto position_sequence = 6;
-  repeated TokenBalanceEntry token_balances = 7; // sorted by token_id
-  optional PreCommitmentProto forward_commitment = 8;
-  optional bytes prev_state_hash = 9 [(dsm_fixed_len)=32];
-  optional bytes entity_signature = 10 [(dsm_max_len)=65535];
-  optional bytes counterparty_signature = 11 [(dsm_max_len)=65535];
-  bytes proof_of_authorization = 12 [(dsm_max_len)=65535];
-  bytes signature = 13 [(dsm_max_len)=65535];
-}
-
 // Deterministic params (no maps in canonical preimages).
 message ParamKV { string key = 1; string value = 2; }
 message TransactionParamsProto { repeated ParamKV kv = 1; } // sorted by key before hashing
 
-// Canonical token metadata (no wall-clock markers; deterministic index).
+// Canonical token metadata.
 message MetadataField { string key = 1; string value = 2; }
 message TokenMetadataProto {
   string token_id = 1;
@@ -1612,7 +1552,8 @@ message TokenMetadataProto {
   optional string icon_url     = 9;
   optional string policy_anchor= 10;
   repeated MetadataField fields= 11;
-  uint64 creation_index        = 12;
+  reserved 12;
+  reserved "creation_index";
 }
 
 // MPC Token creation request (canonical).
@@ -1748,7 +1689,9 @@ message RegisterDeviceRequest {
 message BilateralPrepareRequest {
   bytes  counterparty_device_id = 1 [(dsm_fixed_len)=32];
   bytes  operation_data         = 2 [(dsm_max_len)=4096];
-  uint64 validity_iterations    = 3;
+  // A prepare carries no expiry: DSM has no clock to measure one against.
+  reserved 3;
+  reserved "validity_iterations";
   Hash32 expected_genesis_hash  = 4;
   Hash32 expected_counterparty_state_hash = 5;
   string ble_address            = 6; // BLE MAC address of recipient device
@@ -1797,7 +1740,9 @@ message AnchorDisclosure {
 message BilateralPrepareResponse {
   Hash32 commitment_hash        = 1;
   bytes  local_signature        = 2 [(dsm_max_len)=65535];
-  uint64 expires_iterations     = 3;
+  // A prepare carries no expiry: DSM has no clock to measure one against.
+  reserved 3;
+  reserved "expires_iterations";
   Hash32 counterparty_state_hash= 4;
   Hash32 local_state_hash       = 5;
   // SPHINCS+ SPX256s public key for bilateral verification (64 bytes)
@@ -1919,13 +1864,14 @@ message BilateralCommitResponse {
 message BilateralConfirmRequest {
   Hash32 commitment_hash             = 1;
   bytes  sender_signature            = 2 [(dsm_max_len)=65535]; // σ_A
-  bytes  sender_smt_root             = 3 [(dsm_fixed_len)=32]; // r'_A (post-update root)
-  bytes  rel_proof_parent            = 4 [(dsm_max_len)=131072]; // π(h_n ∈ r_A) — verified against sender_smt_root_before (§4.3); required
-  bytes  rel_proof_child             = 5 [(dsm_max_len)=131072]; // π(h_{n+1} ∈ r'_A)
+  // 3, 4, 5, 9 carried the sender's roots and relationship proofs beside the
+  // receipt. The receipt states both roots and the one relationship path (§4.2);
+  // the receiver verifies them there.
+  reserved 3, 4, 5, 9;
+  reserved "sender_smt_root", "rel_proof_parent", "rel_proof_child", "sender_smt_root_before";
   bytes  stitched_receipt            = 6 [(dsm_max_len)=131072]; // complete receipt, both sigs; enforced ≤128 KiB (§11.1)
   Hash32 shared_chain_tip_new        = 7; // h_{n+1}
   bytes  pre_entropy                 = 8 [(dsm_max_len)=32]; // entropy used to derive h_{n+1}; receiver re-derives for independent verification (§4.1 / §C1)
-  bytes  sender_smt_root_before      = 9 [(dsm_fixed_len)=32]; // r_A (pre-update root) — enables full §4.3 π_rel_parent verification by receiver
   reserved 10, 11; // removed: legacy Safe-7 island_attestation / anchor_expiry_tick (replaced by field 12)
   // Canonical offline-bearer release (Software-Authority / Hardware-Identity v2): the prost-encoded
   // dsm.anchor.OfflineRelease (Δ + Π_i/Π_{i+1} anchor-state inclusion proofs + the v2 certificate
@@ -1951,14 +1897,15 @@ message ReceiptCommit {
   bytes parent_root     = 6 [(dsm_fixed_len)=32]; // r_A
   bytes child_root      = 7 [(dsm_fixed_len)=32]; // r_A'
   // Proof fields are capped to enforce the 128 KiB strict-fail invariant end-to-end.
-  bytes rel_proof_parent= 8 [(dsm_max_len)=131072]; // pi_rel(h_n in r_A)
-  bytes rel_proof_child = 9 [(dsm_max_len)=131072]; // pi'_rel(h_{n+1} in r_A')
+  // pi_rel: the ONE relationship path. It authenticates h_n under r_A, and the
+  // same siblings folded with h_{n+1} are r_A' — there is no second proof.
+  bytes rel_proof_parent= 8 [(dsm_max_len)=131072];
   bytes dev_proof       = 10 [(dsm_max_len)=131072]; // pi_dev(DevID_A in R_G)
-  // Tripwire-critical witness material: MUST be committed into ReceiptCommit.
-  // Verifiers recompute child_root from parent_root by applying a single-leaf replace.
-  bytes rel_replace_witness = 11 [(dsm_max_len)=131072];
+  // 9 was a child inclusion proof and 11 a separate replace witness: both were
+  // second encodings of the path field 8 already carries.
+  reserved 9, 11;
   // Dual SPHINCS+ signatures. These are the receipt challenge responses.
-  // The challenge is the proposed transition context carried by fields 1-11
+  // The challenge is the proposed transition context carried by fields 1-8, 10 and 21
   // plus the bilateral session binding. Each response signs that context with
   // the fresh EK key derived from Smaster, chain_id, h_n, C_pre, and k_step.
   // NOT part of canonical commit preimage.
@@ -2529,8 +2476,10 @@ message Invoke {
   ProgramRef program        = 1;
   string     method         = 2; // e.g., "token.transfer"
   ArgPack    args           = 3;
-  Hash32     pre_state_hash = 4; // MUST equal caller’s current tip
-  Hash32     post_state_hash= 5; // expected effects commitment
+  // 4 and 5 were a pre/post tip pair no receiver verified: the pre tip was
+  // always written as zeros and the post tip was read into nothing.
+  reserved 4, 5;
+  reserved "pre_state_hash", "post_state_hash";
   repeated bytes cosigners  = 6 [(dsm_max_len)=96]; // optional required parties
   Evidence   evidence       = 7; // optional attestation
   Hash16     nonce          = 8; // replay protection
@@ -2597,11 +2546,16 @@ message SequencedBatchEnvelope {
 }
 
 // =============================== ENVELOPE ============================
+// The sender of an addressed envelope. A local answer (this device's Core or
+// SDK answering its own caller) makes no sender claim and carries no Headers.
 message Headers {
   bytes device_id    = 1 [(dsm_fixed_len)=32]; // REQUIRED: 32 bytes
-  bytes chain_tip    = 2 [(dsm_fixed_len)=32]; // RESERVED/IGNORED: SDK always emits zeros; frontend must never read or supply this
+  // 2 was a chain tip and 4 a sequence counter. The relationship tip is the
+  // inbox address itself (storage node spec §8) and DSM keeps no counter;
+  // neither was verified by anything that received it.
+  reserved 2, 4;
+  reserved "chain_tip", "seq";
   bytes genesis_hash = 3 [(dsm_fixed_len)=32]; // REQUIRED: genesis anchor (mandatory per DSM spec)
-  uint64 seq         = 4; // transport-local only (deterministic counter)
 }
 message Envelope {
   uint32  version   = 1; // MUST be 3 (strict-fail if != 3)
@@ -2975,9 +2929,19 @@ message TombstoneReceiptProto {
   bytes  old_smt_root    = 2 [(dsm_fixed_len)=32];
   uint64 old_counter     = 3;
   bytes  old_rollup_hash = 4 [(dsm_fixed_len)=32];
-  uint64 tick            = 5;
+  reserved 5;
+  reserved "tick";
   bytes  signature       = 6 [(dsm_max_len)=65535]; // SPX256f = 49_856 bytes
   bytes  tombstone_hash  = 7 [(dsm_fixed_len)=32];
+}
+
+// Internal codec for `dsm::recovery::tombstone::ContactTombstoneAck` — a
+// contact's acknowledgement that it recorded a device's tombstone, signed by
+// the contact's AK over H(DSM/recovery-ack; tombstone_hash || device_id).
+message ContactTombstoneAckProto {
+  bytes tombstone_hash          = 1 [(dsm_fixed_len)=32];
+  bytes acknowledging_device_id = 2 [(dsm_fixed_len)=32];
+  bytes signature               = 3 [(dsm_max_len)=65535]; // SPX256f = 49_856 bytes
 }
 
 // Wire codec for `dsm::recovery::authority_anchor::RecoveryAuthorityAnchor`
@@ -3061,7 +3025,8 @@ message SuccessionReceiptProto {
   string device_id             = 1;
   bytes  tombstone_hash        = 2 [(dsm_fixed_len)=32];
   bytes  new_device_commitment = 3 [(dsm_max_len)=512];
-  uint64 tick                  = 4;
+  reserved 4;
+  reserved "tick";
   bytes  signature             = 5 [(dsm_max_len)=65535]; // SPX256f
   bytes  succession_hash       = 6 [(dsm_fixed_len)=32];
 }
@@ -3202,11 +3167,14 @@ message ContactAddResponse {
   bytes  device_id = 2 [(dsm_fixed_len)=32];
   Hash32 genesis_hash = 3;
   optional Hash32 chain_tip = 4;
-  optional SmtProof chain_tip_smt_proof = 5;
+  // 5 carried an SMT proof of the chain tip that no producer ever set.
+  reserved 5;
+  reserved "chain_tip_smt_proof";
   optional bytes alias_binding = 6 [(dsm_max_len)=4096];
   bool   genesis_verified_online = 7;
-  uint64 verify_counter          = 8; // deterministic counter (no time)
-  uint64 added_counter           = 9; // deterministic counter (no time)
+  // A contact carries no verification or addition time.
+  reserved 8, 9;
+  reserved "verify_counter", "added_counter";
   repeated string verifying_storage_nodes = 10;
   string ble_address = 11; // BLE MAC address for offline bilateral transfers
   bytes  signing_public_key = 12 [(dsm_fixed_len)=64]; // SPHINCS+ SPX256s public key for bilateral verification
@@ -3215,7 +3183,14 @@ message ContactAddResponse {
 
 // ======================== Faucet Operations =========================
 message FaucetClaimRequest  { bytes device_id = 1 [(dsm_fixed_len)=32]; }
-message FaucetClaimResponse { bool success = 1; uint64 tokens_received = 2; uint64 next_available_index = 3; string message = 4; }
+message FaucetClaimResponse {
+  bool success = 1;
+  uint64 tokens_received = 2;
+  // A claim has no cooldown, so there is no next claim index.
+  reserved 3;
+  reserved "next_available_index";
+  string message = 4;
+}
 
 // ======================= Online Transfer Messages ====================
 message OnlineTransferRequest {
@@ -3228,8 +3203,10 @@ message OnlineTransferRequest {
   bytes nonce = 6 [(dsm_fixed_len)=32];
   // Envelope v3 signing context (AF-2 remediation)
   bytes from_device_id = 7 [(dsm_fixed_len)=32]; // REQUIRED: sender identity for key selection
-  bytes chain_tip = 8 [(dsm_fixed_len)=32]; // RESERVED/IGNORED: SDK derives bilateral tip from SQLite; frontend must never supply this
-  uint64 seq = 9; // REQUIRED: deterministic sequence counter
+  // The SDK derives the relationship tip itself; a caller never supplies it.
+  // DSM keeps no counter: a transfer is ordered by its chain tip alone.
+  reserved 8, 9;
+  reserved "chain_tip", "seq";
   // 10 was `receipt_commit`: the inline full-receipt composition (168,400 B
   // against the node's 128 KiB cap, failing every send with 413). Deleted under
   // ADR 0003 — the A-side receipt travels as its own artifact, referenced by
@@ -3362,7 +3339,7 @@ message OnlineTransferResponse {
   bool success = 1;
   Hash32 transaction_hash = 2;
   string message = 3;
-  uint64 new_balance = 4;
+  optional uint64 new_balance = 4; // absent when the post-send balance could not be read
 }
 
 // ======================= Online Message Messages ====================
@@ -3374,7 +3351,9 @@ message OnlineMessageRequest {
   bytes nonce = 5 [(dsm_fixed_len)=32];
   bytes from_device_id = 6 [(dsm_fixed_len)=32];
   bytes chain_tip = 7 [(dsm_fixed_len)=32];
-  uint64 seq = 8; // deterministic sequence counter
+  // DSM keeps no counter: a message is ordered by its chain tip alone.
+  reserved 8;
+  reserved "seq";
 }
 
 message OnlineMessageResponse {
@@ -3451,14 +3430,17 @@ message TransactionInfo {
   string token_id      = 4;
   uint64 amount        = 5;
   uint64 fee           = 6;
-  uint64 logical_index = 7; // device-local counter
+  // No history ordinal or time: the history is returned in order.
+  reserved 7;
+  reserved "logical_index";
   bytes  tx_hash       = 8 [(dsm_fixed_len)=32];
   sint64 amount_signed = 9; // signed amount for DLV/faucet: positive=incoming, negative=outgoing
   TransactionType tx_type = 10; // enumerated transaction type
   string status        = 11; // "completed", "confirmed", "pending", etc.
   string recipient     = 12; // alias or device ID text for UI display
   bytes  stitched_receipt = 13 [(dsm_max_len)=131072]; // canonical stitched receipt bytes (if available)
-  uint64 created_at = 14; // DISPLAY-ONLY: unix wall-clock seconds for UI history ordering. MUST NOT be used in hash preimages, ReceiptCommit fields, acceptance predicates, or protocol ordering.
+  reserved 14;
+  reserved "created_at";
   string memo = 15; // optional memo/note
   bool   receipt_verified = 16; // true iff stitched_receipt passes cryptographic verification (SMT roots, tripwire, proofs)
   // Display form of `amount_signed`, rendered by Rust from the token's
@@ -3482,7 +3464,9 @@ message MerkleInclusionProof {
 message InboxItem {
   string id              = 1;
   string preview         = 2;
-  uint64 tick            = 3; // deterministic counter (transport only)
+  // An inbox item carries no time; items are listed in arrival order.
+  reserved 3;
+  reserved "tick";
   optional string sender_id = 4;
   bytes  payload         = 5;
   bool   is_stale_route  = 6; // arrived via previous (non-current) relationship tip
@@ -3849,9 +3833,7 @@ message PolicyRoleProto {
 message PolicyConditionProto {
   oneof kind {
     IdentityConstraintProto identity_constraint = 1;
-    VaultEnforcementProto vault_enforcement = 2;
     OperationRestrictionProto operation_restriction = 3;
-    LogicalTimeConstraintProto logical_time_constraint = 4;
     EmissionsScheduleProto emissions_schedule = 5;
     CreditBundlePolicyProto credit_bundle_policy = 6;
     CustomConstraintProto custom = 7;
@@ -3861,6 +3843,13 @@ message PolicyConditionProto {
     TokenAuthorityProto token_authority = 9;
     SupplyCapProto      supply_cap      = 10;
   }
+  // A logical-time window: DSM has no clock to evaluate it against.
+  reserved 4;
+  reserved "logical_time_constraint";
+  // A vault condition (hash, minimum balance, vault type, smart policy): no
+  // verifier derives the vault facts it names, so it cannot be checked.
+  reserved 2;
+  reserved "vault_enforcement";
 }
 
 // Who may mint or burn this token, and how many of them must co-sign.
@@ -3879,9 +3868,7 @@ message SupplyCapProto {
 }
 
 message IdentityConstraintProto { repeated string allowed_identities = 1; bool allow_derived = 2; }
-message VaultEnforcementProto { VaultConditionProto condition = 1; }
 message OperationRestrictionProto { repeated string allowed_operations = 1; }
-message LogicalTimeConstraintProto { uint64 min_tick = 1; uint64 max_tick = 2; }
 message EmissionsScheduleProto { uint64 total_supply = 1; uint32 shard_depth = 2; uint32 schedule_steps = 3; uint64 initial_step_emissions = 4; uint64 initial_step_amount = 5; }
 message CreditBundlePolicyProto { uint64 bundle_size = 1; string debit_rule = 2; string refill_rule = 3; }
 
@@ -3905,15 +3892,6 @@ message CustomConstraintProto {
   repeated ParamKV parameters_kv = 3;
 }
 
-message VaultConditionProto {
-  oneof kind {
-    bytes hash = 1;
-    uint64 minimum_balance = 2;
-    string vault_type = 3;
-    bytes smart_policy = 4;
-  }
-}
-
 message CanonicalPolicy {
   string author = 1;
   repeated PolicyConditionProto conditions = 2;
@@ -3923,7 +3901,8 @@ message CanonicalPolicy {
 message StoredPolicy {
   string name = 1;
   string revision = 2;
-  uint64 created_tick = 3; // deterministic tick (UI/ops only)
+  reserved 3;
+  reserved "created_tick";
   string author = 4;
   string description = 5;
   repeated PolicyConditionProto conditions = 6;

@@ -125,7 +125,7 @@ mod tests {
     // Note: may be flaky under parallel execution due to shared global AppState.
 
     fn setup_test_env() {
-        std::env::set_var("DSM_SDK_TEST_MODE", "1");
+        crate::economic_fixtures::use_test_storage_dir();
         AppState::prime_memory_for_testing();
     }
 

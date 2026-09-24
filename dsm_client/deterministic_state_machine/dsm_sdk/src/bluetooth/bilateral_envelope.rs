@@ -17,62 +17,33 @@ use prost::Message;
 
 use crate::generated;
 
-/// Build an Envelope v3 with an explicit chain tip override.
+/// Build an Envelope v3 from `device_id` under `genesis_hash`.
 ///
-/// All header values (`device_id`, `genesis_hash`, `ticks`) must be supplied
-/// by the caller — this function has no access to `BilateralTransactionManager`
-/// or any shared state.
+/// `Headers.chain_tip` is reserved on the wire (`dsm_app.proto`: the SDK emits
+/// zeros there and no reader may use it), so the envelope carries that reserved
+/// value; no BLE receiver reads it.
+///
+/// The message id is content-addressed: the first 16 bytes of
+/// BLAKE3("DSM/envelope-id", the envelope encoded with an empty id). Two
+/// envelopes share an id only when they are the same envelope.
 pub fn build_envelope(
     device_id: &[u8; 32],
     genesis_hash: &[u8; 32],
-    ticks: u64,
-    chain_tip_override: Option<[u8; 32]>,
     payload: generated::envelope::Payload,
-) -> Result<generated::Envelope, DsmError> {
-    // Derive chain tip from genesis_hash + ticks if no override supplied
-    let chain_tip_bytes = match chain_tip_override {
-        Some(ct) => ct,
-        None => {
-            let mut hasher = dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_CHAIN_TIP);
-            hasher.update(genesis_hash);
-            hasher.update(&ticks.to_le_bytes());
-            let mut ct = [0u8; 32];
-            ct.copy_from_slice(hasher.finalize().as_bytes());
-            ct
-        }
-    };
-
-    // Deterministic message id
-    let mut idh = dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_ENVELOPE_ID);
-    idh.update(device_id);
-    idh.update(genesis_hash);
-    idh.update(&chain_tip_bytes);
-    idh.update(&ticks.to_le_bytes());
-    let mut msgid = vec![0u8; 16];
-    msgid.copy_from_slice(&idh.finalize().as_bytes()[..16]);
-
-    Ok(generated::Envelope {
+) -> generated::Envelope {
+    let mut envelope = generated::Envelope {
         version: 3,
         headers: Some(generated::Headers {
             device_id: device_id.to_vec(),
-            chain_tip: chain_tip_bytes.to_vec(),
             genesis_hash: genesis_hash.to_vec(),
-            seq: 0,
         }),
-        message_id: msgid,
+        message_id: Vec::new(),
         payload: Some(payload),
-    })
-}
-
-/// Build an Envelope v3 using the default chain tip derived from genesis hash + ticks.
-#[allow(dead_code)]
-pub fn build_envelope_default_tip(
-    device_id: &[u8; 32],
-    genesis_hash: &[u8; 32],
-    ticks: u64,
-    payload: generated::envelope::Payload,
-) -> Result<generated::Envelope, DsmError> {
-    build_envelope(device_id, genesis_hash, ticks, None, payload)
+    };
+    let mut idh = dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_ENVELOPE_ID);
+    idh.update(&envelope.encode_to_vec());
+    envelope.message_id = idh.finalize().as_bytes()[..16].to_vec();
+    envelope
 }
 
 /// Extract a `BilateralPrepareRequest` from an incoming Envelope.
@@ -197,86 +168,44 @@ mod tests {
         [0xBB; 32]
     }
 
+    fn tx_payload(atomic: bool) -> generated::envelope::Payload {
+        generated::envelope::Payload::UniversalTx(generated::UniversalTx {
+            ops: vec![],
+            atomic,
+        })
+    }
+
     #[test]
     fn build_envelope_version_and_headers() {
         let did = test_device_id();
         let gh = test_genesis_hash();
-        let payload = generated::envelope::Payload::UniversalTx(generated::UniversalTx {
-            ops: vec![],
-            atomic: false,
-        });
-
-        let env = build_envelope(&did, &gh, 1, None, payload).unwrap();
+        let env = build_envelope(&did, &gh, tx_payload(false));
         assert_eq!(env.version, 3);
         let hdrs = env.headers.as_ref().unwrap();
         assert_eq!(hdrs.device_id, did.to_vec());
         assert_eq!(hdrs.genesis_hash, gh.to_vec());
-        assert_eq!(hdrs.seq, 0);
-    }
-
-    #[test]
-    fn build_envelope_message_id_is_16_bytes() {
-        let did = test_device_id();
-        let gh = test_genesis_hash();
-        let payload = generated::envelope::Payload::UniversalTx(generated::UniversalTx {
-            ops: vec![],
-            atomic: false,
-        });
-        let env = build_envelope(&did, &gh, 5, None, payload).unwrap();
         assert_eq!(env.message_id.len(), 16);
     }
 
+    /// The id names the envelope's bytes: equal envelopes share it, and a
+    /// change to the payload or the sender changes it.
     #[test]
-    fn build_envelope_deterministic_message_id() {
+    fn build_envelope_message_id_is_content_addressed() {
         let did = test_device_id();
         let gh = test_genesis_hash();
-        let mk = |ticks| {
-            let p = generated::envelope::Payload::UniversalTx(generated::UniversalTx {
-                ops: vec![],
-                atomic: false,
-            });
-            build_envelope(&did, &gh, ticks, None, p).unwrap()
-        };
-        let e1 = mk(10);
-        let e2 = mk(10);
-        let e3 = mk(11);
-        assert_eq!(e1.message_id, e2.message_id, "same inputs → same id");
-        assert_ne!(
-            e1.message_id, e3.message_id,
-            "different ticks → different id"
-        );
-    }
+        let e1 = build_envelope(&did, &gh, tx_payload(false));
+        let e2 = build_envelope(&did, &gh, tx_payload(false));
+        let other_payload = build_envelope(&did, &gh, tx_payload(true));
+        let other_sender = build_envelope(&[0xCC; 32], &gh, tx_payload(false));
+        assert_eq!(e1.message_id, e2.message_id);
+        assert_ne!(e1.message_id, other_payload.message_id);
+        assert_ne!(e1.message_id, other_sender.message_id);
 
-    #[test]
-    fn build_envelope_chain_tip_override() {
-        let did = test_device_id();
-        let gh = test_genesis_hash();
-        let custom_tip = [0xFF; 32];
-        let payload = generated::envelope::Payload::UniversalTx(generated::UniversalTx {
-            ops: vec![],
-            atomic: false,
-        });
-        let env = build_envelope(&did, &gh, 1, Some(custom_tip), payload).unwrap();
-        let hdrs = env.headers.unwrap();
-        assert_eq!(hdrs.chain_tip, custom_tip.to_vec());
-    }
-
-    #[test]
-    fn build_envelope_derived_chain_tip() {
-        let did = test_device_id();
-        let gh = test_genesis_hash();
-        let payload = generated::envelope::Payload::UniversalTx(generated::UniversalTx {
-            ops: vec![],
-            atomic: false,
-        });
-        let env = build_envelope(&did, &gh, 42, None, payload).unwrap();
-        let hdrs = env.headers.unwrap();
-        assert_eq!(hdrs.chain_tip.len(), 32);
-        assert_ne!(
-            hdrs.chain_tip,
-            vec![0u8; 32],
-            "derived tip should not be zeros"
-        );
+        let mut unnamed = e1.clone();
+        unnamed.message_id = Vec::new();
+        let mut idh = dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_ENVELOPE_ID);
+        idh.update(&unnamed.encode_to_vec());
+        assert_eq!(e1.message_id, idh.finalize().as_bytes()[..16].to_vec());
     }
 
     fn make_invoke_envelope(method: &str, body: &[u8]) -> generated::Envelope {
@@ -289,8 +218,6 @@ mod tests {
             program: None,
             method: method.to_string(),
             args: Some(args),
-            pre_state_hash: None,
-            post_state_hash: None,
             cosigners: vec![],
             evidence: None,
             nonce: None,
@@ -319,7 +246,6 @@ mod tests {
         let req = generated::BilateralPrepareRequest {
             counterparty_device_id: vec![1; 32],
             operation_data: vec![2; 16],
-            validity_iterations: 100,
             expected_genesis_hash: None,
             expected_counterparty_state_hash: None,
             ble_address: String::new(),
@@ -338,7 +264,6 @@ mod tests {
         let env = make_invoke_envelope("bilateral.prepare", &body);
         let decoded = extract_prepare_request(&env).unwrap();
         assert_eq!(decoded.counterparty_device_id, vec![1; 32]);
-        assert_eq!(decoded.validity_iterations, 100);
     }
 
     #[test]
@@ -379,7 +304,6 @@ mod tests {
         let req = generated::BilateralPrepareRequest {
             counterparty_device_id: vec![1; 32],
             operation_data: vec![2; 16],
-            validity_iterations: 100,
             expected_genesis_hash: None,
             expected_counterparty_state_hash: None,
             ble_address: String::new(),
@@ -407,13 +331,6 @@ mod tests {
         let req = generated::BilateralConfirmRequest {
             commitment_hash: Some(generated::Hash32 { v: vec![0xCC; 32] }),
             sender_signature: vec![3; 16],
-            sender_smt_root: vec![],
-            rel_proof_parent: vec![],
-            rel_proof_child: vec![],
-            stitched_receipt: vec![],
-            shared_chain_tip_new: Some(generated::Hash32 { v: vec![0; 32] }),
-            pre_entropy: vec![],
-            sender_smt_root_before: vec![],
             ..Default::default()
         };
         let body = req.encode_to_vec();
@@ -433,13 +350,6 @@ mod tests {
         let req = generated::BilateralConfirmRequest {
             commitment_hash: Some(generated::Hash32 { v: vec![0xCC; 32] }),
             sender_signature: vec![3; 16],
-            sender_smt_root: vec![],
-            rel_proof_parent: vec![],
-            rel_proof_child: vec![],
-            stitched_receipt: vec![],
-            shared_chain_tip_new: Some(generated::Hash32 { v: vec![0; 32] }),
-            pre_entropy: vec![],
-            sender_smt_root_before: vec![],
             ..Default::default()
         };
         let body = req.encode_to_vec();

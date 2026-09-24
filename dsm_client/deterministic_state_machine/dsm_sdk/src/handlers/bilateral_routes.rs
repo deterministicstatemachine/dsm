@@ -112,7 +112,6 @@ impl AppRouterImpl {
                     let mut metadata: HashMap<String, String> = HashMap::new();
                     metadata.insert("phase".to_string(), phase.to_string());
                     metadata.insert("direction".to_string(), direction.to_string());
-                    metadata.insert("created_at_step".to_string(), s.created_at_step.to_string());
                     if let Some(amt) = amount {
                         metadata.insert("amount".to_string(), amt.to_string());
                     }

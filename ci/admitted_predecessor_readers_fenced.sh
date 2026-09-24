@@ -34,6 +34,7 @@ declare -a EXEMPT=(
   "$core/dsm_sdk/src/sdk/economic_admission_flow.rs|sources the predecessor root rather than checking a supplied one; also names a (position, root) pair for a foreign verifier, and re-derives nothing"
   "$core/dsm/src/economic/peer_lineage.rs|builds a SingleRoot from this verifier's own settled memo, never from the admitted store"
   "$core/dsm/src/economic/lineage.rs|DEFINES the reader; the only production mention is its own doc"
+  "$core/dsm_sdk/src/sdk/sofi_evidence.rs|gathers SetupValid evidence: the claim this lineage accepted at a setup's position (SoFi Amendment S9); it creates no position, and an unresolved position yields no claim because the rehydration refuses it"
 )
 
 [[ -d "$core" ]] || { echo "[FAIL] $core not found"; exit 1; }

@@ -12,6 +12,7 @@ pub mod authority_anchor;
 pub mod bearer_lock;
 pub mod bundle;
 pub mod capsule;
+pub mod cell;
 pub mod chain_segment;
 pub mod dbtc_backing;
 pub mod dbtc_reconcile;
@@ -36,6 +37,7 @@ pub use dbtc_backing::{classify_dbtc_backing, DbtcBitcoinFacts};
 pub use dbtc_reconcile::{aggregate_dbtc_frontier, DbtcVaultCondition, DbtcVaultOutcome};
 pub use dbtc_vault_index::{build_dbtc_vault_index, PostedDbtcVaultIndex};
 pub use bundle::RecoveryBundle;
+pub use cell::RecoveryCell;
 pub use chain_segment::{
     rel_chain_state_from_proto, rel_chain_state_to_proto, RecoveryEstablishmentReceipt,
     RelationshipChainSegment,
@@ -53,7 +55,7 @@ pub use succession_binding::{
 };
 pub use succession_proof::RecoverySuccessionProof;
 pub use rollup::{ReceiptRollup, RollupEntry};
-pub use tombstone::{TombstoneReceipt, SuccessionReceipt, RecoveryReceipt};
+pub use tombstone::{ContactTombstoneAck, TombstoneReceipt, SuccessionReceipt, RecoveryReceipt};
 
 use crate::types::error::DsmError;
 use std::collections::HashMap;

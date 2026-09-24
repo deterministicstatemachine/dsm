@@ -12,7 +12,7 @@ import { decodeFramedEnvelopeV3, encodeEnvelope } from '../decoding';
 
 describe('encoding/decoding helpers parity', () => {
   it('encodeEnvelope matches native toBinary and decodeFramedEnvelopeV3 round-trips via framing', () => {
-    const headers = new pb.Headers({ deviceId: new Uint8Array(32), genesisHash: new Uint8Array(32), chainTip: new Uint8Array(32) } as any);
+    const headers = new pb.Headers({ deviceId: new Uint8Array(32), genesisHash: new Uint8Array(32),} as any);
     const env = new pb.Envelope({ version: 3, headers } as any);
     const direct = env.toBinary();
     const encoded = encodeEnvelope(env);

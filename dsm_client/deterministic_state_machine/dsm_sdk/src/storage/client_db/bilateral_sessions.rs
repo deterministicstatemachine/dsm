@@ -7,7 +7,6 @@ use rusqlite::{params, OptionalExtension};
 
 use super::get_connection;
 use super::types::BilateralSessionRecord;
-use crate::util::deterministic_time::tick;
 use crate::util::text_id::encode_base32_crockford;
 
 /// Get a database connection Arc
@@ -66,22 +65,19 @@ pub fn store_bilateral_session(session: &BilateralSessionRecord) -> Result<()> {
     let conn = binding
         .lock()
         .map_err(|_| anyhow!("Database lock poisoned - concurrent access error"))?;
-    let now = tick();
-
     conn.execute("BEGIN IMMEDIATE", [])?;
     let result = conn.execute(
         "INSERT INTO bilateral_sessions(
             commitment_hash, counterparty_device_id, counterparty_genesis_hash, operation_bytes, phase,
-            local_signature, counterparty_signature, created_at_step,
-                sender_ble_address, updated_at, stitched_receipt_bytes)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+            local_signature, counterparty_signature,
+                sender_ble_address, stitched_receipt_bytes)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
          ON CONFLICT(commitment_hash) DO UPDATE SET
             phase = excluded.phase,
             local_signature = excluded.local_signature,
             counterparty_signature = excluded.counterparty_signature,
             counterparty_genesis_hash = excluded.counterparty_genesis_hash,
             sender_ble_address = excluded.sender_ble_address,
-            updated_at = excluded.updated_at,
             stitched_receipt_bytes = COALESCE(excluded.stitched_receipt_bytes, bilateral_sessions.stitched_receipt_bytes)",
         params![
             &session.commitment_hash,
@@ -91,9 +87,7 @@ pub fn store_bilateral_session(session: &BilateralSessionRecord) -> Result<()> {
             &session.phase,
             &session.local_signature,
             &session.counterparty_signature,
-            session.created_at_step as i64,
             &session.sender_ble_address,
-            now as i64,
             &session.stitched_receipt_bytes,
         ],
     );
@@ -123,10 +117,10 @@ pub fn get_all_bilateral_sessions() -> Result<Vec<BilateralSessionRecord>> {
         .map_err(|_| anyhow!("Database lock poisoned - concurrent access error"))?;
     let mut stmt = conn.prepare(
         "SELECT commitment_hash, counterparty_device_id, operation_bytes, phase,
-               counterparty_genesis_hash, local_signature, counterparty_signature, created_at_step,
+               counterparty_genesis_hash, local_signature, counterparty_signature,
                sender_ble_address, stitched_receipt_bytes
          FROM bilateral_sessions
-           ORDER BY created_at_step DESC",
+           ORDER BY rowid DESC",
     )?;
 
     let iter = stmt.query_map([], |row| {
@@ -138,9 +132,8 @@ pub fn get_all_bilateral_sessions() -> Result<Vec<BilateralSessionRecord>> {
             counterparty_genesis_hash: row.get(4)?,
             local_signature: row.get(5)?,
             counterparty_signature: row.get(6)?,
-            created_at_step: row.get::<_, i64>(7)? as u64,
-            sender_ble_address: row.get(8)?,
-            stitched_receipt_bytes: row.get(9)?,
+            sender_ble_address: row.get(7)?,
+            stitched_receipt_bytes: row.get(8)?,
         })
     })?;
 
@@ -160,7 +153,7 @@ pub fn get_bilateral_session(commitment_hash: &[u8]) -> Result<Option<BilateralS
 
     conn.query_row(
         "SELECT commitment_hash, counterparty_device_id, operation_bytes, phase,
-                counterparty_genesis_hash, local_signature, counterparty_signature, created_at_step,
+                counterparty_genesis_hash, local_signature, counterparty_signature,
                 sender_ble_address, stitched_receipt_bytes
            FROM bilateral_sessions
           WHERE commitment_hash = ?1",
@@ -174,9 +167,8 @@ pub fn get_bilateral_session(commitment_hash: &[u8]) -> Result<Option<BilateralS
                 counterparty_genesis_hash: row.get(4)?,
                 local_signature: row.get(5)?,
                 counterparty_signature: row.get(6)?,
-                created_at_step: row.get::<_, i64>(7)? as u64,
-                sender_ble_address: row.get(8)?,
-                stitched_receipt_bytes: row.get(9)?,
+                sender_ble_address: row.get(7)?,
+                stitched_receipt_bytes: row.get(8)?,
             })
         },
     )
@@ -212,14 +204,6 @@ pub fn update_bilateral_session_phase(commitment_hash: &[u8], phase: &str) -> Re
     Ok(())
 }
 
-/// Clean up expired bilateral sessions
-pub fn cleanup_expired_bilateral_sessions(current_ticks: u64) -> Result<usize> {
-    // Clockless protocol: bilateral sessions do not expire by any local notion of duration.
-    // Cleanup must be driven by explicit state transitions, not by a ticking counter.
-    let _ = current_ticks;
-    Ok(0)
-}
-
 // ═══════════════════════════════════════════════════════════════════════
 // §5.3 Pending Confirm Delivery — crash-safe receipt persistence
 // ═══════════════════════════════════════════════════════════════════════
@@ -238,34 +222,11 @@ pub fn store_pending_confirm_delivery(
     let conn = binding
         .lock()
         .map_err(|_| anyhow!("Database lock poisoned"))?;
-    let tick_val = tick() as i64;
     conn.execute(
-        "INSERT OR REPLACE INTO pending_confirm_delivery (commitment_hash, counterparty_device_id, confirm_envelope, created_at_tick) VALUES (?1, ?2, ?3, ?4)",
-        params![commitment_hash, counterparty_device_id, confirm_envelope, tick_val],
+        "INSERT OR REPLACE INTO pending_confirm_delivery (commitment_hash, counterparty_device_id, confirm_envelope) VALUES (?1, ?2, ?3)",
+        params![commitment_hash, counterparty_device_id, confirm_envelope],
     )?;
     Ok(())
-}
-
-/// Get pending confirm envelopes for a counterparty (for re-delivery on reconnect).
-pub fn get_pending_confirm_deliveries(
-    counterparty_device_id: &[u8],
-) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
-    if counterparty_device_id.len() != 32 {
-        return Err(anyhow!("Invalid device_id length"));
-    }
-    let binding = get_db_connection()?;
-    let conn = binding
-        .lock()
-        .map_err(|_| anyhow!("Database lock poisoned"))?;
-    let mut stmt = conn.prepare(
-        "SELECT commitment_hash, confirm_envelope FROM pending_confirm_delivery WHERE counterparty_device_id = ?1",
-    )?;
-    let rows = stmt
-        .query_map(params![counterparty_device_id], |row| {
-            Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
-        })?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    Ok(rows)
 }
 
 /// Get a pending confirm envelope by commitment hash.
@@ -312,7 +273,7 @@ mod tests {
     use serial_test::serial;
 
     fn init_test_db() {
-        unsafe { std::env::set_var("DSM_SDK_TEST_MODE", "1") };
+        crate::economic_fixtures::use_test_storage_dir();
         crate::storage::client_db::reset_database_for_tests();
         crate::storage::client_db::init_database().expect("init db");
     }
@@ -326,7 +287,6 @@ mod tests {
             phase: phase.to_string(),
             local_signature: Some(vec![0x55; 64]),
             counterparty_signature: None,
-            created_at_step: 1,
             sender_ble_address: None,
             stitched_receipt_bytes: None,
         }
@@ -416,11 +376,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn cleanup_expired_returns_zero() {
-        assert_eq!(cleanup_expired_bilateral_sessions(999).unwrap(), 0);
     }
 
     #[test]

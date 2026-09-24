@@ -13,16 +13,14 @@
 //! - Syncs persisted contacts from SQLite into the `BluetoothManager`.
 //!
 //! Pre-genesis, minimal bootstrap handlers are installed that return
-//! deterministic errors for operations requiring identity, while still
-//! serving `sys.tick` queries.
+//! deterministic errors for operations requiring identity.
 
 use std::sync::Arc;
 use crate::bridge::install_bilateral_handler as install_sdk_bilateral_handler;
-use crate::bridge::install_unilateral_handler as install_sdk_unilateral_handler;
 use crate::bridge::install_app_router as install_sdk_app_router;
 use crate::handlers::{
-    handle_create_genesis_v2_query, handle_generate_mnemonic_query, handle_system_genesis_query,
-    install_app_router_adapter, AppRouterImpl, BiImpl, UniImpl,
+    handle_create_genesis_v2_query, handle_generate_mnemonic_query, install_app_router_adapter,
+    AppRouterImpl, BiImpl,
 };
 use dsm::types::proto as pb;
 use prost::Message;
@@ -324,46 +322,6 @@ struct CoreBilateralBridge {
     sdk_handler: Arc<dyn crate::bridge::BilateralHandler>,
 }
 
-/// Core unilateral handler that wraps SDK's async UniImpl
-struct CoreUnilateralBridge {
-    sdk_handler: Arc<dyn crate::bridge::UnilateralHandler>,
-}
-
-impl dsm::core::bridge::UnilateralHandler for CoreUnilateralBridge {
-    fn handle_unilateral_invoke(&self, operation: pb::Invoke) -> Result<pb::OpResult, String> {
-        // Convert gp::Invoke to UniOp
-        // gp::Invoke.args is Option<ArgPack>. UniImpl expects raw bytes in 'data'.
-        // For unilateral ops, the ArgPack body contains the payload.
-        let data = operation.args.map(|a| a.body).unwrap_or_default();
-
-        let op = crate::bridge::UniOp {
-            operation_type: operation.method,
-            data,
-        };
-
-        let result =
-            crate::runtime::get_runtime().block_on(async { self.sdk_handler.handle(op).await });
-
-        if result.success {
-            Ok(pb::OpResult {
-                op_id: None,
-                accepted: true,
-                post_state_hash: Some(pb::Hash32 { v: vec![0u8; 32] }),
-                result: Some(pb::ResultPack {
-                    schema_hash: Some(pb::Hash32 { v: vec![0u8; 32] }),
-                    codec: pb::Codec::Proto as i32,
-                    body: result.result_data,
-                }),
-                error: None,
-            })
-        } else {
-            Err(result
-                .error_message
-                .unwrap_or_else(|| "Unilateral operation failed".to_string()))
-        }
-    }
-}
-
 impl dsm::core::bridge::BilateralHandler for CoreBilateralBridge {
     fn handle_bilateral_prepare(
         &self,
@@ -389,9 +347,9 @@ impl dsm::core::bridge::BilateralHandler for CoreBilateralBridge {
             Ok(pb::OpResult {
                 op_id: None,
                 accepted: true,
-                post_state_hash: Some(pb::Hash32 { v: vec![0u8; 32] }),
+                post_state_hash: None,
                 result: Some(pb::ResultPack {
-                    schema_hash: Some(pb::Hash32 { v: vec![0u8; 32] }),
+                    schema_hash: None,
                     codec: pb::Codec::Proto as i32,
                     body: result.result_data,
                 }),
@@ -427,9 +385,9 @@ impl dsm::core::bridge::BilateralHandler for CoreBilateralBridge {
             Ok(pb::OpResult {
                 op_id: None,
                 accepted: true,
-                post_state_hash: Some(pb::Hash32 { v: vec![0u8; 32] }),
+                post_state_hash: None,
                 result: Some(pb::ResultPack {
-                    schema_hash: Some(pb::Hash32 { v: vec![0u8; 32] }),
+                    schema_hash: None,
                     codec: pb::Codec::Proto as i32,
                     body: result.result_data,
                 }),
@@ -465,9 +423,9 @@ impl dsm::core::bridge::BilateralHandler for CoreBilateralBridge {
             Ok(pb::OpResult {
                 op_id: None,
                 accepted: true,
-                post_state_hash: Some(pb::Hash32 { v: vec![0u8; 32] }),
+                post_state_hash: None,
                 result: Some(pb::ResultPack {
-                    schema_hash: Some(pb::Hash32 { v: vec![0u8; 32] }),
+                    schema_hash: None,
                     codec: pb::Codec::Proto as i32,
                     body: result.result_data,
                 }),
@@ -503,9 +461,9 @@ impl dsm::core::bridge::BilateralHandler for CoreBilateralBridge {
             Ok(pb::OpResult {
                 op_id: None,
                 accepted: true,
-                post_state_hash: Some(pb::Hash32 { v: vec![0u8; 32] }),
+                post_state_hash: None,
                 result: Some(pb::ResultPack {
-                    schema_hash: Some(pb::Hash32 { v: vec![0u8; 32] }),
+                    schema_hash: None,
                     codec: pb::Codec::Proto as i32,
                     body: result.result_data,
                 }),
@@ -523,15 +481,6 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
     // 1) Validate cfg strictly (no probing)
     cfg.validate()?;
 
-    // 1.5) Initialize progress context for deterministic time (sys.tick queries)
-    // This must happen before any handlers are installed that might need timing.
-    // Initialize with default values - will be updated during bilateral interactions.
-    if let Err(e) = dsm::utils::deterministic_time::update_progress_context([0u8; 32], 0) {
-        log::warn!("[SDK Init] Failed to initialize progress context: {:?}", e);
-    } else {
-        log::info!("[SDK Init] Progress context initialized with defaults");
-    }
-
     // 2) Install bilateral handler into BOTH SDK and core layers
     let bi_impl = Arc::new(BiImpl::new(cfg.clone()));
 
@@ -544,41 +493,9 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
     });
     dsm::core::bridge::install_bilateral_handler(core_bridge);
 
-    // 3) Install unilateral handler into BOTH SDK and core layers
-    //    Pre-genesis: device identity may not exist yet, so we must not panic.
-    //    Instead, install a minimal handler that returns a deterministic error.
-    let uni_impl: Arc<dyn crate::bridge::UnilateralHandler + Send + Sync> =
-        if crate::sdk::app_state::AppState::get_device_id().is_some() {
-            Arc::new(
-                UniImpl::new(cfg.clone()).map_err(|e| format!("Failed to create UniImpl: {e}"))?,
-            )
-        } else {
-            struct MinimalUnilateral;
-
-            #[async_trait::async_trait]
-            impl crate::bridge::UnilateralHandler for MinimalUnilateral {
-                async fn handle(&self, _op: crate::bridge::UniOp) -> crate::bridge::UniResult {
-                    crate::bridge::UniResult {
-                        success: false,
-                        result_data: Vec::new(),
-                        error_message: Some("unilateral handler unavailable pre-genesis".into()),
-                    }
-                }
-            }
-
-            Arc::new(MinimalUnilateral)
-        };
-
-    install_sdk_unilateral_handler(uni_impl.clone());
-
-    let core_uni_bridge = Arc::new(CoreUnilateralBridge {
-        sdk_handler: uni_impl,
-    });
-    dsm::core::bridge::install_unilateral_handler(core_uni_bridge);
-
     // 4) Install AppRouter into BOTH SDK and core layers
     //    - If canonical identity context is ready: full AppRouter
-    //    - Otherwise: minimal bootstrap router (sys.tick + narrow bootstrap queries)
+    //    - Otherwise: minimal bootstrap router (narrow bootstrap queries)
     //
     // IMPORTANT:
     // This init function can be called more than once per process lifetime (e.g. Android
@@ -614,7 +531,6 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
     } else {
         // Install minimal bootstrap router for pre-genesis queries
         use crate::bridge::{AppQuery, AppInvoke, AppResult};
-        use prost::Message;
 
         struct MinimalBootstrapRouter;
 
@@ -622,28 +538,6 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
         impl crate::bridge::AppRouter for MinimalBootstrapRouter {
             async fn query(&self, q: AppQuery) -> AppResult {
                 match q.path.as_str() {
-                    "sys.tick" => {
-                        let tick = dsm::performance::mono_commit_height();
-                        let result_pack = dsm::types::proto::ResultPack {
-                            schema_hash: Some(dsm::types::proto::Hash32 { v: vec![0u8; 32] }),
-                            codec: dsm::types::proto::Codec::Proto as i32,
-                            body: tick.to_le_bytes().to_vec(),
-                        };
-                        let mut data = Vec::new();
-                        if let Err(e) = result_pack.encode(&mut data) {
-                            return AppResult {
-                                success: false,
-                                data: Vec::new(),
-                                error_message: Some(format!("Failed to encode ResultPack: {e}")),
-                            };
-                        }
-                        AppResult {
-                            success: true,
-                            data,
-                            error_message: None,
-                        }
-                    }
-                    "system.genesis" => handle_system_genesis_query(q),
                     // Pre-genesis wallet CREATION is the bootstrap itself and must be allowed here:
                     // generateMnemonic is pure (OsRng -> BIP39), and createGenesisV2 derives the
                     // wallet seed + establishes the identity — after which a re-init installs the full
@@ -685,15 +579,10 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
 
     log::info!("[SDK Init] Core handlers (Unilateral, Bilateral, Recovery) installed successfully");
 
-    // 6) Register BLE backend (Android only; protobuf-only). This wires router → BLE path.
-    // IMPORTANT: BLE init can be deferred if identity is not ready, but the core handlers above
-    // must remain installed so queries like sys.tick work before genesis.
+    // 6) BLE (Android only). BLE init can be deferred if identity is not ready, but the core
+    // handlers above must remain installed so bootstrap queries work before genesis.
     #[cfg(all(target_os = "android", feature = "bluetooth"))]
     {
-        use crate::ble::android_backend::AndroidBleBackend;
-        crate::ble::register_ble_backend(AndroidBleBackend::new());
-        log::info!("[SDK Init] AndroidBleBackend registered");
-
         // Create and register BluetoothManager using AppState identity.
         // Identity MUST be available - this is called post-genesis only.
         use tokio::sync::RwLock as TokioRwLock;
@@ -707,7 +596,7 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
             crate::sdk::app_state::AppState::get_genesis_hash(),
         ) {
             (Some(d), Some(g)) => (d, g),
-            _ => {
+            (None, ..) | (.., None) => {
                 // Identity not ready: Skip BT init but SDK is still functional for queries.
                 // BLE can be late-initialized via initializeBilateralSdk once genesis is created.
                 log::warn!("[SDK Init] BluetoothManager identity not ready (device_id/genesis missing). Skipping BT init; will allow late init.");
@@ -731,25 +620,15 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
         // settle() rejects every bilateral transfer → balance never updates.
         {
             let root = dsm::common::device_tree::DeviceTree::single(dev_fixed).root();
-            crate::sdk::app_state::AppState::set_device_tree_root(root);
+            crate::sdk::app_state::AppState::set_device_tree_root(root)
+                .map_err(|e| format!("persist the device tree root: {e}"))?;
             log::info!(
                 "[SDK Init] Device tree root computed and persisted (dev={})",
                 crate::util::text_id::encode_base32_crockford(&dev_fixed)
             );
         }
 
-        // Bootstrap-time validation gate (§2.3.1): Ensure device_tree_root is always present.
-        // If any earlier initialization step is skipped or fails, recover here.
-        // This prevents silent bilateral transfer failures post-initialization.
-        if crate::sdk::app_state::AppState::get_device_tree_root().is_none() {
-            log::warn!("[SDK Init Validation] device_tree_root is None — emergency backfill from device_id");
-            let root = dsm::common::device_tree::DeviceTree::single(dev_fixed).root();
-            crate::sdk::app_state::AppState::set_device_tree_root(root);
-            log::info!("[SDK Init Validation] Emergency backfill successful — R_G now available");
-        }
-
-        let contact_manager =
-            DsmContactManager::new(dev_fixed, vec![dsm::types::identifiers::NodeId::new("n")]);
+        let contact_manager = DsmContactManager::new(dev_fixed);
 
         // Genesis v2: the device signing keypair is the AK keypair derived deterministically
         // from the BIP39 wallet seed (mnemonic.to_seed) — byte-identical to what
@@ -781,28 +660,19 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
             keypair.public_key.len()
         );
 
-        // Persist the derived public key to AppState if missing or empty.
-        // This fixes users whose genesis was created before signing key persistence was added,
-        // or whose key generation silently failed during genesis.
-        let stored_pk = crate::sdk::app_state::AppState::get_public_key();
-        if stored_pk.as_ref().map_or(true, |v| v.is_empty()) {
-            log::info!(
-                "[SDK Init] Persisting derived signing public key to AppState (len={})",
-                keypair.public_key.len()
-            );
-            let smt =
-                crate::sdk::app_state::AppState::get_smt_root().unwrap_or_else(|| vec![0u8; 32]);
-            crate::sdk::app_state::AppState::set_identity_info(
-                dev.clone(),
-                keypair.public_key.clone(),
-                gen.clone(),
-                smt,
+        // The AK the identity holds is the one the wallet derives: genesis
+        // installed it, and nothing else writes it.
+        let stored_pk = crate::sdk::app_state::AppState::get_public_key()
+            .ok_or_else(|| "the identity holds no signing key".to_string())?;
+        if stored_pk != keypair.public_key {
+            return Err(
+                "the identity's signing key is not the one this wallet derives".to_string(),
             );
         }
 
         let chain_tip_store =
             std::sync::Arc::new(crate::sdk::chain_tip_store::SqliteChainTipStore::new());
-        let manager = BilateralTransactionManager::new_with_chain_tip_store(
+        let manager = BilateralTransactionManager::new(
             contact_manager,
             keypair,
             dev_fixed,
@@ -813,7 +683,7 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
         let manager_arc =
             std::sync::Arc::new(crate::bluetooth::BluetoothManager::new(dev_fixed, btx));
 
-        let _ = crate::bluetooth::register_global_bluetooth_manager(manager_arc.clone());
+        crate::bluetooth::register_global_bluetooth_manager(manager_arc.clone());
         log::info!("[SDK Init] BluetoothManager registered globally");
 
         // Inject BLE frame coordinator into BiImpl so offline sends dispatch over BLE.
@@ -834,79 +704,44 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
         })
         .join();
         match ble_inject_result {
-            Ok(Ok(_)) => log::info!(
+            Ok(Ok(())) => log::info!(
                 "[SDK Init] BLE coordinator and transport adapter injected into bilateral handler"
             ),
-            Ok(Err(e)) => log::warn!("[SDK Init] BLE injection failed: {e}"),
-            Err(_) => log::warn!("[SDK Init] BLE injection thread panicked"),
+            Ok(Err(e)) => return Err(format!("BLE injection failed: {e}")),
+            Err(panic) => return Err(format!("BLE injection thread panicked: {panic:?}")),
         }
 
-        // Load existing contacts from SQLite and sync to BluetoothManager SYNCHRONOUSLY
-        // We're inside a tokio runtime context (from JNI), so we spawn a std::thread
-        // that creates its own runtime to avoid "Cannot start a runtime within a runtime"
+        // Load the persisted contacts into the BluetoothManager before the
+        // first BLE prepare can arrive; otherwise the handler rejects a known
+        // sender. A thread with its own runtime, because init can run inside
+        // a runtime (JNI).
         let manager_for_sync = manager_arc.clone();
-        let handle = std::thread::spawn(move || {
-            // Create a fresh runtime just for this sync operation
-            let rt = match tokio::runtime::Builder::new_current_thread()
+        let synced = std::thread::spawn(move || -> Result<usize, String> {
+            let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
-            {
-                Ok(rt) => rt,
-                Err(e) => {
-                    log::error!("[SDK Init] Failed to create sync runtime: {e}");
-                    return;
-                }
-            };
-
+                .map_err(|e| format!("contact sync runtime: {e}"))?;
             rt.block_on(async move {
-                match crate::storage::client_db::get_all_contacts() {
-                    Ok(contacts) => {
-                        log::warn!(
-                            "[SDK Init] 🔵 Syncing {} contacts to BluetoothManager",
-                            contacts.len()
-                        );
-                        for c in contacts {
-                            let Some(verified_contact) = c.to_verified_contact() else {
-                                log::warn!("[SDK Init] ⚠️ Skipping contact with invalid lengths");
-                                continue;
-                            };
-                            log::warn!(
-                                "[SDK Init] 🔵 Syncing contact alias={} public_key_len={}",
-                                c.alias,
-                                c.public_key.len()
-                            );
-                            if let Err(e) = manager_for_sync
-                                .add_verified_contact(verified_contact)
-                                .await
-                            {
-                                log::warn!(
-                                    "[SDK Init] ❌ Failed to sync contact {}: {}",
-                                    c.alias,
-                                    e
-                                );
-                            } else {
-                                log::warn!(
-                                    "[SDK Init] ✅ Synced contact {} to BluetoothManager",
-                                    c.alias
-                                );
-                            }
-                        }
-                        log::warn!("[SDK Init] 🔵 Contact sync to BluetoothManager complete");
-                    }
-                    Err(e) => {
-                        log::warn!("[SDK Init] ❌ Failed to load contacts for sync: {}", e);
-                    }
+                let contacts = crate::storage::client_db::get_all_contacts()
+                    .map_err(|e| format!("load contacts: {e}"))?;
+                let count = contacts.len();
+                for record in contacts {
+                    let contact = record.to_verified_contact().map_err(|e| e.to_string())?;
+                    manager_for_sync
+                        .add_verified_contact(contact)
+                        .await
+                        .map_err(|e| format!("contact {}: {e}", record.alias))?;
                 }
-            });
-        });
-
-        // Block until contact sync completes. Without this, the BilateralBleHandler's
-        // in-memory ContactManager is empty when the first BLE prepare arrives, causing
-        // "Sender not found in verified contacts" rejections. The sync is fast (single
-        // SQLite query + HashMap inserts) — typically <50ms even with dozens of contacts.
-        match handle.join() {
-            Ok(_) => log::info!("[SDK Init] Contact sync thread completed"),
-            Err(_) => log::warn!("[SDK Init] Contact sync thread panicked"),
+                Ok(count)
+            })
+        })
+        .join();
+        match synced {
+            Ok(Ok(count)) => {
+                log::info!("[SDK Init] {count} contacts synced to the BluetoothManager")
+            }
+            Ok(Err(e)) => return Err(format!("contact sync to the BluetoothManager: {e}")),
+            Err(panic) => return Err(format!("contact sync thread panicked: {panic:?}")),
         }
     }
 

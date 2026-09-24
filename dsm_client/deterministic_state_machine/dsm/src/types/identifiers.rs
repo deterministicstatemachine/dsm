@@ -77,16 +77,6 @@ macro_rules! define_id_type {
             pub fn as_bytes(&self) -> &[u8] {
                 &self.0
             }
-
-            /// Generate a fresh ID (deterministic, process-local).
-            /// 8 bytes from monotonic counter (LE) + 8 bytes from RNG.
-            pub fn generate() -> Self {
-                let counter = crate::performance::mono_commit_height();
-                let mut bytes = Vec::with_capacity(16);
-                bytes.extend_from_slice(&counter.to_le_bytes());
-                bytes.extend_from_slice(&crate::crypto::rng::random_bytes(8));
-                Self(bytes)
-            }
         }
 
         impl fmt::Display for $name {
@@ -427,13 +417,6 @@ mod tests {
         set.insert(VaultId::new("x"));
         set.insert(VaultId::new("x"));
         assert_eq!(set.len(), 1);
-    }
-
-    #[test]
-    fn id_generate_is_unique() {
-        let a = VaultId::generate();
-        let b = VaultId::generate();
-        assert_ne!(a, b);
     }
 
     // --- GenesisHash ---

@@ -42,7 +42,10 @@ use crate::economic::credit::{
 };
 use crate::economic::mutation::EconomicLeafMutation;
 use crate::economic::provenance::validated_peer_debit_source_id;
-use crate::economic::state::{EconomicBalanceState, EconomicConsumedSourceState, EconomicLeafState};
+use crate::economic::state::{
+    EconomicBalanceState, EconomicConsumedSourceState, EconomicLeafState,
+    EconomicTokenCreationState,
+};
 use crate::economic::tree::EconomicSmt;
 use crate::economic::witness::EconomicTransitionWitness;
 use crate::types::operations::Operation;
@@ -267,11 +270,13 @@ enum SemanticWriteSet {
         leg_b: ([u8; 32], u64),
         creation: crate::sofi::wire::VaultCreation,
     },
-    /// `CreateToken` (SoFi §51): the ERA fee debit and the creator's credit of
-    /// the new token's whole genesis supply, as ONE write set. The credit's
+    /// `CreateToken` (SoFi §51, Amendment S8): the ERA fee debit, the
+    /// creator's credit of the new token's whole genesis supply, and the
+    /// creation record inserted FROM ZERO, as ONE write set. The credit's
     /// source is the genesis release (`0x005F`), whose arm checks the amount
-    /// against the genesis supply the token's policy commits. Fee and supply
-    /// are different assets: neither funds the other.
+    /// against the genesis supply the token's policy commits and the creator
+    /// the policy names. Fee and supply are different assets: neither funds
+    /// the other.
     CreateTokenRelease {
         /// `(ERA policy_commit, fee_amount)`.
         fee: ([u8; 32], u64),
@@ -312,7 +317,6 @@ fn pair_legs(
 enum FactsKind {
     NativeReserveRelease,
     PeerDebit,
-    GenesisRelease,
 }
 
 /// The one table: what an operation does to `R_econ`, or why it cannot be
@@ -670,7 +674,6 @@ pub fn build_write_set(
                     CreditSourceFacts::NativeReserveRelease { .. },
                     FactsKind::NativeReserveRelease
                 ) | (CreditSourceFacts::PeerDebit { .. }, FactsKind::PeerDebit)
-                    | (CreditSourceFacts::GenesisRelease, FactsKind::GenesisRelease)
             );
             if !matches {
                 return Err(WriteSetError::FactsDoNotMatchOperation);
@@ -771,6 +774,13 @@ pub fn build_write_set(
                     amount,
                 )?);
             }
+            // The same binding the verifier checks: the record is this
+            // operation's vault's.
+            if creation.vault_id != vault_id {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "the creation record names another vault than the operation",
+                });
+            }
             let state = EconomicLeafState::VaultCreation(creation);
             let key = state.leaf_key(genesis, device_id);
             // Insert-only, and that is what makes the record's presence under
@@ -781,12 +791,53 @@ pub fn build_write_set(
                     detail: "a creation record for this vault already exists",
                 });
             }
-            let _ = vault_id;
             planned.push(PlannedLeaf {
                 key,
                 pre: None,
                 post: Some(state),
                 source: None,
+            });
+        }
+        // SoFi §51: the ERA fee debit and the whole genesis supply credited
+        // to the creator, as one write set.
+        SemanticWriteSet::CreateTokenRelease { fee, release } => {
+            if *facts != CreditSourceFacts::GenesisRelease {
+                return Err(WriteSetError::FactsDoNotMatchOperation);
+            }
+            if fee.1 > 0 {
+                planned.push(plan_balance_debit(
+                    genesis,
+                    device_id,
+                    pre_balances,
+                    fee.0,
+                    fee.1,
+                )?);
+            }
+            let (policy_commit, amount) = release;
+            let record =
+                EconomicLeafState::TokenCreation(EconomicTokenCreationState { policy_commit });
+            let record_key = record.leaf_key(genesis, device_id);
+            // FROM ZERO: a token is created once on its creator's lineage.
+            if tree.get(&record_key).is_some() {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "a creation record for this token already exists",
+                });
+            }
+            planned.push(PlannedLeaf {
+                key: record_key,
+                pre: None,
+                post: Some(record),
+                source: None,
+            });
+            let have = pre_balances.get(&policy_commit).copied().unwrap_or(0);
+            let next = have
+                .checked_add(amount)
+                .ok_or(WriteSetError::BalanceOverflow)?;
+            planned.push(PlannedLeaf {
+                key: crate::economic::keys::balance_key(genesis, device_id, &policy_commit),
+                pre: balance_state(policy_commit, have)?,
+                post: balance_state(policy_commit, next)?,
+                source: Some(PlannedSource::External(facts.clone())),
             });
         }
     }
@@ -918,10 +969,12 @@ pub fn verify_operation_write_set(
     // refused here by class.
     let relationships_legal = matches!(semantic, SemanticWriteSet::SofiSetup { .. });
     let creations_legal = matches!(semantic, SemanticWriteSet::SofiVaultCreate { .. });
+    let token_creations_legal = matches!(semantic, SemanticWriteSet::CreateTokenRelease { .. });
     let mut balances: Vec<ObservedBalance> = Vec::new();
     let mut consumed: Vec<(u32, EconomicConsumedSourceState)> = Vec::new();
     let mut relationships: Vec<(u32, crate::sofi::wire::TraderRelationshipLeaf)> = Vec::new();
     let mut creations: Vec<(u32, crate::sofi::wire::VaultCreation)> = Vec::new();
+    let mut token_creations: Vec<EconomicTokenCreationState> = Vec::new();
     for (i, m) in witness.mutations.iter().enumerate() {
         let index = u32::try_from(i).map_err(|_| WriteSetError::Ccb("index overflow".into()))?;
         let classify = |s: &Option<EconomicLeafState>| -> Result<(), WriteSetError> {
@@ -931,6 +984,7 @@ pub fn verify_operation_write_set(
                 | Some(EconomicLeafState::ConsumedSource(_)) => Ok(()),
                 Some(EconomicLeafState::Relationship(_)) if relationships_legal => Ok(()),
                 Some(EconomicLeafState::VaultCreation(_)) if creations_legal => Ok(()),
+                Some(EconomicLeafState::TokenCreation(_)) if token_creations_legal => Ok(()),
                 Some(_) => Err(WriteSetError::UnexpectedLeafClass),
             }
         };
@@ -953,6 +1007,14 @@ pub fn verify_operation_write_set(
             (Some(EconomicLeafState::VaultCreation(_)), _) => {
                 return Err(WriteSetError::WrongWriteSet {
                     detail: "a creation record is insert-only; a vault is created once",
+                })
+            }
+            (None, Some(EconomicLeafState::TokenCreation(t))) => {
+                token_creations.push(t.clone());
+            }
+            (Some(EconomicLeafState::TokenCreation(_)), _) => {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "a token-creation record is insert-only; a token is created once",
                 })
             }
             (pre, Some(EconomicLeafState::Balance(post))) => {
@@ -1079,34 +1141,6 @@ pub fn verify_operation_write_set(
                     }
                     Ok(())
                 }
-                (
-                    FactsKind::GenesisRelease,
-                    CreditSource::GenesisRelease(d),
-                    Operation::CreateToken { .. },
-                ) => {
-                    // THE SHAPE HALF of the issuance rule. Exactly one balance
-                    // credit and nothing else: non-reuse is the signed body's
-                    // position + operation-digest binding, proven by the
-                    // 0x0023 provenance arm — never a consumed-source leaf.
-                    // Everything semantic (the policy bytes, the k-of-N
-                    // signatures, amount, position, digest) is that arm's job;
-                    // this layer pins that the witness claims exactly the
-                    // effect the operation derives and that the descriptor
-                    // funds exactly the one credit.
-                    if !consumed.is_empty() || witness.mutations.len() != 1 {
-                        return Err(WriteSetError::WrongWriteSet {
-                            detail: "an authorized issuance is exactly one balance credit — \
-                                     its non-reuse is the authorization's position+digest \
-                                     binding, not a consumed-source leaf",
-                        });
-                    }
-                    if d.credit_mutation_index != b.mutation_index {
-                        return Err(WriteSetError::WrongWriteSet {
-                            detail: "issuance source does not fund the balance credit",
-                        });
-                    }
-                    Ok(())
-                }
                 (FactsKind::PeerDebit, CreditSource::ValidatedPeerDebit(d), _) => {
                     if consumed.len() != 1 || witness.mutations.len() != 2 {
                         return Err(WriteSetError::WrongWriteSet {
@@ -1203,6 +1237,71 @@ pub fn verify_operation_write_set(
             if *c != creation || c.vault_id != vault_id {
                 return Err(WriteSetError::WrongWriteSet {
                     detail: "the creation record is not the one the operation carries",
+                });
+            }
+            Ok(())
+        }
+        // SoFi §51: the fee debit, if any, and the release credit, funded by
+        // the one genesis-release source. The source's arm establishes what
+        // the release funds; this layer pins that the witness is exactly this
+        // operation's effect.
+        SemanticWriteSet::CreateTokenRelease { fee, release } => {
+            if fee.0 == release.0 {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "the fee and the created token are different assets",
+                });
+            }
+            if !consumed.is_empty() {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "a token creation consumes no external source",
+                });
+            }
+            let [record] = token_creations.as_slice() else {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "a token creation inserts exactly one creation record",
+                });
+            };
+            let expected_balances = if fee.1 > 0 { 2 } else { 1 };
+            if balances.len() != expected_balances
+                || witness.mutations.len() != expected_balances + 1
+            {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "a token creation is its fee debit, one release credit and its \
+                             creation record",
+                });
+            }
+            if record.policy_commit != release.0 {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "the creation record names another token than the operation creates",
+                });
+            }
+            if fee.1 > 0 {
+                let observed = expect_one_balance(&balances, fee.0)?;
+                if observed.pre_amount.checked_sub(observed.post_amount) != Some(fee.1) {
+                    return Err(WriteSetError::WrongWriteSet {
+                        detail: "the fee debit is not the operation's fee",
+                    });
+                }
+            }
+            let credit = expect_one_balance(&balances, release.0)?;
+            if credit.post_amount.checked_sub(credit.pre_amount) != Some(release.1) {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "the release credit is not the operation's supply",
+                });
+            }
+            let [source] = witness.credit_sources.as_slice() else {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "a token creation is funded by exactly one credit source",
+                });
+            };
+            let CreditSource::GenesisRelease(d) = source else {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "a token creation is funded by a genesis release",
+                });
+            };
+            if d.credit_mutation_index != credit.mutation_index {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "the genesis release does not fund the supply credit",
                 });
             }
             Ok(())

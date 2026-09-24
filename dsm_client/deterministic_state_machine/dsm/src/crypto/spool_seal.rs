@@ -120,12 +120,28 @@ mod tests {
     #[test]
     fn it_opens_under_nothing_else() {
         let sealed = seal(&SS, &ID, b"inner envelope").unwrap();
-        assert_eq!(open(&[8u8; 32], &ID, &sealed), Err(SealError::DoesNotOpen), "another secret");
-        assert_eq!(open(&SS, &[2u8; MESSAGE_ID_LEN], &sealed), Err(SealError::DoesNotOpen), "another id");
+        assert_eq!(
+            open(&[8u8; 32], &ID, &sealed),
+            Err(SealError::DoesNotOpen),
+            "another secret"
+        );
+        assert_eq!(
+            open(&SS, &[2u8; MESSAGE_ID_LEN], &sealed),
+            Err(SealError::DoesNotOpen),
+            "another id"
+        );
         let mut tampered = sealed.clone();
         tampered[0] ^= 1;
-        assert_eq!(open(&SS, &ID, &tampered), Err(SealError::DoesNotOpen), "a changed byte");
-        assert_eq!(open(&SS, &ID, &sealed[..sealed.len() - 1]), Err(SealError::DoesNotOpen), "truncated");
+        assert_eq!(
+            open(&SS, &ID, &tampered),
+            Err(SealError::DoesNotOpen),
+            "a changed byte"
+        );
+        assert_eq!(
+            open(&SS, &ID, &sealed[..sealed.len() - 1]),
+            Err(SealError::DoesNotOpen),
+            "truncated"
+        );
     }
 
     #[test]

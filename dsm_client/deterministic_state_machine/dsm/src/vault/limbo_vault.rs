@@ -6,7 +6,6 @@
 //! No wall-clock usage; verification relies on state numbers and deterministic data.
 //! No hex/json/base64/serde anywhere in Rust.
 
-use core::fmt;
 use std::collections::{HashMap, HashSet};
 
 use prost::Message;
@@ -43,7 +42,6 @@ fn dlv_content_commitment(blinding: &[u8; 32], content: &[u8]) -> [u8; 32] {
     h.update(content);
     *h.finalize().as_bytes()
 }
-use crate::types::policy_types::VaultCondition;
 // State import removed: vault lifecycle APIs now take &[u8; 32] (the
 // resolved reference state hash) directly. Callers supply the digest from
 // DeviceState::root(), RelationshipChainState::compute_chain_tip(), or any
@@ -2293,7 +2291,6 @@ impl Default for LimboVault {
 mod tests {
     use super::*;
     use crate::core::state_machine::random_walk::algorithms::Position;
-    use crate::types::policy_types::VaultCondition;
 
     // ───────── secure_eq ─────────
 
@@ -2641,89 +2638,6 @@ mod tests {
         assert_ne!(VaultState::Limbo, VaultState::Active);
     }
 
-    // ───────── DeterministicLimboVault ─────────
-
-    #[test]
-    fn dlv_new_and_getters() {
-        let cond = VaultCondition::Hash(b"test".to_vec());
-        let v = DeterministicLimboVault::new("alice", "bob", vec![1, 2, 3], cond);
-
-        assert!(v.id().starts_with("dlv-"));
-        assert_eq!(v.creator_id(), "alice");
-        assert_eq!(v.recipient_id(), "bob");
-        assert_eq!(v.data(), &[1, 2, 3]);
-        assert_eq!(*v.status(), VaultStatus::Active);
-    }
-
-    #[test]
-    fn dlv_set_status() {
-        let cond = VaultCondition::Hash(vec![]);
-        let mut v = DeterministicLimboVault::new("c", "r", vec![], cond);
-
-        v.set_status(VaultStatus::Claimed);
-        assert_eq!(*v.status(), VaultStatus::Claimed);
-
-        v.set_status(VaultStatus::Revoked);
-        assert_eq!(*v.status(), VaultStatus::Revoked);
-
-        v.set_status(VaultStatus::Expired);
-        assert_eq!(*v.status(), VaultStatus::Expired);
-    }
-
-    #[test]
-    fn dlv_id_is_deterministic() {
-        let cond1 = VaultCondition::Hash(b"h".to_vec());
-        let cond2 = VaultCondition::Hash(b"h".to_vec());
-        let v1 = DeterministicLimboVault::new("alice", "bob", vec![42], cond1);
-        let v2 = DeterministicLimboVault::new("alice", "bob", vec![42], cond2);
-        assert_eq!(v1.id(), v2.id());
-    }
-
-    #[test]
-    fn dlv_different_data_different_id() {
-        let cond1 = VaultCondition::Hash(vec![]);
-        let cond2 = VaultCondition::Hash(vec![]);
-        let v1 = DeterministicLimboVault::new("a", "b", vec![1], cond1);
-        let v2 = DeterministicLimboVault::new("a", "b", vec![2], cond2);
-        assert_ne!(v1.id(), v2.id());
-    }
-
-    // ───────── factory functions ─────────
-
-    #[test]
-    fn create_deterministic_limbo_vault_basic() {
-        let v = create_deterministic_limbo_vault(
-            "creator1",
-            vec![10, 20],
-            VaultCondition::MinimumBalance(100),
-        );
-        assert!(v.id().starts_with("dlv-"));
-        assert_eq!(v.creator_id(), "creator1");
-        assert_eq!(v.recipient_id(), "");
-        assert_eq!(v.data(), &[10, 20]);
-    }
-
-    #[test]
-    fn create_deterministic_limbo_vault_with_timeout_basic() {
-        let v = create_deterministic_limbo_vault_with_timeout("creator2", vec![30], 999);
-        assert!(v.id().starts_with("dlv-"));
-        assert_eq!(v.creator_id(), "creator2");
-        assert_eq!(v.recipient_id(), "");
-    }
-
-    #[test]
-    fn create_deterministic_limbo_vault_with_timeout_and_recipient_basic() {
-        let v = create_deterministic_limbo_vault_with_timeout_and_recipient(
-            "creator3",
-            "recip3",
-            vec![40],
-            500,
-        );
-        assert!(v.id().starts_with("dlv-"));
-        assert_eq!(v.creator_id(), "creator3");
-        assert_eq!(v.recipient_id(), "recip3");
-    }
-
     // ───────── VaultPost from LimboVault (proto conversion) ─────────
 
     #[test]
@@ -2826,28 +2740,6 @@ mod tests {
             v.fulfillment_condition,
             FulfillmentMechanism::CryptoCondition { .. }
         ));
-    }
-
-    // ───────── VaultStatus Display ─────────
-
-    #[test]
-    fn vault_status_display_active() {
-        assert_eq!(format!("{}", VaultStatus::Active), "active");
-    }
-
-    #[test]
-    fn vault_status_display_claimed() {
-        assert_eq!(format!("{}", VaultStatus::Claimed), "claimed");
-    }
-
-    #[test]
-    fn vault_status_display_revoked() {
-        assert_eq!(format!("{}", VaultStatus::Revoked), "revoked");
-    }
-
-    #[test]
-    fn vault_status_display_expired() {
-        assert_eq!(format!("{}", VaultStatus::Expired), "expired");
     }
 
     // ───────── to_vault_post lock descriptions ─────────
@@ -3318,38 +3210,6 @@ mod tests {
         assert_eq!(v.to_vault_post("t", None).unwrap().status, "invalidated");
     }
 
-    // ───────── from_limbo_vault status mapping ─────────
-
-    #[test]
-    fn from_limbo_vault_status_mapping() {
-        let cond = VaultCondition::Hash(vec![]);
-
-        let mut v = LimboVault {
-            state: VaultState::Limbo,
-            ..Default::default()
-        };
-        let dlv = DeterministicLimboVault::from_limbo_vault(&v, cond.clone()).unwrap();
-        assert_eq!(*dlv.status(), VaultStatus::Active);
-
-        v.state = VaultState::Active;
-        let dlv = DeterministicLimboVault::from_limbo_vault(&v, cond.clone()).unwrap();
-        assert_eq!(*dlv.status(), VaultStatus::Active);
-
-        v.state = VaultState::Claimed {
-            claimant: vec![],
-            claim_proof: vec![],
-        };
-        let dlv = DeterministicLimboVault::from_limbo_vault(&v, cond.clone()).unwrap();
-        assert_eq!(*dlv.status(), VaultStatus::Claimed);
-
-        v.state = VaultState::Invalidated {
-            reason: "test".to_string(),
-            creator_signature: vec![],
-        };
-        let dlv = DeterministicLimboVault::from_limbo_vault(&v, cond).unwrap();
-        assert_eq!(*dlv.status(), VaultStatus::Revoked);
-    }
-
     // ───────── EncryptedContent struct ─────────
 
     #[test]
@@ -3470,143 +3330,5 @@ mod tests {
             Some(vec![0xEEu8; 64]),
             "decoded vault must preserve legacy intended_recipient field verbatim"
         );
-    }
-}
-
-/* ------------------- Optional Deterministic Limbo (lightweight) -------------- */
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum VaultStatus {
-    Active,
-    Claimed,
-    Revoked,
-    Expired,
-}
-
-#[derive(Debug, Clone)]
-pub struct DeterministicLimboVault {
-    id: String,
-    creator_id: String,
-    recipient_id: String,
-    data: Vec<u8>,
-    condition: VaultCondition,
-    status: VaultStatus,
-}
-
-impl DeterministicLimboVault {
-    pub fn new(
-        creator_id: &str,
-        recipient_id: &str,
-        data: Vec<u8>,
-        condition: VaultCondition,
-    ) -> Self {
-        let id = decimal_label(
-            "dlv-",
-            concat_bytes(&[
-                creator_id.as_bytes(),
-                recipient_id.as_bytes(),
-                &domain_hash_bytes(crate::common::domain_tags::TAG_DSM_DLV_CONTENT, &data)[..],
-            ])
-            .as_slice(),
-        );
-        Self {
-            id,
-            creator_id: creator_id.to_string(),
-            recipient_id: recipient_id.to_string(),
-            data,
-            condition,
-            status: VaultStatus::Active,
-        }
-    }
-
-    pub fn id(&self) -> &str {
-        &self.id
-    }
-    pub fn creator_id(&self) -> &str {
-        &self.creator_id
-    }
-    pub fn recipient_id(&self) -> &str {
-        &self.recipient_id
-    }
-    pub fn data(&self) -> &[u8] {
-        &self.data
-    }
-    pub fn condition(&self) -> &VaultCondition {
-        &self.condition
-    }
-    pub fn status(&self) -> &VaultStatus {
-        &self.status
-    }
-    pub fn set_status(&mut self, s: VaultStatus) {
-        self.status = s;
-    }
-
-    pub fn from_limbo_vault(v: &LimboVault, condition: VaultCondition) -> Result<Self, DsmError> {
-        let creator_id = decimal_label("pk-", &v.creator_public_key);
-        let recipient_id = match &v.intended_recipient {
-            Some(pk) => decimal_label("pk-", pk),
-            None => String::new(),
-        };
-        Ok(Self {
-            id: base32::encode(base32::Alphabet::Crockford, &v.id),
-            creator_id,
-            recipient_id,
-            data: v.encrypted_content.encrypted_data.clone(),
-            condition,
-            status: match v.state {
-                VaultState::Limbo => VaultStatus::Active,
-                VaultState::Active => VaultStatus::Active,
-                VaultState::Unlocked { .. } => VaultStatus::Active,
-                VaultState::Claimed { .. } => VaultStatus::Claimed,
-                VaultState::Invalidated { .. } => VaultStatus::Revoked,
-            },
-        })
-    }
-}
-
-pub fn convert_vault(
-    vault: &LimboVault,
-    condition: VaultCondition,
-) -> Result<DeterministicLimboVault, DsmError> {
-    DeterministicLimboVault::from_limbo_vault(vault, condition)
-}
-
-pub fn create_deterministic_limbo_vault(
-    creator_id: &str,
-    data: Vec<u8>,
-    condition: VaultCondition,
-) -> DeterministicLimboVault {
-    DeterministicLimboVault::new(creator_id, "", data, condition)
-}
-
-pub fn create_deterministic_limbo_vault_with_timeout(
-    creator_id: &str,
-    data: Vec<u8>,
-    _timeout_ticks: u64, // logical ticks; not used in minimal builder
-) -> DeterministicLimboVault {
-    let condition = VaultCondition::Hash(b"timeout_disabled".to_vec());
-    DeterministicLimboVault::new(creator_id, "", data, condition)
-}
-
-pub fn create_deterministic_limbo_vault_with_timeout_and_recipient(
-    creator_id: &str,
-    recipient_id: &str,
-    data: Vec<u8>,
-    _timeout_ticks: u64,
-) -> DeterministicLimboVault {
-    let condition = VaultCondition::Hash(b"timeout_disabled".to_vec());
-    DeterministicLimboVault::new(creator_id, recipient_id, data, condition)
-}
-
-/* --------------------------------- Display impls ----------------------------- */
-
-impl fmt::Display for VaultStatus {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            VaultStatus::Active => write!(f, "active"),
-            VaultStatus::Claimed => write!(f, "claimed"),
-            VaultStatus::Revoked => write!(f, "revoked"),
-            VaultStatus::Expired => write!(f, "expired"),
-        }
     }
 }

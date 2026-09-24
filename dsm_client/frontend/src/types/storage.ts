@@ -31,7 +31,6 @@ export interface NodeHealthMetrics {
   name?: string;
   region?: string;
   status: NodeHealth;
-  lastPing?: DisplayOnlyNumber; // UI-only tick
   latencyMs?: DisplayOnlyNumber;
   lastError?: string;
   uptime?: DisplayOnlyNumber; // seconds (UI-only)
@@ -58,16 +57,7 @@ export interface StorageNodesConfig {
   verificationQuorum?: number;
 }
 
-export interface ObjectMetadata {
-  key: string;
-  size: number;
-  contentType?: string;
-  lastModified?: DisplayOnlyNumber;
-  nodes: string[]; // URLs where this object exists
-}
-
 export interface DiagnosticsBundle {
-  tick: number;
   nodesConfig: StorageNodesConfig;
   nodeHealth: NodeHealthMetrics[];
   sdkHealthCache?: any;

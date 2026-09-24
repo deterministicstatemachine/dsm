@@ -40,7 +40,7 @@ const KIND_STATE: i64 = 0;
 const KIND_RELATIONSHIP: i64 = 1;
 
 fn digest32(v: Vec<u8>, what: &str) -> Result<D32> {
-    <D32>::try_from(v.as_slice()).map_err(|_| anyhow!("{what} is not 32 bytes"))
+    <D32>::try_from(v.as_slice()).map_err(|e| anyhow!("{what} is not 32 bytes: {e}"))
 }
 
 /// What this verifier established about one vault: the root of the highest
@@ -58,11 +58,7 @@ pub struct VaultHead {
 ///
 /// The leaves REPLACE this vault's previous set rather than merging into it,
 /// because a head is a whole tree and a mixture of two generations is not one.
-pub fn record_resolved_with_conn(
-    tx: &Transaction<'_>,
-    post: &VaultPostState,
-    now: i64,
-) -> Result<()> {
+pub fn record_resolved_with_conn(tx: &Transaction<'_>, post: &VaultPostState) -> Result<()> {
     // The previous set is read through the CALLER'S transaction, not a second
     // connection: the admit path already holds the connection mutex, and a
     // nested acquisition would deadlock rather than fail.
@@ -94,34 +90,25 @@ pub fn record_resolved_with_conn(
     // set and not a chain, and `root_at(v, g)` is what a parent's status is
     // asked about. Idempotent: re-resolving the same position writes the same
     // two rows.
-    write_root(tx, &post.vault_id, post.pre_generation, &post.pre_root, now)?;
+    write_root(tx, &post.vault_id, post.pre_generation, &post.pre_root)?;
     write(
         tx,
         &post.vault_id,
         post.state.generation,
         &post.root,
         &leaves,
-        now,
     )
 }
 
-fn write_root(
-    tx: &Transaction<'_>,
-    vault_id: &D32,
-    generation: u64,
-    root: &D32,
-    now: i64,
-) -> Result<()> {
+fn write_root(tx: &Transaction<'_>, vault_id: &D32, generation: u64, root: &D32) -> Result<()> {
     tx.execute(
-        "INSERT INTO sofi_vault_root (vault_id, generation, root, updated_at)
-         VALUES (?1, ?2, ?3, ?4)
-         ON CONFLICT(vault_id, generation) DO UPDATE SET
-             root = excluded.root, updated_at = excluded.updated_at",
+        "INSERT INTO sofi_vault_root (vault_id, generation, root)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(vault_id, generation) DO UPDATE SET root = excluded.root",
         params![
             vault_id.as_slice(),
-            i64::try_from(generation).map_err(|_| anyhow!("generation overflow"))?,
+            i64::try_from(generation).map_err(|e| anyhow!("generation overflow: {e}"))?,
             root.as_slice(),
-            now
         ],
     )?;
     Ok(())
@@ -133,24 +120,22 @@ fn write(
     generation: u64,
     root: &D32,
     leaves: &[(D32, D32, i64, Vec<u8>)],
-    now: i64,
 ) -> Result<()> {
-    write_root(tx, vault_id, generation, root, now)?;
+    write_root(tx, vault_id, generation, root)?;
     tx.execute(
         "DELETE FROM sofi_vault_leaf WHERE vault_id = ?1",
         params![vault_id.as_slice()],
     )?;
     for (key, value, kind, preimage) in leaves {
         tx.execute(
-            "INSERT INTO sofi_vault_leaf (vault_id, leaf_key, leaf_value, kind, preimage, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO sofi_vault_leaf (vault_id, leaf_key, leaf_value, kind, preimage)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
                 vault_id.as_slice(),
                 key.as_slice(),
                 value.as_slice(),
                 kind,
                 preimage,
-                now
             ],
         )?;
     }
@@ -171,7 +156,8 @@ pub fn head(vault_id: &D32) -> Result<Option<VaultHead>> {
     .map(|(generation, root)| {
         Ok(VaultHead {
             vault_id: *vault_id,
-            generation: u64::try_from(generation).map_err(|_| anyhow!("generation negative"))?,
+            generation: u64::try_from(generation)
+                .map_err(|e| anyhow!("generation negative: {e}"))?,
             root: digest32(root, "vault root")?,
         })
     })
@@ -195,7 +181,7 @@ fn root_at_with_conn(
         "SELECT root FROM sofi_vault_root WHERE vault_id = ?1 AND generation = ?2",
         params![
             vault_id.as_slice(),
-            i64::try_from(generation).map_err(|_| anyhow!("generation overflow"))?
+            i64::try_from(generation).map_err(|e| anyhow!("generation overflow: {e}"))?
         ],
         |r| r.get::<_, Vec<u8>>(0),
     )
@@ -219,7 +205,7 @@ fn root_at_with_conn(
 /// at most one realized consumption per attempt key — so a second, different
 /// answer at the same generation is a contradiction, not an update, and this
 /// refuses it instead of silently preferring the later one.
-pub fn record_walked(post: &VaultPostState, now: i64) -> Result<()> {
+pub fn record_walked(post: &VaultPostState) -> Result<()> {
     let binding = get_connection()?;
     let mut conn = binding.lock().unwrap_or_else(|p| p.into_inner());
     for (generation, root) in [
@@ -235,7 +221,7 @@ pub fn record_walked(post: &VaultPostState, now: i64) -> Result<()> {
         }
     }
     let tx = conn.transaction()?;
-    record_resolved_with_conn(&tx, post, now)?;
+    record_resolved_with_conn(&tx, post)?;
     tx.commit()?;
     Ok(())
 }
@@ -275,6 +261,34 @@ fn rows_with_conn(
     Ok(out)
 }
 
+/// The vault's whole tree at its established head, rebuilt from every stored
+/// leaf and CHECKED against the head's own root, with its state leaf: what a
+/// producer builds `V°` against. `None` when no head is established, or the
+/// record cannot reproduce its own root (another trader moved the vault
+/// between this device's trades).
+pub fn tree_at_head(vault_id: &D32) -> Result<Option<(VaultHead, EconomicSmt, VaultStateLeaf)>> {
+    let Some(head) = head(vault_id)? else {
+        return Ok(None);
+    };
+    let rows = leaf_rows(vault_id)?;
+    let mut tree = EconomicSmt::new();
+    for (key, value, ..) in &rows {
+        tree.insert(*key, *value);
+    }
+    if tree.root() != head.root {
+        return Ok(None);
+    }
+    let state_key = derive::vault_state_key(vault_id);
+    let state = match rows.iter().find(|(key, ..)| *key == state_key) {
+        Some((.., kind, preimage)) if *kind == KIND_STATE => {
+            VaultStateLeaf::decode(preimage).map_err(|e| anyhow!("state leaf: {e}"))?
+        }
+        Some(row) => return Err(anyhow!("the vault's state key holds leaf kind {}", row.2)),
+        None => return Err(anyhow!("the vault's record holds no state leaf")),
+    };
+    Ok(Some((head, tree, state)))
+}
+
 /// The vault's leaves at its established head, for the keys an acquisition
 /// needs — CHECKED against the head's own root.
 ///
@@ -309,16 +323,14 @@ pub fn leaves_at_head(
     let mut out = std::collections::BTreeMap::new();
     for key in keys {
         let pre = match rows.iter().find(|(k, ..)| k == key) {
-            Some((_, _, kind, preimage)) if *kind == KIND_STATE => VaultLeafPre::State(
+            Some((.., kind, preimage)) if *kind == KIND_STATE => VaultLeafPre::State(
                 VaultStateLeaf::decode(preimage).map_err(|e| anyhow!("state leaf: {e}"))?,
             ),
-            Some((_, _, kind, preimage)) if *kind == KIND_RELATIONSHIP => {
-                VaultLeafPre::Relationship(
-                    VaultRelationshipLeaf::decode(preimage)
-                        .map_err(|e| anyhow!("relationship leaf: {e}"))?,
-                )
-            }
-            Some(_) => return Err(anyhow!("unknown vault leaf kind")),
+            Some((.., kind, preimage)) if *kind == KIND_RELATIONSHIP => VaultLeafPre::Relationship(
+                VaultRelationshipLeaf::decode(preimage)
+                    .map_err(|e| anyhow!("relationship leaf: {e}"))?,
+            ),
+            Some(row) => return Err(anyhow!("unknown vault leaf kind {}", row.2)),
             None => VaultLeafPre::Absent,
         };
         out.insert((*vault_id, *key), pre);

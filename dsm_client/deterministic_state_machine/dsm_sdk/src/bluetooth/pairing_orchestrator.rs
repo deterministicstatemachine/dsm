@@ -1115,12 +1115,6 @@ impl PairingOrchestrator {
         Ok(())
     }
 
-    #[cfg(not(all(target_os = "android", feature = "jni")))]
-    async fn start_ble_discovery(&self, _contact_device_id: [u8; 32]) -> Result<(), String> {
-        log::warn!("[PairingOrchestrator] BLE discovery not available on this platform");
-        Ok(())
-    }
-
     /// Stop BLE scan and advertise via JNI.
     /// Called when the pairing loop exits to prevent lingering radio activity
     /// that causes "stuck scanning" after pairing completes.
@@ -1205,11 +1199,6 @@ impl PairingOrchestrator {
 
         Ok(())
     }
-
-    #[cfg(not(all(target_os = "android", feature = "jni")))]
-    async fn notify_pairing_complete(&self, _device_id: &[u8; 32]) -> Result<(), String> {
-        Ok(())
-    }
 }
 
 impl Default for PairingOrchestrator {
@@ -1286,11 +1275,7 @@ mod tests {
         client_db::init_database().expect("init db");
 
         // Initialize environment for AppState
-        let temp_dir = tempfile::Builder::new()
-            .prefix("dsm_test_pair")
-            .tempdir()
-            .expect("tempdir");
-        let _ = crate::storage_utils::set_storage_base_dir(temp_dir.keep());
+        crate::economic_fixtures::use_test_storage_dir();
 
         // Ensure device ID is available using idempotent bootstrap
         crate::sdk::app_state::AppState::set_identity_info_if_empty(
@@ -1298,7 +1283,8 @@ mod tests {
             vec![0xBB; 32],
             vec![0xCC; 32],
             vec![0x00; 32],
-        );
+        )
+        .expect("AppState identity");
 
         // Create a contact record so initiate_pairing's SQLite gate passes
         let device_id = [0x11u8; 32];
@@ -1308,15 +1294,12 @@ mod tests {
             alias: "test-peer".to_string(),
             genesis_hash: vec![0x33; 32],
             current_chain_tip: None,
-            added_at: 1,
             verified: true,
             verification_proof: None,
             metadata: HashMap::new(),
             ble_address: None,
             status: "Created".to_string(),
             needs_online_reconcile: false,
-            last_seen_online_counter: 0,
-            last_seen_ble_counter: 0,
             public_key: vec![0u8; 32],
             kyber_public_key: Vec::new(),
             previous_chain_tip: None,
@@ -1348,15 +1331,12 @@ mod tests {
             alias: "peer".to_string(),
             genesis_hash: genesis.to_vec(),
             current_chain_tip: None,
-            added_at: 1,
             verified: true,
             verification_proof: None,
             metadata: HashMap::new(),
             ble_address: None,
             status: "Created".to_string(),
             needs_online_reconcile: false,
-            last_seen_online_counter: 0,
-            last_seen_ble_counter: 0,
             public_key: vec![0u8; 32],
             kyber_public_key: Vec::new(),
             previous_chain_tip: None,
@@ -1430,15 +1410,12 @@ mod tests {
             alias: "peer2".to_string(),
             genesis_hash: genesis_stored.to_vec(),
             current_chain_tip: None,
-            added_at: 1,
             verified: true,
             verification_proof: None,
             metadata: HashMap::new(),
             ble_address: None,
             status: "Created".to_string(),
             needs_online_reconcile: false,
-            last_seen_online_counter: 0,
-            last_seen_ble_counter: 0,
             public_key: vec![0u8; 32],
             kyber_public_key: Vec::new(),
             previous_chain_tip: None,

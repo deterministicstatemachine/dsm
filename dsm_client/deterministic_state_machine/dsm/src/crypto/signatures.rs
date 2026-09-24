@@ -149,14 +149,6 @@ impl SignatureKeyPair {
         &self.secret_key
     }
 
-    /// Test-only convenience: generate a keypair quickly for unit tests.
-    /// Panics on failure, so do not use in production paths.
-    #[cfg(any(test, feature = "testing"))]
-    pub fn generate_for_testing() -> Self {
-        #[allow(clippy::expect_used)]
-        Self::new().expect("keygen")
-    }
-
     /// Back-compat: static-style verifier matching historical call sites.
     pub fn verify_raw(
         message: &[u8],

@@ -6,22 +6,22 @@
 //! State-transition semantics such as token balance conservation are enforced
 //! when applying transitions, not from opaque receipt tip hashes alone.
 
+use crate::common::device_tree::DevTreeProof;
+use crate::core::bilateral_transaction_manager::compute_smt_key;
+use crate::merkle::sparse_merkle_tree::{verify_smt_replace, SmtInclusionProof};
 use crate::types::error::DsmError;
 use crate::types::receipt_types::{
-    ParentConsumptionTracker, ReceiptAcceptance, ReceiptVerificationContext, StitchedReceiptV2,
+    DeviceTreeAcceptanceCommitment, ParentConsumptionTracker, ReceiptAcceptance,
+    ReceiptVerificationContext, StitchedReceiptV2,
 };
-use crate::verification::proof_primitives::{
-    verify_device_tree_inclusion_proof_bytes, verify_smt_inclusion_proof_bytes,
-};
-use crate::verification::smt_replace_witness::compute_smt_key;
-use crate::verification::smt_replace_witness::verify_tripwire_smt_replace;
 
 /// Verify a stitched receipt against all acceptance predicates
 ///
 /// Per whitepaper, a receipt is accepted iff:
 /// 1. Both SPHINCS+ signatures verify over canonical commit bytes
-/// 2. Inclusion proofs verify (old/new leaves in SMT, device in Device Tree)
-/// 3. SMT replace recomputes child_root exactly
+/// 2. The receipt's state rules hold ([`verify_receipt_state`]): the one
+///    relationship path authenticates the parent tip and folds the child tip
+///    to `child_root`; the device proof verifies
 /// 4. Parent tip has not been previously consumed (uniqueness)
 /// 5. Size cap enforced (≤128 KiB)
 ///
@@ -133,64 +133,18 @@ pub fn verify_stitched_receipt(
         Err(e) => return Ok(ReceiptAcceptance::reject(format!("ek_cert_b error: {}", e))),
     }
 
-    // Rule 3: Verify inclusion proofs
-    let smt_key = compute_smt_key(&receipt.devid_a, &receipt.devid_b);
-
-    // 3a: Parent tip in parent root (rel_proof_parent)
-    if !verify_smt_inclusion(
-        &receipt.parent_root,
-        &smt_key,
-        &receipt.parent_tip,
-        &receipt.rel_proof_parent,
-    )? {
+    // Rule 2c: the step starts from the root this verifier expects.
+    if receipt.parent_root != ctx.expected_parent_root {
         return Ok(ReceiptAcceptance::reject(
-            "Parent tip inclusion proof failed".to_string(),
+            "the receipt's parent root is not the root this verifier expects".to_string(),
         ));
     }
 
-    // 3b: Child tip in child root (rel_proof_child)
-    if !verify_smt_inclusion(
-        &receipt.child_root,
-        &smt_key,
-        &receipt.child_tip,
-        &receipt.rel_proof_child,
-    )? {
-        return Ok(ReceiptAcceptance::reject(
-            "Child tip inclusion proof failed".to_string(),
-        ));
-    }
-
-    // 3c: DevID in the authenticated Device Tree commitment used for `π_dev`
-    if !verify_device_tree_inclusion(
-        &ctx.device_tree_commitment.root(),
-        &receipt.devid_a,
-        &receipt.dev_proof,
-    )? {
-        return Ok(ReceiptAcceptance::reject(
-            "Device Tree inclusion proof failed".to_string(),
-        ));
-    }
-
-    // Rule 4: SMT replace recomputation
-    // Build an SMT with parent_root, replace parent_tip → child_tip, verify child_root
-    // The replace must be proven AT the relationship key, not at some path the
-    // witness chose: directions come from `k_{A<->B}`, derived canonically from
-    // the two device identities the receipt already carries.
-    let rel_smt_key = crate::core::bilateral_transaction_manager::compute_smt_key(
-        &receipt.devid_a,
-        &receipt.devid_b,
-    );
-    if !verify_smt_replace(
-        &receipt.parent_root,
-        &receipt.child_root,
-        &receipt.parent_tip,
-        &receipt.child_tip,
-        &rel_smt_key,
-        &receipt.rel_replace_witness,
-    )? {
-        return Ok(ReceiptAcceptance::reject(
-            "SMT replace recomputation failed".to_string(),
-        ));
+    // Rules 3–4: the receipt's state — one relationship path authenticates the
+    // parent tip and folds the child tip to the claimed post-state root, and
+    // the device proof puts the sender under the authenticated Device Tree.
+    if let Err(e) = verify_receipt_state(receipt, &ctx.device_tree_commitment) {
+        return Ok(ReceiptAcceptance::reject(e.to_string()));
     }
 
     // Rule 4b: Fork-aware finalization witness (whitepaper §4.1.1 + §4.3).
@@ -248,59 +202,78 @@ pub fn verify_stitched_receipt(
         )));
     }
 
-    // Token balance invariants are enforced in the state-transition layer via
-    // core::state_machine::transition::verify_token_balance_consistency().
-
     // All checks passed
     Ok(ReceiptAcceptance::accept(commitment))
 }
 
-/// Verify SMT inclusion proof
+/// The state rules of a receipt, whoever checks it: the sender before it signs,
+/// the recipient before it accepts, and [`verify_stitched_receipt`] as its
+/// rules 3–4. There is one implementation, over one relationship path.
 ///
-/// Checks that `leaf` is included in `root` via `proof`.
-fn verify_smt_inclusion(
-    root: &[u8; 32],
-    smt_key: &[u8; 32],
-    value: &[u8; 32],
-    proof_bytes: &[u8],
-) -> Result<bool, DsmError> {
-    verify_smt_inclusion_proof_bytes(root, smt_key, value, proof_bytes)
-}
+/// - Every fixed field names something: a zero genesis, device, tip, root or
+///   transition entropy is not a field of any transition.
+/// - The relationship path (`rel_proof_parent`, the tree's own encoding) is at
+///   `compute_smt_key(devid_a, devid_b)` and carries `parent_tip`; through
+///   [`verify_smt_replace`] it authenticates `parent_tip` under `parent_root`,
+///   and the same siblings folded with `child_tip` must be `child_root`.
+/// - The device proof puts `devid_a` under the authenticated Device Tree
+///   commitment the caller supplies — never one derived from the receipt.
+pub fn verify_receipt_state(
+    receipt: &StitchedReceiptV2,
+    device_tree_commitment: &DeviceTreeAcceptanceCommitment,
+) -> Result<(), DsmError> {
+    let named = |b: &[u8; 32]| b.iter().any(|&v| v != 0);
+    for (field, value) in [
+        ("genesis", &receipt.genesis),
+        ("devid_a", &receipt.devid_a),
+        ("devid_b", &receipt.devid_b),
+        ("parent_tip", &receipt.parent_tip),
+        ("child_tip", &receipt.child_tip),
+        ("parent_root", &receipt.parent_root),
+        ("child_root", &receipt.child_root),
+        ("transition_entropy", &receipt.transition_entropy),
+    ] {
+        if !named(value) {
+            return Err(DsmError::invalid_operation(format!(
+                "receipt field {field} is zero"
+            )));
+        }
+    }
 
-/// Verify Device Tree inclusion proof
-///
-/// Checks that `devid` is included in the Device Tree `root` via `proof`.
-fn verify_device_tree_inclusion(
-    root: &[u8; 32],
-    devid: &[u8; 32],
-    proof_bytes: &[u8],
-) -> Result<bool, DsmError> {
-    verify_device_tree_inclusion_proof_bytes(root, devid, proof_bytes)
-}
+    let smt_key = compute_smt_key(&receipt.devid_a, &receipt.devid_b);
+    let path = SmtInclusionProof::from_bytes(&receipt.rel_proof_parent)
+        .ok_or_else(|| DsmError::invalid_operation("the relationship path does not decode"))?;
+    if path.key != smt_key {
+        return Err(DsmError::invalid_operation(
+            "the relationship path is not at the relationship key",
+        ));
+    }
+    if path.value != Some(receipt.parent_tip) {
+        return Err(DsmError::invalid_operation(
+            "the relationship path does not carry the parent tip",
+        ));
+    }
+    let post_root = verify_smt_replace(
+        &receipt.parent_root,
+        &smt_key,
+        &receipt.parent_tip,
+        &receipt.child_tip,
+        &path.siblings,
+    )?;
+    if post_root != receipt.child_root {
+        return Err(DsmError::invalid_operation(
+            "the child tip folded through the relationship path is not the child root",
+        ));
+    }
 
-/// Verify SMT replace recomputation
-///
-/// Rebuilds parent SMT, replaces parent_tip → child_tip, verifies child_root.
-///
-/// This verification ensures that the child_root is the correct result of
-/// replacing the relationship tip in the parent SMT. The SMT replace operation
-/// is fundamental to the DSM protocol's state transition model.
-fn verify_smt_replace(
-    parent_root: &[u8; 32],
-    child_root: &[u8; 32],
-    parent_tip: &[u8; 32],
-    child_tip: &[u8; 32],
-    smt_key: &[u8; 32],
-    witness_bytes: &[u8],
-) -> Result<bool, DsmError> {
-    verify_tripwire_smt_replace(
-        parent_root,
-        child_root,
-        parent_tip,
-        child_tip,
-        smt_key,
-        witness_bytes,
-    )
+    let dev_proof = DevTreeProof::from_bytes(&receipt.dev_proof)
+        .ok_or_else(|| DsmError::invalid_operation("the device proof does not decode"))?;
+    if !dev_proof.verify(&receipt.devid_a, &device_tree_commitment.root()) {
+        return Err(DsmError::invalid_operation(
+            "the device proof does not put the sender under the Device Tree commitment",
+        ));
+    }
+    Ok(())
 }
 
 /// Helper: Verify SPHINCS+ signature
@@ -324,13 +297,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_smt_key_ordering() {
-        // Relationship key computation is enforced in the SMT module, not here.
-        // Tripwire interlock will move to a true SMT replace-witness verifier.
-        // Smoke test: module compiles under tests.
-    }
-
-    #[test]
     fn test_verify_empty_receipt_rejects() {
         let receipt = StitchedReceiptV2::new(
             [0; 32],
@@ -340,7 +306,6 @@ mod tests {
             [0; 32],
             [0; 32],
             [0; 32],
-            vec![],
             vec![],
             vec![],
         );
@@ -357,7 +322,7 @@ mod tests {
 
     #[test]
     fn test_verify_receipt_rejects_missing_receiver_signature() {
-        let keypair_a = crate::crypto::signatures::SignatureKeyPair::generate_for_testing();
+        let keypair_a = crate::crypto::signatures::SignatureKeyPair::new().expect("keygen");
         let mut receipt = StitchedReceiptV2::new(
             [0; 32],
             [0; 32],
@@ -366,7 +331,6 @@ mod tests {
             [0; 32],
             [0; 32],
             [0; 32],
-            vec![],
             vec![],
             vec![],
         );
@@ -389,70 +353,208 @@ mod tests {
             .contains("Missing receiver signature"));
     }
 
+    /// An unsigned receipt over real material, with the Device Tree
+    /// commitment it verifies against: the relationship leaf moves from
+    /// `0xaa..` to `0xbb..` in a tree that also keeps another relationship.
+    fn real_state_receipt() -> (StitchedReceiptV2, DeviceTreeAcceptanceCommitment) {
+        use crate::common::device_tree::DeviceTree;
+        use crate::merkle::sparse_merkle_tree::SparseMerkleTree;
+
+        let devid = |label: &[u8]| {
+            crate::crypto::blake3::domain_hash_bytes(
+                crate::common::domain_tags::TAG_DEVICE_ID,
+                label,
+            )
+        };
+        let (devid_a, devid_b) = (devid(b"state-a"), devid(b"state-b"));
+        let key = compute_smt_key(&devid_a, &devid_b);
+        let mut tree = SparseMerkleTree::new();
+        tree.update_leaf(&compute_smt_key(&devid_a, &devid(b"state-c")), &[0x5E; 32]);
+        tree.update_leaf(&key, &[0xaa; 32]);
+        let replace = tree.smt_replace(&key, &[0xbb; 32]).expect("replace");
+        let device_tree = DeviceTree::single(devid_a);
+        let mut receipt = StitchedReceiptV2::new(
+            [0x0E; 32],
+            devid_a,
+            devid_b,
+            [0xaa; 32],
+            [0xbb; 32],
+            replace.pre_root,
+            replace.post_root,
+            replace.parent_proof.to_bytes(),
+            device_tree.proof(&devid_a).expect("device path").to_bytes(),
+        );
+        receipt.set_transition_entropy([0x21; 32]);
+        (
+            receipt,
+            DeviceTreeAcceptanceCommitment::from_root(device_tree.root()),
+        )
+    }
+
+    /// The state rules hold for a receipt over real material and refuse each
+    /// thing that would let a receipt claim a state its one path does not
+    /// prove: a post-state root the child does not fold to, a pre-state root
+    /// the path does not authenticate the parent under, a changed sibling, a
+    /// path at another key or carrying another tip, a zero field, and a
+    /// device proof for another device.
     #[test]
-    fn test_parent_uniqueness_enforcement() {
+    fn the_state_rules_hold_only_for_what_the_one_path_proves() {
+        use crate::merkle::sparse_merkle_tree::SmtInclusionProof;
+
+        let (receipt, commitment) = real_state_receipt();
+        verify_receipt_state(&receipt, &commitment).expect("a real receipt holds");
+
+        let refused = |mutate: &dyn Fn(&mut StitchedReceiptV2)| {
+            let mut r = receipt.clone();
+            mutate(&mut r);
+            verify_receipt_state(&r, &commitment).is_err()
+        };
+        fn with_path(r: &mut StitchedReceiptV2, f: impl Fn(&mut SmtInclusionProof)) {
+            let mut p = SmtInclusionProof::from_bytes(&r.rel_proof_parent).expect("path");
+            f(&mut p);
+            r.rel_proof_parent = p.to_bytes();
+        }
+
+        assert!(
+            refused(&|r| r.child_root[0] ^= 1),
+            "a post-state root the child does not fold to"
+        );
+        assert!(
+            refused(&|r| r.parent_root[0] ^= 1),
+            "a pre-state root the path does not authenticate"
+        );
+        assert!(
+            refused(&|r| with_path(r, |p| p.siblings[200][3] ^= 1)),
+            "a changed sibling"
+        );
+        assert!(
+            refused(&|r| with_path(r, |p| p.key[0] ^= 1)),
+            "a path at another key"
+        );
+        assert!(
+            refused(&|r| with_path(r, |p| p.value = Some([0xab; 32]))),
+            "a path carrying another tip"
+        );
+        assert!(
+            refused(&|r| with_path(r, |p| {
+                p.siblings.pop();
+            })),
+            "a path of another height"
+        );
+        assert!(refused(&|r| r.transition_entropy = [0; 32]), "a zero field");
+        assert!(
+            refused(&|r| r.devid_a[0] ^= 1),
+            "a device proof for another device"
+        );
+    }
+
+    /// A receipt over real material — a real per-device tree, the device's
+    /// own Device Tree path, both signatures and EK certs — with the context
+    /// a verifier expecting its step would hold.
+    fn signed_receipt_and_context() -> (StitchedReceiptV2, ReceiptVerificationContext) {
+        use crate::common::device_tree::DeviceTree;
         use crate::crypto::ephemeral_key::{generate_ephemeral_keypair, sign_ek_cert};
+        use crate::merkle::sparse_merkle_tree::SparseMerkleTree;
 
-        // Create keypairs for testing
-        let keypair_a = crate::crypto::signatures::SignatureKeyPair::generate_for_testing();
-        let keypair_b = crate::crypto::signatures::SignatureKeyPair::generate_for_testing();
+        let keypair_a = crate::crypto::signatures::SignatureKeyPair::new().expect("keygen");
+        let keypair_b = crate::crypto::signatures::SignatureKeyPair::new().expect("keygen");
+        let devid_a = crate::crypto::blake3::domain_hash_bytes(
+            crate::common::domain_tags::TAG_DEVICE_ID,
+            b"uniqueness-a",
+        );
+        let devid_b = crate::crypto::blake3::domain_hash_bytes(
+            crate::common::domain_tags::TAG_DEVICE_ID,
+            b"uniqueness-b",
+        );
+        let parent_tip = [0xaa; 32];
+        let child_tip = [0xbb; 32];
 
-        // Empty proof bytes — with non-zero roots ([0x01] / [0x02]), the sentinel
-        // check in verify_smt_inclusion_proof_bytes returns Ok(false) cleanly
-        // (no protobuf decode needed). This test targets parent uniqueness, not proofs.
-        let smt_proof_bytes = vec![];
-        let dev_proof_bytes = vec![];
+        let key = compute_smt_key(&devid_a, &devid_b);
+        let mut tree = SparseMerkleTree::new();
+        tree.update_leaf(&key, &parent_tip);
+        let replace = tree.smt_replace(&key, &child_tip).expect("replace");
+        let device_tree = DeviceTree::single(devid_a);
+        let dev_proof = device_tree.proof(&devid_a).expect("device path").to_bytes();
 
         let mut receipt = StitchedReceiptV2::new(
-            [0; 32],                 // genesis
-            [0; 32],                 // devid_a
-            [0; 32],                 // devid_b
-            [0xaa; 32],              // parent_tip
-            [0xbb; 32],              // child_tip
-            [0x01; 32],              // parent_root (different from child)
-            [0x02; 32],              // child_root (different from parent)
-            smt_proof_bytes.clone(), // rel_proof_parent
-            smt_proof_bytes,         // rel_proof_child
-            dev_proof_bytes,         // dev_proof
+            [0x0E; 32],
+            devid_a,
+            devid_b,
+            parent_tip,
+            child_tip,
+            replace.pre_root,
+            replace.post_root,
+            replace.parent_proof.to_bytes(),
+            dev_proof,
         );
-
-        // Compute commitment and sign it
+        receipt.set_transition_entropy([0x21; 32]);
         let commitment = receipt.compute_commitment().unwrap();
-        let sig_a = keypair_a.sign(&commitment).unwrap();
-        let sig_b = keypair_b.sign(&commitment).unwrap();
-        receipt.add_sig_a(sig_a);
-        receipt.add_sig_b(sig_b);
+        receipt.add_sig_a(keypair_a.sign(&commitment).unwrap());
+        receipt.add_sig_b(keypair_b.sign(&commitment).unwrap());
         let (chain_head_pk, chain_head_sk) = generate_ephemeral_keypair(&[0xA5; 32]).unwrap();
         let (chain_head_b_pk, chain_head_b_sk) = generate_ephemeral_keypair(&[0xB5; 32]).unwrap();
         receipt.set_ek_cert_a(
-            sign_ek_cert(&chain_head_sk, keypair_a.public_key(), &[0xaa; 32]).unwrap(),
+            sign_ek_cert(&chain_head_sk, keypair_a.public_key(), &parent_tip).unwrap(),
         );
         receipt.set_ek_cert_b(
-            sign_ek_cert(&chain_head_b_sk, keypair_b.public_key(), &[0xaa; 32]).unwrap(),
+            sign_ek_cert(&chain_head_b_sk, keypair_b.public_key(), &parent_tip).unwrap(),
         );
 
-        // Create context with the public keys
         let ctx = ReceiptVerificationContext::new(
-            [0u8; 32],
-            [0u8; 32],
+            DeviceTreeAcceptanceCommitment::from_root(device_tree.root()),
+            replace.pre_root,
             keypair_a.public_key().to_vec(),
             keypair_b.public_key().to_vec(),
         )
         .with_chain_head_a(chain_head_pk)
         .with_chain_head_b(chain_head_b_pk);
+        (receipt, ctx)
+    }
+
+    /// The real receipt is accepted on a fresh parent; once that parent is
+    /// consumed the same receipt is refused for parent uniqueness, and for
+    /// nothing else.
+    #[test]
+    fn test_parent_uniqueness_enforcement() {
+        let (receipt, ctx) = signed_receipt_and_context();
+        let accepted =
+            verify_stitched_receipt(&receipt, &ctx, &mut ParentConsumptionTracker::new()).unwrap();
+        assert!(accepted.valid, "{:?}", accepted.reason);
+
         let mut tracker = ParentConsumptionTracker::new();
-
-        // Manually mark parent as consumed first
-        tracker.try_consume([0xaa; 32], [0xbb; 32]).unwrap();
-
-        // Now verification should fail uniqueness check (signatures pass, proofs fail on wrong roots, but we test the flow)
+        tracker.try_consume(receipt.parent_tip, [0xcc; 32]).unwrap();
         let result = verify_stitched_receipt(&receipt, &ctx, &mut tracker).unwrap();
         assert!(!result.valid);
-        let reason = result.reason.as_ref().unwrap();
-        eprintln!("Actual rejection reason: {}", reason);
-        // The test may fail at proof verification since roots don't match the empty proof
-        // but the important thing is uniqueness is checked if proofs pass
-        assert!(reason.contains("Parent uniqueness") || reason.contains("inclusion proof failed"));
+        let reason = result.reason.unwrap_or_default();
+        assert!(reason.contains("Parent uniqueness"), "got: {reason}");
+    }
+
+    /// A verifier that expects the step to start from one root refuses a
+    /// receipt — fully signed, its path authentic — over any other root:
+    /// that receipt is a different step.
+    #[test]
+    fn a_receipt_over_a_root_the_verifier_does_not_expect_is_refused() {
+        let (receipt, ctx) = signed_receipt_and_context();
+        let accepted =
+            verify_stitched_receipt(&receipt, &ctx, &mut ParentConsumptionTracker::new()).unwrap();
+        assert!(accepted.valid, "{:?}", accepted.reason);
+
+        let mut elsewhere = ctx;
+        elsewhere.expected_parent_root = receipt.child_root;
+        let mut tracker = ParentConsumptionTracker::new();
+        let refused = verify_stitched_receipt(&receipt, &elsewhere, &mut tracker).unwrap();
+        assert!(!refused.valid);
+        let reason = refused.reason.unwrap_or_default();
+        assert!(
+            reason.contains("is not the root this verifier expects"),
+            "got: {reason}"
+        );
+        assert!(
+            tracker
+                .try_consume(receipt.parent_tip, receipt.child_tip)
+                .is_ok(),
+            "a refused receipt consumes no parent"
+        );
     }
 
     /// Whitepaper §11.1: when a chain head is set on the verification context,
@@ -464,8 +566,8 @@ mod tests {
         use crate::crypto::ephemeral_key::{generate_ephemeral_keypair, sign_ek_cert};
 
         // Build a receipt with valid signatures but no ek_cert_a.
-        let keypair_a = crate::crypto::signatures::SignatureKeyPair::generate_for_testing();
-        let keypair_b = crate::crypto::signatures::SignatureKeyPair::generate_for_testing();
+        let keypair_a = crate::crypto::signatures::SignatureKeyPair::new().expect("keygen");
+        let keypair_b = crate::crypto::signatures::SignatureKeyPair::new().expect("keygen");
         let mut receipt = StitchedReceiptV2::new(
             [0; 32],
             [0; 32],
@@ -474,7 +576,6 @@ mod tests {
             [0xbb; 32],
             [0x01; 32],
             [0x02; 32],
-            vec![],
             vec![],
             vec![],
         );
@@ -518,8 +619,8 @@ mod tests {
     fn test_ek_cert_a_signed_by_wrong_key_rejected() {
         use crate::crypto::ephemeral_key::{generate_ephemeral_keypair, sign_ek_cert};
 
-        let keypair_a = crate::crypto::signatures::SignatureKeyPair::generate_for_testing();
-        let keypair_b = crate::crypto::signatures::SignatureKeyPair::generate_for_testing();
+        let keypair_a = crate::crypto::signatures::SignatureKeyPair::new().expect("keygen");
+        let keypair_b = crate::crypto::signatures::SignatureKeyPair::new().expect("keygen");
         let mut receipt = StitchedReceiptV2::new(
             [0; 32],
             [0; 32],
@@ -528,7 +629,6 @@ mod tests {
             [0xbb; 32],
             [0x01; 32],
             [0x02; 32],
-            vec![],
             vec![],
             vec![],
         );
@@ -583,8 +683,8 @@ mod tests {
         // Reuse the parent_uniqueness test setup but without consuming the parent.
         use crate::crypto::ephemeral_key::{generate_ephemeral_keypair, sign_ek_cert};
 
-        let keypair_a = crate::crypto::signatures::SignatureKeyPair::generate_for_testing();
-        let keypair_b = crate::crypto::signatures::SignatureKeyPair::generate_for_testing();
+        let keypair_a = crate::crypto::signatures::SignatureKeyPair::new().expect("keygen");
+        let keypair_b = crate::crypto::signatures::SignatureKeyPair::new().expect("keygen");
         let mut receipt = StitchedReceiptV2::new(
             [0; 32],
             [0; 32],
@@ -593,7 +693,6 @@ mod tests {
             [0xbb; 32],
             [0x01; 32],
             [0x02; 32],
-            vec![],
             vec![],
             vec![],
         );
@@ -671,7 +770,7 @@ mod tests {
         StitchedReceiptV2,
         crate::crypto::signatures::SignatureKeyPair,
     ) {
-        let keypair_a = crate::crypto::signatures::SignatureKeyPair::generate_for_testing();
+        let keypair_a = crate::crypto::signatures::SignatureKeyPair::new().expect("keygen");
         let mut receipt = StitchedReceiptV2::new(
             [0; 32],
             [0; 32],
@@ -680,7 +779,6 @@ mod tests {
             [0xbb; 32],
             [0x01; 32],
             [0x02; 32],
-            vec![],
             vec![],
             vec![],
         );

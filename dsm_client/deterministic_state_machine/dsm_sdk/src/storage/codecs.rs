@@ -643,7 +643,7 @@ mod tests {
 
     #[test]
     fn serialize_deserialize_transfer_round_trip() {
-        let balance = dsm::types::token_types::Balance::from_state(1000, [0u8; 32]);
+        let balance = dsm::types::token_types::Balance::amount(1000);
         let op = Operation::Transfer {
             policy_commit: [0u8; 32],
             to_device_id: vec![0xAAu8; 32],

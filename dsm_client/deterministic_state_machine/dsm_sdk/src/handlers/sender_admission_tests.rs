@@ -1,99 +1,149 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! 3.5b PR3: the generalized admission seam under ordinary operations —
-//! admitted Burn through the self-loop helper, the multi-step foreign walk,
-//! the admission serialization (correction B), and the held-outbox rule
-//! (correction A).
+//! The generalized admission seam under ordinary operations: an admitted burn
+//! and an admitted token creation through their routes, the multi-step
+//! foreign walk, the admission serialization (correction B), and the
+//! held-outbox rule (correction A).
+//!
+//! Every device is created as wallet creation creates it, on the network's
+//! pinned set of storage nodes; every fault is a node that stops serving.
 
+use prost::Message;
 use serial_test::serial;
 
-use crate::bridge::AppRouter;
-use crate::handlers::faucet_flow_tests_support::{setup_funded, NETWORK};
-use crate::sdk::economic_admission_flow::{admitted_self_loop_operation, resume_pending_admission};
+use crate::bridge::{AppInvoke, AppResult, AppRouter};
+use crate::economic_fixtures::{self, NETWORK};
+use crate::handlers::app_router_impl::AppRouterImpl;
+use crate::sdk::economic_admission_flow::resume_pending_admission;
 use crate::storage::client_db;
+use crate::test_support::one_device::Device;
+use crate::test_support::two_device::Pair;
 
 fn era() -> [u8; 32] {
     dsm::core::token::token_state_manager::era_policy_commit()
 }
 
-fn burn_op(amount: u64) -> dsm::types::operations::Operation {
-    dsm::types::operations::Operation::Burn {
-        amount: dsm::types::token_types::Balance::from_state(amount, [0u8; 32]),
-        token_id: b"ERA".to_vec(),
-        policy_commit: era(),
-        proof_of_ownership: Vec::new(),
-        message: String::new(),
-    }
+async fn invoke<M: Message>(router: &AppRouterImpl, method: &str, body: &M) -> AppResult {
+    router
+        .invoke(AppInvoke {
+            method: method.into(),
+            args: crate::generated::ArgPack {
+                codec: crate::generated::Codec::Proto as i32,
+                body: body.encode_to_vec(),
+                ..Default::default()
+            }
+            .encode_to_vec(),
+        })
+        .await
 }
 
-fn burn_delta(amount: u64) -> dsm::types::device_state::BalanceDelta {
-    dsm::types::device_state::BalanceDelta {
-        policy_commit: era(),
-        direction: dsm::types::device_state::BalanceDirection::Debit,
+fn burn_request(token_id: &str, amount: u64) -> dsm::types::proto::TokenBurnRequest {
+    dsm::types::proto::TokenBurnRequest {
+        token_id: token_id.into(),
         amount,
+        message: format!("burn {amount} {token_id}"),
     }
 }
 
-#[tokio::test(flavor = "multi_thread")]
-#[serial]
-async fn an_admitted_burn_advances_the_lineage_and_is_foreign_walkable() {
-    // Faucet position 1 (+100), then an ADMITTED burn of 40 at position 2 —
-    // the first ordinary economic operation through the generalized seam.
-    // Then the decisive check: a FOREIGN walk of positions 1..2, crossing a
-    // faucet credit AND a pure debit in one lineage.
-    let (core, _fleet) = setup_funded(0xC1).await;
-    let (outcome, admitted) = admitted_self_loop_operation(
-        &core,
-        burn_op(40),
-        burn_delta(40),
-        |_| {
-            Ok((
-                dsm::economic::write_set::CreditSourceFacts::None,
-                Vec::new(),
-            ))
-        },
-        None,
-    )
-    .await
-    .expect("admitted burn");
-    assert_eq!(admitted.economic_position, 2);
-    assert_eq!(outcome.new_device_state.balance(&era()), 60);
-    let head = core.device_head().expect("head");
-    assert!(head.pending_economic_admission().is_none(), "unfenced");
-    let (position, admitted_root) = client_db::economic_lineage::get_admitted_coordinate()
-        .unwrap()
-        .expect("admitted");
-    assert_eq!(position, 2);
+fn create_request(
+    ticker: &str,
+    decimals: u32,
+    genesis_supply: u128,
+) -> crate::generated::TokenCreateRequest {
+    crate::generated::TokenCreateRequest {
+        ticker: ticker.into(),
+        alias: format!("{ticker} Token"),
+        decimals,
+        genesis_supply_u128: genesis_supply.to_be_bytes().to_vec(),
+        burn_enabled: true,
+        transferable: true,
+        threshold: 1,
+        description: String::new(),
+        icon_url: String::new(),
+        allowlist_device_ids: Vec::new(),
+    }
+}
 
-    let (genesis, devid) = (head.genesis_digest(), head.devid());
-    client_db::economic_lineage::clear_peer_lineage(&genesis, &devid).unwrap();
+fn payload(result: &AppResult) -> crate::generated::envelope::Payload {
+    assert!(result.success, "{:?}", result.error_message);
+    crate::generated::Envelope::decode(&result.data[1..])
+        .expect("envelope")
+        .payload
+        .expect("payload")
+}
+
+fn admitted_position() -> u64 {
+    economic_fixtures::admitted_position().expect("the device is activated")
+}
+
+/// A foreign walk of `position` of this device's lineage: the resolver's
+/// cache cleared, so nothing below reads local admission state.
+async fn foreign_walk(
+    genesis: [u8; 32],
+    devid: [u8; 32],
+    position: u64,
+) -> dsm::economic::provenance::ValidatedPeerTransition {
+    client_db::economic_lineage::clear_peer_lineage(&genesis, &devid)
+        .expect("clear the peer lineage cache");
     let handle = tokio::runtime::Handle::current();
-    let peer = tokio::task::spawn_blocking(move || {
+    tokio::task::spawn_blocking(move || {
         use dsm::economic::provenance::ProvenanceResolver;
-        let profile =
-            dsm::economic::register::resolve_root_register_profile(NETWORK).expect("profile");
-        let set = crate::sdk::storage_set::StorageSetCatalog::from_env_config()
-            .expect("catalog")
-            .sets()
-            .iter()
-            .find(|s| {
-                crate::sdk::storage_set::as_ccb_members(s)
-                    .ok()
-                    .and_then(|m| profile.verify_candidate(&m).ok())
-                    .is_some()
-            })
-            .cloned()
-            .expect("canonical set");
+        let set = crate::sdk::storage_set::canonical_set(NETWORK).expect("canonical set");
         let resolver = crate::sdk::economic_registers::LiveRegisterResolver {
             set: &set,
             runtime: handle,
             expected_network_id: NETWORK.to_vec(),
         };
-        resolver.validated_peer_transition(&genesis, &devid, 2)
+        resolver.validated_peer_transition(&genesis, &devid, position)
     })
     .await
     .expect("join")
-    .expect("a two-step lineage (credit then debit) MUST be foreign-walkable");
+    .unwrap_or_else(|e| panic!("position {position} MUST be foreign-walkable: {e:?}"))
+}
+
+/// Every envelope the fleet holds in its spools, over every node.
+async fn fleet_spool_count(p: &Pair) -> usize {
+    let mut count = 0;
+    for node in &p.nodes.nodes {
+        count += node.spool().await.len();
+    }
+    count
+}
+
+fn outbox_status(rel: &[u8; 32]) -> String {
+    let binding = client_db::get_connection().expect("device db");
+    let conn = binding.lock().unwrap_or_else(|e| e.into_inner());
+    conn.query_row(
+        "SELECT status FROM sender_outbox WHERE relationship_key = ?1",
+        rusqlite::params![rel.as_slice()],
+        |r| r.get(0),
+    )
+    .expect("the outbox row")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn an_admitted_burn_advances_the_lineage_and_is_foreign_walkable() {
+    // Faucet position 1 (+100), then an ADMITTED burn of 40 at position 2.
+    // Then the decisive check: a FOREIGN walk of positions 1..2, crossing a
+    // reserve release AND a pure debit in one lineage.
+    let d = Device::funded(0xC1).await;
+    let burned = invoke(&d.router, "token.burn", &burn_request("ERA", 40)).await;
+    match payload(&burned) {
+        crate::generated::envelope::Payload::TokenBurnResponse(r) => {
+            assert_eq!(r.new_balance, 60)
+        }
+        other => panic!("expected TokenBurnResponse, got {other:?}"),
+    }
+    assert_eq!(d.era_balance(), 60);
+    let head = d.core().device_head().expect("head");
+    assert!(head.pending_economic_admission().is_none(), "unfenced");
+    let (position, admitted_root) = client_db::economic_lineage::get_admitted_coordinate()
+        .expect("read admitted")
+        .expect("admitted");
+    assert_eq!(position, 2);
+
+    let peer = foreign_walk(head.genesis_digest(), head.devid(), 2).await;
     assert_eq!(peer.validated_root().economic_position(), 2);
     assert_eq!(peer.validated_root().economic_root(), admitted_root);
     assert!(matches!(
@@ -102,130 +152,152 @@ async fn an_admitted_burn_advances_the_lineage_and_is_foreign_walkable() {
     ));
 }
 
-#[tokio::test(flavor = "multi_thread")]
+/// Correction B: the seam CAS-checks the admitted predecessor UNDER the lock.
+/// An admission staged at position 2, overtaken by another admission that
+/// took position 2 first, must refuse — never overwrite.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn a_stale_admission_snapshot_is_refused_not_committed() {
-    // Correction B: the seam CAS-checks the admitted predecessor UNDER the
-    // lock. A prepared admission built from a stale coordinate (position 1
-    // after position 1 already admitted) must refuse, never overwrite.
-    let (core, _fleet) = setup_funded(0xC2).await;
-    let head = core.device_head().unwrap();
-    let stale = dsm::economic::admission::PendingEconomicAdmission::prepared(
-        dsm::economic::admission::PendingAdmissionKind::DsmBacked,
-        1, // already admitted
-        dsm::economic::tree::empty_economic_root(),
-        dsm::economic::admission::dsm_operation_digest(&burn_op(1).to_bytes()),
-    );
-    let _ = head;
-    let err = core
-        .faucet_claim_advance(
-            burn_op(1),
-            &burn_delta(1),
-            stale,
-            |_| unreachable!("build must not run for a refused admission"),
-            &[0u8; 32],
+    let d = Device::funded(0xC2).await;
+    let (op, deltas) = d
+        .router
+        .burn_operation(&burn_request("ERA", 1))
+        .expect("the burn this device signs");
+    let staged = crate::sdk::economic_admission_flow::stage_admission(
+        d.core(),
+        &op,
+        dsm::economic::write_set::CreditSourceFacts::None,
+        Vec::new(),
+    )
+    .await
+    .expect("stage at position 2");
+    assert_eq!(staged.prepared.economic_position, 2);
+
+    // Another admission takes position 2 first.
+    let overtaking = invoke(&d.router, "token.burn", &burn_request("ERA", 10)).await;
+    assert!(overtaking.success, "{:?}", overtaking.error_message);
+    assert_eq!(admitted_position(), 2);
+    let head_before = d.core().device_head().expect("head").root();
+
+    let err = d
+        .core()
+        .admitted_advance(
+            op,
+            &deltas,
+            staged.prepared,
+            |_| {
+                Err(dsm::types::error::DsmError::invalid_operation(
+                    "the witness of a refused admission must never be built",
+                ))
+            },
+            &staged.set.id(),
             None,
         )
-        .expect_err("stale predecessor must refuse");
+        .expect_err("a stale predecessor must refuse");
     assert!(
         err.to_string()
             .contains("does not extend the admitted coordinate"),
         "got: {err}"
     );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[serial]
-async fn a_held_outbox_row_is_invisible_to_the_resubmit_sweep_until_admitted() {
-    // Correction A's load-bearing rule at the storage layer: a row in
-    // `economic_admission_pending` is NOT an unsettled row — the sweep
-    // cannot see it, so it cannot deliver it. The terminal admission
-    // transaction promotes it; only then is it deliverable.
-    let (_core, _fleet) = setup_funded(0xC3).await;
-    let held = crate::storage::client_db::SenderOutboxRecord {
-        relationship_key: [0x11; 32],
-        canonical_parent: [0x22; 32],
-        proposal_nonce: [0x33; 32],
-        canonical_child: [0x44; 32],
-        commitment: [0x55; 32],
-        projection_parent: [0x66; 32],
-        projection_target: [0x77; 32],
-        routing_address: "route".into(),
-        submission_id: "held-row-test".into(),
-        envelope_bytes: vec![0xEE; 8],
-        local_expected_prev: None,
-        is_first_ek_step: true,
-        status: client_db::OUTBOX_ECONOMIC_ADMISSION_PENDING.to_string(),
-        message_ids: None,
-        created_at: 0,
-    };
-    {
-        let binding = client_db::get_connection().unwrap();
-        let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
-        client_db::insert_sender_outbox_with_conn(&conn, &held).unwrap();
-    }
-    let unsettled = client_db::unsettled_sender_outbox().unwrap();
-    assert!(
-        unsettled.iter().all(|r| r.submission_id != "held-row-test"),
-        "a HELD row must be invisible to the resubmit sweep — zero transfer bytes \
-         may be emitted before ECON_ADMITTED"
+    assert_eq!(admitted_position(), 2, "nothing admitted");
+    assert_eq!(
+        d.core().device_head().expect("head").root(),
+        head_before,
+        "nothing advanced"
     );
-    // Promotion makes it deliverable.
-    {
-        let binding = client_db::get_connection().unwrap();
-        let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
-        let n = client_db::sender_outbox::promote_held_outbox_rows_with_conn(&conn).unwrap();
-        assert_eq!(n, 1);
-    }
-    let unsettled = client_db::unsettled_sender_outbox().unwrap();
-    assert!(unsettled.iter().any(|r| r.submission_id == "held-row-test"));
+    assert_eq!(d.era_balance(), 90, "only the overtaking burn debited");
 }
 
-#[tokio::test(flavor = "multi_thread")]
+/// A refused advance leaves NOTHING: no head movement, no fence, no admitted
+/// movement, no frozen artifact. A burn beyond the balance is refused by the
+/// conservation guard inside the advance, before anything durable.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_refused_advance_leaves_no_trace() {
+    let d = Device::funded(0xC3).await;
+    let head_root_before = d.core().device_head().expect("head").root();
+    let unpublished_before =
+        client_db::frozen_publication_artifact::list_unpublished_artifacts(u32::MAX)
+            .expect("frozen artifacts")
+            .len();
+
+    let refused = invoke(&d.router, "token.burn", &burn_request("ERA", 101)).await;
+    assert!(
+        !refused.success,
+        "a burn beyond the balance must be refused"
+    );
+
+    let head = d.core().device_head().expect("head");
+    assert_eq!(head.root(), head_root_before, "no advance survived");
+    assert!(
+        head.pending_economic_admission().is_none(),
+        "no fence survived"
+    );
+    assert_eq!(admitted_position(), 1, "no admitted movement");
+    assert_eq!(d.era_balance(), 100);
+    assert_eq!(
+        client_db::frozen_publication_artifact::list_unpublished_artifacts(u32::MAX)
+            .expect("frozen artifacts")
+            .len(),
+        unpublished_before,
+        "no artifact was frozen"
+    );
+}
+
+/// Faucet claim, burn, token creation, burn of the created token — four
+/// admissions, three kinds of witness content, one strictly monotonic
+/// lineage.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn sequential_admissions_stay_monotonic_across_operation_kinds() {
-    // Faucet claim, burn, burn — three admissions, three kinds of witness
-    // content, one strictly monotonic lineage.
-    let (core, _fleet) = setup_funded(0xC4).await;
-    let (_o, a2) = admitted_self_loop_operation(
-        &core,
-        burn_op(10),
-        burn_delta(10),
-        |_| {
-            Ok((
-                dsm::economic::write_set::CreditSourceFacts::None,
-                Vec::new(),
-            ))
-        },
-        None,
-    )
-    .await
-    .expect("burn 1");
-    assert_eq!(a2.economic_position, 2);
-    let (_o, a3) = admitted_self_loop_operation(
-        &core,
-        burn_op(20),
-        burn_delta(20),
-        |_| {
-            Ok((
-                dsm::economic::write_set::CreditSourceFacts::None,
-                Vec::new(),
-            ))
-        },
-        None,
-    )
-    .await
-    .expect("burn 2");
-    assert_eq!(a3.economic_position, 3);
-    assert_eq!(core.device_head().unwrap().balance(&era()), 70);
+    let d = Device::funded(0xC4).await;
+    let fee = dsm::core::token::TOKEN_CREATION_FEE_ERA;
+
+    let burned = invoke(&d.router, "token.burn", &burn_request("ERA", 10)).await;
+    assert!(burned.success, "{:?}", burned.error_message);
+    assert_eq!(admitted_position(), 2);
+
+    let created = invoke(&d.router, "token.create", &create_request("SEQ", 0, 500)).await;
+    assert!(created.success, "{:?}", created.error_message);
+    assert_eq!(admitted_position(), 3);
+
+    let seq = client_db::token_registry::get_token_by_ticker("SEQ")
+        .expect("registry read")
+        .expect("SEQ registered");
+    let burned = invoke(&d.router, "token.burn", &burn_request(&seq.token_id, 20)).await;
+    assert!(burned.success, "{:?}", burned.error_message);
+    assert_eq!(admitted_position(), 4);
+
+    let head = d.core().device_head().expect("head");
+    assert_eq!(head.balance(&era()), 90 - fee);
+    assert_eq!(head.balance(&seq.policy_commit), 480);
+}
+
+/// A transfer names its token exactly. A request naming none is not an ERA
+/// transfer, and a ticker is not case-folded into one it does not spell: both
+/// are refused, and nothing moves.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_transfer_naming_no_token_or_a_misspelled_one_is_refused_and_nothing_moves() {
+    let p = Pair::boot(100, 0).await;
+
+    let unnamed = p.a.send_token(&p.b, "", 10).await;
+    assert!(!unnamed.success, "an omitted token is not ERA");
+    let msg = unnamed.error_message.unwrap_or_default();
+    assert!(msg.contains("names no token"), "got: {msg}");
+    assert_eq!(p.a.era_balance(), 100);
+
+    let folded = p.a.send_token(&p.b, "era", 10).await;
+    assert!(!folded.success, "`era` does not name ERA");
+    assert_eq!(p.a.era_balance(), 100);
+    assert_eq!(p.b.era_balance(), 0);
 }
 
 #[test]
 fn online_transfer_request_locators_round_trip_on_the_wire() {
-    // The tag-31 lesson: every wire change owes its inverse immediately. The
-    // 3.5b locator fields (13/14) must survive encode → decode exactly, with
-    // values distinctive enough that a dropped field cannot alias a default.
-    use prost::Message;
+    // Every wire change owes its inverse immediately. The locator fields
+    // must survive encode → decode exactly, with values distinctive enough
+    // that a dropped field cannot alias a default.
     let req = crate::generated::OnlineTransferRequest {
         token_id: "ERA".to_string(),
         to_device_id: vec![0x11; 32],
@@ -234,8 +306,6 @@ fn online_transfer_request_locators_round_trip_on_the_wire() {
         signature: vec![0x22; 8],
         nonce: vec![0x33; 32],
         from_device_id: vec![0x44; 32],
-        chain_tip: Vec::new(),
-        seq: 7,
         canonical_operation_bytes: vec![0x55; 16],
         receipt_evidence_digest: vec![0x66; 32],
         sender_economic_position: 0x0102_0304_0506_0708,
@@ -254,181 +324,181 @@ fn online_transfer_request_locators_round_trip_on_the_wire() {
     );
 }
 
-/// The route-level coverage the integration suites lost when creation's fee
-/// became an ADMITTED debit (integration tests have no fake fleet): the
-/// fee-only creation end to end, its anchor contract, reconciliation, the
-/// named creator-supply refusal, and the admitted burn route — one funded
-/// device, one lineage, every position accounted for.
+/// Token creation through its route, end to end: the fee debit and the
+/// genesis-supply release to the creator are ONE admitted position, the
+/// anchor is the content hash of the stored policy, an identical resubmission
+/// reconciles, and the admitted burn route takes the next position.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
-async fn token_routes_admit_fee_only_create_and_burn_end_to_end() {
-    use prost::Message;
-    let p = crate::test_support::two_device::Pair::boot(100, 0).await;
-    p.a.enter();
-    let router = p.a.router();
-    let pack = |body: Vec<u8>| {
-        crate::generated::ArgPack {
-            schema_hash: Some(crate::generated::Hash32 { v: vec![0u8; 32] }),
-            codec: crate::generated::Codec::Proto as i32,
-            body,
-        }
-        .encode_to_vec()
-    };
-    let create_req = |alloc: u128| {
-        crate::generated::TokenCreateRequest {
-            ticker: "ADMT".into(),
-            alias: "Admitted Token".into(),
-            // Decimals stay nonzero so the created token is not accidentally
-            // the trivial whole-unit shape. The cap-scaling contract is NOT
-            // pinned here any more: a capped creation is refused in beta, so
-            // the only creation that reaches the registry carries no cap.
-            // `token_decimal_scaling.rs` pins the scaling arithmetic through
-            // the capped path's own refusals.
-            decimals: 2,
-            max_supply_u128: 0u128.to_be_bytes().to_vec(),
-            initial_alloc_u128: alloc.to_be_bytes().to_vec(),
-            mint_burn_enabled: true,
-            transferable: true,
-            unlimited_supply: true,
-            mint_burn_threshold: 1,
-            description: String::new(),
-            icon_url: String::new(),
-            allowlist_device_ids: Vec::new(),
-        }
-        .encode_to_vec()
-    };
+async fn token_routes_admit_create_and_burn_end_to_end() {
+    let d = Device::funded(0xC5).await;
     let fee = dsm::core::token::TOKEN_CREATION_FEE_ERA;
-    assert_eq!(
-        p.a.era_balance(),
-        100,
-        "one faucet claim funded the fixture"
-    );
 
-    // Creator supply: the named refusal, and NOTHING moved.
-    let refused = router
-        .invoke(crate::bridge::AppInvoke {
-            method: "token.create".into(),
-            args: pack(create_req(5)),
-        })
-        .await;
-    assert!(!refused.success, "creator supply must be refused");
-    assert!(
-        refused
-            .error_message
-            .unwrap_or_default()
-            .contains("initial_supply > 0 cannot enter a validated lineage"),
-        "the refusal is the NAMED issuance-predicate error"
-    );
-    assert_eq!(p.a.era_balance(), 100, "a refused creation burns nothing");
-    assert_eq!(
-        client_db::economic_lineage::get_admitted_coordinate()
-            .unwrap()
-            .unwrap()
-            .0,
-        1,
-        "a refused creation admits nothing"
-    );
-
-    // Fee-only creation: ADMITTED end to end (position 2).
-    let created = router
-        .invoke(crate::bridge::AppInvoke {
-            method: "token.create".into(),
-            args: pack(create_req(0)),
-        })
-        .await;
-    assert!(created.success, "{:?}", created.error_message);
-    let resp = match crate::generated::Envelope::decode(&created.data[1..])
-        .expect("envelope")
-        .payload
-    {
-        Some(crate::generated::envelope::Payload::TokenCreateResponse(t)) => t,
+    let created = invoke(&d.router, "token.create", &create_request("ADMT", 2, 1_000)).await;
+    let resp = match payload(&created) {
+        crate::generated::envelope::Payload::TokenCreateResponse(t) => t,
         other => panic!("expected TokenCreateResponse, got {other:?}"),
     };
-    assert_eq!(p.a.era_balance(), 100 - fee, "exactly the fee, burned");
+    assert_eq!(d.era_balance(), 100 - fee, "exactly the fee, burned");
     assert_eq!(
-        client_db::economic_lineage::get_admitted_coordinate()
-            .unwrap()
-            .unwrap()
-            .0,
+        admitted_position(),
         2,
-        "the fee debit is an admitted economic position"
+        "the creation is an admitted position"
     );
-    let head = p.a.router().core_sdk.device_head().expect("head");
+    let head = d.core().device_head().expect("head");
     assert!(head.pending_economic_admission().is_none(), "unfenced");
-    // The anchor contract from the retired integration create: the anchor is
-    // the content hash of the policy Rust packed — no node, no client names
-    // it. Re-derive from the stored policy bytes and require equality.
     let row = client_db::token_registry::get_token_by_ticker("ADMT")
         .expect("registry read")
         .expect("registry row committed with the advance");
     assert_eq!(
-        row.max_supply, 0,
-        "an uncapped token records no cap — the only creation beta admits"
+        row.genesis_supply, 100_000,
+        "1,000 at two decimals, in base units"
     );
+    assert_eq!(row.creator_device_id, d.identity.device_id);
+    assert_eq!(
+        head.balance(&row.policy_commit),
+        100_000,
+        "the whole genesis supply was released to the creator"
+    );
+
+    // The anchor is the content hash of the policy Rust packed: re-derive it
+    // from the stored policy bytes.
     assert_eq!(resp.policy_anchor.len(), 32, "anchor is 32 bytes");
     let (stored_anchor, stored_policy) = client_db::token_registry::all_policies()
         .expect("policies")
         .into_iter()
         .find(|(a, _)| a.as_slice() == resp.policy_anchor.as_slice())
         .expect("the created token's policy is stored under its anchor");
-    let derived = dsm::crypto::blake3::domain_hash_bytes(
-        dsm::common::domain_tags::TAG_DSM_POLICY,
-        &stored_policy,
-    );
     assert_eq!(
-        derived, stored_anchor,
+        dsm::crypto::blake3::domain_hash_bytes(
+            dsm::common::domain_tags::TAG_DSM_POLICY,
+            &stored_policy,
+        ),
+        stored_anchor,
         "stored policy must hash to the anchor the route returned"
     );
 
     // An identical resubmission reconciles: same id, no second fee, no advance.
-    let again = router
-        .invoke(crate::bridge::AppInvoke {
-            method: "token.create".into(),
-            args: pack(create_req(0)),
-        })
-        .await;
-    assert!(again.success, "{:?}", again.error_message);
-    let resp2 = match crate::generated::Envelope::decode(&again.data[1..])
-        .expect("envelope")
-        .payload
-    {
-        Some(crate::generated::envelope::Payload::TokenCreateResponse(t)) => t,
+    let again = invoke(&d.router, "token.create", &create_request("ADMT", 2, 1_000)).await;
+    let resp2 = match payload(&again) {
+        crate::generated::envelope::Payload::TokenCreateResponse(t) => t,
         other => panic!("expected TokenCreateResponse, got {other:?}"),
     };
     assert_eq!(resp2.token_id, resp.token_id, "one commitment, one token");
-    assert_eq!(p.a.era_balance(), 100 - fee, "no second fee");
+    assert_eq!(d.era_balance(), 100 - fee, "no second fee");
     assert_eq!(
-        client_db::economic_lineage::get_admitted_coordinate()
-            .unwrap()
-            .unwrap()
-            .0,
+        admitted_position(),
         2,
-        "a reconciled resubmission admits nothing new"
+        "a reconciled resubmission admits nothing"
     );
 
     // The admitted burn ROUTE (position 3).
-    let burned = router
-        .invoke(crate::bridge::AppInvoke {
-            method: "token.burn".into(),
-            args: pack(
-                crate::generated::TokenBurnRequest {
-                    token_id: "ERA".into(),
-                    amount: 25,
-                    message: "route burn".into(),
-                }
-                .encode_to_vec(),
-            ),
-        })
-        .await;
+    let burned = invoke(&d.router, "token.burn", &burn_request("ERA", 25)).await;
     assert!(burned.success, "{:?}", burned.error_message);
-    assert_eq!(p.a.era_balance(), 100 - fee - 25);
+    assert_eq!(d.era_balance(), 100 - fee - 25);
     assert_eq!(
-        client_db::economic_lineage::get_admitted_coordinate()
-            .unwrap()
-            .unwrap()
-            .0,
+        admitted_position(),
         3,
         "the route burn advanced the lineage"
+    );
+}
+
+/// The creation's release is walkable by a FOREIGN verifier with no local
+/// shortcuts: position 2 validates as the CreateToken itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_token_creation_is_foreign_walkable() {
+    let d = Device::funded(0xC6).await;
+    let created = invoke(&d.router, "token.create", &create_request("WALK", 0, 250)).await;
+    assert!(created.success, "{:?}", created.error_message);
+    let (position, admitted_root) = client_db::economic_lineage::get_admitted_coordinate()
+        .expect("read admitted")
+        .expect("admitted");
+    assert_eq!(position, 2);
+
+    let head = d.core().device_head().expect("head");
+    let peer = foreign_walk(head.genesis_digest(), head.devid(), 2).await;
+    assert_eq!(peer.validated_root().economic_position(), 2);
+    assert_eq!(peer.validated_root().economic_root(), admitted_root);
+    assert!(
+        matches!(
+            peer.verified_operation(),
+            dsm::types::operations::Operation::CreateToken { .. }
+        ),
+        "the walked operation is the creation itself"
+    );
+}
+
+/// A creation whose admission cannot finish (the fleet below quorum) is HELD:
+/// the advance, its pending admission and its frozen evidence all exist
+/// durably. Resume completes the SAME admission from the frozen bytes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_failed_finish_holds_the_creation_and_resume_completes_the_same_admission() {
+    let mut d = Device::funded(0xC7).await;
+    let fee = dsm::core::token::TOKEN_CREATION_FEE_ERA;
+    let down = economic_fixtures::members_to_break_quorum();
+
+    d.nodes.take_down(&down).await;
+    let held = invoke(&d.router, "token.create", &create_request("HELD", 0, 300)).await;
+    assert!(
+        !held.success,
+        "a creation that cannot be admitted must not report success"
+    );
+    let pending = d
+        .core()
+        .device_head()
+        .expect("head")
+        .pending_economic_admission()
+        .cloned()
+        .expect("the creation is HELD behind its pending admission");
+    assert_eq!(pending.economic_position, 2);
+    assert_eq!(admitted_position(), 1, "nothing admitted");
+    assert_eq!(
+        d.era_balance(),
+        100 - fee,
+        "forward-only: the committed fee stands"
+    );
+    let frozen = client_db::frozen_publication_artifact::list_unpublished_artifacts(u32::MAX)
+        .expect("frozen artifacts");
+    assert!(
+        !frozen.is_empty(),
+        "the creation's evidence is frozen for resume"
+    );
+
+    d.nodes.bring_up(&down).await;
+    let resumed = resume_pending_admission(d.core(), NETWORK, pending.clone())
+        .await
+        .expect("resume completes the held creation");
+    assert_eq!(
+        resumed.economic_position, 2,
+        "admitted at its signed position"
+    );
+    assert!(
+        d.core()
+            .device_head()
+            .expect("head")
+            .pending_economic_admission()
+            .is_none(),
+        "unfenced after resume"
+    );
+    let row = client_db::token_registry::get_token_by_ticker("HELD")
+        .expect("registry read")
+        .expect("the registry row committed with the advance");
+    assert_eq!(
+        d.core()
+            .device_head()
+            .expect("head")
+            .balance(&row.policy_commit),
+        300,
+        "the released supply stands"
+    );
+    let head = d.core().device_head().expect("head");
+    let walked = foreign_walk(head.genesis_digest(), head.devid(), 2).await;
+    assert_eq!(
+        walked.validated_root().economic_position(),
+        2,
+        "the resumed admission is the one the fleet holds"
     );
 }
 
@@ -439,59 +509,50 @@ async fn token_routes_admit_fee_only_create_and_burn_end_to_end() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn a_stale_resume_returns_the_admitted_outcome_and_leaves_a_newer_admission_alone() {
-    use crate::sdk::economic_admission_flow::resume_pending_admission;
-    use crate::sdk::storage_io::fake_fleet;
-    let p = crate::test_support::two_device::Pair::boot(100, 0).await;
-    let down = crate::economic_fixtures::members_to_break_quorum();
-    let admitted = || {
-        client_db::economic_lineage::get_admitted_coordinate()
-            .unwrap()
-            .unwrap()
-            .0
-    };
+    let mut p = Pair::boot(100, 0).await;
+    let down = economic_fixtures::members_to_break_quorum();
 
     // An admission held at position 2, then finished by a resume.
-    for id in &down {
-        fake_fleet::fail_member(id);
-    }
+    p.nodes.take_down(&down).await;
     assert!(!p.a.send(&p.b, 10).await.success, "the first send is held");
     p.a.enter();
     let core = p.a.router().core_sdk.clone();
     let stale = core
         .device_head()
-        .unwrap()
+        .expect("head")
         .pending_economic_admission()
         .cloned()
         .expect("the first admission rides the head");
-    for id in &down {
-        fake_fleet::heal_member(id);
-    }
-    let first = resume_pending_admission(&core, b"dsm-testnet", stale.clone())
+    p.nodes.bring_up(&down).await;
+    let first = resume_pending_admission(&core, NETWORK, stale.clone())
         .await
         .expect("the resume finishes the held admission");
     p.a.enter();
     assert_eq!(first.economic_position, 2);
-    assert_eq!(admitted(), 2);
+    assert_eq!(admitted_position(), 2);
 
     // A DUPLICATE resume of the same admission: its outcome, nothing written.
-    let again = resume_pending_admission(&core, b"dsm-testnet", stale.clone())
+    let again = resume_pending_admission(&core, NETWORK, stale.clone())
         .await
         .expect("a duplicate resume returns the admitted outcome");
     p.a.enter();
     assert_eq!(again.economic_position, first.economic_position);
-    assert_eq!(admitted(), 2, "the duplicate moved nothing");
+    assert_eq!(admitted_position(), 2, "the duplicate moved nothing");
 
-    // Deliver the first transfer, so the relationship is clear for the next send.
+    // Deliver and finalize the first transfer, so the relationship is clear
+    // for the next send.
     let resent = p.a.sync().await;
     assert!(resent.success, "{:?}", resent.errors);
     let applied = p.b.sync().await;
     assert!(applied.success, "{:?}", applied.errors);
     assert_eq!(p.b.era_balance(), 10, "B received the first transfer");
+    let finalized = p.a.sync().await;
+    assert!(finalized.success, "{:?}", finalized.errors);
+    let released = p.b.sync().await;
+    assert!(released.success, "{:?}", released.errors);
 
     // A NEWER admission held at position 3.
-    for id in &down {
-        fake_fleet::fail_member(id);
-    }
+    p.nodes.take_down(&down).await;
     let held_again = p.a.send(&p.b, 5).await;
     assert!(
         !held_again.success,
@@ -505,21 +566,21 @@ async fn a_stale_resume_returns_the_admitted_outcome_and_leaves_a_newer_admissio
     p.a.enter();
     let newer = core
         .device_head()
-        .unwrap()
+        .expect("head")
         .pending_economic_admission()
         .cloned()
         .expect("the newer admission rides the head");
     assert_eq!(newer.economic_position, 3);
 
     // The STALE resume, held across it: the old outcome, the newer untouched.
-    let stale_again = resume_pending_admission(&core, b"dsm-testnet", stale)
+    let stale_again = resume_pending_admission(&core, NETWORK, stale)
         .await
         .expect("a stale resume of an admitted admission returns its outcome");
     p.a.enter();
     assert_eq!(stale_again.economic_position, 2);
     let kept = core
         .device_head()
-        .unwrap()
+        .expect("head")
         .pending_economic_admission()
         .cloned()
         .expect("the newer admission is still pending");
@@ -528,31 +589,30 @@ async fn a_stale_resume_returns_the_admitted_outcome_and_leaves_a_newer_admissio
         (newer.economic_position, newer.operation_digest),
         "the newer pending admission is untouched"
     );
-    assert_eq!(admitted(), 2, "the admitted coordinate did not move");
-    for id in &down {
-        fake_fleet::heal_member(id);
-    }
+    assert_eq!(
+        admitted_position(),
+        2,
+        "the admitted coordinate did not move"
+    );
+    p.nodes.bring_up(&down).await;
 }
 
-/// Correction A end to end: a send whose admission CANNOT finish (the
-/// register fleet is down past quorum) commits the debit forward-only,
-/// HOLDS the outbox row, and emits ZERO transfer bytes — even when the
-/// resubmit sweep runs in the held window. Recovery then completes the SAME
-/// admission from the frozen artifacts, promotes the row, and the transfer
-/// delivers.
+/// Correction A end to end: a send whose admission CANNOT finish (the fleet
+/// below quorum) commits the debit forward-only, HOLDS the outbox row, and
+/// emits ZERO transfer bytes — even when the resubmit sweep runs in the held
+/// window. Recovery then completes the SAME admission from the frozen
+/// artifacts, promotes the row, and the transfer delivers.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn a_failed_finish_holds_the_outbox_and_resume_completes_the_same_admission() {
-    let p = crate::test_support::two_device::Pair::boot(100, 0).await;
+    let mut p = Pair::boot(100, 0).await;
     let rel = p.a.rel_key_with(&p.b);
-    let submits_before = p.submits().len();
+    let spooled_before = fleet_spool_count(&p).await;
 
     // Losing n − q + 1 members makes evidence publication impossible, so
     // finish_admission dies AFTER the staged commit.
-    let down = crate::economic_fixtures::members_to_break_quorum();
-    for id in &down {
-        crate::sdk::storage_io::fake_fleet::fail_member(id);
-    }
+    let down = economic_fixtures::members_to_break_quorum();
+    p.nodes.take_down(&down).await;
     let refused = p.a.send(&p.b, 10).await;
     assert!(!refused.success, "the send must not report success");
     let msg = refused.error_message.unwrap_or_default();
@@ -566,86 +626,56 @@ async fn a_failed_finish_holds_the_outbox_and_resume_completes_the_same_admissio
         "forward-only: the committed debit stands"
     );
     assert_eq!(
-        p.submits().len(),
-        submits_before,
+        fleet_spool_count(&p).await,
+        spooled_before,
         "zero transfer bytes emitted by the send itself"
     );
 
     p.a.enter();
-    let held_status: String = {
-        let binding = client_db::get_connection().unwrap();
-        let conn = binding.lock().unwrap_or_else(|e| e.into_inner());
-        conn.query_row(
-            "SELECT status FROM sender_outbox WHERE relationship_key = ?1",
-            rusqlite::params![rel.as_slice()],
-            |r| r.get(0),
-        )
-        .unwrap()
-    };
-    assert_eq!(held_status, client_db::OUTBOX_ECONOMIC_ADMISSION_PENDING);
+    assert_eq!(
+        outbox_status(&rel),
+        client_db::OUTBOX_ECONOMIC_ADMISSION_PENDING
+    );
     let core = p.a.router().core_sdk.clone();
     let pending = core
         .device_head()
-        .unwrap()
+        .expect("head")
         .pending_economic_admission()
         .cloned()
         .expect("the admission rides the head for resume");
-    assert_eq!(
-        client_db::economic_lineage::get_admitted_coordinate()
-            .unwrap()
-            .unwrap()
-            .0,
-        1,
-        "nothing admitted"
-    );
+    assert_eq!(admitted_position(), 1, "nothing admitted");
 
     // THE RACE (correction A's control): run the resubmit sweep in the held
     // window — it must not see the row, so nothing reaches any node.
     let swept = p.a.sync().await;
     assert!(swept.success, "{:?}", swept.errors);
     assert_eq!(
-        p.submits().len(),
-        submits_before,
+        fleet_spool_count(&p).await,
+        spooled_before,
         "the sweep in the held window emits ZERO transfer bytes"
     );
 
-    // Recovery: heal the fleet, finish the SAME admission from frozen state.
-    for id in &down {
-        crate::sdk::storage_io::fake_fleet::heal_member(id);
-    }
-    crate::sdk::economic_admission_flow::resume_pending_admission(&core, b"dsm-testnet", pending)
+    // Recovery: the fleet serves again; finish the SAME admission from frozen
+    // state.
+    p.nodes.bring_up(&down).await;
+    resume_pending_admission(&core, NETWORK, pending)
         .await
         .expect("resume completes the same admission");
     p.a.enter();
     assert_eq!(
-        client_db::economic_lineage::get_admitted_coordinate()
-            .unwrap()
-            .unwrap()
-            .0,
+        admitted_position(),
         2,
         "the SAME admission admitted at position 2"
     );
     assert!(
-        p.a.router()
-            .core_sdk
-            .device_head()
-            .unwrap()
+        core.device_head()
+            .expect("head")
             .pending_economic_admission()
             .is_none(),
         "unfenced after resume"
     );
-    let promoted: String = {
-        let binding = client_db::get_connection().unwrap();
-        let conn = binding.lock().unwrap_or_else(|e| e.into_inner());
-        conn.query_row(
-            "SELECT status FROM sender_outbox WHERE relationship_key = ?1",
-            rusqlite::params![rel.as_slice()],
-            |r| r.get(0),
-        )
-        .unwrap()
-    };
     assert_ne!(
-        promoted,
+        outbox_status(&rel),
         client_db::OUTBOX_ECONOMIC_ADMISSION_PENDING,
         "the terminal admission promoted the held row"
     );
@@ -654,550 +684,10 @@ async fn a_failed_finish_holds_the_outbox_and_resume_completes_the_same_admissio
     let resent = p.a.sync().await;
     assert!(resent.success, "{:?}", resent.errors);
     assert!(
-        p.submits().len() > submits_before,
+        fleet_spool_count(&p).await > spooled_before,
         "the promoted row is deliverable"
     );
     let applied = p.b.sync().await;
     assert!(applied.success, "{:?}", applied.errors);
     assert_eq!(p.b.era_balance(), 10, "B received the held transfer once");
-}
-
-/// THE HONEST AUTHORIZED MINT, END TO END, THEN FOREIGN-WALKED.
-///
-/// This is the statement the producer cut exists to make true:
-///
-/// ```text
-/// canonical policy -> exact Mint frozen -> transition-bound 1-of-1 0x0029
-///   -> 0x0023 AuthorizedIssuance -> economic admission -> positive R_econ
-/// ```
-///
-/// Faucet funds position 1, the fee-bearing create admits position 2 and
-/// anchors the policy, the mint admits position 3 — and then a FOREIGN
-/// verifier with no local shortcuts walks the lineage and validates the mint
-/// through the full 0x0023 arm, fetching the 0x0029 bundle by content
-/// address from the fleet.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[serial]
-async fn token_routes_admit_an_authorized_mint_that_is_foreign_walkable() {
-    use prost::Message;
-    let p = crate::test_support::two_device::Pair::boot(100, 0).await;
-    p.a.enter();
-    let router = p.a.router();
-    let pack = |body: Vec<u8>| {
-        crate::generated::ArgPack {
-            schema_hash: Some(crate::generated::Hash32 { v: vec![0u8; 32] }),
-            codec: crate::generated::Codec::Proto as i32,
-            body,
-        }
-        .encode_to_vec()
-    };
-    let created = router
-        .invoke(crate::bridge::AppInvoke {
-            method: "token.create".into(),
-            args: pack(
-                crate::generated::TokenCreateRequest {
-                    ticker: "MNTA".into(),
-                    alias: "Mintable Token".into(),
-                    decimals: 2,
-                    max_supply_u128: 0u128.to_be_bytes().to_vec(),
-                    initial_alloc_u128: 0u128.to_be_bytes().to_vec(),
-                    mint_burn_enabled: true,
-                    transferable: true,
-                    unlimited_supply: true,
-                    mint_burn_threshold: 1,
-                    description: String::new(),
-                    icon_url: String::new(),
-                    allowlist_device_ids: Vec::new(),
-                }
-                .encode_to_vec(),
-            ),
-        })
-        .await;
-    assert!(created.success, "{:?}", created.error_message);
-    assert_eq!(
-        client_db::economic_lineage::get_admitted_coordinate()
-            .unwrap()
-            .unwrap()
-            .0,
-        2,
-        "the creation fee admitted position 2"
-    );
-
-    let minted = router
-        .invoke(crate::bridge::AppInvoke {
-            method: "token.mint".into(),
-            args: pack(
-                crate::generated::TokenMintRequest {
-                    token_id: "MNTA".into(),
-                    amount: 500,
-                    message: "first authorized issuance".into(),
-                }
-                .encode_to_vec(),
-            ),
-        })
-        .await;
-    assert!(minted.success, "{:?}", minted.error_message);
-    let resp = match crate::generated::Envelope::decode(&minted.data[1..])
-        .expect("envelope")
-        .payload
-    {
-        Some(crate::generated::envelope::Payload::TokenMintResponse(t)) => t,
-        other => panic!("expected TokenMintResponse, got {other:?}"),
-    };
-    assert_eq!(resp.new_balance, 500, "the credit landed");
-    let (position, admitted_root) = client_db::economic_lineage::get_admitted_coordinate()
-        .unwrap()
-        .expect("admitted");
-    assert_eq!(position, 3, "the mint admitted position 3");
-    let head = p.a.router().core_sdk.device_head().expect("head");
-    assert!(
-        head.pending_economic_admission().is_none(),
-        "no fence remains after ECON_ADMITTED"
-    );
-
-    // FOREIGN VERIFICATION: no cached shortcuts, live quorum, the real
-    // resolver — position 3 must validate as an AuthorizedIssuance-funded
-    // Mint from public material alone.
-    let (genesis, devid) = (head.genesis_digest(), head.devid());
-    client_db::economic_lineage::clear_peer_lineage(&genesis, &devid).unwrap();
-    let handle = tokio::runtime::Handle::current();
-    let peer = tokio::task::spawn_blocking(move || {
-        use dsm::economic::provenance::ProvenanceResolver;
-        let profile =
-            dsm::economic::register::resolve_root_register_profile(NETWORK).expect("profile");
-        let set = crate::sdk::storage_set::StorageSetCatalog::from_env_config()
-            .expect("catalog")
-            .sets()
-            .iter()
-            .find(|s| {
-                crate::sdk::storage_set::as_ccb_members(s)
-                    .ok()
-                    .and_then(|m| profile.verify_candidate(&m).ok())
-                    .is_some()
-            })
-            .cloned()
-            .expect("canonical set");
-        let resolver = crate::sdk::economic_registers::LiveRegisterResolver {
-            set: &set,
-            runtime: handle,
-            expected_network_id: NETWORK.to_vec(),
-        };
-        resolver.validated_peer_transition(&genesis, &devid, 3)
-    })
-    .await
-    .expect("join")
-    .expect("the minted position MUST be foreign-walkable through the 0x0023 arm");
-    assert_eq!(peer.validated_root().economic_position(), 3);
-    assert_eq!(peer.validated_root().economic_root(), admitted_root);
-    assert!(
-        matches!(
-            peer.verified_operation(),
-            dsm::types::operations::Operation::Mint { .. }
-        ),
-        "the walked operation is the Mint itself"
-    );
-}
-
-/// EVERY UNSUPPORTED POLICY SHAPE REFUSES AT THE PRODUCER, BEFORE ANY
-/// MUTATION — the policy's own reason, not a generic failure. One boot, three
-/// shapes: mint/burn disabled, an allowlist excluding this device, and the
-/// allowlist POSITIVE control proving the refusal is the allowlist rule.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[serial]
-async fn mint_preflight_refuses_each_unsupported_policy_shape_by_name() {
-    use prost::Message;
-    let p = crate::test_support::two_device::Pair::boot(100, 0).await;
-    p.a.enter();
-    let router = p.a.router();
-    let own_devid = router.core_sdk.device_head().expect("head").devid();
-    let pack = |body: Vec<u8>| {
-        crate::generated::ArgPack {
-            schema_hash: Some(crate::generated::Hash32 { v: vec![0u8; 32] }),
-            codec: crate::generated::Codec::Proto as i32,
-            body,
-        }
-        .encode_to_vec()
-    };
-    let create = |ticker: &str, mint_burn: bool, allow: Vec<Vec<u8>>| {
-        crate::generated::TokenCreateRequest {
-            ticker: ticker.into(),
-            alias: format!("{ticker} Token"),
-            decimals: 0,
-            max_supply_u128: 0u128.to_be_bytes().to_vec(),
-            initial_alloc_u128: 0u128.to_be_bytes().to_vec(),
-            mint_burn_enabled: mint_burn,
-            transferable: true,
-            unlimited_supply: true,
-            mint_burn_threshold: 1,
-            description: String::new(),
-            icon_url: String::new(),
-            allowlist_device_ids: allow,
-        }
-        .encode_to_vec()
-    };
-    let mint = |token: &str| {
-        crate::generated::TokenMintRequest {
-            token_id: token.into(),
-            amount: 10,
-            message: String::new(),
-        }
-        .encode_to_vec()
-    };
-
-    let admitted_before_mints = {
-        // three creates, three fee admissions
-        for (ticker, mb, allow) in [
-            ("NOMB", false, Vec::new()),
-            ("ALLW", true, vec![vec![0x77u8; 32]]),
-            ("ALLK", true, vec![own_devid.to_vec()]),
-        ] {
-            let r = router
-                .invoke(crate::bridge::AppInvoke {
-                    method: "token.create".into(),
-                    args: pack(create(ticker, mb, allow)),
-                })
-                .await;
-            assert!(r.success, "create {ticker}: {:?}", r.error_message);
-        }
-        client_db::economic_lineage::get_admitted_coordinate()
-            .unwrap()
-            .unwrap()
-            .0
-    };
-
-    let refused = router
-        .invoke(crate::bridge::AppInvoke {
-            method: "token.mint".into(),
-            args: pack(mint("NOMB")),
-        })
-        .await;
-    assert!(!refused.success);
-    let msg = refused.error_message.unwrap_or_default();
-    assert!(
-        msg.contains("disables mint/burn"),
-        "the committed policy's own reason, got: {msg}"
-    );
-
-    let refused = router
-        .invoke(crate::bridge::AppInvoke {
-            method: "token.mint".into(),
-            args: pack(mint("ALLW")),
-        })
-        .await;
-    assert!(!refused.success);
-    let msg = refused.error_message.unwrap_or_default();
-    assert!(
-        msg.contains("allowlist"),
-        "the receiving device is outside the committed allowlist, got: {msg}"
-    );
-
-    // POSITIVE CONTROL: the same shape NAMING this device mints — so the two
-    // refusals above are the policy rules, not a broken producer.
-    let ok = router
-        .invoke(crate::bridge::AppInvoke {
-            method: "token.mint".into(),
-            args: pack(mint("ALLK")),
-        })
-        .await;
-    assert!(ok.success, "{:?}", ok.error_message);
-    assert_eq!(
-        client_db::economic_lineage::get_admitted_coordinate()
-            .unwrap()
-            .unwrap()
-            .0,
-        admitted_before_mints + 1,
-        "exactly the allowlisted mint admitted; the refusals moved nothing"
-    );
-}
-
-/// ATOMICITY: a failure while building the issuance facts leaves NOTHING —
-/// no advance, no fence, no admitted movement, no frozen evidence. The facts
-/// closure runs before anything durable, so its error must be a clean no-op.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[serial]
-async fn a_failed_issuance_evidence_build_leaves_no_trace() {
-    let (core, _fleet) = setup_funded(0xD4).await;
-    let head_root_before = core.device_head().expect("head").root();
-    let admitted_before = client_db::economic_lineage::get_admitted_coordinate().unwrap();
-
-    let mint = dsm::types::operations::Operation::Mint {
-        amount: dsm::types::token_types::Balance::from_state(25, [0u8; 32]),
-        token_id: b"GHST".to_vec(),
-        policy_commit: [0x5Cu8; 32],
-        message: String::new(),
-    };
-    let delta = dsm::types::device_state::BalanceDelta {
-        policy_commit: [0x5Cu8; 32],
-        direction: dsm::types::device_state::BalanceDirection::Credit,
-        amount: 25,
-    };
-    let refused = admitted_self_loop_operation(
-        &core,
-        mint,
-        delta,
-        |_| {
-            Err(dsm::types::error::DsmError::invalid_operation(
-                "TEST: evidence construction failed",
-            ))
-        },
-        None,
-    )
-    .await;
-    assert!(refused.is_err(), "the seam must surface the build failure");
-
-    let head = core.device_head().expect("head");
-    assert_eq!(head.root(), head_root_before, "no advance survived");
-    assert!(
-        head.pending_economic_admission().is_none(),
-        "no fence survived"
-    );
-    assert_eq!(
-        client_db::economic_lineage::get_admitted_coordinate().unwrap(),
-        admitted_before,
-        "no admitted movement"
-    );
-    assert!(
-        client_db::frozen_publication_artifact::find_current_payload_with_prefix_and_purpose(
-            "immutable::DSM/issuance-authorization-evidence/v1::",
-            "issuance-authorization-evidence",
-        )
-        .unwrap()
-        .is_none(),
-        "no evidence artifact was frozen"
-    );
-}
-
-/// A FAILED FINISH HOLDS THE MINT, AND RESUME COMPLETES THE SAME ADMISSION —
-/// with the SAME 0x0029 evidence bytes, re-signed by nobody. Quorum dies
-/// after the staged commit; the crash invariant is that the mint, its pending
-/// admission and its exact evidence all exist durably, and resume finishes
-/// from frozen bytes alone.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[serial]
-async fn a_failed_finish_holds_the_mint_and_resume_completes_the_same_admission() {
-    let (core, _fleet) = setup_funded(0xD5).await;
-
-    // A real 1-of-1 policy naming THIS wallet's signing key, packed by the
-    // sole production packer — the seam-level twin of what token.create
-    // anchors. The registry is deliberately not involved: the seam consumes
-    // policy BYTES, and only the route resolves tickers.
-    let signer_pk = crate::sdk::signing_authority::current_public_key().expect("pk");
-    let policy_proto = {
-        let packed = crate::handlers::token_routes::build_policy_v3_bytes(
-            &crate::handlers::token_routes::ParsedTokenPolicy {
-                ticker: "HELD".into(),
-                alias: "Held Token".into(),
-                decimals: 0,
-                max_supply: 0,
-                initial_alloc: 0,
-                description: Option::None,
-                icon_url: Option::None,
-                mint_burn_enabled: true,
-                transferable: true,
-                unlimited_supply: true,
-                mint_burn_threshold: 1,
-                signers: vec![signer_pk.clone()],
-                allowlist_device_ids: Vec::new(),
-            },
-        )
-        .expect("pack");
-        use prost::Message;
-        crate::generated::TokenPolicyV3 {
-            policy_bytes: packed,
-        }
-        .encode_to_vec()
-    };
-    let policy_commit = dsm::crypto::blake3::domain_hash_bytes(
-        dsm::common::domain_tags::TAG_DSM_POLICY,
-        &policy_proto,
-    );
-    let head = core.device_head().expect("head");
-    let (genesis, devid) = (head.genesis_digest(), head.devid());
-    // The policy engine on the advance path rehydrates by TOKEN ID from the
-    // durable registry, and DEFAULT-DENIES a token it cannot rehydrate — so
-    // the fixture anchors both halves exactly as token.create would: the
-    // registry row and the verified policy bytes under their own commit.
-    client_db::token_registry::upsert_policy(&policy_commit, &policy_proto)
-        .expect("anchor policy bytes");
-    client_db::token_registry::insert_token(&client_db::token_registry::TokenRegistryRow {
-        token_id: "HELD".into(),
-        policy_commit,
-        ticker: "HELD".into(),
-        alias: "Held Token".into(),
-        decimals: 0,
-        max_supply: 0,
-        owner_device_id: devid,
-    })
-    .expect("registry row");
-    // A bare CoreSDK has no policy resolver (the router installs it); wire
-    // the SAME resolution the production installer uses, so the advance-path
-    // policy engine can rehydrate this token instead of default-denying it.
-    core.set_policy_resolver(std::sync::Arc::new(|identifier: &str| {
-        let row = client_db::token_registry::get_token(identifier)
-            .ok()
-            .flatten()
-            .or_else(|| {
-                client_db::token_registry::get_token_by_ticker(identifier)
-                    .ok()
-                    .flatten()
-            })?;
-        let raw = client_db::token_registry::load_policy_verified(&row.policy_commit)
-            .ok()
-            .flatten()?;
-        let parsed = crate::handlers::token_routes::parse_token_policy(&raw)?;
-        Some((
-            crate::handlers::token_routes::derive_policy_file(&row.ticker, &parsed),
-            dsm::types::policy_types::PolicyAnchor::from_bytes(row.policy_commit),
-        ))
-    }));
-    // THE CREATION'S COMMITMENT (owner ruling 2026-09-13). A creator adopts
-    // its token in the creation advance; this seam test skips the route, so
-    // it commits the same adoption leaf the same way — a SIGNED `AdoptToken`
-    // self-loop advance on the real head — or the mint's credit is refused,
-    // correctly, for want of it. Nothing about the policy is fabricated: the
-    // bytes are the production packer's, under this wallet's real key.
-    {
-        let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(&devid, &devid);
-        let init_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-            &devid, &devid,
-        );
-        let signed = core
-            .sign_operation_sphincs(dsm::types::operations::Operation::AdoptToken {
-                policy_commit,
-                signature: Vec::new(),
-            })
-            .expect("sign the adoption");
-        core.execute_on_relationship_guarded(
-            rel_key,
-            devid,
-            signed,
-            &[],
-            Some(init_tip),
-            None,
-            None,
-        )
-        .expect("commit the adoption");
-        assert!(
-            core.device_head()
-                .expect("head")
-                .has_adopted(&policy_commit),
-            "the adoption leaf is on the head before any credit of HELD"
-        );
-    }
-    let mint = dsm::types::operations::Operation::Mint {
-        amount: dsm::types::token_types::Balance::from_state(25, genesis),
-        token_id: b"HELD".to_vec(),
-        policy_commit,
-        message: String::new(),
-    };
-    let op_digest = dsm::economic::admission::dsm_operation_digest(&mint.to_bytes());
-    let delta = dsm::types::device_state::BalanceDelta {
-        policy_commit,
-        direction: dsm::types::device_state::BalanceDirection::Credit,
-        amount: 25,
-    };
-    let facts = move |target_position: u64| {
-        use prost::Message;
-        let body = dsm::economic::issuance::IssuanceAuthorizationBody {
-            policy_commit,
-            issuer_genesis: genesis,
-            issuer_devid: devid,
-            issuer_economic_position: target_position,
-            recipient_operation_digest: op_digest,
-            amount: 25,
-        };
-        let body_ccb = body.encode().expect("ccb");
-        let digest = body.signing_digest().expect("digest");
-        let sk = crate::sdk::signing_authority::current_secret_key()?;
-        let sig = dsm::crypto::sphincs::sphincs_sign(&sk, &digest).expect("sign");
-        let evidence_bytes = crate::generated::IssuanceAuthorizationEvidenceV1 {
-            canonical_policy_bytes: policy_proto.clone(),
-            authorization_body_ccb: body_ccb,
-            signatures: vec![crate::generated::PolicySignerSignatureV1 {
-                signer_public_key: signer_pk.clone(),
-                signature: sig,
-            }],
-        }
-        .encode_to_vec();
-        let addr = dsm::storage_object::immutable_inner(
-            dsm::common::domain_tags::TAG_DSM_ISSUANCE_AUTHORIZATION_EVIDENCE,
-            &evidence_bytes,
-        );
-        let key = crate::sdk::economic_registers::immutable_object_key(
-            dsm::common::domain_tags::TAG_DSM_ISSUANCE_AUTHORIZATION_EVIDENCE,
-            &evidence_bytes,
-        );
-        Ok((
-            dsm::economic::write_set::CreditSourceFacts::AuthorizedIssuance {
-                issuance_authorization_addr: addr,
-            },
-            vec![(key, evidence_bytes, "issuance-authorization-evidence")],
-        ))
-    };
-
-    // Losing n − q + 1 members makes evidence publication impossible, so
-    // finish dies AFTER the staged commit.
-    let down = crate::economic_fixtures::members_to_break_quorum();
-    for id in &down {
-        crate::sdk::storage_io::fake_fleet::fail_member(id);
-    }
-    let refused = admitted_self_loop_operation(&core, mint, delta.clone(), facts, None).await;
-    let seam_err = refused
-        .as_ref()
-        .err()
-        .map(|e| e.to_string())
-        .unwrap_or_default();
-    assert!(
-        seam_err.contains("below storage quorum"),
-        "finish must fail AT PUBLICATION, not earlier, got: {seam_err}"
-    );
-    let pending = core
-        .device_head()
-        .expect("head")
-        .pending_economic_admission()
-        .cloned()
-        .expect("the mint is HELD behind its pending admission");
-    assert_eq!(pending.operation_digest, op_digest, "held for THIS mint");
-    let frozen =
-        client_db::frozen_publication_artifact::find_current_payload_with_prefix_and_purpose(
-            "immutable::DSM/issuance-authorization-evidence/v1::",
-            "issuance-authorization-evidence",
-        )
-        .unwrap()
-        .expect("the exact evidence bytes are frozen for resume");
-
-    // Heal the fleet; resume completes the SAME admission from frozen bytes.
-    for id in &down {
-        crate::sdk::storage_io::fake_fleet::heal_member(id);
-    }
-    resume_pending_admission(&core, NETWORK, pending)
-        .await
-        .expect("resume completes the held mint admission");
-    let (position, _root) = client_db::economic_lineage::get_admitted_coordinate()
-        .unwrap()
-        .expect("admitted");
-    assert_eq!(position, 2, "the held mint admitted at its signed position");
-    assert!(
-        core.device_head()
-            .expect("head")
-            .pending_economic_admission()
-            .is_none(),
-        "unfenced after resume"
-    );
-    assert_eq!(
-        core.device_head().expect("head").balance(&policy_commit),
-        25,
-        "the authorized credit stands"
-    );
-    let frozen_after =
-        client_db::frozen_publication_artifact::find_current_payload_with_prefix_and_purpose(
-            "immutable::DSM/issuance-authorization-evidence/v1::",
-            "issuance-authorization-evidence",
-        )
-        .unwrap()
-        .expect("still frozen");
-    assert_eq!(
-        frozen, frozen_after,
-        "resume used the SAME evidence bytes — nothing was re-signed"
-    );
 }

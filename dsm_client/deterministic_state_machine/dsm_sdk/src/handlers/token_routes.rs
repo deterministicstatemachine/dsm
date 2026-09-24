@@ -43,6 +43,8 @@ pub(crate) type ParsedTokenPolicy = dsm::economic::token_policy::TokenPolicy;
 ///        backing rule has an encoding)
 ///   u8   flags: 0x01 burn | 0x02 transferable | 0x04 allowlist
 ///   u8   release_rule: 0 all-at-creation | 1 faucet
+///   32B  creator_genesis              (SoFi Amendment S8)
+///   32B  creator_device_id
 ///   u8   threshold k                  (1..=n)
 ///   u8   signer_count n               (1..=16)
 ///   n x  { u16 pk_len, pk }
@@ -107,9 +109,11 @@ pub(crate) fn build_policy_v3_bytes(p: &ParsedTokenPolicy) -> Result<Vec<u8>, St
         SUPPLY_CLASS_NATIVE,
         flags,
         p.release_rule.code(),
-        p.threshold,
-        p.signers.len() as u8,
     ];
+    out.extend_from_slice(&p.creator_genesis);
+    out.extend_from_slice(&p.creator_device_id);
+    out.push(p.threshold);
+    out.push(p.signers.len() as u8);
     for pk in &p.signers {
         if pk.len() > u16::MAX as usize {
             return Err("policy: signer public key too long".into());
@@ -149,142 +153,63 @@ pub(crate) fn parse_token_policy(raw_proto: &[u8]) -> Option<ParsedTokenPolicy> 
     dsm::economic::token_policy::parse_token_policy(raw_proto).ok()
 }
 
-/// Publish policy bytes to the storage nodes.
-///
-/// The policy anchor is content-addressed BY DEFINITION —
-/// `BLAKE3(TAG_DSM_POLICY, policy_bytes)` — so it is ALWAYS derived locally
-/// and a node has no authority to name it. A node's 32-byte reply is treated
-/// purely as an echo: it must equal the locally derived anchor, otherwise
-/// that node is lying (or broken) and its answer is discarded.
-///
-/// This is load-bearing for value safety. The anchor becomes the
-/// `policy_commit` on a `BalanceDelta`, so a node that could name it could
-/// name an EXISTING asset's commit (e.g. ERA) and mint real balance on this
-/// device. The anchor never leaves local derivation.
-///
-/// Returns `true` when at least one node stored the bytes and echoed the
-/// correct anchor. Publication is best-effort: `false` only means the policy
-/// is not yet mirrored, never that the anchor is in doubt.
-/// Why a publish did not happen. "No nodes are configured" and "the configured
-/// nodes refused" are different conditions and creation treats them
-/// differently: the first is a device that is not part of a network at all
-/// (host builds, tests), the second is a device that IS and could not reach it
-/// — which is the case that produces an unadoptable token.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The network's pinned storage set, where token policies live as immutable
+/// objects under `TAG_DSM_POLICY`.
+fn policy_set() -> Result<crate::sdk::storage_set::StorageSet, String> {
+    let network = crate::sdk::economic_admission_flow::committed_network_id()
+        .map_err(|e| format!("no committed network: {e}"))?;
+    crate::sdk::storage_set::canonical_set(&network).map_err(|e| format!("no pinned set: {e}"))
+}
+
+/// Where a policy publication stands.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PublishOutcome {
-    Published,
-    NoNodesConfigured,
-    Failed,
+    /// Three members return the exact bytes (storage spec §5 rule 6).
+    Stored,
+    /// Not `Stored` yet, and why. Publication resumes at startup
+    /// (`republish_owned_policies`).
+    NotStoredYet(String),
 }
 
+/// Put policy bytes on the network's pinned set as the immutable object whose
+/// identity is their anchor, and read them back.
+///
+/// The anchor is content-addressed by definition —
+/// `BLAKE3(TAG_DSM_POLICY, policy_bytes)` — and it is the object's identity
+/// in the store, so no member can name it: a member that served other bytes
+/// would be serving an object at another address.
 async fn publish_policy_to_network(body: &[u8], expected_anchor: &[u8; 32]) -> PublishOutcome {
-    let urls = match crate::sdk::storage_node_sdk::StorageNodeConfig::from_env_config().await {
-        Ok(cfg) => cfg.node_urls,
-        Err(e) => {
-            log::warn!("[tokens.publishPolicy] No storage node config: {}", e);
-            return PublishOutcome::NoNodesConfigured;
-        }
+    let tag = dsm::common::domain_tags::TAG_DSM_POLICY;
+    if dsm::crypto::blake3::domain_hash_bytes(tag, body) != *expected_anchor {
+        return PublishOutcome::NotStoredYet("the bytes are not the policy at this anchor".into());
+    }
+    let set = match policy_set() {
+        Ok(set) => set,
+        Err(e) => return PublishOutcome::NotStoredYet(e),
     };
-    if urls.is_empty() {
-        return PublishOutcome::NoNodesConfigured;
+    if let Err(e) = crate::sdk::storage_io::put_immutable(&set, tag, body).await {
+        return PublishOutcome::NotStoredYet(format!("put: {e}"));
     }
-
-    let client = crate::sdk::storage_node_sdk::build_ca_aware_client();
-    let mut published = false;
-    let mut last_err: Option<String> = None;
-
-    for url in urls {
-        let endpoint = format!("{}/api/v2/policy", url.trim_end_matches('/'));
-        match client
-            .post(&endpoint)
-            .header("content-type", "application/octet-stream")
-            .body(body.to_vec())
-            .send()
-            .await
-        {
-            Ok(resp) if resp.status().is_success() => match resp.bytes().await {
-                Ok(bytes) if bytes.as_ref() == expected_anchor.as_slice() => {
-                    published = true;
-                }
-                Ok(bytes) => {
-                    // The node named a different anchor than the content
-                    // hash. Discard it — never adopt a node-supplied commit.
-                    last_err = Some(format!(
-                        "storage node echoed a policy anchor that is not the content hash \
-                         (len {}); discarding that node's answer",
-                        bytes.len()
-                    ));
-                }
-                Err(e) => last_err = Some(format!("read publish response failed: {e}")),
-            },
-            Ok(resp) => {
-                last_err = Some(format!("publish HTTP {}", resp.status()));
-            }
-            Err(e) => {
-                last_err = Some(e.to_string());
-            }
+    let addr = dsm::storage_object::immutable_addr_from_inner(tag, expected_anchor);
+    match crate::sdk::storage_io::read_stored_bytes(&set, &addr).await {
+        Ok(Some(stored)) if stored == body => PublishOutcome::Stored,
+        Ok(Some(..) | None) => {
+            PublishOutcome::NotStoredYet("fewer than three members return the bytes yet".into())
         }
-    }
-
-    if let Some(msg) = last_err {
-        log::warn!("[tokens.publishPolicy] Network publish issue: {}", msg);
-    }
-    if published {
-        PublishOutcome::Published
-    } else {
-        PublishOutcome::Failed
+        Err(e) => PublishOutcome::NotStoredYet(format!("read back: {e}")),
     }
 }
 
-/// Boolean view for callers that only care whether the bytes are out there.
-async fn try_publish_policy_to_network(body: &[u8], expected_anchor: &[u8; 32]) -> bool {
-    publish_policy_to_network(body, expected_anchor).await == PublishOutcome::Published
-}
-
+/// The policy at `anchor` from the network's pinned set: the bytes a member
+/// serves at its address, which re-hash to it. `None` when no member holds
+/// it.
 pub(crate) async fn try_fetch_policy_from_network(
     anchor: &[u8; 32],
 ) -> Result<Option<Vec<u8>>, String> {
-    let urls = match crate::sdk::storage_node_sdk::StorageNodeConfig::from_env_config().await {
-        Ok(cfg) => cfg.node_urls,
-        Err(e) => {
-            log::warn!("[tokens.getPolicy] No storage node config: {}", e);
-            return Ok(None);
-        }
-    };
-    if urls.is_empty() {
-        return Ok(None);
-    }
-
-    let client = crate::sdk::storage_node_sdk::build_ca_aware_client();
-    let mut last_err: Option<String> = None;
-
-    for url in urls {
-        let endpoint = format!("{}/api/v2/policy/get", url.trim_end_matches('/'));
-        match client
-            .post(&endpoint)
-            .header("content-type", "application/octet-stream")
-            .body(anchor.to_vec())
-            .send()
-            .await
-        {
-            Ok(resp) if resp.status().is_success() => match resp.bytes().await {
-                Ok(bytes) if !bytes.is_empty() => return Ok(Some(bytes.to_vec())),
-                Ok(_) => last_err = Some("empty policy response".to_string()),
-                Err(e) => last_err = Some(format!("read policy response failed: {e}")),
-            },
-            Ok(resp) => {
-                last_err = Some(format!("fetch HTTP {}", resp.status()));
-            }
-            Err(e) => {
-                last_err = Some(e.to_string());
-            }
-        }
-    }
-
-    if let Some(msg) = last_err {
-        log::warn!("[tokens.getPolicy] Network fetch failed: {}", msg);
-    }
-    Ok(None)
+    let set = policy_set()?;
+    crate::sdk::storage_io::fetch_immutable(&set, dsm::common::domain_tags::TAG_DSM_POLICY, anchor)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Build the enforcer's `PolicyFile` from a parsed policy.
@@ -313,16 +238,23 @@ pub(crate) fn derive_policy_file(
     // Conditions are both committed and evaluated.
     pf.add_condition(PolicyCondition::TokenAuthority {
         signers: parsed.signers.clone(),
-        threshold: parsed.mint_burn_threshold as u32,
+        threshold: u32::from(parsed.threshold),
     });
+    // The whole supply exists from creation (SoFi §51): no unit is issued
+    // after it.
     pf.add_condition(PolicyCondition::SupplyCap {
-        max_supply: parsed.max_supply,
-        unlimited: parsed.unlimited_supply,
+        max_supply: parsed.genesis_supply,
+        unlimited: false,
     });
     if !parsed.transferable {
-        // A non-transferable fungible token may still be minted and burned.
+        // A non-transferable token never moves between holders; its holder
+        // may only burn it, when the policy permits burns.
         pf.add_condition(PolicyCondition::OperationRestriction {
-            allowed_operations: vec!["mint".to_string(), "burn".to_string()],
+            allowed_operations: if parsed.burn_enabled {
+                vec!["burn".to_string()]
+            } else {
+                Vec::new()
+            },
         });
     }
 
@@ -510,15 +442,19 @@ impl AppRouterImpl {
     /// node re-derives the anchor from the bytes, and a mismatch is discarded
     /// by `try_publish_policy_to_network`.
     pub async fn republish_owned_policies(&self) {
-        let Ok(tokens) = crate::storage::client_db::token_registry::all_tokens() else {
-            return;
+        let tokens = match crate::storage::client_db::token_registry::all_tokens() {
+            Ok(tokens) => tokens,
+            Err(e) => {
+                log::warn!("[token] republish: the token registry is unreadable: {e}");
+                return;
+            }
         };
         let me = self.core_sdk.get_device_identity().device_id;
-        for row in tokens.into_iter().filter(|t| t.owner_device_id == me) {
+        for row in tokens.into_iter().filter(|t| t.creator_device_id == me) {
             // Only republish what the network genuinely cannot serve.
             if matches!(
                 try_fetch_policy_from_network(&row.policy_commit).await,
-                Ok(Some(_))
+                Ok(Some(..))
             ) {
                 continue;
             }
@@ -528,18 +464,17 @@ impl AppRouterImpl {
                 continue;
             };
             let anchor_b32 = crate::util::text_id::encode_base32_crockford(&row.policy_commit);
-            if try_publish_policy_to_network(&bytes, &row.policy_commit).await {
-                log::info!(
+            match publish_policy_to_network(&bytes, &row.policy_commit).await {
+                PublishOutcome::Stored => log::info!(
                     "[token] republished policy {anchor_b32} for owned token {} — peers can \
                      adopt it again",
                     row.ticker
-                );
-            } else {
-                log::warn!(
-                    "[token] policy {anchor_b32} for owned token {} is on NO storage node and \
-                     could not be republished; peers cannot adopt it until this succeeds",
+                ),
+                PublishOutcome::NotStoredYet(why) => log::warn!(
+                    "[token] policy {anchor_b32} for owned token {} is not Stored ({why}); \
+                     peers cannot adopt it until a republish succeeds",
                     row.ticker
-                );
+                ),
             }
         }
     }
@@ -603,7 +538,7 @@ impl AppRouterImpl {
             // works without a chain scan.
             let anchor_b32 = crate::util::text_id::encode_base32_crockford(&row.policy_commit);
             let mut fields = HashMap::new();
-            fields.insert("max_supply".to_string(), row.max_supply.to_string());
+            fields.insert("genesis_supply".to_string(), row.genesis_supply.to_string());
             fields.insert("policy_anchor".to_string(), anchor_b32.clone());
             fields.insert("kind".to_string(), "FUNGIBLE".to_string());
             let metadata = TokenMetadata {
@@ -614,8 +549,7 @@ impl AppRouterImpl {
                 icon_url: parsed.icon_url.clone(),
                 decimals: row.decimals.min(18) as u8,
                 token_type: TokenType::Created,
-                owner_id: row.owner_device_id,
-                creation_tick: crate::util::deterministic_time::tick(),
+                owner_id: row.creator_device_id,
                 metadata_uri: None,
                 policy_anchor: Some(format!("dsm:policy:{anchor_b32}")),
                 fields,
@@ -872,9 +806,6 @@ impl AppRouterImpl {
                         let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
                             &dev_id, &dev_id,
                         );
-                        let init_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-                            &dev_id, &dev_id,
-                        );
                         let unsigned = dsm::types::operations::Operation::AdoptToken {
                             policy_commit: anchor,
                             signature: Vec::new(),
@@ -892,7 +823,6 @@ impl AppRouterImpl {
                             dev_id,
                             signed,
                             &[],
-                            Some(init_tip),
                             None,
                             None,
                         ) {
@@ -914,8 +844,8 @@ impl AppRouterImpl {
                     ticker: parsed.ticker.clone(),
                     alias: parsed.alias.clone(),
                     decimals: parsed.decimals,
-                    max_supply: parsed.max_supply,
-                    owner_device_id: [0u8; 32], // not ours; ownership lives in the policy
+                    genesis_supply: parsed.genesis_supply,
+                    creator_device_id: parsed.creator_device_id,
                 };
                 if let Err(e) = crate::storage::client_db::token_registry::insert_token(&row) {
                     // Already present is the idempotent case, not a failure.
@@ -983,7 +913,7 @@ impl AppRouterImpl {
                         ticker: meta.ticker,
                         alias: meta.alias,
                         decimals: meta.decimals,
-                        max_supply: meta.max_supply.to_string(),
+                        max_supply: meta.genesis_supply.to_string(),
                     });
                 }
 
@@ -1116,10 +1046,26 @@ impl AppRouterImpl {
                         return err(format!("token.create: signing identity unavailable: {e}"));
                     }
                 };
-                let threshold = req.threshold.clamp(1, u8::MAX as u32) as u8;
-                let creator_pk_for_sig = creator_pk.clone();
-
+                // The client's threshold, as it asked: a value the policy cannot
+                // hold is refused, never moved into range.
+                let threshold = match u8::try_from(req.threshold) {
+                    Ok(t) if t >= 1 => t,
+                    Ok(..) | Err(..) => {
+                        return err(format!(
+                            "token.create: threshold {} is not in 1..=255",
+                            req.threshold
+                        ))
+                    }
+                };
+                // The creator the policy binds (SoFi Amendment S8): this device,
+                // from its head.
+                let Some(head) = self.core_sdk.device_head() else {
+                    return err("token.create: no device head".into());
+                };
+                let (creator_genesis, creator_device_id) = (head.genesis_digest(), head.devid());
                 let parsed = ParsedTokenPolicy {
+                    creator_genesis,
+                    creator_device_id,
                     ticker: ticker.clone(),
                     alias: req.alias.trim().to_string(),
                     decimals: req.decimals,
@@ -1194,19 +1140,11 @@ impl AppRouterImpl {
                 // because the failure otherwise surfaces only on a peer, as
                 // POLICY_NOT_FOUND, long afterwards.
                 match publish_policy_to_network(&raw_proto, &policy_anchor).await {
-                    PublishOutcome::Published => {}
-                    PublishOutcome::Failed => {
-                        log::warn!(
-                            "[token.create] policy {anchor_b32} reached NO storage node; peers \
-                             cannot adopt this token until a later startup republishes it"
-                        );
-                    }
-                    PublishOutcome::NoNodesConfigured => {
-                        log::warn!(
-                            "[token.create] no storage nodes configured; policy {anchor_b32} \
-                             is local-only until one is reachable"
-                        );
-                    }
+                    PublishOutcome::Stored => {}
+                    PublishOutcome::NotStoredYet(why) => log::warn!(
+                        "[token.create] policy {anchor_b32} is not Stored ({why}); peers cannot \
+                         adopt this token until a later startup republishes it"
+                    ),
                 }
                 self.cache_policy_bytes(policy_anchor, raw_proto.clone())
                     .await;
@@ -1280,22 +1218,15 @@ impl AppRouterImpl {
                 }
 
                 let mut fields = HashMap::new();
-                fields.insert("max_supply".to_string(), parsed.max_supply.to_string());
+                fields.insert(
+                    "genesis_supply".to_string(),
+                    parsed.genesis_supply.to_string(),
+                );
                 fields.insert("policy_anchor".to_string(), anchor_b32.clone());
                 fields.insert("kind".to_string(), "FUNGIBLE".to_string());
-                fields.insert(
-                    "mint_burn_enabled".to_string(),
-                    parsed.mint_burn_enabled.to_string(),
-                );
+                fields.insert("burn_enabled".to_string(), parsed.burn_enabled.to_string());
                 fields.insert("transferable".to_string(), parsed.transferable.to_string());
-                fields.insert(
-                    "unlimited_supply".to_string(),
-                    parsed.unlimited_supply.to_string(),
-                );
-                fields.insert(
-                    "mint_burn_threshold".to_string(),
-                    parsed.mint_burn_threshold.to_string(),
-                );
+                fields.insert("threshold".to_string(), parsed.threshold.to_string());
 
                 let metadata = TokenMetadata {
                     token_id: token_id.clone(),
@@ -1306,7 +1237,6 @@ impl AppRouterImpl {
                     decimals: (req.decimals as u8).min(18),
                     token_type: TokenType::Created,
                     owner_id: self.device_id_bytes,
-                    creation_tick: crate::util::deterministic_time::tick(),
                     metadata_uri: None,
                     policy_anchor: Some(format!("dsm:policy:{}", anchor_b32)),
                     fields,
@@ -1353,7 +1283,7 @@ impl AppRouterImpl {
                 };
 
                 let fee_amount = dsm::core::token::TOKEN_CREATION_FEE_ERA;
-                let dev_id = self.device_id_bytes;
+                let dev_id = creator_device_id;
                 let device_txt = crate::util::text_id::encode_base32_crockford(&dev_id);
 
                 // Reject insufficient ERA BEFORE anything is committed. The
@@ -1365,64 +1295,33 @@ impl AppRouterImpl {
                         Some(c) => c,
                         None => return err("token.create: ERA policy commit missing".into()),
                     };
-                    let era_balance = self
-                        .core_sdk
-                        .device_head()
-                        .map(|h| h.balance(&era_commit))
-                        .unwrap_or(0);
+                    let era_balance = head.balance(&era_commit);
                     if era_balance < fee_amount {
                         return err(format!(
-                            "token.create: insufficient ERA for the {fee_amount} ERA creation fee                              (have {era_balance}) — claim from the faucet and retry"
+                            "token.create: insufficient ERA for the {fee_amount} ERA creation fee \
+                             (have {era_balance}) — claim from the faucet and retry"
                         ));
                     }
                 }
-
-                let rel_key =
-                    dsm::core::bilateral_transaction_manager::compute_smt_key(&dev_id, &dev_id);
-                let init_tip =
-                    dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-                        &dev_id, &dev_id,
-                    );
-                let ref_hash = self
-                    .core_sdk
-                    .device_head()
-                    .map(|s| s.genesis_digest())
-                    .unwrap_or([0u8; 32]);
 
                 // Sign the creation with the device key — the sole signer in
                 // the policy we just packed. The authority condition verifies
                 // against the POLICY's signer list, so an unsigned creation is
                 // correctly refused.
-                let auth_preimage =
-                    dsm::core::token::policy::policy_enforcement::token_authorization_preimage(
-                        &policy_commit,
-                        "create_token",
-                        token_id.as_bytes(),
-                        genesis_u64,
-                        &[],
-                    );
-                let signing_key = match crate::sdk::signing_authority::current_secret_key() {
-                    Ok(k) => k,
-                    Err(e) => return err(format!("token.create: signing key unavailable: {e}")),
+                let authorization = match crate::sdk::signing_authority::token_authorization_witness(
+                    &policy_commit,
+                    "create_token",
+                    token_id.as_bytes(),
+                    genesis_u64,
+                    &[],
+                ) {
+                    Ok(w) => w,
+                    Err(e) => return err(format!("token.create: {e}")),
                 };
-                let create_sig =
-                    match dsm::crypto::sphincs::sphincs_sign(&signing_key, &auth_preimage) {
-                        Ok(sig) => sig,
-                        Err(e) => return err(format!("token.create: signing failed: {e}")),
-                    };
-                // Witness record: (u32 pk_len, pk, u32 sig_len, sig).
-                let mut authorization = Vec::new();
-                authorization.extend_from_slice(&(creator_pk_for_sig.len() as u32).to_le_bytes());
-                authorization.extend_from_slice(&creator_pk_for_sig);
-                authorization.extend_from_slice(&(create_sig.len() as u32).to_le_bytes());
-                authorization.extend_from_slice(&create_sig);
 
                 let create_op = dsm::types::operations::Operation::CreateToken {
                     token_id: token_id.as_bytes().to_vec(),
-                    initial_supply: dsm::types::token_types::Balance::from_state(
-                        genesis_u64,
-                        ref_hash,
-                    ),
+                    initial_supply: dsm::types::token_types::Balance::amount(genesis_u64),
                     policy_commit,
                     fee_amount,
                     name: parsed.alias.clone(),
@@ -1466,11 +1365,11 @@ impl AppRouterImpl {
                     ticker: ticker.clone(),
                     alias: parsed.alias.clone(),
                     decimals: parsed.decimals,
-                    max_supply: parsed.genesis_supply,
-                    owner_device_id: dev_id,
+                    genesis_supply: parsed.genesis_supply,
+                    creator_device_id,
                 };
                 let insert_registry = |tx: &rusqlite::Transaction<'_>,
-                                       _outcome: &dsm::types::device_state::AdvanceOutcome|
+                                       &dsm::types::device_state::AdvanceOutcome { .. }: &dsm::types::device_state::AdvanceOutcome|
                  -> Result<(), dsm::types::error::DsmError> {
                     crate::storage::client_db::token_registry::insert_token_with_conn(
                         tx,
@@ -1489,18 +1388,20 @@ impl AppRouterImpl {
                 // genesis release (`0x005F`), beside the ERA fee debit, as one
                 // write set (SoFi §51). The registry row rides the SAME
                 // transaction via the composed in-tx writer.
-                let outcome = match crate::sdk::economic_admission_flow::admitted_creation_operation(
-                    &self.core_sdk,
-                    create_op,
-                    deltas.clone(),
-                    dsm::economic::write_set::CreditSourceFacts::GenesisRelease,
-                    Some(&insert_registry),
-                )
-                .await
-                {
-                    Ok((o, _admitted)) => o,
-                    Err(e) => return err(format!("token.create: {e}")),
-                };
+                let outcome =
+                    match crate::sdk::economic_admission_flow::admitted_self_loop_operation(
+                        &self.core_sdk,
+                        create_op,
+                        &deltas,
+                        dsm::economic::write_set::CreditSourceFacts::GenesisRelease,
+                        Vec::new(),
+                        Some(&insert_registry),
+                    )
+                    .await
+                    {
+                        Ok((o, ..)) => o,
+                        Err(e) => return err(format!("token.create: {e}")),
+                    };
 
                 // Projections for BOTH assets the advance moved.
                 {
@@ -1528,10 +1429,11 @@ impl AppRouterImpl {
                         dsm::core::token::builtin_policy_commit_for_token("ERA")
                     {
                         let era_after = outcome.new_device_state.balance(&era_commit);
-                        let locked =
-                            crate::storage::client_db::get_locked_balance(&device_txt, "ERA")
-                                .unwrap_or(0);
-                        if let Err(e) =
+                        if let Err(e) = crate::storage::client_db::get_locked_balance(
+                            &device_txt,
+                            "ERA",
+                        )
+                        .and_then(|locked| {
                             crate::storage::client_db::build_balance_projection_from_device_head(
                                 &device_txt,
                                 "ERA",
@@ -1540,10 +1442,10 @@ impl AppRouterImpl {
                                 era_after,
                                 locked,
                             )
-                            .and_then(|record| {
-                                crate::storage::client_db::upsert_balance_projection(&record)
-                            })
-                        {
+                        })
+                        .and_then(|record| {
+                            crate::storage::client_db::upsert_balance_projection(&record)
+                        }) {
                             log::warn!("[token.create] ERA projection write failed: {e}");
                         }
                     }
@@ -1570,11 +1472,12 @@ impl AppRouterImpl {
                     dsm::common::domain_tags::TAG_DSM_POLICY,
                     body,
                 );
-                let mirrored = try_publish_policy_to_network(body, &anchor).await;
-                if !mirrored {
+                if let PublishOutcome::NotStoredYet(why) =
+                    publish_policy_to_network(body, &anchor).await
+                {
                     log::warn!(
-                        "[tokens.publishPolicy] policy not mirrored to any storage node; \
-                         anchor is still valid (content-addressed) but remote fetch may fail"
+                        "[tokens.publishPolicy] policy not Stored ({why}); the anchor is its \
+                         content hash, but a remote fetch fails until it is"
                     );
                 }
 
@@ -1643,11 +1546,17 @@ impl AppRouterImpl {
         };
 
         // Canonical state decides whether anything is held — not the registry.
-        let held = self
-            .core_sdk
-            .device_head()
-            .map(|h| h.balance(&row.policy_commit))
-            .unwrap_or(0);
+        // The router is built only over a device head (`AppRouterImpl::new`),
+        // so this is never `None` on a live router; were it, the balance is
+        // unknown, never zero.
+        let held =
+            match self.core_sdk.device_head() {
+                Some(h) => h.balance(&row.policy_commit),
+                None => return err(
+                    "token.forget: no device state is loaded, so the balance cannot be established"
+                        .into(),
+                ),
+            };
         if held != 0 {
             return err(format!(
                 "token.forget: {} still holds {} base units; send or burn them first",
@@ -1678,51 +1587,51 @@ impl AppRouterImpl {
         }
     }
 
-    /// Sign a mint/burn authorization with the device key.
-    ///
-    /// The witness is `(u32 pk_len, pk, u32 sig_len, sig)`; the enforcer
-    /// matches the key against the policy's signer list and rebuilds the
-    /// preimage itself, so this cannot authorize anything but the operation
-    /// actually being executed.
-    /// `authorized_by` MUST equal what the enforcement context will carry for
-    /// this operation, since the enforcer rebuilds the preimage from that
-    /// context. A mismatch here is indistinguishable from a forged signature —
-    /// which is precisely how it should behave.
-    fn sign_token_authorization(
-        policy_commit: &[u8; 32],
-        op: &str,
-        token_id: &str,
-        amount: u64,
-        authorized_by: &[u8],
-    ) -> Result<Vec<u8>, String> {
-        let preimage = dsm::core::token::policy::policy_enforcement::token_authorization_preimage(
-            policy_commit,
-            op,
-            token_id.as_bytes(),
-            amount,
-            authorized_by,
-        );
-        let pk = crate::sdk::signing_authority::current_public_key()
-            .map_err(|e| format!("signing identity unavailable: {e}"))?;
-        let sk = crate::sdk::signing_authority::current_secret_key()
-            .map_err(|e| format!("signing key unavailable: {e}"))?;
-        let sig = dsm::crypto::sphincs::sphincs_sign(&sk, &preimage)
-            .map_err(|e| format!("signing failed: {e}"))?;
-
-        let mut witness = Vec::new();
-        witness.extend_from_slice(&(pk.len() as u32).to_le_bytes());
-        witness.extend_from_slice(&pk);
-        witness.extend_from_slice(&(sig.len() as u32).to_le_bytes());
-        witness.extend_from_slice(&sig);
-        Ok(witness)
-    }
-
     /// Resolve a token to its committed policy commit, failing closed.
     fn resolve_token_for_value_op(&self, token_id: &str) -> Result<[u8; 32], String> {
         self.wallet
             .token_sdk
             .resolve_policy_commit_strict(token_id)
             .map_err(|e| format!("unknown token {token_id}: {e}"))
+    }
+
+    /// The burn `req` asks for, as this device signs it: the operation and its
+    /// one debit of the token's committed policy.
+    pub(crate) fn burn_operation(
+        &self,
+        req: &generated::TokenBurnRequest,
+    ) -> Result<
+        (
+            dsm::types::operations::Operation,
+            [dsm::types::device_state::BalanceDelta; 1],
+        ),
+        String,
+    > {
+        if req.amount == 0 {
+            return Err("amount must be > 0".into());
+        }
+        let policy_commit = self.resolve_token_for_value_op(&req.token_id)?;
+        let authorization = crate::sdk::signing_authority::token_authorization_witness(
+            &policy_commit,
+            "burn",
+            req.token_id.as_bytes(),
+            req.amount,
+            &[],
+        )
+        .map_err(|e| e.to_string())?;
+        let op = dsm::types::operations::Operation::Burn {
+            amount: dsm::types::token_types::Balance::amount(req.amount),
+            token_id: req.token_id.as_bytes().to_vec(),
+            policy_commit,
+            proof_of_ownership: authorization,
+            message: req.message.clone(),
+        };
+        let deltas = [dsm::types::device_state::BalanceDelta {
+            policy_commit,
+            direction: dsm::types::device_state::BalanceDirection::Debit,
+            amount: req.amount,
+        }];
+        Ok((op, deltas))
     }
 
     async fn handle_token_burn(&self, i: AppInvoke) -> AppResult {
@@ -1734,47 +1643,12 @@ impl AppRouterImpl {
             Ok(r) => r,
             Err(e) => return err(format!("decode TokenBurnRequest failed: {e}")),
         };
-        if req.amount == 0 {
-            return err("token.burn: amount must be > 0".into());
-        }
-        let policy_commit = match self.resolve_token_for_value_op(&req.token_id) {
-            Ok(c) => c,
+        let (op, deltas) = match self.burn_operation(&req) {
+            Ok(built) => built,
             Err(e) => return err(format!("token.burn: {e}")),
         };
-        let authorization = match Self::sign_token_authorization(
-            &policy_commit,
-            "burn",
-            &req.token_id,
-            req.amount,
-            &[],
-        ) {
-            Ok(w) => w,
-            Err(e) => return err(format!("token.burn: {e}")),
-        };
-
+        let policy_commit = deltas[0].policy_commit;
         let dev_id = self.device_id_bytes;
-        let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(&dev_id, &dev_id);
-        let init_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-            &dev_id, &dev_id,
-        );
-        let ref_hash = self
-            .core_sdk
-            .device_head()
-            .map(|s| s.genesis_digest())
-            .unwrap_or([0u8; 32]);
-
-        let op = dsm::types::operations::Operation::Burn {
-            amount: dsm::types::token_types::Balance::from_state(req.amount, ref_hash),
-            token_id: req.token_id.as_bytes().to_vec(),
-            policy_commit,
-            proof_of_ownership: authorization,
-            message: req.message.clone(),
-        };
-        let deltas = [dsm::types::device_state::BalanceDelta {
-            policy_commit,
-            direction: dsm::types::device_state::BalanceDirection::Debit,
-            amount: req.amount,
-        }];
 
         // Burn > balance is refused by the conservation guard's checked_sub,
         // which runs before the durable write — no pre-check can be more
@@ -1785,22 +1659,17 @@ impl AppRouterImpl {
         // before this route reports success. An unadmitted local burn would
         // leave the validated R_econ value intact for an adversarial
         // producer while the units disappear locally.
-        let _ = (rel_key, init_tip);
         let outcome = match crate::sdk::economic_admission_flow::admitted_self_loop_operation(
             &self.core_sdk,
             op,
-            deltas[0].clone(),
-            |_| {
-                Ok((
-                    dsm::economic::write_set::CreditSourceFacts::None,
-                    Vec::new(),
-                ))
-            },
+            &deltas,
+            dsm::economic::write_set::CreditSourceFacts::None,
+            Vec::new(),
             None,
         )
         .await
         {
-            Ok((o, _admitted)) => o,
+            Ok((o, ..)) => o,
             Err(e) => return err(format!("token.burn: {e}")),
         };
 
@@ -1835,17 +1704,18 @@ impl AppRouterImpl {
         balance: u64,
     ) {
         let device_txt = crate::util::text_id::encode_base32_crockford(dev_id);
-        let locked =
-            crate::storage::client_db::get_locked_balance(&device_txt, token_id).unwrap_or(0);
-        if let Err(e) = crate::storage::client_db::build_balance_projection_from_device_head(
-            &device_txt,
-            token_id,
-            policy_commit,
-            &outcome.new_device_state,
-            balance,
-            locked,
-        )
-        .and_then(|record| crate::storage::client_db::upsert_balance_projection(&record))
+        if let Err(e) = crate::storage::client_db::get_locked_balance(&device_txt, token_id)
+            .and_then(|locked| {
+                crate::storage::client_db::build_balance_projection_from_device_head(
+                    &device_txt,
+                    token_id,
+                    policy_commit,
+                    &outcome.new_device_state,
+                    balance,
+                    locked,
+                )
+            })
+            .and_then(|record| crate::storage::client_db::upsert_balance_projection(&record))
         {
             log::warn!("[token] projection write failed for {token_id}: {e}");
         }
@@ -1857,211 +1727,147 @@ mod tests {
     use super::*;
     use prost::Message;
 
-    /// Build a canonical v3 policy via the SOLE production packer, so the
-    /// tests exercise the real format rather than a hand-rolled replica that
-    /// could drift from it.
-    fn v3_policy(p: ParsedTokenPolicy) -> Vec<u8> {
-        let bytes = build_policy_v3_bytes(&p).expect("packer should accept the fixture");
+    fn v3_policy(p: &ParsedTokenPolicy) -> Vec<u8> {
         generated::TokenPolicyV3 {
-            policy_bytes: bytes,
+            policy_bytes: build_policy_v3_bytes(p).expect("the packer accepts the fixture"),
         }
         .encode_to_vec()
     }
 
     fn fungible_fixture() -> ParsedTokenPolicy {
         ParsedTokenPolicy {
+            creator_genesis: [0x31; 32],
+            creator_device_id: [0x32; 32],
             ticker: "DSM".into(),
             alias: "DSM Token".into(),
             decimals: 8,
-            max_supply: 1_000_000,
-            initial_alloc: 1_000,
+            genesis_supply: 1_000_000,
+            release_rule: ReleaseRule::AllAtCreation,
             description: Some("A test token".into()),
-            icon_url: None,
-            mint_burn_enabled: true,
+            icon_url: Some("dsm:icon".into()),
+            burn_enabled: true,
             transferable: true,
-            unlimited_supply: false,
-            mint_burn_threshold: 1,
+            threshold: 1,
             signers: vec![vec![0xAB; 64]],
             allowlist_device_ids: Vec::new(),
         }
     }
 
-    // ── SDK -> core issuance-parser conformance (owner control) ──────
-    //
-    // `policy_commit` hashes the exact bytes the SOLE production packer
-    // emits, and the 0x0029 verifier parses those SAME bytes in core. These
-    // two tests are the round-trip control the owner froze with the format:
-    // packer -> commit -> core `parse_token_policy` -> exact semantic
-    // fields, for BOTH allowlist shapes. The mismatch this pins against was
-    // real: core once read no count for kind NONE and refused every
-    // allowlist-free policy as trailing bytes — a blob no user token could
-    // ever issue under, invisible until the bytes crossed the crate boundary.
+    // ── The one packer against Core's one parser ─────────────────────
 
     #[test]
-    fn core_issuance_parser_reads_the_packed_none_allowlist_policy() {
-        let src = ParsedTokenPolicy {
-            unlimited_supply: true,
-            max_supply: 0,
-            initial_alloc: 0,
-            ..fungible_fixture()
-        };
-        let proto = v3_policy(src.clone());
-        let policy = dsm::economic::token_policy::parse_token_policy(&proto)
-            .expect("core must parse the canonical packed NONE-allowlist policy");
-        assert_eq!(policy.threshold, u32::from(src.mint_burn_threshold));
-        assert_eq!(policy.signers, src.signers);
-        assert!(policy.mint_burn_enabled);
-        assert!(policy.transferable);
-        assert!(policy.unlimited_supply);
-        assert!(policy.allowlist_device_ids.is_empty());
-    }
-
-    #[test]
-    fn core_issuance_parser_reads_the_packed_inline_allowlist_policy() {
-        let src = ParsedTokenPolicy {
-            unlimited_supply: true,
-            max_supply: 0,
-            initial_alloc: 0,
-            allowlist_device_ids: vec![[0x11; 32], [0x22; 32]],
-            ..fungible_fixture()
-        };
-        let proto = v3_policy(src.clone());
-        let policy = dsm::economic::token_policy::parse_token_policy(&proto)
-            .expect("core must parse the canonical packed INLINE-allowlist policy");
-        assert_eq!(policy.allowlist_device_ids, src.allowlist_device_ids);
-        assert_eq!(policy.signers, src.signers);
-        assert!(policy.unlimited_supply);
-    }
-
-    // ── v3 round trip ────────────────────────────────────────────────
-
-    #[test]
-    fn v3_round_trips_every_field() {
+    fn the_packed_policy_parses_to_every_field_it_was_packed_from() {
         let src = fungible_fixture();
-        let parsed = parse_token_policy(&v3_policy(src.clone())).expect("should parse v3");
-        assert_eq!(parsed.ticker, src.ticker);
-        assert_eq!(parsed.alias, src.alias);
-        assert_eq!(parsed.decimals, src.decimals);
-        assert_eq!(parsed.max_supply, src.max_supply);
-        assert_eq!(parsed.initial_alloc, src.initial_alloc);
-        assert_eq!(parsed.description, src.description);
-        assert!(parsed.mint_burn_enabled);
-        assert!(parsed.transferable);
-        assert!(!parsed.unlimited_supply);
-        assert_eq!(parsed.mint_burn_threshold, 1);
-        assert_eq!(parsed.signers, src.signers);
-        assert!(parsed.allowlist_device_ids.is_empty());
+        let parsed = parse_token_policy(&v3_policy(&src)).expect("Core parses the packed policy");
+        assert_eq!(parsed, src);
     }
 
     #[test]
-    fn v3_round_trips_unlimited_supply_and_allowlist() {
+    fn an_inline_allowlist_round_trips() {
         let src = ParsedTokenPolicy {
-            unlimited_supply: true,
-            max_supply: 0,
-            initial_alloc: 0,
             allowlist_device_ids: vec![[0x11; 32], [0x22; 32]],
             ..fungible_fixture()
         };
-        let parsed = parse_token_policy(&v3_policy(src)).expect("should parse");
-        assert!(parsed.unlimited_supply);
-        assert_eq!(parsed.max_supply, 0);
-        assert_eq!(parsed.allowlist_device_ids.len(), 2);
+        let parsed = parse_token_policy(&v3_policy(&src)).expect("parses");
+        assert_eq!(parsed.allowlist_device_ids, src.allowlist_device_ids);
     }
 
     #[test]
-    fn v3_round_trips_multi_signer_threshold() {
+    fn a_multi_signer_threshold_round_trips() {
         let src = ParsedTokenPolicy {
-            mint_burn_threshold: 2,
+            threshold: 2,
             signers: vec![vec![0x01; 64], vec![0x02; 64], vec![0x03; 64]],
             ..fungible_fixture()
         };
-        let parsed = parse_token_policy(&v3_policy(src)).expect("should parse");
-        assert_eq!(parsed.mint_burn_threshold, 2);
-        assert_eq!(parsed.signers.len(), 3);
-    }
-
-    // ── fail-closed rejections ───────────────────────────────────────
-
-    /// Mutate one byte of a valid v3 blob and assert it no longer parses.
-    fn assert_rejected_with(mutate: impl Fn(&mut Vec<u8>), why: &str) {
-        let bytes = build_policy_v3_bytes(&fungible_fixture()).expect("pack");
-        let mut mutated = bytes;
-        mutate(&mut mutated);
-        let proto = generated::TokenPolicyV3 {
-            policy_bytes: mutated,
-        }
-        .encode_to_vec();
-        assert!(parse_token_policy(&proto).is_none(), "{why}");
+        let parsed = parse_token_policy(&v3_policy(&src)).expect("parses");
+        assert_eq!(parsed.threshold, 2);
+        assert_eq!(parsed.signers, src.signers);
     }
 
     #[test]
-    fn v3_rejects_wrong_version() {
-        assert_rejected_with(|b| b[0] = 2, "v2 is deleted, not migrated");
-        assert_rejected_with(|b| b[0] = 4, "unknown future version must not parse");
-    }
-
-    /// NFT and SBT are not merely unsupported — the kind byte is a
-    /// discriminant, so a policy claiming those semantics cannot exist.
-    #[test]
-    fn v3_rejects_non_fungible_kinds() {
-        assert_rejected_with(|b| b[1] = 1, "NFT kind must be rejected");
-        assert_rejected_with(|b| b[1] = 2, "SBT kind must be rejected");
-        assert_rejected_with(|b| b[1] = 9, "unknown kind must be rejected");
-    }
-
-    #[test]
-    fn v3_rejects_zero_threshold_and_zero_signers() {
-        assert_rejected_with(|b| b[3] = 0, "threshold 0 is unsatisfiable");
-        assert_rejected_with(
-            |b| b[4] = 0,
-            "a token with no authority cannot mint or burn",
-        );
-    }
-
-    /// k > n would produce a token that can never mint or burn again.
-    #[test]
-    fn v3_rejects_threshold_greater_than_signer_count() {
-        assert_rejected_with(|b| b[3] = 2, "k=2 with n=1 must be rejected");
-    }
-
-    #[test]
-    fn v3_rejects_duplicate_signers() {
-        // Two identical keys would let one signer satisfy a 2-of-2 threshold.
+    fn unset_flags_round_trip_as_unset() {
         let src = ParsedTokenPolicy {
-            mint_burn_threshold: 2,
+            burn_enabled: false,
+            transferable: false,
+            description: None,
+            icon_url: None,
+            ..fungible_fixture()
+        };
+        let parsed = parse_token_policy(&v3_policy(&src)).expect("parses");
+        assert_eq!(parsed, src);
+    }
+
+    /// Two identical keys would let one signer satisfy a 2-of-2 threshold.
+    /// The packer packs them; Core's parser refuses them, so the packer
+    /// refuses its own output.
+    #[test]
+    fn duplicate_signers_are_refused() {
+        let src = ParsedTokenPolicy {
+            threshold: 2,
             signers: vec![vec![0x07; 64], vec![0x07; 64]],
             ..fungible_fixture()
         };
-        let bytes = build_policy_v3_bytes(&src).expect("packer does not dedupe");
-        let proto = generated::TokenPolicyV3 {
-            policy_bytes: bytes,
-        }
-        .encode_to_vec();
-        assert!(
-            parse_token_policy(&proto).is_none(),
-            "duplicate signers must be rejected at parse"
-        );
-    }
-
-    /// Trailing bytes are the classic way a truncated/padded blob sneaks
-    /// through a length-prefixed parser.
-    #[test]
-    fn v3_rejects_trailing_bytes() {
-        assert_rejected_with(|b| b.push(0x00), "trailing byte must be rejected");
+        assert!(build_policy_v3_bytes(&src).is_err());
     }
 
     #[test]
-    fn v3_rejects_truncated_blob() {
-        assert_rejected_with(
-            |b| {
-                b.truncate(6);
-            },
-            "truncated blob must be rejected",
-        );
+    fn a_zero_genesis_supply_is_refused() {
+        let src = ParsedTokenPolicy {
+            genesis_supply: 0,
+            ..fungible_fixture()
+        };
+        assert!(build_policy_v3_bytes(&src).is_err());
     }
 
     #[test]
-    fn v3_rejects_empty_and_garbage() {
+    fn a_bad_ticker_or_decimals_is_refused() {
+        let short = ParsedTokenPolicy {
+            ticker: "X".into(),
+            ..fungible_fixture()
+        };
+        assert!(build_policy_v3_bytes(&short).is_err(), "1-char ticker");
+        let deep = ParsedTokenPolicy {
+            decimals: 19,
+            ..fungible_fixture()
+        };
+        assert!(build_policy_v3_bytes(&deep).is_err(), "decimals > 18");
+    }
+
+    #[test]
+    fn an_unsatisfiable_threshold_is_refused() {
+        let bad = ParsedTokenPolicy {
+            threshold: 3,
+            signers: vec![vec![0x01; 64]],
+            ..fungible_fixture()
+        };
+        assert!(build_policy_v3_bytes(&bad).is_err());
+        let zero = ParsedTokenPolicy {
+            threshold: 0,
+            ..fungible_fixture()
+        };
+        assert!(build_policy_v3_bytes(&zero).is_err());
+    }
+
+    #[test]
+    fn an_empty_or_oversized_signer_set_is_refused() {
+        let none = ParsedTokenPolicy {
+            signers: Vec::new(),
+            ..fungible_fixture()
+        };
+        assert!(build_policy_v3_bytes(&none).is_err());
+
+        let too_many = ParsedTokenPolicy {
+            threshold: 1,
+            signers: (0..(MAX_POLICY_SIGNERS + 1))
+                .map(|i| vec![i as u8; 64])
+                .collect(),
+            ..fungible_fixture()
+        };
+        assert!(build_policy_v3_bytes(&too_many).is_err());
+    }
+
+    #[test]
+    fn a_proto_that_is_not_a_policy_does_not_parse() {
         let empty = generated::TokenPolicyV3 {
             policy_bytes: Vec::new(),
         }
@@ -2070,156 +1876,25 @@ mod tests {
         assert!(parse_token_policy(&[0xFF, 0xFF, 0xFF]).is_none());
     }
 
-    /// `unlimited_supply` has exactly one canonical encoding, so a blob
-    /// carrying both a cap and the unlimited flag cannot parse.
-    #[test]
-    fn v3_rejects_unlimited_with_a_cap() {
-        let src = ParsedTokenPolicy {
-            unlimited_supply: true,
-            max_supply: 5,
-            initial_alloc: 0,
-            ..fungible_fixture()
-        };
-        let bytes = build_policy_v3_bytes(&src).expect("pack");
-        let proto = generated::TokenPolicyV3 {
-            policy_bytes: bytes,
-        }
-        .encode_to_vec();
-        assert!(parse_token_policy(&proto).is_none());
-    }
-
-    #[test]
-    fn v3_rejects_initial_alloc_over_max_supply() {
-        let src = ParsedTokenPolicy {
-            max_supply: 100,
-            initial_alloc: 101,
-            ..fungible_fixture()
-        };
-        let bytes = build_policy_v3_bytes(&src).expect("pack");
-        let proto = generated::TokenPolicyV3 {
-            policy_bytes: bytes,
-        }
-        .encode_to_vec();
-        assert!(
-            parse_token_policy(&proto).is_none(),
-            "allocation above the cap must be rejected in Rust, not just in the UI"
-        );
-    }
-
-    #[test]
-    fn v3_rejects_bad_ticker_and_decimals() {
-        let short = ParsedTokenPolicy {
-            ticker: "X".into(),
-            ..fungible_fixture()
-        };
-        let bytes = build_policy_v3_bytes(&short).expect("pack");
-        let proto = generated::TokenPolicyV3 {
-            policy_bytes: bytes,
-        }
-        .encode_to_vec();
-        assert!(parse_token_policy(&proto).is_none(), "1-char ticker");
-
-        assert_rejected_with(
-            |b| {
-                // decimals sits after: ver,kind,flags,k,n, [u16 pk_len + 64B pk],
-                // ticker_len + 3, alias_len(2) + 9
-                let idx = 5 + 2 + 64 + 1 + 3 + 2 + 9;
-                b[idx] = 19;
-            },
-            "decimals > 18 must be rejected",
-        );
-    }
-
-    // ── packer guards ────────────────────────────────────────────────
-
-    #[test]
-    fn packer_rejects_unsatisfiable_threshold() {
-        let bad = ParsedTokenPolicy {
-            mint_burn_threshold: 3,
-            signers: vec![vec![0x01; 64]],
-            ..fungible_fixture()
-        };
-        assert!(
-            build_policy_v3_bytes(&bad).is_err(),
-            "packer must refuse to build a token that can never mint or burn"
-        );
-    }
-
-    #[test]
-    fn packer_rejects_empty_and_oversized_signer_set() {
-        let none = ParsedTokenPolicy {
-            signers: Vec::new(),
-            ..fungible_fixture()
-        };
-        assert!(build_policy_v3_bytes(&none).is_err());
-
-        let too_many = ParsedTokenPolicy {
-            signers: (0..(MAX_POLICY_SIGNERS + 1))
-                .map(|i| vec![i as u8; 64])
-                .collect(),
-            ..fungible_fixture()
-        };
-        assert!(build_policy_v3_bytes(&too_many).is_err());
-    }
-    // ── Token validation constants ────────────────────────────────────
-
-    #[test]
-    fn token_route_constants() {
-        assert_eq!(TOKEN_POLICY_VERSION, 3);
-        assert_eq!(TOKEN_KIND_FUNGIBLE, 0);
-        assert_eq!(MAX_POLICY_SIGNERS, 16);
-    }
-
-    #[test]
-    fn ticker_validation_logic() {
-        let valid_tickers = ["AB", "ERA", "DSMT", "ABCDEFGH"];
-        for t in &valid_tickers {
-            let ticker = t.trim().to_uppercase();
-            assert!(
-                ticker.len() >= 2 && ticker.len() <= 8,
-                "ticker '{}' should be valid",
-                t
-            );
-        }
-
-        let invalid_tickers = ["A", "", "ABCDEFGHI"];
-        for t in &invalid_tickers {
-            let ticker = t.trim().to_uppercase();
-            assert!(
-                ticker.len() < 2 || ticker.len() > 8,
-                "ticker '{}' should be invalid",
-                t
-            );
-        }
-    }
-
     /// The request carries the user's INTENT only. It must not carry a policy
     /// anchor — Rust derives that from the bytes it packs, so a client can
-    /// never name the commit that binds the issuance delta's asset.
+    /// never name the commit that binds the creation's asset.
     #[test]
-    fn token_create_request_roundtrip() {
+    fn token_create_request_round_trips() {
         let req = generated::TokenCreateRequest {
             ticker: "ERA".into(),
             alias: "Era Token".into(),
             decimals: 8,
-            max_supply_u128: 1_000u128.to_be_bytes().to_vec(),
-            initial_alloc_u128: 250u128.to_be_bytes().to_vec(),
-            mint_burn_enabled: true,
+            genesis_supply_u128: 1_000u128.to_be_bytes().to_vec(),
+            burn_enabled: true,
             transferable: true,
-            unlimited_supply: false,
-            mint_burn_threshold: 1,
+            threshold: 1,
             description: "desc".into(),
-            icon_url: String::new(),
-            allowlist_device_ids: Vec::new(),
+            icon_url: "dsm:icon".into(),
+            allowlist_device_ids: vec![vec![0x44; 32]],
         };
-        let bytes = req.encode_to_vec();
-        let decoded = generated::TokenCreateRequest::decode(&*bytes).expect("decode");
-        assert_eq!(decoded.ticker, "ERA");
-        assert_eq!(decoded.alias, "Era Token");
-        assert_eq!(decoded.decimals, 8);
-        assert_eq!(decoded.max_supply_u128.len(), 16);
-        assert_eq!(decoded.initial_alloc_u128.len(), 16);
-        assert!(decoded.mint_burn_enabled);
-        assert_eq!(decoded.mint_burn_threshold, 1);
+        let decoded =
+            generated::TokenCreateRequest::decode(req.encode_to_vec().as_slice()).expect("decode");
+        assert_eq!(decoded, req);
     }
 }

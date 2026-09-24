@@ -33,8 +33,6 @@ describe('parseBleEnvelope offline transfer detection', () => {
     const invoke = new pb.Invoke({
       method: 'wallet.receive',
       args: argPack,
-      preStateHash: zeroHash32(),
-      postStateHash: zeroHash32(),
     });
 
     const uop = new pb.UniversalOp({

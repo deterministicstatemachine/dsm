@@ -9,20 +9,24 @@
 //!
 //! It is a conclusion, never a record: no member computes it, no member
 //! writes it, and nothing here consults anything but what the members hold.
-//! `Final` at each cell is the R4 adapter over the recognized view — an
-//! object naming `K_ful(q)` is a fulfillment envelope whose body sits at
-//! position `q` and whose `P` names the trader whose key it is; an object
-//! naming `K_root(q)` is a registered claim whose coordinates derive that
-//! key. Bytes that are neither count as nothing anywhere.
+//! `Final` at each cell is the route-chain rule of storage spec §9 over the
+//! recognized view — an object naming `K_ful(q)` is a fulfillment envelope
+//! whose body sits at position `q` and whose `P` names the trader whose key it
+//! is; an object naming `K_root(q)` is a registered claim whose coordinates
+//! derive that key. Bytes that are neither count as nothing anywhere.
 //!
-//! Because the leader of `s(q)` keeps one value first at `K_ful(q)`, at most
+//! Because at most one value has a valid leader link at `K_ful(q)`, at most
 //! one fulfillment is registered per position. Registered is not conforming
 //! and not valid (Section 20.2): what this module answers is only whether the
 //! exercise happened.
 
 use std::collections::BTreeMap;
 
-use super::arith::ObjectResolution;
+use crate::economic::register::{position_seed, read_root_cell, RootCell};
+use crate::route_chain::{
+    check_completion_proof, completion_proof, evaluate, CellError, CellEvidence, CellReading,
+    ChainState, CompletionProof, Missing, ProofRefusal, RoutedCell,
+};
 use super::derive;
 use super::publication::{recognize_fulfillment, Signed};
 use super::wire::{TraderFulfillmentBody, TraderPrecommitBody};
@@ -54,7 +58,7 @@ pub fn names_fulfillment_key(
     position: u64,
     precommits: &impl PrecommitLookup,
 ) -> Option<Signed<TraderFulfillmentBody>> {
-    let (_, signed) = recognize_fulfillment(bytes)?;
+    let signed = recognize_fulfillment(bytes)?.1;
     if signed.body.position() != position {
         return None;
     }
@@ -63,6 +67,57 @@ pub fn names_fulfillment_key(
         return None;
     }
     Some(signed)
+}
+
+/// The two cells of trader `(G, DevID)`'s position `q` as Core derives them
+/// (Sections 7.2, 17.4): `K_ful(q)` and `K_root(q)`, both routed by `s(q)`
+/// over the register's committed set, so one route serves both and a writer
+/// puts the pair at each seat in one transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PositionCells {
+    fulfillment: RoutedCell,
+    root: RootCell,
+}
+
+impl PositionCells {
+    /// `parent_root` is `R_p`, the root the verifier validated at `q - 1`.
+    /// `members` must re-derive `committed_set_id`, the register's pinned
+    /// set id.
+    pub fn new(
+        genesis: &D32,
+        device_id: &D32,
+        position: u64,
+        parent_root: &D32,
+        members: &crate::ccb::StorageSetMembers,
+        committed_set_id: &D32,
+    ) -> Result<Self, CellError> {
+        let root = RootCell::new(
+            genesis,
+            device_id,
+            position,
+            parent_root,
+            members,
+            committed_set_id,
+        )?;
+        let fulfillment = RoutedCell::new(
+            crate::common::domain_tags::TAG_DSM_SOFI_FULFILLMENT.source_bytes(),
+            derive::fulfillment_register_key(genesis, device_id, position),
+            &position_seed(genesis, device_id, position, parent_root),
+            members,
+            committed_set_id,
+        )?;
+        Ok(Self { fulfillment, root })
+    }
+
+    /// `K_ful(q)`.
+    pub fn fulfillment(&self) -> &RoutedCell {
+        &self.fulfillment
+    }
+
+    /// `K_root(q)`.
+    pub fn root(&self) -> &RootCell {
+        &self.root
+    }
 }
 
 /// Which of the two cells settled the answer.
@@ -86,55 +141,119 @@ pub enum Registration {
         fulfillment: Signed<TraderFulfillmentBody>,
         settled_at: PositionCell,
     },
-    /// Not settled: a cell is open, held at its leader but not yet copied,
-    /// or its leader did not answer. A read that establishes nothing is not
-    /// a statement about the position.
+    /// Not registered yet: a cell is open, or the value holding it is not
+    /// final yet.
     Unresolved,
 }
 
-/// Derive `FulfillmentRegistered(q)` from the two cells' resolutions over
-/// their recognized views: `fulfillment` resolved with
-/// [`names_fulfillment_key`], `root` with the register reader's rule (any
-/// registered claim whose coordinates derive `K_root(q)`; `C_q` is one).
-pub fn fulfillment_registered(
-    fulfillment: &ObjectResolution,
-    root: &ObjectResolution,
-    genesis: &D32,
-    device_id: &D32,
-    position: u64,
-    precommits: &impl PrecommitLookup,
-) -> Registration {
-    let ObjectResolution::Final(bytes) = fulfillment else {
-        // Open, held at the leader without two copies, or unread: nothing
-        // is registered yet, and nothing is settled against this position.
-        return Registration::Unresolved;
-    };
-    let Some(signed) = names_fulfillment_key(bytes, genesis, device_id, position, precommits)
-    else {
-        // The adapter only reports what the recognizer admitted; a read that
-        // somehow lacks it establishes nothing.
-        return Registration::Unresolved;
-    };
-    let Some(precommit) = precommits.precommit(signed.body.precommit_id()) else {
-        return Registration::Unresolved;
-    };
-    let claim = derive::resolution_claim(precommit, &signed.body).encode();
-    match root {
-        ObjectResolution::Final(held) if *held == claim => Registration::Registered(signed),
-        // Another claim is the leader's first object at K_root(q): final or
-        // not yet, no other value will ever be final there (Part II §8).
-        ObjectResolution::Final(_) => Registration::NeverRegistered {
-            fulfillment: signed,
-            settled_at: PositionCell::Root,
-        },
-        ObjectResolution::LeaderHeld(held) if *held != claim => Registration::NeverRegistered {
-            fulfillment: signed,
-            settled_at: PositionCell::Root,
-        },
-        ObjectResolution::LeaderHeld(_)
-        | ObjectResolution::Open
-        | ObjectResolution::Unavailable => Registration::Unresolved,
+/// A fulfillment recognized at `K_ful(q)`: its entry digest, the signed
+/// fulfillment, and the precommit it names.
+type RecognizedFulfillment = (D32, (Signed<TraderFulfillmentBody>, TraderPrecommitBody));
+
+/// The recognizer of `K_ful(q)`: fulfillment envelopes naming the key
+/// ([`names_fulfillment_key`]), with the precommit each names, identified by
+/// the entry digest of their exact bytes.
+fn fulfillment_at<'a>(
+    cells: &'a PositionCells,
+    precommits: &'a impl PrecommitLookup,
+) -> impl Fn(&[u8]) -> Option<RecognizedFulfillment> + 'a {
+    move |bytes| {
+        let signed = names_fulfillment_key(
+            bytes,
+            cells.root.genesis(),
+            cells.root.device_id(),
+            cells.root.economic_position(),
+            precommits,
+        )?;
+        let precommit = precommits.precommit(signed.body.precommit_id())?.clone();
+        Some((
+            crate::storage_cell::entry_digest(bytes),
+            (signed, precommit),
+        ))
     }
+}
+
+/// The completion proof of the fulfillment final at `K_ful(q)` (storage spec
+/// §9; SoFi Amendment S10), with the fulfillment; `None` while no chain of
+/// the fulfillment holding the cell has three links.
+pub fn fulfillment_completion(
+    cells: &PositionCells,
+    evidence: &CellEvidence,
+    precommits: &impl PrecommitLookup,
+) -> Result<Option<(Signed<TraderFulfillmentBody>, CompletionProof)>, Missing> {
+    Ok(completion_proof(
+        &cells.fulfillment,
+        evidence,
+        fulfillment_at(cells, precommits),
+    )?
+    .map(|((signed, ..), proof)| (signed, proof)))
+}
+
+/// Check a kept completion proof of `K_ful(q)` against the reads in
+/// `evidence`: the fulfillment it proves final.
+pub fn check_fulfillment_completion(
+    cells: &PositionCells,
+    evidence: &CellEvidence,
+    proof: &CompletionProof,
+    precommits: &impl PrecommitLookup,
+) -> Result<Signed<TraderFulfillmentBody>, ProofRefusal> {
+    check_completion_proof(
+        &cells.fulfillment,
+        evidence,
+        proof,
+        fulfillment_at(cells, precommits),
+    )
+    .map(|(signed, ..)| signed)
+}
+
+/// Derive `FulfillmentRegistered(q)` from the route-chain evidence of the
+/// two position cells: `K_ful(q)` over [`names_fulfillment_key`], `K_root(q)`
+/// over the register reader's rule
+/// ([`crate::economic::register::root_claim_naming`]; `C_q` is one such
+/// claim). `Err` names what the evidence does not yet show at a cell whose
+/// answer is needed: a network status, never an answer about the position.
+pub fn fulfillment_registered(
+    cells: &PositionCells,
+    fulfillment_evidence: &CellEvidence,
+    root_evidence: &CellEvidence,
+    precommits: &impl PrecommitLookup,
+) -> Result<Registration, Missing> {
+    let fulfillment = evaluate(
+        &cells.fulfillment,
+        fulfillment_evidence,
+        fulfillment_at(cells, precommits),
+    )?;
+    let (signed, precommit) = match fulfillment {
+        CellReading::Held {
+            object,
+            state: ChainState::Final,
+            ..
+        } => object,
+        CellReading::Held {
+            state: ChainState::LeaderHeld | ChainState::Preserved,
+            ..
+        }
+        | CellReading::Open => return Ok(Registration::Unresolved),
+    };
+    // The root cell's reading identifies its claim by the entry digest of
+    // its exact bytes, so `C_q` holds the cell exactly when the ids agree.
+    let claim = crate::storage_cell::entry_digest(
+        &derive::resolution_claim(&precommit, &signed.body).encode(),
+    );
+    Ok(match read_root_cell(&cells.root, root_evidence)? {
+        CellReading::Held {
+            id,
+            state: ChainState::Final,
+            ..
+        } if id == claim => Registration::Registered(signed),
+        // Another claim holds the leader link at K_root(q): final or not
+        // yet, no other value will ever be final there (§9 finality 2).
+        CellReading::Held { id, .. } if id != claim => Registration::NeverRegistered {
+            fulfillment: signed,
+            settled_at: PositionCell::Root,
+        },
+        CellReading::Held { .. } | CellReading::Open => Registration::Unresolved,
+    })
 }
 
 #[cfg(test)]
@@ -144,6 +263,8 @@ mod tests {
     use crate::ccb::sigalg::SPHINCS_PLUS_SPX256F as ALG;
     use crate::sofi::publication::Publication;
     use crate::sofi::validation::fixtures::{swap_fixture_n, DEV, G};
+    use crate::route_chain::fixtures::{committed_set, committed_set_id, Cell};
+    use crate::route_chain::ROUTE_LEN;
     use crate::sofi::wire::AttemptEntry;
 
     const KEY: [u8; 64] = [0x31; 64];
@@ -203,9 +324,46 @@ mod tests {
         assert!(names_fulfillment_key(b"not an envelope", &G, &DEV, q, &known).is_none());
     }
 
+    /// A fulfillment final at `K_ful(q)` has a completion proof built from
+    /// the reads, and the proof checks against them.
+    #[test]
+    fn a_final_fulfillment_has_a_completion_proof_that_checks() {
+        let p = swap_fixture_n(2).precommit;
+        let q = p.position() + 1;
+        let f = fulfillment(&p, q);
+        let bytes = envelope(&f);
+        let known = lookup(&p);
+        let cells = PositionCells::new(
+            &G,
+            &DEV,
+            q,
+            &[0x5E; 32],
+            &committed_set(),
+            &committed_set_id(),
+        )
+        .expect("the committed set");
+        let mut seats = Cell::at(cells.fulfillment());
+        seats.write(&bytes, 1, &[]);
+        assert!(matches!(
+            fulfillment_completion(&cells, &seats.evidence(), &known),
+            Ok(None)
+        ));
+        let mut seats = Cell::at(cells.fulfillment());
+        seats.write(&bytes, ROUTE_LEN - 1, &[]);
+        let Ok(Some((proven, proof))) = fulfillment_completion(&cells, &seats.evidence(), &known)
+        else {
+            panic!("a final fulfillment has a completion proof")
+        };
+        assert_eq!(proven.body, f);
+        let checked = check_fulfillment_completion(&cells, &seats.evidence(), &proof, &known)
+            .expect("the kept proof checks");
+        assert_eq!(checked.body, f);
+    }
+
     /// The predicate over the two cells: both final, the root on this F's
-    /// own claim — registered; the root final or leader-held on another
-    /// claim — never; anything short of final at either cell — unresolved.
+    /// own claim — registered; the root held by another claim of this
+    /// position, final or not — never; anything short of final at either
+    /// cell — unresolved; an unread leader — not decided on this evidence.
     #[test]
     fn registration_needs_both_cells_final_and_the_root_on_this_claim() {
         let p = swap_fixture_n(2).precommit;
@@ -214,40 +372,76 @@ mod tests {
         let bytes = envelope(&f);
         let known = lookup(&p);
         let claim = derive::resolution_claim(&p, &f).encode();
-        let other_claim = derive::resolution_claim(&p, &fulfillment(&p, q + 1)).encode();
-        let reg = |ful: ObjectResolution, root: ObjectResolution| {
-            fulfillment_registered(&ful, &root, &G, &DEV, q, &known)
+        let rival = TraderFulfillmentBody::new(
+            derive::precommit_id(&p),
+            vec![[0x03; 32], [0x04; 32]],
+            f.attempts().to_vec(),
+            q,
+            ALG,
+            &KEY,
+        )
+        .unwrap();
+        let other_claim = derive::resolution_claim(&p, &rival).encode();
+        let cells = PositionCells::new(
+            &G,
+            &DEV,
+            q,
+            &[0x5E; 32],
+            &committed_set(),
+            &committed_set_id(),
+        )
+        .expect("the committed set");
+        let written = |at: &RoutedCell, value: &[u8], last: usize| {
+            let mut c = Cell::at(at);
+            c.write(value, last, &[]);
+            c.evidence()
         };
-        use ObjectResolution::{Final, LeaderHeld, Open, Unavailable};
+        let ful_cell = |value: &[u8], last: usize| written(cells.fulfillment(), value, last);
+        let root_cell = |value: &[u8], last: usize| written(cells.root().routed(), value, last);
+        let reg = |ful: &CellEvidence, root: &CellEvidence| {
+            fulfillment_registered(&cells, ful, root, &known)
+        };
+        let registered = Signed {
+            body: f.clone(),
+            signature: SIG.to_vec(),
+        };
+        let final_ful = ful_cell(&bytes, ROUTE_LEN - 1);
         assert_eq!(
-            reg(Final(bytes.clone()), Final(claim.clone())),
-            Registration::Registered(Signed {
-                body: f.clone(),
-                signature: SIG.to_vec()
-            })
+            reg(&final_ful, &root_cell(&claim, ROUTE_LEN - 1)),
+            Ok(Registration::Registered(registered.clone()))
         );
-        for root in [Final(other_claim.clone()), LeaderHeld(other_claim.clone())] {
+        for last in [0, ROUTE_LEN - 1] {
             assert_eq!(
-                reg(Final(bytes.clone()), root),
-                Registration::NeverRegistered {
-                    fulfillment: Signed {
-                        body: f.clone(),
-                        signature: SIG.to_vec()
-                    },
+                reg(&final_ful, &root_cell(&other_claim, last)),
+                Ok(Registration::NeverRegistered {
+                    fulfillment: registered.clone(),
                     settled_at: PositionCell::Root,
-                }
+                }),
+                "another claim of this position holds K_root(q) through position {last}"
             );
         }
-        for root in [LeaderHeld(claim.clone()), Open, Unavailable] {
-            assert_eq!(reg(Final(bytes.clone()), root), Registration::Unresolved);
-        }
-        for ful in [LeaderHeld(bytes.clone()), Open, Unavailable] {
-            assert_eq!(reg(ful, Final(claim.clone())), Registration::Unresolved);
-        }
-        // Final bytes the recognizer would not have admitted establish nothing.
         assert_eq!(
-            reg(Final(b"garbage".to_vec()), Final(claim)),
-            Registration::Unresolved
+            reg(&final_ful, &root_cell(&claim, 1)),
+            Ok(Registration::Unresolved),
+            "the claim is preserved, not final"
         );
+        assert_eq!(
+            reg(&final_ful, &root_cell(b"not a claim", ROUTE_LEN - 1)),
+            Ok(Registration::Unresolved)
+        );
+        assert_eq!(
+            reg(&ful_cell(&bytes, 1), &root_cell(&claim, ROUTE_LEN - 1)),
+            Ok(Registration::Unresolved)
+        );
+        assert_eq!(
+            reg(
+                &ful_cell(b"garbage", ROUTE_LEN - 1),
+                &root_cell(&claim, ROUTE_LEN - 1)
+            ),
+            Ok(Registration::Unresolved)
+        );
+        let mut unread_root = root_cell(&claim, ROUTE_LEN - 1);
+        unread_root.seats[0].values = None;
+        assert_eq!(reg(&final_ful, &unread_root), Err(Missing::LeaderUnread));
     }
 }

@@ -8,9 +8,9 @@
 //! `S`; a storage node never does. Availability, the caller's identity and
 //! node ids never enter a seed, and an offline member stays in `S`, so the
 //! leader of a cell never depends on who is online. The input to `permute` is
-//! `S`, not a caller's view of who is reachable — a caller that passed what it
-//! could reach would compute a different function (`leader.rs`,
-//! `a_reachable_subset_can_name_another_leader`). The ordering is frozen by
+//! `S`, not a caller's view of who is reachable — a route is refused over any
+//! member list but the committed set (`route_chain`,
+//! `a_cell_is_routed_only_over_the_committed_set`). The ordering is frozen by
 //! vectors (`dsm/tests/sofi_v8_independent.rs`); its safety role is stated in
 //! `tla/DSM_SofiSuccessorCells.tla` (`LeaderFromCommittedSet`).
 //!

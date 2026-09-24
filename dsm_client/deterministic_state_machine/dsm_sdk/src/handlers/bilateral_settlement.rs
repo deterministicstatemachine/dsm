@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-#![allow(unused_variables)]
 //! Default settlement delegate for bilateral BLE transfers.
 //!
 //! This module lives in the **application layer** and implements the
@@ -172,6 +171,7 @@ impl BilateralSettlementDelegate for DefaultBilateralSettlementDelegate {
                 &tx_id_candidate,
                 &local_txt,
             )
+            .map_err(|e| format!("sender settlement idempotency read: {e}"))?
         {
             log::warn!(
                 "[BILATERAL][settle] Idempotency guard: sender settlement already completed for {}",
@@ -245,8 +245,6 @@ impl BilateralSettlementDelegate for DefaultBilateralSettlementDelegate {
             amount: transfer_amount,
             tx_type: ctx.tx_type.to_string(),
             status: "completed".to_string(),
-            chain_height: 0,
-            step_index: crate::util::deterministic_time::tick(),
             commitment_hash: Some(encode_base32_crockford(&ctx.commitment_hash).into_bytes()),
             proof_data: ctx.proof_data,
             metadata: {
@@ -256,7 +254,6 @@ impl BilateralSettlementDelegate for DefaultBilateralSettlementDelegate {
                 }
                 m
             },
-            created_at: 0,
         };
 
         // `token_for_atomic` is `None` for the native ERA token (identified by an
@@ -350,7 +347,7 @@ mod tests {
         let op = Operation::Transfer {
             policy_commit: [0u8; 32],
             to_device_id: vec![0x11; 32],
-            amount: Balance::from_state(5, [0u8; 32]),
+            amount: Balance::amount(5),
             token_id: b"DBTC".to_vec(),
             mode: TransactionMode::Bilateral,
             nonce: vec![],
@@ -374,7 +371,7 @@ mod tests {
         let op = Operation::Transfer {
             policy_commit: [0u8; 32],
             to_device_id: vec![0x11; 32],
-            amount: Balance::from_state(7, [0u8; 32]),
+            amount: Balance::amount(7),
             token_id: b"ERA".to_vec(),
             mode: TransactionMode::Bilateral,
             nonce: vec![],

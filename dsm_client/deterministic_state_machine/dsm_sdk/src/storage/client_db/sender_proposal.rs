@@ -41,7 +41,6 @@
 //! replacement artifact for the SAME commitment can still finalize it.
 
 use super::get_connection;
-use crate::util::deterministic_time::tick;
 use anyhow::{anyhow, Result};
 use rusqlite::{params, OptionalExtension};
 
@@ -79,37 +78,28 @@ pub struct SenderOnlineProposal {
     pub amount: u64,
     pub token_id: String,
     pub status: String,
-    pub created_at: u64,
 }
 
 const COLS: &str = "relationship_key, canonical_parent, canonical_child, projection_parent, \
      projection_target, commitment, operation_digest, nonce_hash, message_id, tx_id, \
-     counterparty_device_id, amount, token_id, status, created_at";
+     counterparty_device_id, amount, token_id, status";
 
 fn row_to_proposal(row: &rusqlite::Row) -> rusqlite::Result<SenderOnlineProposal> {
-    let g = |i: usize| -> rusqlite::Result<Vec<u8>> { row.get::<_, Vec<u8>>(i) };
-    let to32 = |v: Vec<u8>| -> [u8; 32] {
-        let mut a = [0u8; 32];
-        let n = v.len().min(32);
-        a[..n].copy_from_slice(&v[..n]);
-        a
-    };
     Ok(SenderOnlineProposal {
-        relationship_key: to32(g(0)?),
-        canonical_parent: to32(g(1)?),
-        canonical_child: to32(g(2)?),
-        projection_parent: to32(g(3)?),
-        projection_target: to32(g(4)?),
-        commitment: to32(g(5)?),
-        operation_digest: to32(g(6)?),
-        nonce_hash: to32(g(7)?),
+        relationship_key: super::column_32(row, 0)?,
+        canonical_parent: super::column_32(row, 1)?,
+        canonical_child: super::column_32(row, 2)?,
+        projection_parent: super::column_32(row, 3)?,
+        projection_target: super::column_32(row, 4)?,
+        commitment: super::column_32(row, 5)?,
+        operation_digest: super::column_32(row, 6)?,
+        nonce_hash: super::column_32(row, 7)?,
         message_id: row.get::<_, Option<String>>(8)?,
         tx_id: row.get::<_, String>(9)?,
-        counterparty_device_id: to32(g(10)?),
+        counterparty_device_id: super::column_32(row, 10)?,
         amount: row.get::<_, i64>(11)? as u64,
         token_id: row.get::<_, String>(12)?,
         status: row.get::<_, String>(13)?,
-        created_at: row.get::<_, i64>(14)? as u64,
     })
 }
 
@@ -173,7 +163,7 @@ pub fn insert_sender_proposal_with_conn(
     conn.execute(
         &format!(
             "INSERT INTO sender_online_proposal ({COLS}) \
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)"
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)"
         ),
         params![
             p.relationship_key.as_slice(),
@@ -190,7 +180,6 @@ pub fn insert_sender_proposal_with_conn(
             p.amount as i64,
             p.token_id,
             p.status,
-            tick() as i64,
         ],
     )?;
     Ok(())
@@ -230,7 +219,7 @@ pub fn get_finalized_proposal_for_relationship(
     let mut stmt = conn.prepare(&format!(
         "SELECT {COLS} FROM sender_online_proposal
           WHERE relationship_key = ?1 AND status = ?2
-          ORDER BY created_at DESC LIMIT 1"
+          ORDER BY rowid DESC LIMIT 1"
     ))?;
     let row = stmt
         .query_row(
@@ -486,7 +475,6 @@ mod tests {
             amount: 15,
             token_id: "ERA".into(),
             status: PROPOSAL_PROPOSED.into(),
-            created_at: 0,
         }
     }
 

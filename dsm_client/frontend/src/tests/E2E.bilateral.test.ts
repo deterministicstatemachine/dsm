@@ -74,7 +74,6 @@ describe('E2E: Bilateral (Offline) Transaction Flow', () => {
     const headers = new pb.Headers({
       deviceId: ALICE_DEVICE_ID,
       genesisHash: { v: ALICE_GENESIS } as any,
-      chainTip: new Uint8Array(32).fill(5),
     });
 
     const uTx = new pb.UniversalTx({
@@ -132,7 +131,6 @@ describe('E2E: Bilateral (Offline) Transaction Flow', () => {
       headers: new pb.Headers({
         deviceId: ALICE_DEVICE_ID,
         genesisHash: { v: ALICE_GENESIS } as any,
-        chainTip: new Uint8Array(32),
       }),
       messageId: new Uint8Array(16),
       payload: {

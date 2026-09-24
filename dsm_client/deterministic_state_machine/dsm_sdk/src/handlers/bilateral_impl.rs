@@ -18,6 +18,7 @@
 
 use async_trait::async_trait;
 use prost::Message;
+#[cfg(all(target_os = "android", feature = "bluetooth"))]
 use std::sync::Arc;
 // Used only by the Android BLE chunk-send error path below (restores the android+bluetooth build).
 #[cfg(all(target_os = "android", feature = "bluetooth"))]
@@ -25,7 +26,6 @@ use dsm::types::error::DsmError;
 
 use crate::bridge::{BiAccept, BiCommit, BiPrepare, BiResult, BiTransfer, BilateralHandler};
 use crate::init::SdkConfig;
-use crate::storage::bilateral::BilateralStorageSDK;
 // Use SDK-local generated protobufs to ensure consistency with tests and app router
 use crate::generated as pb;
 
@@ -45,30 +45,16 @@ pub struct BiImpl {
     ble_coordinator: Arc<tokio::sync::RwLock<Option<Arc<BleFrameCoordinator>>>>,
     #[cfg(all(target_os = "android", feature = "bluetooth"))]
     ble_transport_adapter: Arc<tokio::sync::RwLock<Option<Arc<BilateralTransportAdapter>>>>,
-    storage: Option<Arc<BilateralStorageSDK>>,
 }
 
 impl BiImpl {
     pub fn new(config: SdkConfig) -> Self {
-        // Try to initialize bilateral storage
-        let storage = match crate::storage::bilateral::bilateral::new() {
-            Ok(s) => {
-                log::info!("[BiImpl] Bilateral storage initialized successfully");
-                Some(Arc::new(s))
-            }
-            Err(e) => {
-                log::warn!("[BiImpl] Failed to initialize bilateral storage: {}", e);
-                None
-            }
-        };
-
         Self {
             _config: config,
             #[cfg(all(target_os = "android", feature = "bluetooth"))]
             ble_coordinator: Arc::new(tokio::sync::RwLock::new(None)),
             #[cfg(all(target_os = "android", feature = "bluetooth"))]
             ble_transport_adapter: Arc::new(tokio::sync::RwLock::new(None)),
-            storage,
         }
     }
 
@@ -199,11 +185,7 @@ impl BilateralHandler for BiImpl {
                     };
 
                     match transport_adapter
-                        .create_prepare_message_with_commitment(
-                            counterparty_id,
-                            operation,
-                            req.validity_iterations,
-                        )
+                        .create_prepare_message_with_commitment(counterparty_id, operation)
                         .await
                     {
                         Ok((prepare_envelope, commitment_hash_bytes)) => {
@@ -286,7 +268,6 @@ impl BilateralHandler for BiImpl {
                                     v: commitment_hash_bytes.to_vec(),
                                 }),
                                 local_signature: vec![],
-                                expires_iterations: req.validity_iterations,
                                 counterparty_state_hash: None,
                                 local_state_hash: None,
                                 responder_signing_public_key:
@@ -333,7 +314,6 @@ impl BilateralHandler for BiImpl {
                             v: commitment.as_bytes().to_vec(),
                         }),
                         local_signature: vec![],
-                        expires_iterations: req.validity_iterations,
                         counterparty_state_hash: None,
                         local_state_hash: None,
                         responder_signing_public_key:
@@ -589,23 +569,6 @@ impl BilateralHandler for BiImpl {
         }
     }
 
-    /// Pending bilateral proposals, read from the bilateral transaction store.
-    /// `BilateralStorageSDK::get_pending_transactions` selects PENDING and
-    /// IN_PROGRESS rows; each proposal is that row's operation payload.
-    async fn get_pending_transactions(&self) -> Result<Vec<Vec<u8>>, String> {
-        let storage = self
-            .storage
-            .as_ref()
-            .ok_or_else(|| "bilateral storage unavailable".to_string())?;
-        let rows = storage
-            .get_pending_transactions()
-            .map_err(|e| format!("read pending bilateral transactions: {e}"))?;
-        Ok(rows
-            .into_iter()
-            .map(|(_tx_id, _cp, _commit, operation_data, _phase, _created, _status)| operation_data)
-            .collect())
-    }
-
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -639,7 +602,6 @@ mod tests {
     async fn prepare_rejects_invalid_protobuf() {
         let bi = BiImpl {
             _config: test_config(),
-            storage: None,
         };
         let result = bi
             .prepare(BiPrepare {
@@ -663,7 +625,6 @@ mod tests {
         };
         let bi = BiImpl {
             _config: test_config(),
-            storage: None,
         };
         let result = bi
             .prepare(BiPrepare {
@@ -684,17 +645,15 @@ mod tests {
         // Initialize global storage dir required by AppState::get_public_key()
         let tmp = std::env::temp_dir().join("dsm_test_bilateral_prepare");
         let _ = std::fs::create_dir_all(&tmp);
-        let _ = crate::storage_utils::set_storage_base_dir(tmp);
+        crate::economic_fixtures::use_test_storage_dir();
 
         let op_data = vec![1, 2, 3, 4, 5, 6, 7, 8];
         let req = pb::BilateralPrepareRequest {
             operation_data: op_data.clone(),
-            validity_iterations: 10,
             ..Default::default()
         };
         let bi = BiImpl {
             _config: test_config(),
-            storage: None,
         };
         let result = bi
             .prepare(BiPrepare {
@@ -711,7 +670,6 @@ mod tests {
             pb::BilateralPrepareResponse::decode(&*result.result_data).expect("decode response");
         let commitment = resp.commitment_hash.expect("commitment present");
         assert_eq!(commitment.v.len(), 32);
-        assert_eq!(resp.expires_iterations, 10);
 
         let expected = dsm::crypto::blake3::domain_hash(
             dsm::common::domain_tags::TAG_DSM_BILATERAL_OP_COMMIT,
@@ -727,7 +685,6 @@ mod tests {
     async fn accept_rejects_invalid_protobuf() {
         let bi = BiImpl {
             _config: test_config(),
-            storage: None,
         };
         let result = bi
             .accept(BiAccept {
@@ -751,7 +708,6 @@ mod tests {
         };
         let bi = BiImpl {
             _config: test_config(),
-            storage: None,
         };
         let result = bi
             .accept(BiAccept {
@@ -775,7 +731,6 @@ mod tests {
         };
         let bi = BiImpl {
             _config: test_config(),
-            storage: None,
         };
         let result = bi
             .accept(BiAccept {
@@ -799,7 +754,6 @@ mod tests {
         };
         let bi = BiImpl {
             _config: test_config(),
-            storage: None,
         };
         let result = bi
             .accept(BiAccept {
@@ -821,7 +775,6 @@ mod tests {
     async fn commit_rejects_invalid_protobuf() {
         let bi = BiImpl {
             _config: test_config(),
-            storage: None,
         };
         let result = bi
             .commit(BiCommit {
@@ -848,7 +801,6 @@ mod tests {
         };
         let bi = BiImpl {
             _config: test_config(),
-            storage: None,
         };
         let result = bi
             .commit(BiCommit {
@@ -875,7 +827,6 @@ mod tests {
         };
         let bi = BiImpl {
             _config: test_config(),
-            storage: None,
         };
         let result = bi
             .commit(BiCommit {
@@ -902,7 +853,6 @@ mod tests {
         };
         let bi = BiImpl {
             _config: test_config(),
-            storage: None,
         };
         let result = bi
             .commit(BiCommit {
@@ -929,7 +879,6 @@ mod tests {
         };
         let bi = BiImpl {
             _config: test_config(),
-            storage: None,
         };
         let result = bi
             .commit(BiCommit {
@@ -956,7 +905,6 @@ mod tests {
         };
         let bi = BiImpl {
             _config: test_config(),
-            storage: None,
         };
         let result = bi
             .commit(BiCommit {
@@ -978,7 +926,6 @@ mod tests {
     async fn transfer_rejects_invalid_protobuf() {
         let bi = BiImpl {
             _config: test_config(),
-            storage: None,
         };
         let result = bi
             .transfer(BiTransfer {
@@ -1007,7 +954,6 @@ mod tests {
         };
         let bi = BiImpl {
             _config: test_config(),
-            storage: None,
         };
         let result = bi
             .transfer(BiTransfer {
@@ -1036,7 +982,6 @@ mod tests {
         };
         let bi = BiImpl {
             _config: test_config(),
-            storage: None,
         };
         let result = bi
             .transfer(BiTransfer {
@@ -1065,7 +1010,6 @@ mod tests {
         };
         let bi = BiImpl {
             _config: test_config(),
-            storage: None,
         };
         let result = bi
             .transfer(BiTransfer {
@@ -1094,7 +1038,6 @@ mod tests {
         };
         let bi = BiImpl {
             _config: test_config(),
-            storage: None,
         };
         let result = bi
             .transfer(BiTransfer {

@@ -44,8 +44,6 @@ pub mod algorithms {
         pub step_count: usize,
         /// Maximum coordinate value in any dimension
         pub max_coordinate: u32,
-        #[allow(dead_code)]
-        pub(crate) position_count: usize,
     }
 
     impl Default for RandomWalkConfig {
@@ -54,7 +52,6 @@ pub mod algorithms {
                 dimensions: DEFAULT_DIMENSIONS,
                 step_count: DEFAULT_STEP_COUNT,
                 max_coordinate: DEFAULT_MAX_COORDINATE,
-                position_count: DEFAULT_STEP_COUNT,
             }
         }
     }
@@ -255,33 +252,6 @@ pub mod algorithms {
 
     /// Generate random walk verification for a forward commitment
     ///
-    /// Implements the forward commitment verification described in the whitepaper section 7.3
-    ///
-    /// # Arguments
-    ///
-    /// * `commitment` - Commitment hash
-    /// * `entropy` - Entropy value
-    /// * `config` - Optional configuration parameters
-    ///
-    /// # Returns
-    ///
-    /// * `Result<Vec<Position>, DsmError>` - Position sequence for the forward commitment
-    pub fn generate_forward_commitment_verification(
-        commitment: &Hash,
-        entropy: &[u8],
-        config: Option<RandomWalkConfig>,
-    ) -> Result<Vec<Position>, DsmError> {
-        let seed = generate_seed(commitment, entropy, None);
-        generate_positions(&seed, config)
-    }
-
-    // generate_secure_multi_party_seed and verify_state_transition deleted:
-    // zero callers (only the mod.rs re-export and a doc-comment example).
-    // Both took &State purely to read .hash()?, .operation, .entropy — the
-    // canonical replacement for state-transition verification is the SMT
-    // inclusion proofs in AdvanceOutcome (DeviceState::advance), not a
-    // standalone helper that walks two State snapshots.
-
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -385,7 +355,6 @@ pub mod algorithms {
                 dimensions: 2,
                 step_count: 10,
                 max_coordinate: 100,
-                position_count: 10,
             };
 
             let positions4 = generate_positions(&seed, Some(config))

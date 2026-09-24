@@ -44,7 +44,15 @@ impl ChainTipStore for SqliteChainTipStore {
                 client_db::bilateral_tip_sync::TipSyncOutcome::Advanced { .. }
                 | client_db::bilateral_tip_sync::TipSyncOutcome::RepairedAtTarget { .. }
                 | client_db::bilateral_tip_sync::TipSyncOutcome::AlreadyAtTarget { .. } => Ok(true),
-                _ => Ok(false),
+                client_db::bilateral_tip_sync::TipSyncOutcome::ParentMismatch { .. }
+                | client_db::bilateral_tip_sync::TipSyncOutcome::CanonicalMovedToDifferentTip {
+                    ..
+                } => Ok(false),
+                client_db::bilateral_tip_sync::TipSyncOutcome::InvariantViolation { message } => {
+                    Err(DsmError::InvalidState(format!(
+                        "SqliteChainTipStore: the stored relationship state is not usable: {message}"
+                    )))
+                }
             },
             Err(e) => Err(DsmError::InvalidState(format!(
                 "SqliteChainTipStore persist failed: {e}"

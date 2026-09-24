@@ -5,197 +5,26 @@
 //! DSM Contact Manager - Production Implementation (STRICT, bytes-only, no wall-clock)
 //!
 //! Invariants:
-//! - No wall-clock APIs anywhere. Use deterministic, system-wide ticks from utils::deterministic_time.
+//! - No time of any kind.
 //! - No JSON/GSON at any boundary. No hex/base64 in data structures or logs; bytes-only.
 //! - Mandatory online genesis verification is enforced by the SDK layer; core only exposes bytes APIs.
 //! - Chain tip tracking is bytes-based with deterministic SMT proofs.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(test)]
 use blake3;
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::core::utility::labeling;
-use crate::types::contact_types::{ChainTipSmtProof, DsmVerifiedContact};
+use crate::types::contact_types::DsmVerifiedContact;
 use crate::types::error::DsmError;
-use crate::types::identifiers::NodeId;
-use crate::utils::deterministic_time;
-
-// -------------------- Deterministic ticks (strictly monotone, clockless) --------------------
-// We use the global deterministic tick source for "now". For strictly increasing per-event
-// indices (when multiple events occur within the same tick), we keep a tiny local sequence.
-static EVENT_SEQ: AtomicU64 = AtomicU64::new(1);
-
-#[inline]
-fn now_commit_height() -> u64 {
-    deterministic_time::current_commit_height_blocking()
-}
-
-#[inline]
-fn next_event_index() -> u64 {
-    EVENT_SEQ.fetch_add(1, Ordering::Relaxed)
-}
-
-// Proof freshness window expressed purely in commit heights (no units-of-time semantics here).
-const PROOF_MAX_AGE_COMMIT_HEIGHTS: u64 = 86_400;
-
-// -------------------- Local SMT verifier (bytes-only) --------------------
-#[derive(Debug, Clone, Default)]
-pub struct LocalSmtVerifier {
-    /// Verified Genesis cache for offline checks (device_id -> raw genesis bytes)
-    local_genesis_cache: HashMap<[u8; 32], Vec<u8>>,
-    /// Latest SMT proof per contact (device_id -> proof)
-    local_smt_states: HashMap<[u8; 32], ChainTipSmtProof>,
-}
-
-impl LocalSmtVerifier {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn store_verified_genesis(&mut self, device_id: &[u8; 32], genesis_data: Vec<u8>) {
-        self.local_genesis_cache.insert(*device_id, genesis_data);
-    }
-
-    pub fn verify_contact_locally(
-        &self,
-        device_id: &[u8; 32],
-        expected_genesis_hash: &[u8; 32],
-    ) -> bool {
-        match self.local_genesis_cache.get(device_id) {
-            None => false,
-            Some(genesis_data) => {
-                let computed = crate::crypto::blake3::domain_hash(
-                    crate::common::domain_tags::TAG_DSM_GENESIS_VERIFY,
-                    genesis_data,
-                );
-                let mut bytes = [0u8; 32];
-                bytes.copy_from_slice(computed.as_bytes());
-                &bytes == expected_genesis_hash
-            }
-        }
-    }
-
-    pub fn store_chain_tip_proof(&mut self, device_id: &[u8; 32], proof: ChainTipSmtProof) {
-        self.local_smt_states.insert(*device_id, proof);
-    }
-
-    pub fn verify_chain_tip_with_proof(
-        &self,
-        _device_id: &[u8; 32],
-        chain_tip_hash: &[u8; 32],
-        smt_proof: &ChainTipSmtProof,
-    ) -> bool {
-        if &smt_proof.state_hash != chain_tip_hash {
-            return false;
-        }
-        let now = now_commit_height();
-        if now.saturating_sub(smt_proof.proof_commit_height) > PROOF_MAX_AGE_COMMIT_HEIGHTS {
-            return false;
-        }
-        // §4.3: Verify actual Merkle inclusion proof.
-        // Zero root is always invalid.
-        if smt_proof.smt_root.iter().all(|&b| b == 0) {
-            return false;
-        }
-        if smt_proof.proof_path.is_empty() {
-            // No proof path — reject. Every chain tip must have a real
-            // SMT inclusion proof (initialize_contact_chain_tip inserts
-            // the leaf before proving, so empty paths are never valid).
-            return false;
-        }
-        // proof_path contains sibling hashes directly — construct the proof
-        // and verify against the claimed SMT root.
-        let proof = crate::merkle::sparse_merkle_tree::SmtInclusionProof {
-            key: smt_proof.smt_key,
-            value: Some(smt_proof.state_hash),
-            siblings: smt_proof.proof_path.clone(),
-        };
-        crate::merkle::sparse_merkle_tree::SparseMerkleTree::verify_proof_against_root(
-            &proof,
-            &smt_proof.smt_root,
-        )
-    }
-
-    /// Generate a chain tip proof from the real Per-Device SMT (§2.2).
-    ///
-    /// No fake roots — produces a genuine inclusion proof from the tree.
-    pub fn create_chain_tip_proof_from_smt(
-        &self,
-        chain_tip_hash: &[u8; 32],
-        smt: &crate::merkle::sparse_merkle_tree::SparseMerkleTree,
-        smt_key: &[u8; 32],
-    ) -> ChainTipSmtProof {
-        let tick = deterministic_time::current_commit_height_blocking();
-        let seq = next_event_index();
-
-        let proof = smt.get_inclusion_proof(smt_key, 256).ok();
-        ChainTipSmtProof {
-            smt_root: *smt.root(),
-            state_hash: *chain_tip_hash,
-            smt_key: *smt_key,
-            proof_path: proof.map(|p| p.siblings).unwrap_or_default(),
-            state_index: seq,
-            proof_commit_height: tick,
-        }
-    }
-
-    // No pending/placeholder proofs — §4.2 requires real SMT proofs for every transition.
-}
-
-// -------------------- Storage node client (SDK performs real I/O) --------------------
-#[derive(Debug, Clone)]
-pub struct InitialSetupClient {
-    pub storage_nodes: Vec<NodeId>,
-}
-impl InitialSetupClient {
-    pub fn new(storage_nodes: Vec<NodeId>) -> Self {
-        Self { storage_nodes }
-    }
-}
-
-// -------------------- Unilateral transaction payload (bytes, monotonic) --------------------
-#[derive(Debug, Clone)]
-pub struct UnilateralTransactionPayload {
-    pub transaction_id: [u8; 32],
-    pub sender_device_id: [u8; 32],
-    pub recipient_device_id: [u8; 32],
-    pub chain_tip: [u8; 32],
-    pub smt_proof: ChainTipSmtProof,
-    pub tick: u64,
-}
-
-fn deterministic_tx_id(
-    sender: &[u8; 32],
-    recipient: &[u8; 32],
-    chain_tip: &[u8; 32],
-    tick: u64,
-    index: u64,
-) -> [u8; 32] {
-    let mut h = crate::crypto::blake3::dsm_domain_hasher(
-        crate::common::domain_tags::TAG_DSM_B0X_UNILATERAL,
-    );
-    h.update(sender);
-    h.update(recipient);
-    h.update(chain_tip);
-    h.update(&tick.to_le_bytes());
-    h.update(&index.to_le_bytes());
-    let out = h.finalize();
-    let mut id = [0u8; 32];
-    id.copy_from_slice(out.as_bytes());
-    id
-}
 
 // -------------------- Contact Manager --------------------
 #[derive(Debug, Clone)]
 pub struct DsmContactManager {
     pub contacts: HashMap<[u8; 32], DsmVerifiedContact>,
-    pub storage_nodes: Vec<NodeId>,
     pub own_device_id: [u8; 32],
-    pub local_smt_verifier: LocalSmtVerifier,
-    pub setup_client: InitialSetupClient,
 }
 
 #[derive(Debug)]
@@ -221,14 +50,10 @@ pub enum ContactError {
 }
 
 impl DsmContactManager {
-    pub fn new(own_device_id: [u8; 32], storage_nodes: Vec<NodeId>) -> Self {
-        let setup_client = InitialSetupClient::new(storage_nodes.clone());
+    pub fn new(own_device_id: [u8; 32]) -> Self {
         Self {
             contacts: HashMap::new(),
-            storage_nodes,
             own_device_id,
-            local_smt_verifier: LocalSmtVerifier::new(),
-            setup_client,
         }
     }
 
@@ -247,9 +72,6 @@ impl DsmContactManager {
             labeling::hash_to_short_id(&id)
         );
 
-        self.local_smt_verifier
-            .store_verified_genesis(&id, contact.genesis_material().to_vec());
-
         self.contacts.insert(id, contact);
         Ok(())
     }
@@ -262,160 +84,6 @@ impl DsmContactManager {
     #[inline]
     pub fn get_contact_mut(&mut self, device_id: &[u8; 32]) -> Option<&mut DsmVerifiedContact> {
         self.contacts.get_mut(device_id)
-    }
-
-    /// Update chain tip for bilateral (offline) transactions with a co-signed proof
-    pub fn update_contact_chain_tip_bilateral(
-        &mut self,
-        device_id: &[u8; 32],
-        new_chain_tip: [u8; 32],
-        verified_bilateral_proof: ChainTipSmtProof,
-    ) -> Result<(), ContactError> {
-        self.contacts
-            .get(device_id)
-            .ok_or(ContactError::ContactNotFound)?;
-
-        if !self.local_smt_verifier.verify_chain_tip_with_proof(
-            device_id,
-            &new_chain_tip,
-            &verified_bilateral_proof,
-        ) {
-            return Err(ContactError::InvalidChainTip(
-                "Bilateral SMT proof verification failed".into(),
-            ));
-        }
-
-        let c = self
-            .contacts
-            .get_mut(device_id)
-            .ok_or(ContactError::ContactNotFound)?;
-
-        c.update_chain_tip_with_proof(new_chain_tip, Some(verified_bilateral_proof));
-
-        let proof = c.chain_tip_smt_proof.clone().ok_or_else(|| {
-            ContactError::InvalidContactData("Chain tip proof not set after update".to_string())
-        })?;
-
-        self.local_smt_verifier
-            .store_chain_tip_proof(device_id, proof);
-
-        info!("Updated local SMT for bilateral transaction");
-        Ok(())
-    }
-
-    /// Update chain tip for unilateral (online) transactions.
-    ///
-    /// §4.2: Every state transition requires an SMT-Replace. The caller MUST
-    /// provide the Per-Device SMT and the relationship key. No fake roots.
-    pub fn update_contact_chain_tip_unilateral(
-        &mut self,
-        device_id: &[u8; 32],
-        new_chain_tip: [u8; 32],
-        smt: &crate::merkle::sparse_merkle_tree::SparseMerkleTree,
-        smt_key: &[u8; 32],
-    ) -> Result<UnilateralTransactionPayload, ContactError> {
-        let smt_proof =
-            self.local_smt_verifier
-                .create_chain_tip_proof_from_smt(&new_chain_tip, smt, smt_key);
-
-        let c = self
-            .contacts
-            .get_mut(device_id)
-            .ok_or(ContactError::ContactNotFound)?;
-
-        c.update_chain_tip_with_proof(new_chain_tip, Some(smt_proof.clone()));
-
-        self.local_smt_verifier
-            .store_chain_tip_proof(device_id, smt_proof.clone());
-
-        let tick = deterministic_time::current_commit_height_blocking();
-        let idx = next_event_index();
-        let tx_id = deterministic_tx_id(&self.own_device_id, device_id, &new_chain_tip, tick, idx);
-
-        let payload = UnilateralTransactionPayload {
-            transaction_id: tx_id,
-            sender_device_id: self.own_device_id,
-            recipient_device_id: *device_id,
-            chain_tip: new_chain_tip,
-            smt_proof,
-            tick,
-        };
-
-        info!("Prepared unilateral transaction payload (SDK to submit)");
-        Ok(payload)
-    }
-
-    /// Initialize a contact's chain tip with a real Per-Device SMT proof.
-    ///
-    /// §4.2: Every state transition requires an SMT-Replace. No exceptions.
-    /// The chain tip is inserted into the SMT first, then a genuine inclusion
-    /// proof is generated and verified. No empty-path fallbacks.
-    pub fn initialize_contact_chain_tip(
-        &mut self,
-        device_id: &[u8; 32],
-        new_chain_tip: [u8; 32],
-        smt: &mut crate::merkle::sparse_merkle_tree::SparseMerkleTree,
-        smt_key: &[u8; 32],
-    ) -> Result<ChainTipSmtProof, ContactError> {
-        // Insert the chain tip into the SMT BEFORE generating the proof.
-        // This ensures get_inclusion_proof returns a real proof for the
-        // actual chain tip value, not a ZERO_LEAF non-inclusion proof.
-        smt.update_leaf(smt_key, &new_chain_tip)
-            .map_err(|e| ContactError::InvalidChainTip(format!("SMT update_leaf failed: {e}")))?;
-
-        let smt_proof =
-            self.local_smt_verifier
-                .create_chain_tip_proof_from_smt(&new_chain_tip, smt, smt_key);
-
-        if !self.local_smt_verifier.verify_chain_tip_with_proof(
-            device_id,
-            &new_chain_tip,
-            &smt_proof,
-        ) {
-            return Err(ContactError::InvalidChainTip(
-                "SMT proof verification failed".into(),
-            ));
-        }
-
-        let c = self
-            .contacts
-            .get_mut(device_id)
-            .ok_or(ContactError::ContactNotFound)?;
-
-        c.update_chain_tip_with_proof(new_chain_tip, Some(smt_proof.clone()));
-
-        self.local_smt_verifier
-            .store_chain_tip_proof(device_id, smt_proof.clone());
-
-        info!("Initialized contact chain tip with local SMT proof");
-        Ok(smt_proof)
-    }
-
-    /// Verify all chain tips against their SMT proofs locally (bytes-only)
-    pub fn verify_all_chain_tips(&self) -> HashMap<[u8; 32], bool> {
-        let mut out = HashMap::new();
-
-        for (id, c) in &self.contacts {
-            let valid = match c.chain_tip_smt_proof.as_ref() {
-                None => false,
-                Some(proof) => {
-                    let tip = c.chain_tip.unwrap_or([0u8; 32]);
-                    let ok = self
-                        .local_smt_verifier
-                        .verify_chain_tip_with_proof(id, &tip, proof);
-                    if !ok {
-                        warn!(
-                            "Invalid SMT proof for contact (id_dec={})",
-                            labeling::hash_to_short_id(id)
-                        );
-                    }
-                    ok
-                }
-            };
-            out.insert(*id, valid);
-        }
-
-        out
     }
 
     pub fn list_contacts(&self) -> Vec<&DsmVerifiedContact> {
@@ -437,7 +105,6 @@ impl DsmContactManager {
         })?;
 
         contact.public_key = public_key;
-        contact.last_updated_commit_height = now_commit_height();
 
         info!(
             "Updated public_key for contact (id_dec={}, key_len={})",
@@ -449,37 +116,10 @@ impl DsmContactManager {
     }
 }
 
-// ------------- DsmVerifiedContact contract (expected bytes-only helpers) -------------
-trait VerifiedContactExt {
-    fn genesis_material(&self) -> &[u8];
-
-    #[allow(dead_code)]
-    fn update_chain_tip_with_proof(
-        &mut self,
-        new_chain_tip: [u8; 32],
-        proof: Option<ChainTipSmtProof>,
-    );
-}
-
-impl VerifiedContactExt for DsmVerifiedContact {
-    fn genesis_material(&self) -> &[u8] {
-        self.genesis_material.as_slice()
-    }
-
-    fn update_chain_tip_with_proof(
-        &mut self,
-        new_chain_tip: [u8; 32],
-        proof: Option<ChainTipSmtProof>,
-    ) {
-        self.chain_tip = Some(new_chain_tip);
-        self.chain_tip_smt_proof = proof;
-        self.last_updated_commit_height = now_commit_height();
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::identifiers::NodeId;
 
     fn create_test_device_id(seed: u8) -> [u8; 32] {
         let mut id = [0u8; 32];
@@ -504,53 +144,22 @@ mod tests {
     }
 
     fn create_test_contact(device_id: [u8; 32], genesis_hash: [u8; 32]) -> DsmVerifiedContact {
-        let now = now_commit_height();
         DsmVerifiedContact {
             device_id,
             genesis_hash,
             alias: "Test".into(),
             public_key: vec![0u8; 32],
-            genesis_material: vec![0u8; 32],
             genesis_verified_online: true,
-            verified_at_commit_height: now,
-            added_at_commit_height: now,
-            last_updated_commit_height: now,
             verifying_storage_nodes: create_test_storage_nodes(),
             chain_tip: None,
-            chain_tip_smt_proof: None,
             ble_address: None,
         }
     }
 
     #[test]
-    fn test_local_smt_verifier_genesis_storage() {
-        let mut verifier = LocalSmtVerifier::new();
-        let device_id = create_test_device_id(1);
-        let genesis_data = b"test_genesis_data".to_vec();
-
-        verifier.store_verified_genesis(&device_id, genesis_data.clone());
-        let cached = verifier.local_genesis_cache.get(&device_id);
-        assert!(cached.is_some());
-        assert_eq!(cached.unwrap(), &genesis_data);
-    }
-
-    #[test]
-    fn test_local_smt_verifier_wrong_genesis_fails() {
-        let mut verifier = LocalSmtVerifier::new();
-        let device_id = create_test_device_id(2);
-        let genesis_data = b"correct_genesis".to_vec();
-        let wrong_data = b"wrong_genesis".to_vec();
-
-        verifier.store_verified_genesis(&device_id, genesis_data.clone());
-        let cached = verifier.local_genesis_cache.get(&device_id).unwrap();
-        assert_ne!(cached, &wrong_data);
-    }
-
-    #[test]
     fn test_dsm_contact_manager_add_contact() {
         let own_device_id = create_test_device_id(0);
-        let storage_nodes = create_test_storage_nodes();
-        let mut manager = DsmContactManager::new(own_device_id, storage_nodes);
+        let mut manager = DsmContactManager::new(own_device_id);
 
         let device_id = create_test_device_id(1);
         let genesis_hash = create_test_genesis_hash(&device_id, 0);
@@ -564,7 +173,7 @@ mod tests {
     #[test]
     fn test_dsm_contact_manager_get_contact() {
         let own_device_id = create_test_device_id(0);
-        let mut manager = DsmContactManager::new(own_device_id, create_test_storage_nodes());
+        let mut manager = DsmContactManager::new(own_device_id);
 
         let device_id = create_test_device_id(1);
         let genesis_hash = create_test_genesis_hash(&device_id, 0);
@@ -579,7 +188,7 @@ mod tests {
     #[test]
     fn test_dsm_contact_manager_remove_contact() {
         let own_device_id = create_test_device_id(0);
-        let mut manager = DsmContactManager::new(own_device_id, create_test_storage_nodes());
+        let mut manager = DsmContactManager::new(own_device_id);
 
         let device_id = create_test_device_id(1);
         let genesis_hash = create_test_genesis_hash(&device_id, 0);
@@ -595,7 +204,7 @@ mod tests {
     #[test]
     fn test_dsm_contact_manager_invalid_contact() {
         let own_device_id = create_test_device_id(0);
-        let mut manager = DsmContactManager::new(own_device_id, create_test_storage_nodes());
+        let mut manager = DsmContactManager::new(own_device_id);
 
         let invalid_contact = create_test_contact([0u8; 32], [1u8; 32]);
         assert!(manager.add_verified_contact(invalid_contact).is_err());
@@ -604,7 +213,7 @@ mod tests {
     #[test]
     fn test_dsm_contact_manager_multiple_contacts() {
         let own_device_id = create_test_device_id(0);
-        let mut manager = DsmContactManager::new(own_device_id, create_test_storage_nodes());
+        let mut manager = DsmContactManager::new(own_device_id);
 
         for i in 1..=5 {
             let device_id = create_test_device_id(i);
@@ -615,90 +224,6 @@ mod tests {
 
         assert_eq!(manager.contacts.len(), 5);
         assert_eq!(manager.list_contacts().len(), 5);
-    }
-
-    #[test]
-    fn test_chain_tip_proof_generation() {
-        let verifier = LocalSmtVerifier::new();
-        let chain_tip = [5u8; 32];
-        let mut smt = crate::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
-        let smt_key = [0u8; 32];
-
-        // Insert chain tip into SMT first — proofs are only valid for inserted keys.
-        smt.update_leaf(&smt_key, &chain_tip).unwrap();
-
-        let proof = verifier.create_chain_tip_proof_from_smt(&chain_tip, &smt, &smt_key);
-        assert_eq!(proof.state_hash, chain_tip);
-        assert_ne!(proof.smt_root, [0u8; 32], "SMT root should be non-zero");
-        assert!(
-            !proof.proof_path.is_empty(),
-            "Proof must have real siblings"
-        );
-    }
-
-    #[test]
-    fn test_chain_tip_proof_verification() {
-        let verifier = LocalSmtVerifier::new();
-        let device_id = create_test_device_id(1);
-        let chain_tip = [5u8; 32];
-        let mut smt = crate::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
-        let smt_key = [0u8; 32];
-
-        // Insert chain tip into SMT first — matches production flow where
-        // initialize_contact_chain_tip does update_leaf before proving.
-        smt.update_leaf(&smt_key, &chain_tip).unwrap();
-
-        let proof = verifier.create_chain_tip_proof_from_smt(&chain_tip, &smt, &smt_key);
-        assert!(verifier.verify_chain_tip_with_proof(&device_id, &chain_tip, &proof));
-    }
-
-    #[test]
-    fn test_chain_tip_proof_stale_rejection() {
-        let verifier = LocalSmtVerifier::new();
-        let device_id = create_test_device_id(1);
-        let chain_tip = [5u8; 32];
-
-        let stale_proof = ChainTipSmtProof {
-            state_hash: chain_tip,
-            smt_root: [0u8; 32],
-            smt_key: [0u8; 32],
-            proof_path: Vec::new(),
-            state_index: 0,
-            proof_commit_height: 0,
-        };
-
-        assert!(
-            !verifier.verify_chain_tip_with_proof(&device_id, &chain_tip, &stale_proof),
-            "Should reject proof with zero SMT root"
-        );
-    }
-
-    #[test]
-    fn test_verify_all_chain_tips() {
-        let own_device_id = create_test_device_id(0);
-        let mut manager = DsmContactManager::new(own_device_id, create_test_storage_nodes());
-
-        let device_id = create_test_device_id(1);
-        let genesis_hash = create_test_genesis_hash(&device_id, 0);
-        let mut contact = create_test_contact(device_id, genesis_hash);
-
-        let chain_tip = [5u8; 32];
-        let mut smt = crate::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
-        let smt_key = [0u8; 32];
-        // Insert chain tip into SMT before generating proof.
-        smt.update_leaf(&smt_key, &chain_tip).unwrap();
-        let proof = manager
-            .local_smt_verifier
-            .create_chain_tip_proof_from_smt(&chain_tip, &smt, &smt_key);
-
-        contact.chain_tip = Some(chain_tip);
-        contact.chain_tip_smt_proof = Some(proof);
-
-        manager.add_verified_contact(contact).unwrap();
-
-        let verification_map = manager.verify_all_chain_tips();
-        assert_eq!(verification_map.len(), 1);
-        assert!(verification_map[&device_id]);
     }
 
     #[test]

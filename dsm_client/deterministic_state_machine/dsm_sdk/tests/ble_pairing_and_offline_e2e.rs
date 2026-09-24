@@ -18,7 +18,7 @@ fn gen(id: u8) -> [u8; 32] {
 
 fn reset_db() {
     // Use in-memory DB to avoid stale schema from production DB files
-    std::env::set_var("DSM_SDK_TEST_MODE", "1");
+    dsm_sdk::economic_fixtures::use_test_storage_dir();
     client_db::reset_database_for_tests();
     if let Err(e) = client_db::init_database() {
         eprintln!("[ble_pairing_e2e] init_database skipped (already init): {e}");
@@ -35,15 +35,12 @@ fn make_contact_record(device_id: [u8; 32], genesis_hash: [u8; 32], alias: &str)
         public_key: vec![1u8; 32],
         kyber_public_key: Vec::new(),
         current_chain_tip: None,
-        added_at: 100,
         verified: true,
         verification_proof: None,
         metadata: std::collections::HashMap::new(),
         ble_address: None,
         status: "Created".to_string(),
         needs_online_reconcile: false,
-        last_seen_online_counter: 0,
-        last_seen_ble_counter: 0,
         previous_chain_tip: None,
     }
 }
@@ -104,15 +101,12 @@ async fn test_read_contact_preserves_existing() {
         public_key: vec![1u8; 32],
         kyber_public_key: Vec::new(),
         current_chain_tip: None,
-        added_at: 100,
         verified: true,
         verification_proof: None,
         metadata: std::collections::HashMap::new(),
         ble_address: Some("AA:BB:CC:DD:EE:FF".to_string()),
         status: "Created".to_string(),
         needs_online_reconcile: false,
-        last_seen_online_counter: 0,
-        last_seen_ble_counter: 0,
         previous_chain_tip: None,
     };
     client_db::store_contact(&record).expect("store_contact");
@@ -158,15 +152,12 @@ async fn test_ble_address_persistence_after_ensure() {
         public_key: Vec::new(),
         kyber_public_key: Vec::new(),
         current_chain_tip: None,
-        added_at: 100,
         verified: true,
         verification_proof: None,
         metadata: std::collections::HashMap::new(),
         ble_address: None,
         status: "Created".to_string(),
         needs_online_reconcile: false,
-        last_seen_online_counter: 0,
-        last_seen_ble_counter: 0,
         previous_chain_tip: None,
     };
     client_db::store_contact(&record).expect("store_contact");
@@ -262,15 +253,12 @@ async fn test_ble_address_roundtrip() {
         public_key: vec![1u8; 32],
         kyber_public_key: Vec::new(),
         current_chain_tip: None,
-        added_at: 1,
         verified: true,
         verification_proof: None,
         metadata: std::collections::HashMap::new(),
         ble_address: None,
         status: "Created".to_string(),
         needs_online_reconcile: false,
-        last_seen_online_counter: 0,
-        last_seen_ble_counter: 0,
         previous_chain_tip: None,
     };
     let hash_a = blake3::hash(&a_dev);
@@ -282,15 +270,12 @@ async fn test_ble_address_roundtrip() {
         public_key: vec![2u8; 32],
         kyber_public_key: Vec::new(),
         current_chain_tip: None,
-        added_at: 1,
         verified: true,
         verification_proof: None,
         metadata: std::collections::HashMap::new(),
         ble_address: None,
         status: "Created".to_string(),
         needs_online_reconcile: false,
-        last_seen_online_counter: 0,
-        last_seen_ble_counter: 0,
         previous_chain_tip: None,
     };
     client_db::store_contact(&rec_b).expect("store B on A's side");

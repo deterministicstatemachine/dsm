@@ -22,12 +22,44 @@ fn test_precommitment_integrity() {
         signature: vec![],
     };
 
-    // Create a precommitment
-    let _precommitment = SmartCommitment::new(
+    let condition = CommitmentCondition::ValueThreshold {
+        parameter_name: "balance".into(),
+        threshold: 1,
+        operator: ThresholdOperator::GreaterThanOrEqual,
+    };
+    let precommitment = SmartCommitment::new(
         "test_precommitment",
         &state.hash,
         &state.entropy,
-        // Replace the prior "always true" condition with a deterministic, clockless predicate.
+        condition.clone(),
+        next_operation.clone(),
+    )
+    .unwrap();
+
+    // It verifies against the origin it was made from, and only against it.
+    assert!(precommitment.verify_against_origin(&state.entropy).unwrap());
+    assert!(!precommitment.verify_against_origin(&[9u8; 32]).unwrap());
+
+    // It commits its operation: the same condition over another operation is
+    // another commitment.
+    let other = SmartCommitment::new(
+        "test_precommitment",
+        &state.hash,
+        &state.entropy,
+        condition,
+        Operation::Generic {
+            operation_type: b"test".to_vec(),
+            data: vec![4, 5, 7],
+            message: "Generic operation: test".to_string(),
+            signature: vec![],
+        },
+    )
+    .unwrap();
+    assert_ne!(precommitment.commitment_hash, other.commitment_hash);
+    let again = SmartCommitment::new(
+        "test_precommitment",
+        &state.hash,
+        &state.entropy,
         CommitmentCondition::ValueThreshold {
             parameter_name: "balance".into(),
             threshold: 1,
@@ -36,6 +68,7 @@ fn test_precommitment_integrity() {
         next_operation,
     )
     .unwrap();
+    assert_eq!(precommitment.commitment_hash, again.commitment_hash);
 }
 
 #[test]
@@ -101,34 +134,44 @@ fn test_compound_commitment() {
         threshold: 1,
     };
 
-    // Create compound AND commitment
+    let operation = Operation::Generic {
+        operation_type: b"conditional_action".to_vec(),
+        data: vec![1, 2, 3],
+        message: "Compound action".to_string(),
+        signature: vec![],
+    };
+
     let and_commitment = SmartCommitment::new_compound(
         &state.hash,
         &state.entropy,
-        vec![1, 2, 3, 4], // recipient
-        1000,             // amount
+        operation.clone(),
         vec![sig_condition.clone(), value_condition.clone()],
         "test_and",
     )
     .unwrap();
-
-    // Create compound OR commitment
     let or_commitment = SmartCommitment::new_compound_or(
         &state.hash,
         &state.entropy,
-        vec![1, 2, 3, 4], // recipient
-        1000,             // amount
+        operation,
         vec![sig_condition, value_condition],
         "test_or",
     )
     .unwrap();
 
-    // Create evaluation context
-    let context = CommitmentContext::new();
+    // Nothing in hand: neither holds.
+    let empty = CommitmentContext::new();
+    assert!(!and_commitment.evaluate(&empty));
+    assert!(!or_commitment.evaluate(&empty));
 
-    // NOTE: Compound evaluation semantics depend on the current smart-commitment
-    // policy implementation. We assert only that evaluation is deterministic and
-    // does not require any time-based fields.
-    let _ = and_commitment.evaluate(&context);
-    let _ = or_commitment.evaluate(&context);
+    // The amount alone: OR holds, AND still needs the signature.
+    let mut amount_only = CommitmentContext::new();
+    amount_only.set_parameter("amount", 600);
+    assert!(or_commitment.evaluate(&amount_only));
+    assert!(!and_commitment.evaluate(&amount_only));
+
+    // An amount below the threshold satisfies neither.
+    let mut too_small = CommitmentContext::new();
+    too_small.set_parameter("amount", 499);
+    assert!(!or_commitment.evaluate(&too_small));
+    assert!(!and_commitment.evaluate(&too_small));
 }

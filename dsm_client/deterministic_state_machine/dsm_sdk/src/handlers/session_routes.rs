@@ -27,7 +27,9 @@ impl AppRouterImpl {
         match q.path.as_str() {
             "session.status" => {
                 let mut mgr = SESSION_MANAGER.lock().unwrap_or_else(|p| p.into_inner());
-                mgr.sync_lock_config_from_app_state();
+                if let Err(e) = mgr.sync_lock_config_from_app_state() {
+                    return err(format!("session lock settings: {e}"));
+                }
                 let snapshot = mgr.compute_snapshot();
                 pack_envelope_ok(generated::envelope::Payload::SessionStateResponse(snapshot))
             }
@@ -40,8 +42,12 @@ impl AppRouterImpl {
         match i.method.as_str() {
             "session.lock" => {
                 let mut mgr = SESSION_MANAGER.lock().unwrap_or_else(|p| p.into_inner());
-                mgr.sync_lock_config_from_app_state();
-                mgr.lock_now();
+                if let Err(e) = mgr.sync_lock_config_from_app_state() {
+                    return err(format!("session lock settings: {e}"));
+                }
+                if let Err(e) = mgr.lock_now() {
+                    return err(format!("session.lock: {e}"));
+                }
                 log::info!("SessionRoutes: session locked via invoke");
                 let snapshot = mgr.compute_snapshot();
                 pack_envelope_ok(generated::envelope::Payload::SessionStateResponse(snapshot))
@@ -49,8 +55,12 @@ impl AppRouterImpl {
 
             "session.unlock" => {
                 let mut mgr = SESSION_MANAGER.lock().unwrap_or_else(|p| p.into_inner());
-                mgr.sync_lock_config_from_app_state();
-                mgr.unlock_now();
+                if let Err(e) = mgr.sync_lock_config_from_app_state() {
+                    return err(format!("session lock settings: {e}"));
+                }
+                if let Err(e) = mgr.unlock_now() {
+                    return err(format!("session.unlock: {e}"));
+                }
                 log::info!("SessionRoutes: session unlocked via invoke");
                 let snapshot = mgr.compute_snapshot();
                 pack_envelope_ok(generated::envelope::Payload::SessionStateResponse(snapshot))
@@ -74,8 +84,12 @@ impl AppRouterImpl {
                 };
 
                 let mut mgr = SESSION_MANAGER.lock().unwrap_or_else(|p| p.into_inner());
-                mgr.configure_lock(req.enabled, &req.method, req.lock_on_pause);
-                mgr.persist_lock_config_to_app_state();
+                if let Err(e) = mgr
+                    .configure_lock(req.enabled, &req.method, req.lock_on_pause)
+                    .and_then(|()| mgr.persist_lock_config_to_app_state())
+                {
+                    return err(format!("session.configure_lock: {e}"));
+                }
                 log::info!(
                     "SessionRoutes: lock configured enabled={} method={} lock_on_pause={}",
                     mgr.lock_enabled,
@@ -96,8 +110,12 @@ impl AppRouterImpl {
                     }
                 };
                 let mut mgr = SESSION_MANAGER.lock().unwrap_or_else(|p| p.into_inner());
-                mgr.sync_lock_config_from_app_state();
-                mgr.apply_hardware_facts(&facts);
+                if let Err(e) = mgr.sync_lock_config_from_app_state() {
+                    return err(format!("session lock settings: {e}"));
+                }
+                if let Err(e) = mgr.apply_hardware_facts(&facts) {
+                    return err(format!("session.hardware_update: {e}"));
+                }
                 let snapshot = mgr.compute_snapshot();
                 pack_envelope_ok(generated::envelope::Payload::SessionStateResponse(snapshot))
             }
@@ -106,13 +124,16 @@ impl AppRouterImpl {
                 // args = ArgPack with body = error message string (UTF-8 bytes)
                 let error_msg = match generated::ArgPack::decode(&*i.args) {
                     Ok(pack) => String::from_utf8_lossy(&pack.body).to_string(),
-                    Err(_) => {
-                        // Fallback: treat raw args as UTF-8 error message
-                        String::from_utf8_lossy(&i.args).to_string()
+                    Err(e) => {
+                        return err(format!(
+                            "session.set_fatal_error: decode ArgPack failed: {e}"
+                        ))
                     }
                 };
                 let mut mgr = SESSION_MANAGER.lock().unwrap_or_else(|p| p.into_inner());
-                mgr.sync_lock_config_from_app_state();
+                if let Err(e) = mgr.sync_lock_config_from_app_state() {
+                    return err(format!("session lock settings: {e}"));
+                }
                 mgr.fatal_error = if error_msg.is_empty() {
                     None
                 } else {
@@ -125,7 +146,9 @@ impl AppRouterImpl {
 
             "session.clear_fatal_error" => {
                 let mut mgr = SESSION_MANAGER.lock().unwrap_or_else(|p| p.into_inner());
-                mgr.sync_lock_config_from_app_state();
+                if let Err(e) = mgr.sync_lock_config_from_app_state() {
+                    return err(format!("session lock settings: {e}"));
+                }
                 mgr.fatal_error = None;
                 log::info!("SessionRoutes: fatal error cleared");
                 let snapshot = mgr.compute_snapshot();

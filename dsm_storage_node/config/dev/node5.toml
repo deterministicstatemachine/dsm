@@ -6,7 +6,6 @@ bind_address = "0.0.0.0"
 port = 8084
 enable_cors = true
 cors_allow_origins = ["*"]
-enable_rate_limits = false
 max_body_size = 52428800
 
 [node]
@@ -31,7 +30,6 @@ min_group_size = 2
 engine = "postgresql"
 capacity = 1073741824
 data_dir = "./data-dev-node5"
-database_path = "./data-dev-node5/storage.db"
 
 [database]
 url = "postgresql://localhost:5432/dsm_storage_node5"
@@ -78,7 +76,6 @@ private_key_path = "./keys/dev-node5.key"
 public_key_path = "./keys/dev-node5.pub"
 enable_tls = false
 require_auth = false
-enable_rate_limits = false
 
 [tls]
 enabled = false

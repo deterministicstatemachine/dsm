@@ -101,11 +101,6 @@ class ContactsStore {
         ? bytesToDisplay(chainTipRaw)
         : undefined;
 
-      const smtRaw = contact.chainTipSmtProof;
-      const chainTipSmtProof = smtRaw?.siblings?.length
-        ? { siblings: smtRaw.siblings as Uint8Array[] }
-        : undefined;
-
       return {
         id,
         alias,
@@ -124,11 +119,6 @@ class ContactsStore {
         notes: undefined,
         bleAddress: contact.bleAddress || undefined,
         chainTip,
-        addedCounter: contact.addedCounter,
-        verifyCounter: contact.verifyCounter,
-        chainTipSmtProof,
-        createdAt: 0,
-        updatedAt: 0,
       };
     });
   }

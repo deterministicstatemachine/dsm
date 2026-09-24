@@ -24,7 +24,7 @@ describe('useTransactions', () => {
     const deviceId = new Uint8Array(32).fill(0x01);
     const genesisHash = new Uint8Array(32).fill(0x02);
     const chainTip = new Uint8Array(32).fill(0x03);
-    const headers = new pb.Headers({ deviceId: deviceId as any, genesisHash: genesisHash as any, chainTip: chainTip as any, seq: BigInt(1) as any });
+    const headers = new pb.Headers({ deviceId: deviceId as any, genesisHash: genesisHash as any,});
     win.DsmBridge = {
       __binary: true,
       __callBin: async (reqBytes: Uint8Array) => {

@@ -14,18 +14,16 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, bail, Context};
 use serde::Serialize;
 
+use crate::live_device::{stitched_receipt, verification_context, LiveDevice};
 use crate::tla_runner::TlaSpec;
-use dsm::core::state_machine::relationship::RelationshipStatePair;
-use dsm::core::state_machine::StateMachine;
 use dsm::crypto::blake3::{domain_hash, domain_hash_bytes};
 use dsm::crypto::kyber::generate_kyber_keypair_from_entropy;
-use dsm::crypto::sphincs::{generate_keypair_from_seed, sphincs_sign, SphincsVariant};
+use dsm::crypto::sphincs::{generate_keypair_from_seed, SphincsVariant};
+use dsm::economic::native_reserve::ERA_FAUCET_PAYOUT;
 use dsm::emissions::{JoinActivationProof, SourceDlvState};
-use dsm::types::contact_types::DsmVerifiedContact;
-use dsm::types::operations::{Operation, TransactionMode, VerificationType};
+use dsm::types::operations::Operation;
 use dsm::types::receipt_types::ParentConsumptionTracker;
-use dsm::types::state_types::{DeviceInfo, State};
-use dsm::types::token_types::Balance;
+use dsm::verification::receipt_verification::verify_stitched_receipt;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TlaTraceReplayResult {
@@ -68,8 +66,6 @@ enum TlaValue {
 type TlaState = BTreeMap<String, TlaValue>;
 
 const TRACE_VARIANT: SphincsVariant = SphincsVariant::SPX256f;
-const TRACE_TOKEN_ID: &[u8] = b"ERA";
-const TRACE_INITIAL_BALANCE: u64 = 100;
 
 pub fn simulation_profile_for_spec(_spec: &TlaSpec) -> TlaSimulationProfile {
     TlaSimulationProfile { seed: 42, depth: 5 }
@@ -226,25 +222,37 @@ fn parse_trace_states(trace_text: &str) -> anyhow::Result<Vec<TlaState>> {
     Ok(states)
 }
 
+/// One model device, as a real device: its canonical head, keys and the
+/// chain head its per-step keys certify back to (`LiveDevice`).
 struct DirectDevice {
-    label: String,
-    device_id: [u8; 32],
-    genesis_hash: [u8; 32],
-    identity_pk: Vec<u8>,
-    identity_sk: Vec<u8>,
-    state_machine: StateMachine,
-    state: State,
-    contact_manager: dsm::core::contact_manager::DsmContactManager,
-    generated_signing: bool,
-    generated_kyber: bool,
+    live: LiveDevice,
+    /// The SPHINCS+ and ML-KEM public keys `GenerateKeys` produced, once it
+    /// has run for this device.
+    generated_keys: Option<(Vec<u8>, Vec<u8>)>,
+    /// Real ERA above the model's initial balance: the device is funded in
+    /// whole faucet payouts, and the model starts it at `MaxPayload`.
+    funding_offset: u64,
 }
 
+/// A model relationship on the real pair: whether `CreateRelationship` ran,
+/// how many steps were delivered, and whether any message activated it.
 struct DirectRelationship {
-    pair: RelationshipStatePair,
-    tip: i64,
+    created: bool,
+    delivered: i64,
     active: bool,
 }
 
+impl DirectRelationship {
+    /// The model's tip: creation is the relationship's first step, and every
+    /// delivered transfer is one more.
+    fn model_tip(&self) -> i64 {
+        i64::from(self.created) + self.delivered
+    }
+}
+
+/// A message in the model's network bag. `send_group` is the id of the
+/// `NetSend` it was sent as — a duplicate keeps it — and `operation` is the
+/// transfer its sender signed then.
 #[derive(Clone)]
 struct PendingNetMessage {
     id: i64,
@@ -253,7 +261,8 @@ struct PendingNetMessage {
     payload: TlaValue,
     dup_left: i64,
     parent_tip: i64,
-    pending_state: State,
+    send_group: i64,
+    operation: Operation,
 }
 
 struct DsmImplementationHarness {
@@ -261,6 +270,9 @@ struct DsmImplementationHarness {
     genesis_devices: BTreeMap<TlaValue, BTreeSet<TlaValue>>,
     relationships: BTreeMap<(TlaValue, TlaValue), DirectRelationship>,
     pending_messages: Vec<PendingNetMessage>,
+    /// Sends the model has debited whose transfer no copy has delivered:
+    /// `send_group -> (sender, amount)`.
+    undelivered: BTreeMap<i64, (TlaValue, u64)>,
     ledger: BTreeSet<TlaValue>,
     parent_tracker: ParentConsumptionTracker,
     next_msg_id: i64,
@@ -279,97 +291,35 @@ struct DsmImplementationHarness {
     spent_proofs: BTreeSet<TlaValue>,
     consumed_proofs: BTreeSet<TlaValue>,
     offline_sessions: BTreeSet<TlaValue>,
-    device_balance: BTreeMap<TlaValue, TlaValue>,
 }
 
 impl DsmImplementationHarness {
     fn new(initial: &TlaState) -> anyhow::Result<Self> {
-        dsm::utils::deterministic_time::reset_for_tests();
-
         let key_map = map_var(initial, "keys")?;
-        let mut device_values: Vec<TlaValue> = key_map.keys().cloned().collect();
-        device_values.sort();
-
-        let mut bootstrap = Vec::with_capacity(device_values.len());
-        for device in &device_values {
+        let initial_balance = map_var(initial, "deviceBalance").ok();
+        let mut devices = BTreeMap::new();
+        for device in key_map.keys() {
             let label = tla_atom(device)?;
-            let identity_seed = trace_seed(dsm::tagged_domain!(b"DSM/VV/device-seed"), &label);
-            let signing =
-                generate_keypair_from_seed(TRACE_VARIANT, &identity_seed).with_context(|| {
-                    format!("failed to generate direct replay signing key for {label}")
-                })?;
-            let device_id =
-                bytes32_from_hash(dsm::tagged_domain!(b"DSM/VV/device-id"), label.as_bytes());
-            let genesis_hash = bytes32_from_hash(
-                dsm::tagged_domain!(b"DSM/VV/device-genesis"),
-                label.as_bytes(),
-            );
-            let state = create_direct_trace_state(&identity_seed, device_id, &signing.public_key)?;
-            let mut machine = StateMachine::new();
-            machine.set_state(state.clone());
-            bootstrap.push((
+            let model_balance = match initial_balance.and_then(|b| b.get(device)) {
+                Some(value) => u64::try_from(int_from_value(value)?)
+                    .map_err(|_| anyhow!("{label}: a negative initial balance"))?,
+                None => 0,
+            };
+            let mut live = LiveDevice::new(&format!("tla-{label}"))
+                .with_context(|| format!("direct replay device {label}"))?;
+            let claims = model_balance.div_ceil(ERA_FAUCET_PAYOUT);
+            for generation in 1..=claims {
+                live.claim_faucet(generation)
+                    .with_context(|| format!("funding direct replay device {label}"))?;
+            }
+            devices.insert(
                 device.clone(),
                 DirectDevice {
-                    label,
-                    device_id,
-                    genesis_hash,
-                    identity_pk: signing.public_key.clone(),
-                    identity_sk: signing.secret_key.clone(),
-                    state_machine: machine,
-                    state,
-                    contact_manager: dsm::core::contact_manager::DsmContactManager::new(
-                        device_id,
-                        vec![],
-                    ),
-                    generated_signing: false,
-                    generated_kyber: false,
+                    live,
+                    generated_keys: None,
+                    funding_offset: claims * ERA_FAUCET_PAYOUT - model_balance,
                 },
-            ));
-        }
-
-        let contact_descriptors: Vec<(String, [u8; 32], [u8; 32], Vec<u8>)> = bootstrap
-            .iter()
-            .map(|(_, device)| {
-                (
-                    device.label.clone(),
-                    device.device_id,
-                    device.genesis_hash,
-                    device.identity_pk.clone(),
-                )
-            })
-            .collect();
-
-        let mut devices = BTreeMap::new();
-        for (device_key, mut device) in bootstrap {
-            for (alias, remote_id, remote_genesis, remote_pk) in &contact_descriptors {
-                if *remote_id == device.device_id {
-                    continue;
-                }
-                device
-                    .contact_manager
-                    .add_verified_contact(DsmVerifiedContact {
-                        alias: alias.clone(),
-                        device_id: *remote_id,
-                        genesis_hash: *remote_genesis,
-                        public_key: remote_pk.clone(),
-                        genesis_material: alias.as_bytes().to_vec(),
-                        chain_tip: None,
-                        chain_tip_smt_proof: None,
-                        genesis_verified_online: true,
-                        verified_at_commit_height: 1,
-                        added_at_commit_height: 1,
-                        last_updated_commit_height: 1,
-                        verifying_storage_nodes: vec![],
-                        ble_address: None,
-                    })
-                    .with_context(|| {
-                        format!(
-                            "failed to add verified contact {} to direct replay device {}",
-                            alias, device.label
-                        )
-                    })?;
-            }
-            devices.insert(device_key, device);
+            );
         }
 
         let mut genesis_devices = BTreeMap::new();
@@ -391,12 +341,18 @@ impl DsmImplementationHarness {
             }
         }
 
-        let mut harness = Self {
+        let ledger = cloned_set_var(initial, "ledger");
+        if !ledger.is_empty() {
+            bail!("direct replay starts from an empty ledger; the initial state carries receipts");
+        }
+
+        Ok(Self {
             devices,
             genesis_devices,
             relationships: BTreeMap::new(),
             pending_messages: Vec::new(),
-            ledger: cloned_set_var(initial, "ledger"),
+            undelivered: BTreeMap::new(),
+            ledger,
             parent_tracker: ParentConsumptionTracker::new(),
             next_msg_id: int_var(initial, "nextMsgId").unwrap_or(0),
             storage_nodes: cloned_set_var(initial, "storageNodes"),
@@ -414,36 +370,7 @@ impl DsmImplementationHarness {
             spent_proofs: cloned_set_var(initial, "spentProofs"),
             consumed_proofs: cloned_set_var(initial, "consumedProofs"),
             offline_sessions: cloned_set_var(initial, "offlineSessions"),
-            device_balance: cloned_map_var(initial, "deviceBalance"),
-        };
-
-        for receipt in &harness.ledger {
-            let record = record_fields(receipt)?;
-            let rel_devices = set_items(
-                record
-                    .get("rel")
-                    .ok_or_else(|| anyhow!("ledger receipt missing rel"))?,
-            )?;
-            if rel_devices.len() != 2 {
-                bail!("expected binary relation in initial ledger");
-            }
-            let parent_hash = harness.relationship_tip_hash(
-                &rel_devices[0],
-                &rel_devices[1],
-                receipt_int(record, "oldTip")?,
-            );
-            let child_hash = harness.relationship_tip_hash(
-                &rel_devices[0],
-                &rel_devices[1],
-                receipt_int(record, "newTip")?,
-            );
-            harness
-                .parent_tracker
-                .try_consume(parent_hash, child_hash)
-                .map_err(|e| anyhow!("initial ledger violates direct tripwire tracker: {e}"))?;
-        }
-
-        Ok(harness)
+        })
     }
 
     fn replay_action(
@@ -457,23 +384,18 @@ impl DsmImplementationHarness {
             "add_device" => self.apply_add_device(current, next)?,
             "create_relationship" => self.apply_create_relationship(current, next)?,
             "net_send" => self.apply_net_send(current, next)?,
+            "net_duplicate" => self.apply_net_duplicate(current, next)?,
             "net_deliver" => self.apply_net_deliver(current, next)?,
             "net_drop" => self.apply_net_drop(current, next)?,
             "add_storage_node" => self.apply_add_storage_node(current, next)?,
             "unlock_spend_gate" => self.apply_unlock_spend_gate(current, next)?,
-            "create_vault" => self.apply_create_vault(current, next)?,
-            "unlock_vault" => self.apply_unlock_vault(current, next)?,
-            "consume_jap_and_emit" => self.apply_consume_jap_and_emit(current, next)?,
-            "consume_spent_proof" => self.apply_sync_from_tlc(next)?,
-            "select_winner" => {
-                self.step += 1;
-            }
             "activate_again" => self.apply_activate_again(current, next)?,
             "phase_transition" => self.apply_phase_transition(next)?,
             "step_only" => self.step += 1,
-            unsupported => {
-                bail!("direct implementation replay does not support TLC action {unsupported}")
-            }
+            unrefined => bail!(
+                "the direct implementation replay does not refine TLC action {unrefined}: \
+                 no Rust transition is driven for it"
+            ),
         }
         self.verify_projected_state(next)
     }
@@ -488,23 +410,23 @@ impl DsmImplementationHarness {
             .ok_or_else(|| anyhow!("generate_keys had no changed device"))?;
 
         let label = tla_atom(&changed_device)?;
-        let _signing = generate_keypair_from_seed(
+        let signing = generate_keypair_from_seed(
             TRACE_VARIANT,
             &trace_seed(dsm::tagged_domain!(b"DSM/VV/generated-signing"), &label),
         )
         .with_context(|| format!("failed to generate replay SPHINCS+ key for {label}"))?;
-        let _kyber = generate_kyber_keypair_from_entropy(
+        let kyber_pk = generate_kyber_keypair_from_entropy(
             &trace_seed(dsm::tagged_domain!(b"DSM/VV/generated-kyber"), &label),
             &label,
         )
-        .with_context(|| format!("failed to generate replay Kyber key for {label}"))?;
+        .with_context(|| format!("failed to generate replay Kyber key for {label}"))?
+        .0;
 
         let device = self
             .devices
             .get_mut(&changed_device)
             .ok_or_else(|| anyhow!("missing replay device {label}"))?;
-        device.generated_signing = true;
-        device.generated_kyber = true;
+        device.generated_keys = Some((signing.public_key.clone(), kyber_pk));
         self.step += 1;
         Ok(())
     }
@@ -554,7 +476,6 @@ impl DsmImplementationHarness {
             if pair.len() != 2 || pair[0] == pair[1] {
                 continue;
             }
-
             let current_pair = record_fields(
                 current_relationships
                     .get(pair_key)
@@ -565,7 +486,6 @@ impl DsmImplementationHarness {
                     .get(pair_key)
                     .ok_or_else(|| anyhow!("missing next relationship"))?,
             )?;
-
             if record_int(current_pair, "tip")? == 0
                 && record_str(current_pair, "state")? == "inactive"
                 && record_int(next_pair, "tip")? == 1
@@ -578,21 +498,50 @@ impl DsmImplementationHarness {
 
         let (left, right) =
             target.ok_or_else(|| anyhow!("create_relationship had no activated pair"))?;
+        // The relationship is established on both devices, each writing its
+        // leaf at the h_0 Core derives; the two must hold one h_0.
+        self.establish_pair(&left, &right)?;
+        let (left_live, right_live) = (&self.device(&left)?.live, &self.device(&right)?.live);
+        if left_live.tip_with(right_live) != right_live.tip_with(left_live) {
+            bail!("the two devices hold different h_0 for their relationship");
+        }
         let key = canonical_pair_key(&left, &right);
-        let relationship = self.build_relationship(&key.0, &key.1, 1, true)?;
-        self.relationships.insert(key.clone(), relationship);
-
-        let child_hash = self.relationship_tip_hash(&left, &right, 1);
-        let left_id = self.device(&left)?.device_id;
-        let right_id = self.device(&right)?.device_id;
-        self.parent_tracker
-            .try_consume(self.relationship_tip_hash(&left, &right, 0), child_hash)
-            .map_err(|e| anyhow!("ParentConsumptionTracker rejected create_relationship: {e}"))?;
-        self.ledger
-            .insert(ledger_record(left.clone(), right.clone(), 0, 1));
-        self.update_contact_tip(&left, &right_id, child_hash)?;
-        self.update_contact_tip(&right, &left_id, child_hash)?;
+        let relationship = self.relationships.entry(key).or_insert(DirectRelationship {
+            created: false,
+            delivered: 0,
+            active: false,
+        });
+        if relationship.created || relationship.delivered != 0 {
+            bail!("create_relationship on a relationship that already has steps");
+        }
+        relationship.created = true;
+        relationship.active = true;
+        self.ledger.insert(ledger_record(left, right, 0, 1));
         self.step += 1;
+        Ok(())
+    }
+
+    /// Establish the relationship between `a` and `b` on both devices, as
+    /// adding each other as contacts does. An established one stays as it is.
+    fn establish_pair(&mut self, a: &TlaValue, b: &TlaValue) -> anyhow::Result<()> {
+        for (me, other) in [(a, b), (b, a)] {
+            let other_devid = self.device(other)?.live.devid;
+            let direct = self
+                .devices
+                .get_mut(me)
+                .ok_or_else(|| anyhow!("unknown device {}", me.display()))?;
+            let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
+                &direct.live.devid,
+                &other_devid,
+            );
+            if direct.live.head.chain_tip(&rel_key).is_none() {
+                direct.live.head = direct
+                    .live
+                    .head
+                    .establish_relationship(other_devid)
+                    .map_err(|e| anyhow!("establishing the relationship: {e}"))?;
+            }
+        }
         Ok(())
     }
 
@@ -619,7 +568,6 @@ impl DsmImplementationHarness {
         let msg_id = receipt_int(msg, "id")?;
         let dup_left = receipt_int(msg, "dupLeft")?;
         let parent_tip = receipt_int(msg, "parentTip")?;
-
         if msg_id != self.next_msg_id {
             bail!(
                 "net_send message id {} did not match direct replay nextMsgId {}",
@@ -627,61 +575,30 @@ impl DsmImplementationHarness {
                 self.next_msg_id
             );
         }
+        let amount = u64::try_from(int_from_value(&payload)?)
+            .map_err(|_| anyhow!("net_send payload is negative"))?;
 
-        let recipient = self.device(&to)?.device_id.to_vec();
-        let counterparty_id = self.device(&to)?.device_id;
-        let counterparty_pk = self.device(&to)?.identity_pk.clone();
-        let counterparty_state_number = crate::compat_shim::state_number(&self.device(&to)?.state);
+        // The sender signs the transfer now; the step it describes commits
+        // when a copy is delivered.
+        let operation = {
+            let (sender, recipient) = (&self.device(&from)?.live, &self.device(&to)?.live);
+            let mut nonce = (msg_id as u64).to_le_bytes().to_vec();
+            nonce.extend_from_slice(&(parent_tip as u64).to_le_bytes());
+            sender
+                .transfer(recipient, amount, &nonce)
+                .map_err(|e| anyhow!("the sender could not sign the transfer: {e}"))?
+        };
 
-        let sender = self
-            .devices
-            .get_mut(&from)
-            .ok_or_else(|| anyhow!("missing direct replay sender"))?;
-        let operation = build_direct_signed_transfer(
-            &sender.identity_sk,
-            &sender.state,
-            msg_id,
-            &payload,
-            recipient,
-        )?;
-        let new_state =
-            crate::compat_shim::machine_execute_transition(&mut sender.state_machine, operation)
-                .map_err(|e| anyhow!("StateMachine::execute_transition failed on net_send: {e}"))?;
-        sender.state = new_state.clone();
-
-        // §4.3 — counterparty_state_number is no longer part of the relationship context.
-        let _ = counterparty_state_number;
-        let pending_state = new_state.clone().with_relationship_context_and_chain_tip(
-            counterparty_id,
-            counterparty_pk,
-            chain_tip_id(parent_tip),
-        );
-
-        let key = self.ensure_relationship(&from, &to, parent_tip)?;
-        let left_state = self.device(&key.0)?.state.clone();
-        let right_state = self.device(&key.1)?.state.clone();
-        {
-            let relationship = self
-                .relationships
-                .get_mut(&key)
-                .ok_or_else(|| anyhow!("missing direct relationship after ensure"))?;
-            relationship.active = true;
-            relationship.tip = parent_tip;
-            relationship.pair.entity_state = left_state;
-            relationship.pair.counterparty_state = right_state;
-            // §4.3 — RelationshipStatePair no longer carries a pending-transaction
-            // queue (the entire metadata-based bookkeeping was deleted). The
-            // outgoing pending_state is observable via the trace replay's own
-            // balance / state mirrors below; no extra pair-level tracking needed.
-            let _ = pending_state.clone();
-        }
-
-        // Track deviceBalance: debit sender (mirrors TLA+ NetSend balance guard)
-        if let TlaValue::Int(amount) = &payload {
-            if let Some(TlaValue::Int(bal)) = self.device_balance.get_mut(&from) {
-                *bal -= amount;
-            }
-        }
+        let key = canonical_pair_key(&from, &to);
+        self.relationships
+            .entry(key)
+            .or_insert(DirectRelationship {
+                created: false,
+                delivered: 0,
+                active: false,
+            })
+            .active = true;
+        self.undelivered.insert(msg_id, (from.clone(), amount));
         self.pending_messages.push(PendingNetMessage {
             id: msg_id,
             from,
@@ -689,8 +606,38 @@ impl DsmImplementationHarness {
             payload,
             dup_left,
             parent_tip,
-            pending_state,
+            send_group: msg_id,
+            operation,
         });
+        self.next_msg_id += 1;
+        self.step += 1;
+        Ok(())
+    }
+
+    fn apply_net_duplicate(&mut self, current: &TlaState, next: &TlaState) -> anyhow::Result<()> {
+        let current_net = set_var(current, "net")?;
+        let next_net = set_var(next, "net")?;
+        let removed = set_difference(current_net, next_net);
+        let original = record_fields(
+            removed
+                .first()
+                .ok_or_else(|| anyhow!("net_duplicate did not replace a network message"))?,
+        )?;
+        let original_id = receipt_int(original, "id")?;
+        let idx = self
+            .pending_messages
+            .iter()
+            .position(|pending| pending.id == original_id)
+            .ok_or_else(|| anyhow!("net_duplicate could not find pending message {original_id}"))?;
+        if self.pending_messages[idx].dup_left <= 0 {
+            bail!("net_duplicate on a message with no duplicate budget");
+        }
+        self.pending_messages[idx].dup_left -= 1;
+        let copy = PendingNetMessage {
+            id: self.next_msg_id,
+            ..self.pending_messages[idx].clone()
+        };
+        self.pending_messages.push(copy);
         self.next_msg_id += 1;
         self.step += 1;
         Ok(())
@@ -700,75 +647,93 @@ impl DsmImplementationHarness {
         let current_net = set_var(current, "net")?;
         let next_net = set_var(next, "net")?;
         let removed = set_difference(current_net, next_net);
-        let removed_message = removed
-            .first()
-            .ok_or_else(|| anyhow!("net_deliver did not remove a network message"))?;
-        let msg = record_fields(removed_message)?;
-        let from = msg
-            .get("from")
-            .cloned()
-            .ok_or_else(|| anyhow!("delivered message missing from"))?;
-        let to = msg
-            .get("to")
-            .cloned()
-            .ok_or_else(|| anyhow!("delivered message missing to"))?;
+        let msg = record_fields(
+            removed
+                .first()
+                .ok_or_else(|| anyhow!("net_deliver did not remove a network message"))?,
+        )?;
         let msg_id = receipt_int(msg, "id")?;
-        let parent_tip = receipt_int(msg, "parentTip")?;
-        let new_tip = relationship_tip(next, &TlaValue::Seq(vec![from.clone(), to.clone()]))?;
-
         let pending_idx = self
             .pending_messages
             .iter()
-            .position(|pending| {
-                pending.id == msg_id
-                    && pending.from == from
-                    && pending.to == to
-                    && pending.parent_tip == parent_tip
-            })
+            .position(|pending| pending.id == msg_id)
             .ok_or_else(|| anyhow!("net_deliver could not find pending message {msg_id}"))?;
         let pending = self.pending_messages.remove(pending_idx);
-
-        let parent_hash = self.relationship_tip_hash(&from, &to, parent_tip);
-        let child_hash = self.relationship_tip_hash(&from, &to, new_tip);
-        self.parent_tracker
-            .try_consume(parent_hash, child_hash)
-            .map_err(|e| anyhow!("ParentConsumptionTracker rejected net_deliver: {e}"))?;
-
-        let to_id = self.device(&to)?.device_id;
-        let from_id = self.device(&from)?.device_id;
-        self.update_contact_tip(&from, &to_id, child_hash)?;
-        self.update_contact_tip(&to, &from_id, child_hash)?;
-
-        let key = self.ensure_relationship(&from, &to, parent_tip)?;
-        let left_state = self.device(&key.0)?.state.clone();
-        let right_state = self.device(&key.1)?.state.clone();
-        let delivered_hash = pending
-            .pending_state
-            .hash()
-            .map_err(|e| anyhow!("pending delivered state hash failed: {e}"))?
-            .to_vec();
-        {
-            let relationship = self
-                .relationships
-                .get_mut(&key)
-                .ok_or_else(|| anyhow!("missing direct relationship for delivery"))?;
-            relationship.active = true;
-            relationship.tip = new_tip;
-            relationship.pair.entity_state = left_state;
-            relationship.pair.counterparty_state = right_state;
-            relationship
-                .pair
-                .update_chain_tip(chain_tip_id(new_tip), delivered_hash)
-                .map_err(|e| anyhow!("RelationshipStatePair::update_chain_tip failed: {e}"))?;
+        let key = canonical_pair_key(&pending.from, &pending.to);
+        let model_tip = self
+            .relationships
+            .get(&key)
+            .map(DirectRelationship::model_tip)
+            .unwrap_or(0);
+        if pending.parent_tip != model_tip {
+            bail!(
+                "net_deliver of a message sent at tip {} onto tip {model_tip}",
+                pending.parent_tip
+            );
         }
-        self.ledger
-            .insert(ledger_record(from.clone(), to.clone(), parent_tip, new_tip));
-        // Track deviceBalance: credit receiver (mirrors TLA+ NetDeliver)
-        if let Some(TlaValue::Int(amount)) = msg.get("payload") {
-            if let Some(TlaValue::Int(bal)) = self.device_balance.get_mut(&to) {
-                *bal += amount;
+
+        // Contacts precede transfers: a pair the model never created is
+        // established on both devices before its first step.
+        self.establish_pair(&pending.from, &pending.to)?;
+
+        // The step, as production runs it: the sender's advance, the receipt
+        // both parties sign, the recipient's verifier with its parent tracker,
+        // and the recipient's credit.
+        let (sender_outcome, receipt, receiver_outcome) = {
+            let sender = &self
+                .devices
+                .get(&pending.from)
+                .ok_or_else(|| anyhow!("unknown sender {}", pending.from.display()))?
+                .live;
+            let recipient = &self
+                .devices
+                .get(&pending.to)
+                .ok_or_else(|| anyhow!("unknown recipient {}", pending.to.display()))?
+                .live;
+            let sender_outcome = sender
+                .send(recipient, &pending.operation)
+                .map_err(|e| anyhow!("the sender's advance was refused: {e}"))?;
+            let receipt = stitched_receipt(sender, recipient, &sender_outcome)
+                .map_err(|e| anyhow!("the step's receipt could not be built: {e}"))?;
+            let ctx = verification_context(sender, recipient, sender.head.root());
+            match verify_stitched_receipt(&receipt, &ctx, &mut self.parent_tracker) {
+                Ok(acceptance) if acceptance.valid => {}
+                Ok(acceptance) => bail!(
+                    "the recipient refused the step's receipt: {}",
+                    acceptance.reason.unwrap_or_default()
+                ),
+                Err(e) => bail!("the receipt verifier errored: {e}"),
             }
+            let receiver_outcome = recipient
+                .receive(sender, &pending.operation)
+                .map_err(|e| anyhow!("the recipient's advance was refused: {e}"))?;
+            (sender_outcome, receipt, receiver_outcome)
+        };
+        if receipt.child_tip == receipt.parent_tip {
+            bail!("the delivered step did not move the sender's tip");
         }
+        self.devices
+            .get_mut(&pending.from)
+            .ok_or_else(|| anyhow!("missing sender"))?
+            .live
+            .install(sender_outcome);
+        self.devices
+            .get_mut(&pending.to)
+            .ok_or_else(|| anyhow!("missing recipient"))?
+            .live
+            .install(receiver_outcome);
+
+        self.relationships
+            .get_mut(&key)
+            .ok_or_else(|| anyhow!("delivery on a relationship no message activated"))?
+            .delivered += 1;
+        self.undelivered.remove(&pending.send_group);
+        self.ledger.insert(ledger_record(
+            pending.from.clone(),
+            pending.to.clone(),
+            pending.parent_tip,
+            pending.parent_tip + 1,
+        ));
         self.step += 1;
         Ok(())
     }
@@ -777,31 +742,18 @@ impl DsmImplementationHarness {
         let current_net = set_var(current, "net")?;
         let next_net = set_var(next, "net")?;
         let removed = set_difference(current_net, next_net);
-        let removed_message = removed
-            .first()
-            .ok_or_else(|| anyhow!("net_drop did not remove a network message"))?;
-        let msg = record_fields(removed_message)?;
-        let from = msg
-            .get("from")
-            .cloned()
-            .ok_or_else(|| anyhow!("dropped message missing from"))?;
-        let to = msg
-            .get("to")
-            .cloned()
-            .ok_or_else(|| anyhow!("dropped message missing to"))?;
+        let msg = record_fields(
+            removed
+                .first()
+                .ok_or_else(|| anyhow!("net_drop did not remove a network message"))?,
+        )?;
         let msg_id = receipt_int(msg, "id")?;
-
         let pending_idx = self
             .pending_messages
             .iter()
-            .position(|pending| pending.id == msg_id && pending.from == from && pending.to == to)
+            .position(|pending| pending.id == msg_id)
             .ok_or_else(|| anyhow!("net_drop could not find pending message {msg_id}"))?;
         self.pending_messages.remove(pending_idx);
-
-        // Pending-transaction queue cleanup deleted (§4.3 — RelationshipStatePair
-        // no longer carries metadata-based pending tracking). The pending
-        // message removal above is sufficient for net_drop semantics.
-        let _ = canonical_pair_key(&from, &to);
         self.step += 1;
         Ok(())
     }
@@ -835,7 +787,6 @@ impl DsmImplementationHarness {
             .first()
             .cloned()
             .ok_or_else(|| anyhow!("unlock_spend_gate had no newly activated device"))?;
-        let current_counts = map_var(current, "actCount")?;
         let next_counts = map_var(next, "actCount")?;
         let next_count = int_from_value(
             next_counts
@@ -856,7 +807,6 @@ impl DsmImplementationHarness {
                 );
             }
         }
-        let _ = current_counts;
         self.activated_devices.insert(device.clone());
         self.activation_counts.insert(device, next_count);
         self.djte_seed += 1;
@@ -883,59 +833,6 @@ impl DsmImplementationHarness {
             .map_err(|e| anyhow!("SourceDlvState::add_activation failed on activate_again: {e}"))?;
         self.activation_counts.insert(changed_device, next_count);
         self.djte_seed += 1;
-        self.step += 1;
-        Ok(())
-    }
-
-    /// Sync all TLA+ state variables from the TLC next-state snapshot.
-    /// Used for actions where the replay doesn't have domain-specific logic
-    /// but needs to keep projections in sync.
-    fn apply_sync_from_tlc(&mut self, next: &TlaState) -> anyhow::Result<()> {
-        self.vaults = cloned_map_var(next, "vaults");
-        self.vault_state = cloned_map_var(next, "vaultState");
-        self.spent_japs = cloned_set_var(next, "spentJaps");
-        self.spent_proofs = cloned_set_var(next, "spentProofs");
-        self.consumed_proofs = cloned_set_var(next, "consumedProofs");
-        self.source_remaining = int_var(next, "sourceRemaining").unwrap_or(self.source_remaining);
-        self.djte_seed = int_var(next, "djteSeed").unwrap_or(self.djte_seed);
-        self.phase = int_var(next, "phase").unwrap_or(self.phase);
-        self.device_balance = cloned_map_var(next, "deviceBalance");
-        if let Ok(v) = int_var(next, "emissionIndex") {
-            self.djte_state.emission_index = v as u64;
-        }
-        // shardTree in TLA+ is a placeholder counter for total activations.
-        // Sync the count_smt total to match by incrementing shard 0 as needed.
-        if let Ok(expected_total) = int_var(next, "shardTree") {
-            let current_total = self.djte_state.count_smt.total() as i64;
-            for _ in current_total..expected_total {
-                let _ = self.djte_state.count_smt.increment(0);
-            }
-        }
-        self.step += 1;
-        Ok(())
-    }
-
-    fn apply_consume_jap_and_emit(
-        &mut self,
-        _current: &TlaState,
-        next: &TlaState,
-    ) -> anyhow::Result<()> {
-        // Mirror TLA+ ConsumeJAPAndEmit: sync DJTE state from TLC.
-        self.apply_sync_from_tlc(next)
-    }
-
-    fn apply_create_vault(&mut self, _current: &TlaState, next: &TlaState) -> anyhow::Result<()> {
-        // Mirror TLA+ CreateVault: add vault to owner's set and set initial state.
-        self.vaults = cloned_map_var(next, "vaults");
-        self.vault_state = cloned_map_var(next, "vaultState");
-        self.step += 1;
-        Ok(())
-    }
-
-    fn apply_unlock_vault(&mut self, _current: &TlaState, next: &TlaState) -> anyhow::Result<()> {
-        // Mirror TLA+ UnlockVault: set vault locked=FALSE.
-        // The replay tracks vault_state as opaque TlaValues; sync from TLC next state.
-        self.vault_state = cloned_map_var(next, "vaultState");
         self.step += 1;
         Ok(())
     }
@@ -1038,10 +935,11 @@ impl DsmImplementationHarness {
         if expected.contains_key("step") && self.step != int_var(expected, "step")? {
             bail!("direct replay step projection diverged from TLC");
         }
-        if expected.contains_key("deviceBalance")
-            && self.device_balance != *map_var(expected, "deviceBalance")?
-        {
-            bail!("direct replay deviceBalance projection diverged from TLC");
+        if expected.contains_key("deviceBalance") {
+            let expected_balance = map_var(expected, "deviceBalance")?;
+            if self.project_device_balance(expected_balance)? != *expected_balance {
+                bail!("direct replay deviceBalance projection diverged from TLC");
+            }
         }
         Ok(())
     }
@@ -1057,7 +955,7 @@ impl DsmImplementationHarness {
                 let generated = self
                     .devices
                     .get(&device)
-                    .map(|trace| trace.generated_signing && trace.generated_kyber)
+                    .map(|trace| trace.generated_keys.is_some())
                     .unwrap_or(false);
                 (
                     device,
@@ -1093,26 +991,59 @@ impl DsmImplementationHarness {
         let mut projected = BTreeMap::new();
         for pair_key in expected.keys() {
             let pair = seq_items(pair_key)?;
-            if pair.len() != 2 || pair[0] == pair[1] {
-                projected.insert(pair_key.clone(), relationship_record(0, "inactive"));
-                continue;
-            }
-            let key = canonical_pair_key(&pair[0], &pair[1]);
-            if let Some(relationship) = self.relationships.get(&key) {
-                projected.insert(
-                    pair_key.clone(),
-                    relationship_record(
-                        relationship.tip,
-                        if relationship.active {
-                            "active"
-                        } else {
-                            "inactive"
-                        },
-                    ),
-                );
-            } else {
-                projected.insert(pair_key.clone(), relationship_record(0, "inactive"));
-            }
+            let record = match (pair.len() == 2 && pair[0] != pair[1])
+                .then(|| {
+                    self.relationships
+                        .get(&canonical_pair_key(&pair[0], &pair[1]))
+                })
+                .flatten()
+            {
+                Some(relationship) => relationship_record(
+                    relationship.model_tip(),
+                    if relationship.active {
+                        "active"
+                    } else {
+                        "inactive"
+                    },
+                ),
+                None => relationship_record(0, "inactive"),
+            };
+            projected.insert(pair_key.clone(), record);
+        }
+        Ok(projected)
+    }
+
+    /// The model's balances, from the real heads: a device's ERA, less the
+    /// whole-payout funding above its model balance, less every send the
+    /// model has debited that no delivered copy has committed yet. The model
+    /// debits at send; the protocol debits when the step commits.
+    fn project_device_balance(
+        &self,
+        expected: &BTreeMap<TlaValue, TlaValue>,
+    ) -> anyhow::Result<BTreeMap<TlaValue, TlaValue>> {
+        let mut projected = BTreeMap::new();
+        for device in expected.keys() {
+            let direct = self.device(device)?;
+            let charged: u64 = self
+                .undelivered
+                .values()
+                .filter(|(sender, _)| sender == device)
+                .map(|(_, amount)| amount)
+                .sum();
+            let model = direct
+                .live
+                .era_balance()
+                .checked_sub(direct.funding_offset + charged)
+                .ok_or_else(|| {
+                    anyhow!(
+                        "{} holds less real ERA than the model's debits allow",
+                        device.display()
+                    )
+                })?;
+            projected.insert(
+                device.clone(),
+                TlaValue::Int(i64::try_from(model).map_err(|_| anyhow!("balance overflows"))?),
+            );
         }
         Ok(projected)
     }
@@ -1155,7 +1086,7 @@ impl DsmImplementationHarness {
         ordinal: u64,
         expected_shard: Option<i64>,
     ) -> anyhow::Result<JoinActivationProof> {
-        let label = self.device(device)?.label.clone();
+        let label = tla_atom(device)?;
         let activation_id = self.activation_identity(device, expected_shard)?;
         let nonce = trace_seed(
             dsm::tagged_domain!(b"DSM/VV/jap"),
@@ -1195,85 +1126,6 @@ impl DsmImplementationHarness {
         bail!(
             "failed to derive deterministic activation identity for {label} in shard {target_shard}"
         )
-    }
-
-    fn ensure_relationship(
-        &mut self,
-        left: &TlaValue,
-        right: &TlaValue,
-        tip: i64,
-    ) -> anyhow::Result<(TlaValue, TlaValue)> {
-        let key = canonical_pair_key(left, right);
-        if !self.relationships.contains_key(&key) {
-            let relationship = self.build_relationship(&key.0, &key.1, tip, false)?;
-            self.relationships.insert(key.clone(), relationship);
-        }
-        Ok(key)
-    }
-
-    fn build_relationship(
-        &self,
-        left: &TlaValue,
-        right: &TlaValue,
-        tip: i64,
-        active: bool,
-    ) -> anyhow::Result<DirectRelationship> {
-        let left_device = self.device(left)?;
-        let right_device = self.device(right)?;
-        let mut pair = RelationshipStatePair::new_with_chain_tip(
-            left_device.device_id,
-            right_device.device_id,
-            left_device.state.clone(),
-            right_device.state.clone(),
-            chain_tip_id(tip),
-        )
-        .map_err(|e| anyhow!("RelationshipStatePair::new_with_chain_tip failed: {e}"))?;
-        pair.active = active;
-        Ok(DirectRelationship { pair, tip, active })
-    }
-
-    fn relationship_tip_hash(&self, left: &TlaValue, right: &TlaValue, tip: i64) -> [u8; 32] {
-        let left_id = self
-            .devices
-            .get(left)
-            .map(|device| device.device_id)
-            .unwrap_or_default();
-        let right_id = self
-            .devices
-            .get(right)
-            .map(|device| device.device_id)
-            .unwrap_or_default();
-        let (lo, hi) = if left_id <= right_id {
-            (left_id, right_id)
-        } else {
-            (right_id, left_id)
-        };
-        let mut bytes = Vec::with_capacity(32 + 32 + 8);
-        bytes.extend_from_slice(&lo);
-        bytes.extend_from_slice(&hi);
-        bytes.extend_from_slice(&tip.to_le_bytes());
-        bytes32_from_hash(dsm::tagged_domain!(b"DSM/VV/relationship-tip"), &bytes)
-    }
-
-    fn update_contact_tip(
-        &mut self,
-        owner: &TlaValue,
-        remote_device_id: &[u8; 32],
-        new_tip: [u8; 32],
-    ) -> anyhow::Result<()> {
-        let owner_device = self
-            .devices
-            .get_mut(owner)
-            .ok_or_else(|| anyhow!("missing contact owner in direct replay"))?;
-        let smt = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
-        let smt_key = [0u8; 32];
-        owner_device
-            .contact_manager
-            .update_contact_chain_tip_unilateral(remote_device_id, new_tip, &smt, &smt_key)
-            .map_err(|e| {
-                anyhow!("DsmContactManager::update_contact_chain_tip_unilateral failed: {e}")
-            })?;
-        Ok(())
     }
 
     fn device(&self, device: &TlaValue) -> anyhow::Result<&DirectDevice> {
@@ -1393,76 +1245,6 @@ fn changed_shard_key(
     Ok(None)
 }
 
-fn create_direct_trace_state(
-    seed: &[u8; 32],
-    device_id: [u8; 32],
-    public_key: &[u8],
-) -> anyhow::Result<State> {
-    let device_info = DeviceInfo::new(device_id, public_key.to_vec());
-    let mut state = State::new_genesis(*seed, device_info);
-    state.hash = state
-        .hash()
-        .map_err(|e| anyhow!("failed to hash direct replay genesis state: {e}"))?;
-    // ERA is a builtin token — `resolve_policy_commit` strict-fails for
-    // non-builtins per Track A, but ERA always resolves cleanly.  Surface
-    // any unexpected breakage as an anyhow error rather than panic so the
-    // replay binary's Result return type is honoured.
-    let policy_commit = dsm::core::token::resolve_policy_commit("ERA")
-        .map_err(|e| anyhow!("ERA policy resolution failed (builtin invariant broken): {e}"))?;
-    let balance_key =
-        dsm::core::token::derive_canonical_balance_key(&policy_commit, public_key, "ERA");
-    state.token_balances.insert(
-        balance_key,
-        Balance::from_state(TRACE_INITIAL_BALANCE, state.hash),
-    );
-    state.hash = state
-        .hash()
-        .map_err(|e| anyhow!("failed to hash direct replay funded genesis state: {e}"))?;
-    Ok(state)
-}
-
-fn build_direct_signed_transfer(
-    secret_key: &[u8],
-    current_state: &State,
-    message_id: i64,
-    payload: &TlaValue,
-    recipient: Vec<u8>,
-) -> anyhow::Result<Operation> {
-    let mut nonce = Vec::with_capacity(16);
-    nonce.extend_from_slice(&(message_id as u64).to_le_bytes());
-    let payload_hash = bytes32_from_hash(
-        dsm::tagged_domain!(b"DSM/VV/net-payload"),
-        format!("{}", payload.display()).as_bytes(),
-    );
-    nonce.extend_from_slice(&payload_hash[..8]);
-
-    let mut operation = Operation::Transfer {
-        policy_commit: [0u8; 32],
-        token_id: TRACE_TOKEN_ID.to_vec(),
-        to_device_id: recipient.clone(),
-        amount: Balance::from_state(1, current_state.hash),
-        mode: TransactionMode::Unilateral,
-        nonce,
-        verification: VerificationType::Standard,
-        pre_commit: None,
-        recipient,
-        to: b"tla-direct-recipient".to_vec(),
-        message: format!("direct TLC replay {}", payload.display()),
-        signature: Vec::new(),
-        authority_policy: None,
-    };
-    let signable = operation.with_cleared_signature();
-    let signature = sphincs_sign(secret_key, &signable.to_bytes())
-        .map_err(|e| anyhow!("failed to sign direct replay transfer: {e}"))?;
-    if let Operation::Transfer {
-        signature: slot, ..
-    } = &mut operation
-    {
-        *slot = signature;
-    }
-    Ok(operation)
-}
-
 fn canonical_pair_key(left: &TlaValue, right: &TlaValue) -> (TlaValue, TlaValue) {
     if left <= right {
         (left.clone(), right.clone())
@@ -1480,10 +1262,6 @@ fn tripwire_transition_hash(devices: &[TlaValue], tip: i64) -> [u8; 32] {
     let mut bytes = labels.join("|").into_bytes();
     bytes.extend_from_slice(&tip.to_le_bytes());
     bytes32_from_hash(dsm::tagged_domain!(b"DSM/VV/tripwire-parent"), &bytes)
-}
-
-fn chain_tip_id(tip: i64) -> String {
-    format!("tla-tip:{tip}")
 }
 
 fn tla_atom(value: &TlaValue) -> anyhow::Result<String> {

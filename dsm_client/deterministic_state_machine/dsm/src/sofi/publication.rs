@@ -22,11 +22,13 @@
 
 use crate::ccb::class;
 use crate::common::domain_tags::{
+    TAG_DSM_FEE_POLICY_OBJECT, TAG_DSM_MARKET_POLICY_OBJECT, TAG_DSM_RELEASE_POLICY_OBJECT,
     TAG_DSM_SOFI_DLV_POLICY_FULFILLMENT, TAG_DSM_SOFI_FULFILLMENT_ID,
     TAG_DSM_SOFI_FULFILLMENT_OBJECT, TAG_DSM_SOFI_POLICY_FULFILLMENT_OBJECT,
     TAG_DSM_SOFI_PRECOMMIT_OBJECT, TAG_DSM_SOFI_PREIMAGE_LOCATOR, TAG_DSM_SOFI_PREIMAGE_OBJECT,
     TAG_DSM_SOFI_REL_INDEX, TAG_DSM_SOFI_SETUP_OBJECT, TAG_DSM_SOFI_SETUP_REF,
-    TAG_DSM_SOFI_TRADER_PRECOMMIT_ID,
+    TAG_DSM_SOFI_TRADER_PRECOMMIT_ID, TAG_DSM_SOFI_VAULT_GENESIS_LOCATOR,
+    TAG_DSM_SOFI_VAULT_GENESIS_OBJECT,
 };
 use crate::crypto::domain::TaggedHashDomain;
 use crate::storage_object::immutable_addr;
@@ -34,7 +36,7 @@ use crate::storage_object::immutable_addr;
 use super::derive;
 use super::wire::{
     DlvPolicyFulfillmentBody, SettlementPreimage, SignedSofiObject, SofiSetupBody, SofiWireError,
-    TraderFulfillmentBody, TraderPrecommitBody,
+    TraderFulfillmentBody, TraderPrecommitBody, VaultGenesisPreimage,
 };
 
 type D32 = [u8; 32];
@@ -52,6 +54,25 @@ pub struct Signed<T> {
 pub struct Locator {
     pub index_namespace: &'static [u8],
     pub locator: D32,
+}
+
+/// Which of the three policy objects a vault state commits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VaultPolicyClass {
+    Market,
+    Fee,
+    Release,
+}
+
+impl VaultPolicyClass {
+    /// The CCB class of the policy object.
+    pub fn class(&self) -> u16 {
+        match self {
+            Self::Market => class::MARKET_POLICY,
+            Self::Fee => class::FEE_POLICY,
+            Self::Release => class::RELEASE_POLICY,
+        }
+    }
 }
 
 /// An object to publish, borrowed from the producer that built it.
@@ -75,6 +96,16 @@ pub enum Publication<'a> {
     Fulfillment {
         body: &'a TraderFulfillmentBody,
         signature: &'a [u8],
+    },
+    /// A vault's genesis preimage, bare, indexed under
+    /// `vault_genesis_locator(v)` (§28 step 4). Its acceptance binds it to
+    /// the owner's validated creation, so publishing it asserts nothing.
+    VaultGenesis(&'a VaultGenesisPreimage),
+    /// One of the three policy objects a vault state commits, bare, found by
+    /// the address the state names.
+    VaultPolicy {
+        class: VaultPolicyClass,
+        bytes: &'a [u8],
     },
 }
 
@@ -112,6 +143,8 @@ impl Publication<'_> {
                 body.signature_alg(),
                 signature,
             ),
+            Self::VaultGenesis(preimage) => preimage.encode(),
+            Self::VaultPolicy { bytes, .. } => Ok(bytes.to_vec()),
         }
     }
 
@@ -123,6 +156,12 @@ impl Publication<'_> {
             Self::Preimage(_) => TAG_DSM_SOFI_PREIMAGE_OBJECT,
             Self::PolicyFulfillment(_) => TAG_DSM_SOFI_POLICY_FULFILLMENT_OBJECT,
             Self::Fulfillment { .. } => TAG_DSM_SOFI_FULFILLMENT_OBJECT,
+            Self::VaultGenesis(..) => TAG_DSM_SOFI_VAULT_GENESIS_OBJECT,
+            Self::VaultPolicy { class, .. } => match class {
+                VaultPolicyClass::Market => TAG_DSM_MARKET_POLICY_OBJECT,
+                VaultPolicyClass::Fee => TAG_DSM_FEE_POLICY_OBJECT,
+                VaultPolicyClass::Release => TAG_DSM_RELEASE_POLICY_OBJECT,
+            },
         }
     }
 
@@ -168,6 +207,11 @@ impl Publication<'_> {
                 index_namespace: TAG_DSM_SOFI_FULFILLMENT_ID.source_bytes(),
                 locator: derive::fulfillment_id(body),
             }],
+            Self::VaultGenesis(preimage) => vec![Locator {
+                index_namespace: TAG_DSM_SOFI_VAULT_GENESIS_LOCATOR.source_bytes(),
+                locator: derive::vault_genesis_locator(&preimage.vault_id()),
+            }],
+            Self::VaultPolicy { .. } => Vec::new(),
         })
     }
 }
@@ -262,7 +306,7 @@ pub fn recognize_fulfillment(bytes: &[u8]) -> Option<(D32, Signed<TraderFulfillm
 mod tests {
     use super::*;
     use crate::ccb::sigalg::SPHINCS_PLUS_SPX256F as ALG;
-    use crate::sofi::signature::{verify_signed_object, SignedSofiBody};
+    use crate::sofi::signature::verify_signed_object;
     use crate::sofi::validation::fixtures::{swap_fixture_n, DEV, G};
     use crate::sofi::wire::{AttemptEntry, PrecommitLeg};
 
@@ -458,6 +502,73 @@ mod tests {
             "the envelope itself parses"
         );
         assert!(recognize_setup(&hostile).is_none());
-        let _ = SignedSofiBody::Setup(s);
+    }
+
+    /// A vault policy is published where the verifier fetches it: at the
+    /// address a vault state names, which `policy_object_address` derives
+    /// from the class and the bytes. The genesis preimage lands under its
+    /// own namespace and is indexed under the vault's genesis locator.
+    #[test]
+    fn vault_objects_land_where_the_verifier_looks() {
+        let market = crate::ccb::state::MarketPolicy::beta_constant_product(d(0x40), d(0x41))
+            .unwrap()
+            .encode();
+        let fee = crate::ccb::state::FeePolicy::new(30).unwrap().encode();
+        let release = crate::ccb::state::ReleasePolicy::beta_owner_local_full_close().encode();
+        for (policy_class, bytes) in [
+            (VaultPolicyClass::Market, &market),
+            (VaultPolicyClass::Fee, &fee),
+            (VaultPolicyClass::Release, &release),
+        ] {
+            let published = Publication::VaultPolicy {
+                class: policy_class,
+                bytes,
+            };
+            assert_eq!(
+                Some(published.address().unwrap()),
+                crate::ccb::decode::policy_object_address(policy_class.class(), bytes),
+                "{policy_class:?} lands at the address a vault state names"
+            );
+            assert!(published.locators().unwrap().is_empty());
+        }
+        let state = crate::sofi::wire::VaultStateLeaf {
+            owner_genesis: G,
+            owner_device_id: DEV,
+            create_position: 7,
+            market_policy: crate::ccb::decode::policy_object_address(class::MARKET_POLICY, &market)
+                .unwrap(),
+            fee_policy: crate::ccb::decode::policy_object_address(class::FEE_POLICY, &fee).unwrap(),
+            release_policy: crate::ccb::decode::policy_object_address(
+                class::RELEASE_POLICY,
+                &release,
+            )
+            .unwrap(),
+            storage_set_id: d(0x77),
+            generation: 0,
+            reserve_a: 10_000,
+            reserve_b: 20_000,
+            status: crate::sofi::wire::VAULT_STATUS_ACTIVE,
+        };
+        let preimage = VaultGenesisPreimage {
+            owner_genesis: G,
+            owner_device_id: DEV,
+            create_position: 7,
+            state,
+        };
+        let genesis = Publication::VaultGenesis(&preimage);
+        assert_eq!(
+            genesis.address().unwrap(),
+            immutable_addr(
+                TAG_DSM_SOFI_VAULT_GENESIS_OBJECT,
+                &preimage.encode().unwrap()
+            )
+        );
+        assert_eq!(
+            genesis.locators().unwrap(),
+            vec![Locator {
+                index_namespace: TAG_DSM_SOFI_VAULT_GENESIS_LOCATOR.source_bytes(),
+                locator: derive::vault_genesis_locator(&preimage.vault_id()),
+            }]
+        );
     }
 }

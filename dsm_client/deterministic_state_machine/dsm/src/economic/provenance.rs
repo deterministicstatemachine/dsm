@@ -100,13 +100,14 @@ pub enum ValidatedPeerTransition {
     /// STILL refused as a debit source: P15-9 rules on lineage, not on whether
     /// resolution happened. A boolean `is_unresolved` would get this wrong.
     ///
-    /// **No production path constructs this today, deliberately (E1c-3).**
-    /// `validate_peer_lineage` refuses every conditional claim, resolved or
-    /// not, because a resolved position's register cell still holds `C_q` —
-    /// resolution is verifier-local and never rewrites the cell. The arm
-    /// exists so that when E2/E3 teaches the walk to traverse a resolved SoFi
-    /// position, the refusal in [`prevalidate_sender_debit`] is already there
-    /// rather than owed at the moment it starts mattering.
+    /// **Nothing constructs this arm (E1c-3).** `validate_peer_lineage`
+    /// refuses every conditional claim, resolved or not, because a resolved
+    /// position's register cell still holds `C_q` — resolution is
+    /// verifier-local and never rewrites the cell. The arm exists so that when
+    /// the walk learns to traverse a resolved SoFi position, the refusal in
+    /// [`prevalidate_sender_debit`] is already there; until then no input can
+    /// reach that refusal, and it has no test that performs the forbidden
+    /// debit.
     ResolvedSofi(PeerTransitionFacts),
 }
 
@@ -174,73 +175,6 @@ impl ValidatedPeerTransition {
             embedded_parent,
             verified_operation,
             admission_manifest_addr,
-        })
-    }
-
-    /// A single-root transition assembled directly, for FIXTURES ONLY.
-    ///
-    /// Gated on the `testing` feature, which both this crate and `dsm_sdk`
-    /// enable only through a dev-dependency, so it cannot reach a production
-    /// artifact. It exists because `tests/*.rs` are external consumers that
-    /// deliberately bypass the walk.
-    #[cfg(feature = "testing")]
-    #[allow(clippy::too_many_arguments)]
-    pub fn single_root_for_test(
-        peer_genesis: [u8; 32],
-        peer_devid: [u8; 32],
-        validated_root: ValidatedEconomicRoot,
-        witness: EconomicTransitionWitness,
-        proven_ak: Vec<u8>,
-        c_dsm_plus: [u8; 32],
-        embedded_parent: [u8; 32],
-        verified_operation: crate::types::operations::Operation,
-    ) -> Self {
-        Self::single_root_from_walk(
-            peer_genesis,
-            peer_devid,
-            validated_root,
-            witness,
-            proven_ak,
-            c_dsm_plus,
-            embedded_parent,
-            verified_operation,
-            [0u8; 32],
-        )
-    }
-
-    /// A resolved-SoFi transition, for MUTATION TESTS ONLY.
-    ///
-    /// This is the one way a `ResolvedSofi` value comes into existence
-    /// anywhere, and it is unreachable from production by construction —
-    /// `testing` is a dev-dependency-only feature. Without it the P15-9
-    /// refusal could not be exercised at all today, because no production path
-    /// yet produces a SoFi-lineage transition; with it, removing the refusal
-    /// turns a named test red.
-    ///
-    /// When E2/E3 adds the authoritative production derivation, it adds a
-    /// constructor beside `single_root_from_walk`. It does not change P15-9.
-    #[cfg(feature = "testing")]
-    #[allow(clippy::too_many_arguments)]
-    pub fn resolved_sofi_for_test(
-        peer_genesis: [u8; 32],
-        peer_devid: [u8; 32],
-        validated_root: ValidatedEconomicRoot,
-        witness: EconomicTransitionWitness,
-        proven_ak: Vec<u8>,
-        c_dsm_plus: [u8; 32],
-        embedded_parent: [u8; 32],
-        verified_operation: crate::types::operations::Operation,
-    ) -> Self {
-        Self::ResolvedSofi(PeerTransitionFacts {
-            peer_genesis,
-            peer_devid,
-            validated_root,
-            witness,
-            proven_ak,
-            c_dsm_plus,
-            embedded_parent,
-            verified_operation,
-            admission_manifest_addr: [0u8; 32],
         })
     }
 
@@ -390,16 +324,15 @@ pub trait ProvenanceResolver {
     ) -> Result<ValidatedPeerTransition, PeerLineageFailure>;
 
     /// The release that installed `generation` of the native reserve
-    /// `reserve_id`, FINAL at its cell (the leader's first recognized object,
-    /// held by two other members of the committed set) on a walk from the
-    /// reserve's genesis state. `None` while the lineage has not reached that
-    /// generation, and the verifier fails closed on it: a credit is not
-    /// funded by a release nobody can show was final.
+    /// `reserve_id`, final at its cell on a walk from the reserve's genesis
+    /// state. `Incomplete` while the lineage has not reached that generation
+    /// or its evidence cannot be read: a credit is not funded by a release
+    /// nobody can show was final, and not showing it yet is not a forgery.
     fn native_reserve_release(
         &self,
         reserve_id: &[u8; 32],
         generation: u64,
-    ) -> Option<ReserveReleaseWin>;
+    ) -> Result<ReserveReleaseWin, PeerLineageFailure>;
 
     /// The network's root-register set as the local catalog resolves it.
     ///
@@ -444,10 +377,15 @@ pub trait ProvenanceResolver {
 /// Why a credit is not funded.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProvenanceError {
-    /// A `0x0023` authorized-issuance credit failed one of the conjuncts:
-    /// the policy bytes, the signed body, the V1 support matrix, or the
-    /// k-of-N threshold over the exact issuance.
+    /// A `0x005F` genesis-release credit failed one of its conjuncts: it
+    /// rides no `CreateToken`, the token's committed policy does not parse,
+    /// its release rule is not all-at-creation, or its genesis supply is not
+    /// a balance.
     GenesisReleaseInvalid(String),
+    /// The token's committed policy could not be established for a
+    /// genesis release: not fetched, or the bytes did not re-hash to the
+    /// commit. The taxonomy survives, so an outage is retried.
+    GenesisReleasePolicy(PeerLineageFailure),
     /// A DLV successor's leg fails the applicable token policy — the SoFi
     /// Def 4.1 / Req 4.4 / Req 4.6 conjunct on every market movement and
     /// every release. The anchored bytes did not re-hash to the committed
@@ -511,9 +449,14 @@ pub enum ProvenanceError {
     },
     /// A release is never the genesis generation.
     GenerationIsGenesis,
-    /// The reserve lineage has not reached this generation with a final
-    /// release. Fails closed.
-    ReleaseNotEstablished { generation: u64 },
+    /// No final release at this generation could be established: the
+    /// reserve lineage has not reached it yet, or its evidence could not be
+    /// read. The taxonomy survives in `failure`, so an outage is retried and
+    /// never read as a forgery.
+    ReleaseNotEstablished {
+        generation: u64,
+        failure: PeerLineageFailure,
+    },
     /// The established envelope is not a valid release, is not the successor
     /// of the state the walk validated, or names different coordinates than
     /// the descriptor.
@@ -539,6 +482,9 @@ impl core::fmt::Display for ProvenanceError {
         match self {
             Self::GenesisReleaseInvalid(m) => {
                 write!(f, "genesis-release credit is invalid: {m}")
+            }
+            Self::GenesisReleasePolicy(e) => {
+                write!(f, "genesis-release token policy: {e}")
             }
             Self::MarketLegPolicy(m) => {
                 write!(f, "market leg token policy: {m}")
@@ -622,10 +568,13 @@ impl core::fmt::Display for ProvenanceError {
                 f,
                 "credit provenance: generation 0 is the reserve's genesis state, never a release"
             ),
-            Self::ReleaseNotEstablished { generation } => write!(
+            Self::ReleaseNotEstablished {
+                generation,
+                failure,
+            } => write!(
                 f,
-                "credit provenance: no final release at reserve generation {generation} — fail \
-                 closed; a credit is not funded by a release nobody can show was final"
+                "credit provenance: no final release established at reserve generation \
+                 {generation}: {failure}"
             ),
             Self::ReleaseInvalid(why) => {
                 write!(f, "credit provenance: reserve release invalid: {why}")
@@ -680,13 +629,78 @@ pub fn genesis_release_source_id(
     creator_economic_position: u64,
     policy_commit: &[u8; 32],
 ) -> [u8; 32] {
-    let mut h =
-        dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_ECON_SOURCE_GENESIS_RELEASE);
+    let mut h = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_ECON_SOURCE_GENESIS_RELEASE);
     h.update(creator_genesis);
     h.update(creator_devid);
     h.update(&creator_economic_position.to_be_bytes());
     h.update(policy_commit);
     *h.finalize().as_bytes()
+}
+
+/// Establish what a genesis release (`0x005F`, SoFi §51, Amendment S8) funds.
+///
+/// The asset is the accepted `CreateToken`'s own `policy_commit`, and the
+/// amount is the genesis supply the policy under that commit states — so the
+/// generic asset/amount equality in [`verify_credit_source`] forces the credit
+/// to be exactly the whole supply of exactly the new token. The policy names
+/// its creator, and only the creator's own transition releases it; the write
+/// set of that transition inserts the creation record from zero, so the
+/// creator's lineage releases it once.
+fn verify_genesis_release(
+    resolver: &dyn ProvenanceResolver,
+    ctx: &ProvenanceContext<'_>,
+) -> Result<FundedCredit, ProvenanceError> {
+    // The operation is the verified substrate's, never the descriptor's: the
+    // descriptor carries no asset and no amount to disagree with it.
+    let Some(crate::types::operations::Operation::CreateToken { policy_commit, .. }) =
+        ctx.verified_operation
+    else {
+        return Err(ProvenanceError::GenesisReleaseInvalid(
+            "a genesis release rides only the CreateToken that creates its token".into(),
+        ));
+    };
+    let policy_commit = *policy_commit;
+    let bytes = resolver
+        .anchored_policy_bytes(&policy_commit)
+        .map_err(ProvenanceError::GenesisReleasePolicy)?;
+    // Bytes that do not re-hash to the commit are not the policy; they supply
+    // nothing and prove nothing about the token.
+    if crate::crypto::blake3::domain_hash_bytes(crate::common::domain_tags::TAG_DSM_POLICY, &bytes)
+        != policy_commit
+    {
+        return Err(ProvenanceError::GenesisReleasePolicy(
+            PeerLineageFailure::Incomplete(
+                "policy bytes do not re-hash to the token's policy commit".into(),
+            ),
+        ));
+    }
+    let policy = crate::economic::token_policy::parse_token_policy(&bytes)
+        .map_err(|e| ProvenanceError::GenesisReleaseInvalid(format!("policy: {e}")))?;
+    if (policy.creator_genesis, policy.creator_device_id) != (*ctx.genesis, *ctx.device_id) {
+        return Err(ProvenanceError::GenesisReleaseInvalid(
+            "the token's policy names another creator".into(),
+        ));
+    }
+    if policy.release_rule != crate::economic::token_policy::ReleaseRule::AllAtCreation {
+        return Err(ProvenanceError::GenesisReleaseInvalid(
+            "the token's release rule does not release its supply at creation".into(),
+        ));
+    }
+    let amount = u64::try_from(policy.genesis_supply).map_err(|_| {
+        ProvenanceError::GenesisReleaseInvalid(
+            "the genesis supply exceeds what one balance can hold".into(),
+        )
+    })?;
+    Ok(FundedCredit {
+        source_id: genesis_release_source_id(
+            ctx.genesis,
+            ctx.device_id,
+            ctx.economic_position,
+            &policy_commit,
+        ),
+        policy_commit,
+        amount,
+    })
 }
 
 /// `SourceId` for a peer's validated debit.
@@ -884,9 +898,7 @@ pub fn verify_credit_source(
         // credit goes to the creating device, its asset is the new token, its
         // amount is exactly the policy's genesis supply, and the policy's
         // release rule is `AllAtCreation`. No signer authorizes it.
-        CreditSource::GenesisRelease(_) => {
-            verify_genesis_release(ctx, resolver, credit_index, credit)?
-        }
+        CreditSource::GenesisRelease(_) => verify_genesis_release(resolver, ctx)?,
 
         CreditSource::ValidatedPeerDebit(p) => {
             // The resolver returns a VALIDATED transition or nothing. It
@@ -997,8 +1009,9 @@ pub fn verify_credit_source(
             //    set, nothing counted.
             let win = resolver
                 .native_reserve_release(&d.reserve_id, d.generation)
-                .ok_or(ProvenanceError::ReleaseNotEstablished {
+                .map_err(|failure| ProvenanceError::ReleaseNotEstablished {
                     generation: d.generation,
+                    failure,
                 })?;
             // 4. The release verifies and IS the successor of the state the
             //    walk validated: `remaining' = remaining − amount`, so the

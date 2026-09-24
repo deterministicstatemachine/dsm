@@ -620,6 +620,8 @@ final at K. A verifier MAY classify the loss from the leader’s cell alone.
 is reachable would let two writers settle at two different nodes.
 
 > **Amendment S4 (owner, 2026-09-22) — finality is a route chain.** `Final(K, x)` above, and every use of it in this document, is replaced by the rule of `DSM_Storage_Node_Specification.md` §9: `x` is final when its route chain has a valid leader link and two further valid links along the cell's Fisher–Yates route. Write-procedure steps 3 and 4 read accordingly: after the leader, the writer writes `x` to the route's seats in route order, each copy carrying the chain so far, and `x` is final at three links. Consequences 1 to 4 above still hold, with `LeaderHeld(K, y)` meaning that `y` has the valid leader link; it still settles that no other value is final at `K`.
+> **Amendment S10 (owner, 2026-09-23) — completion proofs.** Every `Final` a DLV unlock relies on is shown by a completion proof (`DSM_Storage_Node_Specification.md` §9): `FulfillmentRegistered(F)` by the proofs at `K_ful(q)` and `K_root(q)`, and each `StorageFinalE(K(F.a_j), E)` in `ConsumedRoute` by the proof at that successor key. The client keeps the proof of each `Final` it relies on. Core checks each proof against its own reads of the seats, which hold everything the proof is made of; an unlock whose proofs do not check does not unlock. The completion digest is the proof's consistent identity: every verifier of the same proof computes the same digest.
+
 **Rule — members keep what they are given**
 
 No member refuses, replaces or compares anything. A value another member already holds for K can therefore
@@ -912,6 +914,8 @@ published as a content addressed object (Section II); Core recomputes ρ from th
 
 SetupValid(setup) is semantic and belongs to Core: canonical body encoding, ρ, the signature over msetup ,
 ClaimRef, and the identity and vault relationship rules.
+
+> **Amendment S9 (owner, 2026-09-23) — ClaimRef is checked against the verifier's own lineage.** `SetupValid` compares the setup's `claim_ref` with the digest of the claim this verifier accepted at the setup's position `p` when it validated the trader's lineage: the registered root claim of an ordinary position, or `C_p` of a resolved SoFi position. RouteValidation's evidence carries that accepted claim as a value only lineage validation produces (or the device's own admitted store, for its own positions), so RouteValidation reads no storage for it. A setup naming any other claim is Invalid. Until the accepted claim is in hand, the setup is not evaluated.
 SetupRegistered(setup) is a durability fact that Core derives from storage reads.
 Accept(E) requires both. Storage establishes neither.
 
@@ -2437,6 +2441,8 @@ recipient allowlist                   none, or an inline list of device ids that
 **Rule**
 The token’s identity is policy_commit, the hash of the whole blob. Any field that differs makes a different token.
 The ticker is display only; two tokens may share one.
+
+> **Amendment S8 (owner, 2026-09-23) — the policy names its creator, and a token is created once.** The policy blob also commits the creator: the genesis `G` and device id `DevID` of the device that creates the token, placed after the release rule. A native token's genesis release is admissible only in a `CreateToken` of that device, so anyone else holding the same policy bytes releases nothing. The creating transition also inserts a creation record for the policy commit into the creator's economic tree, from zero (class `0x0060`, key `H(DSM/economic-token-creation-key/v1; G ∥ DevID ∥ policy_commit)`). Its presence under a validated root proves the creation, and a second creation of the same commit on that lineage cannot build its write set. The economic-root register keeps the lineage unforked, so the genesis supply is released exactly once.
 
 **Code**
 Balances are keyed by policy_commit (the economic balance leaf; CORE/sofi/validation.rs:553). Issuance

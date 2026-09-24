@@ -12,8 +12,8 @@ use super::app_router_impl::AppRouterImpl;
 use super::response_helpers::{err, pack_envelope_ok};
 use crate::bridge::{AppInvoke, AppResult};
 use crate::sdk::sofi_flow::{
-    CloseIntent, CreateVaultIntent, FindRouteIntent, PositionOutcome, PositionState,
-    RelayIntent, SetupIntent, TradeIntent,
+    CloseIntent, CreateVaultIntent, FindRouteIntent, PositionOutcome, PositionState, RelayIntent,
+    SetupIntent, TradeIntent,
 };
 
 /// The most hops a route may have (`ROUTE_MAX_LEGS`, SoFi §31).
@@ -52,7 +52,7 @@ impl AppRouterImpl {
         };
         // The network's pinned set (DSM Amendment A5): every SoFi cell and
         // object lives on it.
-        let set = match crate::sdk::economic_admission_flow::canonical_set(&network) {
+        let set = match crate::sdk::storage_set::canonical_set(&network) {
             Ok(s) => s,
             Err(e) => return err(format!("{}: no pinned storage set: {e}", i.method)),
         };
@@ -83,7 +83,9 @@ impl AppRouterImpl {
             let a = d32(&req.token_a_policy_commit, "token_a_policy_commit", ROUTE)?;
             let b = d32(&req.token_b_policy_commit, "token_b_policy_commit", ROUTE)?;
             if a >= b {
-                return Err(format!("{ROUTE}: the pair must be ordered, token_a < token_b"));
+                return Err(format!(
+                    "{ROUTE}: the pair must be ordered, token_a < token_b"
+                ));
             }
             if req.reserve_a == 0 || req.reserve_b == 0 {
                 return Err(format!("{ROUTE}: both reserves must be positive"));
@@ -110,7 +112,11 @@ impl AppRouterImpl {
         }
     }
 
-    async fn sofi_setup(&self, i: &AppInvoke, set: &crate::sdk::storage_set::StorageSet) -> AppResult {
+    async fn sofi_setup(
+        &self,
+        i: &AppInvoke,
+        set: &crate::sdk::storage_set::StorageSet,
+    ) -> AppResult {
         const ROUTE: &str = "sofi.setup";
         let req: generated::SofiSetupRequest = match request(i) {
             Ok(r) => r,
@@ -143,7 +149,11 @@ impl AppRouterImpl {
         };
         let intent = match (|| -> Result<FindRouteIntent, String> {
             let token_in = d32(&req.token_in_policy_commit, "token_in_policy_commit", ROUTE)?;
-            let token_out = d32(&req.token_out_policy_commit, "token_out_policy_commit", ROUTE)?;
+            let token_out = d32(
+                &req.token_out_policy_commit,
+                "token_out_policy_commit",
+                ROUTE,
+            )?;
             if token_in == token_out {
                 return Err(format!("{ROUTE}: the two tokens must differ"));
             }
@@ -159,7 +169,7 @@ impl AppRouterImpl {
             Ok(v) => v,
             Err(e) => return err(e),
         };
-        match crate::sdk::sofi_flow::find_route(set, &intent).await {
+        match crate::sdk::sofi_flow::find_route(&self.core_sdk, set, &intent).await {
             Ok(hops) => pack_envelope_ok(generated::envelope::Payload::SofiFindRouteResponse(
                 generated::SofiFindRouteResponse {
                     hops: hops
@@ -179,7 +189,11 @@ impl AppRouterImpl {
         }
     }
 
-    async fn sofi_trade(&self, i: &AppInvoke, set: &crate::sdk::storage_set::StorageSet) -> AppResult {
+    async fn sofi_trade(
+        &self,
+        i: &AppInvoke,
+        set: &crate::sdk::storage_set::StorageSet,
+    ) -> AppResult {
         const ROUTE: &str = "sofi.trade";
         let req: generated::SofiTradeRequest = match request(i) {
             Ok(r) => r,
@@ -207,7 +221,11 @@ impl AppRouterImpl {
         }
     }
 
-    async fn sofi_route(&self, i: &AppInvoke, set: &crate::sdk::storage_set::StorageSet) -> AppResult {
+    async fn sofi_route(
+        &self,
+        i: &AppInvoke,
+        set: &crate::sdk::storage_set::StorageSet,
+    ) -> AppResult {
         const ROUTE: &str = "sofi.route";
         let req: generated::SofiRouteRequest = match request(i) {
             Ok(r) => r,
@@ -245,7 +263,11 @@ impl AppRouterImpl {
         }
     }
 
-    async fn sofi_close(&self, i: &AppInvoke, set: &crate::sdk::storage_set::StorageSet) -> AppResult {
+    async fn sofi_close(
+        &self,
+        i: &AppInvoke,
+        set: &crate::sdk::storage_set::StorageSet,
+    ) -> AppResult {
         const ROUTE: &str = "sofi.close";
         let req: generated::SofiCloseRequest = match request(i) {
             Ok(r) => r,
@@ -261,7 +283,11 @@ impl AppRouterImpl {
         }
     }
 
-    async fn sofi_relay(&self, i: &AppInvoke, set: &crate::sdk::storage_set::StorageSet) -> AppResult {
+    async fn sofi_relay(
+        &self,
+        i: &AppInvoke,
+        set: &crate::sdk::storage_set::StorageSet,
+    ) -> AppResult {
         const ROUTE: &str = "sofi.relay";
         let req: generated::SofiRelayRequest = match request(i) {
             Ok(r) => r,

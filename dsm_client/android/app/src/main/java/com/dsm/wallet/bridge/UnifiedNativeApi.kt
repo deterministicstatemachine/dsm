@@ -61,7 +61,6 @@ internal object UnifiedNativeApi {
     @Keep @JvmStatic external fun getAllBalancesStrict(): ByteArray
     @Keep @JvmStatic external fun getWalletHistoryStrict(): ByteArray
     @Keep @JvmStatic external fun bilateralOfflineSend(envelopeBytes: ByteArray, bleAddress: String): ByteArray
-    @Keep @JvmStatic external fun nowTick(): Long
     @Keep @JvmStatic external fun ensureAppRouterInstalled(): Boolean
     @Keep @JvmStatic external fun getAppRouterStatus(): Int
     @Keep @JvmStatic external fun computeB0xAddress(genesis: ByteArray, deviceId: ByteArray, tip: ByteArray): String

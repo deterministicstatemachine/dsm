@@ -2,45 +2,16 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! JNI helpers (prost-only transport; NO JSON/base64/hex)
 
-#![allow(dead_code)]
 #![allow(clippy::needless_pass_by_value)]
 
 use crate::generated as pb;
 
 use prost::Message;
 
-fn strict_headers() -> pb::Headers {
-    pb::Headers {
-        device_id: vec![0u8; 32],
-        chain_tip: vec![0u8; 32],
-        genesis_hash: vec![0u8; 32],
-        seq: 0,
-    }
-}
-
-fn strict_message_id(payload: &pb::envelope::Payload) -> Vec<u8> {
-    let seed = pb::Envelope {
-        version: 3,
-        headers: Some(strict_headers()),
-        message_id: vec![0u8; 16],
-        payload: Some(payload.clone()),
-    }
-    .encode_to_vec();
-    dsm::crypto::blake3::domain_hash_bytes(
-        dsm::common::domain_tags::TAG_DSM_JNI_ENVELOPE_MESSAGE_ID_V1,
-        &seed,
-    )[..16]
-        .to_vec()
-}
-
+/// Wrap `payload` for this device's own app: a local answer, with no sender
+/// headers and no message id.
 pub fn encode_payload_transport(payload: pb::envelope::Payload) -> pb::Envelope {
-    let message_id = strict_message_id(&payload);
-    pb::Envelope {
-        version: 3,
-        headers: Some(strict_headers()),
-        message_id,
-        payload: Some(payload),
-    }
+    crate::envelope::local_answer(payload)
 }
 
 /// Encode a deterministic transport-level error as an Envelope v3.
@@ -69,37 +40,6 @@ pub fn encode_universal_ok() -> pb::Envelope {
     }))
 }
 
-#[cfg(target_os = "android")]
-#[derive(Debug, Clone)]
-pub struct JniResult<T> {
-    pub success: bool,
-    pub data: Option<T>,
-    pub error: Option<String>,
-    /// Deterministic tick (no wall clock)
-    pub tick: u64,
-}
-
-#[cfg(target_os = "android")]
-impl<T> JniResult<T> {
-    pub fn success(data: T) -> Self {
-        Self {
-            success: true,
-            data: Some(data),
-            error: None,
-            tick: crate::util::deterministic_time::tick(),
-        }
-    }
-
-    pub fn error(message: impl Into<String>) -> Self {
-        Self {
-            success: false,
-            data: None,
-            error: Some(message.into()),
-            tick: crate::util::deterministic_time::tick(),
-        }
-    }
-}
-
 /// Minimal JNI error taxonomy for upstream mapping (no std/time/alloc bloat)
 #[derive(Debug, Clone, Copy)]
 pub enum JniErrorCode {
@@ -126,14 +66,17 @@ mod tests {
     fn encode_error_transport_round_trip() {
         let env = encode_error_transport(JniErrorCode::ProcessingFailed as u32, "unit test failed");
         assert_eq!(env.version, 3);
+        assert!(
+            env.headers.is_none() && env.message_id.is_empty(),
+            "a local answer"
+        );
         match env.payload {
             Some(pb::envelope::Payload::Error(e)) => {
                 assert_eq!(e.code, JniErrorCode::ProcessingFailed as u32);
                 assert_eq!(e.message, "unit test failed");
-                // debug_b32 should be present and decode to some bytes
-                assert!(e.debug_b32.is_some());
-                let dbg = e.debug_b32.unwrap();
-                let decoded = match base32::decode(base32::Alphabet::Crockford, &dbg) {
+                // debug_b32 is present and decodes to some bytes
+                assert!(!e.debug_b32.is_empty());
+                let decoded = match base32::decode(base32::Alphabet::Crockford, &e.debug_b32) {
                     Ok(d) => d,
                     Err(e) => panic!("debug_b32 should decode: {:?}", e),
                 };

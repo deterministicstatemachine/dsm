@@ -295,23 +295,25 @@ impl RecoveryHandler for RecoveryImpl {
         // Now bind the new device identity.
         {
             let new_device_id = new_device_commitment[..32].to_vec();
-            let public_key = crate::sdk::app_state::AppState::get_public_key().unwrap_or_default();
+            let public_key = crate::sdk::app_state::AppState::get_public_key()
+                .ok_or_else(|| "the recovering device holds no signing key".to_string())?;
             let genesis_hash = succession.new_device_commitment.clone();
 
-            // Read capsule's SMT root from recovery_prefs if available
+            // The capsule's SMT root, recorded when the capsule was decrypted.
             let smt_root =
                 crate::storage::client_db::recovery::get_recovery_pref("capsule_smt_root")
-                    .ok()
-                    .flatten()
-                    .unwrap_or_else(|| vec![0u8; 32]);
+                    .map_err(|e| format!("read the capsule SMT root: {e}"))?
+                    .ok_or_else(|| "the capsule SMT root was not recorded".to_string())?;
 
             crate::sdk::app_state::AppState::set_identity_info(
                 new_device_id,
                 public_key,
                 genesis_hash,
                 smt_root,
-            );
-            crate::sdk::app_state::AppState::set_has_identity(true);
+            )
+            .map_err(|e| format!("persist the recovered identity: {e}"))?;
+            crate::sdk::app_state::AppState::set_has_identity(true)
+                .map_err(|e| format!("persist the identity mark: {e}"))?;
 
             log::info!("[RECOVERY] State restored with new device binding via succession");
         }
@@ -463,7 +465,7 @@ impl RecoveryHandler for RecoveryImpl {
 
 /// Run tombstone + succession + propagate using cached recovery authority key
 /// and persisted capsule data. Returns a summary string for the frontend.
-pub fn execute_recovery_pipeline() -> Result<String, String> {
+pub async fn execute_recovery_pipeline() -> Result<String, String> {
     // 1. Get cached recovery authority keypair
     let (_pk, sk) = crate::sdk::recovery_sdk::RecoverySDK::get_cached_authority_keypair()
         .ok_or_else(|| "No recovery authority key cached — enter mnemonic first".to_string())?;
@@ -503,7 +505,8 @@ pub fn execute_recovery_pipeline() -> Result<String, String> {
     }
 
     // 5. Store recovery phase
-    let _ = crate::storage::client_db::recovery::set_recovery_state(RecoveryState::Tombstoning);
+    crate::storage::client_db::recovery::set_recovery_state(RecoveryState::Tombstoning)
+        .map_err(|e| format!("Failed to record the tombstoning phase: {e}"))?;
 
     // 5a. P5: start this recovery cycle with a clean bearer-asset lock registry so stale
     // reconciliations from a prior cycle cannot leave an asset spendable (fail-closed).
@@ -525,7 +528,7 @@ pub fn execute_recovery_pipeline() -> Result<String, String> {
     .map_err(|e| format!("Tombstone creation failed: {e}"))?;
 
     let tombstone_receipt_bytes = tombstone.to_bytes();
-    let tombstone_hash_hex =
+    let tombstone_hash_b32 =
         crate::util::text_id::encode_base32_crockford(&tombstone.tombstone_hash);
 
     // Persist tombstone receipt for propagation
@@ -546,7 +549,8 @@ pub fn execute_recovery_pipeline() -> Result<String, String> {
     );
 
     // 7. Create succession receipt
-    let _ = crate::storage::client_db::recovery::set_recovery_state(RecoveryState::Succession);
+    crate::storage::client_db::recovery::set_recovery_state(RecoveryState::Succession)
+        .map_err(|e| format!("Failed to record the succession phase: {e}"))?;
 
     let new_device_id_str = crate::util::text_id::encode_base32_crockford(&new_device_id);
     let succession = create_succession(
@@ -566,7 +570,8 @@ pub fn execute_recovery_pipeline() -> Result<String, String> {
 
     // Bind the new device identity with capsule state
     {
-        let public_key = crate::sdk::app_state::AppState::get_public_key().unwrap_or_default();
+        let public_key = crate::sdk::app_state::AppState::get_public_key()
+            .ok_or_else(|| "the recovering device holds no signing key".to_string())?;
         let genesis_hash = succession.new_device_commitment.clone();
         let smt_root = capsule_smt_root;
 
@@ -575,8 +580,10 @@ pub fn execute_recovery_pipeline() -> Result<String, String> {
             public_key,
             genesis_hash,
             smt_root,
-        );
-        crate::sdk::app_state::AppState::set_has_identity(true);
+        )
+        .map_err(|e| format!("persist the recovered identity: {e}"))?;
+        crate::sdk::app_state::AppState::set_has_identity(true)
+            .map_err(|e| format!("persist the identity mark: {e}"))?;
     }
 
     log::info!(
@@ -608,48 +615,55 @@ pub fn execute_recovery_pipeline() -> Result<String, String> {
     // 8. Initialize sync gate from capsule counterparty IDs
     let counterparty_ids = crate::storage::client_db::recovery::get_capsule_counterparty_ids()
         .map_err(|e| format!("Failed to read counterparty IDs: {e}"))?;
-    if let Err(e) =
-        crate::storage::client_db::recovery::init_recovery_sync_status(&counterparty_ids)
-    {
-        log::warn!("[RECOVERY] Failed to init sync gate: {e}");
-    }
+    crate::storage::client_db::recovery::init_recovery_sync_status(&counterparty_ids)
+        .map_err(|e| format!("Failed to init sync gate: {e}"))?;
 
-    // 9. Propagate tombstone to storage nodes
-    let _ = crate::storage::client_db::recovery::set_recovery_state(RecoveryState::Propagating);
-
-    let mut pushed = 0u64;
-    let mut failed = 0u64;
-    let total = counterparty_ids.len() as u64;
-
-    for counterparty_id in &counterparty_ids {
-        let notify_key = {
-            let mut h = dsm::crypto::blake3::dsm_domain_hasher(
-                dsm::common::domain_tags::TAG_DSM_TOMBSTONE_NOTIFY,
-            );
-            h.update(counterparty_id);
-            crate::util::text_id::encode_base32_crockford(h.finalize().as_bytes())
-        };
-        match crate::sdk::storage_node_sdk::put_to_storage(&notify_key, &tombstone_receipt_bytes) {
-            Ok(()) => {
-                pushed += 1;
-                log::info!(
-                    "[RECOVERY] Pushed tombstone for counterparty {}",
-                    &crate::util::text_id::encode_base32_crockford(counterparty_id)[..16]
-                );
-            }
-            Err(e) => {
-                failed += 1;
-                log::warn!("[RECOVERY] Failed to push tombstone for counterparty: {e}");
-            }
-        }
-    }
+    // 9. Propagate the tombstone to every counterparty's notice cell
+    crate::storage::client_db::recovery::set_recovery_state(RecoveryState::Propagating)
+        .map_err(|e| format!("Failed to record the propagating phase: {e}"))?;
+    let propagated = propagate_tombstone().await?;
 
     // 10. Set phase to polling
-    let _ = crate::storage::client_db::recovery::set_recovery_state(RecoveryState::Polling);
+    crate::storage::client_db::recovery::set_recovery_state(RecoveryState::Polling)
+        .map_err(|e| format!("Failed to record the polling phase: {e}"))?;
 
     Ok(format!(
-        "phase=polling,tombstone_hash={},pushed={},failed={},total={}",
-        tombstone_hash_hex, pushed, failed, total,
+        "phase=polling,tombstone_hash={tombstone_hash_b32},{propagated}"
+    ))
+}
+
+/// Put the stored tombstone receipt in each unsynced counterparty's notice
+/// cell. Reports `pushed`, `failed` and `total`.
+pub(crate) async fn propagate_tombstone() -> Result<String, String> {
+    let bytes = crate::storage::client_db::recovery::get_tombstone_receipt()
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "no tombstone receipt stored; call recovery.tombstone first".to_string())?;
+    let unsynced = crate::storage::client_db::recovery::get_unsynced_counterparties()
+        .map_err(|e| e.to_string())?;
+    if unsynced.is_empty() {
+        return Err("no unsynced counterparties to propagate to".to_string());
+    }
+    let mut pushed = 0u64;
+    let mut failed = Vec::new();
+    for contact_device_id in &unsynced {
+        let cell = dsm::recovery::RecoveryCell::TombstoneNotice {
+            contact_device_id: *contact_device_id,
+        };
+        match crate::sdk::recovery_store::put(&cell, &bytes).await {
+            Ok(..) => pushed += 1,
+            Err(e) => failed.push(format!(
+                "{}: {e}",
+                &crate::util::text_id::encode_base32_crockford(contact_device_id)[..16]
+            )),
+        }
+    }
+    if !failed.is_empty() {
+        log::warn!("[RECOVERY] tombstone not posted for: {}", failed.join("; "));
+    }
+    Ok(format!(
+        "pushed={pushed},failed={},total={}",
+        failed.len(),
+        unsynced.len()
     ))
 }
 
@@ -668,7 +682,8 @@ pub fn resume_all_contacts() -> Result<String, String> {
         ));
     }
 
-    let _ = crate::storage::client_db::recovery::set_recovery_state(RecoveryState::Resuming);
+    crate::storage::client_db::recovery::set_recovery_state(RecoveryState::Resuming)
+        .map_err(|e| format!("Failed to record the resuming phase: {e}"))?;
 
     // Get recovered chain tips and resume each
     let tips = crate::storage::client_db::recovery::get_recovered_chain_tips()
@@ -720,7 +735,8 @@ pub fn resume_all_contacts() -> Result<String, String> {
     // Cleanup
     let _ = crate::storage::client_db::recovery::clear_recovery_sync_status();
     let _ = crate::storage::client_db::recovery::clear_recovered_chain_tips();
-    let _ = crate::storage::client_db::recovery::set_recovery_state(RecoveryState::Complete);
+    crate::storage::client_db::recovery::set_recovery_state(RecoveryState::Complete)
+        .map_err(|e| format!("Failed to record the complete phase: {e}"))?;
 
     Ok(format!("success=true,resumed={}", resumed))
 }

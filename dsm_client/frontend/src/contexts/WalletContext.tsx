@@ -23,12 +23,9 @@ export interface WalletContact {
   deviceId: string;
   genesisHash: string;
   chainTip?: string;
-  chainTipSmtProof?: Uint8Array;
   bleAddress?: string;
   status?: string;
   genesisVerifiedOnline?: boolean;
-  verifyCounter?: number;
-  addedCounter?: number;
   verifyingStorageNodes?: number;
 }
 

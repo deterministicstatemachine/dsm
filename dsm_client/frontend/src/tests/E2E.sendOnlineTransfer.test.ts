@@ -158,40 +158,8 @@ describe('E2E: sendOnlineTransfer (unit-level, mocked storage)', () => {
 
     expect(req.toDeviceId).toEqual(devB);
     expect(req.fromDeviceId).toEqual(new Uint8Array(32).fill(0x11));
-    expect(req.seq).toBe(1n);
     expect(req.tokenId).toBe('dBTC');
     expect(req.memo).toBe('bridge payload check');
-  });
-
-  it('normalizes missing or zero transport sequence to 1 before wallet.send', async () => {
-    const devB = new Uint8Array(32).fill(0x22);
-    (global as any).window.DsmBridge.__callBin = async (reqBytes: Uint8Array) => {
-      const req = pb.BridgeRpcRequest.fromBinary(reqBytes);
-      const method = req.method || '';
-
-      if (method === 'getTransportHeadersV3Bin') {
-        const headers = new pb.Headers({
-          deviceId: new Uint8Array(32).fill(0x33),
-          chainTip: new Uint8Array(32).fill(0xff),
-          genesisHash: new Uint8Array(32).fill(0x44),
-          seq: 0n as any,
-        } as any);
-        return wrapSuccessRaw(headers.toBinary());
-      }
-
-      return wrapSuccessEnvelope(new Uint8Array(0));
-    };
-
-    const mockAppRouterInvoke = jest.fn().mockResolvedValue(makeOnlineResponseFramed(true, 'ok', 5n));
-    jest.spyOn(require('../dsm/WebViewBridge'), 'routerInvokeBin').mockImplementation(mockAppRouterInvoke);
-
-    const res = await dsm.sendOnlineTransfer({ to: encodeBase32Crockford(devB), amount: 5n, tokenId: 'ERA' });
-
-    expect(res.accepted).toBe(true);
-    const [, argPackBytes] = mockAppRouterInvoke.mock.calls[0];
-    const req = decodeOnlineTransferRequest(argPackBytes);
-    expect(req.fromDeviceId).toEqual(new Uint8Array(32).fill(0x33));
-    expect(req.seq).toBe(1n);
   });
 
   // Quorum/fan-out is handled by native persistence.

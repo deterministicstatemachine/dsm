@@ -11,6 +11,15 @@
 [node]
 id = "__NODE_ID__"
 
+# The network this node serves. NOT optional in practice: the canonical ERA
+# faucet identity is network-scoped (`era_faucet_id(network_id)`), so a node
+# without it logs "the faucet-ticket register is INACTIVE" and refuses every
+# ticket claim — economic admission cannot complete on a fleet missing this.
+# It is spelled here rather than left to the operator because the 2026-09-05
+# Alibaba fleet shipped without it and the gap went unnoticed until a device
+# run needed the faucet.
+network_id = "dsm-testnet"
+
 # THE CANONICAL STORAGE SET this node belongs to — required before the
 # settlement-slot claim register will accept anything (absent ⇒ the register is
 # INACTIVE on this node and every claim is refused, fail-closed).

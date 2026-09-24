@@ -216,7 +216,6 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
           // form. This used to divide by 10^8 in floating point, which is both
           // the wrong scale and the wrong arithmetic for an amount.
           rawTokens == null ? '—' : String(rawTokens);
-        const nextAvail = result?.nextAvailable != null ? String(result.nextAvailable) : '—';
 
         await loadBalances();
         try {
@@ -231,7 +230,7 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
         // history again).
 
         setSuccessMsg(
-          `Claimed ${tokensHuman} ${symbol || 'ERA'}. Next claim in ~${nextAvail}s.`
+          `Claimed ${tokensHuman} ${symbol || 'ERA'}.`
         );
       } catch (e) {
         console.warn('[UI:faucet] claim failed', e);
@@ -244,12 +243,11 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
     [loadBalances, refreshAll]
   );
 
-  /// Run a mint or burn and show whatever the policy decided, verbatim.
+  /// Run a burn and show whatever the policy decided, verbatim.
   ///
   /// The amount goes to Rust exactly as typed — no client-side rescaling — and
-  /// this never pre-judges whether the operation is permitted. Authority,
-  /// k-of-N threshold and the supply cap are the committed policy's call, and
-  /// its refusal is the message the user sees.
+  /// this never pre-judges whether the operation is permitted. That is the
+  /// committed policy's call, and its refusal is the message the user sees.
   const runSupplyAction = useCallback(async () => {
     if (!supplyAction || !amount.trim()) return;
     setBusy(true);
@@ -352,8 +350,8 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
       padding: '0 8px',
       margin: 0,
       // The container is a fixed height, so vertical overflow must scroll: an
-      // expanded token card is taller than the screen and its MINT / BURN /
-      // FORGET row sits below the fold. `hidden` made those controls
+      // expanded token card is taller than the screen and its BURN / FORGET
+      // row sits below the fold. `hidden` made those controls
       // unreachable.
       overflowX: 'hidden',
       overflowY: 'auto',

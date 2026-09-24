@@ -22,8 +22,6 @@ function makeContactsResponse(): Uint8Array {
     genesisHash: new pb.Hash32({ v: new Uint8Array(32).fill(0xee) }),
     chainTip: new pb.Hash32({ v: new Uint8Array(32).fill(0xff) }),
     genesisVerifiedOnline: true,
-    verifyCounter: 1n as any,
-    addedCounter: 1n as any,
     verifyingStorageNodes: ['http://127.0.0.1:8080'],
     bleAddress: '',
   } as any);
@@ -52,7 +50,6 @@ function makeOkEnvelope(): pb.Envelope {
     version: 3,
     headers: new pb.Headers({
       deviceId: new Uint8Array(32) as any,
-      chainTip: new Uint8Array(32) as any,
       genesisHash: new Uint8Array(32) as any,
     } as any),
     payload: { case: 'onlineTransferResponse', value: resp },
@@ -128,7 +125,6 @@ describe('online transfer', () => {
       genesisHash: new Uint8Array(32).fill(0xee),
       chainTip: new Uint8Array(32).fill(0xff),
       genesisVerifiedOnline: true,
-      verifyCounter: 1,
       verifyingStorageNodes: ['http://127.0.0.1:8080'],
       bleAddress: '',
       publicKey: new Uint8Array(0),
@@ -144,8 +140,6 @@ describe('online transfer', () => {
     const transportHeaders = new pb.Headers({
       deviceId: deviceId as any,
       genesisHash: genesisHash as any,
-      chainTip: chainTip as any,
-      seq: BigInt(1) as any,
     });
     transportHeaderBytes = transportHeaders.toBinary();
 

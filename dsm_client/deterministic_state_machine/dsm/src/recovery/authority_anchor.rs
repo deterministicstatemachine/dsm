@@ -118,6 +118,42 @@ impl RecoveryAuthorityAnchor {
         genesis_signing_pubkey: &[u8],
         candidate_authority_pubkey: &[u8],
     ) -> Result<(), DsmError> {
+        self.verify_genesis_binding(
+            expected_genesis_id,
+            expected_device_id,
+            genesis_signing_pubkey,
+        )?;
+        if self.authority_pubkey_commit
+            != compute_authority_pubkey_commit(candidate_authority_pubkey)
+        {
+            return Err(DsmError::verification(
+                "authority-anchor: candidate authority pubkey does not match the anchored commitment",
+            ));
+        }
+        if !sphincs_verify(
+            candidate_authority_pubkey,
+            &self.digest(),
+            &self.authority_signature,
+        )? {
+            return Err(DsmError::verification(
+                "authority-anchor: authority self-signature invalid (possession proof failed)",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Conditions 1 and 3 of [`Self::verify`]: the anchor names the genesis and
+    /// device under recovery, and the device's genesis-authenticated signing key
+    /// signed it. This is what makes an anchor the device's own declaration, and
+    /// what a reader counts to decide that the device bound exactly one
+    /// authority: two distinct anchors that both pass are the device declaring
+    /// two, and no single authority is anchored.
+    pub fn verify_genesis_binding(
+        &self,
+        expected_genesis_id: &[u8; 32],
+        expected_device_id: &[u8; 32],
+        genesis_signing_pubkey: &[u8],
+    ) -> Result<(), DsmError> {
         if &self.genesis_id != expected_genesis_id {
             return Err(DsmError::verification(
                 "authority-anchor: genesis_id does not match the genesis under recovery",
@@ -128,26 +164,13 @@ impl RecoveryAuthorityAnchor {
                 "authority-anchor: device_id does not match the device under recovery",
             ));
         }
-        if self.authority_pubkey_commit
-            != compute_authority_pubkey_commit(candidate_authority_pubkey)
-        {
-            return Err(DsmError::verification(
-                "authority-anchor: candidate authority pubkey does not match the anchored commitment",
-            ));
-        }
-        let digest = self.digest();
-        if !sphincs_verify(genesis_signing_pubkey, &digest, &self.device_signature)? {
-            return Err(DsmError::verification(
-                "authority-anchor: genesis signing-key signature invalid (genesis binding failed)",
-            ));
-        }
         if !sphincs_verify(
-            candidate_authority_pubkey,
-            &digest,
-            &self.authority_signature,
+            genesis_signing_pubkey,
+            &self.digest(),
+            &self.device_signature,
         )? {
             return Err(DsmError::verification(
-                "authority-anchor: authority self-signature invalid (possession proof failed)",
+                "authority-anchor: genesis signing-key signature invalid (genesis binding failed)",
             ));
         }
         Ok(())

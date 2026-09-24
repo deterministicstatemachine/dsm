@@ -35,22 +35,9 @@ fn ingress_error(code: u32, message: impl Into<String>) -> pb::Error {
     }
 }
 
-fn build_envelope(payload: pb::envelope::Payload) -> Envelope {
-    Envelope {
-        version: 3,
-        headers: Some(pb::Headers {
-            device_id: vec![0u8; 32],
-            chain_tip: vec![0u8; 32],
-            genesis_hash: vec![0u8; 32],
-            seq: 0,
-        }),
-        message_id: vec![0u8; 16],
-        payload: Some(payload),
-    }
-}
-
+#[cfg(all(target_os = "android", feature = "jni"))]
 fn encode_framed_envelope(payload: pb::envelope::Payload) -> Result<Vec<u8>, pb::Error> {
-    let envelope = build_envelope(payload);
+    let envelope = crate::envelope::local_answer(payload);
     let mut buf = Vec::with_capacity(1 + envelope.encoded_len());
     buf.push(0x03);
     envelope.encode(&mut buf).map_err(|e| {
@@ -97,7 +84,7 @@ fn bootstrap_finalize_envelope(
     genesis_hash: Vec<u8>,
     message: impl Into<String>,
 ) -> Envelope {
-    build_envelope(pb::envelope::Payload::BootstrapFinalizeResponse(
+    crate::envelope::local_answer(pb::envelope::Payload::BootstrapFinalizeResponse(
         pb::BootstrapFinalizeResponse {
             result,
             device_id,
@@ -255,15 +242,21 @@ fn finalize_bootstrap_core(report: pb::BootstrapMeasurementReport) -> Result<Env
             crate::sdk::session_manager::SDK_READY.load(std::sync::atomic::Ordering::SeqCst),
             crate::sdk::app_state::AppState::get_has_identity()
         );
-        let _ = push_genesis_lifecycle_event(
+        let message = match push_genesis_lifecycle_event(
             pb::genesis_lifecycle_event::Kind::GenesisKindError as i32,
             0,
-        );
+        ) {
+            Ok(()) => error.message,
+            Err(push_error) => format!(
+                "{}; the error lifecycle event was not delivered: {}",
+                error.message, push_error.message
+            ),
+        };
         return Ok(bootstrap_finalize_envelope(
             pb::bootstrap_finalize_response::Result::BootstrapResultError as i32,
             device_id,
             genesis_hash,
-            error.message,
+            message,
         ));
     }
 
@@ -285,59 +278,6 @@ fn finalize_bootstrap_core(report: pb::BootstrapMeasurementReport) -> Result<Env
         0,
     )?;
     push_genesis_lifecycle_event(pb::genesis_lifecycle_event::Kind::GenesisKindOk as i32, 0)?;
-
-    // Ensure the wallet is registered for authenticated PUTs on every
-    // configured storage node.  Runs on BOTH genesis (BootstrapPhaseFinalize)
-    // and resume (BootstrapPhaseResumeFinalize) so existing wallets that
-    // completed genesis before this code existed get their auth tokens
-    // populated on the next launch.  Idempotent at the storage-node level;
-    // tokens stored via `store_auth_token`, read on every PUT path via
-    // `storage_io::resolve_storage_auth`.  Best-effort: failures are
-    // logged but never block bootstrap completion.
-    let device_id_b32 = crate::util::text_id::encode_base32_crockford(&context.device_id);
-    let genesis_hash_b32 = crate::util::text_id::encode_base32_crockford(&context.genesis_hash);
-    let public_key = crate::sdk::app_state::AppState::get_public_key().unwrap_or_default();
-    let public_key_b32 = crate::util::text_id::encode_base32_crockford(&public_key);
-    let rt = tokio::runtime::Handle::try_current();
-    let auth_task = async move {
-        match crate::sdk::storage_node_sdk::StorageNodeConfig::from_env_config().await {
-            Ok(cfg) => match crate::sdk::storage_node_sdk::StorageNodeSDK::new(cfg).await {
-                Ok(auth_sdk) => match auth_sdk
-                    .register_device_for_auth(&device_id_b32, &public_key_b32, &genesis_hash_b32)
-                    .await
-                {
-                    Ok(_) => log::info!(
-                        "FINALIZE_BOOTSTRAP: storage-node auth-registration completed"
-                    ),
-                    Err(e) => log::warn!(
-                        "FINALIZE_BOOTSTRAP: auth-registration failed (PUTs may 401 until retry): {e}"
-                    ),
-                },
-                Err(e) => log::warn!(
-                    "FINALIZE_BOOTSTRAP: auth-registration SDK init failed: {e}"
-                ),
-            },
-            Err(e) => log::warn!(
-                "FINALIZE_BOOTSTRAP: auth-registration cfg load failed: {e}"
-            ),
-        }
-    };
-    if let Ok(handle) = rt {
-        // Spawn off the runtime if we're already on one — never block
-        // finalize_bootstrap_core on the network round-trips.
-        handle.spawn(auth_task);
-    } else {
-        // No active runtime (test or unusual init order); fire-and-forget
-        // via a fresh runtime so the storage publishes still happen.
-        std::thread::spawn(|| {
-            if let Ok(rt) = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                rt.block_on(auth_task);
-            }
-        });
-    }
 
     let ready_message = if report.trust_level
         == pb::bootstrap_measurement_report::TrustLevel::BootstrapTrustLevelPinRequired as i32
@@ -464,7 +404,7 @@ fn process_envelope_core(envelope_in: Envelope) -> Result<Envelope, pb::Error> {
         &out[..]
     };
 
-    crate::envelope::from_canonical_bytes(payload).map_err(|e| {
+    crate::envelope::local_answer_from_canonical_bytes(payload).map_err(|e| {
         ingress_error(
             ERROR_CODE_PROCESSING_FAILED,
             format!("ingress: response envelope decode failed: {e}"),
@@ -478,22 +418,6 @@ fn router_query_core(method: String, args: Vec<u8>) -> Result<Vec<u8>, pb::Error
             ERROR_CODE_INVALID_INPUT,
             "ingress: router query path missing",
         ));
-    }
-
-    if method == "system.genesis" {
-        let res = crate::handlers::handle_system_genesis_query(crate::bridge::AppQuery {
-            path: method,
-            params: args,
-        });
-        return if res.success {
-            Ok(res.data)
-        } else {
-            Err(ingress_error(
-                ERROR_CODE_PROCESSING_FAILED,
-                res.error_message
-                    .unwrap_or_else(|| "router_query_core failed".to_string()),
-            ))
-        };
     }
 
     let router = match crate::bridge::app_router() {
@@ -701,20 +625,43 @@ fn prime_identity_app_state(device_id: &[u8], genesis_hash: &[u8]) -> Result<(),
         kp.public_key().len()
     );
 
-    let smt_root = dsm::merkle::sparse_merkle_tree::empty_root(
-        dsm::merkle::sparse_merkle_tree::DEFAULT_SMT_HEIGHT,
-    )
-    .to_vec();
+    // The SMT root genesis recorded for this identity.
+    let genesis_b32 = crate::util::text_id::encode_base32_crockford(&g);
+    let record = crate::storage::client_db::get_genesis_record_by_id(&genesis_b32)
+        .map_err(|e| {
+            ingress_error(
+                ERROR_CODE_PROCESSING_FAILED,
+                format!("startup: read the genesis record: {e}"),
+            )
+        })?
+        .ok_or_else(|| {
+            ingress_error(
+                ERROR_CODE_PROCESSING_FAILED,
+                "startup: no genesis record for this identity".to_string(),
+            )
+        })?;
+    let smt_root = crate::util::text_id::decode_base32_crockford(&record.merkle_root)
+        .filter(|root| root.len() == 32)
+        .ok_or_else(|| {
+            ingress_error(
+                ERROR_CODE_PROCESSING_FAILED,
+                "startup: the genesis record's SMT root is not 32 Base32 bytes".to_string(),
+            )
+        })?;
 
     crate::sdk::app_state::AppState::set_identity_info(
         device_id.to_vec(),
         kp.public_key().to_vec(),
         genesis_hash.to_vec(),
         smt_root,
-    );
-    crate::sdk::app_state::AppState::set_has_identity(true);
-
-    Ok(())
+    )
+    .and_then(|()| crate::sdk::app_state::AppState::set_has_identity(true))
+    .map_err(|e| {
+        ingress_error(
+            ERROR_CODE_PROCESSING_FAILED,
+            format!("startup: persist the identity: {e}"),
+        )
+    })
 }
 
 fn ensure_identity_context_matches(
@@ -781,22 +728,16 @@ fn install_identity_context_core(
         ));
     }
 
-    if ensure_identity_context_matches(&device_id, &genesis_hash)? {
+    // The same identity already installed, with its SDK context up, is done.
+    // An identity on disk with no context in this process — a restart — is
+    // not: its context is brought up below.
+    if ensure_identity_context_matches(&device_id, &genesis_hash)?
+        && crate::is_sdk_context_initialized()
+    {
         return Ok(());
     }
 
     prime_identity_app_state(&device_id, &genesis_hash)?;
-
-    // Self-heal: republish DeviceTreeEntry to the registry if it is below
-    // quorum on the network. Genesis creation used to swallow publish
-    // failures silently, which left some users with locally-valid identities
-    // that were invisible to `contacts.addManual`. Running the idempotent
-    // verify+republish on every bootstrap guarantees eventual consistency
-    // without requiring the user to regenerate their identity.
-    //
-    // Non-fatal: network errors here never block startup. If the device is
-    // offline we'll retry on the next bootstrap.
-    ensure_device_tree_registered(device_id.clone(), genesis_hash.clone());
 
     let wallet_seed = crate::fetch_wallet_seed().map_err(|e| {
         ingress_error(
@@ -811,49 +752,6 @@ fn install_identity_context_core(
             format!("startup: initialize_sdk_context failed: {e}"),
         )
     })
-}
-
-/// Best-effort self-heal for the DeviceTreeEntry registry entry.
-///
-/// Runs the `ensure_device_in_tree` flow on a background task using the
-/// shared tokio runtime so the bootstrap path is never blocked on network
-/// I/O. The task logs its own success/failure; there is no caller-visible
-/// error surface because registry publication is strictly best-effort at
-/// the ingress boundary — any failure here will retry on the next bootstrap.
-fn ensure_device_tree_registered(device_id: Vec<u8>, genesis_hash: Vec<u8>) {
-    let rt = crate::runtime::get_runtime();
-    rt.spawn(async move {
-        let cfg = match crate::sdk::storage_node_sdk::StorageNodeConfig::from_env_config().await {
-            Ok(cfg) => cfg,
-            Err(e) => {
-                log::warn!("self-heal registry: env config unavailable, skipping republish: {e}");
-                return;
-            }
-        };
-
-        let sdk = match crate::sdk::storage_node_sdk::StorageNodeSDK::new(cfg).await {
-            Ok(sdk) => sdk,
-            Err(e) => {
-                log::warn!("self-heal registry: storage SDK init failed, skipping republish: {e}");
-                return;
-            }
-        };
-
-        match sdk.ensure_device_in_tree(&device_id, &genesis_hash).await {
-            Ok(n) => {
-                log::info!(
-                    "self-heal registry: DeviceTreeEntry healthy on {} storage nodes",
-                    n
-                );
-            }
-            Err(e) => {
-                log::error!(
-                    "self-heal registry: failed to ensure DeviceTreeEntry visibility: {e}. \
-                     Contact discovery will remain broken until network recovers."
-                );
-            }
-        }
-    });
 }
 
 fn initialize_identity_context_core(
@@ -1021,83 +919,40 @@ pub fn dispatch_startup_bytes(request_bytes: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
-    use async_trait::async_trait;
-    use once_cell::sync::Lazy;
     use serial_test::serial;
 
-    use crate::bridge::{install_app_router, AppInvoke, AppQuery, AppResult, AppRouter};
+    use crate::bridge::install_app_router;
+    use crate::economic_fixtures::{self, TestIdentity};
 
-    // Local mutex serializes tests within this module. We additionally apply
-    // `#[serial]` to every test so they cooperate with the global
-    // `serial_test` mutex used by other modules (notably
-    // `handlers::bitcoin_invoke_routes::tests`) which mutate the same global
-    // C-DBRW binding-key slot. Without the global serialization, a parallel
-    // bitcoin test calling `install_test_identity(.., vec![0xD1; 32])` could
-    // overwrite the binding key between this module's `setup_test_env()` (which
-    // clears it) and its `install_identity_context_core(...)` reading it back.
-    static TEST_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
-
-    struct TestRouter;
-
-    #[async_trait]
-    impl AppRouter for TestRouter {
-        async fn query(&self, q: AppQuery) -> AppResult {
-            AppResult {
-                success: true,
-                data: format!("query:{}:{}", q.path, q.params.len()).into_bytes(),
-                error_message: None,
-            }
-        }
-
-        async fn invoke(&self, i: AppInvoke) -> AppResult {
-            AppResult {
-                success: true,
-                data: format!("invoke:{}:{}", i.method, i.args.len()).into_bytes(),
-                error_message: None,
-            }
-        }
-    }
-
-    fn ensure_test_env_config() -> String {
-        let path = crate::network::get_env_config_path()
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::env::temp_dir().join("dsm_ingress_startup_test_env.toml"));
-        let body = r#"
-protocol = "http"
-lan_ip = "127.0.0.1"
-allow_localhost = true
-
-[[nodes]]
-name = "test-1"
-endpoint = "http://127.0.0.1:8080"
-register_incarnation = "BHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE0"
-"#;
-        std::fs::write(&path, body).expect("write env config");
-        path.to_string_lossy().to_string()
-    }
-
-    fn setup_test_env() -> std::sync::MutexGuard<'static, ()> {
-        let guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        std::env::set_var("DSM_SDK_TEST_MODE", "1");
-        let storage_base = crate::storage_utils::get_storage_base_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("./.dsm_testdata"));
-        let _ = crate::storage_utils::set_storage_base_dir(storage_base);
-        crate::sdk::app_state::AppState::reset_for_testing();
-        crate::sdk::app_state::AppState::prime_memory_for_testing();
+    /// A process with nothing installed yet: no router, no SDK context, no
+    /// identity in memory, the SDK not ready.
+    fn fresh_process() {
+        economic_fixtures::use_test_storage_dir();
         crate::sdk::session_manager::set_sdk_ready(false);
         crate::reset_sdk_context_for_testing();
         unsafe { crate::bridge::reset_bridge_handlers_for_tests() };
-        let config_path = ensure_test_env_config();
-        let _ = dispatch_startup(StartupRequest {
-            operation: Some(startup_request::Operation::ConfigureEnv(
-                pb::ConfigureEnvOp {
-                    config_path_utf8: config_path,
-                },
-            )),
-        });
-        guard
+    }
+
+    /// A device created as wallet creation creates it, then the process that
+    /// created it gone: its identity is on disk, the new process holds
+    /// nothing in memory, and the wallet is unlocked from its mnemonic.
+    fn restarted_device(seed: u8) -> TestIdentity {
+        let identity = economic_fixtures::local_device(seed).0;
+        crate::sdk::app_state::AppState::reset_memory_for_testing();
+        fresh_process();
+        crate::sdk::recovery_sdk::RecoverySDK::derive_and_cache_key(
+            &economic_fixtures::test_mnemonic(seed),
+        )
+        .expect("unlock the wallet");
+        identity
+    }
+
+    /// The network's pinned nodes and the env config naming them — what
+    /// `ConfigureEnv` points a device at.
+    fn fleet() -> crate::test_support::one_device::Fleet {
+        crate::test_support::one_device::Fleet::start()
     }
 
     fn expect_ok_bytes(response: IngressResponse) -> Vec<u8> {
@@ -1131,7 +986,7 @@ register_incarnation = "BHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE0"
     #[test]
     #[serial]
     fn dispatch_ingress_empty_request_returns_invalid_input() {
-        let _guard = setup_test_env();
+        fresh_process();
         let response = dispatch_ingress(IngressRequest { operation: None });
         let error = expect_error(response);
         assert_eq!(error.code, ERROR_CODE_INVALID_INPUT);
@@ -1141,7 +996,7 @@ register_incarnation = "BHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE0"
     #[test]
     #[serial]
     fn dispatch_ingress_bytes_invalid_proto_returns_invalid_input() {
-        let _guard = setup_test_env();
+        fresh_process();
         let response_bytes = dispatch_ingress_bytes(&[0xff, 0xfe, 0xfd]);
         let response = IngressResponse::decode(response_bytes.as_slice()).expect("decode response");
         let error = expect_error(response);
@@ -1151,14 +1006,12 @@ register_incarnation = "BHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE0"
     #[test]
     #[serial]
     fn envelope_request_strips_optional_prefix_and_reframes_success_output() {
-        let _guard = setup_test_env();
+        fresh_process();
         let request_env = Envelope {
             version: 3,
             headers: Some(pb::Headers {
                 device_id: vec![1; 32],
-                chain_tip: vec![2; 32],
                 genesis_hash: vec![3; 32],
-                seq: 0,
             }),
             message_id: vec![7; 16],
             payload: Some(pb::envelope::Payload::Error(pb::Error {
@@ -1180,15 +1033,15 @@ register_incarnation = "BHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE0"
         });
         let ok_bytes = expect_ok_bytes(response);
         assert_eq!(ok_bytes.first(), Some(&0x03));
-        let decoded =
-            crate::envelope::from_canonical_bytes(&ok_bytes[1..]).expect("decode envelope");
+        let decoded = crate::envelope::local_answer_from_canonical_bytes(&ok_bytes[1..])
+            .expect("the answer is a local answer");
         assert_eq!(decoded.version, 3);
     }
 
     #[test]
     #[serial]
     fn malformed_envelope_returns_invalid_input() {
-        let _guard = setup_test_env();
+        fresh_process();
         let response = dispatch_ingress(IngressRequest {
             operation: Some(ingress_request::Operation::Envelope(pb::EnvelopeOp {
                 envelope_bytes: vec![0x03, 0xaa, 0xbb, 0xcc],
@@ -1202,14 +1055,12 @@ register_incarnation = "BHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE0"
     #[test]
     #[serial]
     fn wrong_version_envelope_returns_invalid_input() {
-        let _guard = setup_test_env();
+        fresh_process();
         let request_env = Envelope {
             version: 2,
             headers: Some(pb::Headers {
                 device_id: vec![1; 32],
-                chain_tip: vec![2; 32],
                 genesis_hash: vec![3; 32],
-                seq: 0,
             }),
             message_id: vec![4; 16],
             payload: Some(pb::envelope::Payload::Error(pb::Error {
@@ -1238,44 +1089,88 @@ register_incarnation = "BHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE0"
         );
     }
 
+    /// The device's router answers through the ingress byte for byte: a
+    /// preference set and read back through `RouterQuery`.
     #[test]
     #[serial]
-    fn router_query_success_returns_router_payload() {
-        let _guard = setup_test_env();
-        install_app_router(Arc::new(TestRouter)).expect("install router");
-
-        let response = dispatch_ingress(IngressRequest {
-            operation: Some(ingress_request::Operation::RouterQuery(pb::RouterQueryOp {
-                method: "wallet.balance".to_string(),
-                args: vec![1, 2, 3],
-            })),
-        });
-        let ok_bytes = expect_ok_bytes(response);
-        assert_eq!(ok_bytes, b"query:wallet.balance:3".to_vec());
+    fn a_router_query_answer_passes_through_unchanged() {
+        fresh_process();
+        economic_fixtures::local_device(0x44);
+        let router = crate::handlers::app_router_impl::AppRouterImpl::new(crate::init::SdkConfig {
+            node_id: "ingress-router-test".to_string(),
+            storage_endpoints: Vec::new(),
+            enable_offline: false,
+        })
+        .expect("router");
+        install_app_router(Arc::new(router)).expect("install router");
+        let pref = |path: &str, value: &str| {
+            dispatch_ingress(IngressRequest {
+                operation: Some(ingress_request::Operation::RouterQuery(pb::RouterQueryOp {
+                    method: path.to_string(),
+                    args: pb::ArgPack {
+                        codec: pb::Codec::Proto as i32,
+                        body: pb::AppStateRequest {
+                            key: "ingress.test".to_string(),
+                            operation: String::new(),
+                            value: value.to_string(),
+                        }
+                        .encode_to_vec(),
+                        ..Default::default()
+                    }
+                    .encode_to_vec(),
+                })),
+            })
+        };
+        expect_ok_bytes(pref("prefs.set", "through the ingress"));
+        let answer = expect_ok_bytes(pref("prefs.get", ""));
+        let envelope = crate::handlers::response_helpers::decode_local_envelope(&answer)
+            .expect("the router's local answer");
+        match envelope.payload {
+            Some(dsm::types::proto::envelope::Payload::AppStateResponse(r)) => {
+                assert_eq!(r.value.as_deref(), Some("through the ingress"))
+            }
+            other => panic!("prefs.get answered {other:?}"),
+        }
     }
 
+    /// A router refusal reaches the caller as an error carrying the router's
+    /// own reason: an invoke for a token this device does not hold.
     #[test]
     #[serial]
-    fn router_invoke_success_returns_router_payload() {
-        let _guard = setup_test_env();
-        install_app_router(Arc::new(TestRouter)).expect("install router");
-
+    fn a_router_invoke_refusal_passes_through_with_its_reason() {
+        fresh_process();
+        economic_fixtures::local_device(0x45);
+        let router = crate::handlers::app_router_impl::AppRouterImpl::new(crate::init::SdkConfig {
+            node_id: "ingress-router-test".to_string(),
+            storage_endpoints: Vec::new(),
+            enable_offline: false,
+        })
+        .expect("router");
+        install_app_router(Arc::new(router)).expect("install router");
         let response = dispatch_ingress(IngressRequest {
             operation: Some(ingress_request::Operation::RouterInvoke(
                 pb::RouterInvokeOp {
-                    method: "wallet.send".to_string(),
-                    args: vec![9, 8],
+                    method: "token.forget".to_string(),
+                    args: pb::ArgPack {
+                        codec: pb::Codec::Proto as i32,
+                        body: pb::TokenForgetRequest {
+                            token_id: "NOTHELD".to_string(),
+                        }
+                        .encode_to_vec(),
+                        ..Default::default()
+                    }
+                    .encode_to_vec(),
                 },
             )),
         });
-        let ok_bytes = expect_ok_bytes(response);
-        assert_eq!(ok_bytes, b"invoke:wallet.send:2".to_vec());
+        let error = expect_error(response);
+        assert!(error.message.contains("token.forget"), "{}", error.message);
     }
 
     #[test]
     #[serial]
     fn router_absent_maps_to_not_ready() {
-        let _guard = setup_test_env();
+        fresh_process();
         let response = dispatch_ingress(IngressRequest {
             operation: Some(ingress_request::Operation::RouterQuery(pb::RouterQueryOp {
                 method: "wallet.balance".to_string(),
@@ -1290,7 +1185,7 @@ register_incarnation = "BHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE0"
     #[test]
     #[serial]
     fn hardware_facts_success_returns_envelope_wrapped_snapshot() {
-        let _guard = setup_test_env();
+        fresh_process();
         let response = dispatch_ingress(IngressRequest {
             operation: Some(ingress_request::Operation::HardwareFacts(
                 pb::HardwareFactsOp {
@@ -1311,10 +1206,10 @@ register_incarnation = "BHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE0"
         });
         let ok_bytes = expect_ok_bytes(response);
         assert_eq!(ok_bytes.first(), Some(&0x03));
-        let envelope =
-            crate::envelope::from_canonical_bytes(&ok_bytes[1..]).expect("decode envelope");
+        let envelope = crate::handlers::response_helpers::decode_local_envelope(&ok_bytes)
+            .expect("the session snapshot is a local answer");
         match envelope.payload {
-            Some(pb::envelope::Payload::SessionStateResponse(snapshot)) => {
+            Some(dsm::types::proto::envelope::Payload::SessionStateResponse(snapshot)) => {
                 let hardware = snapshot.hardware_status.expect("hardware status");
                 assert!(hardware.app_foreground);
             }
@@ -1325,7 +1220,7 @@ register_incarnation = "BHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE0"
     #[test]
     #[serial]
     fn startup_empty_request_returns_invalid_input() {
-        let _guard = setup_test_env();
+        fresh_process();
         let response = dispatch_startup(StartupRequest { operation: None });
         let error = expect_startup_error(response);
         assert_eq!(error.code, ERROR_CODE_INVALID_INPUT);
@@ -1335,7 +1230,7 @@ register_incarnation = "BHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE0"
     #[test]
     #[serial]
     fn startup_set_storage_base_dir_is_idempotent() {
-        let _guard = setup_test_env();
+        fresh_process();
         let path_utf8 = crate::storage_utils::get_storage_base_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("./.dsm_testdata"))
             .to_string_lossy()
@@ -1358,7 +1253,8 @@ register_incarnation = "BHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE0"
     #[test]
     #[serial]
     fn startup_initialize_sdk_installs_minimal_router() {
-        let _guard = setup_test_env();
+        fresh_process();
+        let fleet = fleet();
         let response = dispatch_startup(StartupRequest {
             operation: Some(startup_request::Operation::InitializeSdk(
                 pb::InitializeSdkOp {},
@@ -1369,61 +1265,25 @@ register_incarnation = "BHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE0"
 
         let response = dispatch_ingress(IngressRequest {
             operation: Some(ingress_request::Operation::RouterQuery(pb::RouterQueryOp {
-                method: "sys.tick".to_string(),
+                method: "system.generateMnemonic".to_string(),
                 args: Vec::new(),
             })),
         });
+        // Before genesis the minimal router answers wallet creation's first
+        // query: a fresh BIP39 mnemonic.
         let ok_bytes = expect_ok_bytes(response);
-        assert!(!ok_bytes.is_empty());
-    }
-
-    #[test]
-    #[serial]
-    fn startup_minimal_router_routes_system_genesis_validation() {
-        let _guard = setup_test_env();
-        let response = dispatch_startup(StartupRequest {
-            operation: Some(startup_request::Operation::InitializeSdk(
-                pb::InitializeSdkOp {},
-            )),
-        });
-        assert_eq!(expect_startup_ok(response), STARTUP_OK_BYTES);
-
-        let args = pb::ArgPack {
-            schema_hash: None,
-            codec: pb::Codec::Proto as i32,
-            body: pb::SystemGenesisRequest {
-                locale: "en-US".to_string(),
-                network_id: "testnet".to_string(),
-                device_entropy: vec![0x42; 8],
-            }
-            .encode_to_vec(),
-        }
-        .encode_to_vec();
-
-        let response = dispatch_ingress(IngressRequest {
-            operation: Some(ingress_request::Operation::RouterQuery(pb::RouterQueryOp {
-                method: "system.genesis".to_string(),
-                args,
-            })),
-        });
-        let error = expect_error(response);
-        assert_eq!(error.code, ERROR_CODE_PROCESSING_FAILED);
-        assert!(error.message.contains("device_entropy must be 32 bytes"));
-        assert!(!error.message.contains("requires genesis"));
-    }
-
-    /// Cache a deterministic wallet seed so the Genesis v2 identity derivation can run
-    /// (replaces the legacy C-DBRW binding-key staging).
-    fn unlock_test_wallet_seed() {
-        crate::sdk::recovery_sdk::RecoverySDK::set_cached_wallet_seed_for_testing(vec![0x33; 64]);
+        let pack = pb::ArgPack::decode(ok_bytes.as_slice()).expect("an ArgPack answer");
+        let phrase = String::from_utf8(pack.body).expect("a UTF-8 phrase");
+        bip39::Mnemonic::parse_in(bip39::Language::English, &phrase)
+            .expect("the minimal router answers a valid mnemonic");
+        drop(fleet);
     }
 
     #[test]
     #[serial]
     fn startup_initialize_identity_context_sets_identity_and_router() {
-        let _guard = setup_test_env();
-        unlock_test_wallet_seed();
-        install_identity_context_core(vec![0x11; 32], vec![0x22; 32])
+        let identity = restarted_device(0x11);
+        install_identity_context_core(identity.device_id.to_vec(), identity.genesis.to_vec())
             .expect("identity context install should succeed");
         assert!(crate::is_sdk_context_initialized());
     }
@@ -1431,11 +1291,11 @@ register_incarnation = "BHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE0"
     #[test]
     #[serial]
     fn prime_identity_app_state_returns_error_when_wallet_locked() {
-        let _guard = setup_test_env();
-        // No wallet seed cached → identity priming fails closed.
-        let error = prime_identity_app_state(&[0x11; 32], &[0x22; 32])
-            .expect_err("missing wallet seed should be surfaced as startup error");
-
+        let identity = restarted_device(0x12);
+        // The wallet locks: its seed leaves RAM.
+        crate::sdk::recovery_sdk::RecoverySDK::clear_wallet_seed_cache();
+        let error = prime_identity_app_state(&identity.device_id, &identity.genesis)
+            .expect_err("a locked wallet must be surfaced as a startup error");
         assert_eq!(error.code, ERROR_CODE_PROCESSING_FAILED);
         assert!(error
             .message
@@ -1445,108 +1305,78 @@ register_incarnation = "BHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE0"
     #[test]
     #[serial]
     fn startup_initialize_identity_context_via_dispatch_succeeds() {
-        let _guard = setup_test_env();
-        unlock_test_wallet_seed();
-        // The legacy C-DBRW binding_key field is gone from the proto; identity install is
-        // wallet-seed-rooted and succeeds via the dispatch path.
+        let identity = restarted_device(0x13);
+        let fleet = fleet();
         let response = dispatch_startup(StartupRequest {
             operation: Some(startup_request::Operation::InitializeIdentityContext(
                 pb::InitializeIdentityContextOp {
-                    device_id: vec![0x11; 32],
-                    genesis_hash: vec![0x22; 32],
+                    device_id: identity.device_id.to_vec(),
+                    genesis_hash: identity.genesis.to_vec(),
                 },
             )),
         });
-        match response.result {
-            Some(startup_response::Result::OkBytes(_)) => {}
-            other => panic!("expected OkBytes, got {other:?}"),
-        }
+        assert_eq!(expect_startup_ok(response), STARTUP_OK_BYTES);
         assert!(crate::is_sdk_context_initialized());
+        drop(fleet);
+    }
+
+    fn restore(identity_device: [u8; 32], genesis: [u8; 32]) -> StartupResponse {
+        dispatch_startup(StartupRequest {
+            operation: Some(startup_request::Operation::RestoreIdentityContext(
+                pb::RestoreIdentityContextOp {
+                    device_id: identity_device.to_vec(),
+                    genesis_hash: genesis.to_vec(),
+                },
+            )),
+        })
     }
 
     #[test]
     #[serial]
     fn startup_restore_identity_context_initializes_router() {
-        let _guard = setup_test_env();
-        unlock_test_wallet_seed();
-        let response = dispatch_startup(StartupRequest {
-            operation: Some(startup_request::Operation::RestoreIdentityContext(
-                pb::RestoreIdentityContextOp {
-                    device_id: vec![0x11; 32],
-                    genesis_hash: vec![0x22; 32],
-                },
-            )),
-        });
-
-        match response.result {
-            Some(startup_response::Result::OkBytes(_)) => {}
-            other => panic!("expected OkBytes, got {other:?}"),
-        }
+        let identity = restarted_device(0x14);
+        let fleet = fleet();
+        assert_eq!(
+            expect_startup_ok(restore(identity.device_id, identity.genesis)),
+            STARTUP_OK_BYTES
+        );
         assert!(crate::is_sdk_context_initialized());
+        drop(fleet);
     }
 
     #[test]
     #[serial]
     fn startup_restore_identity_context_is_idempotent_for_same_identity() {
-        let _guard = setup_test_env();
-        unlock_test_wallet_seed();
-
-        let first = dispatch_startup(StartupRequest {
-            operation: Some(startup_request::Operation::RestoreIdentityContext(
-                pb::RestoreIdentityContextOp {
-                    device_id: vec![0x11; 32],
-                    genesis_hash: vec![0x22; 32],
-                },
-            )),
-        });
-        match first.result {
-            Some(startup_response::Result::OkBytes(_)) => {}
-            other => panic!("expected OkBytes, got {other:?}"),
-        }
-
-        let second = dispatch_startup(StartupRequest {
-            operation: Some(startup_request::Operation::RestoreIdentityContext(
-                pb::RestoreIdentityContextOp {
-                    device_id: vec![0x11; 32],
-                    genesis_hash: vec![0x22; 32],
-                },
-            )),
-        });
-        match second.result {
-            Some(startup_response::Result::OkBytes(_)) => {}
-            other => panic!("expected OkBytes, got {other:?}"),
-        }
+        let identity = restarted_device(0x15);
+        let fleet = fleet();
+        assert_eq!(
+            expect_startup_ok(restore(identity.device_id, identity.genesis)),
+            STARTUP_OK_BYTES
+        );
+        assert_eq!(
+            expect_startup_ok(restore(identity.device_id, identity.genesis)),
+            STARTUP_OK_BYTES
+        );
+        drop(fleet);
     }
 
     #[test]
     #[serial]
     fn startup_restore_identity_context_rejects_mismatched_identity() {
-        let _guard = setup_test_env();
-        unlock_test_wallet_seed();
-
-        let first = dispatch_startup(StartupRequest {
-            operation: Some(startup_request::Operation::RestoreIdentityContext(
-                pb::RestoreIdentityContextOp {
-                    device_id: vec![0x11; 32],
-                    genesis_hash: vec![0x22; 32],
-                },
-            )),
-        });
-        match first.result {
-            Some(startup_response::Result::OkBytes(_)) => {}
-            other => panic!("expected OkBytes, got {other:?}"),
-        }
-
-        let second = dispatch_startup(StartupRequest {
-            operation: Some(startup_request::Operation::RestoreIdentityContext(
-                pb::RestoreIdentityContextOp {
-                    device_id: vec![0x99; 32],
-                    genesis_hash: vec![0x22; 32],
-                },
-            )),
-        });
-        let error = expect_startup_error(second);
+        let other = crate::test_support::two_device::TestDevice::create("other", 0x99);
+        let identity = restarted_device(0x16);
+        let fleet = fleet();
+        assert_eq!(
+            expect_startup_ok(restore(identity.device_id, identity.genesis)),
+            STARTUP_OK_BYTES
+        );
+        let error = expect_startup_error(restore(other.device_id, identity.genesis));
         assert_eq!(error.code, ERROR_CODE_INVALID_INPUT);
-        assert!(error.message.contains("different device_id"));
+        assert!(
+            error.message.contains("different device_id"),
+            "{}",
+            error.message
+        );
+        drop(fleet);
     }
 }

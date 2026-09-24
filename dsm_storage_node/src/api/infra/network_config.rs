@@ -34,11 +34,6 @@ pub enum NetworkType {
 pub struct NetworkDetector;
 
 impl NetworkDetector {
-    /// Automatically detect the best network configuration for this storage node
-    pub fn detect_network_config(node_index: usize) -> Result<AutoNetworkConfig> {
-        Self::detect_network_config_with_tls(node_index, false)
-    }
-
     /// Autodetect with optional TLS scheme for the public endpoint.
     pub fn detect_network_config_with_tls(
         node_index: usize,
@@ -270,42 +265,6 @@ impl NetworkDetector {
         info!("net:peers {} discovered", peers.len());
         debug!("net:peer endpoints = {:?}", peers);
         Ok(peers)
-    }
-
-    /// Optional validation helper (bind test).
-    #[allow(dead_code)]
-    pub fn validate_config(cfg: &AutoNetworkConfig) -> Result<()> {
-        if !Self::is_port_available(cfg.port) {
-            return Err(anyhow::anyhow!("Port {} is not available", cfg.port));
-        }
-        let addr = SocketAddr::new(cfg.listen_address, cfg.port);
-        let _ = TcpListener::bind(addr)
-            .map_err(|e| anyhow::anyhow!("Cannot bind to {}: {}", addr, e))?;
-        info!("net:config validated");
-        Ok(())
-    }
-
-    /// Build N-node config set on current host (best-effort).
-    #[allow(dead_code)]
-    pub fn create_dev_node_configs(num_nodes: usize) -> Result<Vec<AutoNetworkConfig>> {
-        let mut cfgs = Vec::with_capacity(num_nodes);
-        for i in 0..num_nodes {
-            let c = Self::detect_network_config(i)?;
-            let _ = Self::validate_config(&c);
-            cfgs.push(c);
-        }
-        // Normalize peers across the set
-        let mut all: Vec<String> = cfgs.iter().map(|c| c.public_endpoint.clone()).collect();
-        all.sort();
-        all.dedup();
-        for c in &mut cfgs {
-            c.peers = all
-                .iter()
-                .filter(|ep| *ep != &c.public_endpoint)
-                .cloned()
-                .collect();
-        }
-        Ok(cfgs)
     }
 }
 
