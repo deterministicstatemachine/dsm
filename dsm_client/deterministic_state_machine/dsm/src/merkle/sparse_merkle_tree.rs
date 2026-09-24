@@ -543,7 +543,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn empty_tree_root_matches_default_chain() {
         let smt = SparseMerkleTree::new();
         assert_eq!(*smt.root(), empty_root(256));

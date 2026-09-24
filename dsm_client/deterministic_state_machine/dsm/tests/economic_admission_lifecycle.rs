@@ -15,7 +15,7 @@ use dsm::economic::admission::{
 };
 use dsm::economic::claim::{AdmissionSubstrate, EconomicAdmissionManifest};
 use dsm::economic::classifier::EconomicEffect;
-use dsm::economic::credit::{CreditSource, CreditSourceAuthorizedIssuance};
+use dsm::economic::credit::CreditSource;
 use dsm::economic::lineage::{
     activate, advance_validated, AcceptedSubstrate, EconomicActivationSnapshot,
     EconomicValidationError,
@@ -36,7 +36,6 @@ const DEV: [u8; 32] = [0x22; 32];
 const ERA: [u8; 32] = [0xAA; 32];
 
 const SOFI: [u8; 32] = [0xBB; 32];
-const ISSUANCE_ADDR: [u8; 32] = [0xC1; 32];
 
 fn pending(kind: PendingAdmissionKind, state: EconomicAdmissionState) -> PendingEconomicAdmission {
     let prepared = PendingEconomicAdmission::prepared(kind, 4, [1; 32], [3; 32]);
@@ -501,71 +500,6 @@ fn a_witness_that_is_not_the_operations_exact_effect_is_refused() {
     }
 }
 
-/// THE BOOTSTRAP FINDING, RESOLVED — and what replaced it.
-///
-/// This test used to pin `IssuancePredicateUndefined`: with no authenticated
-/// issuance predicate, a positive credit could never enter a validated
-/// lineage at all, and the wallet was structurally unfundable except through
-/// the ERA faucet's bootstrap tickets.
-///
-/// Class `0x0029` answers that, so the blanket refusal is gone. What replaced
-/// it is narrower and is what this test now pins: the predicate must be
-/// SATISFIED, not merely defined. A mint whose witness carries no issuance
-/// source — as here — is refused because the credit it claims has no source
-/// of the kind the operation requires. Existence of a predicate never
-/// substitutes for evidence under it.
-#[test]
-fn issuance_requires_its_predicate_to_be_satisfied_not_merely_defined() {
-    let fx = faucet_fixture(1);
-    let (witness, post_root) = build_transition(fx.witness.operation_digest);
-    let mint = Operation::Mint {
-        amount: Balance::from_state(100, [0u8; 32]),
-        token_id: b"ERA".to_vec(),
-        policy_commit: ERA,
-        message: String::new(),
-    };
-    let accepted = AcceptedSubstrate::from_verified_dsm_successor(
-        mint.clone(),
-        C_DSM_PLUS,
-        EMBEDDED_PARENT,
-        SUBSTRATE_ADDR,
-    );
-    // Rebind the witness digest to the mint operation so the refusal comes
-    // from the write-set/source clause, not a digest mismatch.
-    let witness = EconomicTransitionWitness::new(
-        witness.pre_economic_root,
-        witness.post_economic_root,
-        dsm::economic::admission::dsm_economic_operation_id(&G, &DEV, &C_DSM_PLUS),
-        dsm::economic::admission::dsm_operation_digest(&mint.to_bytes()),
-        witness.mutations,
-        witness.credit_sources,
-    )
-    .expect("valid witness");
-    let manifest = manifest_for(&witness);
-    let registered = registered_for(&manifest, 1, post_root);
-    // LAYERING SHIFT (producer cut): the witness DOES carry a 0x0023
-    // descriptor, so the write-set shape check now passes — the missing
-    // verifier arm that used to refuse this as a kind mismatch was one of the
-    // defects the producer cut fixed. The refusal therefore moved DOWN to the
-    // layer that actually resolves the predicate: provenance must fetch the
-    // authorization evidence, and in this fixture no evidence store exists —
-    // the predicate is defined but unsatisfiable, and validation fails closed
-    // exactly there.
-    match run(&fx, &registered, &manifest, &witness, &accepted) {
-        Err(EconomicValidationError::Provenance(e)) => {
-            let msg = e.to_string();
-            assert!(
-                msg.contains("no evidence store in this fixture"),
-                "the refusal must be the unresolvable issuance evidence, got: {msg}"
-            );
-        }
-        other => panic!(
-            "a mint whose issuance predicate cannot be satisfied must be refused at the \
-             provenance layer, got {other:?}"
-        ),
-    }
-}
-
 #[test]
 fn a_successor_paired_with_a_different_operation_is_refused() {
     // THE clause that is easiest to omit and most costly to omit. Both
@@ -681,37 +615,6 @@ fn a_registered_root_disagreeing_with_the_witness_is_refused() {
         run(&fx, &registered, &manifest, &fx.witness, &accepted),
         Err(EconomicValidationError::RegisteredRootDiffersFromWitness { .. })
     ));
-}
-
-/// The Mint-shaped witness the issuance test pairs with a Mint operation.
-fn build_transition(operation_digest: [u8; 32]) -> (EconomicTransitionWitness, [u8; 32]) {
-    let mut tree = EconomicSmt::new();
-    let pre_root = tree.root();
-
-    let credit = bal(ERA, 100);
-    let key = credit.leaf_key(&G, &DEV);
-    let siblings = tree.siblings(&key).to_vec();
-    let mutation =
-        EconomicLeafMutation::new(None, Some(credit.clone()), siblings).expect("well-formed");
-    assert!(mutation.is_positive_credit());
-    tree.insert(key, credit.leaf_value().expect("encodable"));
-    let post_root = tree.root();
-
-    let witness = EconomicTransitionWitness::new(
-        pre_root,
-        post_root,
-        [0x0E; 32],
-        operation_digest,
-        vec![mutation],
-        vec![CreditSource::AuthorizedIssuance(
-            CreditSourceAuthorizedIssuance {
-                credit_mutation_index: 0,
-                issuance_authorization_addr: ISSUANCE_ADDR,
-            },
-        )],
-    )
-    .expect("valid witness");
-    (witness, post_root)
 }
 
 // ─── The market-leg token-policy conjunct (SoFi Def 4.1 / Req 4.4 / 4.6) ────

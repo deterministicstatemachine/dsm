@@ -1488,25 +1488,6 @@ mod tests {
         signed_transfer_op_amount(sk, state_hash, nonce, message, "ERA", 10)
     }
 
-    // Mint carries no authorization bytes — authority lives in the 0x0029
-    // admission evidence, so a fixture mint is just the economic intent.
-    fn mint_op_amount(token_id: &str, amount: u64) -> Operation {
-        Operation::Mint {
-            amount: {
-                let mut balance = Balance::zero();
-                balance.update_add(amount);
-                balance
-            },
-            token_id: token_id.as_bytes().to_vec(),
-            policy_commit: [0u8; 32],
-            message: "test mint".to_string(),
-        }
-    }
-
-    fn signed_mint_op(_sk: &[u8]) -> Operation {
-        mint_op_amount("token2", 100)
-    }
-
     fn signed_burn_op_amount(sk: &[u8], token_id: &str, amount: u64) -> Operation {
         let mut op = Operation::Burn {
             amount: {
@@ -1733,10 +1714,10 @@ mod tests {
 
         assert!(transfer_op.affects_balance(b"ERA"));
         assert!(!transfer_op.affects_balance(b"token2"));
-        let mint_op = signed_mint_op(&sk);
+        let burn_op = signed_burn_op_amount(&sk, "token2", 100);
 
-        assert!(mint_op.affects_balance(b"token2"));
-        assert!(!mint_op.affects_balance(b"ERA"));
+        assert!(burn_op.affects_balance(b"token2"));
+        assert!(!burn_op.affects_balance(b"ERA"));
     }
 
     // calculate_sparse_indices tests removed — function deleted per §4.3
@@ -1784,29 +1765,6 @@ mod tests {
         assert!(result.is_ok());
         assert!(!result.unwrap_or_else(|e| panic!("verification should return Ok(false): {e}")));
         // Should be false
-    }
-
-    #[test]
-    fn test_verify_token_balance_consistency_mint() {
-        let mut prev_state = create_test_state(1);
-        let mut current_state = create_test_state(2);
-        let key = test_balance_key(&prev_state, b"token1");
-
-        prev_state.token_balances.insert(key.clone(), {
-            let mut balance = Balance::zero();
-            balance.update_add(100);
-            balance
-        });
-        current_state.token_balances.insert(key.clone(), {
-            let mut balance = Balance::zero();
-            balance.update_add(150);
-            balance
-        });
-        let mint_op = mint_op_amount("token1", 50);
-
-        let result = verify_token_balance_consistency(&prev_state, &current_state, &mint_op);
-        assert!(result.is_ok());
-        assert!(result.unwrap_or_else(|e| panic!("mint consistency should be ok: {e}")));
     }
 
     #[test]
@@ -2103,46 +2061,6 @@ mod tests {
         let result = verify_token_balance_consistency(&prev_state, &current_state, &burn_op);
         assert!(result.is_ok());
         // Burn falls through to the default case which checks balance preservation
-    }
-
-    #[test]
-    fn test_verify_token_balance_consistency_missing_token_after_mint() {
-        let prev_state = create_test_state(1);
-        let current_state = create_test_state(2);
-
-        // Mint operation but token not added to current state
-        let mint_op = mint_op_amount("new_token", 100);
-
-        let result = verify_token_balance_consistency(&prev_state, &current_state, &mint_op);
-        assert!(result.is_ok());
-        assert!(!result.unwrap_or_else(|e| panic!(
-            "should return false when minted token missing from current state: {e}"
-        )));
-    }
-
-    #[test]
-    fn test_verify_token_balance_consistency_incorrect_mint_amount() {
-        let mut prev_state = create_test_state(1);
-        let mut current_state = create_test_state(2);
-
-        let key = test_balance_key(&prev_state, b"token1");
-        prev_state.token_balances.insert(key.clone(), {
-            let mut balance = Balance::zero();
-            balance.update_add(50);
-            balance
-        });
-        current_state.token_balances.insert(key, {
-            let mut balance = Balance::zero();
-            balance.update_add(120); // Should be 50 + 100 = 150
-            balance
-        });
-
-        let mint_op = mint_op_amount("token1", 100);
-
-        let result = verify_token_balance_consistency(&prev_state, &current_state, &mint_op);
-        assert!(result.is_ok());
-        assert!(!result
-            .unwrap_or_else(|e| panic!("should return false for incorrect mint amount: {e}")));
     }
 
     #[test]

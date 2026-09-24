@@ -30,8 +30,8 @@
 //! raise availability and nothing else: no member votes, compares or decides,
 //! the leader of a cell is `FisherYates(seed(reserve_id, R_n), S)[0]` over the
 //! COMMITTED set, and `Final` is the leader's first recognized object held by
-//! two further links on its route chain ([`crate::route_chain::evaluate`]). Which bytes at the cell are
-//! an object naming it is Core's question, answered here by
+//! two further links on its route chain ([`crate::route_chain::evaluate`]).
+//! Which bytes at the cell are an object naming it is Core's question, answered here by
 //! [`recognize_release`]: a release that does not fit its parent — wrong
 //! reserve, wrong root, wrong generation, zero, or more than remains — is not
 //! an occupant, however early it arrived and however many members hold it.
@@ -64,7 +64,7 @@ use crate::common::domain_tags::{
     TAG_DSM_NATIVE_RESERVE_SEED, TAG_DSM_NATIVE_RESERVE_STATE,
 };
 use crate::crypto::blake3::dsm_domain_hasher;
-use crate::route_chain::{evaluate, CellEvidence, CellReading, ChainState};
+use crate::route_chain::{evaluate, CellEvidence, CellReading, ChainState, Missing};
 use crate::storage_object::immutable_addr;
 use crate::types::proto as generated;
 
@@ -497,7 +497,7 @@ pub enum SuccessorRead {
         release: Box<VerifiedRelease>,
         child: NativeReserveState,
     },
-    /// The leader's first recognized object, not yet held by two others. No
+    /// The release holds the leader link and its chain is not final yet. No
     /// other release will ever be final here; the state is settled but not
     /// yet final.
     LeaderHeld {
@@ -506,47 +506,44 @@ pub enum SuccessorRead {
     },
     /// The leader answered and holds no release of this state: the head.
     Open,
-    /// The leader did not answer. No member stands in.
-    Unavailable,
+    /// The evidence in hand does not decide the cell yet: a network status
+    /// the caller retries, never an answer. No member stands in.
+    Unavailable(Missing),
 }
 
 /// Resolve the parent's successor cell from its route-chain evidence (storage
 /// spec §9): the leader's arrival log, each later seat's, and the ByteCommits
 /// that make their links checkable.
 ///
-/// Recognition first: only bytes that are a release of this parent count, so
-/// unrecognized bytes are never an occupant, never final, however early they
-/// arrived. `Unavailable` means the evidence in hand does not yet decide the
-/// cell (the leader unread, or its link not yet committed): a network status
-/// the caller retries, never an answer.
+/// Recognition first: only bytes that verify as a release AND succeed this
+/// parent count, so unrecognized bytes are never an occupant, never final,
+/// however early they arrived. What holds the cell is the release and the
+/// child state recognition built.
 pub fn resolve_successor(parent: &NativeReserveState, evidence: &CellEvidence) -> SuccessorRead {
     let reading = evaluate(evidence, |bytes| {
-        recognize_release(parent, bytes).map(|_| crate::storage_cell::entry_digest(bytes))
-    });
-    // The held bytes were recognized above, so they rebuild into a release
-    // that is the parent's successor; bytes that somehow do not establish
-    // nothing, never something.
-    let recognized = |bytes: &[u8]| -> Option<(VerifiedRelease, NativeReserveState)> {
-        let release = recognize_release(parent, bytes)?;
+        let release = decode_and_verify_release(bytes).ok()?;
         let child = release_constructible(parent, &release).ok()?;
-        Some((release, child))
-    };
+        Some((crate::storage_cell::entry_digest(bytes), (release, child)))
+    });
     match reading {
-        Ok(CellReading::Held { value, state, .. }) => match (recognized(&value), state) {
-            (Some((release, child)), ChainState::Final) => SuccessorRead::Final {
-                release: Box::new(release),
-                child,
-            },
-            (Some((release, child)), ChainState::LeaderHeld | ChainState::Preserved) => {
-                SuccessorRead::LeaderHeld {
-                    release: Box::new(release),
-                    child,
-                }
-            }
-            (None, _) => SuccessorRead::Unavailable,
+        Ok(CellReading::Held {
+            object: (release, child),
+            state: ChainState::Final,
+            ..
+        }) => SuccessorRead::Final {
+            release: Box::new(release),
+            child,
+        },
+        Ok(CellReading::Held {
+            object: (release, child),
+            state: ChainState::LeaderHeld | ChainState::Preserved,
+            ..
+        }) => SuccessorRead::LeaderHeld {
+            release: Box::new(release),
+            child,
         },
         Ok(CellReading::Open) => SuccessorRead::Open,
-        Err(_) => SuccessorRead::Unavailable,
+        Err(missing) => SuccessorRead::Unavailable(missing),
     }
 }
 
@@ -562,8 +559,11 @@ pub enum WalkStop {
         release: Box<VerifiedRelease>,
         child: NativeReserveState,
     },
-    /// The successor cell of `last` could not be read.
-    Unavailable(NativeReserveState),
+    /// The evidence for the successor cell of `last` does not decide it yet.
+    Unavailable {
+        last: NativeReserveState,
+        missing: Missing,
+    },
     /// The budget ran out at `last`. Never a verdict about the lineage.
     BudgetExhausted(NativeReserveState),
 }
@@ -601,7 +601,12 @@ where
                 }
             }
             SuccessorRead::Open => return WalkStop::Head(state),
-            SuccessorRead::Unavailable => return WalkStop::Unavailable(state),
+            SuccessorRead::Unavailable(missing) => {
+                return WalkStop::Unavailable {
+                    last: state,
+                    missing,
+                }
+            }
         }
     }
     WalkStop::BudgetExhausted(state)
@@ -610,7 +615,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sofi::wire::STORAGE_MEMBER_COUNT;
+    use crate::route_chain::{fixtures::Cell, ROUTE_LEN};
 
     const NETWORK: &[u8] = b"dsm-testnet";
     const SET: D32 = [0xB1; 32];
@@ -642,16 +647,20 @@ mod tests {
         }
     }
 
-    fn signed(parent: &NativeReserveState, amount: u64) -> (VerifiedRelease, Vec<u8>) {
+    /// A release of `parent`, signed by a fresh claimant key, and that key.
+    fn signed_with_key(parent: &NativeReserveState, amount: u64) -> (VerifiedRelease, Vec<u8>) {
         let (pk, sk) = keypair();
         let bytes = sign_release(&body(parent, amount, &pk), &sk).expect("signable");
         (decode_and_verify_release(&bytes).expect("verifies"), pk)
     }
 
-    fn reads(
-        per_member: [Option<Vec<Vec<u8>>>; STORAGE_MEMBER_COUNT],
-    ) -> Vec<Option<Vec<Vec<u8>>>> {
-        per_member.to_vec()
+    fn signed(parent: &NativeReserveState, amount: u64) -> VerifiedRelease {
+        signed_with_key(parent, amount).0
+    }
+
+    /// The parent's successor cell, over the fixture's committed set.
+    fn successor_cell() -> Cell {
+        Cell::new(b"DSM/test-reserve-cell", [0x4E; 32], [0x91; 32])
     }
 
     // ── Identity ─────────────────────────────────────────────────────────
@@ -683,7 +692,7 @@ mod tests {
 
     #[test]
     fn the_envelope_round_trips_and_is_strict() {
-        let (release, _) = signed(&genesis(), 100);
+        let release = signed(&genesis(), 100);
         let bytes = release.envelope_bytes.clone();
         // Decodable-but-non-canonical: unknown field, silently skipped by
         // prost, caught only by the re-encode comparison.
@@ -705,7 +714,7 @@ mod tests {
     #[test]
     fn a_release_conserves_the_reserve() {
         let r0 = genesis();
-        let (release, _) = signed(&r0, ERA_FAUCET_PAYOUT);
+        let release = signed(&r0, ERA_FAUCET_PAYOUT);
         let r1 = release_constructible(&r0, &release).expect("constructible");
         assert_eq!(
             r1.remaining_supply + release.body.amount,
@@ -723,7 +732,7 @@ mod tests {
     fn no_valid_reserve_transition_can_mint_era() {
         let mut low = genesis();
         low.remaining_supply = 50;
-        let (release, _) = signed(&low, 51);
+        let release = signed(&low, 51);
         assert_eq!(
             release_constructible(&low, &release),
             Err(ReleaseRefusal::ExceedsReserve {
@@ -737,10 +746,10 @@ mod tests {
         );
         // Exactly what remains is the last legal release; the reserve is then
         // exhausted, and nothing replenishes it.
-        let (last, _) = signed(&low, 50);
+        let last = signed(&low, 50);
         let exhausted = release_constructible(&low, &last).expect("the last unit");
         assert_eq!(exhausted.remaining_supply, 0);
-        let (more, _) = signed(&exhausted, 1);
+        let more = signed(&exhausted, 1);
         assert!(release_constructible(&exhausted, &more).is_err());
     }
 
@@ -751,7 +760,7 @@ mod tests {
         let mut state = genesis();
         let mut released = 0u64;
         for amount in [100u64, 7, 100, 1] {
-            let (release, _) = signed(&state, amount);
+            let release = signed(&state, amount);
             state = release_constructible(&state, &release).expect("constructible");
             released += amount;
             assert_eq!(
@@ -769,12 +778,12 @@ mod tests {
     #[test]
     fn no_creator_backout_the_only_transition_is_a_release_to_its_recipient() {
         let r0 = genesis();
-        let (zero, _) = signed(&r0, 0);
+        let zero = signed(&r0, 0);
         assert_eq!(
             release_constructible(&r0, &zero),
             Err(ReleaseRefusal::ZeroRelease)
         );
-        let (release, pk) = signed(&r0, 100);
+        let (release, pk) = signed_with_key(&r0, 100);
         let r1 = release_constructible(&r0, &release).expect("constructible");
         // Every unit that left the reserve is accounted to the recipient the
         // body names, and that recipient is the signer.
@@ -823,52 +832,38 @@ mod tests {
 
     // ── The cell, leader first ───────────────────────────────────────────
 
-    /// `finality without the deterministic leader is impossible`: four
-    /// members holding a release with the leader empty resolve to nothing;
-    /// the leader's first recognized object held by two others is final.
+    /// Finality without the leader is impossible: a release at every later
+    /// seat with nothing at the leader leaves the cell open, and an unread
+    /// leader leaves it undecided. The leader's first recognized release with
+    /// two further valid links is final.
     #[test]
     fn finality_without_the_deterministic_leader_is_impossible() {
         let r0 = genesis();
-        let (release, _) = signed(&r0, 100);
+        let release = signed(&r0, 100);
         let x = release.envelope_bytes.clone();
-        let without_leader = reads([
-            Some(vec![]),
-            Some(vec![x.clone()]),
-            Some(vec![x.clone()]),
-            Some(vec![x.clone()]),
-            Some(vec![x.clone()]),
-        ]);
+        let mut skipped_leader = successor_cell();
+        skipped_leader.write(&x, ROUTE_LEN - 1, &[0]);
         assert_eq!(
-            resolve_successor(&r0, &without_leader, 0).unwrap(),
+            resolve_successor(&r0, &skipped_leader.evidence()),
             SuccessorRead::Open,
-            "four holders and an empty leader: the race has not ended"
+            "four seats hold the release and the leader holds nothing"
         );
-        let with_leader = reads([
-            Some(vec![x.clone()]),
-            Some(vec![x.clone()]),
-            Some(vec![x.clone()]),
-            None,
-            Some(vec![]),
-        ]);
+        let mut cell = successor_cell();
+        cell.write(&x, ROUTE_LEN - 1, &[]);
         let child = release_constructible(&r0, &release).unwrap();
         assert_eq!(
-            resolve_successor(&r0, &with_leader, 0).unwrap(),
+            resolve_successor(&r0, &cell.evidence()),
             SuccessorRead::Final {
-                release: Box::new(release.clone()),
+                release: Box::new(release),
                 child
             }
         );
-        let unread_leader = reads([
-            None,
-            Some(vec![x.clone()]),
-            Some(vec![x.clone()]),
-            Some(vec![x.clone()]),
-            Some(vec![x]),
-        ]);
+        let mut unread_leader = cell.evidence();
+        unread_leader.seats[0].values = None;
         assert_eq!(
-            resolve_successor(&r0, &unread_leader, 0).unwrap(),
-            SuccessorRead::Unavailable,
-            "an unread leader is Unavailable; no member stands in"
+            resolve_successor(&r0, &unread_leader),
+            SuccessorRead::Unavailable(Missing::LeaderUnread),
+            "no member stands in for the leader"
         );
     }
 
@@ -877,85 +872,52 @@ mod tests {
     #[test]
     fn unrecognized_bytes_never_occupy_the_cell() {
         let r0 = genesis();
-        let (release, _) = signed(&r0, 100);
-        let x = release.envelope_bytes.clone();
+        let release = signed(&r0, 100);
         // Signed, canonical, succeeding R_0 — and releasing more than exists.
-        let (too_much, _) = signed(&r0, ERA_RESERVE_GENESIS_SUPPLY + 1);
-        let garbage = b"not a release".to_vec();
-        let member = Some(vec![garbage, too_much.envelope_bytes.clone(), x.clone()]);
-        let r = reads([
-            member.clone(),
-            member.clone(),
-            member,
-            Some(vec![]),
-            Some(vec![]),
-        ]);
+        let too_much = signed(&r0, ERA_RESERVE_GENESIS_SUPPLY + 1);
+        let mut cell = successor_cell();
+        cell.write(b"not a release", 0, &[]);
+        cell.write(&too_much.envelope_bytes, 0, &[]);
+        cell.write(&release.envelope_bytes, ROUTE_LEN - 1, &[]);
         let child = release_constructible(&r0, &release).unwrap();
         assert_eq!(
-            resolve_successor(&r0, &r, 0).unwrap(),
+            resolve_successor(&r0, &cell.evidence()),
             SuccessorRead::Final {
                 release: Box::new(release),
                 child
             },
-            "the first RECOGNIZED object at the leader wins, not the first bytes"
+            "the first RECOGNIZED object at the leader holds the cell, not the first bytes"
         );
     }
 
-    /// `additional replicas do not alter the selected leader/winner`: copies
-    /// change only how many hold the leader's first object, never which
-    /// object that is.
+    /// Copies never change which release holds the cell: the leader's first
+    /// recognized release does, and only its own chain can make it final.
     #[test]
     fn additional_replicas_do_not_alter_the_winner() {
         let r0 = genesis();
-        let (a, _) = signed(&r0, 100);
-        let (b, _) = signed(&r0, 100);
-        let (xa, xb) = (a.envelope_bytes.clone(), b.envelope_bytes.clone());
+        let a = signed(&r0, 100);
+        let b = signed(&r0, 100);
         let child_a = release_constructible(&r0, &a).unwrap();
-        // A reached the leader first; B is everywhere else.
-        let few = reads([
-            Some(vec![xa.clone(), xb.clone()]),
-            Some(vec![xb.clone()]),
-            Some(vec![]),
-            Some(vec![]),
-            Some(vec![]),
-        ]);
+        let mut cell = successor_cell();
+        cell.write(&a.envelope_bytes, 0, &[]);
+        cell.write(&b.envelope_bytes, ROUTE_LEN - 1, &[]);
         assert_eq!(
-            resolve_successor(&r0, &few, 0).unwrap(),
-            SuccessorRead::LeaderHeld {
-                release: Box::new(a.clone()),
-                child: child_a
-            }
-        );
-        let many_b = reads([
-            Some(vec![xa.clone(), xb.clone()]),
-            Some(vec![xb.clone()]),
-            Some(vec![xb.clone()]),
-            Some(vec![xb.clone()]),
-            Some(vec![xb.clone()]),
-        ]);
-        assert_eq!(
-            resolve_successor(&r0, &many_b, 0).unwrap(),
+            resolve_successor(&r0, &cell.evidence()),
             SuccessorRead::LeaderHeld {
                 release: Box::new(a.clone()),
                 child: child_a
             },
-            "four replicas of B do not make B the winner"
+            "B at every seat does not make B the winner"
         );
-        let copies_of_a = reads([
-            Some(vec![xa.clone(), xb.clone()]),
-            Some(vec![xb.clone(), xa.clone()]),
-            Some(vec![xa.clone()]),
-            Some(vec![xb.clone()]),
-            Some(vec![xb]),
-        ]);
+        cell.continue_chain(&a.envelope_bytes, 1, 2);
         assert_eq!(
-            resolve_successor(&r0, &copies_of_a, 0).unwrap(),
+            resolve_successor(&r0, &cell.evidence()),
             SuccessorRead::Final {
                 release: Box::new(a),
                 child: child_a
-            }
+            },
+            "A's own chain, continued after B's copies, makes A final"
         );
-        let _ = xa;
     }
 
     // ── The walk ─────────────────────────────────────────────────────────
@@ -963,9 +925,9 @@ mod tests {
     #[test]
     fn the_walk_advances_through_final_releases_and_stops_at_the_head() {
         let r0 = genesis();
-        let (rel1, _) = signed(&r0, 100);
+        let rel1 = signed(&r0, 100);
         let r1 = release_constructible(&r0, &rel1).unwrap();
-        let (rel2, _) = signed(&r1, 7);
+        let rel2 = signed(&r1, 7);
         let r2 = release_constructible(&r1, &rel2).unwrap();
         let mut visited = Vec::new();
         let stop = walk_lineage(
@@ -986,21 +948,40 @@ mod tests {
                     SuccessorRead::Open
                 }
             },
-            |parent, _release, child| visited.push((parent.generation, child.generation)),
+            |parent, release, child| {
+                visited.push((parent.generation, release.body.generation, child.generation))
+            },
         );
         assert_eq!(stop, WalkStop::Head(r2));
-        assert_eq!(visited, vec![(0, 1), (1, 2)]);
+        assert_eq!(visited, vec![(0, 1, 1), (1, 2, 2)]);
         assert_eq!(r2.remaining_supply, ERA_RESERVE_GENESIS_SUPPLY - 107);
     }
 
     #[test]
     fn the_walk_never_turns_unavailable_or_budget_into_a_head() {
         let r0 = genesis();
+        let mut visited = 0;
         assert_eq!(
-            walk_lineage(r0, 16, |_| SuccessorRead::Unavailable, |_, _, _| {}),
-            WalkStop::Unavailable(r0)
+            walk_lineage(
+                r0,
+                16,
+                |parent| {
+                    assert_eq!(parent.generation, 0, "the walk reads R_0's cell first");
+                    SuccessorRead::Unavailable(Missing::LeaderUnread)
+                },
+                |parent, release, child| {
+                    visited += 1;
+                    assert_eq!(parent.generation + 1, release.body.generation);
+                    assert_eq!(release.body.generation, child.generation);
+                },
+            ),
+            WalkStop::Unavailable {
+                last: r0,
+                missing: Missing::LeaderUnread
+            }
         );
-        let (rel1, _) = signed(&r0, 100);
+        assert_eq!(visited, 0, "nothing final was read");
+        let rel1 = signed(&r0, 100);
         let r1 = release_constructible(&r0, &rel1).unwrap();
         let stop = walk_lineage(
             r0,
@@ -1015,7 +996,10 @@ mod tests {
                     SuccessorRead::Open
                 }
             },
-            |_, _, _| {},
+            |parent, release, child| {
+                assert_eq!(parent.generation + 1, release.body.generation);
+                assert_eq!(release.body.generation, child.generation);
+            },
         );
         assert_eq!(stop, WalkStop::BudgetExhausted(r1));
     }

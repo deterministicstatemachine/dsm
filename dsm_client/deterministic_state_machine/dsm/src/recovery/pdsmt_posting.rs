@@ -794,11 +794,11 @@ mod tests {
 
         let genesis = [0x6E; 32];
         let owner = [0xA0; 32];
-        // The issuance lands on the device's SELF-LOOP — a value relationship
+        // The creation lands on the device's SELF-LOOP — a value relationship
         // of its own, exactly as a real device's faucet claim is.
         let dev = DeviceState::new(genesis, owner, vec![0xAA; 64])
-            .admitted_mint([0xF1; 32], 1_000)
-            .expect("admitted mint");
+            .created_token([0xF1; 32], 1_000)
+            .expect("token created");
         let rk_self = compute_smt_key(&owner, &owner);
 
         // A value relationship (Burn → Yes). A burn is value-bearing without

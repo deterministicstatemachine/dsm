@@ -50,8 +50,6 @@ pub enum AdvanceError {
     ParentClaimMismatch,
     /// The fulfillment installed a different `C_q` than `(P, F)` derive.
     ResolutionClaimMismatch { registered: D32, derived: D32 },
-    /// The position has not resolved, so there is nothing to install.
-    NotResolved,
     /// The position resolved Invalid: the lineage is terminal here, and no
     /// root follows it.
     LineageIsTerminal,
@@ -93,7 +91,6 @@ impl core::fmt::Display for AdvanceError {
                 "the registered C_q is not the one (P, F) derive — a claim is \
                  recomputed, never believed"
             ),
-            Self::NotResolved => write!(f, "the position has not resolved"),
             Self::LineageIsTerminal => {
                 write!(f, "the position resolved Invalid: no root follows it")
             }
@@ -585,21 +582,10 @@ mod tests {
     }
 
     #[test]
-    fn an_unresolved_or_invalid_position_installs_nothing() {
+    fn an_invalid_position_installs_nothing() {
         let pre = d(0xA0);
         let p = precommit(pre, d(0xA1));
         let f = fulfillment(&p);
-        assert_eq!(
-            advance_resolved(
-                &previous(pre),
-                &p,
-                &f,
-                &claims(&p, &f),
-                Resolution::Pending,
-                None
-            ),
-            Err(AdvanceError::NotResolved)
-        );
         assert_eq!(
             advance_resolved(
                 &previous(pre),

@@ -23,17 +23,18 @@
 //! `Invalid` means the operation never satisfied the DLV or protocol rules.
 //! `Void` means a valid operation that could not execute — it lost contention
 //! or became impossible. So validity is established BEFORE Void is declared,
-//! and a position never moves `Void → Invalid` (R14-1). Missing evidence keeps
-//! a lost route Pending rather than voiding it.
+//! and a position never moves `Void → Invalid` (R14-1). Core resolves only
+//! over complete facts (Amendment S7); until they are complete the position
+//! is not resolved at all.
 //!
 //! One `FinalE(E)` cell is not one executed swap. A route realizes only when
 //! every required leg consumes its exact parent under one registered
 //! fulfillment, which is why [`consumed_route`] quantifies over all legs.
 //!
 //! Registration supplies no truth value: `FulfillmentConformance(F)` is a
-//! conjunct of [`consumed_route`] and rungs 3 and 4 of the ladder (rebuild
-//! step R12), so a registered `F` that never conformed is Invalid and one
-//! whose conformance is undecided is Pending — never Void, never Realized.
+//! conjunct of [`consumed_route`] and rung 2 of the ladder (rebuild step
+//! R12), so a registered `F` that never conformed is Invalid — never Void,
+//! never Realized.
 
 use crate::route_chain::{CellFact, ChainState};
 use super::conformance::Validation;
@@ -102,16 +103,9 @@ pub fn effect_of(resolution: Resolution) -> PositionEffect {
 /// against `R*_g` — the validated canonical root of that vault at that
 /// generation (owner ruling, Section 44.4).
 ///
-/// THREE VALUED, AND "UNKNOWN" IS NOT `false`. This replaced a pair of
-/// booleans, `canonical_parent` and `parent_orphaned`, whose false-false
-/// corner said two different things at once: a parent the verifier has not
-/// walked to, and a parent it has walked past. The first must keep the
-/// position Pending and the second must defeat it, so a verifier with no
-/// producer for the second wrote `false` and silently meant the first.
-///
-/// The exclusion the ladder needs is now the type. `Coherent`'s assumption
-/// that an orphaned parent is never canonical is not an assumption any more:
-/// there is no value that is both.
+/// Three valued, and "not established" is not `false`: a parent the verifier
+/// has not walked to leaves the position unresolved, and a parent it has
+/// walked past defeats it. No value is both canonical and orphaned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParentStatus {
     /// `R = R*_g`. The leg names the root that vault's lineage took.
@@ -369,12 +363,11 @@ pub enum ImpossibleArm {
 
 /// The arm of `RouteImpossible(P, E)` that holds, in arm order.
 ///
-/// Arms (ii) to (v) need no validation evidence, so a stranded cell of an
-/// impossible operation is skippable even while `RouteValidation` is
-/// `Unavailable`. Arms (iv) and (v) create no `Void`: under (iv) the trader
-/// position is Invalid through the ladder, under (v) the position went to
-/// another claim and this `F` never resolves through it; both arms exist
-/// only to stop an impossible operation stranding a DLV successor key.
+/// Arms (ii) to (v) hold whatever `RouteValidation` says. Arms (iv) and (v)
+/// create no `Void`: under (iv) the trader position is Invalid through the
+/// ladder, under (v) the position went to another claim and this `F` never
+/// resolves through it; both arms exist only to stop an impossible operation
+/// stranding a DLV successor key.
 pub fn route_impossible(facts: &RouteFacts<'_>) -> Option<ImpossibleArm> {
     if facts.validation == Validation::Invalid {
         return Some(ImpossibleArm::ValidationInvalid);
@@ -533,24 +526,17 @@ pub fn classify_attempt(
             };
             return (AttemptClass::Skipped, Some(reason));
         }
-        // A final cell is a CONSUMPTION only when the whole operation consumed
-        // — the same E across every required leg, validation Valid, the trader
-        // parent compatible. A leg's
-        // own facts are not enough: one FinalE(E) cell is not one executed
-        // swap (F4), and treating it as one is what would let a multi-leg
-        // route consume a parent it never realized on.
-        if consumed_route(facts) && leg.final_on(&facts.external_commitment) {
+        // A final cell is a consumption only when the whole operation
+        // consumed: the same E across every required leg, validation Valid,
+        // the trader parent compatible. One final cell is not one executed
+        // swap (F4), so a leg's own facts are not enough.
+        if consumed_route(facts) {
             return (AttemptClass::Consumed, None);
         }
     }
-    // The leader holds another exercise first, or another exercise is final:
-    // that key is the other operation's question, and this walker sees it as
-    // unresolved until that operation's own facts settle it.
-    if leg.final_on_other(&facts.external_commitment) {
-        // Another operation's commitment sits here. Whether that consumed the
-        // parent is that operation's question, not this one's.
-        return (AttemptClass::Unresolved, None);
-    }
+    // Neither skipped nor consumed on these facts: the cell is open or not
+    // final, or another operation's commitment holds it, which is that
+    // operation's question and not this one's.
     (AttemptClass::Unresolved, None)
 }
 
@@ -600,7 +586,7 @@ where
 #[allow(clippy::disallowed_methods)] // test asserts; a failure here is the signal
 mod tests {
     use super::*;
-    use crate::sofi::conformance::Validation::{Invalid, Unavailable, Valid};
+    use crate::sofi::conformance::Validation::{Invalid, Valid};
 
     const E: [u8; 32] = [0xE5; 32];
     const OTHER_E: [u8; 32] = [0x11; 32];
@@ -634,33 +620,39 @@ mod tests {
 
     #[test]
     fn an_unreached_generation_neither_consumes_nor_defeats_a_route() {
-        // The status is not read in isolation: an Unavailable parent must
-        // leave the route Pending, where an Orphaned one would Void it.
+        // The status is not read in isolation: an unestablished parent leaves
+        // the position unresolved, where an Orphaned one would Void it.
         let waiting = [LegFacts {
             parent: parent_status(None, &PRE),
             ..good_leg()
         }];
-        assert_eq!(resolve_position(&realized(&waiting)), Resolution::Pending);
+        assert_eq!(
+            resolve_position(&realized(&waiting)),
+            Err(Incomplete::StorageNotFinal)
+        );
         let refuted = [LegFacts {
             parent: parent_status(Some(OTHER_ROOT), &PRE),
             ..good_leg()
         }];
-        assert_eq!(resolve_position(&realized(&refuted)), Resolution::Void);
+        assert_eq!(resolve_position(&realized(&refuted)), Ok(Resolution::Void));
     }
 
     /// A leg that consumed its canonical parent on this operation's E.
     fn good_leg() -> LegFacts {
         LegFacts {
-            cell: CellResolution::Final(E),
+            cell: CellFact::Held {
+                id: E,
+                state: ChainState::Final,
+            },
             parent: ParentStatus::Canonical,
             attempt_live: true,
             parent_consumed_elsewhere: false,
         }
     }
 
-    fn pending_leg() -> LegFacts {
+    fn open_leg() -> LegFacts {
         LegFacts {
-            cell: CellResolution::Unresolved,
+            cell: CellFact::Open,
             ..good_leg()
         }
     }
@@ -687,71 +679,49 @@ mod tests {
     /// `CellsOnlyAfterFulfillmentRegistered`: before registration nothing is
     /// exercised, whatever the cells say.
     #[test]
-    fn an_unregistered_fulfillment_is_pending_even_with_every_leg_final() {
+    fn an_unregistered_fulfillment_is_not_resolved_even_with_every_leg_final() {
         let legs = [good_leg()];
         let facts = RouteFacts {
             registered: false,
             ..realized(&legs)
         };
-        assert_eq!(resolve_position(&facts), Resolution::Pending);
+        assert_eq!(resolve_position(&facts), Err(Incomplete::NotRegistered));
         assert!(!consumed_route(&facts));
     }
 
     // ── steps 1–2: the trader parent (P15-3, R17-3) ────────────────────────
 
-    /// Lean `conditional_parent_pending_keeps_the_position_pending`: q waits
-    /// for p, and the wait is not a route verdict.
+    /// A lost leg under a conditional parent resolves by the branch the parent
+    /// took: Void on the root this operation was built on, Invalid on the
+    /// other. The parent is resolved before Core is called (Amendment S7), so
+    /// a terminal Void is never retracted by a later parent answer.
     #[test]
-    fn a_conditional_parent_that_has_not_resolved_keeps_the_position_pending() {
-        let legs = [good_leg()];
-        let facts = RouteFacts {
-            parent: ParentPosition::ConditionalPending,
-            ..realized(&legs)
-        };
-        assert_eq!(resolve_position(&facts), Resolution::Pending);
-        // The parent alone neither consumes nor makes the route impossible.
-        assert!(!trader_parent_compatible(&facts.parent, &PRE));
-        assert!(!trader_parent_impossible(&facts.parent, &PRE));
-        assert!(!consumed_route(&facts));
-        assert_eq!(route_impossible(&facts), None);
-    }
-
-    /// Lean `conditional_parent_pending_keeps_the_position_pending`, TLA
-    /// `PendingParentDecidesNothing`: an undecided parent OUTRANKS a lost leg.
-    /// Voiding here would be the R14-1 break again in another guise — the
-    /// parent could still select the other branch, whose answer is Invalid, so
-    /// a terminal Void would have to be retracted.
-    #[test]
-    fn a_pending_parent_outranks_a_lost_leg_instead_of_voiding() {
+    fn a_lost_leg_under_a_conditional_parent_resolves_by_the_branch_it_took() {
         let legs = [LegFacts {
-            cell: CellResolution::LeaderHeld(OTHER_E),
+            cell: CellFact::Held {
+                id: OTHER_E,
+                state: ChainState::LeaderHeld,
+            },
             ..good_leg()
         }];
-        let waiting = RouteFacts {
-            parent: ParentPosition::ConditionalPending,
-            ..realized(&legs)
-        };
-        // Valid, storage-resolved and objectively lost — and still Pending.
-        assert_eq!(waiting.validation, Valid);
-        assert!(waiting.storage_resolved);
-        assert_eq!(resolve_position(&waiting), Resolution::Pending);
-
-        // The two ways the parent can settle, from those same facts.
+        let lost = realized(&legs);
+        assert_eq!(lost.validation, Valid);
+        assert!(lost.storage_resolved);
         assert_eq!(
             resolve_position(&RouteFacts {
                 parent: ParentPosition::ConditionalSelected {
                     selected_root: OTHER_ROOT,
                 },
-                ..waiting
+                ..lost
             }),
-            Resolution::Invalid
+            Ok(Resolution::Invalid)
         );
         assert_eq!(
             resolve_position(&RouteFacts {
                 parent: ParentPosition::ConditionalSelected { selected_root: PRE },
-                ..waiting
+                ..lost
             }),
-            Resolution::Void
+            Ok(Resolution::Void)
         );
     }
 
@@ -764,7 +734,7 @@ mod tests {
             ..realized(&legs)
         };
         assert!(trader_parent_compatible(&facts.parent, &PRE));
-        assert_eq!(resolve_position(&facts), Resolution::Realized);
+        assert_eq!(resolve_position(&facts), Ok(Resolution::Realized));
     }
 
     /// Lean `conditional_parent_on_another_branch_is_invalid`: the trader
@@ -780,7 +750,7 @@ mod tests {
             ..realized(&legs)
         };
         assert!(trader_parent_impossible(&facts.parent, &PRE));
-        assert_eq!(resolve_position(&facts), Resolution::Invalid);
+        assert_eq!(resolve_position(&facts), Ok(Resolution::Invalid));
         assert!(!consumed_route(&facts));
         assert_eq!(
             route_impossible(&facts),
@@ -788,18 +758,17 @@ mod tests {
         );
     }
 
-    /// Lean `terminal_parent_with_no_root_is_invalid_without_evidence`: arm
-    /// (iv) needs no validation evidence, so the DLV key still skips while
-    /// `RouteValidation` is Unavailable.
+    /// Lean `terminal_parent_with_no_root_is_invalid_without_evidence`: a
+    /// parent that selected no root makes the position Invalid, and its DLV
+    /// key skips on arm (iv) over a statically valid route.
     #[test]
-    fn a_terminal_parent_that_selected_no_root_is_invalid_even_while_evidence_is_unavailable() {
+    fn a_terminal_parent_that_selected_no_root_is_invalid_and_its_key_skips() {
         let legs = [good_leg()];
         let facts = RouteFacts {
             parent: ParentPosition::ConditionalNoRoot,
-            validation: Unavailable,
             ..realized(&legs)
         };
-        assert_eq!(resolve_position(&facts), Resolution::Invalid);
+        assert_eq!(resolve_position(&facts), Ok(Resolution::Invalid));
         assert_eq!(
             route_impossible(&facts),
             Some(ImpossibleArm::TraderParentImpossible)
@@ -834,12 +803,11 @@ mod tests {
         assert_eq!(reason, Some(SkipReason::RejectedFinalConformance));
     }
 
-    /// Lean `trader_parent_arm_is_monotone`: once the parent is terminal the
-    /// arm never retracts, and a compatible parent never becomes impossible.
+    /// Lean `trader_parent_arm_is_monotone`: a resolved parent fixes exactly
+    /// one of compatible and impossible, for every root, so the arm never
+    /// retracts and a compatible parent never becomes impossible.
     #[test]
     fn the_trader_parent_arm_is_monotone() {
-        // Pending is the only state where both are false; every terminal
-        // state fixes exactly one of them, for every root.
         for root in [PRE, OTHER_ROOT] {
             for parent in [
                 ParentPosition::SingleRoot,
@@ -853,13 +821,10 @@ mod tests {
                 let impossible = trader_parent_impossible(&parent, &root);
                 assert!(
                     compatible != impossible,
-                    "a terminal parent is exactly one of the two: {parent:?} against {root:?}"
+                    "a resolved parent is exactly one of the two: {parent:?} against {root:?}"
                 );
             }
         }
-        let pending = ParentPosition::ConditionalPending;
-        assert!(!trader_parent_compatible(&pending, &PRE));
-        assert!(!trader_parent_impossible(&pending, &PRE));
     }
 
     // ── step 3: consumption ────────────────────────────────────────────────
@@ -868,10 +833,10 @@ mod tests {
     /// final leg is not one executed swap.
     #[test]
     fn a_route_with_one_leg_still_open_is_not_consumed() {
-        let legs = [good_leg(), pending_leg()];
+        let legs = [good_leg(), open_leg()];
         let facts = RouteFacts { ..realized(&legs) };
         assert!(!consumed_route(&facts));
-        assert_eq!(resolve_position(&facts), Resolution::Pending);
+        assert_eq!(resolve_position(&facts), Err(Incomplete::StorageNotFinal));
     }
 
     /// Lean `route_validation_excludes_parent_canonicality`: canonicality is a
@@ -885,7 +850,7 @@ mod tests {
         }];
         let facts = realized(&legs);
         assert!(!consumed_route(&facts));
-        assert_eq!(resolve_position(&facts), Resolution::Pending);
+        assert_eq!(resolve_position(&facts), Err(Incomplete::StorageNotFinal));
     }
 
     /// An earlier attempt key another operation reached first means the fulfillment's own key was
@@ -900,22 +865,25 @@ mod tests {
         assert!(!consumed_route(&facts));
     }
 
-    /// THE THIRD VALUE IS NOT THE SECOND. A parent the verifier has not
-    /// established keeps the position Pending; one it has established as
-    /// another root defeats it. Under the pair of booleans this change
-    /// replaced, both were `false` on both fields and the ladder could not
-    /// tell them apart — so the verifier that had no producer for orphaning
-    /// wrote the value that silently meant "not refuted" and hoped.
+    /// An unestablished parent is not a refuted one. A parent the verifier
+    /// has not established leaves the position unresolved; one it has
+    /// established as another root defeats it. Under the pair of booleans
+    /// `ParentStatus` replaced, both were `false` on both fields and the
+    /// ladder could not tell them apart.
     #[test]
     fn an_unestablished_parent_waits_and_an_orphaned_one_defeats() {
         for (status, expected, arm) in [
-            (ParentStatus::Unavailable, Resolution::Pending, None),
+            (
+                ParentStatus::Unavailable,
+                Err(Incomplete::StorageNotFinal),
+                None,
+            ),
             (
                 ParentStatus::Orphaned,
-                Resolution::Void,
+                Ok(Resolution::Void),
                 Some(ImpossibleArm::ParentOrphaned),
             ),
-            (ParentStatus::Canonical, Resolution::Realized, None),
+            (ParentStatus::Canonical, Ok(Resolution::Realized), None),
         ] {
             let legs = [LegFacts {
                 parent: status,
@@ -942,7 +910,7 @@ mod tests {
             ..good_leg()
         }];
         let facts = realized(&legs);
-        assert_eq!(resolve_position(&facts), Resolution::Void);
+        assert_eq!(resolve_position(&facts), Ok(Resolution::Void));
         assert_eq!(
             effect_of(Resolution::Void),
             PositionEffect::InstallPreviousRoot,
@@ -954,7 +922,7 @@ mod tests {
                 validation: Invalid,
                 ..facts
             }),
-            Resolution::Invalid
+            Ok(Resolution::Invalid)
         );
     }
 
@@ -965,19 +933,17 @@ mod tests {
     ///
     /// The leg's own key is open: a cell final on THIS operation's `E` would
     /// say we consumed the parent ourselves, which is not a route another
-    /// operation took. The first draft of this test asserted both at once and
-    /// the ladder answered `Realized`, which was the test's error and not the
-    /// ladder's.
+    /// operation took.
     #[test]
     fn a_canonical_parent_taken_by_another_route_is_consumed_not_orphaned() {
         let legs = [LegFacts {
-            cell: CellResolution::Unresolved,
+            cell: CellFact::Open,
             parent: ParentStatus::Canonical,
             parent_consumed_elsewhere: true,
             ..good_leg()
         }];
         let facts = realized(&legs);
-        assert_eq!(resolve_position(&facts), Resolution::Void);
+        assert_eq!(resolve_position(&facts), Ok(Resolution::Void));
         assert_eq!(
             route_impossible(&facts),
             Some(ImpossibleArm::ParentConsumedElsewhere),
@@ -991,13 +957,13 @@ mod tests {
     /// storage resolution.
     #[test]
     fn a_statically_invalid_route_is_invalid_before_storage_resolves() {
-        let legs = [pending_leg()];
+        let legs = [open_leg()];
         let facts = RouteFacts {
             validation: Invalid,
             storage_resolved: false,
             ..realized(&legs)
         };
-        assert_eq!(resolve_position(&facts), Resolution::Invalid);
+        assert_eq!(resolve_position(&facts), Ok(Resolution::Invalid));
         assert_eq!(
             route_impossible(&facts),
             Some(ImpossibleArm::ValidationInvalid)
@@ -1012,12 +978,12 @@ mod tests {
     #[test]
     fn a_valid_route_whose_parent_was_consumed_elsewhere_voids() {
         let legs = [LegFacts {
-            cell: CellResolution::Unresolved,
+            cell: CellFact::Open,
             parent_consumed_elsewhere: true,
             ..good_leg()
         }];
         let facts = realized(&legs);
-        assert_eq!(resolve_position(&facts), Resolution::Void);
+        assert_eq!(resolve_position(&facts), Ok(Resolution::Void));
         assert_eq!(
             effect_of(Resolution::Void),
             PositionEffect::InstallPreviousRoot
@@ -1028,60 +994,60 @@ mod tests {
     #[test]
     fn a_reserved_key_another_operation_reached_first_voids() {
         let taken = [LegFacts {
-            cell: CellResolution::LeaderHeld(OTHER_E),
+            cell: CellFact::Held {
+                id: OTHER_E,
+                state: ChainState::LeaderHeld,
+            },
             ..good_leg()
         }];
-        assert_eq!(resolve_position(&realized(&taken)), Resolution::Void);
+        assert_eq!(resolve_position(&realized(&taken)), Ok(Resolution::Void));
     }
 
     /// Lean `resolution_is_permanent` and its counterexample
     /// `literal_ladder_is_not_permanent`, TLA falsification
-    /// `VoidBeforeValidation`: a route already lost stays Pending while
-    /// evidence is Unavailable, then resolves once — Void if it was valid,
-    /// Invalid if it never was. Voiding first would flip a terminal answer.
+    /// `VoidBeforeValidation`: a lost route is Void only when it was valid,
+    /// and Invalid when it never was. Rung 4 precedes rung 5, so a lost route
+    /// is never voided ahead of its validation.
     #[test]
-    fn a_lost_route_waits_for_evidence_instead_of_voiding() {
+    fn a_lost_route_is_void_when_valid_and_invalid_when_not() {
         let legs = [LegFacts {
-            cell: CellResolution::LeaderHeld(OTHER_E),
+            cell: CellFact::Held {
+                id: OTHER_E,
+                state: ChainState::LeaderHeld,
+            },
             ..good_leg()
         }];
-        let unavailable = RouteFacts {
-            validation: Unavailable,
-            ..realized(&legs)
-        };
-        assert_eq!(resolve_position(&unavailable), Resolution::Pending);
-
-        // The same facts once the evidence lands, both ways.
+        let lost = realized(&legs);
         assert_eq!(
             resolve_position(&RouteFacts {
                 validation: Valid,
-                ..unavailable
+                ..lost
             }),
-            Resolution::Void
+            Ok(Resolution::Void)
         );
         assert_eq!(
             resolve_position(&RouteFacts {
                 validation: Invalid,
-                ..unavailable
+                ..lost
             }),
-            Resolution::Invalid
+            Ok(Resolution::Invalid)
         );
     }
 
     /// Void needs storage resolution: a route that merely looks lost while its
-    /// keys are open is still Pending.
+    /// keys are open is not resolved.
     #[test]
     fn void_requires_storage_resolution() {
         let legs = [LegFacts {
             parent: ParentStatus::Orphaned,
-            cell: CellResolution::Unresolved,
+            cell: CellFact::Open,
             ..good_leg()
         }];
         let facts = RouteFacts {
             storage_resolved: false,
             ..realized(&legs)
         };
-        assert_eq!(resolve_position(&facts), Resolution::Pending);
+        assert_eq!(resolve_position(&facts), Err(Incomplete::StorageNotFinal));
     }
 
     // ── rungs 3–4: FulfillmentConformance (R12) ───────────────────────────
@@ -1089,78 +1055,70 @@ mod tests {
     /// Lean `realized_requires_conformance`, TLA `RealizedRequiresConformance`
     /// (fault `_ConformanceDropped`): FulfillmentConformance is a conjunct of
     /// ConsumedRoute. A registered, statically valid route with every leg
-    /// final on its E does not realize until its conformance is Valid — and
-    /// never does once it is Invalid.
+    /// final on its E never realizes once its conformance is Invalid.
     #[test]
     fn realized_requires_conformance() {
         let legs = [good_leg(), good_leg()];
-        let undecided = RouteFacts {
-            conformance: Unavailable,
-            ..realized(&legs)
-        };
-        assert!(!consumed_route(&undecided));
-        assert_eq!(resolve_position(&undecided), Resolution::Pending);
         let never = RouteFacts {
             conformance: Invalid,
             ..realized(&legs)
         };
         assert!(!consumed_route(&never));
-        assert_eq!(resolve_position(&never), Resolution::Invalid);
-        assert_eq!(effect_of(resolve_position(&never)), PositionEffect::None);
+        assert_eq!(resolve_position(&never), Ok(Resolution::Invalid));
+        assert_eq!(
+            resolve_position(&never).map(effect_of),
+            Ok(PositionEffect::None)
+        );
         // Only Valid realizes, and the effect is the realize root.
         assert!(consumed_route(&realized(&legs)));
-        assert_eq!(resolve_position(&realized(&legs)), Resolution::Realized);
+        assert_eq!(resolve_position(&realized(&legs)), Ok(Resolution::Realized));
         assert_eq!(
-            effect_of(resolve_position(&realized(&legs))),
-            PositionEffect::InstallRealizeRoot
+            resolve_position(&realized(&legs)).map(effect_of),
+            Ok(PositionEffect::InstallRealizeRoot)
         );
     }
 
     /// Lean `registration_is_not_conformance`, TLA `RegistrationIsNotConformance`:
     /// registration supplies no truth value. The same registered facts with
-    /// conformance anything but Valid never realize.
+    /// conformance Invalid never realize.
     #[test]
     fn registration_is_not_conformance() {
         let legs = [good_leg()];
-        for conformance in [Invalid, Unavailable] {
-            let facts = RouteFacts {
-                conformance,
-                ..realized(&legs)
-            };
-            assert!(facts.registered);
-            assert_ne!(resolve_position(&facts), Resolution::Realized);
-        }
-    }
-
-    /// Section 21.1: no route becomes Void while its conformance is unknown.
-    /// A registered, valid route already lost at a reserved key stays Pending
-    /// until conformance decides, then resolves once — Void if it conformed,
-    /// Invalid if it never did.
-    #[test]
-    fn no_route_becomes_void_while_its_conformance_is_unknown() {
-        let legs = [LegFacts {
-            cell: CellResolution::LeaderHeld(OTHER_E),
-            ..good_leg()
-        }];
-        let unknown = RouteFacts {
-            conformance: Unavailable,
+        let facts = RouteFacts {
+            conformance: Invalid,
             ..realized(&legs)
         };
-        assert!(unknown.storage_resolved && unknown.validation == Valid);
-        assert_eq!(resolve_position(&unknown), Resolution::Pending);
+        assert!(facts.registered);
+        assert_ne!(resolve_position(&facts), Ok(Resolution::Realized));
+    }
+
+    /// Section 21.1: a registered, valid route already lost at a reserved key
+    /// is Void only if it conformed, and Invalid if it never did. Rung 2
+    /// precedes rung 5, so no route is voided ahead of its conformance.
+    #[test]
+    fn a_lost_route_is_void_only_if_it_conformed() {
+        let legs = [LegFacts {
+            cell: CellFact::Held {
+                id: OTHER_E,
+                state: ChainState::LeaderHeld,
+            },
+            ..good_leg()
+        }];
+        let lost = realized(&legs);
+        assert!(lost.storage_resolved && lost.validation == Valid);
         assert_eq!(
             resolve_position(&RouteFacts {
                 conformance: Valid,
-                ..unknown
+                ..lost
             }),
-            Resolution::Void
+            Ok(Resolution::Void)
         );
         assert_eq!(
             resolve_position(&RouteFacts {
                 conformance: Invalid,
-                ..unknown
+                ..lost
             }),
-            Resolution::Invalid
+            Ok(Resolution::Invalid)
         );
     }
 
@@ -1170,17 +1128,15 @@ mod tests {
     /// `ObjectiveRejectionImpliesSkipped`), Lean
     /// `a_lost_position_makes_a_final_route_skippable`: an exercise final at a
     /// key whose F can never register — the position holds another claim —
-    /// is skipped, with no validation evidence, so the parent's attempt chain
-    /// is not stranded. It is no Void: the position resolves through the claim
-    /// that took it, never through this F.
+    /// is skipped, so the parent's attempt chain is not stranded. It is no
+    /// Void: the position resolves through the claim that took it, never
+    /// through this F.
     #[test]
     fn a_final_cell_whose_fulfillment_lost_its_position_is_skipped() {
         let legs = [good_leg()];
         let facts = RouteFacts {
             registered: false,
             position_lost: true,
-            conformance: Unavailable,
-            validation: Unavailable,
             ..realized(&legs)
         };
         assert_eq!(route_impossible(&facts), Some(ImpossibleArm::PositionLost));
@@ -1191,7 +1147,7 @@ mod tests {
                 Some(SkipReason::RejectedFinalRoute(ImpossibleArm::PositionLost))
             )
         );
-        assert_eq!(resolve_position(&facts), Resolution::Pending);
+        assert_eq!(resolve_position(&facts), Err(Incomplete::NotRegistered));
         assert!(!consumed_route(&facts));
         // Without the arm the same cell is that F's open question forever.
         let held = RouteFacts {
@@ -1208,19 +1164,21 @@ mod tests {
     // ── rung 8, and the ladder as a whole ──────────────────────────────────
 
     /// Lean `resolution_is_permanent`: no terminal answer is reachable from
-    /// another terminal answer as facts accumulate monotonically. Checked by
-    /// enumeration over every fact combination the ladder reads.
+    /// another terminal answer as facts accumulate monotonically — storage
+    /// resolving, or a cell's chain growing. Checked by enumeration over every
+    /// fact combination the ladder reads.
     #[test]
     fn a_terminal_resolution_is_never_reached_from_another_terminal_one() {
+        let held = |id: [u8; 32], state: ChainState| CellFact::Held { id, state };
         let cells = [
-            CellResolution::Final(E),
-            CellResolution::Final(OTHER_E),
-            CellResolution::LeaderHeld(OTHER_E),
-            CellResolution::Unresolved,
+            held(E, ChainState::Final),
+            held(E, ChainState::LeaderHeld),
+            held(OTHER_E, ChainState::Final),
+            held(OTHER_E, ChainState::LeaderHeld),
+            CellFact::Open,
         ];
         let parents = [
             ParentPosition::SingleRoot,
-            ParentPosition::ConditionalPending,
             ParentPosition::ConditionalSelected { selected_root: PRE },
             ParentPosition::ConditionalSelected {
                 selected_root: OTHER_ROOT,
@@ -1229,8 +1187,8 @@ mod tests {
         ];
         for cell in cells {
             for parent in parents {
-                for validation in [Valid, Invalid, Unavailable] {
-                    for conformance in [Valid, Invalid, Unavailable] {
+                for validation in [Valid, Invalid] {
+                    for conformance in [Valid, Invalid] {
                         for storage_resolved in [false, true] {
                             let legs = [LegFacts { cell, ..good_leg() }];
                             let facts = RouteFacts {
@@ -1245,42 +1203,32 @@ mod tests {
                                 legs: &legs,
                             };
                             let before = resolve_position(&facts);
-                            // Evidence arriving is the only monotone step that
-                            // can change an Unavailable verdict — for either
-                            // predicate.
-                            if validation == Unavailable {
-                                for settled in [Valid, Invalid] {
-                                    let after = resolve_position(&RouteFacts {
-                                        validation: settled,
-                                        ..facts
-                                    });
-                                    assert!(
-                                        before == Resolution::Pending || before == after,
-                                        "{before:?} changed to {after:?} on evidence"
-                                    );
-                                }
-                            }
-                            if conformance == Unavailable {
-                                for settled in [Valid, Invalid] {
-                                    let after = resolve_position(&RouteFacts {
-                                        conformance: settled,
-                                        ..facts
-                                    });
-                                    assert!(
-                                        before == Resolution::Pending || before == after,
-                                        "{before:?} changed to {after:?} on conformance evidence"
-                                    );
-                                }
-                            }
-                            // Storage resolving cannot flip a terminal answer.
                             if !storage_resolved {
                                 let after = resolve_position(&RouteFacts {
                                     storage_resolved: true,
                                     ..facts
                                 });
                                 assert!(
-                                    before == Resolution::Pending || before == after,
+                                    before.is_err() || before == after,
                                     "{before:?} changed to {after:?} on storage resolution"
+                                );
+                            }
+                            if let CellFact::Held {
+                                id,
+                                state: ChainState::LeaderHeld,
+                            } = cell
+                            {
+                                let grown = [LegFacts {
+                                    cell: held(id, ChainState::Final),
+                                    ..good_leg()
+                                }];
+                                let after = resolve_position(&RouteFacts {
+                                    legs: &grown,
+                                    ..facts
+                                });
+                                assert!(
+                                    before.is_err() || before == after,
+                                    "{before:?} changed to {after:?} as the chain grew"
                                 );
                             }
                         }
@@ -1303,38 +1251,28 @@ mod tests {
             PositionEffect::InstallPreviousRoot
         );
         assert_eq!(effect_of(Resolution::Invalid), PositionEffect::None);
-        assert_eq!(effect_of(Resolution::Pending), PositionEffect::None);
     }
 
     // ── impossibility arms and the walk ────────────────────────────────────
 
     /// Lean `route_impossible_orphan_and_consumed_elsewhere_arms`: arms (ii)
-    /// and (iii′) hold without any validation evidence.
+    /// and (iii′) hold on a statically valid route.
     #[test]
-    fn the_orphan_and_consumed_elsewhere_arms_need_no_evidence() {
+    fn the_orphan_and_consumed_elsewhere_arms_hold_on_a_valid_route() {
         let orphaned = [LegFacts {
             parent: ParentStatus::Orphaned,
             ..good_leg()
         }];
-        let facts = RouteFacts {
-            validation: Unavailable,
-            ..realized(&orphaned)
-        };
         assert_eq!(
-            route_impossible(&facts),
+            route_impossible(&realized(&orphaned)),
             Some(ImpossibleArm::ParentOrphaned)
         );
-
         let taken = [LegFacts {
             parent_consumed_elsewhere: true,
             ..good_leg()
         }];
-        let facts = RouteFacts {
-            validation: Unavailable,
-            ..realized(&taken)
-        };
         assert_eq!(
-            route_impossible(&facts),
+            route_impossible(&realized(&taken)),
             Some(ImpossibleArm::ParentConsumedElsewhere)
         );
     }
@@ -1343,25 +1281,14 @@ mod tests {
     /// impossible route is skipped, and skipping it is not a rollback.
     #[test]
     fn a_stranded_final_cell_of_an_impossible_route_is_skipped() {
-        let legs = [good_leg(), pending_leg()];
-        let facts = RouteFacts {
-            legs: &legs,
-            ..RouteFacts {
-                validation: Unavailable,
-                ..realized(&legs)
-            }
-        };
         let lost = [
             LegFacts {
                 parent: ParentStatus::Orphaned,
-                ..pending_leg()
+                ..open_leg()
             },
             good_leg(),
         ];
-        let facts = RouteFacts {
-            legs: &lost,
-            ..facts
-        };
+        let facts = realized(&lost);
         let (class, reason) = classify_attempt(&facts, &lost[1]);
         assert_eq!(class, AttemptClass::Skipped);
         assert_eq!(
@@ -1391,15 +1318,14 @@ mod tests {
     #[test]
     fn a_cell_another_operation_reached_first_is_that_operations_question() {
         let legs = [LegFacts {
-            cell: CellResolution::LeaderHeld(OTHER_E),
+            cell: CellFact::Held {
+                id: OTHER_E,
+                state: ChainState::LeaderHeld,
+            },
             ..good_leg()
         }];
-        let facts = RouteFacts {
-            validation: Unavailable,
-            ..realized(&legs)
-        };
         assert_eq!(
-            classify_attempt(&facts, &legs[0]),
+            classify_attempt(&realized(&legs), &legs[0]),
             (AttemptClass::Unresolved, None)
         );
     }
@@ -1413,7 +1339,10 @@ mod tests {
         // describe the ROUTE the key belongs to, because a key is consumed
         // only when its whole operation is.
         let rejected = LegFacts {
-            cell: CellResolution::Final(OTHER_E),
+            cell: CellFact::Held {
+                id: OTHER_E,
+                state: ChainState::Final,
+            },
             ..good_leg()
         };
         let rejected_legs = [rejected];
@@ -1466,7 +1395,7 @@ mod tests {
     /// not one executed swap.
     #[test]
     fn a_final_leg_of_an_incomplete_route_is_not_consumed() {
-        let legs = [good_leg(), pending_leg()];
+        let legs = [good_leg(), open_leg()];
         let facts = RouteFacts { ..realized(&legs) };
         assert_eq!(
             classify_attempt(&facts, &legs[0]),
@@ -1481,18 +1410,19 @@ mod tests {
         );
     }
 
-    /// A final cell whose route is not statically Valid is not a consumption
-    /// either — consumption carries the validation premise (F4).
+    /// A final cell whose route is statically Invalid is not a consumption
+    /// either: consumption carries the validation premise (F4).
     #[test]
-    fn a_final_leg_of_an_unvalidated_route_is_not_consumed() {
+    fn a_final_leg_of_an_invalid_route_is_not_consumed() {
         let legs = [good_leg()];
-        let unavailable = RouteFacts {
-            validation: Unavailable,
+        let invalid = RouteFacts {
+            validation: Invalid,
             ..realized(&legs)
         };
+        assert!(!consumed_route(&invalid));
         assert_eq!(
-            classify_attempt(&unavailable, &legs[0]).0,
-            AttemptClass::Unresolved
+            classify_attempt(&invalid, &legs[0]).0,
+            AttemptClass::Skipped
         );
     }
 
@@ -1503,7 +1433,10 @@ mod tests {
         // Every key is skipped (final on a rejected exercise), so the walk
         // would advance forever; at `u64::MAX` it refuses instead.
         let rejected = LegFacts {
-            cell: CellResolution::Final(OTHER_E),
+            cell: CellFact::Held {
+                id: OTHER_E,
+                state: ChainState::Final,
+            },
             ..good_leg()
         };
         let legs = [rejected];
@@ -1539,7 +1472,10 @@ mod tests {
         let legs = [
             good_leg(),
             LegFacts {
-                cell: CellResolution::Final(OTHER_E),
+                cell: CellFact::Held {
+                    id: OTHER_E,
+                    state: ChainState::Final,
+                },
                 ..good_leg()
             },
         ];
@@ -1549,10 +1485,10 @@ mod tests {
             !consumed_route(&facts),
             "a leg final on another operation's E is not this route's consumption"
         );
-        assert_ne!(resolve_position(&facts), Resolution::Realized);
+        assert_ne!(resolve_position(&facts), Ok(Resolution::Realized));
         // It is the loss of the route, not a consumption: the second leg's key
         // is final on someone else's commitment.
-        assert_eq!(resolve_position(&facts), Resolution::Void);
+        assert_eq!(resolve_position(&facts), Ok(Resolution::Void));
         // And the stray leg is never classified as consuming this route.
         assert_eq!(
             classify_attempt(&facts, &legs[1]).0,

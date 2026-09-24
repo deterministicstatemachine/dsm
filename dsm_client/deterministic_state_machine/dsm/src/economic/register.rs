@@ -67,6 +67,19 @@ pub fn economic_root_register_key(
     *h.finalize().as_bytes()
 }
 
+/// An object naming `K_root`: a registered economic claim — a trader's
+/// signed root claim, or a conditional SoFi claim — whose own coordinates
+/// derive `k_root`. Anything else at the cell counts as nothing.
+pub fn root_claim_naming(
+    bytes: &[u8],
+    k_root: &[u8; 32],
+) -> Option<crate::economic::claim_envelope::RegisteredEconomicClaim> {
+    let claim = crate::economic::claim_envelope::decode_registered_economic_claim(bytes).ok()?;
+    let (genesis, device_id) = claim.trader();
+    (economic_root_register_key(&genesis, &device_id, claim.economic_position()) == *k_root)
+        .then_some(claim)
+}
+
 /// `s(q)` — the seed of a trader's position cells (Part II §7.2), consumed
 /// by the leader shuffle for `K_ful(q)` and `K_root(q)`. `parent_root` is the
 /// validated economic root at `q - 1`, or the genesis root for the first

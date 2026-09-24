@@ -202,28 +202,120 @@ fn a_faucet_claim_round_trips_on_the_builder() {
     }
 }
 
-// ── The owner's two CreateToken tests ──────────────────────────────────────
+// ── CreateToken: the fee debit and the genesis release (SoFi §51) ──────────
 
+/// A token with no genesis supply is not a token (SoFi §50), so it has no
+/// write set to build.
 #[test]
-fn create_token_with_zero_supply_validates_as_a_pure_era_fee_debit() {
-    let (tree, balances) = funded_tree(era(), 500);
-    let witness = round_trip(
-        &create_token(0, 500),
-        tree,
-        balances,
-        &CreditSourceFacts::None,
-    );
-    assert!(
-        witness.mutations[0].post_state.is_none(),
-        "full fee zeroes the balance"
+fn a_zero_supply_creation_has_no_write_set() {
+    let (mut tree, balances) = funded_tree(era(), 500);
+    assert_eq!(
+        build_write_set(
+            &create_token(0, 500),
+            &G,
+            &DEV,
+            &econ_op_id(),
+            &EconomicPreState::new(&balances, P_CREATE),
+            &mut tree,
+            &CreditSourceFacts::GenesisRelease,
+        )
+        .expect_err("a zero-supply creation is not a token"),
+        WriteSetError::NoEconomicWriteSet
     );
 }
 
+/// A creation is its ERA fee debit and the credit of its whole genesis
+/// supply, funded by one genesis release naming that credit. Built and
+/// verified from the one table.
 #[test]
-fn create_token_with_initial_supply_gets_the_exact_named_refusal() {
-    let (mut tree, balances) = funded_tree(era(), 500);
-    let err = build_write_set(
+fn a_token_creation_is_its_fee_debit_and_its_genesis_release() {
+    let (tree, balances) = funded_tree(era(), 500);
+    let witness = round_trip(
         &create_token(1_000, 500),
+        tree,
+        balances,
+        &CreditSourceFacts::GenesisRelease,
+    );
+    assert_eq!(witness.mutations.len(), 2, "the fee debit and the release");
+    let [dsm::economic::credit::CreditSource::GenesisRelease(release)] =
+        witness.credit_sources.as_slice()
+    else {
+        panic!("one genesis release, got {:?}", witness.credit_sources)
+    };
+    let credited = &witness.mutations[release.credit_mutation_index as usize];
+    match &credited.post_state {
+        Some(EconomicLeafState::Balance(b)) => {
+            assert_eq!((b.policy_commit, b.amount), ([0x77; 32], 1_000));
+        }
+        other => panic!("expected the release credit, got {other:?}"),
+    }
+    // Without a fee, the release alone.
+    let (tree, balances) = funded_tree(era(), 500);
+    let witness = round_trip(
+        &create_token(1_000, 0),
+        tree,
+        balances,
+        &CreditSourceFacts::GenesisRelease,
+    );
+    assert_eq!(witness.mutations.len(), 1);
+}
+
+/// A creation witness is the effect of exactly its own operation: offered
+/// for a creation of another supply or another fee, it is refused.
+#[test]
+fn a_creation_witness_of_another_supply_or_fee_is_refused() {
+    let (mut tree, balances) = funded_tree(era(), 500);
+    let pre = tree.root();
+    let op = create_token(1_000, 500);
+    let built = build_write_set(
+        &op,
+        &G,
+        &DEV,
+        &econ_op_id(),
+        &EconomicPreState::new(&balances, P_CREATE),
+        &mut tree,
+        &CreditSourceFacts::GenesisRelease,
+    )
+    .unwrap();
+    let witness = witness_for(pre, built, &op);
+    assert_eq!(
+        verify_operation_write_set(&op, &G, &DEV, &witness, P_CREATE),
+        Ok(())
+    );
+    for other in [create_token(999, 500), create_token(1_000, 400)] {
+        assert!(
+            matches!(
+                verify_operation_write_set(&other, &G, &DEV, &witness, P_CREATE),
+                Err(WriteSetError::WrongWriteSet { .. })
+            ),
+            "{other:?}"
+        );
+    }
+}
+
+/// The creation's credit has one funding statement, the genesis release:
+/// no other facts build it, and the verifier refuses a witness of another
+/// operation's effect offered for it.
+#[test]
+fn a_token_creation_is_funded_only_by_its_genesis_release() {
+    let (mut tree, balances) = funded_tree(era(), 500);
+    assert_eq!(
+        build_write_set(
+            &create_token(1_000, 500),
+            &G,
+            &DEV,
+            &econ_op_id(),
+            &EconomicPreState::new(&balances, P_CREATE),
+            &mut tree,
+            &CreditSourceFacts::None,
+        )
+        .expect_err("a credit with no source is not fundable"),
+        WriteSetError::FactsDoNotMatchOperation
+    );
+    let (mut tree, balances) = funded_tree(era(), 500);
+    let pre = tree.root();
+    let burned = build_write_set(
+        &burn(500, era()),
         &G,
         &DEV,
         &econ_op_id(),
@@ -231,35 +323,12 @@ fn create_token_with_initial_supply_gets_the_exact_named_refusal() {
         &mut tree,
         &CreditSourceFacts::None,
     )
-    .expect_err("initial supply cannot be funded");
-    assert_eq!(
-        err,
-        WriteSetError::CreateTokenInitialSupplyRequiresIssuancePredicate
-    );
-    // The verifier refuses identically: nobody can hand-craft a witness
-    // around the builder.
-    let (tree2, _) = funded_tree(era(), 500);
-    let some_witness = {
-        let (t, b) = funded_tree(era(), 500);
-        let pre = t.root();
-        let mut t = t;
-        let built = build_write_set(
-            &burn(500, era()),
-            &G,
-            &DEV,
-            &econ_op_id(),
-            &EconomicPreState::new(&b, P_CREATE),
-            &mut t,
-            &CreditSourceFacts::None,
-        )
-        .unwrap();
-        witness_for(pre, built, &burn(500, era()))
-    };
-    drop(tree2);
-    assert_eq!(
-        verify_operation_write_set(&create_token(1_000, 500), &G, &DEV, &some_witness, P_CREATE),
-        Err(WriteSetError::CreateTokenInitialSupplyRequiresIssuancePredicate)
-    );
+    .unwrap();
+    let burn_witness = witness_for(pre, burned, &burn(500, era()));
+    assert!(matches!(
+        verify_operation_write_set(&create_token(1_000, 500), &G, &DEV, &burn_witness, P_CREATE),
+        Err(WriteSetError::WrongWriteSet { .. })
+    ));
 }
 
 // ── Adversarial near-misses the verifier must refuse ───────────────────────
@@ -383,83 +452,6 @@ fn a_recipient_credit_without_its_consumed_source_is_refused() {
         verify_operation_write_set(&op, &G, &DEV, &stripped, P_CREATE),
         Err(WriteSetError::WrongWriteSet { .. })
     ));
-}
-
-/// A mint now HAS a write set — one balance credit of exactly the operation's
-/// amount — but it still demands its issuance facts.
-///
-/// This used to assert `IssuancePredicateUndefined`, which was correct while
-/// class 0x0029 did not exist. The refusal did not disappear; it MOVED to
-/// where it can actually be checked: the write set states the effect, and the
-/// 0x0023 arm states who was entitled to cause it. Bare facts are refused
-/// here, and a wrong authorization is refused there.
-#[test]
-fn a_mint_builds_a_credit_but_demands_its_issuance_facts() {
-    let (mut tree, balances) = funded_tree(era(), 100);
-    let pc = [0x7Eu8; 32];
-    let mint = Operation::Mint {
-        amount: Balance::from_state(100, [0u8; 32]),
-        token_id: b"NEW".to_vec(),
-        policy_commit: pc,
-        // The 0x0029 signatures live in the evidence bundle, never here: a
-        // signature inside the operation would change the operation digest the
-        // signed body commits to, and the scheme would have no fixed point.
-        message: String::new(),
-    };
-    assert_eq!(
-        build_write_set(
-            &mint,
-            &G,
-            &DEV,
-            &econ_op_id(),
-            &EconomicPreState::new(&balances, P_CREATE),
-            &mut tree.clone(),
-            &CreditSourceFacts::None,
-        )
-        .expect_err("a credit with no source is not fundable"),
-        WriteSetError::FactsDoNotMatchOperation
-    );
-
-    let built = build_write_set(
-        &mint,
-        &G,
-        &DEV,
-        &econ_op_id(),
-        &EconomicPreState::new(&balances, P_CREATE),
-        &mut tree,
-        &CreditSourceFacts::AuthorizedIssuance {
-            issuance_authorization_addr: [0xA9; 32],
-        },
-    )
-    .expect("issuance facts make the mint buildable");
-    assert_eq!(built.mutations.len(), 1, "one balance credit, nothing else");
-    assert_eq!(built.credit_sources.len(), 1);
-    assert!(matches!(
-        built.credit_sources[0],
-        dsm::economic::credit::CreditSource::AuthorizedIssuance(_)
-    ));
-    // A zero-unit mint creates nothing, so it has no economic write set at all.
-    let zero = Operation::Mint {
-        amount: Balance::from_state(0, [0u8; 32]),
-        token_id: b"NEW".to_vec(),
-        policy_commit: pc,
-        message: String::new(),
-    };
-    assert_eq!(
-        build_write_set(
-            &zero,
-            &G,
-            &DEV,
-            &econ_op_id(),
-            &EconomicPreState::new(&balances, P_CREATE),
-            &mut tree,
-            &CreditSourceFacts::AuthorizedIssuance {
-                issuance_authorization_addr: [0xA9; 32],
-            },
-        )
-        .expect_err("zero units is not issuance"),
-        WriteSetError::NoEconomicWriteSet
-    );
 }
 
 #[test]

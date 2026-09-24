@@ -18,7 +18,7 @@
 //! is not validation: whether the route it carries realizes is the ladder's
 //! question (rebuild step R12), answered from the same bytes.
 
-use crate::route_chain::{CellFact, CellReading, Missing};
+use crate::route_chain::{evaluate, CellEvidence, CellReading, Missing};
 use super::derive;
 use super::publication::{
     recognize_policy_fulfillment, recognize_precommit, recognize_fulfillment, Signed,
@@ -48,7 +48,7 @@ pub struct RecognizedExercise {
 /// another. `None` for bytes that are not one exercise of one operation.
 pub fn recognize_exercise(bytes: &[u8]) -> Option<RecognizedExercise> {
     let exercise = SofiExercise::decode(bytes).ok()?;
-    let (_, fulfillment) = recognize_fulfillment(exercise.fulfillment())?;
+    let fulfillment = recognize_fulfillment(exercise.fulfillment())?.1;
     let (pid, precommit) = recognize_precommit(exercise.precommit())?;
     if *fulfillment.body.precommit_id() != pid {
         return None;
@@ -120,36 +120,23 @@ pub fn exercise_names_key(
     (names_attempt && names_parent).then_some(recognized)
 }
 
-/// `SuccessorResolution(K)` (Section 23.1) as the ladder reads it: the cell's
-/// storage fact from its route chains, identified by the `E` of the exercise
-/// that holds it, and the exercise itself when there is one. A cell whose
-/// leader holds no exercise naming the key is `Open`; evidence that does not
-/// yet decide the cell is `Missing`, a network status and never an answer.
-/// No key is ever dead.
+/// `SuccessorResolution(K)` (Section 23.1) as the ladder reads it: the
+/// route-chain reading of the successor key `K^(attempt)` of `vault_id` at
+/// `parent_root`, over exercises naming that key. What holds the cell is the
+/// recognized exercise, identified by its `E`. A cell whose leader holds no
+/// exercise naming the key is `Open`; evidence that does not yet decide the
+/// cell is [`Missing`], a network status and never an answer. No key is ever
+/// dead.
 pub fn attempt_resolution(
-    reading: &Result<CellReading, Missing>,
+    evidence: &CellEvidence,
     vault_id: &D32,
     parent_root: &D32,
     attempt: u64,
-) -> (Result<CellFact, Missing>, Option<RecognizedExercise>) {
-    match reading {
-        Ok(CellReading::Held { value, state, .. }) => {
-            match exercise_names_key(value, vault_id, parent_root, attempt) {
-                Some(x) => (
-                    Ok(CellFact::Held {
-                        id: x.external_commitment,
-                        state: *state,
-                    }),
-                    Some(x),
-                ),
-                // The reading was evaluated with this recognizer; bytes that
-                // somehow fail it establish nothing.
-                None => (Err(Missing::LeaderLinkUncommitted), None),
-            }
-        }
-        Ok(CellReading::Open) => (Ok(CellFact::Open), None),
-        Err(m) => (Err(*m), None),
-    }
+) -> Result<CellReading<RecognizedExercise>, Missing> {
+    evaluate(evidence, |bytes| {
+        exercise_names_key(bytes, vault_id, parent_root, attempt)
+            .map(|x| (x.external_commitment, x))
+    })
 }
 
 #[cfg(test)]
@@ -161,17 +148,22 @@ mod tests {
     use crate::sofi::derive::precommit_id;
     use crate::sofi::publication::Publication;
     use crate::sofi::validation::fixtures::{swap_fixture_n, Fixture};
+    use crate::route_chain::{fixtures::Cell, CellFact, ChainState, ROUTE_LEN};
     use crate::sofi::wire::AttemptEntry;
 
     const KEY: [u8; 64] = [0x31; 64];
     const SIG: [u8; 8] = [0x77; 8];
 
-    /// One two-leg operation as an exercise: F over attempts (0, 1), the
-    /// canonical witnesses over the shadows P(E) commits, no closure.
-    fn exercise(
-        f: &Fixture,
-        attempts: &[u64],
-    ) -> (SofiExercise, TraderPrecommitBody, TraderFulfillmentBody) {
+    /// An exercise with the precommit and fulfillment body it carries.
+    struct Built {
+        exercise: SofiExercise,
+        precommit: TraderPrecommitBody,
+        fulfillment: TraderFulfillmentBody,
+    }
+
+    /// One operation as an exercise: F over `attempts`, the canonical
+    /// witnesses over the shadows P(E) commits, no closure.
+    fn exercise(f: &Fixture, attempts: &[u64]) -> Built {
         let p = &f.precommit;
         let canonical = derive::canonical_legs(&f.preimage).unwrap();
         let shadows: Vec<D32> = p
@@ -228,13 +220,21 @@ mod tests {
             Vec::new(),
         )
         .unwrap();
-        (x, p.clone(), fb)
+        Built {
+            exercise: x,
+            precommit: p.clone(),
+            fulfillment: fb,
+        }
     }
 
     #[test]
     fn an_exercise_round_trips_and_rebuilds_into_bound_objects() {
         let f = swap_fixture_n(2);
-        let (x, p, fb) = exercise(&f, &[0, 1]);
+        let Built {
+            exercise: x,
+            precommit: p,
+            fulfillment: fb,
+        } = exercise(&f, &[0, 1]);
         let bytes = x.encode();
         assert_eq!(SofiExercise::decode(&bytes).unwrap(), x);
         let r = recognize_exercise(&bytes).unwrap();
@@ -252,9 +252,9 @@ mod tests {
     #[test]
     fn an_exercise_names_exactly_the_keys_its_fulfillment_and_precommit_name() {
         let f = swap_fixture_n(2);
-        let (x, p, _) = exercise(&f, &[0, 1]);
-        let bytes = x.encode();
-        let legs = p.legs();
+        let built = exercise(&f, &[0, 1]);
+        let bytes = built.exercise.encode();
+        let legs = built.precommit.legs();
         assert!(exercise_names_key(&bytes, &legs[0].vault_id, &legs[0].parent_root, 0).is_some());
         assert!(exercise_names_key(&bytes, &legs[1].vault_id, &legs[1].parent_root, 1).is_some());
         assert!(exercise_names_key(&bytes, &legs[0].vault_id, &legs[0].parent_root, 1).is_none());
@@ -276,9 +276,9 @@ mod tests {
     #[test]
     fn an_exercise_whose_parts_are_not_one_operations_is_nothing() {
         let f = swap_fixture_n(2);
-        let (x, p, fb) = exercise(&f, &[0, 1]);
+        let x = exercise(&f, &[0, 1]).exercise;
         let other = swap_fixture_n(1);
-        let (ox, _, _) = exercise(&other, &[0]);
+        let ox = exercise(&other, &[0]).exercise;
         // F of another P.
         let bent = SofiExercise::new(
             ox.fulfillment().to_vec(),
@@ -327,45 +327,58 @@ mod tests {
         )
         .unwrap();
         assert!(recognize_exercise(&bent.encode()).is_none());
-        let _ = (p, fb);
     }
 
-    /// The ladder's read of a successor key: the E of the exercise that won,
-    /// final or leader-held; anything that names no exercise for the key —
-    /// an open cell, an unread leader, bytes the recognizer refuses — is
-    /// unresolved, and no key is dead.
+    /// The ladder's read of a successor key: the exercise that holds it,
+    /// identified by its E, final or leader-held; a cell whose leader holds
+    /// no exercise naming the key is open; an unread leader decides nothing.
     #[test]
     fn a_successor_key_resolves_to_the_e_of_the_exercise_that_names_it_or_stays_open() {
         let f = swap_fixture_n(2);
-        let (x, p, _) = exercise(&f, &[0, 1]);
-        let bytes = x.encode();
-        let leg = &p.legs()[0];
-        let e = *p.external_commitment();
-        let (res, got) = attempt_resolution(
-            &ObjectResolution::Final(bytes.clone()),
-            &leg.vault_id,
-            &leg.parent_root,
-            0,
-        );
-        assert_eq!(res, CellResolution::Final(e));
-        assert!(got.is_some());
-        let (res, _) = attempt_resolution(
-            &ObjectResolution::LeaderHeld(bytes.clone()),
-            &leg.vault_id,
-            &leg.parent_root,
-            0,
-        );
-        assert_eq!(res, CellResolution::LeaderHeld(e));
-        for objects in [
-            ObjectResolution::Final(b"garbage".to_vec()),
-            ObjectResolution::Final(bytes.clone()),
-            ObjectResolution::Open,
-            ObjectResolution::Unavailable,
+        let built = exercise(&f, &[0, 1]);
+        let bytes = built.exercise.encode();
+        let leg = &built.precommit.legs()[0];
+        let e = *built.precommit.external_commitment();
+        let read = |cell: &Cell, attempt: u64| {
+            attempt_resolution(&cell.evidence(), &leg.vault_id, &leg.parent_root, attempt)
+        };
+        let fact = |reading: &Result<CellReading<RecognizedExercise>, Missing>| match reading {
+            Ok(held) => Ok(held.fact()),
+            Err(missing) => Err(*missing),
+        };
+        for (last, state) in [
+            (0, ChainState::LeaderHeld),
+            (ROUTE_LEN - 1, ChainState::Final),
         ] {
-            // the second one: right bytes, wrong attempt
-            let (res, got) = attempt_resolution(&objects, &leg.vault_id, &leg.parent_root, 7);
-            assert_eq!(res, CellResolution::Unresolved);
-            assert!(got.is_none());
+            let mut cell = Cell::new(b"DSM/test-successor", [0x61; 32], [0x62; 32]);
+            cell.write(&bytes, last, &[]);
+            let reading = read(&cell, 0);
+            assert_eq!(fact(&reading), Ok(CellFact::Held { id: e, state }));
+            let Ok(CellReading::Held { object, .. }) = reading else {
+                panic!("the exercise holds the key")
+            };
+            assert_eq!(object.fulfillment.body, built.fulfillment);
         }
+        let mut garbage = Cell::new(b"DSM/test-successor", [0x61; 32], [0x62; 32]);
+        garbage.write(b"garbage", ROUTE_LEN - 1, &[]);
+        assert_eq!(fact(&read(&garbage, 0)), Ok(CellFact::Open));
+        let mut other_attempt = Cell::new(b"DSM/test-successor", [0x61; 32], [0x62; 32]);
+        other_attempt.write(&bytes, ROUTE_LEN - 1, &[]);
+        assert_eq!(
+            fact(&read(&other_attempt, 7)),
+            Ok(CellFact::Open),
+            "the right bytes at another attempt's key name nothing there"
+        );
+        let mut unread = other_attempt.evidence();
+        unread.seats[0].values = None;
+        assert_eq!(
+            fact(&attempt_resolution(
+                &unread,
+                &leg.vault_id,
+                &leg.parent_root,
+                0
+            )),
+            Err(Missing::LeaderUnread)
+        );
     }
 }

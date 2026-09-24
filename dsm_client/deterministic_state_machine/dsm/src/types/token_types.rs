@@ -1102,16 +1102,7 @@ mod tests {
     fn token_supply_fixed() {
         let s = TokenSupply::fixed(1000);
         assert!(s.is_fixed());
-        assert!(!s.is_unlimited());
         assert_eq!(s.max_supply(), Some(1000));
-    }
-
-    #[test]
-    fn token_supply_unlimited() {
-        let s = TokenSupply::unlimited();
-        assert!(s.is_unlimited());
-        assert!(!s.is_fixed());
-        assert_eq!(s.max_supply(), None);
     }
 
     #[test]

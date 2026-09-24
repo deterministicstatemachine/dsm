@@ -1706,7 +1706,7 @@ pub(crate) mod fixtures {
     use super::*;
     use crate::sofi::smt::batch_fold;
     use crate::economic::tree::EconomicSmt;
-    use crate::sofi::wire::{PreEClosureIndex, PrecommitLeg};
+    use crate::sofi::wire::{PreEClosureIndex, PrecommitLeg, SofiSetupBody};
 
     pub(crate) const G: D32 = [0x11; 32];
     pub(crate) const DEV: D32 = [0x22; 32];
@@ -1722,11 +1722,123 @@ pub(crate) mod fixtures {
         [byte; 32]
     }
 
-    /// Vault `j` trades the pair `(token(j), token(j+1))`, strictly ordered as
+    /// The position the trader's setups are made at, before `P`'s.
+    pub(crate) const SETUP_POS: u64 = P_POS - 1;
+
+    /// The tokens a fixture route can walk: one more than its longest route.
+    const FIXTURE_TOKENS: usize = 4;
+
+    /// The trader's SPHINCS+ key pair `(pk, sk)`: `P`, `F` and every setup
+    /// are signed with it. Key generation is slow, so it is made once.
+    pub(crate) fn trader_keys() -> &'static (Vec<u8>, Vec<u8>) {
+        static KEYS: std::sync::OnceLock<(Vec<u8>, Vec<u8>)> = std::sync::OnceLock::new();
+        KEYS.get_or_init(|| crate::crypto::sphincs::generate_sphincs_keypair().expect("keypair"))
+    }
+
+    /// The `TokenPolicyV3` bytes of fixture token `i`: native, transferable,
+    /// its whole supply released at creation, laid out as SoFi §47 packs it.
+    fn token_policy_bytes(i: u8) -> Vec<u8> {
+        use crate::economic::token_policy::{
+            ReleaseRule, ALLOWLIST_KIND_NONE, POLICY_FLAG_TRANSFERABLE, SUPPLY_CLASS_NATIVE,
+            TOKEN_KIND_FUNGIBLE, TOKEN_POLICY_VERSION,
+        };
+        let signer = &trader_keys().0;
+        let ticker = format!("T{i:02}");
+        let alias = format!("Token {i}");
+        let mut blob = vec![
+            TOKEN_POLICY_VERSION,
+            TOKEN_KIND_FUNGIBLE,
+            SUPPLY_CLASS_NATIVE,
+            POLICY_FLAG_TRANSFERABLE,
+            ReleaseRule::AllAtCreation.code(),
+            1,
+            1,
+        ];
+        blob.extend_from_slice(&(signer.len() as u16).to_be_bytes());
+        blob.extend_from_slice(signer);
+        blob.push(ticker.len() as u8);
+        blob.extend_from_slice(ticker.as_bytes());
+        blob.extend_from_slice(&(alias.len() as u16).to_be_bytes());
+        blob.extend_from_slice(alias.as_bytes());
+        blob.push(6);
+        blob.extend_from_slice(&1_000_000_000u128.to_be_bytes());
+        blob.extend_from_slice(&0u16.to_be_bytes());
+        blob.extend_from_slice(&0u16.to_be_bytes());
+        blob.push(ALLOWLIST_KIND_NONE);
+        blob.extend_from_slice(&0u16.to_be_bytes());
+        prost::Message::encode_to_vec(&crate::types::proto::TokenPolicyV3 { policy_bytes: blob })
+    }
+
+    /// The fixture tokens as `(policy_commit, TokenPolicyV3 bytes)`, in
+    /// ascending commit order: vault `j` trades token `j` for token `j + 1`,
+    /// the strict order its market policy requires.
+    pub(crate) fn tokens() -> &'static [(D32, Vec<u8>)] {
+        static TOKENS: std::sync::OnceLock<Vec<(D32, Vec<u8>)>> = std::sync::OnceLock::new();
+        TOKENS.get_or_init(|| {
+            let mut tokens: Vec<(D32, Vec<u8>)> = (0..FIXTURE_TOKENS as u8)
+                .map(|i| {
+                    let bytes = token_policy_bytes(i);
+                    (
+                        crate::crypto::blake3::domain_hash_bytes(
+                            crate::common::domain_tags::TAG_DSM_POLICY,
+                            &bytes,
+                        ),
+                        bytes,
+                    )
+                })
+                .collect();
+            tokens.sort();
+            tokens
+        })
+    }
+
+    /// Vault `j` trades the pair `(token j, token j+1)`, strictly ordered as
     /// the market policy requires, so an N-hop route walks t0 → t1 → … → tN
     /// and never trades a token against itself.
     pub(crate) fn pair(j: usize) -> (D32, D32) {
-        (token(0x40 + j as u8), token(0x41 + j as u8))
+        (tokens()[j].0, tokens()[j + 1].0)
+    }
+
+    /// The trader's setup for `vault_id`, made at [`SETUP_POS`] under the
+    /// trader's key.
+    pub(crate) fn setup_body_for(vault_id: D32) -> SofiSetupBody {
+        SofiSetupBody::new(
+            G,
+            DEV,
+            SETUP_POS,
+            vault_id,
+            token(0xA0),
+            token(0xB0),
+            SIG_ALG,
+            &trader_keys().0,
+        )
+        .expect("a setup body")
+    }
+
+    /// The published form of `body`: the envelope carrying the trader's
+    /// signature over `m_setup`.
+    pub(crate) fn setup_envelope_of(body: &SofiSetupBody) -> Vec<u8> {
+        let signature = crate::crypto::sphincs::sphincs_sign(
+            &trader_keys().1,
+            &derive::setup_signing_digest(body),
+        )
+        .expect("a setup signature");
+        crate::sofi::publication::Publication::Setup {
+            body,
+            signature: &signature,
+        }
+        .object_bytes()
+        .expect("a setup envelope")
+    }
+
+    /// The published setup for `vault_id`.
+    pub(crate) fn setup_envelope_for(vault_id: D32) -> Vec<u8> {
+        setup_envelope_of(&setup_body_for(vault_id))
+    }
+
+    /// `ρ` of the trader's setup for `vault_id`.
+    pub(crate) fn setup_ref_for(vault_id: D32) -> D32 {
+        derive::setup_ref(&setup_body_for(vault_id))
     }
 
     pub(crate) fn policies(j: usize) -> (MarketPolicy, FeePolicy, ReleasePolicy) {
@@ -1889,33 +2001,27 @@ pub(crate) mod fixtures {
         }
     }
 
-    /// The setup reference the default fixtures give hop `j`: an opaque
-    /// digest, because RouteValidation reads `ρ` only through `E`.
-    pub(crate) fn default_setup_ref(j: usize) -> D32 {
-        token(0x55 + j as u8)
-    }
-
     pub(crate) fn swap_fixture_n(hops: usize) -> Fixture {
-        swap_fixture_with(
-            hops,
-            &default_setup_ref,
-            PreEClosureIndex::new(Vec::new()).unwrap(),
-        )
+        swap_fixture_with(hops, PreEClosureIndex::new(Vec::new()).unwrap())
     }
 
-    /// A swap over `hops` vaults whose leg `j` carries `setup_ref_of(j)` and
-    /// whose `B°` commits `closure` — for the conformance tests, which need
-    /// `ρ_j` to be the reference of a real setup body and `𝒞_E^pre` to name
-    /// real objects.
-    pub(crate) fn swap_fixture_with(
+    /// A swap over `hops` vaults whose leg `j` carries the trader's setup for
+    /// that vault and whose `B°` commits `closure`.
+    pub(crate) fn swap_fixture_with(hops: usize, closure: PreEClosureIndex) -> Fixture {
+        swap_fixture_with_setups(hops, &|j| setup_body_for(vault_id_of(j)), closure)
+    }
+
+    /// A swap over `hops` vaults whose leg `j` carries the setup `setup(j)`,
+    /// signed under the trader's key, and whose `B°` commits `closure`.
+    pub(crate) fn swap_fixture_with_setups(
         hops: usize,
-        setup_ref_of: &dyn Fn(usize) -> D32,
+        setup: &dyn Fn(usize) -> SofiSetupBody,
         closure: PreEClosureIndex,
     ) -> Fixture {
         let mut parts: Vec<VaultParts> = Vec::new();
         let mut amount = AMOUNT_IN;
         for j in 0..hops {
-            let part = swap_vault_parts(j, amount, setup_ref_of(j));
+            let part = swap_vault_parts(j, amount, derive::setup_ref(&setup(j)));
             amount = part.hop.amount_out;
             parts.push(part);
         }
@@ -2009,6 +2115,10 @@ pub(crate) mod fixtures {
             objects: policy_objects(hops),
             trader_leaves,
             vault_leaves,
+            setups: (0..hops)
+                .map(|j| (parts[j].hop.setup_ref, setup_envelope_of(&setup(j))))
+                .collect(),
+            token_policies: tokens()[..=hops].iter().cloned().collect(),
         };
         // The realize root is what the core folds to UNDER E, so it cannot be
         // chosen: BindExt fills the relationship posts and the fold does the rest.
@@ -2041,7 +2151,7 @@ pub(crate) mod fixtures {
             trader_tree.root(),
             token(0x77),
             SIG_ALG,
-            &[0x01; 64],
+            &trader_keys().0,
         )
         .unwrap();
         Fixture {
@@ -2071,20 +2181,23 @@ mod tests {
         assert_eq!(validate(&f.precommit, &f.preimage, &f.evidence), Ok(()));
         assert_eq!(
             route_validation(&f.precommit, &f.preimage, &f.evidence),
-            Validation::Valid
+            Ok(Validation::Valid)
         );
     }
 
-    /// Missing evidence is Unavailable, and stays Unavailable however much of
-    /// the rest is present. It never hardens into Invalid.
+    /// Missing evidence leaves the predicate unevaluated and names what is
+    /// missing, however much of the rest is present. It never hardens into
+    /// Invalid.
     #[test]
-    fn missing_evidence_is_unavailable_never_invalid() {
+    fn missing_evidence_is_named_never_invalid() {
         let f = swap_fixture();
         let (market, _, _) = policies(0);
         let mut without_policy = Evidence {
             objects: f.evidence.objects.clone(),
             trader_leaves: f.evidence.trader_leaves.clone(),
             vault_leaves: f.evidence.vault_leaves.clone(),
+            setups: f.evidence.setups.clone(),
+            token_policies: f.evidence.token_policies.clone(),
         };
         without_policy.objects.remove(&policy_addr(
             crate::ccb::class::MARKET_POLICY,
@@ -2094,21 +2207,23 @@ mod tests {
             validate(&f.precommit, &f.preimage, &without_policy),
             Err(Refusal::Incomplete(Missing::Policy { .. }))
         ));
-        assert_eq!(
+        assert!(matches!(
             route_validation(&f.precommit, &f.preimage, &without_policy),
-            Validation::Unavailable
-        );
+            Err(Missing::Policy { .. })
+        ));
 
         let mut without_leaf = Evidence {
             objects: f.evidence.objects.clone(),
             trader_leaves: f.evidence.trader_leaves.clone(),
             vault_leaves: BTreeMap::new(),
+            setups: f.evidence.setups.clone(),
+            token_policies: f.evidence.token_policies.clone(),
         };
         without_leaf.trader_leaves.clear();
-        assert_eq!(
+        assert!(matches!(
             route_validation(&f.precommit, &f.preimage, &without_leaf),
-            Validation::Unavailable
-        );
+            Err(Missing::TraderLeaf { .. } | Missing::VaultLeaf { .. })
+        ));
     }
 
     /// A two-hop route: the trader spends t0, receives t2, and t1 never
@@ -2566,6 +2681,8 @@ mod tests {
             objects: f.evidence.objects.clone(),
             trader_leaves: f.evidence.trader_leaves.clone(),
             vault_leaves: f.evidence.vault_leaves.clone(),
+            setups: f.evidence.setups.clone(),
+            token_policies: f.evidence.token_policies.clone(),
         };
         let VaultLeafPre::State(state) = evidence.vault_leaves[&(vault_id, state_key)].clone()
         else {
@@ -2594,6 +2711,8 @@ mod tests {
             objects: f.evidence.objects.clone(),
             trader_leaves: f.evidence.trader_leaves.clone(),
             vault_leaves: f.evidence.vault_leaves.clone(),
+            setups: f.evidence.setups.clone(),
+            token_policies: f.evidence.token_policies.clone(),
         };
         let VaultLeafPre::State(state) = evidence.vault_leaves[&(vault_id, state_key)].clone()
         else {
@@ -2725,7 +2844,7 @@ mod tests {
         let settlement = SettlementBody::Close {
             vault_id,
             parent_root: vault_tree.root(),
-            setup_ref: token(0x55),
+            setup_ref: setup_ref_for(vault_id),
             owner_authority: authority,
             reserve_a: RESERVE_A,
             reserve_b: RESERVE_B,
@@ -2758,6 +2877,8 @@ mod tests {
                     VaultLeafPre::Relationship(relationship),
                 ),
             ]),
+            setups: BTreeMap::from([(setup_ref_for(vault_id), setup_envelope_for(vault_id))]),
+            token_policies: tokens()[..=1].iter().cloned().collect(),
         };
         let realize_root = {
             let entries = trader_fold_entries(&trader_core, &e, &evidence).unwrap();
@@ -2774,13 +2895,13 @@ mod tests {
             vec![PrecommitLeg {
                 vault_id,
                 parent_root: vault_tree.root(),
-                setup_ref: token(0x55),
+                setup_ref: setup_ref_for(vault_id),
             }],
             realize_root,
             trader_tree.root(),
             token(0x77),
             SIG_ALG,
-            &[0x01; 64],
+            &trader_keys().0,
         )
         .unwrap();
         Fixture {
@@ -2811,13 +2932,13 @@ mod tests {
         );
         assert_eq!(
             route_validation(&f.precommit, &f.preimage, &f.evidence),
-            Validation::Invalid
+            Ok(Validation::Invalid)
         );
         // Even with NOTHING fetched it is Invalid: the branch is refused before
         // any evidence is consulted.
         assert_eq!(
             route_validation(&f.precommit, &f.preimage, &Evidence::default()),
-            Validation::Invalid
+            Ok(Validation::Invalid)
         );
     }
 
@@ -2832,6 +2953,8 @@ mod tests {
             objects: f.evidence.objects.clone(),
             trader_leaves: f.evidence.trader_leaves.clone(),
             vault_leaves: f.evidence.vault_leaves.clone(),
+            setups: f.evidence.setups.clone(),
+            token_policies: f.evidence.token_policies.clone(),
         };
         let VaultLeafPre::State(state) = evidence.vault_leaves[&(vault_id, state_key)].clone()
         else {
@@ -3260,6 +3383,8 @@ mod tests {
             objects: f.evidence.objects.clone(),
             trader_leaves: f.evidence.trader_leaves.clone(),
             vault_leaves: f.evidence.vault_leaves.clone(),
+            setups: f.evidence.setups.clone(),
+            token_policies: f.evidence.token_policies.clone(),
         };
         let VaultLeafPre::State(state) = evidence.vault_leaves[&(vault_id, state_key)].clone()
         else {
@@ -3290,6 +3415,8 @@ mod tests {
             objects: f.evidence.objects.clone(),
             trader_leaves: f.evidence.trader_leaves.clone(),
             vault_leaves: f.evidence.vault_leaves.clone(),
+            setups: f.evidence.setups.clone(),
+            token_policies: f.evidence.token_policies.clone(),
         };
         let VaultLeafPre::State(state) = evidence.vault_leaves[&(vault_id, state_key)].clone()
         else {
@@ -3336,6 +3463,8 @@ mod tests {
             objects: f.evidence.objects.clone(),
             trader_leaves: f.evidence.trader_leaves.clone(),
             vault_leaves: f.evidence.vault_leaves.clone(),
+            setups: f.evidence.setups.clone(),
+            token_policies: f.evidence.token_policies.clone(),
         };
         let VaultLeafPre::State(state) = evidence.vault_leaves[&(vault_id, state_key)].clone()
         else {
@@ -3370,6 +3499,8 @@ mod tests {
             objects: f.evidence.objects.clone(),
             trader_leaves: f.evidence.trader_leaves.clone(),
             vault_leaves: f.evidence.vault_leaves.clone(),
+            setups: f.evidence.setups.clone(),
+            token_policies: f.evidence.token_policies.clone(),
         };
         let VaultLeafPre::State(state) = evidence.vault_leaves[&(vault_id, state_key)].clone()
         else {
@@ -3389,7 +3520,7 @@ mod tests {
         ));
         assert_eq!(
             route_validation(&f.precommit, &f.preimage, &evidence),
-            Validation::Invalid
+            Ok(Validation::Invalid)
         );
         assert_eq!(
             validate(&f.precommit, &f.preimage, &evidence),
@@ -3410,6 +3541,8 @@ mod tests {
             objects: f.evidence.objects.clone(),
             trader_leaves: f.evidence.trader_leaves.clone(),
             vault_leaves: f.evidence.vault_leaves.clone(),
+            setups: f.evidence.setups.clone(),
+            token_policies: f.evidence.token_policies.clone(),
         };
         // Hop 0's state is simply not held.
         evidence
@@ -3430,7 +3563,7 @@ mod tests {
         );
         assert_eq!(
             route_validation(&f.precommit, &f.preimage, &evidence),
-            Validation::Invalid
+            Ok(Validation::Invalid)
         );
     }
 
@@ -3572,6 +3705,8 @@ mod tests {
             objects: f.evidence.objects.clone(),
             trader_leaves: f.evidence.trader_leaves.clone(),
             vault_leaves: f.evidence.vault_leaves.clone(),
+            setups: f.evidence.setups.clone(),
+            token_policies: f.evidence.token_policies.clone(),
         };
         // Garbage, under the address of a policy that really exists.
         evidence
@@ -3583,7 +3718,7 @@ mod tests {
         );
         assert_eq!(
             route_validation(&f.precommit, &f.preimage, &evidence),
-            Validation::Unavailable
+            Err(Missing::NonVerifyingObject { addr })
         );
 
         // Well-formed bytes of the RIGHT class, under the WRONG address, are
@@ -3592,14 +3727,14 @@ mod tests {
         evidence.objects.insert(addr, other_market.encode());
         assert_eq!(
             route_validation(&f.precommit, &f.preimage, &evidence),
-            Validation::Unavailable
+            Err(Missing::NonVerifyingObject { addr })
         );
         // And supplying the real object validates, so the refusal really was
         // about the evidence and not about the operation.
         evidence.objects.insert(addr, market.encode());
         assert_eq!(
             route_validation(&f.precommit, &f.preimage, &evidence),
-            Validation::Valid
+            Ok(Validation::Valid)
         );
     }
 
@@ -3688,6 +3823,8 @@ mod tests {
             objects: f.evidence.objects.clone(),
             trader_leaves: f.evidence.trader_leaves.clone(),
             vault_leaves: f.evidence.vault_leaves.clone(),
+            setups: f.evidence.setups.clone(),
+            token_policies: f.evidence.token_policies.clone(),
         };
         let VaultLeafPre::Relationship(leaf) = evidence.vault_leaves[&(vault_id, rel_key)].clone()
         else {

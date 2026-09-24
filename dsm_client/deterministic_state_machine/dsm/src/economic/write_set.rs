@@ -769,6 +769,13 @@ pub fn build_write_set(
                     amount,
                 )?);
             }
+            // The same binding the verifier checks: the record is this
+            // operation's vault's.
+            if creation.vault_id != vault_id {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "the creation record names another vault than the operation",
+                });
+            }
             let state = EconomicLeafState::VaultCreation(creation);
             let key = state.leaf_key(genesis, device_id);
             // Insert-only, and that is what makes the record's presence under
@@ -779,7 +786,6 @@ pub fn build_write_set(
                     detail: "a creation record for this vault already exists",
                 });
             }
-            let _ = vault_id;
             planned.push(PlannedLeaf {
                 key,
                 pre: None,
@@ -803,25 +809,14 @@ pub fn build_write_set(
                 )?);
             }
             let (policy_commit, amount) = release;
-            // FROM ZERO. A balance of this commit already in the creator's
-            // authenticated pre-state is units of it already released, and a
-            // second release of the genesis supply would exceed it.
-            if pre_balances.get(&policy_commit).copied().unwrap_or(0) != 0 {
-                return Err(WriteSetError::WrongWriteSet {
-                    detail: "the creator already holds units of the token it creates",
-                });
-            }
-            let post = balance_state(policy_commit, amount)?;
-            let key = post
-                .as_ref()
-                .map(|s| s.leaf_key(genesis, device_id))
-                .ok_or(WriteSetError::WrongWriteSet {
-                    detail: "a genesis release credits no units",
-                })?;
+            let have = pre_balances.get(&policy_commit).copied().unwrap_or(0);
+            let next = have
+                .checked_add(amount)
+                .ok_or(WriteSetError::BalanceOverflow)?;
             planned.push(PlannedLeaf {
-                key,
-                pre: None,
-                post,
+                key: crate::economic::keys::balance_key(genesis, device_id, &policy_commit),
+                pre: balance_state(policy_commit, have)?,
+                post: balance_state(policy_commit, next)?,
                 source: Some(PlannedSource::External(facts.clone())),
             });
         }
@@ -1215,10 +1210,10 @@ pub fn verify_operation_write_set(
             }
             Ok(())
         }
-        // SoFi §51: the fee debit, if any, and the release credit from zero,
-        // funded by the one genesis-release source. The source's arm proves
-        // the amount is the policy's genesis supply; this layer pins that the
-        // witness is exactly this operation's effect.
+        // SoFi §51: the fee debit, if any, and the release credit, funded by
+        // the one genesis-release source. The source's arm establishes what
+        // the release funds; this layer pins that the witness is exactly this
+        // operation's effect.
         SemanticWriteSet::CreateTokenRelease { fee, release } => {
             if fee.0 == release.0 {
                 return Err(WriteSetError::WrongWriteSet {
@@ -1245,24 +1240,27 @@ pub fn verify_operation_write_set(
                 }
             }
             let credit = expect_one_balance(&balances, release.0)?;
-            if credit.pre_amount != 0 || credit.post_amount != release.1 {
+            if credit.post_amount.checked_sub(credit.pre_amount) != Some(release.1) {
                 return Err(WriteSetError::WrongWriteSet {
-                    detail: "the release is not the operation's supply credited from zero",
+                    detail: "the release credit is not the operation's supply",
                 });
             }
-            match witness.credit_sources.as_slice() {
-                [CreditSource::GenesisRelease(d)] => {
-                    if d.credit_mutation_index != credit.mutation_index {
-                        return Err(WriteSetError::WrongWriteSet {
-                            detail: "the genesis release does not fund the supply credit",
-                        });
-                    }
-                    Ok(())
-                }
-                _ => Err(WriteSetError::WrongWriteSet {
-                    detail: "a token creation is funded by exactly one genesis release",
-                }),
+            let [source] = witness.credit_sources.as_slice() else {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "a token creation is funded by exactly one credit source",
+                });
+            };
+            let CreditSource::GenesisRelease(d) = source else {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "a token creation is funded by a genesis release",
+                });
+            };
+            if d.credit_mutation_index != credit.mutation_index {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "the genesis release does not fund the supply credit",
+                });
             }
+            Ok(())
         }
     }
 }
