@@ -97,6 +97,7 @@ fn facts() -> (ValidatedEconomicRoot, EconomicTransitionWitness, Operation) {
         AdmittedEconomicPosition::SingleRoot {
             economic_position: 4,
             economic_root: tree.root(),
+            claim_ref: [0xC7; 32],
         },
     )
     .expect("an ordinary admitted position");
@@ -135,6 +136,7 @@ fn resolved_sofi() -> ValidatedPeerTransition {
             economic_position: 4,
             selected_root: tree.root(),
             fulfillment_id: [0xF1; 32],
+            claim_ref: [0xC7; 32],
         },
     )
     .expect("a resolved route selected exactly one root");

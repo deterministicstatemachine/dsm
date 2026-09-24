@@ -202,6 +202,14 @@ fn adoption_admits(
     Ok(())
 }
 
+/// What [`advance_resolved`] establishes at `q`: the validated root, and the
+/// claim `C_q` accepted there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedAdvance {
+    pub root: ValidatedEconomicRoot,
+    pub claim: crate::economic::lineage::AcceptedClaim,
+}
+
 /// Advance the validated lineage through a resolved SoFi position (P15-10).
 ///
 /// Every conjunct is independent and each one is a separate reason to refuse:
@@ -216,7 +224,7 @@ pub fn advance_resolved(
     claims: &RegisteredClaims,
     resolution: Resolution,
     receipt: Option<&RealizedReceipt<'_>>,
-) -> Result<ValidatedEconomicRoot, AdvanceError> {
+) -> Result<ResolvedAdvance, AdvanceError> {
     let q = next_position(precommit.position()).map_err(AdvanceError::Counter)?;
     if fulfillment.position() != q || previous.economic_position() != precommit.position() {
         return Err(AdvanceError::PositionIsNotSuccessor {
@@ -259,7 +267,15 @@ pub fn advance_resolved(
         Resolution::Void => previous.economic_root(),
         Resolution::Invalid => return Err(AdvanceError::LineageIsTerminal),
     };
-    Ok(ValidatedEconomicRoot::from_resolved_sofi_position(q, root))
+    Ok(ResolvedAdvance {
+        root: ValidatedEconomicRoot::from_resolved_sofi_position(q, root),
+        claim: crate::economic::lineage::AcceptedClaim::from_resolved_sofi_position(
+            *precommit.genesis(),
+            *precommit.device_id(),
+            q,
+            derived_digest,
+        ),
+    })
 }
 
 /// What the verifier knows about the claim at a predecessor position, for the
@@ -513,6 +529,7 @@ mod tests {
             crate::economic::lineage::AdmittedEconomicPosition::SingleRoot {
                 economic_position: P_POS,
                 economic_root: root,
+                claim_ref: d(0x66),
             },
         )
         .expect("an ordinary admitted position")
@@ -557,8 +574,23 @@ mod tests {
             Some(&receipt(&fx, &receiver)),
         )
         .unwrap();
-        assert_eq!(advanced.economic_position(), P_POS + 1);
-        assert_eq!(advanced.economic_root(), *p.realize_root());
+        assert_eq!(advanced.root.economic_position(), P_POS + 1);
+        assert_eq!(advanced.root.economic_root(), *p.realize_root());
+        // The claim accepted at q is C_q, derived from (P, F).
+        assert_eq!(
+            (
+                advanced.claim.genesis(),
+                advanced.claim.device_id(),
+                advanced.claim.economic_position(),
+                advanced.claim.claim_ref()
+            ),
+            (
+                G,
+                DEV,
+                P_POS + 1,
+                derive::claim_ref(&derive::resolution_claim(&p, &f).encode())
+            )
+        );
     }
 
     /// SofiVoid has zero mutations: the position exists, it is terminal, and
@@ -577,8 +609,8 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(advanced.economic_position(), P_POS + 1);
-        assert_eq!(advanced.economic_root(), pre);
+        assert_eq!(advanced.root.economic_position(), P_POS + 1);
+        assert_eq!(advanced.root.economic_root(), pre);
     }
 
     #[test]
@@ -616,6 +648,7 @@ mod tests {
                     crate::economic::lineage::AdmittedEconomicPosition::SingleRoot {
                         economic_position: P_POS + 3,
                         economic_root: pre,
+                        claim_ref: d(0x66),
                     },
                 )
                 .expect("an ordinary admitted position"),
@@ -912,11 +945,13 @@ mod tests {
             AdmittedEconomicPosition::SingleRoot {
                 economic_position: 4,
                 economic_root: d(0xA0),
+                claim_ref: d(0x66),
             },
             AdmittedEconomicPosition::ResolvedSofi {
                 economic_position: 4,
                 selected_root: d(0xA0),
                 fulfillment_id: d(0xF1),
+                claim_ref: d(0x66),
             },
             AdmittedEconomicPosition::UnresolvedSofi {
                 economic_position: 4,
@@ -1049,7 +1084,7 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(advanced.economic_root(), *p.void_root());
+        assert_eq!(advanced.root.economic_root(), *p.void_root());
     }
 
     /// THE MULTI-HOP CASE. A route `A -> B -> C` obliges the trader to have
@@ -1114,7 +1149,7 @@ mod tests {
             assert_eq!(
                 descendant_fence(
                     PredecessorClaim::ConditionalResolved {
-                        selected_root: advanced.economic_root()
+                        selected_root: advanced.root.economic_root()
                     },
                     &expected
                 ),
@@ -1124,7 +1159,7 @@ mod tests {
             let other = if expected == realize { pre } else { realize };
             assert!(descendant_fence(
                 PredecessorClaim::ConditionalResolved {
-                    selected_root: advanced.economic_root()
+                    selected_root: advanced.root.economic_root()
                 },
                 &other
             )

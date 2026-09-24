@@ -228,6 +228,11 @@ pub mod class {
     /// cannot count at another key. `0x005D` is the native-reserve credit
     /// source (R4), which is why this is `0x005E`.
     pub const SOFI_EXERCISE: u16 = 0x005E;
+    /// `0x0060` — the creator's insert-only record that a native token was
+    /// created on its lineage (SoFi Amendment S8). Presence under a validated
+    /// root proves the creation, and a second creation of the same policy
+    /// commit on that lineage cannot insert it again.
+    pub const ECONOMIC_TOKEN_CREATION_STATE: u16 = 0x0060;
 }
 
 /// Discriminants **allocated but not encodable** — see [`class`] for the ones

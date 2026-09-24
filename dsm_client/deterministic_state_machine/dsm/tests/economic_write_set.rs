@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use dsm::economic::admission::dsm_economic_operation_id;
 use dsm::economic::native_reserve::{era_reserve_id, ERA_FAUCET_PAYOUT};
 use dsm::economic::mutation::EconomicLeafMutation;
-use dsm::economic::state::{EconomicBalanceState, EconomicLeafState};
+use dsm::economic::state::{EconomicBalanceState, EconomicLeafState, EconomicTokenCreationState};
 use dsm::economic::tree::EconomicSmt;
 use dsm::economic::witness::{verify_mutation_sequence, EconomicTransitionWitness};
 use dsm::economic::write_set::{
@@ -224,9 +224,9 @@ fn a_zero_supply_creation_has_no_write_set() {
     );
 }
 
-/// A creation is its ERA fee debit and the credit of its whole genesis
-/// supply, funded by one genesis release naming that credit. Built and
-/// verified from the one table.
+/// A creation is its ERA fee debit, the credit of its whole genesis supply
+/// funded by one genesis release naming that credit, and its creation record
+/// inserted from zero (Amendment S8). Built and verified from the one table.
 #[test]
 fn a_token_creation_is_its_fee_debit_and_its_genesis_release() {
     let (tree, balances) = funded_tree(era(), 500);
@@ -236,7 +236,18 @@ fn a_token_creation_is_its_fee_debit_and_its_genesis_release() {
         balances,
         &CreditSourceFacts::GenesisRelease,
     );
-    assert_eq!(witness.mutations.len(), 2, "the fee debit and the release");
+    assert_eq!(
+        witness.mutations.len(),
+        3,
+        "the fee debit, the release and the creation record"
+    );
+    assert!(witness.mutations.iter().any(|m| m.pre_state.is_none()
+        && m.post_state
+            == Some(EconomicLeafState::TokenCreation(
+                EconomicTokenCreationState {
+                    policy_commit: [0x77; 32]
+                }
+            ))));
     let [dsm::economic::credit::CreditSource::GenesisRelease(release)] =
         witness.credit_sources.as_slice()
     else {
@@ -249,7 +260,7 @@ fn a_token_creation_is_its_fee_debit_and_its_genesis_release() {
         }
         other => panic!("expected the release credit, got {other:?}"),
     }
-    // Without a fee, the release alone.
+    // Without a fee, the release and the record.
     let (tree, balances) = funded_tree(era(), 500);
     let witness = round_trip(
         &create_token(1_000, 0),
@@ -257,7 +268,31 @@ fn a_token_creation_is_its_fee_debit_and_its_genesis_release() {
         balances,
         &CreditSourceFacts::GenesisRelease,
     );
-    assert_eq!(witness.mutations.len(), 1);
+    assert_eq!(witness.mutations.len(), 2);
+}
+
+/// Amendment S8: a token is created once on its creator's lineage. A tree
+/// already holding the creation record cannot build a second creation of the
+/// same token.
+#[test]
+fn a_token_is_created_once_on_its_creators_lineage() {
+    let (mut tree, balances) = funded_tree(era(), 500);
+    let record = EconomicLeafState::TokenCreation(EconomicTokenCreationState {
+        policy_commit: [0x77; 32],
+    });
+    tree.insert(record.leaf_key(&G, &DEV), record.leaf_value().unwrap());
+    assert!(matches!(
+        build_write_set(
+            &create_token(1_000, 500),
+            &G,
+            &DEV,
+            &econ_op_id(),
+            &EconomicPreState::new(&balances, P_CREATE),
+            &mut tree,
+            &CreditSourceFacts::GenesisRelease,
+        ),
+        Err(WriteSetError::WrongWriteSet { .. })
+    ));
 }
 
 /// A creation witness is the effect of exactly its own operation: offered
@@ -291,6 +326,54 @@ fn a_creation_witness_of_another_supply_or_fee_is_refused() {
             "{other:?}"
         );
     }
+}
+
+/// A creation witness without its creation record is not the creation's
+/// effect: the record is what makes a second creation unbuildable.
+#[test]
+fn a_creation_witness_without_its_record_is_refused() {
+    let (mut tree, balances) = funded_tree(era(), 500);
+    let pre = tree.root();
+    let op = create_token(1_000, 500);
+    let built = build_write_set(
+        &op,
+        &G,
+        &DEV,
+        &econ_op_id(),
+        &EconomicPreState::new(&balances, P_CREATE),
+        &mut tree,
+        &CreditSourceFacts::GenesisRelease,
+    )
+    .unwrap();
+    let credit_index = built.credit_sources[0].credit_mutation_index() as usize;
+    let credited = built.mutations[credit_index].clone();
+    let without_record: Vec<EconomicLeafMutation> = built
+        .mutations
+        .into_iter()
+        .filter(|m| !matches!(m.post_state, Some(EconomicLeafState::TokenCreation(_))))
+        .collect();
+    assert_eq!(without_record.len(), 2);
+    let index = without_record
+        .iter()
+        .position(|m| *m == credited)
+        .expect("the release credit") as u32;
+    let witness = EconomicTransitionWitness::new(
+        pre,
+        built.post_root,
+        econ_op_id(),
+        dsm::economic::admission::dsm_operation_digest(&op.to_bytes()),
+        without_record,
+        vec![dsm::economic::credit::CreditSource::GenesisRelease(
+            dsm::economic::credit::CreditSourceGenesisRelease {
+                credit_mutation_index: index,
+            },
+        )],
+    )
+    .expect("a structurally valid witness");
+    assert!(matches!(
+        verify_operation_write_set(&op, &G, &DEV, &witness, P_CREATE),
+        Err(WriteSetError::WrongWriteSet { .. })
+    ));
 }
 
 /// The creation's credit has one funding statement, the genesis release:

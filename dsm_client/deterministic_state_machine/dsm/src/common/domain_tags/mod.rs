@@ -149,7 +149,7 @@ mod tests {
     // -3 for the retired signer-issuance tags, +1 for the genesis release
     // (SoFi §51), +1 for the spool seal (DSM Amendment A7), +2 for the
     // self-signed device directory, 2026-09-23.
-    const EXPECTED_TAG_COUNT: usize = 390;
+    const EXPECTED_TAG_COUNT: usize = 391;
 
     /// Scan the crate source for every declared domain-tag constant.
     ///

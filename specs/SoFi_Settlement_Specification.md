@@ -912,6 +912,8 @@ published as a content addressed object (Section II); Core recomputes ρ from th
 
 SetupValid(setup) is semantic and belongs to Core: canonical body encoding, ρ, the signature over msetup ,
 ClaimRef, and the identity and vault relationship rules.
+
+> **Amendment S9 (owner, 2026-09-23) — ClaimRef is checked against the verifier's own lineage.** `SetupValid` compares the setup's `claim_ref` with the digest of the claim this verifier accepted at the setup's position `p` when it validated the trader's lineage: the registered root claim of an ordinary position, or `C_p` of a resolved SoFi position. RouteValidation's evidence carries that accepted claim as a value only lineage validation produces (or the device's own admitted store, for its own positions), so RouteValidation reads no storage for it. A setup naming any other claim is Invalid. Until the accepted claim is in hand, the setup is not evaluated.
 SetupRegistered(setup) is a durability fact that Core derives from storage reads.
 Accept(E) requires both. Storage establishes neither.
 
@@ -2437,6 +2439,8 @@ recipient allowlist                   none, or an inline list of device ids that
 **Rule**
 The token’s identity is policy_commit, the hash of the whole blob. Any field that differs makes a different token.
 The ticker is display only; two tokens may share one.
+
+> **Amendment S8 (owner, 2026-09-23) — the policy names its creator, and a token is created once.** The policy blob also commits the creator: the genesis `G` and device id `DevID` of the device that creates the token, placed after the release rule. A native token's genesis release is admissible only in a `CreateToken` of that device, so anyone else holding the same policy bytes releases nothing. The creating transition also inserts a creation record for the policy commit into the creator's economic tree, from zero (class `0x0060`, key `H(DSM/economic-token-creation-key/v1; G ∥ DevID ∥ policy_commit)`). Its presence under a validated root proves the creation, and a second creation of the same commit on that lineage cannot build its write set. The economic-root register keeps the lineage unforked, so the genesis supply is released exactly once.
 
 **Code**
 Balances are keyed by policy_commit (the economic balance leaf; CORE/sofi/validation.rs:553). Issuance

@@ -42,7 +42,10 @@ use crate::economic::credit::{
 };
 use crate::economic::mutation::EconomicLeafMutation;
 use crate::economic::provenance::validated_peer_debit_source_id;
-use crate::economic::state::{EconomicBalanceState, EconomicConsumedSourceState, EconomicLeafState};
+use crate::economic::state::{
+    EconomicBalanceState, EconomicConsumedSourceState, EconomicLeafState,
+    EconomicTokenCreationState,
+};
 use crate::economic::tree::EconomicSmt;
 use crate::economic::witness::EconomicTransitionWitness;
 use crate::types::operations::Operation;
@@ -267,11 +270,13 @@ enum SemanticWriteSet {
         leg_b: ([u8; 32], u64),
         creation: crate::sofi::wire::VaultCreation,
     },
-    /// `CreateToken` (SoFi §51): the ERA fee debit and the creator's credit of
-    /// the new token's whole genesis supply, as ONE write set. The credit's
+    /// `CreateToken` (SoFi §51, Amendment S8): the ERA fee debit, the
+    /// creator's credit of the new token's whole genesis supply, and the
+    /// creation record inserted FROM ZERO, as ONE write set. The credit's
     /// source is the genesis release (`0x005F`), whose arm checks the amount
-    /// against the genesis supply the token's policy commits. Fee and supply
-    /// are different assets: neither funds the other.
+    /// against the genesis supply the token's policy commits and the creator
+    /// the policy names. Fee and supply are different assets: neither funds
+    /// the other.
     CreateTokenRelease {
         /// `(ERA policy_commit, fee_amount)`.
         fee: ([u8; 32], u64),
@@ -809,6 +814,21 @@ pub fn build_write_set(
                 )?);
             }
             let (policy_commit, amount) = release;
+            let record =
+                EconomicLeafState::TokenCreation(EconomicTokenCreationState { policy_commit });
+            let record_key = record.leaf_key(genesis, device_id);
+            // FROM ZERO: a token is created once on its creator's lineage.
+            if tree.get(&record_key).is_some() {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "a creation record for this token already exists",
+                });
+            }
+            planned.push(PlannedLeaf {
+                key: record_key,
+                pre: None,
+                post: Some(record),
+                source: None,
+            });
             let have = pre_balances.get(&policy_commit).copied().unwrap_or(0);
             let next = have
                 .checked_add(amount)
@@ -949,10 +969,12 @@ pub fn verify_operation_write_set(
     // refused here by class.
     let relationships_legal = matches!(semantic, SemanticWriteSet::SofiSetup { .. });
     let creations_legal = matches!(semantic, SemanticWriteSet::SofiVaultCreate { .. });
+    let token_creations_legal = matches!(semantic, SemanticWriteSet::CreateTokenRelease { .. });
     let mut balances: Vec<ObservedBalance> = Vec::new();
     let mut consumed: Vec<(u32, EconomicConsumedSourceState)> = Vec::new();
     let mut relationships: Vec<(u32, crate::sofi::wire::TraderRelationshipLeaf)> = Vec::new();
     let mut creations: Vec<(u32, crate::sofi::wire::VaultCreation)> = Vec::new();
+    let mut token_creations: Vec<EconomicTokenCreationState> = Vec::new();
     for (i, m) in witness.mutations.iter().enumerate() {
         let index = u32::try_from(i).map_err(|_| WriteSetError::Ccb("index overflow".into()))?;
         let classify = |s: &Option<EconomicLeafState>| -> Result<(), WriteSetError> {
@@ -962,6 +984,7 @@ pub fn verify_operation_write_set(
                 | Some(EconomicLeafState::ConsumedSource(_)) => Ok(()),
                 Some(EconomicLeafState::Relationship(_)) if relationships_legal => Ok(()),
                 Some(EconomicLeafState::VaultCreation(_)) if creations_legal => Ok(()),
+                Some(EconomicLeafState::TokenCreation(_)) if token_creations_legal => Ok(()),
                 Some(_) => Err(WriteSetError::UnexpectedLeafClass),
             }
         };
@@ -984,6 +1007,14 @@ pub fn verify_operation_write_set(
             (Some(EconomicLeafState::VaultCreation(_)), _) => {
                 return Err(WriteSetError::WrongWriteSet {
                     detail: "a creation record is insert-only; a vault is created once",
+                })
+            }
+            (None, Some(EconomicLeafState::TokenCreation(t))) => {
+                token_creations.push(t.clone());
+            }
+            (Some(EconomicLeafState::TokenCreation(_)), _) => {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "a token-creation record is insert-only; a token is created once",
                 })
             }
             (pre, Some(EconomicLeafState::Balance(post))) => {
@@ -1225,10 +1256,23 @@ pub fn verify_operation_write_set(
                     detail: "a token creation consumes no external source",
                 });
             }
-            let expected = if fee.1 > 0 { 2 } else { 1 };
-            if balances.len() != expected || witness.mutations.len() != expected {
+            let [record] = token_creations.as_slice() else {
                 return Err(WriteSetError::WrongWriteSet {
-                    detail: "a token creation is its fee debit and one release credit",
+                    detail: "a token creation inserts exactly one creation record",
+                });
+            };
+            let expected_balances = if fee.1 > 0 { 2 } else { 1 };
+            if balances.len() != expected_balances
+                || witness.mutations.len() != expected_balances + 1
+            {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "a token creation is its fee debit, one release credit and its \
+                             creation record",
+                });
+            }
+            if record.policy_commit != release.0 {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "the creation record names another token than the operation creates",
                 });
             }
             if fee.1 > 0 {

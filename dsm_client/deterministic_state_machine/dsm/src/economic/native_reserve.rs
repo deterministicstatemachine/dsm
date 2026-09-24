@@ -64,7 +64,9 @@ use crate::common::domain_tags::{
     TAG_DSM_NATIVE_RESERVE_SEED, TAG_DSM_NATIVE_RESERVE_STATE,
 };
 use crate::crypto::blake3::dsm_domain_hasher;
-use crate::route_chain::{evaluate, CellEvidence, CellReading, ChainState, Missing};
+use crate::route_chain::{
+    evaluate, CellError, CellEvidence, CellReading, ChainState, Missing, RoutedCell,
+};
 use crate::storage_object::immutable_addr;
 use crate::types::proto as generated;
 
@@ -511,16 +513,55 @@ pub enum SuccessorRead {
     Unavailable(Missing),
 }
 
-/// Resolve the parent's successor cell from its route-chain evidence (storage
-/// spec §9): the leader's arrival log, each later seat's, and the ByteCommits
-/// that make their links checkable.
+/// The cell where a reserve state's successor is decided, as Core derives
+/// it: the key and seed from the state, the route over the set the state
+/// commits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SuccessorCell {
+    parent: NativeReserveState,
+    cell: RoutedCell,
+}
+
+impl SuccessorCell {
+    /// `parent`'s successor cell. `members` must re-derive
+    /// `parent.storage_set_id`; any other set is refused.
+    pub fn of(
+        parent: &NativeReserveState,
+        members: &crate::ccb::StorageSetMembers,
+    ) -> Result<Self, CellError> {
+        let cell = RoutedCell::new(
+            reserve_cell_namespace(),
+            parent.successor_cell(),
+            &parent.successor_seed(),
+            members,
+            &parent.storage_set_id,
+        )?;
+        Ok(Self {
+            parent: *parent,
+            cell,
+        })
+    }
+
+    pub fn parent(&self) -> &NativeReserveState {
+        &self.parent
+    }
+
+    pub fn routed(&self) -> &RoutedCell {
+        &self.cell
+    }
+}
+
+/// Resolve a successor cell from its route-chain evidence (storage spec §9):
+/// the leader's arrival log, each later seat's, and the ByteCommits that make
+/// their links checkable.
 ///
 /// Recognition first: only bytes that verify as a release AND succeed this
 /// parent count, so unrecognized bytes are never an occupant, never final,
 /// however early they arrived. What holds the cell is the release and the
 /// child state recognition built.
-pub fn resolve_successor(parent: &NativeReserveState, evidence: &CellEvidence) -> SuccessorRead {
-    let reading = evaluate(evidence, |bytes| {
+pub fn resolve_successor(cell: &SuccessorCell, evidence: &CellEvidence) -> SuccessorRead {
+    let parent = &cell.parent;
+    let reading = evaluate(&cell.cell, evidence, |bytes| {
         let release = decode_and_verify_release(bytes).ok()?;
         let child = release_constructible(parent, &release).ok()?;
         Some((crate::storage_cell::entry_digest(bytes), (release, child)))
@@ -615,10 +656,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::route_chain::{fixtures::Cell, ROUTE_LEN};
+    use crate::route_chain::fixtures::{committed_set, committed_set_id, Cell};
+    use crate::route_chain::ROUTE_LEN;
 
     const NETWORK: &[u8] = b"dsm-testnet";
-    const SET: D32 = [0xB1; 32];
     const G: D32 = [0x11; 32];
     const DEV: D32 = [0x22; 32];
 
@@ -627,7 +668,7 @@ mod tests {
     }
 
     fn genesis() -> NativeReserveState {
-        NativeReserveState::genesis(NETWORK, SET)
+        NativeReserveState::genesis(NETWORK, committed_set_id())
     }
 
     fn body(parent: &NativeReserveState, amount: u64, pk: &[u8]) -> NativeReserveReleaseBody {
@@ -640,7 +681,7 @@ mod tests {
             recipient_devid: DEV,
             recipient_economic_position: 1,
             recipient_operation_digest: [0x33; 32],
-            storage_set_id: SET,
+            storage_set_id: committed_set_id(),
             source: ReleaseSource::FaucetClaimant {
                 claimant_public_key: pk.to_vec(),
             },
@@ -658,9 +699,30 @@ mod tests {
         signed_with_key(parent, amount).0
     }
 
-    /// The parent's successor cell, over the fixture's committed set.
-    fn successor_cell() -> Cell {
-        Cell::new(b"DSM/test-reserve-cell", [0x4E; 32], [0x91; 32])
+    /// `parent`'s successor cell over the fixture's committed set, and its
+    /// seats.
+    fn successor_cell(parent: &NativeReserveState) -> (SuccessorCell, Cell) {
+        let cell = SuccessorCell::of(parent, &committed_set()).expect("the committed set");
+        let seats = Cell::at(cell.routed());
+        (cell, seats)
+    }
+
+    /// A successor cell is routed only over the set its parent commits.
+    #[test]
+    fn a_successor_cell_is_routed_over_the_set_its_parent_commits() {
+        let r0 = genesis();
+        let (cell, seats) = successor_cell(&r0);
+        assert_eq!(cell.routed().key(), &r0.successor_cell());
+        assert_eq!(cell.routed().namespace(), reserve_cell_namespace());
+        assert_eq!(
+            seats.route,
+            crate::route_chain::Route::of(&r0.successor_seed(), &committed_set()).unwrap()
+        );
+        let other = NativeReserveState::genesis(NETWORK, [0x77; 32]);
+        assert!(matches!(
+            SuccessorCell::of(&other, &committed_set()),
+            Err(CellError::NotTheCommittedSet { .. })
+        ));
     }
 
     // ── Identity ─────────────────────────────────────────────────────────
@@ -841,18 +903,18 @@ mod tests {
         let r0 = genesis();
         let release = signed(&r0, 100);
         let x = release.envelope_bytes.clone();
-        let mut skipped_leader = successor_cell();
+        let (at, mut skipped_leader) = successor_cell(&r0);
         skipped_leader.write(&x, ROUTE_LEN - 1, &[0]);
         assert_eq!(
-            resolve_successor(&r0, &skipped_leader.evidence()),
+            resolve_successor(&at, &skipped_leader.evidence()),
             SuccessorRead::Open,
             "four seats hold the release and the leader holds nothing"
         );
-        let mut cell = successor_cell();
+        let (at, mut cell) = successor_cell(&r0);
         cell.write(&x, ROUTE_LEN - 1, &[]);
         let child = release_constructible(&r0, &release).unwrap();
         assert_eq!(
-            resolve_successor(&r0, &cell.evidence()),
+            resolve_successor(&at, &cell.evidence()),
             SuccessorRead::Final {
                 release: Box::new(release),
                 child
@@ -861,7 +923,7 @@ mod tests {
         let mut unread_leader = cell.evidence();
         unread_leader.seats[0].values = None;
         assert_eq!(
-            resolve_successor(&r0, &unread_leader),
+            resolve_successor(&at, &unread_leader),
             SuccessorRead::Unavailable(Missing::LeaderUnread),
             "no member stands in for the leader"
         );
@@ -875,13 +937,13 @@ mod tests {
         let release = signed(&r0, 100);
         // Signed, canonical, succeeding R_0 — and releasing more than exists.
         let too_much = signed(&r0, ERA_RESERVE_GENESIS_SUPPLY + 1);
-        let mut cell = successor_cell();
+        let (at, mut cell) = successor_cell(&r0);
         cell.write(b"not a release", 0, &[]);
         cell.write(&too_much.envelope_bytes, 0, &[]);
         cell.write(&release.envelope_bytes, ROUTE_LEN - 1, &[]);
         let child = release_constructible(&r0, &release).unwrap();
         assert_eq!(
-            resolve_successor(&r0, &cell.evidence()),
+            resolve_successor(&at, &cell.evidence()),
             SuccessorRead::Final {
                 release: Box::new(release),
                 child
@@ -898,11 +960,11 @@ mod tests {
         let a = signed(&r0, 100);
         let b = signed(&r0, 100);
         let child_a = release_constructible(&r0, &a).unwrap();
-        let mut cell = successor_cell();
+        let (at, mut cell) = successor_cell(&r0);
         cell.write(&a.envelope_bytes, 0, &[]);
         cell.write(&b.envelope_bytes, ROUTE_LEN - 1, &[]);
         assert_eq!(
-            resolve_successor(&r0, &cell.evidence()),
+            resolve_successor(&at, &cell.evidence()),
             SuccessorRead::LeaderHeld {
                 release: Box::new(a.clone()),
                 child: child_a
@@ -911,7 +973,7 @@ mod tests {
         );
         cell.continue_chain(&a.envelope_bytes, 1, 2);
         assert_eq!(
-            resolve_successor(&r0, &cell.evidence()),
+            resolve_successor(&at, &cell.evidence()),
             SuccessorRead::Final {
                 release: Box::new(a),
                 child: child_a

@@ -110,6 +110,7 @@ impl ValidatedEconomicRoot {
             AdmittedEconomicPosition::SingleRoot {
                 economic_position,
                 economic_root,
+                ..
             }
             | AdmittedEconomicPosition::ResolvedSofi {
                 economic_position,
@@ -119,13 +120,8 @@ impl ValidatedEconomicRoot {
                 economic_position,
                 economic_root,
             }),
-            // THE DOOR THIS CLOSES. The store used to hand back a bare
-            // `(position, root)` and this returned a validated root for it, no
-            // questions asked. A conditional position has TWO roots and has
-            // selected neither, so whichever one got written would have been
-            // laundered into "validated" here — with no verifier involved, on
-            // the device's own say-so. There is no root to return, so none is
-            // returned.
+            // An unresolved conditional position has two roots and has
+            // selected neither: there is no root to return.
             AdmittedEconomicPosition::UnresolvedSofi {
                 economic_position,
                 fulfillment_id,
@@ -165,6 +161,104 @@ impl ValidatedEconomicRoot {
     }
 }
 
+/// The claim Core accepted at one position of one trader's lineage, by the
+/// digest of its exact envelope (`ClaimRef_p`, SoFi §16). A setup's
+/// `claim_ref` is checked against this (SoFi Amendment S9).
+///
+/// Verifier-derived, like [`ValidatedEconomicRoot`]: [`advance_validated`]
+/// produces one for an ordinary position, `sofi::lineage::advance_resolved`
+/// for a SoFi position, and [`Self::rehydrate_from_admitted_store`] for this
+/// device's own admitted position. There is no other constructor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AcceptedClaim {
+    genesis: [u8; 32],
+    device_id: [u8; 32],
+    economic_position: u64,
+    claim_ref: [u8; 32],
+}
+
+impl AcceptedClaim {
+    /// Rehydrate THIS DEVICE'S OWN accepted claim from its admitted store,
+    /// on exactly the terms of
+    /// [`ValidatedEconomicRoot::rehydrate_from_admitted_store`]: a coordinate
+    /// this device validated and recorded, never a peer's and never anything
+    /// read from a network. An unresolved position was registered but never
+    /// accepted, so it yields none.
+    pub fn rehydrate_from_admitted_store(
+        genesis: [u8; 32],
+        device_id: [u8; 32],
+        admitted: AdmittedEconomicPosition,
+    ) -> Result<Self, PredecessorHasNotSelected> {
+        match admitted {
+            AdmittedEconomicPosition::SingleRoot {
+                economic_position,
+                claim_ref,
+                ..
+            }
+            | AdmittedEconomicPosition::ResolvedSofi {
+                economic_position,
+                claim_ref,
+                ..
+            } => Ok(Self {
+                genesis,
+                device_id,
+                economic_position,
+                claim_ref,
+            }),
+            AdmittedEconomicPosition::UnresolvedSofi {
+                economic_position,
+                fulfillment_id,
+                ..
+            } => Err(PredecessorHasNotSelected {
+                economic_position,
+                fulfillment_id,
+            }),
+        }
+    }
+
+    /// The SoFi counterpart, for a position whose claim is `C_q`. **Only
+    /// `sofi::lineage::advance_resolved` may call this**, for the same reason
+    /// as [`ValidatedEconomicRoot::from_resolved_sofi_position`].
+    pub(crate) fn from_resolved_sofi_position(
+        genesis: [u8; 32],
+        device_id: [u8; 32],
+        economic_position: u64,
+        claim_ref: [u8; 32],
+    ) -> Self {
+        Self {
+            genesis,
+            device_id,
+            economic_position,
+            claim_ref,
+        }
+    }
+
+    pub fn genesis(&self) -> [u8; 32] {
+        self.genesis
+    }
+
+    pub fn device_id(&self) -> [u8; 32] {
+        self.device_id
+    }
+
+    pub fn economic_position(&self) -> u64 {
+        self.economic_position
+    }
+
+    pub fn claim_ref(&self) -> [u8; 32] {
+        self.claim_ref
+    }
+}
+
+/// What [`advance_validated`] establishes at the registered position: the
+/// validated root, the credits it funded, and the claim it accepted.
+#[derive(Debug, Clone)]
+pub struct ValidatedAdvance {
+    pub root: ValidatedEconomicRoot,
+    pub funded: Vec<FundedCredit>,
+    pub claim: AcceptedClaim,
+}
+
 /// The device's own admitted position, as the durable store records it.
 ///
 /// A bare `(position, root)` pair cannot express a conditional position, which
@@ -174,10 +268,12 @@ impl ValidatedEconomicRoot {
 /// restart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdmittedEconomicPosition {
-    /// An ordinary position. Its root is the one the register holds.
+    /// An ordinary position. Its root is the one the register holds, in the
+    /// claim whose envelope digest is `claim_ref`.
     SingleRoot {
         economic_position: u64,
         economic_root: [u8; 32],
+        claim_ref: [u8; 32],
     },
     /// A conditional SoFi position whose route resolved and selected a root.
     /// Realized selects `realize_root`; Void selects the predecessor's root.
@@ -186,6 +282,8 @@ pub enum AdmittedEconomicPosition {
         economic_position: u64,
         selected_root: [u8; 32],
         fulfillment_id: [u8; 32],
+        /// The digest of the position's conditional claim `C_q`.
+        claim_ref: [u8; 32],
     },
     /// A conditional SoFi position that has not resolved. It commits two roots
     /// and has selected neither, so nothing descends from it.
@@ -436,6 +534,9 @@ pub enum EconomicValidationError {
     },
     /// The registration is not for the next position.
     PositionIsNotSuccessor { previous: u64, registered: u64 },
+    /// The registered claim names another trader than the lineage under
+    /// validation.
+    RegisteredClaimNamesAnotherTrader,
     /// A `SofiSetup` names a predecessor position that is not the one its
     /// transition actually extends (F1: `p` is the position `ClaimRef_p`
     /// names, and the setup lands at `p + 1`).
@@ -512,6 +613,11 @@ impl core::fmt::Display for EconomicValidationError {
                 "economic validation: the setup's R_T^setup is not the root its own \
                  transition produces — the field is DERIVED from the parent root by the \
                  P15-6 absent→h⁰ insertion, never asserted by the body"
+            ),
+            Self::RegisteredClaimNamesAnotherTrader => write!(
+                f,
+                "economic validation: the registered claim names another trader than the \
+                 lineage under validation"
             ),
             Self::PositionIsNotSuccessor {
                 previous,
@@ -595,7 +701,10 @@ pub fn advance_validated(
     // claims bind against THIS, because storage-node bearer attribution is
     // not the cryptographic identity binding.
     proven_ak: &[u8],
-) -> Result<(ValidatedEconomicRoot, Vec<FundedCredit>), EconomicValidationError> {
+) -> Result<ValidatedAdvance, EconomicValidationError> {
+    if registered.trader_genesis() != *genesis || registered.trader_devid() != *device_id {
+        return Err(EconomicValidationError::RegisteredClaimNamesAnotherTrader);
+    }
     if previous.economic_root != witness.pre_economic_root {
         return Err(EconomicValidationError::PreRootIsNotThePredecessor {
             predecessor: previous.economic_root,
@@ -711,10 +820,9 @@ pub fn advance_validated(
     // predecessor root is `previous.economic_root()`, the root the parent
     // claim names, and the setup lands at `p + 1`.
     //
-    // `ClaimRef_p` itself stays E2's: proving it is the exact claim at
-    // `K_root(G, DevID, p)` needs the parent envelope, which this verifier
-    // does not hold. `p` and `R_T^setup` need no such evidence, so they are
-    // established here rather than left signed-but-unchecked until then.
+    // `ClaimRef_p` is checked by `SetupValid` against the claim this
+    // verifier accepted at `p` (SoFi Amendment S9); `p` and `R_T^setup` need
+    // no such evidence, so they are established here.
     if let Some(crate::types::operations::Operation::SofiSetup { setup_body, .. }) =
         accepted.dsm_verified_operation()
     {
@@ -804,13 +912,19 @@ pub fn advance_validated(
         ));
     }
 
-    Ok((
-        ValidatedEconomicRoot {
+    Ok(ValidatedAdvance {
+        root: ValidatedEconomicRoot {
             economic_position: registered.economic_position(),
             economic_root: derived,
         },
         funded,
-    ))
+        claim: AcceptedClaim {
+            genesis: *genesis,
+            device_id: *device_id,
+            economic_position: registered.economic_position(),
+            claim_ref: registered.claim_ref(),
+        },
+    })
 }
 
 #[cfg(test)]
@@ -822,6 +936,7 @@ mod admitted_position_tests {
     const REALIZE: [u8; 32] = [0xA1; 32];
     const VOID: [u8; 32] = [0xB1; 32];
     const FID: [u8; 32] = [0xF1; 32];
+    const CLAIM_REF: [u8; 32] = [0xC7; 32];
 
     /// AN UNRESOLVED POSITION MINTS NOTHING, from either of its two roots.
     ///
@@ -866,6 +981,7 @@ mod admitted_position_tests {
                 economic_position: 9,
                 selected_root: selected,
                 fulfillment_id: FID,
+                claim_ref: CLAIM_REF,
             };
             let validated = ValidatedEconomicRoot::rehydrate_from_admitted_store(resolved).unwrap();
             assert_eq!(validated.economic_root(), selected);
@@ -894,6 +1010,7 @@ mod admitted_position_tests {
         let ordinary = AdmittedEconomicPosition::SingleRoot {
             economic_position: 9,
             economic_root: REALIZE,
+            claim_ref: CLAIM_REF,
         };
         assert_eq!(ordinary.predecessor_claim(), PredecessorClaim::SingleRoot);
         // An ordinary position is unconstrained by the fence: its own root is

@@ -15,6 +15,8 @@
 //!   u8   supply_class = 0 (NATIVE)
 //!   u8   flags: 0x01 burn | 0x02 transferable | 0x04 allowlist
 //!   u8   release_rule: 0 all-at-creation | 1 faucet
+//!   32B  creator_genesis              (SoFi Amendment S8)
+//!   32B  creator_device_id
 //!   u8   threshold k                  (1..=n)
 //!   u8   signer_count n               (1..=16)
 //!   n x  { u16 pk_len (> 0), pk }     (no duplicates)
@@ -96,6 +98,11 @@ impl ReleaseRule {
 /// A committed token policy, every field of the blob, validated.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TokenPolicy {
+    /// The genesis of the device that creates the token. Only that device's
+    /// `CreateToken` releases a native token's supply (SoFi Amendment S8).
+    pub creator_genesis: [u8; 32],
+    /// The creating device's id.
+    pub creator_device_id: [u8; 32],
     pub ticker: String,
     pub alias: String,
     pub decimals: u32,
@@ -198,6 +205,10 @@ pub fn parse_token_policy_blob(blob: &[u8]) -> Result<TokenPolicy, String> {
     let rule = r.u8()?;
     let release_rule = ReleaseRule::from_code(rule)
         .ok_or_else(|| format!("policy blob release rule {rule} is unknown"))?;
+    let mut creator_genesis = [0u8; 32];
+    creator_genesis.copy_from_slice(r.bytes(32)?);
+    let mut creator_device_id = [0u8; 32];
+    creator_device_id.copy_from_slice(r.bytes(32)?);
 
     let threshold = r.u8()?;
     let signer_count = r.u8()? as usize;
@@ -288,6 +299,8 @@ pub fn parse_token_policy_blob(blob: &[u8]) -> Result<TokenPolicy, String> {
     }
 
     Ok(TokenPolicy {
+        creator_genesis,
+        creator_device_id,
         ticker,
         alias,
         decimals,
@@ -307,6 +320,11 @@ pub fn parse_token_policy_blob(blob: &[u8]) -> Result<TokenPolicy, String> {
 mod tests {
     use super::*;
 
+    const CREATOR_GENESIS: [u8; 32] = [0x11; 32];
+    const CREATOR_DEVICE: [u8; 32] = [0x22; 32];
+    /// Offset of the threshold byte: five header bytes, then the creator.
+    const THRESHOLD_AT: usize = 5 + 64;
+
     /// A well-formed blob, built field by field from the layout above — not
     /// from the SDK packer, so the parser is checked against the layout.
     fn blob() -> Vec<u8> {
@@ -316,9 +334,11 @@ mod tests {
             SUPPLY_CLASS_NATIVE,
             POLICY_FLAG_BURN | POLICY_FLAG_TRANSFERABLE,
             ReleaseRule::AllAtCreation.code(),
-            1, // threshold
-            1, // signers
         ];
+        b.extend_from_slice(&CREATOR_GENESIS);
+        b.extend_from_slice(&CREATOR_DEVICE);
+        b.push(1); // threshold
+        b.push(1); // signers
         b.extend_from_slice(&3u16.to_be_bytes());
         b.extend_from_slice(b"key");
         b.push(3);
@@ -337,6 +357,10 @@ mod tests {
     #[test]
     fn a_well_formed_blob_parses_to_its_fields() {
         let p = parse_token_policy_blob(&blob()).expect("parses");
+        assert_eq!(
+            (p.creator_genesis, p.creator_device_id),
+            (CREATOR_GENESIS, CREATOR_DEVICE)
+        );
         assert_eq!(p.ticker, "TKN");
         assert_eq!(p.alias, "Token");
         assert_eq!(p.decimals, 6);
@@ -360,9 +384,9 @@ mod tests {
             ("unknown class", Box::new(|b| b[2] = 7)),
             ("meaningless flag", Box::new(|b| b[3] |= 0x08)),
             ("unknown release rule", Box::new(|b| b[4] = 9)),
-            ("zero threshold", Box::new(|b| b[5] = 0)),
-            ("threshold above n", Box::new(|b| b[5] = 2)),
-            ("zero signers", Box::new(|b| b[6] = 0)),
+            ("zero threshold", Box::new(|b| b[THRESHOLD_AT] = 0)),
+            ("threshold above n", Box::new(|b| b[THRESHOLD_AT] = 2)),
+            ("zero signers", Box::new(|b| b[THRESHOLD_AT + 1] = 0)),
             ("trailing byte", Box::new(|b| b.push(0))),
             (
                 "truncated",
@@ -388,8 +412,9 @@ mod tests {
     #[test]
     fn a_zero_genesis_supply_is_refused() {
         let mut b = blob();
-        // version..n (7) + pk (2 + 3) + ticker (1 + 3) + alias (2 + 5) + decimals (1)
-        let at = 7 + 5 + 4 + 7 + 1;
+        // header (5) + creator (64) + threshold and n (2) + pk (2 + 3)
+        // + ticker (1 + 3) + alias (2 + 5) + decimals (1)
+        let at = THRESHOLD_AT + 2 + 5 + 4 + 7 + 1;
         b[at..at + 16].copy_from_slice(&0u128.to_be_bytes());
         assert!(parse_token_policy_blob(&b).is_err());
     }

@@ -32,6 +32,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::ccb::state::{FeePolicy, MarketPolicy, ReleasePolicy};
 use crate::dlv::route_commit::constant_product_output_classified;
 use crate::economic::keys::balance_key;
+use crate::economic::lineage::AcceptedClaim;
 use crate::economic::state::{EconomicBalanceState, EconomicLeafState};
 
 use super::conformance::Validation;
@@ -118,7 +119,10 @@ pub enum Invalid {
     /// A leg's setup names another vault than the leg's.
     SetupNotThisVault,
     /// A leg's setup is not signed by the precommit's trader key.
-    SetupSignature,
+    SetupSignature(crate::sofi::signature::SignatureError),
+    /// A leg's setup names a claim at its position other than the one the
+    /// trader's lineage accepted there (SoFi §16, Amendment S9).
+    SetupClaimRefIsNotTheAcceptedClaim,
     /// A token's committed policy does not parse.
     TokenPolicyDoesNotParse { token: D32 },
     /// A token's committed policy forbids transfer, so it cannot be a market
@@ -195,6 +199,9 @@ pub enum Missing {
     VaultState { vault_id: D32 },
     /// The signed setup envelope stored at `ρ` for one of P's legs.
     Setup { setup_ref: D32 },
+    /// The claim this verifier accepted at a position of P's trader, which a
+    /// setup names by `claim_ref` (SoFi Amendment S9).
+    AcceptedClaim { economic_position: u64 },
     /// Bytes were supplied for an address but do not authenticate to it. They
     /// establish NOTHING — note 9: a non-verifying candidate can never prove
     /// invalidity, it only fails to supply the object.
@@ -252,7 +259,7 @@ pub enum VaultLeafPre {
 /// verifier's own validated tree, vault leaf pre values from the vault
 /// lineage it fetched, policy objects from the immutable store under the
 /// address the vault state commits. Nothing is defaulted or filled in.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[cfg_attr(test, derive(Default))]
 pub struct Evidence {
     /// Canonical bytes by content address — the policy objects a vault names.
@@ -269,6 +276,10 @@ pub struct Evidence {
     /// (SoFi §19.5, §49). Re-hashed to the commit under `TAG_DSM_POLICY` when
     /// consumed: bytes supplied under a commit prove nothing by themselves.
     pub token_policies: BTreeMap<D32, Vec<u8>>,
+    /// The claims this verifier accepted on P's trader's lineage, by
+    /// position: what each setup's `claim_ref` is checked against (SoFi
+    /// Amendment S9). Only lineage validation produces an [`AcceptedClaim`].
+    pub accepted_claims: BTreeMap<u64, AcceptedClaim>,
 }
 
 /// What a settlement preimage needs fetched before `validate` can reach a
@@ -345,6 +356,7 @@ impl Evidence {
         vault_leaves: BTreeMap<(D32, D32), VaultLeafPre>,
         setups: BTreeMap<D32, Vec<u8>>,
         token_policies: BTreeMap<D32, Vec<u8>>,
+        accepted_claims: BTreeMap<u64, AcceptedClaim>,
     ) -> Self {
         Self {
             objects,
@@ -352,6 +364,7 @@ impl Evidence {
             vault_leaves,
             setups,
             token_policies,
+            accepted_claims,
         }
     }
 
@@ -456,11 +469,12 @@ impl Policies {
 
 /// `SetupValid` for one leg of P (SoFi §16, §20.1): the setup the leg names by
 /// `ρ` is the canonical envelope whose body re-derives `ρ`, names P's trader
-/// and the leg's vault, and is signed by P's trader key.
+/// and the leg's vault, is signed by P's trader key, and names by
+/// `claim_ref` the claim the trader's lineage accepted at the setup's
+/// position (Amendment S9).
 ///
-/// Bytes that do not authenticate to `ρ` supply nothing (note 9). The
-/// ClaimRef the setup names is not decided here: the trader's claim at the
-/// setup's position is not in `Evidence`.
+/// Bytes that do not authenticate to `ρ` supply nothing (note 9), and an
+/// accepted claim of another trader supplies nothing either.
 fn setup_valid(
     precommit: &TraderPrecommitBody,
     leg: &crate::sofi::wire::PrecommitLeg,
@@ -490,7 +504,26 @@ fn setup_valid(
         return Err(Refusal::Invalid(Invalid::SetupNotThisVault));
     }
     crate::sofi::signature::verify_setup(body, &signed.signature, precommit.claimant_public_key())
-        .map_err(|_| Refusal::Invalid(Invalid::SetupSignature))
+        .map_err(|e| Refusal::Invalid(Invalid::SetupSignature(e)))?;
+    let missing_claim = Refusal::Incomplete(Missing::AcceptedClaim {
+        economic_position: body.position(),
+    });
+    let accepted = evidence
+        .accepted_claims
+        .get(&body.position())
+        .ok_or(missing_claim.clone())?;
+    if accepted.genesis() != *body.genesis()
+        || accepted.device_id() != *body.device_id()
+        || accepted.economic_position() != body.position()
+    {
+        return Err(missing_claim);
+    }
+    if accepted.claim_ref() != *body.claim_ref() {
+        return Err(Refusal::Invalid(
+            Invalid::SetupClaimRefIsNotTheAcceptedClaim,
+        ));
+    }
+    Ok(())
 }
 
 /// Both tokens of a vault the operation touches pass their policies as market
@@ -1725,6 +1758,25 @@ pub(crate) mod fixtures {
     /// The position the trader's setups are made at, before `P`'s.
     pub(crate) const SETUP_POS: u64 = P_POS - 1;
 
+    /// The digest of the claim the trader's lineage accepted at
+    /// [`SETUP_POS`], which the trader's setups name.
+    pub(crate) const SETUP_CLAIM_REF: D32 = [0xA0; 32];
+
+    /// The claim this verifier accepted at [`SETUP_POS`], rehydrated from the
+    /// trader's own admitted store.
+    pub(crate) fn accepted_setup_claim() -> AcceptedClaim {
+        AcceptedClaim::rehydrate_from_admitted_store(
+            G,
+            DEV,
+            crate::economic::lineage::AdmittedEconomicPosition::SingleRoot {
+                economic_position: SETUP_POS,
+                economic_root: token(0x9A),
+                claim_ref: SETUP_CLAIM_REF,
+            },
+        )
+        .expect("an ordinary admitted position")
+    }
+
     /// The tokens a fixture route can walk: one more than its longest route.
     const FIXTURE_TOKENS: usize = 4;
 
@@ -1738,9 +1790,14 @@ pub(crate) mod fixtures {
     /// The `TokenPolicyV3` bytes of fixture token `i`: native, transferable,
     /// its whole supply released at creation, laid out as SoFi §47 packs it.
     fn token_policy_bytes(i: u8) -> Vec<u8> {
+        token_policy_bytes_with(i, crate::economic::token_policy::POLICY_FLAG_TRANSFERABLE)
+    }
+
+    /// Fixture token `i` with the policy flags `flags`.
+    pub(crate) fn token_policy_bytes_with(i: u8, flags: u8) -> Vec<u8> {
         use crate::economic::token_policy::{
-            ReleaseRule, ALLOWLIST_KIND_NONE, POLICY_FLAG_TRANSFERABLE, SUPPLY_CLASS_NATIVE,
-            TOKEN_KIND_FUNGIBLE, TOKEN_POLICY_VERSION,
+            ReleaseRule, ALLOWLIST_KIND_NONE, SUPPLY_CLASS_NATIVE, TOKEN_KIND_FUNGIBLE,
+            TOKEN_POLICY_VERSION,
         };
         let signer = &trader_keys().0;
         let ticker = format!("T{i:02}");
@@ -1749,11 +1806,13 @@ pub(crate) mod fixtures {
             TOKEN_POLICY_VERSION,
             TOKEN_KIND_FUNGIBLE,
             SUPPLY_CLASS_NATIVE,
-            POLICY_FLAG_TRANSFERABLE,
+            flags,
             ReleaseRule::AllAtCreation.code(),
-            1,
-            1,
         ];
+        blob.extend_from_slice(&G);
+        blob.extend_from_slice(&DEV);
+        blob.push(1);
+        blob.push(1);
         blob.extend_from_slice(&(signer.len() as u16).to_be_bytes());
         blob.extend_from_slice(signer);
         blob.push(ticker.len() as u8);
@@ -1769,6 +1828,17 @@ pub(crate) mod fixtures {
         prost::Message::encode_to_vec(&crate::types::proto::TokenPolicyV3 { policy_bytes: blob })
     }
 
+    /// `(policy_commit, bytes)` for policy bytes.
+    pub(crate) fn committed(bytes: Vec<u8>) -> (D32, Vec<u8>) {
+        (
+            crate::crypto::blake3::domain_hash_bytes(
+                crate::common::domain_tags::TAG_DSM_POLICY,
+                &bytes,
+            ),
+            bytes,
+        )
+    }
+
     /// The fixture tokens as `(policy_commit, TokenPolicyV3 bytes)`, in
     /// ascending commit order: vault `j` trades token `j` for token `j + 1`,
     /// the strict order its market policy requires.
@@ -1776,16 +1846,7 @@ pub(crate) mod fixtures {
         static TOKENS: std::sync::OnceLock<Vec<(D32, Vec<u8>)>> = std::sync::OnceLock::new();
         TOKENS.get_or_init(|| {
             let mut tokens: Vec<(D32, Vec<u8>)> = (0..FIXTURE_TOKENS as u8)
-                .map(|i| {
-                    let bytes = token_policy_bytes(i);
-                    (
-                        crate::crypto::blake3::domain_hash_bytes(
-                            crate::common::domain_tags::TAG_DSM_POLICY,
-                            &bytes,
-                        ),
-                        bytes,
-                    )
-                })
+                .map(|i| committed(token_policy_bytes(i)))
                 .collect();
             tokens.sort();
             tokens
@@ -1807,7 +1868,7 @@ pub(crate) mod fixtures {
             DEV,
             SETUP_POS,
             vault_id,
-            token(0xA0),
+            SETUP_CLAIM_REF,
             token(0xB0),
             SIG_ALG,
             &trader_keys().0,
@@ -1842,7 +1903,11 @@ pub(crate) mod fixtures {
     }
 
     pub(crate) fn policies(j: usize) -> (MarketPolicy, FeePolicy, ReleasePolicy) {
-        let (a, b) = pair(j);
+        policies_over(pair(j))
+    }
+
+    /// A vault's policies over the market pair `(a, b)`.
+    pub(crate) fn policies_over((a, b): (D32, D32)) -> (MarketPolicy, FeePolicy, ReleasePolicy) {
         (
             MarketPolicy::beta_constant_product(a, b).unwrap(),
             FeePolicy::new(FEE_BPS).unwrap(),
@@ -1866,7 +1931,18 @@ pub(crate) mod fixtures {
         reserve_b: u64,
         status: u16,
     ) -> VaultStateLeaf {
-        let (market, fee, release) = policies(j);
+        vault_state_over(j, pair(j), reserve_a, reserve_b, status)
+    }
+
+    /// Vault `j`'s state over the market pair `market_pair`.
+    pub(crate) fn vault_state_over(
+        j: usize,
+        market_pair: (D32, D32),
+        reserve_a: u64,
+        reserve_b: u64,
+        status: u16,
+    ) -> VaultStateLeaf {
+        let (market, fee, release) = policies_over(market_pair);
         VaultStateLeaf {
             owner_genesis: G,
             owner_device_id: DEV,
@@ -1883,9 +1959,14 @@ pub(crate) mod fixtures {
     }
 
     pub(crate) fn policy_objects(hops: usize) -> BTreeMap<D32, Vec<u8>> {
+        policy_objects_over(&(0..hops.max(1)).map(pair).collect::<Vec<_>>())
+    }
+
+    /// The policy objects of vaults over `pairs`.
+    pub(crate) fn policy_objects_over(pairs: &[(D32, D32)]) -> BTreeMap<D32, Vec<u8>> {
         let mut objects = BTreeMap::new();
-        for j in 0..hops.max(1) {
-            let (market, fee, release) = policies(j);
+        for market_pair in pairs {
+            let (market, fee, release) = policies_over(*market_pair);
             for (class, bytes) in [
                 (crate::ccb::class::MARKET_POLICY, market.encode()),
                 (crate::ccb::class::FEE_POLICY, fee.encode()),
@@ -1938,12 +2019,18 @@ pub(crate) mod fixtures {
         pub(crate) rel_key: D32,
     }
 
-    pub(crate) fn swap_vault_parts(j: usize, amount_in: u64, setup_ref: D32) -> VaultParts {
-        let (token_in, token_out) = pair(j);
+    /// Vault `j` of a swap, trading the market pair `market_pair`.
+    pub(crate) fn swap_vault_parts_over(
+        j: usize,
+        market_pair: (D32, D32),
+        amount_in: u64,
+        setup_ref: D32,
+    ) -> VaultParts {
+        let (token_in, token_out) = market_pair;
         let vault_id = vault_id_of(j);
         let rel_key = derive::relationship_key(&G, &DEV, &vault_id);
         let base = base_of(j);
-        let state = vault_state(j, RESERVE_A, RESERVE_B, VAULT_STATUS_ACTIVE);
+        let state = vault_state_over(j, market_pair, RESERVE_A, RESERVE_B, VAULT_STATUS_ACTIVE);
         let amount_out =
             constant_product_output_classified(amount_in, RESERVE_A, RESERVE_B, FEE_BPS).unwrap();
         let relationship = VaultRelationshipLeaf {
@@ -2018,10 +2105,24 @@ pub(crate) mod fixtures {
         setup: &dyn Fn(usize) -> SofiSetupBody,
         closure: PreEClosureIndex,
     ) -> Fixture {
+        swap_fixture_over(&tokens()[..=hops], setup, closure)
+    }
+
+    /// A swap walking `route_tokens` in order — vault `j` trades token `j` for
+    /// token `j + 1`, so they must ascend by commit — whose leg `j` carries
+    /// `setup(j)` and whose `B°` commits `closure`. The evidence carries the
+    /// policy bytes of every token that is not builtin.
+    pub(crate) fn swap_fixture_over(
+        route_tokens: &[(D32, Vec<u8>)],
+        setup: &dyn Fn(usize) -> SofiSetupBody,
+        closure: PreEClosureIndex,
+    ) -> Fixture {
+        let hops = route_tokens.len() - 1;
+        let pairs: Vec<(D32, D32)> = route_tokens.windows(2).map(|w| (w[0].0, w[1].0)).collect();
         let mut parts: Vec<VaultParts> = Vec::new();
         let mut amount = AMOUNT_IN;
         for j in 0..hops {
-            let part = swap_vault_parts(j, amount, derive::setup_ref(&setup(j)));
+            let part = swap_vault_parts_over(j, pairs[j], amount, derive::setup_ref(&setup(j)));
             amount = part.hop.amount_out;
             parts.push(part);
         }
@@ -2112,13 +2213,20 @@ pub(crate) mod fixtures {
             );
         }
         let evidence = Evidence {
-            objects: policy_objects(hops),
+            objects: policy_objects_over(&pairs),
             trader_leaves,
             vault_leaves,
             setups: (0..hops)
                 .map(|j| (parts[j].hop.setup_ref, setup_envelope_of(&setup(j))))
                 .collect(),
-            token_policies: tokens()[..=hops].iter().cloned().collect(),
+            token_policies: route_tokens
+                .iter()
+                .filter(|(commit, _)| {
+                    crate::core::token::builtin_token_id_for_policy_commit(commit).is_none()
+                })
+                .cloned()
+                .collect(),
+            accepted_claims: BTreeMap::from([(SETUP_POS, accepted_setup_claim())]),
         };
         // The realize root is what the core folds to UNDER E, so it cannot be
         // chosen: BindExt fills the relationship posts and the fold does the rest.
@@ -2198,6 +2306,7 @@ mod tests {
             vault_leaves: f.evidence.vault_leaves.clone(),
             setups: f.evidence.setups.clone(),
             token_policies: f.evidence.token_policies.clone(),
+            accepted_claims: f.evidence.accepted_claims.clone(),
         };
         without_policy.objects.remove(&policy_addr(
             crate::ccb::class::MARKET_POLICY,
@@ -2218,6 +2327,7 @@ mod tests {
             vault_leaves: BTreeMap::new(),
             setups: f.evidence.setups.clone(),
             token_policies: f.evidence.token_policies.clone(),
+            accepted_claims: f.evidence.accepted_claims.clone(),
         };
         without_leaf.trader_leaves.clear();
         assert!(matches!(
@@ -2683,6 +2793,7 @@ mod tests {
             vault_leaves: f.evidence.vault_leaves.clone(),
             setups: f.evidence.setups.clone(),
             token_policies: f.evidence.token_policies.clone(),
+            accepted_claims: f.evidence.accepted_claims.clone(),
         };
         let VaultLeafPre::State(state) = evidence.vault_leaves[&(vault_id, state_key)].clone()
         else {
@@ -2713,6 +2824,7 @@ mod tests {
             vault_leaves: f.evidence.vault_leaves.clone(),
             setups: f.evidence.setups.clone(),
             token_policies: f.evidence.token_policies.clone(),
+            accepted_claims: f.evidence.accepted_claims.clone(),
         };
         let VaultLeafPre::State(state) = evidence.vault_leaves[&(vault_id, state_key)].clone()
         else {
@@ -2879,6 +2991,7 @@ mod tests {
             ]),
             setups: BTreeMap::from([(setup_ref_for(vault_id), setup_envelope_for(vault_id))]),
             token_policies: tokens()[..=1].iter().cloned().collect(),
+            accepted_claims: BTreeMap::from([(SETUP_POS, accepted_setup_claim())]),
         };
         let realize_root = {
             let entries = trader_fold_entries(&trader_core, &e, &evidence).unwrap();
@@ -2955,6 +3068,7 @@ mod tests {
             vault_leaves: f.evidence.vault_leaves.clone(),
             setups: f.evidence.setups.clone(),
             token_policies: f.evidence.token_policies.clone(),
+            accepted_claims: f.evidence.accepted_claims.clone(),
         };
         let VaultLeafPre::State(state) = evidence.vault_leaves[&(vault_id, state_key)].clone()
         else {
@@ -3385,6 +3499,7 @@ mod tests {
             vault_leaves: f.evidence.vault_leaves.clone(),
             setups: f.evidence.setups.clone(),
             token_policies: f.evidence.token_policies.clone(),
+            accepted_claims: f.evidence.accepted_claims.clone(),
         };
         let VaultLeafPre::State(state) = evidence.vault_leaves[&(vault_id, state_key)].clone()
         else {
@@ -3417,6 +3532,7 @@ mod tests {
             vault_leaves: f.evidence.vault_leaves.clone(),
             setups: f.evidence.setups.clone(),
             token_policies: f.evidence.token_policies.clone(),
+            accepted_claims: f.evidence.accepted_claims.clone(),
         };
         let VaultLeafPre::State(state) = evidence.vault_leaves[&(vault_id, state_key)].clone()
         else {
@@ -3465,6 +3581,7 @@ mod tests {
             vault_leaves: f.evidence.vault_leaves.clone(),
             setups: f.evidence.setups.clone(),
             token_policies: f.evidence.token_policies.clone(),
+            accepted_claims: f.evidence.accepted_claims.clone(),
         };
         let VaultLeafPre::State(state) = evidence.vault_leaves[&(vault_id, state_key)].clone()
         else {
@@ -3501,6 +3618,7 @@ mod tests {
             vault_leaves: f.evidence.vault_leaves.clone(),
             setups: f.evidence.setups.clone(),
             token_policies: f.evidence.token_policies.clone(),
+            accepted_claims: f.evidence.accepted_claims.clone(),
         };
         let VaultLeafPre::State(state) = evidence.vault_leaves[&(vault_id, state_key)].clone()
         else {
@@ -3543,6 +3661,7 @@ mod tests {
             vault_leaves: f.evidence.vault_leaves.clone(),
             setups: f.evidence.setups.clone(),
             token_policies: f.evidence.token_policies.clone(),
+            accepted_claims: f.evidence.accepted_claims.clone(),
         };
         // Hop 0's state is simply not held.
         evidence
@@ -3707,6 +3826,7 @@ mod tests {
             vault_leaves: f.evidence.vault_leaves.clone(),
             setups: f.evidence.setups.clone(),
             token_policies: f.evidence.token_policies.clone(),
+            accepted_claims: f.evidence.accepted_claims.clone(),
         };
         // Garbage, under the address of a policy that really exists.
         evidence
@@ -3825,6 +3945,7 @@ mod tests {
             vault_leaves: f.evidence.vault_leaves.clone(),
             setups: f.evidence.setups.clone(),
             token_policies: f.evidence.token_policies.clone(),
+            accepted_claims: f.evidence.accepted_claims.clone(),
         };
         let VaultLeafPre::Relationship(leaf) = evidence.vault_leaves[&(vault_id, rel_key)].clone()
         else {
@@ -3841,5 +3962,264 @@ mod tests {
             validate(&f.precommit, &f.preimage, &evidence),
             Err(Refusal::Invalid(Invalid::RelationshipIdentityMismatch))
         );
+    }
+
+    // ── SetupValid (SoFi §16, §20.1, Amendment S9) ─────────────────────────
+
+    /// A one-hop swap whose leg carries `body`, signed under the trader's key.
+    fn with_setup(body: crate::sofi::wire::SofiSetupBody) -> Fixture {
+        swap_fixture_with_setups(
+            1,
+            &|j| {
+                assert_eq!(j, 0, "a one-hop swap has one leg");
+                body.clone()
+            },
+            PreEClosureIndex::new(Vec::new()).unwrap(),
+        )
+    }
+
+    fn setup_at(
+        genesis: D32,
+        device: D32,
+        vault: D32,
+        claim_ref: D32,
+    ) -> crate::sofi::wire::SofiSetupBody {
+        crate::sofi::wire::SofiSetupBody::new(
+            genesis,
+            device,
+            SETUP_POS,
+            vault,
+            claim_ref,
+            token(0xB0),
+            SIG_ALG,
+            &trader_keys().0,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_setup_not_held_or_not_its_reference_is_missing() {
+        let f = swap_fixture();
+        let rho = f.precommit.legs()[0].setup_ref;
+        let mut evidence = f.evidence.clone();
+        evidence.setups.remove(&rho);
+        assert_eq!(
+            validate(&f.precommit, &f.preimage, &evidence),
+            Err(Refusal::Incomplete(Missing::Setup { setup_ref: rho }))
+        );
+        evidence.setups.insert(rho, b"not a setup".to_vec());
+        assert_eq!(
+            validate(&f.precommit, &f.preimage, &evidence),
+            Err(Refusal::Incomplete(Missing::NonVerifyingObject {
+                addr: rho
+            }))
+        );
+        // Another setup's envelope under this reference.
+        evidence
+            .setups
+            .insert(rho, setup_envelope_for(vault_id_of(1)));
+        assert_eq!(
+            validate(&f.precommit, &f.preimage, &evidence),
+            Err(Refusal::Incomplete(Missing::NonVerifyingObject {
+                addr: rho
+            }))
+        );
+    }
+
+    #[test]
+    fn a_setup_of_another_trader_or_vault_is_invalid() {
+        let f = with_setup(setup_at(token(0x33), DEV, vault_id_of(0), SETUP_CLAIM_REF));
+        assert_eq!(
+            validate(&f.precommit, &f.preimage, &f.evidence),
+            Err(Refusal::Invalid(Invalid::SetupNotThisTrader))
+        );
+        let f = with_setup(setup_at(G, DEV, vault_id_of(1), SETUP_CLAIM_REF));
+        assert_eq!(
+            validate(&f.precommit, &f.preimage, &f.evidence),
+            Err(Refusal::Invalid(Invalid::SetupNotThisVault))
+        );
+    }
+
+    #[test]
+    fn a_setup_not_signed_by_the_traders_key_is_invalid() {
+        let f = swap_fixture();
+        let rho = f.precommit.legs()[0].setup_ref;
+        let (other_pk, other_sk) = crate::crypto::sphincs::generate_sphincs_keypair().unwrap();
+        let body = setup_body_for(vault_id_of(0));
+        let forged = crate::sofi::publication::Publication::Setup {
+            body: &body,
+            signature: &crate::crypto::sphincs::sphincs_sign(
+                &other_sk,
+                &derive::setup_signing_digest(&body),
+            )
+            .unwrap(),
+        }
+        .object_bytes()
+        .unwrap();
+        assert_ne!(other_pk, trader_keys().0);
+        let mut evidence = f.evidence.clone();
+        evidence.setups.insert(rho, forged);
+        assert_eq!(
+            validate(&f.precommit, &f.preimage, &evidence),
+            Err(Refusal::Invalid(Invalid::SetupSignature(
+                crate::sofi::signature::SignatureError::DoesNotVerify { what: "SofiSetup" }
+            )))
+        );
+    }
+
+    /// Amendment S9: the setup names the claim the trader's lineage accepted
+    /// at its position, and no other.
+    #[test]
+    fn a_setup_naming_another_claim_than_the_accepted_one_is_invalid() {
+        let f = with_setup(setup_at(G, DEV, vault_id_of(0), token(0xA1)));
+        assert_eq!(
+            validate(&f.precommit, &f.preimage, &f.evidence),
+            Err(Refusal::Invalid(
+                Invalid::SetupClaimRefIsNotTheAcceptedClaim
+            ))
+        );
+        assert_eq!(
+            route_validation(&f.precommit, &f.preimage, &f.evidence),
+            Ok(Validation::Invalid)
+        );
+    }
+
+    /// Without the claim the verifier accepted at the setup's position, the
+    /// setup is not decided yet; an accepted claim of another trader supplies
+    /// nothing.
+    #[test]
+    fn a_setup_whose_accepted_claim_is_not_in_hand_is_missing() {
+        let f = swap_fixture();
+        let missing = Err(Refusal::Incomplete(Missing::AcceptedClaim {
+            economic_position: SETUP_POS,
+        }));
+        let mut evidence = f.evidence.clone();
+        evidence.accepted_claims.clear();
+        assert_eq!(validate(&f.precommit, &f.preimage, &evidence), missing);
+        let foreign = crate::economic::lineage::AcceptedClaim::rehydrate_from_admitted_store(
+            token(0x33),
+            DEV,
+            crate::economic::lineage::AdmittedEconomicPosition::SingleRoot {
+                economic_position: SETUP_POS,
+                economic_root: token(0x9A),
+                claim_ref: SETUP_CLAIM_REF,
+            },
+        )
+        .unwrap();
+        evidence.accepted_claims.insert(SETUP_POS, foreign);
+        assert_eq!(validate(&f.precommit, &f.preimage, &evidence), missing);
+    }
+
+    // ── The transferable check on every leg (SoFi §49, MR-SOFI-0311) ────────
+
+    #[test]
+    fn a_market_tokens_policy_not_in_hand_is_missing() {
+        let f = swap_fixture();
+        let (token_a, _) = pair(0);
+        let mut evidence = f.evidence.clone();
+        evidence.token_policies.remove(&token_a);
+        assert_eq!(
+            validate(&f.precommit, &f.preimage, &evidence),
+            Err(Refusal::Incomplete(Missing::TokenPolicy {
+                commit: token_a
+            }))
+        );
+        // Another token's policy under this commit is not this token's.
+        let (other, other_bytes) = tokens()[2].clone();
+        assert_ne!(other, token_a);
+        evidence.token_policies.insert(token_a, other_bytes);
+        assert_eq!(
+            validate(&f.precommit, &f.preimage, &evidence),
+            Err(Refusal::Incomplete(Missing::NonVerifyingObject {
+                addr: token_a
+            }))
+        );
+    }
+
+    /// Both tokens of a vault must permit transfer, whichever side the
+    /// trader spends.
+    #[test]
+    fn a_token_whose_policy_forbids_transfer_cannot_be_a_market_leg() {
+        let locked = committed(token_policy_bytes_with(9, 0));
+        let mut route = vec![tokens()[0].clone(), locked.clone()];
+        route.sort();
+        let f = swap_fixture_over(
+            &route,
+            &|j| setup_body_for(vault_id_of(j)),
+            PreEClosureIndex::new(Vec::new()).unwrap(),
+        );
+        assert_eq!(
+            validate(&f.precommit, &f.preimage, &f.evidence),
+            Err(Refusal::Invalid(Invalid::TokenNotTransferable {
+                token: locked.0
+            }))
+        );
+    }
+
+    /// Authenticated policy bytes that do not parse make the token no market
+    /// leg: the commit is the token's identity, and its policy is not a
+    /// policy.
+    #[test]
+    fn a_token_whose_committed_policy_does_not_parse_cannot_be_a_market_leg() {
+        let broken = committed(prost::Message::encode_to_vec(
+            &crate::types::proto::TokenPolicyV3 {
+                policy_bytes: b"not a policy blob".to_vec(),
+            },
+        ));
+        let mut route = vec![tokens()[0].clone(), broken.clone()];
+        route.sort();
+        let f = swap_fixture_over(
+            &route,
+            &|j| setup_body_for(vault_id_of(j)),
+            PreEClosureIndex::new(Vec::new()).unwrap(),
+        );
+        assert_eq!(
+            validate(&f.precommit, &f.preimage, &f.evidence),
+            Err(Refusal::Invalid(Invalid::TokenPolicyDoesNotParse {
+                token: broken.0
+            }))
+        );
+    }
+
+    /// The token between two hops moves inside the vaults and never touches
+    /// the trader's balances, and it is checked all the same.
+    #[test]
+    fn an_intermediate_token_must_permit_transfer_too() {
+        // A non-transferable token whose commit sorts strictly between two
+        // fixture tokens, so an ascending two-hop route passes through it.
+        let (lower, locked, upper) = (9u8..=u8::MAX)
+            .find_map(|i| {
+                let locked = committed(token_policy_bytes_with(i, 0));
+                let lower = tokens().iter().filter(|t| t.0 < locked.0).last()?.clone();
+                let upper = tokens().iter().find(|t| t.0 > locked.0)?.clone();
+                Some((lower, locked, upper))
+            })
+            .expect("a locked token between two fixture tokens");
+        let f = swap_fixture_over(
+            &[lower, locked.clone(), upper],
+            &|j| setup_body_for(vault_id_of(j)),
+            PreEClosureIndex::new(Vec::new()).unwrap(),
+        );
+        assert_eq!(
+            validate(&f.precommit, &f.preimage, &f.evidence),
+            Err(Refusal::Invalid(Invalid::TokenNotTransferable {
+                token: locked.0
+            }))
+        );
+    }
+
+    /// ERA and dBTC are pre-rooted: no policy bytes are consulted for them.
+    #[test]
+    fn a_builtin_token_needs_no_policy_bytes() {
+        let era = crate::core::token::token_state_manager::era_policy_commit();
+        let mut route = vec![(era, Vec::new()), tokens()[0].clone()];
+        route.sort();
+        let f = swap_fixture_over(
+            &route,
+            &|j| setup_body_for(vault_id_of(j)),
+            PreEClosureIndex::new(Vec::new()).unwrap(),
+        );
+        assert!(!f.evidence.token_policies.contains_key(&era));
+        assert_eq!(validate(&f.precommit, &f.preimage, &f.evidence), Ok(()));
     }
 }

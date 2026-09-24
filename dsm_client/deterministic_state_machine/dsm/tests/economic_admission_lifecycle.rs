@@ -394,13 +394,24 @@ fn registered_naming(
     post_root: [u8; 32],
     manifest_addr: [u8; 32],
 ) -> RegisteredEconomicRoot {
+    registered_for_trader(G, DEV, position, post_root, manifest_addr)
+}
+
+/// A registered root of the trader `(genesis, device)`.
+fn registered_for_trader(
+    genesis: [u8; 32],
+    device: [u8; 32],
+    position: u64,
+    post_root: [u8; 32],
+    manifest_addr: [u8; 32],
+) -> RegisteredEconomicRoot {
     static KEYS: std::sync::OnceLock<(Vec<u8>, Vec<u8>)> = std::sync::OnceLock::new();
     let (pk, sk) = KEYS.get_or_init(|| {
         dsm::crypto::sphincs::generate_sphincs_keypair().expect("a claimant keypair")
     });
     let body = dsm::economic::claim::EconomicRootClaimBody::new(
-        G,
-        DEV,
+        genesis,
+        device,
         position,
         post_root,
         manifest_addr,
@@ -426,13 +437,7 @@ fn run(
     manifest: &EconomicAdmissionManifest,
     witness: &EconomicTransitionWitness,
     accepted: &AcceptedSubstrate,
-) -> Result<
-    (
-        dsm::economic::lineage::ValidatedEconomicRoot,
-        Vec<dsm::economic::provenance::FundedCredit>,
-    ),
-    EconomicValidationError,
-> {
+) -> Result<dsm::economic::lineage::ValidatedAdvance, EconomicValidationError> {
     let zero = activate(EconomicActivationSnapshot::fresh()).expect("fresh");
     advance_validated(
         &zero,
@@ -456,10 +461,37 @@ fn a_faucet_claim_transition_advances_the_validated_lineage() {
     let manifest = manifest_for(&fx.witness);
     let registered = registered_for(&manifest, 1, fx.post_root);
     let accepted = accepted_for(&fx.op);
-    let (one, funded) =
-        run(&fx, &registered, &manifest, &fx.witness, &accepted).expect("validates");
-    assert_eq!(one.economic_position(), 1);
-    assert_eq!(funded.len(), 1);
+    let advanced = run(&fx, &registered, &manifest, &fx.witness, &accepted).expect("validates");
+    assert_eq!(advanced.root.economic_position(), 1);
+    assert_eq!(advanced.funded.len(), 1);
+    // The claim accepted at the position is the registered one, of this
+    // trader.
+    assert_eq!(
+        (
+            advanced.claim.genesis(),
+            advanced.claim.device_id(),
+            advanced.claim.economic_position(),
+            advanced.claim.claim_ref()
+        ),
+        (G, DEV, 1, registered.claim_ref())
+    );
+}
+
+/// A registered claim of another trader is not a registration of this
+/// lineage, whatever root it names.
+#[test]
+fn a_registered_claim_of_another_trader_is_refused() {
+    let fx = faucet_fixture(1);
+    let manifest = manifest_for(&fx.witness);
+    let accepted = accepted_for(&fx.op);
+    let addr = manifest.addr().expect("addressable");
+    for (genesis, device) in [([0x99; 32], DEV), (G, [0x98; 32])] {
+        let foreign = registered_for_trader(genesis, device, 1, fx.post_root, addr);
+        assert!(matches!(
+            run(&fx, &foreign, &manifest, &fx.witness, &accepted),
+            Err(EconomicValidationError::RegisteredClaimNamesAnotherTrader)
+        ));
+    }
 }
 
 #[test]

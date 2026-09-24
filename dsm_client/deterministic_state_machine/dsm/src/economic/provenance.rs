@@ -696,29 +696,29 @@ pub fn genesis_release_source_id(
     *h.finalize().as_bytes()
 }
 
-/// Establish what a genesis release (`0x005F`, SoFi §51) funds.
+/// Establish what a genesis release (`0x005F`, SoFi §51, Amendment S8) funds.
 ///
 /// The asset is the accepted `CreateToken`'s own `policy_commit`, and the
 /// amount is the genesis supply the policy under that commit states — so the
 /// generic asset/amount equality in [`verify_credit_source`] forces the credit
-/// to be exactly the whole supply of exactly the new token. The credit lands
-/// in the witness of the identity under validation, which is the creator.
+/// to be exactly the whole supply of exactly the new token. The policy names
+/// its creator, and only the creator's own transition releases it; the write
+/// set of that transition inserts the creation record from zero, so the
+/// creator's lineage releases it once.
 fn verify_genesis_release(
     resolver: &dyn ProvenanceResolver,
     ctx: &ProvenanceContext<'_>,
 ) -> Result<FundedCredit, ProvenanceError> {
     // The operation is the verified substrate's, never the descriptor's: the
     // descriptor carries no asset and no amount to disagree with it.
-    let policy_commit = match ctx.verified_operation {
-        Some(crate::types::operations::Operation::CreateToken { policy_commit, .. }) => {
-            *policy_commit
-        }
-        _ => {
-            return Err(ProvenanceError::GenesisReleaseInvalid(
-                "a genesis release rides only the CreateToken that creates its token".into(),
-            ))
-        }
+    let Some(crate::types::operations::Operation::CreateToken { policy_commit, .. }) =
+        ctx.verified_operation
+    else {
+        return Err(ProvenanceError::GenesisReleaseInvalid(
+            "a genesis release rides only the CreateToken that creates its token".into(),
+        ));
     };
+    let policy_commit = *policy_commit;
     let bytes = resolver
         .anchored_policy_bytes(&policy_commit)
         .map_err(ProvenanceError::GenesisReleasePolicy)?;
@@ -735,6 +735,11 @@ fn verify_genesis_release(
     }
     let policy = crate::economic::token_policy::parse_token_policy(&bytes)
         .map_err(|e| ProvenanceError::GenesisReleaseInvalid(format!("policy: {e}")))?;
+    if (policy.creator_genesis, policy.creator_device_id) != (*ctx.genesis, *ctx.device_id) {
+        return Err(ProvenanceError::GenesisReleaseInvalid(
+            "the token's policy names another creator".into(),
+        ));
+    }
     if policy.release_rule != crate::economic::token_policy::ReleaseRule::AllAtCreation {
         return Err(ProvenanceError::GenesisReleaseInvalid(
             "the token's release rule does not release its supply at creation".into(),

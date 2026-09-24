@@ -20,10 +20,11 @@
 //! on `Final`; `Preserved` matters only for loss (§12.6) and is never
 //! spendable.
 //!
-//! This module holds the route, the entry every seat stores, the chain slots,
-//! the chain states, and the evidence a verifier gathers to evaluate them.
+//! This module holds the route, the cell Core derives from committed state,
+//! the entry every seat stores, the chain slots, the chain states, and the
+//! evidence a verifier gathers to evaluate them.
 
-use crate::ccb::StorageSetMembers;
+use crate::ccb::{CcbError, StorageSetMembers};
 use crate::sofi::fisher_yates::{permute, FisherYatesError};
 use crate::storage_cell::{ArrivalRecord, ByteCommit, CellCommitProof};
 use crate::types::proto;
@@ -101,6 +102,71 @@ impl Route {
     /// The seats in route order.
     pub fn seats(&self) -> &[Vec<u8>] {
         &self.seats
+    }
+}
+
+/// A cell as Core derives it from committed state (§9 route rules 1–3): its
+/// namespace, its key, and its route `FisherYates(s, S)` over the set the
+/// seeding state commits. Built only by [`RoutedCell::new`], which refuses
+/// members that are not that set, so a route never comes from a reader, a
+/// writer, or a node.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoutedCell {
+    namespace: Vec<u8>,
+    key: [u8; 32],
+    route: Route,
+}
+
+/// Why a cell could not be derived.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CellError {
+    /// The members offered derive another set id than the one the seeding
+    /// state commits.
+    NotTheCommittedSet {
+        committed: [u8; 32],
+        derived: [u8; 32],
+    },
+    /// The members offered do not form a set id at all.
+    SetId(CcbError),
+    Route(RouteError),
+}
+
+impl RoutedCell {
+    /// The cell at `(namespace, key)` whose route is seeded by `seed` over
+    /// `members`, which must re-derive `committed_set_id`, the set id the
+    /// seeding state commits. The id covers every `(member id, incarnation)`
+    /// pair, so equal ids mean the same members.
+    pub fn new(
+        namespace: &[u8],
+        key: [u8; 32],
+        seed: &[u8; 32],
+        members: &StorageSetMembers,
+        committed_set_id: &[u8; 32],
+    ) -> Result<Self, CellError> {
+        let derived = crate::ccb::storage_set_id(members).map_err(CellError::SetId)?;
+        if derived != *committed_set_id {
+            return Err(CellError::NotTheCommittedSet {
+                committed: *committed_set_id,
+                derived,
+            });
+        }
+        Ok(Self {
+            namespace: namespace.to_vec(),
+            key,
+            route: Route::of(seed, members).map_err(CellError::Route)?,
+        })
+    }
+
+    pub fn namespace(&self) -> &[u8] {
+        &self.namespace
+    }
+
+    pub fn key(&self) -> &[u8; 32] {
+        &self.key
+    }
+
+    pub fn route(&self) -> &Route {
+        &self.route
     }
 }
 
@@ -340,13 +406,11 @@ pub struct SeatEvidence {
     pub leader_seen: Option<CommittedAt>,
 }
 
-/// Everything a verifier holds about one cell: which cell, its route, and
-/// one [`SeatEvidence`] per route position.
+/// Everything a verifier holds about one cell: one [`SeatEvidence`] per
+/// route position of the cell, in route order. Which cell, and so which
+/// route, is Core's ([`RoutedCell`]); the evidence carries only reads.
 #[derive(Debug, Clone)]
 pub struct CellEvidence {
-    pub namespace: Vec<u8>,
-    pub key: [u8; 32],
-    pub route: Route,
     pub seats: Vec<SeatEvidence>,
 }
 
@@ -420,14 +484,15 @@ fn committed_by(record: &ArrivalRecord, log: &[Vec<u8>], commit: Option<&Committ
 /// Whether a route entry is this cell's copy for route position `position`:
 /// same namespace and key, that position, the seat the route puts there, and
 /// every carried record from the seat at its own position.
-fn is_cell_copy_at(entry: &RouteEntry, ev: &CellEvidence, position: usize) -> bool {
-    entry.namespace == ev.namespace
-        && entry.key == ev.key
+fn is_cell_copy_at(entry: &RouteEntry, cell: &RoutedCell, position: usize) -> bool {
+    entry.namespace == cell.namespace
+        && entry.key == cell.key
         && entry.position == position
-        && entry.fits(&ev.route)
+        && entry.fits(&cell.route)
 }
 
-/// Evaluate a cell's route chains (storage spec §9). `recognize` returns the
+/// Evaluate `cell`'s route chains (storage spec §9) over the reads in `ev`,
+/// one per route position of `cell`. `recognize` returns the
 /// id of a value that is a recognized object naming the cell, with what it
 /// recognized, and `None` for anything else; unrecognized bytes never count,
 /// wherever they arrived.
@@ -442,7 +507,11 @@ fn is_cell_copy_at(entry: &RouteEntry, ev: &CellEvidence, position: usize) -> bo
 ///    mirror of the leader's ByteCommits covers the leader link (§9 rule 4).
 ///    The position is the route's, so it is higher than every carried link's.
 /// 3. The value's state is its count of positions with a valid link.
-pub fn evaluate<T, F>(ev: &CellEvidence, recognize: F) -> Result<CellReading<T>, Missing>
+pub fn evaluate<T, F>(
+    cell: &RoutedCell,
+    ev: &CellEvidence,
+    recognize: F,
+) -> Result<CellReading<T>, Missing>
 where
     F: Fn(&[u8]) -> Option<([u8; 32], T)>,
 {
@@ -454,7 +523,7 @@ where
         let Some(entry) = RouteEntry::decode(bytes) else {
             continue;
         };
-        if !is_cell_copy_at(&entry, ev, 0) {
+        if !is_cell_copy_at(&entry, cell, 0) {
             continue;
         }
         if let Some((id, object)) = recognize(&entry.value) {
@@ -465,16 +534,21 @@ where
     let Some((n, value, id, object)) = first else {
         return Ok(CellReading::Open);
     };
-    let leader_link = record_of(ev.route.leader(), &ev.namespace, &ev.key, &leader_log[..=n]);
+    let leader_link = record_of(
+        cell.route.leader(),
+        &cell.namespace,
+        &cell.key,
+        &leader_log[..=n],
+    );
     if !committed_by(&leader_link, leader_log, leader.committed.as_ref()) {
         return Err(Missing::LeaderLinkUncommitted);
     }
 
     // `links[i]` holds every valid link of this value at route position `i`.
-    let mut links: Vec<Vec<ArrivalRecord>> = vec![Vec::new(); ev.route.seats().len()];
+    let mut links: Vec<Vec<ArrivalRecord>> = vec![Vec::new(); cell.route.seats().len()];
     links[0].push(leader_link.clone());
     let leader_slot = ChainSlot::Link(leader_link.clone());
-    for (position, seat_id) in ev.route.seats().iter().enumerate().skip(1) {
+    for (position, seat_id) in cell.route.seats().iter().enumerate().skip(1) {
         let Some(seat) = ev.seats.get(position) else {
             continue;
         };
@@ -482,7 +556,7 @@ where
             continue;
         };
         let leader_seen = seat.leader_seen.as_ref().is_some_and(|c| {
-            c.commit.member_id.as_slice() == ev.route.leader()
+            c.commit.member_id.as_slice() == cell.route.leader()
                 && crate::storage_cell::record_is_committed(
                     &leader_link,
                     leader_log,
@@ -497,7 +571,7 @@ where
             let Some(entry) = RouteEntry::decode(bytes) else {
                 continue;
             };
-            if !is_cell_copy_at(&entry, ev, position)
+            if !is_cell_copy_at(&entry, cell, position)
                 || entry.value != value
                 || entry.chain.first() != Some(&leader_slot)
             {
@@ -517,7 +591,7 @@ where
             if !carries_only_valid_links {
                 continue;
             }
-            let link = record_of(seat_id, &ev.namespace, &ev.key, &log[..=m]);
+            let link = record_of(seat_id, &cell.namespace, &cell.key, &log[..=m]);
             if committed_by(&link, log, seat.committed.as_ref()) {
                 links[position].push(link);
             }
@@ -553,6 +627,11 @@ pub(crate) mod fixtures {
         StorageSetMembers::new(&entries).expect("five members")
     }
 
+    /// The id of [`committed_set`].
+    pub(crate) fn committed_set_id() -> [u8; 32] {
+        crate::ccb::storage_set_id(&committed_set()).expect("set id")
+    }
+
     /// One cell across its five seats.
     pub(crate) struct Cell {
         pub(crate) namespace: Vec<u8>,
@@ -563,12 +642,30 @@ pub(crate) mod fixtures {
     }
 
     impl Cell {
+        /// The cell at `(namespace, key)` routed by `seed` over the fixture set.
         pub(crate) fn new(namespace: &[u8], key: [u8; 32], seed: [u8; 32]) -> Self {
+            Self::at(
+                &RoutedCell::new(namespace, key, &seed, &committed_set(), &committed_set_id())
+                    .expect("a cell over the fixture set"),
+            )
+        }
+
+        /// Empty seats at a cell Core derived.
+        pub(crate) fn at(cell: &RoutedCell) -> Self {
             Self {
-                namespace: namespace.to_vec(),
-                key,
-                route: Route::of(&seed, &committed_set()).expect("route"),
+                namespace: cell.namespace().to_vec(),
+                key: *cell.key(),
+                route: cell.route().clone(),
                 logs: vec![Vec::new(); ROUTE_LEN],
+            }
+        }
+
+        /// The cell as Core derives it.
+        pub(crate) fn routed(&self) -> RoutedCell {
+            RoutedCell {
+                namespace: self.namespace.clone(),
+                key: self.key,
+                route: self.route.clone(),
             }
         }
 
@@ -681,9 +778,6 @@ pub(crate) mod fixtures {
         pub(crate) fn evidence(&self) -> CellEvidence {
             let leader = self.commit(0);
             CellEvidence {
-                namespace: self.namespace.clone(),
-                key: self.key,
-                route: self.route.clone(),
                 seats: (0..ROUTE_LEN)
                     .map(|position| SeatEvidence {
                         values: Some(self.logs[position].clone()),
@@ -755,6 +849,34 @@ mod tests {
         );
     }
 
+    /// Route rule 3: a cell's route is over the set its seeding state
+    /// commits. Members that re-derive another set id give no cell.
+    #[test]
+    fn a_cell_is_routed_only_over_the_committed_set() {
+        let committed = crate::ccb::storage_set_id(&five()).expect("id");
+        assert!(RoutedCell::new(b"DSM/c", [1; 32], &[2; 32], &five(), &committed).is_ok());
+        let other = set(&["m1", "m2", "m3", "m4", "m5"]);
+        let derived = crate::ccb::storage_set_id(&other).expect("id");
+        assert_eq!(
+            RoutedCell::new(b"DSM/c", [1; 32], &[2; 32], &other, &committed),
+            Err(CellError::NotTheCommittedSet { committed, derived })
+        );
+        let pinned = five();
+        let rebuilt: Vec<(&[u8], [u8; 32])> = pinned
+            .entries()
+            .iter()
+            .map(|e| (e.member_id(), [8u8; 32]))
+            .collect();
+        let rebuilt = StorageSetMembers::new(&rebuilt).expect("set");
+        assert!(
+            matches!(
+                RoutedCell::new(b"DSM/c", [1; 32], &[2; 32], &rebuilt, &committed),
+                Err(CellError::NotTheCommittedSet { .. })
+            ),
+            "the same member ids under other incarnations are another set"
+        );
+    }
+
     #[test]
     fn a_route_needs_exactly_five_members() {
         let four = set(&["a", "b", "c", "d"]);
@@ -780,10 +902,10 @@ mod tests {
         }
         assert_eq!(e2.chain.len(), 2);
         let mut last = e2.clone();
-        for _ in 2..ROUTE_LEN - 1 {
+        for position in 3..ROUTE_LEN {
             last = last.next(ChainSlot::NoResponse, &route).expect("next");
+            assert_eq!(last.position, position);
         }
-        assert_eq!(last.position, ROUTE_LEN - 1);
         assert!(
             last.next(ChainSlot::NoResponse, &route).is_none(),
             "no position past the route"
@@ -931,9 +1053,15 @@ mod tests {
         c.write(b"ok-x", ROUTE_LEN - 1, &[]);
         let mut ev = c.evidence();
         ev.seats[0].values = None;
-        assert_eq!(evaluate(&ev, recognize_ok), Err(Missing::LeaderUnread));
+        assert_eq!(
+            evaluate(&c.routed(), &ev, recognize_ok),
+            Err(Missing::LeaderUnread)
+        );
         ev.seats.clear();
-        assert_eq!(evaluate(&ev, recognize_ok), Err(Missing::LeaderUnread));
+        assert_eq!(
+            evaluate(&c.routed(), &ev, recognize_ok),
+            Err(Missing::LeaderUnread)
+        );
     }
 
     #[test]
@@ -941,7 +1069,10 @@ mod tests {
         let mut c = cell();
         c.write(b"junk", ROUTE_LEN - 1, &[]);
         c.put(0, b"not a route entry".to_vec());
-        assert_eq!(evaluate(&c.evidence(), recognize_ok), Ok(CellReading::Open));
+        assert_eq!(
+            evaluate(&c.routed(), &c.evidence(), recognize_ok),
+            Ok(CellReading::Open)
+        );
     }
 
     /// Rule 3: bytes that are not a recognized object naming the cell never
@@ -953,7 +1084,7 @@ mod tests {
         c.write(b"junk", 0, &[]);
         c.write(b"ok-x", ROUTE_LEN - 1, &[]);
         assert_eq!(
-            evaluate(&c.evidence(), recognize_ok),
+            evaluate(&c.routed(), &c.evidence(), recognize_ok),
             held(ChainState::Final, b"ok-x")
         );
     }
@@ -967,7 +1098,7 @@ mod tests {
         c.write(b"ok-a", 0, &[]);
         c.write(b"ok-b", ROUTE_LEN - 1, &[]);
         assert_eq!(
-            evaluate(&c.evidence(), recognize_ok),
+            evaluate(&c.routed(), &c.evidence(), recognize_ok),
             held(ChainState::LeaderHeld, b"ok-a")
         );
     }
@@ -983,12 +1114,12 @@ mod tests {
         let mut ev = c.evidence();
         ev.seats[0].committed = None;
         assert_eq!(
-            evaluate(&ev, recognize_ok),
+            evaluate(&c.routed(), &ev, recognize_ok),
             Err(Missing::LeaderLinkUncommitted)
         );
         ev.seats[0].committed = before;
         assert_eq!(
-            evaluate(&ev, recognize_ok),
+            evaluate(&c.routed(), &ev, recognize_ok),
             Err(Missing::LeaderLinkUncommitted),
             "a ByteCommit closed before the value arrived commits nothing of it"
         );
@@ -1006,7 +1137,7 @@ mod tests {
             let mut c = cell();
             c.write(b"ok-x", last, &[]);
             assert_eq!(
-                evaluate(&c.evidence(), recognize_ok),
+                evaluate(&c.routed(), &c.evidence(), recognize_ok),
                 held(state, b"ok-x"),
                 "written through position {last}"
             );
@@ -1026,14 +1157,14 @@ mod tests {
             seat.leader_seen = None;
         }
         assert_eq!(
-            evaluate(&ev, recognize_ok),
+            evaluate(&c.routed(), &ev, recognize_ok),
             held(ChainState::LeaderHeld, b"ok-x")
         );
         for seat in ev.seats.iter_mut().skip(1) {
             seat.leader_seen = stale.clone();
         }
         assert_eq!(
-            evaluate(&ev, recognize_ok),
+            evaluate(&c.routed(), &ev, recognize_ok),
             held(ChainState::LeaderHeld, b"ok-x"),
             "a mirror older than the leader link does not cover it"
         );
@@ -1048,7 +1179,7 @@ mod tests {
         let mut ev = c.evidence();
         ev.seats[1].committed = None;
         assert_eq!(
-            evaluate(&ev, recognize_ok),
+            evaluate(&c.routed(), &ev, recognize_ok),
             held(ChainState::LeaderHeld, b"ok-x"),
             "every later copy carries the uncommitted link at position 1"
         );
@@ -1066,7 +1197,7 @@ mod tests {
             let mut c = cell();
             c.write(b"ok-x", ROUTE_LEN - 1, &silent);
             assert_eq!(
-                evaluate(&c.evidence(), recognize_ok),
+                evaluate(&c.routed(), &c.evidence(), recognize_ok),
                 held(state, b"ok-x"),
                 "silent at {silent:?}"
             );
@@ -1082,7 +1213,7 @@ mod tests {
         c.write(b"ok-x", 0, &[]);
         c.write(b"ok-x", 2, &[0]);
         assert_eq!(
-            evaluate(&c.evidence(), recognize_ok),
+            evaluate(&c.routed(), &c.evidence(), recognize_ok),
             held(ChainState::LeaderHeld, b"ok-x")
         );
     }
@@ -1103,7 +1234,7 @@ mod tests {
             .expect("position 1");
         c.put(1, other_value.encode());
         assert_eq!(
-            evaluate(&c.evidence(), recognize_ok),
+            evaluate(&c.routed(), &c.evidence(), recognize_ok),
             held(ChainState::LeaderHeld, b"ok-x")
         );
     }

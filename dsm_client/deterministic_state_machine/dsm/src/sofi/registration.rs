@@ -22,7 +22,10 @@
 
 use std::collections::BTreeMap;
 
-use crate::route_chain::{evaluate, CellEvidence, CellReading, ChainState, Missing};
+use crate::economic::register::{position_seed, read_root_cell, RootCell};
+use crate::route_chain::{
+    evaluate, CellError, CellEvidence, CellReading, ChainState, Missing, RoutedCell,
+};
 use super::derive;
 use super::publication::{recognize_fulfillment, Signed};
 use super::wire::{TraderFulfillmentBody, TraderPrecommitBody};
@@ -65,6 +68,57 @@ pub fn names_fulfillment_key(
     Some(signed)
 }
 
+/// The two cells of trader `(G, DevID)`'s position `q` as Core derives them
+/// (Sections 7.2, 17.4): `K_ful(q)` and `K_root(q)`, both routed by `s(q)`
+/// over the register's committed set, so one route serves both and a writer
+/// puts the pair at each seat in one transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PositionCells {
+    fulfillment: RoutedCell,
+    root: RootCell,
+}
+
+impl PositionCells {
+    /// `parent_root` is `R_p`, the root the verifier validated at `q - 1`.
+    /// `members` must re-derive `committed_set_id`, the register's pinned
+    /// set id.
+    pub fn new(
+        genesis: &D32,
+        device_id: &D32,
+        position: u64,
+        parent_root: &D32,
+        members: &crate::ccb::StorageSetMembers,
+        committed_set_id: &D32,
+    ) -> Result<Self, CellError> {
+        let root = RootCell::new(
+            genesis,
+            device_id,
+            position,
+            parent_root,
+            members,
+            committed_set_id,
+        )?;
+        let fulfillment = RoutedCell::new(
+            crate::common::domain_tags::TAG_DSM_SOFI_FULFILLMENT.source_bytes(),
+            derive::fulfillment_register_key(genesis, device_id, position),
+            &position_seed(genesis, device_id, position, parent_root),
+            members,
+            committed_set_id,
+        )?;
+        Ok(Self { fulfillment, root })
+    }
+
+    /// `K_ful(q)`.
+    pub fn fulfillment(&self) -> &RoutedCell {
+        &self.fulfillment
+    }
+
+    /// `K_root(q)`.
+    pub fn root(&self) -> &RootCell {
+        &self.root
+    }
+}
+
 /// Which of the two cells settled the answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PositionCell {
@@ -98,14 +152,15 @@ pub enum Registration {
 /// claim). `Err` names what the evidence does not yet show at a cell whose
 /// answer is needed: a network status, never an answer about the position.
 pub fn fulfillment_registered(
-    fulfillment_cell: &CellEvidence,
-    root_cell: &CellEvidence,
-    genesis: &D32,
-    device_id: &D32,
-    position: u64,
+    cells: &PositionCells,
+    fulfillment_evidence: &CellEvidence,
+    root_evidence: &CellEvidence,
     precommits: &impl PrecommitLookup,
 ) -> Result<Registration, Missing> {
-    let fulfillment = evaluate(fulfillment_cell, |bytes| {
+    let genesis = cells.root.genesis();
+    let device_id = cells.root.device_id();
+    let position = cells.root.economic_position();
+    let fulfillment = evaluate(&cells.fulfillment, fulfillment_evidence, |bytes| {
         let signed = names_fulfillment_key(bytes, genesis, device_id, position, precommits)?;
         let precommit = precommits.precommit(signed.body.precommit_id())?.clone();
         Some((
@@ -125,23 +180,20 @@ pub fn fulfillment_registered(
         }
         | CellReading::Open => return Ok(Registration::Unresolved),
     };
-    let claim = derive::resolution_claim(&precommit, &signed.body).encode();
-    let k_root =
-        crate::economic::register::economic_root_register_key(genesis, device_id, position);
-    let root = evaluate(root_cell, |bytes| {
-        crate::economic::register::root_claim_naming(bytes, &k_root)
-            .is_some()
-            .then(|| (crate::storage_cell::entry_digest(bytes), bytes.to_vec()))
-    })?;
-    Ok(match root {
+    // The root cell's reading identifies its claim by the entry digest of
+    // its exact bytes, so `C_q` holds the cell exactly when the ids agree.
+    let claim = crate::storage_cell::entry_digest(
+        &derive::resolution_claim(&precommit, &signed.body).encode(),
+    );
+    Ok(match read_root_cell(&cells.root, root_evidence)? {
         CellReading::Held {
-            object,
+            id,
             state: ChainState::Final,
             ..
-        } if object == claim => Registration::Registered(signed),
+        } if id == claim => Registration::Registered(signed),
         // Another claim holds the leader link at K_root(q): final or not
         // yet, no other value will ever be final there (§9 finality 2).
-        CellReading::Held { object, .. } if object != claim => Registration::NeverRegistered {
+        CellReading::Held { id, .. } if id != claim => Registration::NeverRegistered {
             fulfillment: signed,
             settled_at: PositionCell::Root,
         },
@@ -156,7 +208,8 @@ mod tests {
     use crate::ccb::sigalg::SPHINCS_PLUS_SPX256F as ALG;
     use crate::sofi::publication::Publication;
     use crate::sofi::validation::fixtures::{swap_fixture_n, DEV, G};
-    use crate::route_chain::{fixtures::Cell, ROUTE_LEN};
+    use crate::route_chain::fixtures::{committed_set, committed_set_id, Cell};
+    use crate::route_chain::ROUTE_LEN;
     use crate::sofi::wire::AttemptEntry;
 
     const KEY: [u8; 64] = [0x31; 64];
@@ -238,26 +291,37 @@ mod tests {
         )
         .unwrap();
         let other_claim = derive::resolution_claim(&p, &rival).encode();
-        let cell = |value: &[u8], last: usize| {
-            let mut c = Cell::new(b"DSM/test-position", [0x71; 32], [0x72; 32]);
+        let cells = PositionCells::new(
+            &G,
+            &DEV,
+            q,
+            &[0x5E; 32],
+            &committed_set(),
+            &committed_set_id(),
+        )
+        .expect("the committed set");
+        let written = |at: &RoutedCell, value: &[u8], last: usize| {
+            let mut c = Cell::at(at);
             c.write(value, last, &[]);
             c.evidence()
         };
+        let ful_cell = |value: &[u8], last: usize| written(cells.fulfillment(), value, last);
+        let root_cell = |value: &[u8], last: usize| written(cells.root().routed(), value, last);
         let reg = |ful: &CellEvidence, root: &CellEvidence| {
-            fulfillment_registered(ful, root, &G, &DEV, q, &known)
+            fulfillment_registered(&cells, ful, root, &known)
         };
         let registered = Signed {
             body: f.clone(),
             signature: SIG.to_vec(),
         };
-        let final_ful = cell(&bytes, ROUTE_LEN - 1);
+        let final_ful = ful_cell(&bytes, ROUTE_LEN - 1);
         assert_eq!(
-            reg(&final_ful, &cell(&claim, ROUTE_LEN - 1)),
+            reg(&final_ful, &root_cell(&claim, ROUTE_LEN - 1)),
             Ok(Registration::Registered(registered.clone()))
         );
         for last in [0, ROUTE_LEN - 1] {
             assert_eq!(
-                reg(&final_ful, &cell(&other_claim, last)),
+                reg(&final_ful, &root_cell(&other_claim, last)),
                 Ok(Registration::NeverRegistered {
                     fulfillment: registered.clone(),
                     settled_at: PositionCell::Root,
@@ -266,26 +330,26 @@ mod tests {
             );
         }
         assert_eq!(
-            reg(&final_ful, &cell(&claim, 1)),
+            reg(&final_ful, &root_cell(&claim, 1)),
             Ok(Registration::Unresolved),
             "the claim is preserved, not final"
         );
         assert_eq!(
-            reg(&final_ful, &cell(b"not a claim", ROUTE_LEN - 1)),
+            reg(&final_ful, &root_cell(b"not a claim", ROUTE_LEN - 1)),
             Ok(Registration::Unresolved)
         );
         assert_eq!(
-            reg(&cell(&bytes, 1), &cell(&claim, ROUTE_LEN - 1)),
+            reg(&ful_cell(&bytes, 1), &root_cell(&claim, ROUTE_LEN - 1)),
             Ok(Registration::Unresolved)
         );
         assert_eq!(
             reg(
-                &cell(b"garbage", ROUTE_LEN - 1),
-                &cell(&claim, ROUTE_LEN - 1)
+                &ful_cell(b"garbage", ROUTE_LEN - 1),
+                &root_cell(&claim, ROUTE_LEN - 1)
             ),
             Ok(Registration::Unresolved)
         );
-        let mut unread_root = cell(&claim, ROUTE_LEN - 1);
+        let mut unread_root = root_cell(&claim, ROUTE_LEN - 1);
         unread_root.seats[0].values = None;
         assert_eq!(reg(&final_ful, &unread_root), Err(Missing::LeaderUnread));
     }

@@ -24,7 +24,10 @@ use crate::economic::credit::{
     CreditSourceValidatedPeerDebit,
 };
 use crate::economic::mutation::EconomicLeafMutation;
-use crate::economic::state::{EconomicBalanceState, EconomicConsumedSourceState, EconomicLeafState};
+use crate::economic::state::{
+    EconomicBalanceState, EconomicConsumedSourceState, EconomicLeafState,
+    EconomicTokenCreationState,
+};
 use crate::economic::tree::ECONOMIC_SMT_HEIGHT;
 use crate::economic::claim::{AdmissionSubstrate, EconomicAdmissionManifest};
 use crate::economic::witness::EconomicTransitionWitness;
@@ -254,6 +257,17 @@ fn read_leaf_state(c: &mut Cursor<'_>) -> Result<EconomicLeafState, DecodeError>
                 EconomicConsumedSourceState {
                     source_id: c.digest32()?,
                     consumer_economic_operation_id: c.digest32()?,
+                },
+            ))
+        }
+        class::ECONOMIC_TOKEN_CREATION_STATE => {
+            c.envelope(
+                EconomicTokenCreationState::CLASS,
+                EconomicTokenCreationState::SCHEMA,
+            )?;
+            Ok(EconomicLeafState::TokenCreation(
+                EconomicTokenCreationState {
+                    policy_commit: c.digest32()?,
                 },
             ))
         }

@@ -18,7 +18,7 @@
 //! is not validation: whether the route it carries realizes is the ladder's
 //! question (rebuild step R12), answered from the same bytes.
 
-use crate::route_chain::{evaluate, CellEvidence, CellReading, Missing};
+use crate::route_chain::{evaluate, CellError, CellEvidence, CellReading, Missing, RoutedCell};
 use super::derive;
 use super::publication::{
     recognize_policy_fulfillment, recognize_precommit, recognize_fulfillment, Signed,
@@ -120,21 +120,71 @@ pub fn exercise_names_key(
     (names_attempt && names_parent).then_some(recognized)
 }
 
-/// `SuccessorResolution(K)` (Section 23.1) as the ladder reads it: the
-/// route-chain reading of the successor key `K^(attempt)` of `vault_id` at
-/// `parent_root`, over exercises naming that key. What holds the cell is the
-/// recognized exercise, identified by its `E`. A cell whose leader holds no
-/// exercise naming the key is `Open`; evidence that does not yet decide the
-/// cell is [`Missing`], a network status and never an answer. No key is ever
-/// dead.
-pub fn attempt_resolution(
-    evidence: &CellEvidence,
-    vault_id: &D32,
-    parent_root: &D32,
+/// The successor key `K^(attempt)` of `vault_id` at `parent_root` as Core
+/// derives it (Sections 7.2, 17.5): the key, and the route seeded by
+/// `storage_seed(v, R_n)` over the set the vault state commits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttemptCell {
+    vault_id: D32,
+    parent_root: D32,
     attempt: u64,
+    cell: RoutedCell,
+}
+
+impl AttemptCell {
+    /// `members` must re-derive `committed_set_id`, the `storage_set_id` of
+    /// the vault state at `parent_root`, which the caller validated.
+    pub fn new(
+        vault_id: &D32,
+        parent_root: &D32,
+        attempt: u64,
+        members: &crate::ccb::StorageSetMembers,
+        committed_set_id: &D32,
+    ) -> Result<Self, CellError> {
+        let cell = RoutedCell::new(
+            crate::common::domain_tags::TAG_DSM_SOFI_SUCC_CELL_V2.source_bytes(),
+            derive::successor_attempt_key(vault_id, parent_root, attempt),
+            &derive::storage_seed(vault_id, parent_root),
+            members,
+            committed_set_id,
+        )?;
+        Ok(Self {
+            vault_id: *vault_id,
+            parent_root: *parent_root,
+            attempt,
+            cell,
+        })
+    }
+
+    pub fn vault_id(&self) -> &D32 {
+        &self.vault_id
+    }
+
+    pub fn parent_root(&self) -> &D32 {
+        &self.parent_root
+    }
+
+    pub fn attempt(&self) -> u64 {
+        self.attempt
+    }
+
+    pub fn routed(&self) -> &RoutedCell {
+        &self.cell
+    }
+}
+
+/// `SuccessorResolution(K)` (Section 23.1) as the ladder reads it: the
+/// route-chain reading of an attempt cell over exercises naming its key.
+/// What holds the cell is the recognized exercise, identified by its `E`. A
+/// cell whose leader holds no exercise naming the key is `Open`; evidence
+/// that does not yet decide the cell is [`Missing`], a network status and
+/// never an answer. No key is ever dead.
+pub fn attempt_resolution(
+    cell: &AttemptCell,
+    evidence: &CellEvidence,
 ) -> Result<CellReading<RecognizedExercise>, Missing> {
-    evaluate(evidence, |bytes| {
-        exercise_names_key(bytes, vault_id, parent_root, attempt)
+    evaluate(&cell.cell, evidence, |bytes| {
+        exercise_names_key(bytes, &cell.vault_id, &cell.parent_root, cell.attempt)
             .map(|x| (x.external_commitment, x))
     })
 }
@@ -148,7 +198,8 @@ mod tests {
     use crate::sofi::derive::precommit_id;
     use crate::sofi::publication::Publication;
     use crate::sofi::validation::fixtures::{swap_fixture_n, Fixture};
-    use crate::route_chain::{fixtures::Cell, CellFact, ChainState, ROUTE_LEN};
+    use crate::route_chain::fixtures::{committed_set, committed_set_id, Cell};
+    use crate::route_chain::{CellFact, ChainState, ROUTE_LEN};
     use crate::sofi::wire::AttemptEntry;
 
     const KEY: [u8; 64] = [0x31; 64];
@@ -339,9 +390,17 @@ mod tests {
         let bytes = built.exercise.encode();
         let leg = &built.precommit.legs()[0];
         let e = *built.precommit.external_commitment();
-        let read = |cell: &Cell, attempt: u64| {
-            attempt_resolution(&cell.evidence(), &leg.vault_id, &leg.parent_root, attempt)
+        let at = |attempt: u64| {
+            AttemptCell::new(
+                &leg.vault_id,
+                &leg.parent_root,
+                attempt,
+                &committed_set(),
+                &committed_set_id(),
+            )
+            .expect("the committed set")
         };
+        let read = |seats: &Cell, attempt: u64| attempt_resolution(&at(attempt), &seats.evidence());
         let fact = |reading: &Result<CellReading<RecognizedExercise>, Missing>| match reading {
             Ok(held) => Ok(held.fact()),
             Err(missing) => Err(*missing),
@@ -350,7 +409,7 @@ mod tests {
             (0, ChainState::LeaderHeld),
             (ROUTE_LEN - 1, ChainState::Final),
         ] {
-            let mut cell = Cell::new(b"DSM/test-successor", [0x61; 32], [0x62; 32]);
+            let mut cell = Cell::at(at(0).routed());
             cell.write(&bytes, last, &[]);
             let reading = read(&cell, 0);
             assert_eq!(fact(&reading), Ok(CellFact::Held { id: e, state }));
@@ -359,25 +418,22 @@ mod tests {
             };
             assert_eq!(object.fulfillment.body, built.fulfillment);
         }
-        let mut garbage = Cell::new(b"DSM/test-successor", [0x61; 32], [0x62; 32]);
+        let mut garbage = Cell::at(at(0).routed());
         garbage.write(b"garbage", ROUTE_LEN - 1, &[]);
         assert_eq!(fact(&read(&garbage, 0)), Ok(CellFact::Open));
-        let mut other_attempt = Cell::new(b"DSM/test-successor", [0x61; 32], [0x62; 32]);
+        let mut other_attempt = Cell::at(at(7).routed());
         other_attempt.write(&bytes, ROUTE_LEN - 1, &[]);
         assert_eq!(
             fact(&read(&other_attempt, 7)),
             Ok(CellFact::Open),
             "the right bytes at another attempt's key name nothing there"
         );
-        let mut unread = other_attempt.evidence();
+        let mut written = Cell::at(at(0).routed());
+        written.write(&bytes, ROUTE_LEN - 1, &[]);
+        let mut unread = written.evidence();
         unread.seats[0].values = None;
         assert_eq!(
-            fact(&attempt_resolution(
-                &unread,
-                &leg.vault_id,
-                &leg.parent_root,
-                0
-            )),
+            fact(&attempt_resolution(&at(0), &unread)),
             Err(Missing::LeaderUnread)
         );
     }

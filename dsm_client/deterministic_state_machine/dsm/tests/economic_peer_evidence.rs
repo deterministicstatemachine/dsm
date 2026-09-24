@@ -428,6 +428,7 @@ fn peer_vpt(verified_operation: Operation, debit_amount: u64) -> ValidatedPeerTr
             dsm::economic::lineage::AdmittedEconomicPosition::SingleRoot {
                 economic_position: 4,
                 economic_root: tree.root(),
+                claim_ref: [0xC7; 32],
             },
         )
         .expect("an ordinary admitted position"),
