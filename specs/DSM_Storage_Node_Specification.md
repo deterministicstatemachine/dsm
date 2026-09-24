@@ -229,6 +229,7 @@ Positions are numbered 0 to 4 in route order. Position 0 is always the leader.
     - `len(N)` is 2 bytes; `n` is 1 byte; `i` is 8 bytes, big-endian.
 
     The digest excludes the ByteCommits that make the links checkable, because a verifier may obtain them at different cycles. Every verifier of the same proof computes the same digest.
+11. The client that relies on a `Final` keeps its completion proof. Nothing else stores or commits the proof or its digest: the seats already hold everything the proof is made of — the chain's copies, their arrival records and the ByteCommits that commit them — so any verifier rebuilds and checks the proof from its own reads.
 
 **Invariant — historical routes are fixed (Owner decision)**
 
@@ -632,4 +633,3 @@ No safety property, and no party's liveness other than the owner's own, may depe
 | 12 | The minimum network size: a set needs five distinct operators, and replacements need more to draw from (§12). |
 | 13 | Whether opting out of a member should carry a cost (§12.4). |
 | 14 | The registry growth ranking, its genesis commit-reveal anchor, and the Up and Down capacity-signal computations, now referenced from the October 2025 spec outside this corpus (§13, §14). |
-| 15 | Which object commits a completion digest (§9), and the wire form of a completion proof. |
