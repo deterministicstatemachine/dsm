@@ -3,7 +3,7 @@
 //! Storage node DB layer (clean, DLV-only)
 //! Minimal schema + helpers used by the DLV-backed object store.
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use deadpool_postgres::Runtime; // Added Runtime import
 use deadpool_postgres::{ManagerConfig, Pool, RecyclingMethod};
 // use tokio_postgres::Row; // removed: no longer mapping rows to SlotRecord
@@ -199,238 +199,353 @@ pub async fn register_incarnation(pool: &Pool) -> Result<[u8; 32]> {
         .map_err(|_| anyhow!("stored register incarnation is not 32 bytes"))
 }
 
-// ===================== Generic conditional binding (Rev 15 §15.5) =====================
+/// The storage layout this build creates and serves (owner ruling #3).
+///
+/// A database carries exactly one schema version. This build starts only on an
+/// empty database, which it creates at this version, or on one already at this
+/// version whose layout is exactly [`SCHEMA_LAYOUT`]. It migrates nothing: an
+/// older, newer or unversioned database is refused, and is reprovisioned, not
+/// transformed. The schema version is its own axis — not the protocol version,
+/// and not the register incarnation, which names this node's register history.
+pub const SCHEMA_VERSION: i32 = 1;
 
-/// Initialize database schema for storage node.
+/// The DDL of [`SCHEMA_VERSION`], run once, on an empty database, in one
+/// transaction with the version row.
+const SCHEMA_DDL: &str = r#"
+    CREATE TABLE schema_version (
+        only_row SMALLINT PRIMARY KEY CHECK (only_row = 1),
+        version  INTEGER NOT NULL
+    );
+
+    CREATE TABLE register_incarnation (
+        only_row    SMALLINT PRIMARY KEY CHECK (only_row = 1),
+        incarnation BYTEA NOT NULL
+    );
+
+    -- Keyed cells: the member keeps EVERY value it is given for a key, in
+    -- arrival order, and never refuses, replaces or compares. Which value
+    -- counts is the reader's question. Each entry carries its per-key arrival
+    -- index (from 1) and the member's running hash for the key after it, and,
+    -- once a cycle closes over it, that cycle (storage spec §14).
+    CREATE TABLE cells (
+        seq             BIGSERIAL PRIMARY KEY,
+        namespace       BYTEA NOT NULL,
+        cell_key        BYTEA NOT NULL,
+        value           BYTEA NOT NULL,
+        arrival_index   BIGINT NOT NULL,
+        running_hash    BYTEA NOT NULL,
+        committed_cycle BIGINT
+    );
+    CREATE INDEX cells_by_key ON cells (namespace, cell_key, seq);
+    CREATE UNIQUE INDEX cells_by_arrival ON cells (namespace, cell_key, arrival_index);
+    CREATE INDEX cells_uncommitted ON cells (seq) WHERE committed_cycle IS NULL;
+
+    -- Indexes: content addresses appended under a locator, never removed,
+    -- read back in append order.
+    CREATE TABLE index_entries (
+        seq     BIGSERIAL PRIMARY KEY,
+        locator BYTEA NOT NULL,
+        addr    BYTEA NOT NULL
+    );
+    CREATE INDEX index_entries_by_locator ON index_entries (locator, seq);
+
+    CREATE TABLE dlv_slots (
+        dlv_id         BYTEA PRIMARY KEY,
+        capacity_bytes BIGINT NOT NULL,
+        used_bytes     BIGINT NOT NULL,
+        stake_hash     BYTEA NOT NULL
+    );
+
+    -- The b0x inbox spool: append-only, per device, read from a position.
+    -- Which messages a device has consumed is the device's own state.
+    CREATE TABLE inbox_spool (
+        id         BIGSERIAL PRIMARY KEY,
+        device_id  TEXT NOT NULL,
+        message_id TEXT NOT NULL UNIQUE,
+        envelope   BYTEA NOT NULL,
+        seq_num    BIGINT NOT NULL
+    );
+    CREATE INDEX idx_inbox_spool_device_seq ON inbox_spool (device_id, seq_num);
+
+    -- One validated Device Tree state per genesis; `version_number` is the
+    -- monotone counter the PUT /devtree/root validator enforces.
+    CREATE TABLE device_tree_states (
+        genesis_b32     TEXT PRIMARY KEY,
+        version_number  BIGINT NOT NULL,
+        device_count    BIGINT NOT NULL,
+        root_hash       BYTEA NOT NULL,
+        payload         BYTEA NOT NULL,
+        updated_at_tick BIGINT NOT NULL
+    );
+    CREATE INDEX idx_device_tree_states_version ON device_tree_states (genesis_b32, version_number);
+
+    -- The immutable object store, keyed by the content address addr(N, P);
+    -- write-once: no UPDATE and no DELETE statement exists against it.
+    CREATE TABLE immutable_objects (
+        addr_b32           TEXT PRIMARY KEY,
+        namespace          BYTEA NOT NULL,
+        payload            BYTEA NOT NULL,
+        first_written_tick BIGINT NOT NULL
+    );
+
+    -- This node's own ByteCommits, one per cycle (storage spec §14).
+    CREATE TABLE own_bytecommits (
+        cycle_index BIGINT PRIMARY KEY,
+        digest      BYTEA NOT NULL,
+        commit_pb   BYTEA NOT NULL
+    );
+    -- This node's mirror of its set-mates' ByteCommits: only what it fetched
+    -- from that member itself. Every distinct ByteCommit is kept, so an
+    -- equivocation shows.
+    CREATE TABLE bytecommit_mirror (
+        member_id   BYTEA NOT NULL,
+        cycle_index BIGINT NOT NULL,
+        digest      BYTEA NOT NULL,
+        commit_pb   BYTEA NOT NULL,
+        PRIMARY KEY (member_id, cycle_index, digest)
+    );
+"#;
+
+/// A column as `information_schema.columns` reports it: name, `udt_name`,
+/// nullable.
+type ExpectedColumn = (&'static str, &'static str, bool);
+
+/// The layout of [`SCHEMA_VERSION`]: every table with its columns in order,
+/// and every index. A database at this version holds exactly this — nothing
+/// missing, nothing extra — or the node does not start on it.
+pub const SCHEMA_LAYOUT: &[(&str, &[ExpectedColumn])] = &[
+    (
+        "bytecommit_mirror",
+        &[
+            ("member_id", "bytea", false),
+            ("cycle_index", "int8", false),
+            ("digest", "bytea", false),
+            ("commit_pb", "bytea", false),
+        ],
+    ),
+    (
+        "cells",
+        &[
+            ("seq", "int8", false),
+            ("namespace", "bytea", false),
+            ("cell_key", "bytea", false),
+            ("value", "bytea", false),
+            ("arrival_index", "int8", false),
+            ("running_hash", "bytea", false),
+            ("committed_cycle", "int8", true),
+        ],
+    ),
+    (
+        "device_tree_states",
+        &[
+            ("genesis_b32", "text", false),
+            ("version_number", "int8", false),
+            ("device_count", "int8", false),
+            ("root_hash", "bytea", false),
+            ("payload", "bytea", false),
+            ("updated_at_tick", "int8", false),
+        ],
+    ),
+    (
+        "dlv_slots",
+        &[
+            ("dlv_id", "bytea", false),
+            ("capacity_bytes", "int8", false),
+            ("used_bytes", "int8", false),
+            ("stake_hash", "bytea", false),
+        ],
+    ),
+    (
+        "immutable_objects",
+        &[
+            ("addr_b32", "text", false),
+            ("namespace", "bytea", false),
+            ("payload", "bytea", false),
+            ("first_written_tick", "int8", false),
+        ],
+    ),
+    (
+        "inbox_spool",
+        &[
+            ("id", "int8", false),
+            ("device_id", "text", false),
+            ("message_id", "text", false),
+            ("envelope", "bytea", false),
+            ("seq_num", "int8", false),
+        ],
+    ),
+    (
+        "index_entries",
+        &[
+            ("seq", "int8", false),
+            ("locator", "bytea", false),
+            ("addr", "bytea", false),
+        ],
+    ),
+    (
+        "own_bytecommits",
+        &[
+            ("cycle_index", "int8", false),
+            ("digest", "bytea", false),
+            ("commit_pb", "bytea", false),
+        ],
+    ),
+    (
+        "register_incarnation",
+        &[("only_row", "int2", false), ("incarnation", "bytea", false)],
+    ),
+    (
+        "schema_version",
+        &[("only_row", "int2", false), ("version", "int4", false)],
+    ),
+];
+
+/// Every index of [`SCHEMA_VERSION`], the implicit ones of primary keys and
+/// unique constraints included.
+pub const SCHEMA_INDEXES: &[&str] = &[
+    "bytecommit_mirror_pkey",
+    "cells_by_arrival",
+    "cells_by_key",
+    "cells_pkey",
+    "cells_uncommitted",
+    "device_tree_states_pkey",
+    "dlv_slots_pkey",
+    "idx_device_tree_states_version",
+    "idx_inbox_spool_device_seq",
+    "immutable_objects_pkey",
+    "inbox_spool_message_id_key",
+    "inbox_spool_pkey",
+    "index_entries_by_locator",
+    "index_entries_pkey",
+    "own_bytecommits_pkey",
+    "register_incarnation_pkey",
+    "schema_version_pkey",
+];
+
 /// Advisory-lock key serialising schema initialisation on one database.
 const INIT_DB_LOCK: i64 = 0x4453_4D49_4E49_5444;
 
-/// Create or migrate the schema. Initialisations of one database run one at
-/// a time: concurrent `CREATE … IF NOT EXISTS` statements race inside the
-/// Postgres catalog and fail, so the whole run holds a session advisory lock,
-/// released on every path.
+/// Open the database at [`SCHEMA_VERSION`] or refuse. An empty database is
+/// created at this version; a database at this version is checked against
+/// [`SCHEMA_LAYOUT`] and [`SCHEMA_INDEXES`]; anything else — tables with no
+/// version row, or another version — is refused. Initialisations of one
+/// database run one at a time under a session advisory lock, released on
+/// every path.
 pub async fn init_db(pool: &Pool) -> Result<()> {
-    let client = pool.get().await?;
+    let mut client = pool.get().await?;
     client
         .execute("SELECT pg_advisory_lock($1)", &[&INIT_DB_LOCK])
         .await?;
-    let result = init_db_serialized(pool, &client).await;
+    let result = init_db_serialized(&mut client).await;
     client
         .execute("SELECT pg_advisory_unlock($1)", &[&INIT_DB_LOCK])
         .await?;
     result
 }
 
-async fn init_db_serialized(pool: &Pool, client: &deadpool_postgres::Object) -> Result<()> {
-    client
-        .batch_execute(
-            r#"CREATE TABLE IF NOT EXISTS register_incarnation (
-                    only_row    SMALLINT PRIMARY KEY CHECK (only_row = 1),
-                    incarnation BYTEA NOT NULL
-                );
-
-                -- Keyed cells: the member keeps EVERY value it is given for a
-                -- key, in arrival order, and never refuses, replaces or
-                -- compares. Which value counts is the reader's question.
-                CREATE TABLE IF NOT EXISTS cells (
-                    seq       BIGSERIAL PRIMARY KEY,
-                    namespace BYTEA NOT NULL,
-                    cell_key  BYTEA NOT NULL,
-                    value     BYTEA NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS cells_by_key ON cells (namespace, cell_key, seq);
-
-                -- Indexes: content addresses appended under a locator, never
-                -- removed, read back in append order.
-                CREATE TABLE IF NOT EXISTS index_entries (
-                    seq     BIGSERIAL PRIMARY KEY,
-                    locator BYTEA NOT NULL,
-                    addr    BYTEA NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS index_entries_by_locator ON index_entries (locator, seq);
-
-                CREATE TABLE IF NOT EXISTS dlv_slots (
-                    dlv_id         BYTEA PRIMARY KEY,
-                    capacity_bytes BIGINT NOT NULL,
-                    used_bytes     BIGINT NOT NULL DEFAULT 0,
-                    stake_hash     BYTEA NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS objects (
-                    key           TEXT PRIMARY KEY,
-                    value         BYTEA NOT NULL,
-                    dlv_id        BYTEA NOT NULL,
-                    size_bytes    BIGINT NOT NULL,
-                    iter_created  BIGINT NOT NULL DEFAULT 0,
-                    iter_expires  BIGINT
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_objects_dlv_id ON objects(dlv_id);
-                CREATE INDEX IF NOT EXISTS idx_objects_iter_expires ON objects(iter_expires);
-
-            "#,
-        )
-        .await?;
-    // Clockless b0x inbox spool (per-device)
-    client
-        .batch_execute(
-            r#"CREATE TABLE IF NOT EXISTS inbox_spool (
-                        id                BIGSERIAL PRIMARY KEY,
-                        device_id         TEXT NOT NULL,
-                        message_id        TEXT NOT NULL UNIQUE,
-                        envelope          BYTEA NOT NULL
-                    );
-                "#,
-        )
-        .await?;
-
-    // Schema migration for older inbox_spool rows missing newer columns (clockless ordering).
-    client
-        .batch_execute(
-            r#"ALTER TABLE inbox_spool
-                    ADD COLUMN IF NOT EXISTS seq_num BIGINT NOT NULL DEFAULT 0;
-                CREATE INDEX IF NOT EXISTS idx_inbox_spool_device_seq ON inbox_spool(device_id, seq_num);
-                -- The spool is append-only: no read flag and no expiry. Which
-                -- messages a device has consumed is the device's own state.
-                DROP INDEX IF EXISTS idx_inbox_spool_device_acked;
-                DROP INDEX IF EXISTS idx_inbox_spool_expires;
-                ALTER TABLE inbox_spool DROP COLUMN IF EXISTS acked;
-                ALTER TABLE inbox_spool DROP COLUMN IF EXISTS expires_at_iter;
-            "#,
-        )
-        .await?;
-
-    // ── Storage Node Regulation tables (clockless, signature-free) ──────────
-    client
-        .batch_execute(
-            r#"-- Device tokens, their replay guard, and the spend gate's
-                -- receipts and flag are gone with writer authorization and the
-                -- spend gate (storage spec §4; owner, 2026-09-23).
-                DROP TABLE IF EXISTS payment_receipts;
-                -- The node decides no registry (storage spec §13).
-                DROP TABLE IF EXISTS registry_evidence;
-                DROP TABLE IF EXISTS node_registry;
-                DROP TABLE IF EXISTS capacity_signals;
-                DROP TABLE IF EXISTS applicants;
-                DROP TABLE IF EXISTS inbox_receipts;
-                -- The device directory is self-signed entries in keyed cells
-                -- that readers verify; the node keeps no device table
-                -- (owner, 2026-09-23).
-                DROP TABLE IF EXISTS devices;
-            "#,
-        )
-        .await?;
-
-    // Phase B.4 (issue #275): bounded validator for the published
-    // Device Tree state. One row per genesis. `version_number` is the
-    // monotone counter the PUT /devtree/root validator enforces;
-    // `root_hash` and `device_count` are broken out for indexed lookup.
-    // `payload` is the canonical `DeviceTreeStateV1` proto bytes.
-    client
-        .batch_execute(
-            r#"CREATE TABLE IF NOT EXISTS device_tree_states (
-                    genesis_b32     TEXT PRIMARY KEY,
-                    version_number  BIGINT NOT NULL,
-                    device_count    BIGINT NOT NULL,
-                    root_hash       BYTEA NOT NULL,
-                    payload         BYTEA NOT NULL,
-                    updated_at_tick BIGINT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_device_tree_states_version
-                    ON device_tree_states(genesis_b32, version_number);
-
-                -- IMMUTABLE OBJECT STORE (Area 4, Rev 15 §15.3). Keyed by the
-                -- content address addr(N, P); write-once forever — no UPDATE
-                -- and no DELETE statement exists against this table anywhere.
-                -- The node recomputes the address on write AND on read; it
-                -- never decodes the payload.
-                CREATE TABLE IF NOT EXISTS immutable_objects (
-                    addr_b32           TEXT PRIMARY KEY,
-                    namespace          BYTEA NOT NULL,
-                    payload            BYTEA NOT NULL,
-                    first_written_tick BIGINT NOT NULL
-                );
-            "#,
-        )
-        .await?;
-
-    // Arrival order is committed (storage spec §14): each entry's per-key
-    // arrival index (from 1) and the member's running hash for the key after
-    // it. The columns are added once, under an explicit table lock taken
-    // first, so two concurrent initialisations queue instead of deadlocking
-    // on a lock upgrade; after that, startup never takes the lock again.
-    let has_arrival: bool = client
-        .query_one(
-            "SELECT EXISTS (SELECT 1 FROM information_schema.columns
-             WHERE table_name = 'cells' AND column_name = 'arrival_index')",
+async fn init_db_serialized(client: &mut deadpool_postgres::Object) -> Result<()> {
+    let tables: Vec<String> = client
+        .query(
+            "SELECT table_name::text FROM information_schema.tables
+              WHERE table_schema = current_schema() AND table_type = 'BASE TABLE'",
             &[],
         )
         .await?
-        .get(0);
-    if !has_arrival {
-        client
-            .batch_execute(
-                "BEGIN;
-                 LOCK TABLE cells IN ACCESS EXCLUSIVE MODE;
-                 ALTER TABLE cells ADD COLUMN IF NOT EXISTS arrival_index BIGINT;
-                 ALTER TABLE cells ADD COLUMN IF NOT EXISTS running_hash BYTEA;
-                 CREATE UNIQUE INDEX IF NOT EXISTS cells_by_arrival
-                     ON cells (namespace, cell_key, arrival_index);
-                 COMMIT;",
-            )
-            .await?;
+        .iter()
+        .map(|r| r.get(0))
+        .collect();
+    if tables.is_empty() {
+        let tx = client.transaction().await?;
+        tx.batch_execute(SCHEMA_DDL).await?;
+        tx.execute(
+            "INSERT INTO schema_version (only_row, version) VALUES (1, $1)",
+            &[&SCHEMA_VERSION],
+        )
+        .await?;
+        tx.commit().await?;
+        log::info!("storage database created at schema version {SCHEMA_VERSION}");
+    } else {
+        if !tables.iter().any(|t| t == "schema_version") {
+            bail!(
+                "the storage database holds tables but no schema version; this build \
+                 starts only on an empty database or one at schema version {SCHEMA_VERSION} \
+                 — reprovision the database"
+            );
+        }
+        let held: Option<i32> = client
+            .query_opt("SELECT version FROM schema_version WHERE only_row = 1", &[])
+            .await?
+            .map(|r| r.get(0));
+        match held {
+            Some(v) if v == SCHEMA_VERSION => {}
+            Some(v) => bail!(
+                "the storage database is at schema version {v}; this build serves exactly \
+                 {SCHEMA_VERSION} and migrates nothing — reprovision the database"
+            ),
+            None => bail!(
+                "the storage database's schema_version table holds no version row — \
+                 reprovision the database"
+            ),
+        }
+    }
+    verify_schema_layout(client).await
+}
+
+/// The database's tables, columns and indexes are exactly those of
+/// [`SCHEMA_VERSION`].
+async fn verify_schema_layout(client: &deadpool_postgres::Object) -> Result<()> {
+    let rows = client
+        .query(
+            "SELECT table_name::text, column_name::text, udt_name::text, is_nullable::text
+               FROM information_schema.columns
+              WHERE table_schema = current_schema()
+              ORDER BY table_name, ordinal_position",
+            &[],
+        )
+        .await?;
+    let held: Vec<(String, String, String, bool)> = rows
+        .iter()
+        .map(|r| (r.get(0), r.get(1), r.get(2), r.get::<_, String>(3) == "YES"))
+        .collect();
+    let expected: Vec<(String, String, String, bool)> = SCHEMA_LAYOUT
+        .iter()
+        .flat_map(|(table, columns)| {
+            columns.iter().map(move |(column, udt, nullable)| {
+                (
+                    table.to_string(),
+                    column.to_string(),
+                    udt.to_string(),
+                    *nullable,
+                )
+            })
+        })
+        .collect();
+    if held != expected {
+        let missing: Vec<_> = expected.iter().filter(|c| !held.contains(c)).collect();
+        let extra: Vec<_> = held.iter().filter(|c| !expected.contains(c)).collect();
+        bail!(
+            "the storage database's columns are not those of schema version {SCHEMA_VERSION} \
+             (missing {missing:?}, unexpected {extra:?}) — reprovision the database"
+        );
     }
 
-    // Which ByteCommit first committed an entry (storage spec §14). NULL
-    // until the next cycle closes. Guarded like the arrival columns.
-    let has_committed: bool = client
-        .query_one(
-            "SELECT EXISTS (SELECT 1 FROM information_schema.columns
-             WHERE table_name = 'cells' AND column_name = 'committed_cycle')",
+    let mut indexes: Vec<String> = client
+        .query(
+            "SELECT indexname::text FROM pg_indexes WHERE schemaname = current_schema()",
             &[],
         )
         .await?
-        .get(0);
-    if !has_committed {
-        client
-            .batch_execute(
-                "BEGIN;
-                 LOCK TABLE cells IN ACCESS EXCLUSIVE MODE;
-                 ALTER TABLE cells ADD COLUMN IF NOT EXISTS committed_cycle BIGINT;
-                 CREATE INDEX IF NOT EXISTS cells_uncommitted
-                     ON cells (seq) WHERE committed_cycle IS NULL;
-                 COMMIT;",
-            )
-            .await?;
+        .iter()
+        .map(|r| r.get(0))
+        .collect();
+    indexes.sort();
+    let expected_indexes: Vec<String> = SCHEMA_INDEXES.iter().map(|s| s.to_string()).collect();
+    if indexes != expected_indexes {
+        bail!(
+            "the storage database's indexes are not those of schema version {SCHEMA_VERSION} \
+             (held {indexes:?}) — reprovision the database"
+        );
     }
-    client
-        .batch_execute(
-            r#"-- This node's own ByteCommits, one per cycle (storage spec §14).
-               CREATE TABLE IF NOT EXISTS own_bytecommits (
-                   cycle_index BIGINT PRIMARY KEY,
-                   digest      BYTEA NOT NULL,
-                   commit_pb   BYTEA NOT NULL
-               );
-               -- This node's mirror of its set-mates' ByteCommits: only what it
-               -- fetched from that member itself, never a third party's bytes.
-               -- Every distinct ByteCommit is kept, so an equivocation shows.
-               CREATE TABLE IF NOT EXISTS bytecommit_mirror (
-                   member_id   BYTEA NOT NULL,
-                   cycle_index BIGINT NOT NULL,
-                   digest      BYTEA NOT NULL,
-                   commit_pb   BYTEA NOT NULL,
-                   PRIMARY KEY (member_id, cycle_index, digest)
-               );"#,
-        )
-        .await?;
-
-    // Before the node serves a single put: rows from before arrival records
-    // existed get theirs, so no key ever mixes recorded and unrecorded rows.
-    let backfilled = backfill_cell_arrival_records(pool).await?;
-    if backfilled > 0 {
-        log::info!("cells: backfilled arrival records for {backfilled} keys");
-    }
-
     Ok(())
 }
 
@@ -775,17 +890,6 @@ pub async fn spool_list_from_seq(
 // ===================== Centralized Query Functions =====================
 // All SQL queries should go through these functions, not be inlined in API handlers.
 
-/// Fetch a single object's value by key. Used by identity_tips, identity_devtree,
-/// object_store, recovery_capsule, policy, bytecommit GET handlers.
-pub async fn get_object_by_key(pool: &Pool, key: &str) -> Result<Option<Vec<u8>>> {
-    let client = pool.get().await?;
-    let stmt = client
-        .prepare_cached("SELECT value FROM objects WHERE key=$1 LIMIT 1")
-        .await?;
-    let row_opt = client.query_opt(&stmt, &[&key]).await?;
-    Ok(row_opt.map(|r| r.get::<_, Vec<u8>>(0)))
-}
-
 /// Fetch a DLV slot's capacity and used bytes.
 pub async fn get_dlv_slot_capacity(pool: &Pool, dlv_id: &[u8]) -> Result<Option<(i64, i64)>> {
     let client = pool.get().await?;
@@ -820,12 +924,6 @@ pub fn create_pool(database_url: &str) -> anyhow::Result<DBPool> {
     };
     Ok(pool)
 }
-
-// Ensure module ends cleanly
-
-// ===================== PaidK Spend-Gate =====================
-
-// ===================== Node Registry & Signals =====================
 
 // ── keyed cells and indexes: bytes in, bytes out ───────────────────────────
 
@@ -921,7 +1019,7 @@ async fn append_cell_entry(
     let last = tx
         .query_opt(
             "SELECT arrival_index, running_hash FROM cells
-             WHERE namespace = $1 AND cell_key = $2 AND arrival_index IS NOT NULL
+             WHERE namespace = $1 AND cell_key = $2
              ORDER BY arrival_index DESC LIMIT 1",
             &[&namespace, &key],
         )
@@ -982,11 +1080,8 @@ pub async fn get_cell_entries(
         .await?;
     rows.iter()
         .map(|r| {
-            let i: Option<i64> = r.get(1);
-            let h: Option<Vec<u8>> = r.get(2);
-            let (Some(i), Some(h)) = (i, h) else {
-                anyhow::bail!("cell entry has no arrival record; backfill has not run");
-            };
+            let i: i64 = r.get(1);
+            let h: Vec<u8> = r.get(2);
             let h: [u8; 32] = h
                 .as_slice()
                 .try_into()
@@ -994,78 +1089,6 @@ pub async fn get_cell_entries(
             Ok((r.get::<_, Vec<u8>>(0), u64::try_from(i)?, h))
         })
         .collect()
-}
-
-/// Give every entry of every key that holds an entry without an arrival
-/// record its record: the key's values replayed in arrival (`seq`) order,
-/// exactly as storage spec §14 defines `(i, h_i)`. The key's indexes are
-/// cleared first so the unique arrival index never sees two rows claim one
-/// position mid-rewrite. Only the two metadata columns are written; no value
-/// is touched. Idempotent: a key whose entries all hold records is not read.
-pub async fn backfill_cell_arrival_records(pool: &Pool) -> Result<u64> {
-    let mut client = pool.get().await?;
-    let keys = client
-        .query(
-            "SELECT DISTINCT namespace, cell_key FROM cells WHERE arrival_index IS NULL",
-            &[],
-        )
-        .await?;
-    let mut fixed = 0u64;
-    for k in keys {
-        let namespace: Vec<u8> = k.get(0);
-        let key: Vec<u8> = k.get(1);
-        let key32: [u8; 32] = key
-            .as_slice()
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("a held cell key is not 32 bytes"))?;
-        let tx = begin_durable_write(&mut client).await?;
-        let rows = tx
-            .query(
-                "SELECT seq, value FROM cells WHERE namespace = $1 AND cell_key = $2
-                 ORDER BY seq ASC FOR UPDATE",
-                &[&namespace, &key],
-            )
-            .await?;
-        tx.execute(
-            "UPDATE cells SET arrival_index = NULL, running_hash = NULL
-             WHERE namespace = $1 AND cell_key = $2",
-            &[&namespace, &key],
-        )
-        .await?;
-        let mut h = dsm::storage_cell::running_hash_init(&namespace, &key32);
-        for (n, row) in rows.iter().enumerate() {
-            let seq: i64 = row.get(0);
-            let value: Vec<u8> = row.get(1);
-            h = dsm::storage_cell::running_hash_next(&h, &dsm::storage_cell::entry_digest(&value));
-            tx.execute(
-                "UPDATE cells SET arrival_index = $2, running_hash = $3 WHERE seq = $1",
-                &[&seq, &(n as i64 + 1), &h.as_slice()],
-            )
-            .await?;
-        }
-        tx.commit().await?;
-        fixed += 1;
-    }
-    Ok(fixed)
-}
-
-/// A cell row exactly as a binary from before arrival records wrote it: the
-/// value and nothing else. Unit tests only.
-#[cfg(test)]
-pub(crate) async fn insert_cell_without_record(
-    pool: &Pool,
-    namespace: &[u8],
-    key: &[u8],
-    value: &[u8],
-) -> Result<()> {
-    pool.get()
-        .await?
-        .execute(
-            "INSERT INTO cells (namespace, cell_key, value) VALUES ($1, $2, $3)",
-            &[&namespace, &key, &value],
-        )
-        .await?;
-    Ok(())
 }
 
 // ── ByteCommits (storage spec §14) ─────────────────────────────────────────

@@ -23,7 +23,6 @@ use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::CertificateDer;
 use rustls::{ClientConfig, RootCertStore};
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -103,31 +102,23 @@ fn status_from_i32(value: i32) -> Option<pb::StorageNodeStatus> {
     pb::StorageNodeStatus::try_from(value).ok()
 }
 
-/// Load the first certificate from a PEM file for TLS pinning.
-///
-/// Issue #24 migration: previously used `rustls_pemfile::certs` (unmaintained
-/// per RUSTSEC-2025-0134). Now uses `rustls::pki_types::pem::PemObject`,
-/// which is the maintained upstream PEM-reading helper exposed by
-/// `rustls-pki-types` v1.10+ under the `alloc` feature.
-fn load_certificate(
-    cert_path: &Path,
-) -> Result<CertificateDer<'static>, Box<dyn std::error::Error + Send + Sync>> {
-    CertificateDer::from_pem_file(cert_path)
-        .map_err(|e| format!("Failed to load PEM certificate from {cert_path:?}: {e}").into())
-}
-
-/// Create a reqwest client with certificate pinning
+/// A client that trusts exactly the storage set's CA: every peer it talks to
+/// presents a certificate chaining to that one anchor.
 fn create_pinned_client(
-    cert_path: &Path,
+    set_ca_pem: &[u8],
 ) -> Result<Client, Box<dyn std::error::Error + Send + Sync>> {
-    let cert = load_certificate(cert_path)?;
-
+    let ca = CertificateDer::from_pem_slice(set_ca_pem)
+        .map_err(|e| format!("the storage set's CA certificate is not PEM: {e}"))?;
     let mut root_store = RootCertStore::empty();
-    root_store.add(cert)?;
+    root_store.add(ca)?;
 
-    let config = ClientConfig::builder()
-        .with_root_certificates(root_store)
-        .with_no_client_auth();
+    // The provider is named here rather than read from a process-wide
+    // default, so the pin never depends on what else was installed first.
+    let config =
+        ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()?
+            .with_root_certificates(root_store)
+            .with_no_client_auth();
 
     Ok(Client::builder().use_preconfigured_tls(config).build()?)
 }
@@ -142,20 +133,19 @@ pub struct ReplicationManager {
 }
 
 impl ReplicationManager {
+    /// A manager for this node, pinning its peers to `set_ca_pem`, the
+    /// storage set's CA certificate, and seeded with `seed_peers`.
     pub fn new(
         config: ReplicationConfig,
         local_node_id: String,
         local_address: String,
-        cert_path: &Path,
+        set_ca_pem: &[u8],
         seed_peers: Vec<String>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let mut node_states = HashMap::new();
         let local_info = canonical_node_info(local_node_id, local_address.clone(), 0);
-        // `canonical_node_info` always sets `node_id = StorageNodeId::to_base32(...)`,
-        // so decode must succeed. Fall back to deriving from the address if the
-        // invariant is somehow violated rather than panicking in production.
         let local_node_id = StorageNodeId::from_base32(&local_info.node_id)
-            .unwrap_or_else(|| StorageNodeId::derive(local_info.address.as_bytes()));
+            .ok_or("the canonical node info names no decodable node id")?;
 
         // Initialize with local node
         node_states.insert(local_info.node_id.clone(), local_info);
@@ -180,31 +170,7 @@ impl ReplicationManager {
             config,
             local_node_id,
             node_states: Arc::new(std::sync::RwLock::new(node_states)),
-            client: create_pinned_client(cert_path)?,
-        })
-    }
-
-    pub fn new_for_tests(
-        config: ReplicationConfig,
-        local_node_id: String,
-        local_address: String,
-    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let mut node_states = HashMap::new();
-        let local_info = canonical_node_info(local_node_id, local_address.clone(), 0);
-        // `canonical_node_info` always sets `node_id = StorageNodeId::to_base32(...)`,
-        // so decode must succeed. Fall back to deriving from the address if the
-        // invariant is somehow violated rather than panicking in production.
-        let local_node_id = StorageNodeId::from_base32(&local_info.node_id)
-            .unwrap_or_else(|| StorageNodeId::derive(local_info.address.as_bytes()));
-        node_states.insert(local_info.node_id.clone(), local_info);
-
-        let client = Client::builder().build()?;
-
-        Ok(Self {
-            config,
-            local_node_id,
-            node_states: Arc::new(std::sync::RwLock::new(node_states)),
-            client,
+            client: create_pinned_client(set_ca_pem)?,
         })
     }
 
@@ -388,6 +354,14 @@ pub fn default_production_config() -> ReplicationConfig {
     }
 }
 
+/// A storage set CA for tests: a real self-signed certificate to pin.
+#[cfg(test)]
+pub(crate) fn test_set_ca_pem() -> Vec<u8> {
+    rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+        .map(|ca| ca.cert.pem().into_bytes())
+        .unwrap_or_else(|e| panic!("generate a test CA: {e}"))
+}
+
 #[cfg(test)]
 #[allow(clippy::disallowed_methods)]
 mod tests {
@@ -419,10 +393,12 @@ mod tests {
     }
 
     fn make_manager(node_id: &str, addr: &str) -> ReplicationManager {
-        must(ReplicationManager::new_for_tests(
+        must(ReplicationManager::new(
             test_config(),
             node_id.to_string(),
             addr.to_string(),
+            &test_set_ca_pem(),
+            Vec::new(),
         ))
     }
 
@@ -463,7 +439,7 @@ mod tests {
     }
 
     #[test]
-    fn new_for_tests_initializes_local_node_alive() {
+    fn a_new_manager_holds_its_local_node_alive() {
         let mgr = make_manager("node-1", "http://127.0.0.1:8080");
         let alive = mgr.get_alive_nodes();
         assert_eq!(alive.len(), 1);

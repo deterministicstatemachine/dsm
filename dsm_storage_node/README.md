@@ -80,21 +80,16 @@ For offline development or testing against local nodes (not required for normal 
 ```bash
 cd dsm_storage_node
 
-# 1. Create dev databases (one-time)
-./scripts/setup_dev_db.sh
-
-# 2. Start 5 local dev nodes
+# Start 5 local dev nodes: the production binary, serving TLS under a local
+# dev CA, with admin and gossip tokens. The first run generates dev-pki/ and
+# creates the databases dsm_storage_node1..5.
 ./scripts/dev/start_dev_nodes.sh
 
-# 3. Verify all nodes are healthy
-for port in 8080 8081 8082 8083 8084; do
-  curl -s http://localhost:$port/api/v2/health | grep -q ok \
-    && echo "Node $port: OK" \
-    || echo "Node $port: NOT RUNNING"
-done
+# Health over verified TLS
+./scripts/dev/start_dev_nodes.sh status
 ```
 
-PIDs saved in `dev-node*.pid`, logs in `logs/`.
+PIDs saved in `dev-node*.pid`, logs in `logs/`. Clients trust `dev-pki/ca.crt`.
 
 ### Stop
 
@@ -166,8 +161,7 @@ src/
 │   ├── object_store.rs  # Generic object storage
 │   ├── unilateral_api.rs # b0x unilateral transport
 │   ├── recovery_capsule.rs # Recovery capsule CRUD
-│   ├── hardening.rs     # Request validation, size limits
-│   └── network_config.rs # Auto-detection of network topology
+│   └── hardening.rs     # Request validation, size limits
 ├── auth/                # Token-based gossip auth
 ├── db/                  # PostgreSQL schema, migrations, queries
 ├── replication.rs       # Replica placement (Fisher-Yates)
@@ -177,15 +171,17 @@ src/
 
 ## Configuration
 
-Nodes are configured via TOML files or CLI arguments:
+A node starts from its TOML config (`--config`, required). It refuses to start
+without `node.id`, `network.listen_addr`, `network.port`, `database.url`, and
+`tls.cert_path` / `tls.key_path` / `tls.ca_path` (the storage set's CA, which
+replication pins peers to). It serves TLS only, and admin and gossip requests
+need `DSM_ADMIN_TOKEN` / `DSM_GOSSIP_TOKEN`; there is no debug-build exception.
+See `config/production.toml` and `config/dev/`.
 
-```bash
-# Run a single node with config file
-cargo run --release -- --config config.toml
-
-# Run with auto-detection
-cargo run --release -- --auto-detect --node-index 0
-```
+The database carries an explicit schema version: an empty database is created
+at the version this build serves, a database at that version must hold exactly
+its layout, and anything else is refused. Nothing is migrated in place; an old
+database is reprovisioned.
 
 ## Build
 
@@ -217,8 +213,8 @@ Storage nodes themselves never sign anything. The crypto stack is used for TLS t
 brew services list | grep postgresql   # macOS
 sudo systemctl status postgresql       # Linux
 
-# Re-run setup
-./scripts/setup_dev_db.sh
+# Re-run the launcher; it creates missing dev databases
+./scripts/dev/start_dev_nodes.sh
 ```
 
 **"Port already in use"**
@@ -228,12 +224,11 @@ sudo systemctl status postgresql       # Linux
 rm -f dev-node*.pid
 ```
 
-**Schema drift errors**
+**"the storage database is at schema version …" / "holds tables but no schema version"**
 
 ```bash
-# Drop and recreate dev databases
-./scripts/dev/stop_dev_nodes.sh
-./scripts/setup_dev_db.sh
+# The dev databases predate this build's schema: drop them and start fresh
+./scripts/dev/start_dev_nodes.sh reset
 ./scripts/dev/start_dev_nodes.sh
 ```
 

@@ -223,16 +223,25 @@ impl NodeSet {
             .map(|p| (p.member_id.clone(), endpoint_of(&p.address)))
             .collect();
 
+        // The set's CA, the one anchor every member pins its peers to.
+        let set_ca_pem = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+            .expect("generate the set's CA")
+            .cert
+            .pem()
+            .into_bytes();
+
         // Phase 2: each node, with the set checked against its own register,
         // serving the binary's app.
         let mut nodes = Vec::with_capacity(prepared.len());
         for p in prepared {
             let endpoint = endpoint_of(&p.address);
             let replication = Arc::new(
-                replication::ReplicationManager::new_for_tests(
+                replication::ReplicationManager::new(
                     replication::default_production_config(),
                     p.member_id.clone(),
                     endpoint.clone(),
+                    &set_ca_pem,
+                    Vec::new(),
                 )
                 .expect("replication manager"),
             );
