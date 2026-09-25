@@ -29,20 +29,21 @@ fn mark_contact_needs_online_reconcile_and_refresh(device_id: &[u8]) -> Result<(
     Ok(())
 }
 
-/// Non-authoritative history/UI residue after a split transfer is accepted.
+/// History and UI residue after a split transfer is accepted.
 ///
 /// The balance is already materialized by the full-state apply; the acceptance
-/// reply is already enqueued by convergence. This only writes the local
-/// transaction row the History tab reads and refreshes the in-memory caches.
-/// Every failure is non-fatal and logged — none of this is protocol state.
+/// reply is already enqueued by convergence. This writes the local transaction
+/// row the History tab reads and refreshes this device's balance cache. None of
+/// it is protocol state, so a failure does not hold the ACK; it is reported.
 fn record_accepted_split_history(
+    wallet: &crate::sdk::wallet_sdk::WalletSDK,
     correlation_key: &str,
     receipt: &dsm::types::receipt_types::StitchedReceiptV2,
     sender_b32: &str,
     self_b32: &str,
     amount: u64,
     token_id: String,
-) {
+) -> Result<(), String> {
     use crate::storage::codecs::hash_blake3_bytes;
 
     let tx_hash = crate::util::text_id::encode_base32_crockford(&hash_blake3_bytes(
@@ -51,6 +52,9 @@ fn record_accepted_split_history(
     let mut meta: std::collections::HashMap<String, Vec<u8>> = std::collections::HashMap::new();
     meta.insert("token_id".to_string(), token_id.into_bytes());
     meta.insert("adr0003_split".to_string(), b"true".to_vec());
+    let proof_data = receipt
+        .to_full_protobuf()
+        .map_err(|e| format!("{correlation_key}: the receipt does not encode: {e}"))?;
     let rec = crate::storage::client_db::TransactionRecord {
         tx_id: correlation_key.to_string(),
         tx_hash,
@@ -60,16 +64,16 @@ fn record_accepted_split_history(
         tx_type: "online".to_string(),
         status: "confirmed".to_string(),
         commitment_hash: None,
-        proof_data: receipt.to_full_protobuf().ok(),
+        proof_data: Some(proof_data),
         metadata: meta,
     };
-    if let Err(e) = crate::storage::client_db::store_transaction(&rec) {
-        log::warn!("[storage.sync] ADR 0003 store_transaction failed for {correlation_key}: {e} (non-fatal)");
-    }
-    if let Some(router) = crate::bridge::app_router() {
-        router.sync_balance_cache();
-    }
+    crate::storage::client_db::store_transaction(&rec)
+        .map_err(|e| format!("{correlation_key}: history row not stored: {e}"))?;
+    wallet
+        .reload_balance_cache_for_self()
+        .map_err(|e| format!("{correlation_key}: balance cache not reloaded: {e}"))?;
     emit_authoritative_wallet_refresh();
+    Ok(())
 }
 
 /// Verify an inbound stitched receipt's sender authorization (`sig_a`) the way
@@ -1485,7 +1489,7 @@ impl AppRouterImpl {
             let sender_ak = match resolve_trusted_sender_ak(&sender_b32, &[]) {
                 Ok(k) => k,
                 Err(e) => {
-                    log::warn!("[storage.sync] ADR 0003 completion: {key}: {e}");
+                    failures.push(format!("split transfer {key}: {e}"));
                     continue;
                 }
             };
@@ -1521,9 +1525,7 @@ impl AppRouterImpl {
                     }
                     Ok(false) => {}
                     Err(e) => {
-                        log::warn!(
-                            "[storage.sync] ADR 0003 completion: {key}: barrier read failed: {e}"
-                        );
+                        failures.push(format!("split transfer {key}: barrier read failed: {e}"));
                         continue;
                     }
                 }
@@ -1531,7 +1533,7 @@ impl AppRouterImpl {
                 let (ak_pk, ak_sk) = match self.wallet.ak_keypair_for_cert_chain() {
                     Ok(p) => p,
                     Err(e) => {
-                        log::error!("[storage.sync] ADR 0003 completion: {key}: AK keypair unavailable: {e}");
+                        failures.push(format!("split transfer {key}: AK keypair unavailable: {e}"));
                         continue;
                     }
                 };
@@ -1541,7 +1543,9 @@ impl AppRouterImpl {
                             let genesis: [u8; 32] = match c.genesis_hash.as_slice().try_into() {
                                 Ok(g) => g,
                                 Err(_) => {
-                                    log::error!("[storage.sync] ADR 0003 completion: {key}: contact genesis is not 32 bytes — fail closed");
+                                    failures.push(format!(
+                                        "split transfer {key}: the sender contact's genesis is not 32 bytes"
+                                    ));
                                     continue;
                                 }
                             };
@@ -1552,7 +1556,9 @@ impl AppRouterImpl {
                             continue;
                         }
                         Err(e) => {
-                            log::error!("[storage.sync] ADR 0003 completion: {key}: sender contact unreadable: {e}");
+                            failures.push(format!(
+                                "split transfer {key}: sender contact unreadable: {e}"
+                            ));
                             continue;
                         }
                     };
@@ -1601,7 +1607,7 @@ impl AppRouterImpl {
                 let wrap_key = match crate::init::current_chain_head_at_rest_key() {
                     Ok(k) => k,
                     Err(e) => {
-                        log::error!("[storage.sync] ADR 0003 completion: {key}: wrap key unavailable (wallet locked?): {e}");
+                        failures.push(format!("split transfer {key}: wrap key unavailable: {e}"));
                         continue;
                     }
                 };
@@ -1609,7 +1615,7 @@ impl AppRouterImpl {
                 let (econ_genesis, econ_devid) = match core_sdk.device_head() {
                     Some(h) => (h.genesis_digest(), h.devid()),
                     None => {
-                        log::error!("[storage.sync] ADR 0003 completion: {key}: no device head");
+                        failures.push(format!("split transfer {key}: no device head"));
                         continue;
                     }
                 };
@@ -1844,10 +1850,10 @@ impl AppRouterImpl {
                             let built = admission_build.borrow_mut().take();
                             let signed_op = signed_op_stash.borrow_mut().take();
                             let (Some(built), Some(signed_op)) = (built, signed_op) else {
-                                log::error!(
-                                    "[storage.sync] ADR 0003 completion: {key}: admission \
-                                     accepted with no build — invariant violated; held for resume"
-                                );
+                                failures.push(format!(
+                                    "split transfer {key}: admission accepted with no build \
+                                     (invariant violated); held for resume"
+                                ));
                                 continue;
                             };
                             if let Err(e) = crate::sdk::economic_admission_flow::finish_admission(
@@ -1877,37 +1883,45 @@ impl AppRouterImpl {
                                      economic admission HELD for resume ({e}) — release \
                                      undelivered, no ACK"
                                 );
-                                if let Err(e) = mark_contact_needs_online_reconcile_and_refresh(&sender_device) {
-                                failures.push(e);
-                            }
+                                if let Err(e) =
+                                    mark_contact_needs_online_reconcile_and_refresh(&sender_device)
+                                {
+                                    failures.push(e);
+                                }
                                 continue;
                             }
                         }
                         // Amount/token from the FROZEN transfer half (SIG A already verified
                         // over its canonical bytes by `verify_staged_transfer`).
-                        let (amount, token_id) = row
+                        let frozen = row
                             .transfer_bytes
                             .as_deref()
+                            .ok_or_else(|| "the frozen transfer half is missing".to_string())
                             .and_then(|b| {
-                                <dsm::types::proto::OnlineTransferRequest as prost::Message>::decode(b).ok()
-                            })
-                            .map(|r| (r.amount, r.token_id))
-                            .unwrap_or((0, "ERA".to_string()));
-                        record_accepted_split_history(
-                            &key,
-                            &evidence_receipt,
-                            &sender_b32,
-                            &self_device_b32,
-                            amount,
-                            token_id,
-                        );
+                                <dsm::types::proto::OnlineTransferRequest as prost::Message>::decode(b)
+                                    .map_err(|e| format!("the frozen transfer half does not decode: {e}"))
+                            });
+                        let history = frozen.and_then(|r| {
+                            record_accepted_split_history(
+                                &self.wallet,
+                                &key,
+                                &evidence_receipt,
+                                &sender_b32,
+                                &self_device_b32,
+                                r.amount,
+                                r.token_id,
+                            )
+                        });
+                        if let Err(e) = history {
+                            failures.push(format!("split transfer {key} history: {e}"));
+                        }
                     }
                     Ok(AckDecision::DoNotAck(why)) => {
                         log::info!("[storage.sync] ADR 0003 completion: {key} not ACK-able: {why}");
                         continue;
                     }
                     Err(e) => {
-                        log::warn!("[storage.sync] ADR 0003 completion: {key} failed: {e}");
+                        failures.push(format!("split transfer {key}: {e}"));
                         continue;
                     }
                 }
@@ -1918,7 +1932,9 @@ impl AppRouterImpl {
                 }) {
                     Ok(AckDecision::Ack(_)) => {}
                     other => {
-                        log::warn!("[storage.sync] ADR 0003 completion: {key} accepted row did not re-ACK: {other:?}");
+                        failures.push(format!(
+                            "split transfer {key}: the accepted row did not re-ACK: {other:?}"
+                        ));
                         continue;
                     }
                 }
@@ -1932,10 +1948,10 @@ impl AppRouterImpl {
             // accepted row without a route here is an invariant violation, not a
             // recoverable state.
             let Some(route) = row.retained_route.clone() else {
-                log::error!(
-                    "[storage.sync] ADR 0003 completion: {key} is accepted with no retained \
-                     route — invariant violated; cannot ACK by route"
-                );
+                failures.push(format!(
+                    "split transfer {key} is accepted with no retained route (invariant \
+                     violated); it cannot be ACKed by route"
+                ));
                 continue;
             };
             acks.push((route.clone(), key.clone()));
