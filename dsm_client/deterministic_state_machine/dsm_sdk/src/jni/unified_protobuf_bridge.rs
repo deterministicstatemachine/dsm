@@ -355,29 +355,6 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_getAllBalance
                 );
             }
 
-            // Defensive: ensure the bilateral handler is installed.
-            // Offline BLE transfers need no storage endpoints — contact was already
-            // verified against storage nodes during the add-contact (QR scan) phase.
-            #[cfg(all(target_os = "android", feature = "bluetooth"))]
-            {
-                if crate::bridge::bilateral_handler().is_none() {
-                    use crate::init::SdkConfig;
-                    let cfg = SdkConfig {
-                        node_id: "default".to_string(),
-                        storage_endpoints: Vec::new(),
-                        enable_offline: true,
-                    };
-                    log::warn!("bilateral handler missing – attempting offline-only SDK init");
-                    match crate::init::init_dsm_sdk(&cfg) {
-                        Ok(()) => {
-                            log::info!(
-                                "offline-only SDK init completed; bilateral handler installed"
-                            )
-                        }
-                        Err(e) => log::error!("offline-only SDK init failed: {}", e),
-                    }
-                }
-            }
             if !SDK_READY.load(Ordering::SeqCst) || !crate::is_sdk_context_initialized() {
                 return respond_error(
                     &mut env,
@@ -1561,29 +1538,8 @@ pub extern "system" fn Java_com_dsm_native_DsmNative_initializeBilateralSdk(
                 return jni::sys::JNI_TRUE;
             }
 
-            // Defensive: Just-in-Time init to ensure handler exists for background services
-            if crate::bridge::bilateral_handler().is_none() {
-                use crate::init::SdkConfig;
-                let cfg = SdkConfig {
-                    node_id: "default".to_string(),
-                    storage_endpoints: Vec::new(),
-                    enable_offline: true,
-                };
-                log::warn!(
-            "initializeBilateralSdk: bilateral handler missing – attempting offline-only SDK init"
-        );
-                match crate::init::init_dsm_sdk(&cfg) {
-                    Ok(()) => log::info!("initializeBilateralSdk: offline-only SDK init completed"),
-                    Err(e) => log::error!(
-                        "initializeBilateralSdk: offline-only SDK init failed: {}",
-                        e
-                    ),
-                }
-            }
-
             // Defer if context or handler not available yet
-            if !crate::is_sdk_context_initialized() || crate::bridge::bilateral_handler().is_none()
-            {
+            if !crate::is_sdk_context_initialized() || crate::bridge::ble_runtime().is_none() {
                 if !BILATERAL_INIT_POLL_STARTED.swap(true, Ordering::SeqCst) {
                     log::info!("initializeBilateralSdk: preconditions missing – spawning poller");
                     // Spawn runtime task with adaptive backoff & telemetry.
@@ -1593,7 +1549,7 @@ pub extern "system" fn Java_com_dsm_native_DsmNative_initializeBilateralSdk(
                             || {
                                 (
                                     crate::is_sdk_context_initialized(),
-                                    crate::bridge::bilateral_handler().is_some(),
+                                    crate::bridge::ble_runtime().is_some(),
                                 )
                             },
                             || {
