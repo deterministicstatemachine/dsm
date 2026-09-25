@@ -31,7 +31,7 @@ use crate::tla_trace_replay::{
 /// `expected=12` module count in CI, and it exists for the same reason: an
 /// anti-skip tripwire is cheap, and a silently shrinking formal suite is the
 /// failure mode that looks most like success.
-pub const EXPECTED_STANDARD_SPECS: usize = 75;
+pub const EXPECTED_STANDARD_SPECS: usize = 79;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TlaSpec {
@@ -543,6 +543,47 @@ impl TlaRunner {
                 "DSM_NativeReserveRelease.tla",
                 "DSM_NativeReserveRelease_MintArm.cfg",
                 "Conservation",
+            ),
+            // Route-chain finality at one cell (storage spec §9, §12.6; DSM
+            // Amendment A6; SoFi Amendment S4): the leader's link and two
+            // further links of one chain, and what survives two lost seats.
+            // Finite: two values over five seats, exhausted breadth-first in
+            // about a second. The Rust twin is dsm/src/route_chain.rs; the
+            // Lean statement is lean4/DSMRouteChain.lean.
+            TlaSpec {
+                label: "RouteChain".into(),
+                spec_file: "DSM_RouteChain.tla".into(),
+                config_file: "DSM_RouteChain.cfg".into(),
+                invariants: vec![
+                    "TypeOK".into(),
+                    "ChainUniqueness".into(),
+                    "AtMostOneFinal".into(),
+                    "StatesNest".into(),
+                    "FinalSurvivesTwoLosses".into(),
+                ],
+                properties: vec!["FinalityStable".into(), "LeaderHeldStable".into()],
+                linked_implementation_traces: vec![],
+                supports_trace_replay: false,
+                expect_violation: None,
+                exhaustive: true,
+            },
+            expect_violation(
+                "RouteChain/any-arrival-leads",
+                "DSM_RouteChain.tla",
+                "DSM_RouteChain_AnyArrivalLeads.cfg",
+                "ChainUniqueness",
+            ),
+            expect_violation(
+                "RouteChain/count-without-leader",
+                "DSM_RouteChain.tla",
+                "DSM_RouteChain_CountWithoutLeader.cfg",
+                "ChainUniqueness",
+            ),
+            expect_property_violation(
+                "RouteChain/node-removes",
+                "DSM_RouteChain.tla",
+                "DSM_RouteChain_NodeRemoves.cfg",
+                "FinalityStable",
             ),
             expect_violation(
                 "NativeReserveRelease/creator-backout",
@@ -1191,8 +1232,11 @@ impl TlaRunner {
             // for the invariant it names. A config that fails for some other
             // reason is not evidence about the invariant it was written for.
             if let Some(expected) = spec.expect_violation.as_deref() {
-                let needle = format!("Invariant violated: {expected}");
-                let hit = result.errors.iter().any(|e| e == &needle);
+                let needles = [
+                    format!("Invariant violated: {expected}"),
+                    format!("Property violated: {expected}"),
+                ];
+                let hit = result.errors.iter().any(|e| needles.contains(e));
                 if hit {
                     result.passed = true;
                     result.errors = vec![format!(
@@ -1274,6 +1318,27 @@ fn exhaustive_by_construction(spec_file: &str) -> bool {
     spec_file.starts_with("DSM_Sofi")
 }
 
+/// A falsification config whose named finding is a `[][P]_vars` action
+/// property rather than a state invariant.
+fn expect_property_violation(
+    label: &str,
+    spec_file: &str,
+    config_file: &str,
+    property: &str,
+) -> TlaSpec {
+    TlaSpec {
+        label: label.into(),
+        spec_file: spec_file.into(),
+        config_file: config_file.into(),
+        invariants: vec![],
+        properties: vec![property.into()],
+        linked_implementation_traces: vec![],
+        supports_trace_replay: false,
+        expect_violation: Some(property.into()),
+        exhaustive: exhaustive_by_construction(spec_file),
+    }
+}
+
 fn expect_violation(label: &str, spec_file: &str, config_file: &str, invariant: &str) -> TlaSpec {
     TlaSpec {
         label: label.into(),
@@ -1315,11 +1380,13 @@ mod registry_tests {
                 continue;
             };
             assert!(
-                spec.invariants.iter().any(|i| i == expected),
+                spec.invariants.iter().any(|i| i == expected)
+                    || spec.properties.iter().any(|p| p == expected),
                 "{} expects a violation of `{expected}`, which is not in its own \
-                 declared invariants {:?}",
+                 declared invariants {:?} or properties {:?}",
                 spec.label,
-                spec.invariants
+                spec.invariants,
+                spec.properties
             );
         }
     }
@@ -1410,6 +1477,9 @@ fn parse_tlc_output(stdout: &str, stderr: &str) -> TlcResult {
 
     let error_re = Regex::new(r"(?m)^Error:\s*(.+)$").ok();
     let invariant_re = Regex::new(r"Invariant\s+(\S+)\s+is\s+violated").ok();
+    // `[][P]_vars` properties: TLC names them the same way, so a falsification
+    // config can expect one by name.
+    let property_re = Regex::new(r"Action property\s+(\S+)\s+is\s+violated").ok();
     let exception_re = Regex::new(r"(?m)^The exception was a\s+(.+)$").ok();
 
     // About the MODEL.
@@ -1431,6 +1501,12 @@ fn parse_tlc_output(stdout: &str, stderr: &str) -> TlcResult {
     if let Some(ref re) = invariant_re {
         for caps in re.captures_iter(&combined) {
             push(&mut faults, format!("Invariant violated: {}", &caps[1]));
+        }
+    }
+
+    if let Some(ref re) = property_re {
+        for caps in re.captures_iter(&combined) {
+            push(&mut faults, format!("Property violated: {}", &caps[1]));
         }
     }
 

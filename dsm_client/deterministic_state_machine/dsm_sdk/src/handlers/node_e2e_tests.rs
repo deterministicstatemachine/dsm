@@ -12,7 +12,7 @@ use generated::envelope::Payload;
 use prost::Message;
 use serial_test::serial;
 
-use crate::bridge::{AppInvoke, AppResult, AppRouter as _};
+use crate::bridge::{AppInvoke, AppQuery, AppResult, AppRouter as _};
 use crate::test_support::two_device::{Pair, TestDevice};
 
 fn args<M: Message>(m: &M) -> Vec<u8> {
@@ -79,8 +79,36 @@ async fn create_token(d: &TestDevice, ticker: &str, supply: u128) -> [u8; 32] {
         .policy_commit
 }
 
+/// The sender's `wallet.history` answer: the frontend's query, limit 16,
+/// offset 0.
+async fn history(d: &TestDevice) -> Vec<u8> {
+    let mut body = Vec::with_capacity(16);
+    body.extend_from_slice(&16u64.to_le_bytes());
+    body.extend_from_slice(&0u64.to_le_bytes());
+    let params = generated::ArgPack {
+        codec: generated::Codec::Proto as i32,
+        body,
+        ..Default::default()
+    }
+    .encode_to_vec();
+    d.enter();
+    let r = d
+        .router()
+        .query(AppQuery {
+            path: "wallet.history".to_string(),
+            params,
+        })
+        .await;
+    assert!(r.success, "wallet.history: {:?}", r.error_message);
+    r.data
+}
+
 /// DSM Amendment A7: a transfer arrives, and no node ever held anything but
 /// sealed, header-less envelopes — the memo is nowhere in any node's bytes.
+///
+/// The memo searched for is the one the harness sent (its first send is
+/// `A->B #1`), shown by finding it in the sender's own history first: a
+/// search for bytes that were never sent proves nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn a_transfer_reaches_the_nodes_only_sealed_and_arrives() {
@@ -94,7 +122,13 @@ async fn a_transfer_reaches_the_nodes_only_sealed_and_arrives() {
     assert_eq!(p.a.era_balance(), 90);
     assert_eq!(p.b.era_balance(), 10);
 
-    let memo = b"A->B #0";
+    let memo = format!("{}->{} #1", p.a.slot, p.b.slot).into_bytes();
+    let memo = memo.as_slice();
+    let sender_history = history(&p.a).await;
+    assert!(
+        sender_history.windows(memo.len()).any(|w| w == memo),
+        "the sender's history does not carry the memo it sent"
+    );
     let mut held = 0usize;
     for node in &p.nodes.nodes {
         for spooled in node.spool().await {
