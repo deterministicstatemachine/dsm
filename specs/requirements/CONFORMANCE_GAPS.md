@@ -679,16 +679,26 @@ MR-SOFI-0310, SoFi §47 and §49: a policy's signer set and threshold authorize 
 | `lean4/DSMRouteChain.lean` | `LeaderHeldStable` and `FinalStable` were definitions, not theorems: stated for the verification step and never proved. | Proved: `leader_held_stable` (a node only appends, so the first arrival stays first) and `final_stable` (further links never decrease under growth; `length_filter_le_of_imp`, `contains_of_grows`, `further_links_mono`). `FinalSurvivesTwoLosses` stays a statement, checked by TLC. |
 | `lean4/DSMTokenIssuance.lean` | `create_zero_allocation_still_burns` proved a zero-supply creation that burns the fee, which the beta refuses (SoFi §50; `validate_conservation` refuses a zero `initial_supply` before any write). | Replaced by `tryCreateWithSupply` and `create_with_no_supply_is_refused` (nothing burned, nothing issued) and `create_with_supply_burns_and_releases`. |
 
+### 6.20 A transfer registers the sender's root at the next position (branch `test/a-transfer-registers-the-senders-root`, 2026-09-24)
+
+MR-DSM-0030 was Partial because no test failed if the send path stopped registering.
+
+**Resolved**
+
+| Location | Finding | State |
+|---|---|---|
+| `dsm_sdk/src/handlers/sender_admission_tests.rs` | The register write of a transfer (`finish_admission` → `register_economic_root`) had no test that goes red without it; token creation and burn had theirs. | `a_transfer_registers_the_senders_root_at_the_next_position`: after a send, the sender's admitted coordinate is the next position, and a foreign walk of the sender's lineage validates that position's root as the transfer itself. With the register call removed from `finish_admission`, the test is red. MR-DSM-0030 Partial → Met. |
+
 ## 7 Totals
 
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |
 |---|---|---|---|---|---|---|---|
-| DSM high-level (MR-DSM) | 272 | 63 | 124 | 29 | 9 | 29 | 18 |
+| DSM high-level (MR-DSM) | 272 | 64 | 123 | 29 | 9 | 29 | 18 |
 | SoFi (MR-SOFI) | 333 | 203 | 86 | 19 | 8 | 17 | 0 |
 | dBTC (MR-DBTC) | 135 | 0 | 0 | 0 | 0 | 0 | 135 |
 | Storage node (MR-STOR) | 158 | 32 | 41 | 50 | 16 | 18 | 1 |
 | Storage §14 lines added after the pin (STOR-014) | 11 | 9 | 1 | 1 | 0 | 0 | 0 |
-| **All** | **909** | **307** | **252** | **99** | **33** | **64** | **154** |
+| **All** | **909** | **308** | **251** | **99** | **33** | **64** | **154** |
 
 ## 8 Per-requirement results
 
@@ -725,7 +735,7 @@ MR-SOFI-0310, SoFi §47 and §49: a policy's signer set and threshold authorize 
 | MR-DSM-0027 | Partial | dsm · economic/peer_acceptance.rs (87-147, EK-ancestry walk) | — | A generic "relationship created only after mirror-verify" gate not located outside this SoFi path. |
 | MR-DSM-0028 | Met | `dsm::economic::peer_acceptance::resolve_expected_prev_pk` | `dsm::economic_peer_evidence::ek_ancestry_walks_one_step_and_refuses_unhashed_substitution` | — |
 | MR-DSM-0029 | Partial | ordering not located on the production path | no test found | The earlier locus (transition.rs) has no production caller. |
-| MR-DSM-0030 | Partial | dsm_sdk · handlers/app_router_impl.rs · `process_online_transfer_logic` → sdk/economic_admission_flow.rs · `finish_admission` → `register_economic_root`; handlers/token_routes.rs · `token.create`, `token.burn` → `admitted_self_loop_operation` | none | Reconciled Violated → Partial (G6 withdrawn): every value-moving advance registers its root at the next economic position, in the SDK rather than in Core. No test fails if the send path stops registering. |
+| MR-DSM-0030 | Met | `dsm_sdk::handlers::app_router_impl::process_online_transfer_logic`; `dsm_sdk::sdk::economic_admission_flow::finish_admission`; `dsm_sdk::sdk::economic_registers::register_economic_root`; `dsm_sdk::sdk::economic_admission_flow::admitted_self_loop_operation` | `dsm_sdk::handlers::sender_admission_tests::a_transfer_registers_the_senders_root_at_the_next_position`; `dsm_sdk::handlers::sender_admission_tests::token_routes_admit_create_and_burn_end_to_end`; `dsm_sdk::handlers::sender_admission_tests::an_admitted_burn_advances_the_lineage_and_is_foreign_walkable` | Every value-moving advance registers its root at the next economic position, in the SDK rather than in Core (G6 withdrawn). The send path is covered: a transfer registers the sender's root at the next position, and a foreign walk validates that position as the transfer; with the register write removed from `finish_admission` the test is red (2026-09-24). |
 | MR-DSM-0031 | Met | `dsm::economic::register::economic_root_register_key` | `dsm::economic_lineage_register::each_position_of_each_identity_is_its_own_cell` | — |
 | MR-DSM-0032 | Met | `dsm::economic::register::position_leader` | `dsm::sofi::fisher_yates::tests::different_seeds_can_choose_different_first_members` | — |
 | MR-DSM-0033 | Met | `dsm::economic::register::RegisteredEconomicRoot::from_verified_single_root` | `dsm::economic::register::registered_root_construction_tests::a_registered_root_is_a_projection_of_a_verified_claim`; `dsm::economic::register::registered_root_construction_tests::a_conditional_claim_has_nothing_to_construct_from` | — |
