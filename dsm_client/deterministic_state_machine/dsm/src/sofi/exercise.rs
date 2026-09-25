@@ -56,6 +56,14 @@ pub fn recognize_exercise(bytes: &[u8]) -> Option<RecognizedExercise> {
     if *fulfillment.body.precommit_id() != pid {
         return None;
     }
+    // F is signed under the key P commits (conformance item 2, decidable in
+    // hand): each envelope verified under its own body's key, and the two
+    // keys one.
+    if fulfillment.body.signature_alg() != precommit.body.signature_alg()
+        || fulfillment.body.claimant_public_key() != precommit.body.claimant_public_key()
+    {
+        return None;
+    }
     let preimage = SettlementPreimage::decode(exercise.preimage()).ok()?;
     let e = derive::recompute_e(&preimage).ok()?;
     if e != *precommit.body.external_commitment() {
@@ -226,13 +234,20 @@ mod tests {
     use crate::sofi::conformance::derive_policy_fulfillments;
     use crate::sofi::derive::precommit_id;
     use crate::sofi::publication::Publication;
-    use crate::sofi::validation::fixtures::{swap_fixture_n, Fixture};
+    use crate::sofi::validation::fixtures::{swap_fixture_n, trader_keys, Fixture};
     use crate::route_chain::fixtures::{committed_set, committed_set_id, Cell};
     use crate::route_chain::{CellFact, ChainState, ROUTE_LEN};
     use crate::sofi::wire::AttemptEntry;
 
-    const KEY: [u8; 64] = [0x31; 64];
-    const SIG: [u8; 8] = [0x77; 8];
+    /// The trader's key, as every fixture `P` commits it.
+    fn key() -> &'static [u8] {
+        &trader_keys().0
+    }
+
+    /// The trader's signature over `digest`.
+    fn signed(digest: D32) -> Vec<u8> {
+        crate::crypto::sphincs::sphincs_sign(&trader_keys().1, &digest).unwrap()
+    }
 
     /// An exercise with the precommit and fulfillment body it carries.
     struct Built {
@@ -276,19 +291,19 @@ mod tests {
                 .collect(),
             p.position() + 1,
             ALG,
-            &KEY,
+            key(),
         )
         .unwrap();
         let x = SofiExercise::new(
             Publication::Fulfillment {
                 body: &fb,
-                signature: &SIG,
+                signature: &signed(derive::fulfillment_signing_digest(&fb)),
             }
             .object_bytes()
             .unwrap(),
             Publication::Precommit {
                 body: p,
-                signature: &SIG,
+                signature: &signed(derive::precommit_signing_digest(p)),
             }
             .object_bytes()
             .unwrap(),
@@ -407,6 +422,97 @@ mod tests {
         )
         .unwrap();
         assert!(recognize_exercise(&bent.encode()).is_none());
+    }
+
+    /// SoFi §17.5 and §9: an exercise counts only when `F` and `P` are signed
+    /// — each envelope's signature verifies over its body under the key the
+    /// body commits, and `F`'s key is the one `P` commits. Bytes shaped like
+    /// an exercise whose signatures do not verify are nothing, so written
+    /// first at the leader they block nothing (storage spec §9 rule 3): the
+    /// signed exercise that arrives after them holds the key.
+    #[test]
+    fn an_exercise_counts_only_when_f_and_p_are_signed_under_the_key_p_commits() {
+        let f = swap_fixture_n(2);
+        let honest = exercise(&f, &[0, 1]);
+        let (p, fb) = (&honest.precommit, &honest.fulfillment);
+        let with = |f_body: &TraderFulfillmentBody, f_sig: &[u8], p_sig: &[u8]| {
+            SofiExercise::new(
+                Publication::Fulfillment {
+                    body: f_body,
+                    signature: f_sig,
+                }
+                .object_bytes()
+                .unwrap(),
+                Publication::Precommit {
+                    body: p,
+                    signature: p_sig,
+                }
+                .object_bytes()
+                .unwrap(),
+                honest.exercise.preimage().to_vec(),
+                honest.exercise.witnesses().to_vec(),
+                Vec::new(),
+            )
+            .unwrap()
+            .encode()
+        };
+        let f_sig = signed(derive::fulfillment_signing_digest(fb));
+        let p_sig = signed(derive::precommit_signing_digest(p));
+        assert!(recognize_exercise(&with(fb, &f_sig, &p_sig)).is_some());
+
+        // A signature that does not verify, in place of either.
+        let junk = [0x77u8; 8];
+        assert!(recognize_exercise(&with(fb, &junk, &p_sig)).is_none());
+        assert!(recognize_exercise(&with(fb, &f_sig, &junk)).is_none());
+        // P's signature where F's belongs: a real signature over another digest.
+        assert!(recognize_exercise(&with(fb, &p_sig, &p_sig)).is_none());
+
+        // F signed under a key other than the one P commits: it verifies
+        // under its own key and is still not this P's exercise.
+        let (other_pk, other_sk) = crate::crypto::sphincs::generate_sphincs_keypair().unwrap();
+        let foreign = TraderFulfillmentBody::new(
+            *fb.precommit_id(),
+            fb.policy_fulfillment_set().to_vec(),
+            fb.attempts().to_vec(),
+            fb.position(),
+            ALG,
+            &other_pk,
+        )
+        .unwrap();
+        let foreign_sig = crate::crypto::sphincs::sphincs_sign(
+            &other_sk,
+            &derive::fulfillment_signing_digest(&foreign),
+        )
+        .unwrap();
+        assert!(recognize_exercise(&with(&foreign, &foreign_sig, &p_sig)).is_none());
+
+        // At the cell: the unsigned exercise first at the leader, the signed
+        // one after it along the whole route — the signed one holds the key.
+        let leg = &p.legs()[0];
+        let at = AttemptCell::new(
+            &leg.vault_id,
+            &leg.parent_root,
+            0,
+            &committed_set(),
+            &committed_set_id(),
+        )
+        .expect("the committed set");
+        let mut cell = Cell::at(at.routed());
+        cell.write(&with(fb, &junk, &junk), ROUTE_LEN - 1, &[]);
+        cell.write(&with(fb, &f_sig, &p_sig), ROUTE_LEN - 1, &[]);
+        assert_eq!(
+            attempt_resolution(&at, &cell.evidence()).map(|r| r.fact()),
+            Ok(CellFact::Held {
+                id: *p.external_commitment(),
+                state: ChainState::Final,
+            })
+        );
+        let mut only_junk = Cell::at(at.routed());
+        only_junk.write(&with(fb, &junk, &junk), ROUTE_LEN - 1, &[]);
+        assert_eq!(
+            attempt_resolution(&at, &only_junk.evidence()).map(|r| r.fact()),
+            Ok(CellFact::Open)
+        );
     }
 
     /// An exercise final at its attempt cell has a completion proof built
