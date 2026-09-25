@@ -11185,6 +11185,15 @@ export class BilateralPrepareRequest extends Message<BilateralPrepareRequest> {
    */
   senderKyberBindingSig = new Uint8Array(0);
 
+  /**
+   * The proposer's SPHINCS+ signature (σ_A) over
+   * "DSM/bilateral-sign\0" || the proposal's commitment, under its pinned AK:
+   * the receiver puts to its user only a proposal the sender signed.
+   *
+   * @generated from field: bytes sender_signature = 18;
+   */
+  senderSignature = new Uint8Array(0);
+
   constructor(data?: PartialMessage<BilateralPrepareRequest>) {
     super();
     proto3.util.initPartial(data, this);
@@ -11207,6 +11216,7 @@ export class BilateralPrepareRequest extends Message<BilateralPrepareRequest> {
     { no: 14, name: "transfer_amount_display", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 16, name: "sender_kyber_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 17, name: "sender_kyber_binding_sig", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 18, name: "sender_signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BilateralPrepareRequest {

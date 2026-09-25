@@ -255,6 +255,7 @@ mod tests {
             token_id_hint: String::new(),
             memo_hint: String::new(),
             transfer_amount_display: String::new(),
+            sender_signature: vec![],
             sender_kyber_public_key: vec![],
             sender_kyber_binding_sig: vec![],
         };
@@ -312,6 +313,7 @@ mod tests {
             token_id_hint: String::new(),
             memo_hint: String::new(),
             transfer_amount_display: String::new(),
+            sender_signature: vec![],
             sender_kyber_public_key: vec![],
             sender_kyber_binding_sig: vec![],
         };

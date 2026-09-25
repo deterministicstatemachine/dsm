@@ -194,6 +194,15 @@ pub fn set_anchor_state_leaf_value(
 
 /// Whether an operation declares it requires offline-bearer authority (the canonical per-Operation
 /// trigger). Only these transitions run the anchor gate; all others finalize unchanged.
+/// The bytes a party's signature over the step `commitment_hash` covers: the
+/// proposer's σ_A and the receiver's acceptance σ_B alike.
+pub fn bilateral_sign_message(commitment_hash: &[u8; 32]) -> Vec<u8> {
+    let mut msg = Vec::with_capacity(19 + 32);
+    msg.extend_from_slice(b"DSM/bilateral-sign\0");
+    msg.extend_from_slice(commitment_hash);
+    msg
+}
+
 pub fn operation_requires_offline_bearer(op: &crate::types::operations::Operation) -> bool {
     use crate::types::operations::{AuthorityMode, Operation};
     matches!(
@@ -426,15 +435,13 @@ impl BilateralTransactionManager {
     /// Fail-closed: signer errors are surfaced as `DsmError`, never silently converted
     /// to an empty signature blob. See issue #191.
     pub fn sign_commitment(&self, commitment_hash: &[u8; 32]) -> Result<Vec<u8>, DsmError> {
-        // §ISSUE-B4 FIX: canonical "DSM/<domain>\0" domain separator format.
-        let mut msg = Vec::with_capacity(22 + 32);
-        msg.extend_from_slice(b"DSM/bilateral-sign\0");
-        msg.extend_from_slice(commitment_hash);
-
-        let sig = self.signature_keypair.sign(&msg).map_err(|e| {
-            error!("[BTM] sign_commitment: failed to sign: {}", e);
-            e
-        })?;
+        let sig = self
+            .signature_keypair
+            .sign(&bilateral_sign_message(commitment_hash))
+            .map_err(|e| {
+                error!("[BTM] sign_commitment: failed to sign: {}", e);
+                e
+            })?;
         info!(
             "[BTM] sign_commitment: signed commitment {}... with {} byte signature",
             labeling::hash_to_short_id(commitment_hash),
@@ -630,12 +637,8 @@ impl BilateralTransactionManager {
             .public_key
             .clone();
 
-        let mut signature_msg = Vec::with_capacity(22 + 32);
-        signature_msg.extend_from_slice(b"DSM/bilateral-sign\0");
-        signature_msg.extend_from_slice(pre_commitment_hash);
-
         let valid = SignatureKeyPair::verify_raw(
-            &signature_msg,
+            &bilateral_sign_message(pre_commitment_hash),
             receiver_acceptance_proof,
             &counterparty_pubkey,
         )

@@ -129,52 +129,6 @@ fn stored_contact_tip(
 }
 
 impl BilateralBleHandler {
-    /// The keys a peer sent must be the keys its contact record pins from its
-    /// self-proving directory entry: the signing AK equal, the Kyber key equal,
-    /// and the Kyber identity binding verifying under the pinned AK. Nothing
-    /// sent is stored; any other key refuses the message.
-    fn require_pinned_peer_keys(
-        counterparty_device_id: &[u8; 32],
-        wire_signing_key: &[u8],
-        wire_kyber_pk: &[u8],
-        wire_binding_sig: &[u8],
-        label: &str,
-    ) -> Result<(), DsmError> {
-        let contact = crate::storage::client_db::get_contact_by_device_id(counterparty_device_id)
-            .map_err(|e| {
-                DsmError::storage(
-                    format!("{label}: contact unreadable: {e}"),
-                    None::<std::io::Error>,
-                )
-            })?
-            .ok_or_else(|| DsmError::relationship(format!("{label}: the peer is not a contact")))?;
-        if wire_signing_key != contact.public_key.as_slice() {
-            return Err(DsmError::invalid_operation(format!(
-                "{label}: the signing key sent is not the contact's pinned AK"
-            )));
-        }
-        if wire_kyber_pk != contact.kyber_public_key.as_slice() {
-            return Err(DsmError::invalid_operation(format!(
-                "{label}: the Kyber key sent is not the contact's pinned Kyber key"
-            )));
-        }
-        let genesis: [u8; 32] = contact.genesis_hash.as_slice().try_into().map_err(|_| {
-            DsmError::invalid_operation(format!("{label}: the contact's genesis is not 32 bytes"))
-        })?;
-        crate::sdk::kyber_identity::verify_kyber_identity_binding(
-            counterparty_device_id,
-            &genesis,
-            wire_kyber_pk,
-            wire_binding_sig,
-            &contact.public_key,
-        )
-        .map_err(|e| {
-            DsmError::invalid_operation(format!(
-                "{label}: the Kyber identity binding does not verify under the pinned AK: {e}"
-            ))
-        })
-    }
-
     pub async fn transition_session_to_failed(&self, commitment_hash: &[u8; 32]) {
         let pending_key = {
             let mut sessions = self.sessions.sessions.lock().await;
@@ -1354,7 +1308,7 @@ impl BilateralBleHandler {
             counterparty_genesis_hash,
             operation: operation.clone(),
             phase: BilateralPhase::Preparing,
-            local_signature: Some(commit_signature),
+            local_signature: Some(commit_signature.clone()),
             counterparty_signature: None,
             sender_ble_address: None, // Sender side - no counterparty BLE address yet
             created_at_wall: Instant::now(),
@@ -1468,6 +1422,9 @@ impl BilateralBleHandler {
             transfer_amount_display: String::new(),
             sender_kyber_public_key,
             sender_kyber_binding_sig,
+            // σ_A over the commitment: the receiver puts to its user only a
+            // proposal its sender signed.
+            sender_signature: commit_signature,
         };
 
         let envelope = self
@@ -1736,26 +1693,11 @@ impl BilateralBleHandler {
         // Use sender_device_id for contact verification, but keep counterparty_device_id for transaction tracking
         let counterparty_device_id: [u8; 32] = sender_device_id;
 
-        // Deserialize operation
-        let operation = Operation::from_bytes(&prepare_request.operation_data)
-            .map_err(|_| DsmError::invalid_operation("invalid operation payload"))?;
-
         // BLE/USB is the OFFLINE transport: the only value it carries is the
-        // bearer tier, drawn from the device-bound offline-cash allocation. An
-        // online-tier Transfer has the network transport and no business here
-        // — refused at the door, before any session state exists, so the
-        // capability is unavailable rather than merely gated deeper in
-        // `advance` (owner ruling 2026-08-28).
-        if matches!(operation, Operation::Transfer { .. })
-            && !dsm::core::bilateral_transaction_manager::operation_requires_offline_bearer(
-                &operation,
-            )
-        {
-            return Err(DsmError::invalid_operation(
-                "bilateral prepare refused: BLE/USB carries offline-bearer transfers only — an \
-                 online-tier transfer uses the network transport",
-            ));
-        }
+        // bearer tier. An online-tier transfer is refused at the door, before
+        // any session state exists (owner ruling 2026-08-28).
+        let operation =
+            dsm::bilateral::offline::offline_operation(&prepare_request.operation_data)?;
 
         // §0.5 recovery re-establish accept-guard (gate 1 of the two-gate model). If this
         // prepare is a recovery-establish proposal (canonical marker), C MUST verify — before
@@ -1935,14 +1877,6 @@ impl BilateralBleHandler {
                 }
             }
 
-            Self::require_pinned_peer_keys(
-                &counterparty_device_id,
-                &prepare_request.sender_signing_public_key,
-                &prepare_request.sender_kyber_public_key,
-                &prepare_request.sender_kyber_binding_sig,
-                "prepare-request",
-            )?;
-
             if mgr.get_relationship(&counterparty_device_id).is_none() {
                 mgr.establish_relationship(&counterparty_device_id)
                     .await
@@ -1952,9 +1886,9 @@ impl BilateralBleHandler {
             }
         }
 
-        // The sender's expectation is checked against the relationship tip this
-        // device holds durably; the manager builds on the same tip. A mismatch
-        // means the sender's view is stale, and the proposal is rejected.
+        // Core decides on the proposal from the sender's pinned identity and
+        // the relationship tip this device holds durably; the manager builds
+        // on the same tip.
         let our_local_chain_tip: [u8; 32] = stored_contact_tip(
             crate::storage::client_db::get_contact_chain_tip(&counterparty_device_id),
         )?
@@ -1963,105 +1897,127 @@ impl BilateralBleHandler {
             .write()
             .await
             .advance_chain_tip(&counterparty_device_id, our_local_chain_tip);
-
-        let sender_expected_hash: Option<[u8; 32]> = prepare_request
-            .expected_counterparty_state_hash
-            .as_ref()
-            .and_then(|h| h.v.clone().try_into().ok());
-
-        let hash_verified = match sender_expected_hash {
-            Some(expected) => {
-                let matches = expected == our_local_chain_tip;
-                info!(
-                    "Hash verification: sender_expected={} our_actual={} MATCH={}",
-                    bytes_to_base32(&expected[..8]),
-                    bytes_to_base32(&our_local_chain_tip[..8]),
-                    matches
+        let sender_contact =
+            crate::storage::client_db::get_contact_by_device_id(&counterparty_device_id)
+                .map_err(|e| {
+                    DsmError::storage(format!("the sender's contact: {e}"), None::<std::io::Error>)
+                })?
+                .ok_or_else(|| DsmError::relationship("the sender is not a contact"))?;
+        let sender_genesis: [u8; 32] =
+            sender_contact
+                .genesis_hash
+                .as_slice()
+                .try_into()
+                .map_err(|_| {
+                    DsmError::invalid_operation("the sender's pinned genesis is not 32 bytes")
+                })?;
+        let decision = dsm::bilateral::offline::decide_prepare(
+            origin_commitment_hash,
+            &operation,
+            dsm::bilateral::offline::PrepareClaims {
+                expected_tip: prepare_request
+                    .expected_counterparty_state_hash
+                    .as_ref()
+                    .and_then(|h| <[u8; 32]>::try_from(h.v.as_slice()).ok()),
+                credentials: dsm::bilateral::offline::PeerCredentials {
+                    signing_key: &prepare_request.sender_signing_public_key,
+                    kyber_public_key: &prepare_request.sender_kyber_public_key,
+                    kyber_binding_sig: &prepare_request.sender_kyber_binding_sig,
+                },
+                signature: &prepare_request.sender_signature,
+            },
+            &dsm::bilateral::offline::PinnedPeer {
+                device_id: counterparty_device_id,
+                genesis: sender_genesis,
+                signing_key: &sender_contact.public_key,
+                kyber_public_key: &sender_contact.kyber_public_key,
+            },
+            our_local_chain_tip,
+        )?;
+        match decision {
+            dsm::bilateral::offline::PrepareDecision::Consider { .. } => {}
+            // A proposal that does not extend the held tip is answered with a
+            // signed rejection, and no precommitment is made.
+            dsm::bilateral::offline::PrepareDecision::StaleTip {
+                expected: sender_expected_hash,
+                ..
+            } => {
+                let reason = format!(
+                    "Chain tip mismatch: sender expected {} but receiver has {}. Online reconciliation required.",
+                    sender_expected_hash.map(|h| bytes_to_base32(&h[..8])).unwrap_or_else(|| "none".to_string()),
+                    bytes_to_base32(&our_local_chain_tip[..8])
                 );
-                matches
-            }
-            None => {
-                warn!("No expected_counterparty_state_hash in prepare request - cannot verify");
-                false
-            }
-        };
+                warn!("[BLE_HANDLER] Auto-rejecting proposal: {}", reason);
 
-        // If hash verification fails, auto-reject without creating pre-commitment
-        if !hash_verified {
-            let reason = format!(
-                "Chain tip mismatch: sender expected {} but receiver has {}. Online reconciliation required.",
-                sender_expected_hash.map(|h| bytes_to_base32(&h[..8])).unwrap_or_else(|| "none".to_string()),
-                bytes_to_base32(&our_local_chain_tip[..8])
-            );
-            warn!("[BLE_HANDLER] Auto-rejecting proposal: {}", reason);
-
-            if let Some(expected_tip) = sender_expected_hash {
-                if let Err(e) = crate::storage::client_db::record_observed_remote_chain_tip(
-                    &counterparty_device_id,
-                    &expected_tip,
-                    crate::storage::client_db::ObservedRemoteTipSource::LivePeerClaim,
-                ) {
-                    warn!(
-                        "[BLE_HANDLER] Failed to record observed sender tip after prepare mismatch: {}",
-                        e
-                    );
+                if let Some(expected_tip) = sender_expected_hash {
+                    if let Err(e) = crate::storage::client_db::record_observed_remote_chain_tip(
+                        &counterparty_device_id,
+                        &expected_tip,
+                        crate::storage::client_db::ObservedRemoteTipSource::LivePeerClaim,
+                    ) {
+                        warn!(
+                            "[BLE_HANDLER] Failed to record observed sender tip after prepare mismatch: {}",
+                            e
+                        );
+                    }
                 }
+
+                // Emit rejection event with verification failure
+                self.emit_event(&generated::BilateralEventNotification {
+                    // Rendered in emit_event, the one boundary all emitters cross.
+                    display_amount: None,
+                    event_type: generated::BilateralEventType::BilateralEventRejected.into(),
+                    counterparty_device_id: counterparty_device_id.to_vec(),
+                    commitment_hash: origin_commitment_hash.to_vec(),
+                    transaction_hash: None,
+                    amount: None,
+                    token_id: None,
+                    status: "needs_online_reconcile".to_string(),
+                    message: reason.clone(),
+                    sender_ble_address: None,
+                    failure_reason: Some(
+                        generated::BilateralFailureReason::FailureReasonCryptoInvalid.into(),
+                    ),
+                });
+
+                // Build and return reject envelope (no pre-commitment created)
+                let send_status =
+                    crate::handlers::relationship_status::derive_local_send_status_for_device_id(
+                        &counterparty_device_id,
+                    );
+                let send_status = sdk_send_status_from_router_status(send_status);
+                let rejector_signature = self
+                    .bilateral_tx_manager
+                    .read()
+                    .await
+                    .sign_rejection(&origin_commitment_hash, &reason)?;
+                let reject = generated::BilateralPrepareReject {
+                    commitment_hash: Some(generated::Hash32 {
+                        v: origin_commitment_hash.to_vec(),
+                    }),
+                    reason,
+                    rejector_device_id: self.device_id.to_vec(),
+                    send_status: Some(send_status),
+                    rejector_signature,
+                };
+                let envelope = self
+                    .create_envelope(generated::envelope::Payload::BilateralPrepareReject(reject))
+                    .await;
+                let mut buffer = Vec::new();
+                envelope.encode(&mut buffer).map_err(|e| {
+                    DsmError::serialization_error(
+                        "encode_auto_reject",
+                        "protobuf",
+                        Some(e.to_string()),
+                        Some(e),
+                    )
+                })?;
+                return Ok((buffer, crate::sdk::transfer_hooks::TransferMeta::default()));
             }
-
-            // Emit rejection event with verification failure
-            self.emit_event(&generated::BilateralEventNotification {
-                // Rendered in emit_event, the one boundary all emitters cross.
-                display_amount: None,
-                event_type: generated::BilateralEventType::BilateralEventRejected.into(),
-                counterparty_device_id: counterparty_device_id.to_vec(),
-                commitment_hash: origin_commitment_hash.to_vec(),
-                transaction_hash: None,
-                amount: None,
-                token_id: None,
-                status: "needs_online_reconcile".to_string(),
-                message: reason.clone(),
-                sender_ble_address: None,
-                failure_reason: Some(
-                    generated::BilateralFailureReason::FailureReasonCryptoInvalid.into(),
-                ),
-            });
-
-            // Build and return reject envelope (no pre-commitment created)
-            let send_status =
-                crate::handlers::relationship_status::derive_local_send_status_for_device_id(
-                    &counterparty_device_id,
-                );
-            let send_status = sdk_send_status_from_router_status(send_status);
-            let rejector_signature = self
-                .bilateral_tx_manager
-                .read()
-                .await
-                .sign_rejection(&origin_commitment_hash, &reason)?;
-            let reject = generated::BilateralPrepareReject {
-                commitment_hash: Some(generated::Hash32 {
-                    v: origin_commitment_hash.to_vec(),
-                }),
-                reason,
-                rejector_device_id: self.device_id.to_vec(),
-                send_status: Some(send_status),
-                rejector_signature,
-            };
-            let envelope = self
-                .create_envelope(generated::envelope::Payload::BilateralPrepareReject(reject))
-                .await;
-            let mut buffer = Vec::new();
-            envelope.encode(&mut buffer).map_err(|e| {
-                DsmError::serialization_error(
-                    "encode_auto_reject",
-                    "protobuf",
-                    Some(e.to_string()),
-                    Some(e),
-                )
-            })?;
-            return Ok((buffer, crate::sdk::transfer_hooks::TransferMeta::default()));
         }
 
-        // Hash verified! Now create our own pre-commitment
+        // The proposal is the sender's, and it extends the held tip: this
+        // device's own precommitment to the same step.
         let our_pre_commitment = {
             let mut manager = self.bilateral_tx_manager.write().await;
             manager
@@ -2069,17 +2025,8 @@ impl BilateralBleHandler {
                 .await?
         };
 
-        let counterparty_genesis_hash = if let Some(hash) = prepare_request
-            .expected_genesis_hash
-            .as_ref()
-            .and_then(|h| h.v.clone().try_into().ok())
-        {
-            Some(hash)
-        } else {
-            let mgr = self.bilateral_tx_manager.read().await;
-            mgr.get_contact(&counterparty_device_id)
-                .map(|c| c.genesis_hash)
-        };
+        // The sender's genesis is the one its contact pins, not one the wire names.
+        let counterparty_genesis_hash = Some(sender_genesis);
 
         // Track session as PendingUserAction (NOT auto-accepted)
         let commit_signature = {
@@ -2562,35 +2509,6 @@ impl BilateralBleHandler {
             .try_into()
             .map_err(|_| DsmError::invalid_operation("commitment hash must be 32 bytes"))?;
 
-        // Stash the receiver's challenge r_R against our sender-side session, so the confirm's
-        // offline-bearer release can bind it. Absent/short -> left None, which keeps the
-        // offline-bearer send path fail-closed (no release produced).
-        if let Ok(r_r) = <[u8; 32]>::try_from(prepare_response.receiver_challenge.as_slice()) {
-            let mut sessions = self.sessions.sessions.lock().await;
-            if let Some(s) = sessions.get_mut(&commitment_hash) {
-                s.receiver_challenge = Some(r_r);
-            }
-        }
-
-        {
-            let counterparty_device_id = {
-                let sessions = self.sessions.sessions.lock().await;
-                sessions
-                    .get(&commitment_hash)
-                    .map(|s| s.counterparty_device_id)
-            }
-            .ok_or_else(|| {
-                DsmError::invalid_operation("prepare-response: no session for this commitment")
-            })?;
-            Self::require_pinned_peer_keys(
-                &counterparty_device_id,
-                &prepare_response.responder_signing_public_key,
-                &prepare_response.responder_kyber_public_key,
-                &prepare_response.responder_kyber_binding_sig,
-                "prepare-response",
-            )?;
-        }
-
         // Resolve session first (no mutation yet)
         let counterparty_device_id = {
             let mut sessions = self.sessions.sessions.lock().await;
@@ -2672,75 +2590,75 @@ impl BilateralBleHandler {
         };
 
         // Verify receiver signature (σ_B) before mutating/persisting sender session.
-        if prepare_response.local_signature.is_empty() {
-            return Err(DsmError::invalid_operation(
-                "missing counterparty signature (σ_B) in prepare response",
-            ));
-        }
+        // Core decides on the response from the receiver's pinned identity:
+        // its keys, its signature over the commitment, and the challenge it
+        // carries. Nothing in the response is taken before it verifies.
+        let receiver_contact =
+            crate::storage::client_db::get_contact_by_device_id(&counterparty_device_id)
+                .map_err(|e| {
+                    DsmError::storage(
+                        format!("the receiver's contact: {e}"),
+                        None::<std::io::Error>,
+                    )
+                })?
+                .ok_or_else(|| DsmError::relationship("the receiver is not a contact"))?;
+        let receiver_genesis: [u8; 32] = receiver_contact
+            .genesis_hash
+            .as_slice()
+            .try_into()
+            .map_err(|_| {
+                DsmError::invalid_operation("the receiver's pinned genesis is not 32 bytes")
+            })?;
+        let acceptance = dsm::bilateral::offline::decide_prepare_response(
+            commitment_hash,
+            dsm::bilateral::offline::ResponseClaims {
+                commitment_hash: prepare_response
+                    .commitment_hash
+                    .as_ref()
+                    .and_then(|h| <[u8; 32]>::try_from(h.v.as_slice()).ok()),
+                credentials: dsm::bilateral::offline::PeerCredentials {
+                    signing_key: &prepare_response.responder_signing_public_key,
+                    kyber_public_key: &prepare_response.responder_kyber_public_key,
+                    kyber_binding_sig: &prepare_response.responder_kyber_binding_sig,
+                },
+                signature: &prepare_response.local_signature,
+                receiver_challenge: &prepare_response.receiver_challenge,
+            },
+            &dsm::bilateral::offline::PinnedPeer {
+                device_id: counterparty_device_id,
+                genesis: receiver_genesis,
+                signing_key: &receiver_contact.public_key,
+                kyber_public_key: &receiver_contact.kyber_public_key,
+            },
+        )?;
 
-        let counterparty_pubkey = {
-            let mgr = self.bilateral_tx_manager.read().await;
-            mgr.get_contact(&counterparty_device_id)
-                .ok_or_else(|| DsmError::invalid_operation("missing counterparty contact"))?
-                .public_key
-                .clone()
-        };
-        let mut signature_msg = Vec::with_capacity(22 + 32);
-        signature_msg.extend_from_slice(b"DSM/bilateral-sign\0");
-        signature_msg.extend_from_slice(&commitment_hash);
-
-        if !crate::crypto::signatures::SignatureKeyPair::verify_raw(
-            &signature_msg,
-            &prepare_response.local_signature,
-            &counterparty_pubkey,
-        )
-        .map_err(|e| DsmError::crypto(format!("verify σ_B failed: {e}"), None::<std::io::Error>))?
-        {
-            return Err(DsmError::invalid_operation(
-                "invalid counterparty signature (σ_B)",
-            ));
-        }
-
-        // Update session with counterparty signature after cryptographic verification.
+        // The accepted session is written before it is held.
         let updated_session = {
-            let mut sessions = self.sessions.sessions.lock().await;
-            if let Some(session) = sessions.get_mut(&commitment_hash) {
-                if session.phase == BilateralPhase::Accepted
-                    || session.phase == BilateralPhase::Committed
-                    || session.phase == BilateralPhase::ConfirmPending
-                {
-                    log::warn!(
-                        "[BLE_HANDLER] ⚠️ Duplicate prepare response for {}. Dropping silently.",
-                        bytes_to_base32(&commitment_hash)
-                    );
-                    return Err(DsmError::invalid_operation("silent_drop_duplicate_packet"));
-                }
-                session.counterparty_signature = Some(prepare_response.local_signature.clone());
-                session.phase = BilateralPhase::Accepted;
-                info!("Session moved to Accepted phase");
-                session.clone()
-            } else {
-                error!(
-                    "[BLE_HANDLER] handle_prepare_response: NO SESSION FOUND for commitment={} (origin={})",
-                    bytes_to_base32(&commitment_hash),
-                    bytes_to_base32(&commitment_hash)
-                );
-                return Err(DsmError::invalid_operation(
-                    "no session found for commitment hash",
-                ));
+            let sessions = self.sessions.sessions.lock().await;
+            let session = sessions.get(&commitment_hash).ok_or_else(|| {
+                DsmError::invalid_operation("no session found for commitment hash")
+            })?;
+            if matches!(
+                session.phase,
+                BilateralPhase::Accepted
+                    | BilateralPhase::Committed
+                    | BilateralPhase::ConfirmPending
+            ) {
+                return Err(DsmError::invalid_operation("silent_drop_duplicate_packet"));
             }
+            let mut accepted = session.clone();
+            accepted.counterparty_signature = Some(acceptance.signature);
+            accepted.receiver_challenge = acceptance.receiver_challenge;
+            accepted.phase = BilateralPhase::Accepted;
+            accepted
         };
+        self.persist_session(&updated_session, None).await?;
+        self.sessions
+            .sessions
+            .lock()
+            .await
+            .insert(commitment_hash, updated_session);
 
-        // Persist accepted session (sender side)
-        if let Err(e) = self.persist_session(&updated_session, None).await {
-            warn!(
-                "[BLE_HANDLER] Failed to persist accepted session (sender): {}",
-                e
-            );
-        }
-
-        // 3-step protocol: sender builds BilateralConfirmRequest, finalizes, and sends confirm.
-        // The receiver will finalize upon receiving the confirm message.
         info!("Building bilateral confirm message (3-step protocol, step 3)");
         let (confirm_envelope, confirm_meta) = self.send_bilateral_confirm(commitment_hash).await?;
 
@@ -5381,112 +5299,6 @@ mod tests {
         (bilateral_manager, handler)
     }
 
-    /// The keys a peer sends in a prepare are refused unless they are the
-    /// keys its contact pins (ADR 0002): the AK equal, the Kyber key equal and
-    /// its binding verifying under the pinned AK. Every refusal says why, and
-    /// nothing sent is ever written to the contact.
-    #[test]
-    #[serial]
-    fn a_peer_is_held_to_the_keys_its_contact_pins() {
-        use crate::sdk::kyber_identity::binding_digest;
-        use crate::storage::client_db::{get_contact_by_device_id, store_contact, ContactRecord};
-        use dsm::crypto::{kyber, sphincs};
-
-        init_test_db();
-
-        let device_id = [0x7Cu8; 32];
-        let genesis = [0x3Du8; 32];
-        let (pinned_ak, pinned_sk) = sphincs::generate_sphincs_keypair().expect("ak keypair");
-        let kyber_pk = kyber::generate_kyber_keypair()
-            .expect("kyber")
-            .public_key
-            .clone();
-
-        let contact = ContactRecord {
-            contact_id: "peer".into(),
-            device_id: device_id.to_vec(),
-            alias: "peer".into(),
-            genesis_hash: genesis.to_vec(),
-            public_key: pinned_ak.clone(),
-            kyber_public_key: kyber_pk.clone(),
-            current_chain_tip: Some(vec![0x71; 32]),
-            verified: true,
-            verification_proof: None,
-            metadata: std::collections::HashMap::new(),
-            ble_address: None,
-            status: "active".into(),
-            needs_online_reconcile: false,
-            previous_chain_tip: None,
-        };
-        store_contact(&contact).expect("store pinned contact");
-        let valid_sig =
-            sphincs::sphincs_sign(&pinned_sk, &binding_digest(&device_id, &genesis, &kyber_pk))
-                .expect("sign binding");
-        let check = |ak: &[u8], kyber_pk: &[u8], sig: &[u8]| {
-            BilateralBleHandler::require_pinned_peer_keys(&device_id, ak, kyber_pk, sig, "test")
-                .map_err(|e| e.to_string())
-        };
-        let refused = |r: Result<(), String>, why: &str| {
-            let e = r.expect_err(why);
-            assert!(e.contains(why), "refused for another reason: {e}");
-        };
-
-        check(&pinned_ak, &kyber_pk, &valid_sig).expect("the pinned keys and their binding");
-
-        let (other_ak, other_sk) = sphincs::generate_sphincs_keypair().expect("other keypair");
-        refused(
-            check(&other_ak, &kyber_pk, &valid_sig),
-            "not the contact's pinned AK",
-        );
-        refused(
-            check(&[], &kyber_pk, &valid_sig),
-            "not the contact's pinned AK",
-        );
-        let substituted = kyber::generate_kyber_keypair()
-            .expect("kyber")
-            .public_key
-            .clone();
-        refused(
-            check(&pinned_ak, &substituted, &valid_sig),
-            "not the contact's pinned Kyber key",
-        );
-        refused(
-            check(&pinned_ak, &[], &valid_sig),
-            "not the contact's pinned Kyber key",
-        );
-        refused(
-            check(&pinned_ak, &kyber_pk, &[]),
-            "does not verify under the pinned AK",
-        );
-        let wrong_signer =
-            sphincs::sphincs_sign(&other_sk, &binding_digest(&device_id, &genesis, &kyber_pk))
-                .expect("sign");
-        refused(
-            check(&pinned_ak, &kyber_pk, &wrong_signer),
-            "does not verify under the pinned AK",
-        );
-        let other_digest = sphincs::sphincs_sign(&pinned_sk, &[0x11u8; 32]).expect("sign");
-        refused(
-            check(&pinned_ak, &kyber_pk, &other_digest),
-            "does not verify under the pinned AK",
-        );
-        refused(
-            BilateralBleHandler::require_pinned_peer_keys(
-                &[0xEE; 32],
-                &pinned_ak,
-                &kyber_pk,
-                &valid_sig,
-                "test",
-            )
-            .map_err(|e| e.to_string()),
-            "not a contact",
-        );
-
-        let stored = get_contact_by_device_id(&device_id).unwrap().unwrap();
-        assert_eq!(stored.public_key, pinned_ak, "nothing sent is written");
-        assert_eq!(stored.kyber_public_key, kyber_pk, "nothing sent is written");
-    }
-
     #[tokio::test]
     async fn test_bilateral_ble_session_lifecycle() {
         // Setup - Generate proper cryptographic keypair based on test identity
@@ -5724,6 +5536,7 @@ mod tests {
             transfer_amount_display: String::new(),
             sender_kyber_public_key: vec![],
             sender_kyber_binding_sig: vec![],
+            sender_signature: vec![],
         };
         let envelope = generated::Envelope {
             version: 3,
@@ -5811,7 +5624,7 @@ mod tests {
             mgr.advance_chain_tip(&sender, cached_tip);
         }
         let binding_sig = sender_keys
-            .sign(&crate::sdk::kyber_identity::binding_digest(
+            .sign(&dsm::bilateral::identity_binding::binding_digest(
                 &sender,
                 &sender_genesis,
                 &kyber_pk,
@@ -5837,6 +5650,13 @@ mod tests {
             transfer_amount_display: String::new(),
             sender_kyber_public_key: kyber_pk,
             sender_kyber_binding_sig: binding_sig,
+            sender_signature: sender_keys
+                .sign(
+                    &dsm::core::bilateral_transaction_manager::bilateral_sign_message(
+                        &[0x86u8; 32],
+                    ),
+                )
+                .expect("sigma_A"),
         };
         let envelope = generated::Envelope {
             version: 3,

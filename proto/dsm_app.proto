@@ -1671,6 +1671,10 @@ message BilateralPrepareRequest {
   // binding_digest(device_id, genesis, sender_kyber_public_key), per ADR 0002, verified
   // against the PINNED peer AK (never the wire signing key). Required.
   bytes  sender_kyber_binding_sig = 17 [(dsm_max_len)=51200];
+  // The proposer's SPHINCS+ signature (σ_A) over
+  // "DSM/bilateral-sign\0" || the proposal's commitment, under its pinned AK:
+  // the receiver puts to its user only a proposal the sender signed.
+  bytes  sender_signature = 18 [(dsm_max_len)=65535];
 }
 // A -> B, rides BilateralConfirmRequest (Software-Authority / Hardware-Identity receiver-admit).
 // A discloses its fused-anchor pin material so B can PIN it under the ALREADY-verified contact,

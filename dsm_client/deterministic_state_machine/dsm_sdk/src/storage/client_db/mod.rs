@@ -2338,12 +2338,12 @@ mod tests {
 
     /// B4 CACHE INVENTORY, pinned rather than asserted in prose.
     ///
-    /// The trace found NO cached verification verdict for the ML-KEM identity
+    /// There is NO cached verification verdict for the ML-KEM identity
     /// binding anywhere:
     ///
-    ///   - `verify_kyber_identity_binding` has ZERO production callers; only
-    ///     `build_local_kyber_identity_binding` is used (b0x_sdk ×2,
-    ///     storage_node_sdk ×1).
+    ///   - `verify_kyber_identity_binding` runs on every offline message that
+    ///     carries a binding (`dsm::bilateral::offline::verify_pinned_peer_keys`);
+    ///     its answer is kept nowhere.
     ///   - the storage node PERSISTS `kyber_public_key` + `kyber_binding_sig`
     ///     in its device registry and never verifies the signature.
     ///   - `contacts.kyber_public_key` caches the peer's KEY, not the binding
