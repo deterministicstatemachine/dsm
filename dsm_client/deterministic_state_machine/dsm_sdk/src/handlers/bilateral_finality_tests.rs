@@ -623,6 +623,73 @@ async fn r4_calibration_cannot_release_the_sender_gate() {
 }
 
 // =====================================================================
+// THE HARNESS HOLDS THE BACKGROUND POLLER OFF. R4 failed on CI when the
+// process's background poller — started by an earlier test's send, woken by
+// the calibration's `resume_poller` — ran a sync of A between A's own sync and
+// the read of the state it left, and collected A's outbox row
+// (gc_pending → complete).
+// =====================================================================
+/// While a pair lives, a wake of the background poller starts no sync: the
+/// send's wake and a wake inside the window after A's sync are deferred, and
+/// the state A's sync left is the state read. Released, the deferred start
+/// runs: the poller's first cycle syncs the entered device and collects the
+/// row — the wake was deferred, not lost.
+/// MUTATION CONTROL: letting `start_poller` run while the hold stands turns
+/// this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn the_harness_defers_the_background_poller_while_a_pair_lives() {
+    use crate::sdk::inbox_poller::{
+        poller_running, poller_start_deferred, resume_poller, stop_poller, POLLER_CYCLE_DONE,
+    };
+    let mut p = Pair::boot(1_000, 0).await;
+    let rel = p.a.rel_key_with(&p.b);
+    let sent = p.a.send(&p.b, 10).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+    assert!(
+        !poller_running() && poller_start_deferred(),
+        "the send's wake started a poller while the pair lives"
+    );
+    let b_sync = p.b.sync().await;
+    assert!(b_sync.success, "{:?}", b_sync.errors);
+    let a_sync = p.a.sync().await;
+    assert!(a_sync.success, "{:?}", a_sync.errors);
+    p.a.enter();
+    assert_eq!(
+        outbox_statuses(&rel),
+        vec![cdb::OUTBOX_GC_PENDING.to_string()]
+    );
+
+    // The wake a calibration issues, in the window between A's sync and the
+    // read of the state it left.
+    resume_poller();
+    assert!(!poller_running(), "a poller started inside the window");
+    assert_eq!(
+        outbox_statuses(&rel),
+        vec![cdb::OUTBOX_GC_PENDING.to_string()],
+        "a sync entered the window"
+    );
+
+    // Released, the deferred start runs; its first cycle syncs A (entered)
+    // and collects the row.
+    let cycle = POLLER_CYCLE_DONE.notified();
+    tokio::pin!(cycle);
+    cycle.as_mut().enable();
+    p.release_background_poller();
+    assert!(poller_running(), "the deferred start was lost");
+    tokio::time::timeout(std::time::Duration::from_secs(60), cycle)
+        .await
+        .expect("the released poller's first cycle");
+    stop_poller();
+    p.a.enter();
+    assert_eq!(
+        outbox_statuses(&rel),
+        vec![cdb::OUTBOX_COMPLETE.to_string()],
+        "the released poller's sync did not collect the row"
+    );
+}
+
+// =====================================================================
 // R11 — ONLY THE POST-QUORUM SWEEP DELETES THE SENDER GATE. With the
 // certificate unshipped, none of the other historical clearers may touch it.
 // =====================================================================
