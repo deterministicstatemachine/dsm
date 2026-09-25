@@ -457,31 +457,6 @@ impl BilateralTransactionManager {
         self.contact_manager.get_contact(remote_device_id)
     }
 
-    /// Update a contact's signing public key after receiving it via BLE.
-    /// Used by receivers to store the sender's key for signature verification.
-    pub fn update_contact_signing_key(
-        &mut self,
-        remote_device_id: &[u8; 32],
-        signing_public_key: Vec<u8>,
-    ) -> Result<(), DsmError> {
-        info!(
-            "[BTM] update_contact_signing_key: device={} key_len={}",
-            labeling::hash_to_short_id(remote_device_id),
-            signing_public_key.len()
-        );
-        let result = self
-            .contact_manager
-            .update_contact_public_key(remote_device_id, signing_public_key);
-        // Verify the update took effect
-        if let Some(c) = self.contact_manager.get_contact(remote_device_id) {
-            info!(
-                "[BTM] update_contact_signing_key: AFTER update, contact.public_key.len()={}",
-                c.public_key.len()
-            );
-        }
-        result
-    }
-
     pub async fn establish_relationship(
         &mut self,
         remote_device_id: &[u8; 32],
@@ -504,93 +479,33 @@ impl BilateralTransactionManager {
                 "Contact Genesis not verified online".into(),
             ));
         }
-        // Capture chain_tip before contact borrow ends
-        let contact_chain_tip = contact.chain_tip;
         let contact_genesis_hash = contact.genesis_hash;
         // Strict: a relationship established for bilateral transfer needs the
         // counterparty's signing key, which verifies its acceptance proofs.
         Self::require_signing_key(contact)?;
+        // The relationship's tip is the one its store holds: adding the contact
+        // committed h_0 there, and each finalized step since has advanced it. A
+        // relationship the store does not hold is not established here.
+        let tip = self
+            .chain_tip_store
+            .get_contact_chain_tip(remote_device_id)?
+            .ok_or_else(|| {
+                DsmError::InvalidState(format!(
+                    "relationship {}: the chain-tip store holds no tip; a relationship is \
+                     established when its contact is added",
+                    labeling::hash_to_short_id(remote_device_id)
+                ))
+            })?;
         let mut anchor = BilateralRelationshipAnchor::new(
             self.local_device_id,
             self.local_genesis_hash,
             *remote_device_id,
             contact_genesis_hash,
         );
-        // CRITICAL: Initialize shared relationship chain tip deterministically.
-        // h_0 is derived from both parties' genesis + device IDs (lexicographic)
-        // and must match on both sides for first-contact binding.
-        let initial_tip = initial_relationship_chain_tip(
-            &self.local_device_id,
-            &self.local_genesis_hash,
-            remote_device_id,
-            &contact_genesis_hash,
-        );
-
-        // Use persisted chain tip if available (from previous session), else h_0.
-        let tip = contact_chain_tip.unwrap_or(initial_tip);
-        info!(
-            "[BTM] establish_relationship: setting chain_tip={} (from_persisted={})",
-            labeling::hash_to_short_id(&tip),
-            contact_chain_tip.is_some()
-        );
         anchor.chain_tip = tip;
-
-        // Seed the chain tip store only when the contact record holds no tip.
-        // A store already at h_0 accepts the write; a store holding any other
-        // tip disagrees with the contact record, and the relationship is not
-        // established over that disagreement.
-        if contact_chain_tip.is_none()
-            && !self
-                .chain_tip_store
-                .set_contact_chain_tip(remote_device_id, [0u8; 32], tip)?
-        {
-            return Err(DsmError::InvalidState(format!(
-                "relationship {}: the contact record holds no chain tip, but the chain-tip \
-                 store holds one other than h_0",
-                labeling::hash_to_short_id(remote_device_id)
-            )));
+        if let Some(contact) = self.contact_manager.get_contact_mut(remote_device_id) {
+            contact.chain_tip = Some(tip);
         }
-
-        self.relationships.insert(*remote_device_id, anchor.clone());
-        Ok(anchor)
-    }
-
-    /// Ensure a relationship anchor exists for a sender path without requiring
-    /// the remote contact to have a signing public key present. This is used
-    /// by sender-side flows where the contact may be stored but signing key
-    /// is not yet exchanged; we must still create a canonical relationship
-    /// anchor and initialize the bilateral state manager so precommitments
-    /// can be created and pending in the core manager.
-    pub fn ensure_relationship_for_sender(
-        &mut self,
-        remote_device_id: &[u8; 32],
-    ) -> Result<BilateralRelationshipAnchor, DsmError> {
-        // If relationship already present, return it
-        if let Some(r) = self.relationships.get(remote_device_id) {
-            return Ok(r.clone());
-        }
-
-        let contact = self
-            .contact_manager
-            .get_contact(remote_device_id)
-            .ok_or_else(|| DsmError::ContactNotFound("remote device".into()))?;
-
-        // Build anchor similar to establish_relationship but tolerant of missing signing key
-        let mut anchor = BilateralRelationshipAnchor::new(
-            self.local_device_id,
-            self.local_genesis_hash,
-            *remote_device_id,
-            contact.genesis_hash,
-        );
-
-        // Initialize shared chain tip deterministically (same as establish_relationship)
-        let initial_tip = initial_relationship_chain_tip(
-            &self.local_device_id,
-            &self.local_genesis_hash,
-            remote_device_id,
-            &contact.genesis_hash,
-        );
-        anchor.chain_tip = contact.chain_tip.unwrap_or(initial_tip);
 
         self.relationships.insert(*remote_device_id, anchor.clone());
         Ok(anchor)
@@ -943,7 +858,18 @@ mod tests {
         ([9u8; 32], [7u8; 32]) // (device_id, genesis_hash)
     }
 
+    type MemoryStore = crate::core::chain_tip_store::memory::InMemoryChainTipStore;
+
     fn make_manager() -> (BilateralTransactionManager, SignatureKeyPair) {
+        let (manager, kp, _store) = make_manager_with_store();
+        (manager, kp)
+    }
+
+    fn make_manager_with_store() -> (
+        BilateralTransactionManager,
+        SignatureKeyPair,
+        std::sync::Arc<MemoryStore>,
+    ) {
         let (local_device_id, local_genesis_hash) = make_manager_ids();
         let contact_manager = DsmContactManager::new(local_device_id);
         // Generate proper cryptographic keypair based on device and genesis identity
@@ -951,14 +877,34 @@ mod tests {
         let kp = SignatureKeyPair::generate_from_entropy(&key_entropy)
             .map_err(|e| DsmError::crypto("Failed to generate test keypair", Some(e)))
             .unwrap();
+        let store = std::sync::Arc::new(MemoryStore::new());
         let manager = BilateralTransactionManager::new(
             contact_manager,
             kp.clone(),
             local_device_id,
             local_genesis_hash,
-            std::sync::Arc::new(crate::core::chain_tip_store::memory::InMemoryChainTipStore::new()),
+            store.clone(),
         );
-        (manager, kp)
+        (manager, kp, store)
+    }
+
+    /// The contact is added the way the SDK adds one: cached for the manager,
+    /// and its relationship recorded in the store at the h_0 both sides derive.
+    fn add_contact(
+        manager: &mut BilateralTransactionManager,
+        store: &MemoryStore,
+        contact: DsmVerifiedContact,
+    ) -> [u8; 32] {
+        let (local_device_id, local_genesis_hash) = make_manager_ids();
+        let h_0 = initial_relationship_chain_tip(
+            &local_device_id,
+            &local_genesis_hash,
+            &contact.device_id,
+            &contact.genesis_hash,
+        );
+        store.record_contact_added(contact.device_id, h_0);
+        manager.add_verified_contact(contact).expect("add");
+        h_0
     }
 
     fn make_verified_contact(
@@ -1037,47 +983,45 @@ mod tests {
         assert!(matches!(res, Err(DsmError::InvalidContact(_))));
     }
 
-    /// A contact record without a tip, over a chain-tip store that already
-    /// holds a tip other than h_0: the two disagree, and no relationship is
-    /// established over the disagreement.
+    /// A relationship its store does not hold is not established, and
+    /// establishing writes no tip of its own: nothing is seeded.
     #[tokio::test]
-    async fn establish_relationship_refuses_a_store_tip_the_contact_record_does_not_hold() {
-        let (local_device_id, local_genesis_hash) = make_manager_ids();
-        let key_entropy = [local_device_id.as_slice(), local_genesis_hash.as_slice()].concat();
-        let kp = SignatureKeyPair::generate_from_entropy(&key_entropy).unwrap();
-        let store =
-            std::sync::Arc::new(crate::core::chain_tip_store::memory::InMemoryChainTipStore::new());
-        let mut manager = BilateralTransactionManager::new(
-            DsmContactManager::new(local_device_id),
-            kp,
-            local_device_id,
-            local_genesis_hash,
-            store.clone(),
-        );
+    async fn establish_relationship_refuses_a_relationship_its_store_does_not_hold() {
+        let (mut manager, _kp, store) = make_manager_with_store();
         let contact = make_verified_contact("Bob", true, true);
         let remote_id = contact.device_id;
         manager.add_verified_contact(contact).expect("add");
-        assert!(store
-            .set_contact_chain_tip(&remote_id, [0u8; 32], [0x5A; 32])
-            .unwrap());
 
         assert!(
             manager.establish_relationship(&remote_id).await.is_err(),
-            "a store tip the contact record does not hold must refuse the relationship"
+            "a relationship the store does not hold must be refused"
         );
         assert!(
             manager.get_relationship(&remote_id).is_none(),
             "a refused relationship leaves no anchor behind"
         );
+        assert!(
+            store
+                .get_contact_chain_tip(&remote_id)
+                .expect("read")
+                .is_none(),
+            "establishing seeded a tip"
+        );
     }
 
+    /// The relationship is established on the tip its store holds, not on
+    /// the h_0 the manager could derive for itself.
     #[tokio::test]
-    async fn establish_relationship_success_and_integrity() {
-        let (mut manager, _kp) = make_manager();
+    async fn establish_relationship_takes_the_tip_its_store_holds() {
+        let (mut manager, _kp, store) = make_manager_with_store();
         let contact = make_verified_contact("Bob", true, true);
         let remote_id = contact.device_id;
         let remote_genesis = contact.genesis_hash;
-        manager.add_verified_contact(contact).expect("add");
+        let h_0 = add_contact(&mut manager, &store, contact);
+        let h_1 = [0x5A; 32];
+        assert!(store
+            .set_contact_chain_tip(&remote_id, h_0, h_1)
+            .expect("advance"));
 
         let anchor = manager
             .establish_relationship(&remote_id)
@@ -1087,17 +1031,8 @@ mod tests {
         assert_eq!(anchor.local_genesis_hash, make_manager_ids().1);
         assert_eq!(anchor.remote_device_id, remote_id);
         assert_eq!(anchor.remote_genesis_hash, remote_genesis);
-        // After establishing relationship, the manager sets the shared chain tip to
-        // the deterministic initial relationship tip (h_0).
-        let initial_tip = initial_relationship_chain_tip(
-            &make_manager_ids().0,
-            &make_manager_ids().1,
-            &remote_id,
-            &remote_genesis,
-        );
-        assert_eq!(anchor.chain_tip, initial_tip);
-
-        assert!(manager.get_relationship(&remote_id).is_some());
+        assert_eq!(anchor.chain_tip, h_1);
+        assert_eq!(manager.get_chain_tip_for(&remote_id), Some(h_1));
     }
 
     #[tokio::test]
@@ -1112,10 +1047,10 @@ mod tests {
 
     #[tokio::test]
     async fn create_precommitment_success_and_pending() {
-        let (mut manager, _kp) = make_manager();
+        let (mut manager, _kp, store) = make_manager_with_store();
         let contact = make_verified_contact("Carol", true, true);
         let remote_id = contact.device_id;
-        manager.add_verified_contact(contact).expect("add");
+        add_contact(&mut manager, &store, contact);
         manager
             .establish_relationship(&remote_id)
             .await
@@ -1141,19 +1076,20 @@ mod tests {
 
     #[tokio::test]
     async fn create_precommitment_requires_signing_key_when_relationship_exists() {
-        let (mut manager, _kp) = make_manager();
-        // Add contact without public key but keep genesis_verified true so
-        // ensure_relationship_for_sender can create a relationship anchor.
-        let contact = make_verified_contact("Grace", false, true);
+        let (mut manager, _kp, store) = make_manager_with_store();
+        let contact = make_verified_contact("Grace", true, true);
         let remote_id = contact.device_id;
-        manager.add_verified_contact(contact).expect("add");
-
-        // Relationship can be initialized tolerantly for sender flows
+        add_contact(&mut manager, &store, contact);
         manager
-            .ensure_relationship_for_sender(&remote_id)
-            .expect("ensure rel");
+            .establish_relationship(&remote_id)
+            .await
+            .expect("establish");
 
-        // But creating a precommitment must require the signing key and therefore fail
+        // The cached contact is replaced by one without its signing key: the
+        // relationship stands, and no precommitment is made without the key.
+        manager
+            .add_verified_contact(make_verified_contact("Grace", false, true))
+            .expect("re-add");
         let op = signed_transfer_op(&manager.signature_keypair, "m", 5);
         let res = manager.create_bilateral_precommitment(&remote_id, op).await;
         assert!(matches!(res, Err(DsmError::InvalidContact(_))));

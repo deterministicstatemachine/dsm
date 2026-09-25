@@ -12,8 +12,8 @@ use dsm::types::operations::{Operation, TransactionMode};
 use dsm::types::token_types::Balance;
 
 /// Relationship chain tips over process memory, with the store trait's
-/// compare-and-set: an update applies only on the expected parent, and an
-/// absent tip reads as the zero parent a relationship starts from.
+/// compare-and-set: an update applies only on the expected parent of a
+/// relationship its contact add recorded.
 #[derive(Default)]
 struct MemoryTips {
     tips: std::sync::Mutex<std::collections::HashMap<[u8; 32], [u8; 32]>>,
@@ -39,7 +39,12 @@ impl dsm::core::chain_tip_store::ChainTipStore for MemoryTips {
         new_tip: [u8; 32],
     ) -> Result<bool, dsm::types::error::DsmError> {
         let mut tips = self.tips.lock().unwrap_or_else(|p| p.into_inner());
-        if tips.get(device_id).copied().unwrap_or([0u8; 32]) != expected_parent_tip {
+        let current = tips.get(device_id).copied().ok_or_else(|| {
+            dsm::types::error::DsmError::InvalidState(
+                "no relationship with that device".to_string(),
+            )
+        })?;
+        if current != expected_parent_tip {
             return Ok(false);
         }
         tips.insert(*device_id, new_tip);

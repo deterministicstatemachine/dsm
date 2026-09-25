@@ -1274,91 +1274,21 @@ impl BilateralBleHandler {
             }
         }
 
-        // Ensure we have a verified contact and relationship. A self-device
-        // counterparty takes the same path as any other: a real contact record,
-        // or a refusal. There is no test-only contact (owner, 2026-09-23).
-        if counterparty_device_id == self.device_id {
-            {
-                let mgr = self.bilateral_tx_manager.read().await;
-                let has_contact = mgr.has_verified_contact(&counterparty_device_id);
-                drop(mgr);
-                if !has_contact {
-                    log::warn!(
-                        "[BLE_HANDLER] Self-device contact not in BTM — attempting just-in-time sync"
-                    );
-                    let mut mgr = self.bilateral_tx_manager.write().await;
-                    sync_contact_from_storage(&mut mgr, &counterparty_device_id)?;
-                }
-                // Auto-establish relationship if missing (one-time, after QR contact exchange)
-                let mut mgr = self.bilateral_tx_manager.write().await;
-                if mgr.get_relationship(&counterparty_device_id).is_none() {
-                    info!("Auto-establishing bilateral relationship for self-device counterparty");
-                    mgr.ensure_relationship_for_sender(&counterparty_device_id)
-                        .map_err(|e| {
-                            DsmError::relationship(format!(
-                                "Failed to auto-establish relationship: {e}"
-                            ))
-                        })?;
-                    // Restore persisted local chain tip (same as receiver path at handle_prepare_request).
-                    // ensure_relationship_for_sender defaults local_chain_tip to initial_tip;
-                    // without this, a prior receiver whose BTM was re-created would have a stale local tip.
-                    if let Some(persisted_local) = stored_contact_tip(
-                        crate::storage::client_db::get_local_bilateral_chain_tip(
-                            &counterparty_device_id,
-                        ),
-                    )? {
-                        info!(
-                            "[BLE_HANDLER] Sender: restoring persisted local bilateral chain tip: {}",
-                            bytes_to_base32(&persisted_local[..8])
-                        );
-                        mgr.advance_chain_tip(&counterparty_device_id, persisted_local);
-                    }
-                }
-                drop(mgr);
-            }
-        } else {
-            let mgr = self.bilateral_tx_manager.read().await;
-            let has_contact = mgr.has_verified_contact(&counterparty_device_id);
-            drop(mgr);
-            if !has_contact {
-                // Just-in-time sync: the in-memory BTM may not have this contact even
-                // though SQLite does (e.g., init-time sync was missed). Try to load and
-                // add it before failing.
-                log::warn!(
-                    "[BLE_HANDLER] Contact not in BTM — attempting just-in-time sync from SQLite"
-                );
-                let mut mgr = self.bilateral_tx_manager.write().await;
+        // The counterparty is a contact, and the relationship is established
+        // over its pinned key. A self-device counterparty takes the same path as
+        // any other: a real contact record, or a refusal (owner, 2026-09-23).
+        {
+            let mut mgr = self.bilateral_tx_manager.write().await;
+            if !mgr.has_verified_contact(&counterparty_device_id) {
                 sync_contact_from_storage(&mut mgr, &counterparty_device_id)?;
             }
-            // Auto-establish relationship if missing (one-time, after QR contact exchange)
-            let mut mgr = self.bilateral_tx_manager.write().await;
             if mgr.get_relationship(&counterparty_device_id).is_none() {
-                info!(
-                    "Auto-establishing bilateral relationship for counterparty {:?}",
-                    &counterparty_device_id[..8]
-                );
-                mgr.ensure_relationship_for_sender(&counterparty_device_id)
+                mgr.establish_relationship(&counterparty_device_id)
+                    .await
                     .map_err(|e| {
-                        DsmError::relationship(format!(
-                            "Failed to auto-establish relationship: {e}"
-                        ))
+                        DsmError::relationship(format!("the relationship is not established: {e}"))
                     })?;
-                // Restore persisted local chain tip (same as receiver path at handle_prepare_request).
-                // ensure_relationship_for_sender defaults local_chain_tip to initial_tip;
-                // without this, a prior receiver whose BTM was re-created would have a stale local tip.
-                if let Some(persisted_local) =
-                    stored_contact_tip(crate::storage::client_db::get_local_bilateral_chain_tip(
-                        &counterparty_device_id,
-                    ))?
-                {
-                    info!(
-                        "[BLE_HANDLER] Sender: restoring persisted local bilateral chain tip: {}",
-                        bytes_to_base32(&persisted_local[..8])
-                    );
-                    mgr.advance_chain_tip(&counterparty_device_id, persisted_local);
-                }
             }
-            drop(mgr);
         }
 
         // The relationship's persisted tip is the one the prepare builds on.
@@ -1370,6 +1300,13 @@ impl BilateralBleHandler {
             let mut mgr = self.bilateral_tx_manager.write().await;
             mgr.advance_chain_tip(&counterparty_device_id, stored_tip);
         }
+
+        // Detached ML-KEM identity binding (ADR 0002): the Kyber key and a SPHINCS+ signature
+        // over binding_digest(device_id, genesis, kyber_pk) under our own AK, which the receiver
+        // checks against the keys it pinned for us. Without them (locked wallet, no key) there is
+        // no prepare to send, and nothing is staged.
+        let (sender_kyber_public_key, sender_kyber_binding_sig) =
+            crate::sdk::kyber_identity::build_local_kyber_identity_binding()?;
 
         // Prepare offline transfer in core
         let (pre_commitment, local_genesis_hash) = {
@@ -1422,14 +1359,18 @@ impl BilateralBleHandler {
             offline_spend: None,
         };
 
+        // The session is durable before anything is sent; a session that could
+        // not be kept is not started.
+        if let Err(e) = self.persist_session(&session, None).await {
+            self.bilateral_tx_manager
+                .write()
+                .await
+                .consume_pre_commitment(&pre_commitment.bilateral_commitment_hash);
+            return Err(e);
+        }
         {
             let mut sessions = self.sessions.sessions.lock().await;
             sessions.insert(pre_commitment.bilateral_commitment_hash, session.clone());
-        }
-
-        // Persist session to storage
-        if let Err(e) = self.persist_session(&session, None).await {
-            warn!("[BLE_HANDLER] Failed to persist preparing session: {}", e);
         }
 
         // Build prepare request with BLE address lookup
@@ -1494,25 +1435,6 @@ impl BilateralBleHandler {
             m.local_signing_public_key()
         };
 
-        // Get sender's current chain tip for the relationship
-        let sender_chain_tip = {
-            let m = self.bilateral_tx_manager.read().await;
-            m.get_chain_tip_for(&counterparty_device_id)
-                .unwrap_or([0u8; 32]) // use zero if no relationship established yet
-        };
-
-        debug!(
-            "[BLE_HANDLER] Including sender_signing_public_key (len={}) and sender_chain_tip={} in PrepareRequest",
-            sender_signing_public_key.len(),
-            bytes_to_base32(&sender_chain_tip[..8])
-        );
-
-        // Detached ML-KEM identity binding (ADR 0002): carry both the Kyber key and a SPHINCS+
-        // signature over binding_digest(device_id, genesis, kyber_pk) under our own AK, so the
-        // receiver verifies it against our PINNED AK before caching. Fail-soft to empty (locked
-        // wallet / no key); the receiver then fail-closes and caches nothing.
-        let (sender_kyber_public_key, sender_kyber_binding_sig) =
-            crate::sdk::kyber_identity::build_local_kyber_identity_binding().unwrap_or_default();
         let prepare_request = generated::BilateralPrepareRequest {
             counterparty_device_id: counterparty_device_id.to_vec(),
             operation_data: operation.to_bytes(),
@@ -1528,9 +1450,6 @@ impl BilateralBleHandler {
             sender_device_id: self.device_id.to_vec(),
             sender_genesis_hash: Some(generated::Hash32 {
                 v: local_genesis_hash.to_vec(),
-            }),
-            sender_chain_tip: Some(generated::Hash32 {
-                v: sender_chain_tip.to_vec(),
             }),
             // transfer_amount and token_id_hint are UI-only hints; protocol
             // correctness is carried entirely by operation_data.  The transport
@@ -2016,103 +1935,26 @@ impl BilateralBleHandler {
                 "prepare-request",
             )?;
 
-            // =====================================================================
-            // CRITICAL: Update our view of sender's chain tip from prepare request
-            // This enables proper state synchronization in multi-relationship scenarios
-            // =====================================================================
-            if let Some(sender_chain_tip_hash32) = &prepare_request.sender_chain_tip {
-                if let Ok(sender_chain_tip_bytes) =
-                    <Vec<u8> as TryInto<[u8; 32]>>::try_into(sender_chain_tip_hash32.v.clone())
-                {
-                    log::info!(
-                        "[BilateralBleHandler] 🔄 Updating remote chain tip for sender {} to {}",
-                        bytes_to_base32(&counterparty_device_id[..8]),
-                        bytes_to_base32(&sender_chain_tip_bytes[..8])
-                    );
-                    // Update in-memory view of sender's chain tip
-                    mgr.advance_chain_tip(&counterparty_device_id, sender_chain_tip_bytes);
-                    // Persist to SQLite in the observed-tip namespace for
-                    // durability across restarts without mutating canonical state.
-                    if let Err(e) = crate::storage::client_db::record_observed_remote_chain_tip(
-                        &counterparty_device_id,
-                        &sender_chain_tip_bytes,
-                        crate::storage::client_db::ObservedRemoteTipSource::LivePeerClaim,
-                    ) {
-                        log::warn!(
-                            "[BilateralBleHandler] ⚠️ Failed to persist observed remote chain tip to SQLite: {}",
-                            e
-                        );
-                        // Non-fatal - in-memory update still happened
-                    } else {
-                        log::info!(
-                            "[BilateralBleHandler] ✅ Persisted observed remote chain tip to SQLite"
-                        );
-                    }
-                } else {
-                    log::warn!(
-                        "[BilateralBleHandler] ⚠️ Invalid sender_chain_tip format in prepare request"
-                    );
-                }
-            } else {
-                log::warn!(
-                    "[BilateralBleHandler] ⚠️ No sender_chain_tip in prepare request - state sync may fail in multi-relationship scenarios"
-                );
-            }
-
             if mgr.get_relationship(&counterparty_device_id).is_none() {
                 mgr.establish_relationship(&counterparty_device_id)
                     .await
                     .map_err(|e| {
                         DsmError::relationship(format!("Failed to establish relationship: {e}"))
                     })?;
-                // establish_relationship defaults local_chain_tip to initial_tip.
-                // Restore the persisted value so the chain tip check doesn't mismatch.
-                if let Some(persisted_local) =
-                    stored_contact_tip(crate::storage::client_db::get_local_bilateral_chain_tip(
-                        &counterparty_device_id,
-                    ))?
-                {
-                    info!(
-                        "[BLE_HANDLER] Restoring persisted local bilateral chain tip: {}",
-                        bytes_to_base32(&persisted_local[..8])
-                    );
-                    mgr.advance_chain_tip(&counterparty_device_id, persisted_local);
-                }
             }
         }
 
-        // =====================================================================
-        // CRITICAL: Verify expected_counterparty_state_hash matches our local chain tip
-        // If mismatch, auto-reject - the sender has stale view of our state
-        // =====================================================================
-
-        // Re-sync the BTM chain tip from SQLite before verification. An online
-        // send may have advanced the tip in SQLite without updating the BTM.
-        {
-            let mut mgr = self.bilateral_tx_manager.write().await;
-            if let Some(sqlite_tip) = stored_contact_tip(
-                crate::storage::client_db::get_contact_chain_tip(&counterparty_device_id),
-            )? {
-                let btm_tip = mgr.get_chain_tip_for(&counterparty_device_id);
-                if btm_tip != Some(sqlite_tip) {
-                    info!(
-                        "[BLE_HANDLER] Refreshing BTM chain tip from SQLite: {}",
-                        bytes_to_base32(&sqlite_tip[..8])
-                    );
-                    mgr.advance_chain_tip(&counterparty_device_id, sqlite_tip);
-                }
-            }
-        }
-
-        let our_local_chain_tip: [u8; 32] = {
-            let m = self.bilateral_tx_manager.read().await;
-            m.get_chain_tip_for(&counterparty_device_id)
-                .ok_or_else(|| {
-                    DsmError::invalid_operation(
-                        "No local chain tip found for counterparty - relationship not established",
-                    )
-                })?
-        };
+        // The sender's expectation is checked against the relationship tip this
+        // device holds durably; the manager builds on the same tip. A mismatch
+        // means the sender's view is stale, and the proposal is rejected.
+        let our_local_chain_tip: [u8; 32] = stored_contact_tip(
+            crate::storage::client_db::get_contact_chain_tip(&counterparty_device_id),
+        )?
+        .ok_or_else(|| DsmError::relationship("the counterparty is not a contact"))?;
+        self.bilateral_tx_manager
+            .write()
+            .await
+            .advance_chain_tip(&counterparty_device_id, our_local_chain_tip);
 
         let sender_expected_hash: Option<[u8; 32]> = prepare_request
             .expected_counterparty_state_hash
@@ -2402,17 +2244,20 @@ impl BilateralBleHandler {
             }
         }
 
-        // Detached ML-KEM identity binding (ADR 0002): as on the request path, carry the Kyber key
-        // and a SPHINCS+ signature over binding_digest(device_id, genesis, kyber_pk) under our AK.
-        // Fail-soft to empty; the sender then fail-closes and caches nothing.
+        // Detached ML-KEM identity binding (ADR 0002), as on the request path. Without it there
+        // is no response to send.
         let (responder_kyber_public_key, responder_kyber_binding_sig) =
-            crate::sdk::kyber_identity::build_local_kyber_identity_binding().unwrap_or_default();
+            crate::sdk::kyber_identity::build_local_kyber_identity_binding()?;
         // Build prepare response
         let prepare_response = generated::BilateralPrepareResponse {
             commitment_hash: Some(generated::Hash32 {
                 v: origin_commitment_hash.to_vec(),
             }),
-            local_signature: session.local_signature.clone().unwrap_or_default(),
+            local_signature: session.local_signature.clone().ok_or_else(|| {
+                DsmError::invalid_operation(
+                    "the receiver's session holds no signature over the commitment",
+                )
+            })?,
             counterparty_state_hash: Some(generated::Hash32 {
                 v: shared_chain_tip.to_vec(),
             }),
@@ -5668,15 +5513,11 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn test_core_manager_integration() {
-        init_test_db();
-        // Setup - Generate proper cryptographic keypair based on test identity
-        let device_id = [1u8; 32];
-        let genesis_hash = [2u8; 32];
-        let key_entropy = [device_id.as_slice(), genesis_hash.as_slice()].concat();
-        let keypair = match SignatureKeyPair::generate_from_entropy(&key_entropy) {
-            Ok(kp) => kp,
-            Err(e) => panic!("keypair generation failed in test: {}", e),
-        };
+        // A device made as wallet creation makes one: its own identity, AK and
+        // Kyber key, in a fresh database. It prepares nothing without them.
+        let (identity, _core) = crate::economic_fixtures::local_device(0x11);
+        let (device_id, genesis_hash) = (identity.device_id, identity.genesis);
+        let keypair = identity.signing_keypair();
 
         let counterparty_device_id = [3u8; 32];
         let counterparty_genesis = [4u8; 32];
@@ -5736,6 +5577,54 @@ mod tests {
         assert_eq!(reconciled, 0);
     }
 
+    /// A device that cannot produce its Kyber identity binding (no wallet, so
+    /// no AK secret or Kyber key) sends no prepare: the peer would refuse one
+    /// without it, and nothing is staged for a message that cannot be sent.
+    /// MUTATION CONTROL: falling back to an empty binding lets the prepare
+    /// through and turns this red.
+    #[tokio::test]
+    #[serial]
+    async fn a_device_without_its_kyber_binding_prepares_nothing() {
+        init_test_db();
+        crate::reset_sdk_context_for_testing();
+        let counterparty = [0x92u8; 32];
+        let (bilateral_manager, handler) =
+            make_test_handler([0x91u8; 32], [0x93u8; 32], b"no-kyber-binding-sender");
+        let contact = dsm::types::contact_types::DsmVerifiedContact {
+            alias: "peer".to_string(),
+            device_id: counterparty,
+            genesis_hash: [0x94u8; 32],
+            public_key: vec![9u8; 32],
+            chain_tip: Some([0x95u8; 32]),
+            genesis_verified_online: true,
+            verifying_storage_nodes: vec![],
+            ble_address: None,
+        };
+        crate::storage::client_db::store_contact_for_tests(&contact);
+        bilateral_manager
+            .write()
+            .await
+            .add_verified_contact(contact)
+            .expect("add contact");
+
+        handler
+            .prepare_bilateral_transaction(counterparty, Operation::Noop)
+            .await
+            .expect_err("no prepare without the device's Kyber identity binding");
+        assert!(
+            handler.sessions.sessions.lock().await.is_empty(),
+            "no session is staged for a prepare that was not sent"
+        );
+        assert!(
+            bilateral_manager
+                .read()
+                .await
+                .list_pending_commitments()
+                .is_empty(),
+            "no precommitment is held for a prepare that was not sent"
+        );
+    }
+
     /// Builds the online-tier Transfer shape (`authority_policy: None`) that
     /// the network transport carries and BLE/USB must refuse.
     fn online_tier_transfer(counterparty: [u8; 32]) -> Operation {
@@ -5770,7 +5659,7 @@ mod tests {
             make_test_handler(device_id, [0x53u8; 32], b"online-tier-sender-door");
         {
             let mut mgr = bilateral_manager.write().await;
-            mgr.add_verified_contact(dsm::types::contact_types::DsmVerifiedContact {
+            let contact = dsm::types::contact_types::DsmVerifiedContact {
                 alias: "peer".to_string(),
                 device_id: counterparty,
                 genesis_hash: [0x54u8; 32],
@@ -5779,8 +5668,9 @@ mod tests {
                 genesis_verified_online: true,
                 verifying_storage_nodes: vec![],
                 ble_address: None,
-            })
-            .expect("add contact");
+            };
+            crate::storage::client_db::store_contact_for_tests(&contact);
+            mgr.add_verified_contact(contact).expect("add contact");
             mgr.establish_relationship(&counterparty)
                 .await
                 .expect("establish relationship");
@@ -5820,7 +5710,6 @@ mod tests {
             sender_signing_public_key: vec![0; 64],
             sender_device_id: sender.to_vec(),
             sender_genesis_hash: None,
-            sender_chain_tip: None,
             transfer_amount: 0,
             token_id_hint: String::new(),
             memo_hint: String::new(),
@@ -5866,6 +5755,129 @@ mod tests {
         assert!(
             msg.contains("offline-bearer transfers only"),
             "the refusal names the transport rule, got: {msg}"
+        );
+    }
+
+    /// The receiver checks a prepare's expected relationship tip against the
+    /// tip it holds durably, never against its manager's cached view (which
+    /// once took the sender's own claim). MUTATION CONTROL: reading the cached
+    /// tip instead lets this prepare through to a precommitment and turns this
+    /// red.
+    #[tokio::test]
+    #[serial]
+    async fn a_prepare_is_checked_against_the_durable_relationship_tip() {
+        init_test_db();
+        let receiver = [0x81u8; 32];
+        let sender = [0x82u8; 32];
+        let sender_genesis = [0x84u8; 32];
+        let durable_tip = [0x70u8; 32];
+        let cached_tip = [0x5Au8; 32];
+        let (manager, handler) =
+            make_test_handler(receiver, [0x83u8; 32], b"prepare-durable-tip-receiver");
+        let sender_keys = SignatureKeyPair::generate_from_entropy(b"prepare-durable-tip-sender")
+            .expect("sender keys");
+        let kyber_pk = vec![0x4Bu8; 1184];
+        crate::storage::client_db::store_contact(&crate::storage::client_db::ContactRecord {
+            contact_id: "sender".to_string(),
+            device_id: sender.to_vec(),
+            alias: "sender".to_string(),
+            genesis_hash: sender_genesis.to_vec(),
+            public_key: sender_keys.public_key().to_vec(),
+            kyber_public_key: kyber_pk.clone(),
+            current_chain_tip: Some(durable_tip.to_vec()),
+            verified: true,
+            verification_proof: None,
+            metadata: std::collections::HashMap::new(),
+            ble_address: None,
+            status: "verified".to_string(),
+            needs_online_reconcile: false,
+            previous_chain_tip: None,
+        })
+        .expect("persist the contact");
+        {
+            let mut mgr = manager.write().await;
+            sync_contact_from_storage(&mut mgr, &sender).expect("load the contact");
+            mgr.establish_relationship(&sender)
+                .await
+                .expect("establish");
+            mgr.advance_chain_tip(&sender, cached_tip);
+        }
+        let binding_sig = sender_keys
+            .sign(&crate::sdk::kyber_identity::binding_digest(
+                &sender,
+                &sender_genesis,
+                &kyber_pk,
+            ))
+            .expect("binding signature");
+
+        let req = generated::BilateralPrepareRequest {
+            counterparty_device_id: receiver.to_vec(),
+            operation_data: Operation::Noop.to_bytes(),
+            expected_genesis_hash: None,
+            expected_counterparty_state_hash: Some(generated::Hash32 {
+                v: cached_tip.to_vec(),
+            }),
+            ble_address: String::new(),
+            sender_signing_public_key: sender_keys.public_key().to_vec(),
+            sender_device_id: sender.to_vec(),
+            sender_genesis_hash: Some(generated::Hash32 {
+                v: sender_genesis.to_vec(),
+            }),
+            transfer_amount: 0,
+            token_id_hint: String::new(),
+            memo_hint: String::new(),
+            transfer_amount_display: String::new(),
+            sender_kyber_public_key: kyber_pk,
+            sender_kyber_binding_sig: binding_sig,
+        };
+        let envelope = generated::Envelope {
+            version: 3,
+            headers: Some(generated::Headers {
+                device_id: sender.to_vec(),
+                genesis_hash: sender_genesis.to_vec(),
+            }),
+            message_id: vec![0x85u8; 16],
+            payload: Some(generated::envelope::Payload::UniversalTx(
+                generated::UniversalTx {
+                    ops: vec![generated::UniversalOp {
+                        op_id: Some(generated::Hash32 {
+                            v: vec![0x86u8; 32],
+                        }),
+                        actor: sender.to_vec(),
+                        kind: Some(generated::universal_op::Kind::Invoke(generated::Invoke {
+                            program: None,
+                            method: "bilateral.prepare".to_string(),
+                            args: Some(generated::ArgPack {
+                                schema_hash: None,
+                                codec: 0,
+                                body: prost::Message::encode_to_vec(&req),
+                            }),
+                            cosigners: vec![],
+                            evidence: None,
+                            nonce: None,
+                        })),
+                    }],
+                    atomic: false,
+                },
+            )),
+        };
+
+        let (reply, _meta) = handler
+            .handle_prepare_request(&crate::envelope::to_canonical_bytes(&envelope), None)
+            .await
+            .expect("the prepare is answered");
+        let reply = crate::envelope::from_canonical_bytes(&reply).expect("decode the reply");
+        match reply.payload {
+            Some(generated::envelope::Payload::BilateralPrepareReject(reject)) => assert!(
+                reject.reason.contains("Chain tip mismatch"),
+                "the rejection names the tip mismatch, got: {}",
+                reject.reason
+            ),
+            other => panic!("expected a prepare rejection, got {other:?}"),
+        }
+        assert!(
+            manager.read().await.list_pending_commitments().is_empty(),
+            "no precommitment is made on a stale expectation"
         );
     }
 
@@ -6066,13 +6078,13 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_stale_receiver_session_cleans_local_pending_commitment() {
-        let device_id = [31u8; 32];
-        let genesis_hash = [32u8; 32];
+        let (identity, _core) = crate::economic_fixtures::local_device(0x12);
+        let (device_id, genesis_hash) = (identity.device_id, identity.genesis);
         let counterparty_device_id = [33u8; 32];
         let counterparty_genesis = [34u8; 32];
-        let keypair = SignatureKeyPair::generate_from_entropy(b"stale-local-pending-cleanup")
-            .expect("keypair");
+        let keypair = identity.signing_keypair();
 
         let contact_manager = DsmContactManager::new(device_id);
         let bilateral_manager = Arc::new(RwLock::new(BilateralTransactionManager::new(
@@ -6354,7 +6366,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_fail_session_by_commitment_cleans_receiver_accepted_session() {
+        init_test_db();
         let device_id = [41u8; 32];
         let genesis_hash = [42u8; 32];
         let counterparty_device_id = [43u8; 32];
@@ -6385,6 +6399,7 @@ mod tests {
 
         {
             let mut mgr = bilateral_manager.write().await;
+            crate::storage::client_db::store_contact_for_tests(&contact);
             mgr.add_verified_contact(contact).expect("add contact");
             mgr.establish_relationship(&counterparty_device_id)
                 .await

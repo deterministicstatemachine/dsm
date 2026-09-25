@@ -685,11 +685,43 @@ mod tests {
         Arc<BleFrameCoordinator>,
         AndroidBleBridge,
     ) {
-        let contact_manager = dsm::core::contact_manager::DsmContactManager::new(device_id);
         let keypair = dsm::crypto::SignatureKeyPair::generate_from_entropy(
             &[device_id.as_slice(), genesis_hash.as_slice()].concat(),
         )
         .expect("keypair generation failed in test helper");
+        bridge_over(device_id, genesis_hash, keypair)
+    }
+
+    /// A bridge on a device made as wallet creation makes one: its own
+    /// identity, AK and Kyber key, in a fresh database. A device prepares
+    /// nothing without its Kyber identity binding.
+    fn make_device_bridge(
+        seed: u8,
+    ) -> (
+        Arc<RwLock<dsm::core::bilateral_transaction_manager::BilateralTransactionManager>>,
+        Arc<BilateralTransportAdapter>,
+        Arc<BleFrameCoordinator>,
+        AndroidBleBridge,
+    ) {
+        let (identity, _core) = crate::economic_fixtures::local_device(seed);
+        bridge_over(
+            identity.device_id,
+            identity.genesis,
+            identity.signing_keypair(),
+        )
+    }
+
+    fn bridge_over(
+        device_id: [u8; 32],
+        genesis_hash: [u8; 32],
+        keypair: dsm::crypto::SignatureKeyPair,
+    ) -> (
+        Arc<RwLock<dsm::core::bilateral_transaction_manager::BilateralTransactionManager>>,
+        Arc<BilateralTransportAdapter>,
+        Arc<BleFrameCoordinator>,
+        AndroidBleBridge,
+    ) {
+        let contact_manager = dsm::core::contact_manager::DsmContactManager::new(device_id);
         let bilateral_tx_manager = Arc::new(RwLock::new(
             dsm::core::bilateral_transaction_manager::BilateralTransactionManager::new(
                 contact_manager,
@@ -1158,8 +1190,7 @@ mod tests {
     #[tokio::test]
     async fn test_defer_response_until_identity() {
         // Build minimal environment similar to other tests
-        let (bilateral_mgr, transport_adapter, coord, bridge) =
-            make_test_bridge([9u8; 32], [5u8; 32]);
+        let (bilateral_mgr, transport_adapter, coord, bridge) = make_device_bridge(0x21);
 
         // Establish verified contact + relationship for counterparty so prepare succeeds
         let counterparty = [7u8; 32];
@@ -1233,8 +1264,7 @@ mod tests {
             Ok(rt) => rt,
             Err(e) => panic!("failed to create tokio runtime: {}", e),
         };
-        let (bilateral_mgr, transport_adapter, coord, _bridge) =
-            make_test_bridge([0u8; 32], [0u8; 32]);
+        let (bilateral_mgr, transport_adapter, coord, _bridge) = make_device_bridge(0x22);
         // Prepare inputs
         let cp = [2u8; 32];
         // Satisfy relationship requirement: add verified contact and establish relationship
@@ -1245,7 +1275,7 @@ mod tests {
                 device_id: cp,
                 genesis_hash: [1u8; 32],
                 public_key: vec![7u8; 32],
-                chain_tip: Some([0u8; 32]),
+                chain_tip: Some([0x0Cu8; 32]),
                 genesis_verified_online: true,
                 ble_address: Some(String::new()),
                 verifying_storage_nodes: vec![],

@@ -11166,13 +11166,6 @@ export class BilateralPrepareRequest extends Message<BilateralPrepareRequest> {
   senderGenesisHash?: Hash32;
 
   /**
-   * Sender's current chain tip for state synchronization
-   *
-   * @generated from field: dsm.Hash32 sender_chain_tip = 10;
-   */
-  senderChainTip?: Hash32;
-
-  /**
    * Transfer intent fields. Rust builds canonical operation_data from these
    * when operation_data is empty.
    *
@@ -11204,13 +11197,10 @@ export class BilateralPrepareRequest extends Message<BilateralPrepareRequest> {
   transferAmountDisplay = "";
 
   /**
-   * Sender's ML-KEM-768 encapsulation key (1184 bytes; empty = legacy peer).
-   * The device Kyber keypair is DETERMINISTIC — derived from the wallet master secret
-   * with the Genesis v2 derivation ("DSM/kyber\0"), so it is stable across restarts and
-   * reinstalls-from-seed. It still rides every prepare exchange (like
-   * sender_signing_public_key above) so a peer paired before this key existed is
-   * upgraded in place. The receiver persists it on the contact record; the §11.1
-   * per-step EK receipt (kyber_ct encapsulation) fail-closes without it.
+   * Sender's ML-KEM-768 encapsulation key (1184 bytes). The device Kyber keypair is
+   * derived from the wallet master secret ("DSM/kyber\0"). The receiver refuses the
+   * prepare unless it equals the key pinned on the sender's contact record; nothing
+   * sent is stored.
    *
    * @generated from field: bytes sender_kyber_public_key = 16;
    */
@@ -11218,11 +11208,8 @@ export class BilateralPrepareRequest extends Message<BilateralPrepareRequest> {
 
   /**
    * Detached SPHINCS+ (device AK) signature over
-   * binding_digest(device_id, genesis, sender_kyber_public_key), per ADR 0002. The
-   * receiver verifies this against the PINNED peer AK (never the wire signing key)
-   * BEFORE caching the Kyber key — the one identity-binding primitive shared with
-   * storage-fetch and repair. Empty = unverifiable: the receiver fail-closes and does
-   * not cache the Kyber key (no implicit TOFU).
+   * binding_digest(device_id, genesis, sender_kyber_public_key), per ADR 0002, verified
+   * against the PINNED peer AK (never the wire signing key). Required.
    *
    * @generated from field: bytes sender_kyber_binding_sig = 17;
    */
@@ -11244,7 +11231,6 @@ export class BilateralPrepareRequest extends Message<BilateralPrepareRequest> {
     { no: 7, name: "sender_signing_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 8, name: "sender_device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 9, name: "sender_genesis_hash", kind: "message", T: Hash32 },
-    { no: 10, name: "sender_chain_tip", kind: "message", T: Hash32 },
     { no: 11, name: "transfer_amount", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
     { no: 12, name: "token_id_hint", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 13, name: "memo_hint", kind: "scalar", T: 9 /* ScalarType.STRING */ },
@@ -11393,9 +11379,9 @@ export class BilateralPrepareResponse extends Message<BilateralPrepareResponse> 
   receiverChallenge = new Uint8Array(0);
 
   /**
-   * Responder's CURRENT ML-KEM-768 encapsulation key (1184 bytes; empty = legacy peer).
-   * Mirrors responder_signing_public_key: the sender persists it on the contact record so the
-   * §11.1 per-step EK receipt built in the immediately following confirm can encapsulate to it.
+   * Responder's ML-KEM-768 encapsulation key (1184 bytes). The sender refuses the
+   * response unless it equals the key pinned on the responder's contact record; nothing
+   * sent is stored.
    *
    * @generated from field: bytes responder_kyber_public_key = 9;
    */
@@ -11403,9 +11389,8 @@ export class BilateralPrepareResponse extends Message<BilateralPrepareResponse> 
 
   /**
    * Detached SPHINCS+ (device AK) signature over
-   * binding_digest(device_id, genesis, responder_kyber_public_key), per ADR 0002. The
-   * sender verifies this against the PINNED peer AK (never the wire signing key) BEFORE
-   * caching the responder's Kyber key. Empty = unverifiable: fail-closed, no cache, no TOFU.
+   * binding_digest(device_id, genesis, responder_kyber_public_key), per ADR 0002, verified
+   * against the PINNED peer AK (never the wire signing key). Required.
    *
    * @generated from field: bytes responder_kyber_binding_sig = 10;
    */

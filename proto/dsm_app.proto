@@ -1652,7 +1652,9 @@ message BilateralPrepareRequest {
   bytes  sender_signing_public_key = 7 [(dsm_fixed_len)=64]; // Sender's SPHINCS+ SPX256s public key for offline verification
   bytes  sender_device_id       = 8 [(dsm_fixed_len)=32]; // Sender's device ID for relationship binding
   Hash32 sender_genesis_hash    = 9; // Sender's genesis hash for relationship anchor
-  Hash32 sender_chain_tip       = 10; // Sender's current chain tip for state synchronization
+  // The relationship tip travels once, as expected_counterparty_state_hash.
+  reserved 10;
+  reserved "sender_chain_tip";
   // Transfer intent fields. Rust builds canonical operation_data from these
   // when operation_data is empty.
   uint64 transfer_amount         = 11; // amount in token base units
@@ -1660,20 +1662,14 @@ message BilateralPrepareRequest {
   string memo_hint               = 13; // optional transfer memo
   string transfer_amount_display = 14; // decimal display amount; backend scales via token decimals
   reserved 15; // removed: legacy Safe-7 sender_anchor_identity (fused anchor is pinned out-of-band)
-  // Sender's ML-KEM-768 encapsulation key (1184 bytes; empty = legacy peer).
-  // The device Kyber keypair is DETERMINISTIC — derived from the wallet master secret
-  // with the Genesis v2 derivation ("DSM/kyber\0"), so it is stable across restarts and
-  // reinstalls-from-seed. It still rides every prepare exchange (like
-  // sender_signing_public_key above) so a peer paired before this key existed is
-  // upgraded in place. The receiver persists it on the contact record; the §11.1
-  // per-step EK receipt (kyber_ct encapsulation) fail-closes without it.
+  // Sender's ML-KEM-768 encapsulation key (1184 bytes). The device Kyber keypair is
+  // derived from the wallet master secret ("DSM/kyber\0"). The receiver refuses the
+  // prepare unless it equals the key pinned on the sender's contact record; nothing
+  // sent is stored.
   bytes  sender_kyber_public_key = 16 [(dsm_max_len)=1184];
   // Detached SPHINCS+ (device AK) signature over
-  // binding_digest(device_id, genesis, sender_kyber_public_key), per ADR 0002. The
-  // receiver verifies this against the PINNED peer AK (never the wire signing key)
-  // BEFORE caching the Kyber key — the one identity-binding primitive shared with
-  // storage-fetch and repair. Empty = unverifiable: the receiver fail-closes and does
-  // not cache the Kyber key (no implicit TOFU).
+  // binding_digest(device_id, genesis, sender_kyber_public_key), per ADR 0002, verified
+  // against the PINNED peer AK (never the wire signing key). Required.
   bytes  sender_kyber_binding_sig = 17 [(dsm_max_len)=51200];
 }
 // A -> B, rides BilateralConfirmRequest (Software-Authority / Hardware-Identity receiver-admit).
@@ -1709,14 +1705,13 @@ message BilateralPrepareResponse {
   // anchor appliance PREPARE. Empty for ordinary (non-bearer) transfers.
   bytes  receiver_challenge = 7 [(dsm_fixed_len)=32];
   reserved 8; // removed v1 counter-era AnchorEnrollRequest (verifier-slot pairing)
-  // Responder's CURRENT ML-KEM-768 encapsulation key (1184 bytes; empty = legacy peer).
-  // Mirrors responder_signing_public_key: the sender persists it on the contact record so the
-  // §11.1 per-step EK receipt built in the immediately following confirm can encapsulate to it.
+  // Responder's ML-KEM-768 encapsulation key (1184 bytes). The sender refuses the
+  // response unless it equals the key pinned on the responder's contact record; nothing
+  // sent is stored.
   bytes  responder_kyber_public_key = 9 [(dsm_max_len)=1184];
   // Detached SPHINCS+ (device AK) signature over
-  // binding_digest(device_id, genesis, responder_kyber_public_key), per ADR 0002. The
-  // sender verifies this against the PINNED peer AK (never the wire signing key) BEFORE
-  // caching the responder's Kyber key. Empty = unverifiable: fail-closed, no cache, no TOFU.
+  // binding_digest(device_id, genesis, responder_kyber_public_key), per ADR 0002, verified
+  // against the PINNED peer AK (never the wire signing key). Required.
   bytes  responder_kyber_binding_sig = 10 [(dsm_max_len)=51200];
 }
 
