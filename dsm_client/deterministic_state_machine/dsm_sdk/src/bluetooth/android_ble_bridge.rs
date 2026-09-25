@@ -203,13 +203,8 @@ impl AndroidBleBridge {
                 let address = dev.address;
                 info!("BLE device disconnected (proto): {address}");
 
-                // Fail any early-phase bilateral sessions for this address before removing
-                // from the connected set.  Late-phase sessions (Accepted, ConfirmPending)
-                // retain all cryptographic material for automatic recovery on reconnect.
-                self.transport_delegate
-                    .on_peer_disconnected(address.clone())
-                    .await;
-
+                // A lost link fails no bilateral step: each keeps what it owes
+                // and delivers it when the link returns.
                 // Notify the pairing orchestrator so stale pairing sessions for this
                 // address are reset immediately (no need to wait for the 90-second timeout).
                 crate::bluetooth::get_pairing_orchestrator()
@@ -250,10 +245,6 @@ impl AndroidBleBridge {
                 let address = fail_info.address;
                 let error = fail_info.error;
                 warn!("BLE connection failed (proto): {address}, reason: {error}");
-                // Fail any early-phase bilateral sessions associated with this address.
-                self.transport_delegate
-                    .on_peer_disconnected(address.clone())
-                    .await;
                 // Reset stale pairing sessions for this address immediately.
                 crate::bluetooth::get_pairing_orchestrator()
                     .handle_peer_disconnected(&address)

@@ -160,6 +160,9 @@ pub struct BilateralSessionRecord {
     pub spend_anchor_bundle: Option<Vec<u8>>,
     pub spend_asset: Option<Vec<u8>>,
     pub spend_amount: Option<i64>,
+    /// The frame the session owes its counterparty, delivered again when the
+    /// link returns.
+    pub owed_frame: Option<Vec<u8>>,
 }
 
 /// Persisted BLE chunk for durable reassembly across connection drops.

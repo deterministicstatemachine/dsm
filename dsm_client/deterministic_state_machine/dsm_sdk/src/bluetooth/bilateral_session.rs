@@ -91,6 +91,47 @@ pub struct BilateralBleSession {
     /// precommitment's parent. With the operation it hashes to the
     /// commitment, which is how a restart holds the precommitment again.
     pub parent_tip: Option<[u8; 32]>,
+    /// The frame this session owes its counterparty until the counterparty
+    /// answers it: the sender's prepare (Prepared) or confirm
+    /// (ConfirmPending), the receiver's response (Accepted). Written with the
+    /// phase that owes it, and delivered again whenever the link returns.
+    pub owed_frame: Option<Vec<u8>>,
+}
+
+/// The kind of an offline protocol frame, whatever carries it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OfflineFrameKind {
+    Prepare,
+    PrepareResponse,
+    Confirm,
+}
+
+/// A frame a session owes its counterparty.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwedFrame {
+    pub commitment_hash: [u8; 32],
+    pub kind: OfflineFrameKind,
+    pub bytes: Vec<u8>,
+}
+
+impl BilateralBleSession {
+    /// The frame this session owes, by the phase it is in: a proposal awaiting
+    /// its answer owes the prepare, an acceptance awaiting its confirm owes the
+    /// response, a confirm awaiting its ack owes the confirm. A session in any
+    /// other phase owes nothing.
+    pub fn owed(&self) -> Option<OwedFrame> {
+        let kind = match self.phase {
+            BilateralPhase::Prepared => OfflineFrameKind::Prepare,
+            BilateralPhase::Accepted => OfflineFrameKind::PrepareResponse,
+            BilateralPhase::ConfirmPending => OfflineFrameKind::Confirm,
+            _ => return None,
+        };
+        self.owed_frame.as_ref().map(|bytes| OwedFrame {
+            commitment_hash: self.commitment_hash,
+            kind,
+            bytes: bytes.clone(),
+        })
+    }
 }
 
 fn array32(what: &str, bytes: Option<&Vec<u8>>) -> Result<Option<[u8; 32]>, DsmError> {
@@ -139,6 +180,7 @@ impl BilateralBleSession {
             spend_anchor_bundle,
             spend_asset,
             spend_amount,
+            owed_frame: self.owed_frame.clone(),
         })
     }
 
@@ -218,6 +260,7 @@ impl BilateralBleSession {
             sent_child_root: array32("sent_child_root", record.sent_child_root.as_ref())?,
             offline_spend,
             parent_tip: array32("parent_tip", record.parent_tip.as_ref())?,
+            owed_frame: record.owed_frame.clone(),
         })
     }
 }
@@ -332,6 +375,7 @@ mod tests {
             sent_child_root: None,
             offline_spend: None,
             parent_tip: None,
+            owed_frame: None,
         }
     }
 
@@ -414,6 +458,7 @@ mod tests {
             asset: [0x5A; 32],
             amount: 7,
         });
+        session.owed_frame = Some(vec![0x5B; 48]);
         let restored =
             BilateralBleSession::from_record(&session.to_record().expect("row")).expect("session");
         assert_eq!(restored.phase, session.phase);
@@ -434,6 +479,11 @@ mod tests {
         assert_eq!(restored.sent_child_root, session.sent_child_root);
         assert_eq!(restored.anchor_leaf, session.anchor_leaf);
         assert_eq!(restored.offline_spend, session.offline_spend);
+        assert_eq!(restored.owed_frame, session.owed_frame);
+        assert_eq!(
+            restored.owed().map(|f| f.kind),
+            Some(OfflineFrameKind::Confirm)
+        );
     }
 
     /// A row that does not decode is an error, never a session with a

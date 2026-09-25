@@ -216,21 +216,56 @@ pub fn update_transaction_proof_data(tx_id: &str, proof_data: &[u8]) -> Result<(
 /// applied and recorded this exact transfer. Used to recognize a stale-route
 /// re-delivery of an already-accepted transition so it can be re-ACKed (releasing
 /// the sender's pending online gate) instead of silently skipped and stranded.
-pub fn transaction_exists(tx_id: &str) -> bool {
-    let binding = match get_connection() {
-        Ok(b) => b,
-        Err(_) => return false,
+/// Whether this device's history holds the step `tx_id`. A history that
+/// cannot be read is an error, never an absent step.
+pub fn transaction_exists(tx_id: &str) -> Result<bool> {
+    Ok(get_transaction(tx_id)?.is_some())
+}
+
+/// This device's history row for `tx_id`, if it has one.
+pub fn get_transaction(tx_id: &str) -> Result<Option<TransactionRecord>> {
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    Ok(conn
+        .query_row(
+            &format!("SELECT {TRANSACTION_COLUMNS} FROM transactions WHERE tx_id = ?1"),
+            params![tx_id],
+            transaction_from_row,
+        )
+        .optional()?)
+}
+
+const TRANSACTION_COLUMNS: &str = "tx_id, tx_hash, from_device, to_device, amount, tx_type, \
+                                   status, commitment_hash, proof_data, metadata";
+
+fn transaction_from_row(row: &Row) -> rusqlite::Result<TransactionRecord> {
+    let meta_blob: Vec<u8> = row.get(9)?;
+    let metadata = meta_from_blob(&meta_blob).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(
+            9,
+            rusqlite::types::Type::Blob,
+            format!("transaction metadata: {e}").into(),
+        )
+    })?;
+    let tx_type: String = row.get(5)?;
+    let proof_data = match row.get::<_, Option<Vec<u8>>>(8)? {
+        Some(_) if tx_type == "unilateral_send" => None,
+        other => other,
     };
-    let conn = binding.lock().unwrap_or_else(|poisoned| {
-        log::warn!("DB lock poisoned, recovering");
-        poisoned.into_inner()
-    });
-    conn.query_row(
-        "SELECT 1 FROM transactions WHERE tx_id = ?1 LIMIT 1",
-        params![tx_id],
-        |_| Ok(true),
-    )
-    .unwrap_or(false)
+    Ok(TransactionRecord {
+        tx_id: row.get(0)?,
+        tx_hash: row.get(1)?,
+        from_device: row.get(2)?,
+        to_device: row.get(3)?,
+        amount: row.get::<_, i64>(4)? as u64,
+        tx_type,
+        status: row.get(6)?,
+        commitment_hash: row.get::<_, Option<Vec<u8>>>(7)?,
+        proof_data,
+        metadata,
+    })
 }
 
 pub fn get_transaction_history(
@@ -248,50 +283,21 @@ pub fn get_transaction_history(
     };
     let lim = i64::try_from(lim).map_err(|e| anyhow::anyhow!("history limit: {e}"))?;
 
-    let map_row = |row: &Row| -> rusqlite::Result<TransactionRecord> {
-        let meta_blob: Vec<u8> = row.get(9)?;
-        let metadata = meta_from_blob(&meta_blob).map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(
-                9,
-                rusqlite::types::Type::Blob,
-                format!("transaction metadata: {e}").into(),
-            )
-        })?;
-        let tx_type: String = row.get(5)?;
-        let proof_data = match row.get::<_, Option<Vec<u8>>>(8)? {
-            Some(_) if tx_type == "unilateral_send" => None,
-            other => other,
-        };
-        Ok(TransactionRecord {
-            tx_id: row.get(0)?,
-            tx_hash: row.get(1)?,
-            from_device: row.get(2)?,
-            to_device: row.get(3)?,
-            amount: row.get::<_, i64>(4)? as u64,
-            tx_type,
-            status: row.get(6)?,
-            commitment_hash: row.get::<_, Option<Vec<u8>>>(7)?,
-            proof_data,
-            metadata,
-        })
-    };
-
     // Newest first, in the order this device recorded them.
-    const COLS: &str = "tx_id, tx_hash, from_device, to_device, amount, tx_type, status, \
-                        commitment_hash, proof_data, metadata";
+    const COLS: &str = TRANSACTION_COLUMNS;
     let rows = match device_id {
         Some(d) => conn
             .prepare(&format!(
                 "SELECT {COLS} FROM transactions WHERE from_device = ?1 OR to_device = ?1 \
                  ORDER BY rowid DESC LIMIT ?2"
             ))?
-            .query_map(params![d, lim], map_row)?
+            .query_map(params![d, lim], transaction_from_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?,
         None => conn
             .prepare(&format!(
                 "SELECT {COLS} FROM transactions ORDER BY rowid DESC LIMIT ?1"
             ))?
-            .query_map(params![lim], map_row)?
+            .query_map(params![lim], transaction_from_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?,
     };
     Ok(rows)
@@ -400,7 +406,7 @@ mod tests {
                 .expect("load observed tip")
                 .is_none()
         );
-        assert!(transaction_exists("step-1"));
+        assert!(transaction_exists("step-1").expect("read the history"));
 
         // The same step again is refused as already applied, and writes nothing.
         let again = history_row("step-1-again");
@@ -419,7 +425,7 @@ mod tests {
         })
         .expect_err("a step already applied is not applied again");
         assert!(err.to_string().contains("already applied"), "{err}");
-        assert!(!transaction_exists("step-1-again"));
+        assert!(!transaction_exists("step-1-again").expect("read the history"));
     }
 
     /// The tip is a compare-and-set bound to the step: it moves only from the

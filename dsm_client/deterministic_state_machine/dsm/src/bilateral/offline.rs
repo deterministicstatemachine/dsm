@@ -332,6 +332,18 @@ pub fn decide_confirm(
     })
 }
 
+/// The receiver's decision on a confirm for a step it has already committed
+/// (its session ended in that commit): the confirm is delivered again because
+/// its ack was lost, and the ack the step committed is the answer again — only
+/// for a confirm the step's pinned sender signed over the step's commitment.
+pub fn decide_committed_confirm(
+    signature: &[u8],
+    commitment_hash: &[u8; 32],
+    sender: &PinnedPeer<'_>,
+) -> Result<(), DsmError> {
+    verify_step_signature(sender, commitment_hash, signature, "confirm")
+}
+
 /// What the sender holds for a step it confirmed and awaits the ack of.
 #[derive(Clone, Copy, Debug)]
 pub struct ConfirmedStep<'a> {
@@ -929,6 +941,41 @@ mod tests {
     /// commitment, with the B-side EK chained from the receiver's head.
     /// MUTATION CONTROLS: dropping the device binding or the B-side EK check
     /// lets a forged ack through and turns this red.
+    /// A confirm for a committed step is answered again only as its pinned
+    /// sender signed it over that step's commitment.
+    #[test]
+    fn a_committed_steps_confirm_is_answered_only_as_its_sender_signed_it() {
+        let sender = Peer::new(0x76);
+        let other = Peer::new(0x77);
+        let commitment_hash = [0x78u8; 32];
+        decide_committed_confirm(
+            &sender.sign_step(&commitment_hash),
+            &commitment_hash,
+            &sender.pinned(),
+        )
+        .expect("the sender's own confirm");
+        refused(
+            decide_committed_confirm(
+                &other.sign_step(&commitment_hash),
+                &commitment_hash,
+                &sender.pinned(),
+            ),
+            "not signed over its commitment by the pinned AK",
+        );
+        refused(
+            decide_committed_confirm(
+                &sender.sign_step(&[0x79u8; 32]),
+                &commitment_hash,
+                &sender.pinned(),
+            ),
+            "not signed over its commitment by the pinned AK",
+        );
+        refused(
+            decide_committed_confirm(&[], &commitment_hash, &sender.pinned()),
+            "carries no signature",
+        );
+    }
+
     #[test]
     fn an_ack_is_only_the_receivers_counter_signed_receipt() {
         let receiver = Peer::new(0x71);

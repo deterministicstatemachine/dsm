@@ -75,17 +75,6 @@ pub fn reset_pairing_orchestrator_for_tests() {
     }
 }
 
-/// Manual-accept mode (global flag for bilateral prepare responses)
-static MANUAL_ACCEPT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-pub fn manual_accept_enabled() -> bool {
-    MANUAL_ACCEPT.load(std::sync::atomic::Ordering::Relaxed)
-}
-
-pub fn set_manual_accept_enabled(v: bool) {
-    MANUAL_ACCEPT.store(v, std::sync::atomic::Ordering::Relaxed);
-}
-
 /// Bluetooth manager orchestrates bilateral BLE transactions.
 pub struct BluetoothManager {
     /// BLE frame coordinator for chunking

@@ -42,8 +42,6 @@ pub trait BleTransportDelegate: Send + Sync + 'static {
         &self,
         message: TransportInboundMessage,
     ) -> DelegateFuture<Result<Vec<TransportOutbound>, DsmError>>;
-
-    fn on_peer_disconnected(&self, peer_address: String) -> DelegateFuture<()>;
 }
 
 pub struct BilateralTransportAdapter {
@@ -59,12 +57,6 @@ impl BilateralTransportAdapter {
     #[must_use]
     pub fn bilateral_handler(&self) -> &Arc<BilateralBleHandler> {
         &self.bilateral_handler
-    }
-
-    pub async fn cancel_prepared_session_for_counterparty(&self, counterparty_device_id: [u8; 32]) {
-        self.bilateral_handler
-            .cancel_prepared_session_for_counterparty(counterparty_device_id)
-            .await;
     }
 
     pub async fn fail_session_by_commitment(
@@ -185,6 +177,22 @@ async fn queue_follow_up_chunks(
     ))
 }
 
+/// Route a `handle_prepare_request` reply to its BLE frame by the returned
+/// envelope's payload: the response a proposal delivered again is owed, or a
+/// signed rejection. Anything else is `None` → fail-closed at the call site.
+fn classify_prepare_reply(envelope_bytes: &[u8]) -> Option<BleFrameType> {
+    let env = crate::envelope::from_canonical_bytes(envelope_bytes).ok()?;
+    match env.payload {
+        Some(crate::generated::envelope::Payload::BilateralPrepareResponse(_)) => {
+            Some(BleFrameType::BilateralPrepareResponse)
+        }
+        Some(crate::generated::envelope::Payload::BilateralPrepareReject(_)) => {
+            Some(BleFrameType::BilateralPrepareReject)
+        }
+        _ => None,
+    }
+}
+
 /// Route a `handle_prepare_response` reply to its BLE frame by the returned envelope's payload.
 /// The only routable reply is the confirm (a UniversalTx invoking "bilateral.confirm") — anything
 /// else is `None` → fail-closed at the call site (never a best-effort frame guess).
@@ -223,24 +231,16 @@ impl BleTransportDelegate for BilateralTransportAdapter {
                         )
                         .await
                     {
-                        Ok((response, _meta)) => {
-                            if crate::bluetooth::manual_accept_enabled() {
-                                debug!(
-                                    "Manual accept enabled; suppressing immediate prepare response for {}",
-                                    message.peer_address
-                                );
-                                Ok(Vec::new())
-                            } else {
-                                Ok(vec![TransportOutbound::new(
-                                    BleFrameType::BilateralPrepareResponse,
-                                    response,
-                                )])
-                            }
-                        }
-                        Err(e) if e.to_string().contains("silent_drop_duplicate_packet") => {
-                            warn!("Silently dropping duplicate Prepare request.");
-                            Ok(Vec::new())
-                        }
+                        // A new proposal waits for its user and answers nothing;
+                        // one delivered again is answered with what it is owed.
+                        Ok((reply, _meta)) if reply.is_empty() => Ok(Vec::new()),
+                        Ok((reply, _meta)) => match classify_prepare_reply(&reply) {
+                            Some(frame) => Ok(vec![TransportOutbound::new(frame, reply)]),
+                            None => Err(DsmError::invalid_operation(
+                                "handle_prepare_request returned an unroutable reply (fail-closed)"
+                                    .to_string(),
+                            )),
+                        },
                         Err(e) => {
                             warn!("BilateralPrepare rejected: {e}. Ensure contact is added/verified and synced to BluetoothManager.");
                             Err(e)
@@ -285,10 +285,6 @@ impl BleTransportDelegate for BilateralTransportAdapter {
                                         .to_string(),
                                 )),
                             }
-                        }
-                        Err(e) if e.to_string().contains("silent_drop_duplicate_packet") => {
-                            warn!("Silently dropping duplicate Prepare Response.");
-                            Ok(Vec::new())
                         }
                         Err(e) => Err(e),
                     }
@@ -386,13 +382,6 @@ impl BleTransportDelegate for BilateralTransportAdapter {
                                         }
                                     }
                                 }
-                                Err(e)
-                                    if e.to_string().contains("silent_drop_duplicate_packet") =>
-                                {
-                                    warn!(
-                                        "[BILATERAL] Silently dropping duplicate Confirm Request."
-                                    );
-                                }
                                 Err(e) => {
                                     log::error!("[BILATERAL] Confirm handler failed: {e}");
                                 }
@@ -436,20 +425,6 @@ impl BleTransportDelegate for BilateralTransportAdapter {
                     debug!("Ignoring unknown BLE frame type: {:?}", message.frame_type);
                     Ok(Vec::new())
                 }
-            }
-        })
-    }
-
-    fn on_peer_disconnected(&self, peer_address: String) -> DelegateFuture<()> {
-        let bilateral_handler = Arc::clone(&self.bilateral_handler);
-        Box::pin(async move {
-            let failed = bilateral_handler
-                .handle_peer_disconnected(&peer_address)
-                .await;
-            if failed > 0 {
-                info!(
-                    "BLE disconnect {peer_address}: failed {failed} in-flight bilateral session(s)"
-                );
             }
         })
     }

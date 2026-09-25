@@ -547,11 +547,6 @@ object Unified {
      */
     @Keep @JvmStatic fun forceBleCoordinatorInit(): Boolean = UnifiedNativeApi.forceBleCoordinatorInit()
 
-    // ---------- Bilateral manual accept gate ----------
-    @Keep @JvmStatic fun setManualAcceptEnabled(enabled: Boolean) {
-        UnifiedNativeApi.setManualAcceptEnabled(enabled)
-    }
-
     // ---------- BLE diagnostics + retry helpers (non-external; pure-Kotlin wrappers) ----------
     @Keep @JvmStatic fun getBleStats(deviceAddress: String): ByteArray {
         return UnifiedBleBridge.getBleStats(deviceAddress)

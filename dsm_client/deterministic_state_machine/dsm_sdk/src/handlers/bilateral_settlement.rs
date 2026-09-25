@@ -372,6 +372,7 @@ mod tests {
         );
         assert!(!crate::storage::client_db::transaction_exists(
             &crate::util::text_id::encode_base32_crockford(&[0x34u8; 32])
-        ));
+        )
+        .expect("read the history"));
     }
 }
