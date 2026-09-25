@@ -257,7 +257,8 @@ mod tests {
     }
 
     /// One operation as an exercise: F over `attempts`, the canonical
-    /// witnesses over the shadows P(E) commits, no closure.
+    /// witnesses over the shadows P(E) commits, and the parent claim its
+    /// closure references.
     fn exercise(f: &Fixture, attempts: &[u64]) -> Built {
         let p = &f.precommit;
         let canonical = derive::canonical_legs(&f.preimage).unwrap();
@@ -312,7 +313,8 @@ mod tests {
                 .iter()
                 .map(DlvPolicyFulfillmentBody::encode)
                 .collect(),
-            Vec::new(),
+            // 𝒞_E^pre references the parent P names; the exercise carries it.
+            vec![f.parent_claim.clone()],
         )
         .unwrap();
         Built {
@@ -380,7 +382,7 @@ mod tests {
             x.precommit().to_vec(),
             x.preimage().to_vec(),
             x.witnesses().to_vec(),
-            Vec::new(),
+            x.closure().to_vec(),
         )
         .unwrap();
         assert!(recognize_exercise(&bent.encode()).is_none());
@@ -390,7 +392,7 @@ mod tests {
             x.precommit().to_vec(),
             other.preimage.encode().unwrap(),
             x.witnesses().to_vec(),
-            Vec::new(),
+            x.closure().to_vec(),
         )
         .unwrap();
         assert!(recognize_exercise(&bent.encode()).is_none());
@@ -402,7 +404,7 @@ mod tests {
             x.precommit().to_vec(),
             x.preimage().to_vec(),
             ws,
-            Vec::new(),
+            x.closure().to_vec(),
         )
         .unwrap();
         assert!(recognize_exercise(&bent.encode()).is_none());
@@ -418,7 +420,7 @@ mod tests {
             x.precommit().to_vec(),
             x.preimage().to_vec(),
             ws,
-            Vec::new(),
+            x.closure().to_vec(),
         )
         .unwrap();
         assert!(recognize_exercise(&bent.encode()).is_none());
@@ -451,7 +453,7 @@ mod tests {
                 .unwrap(),
                 honest.exercise.preimage().to_vec(),
                 honest.exercise.witnesses().to_vec(),
-                Vec::new(),
+                honest.exercise.closure().to_vec(),
             )
             .unwrap()
             .encode()

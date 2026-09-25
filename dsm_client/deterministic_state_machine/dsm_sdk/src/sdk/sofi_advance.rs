@@ -300,8 +300,9 @@ fn pending_fulfillment(core: &CoreSDK) -> Result<(PendingEconomicAdmission, D32)
 /// The closure objects only this trader holds exactly, from its own durable
 /// state: the claim envelope it registered at `p` for a `SingleRootClaim`
 /// naming that claim; a `ConditionalClaim` is the final bytes at `K_root` of
-/// the position it names, which are storage's.
-async fn own_closure_objects(
+/// the position it names, which are storage's, read where that position's
+/// cells are routed — by the root it was built on.
+pub(crate) async fn own_closure_objects(
     set: &StorageSet,
     precommit: &TraderPrecommitBody,
     preimage: &SettlementPreimage,
@@ -325,9 +326,11 @@ async fn own_closure_objects(
                 position,
                 ..
             } => {
+                let Some(built_on) = own_root_before(*position)? else {
+                    continue;
+                };
                 if let Some(bytes) =
-                    final_root_cell(set, genesis, device_id, *position, precommit.void_root())
-                        .await?
+                    final_root_cell(set, genesis, device_id, *position, &built_on).await?
                 {
                     own.insert(*reference, bytes);
                 }
@@ -336,6 +339,28 @@ async fn own_closure_objects(
         }
     }
     Ok(own)
+}
+
+/// The root this device's position `position` was built on — the root its
+/// admitted position `position - 1` selected — which routes the cells of
+/// `position` (`s(q)` from the parent root, as [`crate::sdk::sofi_register::cells_of`] routes `F.q` by
+/// `P.void_root`). `None` when this device admitted no position there that
+/// selected a root.
+fn own_root_before(position: u64) -> Result<Option<D32>, DsmError> {
+    let Some(before) = position.checked_sub(1) else {
+        return Ok(None);
+    };
+    Ok(
+        match economic_lineage::get_admitted_at(before)
+            .map_err(|e| storage("admitted history", e))?
+        {
+            Some(AdmittedEconomicPosition::SingleRoot { economic_root, .. }) => Some(economic_root),
+            Some(AdmittedEconomicPosition::ResolvedSofi { selected_root, .. }) => {
+                Some(selected_root)
+            }
+            Some(AdmittedEconomicPosition::UnresolvedSofi { .. }) | None => None,
+        },
+    )
 }
 
 /// The bytes final at `K_root(position)` of `(genesis, device_id)`, routed
