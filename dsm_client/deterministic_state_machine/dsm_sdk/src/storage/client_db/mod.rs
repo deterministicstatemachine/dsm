@@ -412,7 +412,10 @@ fn get_database_path() -> Result<PathBuf> {
 /// 23: `contacts.chain_tip_commitment` records the step commitment that moved
 /// an offline relationship's tip, so a replayed step is recognised as already
 /// applied; `bilateral_sender_settlements` is gone (a step's settlement
-/// commits in its advance's transaction, so it cannot be applied twice).
+/// commits in its advance's transaction, so it cannot be applied twice), and
+/// so is `pending_confirm_delivery` (a confirm envelope kept "for re-delivery"
+/// that nothing ever read back or re-delivered); `bilateral_sessions` keeps
+/// the receiver's counter-signed receipt beside the sender's own.
 pub const CLIENT_DB_SCHEMA_VERSION: i64 = 23;
 
 /// A 32-byte column, exactly. Any other length is a corrupt row and an error —
@@ -1252,15 +1255,8 @@ fn create_schema(conn: &Connection) -> Result<()> {
             local_signature           BLOB,
             counterparty_signature    BLOB,
             sender_ble_address        TEXT,
-            stitched_receipt_bytes    BLOB
-        );
-
-        -- §5.3 Atomic bilateral commit: persists the confirm envelope atomically
-        -- with sender finalization so it survives crashes for re-delivery.
-        CREATE TABLE IF NOT EXISTS pending_confirm_delivery(
-            commitment_hash        BLOB PRIMARY KEY,
-            counterparty_device_id BLOB NOT NULL,
-            confirm_envelope       BLOB NOT NULL
+            stitched_receipt_bytes    BLOB,
+            counter_signed_receipt    BLOB
         );
 
         CREATE TABLE IF NOT EXISTS transactions(

@@ -141,8 +141,8 @@ pub fn derive_kyber_k_step_for_verify(
 /// The helper handles the full whitepaper §11.1 per-step signing flow:
 /// loading the prior chain head SK (or the root AK at relationship genesis), deriving a
 /// fresh `EK_{n+1}` keypair, signing the cert, answering the receipt challenge,
-/// and returning all artifacts. Callers do post-acceptance advancement
-/// separately via `advance_local_chain_head_after_signing`.
+/// and returning all artifacts. The Local head moves to the new EK only in
+/// the step's commit, by compare-and-set on the head it was signed from.
 pub struct PerStepSigningInputs<'a> {
     /// The receipt commitment hash (output of
     /// `StitchedReceiptV2::compute_commitment`) — the transition commitment
@@ -187,8 +187,8 @@ pub struct PerStepSigningOutput {
     /// New EK public key — caller should set this on `receipt.ek_pk_a`
     /// (or `ek_pk_b` if they're co-signing on B's side).
     pub ek_pk: Vec<u8>,
-    /// New EK secret key — kept in memory for `advance_local_chain_head_after_signing`.
-    /// Caller MUST wipe this from memory after advancement.
+    /// New EK secret key — kept in memory until the step's commit records it
+    /// under the at-rest key. Caller MUST wipe this from memory afterwards.
     pub ek_sk: Vec<u8>,
     /// Cert chaining `EK_pk` back to the prior chain head — caller should
     /// set this on `receipt.ek_cert_a` (or `ek_cert_b`).
@@ -223,8 +223,8 @@ pub struct PerStepSigningOutput {
 /// 4. Sign `cert_{n+1} = Sign_{prior_SK}(BLAKE3("DSM/ek-cert\0" ||
 ///    EK_pk_{n+1} || h_n))`.
 /// 5. Sign `inputs.commitment` with the new `EK_sk_{n+1}` to produce sig.
-/// 6. Return all artifacts; caller stamps them onto the receipt and calls
-///    `advance_local_chain_head_after_signing` post-acceptance.
+/// 6. Return all artifacts; caller stamps them onto the receipt, and the
+///    step's commit moves the Local head to the new EK.
 pub fn sign_receipt_with_per_step_ek(
     inputs: &PerStepSigningInputs,
 ) -> Result<PerStepSigningOutput, DsmError> {
@@ -310,50 +310,6 @@ pub fn sign_receipt_with_per_step_ek_target(
         kyber_ct: kyber_step.ciphertext,
         used_root_ak,
     })
-}
-
-/// Persist the new chain head after a receipt has been accepted.
-///
-/// Distinguishes between the relationship-genesis case (where the chain
-/// head has never been initialized — caller passes `init = true`) and the
-/// steady-state case (caller passes `init = false`). In both cases the
-/// new `EK_pk_{n+1}` becomes the current chain head, encrypted SK stored
-/// for the next step's signing.
-///
-/// Caller MUST wipe `ek_sk_in_memory` (zeroize) after this returns.
-pub fn advance_local_chain_head_after_signing(
-    relationship_key: &[u8; 32],
-    new_ek_pk: &[u8],
-    new_ek_sk_in_memory: &[u8],
-    at_rest_key: &[u8; 32],
-    init: bool,
-) -> Result<(), DsmError> {
-    use crate::storage::client_db::{
-        advance_local_cert_chain_head_with_sk, init_local_cert_chain_head_with_sk,
-    };
-
-    if init {
-        // First-ever advance for this relationship — write Local row with the
-        // new EK as the chain head. Counterparty side still needs separate
-        // initialization with their AK_pk by the caller (typically at contact
-        // establishment time via init_cert_chain_for_relationship).
-        init_local_cert_chain_head_with_sk(
-            relationship_key,
-            new_ek_pk,
-            new_ek_sk_in_memory,
-            at_rest_key,
-        )
-        .map_err(|e| DsmError::invalid_operation(format!("chain-head SK init: {e}")))?;
-    } else {
-        advance_local_cert_chain_head_with_sk(
-            relationship_key,
-            new_ek_pk,
-            new_ek_sk_in_memory,
-            at_rest_key,
-        )
-        .map_err(|e| DsmError::invalid_operation(format!("chain-head SK advance: {e}")))?;
-    }
-    Ok(())
 }
 
 /// Build the canonical receipt of one relationship step (§4.2).
@@ -644,15 +600,50 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // ── sign_receipt_with_per_step_ek + advance_local_chain_head_after_signing ──
+    // ── sign_receipt_with_per_step_ek + the committed head move ──
 
     /// Set up AppState identity (`G` + `DevID`) + a cached wallet seed so the per-step signing
     /// helpers can re-derive `Smaster` (EK/coins) and the chain-head at-rest key internally
-    /// (replaces the old explicit K_DBRW argument). Returns the at-rest key for
-    /// `advance_local_chain_head_after_signing` calls.
+    /// (replaces the old explicit K_DBRW argument). Returns the at-rest key the
+    /// committed head moves record the EK secret under.
     fn setup_signing_identity() -> [u8; 32] {
         crate::economic_fixtures::local_device(0x11);
         crate::init::current_chain_head_at_rest_key().expect("the chain head's at-rest key")
+    }
+
+    /// Move the Local head from `prev` to the signed step's EK as a committed
+    /// step does: compare-and-set, the first step declared by `prev == None`.
+    fn commit_local_head(
+        rel_key: &[u8; 32],
+        prev: Option<&[u8]>,
+        ek_pk: &[u8],
+        ek_sk: &[u8],
+        wrap: &[u8; 32],
+    ) {
+        use crate::storage::client_db::{cas_advance_local_cert_chain_head_with_sk, CasHeadOutcome};
+        let outcome = cas_advance_local_cert_chain_head_with_sk(rel_key, prev, ek_pk, ek_sk, wrap)
+            .expect("the head write");
+        assert!(
+            matches!(
+                outcome,
+                CasHeadOutcome::Advanced { .. } | CasHeadOutcome::GenesisInit
+            ),
+            "the Local head did not move from its expected predecessor: {outcome:?}"
+        );
+    }
+
+    /// Move the Counterparty mirror from `prev` to the peer's step EK; returns
+    /// the mirror's step count.
+    fn commit_counterparty_head(rel_key: &[u8; 32], prev: &[u8], ek_pk: &[u8]) -> u64 {
+        use crate::storage::client_db::{cas_advance_counterparty_cert_chain_head, CasHeadOutcome};
+        match cas_advance_counterparty_cert_chain_head(rel_key, Some(prev), ek_pk)
+            .expect("the mirror write")
+        {
+            CasHeadOutcome::Advanced { step } => step,
+            other => panic!(
+                "the Counterparty mirror did not move from its expected predecessor: {other:?}"
+            ),
+        }
     }
 
     /// Helper: build minimal valid signing inputs for tests.
@@ -738,8 +729,7 @@ mod tests {
         let inputs0 = signing_inputs(&commit0, &rel_key, &ak_pk, &ak_sk, &kyber_pk);
         let out0 = sign_receipt_with_per_step_ek(&inputs0).unwrap();
         assert!(out0.used_root_ak);
-        advance_local_chain_head_after_signing(&rel_key, &out0.ek_pk, &out0.ek_sk, &at_rest, true)
-            .unwrap();
+        commit_local_head(&rel_key, None, &out0.ek_pk, &out0.ek_sk, &at_rest);
 
         // Step 1: chain head is EK_1 — root NOT used.
         let commit1 = [0xC1; 32];
@@ -796,9 +786,8 @@ mod tests {
         let target0 = compute_receipt_challenge_response_target(&commit0, inputs0.session_binding);
         assert!(sphincs_verify(&out0.ek_pk, &target0, &out0.sig).unwrap());
 
-        // Persist EK_0 as new chain head.
-        advance_local_chain_head_after_signing(&rel_key, &out0.ek_pk, &out0.ek_sk, &at_rest, true)
-            .unwrap();
+        // Commit EK_0 as the chain head.
+        commit_local_head(&rel_key, None, &out0.ek_pk, &out0.ek_sk, &at_rest);
 
         // ────── Step 1 ──────
         let commit1 = [0xF1; 32];
@@ -819,8 +808,13 @@ mod tests {
         // Distinct EK at step 1 vs step 0.
         assert_ne!(out0.ek_pk, out1.ek_pk);
 
-        advance_local_chain_head_after_signing(&rel_key, &out1.ek_pk, &out1.ek_sk, &at_rest, false)
-            .unwrap();
+        commit_local_head(
+            &rel_key,
+            Some(&out0.ek_pk),
+            &out1.ek_pk,
+            &out1.ek_sk,
+            &at_rest,
+        );
     }
 
     /// Property-style test (loop-based, no proptest dependency).
@@ -889,15 +883,14 @@ mod tests {
                 };
                 let out = sign_receipt_with_per_step_ek(&inputs).unwrap();
 
-                // Advance chain head so step+1 won't take the root AK.
-                advance_local_chain_head_after_signing(
+                // Commit the chain head so step+1 won't take the root AK.
+                commit_local_head(
                     &rel_key,
+                    chain_pubkeys.last().map(Vec::as_slice),
                     &out.ek_pk,
                     &out.ek_sk,
                     &at_rest,
-                    /*init=*/ step == 0,
-                )
-                .unwrap();
+                );
 
                 chain_pubkeys.push(out.ek_pk);
                 chain_certs.push(out.ek_cert);
@@ -1204,15 +1197,14 @@ mod tests {
     /// expected_prev_pk is loaded from `cert_chain_heads.Counterparty`
     /// (now the fresh EK_pk_0, not the stale AK_pk).
     ///
-    /// Without the post-commit `advance_cert_chain_head(Counterparty, ...)`
-    /// call, this test fails at step 1 because the cert chains to EK_pk_0
+    /// Without the committed step's Counterparty move, this test fails at step 1 because the cert chains to EK_pk_0
     /// while the verifier still reads AK_pk.
     #[test]
     #[serial_test::serial]
     fn verify_per_step_ek_signing_multi_step_with_counterparty_advance() {
         use crate::storage::client_db::{
-            advance_cert_chain_head, init_cert_chain_head, load_cert_chain_head_pubkey,
-            reset_database_for_tests, CertChainSide,
+            init_cert_chain_head, load_cert_chain_head_pubkey, reset_database_for_tests,
+            CertChainSide,
         };
         use dsm::crypto::ephemeral_key::generate_ephemeral_keypair;
 
@@ -1266,17 +1258,8 @@ mod tests {
         receipt_step0.set_kyber_ct_a(out0.kyber_ct);
         receipt_step0.add_sig_a(out0.sig);
 
-        // Sender advances Local during signing (already done by
-        // sign_receipt_with_per_step_ek + advance_local_chain_head_after_signing
-        // in the BLE handler signer path).
-        advance_local_chain_head_after_signing(
-            &sender_rel_key,
-            &out0.ek_pk,
-            &out0.ek_sk,
-            &at_rest,
-            out0.used_root_ak,
-        )
-        .unwrap();
+        // The sender's step commits: its Local head moves to EK_0.
+        commit_local_head(&sender_rel_key, None, &out0.ek_pk, &out0.ek_sk, &at_rest);
 
         // Step 0 verifier check: the sender's chain head as observed by
         // the receiver (Counterparty side from receiver's POV) is
@@ -1303,10 +1286,7 @@ mod tests {
         // outbound chain head in their own Counterparty row so step 1+
         // verification finds the fresh prev_pk (EK_pk_0), not the stale
         // genesis AK_pk.
-        let new_step =
-            advance_cert_chain_head(&sender_rel_key, CertChainSide::Counterparty, &out0.ek_pk)
-                .unwrap()
-                .expect("Counterparty advance must report new step number");
+        let new_step = commit_counterparty_head(&sender_rel_key, &sender_ak_pk, &out0.ek_pk);
         assert_eq!(new_step, 1, "Counterparty step counter should advance to 1");
 
         // ────── Step 1 (sender signs again with advanced Local head) ──────
@@ -1708,8 +1688,8 @@ mod tests {
     #[serial_test::serial]
     fn bilateral_three_step_chain_extension_e2e() {
         use crate::storage::client_db::{
-            advance_cert_chain_head, init_cert_chain_head, load_cert_chain_head_pubkey,
-            reset_database_for_tests, CertChainSide,
+            init_cert_chain_head, load_cert_chain_head_pubkey, reset_database_for_tests,
+            CertChainSide,
         };
         use dsm::crypto::ephemeral_key::generate_ephemeral_keypair;
 
@@ -1791,14 +1771,13 @@ mod tests {
             receipt.set_ek_cert_a(a_out.ek_cert.clone());
             receipt.set_kyber_ct_a(a_out.kyber_ct.clone());
             receipt.add_sig_a(a_out.sig.clone());
-            advance_local_chain_head_after_signing(
+            commit_local_head(
                 &rel_a,
+                ek_pks_a.last().map(Vec::as_slice),
                 &a_out.ek_pk,
                 &a_out.ek_sk,
                 &at_rest,
-                a_out.used_root_ak,
-            )
-            .unwrap();
+            );
 
             // ─── B-side verification of A (Device B verifies A) ───
             let prev_pk_a_loaded = load_cert_chain_head_pubkey(&rel_a, CertChainSide::Counterparty)
@@ -1862,14 +1841,13 @@ mod tests {
             receipt.set_ek_cert_b(b_out.ek_cert.clone());
             receipt.set_kyber_ct_b(b_out.kyber_ct.clone());
             receipt.add_sig_b(b_out.sig.clone());
-            advance_local_chain_head_after_signing(
+            commit_local_head(
                 &rel_b,
+                ek_pks_b.last().map(Vec::as_slice),
                 &b_out.ek_pk,
                 &b_out.ek_sk,
                 &at_rest,
-                b_out.used_root_ak,
-            )
-            .unwrap();
+            );
 
             assert!(
                 receipt.is_fully_signed(),
@@ -1896,14 +1874,8 @@ mod tests {
 
             // ─── Post-commit Counterparty advances ───
             // Both devices advance their mirrors of the other's chain.
-            let new_step_a =
-                advance_cert_chain_head(&rel_a, CertChainSide::Counterparty, &a_out.ek_pk)
-                    .unwrap()
-                    .expect("rel_a.Counterparty advance must succeed");
-            let new_step_b =
-                advance_cert_chain_head(&rel_b, CertChainSide::Counterparty, &b_out.ek_pk)
-                    .unwrap()
-                    .expect("rel_b.Counterparty advance must succeed");
+            let new_step_a = commit_counterparty_head(&rel_a, &prev_pk_a_loaded, &a_out.ek_pk);
+            let new_step_b = commit_counterparty_head(&rel_b, &prev_pk_b_loaded, &b_out.ek_pk);
             assert_eq!(
                 new_step_a,
                 step as u64 + 1,
