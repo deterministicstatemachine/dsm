@@ -53,7 +53,7 @@ pub struct BilateralSettlementContext {
     /// `true` when the local device is the sender of the transfer.
     pub is_sender: bool,
     /// Transaction type label stored in the history record
-    /// (e.g. `"bilateral_offline"`, `"bilateral_offline_recovered"`).
+    /// (e.g. `"bilateral_offline"`).
     pub tx_type: &'static str,
     /// New bilateral chain tip required for the receiver-side atomic persistence
     /// boundary.  Set to `[0u8; 32]` on sender paths where it is not needed.
