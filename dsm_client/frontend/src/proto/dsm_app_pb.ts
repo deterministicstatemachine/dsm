@@ -215,38 +215,6 @@ proto3.util.setEnumType(VaultPublicationState, "dsm.VaultPublicationState", [
 ]);
 
 /**
- * @generated from enum dsm.StorageNodeStatus
- */
-export enum StorageNodeStatus {
-  /**
-   * @generated from enum value: STORAGE_NODE_STATUS_UNSPECIFIED = 0;
-   */
-  UNSPECIFIED = 0,
-
-  /**
-   * @generated from enum value: STORAGE_NODE_STATUS_ALIVE = 1;
-   */
-  ALIVE = 1,
-
-  /**
-   * @generated from enum value: STORAGE_NODE_STATUS_SUSPECTED = 2;
-   */
-  SUSPECTED = 2,
-
-  /**
-   * @generated from enum value: STORAGE_NODE_STATUS_DEAD = 3;
-   */
-  DEAD = 3,
-}
-// Retrieve enum metadata with: proto3.getEnumType(StorageNodeStatus)
-proto3.util.setEnumType(StorageNodeStatus, "dsm.StorageNodeStatus", [
-  { no: 0, name: "STORAGE_NODE_STATUS_UNSPECIFIED" },
-  { no: 1, name: "STORAGE_NODE_STATUS_ALIVE" },
-  { no: 2, name: "STORAGE_NODE_STATUS_SUSPECTED" },
-  { no: 3, name: "STORAGE_NODE_STATUS_DEAD" },
-]);
-
-/**
  * =================== UNIVERSAL ARG/RESULT PACKS =====================
  *
  * @generated from enum dsm.Codec
@@ -9025,202 +8993,6 @@ export class RoutingVaultAdvertisementV1 extends Message<RoutingVaultAdvertiseme
 }
 
 /**
- * @generated from message dsm.StorageNodeInfoV1
- */
-export class StorageNodeInfoV1 extends Message<StorageNodeInfoV1> {
-  /**
-   * @generated from field: string node_id = 1;
-   */
-  nodeId = "";
-
-  /**
-   * @generated from field: string address = 2;
-   */
-  address = "";
-
-  /**
-   * deterministic counter (transport/admin only)
-   *
-   * @generated from field: int64 last_seen_tick = 3;
-   */
-  lastSeenTick = protoInt64.zero;
-
-  /**
-   * @generated from field: dsm.StorageNodeStatus status = 4;
-   */
-  status = StorageNodeStatus.UNSPECIFIED;
-
-  constructor(data?: PartialMessage<StorageNodeInfoV1>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.StorageNodeInfoV1";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "node_id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 2, name: "address", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 3, name: "last_seen_tick", kind: "scalar", T: 3 /* ScalarType.INT64 */ },
-    { no: 4, name: "status", kind: "enum", T: proto3.getEnumType(StorageNodeStatus) },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): StorageNodeInfoV1 {
-    return new StorageNodeInfoV1().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): StorageNodeInfoV1 {
-    return new StorageNodeInfoV1().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): StorageNodeInfoV1 {
-    return new StorageNodeInfoV1().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: StorageNodeInfoV1 | PlainMessage<StorageNodeInfoV1> | undefined, b: StorageNodeInfoV1 | PlainMessage<StorageNodeInfoV1> | undefined): boolean {
-    return proto3.util.equals(StorageNodeInfoV1, a, b);
-  }
-}
-
-/**
- * @generated from message dsm.GossipMessageV1
- */
-export class GossipMessageV1 extends Message<GossipMessageV1> {
-  /**
-   * @generated from field: string sender_node_id = 1;
-   */
-  senderNodeId = "";
-
-  /**
-   * deterministic counter (transport/admin only)
-   *
-   * @generated from field: int64 sender_tick = 2;
-   */
-  senderTick = protoInt64.zero;
-
-  /**
-   * @generated from field: repeated dsm.StorageNodeInfoV1 node_states = 3;
-   */
-  nodeStates: StorageNodeInfoV1[] = [];
-
-  constructor(data?: PartialMessage<GossipMessageV1>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.GossipMessageV1";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "sender_node_id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 2, name: "sender_tick", kind: "scalar", T: 3 /* ScalarType.INT64 */ },
-    { no: 3, name: "node_states", kind: "message", T: StorageNodeInfoV1, repeated: true },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): GossipMessageV1 {
-    return new GossipMessageV1().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): GossipMessageV1 {
-    return new GossipMessageV1().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): GossipMessageV1 {
-    return new GossipMessageV1().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: GossipMessageV1 | PlainMessage<GossipMessageV1> | undefined, b: GossipMessageV1 | PlainMessage<GossipMessageV1> | undefined): boolean {
-    return proto3.util.equals(GossipMessageV1, a, b);
-  }
-}
-
-/**
- * @generated from message dsm.GossipStatusV1
- */
-export class GossipStatusV1 extends Message<GossipStatusV1> {
-  /**
-   * @generated from field: uint32 alive_nodes_count = 1;
-   */
-  aliveNodesCount = 0;
-
-  /**
-   * @generated from field: repeated dsm.StorageNodeInfoV1 nodes = 2;
-   */
-  nodes: StorageNodeInfoV1[] = [];
-
-  constructor(data?: PartialMessage<GossipStatusV1>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.GossipStatusV1";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "alive_nodes_count", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
-    { no: 2, name: "nodes", kind: "message", T: StorageNodeInfoV1, repeated: true },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): GossipStatusV1 {
-    return new GossipStatusV1().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): GossipStatusV1 {
-    return new GossipStatusV1().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): GossipStatusV1 {
-    return new GossipStatusV1().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: GossipStatusV1 | PlainMessage<GossipStatusV1> | undefined, b: GossipStatusV1 | PlainMessage<GossipStatusV1> | undefined): boolean {
-    return proto3.util.equals(GossipStatusV1, a, b);
-  }
-}
-
-/**
- * @generated from message dsm.AdminMaintenanceResponseV1
- */
-export class AdminMaintenanceResponseV1 extends Message<AdminMaintenanceResponseV1> {
-  /**
-   * deterministic counter (admin only)
-   *
-   * @generated from field: int64 tick = 1;
-   */
-  tick = protoInt64.zero;
-
-  /**
-   * @generated from field: bool ok = 2;
-   */
-  ok = false;
-
-  constructor(data?: PartialMessage<AdminMaintenanceResponseV1>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.AdminMaintenanceResponseV1";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "tick", kind: "scalar", T: 3 /* ScalarType.INT64 */ },
-    { no: 2, name: "ok", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AdminMaintenanceResponseV1 {
-    return new AdminMaintenanceResponseV1().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): AdminMaintenanceResponseV1 {
-    return new AdminMaintenanceResponseV1().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): AdminMaintenanceResponseV1 {
-    return new AdminMaintenanceResponseV1().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: AdminMaintenanceResponseV1 | PlainMessage<AdminMaintenanceResponseV1> | undefined, b: AdminMaintenanceResponseV1 | PlainMessage<AdminMaintenanceResponseV1> | undefined): boolean {
-    return proto3.util.equals(AdminMaintenanceResponseV1, a, b);
-  }
-}
-
-/**
  * No artifact body may exceed the storage node's 128 KiB envelope cap; the largest
  * b0x carriers are the ADR 0003 A-side evidence (~118 KB) and the B-side
  * countersign delta (~101 KB). A full countersigned StitchedReceiptV2 (~218 KB)
@@ -17094,16 +16866,19 @@ export class BatchEnvelope extends Message<BatchEnvelope> {
 }
 
 /**
+ * One spool entry: the bytes submitted, exactly as the node holds them. The
+ * node never opens an envelope (storage spec §8); the reader decodes it.
+ *
  * @generated from message dsm.SequencedEnvelope
  */
 export class SequencedEnvelope extends Message<SequencedEnvelope> {
   /**
-   * @generated from field: dsm.Envelope envelope = 1;
+   * @generated from field: bytes envelope = 1;
    */
-  envelope?: Envelope;
+  envelope = new Uint8Array(0);
 
   /**
-   * sequence number for idempotent retrieval
+   * the entry's position in the spool
    *
    * @generated from field: uint64 seq_num = 2;
    */
@@ -17117,7 +16892,7 @@ export class SequencedEnvelope extends Message<SequencedEnvelope> {
   static readonly runtime: typeof proto3 = proto3;
   static readonly typeName = "dsm.SequencedEnvelope";
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "envelope", kind: "message", T: Envelope },
+    { no: 1, name: "envelope", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 2, name: "seq_num", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
   ]);
 
@@ -21812,55 +21587,6 @@ export class OnlineMessageResponse extends Message<OnlineMessageResponse> {
 /**
  * =================== Discovery / Publish Diagnostics =================
  *
- * @generated from message dsm.DiscoverLocalResponse
- */
-export class DiscoverLocalResponse extends Message<DiscoverLocalResponse> {
-  /**
-   * @generated from field: repeated string discovered_nodes = 1;
-   */
-  discoveredNodes: string[] = [];
-
-  /**
-   * @generated from field: string discovery_method = 2;
-   */
-  discoveryMethod = "";
-
-  /**
-   * @generated from field: uint64 event_counter = 3;
-   */
-  eventCounter = protoInt64.zero;
-
-  constructor(data?: PartialMessage<DiscoverLocalResponse>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.DiscoverLocalResponse";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "discovered_nodes", kind: "scalar", T: 9 /* ScalarType.STRING */, repeated: true },
-    { no: 2, name: "discovery_method", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 3, name: "event_counter", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): DiscoverLocalResponse {
-    return new DiscoverLocalResponse().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): DiscoverLocalResponse {
-    return new DiscoverLocalResponse().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): DiscoverLocalResponse {
-    return new DiscoverLocalResponse().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: DiscoverLocalResponse | PlainMessage<DiscoverLocalResponse> | undefined, b: DiscoverLocalResponse | PlainMessage<DiscoverLocalResponse> | undefined): boolean {
-    return proto3.util.equals(DiscoverLocalResponse, a, b);
-  }
-}
-
-/**
  * @generated from message dsm.PublishGenesisResponse
  */
 export class PublishGenesisResponse extends Message<PublishGenesisResponse> {

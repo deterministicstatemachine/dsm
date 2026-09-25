@@ -14,10 +14,7 @@ use std::sync::Arc;
 
 use axum::{body::Body, http::Request, http::StatusCode, Router};
 use dsm::utils::text_id;
-use dsm_storage_node::{
-    replication::{ReplicationConfig, ReplicationManager},
-    AppState,
-};
+use dsm_storage_node::AppState;
 use prost::Message;
 use tower::ServiceExt;
 
@@ -25,33 +22,13 @@ const NS: &str = "DSM/cells-contract";
 
 /// A member over a fresh store of its own, named `store`.
 async fn member(store: &str) -> Router {
-    let endpoint = "http://member.local:8080".to_string();
     let pool = common::fresh_store(store).await;
-    let rm = Arc::new(
-        ReplicationManager::new(
-            ReplicationConfig {
-                replication_factor: 3,
-                gossip_interval_ticks: 100,
-                failure_timeout_ticks: 300,
-                gossip_fanout: 3,
-                max_concurrent_jobs: 10,
-            },
-            "member".to_string(),
-            endpoint.clone(),
-            &common::set_ca_pem(),
-            Vec::new(),
-        )
-        .expect("replication manager"),
-    );
-    let state = Arc::new(AppState::new(
-        "member".to_string(),
-        &endpoint,
-        None,
-        pool,
-        rm,
+    let state = Arc::new(common::ok_or_panic(
+        AppState::new("member".to_string(), pool, common::set_client()),
+        "app state",
     ));
-    // The binary's own assembly (R2): what this suite drives is what is served.
-    dsm_storage_node::storage_contract_router(state)
+    // The binary's own assembly: what this suite drives is what is served.
+    common::served(state)
 }
 
 fn key(tag: u8) -> String {

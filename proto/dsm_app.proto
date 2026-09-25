@@ -1353,39 +1353,6 @@ message RoutingVaultAdvertisementV1 {
   uint64 economic_proof_position  = 16;
 }
 
-// ===================== STORAGE NODE ADMIN/GOSSIP/LIST (V1) ==================
-// Protobuf-only responses for admin and gossip endpoints (no JSON, no clocks).
-
-enum StorageNodeStatus {
-  STORAGE_NODE_STATUS_UNSPECIFIED = 0;
-  STORAGE_NODE_STATUS_ALIVE       = 1;
-  STORAGE_NODE_STATUS_SUSPECTED   = 2;
-  STORAGE_NODE_STATUS_DEAD        = 3;
-}
-
-message StorageNodeInfoV1 {
-  string node_id       = 1;
-  string address       = 2;
-  int64  last_seen_tick = 3; // deterministic counter (transport/admin only)
-  StorageNodeStatus status = 4;
-}
-
-message GossipMessageV1 {
-  string sender_node_id = 1;
-  int64  sender_tick    = 2; // deterministic counter (transport/admin only)
-  repeated StorageNodeInfoV1 node_states = 3;
-}
-
-message GossipStatusV1 {
-  uint32 alive_nodes_count = 1;
-  repeated StorageNodeInfoV1 nodes = 2;
-}
-
-message AdminMaintenanceResponseV1 {
-  int64 tick = 1; // deterministic counter (admin only)
-  bool  ok   = 2;
-}
-
 // =================== UNIVERSAL ARG/RESULT PACKS =====================
 enum Codec { CODEC_UNSPECIFIED = 0; CODEC_PROTO = 1; }   // canonical: PROTO only
 // No artifact body may exceed the storage node's 128 KiB envelope cap; the largest
@@ -2542,9 +2509,11 @@ message BatchEnvelope {
   bool    atomic_execution    = 3; // deterministic local ordering
 }
 
+// One spool entry: the bytes submitted, exactly as the node holds them. The
+// node never opens an envelope (storage spec §8); the reader decodes it.
 message SequencedEnvelope {
-  Envelope envelope = 1;
-  uint64   seq_num   = 2; // sequence number for idempotent retrieval
+  bytes  envelope = 1;
+  uint64 seq_num  = 2; // the entry's position in the spool
 }
 
 message SequencedBatchEnvelope {
@@ -3370,7 +3339,6 @@ message OnlineMessageResponse {
 }
 
 // =================== Discovery / Publish Diagnostics =================
-message DiscoverLocalResponse { repeated string discovered_nodes = 1; string discovery_method = 2; uint64 event_counter = 3; }
 message PublishGenesisResponse { bool success = 1; bool published = 2; string key = 3; uint32 published_to_nodes = 4; uint64 event_counter = 5; }
 
 message TokenPolicyCacheEntry {

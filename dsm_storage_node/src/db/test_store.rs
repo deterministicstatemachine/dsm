@@ -45,3 +45,12 @@ pub(crate) fn unique_key(tag: u8) -> [u8; 32] {
 pub(crate) fn unique_name(tag: u8) -> String {
     dsm::utils::text_id::encode_base32_crockford(&unique_key(tag))
 }
+
+/// A client pinned to a freshly generated CA: the unit tests' nodes reach no
+/// set-mate, and a node's state holds a pinned client whatever it reaches.
+pub(crate) fn set_client() -> reqwest::Client {
+    let ca = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+        .unwrap_or_else(|e| panic!("generate a test CA: {e}"));
+    crate::set_client::pinned_set_client(ca.cert.pem().as_bytes())
+        .unwrap_or_else(|e| panic!("pinned client: {e}"))
+}

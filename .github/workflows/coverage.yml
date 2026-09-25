@@ -46,7 +46,7 @@ jobs:
     # The storage node's store is Postgres, and the SDK suites run their nodes
     # on it: every node-backed test needs this server.
     env:
-      DSM_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/dsm_node_test
+      DSM_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/dsm_node_test?sslmode=disable
     steps:
       - uses: actions/checkout@v7
 
