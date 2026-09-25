@@ -17,7 +17,7 @@ use crate::handlers::app_router_impl::AppRouterImpl;
 use crate::sdk::economic_admission_flow::resume_pending_admission;
 use crate::storage::client_db;
 use crate::test_support::one_device::Device;
-use crate::test_support::two_device::Pair;
+use crate::test_support::two_device::{assert_incomplete, Pair};
 
 fn era() -> [u8; 32] {
     dsm::core::token::token_state_manager::era_policy_commit()
@@ -786,7 +786,7 @@ async fn a_failed_finish_holds_the_outbox_and_resume_completes_the_same_admissio
     // THE RACE (correction A's control): run the resubmit sweep in the held
     // window — it must not see the row, so nothing reaches any node.
     let swept = p.a.sync().await;
-    assert!(swept.success, "{:?}", swept.errors);
+    assert_incomplete(&swept);
     assert_eq!(
         fleet_spool_count(&p).await,
         spooled_before,

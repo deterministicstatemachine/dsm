@@ -45,11 +45,16 @@ pub async fn arrivals_for(device: &TestDevice, fleet: &FleetGuard) -> Arrived {
         device.device_id,
         &contacts,
     ) {
-        arrived.transfers.extend(
-            b0x.retrieve_from_b0x_v2(&tagged.address)
-                .await
-                .expect("read the inbox"),
+        let outcome = b0x
+            .retrieve_from_b0x_v2(&tagged.address)
+            .await
+            .expect("read the inbox");
+        assert_eq!(
+            outcome.coverage,
+            crate::sdk::b0x_sdk::SpoolCoverage::Complete,
+            "the harness reads every delivery"
         );
+        arrived.transfers.extend(outcome.entries);
         for evidence in b0x.take_evidence_artifacts() {
             arrived.evidence.push((evidence, tagged.address.clone()));
         }

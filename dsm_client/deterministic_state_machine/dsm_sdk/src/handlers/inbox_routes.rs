@@ -80,10 +80,23 @@ impl AppRouterImpl {
                         break;
                     }
                     match b0x_sdk.retrieve_from_b0x_v2(&tagged.address).await {
-                        Ok(items) => {
+                        Ok(outcome) => {
+                            if let crate::sdk::b0x_sdk::SpoolCoverage::Partial {
+                                responded,
+                                needed,
+                            } = outcome.coverage
+                            {
+                                poll_errors.push(format!(
+                                    "{}: partial read, {responded} of {} members answered, \
+                                     {needed} needed",
+                                    &tagged.address[..16.min(tagged.address.len())],
+                                    outcome.members
+                                ));
+                            }
                             let remaining = limit - all_items.len();
                             all_items.extend(
-                                items
+                                outcome
+                                    .entries
                                     .into_iter()
                                     .take(remaining)
                                     .map(|entry| (entry, tagged.freshness)),
@@ -177,7 +190,11 @@ impl AppRouterImpl {
                 // mid-settlement so money in flight is never blocked on the user
                 // keeping the app on screen.
                 log::info!("[DSM_SDK] inbox.stopPoller called (lifecycle)");
-                crate::sdk::inbox_poller::stop_poller_for_lifecycle();
+                if let Err(e) = crate::sdk::inbox_poller::stop_poller_for_lifecycle() {
+                    return err(format!(
+                        "inbox.stopPoller: settlement state unreadable, the poller keeps running: {e}"
+                    ));
+                }
                 pack_envelope_ok(generated::envelope::Payload::StorageSyncResponse(
                     generated::StorageSyncResponse {
                         success: true,

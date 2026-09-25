@@ -1236,7 +1236,13 @@ message EconomicRootClaimV1 {
 // The body names its recipient directly. Under `faucet_claimant` the
 // recipient IS the claimant: the signature over the body under
 // `claimant_public_key` is the whole source of the release, and the verifier
-// checks that key is the recipient's proven AK. Other sources (an emission
+// checks that key is the recipient's proven AK. `claimant_att_a` is the
+// recipient device's birth attestation digest: the recognizer at the reserve
+// cell requires `derive_devid(claimant_public_key, claimant_att_a) ==
+// recipient_devid`, so only the device the release names can sign one that
+// occupies a cell — decided from the bytes, never by a fetch (owner ruling
+// 2026-09-25). It binds the key to the DEVICE; that the device belongs to
+// `recipient_genesis` is P0-P6's question, answered when a credit consumes it. Other sources (an emission
 // lottery, later) add arms to `source`; the reserve mechanics do not change.
 //
 // Signature covers the BODY only:
@@ -1245,6 +1251,7 @@ message EconomicRootClaimV1 {
 // signs ONCE per parent root and replays the exact bytes on every retry.
 message FaucetClaimantRecipientV1 {
   bytes claimant_public_key = 1 [(dsm_max_len)=65535];
+  bytes claimant_att_a      = 2 [(dsm_fixed_len)=32];
 }
 
 message NativeReserveReleaseBodyV1 {

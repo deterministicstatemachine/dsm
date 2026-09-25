@@ -237,6 +237,7 @@ fn step_failure(position: u64, e: EconomicValidationError) -> PeerLineageFailure
             | P::PeerTransitionNotValidated { failure, .. }
             | P::AcceptanceEvidence(failure)
             | P::OwnerLineage(failure)
+            | P::RegisterNotEstablished(failure)
             | P::ReleaseNotEstablished { failure, .. } => at_position(position, failure),
             P::GenesisReleaseInvalid(..)
             | P::MarketLegPolicy(..)
@@ -827,6 +828,15 @@ mod tests {
             step_failure(
                 3,
                 provenance(P::OwnerLineage(unavailable("no member answered")))
+            ),
+            PeerLineageFailure::Incomplete(_)
+        ));
+        assert!(matches!(
+            step_failure(
+                3,
+                provenance(P::RegisterNotEstablished(unavailable(
+                    "the catalog could not be read"
+                )))
             ),
             PeerLineageFailure::Incomplete(_)
         ));

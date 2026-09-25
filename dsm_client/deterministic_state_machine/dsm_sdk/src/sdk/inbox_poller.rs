@@ -73,7 +73,15 @@ pub fn start_poller() {
             // countersigned reply. Polling the reply side at the idle interval
             // would leave the sender's gate held for a minute after the money
             // was already applied.
-            let pending_gate_active = has_pending_settlement_work();
+            // Settlement state that cannot be read is not "nothing owed": the
+            // poller keeps the settlement cadence and says why, every cycle.
+            let pending_gate_active = match has_pending_settlement_work() {
+                Ok(pending) => pending,
+                Err(e) => {
+                    log::error!("[inbox_poller] settlement state unreadable: {e}");
+                    true
+                }
+            };
 
             // Enter eager mode when items are processed, so follow-up
             // messages (ACKs, rapid exchanges) are discovered faster.
@@ -110,12 +118,6 @@ pub fn start_poller() {
     });
 }
 
-fn has_pending_online_catchup() -> bool {
-    crate::storage::client_db::get_all_pending_online_outbox()
-        .map(|entries| !entries.is_empty())
-        .unwrap_or(false)
-}
-
 /// True while this device owes the network a settlement step that only polling
 /// can complete:
 ///   * a SENDER-side pending online gate awaiting the recipient's acceptance
@@ -126,45 +128,48 @@ fn has_pending_online_catchup() -> bool {
 /// Money in flight must not depend on the user keeping the app on screen. A
 /// transfer whose settlement stalls because the phone went in a pocket is
 /// indistinguishable, to both parties, from one that failed.
-pub fn has_pending_settlement_work() -> bool {
-    if has_pending_online_catchup() {
-        return true;
+///
+/// `Err` when any of it cannot be read. That is not "nothing owed": a reader
+/// that could not look has not seen an empty queue (storage spec §4), and the
+/// counterparty's liveness rests on this device continuing to deliver.
+pub fn has_pending_settlement_work() -> anyhow::Result<bool> {
+    if !crate::storage::client_db::get_all_pending_online_outbox()?.is_empty() {
+        return Ok(true);
     }
     // A relationship owing a cert-head resync is settlement work: the poller must
     // stay alive to drive it, otherwise a device with no other traffic can never
     // recover its ability to send.
-    if crate::storage::client_db::has_outstanding_cert_resync().unwrap_or(false) {
-        return true;
+    if crate::storage::client_db::has_outstanding_cert_resync()? {
+        return Ok(true);
     }
     // Finality barrier: a sender whose certificate has not reached quorum must
     // keep sweeping; a recipient still awaiting a certificate must keep
     // polling — a backgrounded device would otherwise never be released.
-    if crate::storage::client_db::finalization_checkpoint_pending_sender_outbox()
-        .map(|r| !r.is_empty())
-        .unwrap_or(false)
-    {
-        return true;
+    if !crate::storage::client_db::finalization_checkpoint_pending_sender_outbox()?.is_empty() {
+        return Ok(true);
     }
-    if crate::storage::client_db::any_relationship_awaits_peer_finalization().unwrap_or(false) {
-        return true;
+    if crate::storage::client_db::any_relationship_awaits_peer_finalization()? {
+        return Ok(true);
     }
-    crate::storage::client_db::pending_outbound_replies()
-        .map(|r| !r.is_empty())
-        .unwrap_or(false)
+    Ok(!crate::storage::client_db::pending_outbound_replies()?.is_empty())
 }
 
-/// Lifecycle-driven stop (app backgrounded). REFUSES to stop while settlement
-/// work is outstanding — see [`has_pending_settlement_work`]. Use
-/// [`stop_poller`] for an unconditional shutdown.
-pub fn stop_poller_for_lifecycle() {
-    if has_pending_settlement_work() {
+/// Lifecycle-driven stop (app backgrounded). `Ok(true)` when the poller was
+/// stopped; `Ok(false)` when it was not, because settlement work is
+/// outstanding (see [`has_pending_settlement_work`]); `Err` when the
+/// settlement state cannot be read — the poller is not stopped then either,
+/// because only a readable "nothing owed" may stop it. Use [`stop_poller`]
+/// for an unconditional shutdown.
+pub fn stop_poller_for_lifecycle() -> anyhow::Result<bool> {
+    if has_pending_settlement_work()? {
         log::info!(
             "[inbox_poller] lifecycle stop DECLINED — settlement work outstanding; \
              continuing to poll in the background so the transfer can complete"
         );
-        return;
+        return Ok(false);
     }
     stop_poller();
+    Ok(true)
 }
 
 /// Stop the inbox poller unconditionally. The task will exit on its next
@@ -296,6 +301,60 @@ fn decode_sync_response(data: &[u8]) -> Option<(u32, u32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Rename one settlement table out of reach for the guard's lifetime, so
+    /// every query over it fails as a production read would.
+    struct Unreadable(&'static str);
+    impl Unreadable {
+        fn table(name: &'static str) -> Self {
+            crate::storage::client_db::get_connection()
+                .expect("the store")
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .execute_batch(&format!("ALTER TABLE {name} RENAME TO {name}_unreadable"))
+                .expect("hide the table");
+            Self(name)
+        }
+    }
+    impl Drop for Unreadable {
+        fn drop(&mut self) {
+            let name = self.0;
+            let restored = crate::storage::client_db::get_connection().and_then(|conn| {
+                conn.lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .execute_batch(&format!("ALTER TABLE {name}_unreadable RENAME TO {name}"))
+                    .map_err(anyhow::Error::from)
+            });
+            if let Err(e) = restored {
+                eprintln!("{name} was not restored; later tests will fail on it: {e}");
+            }
+        }
+    }
+
+    /// Storage spec §4: settlement state that cannot be read is not "nothing
+    /// owed". With either settlement table unreadable, the check is an error
+    /// and the lifecycle stop declines — the stop flag stays down. With the
+    /// store readable and empty, the same stop goes through.
+    #[test]
+    #[serial_test::serial]
+    fn a_lifecycle_stop_is_declined_while_settlement_state_is_unreadable() {
+        crate::economic_fixtures::use_test_storage_dir();
+        crate::storage::client_db::reset_database_for_tests();
+        POLLER_STOP.store(false, Ordering::SeqCst);
+        assert!(!has_pending_settlement_work().expect("a readable, empty store"));
+        for table in ["pending_online_outbox", "recipient_outbound_reply"] {
+            let _hidden = Unreadable::table(table);
+            assert!(has_pending_settlement_work().is_err(), "{table}");
+            assert!(stop_poller_for_lifecycle().is_err(), "{table}");
+            assert!(
+                !POLLER_STOP.load(Ordering::SeqCst),
+                "{table}: the poller was stopped"
+            );
+        }
+        assert!(stop_poller_for_lifecycle().expect("readable again"));
+        assert!(POLLER_STOP.load(Ordering::SeqCst));
+        POLLER_STOP.store(false, Ordering::SeqCst);
+    }
 
     // ── Constants ──
 

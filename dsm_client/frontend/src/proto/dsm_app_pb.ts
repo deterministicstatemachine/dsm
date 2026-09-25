@@ -8612,7 +8612,13 @@ export class EconomicRootClaimV1 extends Message<EconomicRootClaimV1> {
  * The body names its recipient directly. Under `faucet_claimant` the
  * recipient IS the claimant: the signature over the body under
  * `claimant_public_key` is the whole source of the release, and the verifier
- * checks that key is the recipient's proven AK. Other sources (an emission
+ * checks that key is the recipient's proven AK. `claimant_att_a` is the
+ * recipient device's birth attestation digest: the recognizer at the reserve
+ * cell requires `derive_devid(claimant_public_key, claimant_att_a) ==
+ * recipient_devid`, so only the device the release names can sign one that
+ * occupies a cell — decided from the bytes, never by a fetch (owner ruling
+ * 2026-09-25). It binds the key to the DEVICE; that the device belongs to
+ * `recipient_genesis` is P0-P6's question, answered when a credit consumes it. Other sources (an emission
  * lottery, later) add arms to `source`; the reserve mechanics do not change.
  *
  * Signature covers the BODY only:
@@ -8628,6 +8634,11 @@ export class FaucetClaimantRecipientV1 extends Message<FaucetClaimantRecipientV1
    */
   claimantPublicKey = new Uint8Array(0);
 
+  /**
+   * @generated from field: bytes claimant_att_a = 2;
+   */
+  claimantAttA = new Uint8Array(0);
+
   constructor(data?: PartialMessage<FaucetClaimantRecipientV1>) {
     super();
     proto3.util.initPartial(data, this);
@@ -8637,6 +8648,7 @@ export class FaucetClaimantRecipientV1 extends Message<FaucetClaimantRecipientV1
   static readonly typeName = "dsm.FaucetClaimantRecipientV1";
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
     { no: 1, name: "claimant_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "claimant_att_a", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): FaucetClaimantRecipientV1 {

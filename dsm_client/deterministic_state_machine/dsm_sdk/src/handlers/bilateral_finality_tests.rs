@@ -18,7 +18,7 @@
 //! R5/R6 live beside the code they pin (`storage_routes` / `core_sdk`).
 
 use crate::storage::client_db as cdb;
-use crate::test_support::two_device::{Pair, TestDevice};
+use crate::test_support::two_device::{assert_incomplete, Pair, TestDevice};
 use dsm::types::proto as generated;
 use prost::Message;
 use serial_test::serial;
@@ -487,7 +487,7 @@ async fn r3_sender_stays_gated_until_the_checkpoint_reaches_quorum() {
     let down = crate::economic_fixtures::members_to_break_quorum();
     p.nodes.fail_spools(&down).await;
     let a_sync = p.a.sync().await;
-    assert!(a_sync.success, "{:?}", a_sync.errors);
+    assert_incomplete(&a_sync);
     p.a.enter();
     assert_eq!(
         proposal_statuses(&rel),
@@ -638,7 +638,7 @@ async fn r11_only_the_checkpoint_sweep_clears_the_gate() {
     let down = crate::economic_fixtures::members_to_break_quorum();
     p.nodes.fail_spools(&down).await;
     let a_sync = p.a.sync().await;
-    assert!(a_sync.success, "{:?}", a_sync.errors);
+    assert_incomplete(&a_sync);
     p.a.enter();
     assert_eq!(
         proposal_statuses(&rel),
@@ -660,7 +660,7 @@ async fn r11_only_the_checkpoint_sweep_clears_the_gate() {
     );
     assert!(gate_present(&p.b), "the stale-gate check must not clear it");
     let a_sync = p.a.sync().await;
-    assert!(a_sync.success, "{:?}", a_sync.errors);
+    assert_incomplete(&a_sync);
     p.a.enter();
     assert!(
         gate_present(&p.b),
@@ -701,7 +701,7 @@ async fn r7_a_frozen_checkpoint_is_replayed_byte_identically_after_the_fleet_ret
     let down = crate::economic_fixtures::members_to_break_quorum();
     p.nodes.fail_spools(&down).await;
     let a_sync = p.a.sync().await;
-    assert!(a_sync.success, "{:?}", a_sync.errors);
+    assert_incomplete(&a_sync);
     p.a.enter();
     assert_eq!(
         proposal_statuses(&rel),
@@ -823,8 +823,8 @@ async fn r8_a_next_generation_transfer_is_held_until_the_certificate_lands() {
     p.nodes.fail_spools(&rest).await;
     for pass in 0..2 {
         let b_sync = p.b.sync().await;
-        assert!(b_sync.success, "pass {pass}: {:?}", b_sync.errors);
-        assert_eq!(p.b.era_balance(), 10, "held: not applied");
+        assert_incomplete(&b_sync);
+        assert_eq!(p.b.era_balance(), 10, "pass {pass}: held, not applied");
         p.b.enter();
         assert_eq!(rows_for_relationship("canonical_apply_identity", &rel), 1);
         assert_eq!(

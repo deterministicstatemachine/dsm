@@ -191,9 +191,15 @@ impl NativeReserveState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReleaseSource {
     /// The recipient claimed for itself. The signature over the body under
-    /// this key is the whole authority; the verifier checks the key is the
-    /// recipient's proven AK.
-    FaucetClaimant { claimant_public_key: Vec<u8> },
+    /// this key is the whole authority; the key is the recipient device's —
+    /// `derive_devid(claimant_public_key, claimant_att_a) == recipient_devid`,
+    /// checked at the cell — and the credit arm checks it is the recipient's
+    /// P0–P6-proven AK.
+    FaucetClaimant {
+        claimant_public_key: Vec<u8>,
+        /// The recipient device's `AttA` (`DevID = H(AK ‖ AttA)`).
+        claimant_att_a: D32,
+    },
 }
 
 /// The unsigned release body — what the signature covers.
@@ -223,9 +229,11 @@ impl NativeReserveReleaseBody {
         let source = match &self.source {
             ReleaseSource::FaucetClaimant {
                 claimant_public_key,
+                claimant_att_a,
             } => generated::native_reserve_release_body_v1::Source::FaucetClaimant(
                 generated::FaucetClaimantRecipientV1 {
                     claimant_public_key: claimant_public_key.clone(),
+                    claimant_att_a: claimant_att_a.to_vec(),
                 },
             ),
         };
@@ -261,6 +269,7 @@ impl NativeReserveReleaseBody {
                 }
                 ReleaseSource::FaucetClaimant {
                     claimant_public_key: c.claimant_public_key.clone(),
+                    claimant_att_a: fixed(&c.claimant_att_a, "claimant_att_a")?,
                 }
             }
             None => return Err(ReleaseError::Malformed("release has no source")),
@@ -294,6 +303,7 @@ impl NativeReserveReleaseBody {
         match &self.source {
             ReleaseSource::FaucetClaimant {
                 claimant_public_key,
+                ..
             } => claimant_public_key,
         }
     }
@@ -419,6 +429,11 @@ pub enum ReleaseRefusal {
     ZeroRelease,
     /// Releases more than remains: the one arm that would mint.
     ExceedsReserve { remaining: u64, amount: u64 },
+    /// Signed by a key that is not the recipient device's: `derive_devid(key,
+    /// AttA)` is not the `recipient_devid` the release names. Only the device
+    /// a faucet release credits can sign one that occupies a cell (owner
+    /// ruling 2026-09-25).
+    SignerIsNotTheRecipient,
     /// Releases an amount the release rule of its source does not name. A
     /// faucet claim releases exactly [`ERA_FAUCET_PAYOUT`]: the beta claim
     /// policy fixes it, and a release the policy does not allow cannot exist
@@ -440,6 +455,10 @@ impl core::fmt::Display for ReleaseRefusal {
                 f,
                 "release of {amount} exceeds the {remaining} remaining — no valid reserve \
                  transition mints"
+            ),
+            Self::SignerIsNotTheRecipient => write!(
+                f,
+                "release signed by a key that is not the recipient device's"
             ),
             Self::NotTheReleaseRulesAmount { amount, rule } => write!(
                 f,
@@ -487,8 +506,22 @@ pub fn release_constructible(
     // under the conditions the policy commits). Checked here, at the cell's
     // construction predicate, so a release the rule does not allow never
     // holds the cell — not merely later, when a credit would consume it.
+    // The signer is the recipient device: `DevID = H(AK ‖ AttA)` commits the
+    // key, so a key that derives another device id is not the recipient's,
+    // whatever its signature verifies. Decided from the bytes, never by a
+    // fetch: occupancy must not depend on availability.
     let rule = match &body.source {
-        ReleaseSource::FaucetClaimant { .. } => ERA_FAUCET_PAYOUT,
+        ReleaseSource::FaucetClaimant {
+            claimant_public_key,
+            claimant_att_a,
+        } => {
+            if crate::core::identity::genesis_v2::derive_devid(claimant_public_key, claimant_att_a)
+                != body.recipient_devid
+            {
+                return Err(ReleaseRefusal::SignerIsNotTheRecipient);
+            }
+            ERA_FAUCET_PAYOUT
+        }
     };
     if body.amount != rule {
         return Err(ReleaseRefusal::NotTheReleaseRulesAmount {
@@ -721,7 +754,7 @@ mod tests {
 
     const NETWORK: &[u8] = b"dsm-testnet";
     const G: D32 = [0x11; 32];
-    const DEV: D32 = [0x22; 32];
+    const ATTA: D32 = [0x4A; 32];
 
     fn keypair() -> (Vec<u8>, Vec<u8>) {
         crate::crypto::sphincs::generate_sphincs_keypair().expect("keypair")
@@ -738,12 +771,14 @@ mod tests {
             generation: parent.generation + 1,
             amount,
             recipient_genesis: G,
-            recipient_devid: DEV,
+            // The signer is the device the release credits.
+            recipient_devid: crate::core::identity::genesis_v2::derive_devid(pk, &ATTA),
             recipient_economic_position: 1,
             recipient_operation_digest: [0x33; 32],
             storage_set_id: committed_set_id(),
             source: ReleaseSource::FaucetClaimant {
                 claimant_public_key: pk.to_vec(),
+                claimant_att_a: ATTA,
             },
         }
     }
@@ -874,6 +909,61 @@ mod tests {
         assert_eq!(exhausted.remaining_supply, 0);
         let more = signed(&exhausted, ERA_FAUCET_PAYOUT);
         assert!(release_constructible(&exhausted, &more).is_err());
+    }
+
+    /// Owner ruling 2026-09-25: a faucet release occupies a cell only when its
+    /// signer is the device it credits — `derive_devid(claimant_public_key,
+    /// AttA) == recipient_devid`, decided from the bytes. A payout release
+    /// naming a device whose key did not sign it, however valid its
+    /// signature, is not an object naming the cell: first at the leader and
+    /// final along its route, it holds nothing, and the recipient's own
+    /// release behind it is final. Mutation: drop the binding and the
+    /// foreign release holds the cell.
+    #[test]
+    fn a_release_signed_by_any_key_but_the_recipient_devices_never_holds_the_cell() {
+        let r0 = genesis();
+        let (pk, sk) = keypair();
+        let (thief_pk, thief_sk) = keypair();
+        let honest_body = body(&r0, ERA_FAUCET_PAYOUT, &pk);
+        // The recipient's own body, signed by another key under that key's
+        // own name and AttA: it verifies, and it names a device the key does
+        // not derive.
+        let mut foreign_body = honest_body.clone();
+        foreign_body.source = ReleaseSource::FaucetClaimant {
+            claimant_public_key: thief_pk.clone(),
+            claimant_att_a: ATTA,
+        };
+        let foreign = decode_and_verify_release(&sign_release(&foreign_body, &thief_sk).unwrap())
+            .expect("the signature verifies under the key it carries");
+        assert_eq!(
+            release_constructible(&r0, &foreign),
+            Err(ReleaseRefusal::SignerIsNotTheRecipient)
+        );
+        // The recipient's own key under an AttA that is not the device's.
+        let mut wrong_atta = honest_body.clone();
+        wrong_atta.source = ReleaseSource::FaucetClaimant {
+            claimant_public_key: pk.clone(),
+            claimant_att_a: [0x4B; 32],
+        };
+        let wrong_atta =
+            decode_and_verify_release(&sign_release(&wrong_atta, &sk).unwrap()).expect("verifies");
+        assert_eq!(
+            release_constructible(&r0, &wrong_atta),
+            Err(ReleaseRefusal::SignerIsNotTheRecipient)
+        );
+        let honest =
+            decode_and_verify_release(&sign_release(&honest_body, &sk).unwrap()).expect("verifies");
+        let child = release_constructible(&r0, &honest).expect("the recipient's own release");
+        let (at, mut cell) = successor_cell(&r0);
+        cell.write(&foreign.envelope_bytes, ROUTE_LEN - 1, &[]);
+        cell.write(&honest.envelope_bytes, ROUTE_LEN - 1, &[]);
+        assert_eq!(
+            resolve_successor(&at, &cell.evidence()),
+            SuccessorRead::Final {
+                release: Box::new(honest),
+                child
+            }
+        );
     }
 
     /// SoFi §51 rule 3 and the shortcut audit of 2026-09-25: a faucet release

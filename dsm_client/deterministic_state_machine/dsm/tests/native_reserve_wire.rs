@@ -33,7 +33,6 @@ use dsm::economic::witness::EconomicTransitionWitness;
 use dsm::types::operations::Operation;
 
 const G: [u8; 32] = [0x11; 32];
-const DEV: [u8; 32] = [0x22; 32];
 const NETWORK: &[u8] = b"dsm-testnet";
 const SET_ID: [u8; 32] = [0xB1; 32];
 
@@ -43,6 +42,22 @@ fn era_commit() -> [u8; 32] {
 
 fn keypair() -> (Vec<u8>, Vec<u8>) {
     dsm::crypto::sphincs::generate_sphincs_keypair().expect("keypair")
+}
+
+/// The trader's one key pair, and its `AttA`: the device id a faucet release
+/// names is the one they derive (`DevID = H(AK ‖ AttA)`), because the reserve
+/// cell recognizes a release only when its signer is the device it credits.
+fn trader() -> &'static (Vec<u8>, Vec<u8>) {
+    static KEYS: std::sync::OnceLock<(Vec<u8>, Vec<u8>)> = std::sync::OnceLock::new();
+    KEYS.get_or_init(|| dsm::crypto::sphincs::generate_sphincs_keypair().expect("keypair"))
+}
+
+const ATTA: [u8; 32] = [0x4A; 32];
+
+/// The trader's device id, derived from its key and `AttA`.
+fn dev() -> &'static [u8; 32] {
+    static DEVID: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
+    DEVID.get_or_init(|| dsm::core::identity::genesis_v2::derive_devid(&trader().0, &ATTA))
 }
 
 fn claim_op(reserve_id: [u8; 32], generation: u64) -> Operation {
@@ -67,7 +82,7 @@ struct Fixture {
 }
 
 fn fixture_at(parent: NativeReserveState, position: u64, amount: u64) -> Fixture {
-    let (pk, sk) = keypair();
+    let (pk, sk) = trader().clone();
     let reserve_id = parent.reserve_id;
     let generation = parent.generation + 1;
     let op = claim_op(reserve_id, generation);
@@ -78,12 +93,13 @@ fn fixture_at(parent: NativeReserveState, position: u64, amount: u64) -> Fixture
         generation,
         amount,
         recipient_genesis: G,
-        recipient_devid: DEV,
+        recipient_devid: *dev(),
         recipient_economic_position: position,
         recipient_operation_digest: op_digest,
         storage_set_id: SET_ID,
         source: ReleaseSource::FaucetClaimant {
             claimant_public_key: pk.clone(),
+            claimant_att_a: ATTA,
         },
     };
     let envelope = sign_release(&body, &sk).expect("signable");
@@ -94,7 +110,7 @@ fn fixture_at(parent: NativeReserveState, position: u64, amount: u64) -> Fixture
     let credit = EconomicLeafState::Balance(
         EconomicBalanceState::new(era_commit(), amount).expect("nonzero"),
     );
-    let key = credit.leaf_key(&G, &DEV);
+    let key = credit.leaf_key(&G, dev());
     let siblings = tree.siblings(&key).to_vec();
     let mutation =
         EconomicLeafMutation::new(None, Some(credit.clone()), siblings).expect("well-formed");
@@ -273,7 +289,7 @@ impl ProvenanceResolver for Nothing {
 fn ctx<'a>(position: u64, ak: &'a [u8]) -> ProvenanceContext<'a> {
     ProvenanceContext {
         genesis: &G,
-        device_id: &DEV,
+        device_id: dev(),
         economic_position: position,
         network_id: NETWORK,
         proven_ak: ak,
@@ -438,12 +454,13 @@ fn faucet_claim_names_its_claimant_as_recipient() {
             generation: 1,
             amount: ERA_FAUCET_PAYOUT,
             recipient_genesis: [0x66; 32],
-            recipient_devid: [0x67; 32],
+            recipient_devid: dsm::core::identity::genesis_v2::derive_devid(&pk, &ATTA),
             recipient_economic_position: 1,
             recipient_operation_digest: dsm_operation_digest(&op.to_bytes()),
             storage_set_id: SET_ID,
             source: ReleaseSource::FaucetClaimant {
                 claimant_public_key: pk.clone(),
+                claimant_att_a: ATTA,
             },
         },
         &sk,
