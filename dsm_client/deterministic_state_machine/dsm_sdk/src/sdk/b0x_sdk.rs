@@ -933,7 +933,6 @@ impl B0xSDK {
                 v: certificate_digest.to_vec(),
             }),
             actor: local_device_bytes.clone(),
-            genesis_hash: local_genesis.to_vec(),
             kind: Some(dsm::types::proto::universal_op::Kind::Invoke(invoke)),
         };
         let envelope = dsm::types::proto::Envelope {
@@ -1129,7 +1128,6 @@ impl B0xSDK {
                 v: digest_b.to_vec(),
             }),
             actor: local_device_bytes.clone(),
-            genesis_hash: local_genesis.to_vec(),
             kind: Some(dsm::types::proto::universal_op::Kind::Invoke(invoke)),
         };
         let envelope = dsm::types::proto::Envelope {
@@ -1363,7 +1361,6 @@ impl B0xSDK {
                 v: message_id_bytes.clone(),
             }),
             actor: local_device_bytes.clone(),
-            genesis_hash: local_genesis.clone(),
             kind: Some(dsm::types::proto::universal_op::Kind::Invoke(invoke)),
         };
         let envelope = dsm::types::proto::Envelope {
@@ -1530,7 +1527,6 @@ impl B0xSDK {
                             v: evidence_digest.to_vec(),
                         }),
                         actor: self_device_bytes.clone(),
-                        genesis_hash: vec![0u8; 32],
                         kind: Some(dsm::types::proto::universal_op::Kind::Invoke(invoke)),
                     }],
                     atomic: true,
@@ -1922,7 +1918,6 @@ impl B0xSDK {
                 v: message_id_bytes.to_vec(),
             }),
             actor: actor_device_bytes.clone(),
-            genesis_hash: local_genesis_bytes.clone(),
             kind: Some(dsm::types::proto::universal_op::Kind::Invoke(invoke)),
         };
 
@@ -3208,7 +3203,6 @@ mod tests {
         let op = dsm::types::proto::UniversalOp {
             op_id: Some(dsm::types::proto::Hash32 { v: vec![9; 32] }),
             actor: vec![2; 32],
-            genesis_hash: vec![3; 32],
             kind: Some(dsm::types::proto::universal_op::Kind::Invoke(invoke)),
         };
 
@@ -3291,7 +3285,6 @@ mod tests {
         let op = dsm::types::proto::UniversalOp {
             op_id: Some(dsm::types::proto::Hash32 { v: vec![9; 32] }),
             actor: vec![2; 32],
-            genesis_hash: vec![3; 32],
             kind: Some(dsm::types::proto::universal_op::Kind::Invoke(invoke)),
         };
 
@@ -3361,7 +3354,6 @@ mod tests {
         let op = dsm::types::proto::UniversalOp {
             op_id: Some(dsm::types::proto::Hash32 { v: vec![9; 32] }),
             actor: vec![2; 32],
-            genesis_hash: vec![3; 32],
             kind: Some(dsm::types::proto::universal_op::Kind::Invoke(invoke)),
         };
 
@@ -4186,7 +4178,6 @@ mod tests {
                     ops: vec![dsm::types::proto::UniversalOp {
                         op_id: Some(dsm::types::proto::Hash32 { v: vec![0u8; 32] }),
                         actor: vec![0x11; 32],
-                        genesis_hash: vec![0x33; 32],
                         kind: Some(dsm::types::proto::universal_op::Kind::Invoke(invoke)),
                     }],
                     atomic: true,

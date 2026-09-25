@@ -600,7 +600,6 @@ impl AppRouterImpl {
                             to_device_id: bytes32("recipient device id", &t.to_device)?,
                             token_id: canonicalize_token_id(&token_id),
                             amount: t.amount,
-                            fee: 0,
                             // tx_hash is stored as canonical base32 text in SQLite.
                             tx_hash: bytes32("transaction hash", &t.tx_hash)?,
                             amount_signed,

@@ -27,8 +27,6 @@ describe('E2E: Bilateral (Offline) Transaction Flow', () => {
       senderId: ALICE_DEVICE_ID,
       recipientId: BOB_DEVICE_ID,
       commitmentHash: new Uint8Array(32).fill(0xAA),
-      senderStateHash: new Uint8Array(32).fill(0xBB),
-      recipientStateHash: new Uint8Array(32).fill(0xCC),
       status: pb.OfflineBilateralTransactionStatus.OFFLINE_TX_PENDING,
       metadata: {
         token: 'ROOT',
@@ -116,8 +114,6 @@ describe('E2E: Bilateral (Offline) Transaction Flow', () => {
       senderId: ALICE_DEVICE_ID,
       recipientId: BOB_DEVICE_ID,
       commitmentHash: new Uint8Array(32),
-      senderStateHash: new Uint8Array(32),
-      recipientStateHash: new Uint8Array(32),
       status: pb.OfflineBilateralTransactionStatus.OFFLINE_TX_CONFIRMED,
     });
 
@@ -163,14 +159,10 @@ describe('E2E: Bilateral (Offline) Transaction Flow', () => {
       senderId: ALICE_DEVICE_ID,
       recipientId: BOB_DEVICE_ID,
       commitmentHash,
-      senderStateHash: new Uint8Array(32),
-      recipientStateHash: new Uint8Array(32),
       status: pb.OfflineBilateralTransactionStatus.OFFLINE_TX_PENDING,
     });
 
     expect(tx.commitmentHash).toHaveLength(32);
-    expect(tx.senderStateHash).toHaveLength(32);
-    expect(tx.recipientStateHash).toHaveLength(32);
   });
 
   test('bilateral transaction metadata encoding', () => {
@@ -180,8 +172,6 @@ describe('E2E: Bilateral (Offline) Transaction Flow', () => {
       senderId: ALICE_DEVICE_ID,
       recipientId: BOB_DEVICE_ID,
       commitmentHash: new Uint8Array(32),
-      senderStateHash: new Uint8Array(32),
-      recipientStateHash: new Uint8Array(32),
       status: pb.OfflineBilateralTransactionStatus.OFFLINE_TX_PENDING,
       metadata: {
         token_id: 'ROOT',

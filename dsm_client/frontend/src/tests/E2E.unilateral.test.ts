@@ -95,7 +95,6 @@ describe('E2E: Unilateral Transaction Flow', () => {
           toDeviceId: BOB_DEVICE_ID,
           tokenId: 'ROOT',
           amount: 200000000n, // uint64 = bigint
-          fee: 0n,
           txHash: new Uint8Array(32).fill(88),
         },
       ] as any,

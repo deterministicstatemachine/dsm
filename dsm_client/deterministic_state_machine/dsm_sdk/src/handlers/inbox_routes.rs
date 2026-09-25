@@ -162,7 +162,6 @@ impl AppRouterImpl {
                             ),
                         },
                         sender_id: Some(e.sender_device_id.clone()),
-                        payload: vec![],
                         is_stale_route: *freshness == RouteFreshness::PreviousTip,
                     })
                     .collect();

@@ -147,7 +147,6 @@ impl RecoveryHandler for RecoveryImpl {
         Ok(gp::OpResult {
             op_id: None,
             accepted: true,
-            post_state_hash: None,
             result: Some(gp::ResultPack {
                 schema_hash: None,
                 codec: gp::Codec::Proto as i32,
@@ -167,7 +166,6 @@ impl RecoveryHandler for RecoveryImpl {
         Ok(gp::OpResult {
             op_id: None,
             accepted: true,
-            post_state_hash: None,
             result: Some(gp::ResultPack {
                 schema_hash: None,
                 codec: gp::Codec::Proto as i32,
@@ -238,7 +236,6 @@ impl RecoveryHandler for RecoveryImpl {
         Ok(gp::OpResult {
             op_id: None,
             accepted: true,
-            post_state_hash: None,
             result: Some(gp::ResultPack {
                 schema_hash: None,
                 codec: gp::Codec::Proto as i32,
@@ -338,7 +335,6 @@ impl RecoveryHandler for RecoveryImpl {
         Ok(gp::OpResult {
             op_id: None,
             accepted: true,
-            post_state_hash: None,
             result: Some(gp::ResultPack {
                 schema_hash: None,
                 codec: gp::Codec::Proto as i32,
@@ -446,7 +442,6 @@ impl RecoveryHandler for RecoveryImpl {
         Ok(gp::OpResult {
             op_id: None,
             accepted: true,
-            post_state_hash: None,
             result: Some(gp::ResultPack {
                 schema_hash: None,
                 codec: gp::Codec::Proto as i32,

@@ -3,11 +3,9 @@
 
 use dsm::types::proto as generated;
 
-use crate::bridge::{AppInvoke, AppQuery, AppResult};
+use crate::bridge::{AppQuery, AppResult};
 use super::app_router_impl::AppRouterImpl;
-use super::relationship_status::{
-    blocked_status, derive_local_send_status_for_device_id, status_message,
-};
+use super::relationship_status::{blocked_status, derive_local_send_status_for_device_id};
 use super::response_helpers::{pack_envelope_ok, err};
 
 use crate::storage::client_db::{
@@ -128,8 +126,6 @@ impl AppRouterImpl {
                         sender_id,
                         recipient_id,
                         commitment_hash: commitment_hash_arr.to_vec(),
-                        sender_state_hash: vec![0u8; 32],
-                        recipient_state_hash: vec![0u8; 32],
                         status: status.into(),
                         metadata,
                     });
@@ -149,17 +145,13 @@ impl AppRouterImpl {
 
 impl AppRouterImpl {
     /// The send-status calibration a UI or the offline-send path asks for
-    /// (`bilateral.reconcile` / `wallet.sendOffline`).
+    /// (`wallet.sendOffline`).
     ///
     /// Under the finality barrier this is READ-ONLY: it never releases the
-    /// pending online gate. Historically it cleared the gate on two signals —
-    /// `contacts.chain_tip == gate.next` and a storage-node "message
-    /// acknowledged" answer — both of which are transport/projection facts, not
-    /// finality: the tip equality is simply the normal
-    /// `finalization_checkpoint_pending` state now, and an ACK proves only that
-    /// the recipient consumed its spool copy. The ONE deleter is the
-    /// post-quorum checkpoint sweep. What remains here: while a gate is armed,
-    /// make sure the poller is running (it drives the sweep), then report the
+    /// pending online gate. Neither the relationship tip reaching the gate's
+    /// next tip nor a storage node's acknowledgement is finality; the one
+    /// deleter is the post-quorum checkpoint sweep. While a gate is armed this
+    /// makes sure the poller is running (it drives the sweep), then reports the
     /// authority's status.
     pub(crate) async fn calibrate_local_relationship_send_status(
         &self,
@@ -185,59 +177,5 @@ impl AppRouterImpl {
             }
         }
         derive_local_send_status_for_device_id(counterparty_device_id)
-    }
-
-    pub(crate) async fn handle_bilateral_reconcile_invoke(&self, i: AppInvoke) -> AppResult {
-        use prost::Message;
-
-        let pack = match generated::ArgPack::decode(&*i.args) {
-            Ok(p) => p,
-            Err(e) => return err(format!("bilateral.reconcile: ArgPack decode failed: {e}")),
-        };
-        if pack.codec != generated::Codec::Proto as i32 {
-            return err("bilateral.reconcile: ArgPack.codec must be PROTO".to_string());
-        }
-
-        let req = match generated::BilateralReconciliationRequest::decode(&*pack.body) {
-            Ok(r) => r,
-            Err(e) => return err(format!("bilateral.reconcile: request decode failed: {e}")),
-        };
-
-        let remote_device_id = req.remote_device_id;
-        if remote_device_id.len() != 32 {
-            return err(format!(
-                "bilateral.reconcile: remote_device_id must be 32 bytes, got {}",
-                remote_device_id.len()
-            ));
-        }
-
-        let local_status = self
-            .calibrate_local_relationship_send_status(&remote_device_id)
-            .await;
-        let remote_tip = match crate::storage::client_db::get_contact_chain_tip(&remote_device_id) {
-            Ok(Some(tip)) => tip,
-            Ok(None) => {
-                return err("bilateral.reconcile: the remote device is not a contact".into())
-            }
-            Err(e) => {
-                return err(format!(
-                    "bilateral.reconcile: relationship tip unreadable: {e}"
-                ))
-            }
-        };
-        let peer_status = None;
-        let resp = generated::BilateralReconciliationResponse {
-            mismatch_detected: !local_status.send_ready,
-            reconciled: local_status.send_ready,
-            remote_tip: remote_tip.to_vec(),
-            error_message: if local_status.send_ready {
-                String::new()
-            } else {
-                status_message(&local_status)
-            },
-            local_status: Some(local_status),
-            peer_status,
-        };
-        pack_envelope_ok(generated::envelope::Payload::ReconciliationResponse(resp))
     }
 }

@@ -66,9 +66,8 @@ use crate::bluetooth::frame_classify::{
     ble_frame_needs_chunking, detect_ble_frame_type_from_bytes, strip_envelope_v3_framing,
 };
 #[cfg(all(target_os = "android", feature = "bluetooth"))]
-use crate::jni::state::{parse_hex_32, DEVICE_ID_TO_ADDR};
+use crate::jni::state::DEVICE_ID_TO_ADDR;
 #[cfg(all(target_os = "android", feature = "bluetooth"))]
-use crate::storage::client_db::get_contact_chain_tip;
 #[cfg(all(target_os = "android", feature = "bluetooth"))]
 use jni::objects::{JObject, JValue};
 #[cfg(all(target_os = "android", feature = "bluetooth"))]
@@ -317,20 +316,6 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_dispatchIngre
 
 fn fetch_transport_headers_bytes() -> Result<Vec<u8>, String> {
     crate::get_transport_headers_v3_bytes().map_err(|e| format!("headers fetch failed: {e}"))
-}
-
-fn build_transport_headers_pack() -> Result<Vec<u8>, String> {
-    let body = fetch_transport_headers_bytes()
-        .map_err(|e| format!("fetch_transport_headers_bytes failed: {}", e))?;
-    let pack = pb::ResultPack {
-        schema_hash: None,
-        codec: pb::Codec::Proto as i32,
-        body,
-    };
-    let mut out = Vec::new();
-    pack.encode(&mut out)
-        .map_err(|e| format!("ResultPack encode failed: {}", e))?;
-    Ok(out)
 }
 
 // JNI export for getAllBalancesStrict (top-level, not nested)
@@ -886,45 +871,6 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_getTransportH
     )
 }
 
-#[no_mangle]
-pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_getTransportHeadersV3Pack(
-    env: jni::sys::JNIEnv,
-    _class: jni::sys::jclass,
-) -> jni::sys::jbyteArray {
-    crate::jni::bridge_utils::jni_catch_unwind_jbytearray(
-        "getTransportHeadersV3Pack",
-        std::panic::AssertUnwindSafe(|| {
-            let mut env = match unsafe { env_from(env) } {
-                Some(e) => e,
-                None => return std::ptr::null_mut(),
-            };
-            // Same policy as getTransportHeadersV3: allow header pack retrieval as soon as
-            // identity exists and the SDK context can be bootstrapped from AppState.
-            let out = match build_transport_headers_pack() {
-                Ok(v) => v,
-                Err(e) => {
-                    return error_byte_array(
-                        &mut env,
-                        helpers::JniErrorCode::ProcessingFailed as u32,
-                        &e,
-                    )
-                    .into_raw()
-                }
-            };
-            env.byte_array_from_slice(&out)
-                .map(|a| a.into_raw())
-                .unwrap_or(
-                    error_byte_array(
-                        &mut env,
-                        helpers::JniErrorCode::EncodingFailed as u32,
-                        "failed to allocate return bytes",
-                    )
-                    .into_raw(),
-                )
-        }),
-    )
-}
-
 /// App-backgrounded lifecycle transition. Rust performs the ENTIRE decision:
 /// it stops the inbox poller unless a §16.6 settlement step is still owed (a
 /// sender-side pending gate, or a countersigned reply not yet delivered), and
@@ -1119,32 +1065,6 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_getSigningPub
                         .unwrap_or(std::ptr::null_mut())
                 }
             }
-        }),
-    )
-}
-
-#[no_mangle]
-pub extern "system" fn Java_com_dsm_native_DsmNative_getTransportHeadersV3(
-    env: jni::sys::JNIEnv,
-    _clazz: jni::sys::jclass,
-) -> jni::sys::jbyteArray {
-    crate::jni::bridge_utils::jni_catch_unwind_jbytearray(
-        "DsmNative_getTransportHeadersV3",
-        std::panic::AssertUnwindSafe(|| {
-            Java_com_dsm_wallet_bridge_UnifiedNativeApi_getTransportHeadersV3(env, _clazz)
-        }),
-    )
-}
-
-#[no_mangle]
-pub extern "system" fn Java_com_dsm_native_DsmNative_getTransportHeadersV3Pack(
-    env: jni::sys::JNIEnv,
-    _clazz: jni::sys::jclass,
-) -> jni::sys::jbyteArray {
-    crate::jni::bridge_utils::jni_catch_unwind_jbytearray(
-        "DsmNative_getTransportHeadersV3Pack",
-        std::panic::AssertUnwindSafe(|| {
-            Java_com_dsm_wallet_bridge_UnifiedNativeApi_getTransportHeadersV3Pack(env, _clazz)
         }),
     )
 }
@@ -1436,64 +1356,6 @@ pub(crate) fn handle_ble_identity_observed_from_envelope(
 
 // ==================== MCP JNI externs ====================
 #[no_mangle]
-pub extern "system" fn Java_com_dsm_wallet_mcp_McpServiceBus_jniSubmitEnvelope(
-    env: jni::sys::JNIEnv,
-    _clazz: jni::sys::jclass,
-    envelope: jni::sys::jbyteArray,
-) -> jni::sys::jbyteArray {
-    let env_raw = env;
-    let envelope_raw = envelope;
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let mut env = match unsafe { env_from(env_raw) } {
-            Some(e) => e,
-            None => return std::ptr::null_mut(),
-        };
-        let jba = unsafe { jba_from(envelope_raw) };
-
-        let req = match env.convert_byte_array(&jba) {
-            Ok(v) => v,
-            Err(e) => {
-                return error_byte_array(
-                    &mut env,
-                    helpers::JniErrorCode::InvalidInput as u32,
-                    &format!("invalid envelope bytes: {e}"),
-                )
-                .into_raw();
-            }
-        };
-
-        let resp = match process_envelope_v3(&req) {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                return error_byte_array(&mut env, e.code, &e.message).into_raw();
-            }
-        };
-
-        env.byte_array_from_slice(&resp)
-            .map(|a| a.into_raw())
-            .unwrap_or_else(|_| empty_byte_array_or_empty(&mut env).into_raw())
-    })) {
-        Ok(result) => result,
-        Err(panic) => {
-            log::error!(
-                "jniSubmitEnvelope: panic captured: {}",
-                crate::jni::bridge_utils::panic_message(&panic)
-            );
-            let mut env = match unsafe { env_from(env_raw) } {
-                Some(e) => e,
-                None => return std::ptr::null_mut(),
-            };
-            error_byte_array(
-                &mut env,
-                helpers::JniErrorCode::ProcessingFailed as u32,
-                "panic in jniSubmitEnvelope",
-            )
-            .into_raw()
-        }
-    }
-}
-
-#[no_mangle]
 pub extern "system" fn Java_com_dsm_wallet_mcp_McpServiceBus_jniGetDeviceId(
     env: jni::sys::JNIEnv,
     _clazz: jni::sys::jclass,
@@ -1536,98 +1398,8 @@ pub extern "system" fn Java_com_dsm_wallet_mcp_McpServiceBus_jniGetDeviceId(
     }
 }
 
-#[no_mangle]
-pub extern "system" fn Java_com_dsm_wallet_mcp_McpServiceBus_jniGetTransportHeaders(
-    env: jni::sys::JNIEnv,
-    _clazz: jni::sys::jclass,
-) -> jni::sys::jbyteArray {
-    let env_raw = env;
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let mut env = match unsafe { env_from(env_raw) } {
-            Some(e) => e,
-            None => return std::ptr::null_mut(),
-        };
-        let bytes = match fetch_transport_headers_bytes() {
-            Ok(b) => b,
-            Err(e) => {
-                return error_byte_array(
-                    &mut env,
-                    helpers::JniErrorCode::ProcessingFailed as u32,
-                    &format!("getTransportHeaders failed: {e}"),
-                )
-                .into_raw();
-            }
-        };
-        env.byte_array_from_slice(&bytes)
-            .map(|a| a.into_raw())
-            .unwrap_or_else(|_| empty_byte_array_or_empty(&mut env).into_raw())
-    })) {
-        Ok(result) => result,
-        Err(panic) => {
-            log::error!(
-                "jniGetTransportHeaders: panic captured: {}",
-                crate::jni::bridge_utils::panic_message(&panic)
-            );
-            let mut env = match unsafe { env_from(env_raw) } {
-                Some(e) => e,
-                None => return std::ptr::null_mut(),
-            };
-            error_byte_array(
-                &mut env,
-                helpers::JniErrorCode::ProcessingFailed as u32,
-                "panic in jniGetTransportHeaders",
-            )
-            .into_raw()
-        }
-    }
-}
-
-#[no_mangle]
-pub extern "system" fn Java_com_dsm_wallet_mcp_McpServiceBus_jniSendBleProto(
-    env: jni::sys::JNIEnv,
-    _clazz: jni::sys::jclass,
-    bytes: jni::sys::jbyteArray,
-) -> jni::sys::jboolean {
-    crate::jni::bridge_utils::jni_catch_unwind_jboolean(
-        "jniSendBleProto",
-        std::panic::AssertUnwindSafe(|| {
-            let env = match unsafe { env_from(env) } {
-                Some(e) => e,
-                None => return jni::sys::JNI_FALSE,
-            };
-            let jba = unsafe { jba_from(bytes) };
-            let payload = match env.convert_byte_array(&jba) {
-                Ok(v) => v,
-                Err(_) => return jni::sys::JNI_FALSE,
-            };
-            if payload.is_empty() {
-                return jni::sys::JNI_FALSE;
-            }
-
-            #[cfg(all(target_os = "android", feature = "bluetooth"))]
-            {
-                if let Some(bridge) =
-                    crate::bluetooth::android_ble_bridge::get_global_android_bridge()
-                {
-                    let res = crate::runtime::get_runtime()
-                        .block_on(async { bridge.handle_ble_event_bytes(&payload).await });
-                    match res {
-                        Ok(_) => return jni::sys::JNI_TRUE,
-                        Err(e) => {
-                            log::warn!("jniSendBleProto: handle_ble_event_bytes failed: {e}");
-                            return jni::sys::JNI_FALSE;
-                        }
-                    }
-                }
-            }
-
-            jni::sys::JNI_FALSE
-        }),
-    )
-}
-
 /// UnifiedNativeApi JNI entry for processEnvelopeV3.
-/// Delegates to the internal `process_envelope_v3()` helper (line 846).
+/// Delegates to the internal `process_envelope_v3()` helper.
 /// Kotlin BLE layer (GattServerHost, GattClientSession, BleCoordinator) calls
 /// Unified.processEnvelopeV3() which routes here.
 #[no_mangle]
@@ -1765,145 +1537,6 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_processEnvelo
                 &mut env,
                 helpers::JniErrorCode::ProcessingFailed as u32,
                 "panic in processEnvelopeV3WithAddress",
-            )
-            .into_raw()
-        }
-    }
-}
-
-/// UnifiedNativeApi JNI entry for extractGenesisIdentity.
-/// Thin delegate to the existing DsmNative implementation.
-#[no_mangle]
-pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_extractGenesisIdentity(
-    env: jni::sys::JNIEnv,
-    clazz: jni::sys::jclass,
-    envelope_bytes: jni::sys::jbyteArray,
-) -> jni::sys::jbyteArray {
-    crate::jni::bridge_utils::jni_catch_unwind_jbytearray(
-        "extractGenesisIdentity",
-        std::panic::AssertUnwindSafe(|| {
-            Java_com_dsm_native_DsmNative_extractGenesisIdentity(env, clazz, envelope_bytes)
-        }),
-    )
-}
-
-/* ====================================================================================
-Manual Accept Toggle (BLE deterministic gate)
-==================================================================================== */
-
-/// Process raw NFC tag bytes by wrapping them in a UniversalOp::ExternalCommit
-/// and routing through the standard envelope processor.
-#[no_mangle]
-pub extern "system" fn Java_com_dsm_native_DsmNative_processNfcTag(
-    env: jni::sys::JNIEnv,
-    _clazz: jni::sys::jclass,
-    tag_data: jni::sys::jbyteArray,
-) -> jni::sys::jbyteArray {
-    let env_raw = env;
-    let tag_data_raw = tag_data;
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let mut env = match unsafe { env_from(env_raw) } {
-            Some(e) => e,
-            None => return std::ptr::null_mut(),
-        };
-        let jba = unsafe { jba_from(tag_data_raw) };
-
-        let payload = match env.convert_byte_array(&jba) {
-            Ok(v) => v,
-            Err(e) => {
-                log::error!("[JNI] processNfcTag: failed to read bytes: {}", e);
-                return error_byte_array(
-                    &mut env,
-                    crate::jni::helpers::JniErrorCode::InvalidInput as u32,
-                    &format!("failed to read bytes: {}", e),
-                )
-                .into_raw();
-            }
-        };
-
-        // Construct ExternalCommit with source "nfc:recovery"
-        let source = "nfc:recovery";
-        let source_id = dsm::commitments::external_source_id(source);
-        let evidence_hash = dsm::commitments::external_evidence_hash(&[]);
-        let commit_id =
-            dsm::commitments::create_external_commitment(&payload, &source_id, &evidence_hash);
-        let op = pb::UniversalOp {
-            op_id: None,
-            actor: vec![],
-            genesis_hash: vec![],
-            kind: Some(pb::universal_op::Kind::ExternalCommit(pb::ExternalCommit {
-                source_id: Some(pb::Hash32 {
-                    v: source_id.to_vec(),
-                }),
-                payload,
-                evidence: None,
-                commit_id: Some(pb::Hash32 {
-                    v: commit_id.to_vec(),
-                }),
-            })),
-        };
-
-        // Construct UniversalTx
-        let tx = pb::UniversalTx {
-            ops: vec![op],
-            atomic: true,
-        };
-
-        let envelope =
-            crate::jni::helpers::encode_payload_transport(pb::envelope::Payload::UniversalTx(tx));
-
-        let mut env_bytes = Vec::new();
-        env_bytes.push(0x03); // Canonical framing byte for FramedEnvelopeV3
-        if let Err(e) = envelope.encode(&mut env_bytes) {
-            log::error!("[JNI] processNfcTag: failed to encode envelope: {}", e);
-            return error_byte_array(
-                &mut env,
-                crate::jni::helpers::JniErrorCode::EncodingFailed as u32,
-                &format!("failed to encode envelope: {}", e),
-            )
-            .into_raw();
-        }
-
-        // Process via core bridge
-        let resp_bytes = match process_envelope_v3(&env_bytes) {
-            Ok(b) => b,
-            Err(e) => {
-                log::error!("[JNI] processNfcTag: process_envelope_v3 failed: {}", e);
-                return error_byte_array(
-                    &mut env,
-                    crate::jni::helpers::JniErrorCode::ProcessingFailed as u32,
-                    &format!("process_envelope_v3 failed: {}", e),
-                )
-                .into_raw();
-            }
-        };
-        match env.byte_array_from_slice(&resp_bytes) {
-            Ok(arr) => arr.into_raw(),
-            Err(e) => {
-                log::error!("processNfcTag: failed to allocate return bytes: {}", e);
-                error_byte_array(
-                    &mut env,
-                    crate::jni::helpers::JniErrorCode::EncodingFailed as u32,
-                    "failed to allocate return bytes",
-                )
-                .into_raw()
-            }
-        }
-    })) {
-        Ok(result) => result,
-        Err(panic) => {
-            log::error!(
-                "processNfcTag: panic captured: {}",
-                crate::jni::bridge_utils::panic_message(&panic)
-            );
-            let mut env = match unsafe { env_from(env_raw) } {
-                Some(e) => e,
-                None => return std::ptr::null_mut(),
-            };
-            error_byte_array(
-                &mut env,
-                helpers::JniErrorCode::ProcessingFailed as u32,
-                "panic in processNfcTag",
             )
             .into_raw()
         }
@@ -2052,40 +1685,6 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_setManualAcce
             // No-op on non-Android/non-BLE builds.
         }),
     );
-}
-
-// Readiness query exports for UI polling (aggregate readiness includes bilateral on bluetooth builds)
-#[no_mangle]
-pub extern "system" fn Java_com_dsm_native_DsmNative_isSdkFullyReady(
-    _env: jni::sys::JNIEnv,
-    _clazz: jni::sys::jclass,
-) -> jni::sys::jboolean {
-    crate::jni::bridge_utils::jni_catch_unwind_jboolean(
-        "DsmNative_isSdkFullyReady",
-        std::panic::AssertUnwindSafe(|| {
-            if SDK_READY.load(Ordering::SeqCst) && crate::is_sdk_fully_ready() {
-                jni::sys::JNI_TRUE
-            } else {
-                jni::sys::JNI_FALSE
-            }
-        }),
-    )
-}
-#[no_mangle]
-pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_isSdkFullyReady(
-    _env: jni::sys::JNIEnv,
-    _clazz: jni::sys::jclass,
-) -> jni::sys::jboolean {
-    crate::jni::bridge_utils::jni_catch_unwind_jboolean(
-        "UnifiedNativeApi_isSdkFullyReady",
-        std::panic::AssertUnwindSafe(|| {
-            if SDK_READY.load(Ordering::SeqCst) && crate::is_sdk_fully_ready() {
-                jni::sys::JNI_TRUE
-            } else {
-                jni::sys::JNI_FALSE
-            }
-        }),
-    )
 }
 
 /// Canonical offline send validation + response generation.
@@ -2420,7 +2019,6 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_bilateralOffl
                                     };
                                     results.push(gp::OpResult {
                                         op_id, accepted: true,
-                                        post_state_hash: None,
                                         result: Some(gp::ResultPack {
                                             schema_hash: None,
                                             codec: gp::Codec::Proto as i32,
@@ -3377,7 +2975,6 @@ mod unified_protobuf_bridge_tests {
                 ops: vec![pb::UniversalOp {
                     op_id: Some(pb::Hash32 { v: vec![5; 32] }),
                     actor: vec![1; 32],
-                    genesis_hash: vec![3; 32],
                     kind: Some(pb::universal_op::Kind::Invoke(pb::Invoke {
                         method: "bilateral.confirm".to_string(),
                         args: Some(pb::ArgPack {
@@ -3915,100 +3512,6 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_rejectBilater
     )
 }
 
-/// Extract device_id and genesis_hash from a GenesisCreated envelope
-/// Returns byte array: [device_id 32 bytes][genesis_hash 32 bytes] or empty on error
-#[no_mangle]
-#[cfg(target_os = "android")]
-pub extern "system" fn Java_com_dsm_native_DsmNative_extractGenesisIdentity(
-    env: jni::sys::JNIEnv,
-    _clazz: jni::sys::jclass,
-    envelope_bytes: jni::sys::jbyteArray,
-) -> jni::sys::jbyteArray {
-    crate::jni::bridge_utils::jni_catch_unwind_jbytearray(
-        "DsmNative_extractGenesisIdentity",
-        std::panic::AssertUnwindSafe(|| {
-            let mut env = match unsafe { env_from(env) } {
-                Some(e) => e,
-                None => return std::ptr::null_mut(),
-            };
-            let jba = unsafe { jba_from(envelope_bytes) };
-            let bytes = match env.convert_byte_array(&jba) {
-                Ok(v) => v,
-                Err(_) => return empty_byte_array_or_empty(&mut env).into_raw(),
-            };
-
-            let result = match crate::handlers::system_routes::genesis_identity_from_answer(&bytes)
-            {
-                Ok(identity) => identity,
-                Err(e) => {
-                    log::error!("extractGenesisIdentity: {e}");
-                    return empty_byte_array_or_empty(&mut env).into_raw();
-                }
-            };
-
-            match env.byte_array_from_slice(&result) {
-                Ok(arr) => arr.into_raw(),
-                Err(_) => empty_byte_array_or_empty(&mut env).into_raw(),
-            }
-        }),
-    )
-}
-
-// Telemetry accessor (simple 4-counter pack) for diagnostics
-#[no_mangle]
-#[cfg(all(target_os = "android", feature = "bluetooth"))]
-pub extern "system" fn Java_com_dsm_native_DsmNative_getBilateralPollTelemetry(
-    env: jni::sys::JNIEnv,
-    _clazz: jni::sys::jclass,
-) -> jni::sys::jbyteArray {
-    crate::jni::bridge_utils::jni_catch_unwind_jbytearray(
-        "getBilateralPollTelemetry",
-        std::panic::AssertUnwindSafe(|| {
-            let mut env = match unsafe { env_from(env) } {
-                Some(e) => e,
-                None => return std::ptr::null_mut(),
-            };
-            use prost::Message;
-            let pack = pb::ResultPack {
-                schema_hash: None,
-                codec: pb::Codec::Proto as i32,
-                body: vec![
-                    (POLL_ATTEMPTS_STARTED.load(Ordering::SeqCst) as u64)
-                        .to_le_bytes()
-                        .as_slice(),
-                    (POLL_ATTEMPTS_SUCCESS.load(Ordering::SeqCst) as u64)
-                        .to_le_bytes()
-                        .as_slice(),
-                    (POLL_ATTEMPTS_TIMEOUT.load(Ordering::SeqCst) as u64)
-                        .to_le_bytes()
-                        .as_slice(),
-                    (POLL_TOTAL_ITERATIONS.load(Ordering::SeqCst) as u64)
-                        .to_le_bytes()
-                        .as_slice(),
-                ]
-                .concat(),
-            };
-            let mut out = Vec::new();
-            let _ = pack.encode(&mut out);
-            match env.byte_array_from_slice(&out) {
-                Ok(arr) => arr.into_raw(),
-                Err(e) => {
-                    log::error!(
-                        "getBilateralPollTelemetry: failed to allocate return bytes: {}",
-                        e
-                    );
-                    error_byte_array(
-                        &mut env,
-                        crate::jni::helpers::JniErrorCode::EncodingFailed as u32,
-                        "failed to allocate telemetry bytes",
-                    )
-                    .into_raw()
-                }
-            }
-        }),
-    )
-}
-
 /* =============================================================================
 Unified init/status + header fetch (stable surface for Activity gating)
 ============================================================================= */
@@ -4115,58 +3618,6 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_resolveBleAdd
 
             let addr_bytes = final_addr.as_bytes();
             env.byte_array_from_slice(addr_bytes)
-                .map(|a| a.into_raw())
-                .unwrap_or_else(|_| empty_byte_array_or_empty(&mut env).into_raw())
-        }),
-    )
-}
-
-/// Retrieve 32-byte local chain tip for a remote device (by BLE MAC or device ID hex).
-#[no_mangle]
-#[cfg(all(target_os = "android", feature = "bluetooth"))]
-pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_getLocalChainTipBin(
-    env: jni::sys::JNIEnv,
-    _clazz: jni::sys::jclass,
-    device_address: jni::sys::jstring,
-) -> jni::sys::jbyteArray {
-    crate::jni::bridge_utils::jni_catch_unwind_jbytearray(
-        "getLocalChainTipBin",
-        std::panic::AssertUnwindSafe(|| {
-            let mut env = match unsafe { env_from(env) } {
-                Some(e) => e,
-                None => return std::ptr::null_mut(),
-            };
-            let jaddr = unsafe { jstr_from(device_address) };
-            let addr: String = match env.get_string(&jaddr) {
-                Ok(s) => s.into(),
-                Err(_) => String::new(),
-            };
-
-            let addr_lc = addr.to_lowercase();
-            let mut dev_bytes: Option<[u8; 32]> = None;
-
-            if addr_lc.len() == 64 && addr_lc.chars().all(|c| c.is_ascii_hexdigit()) {
-                // 64-char hex device ID → parse to bytes at boundary
-                dev_bytes = parse_hex_32(&addr_lc);
-            } else if addr_lc.contains(':') || addr_lc.contains('-') || addr_lc.len() <= 17 {
-                // Treat as BLE MAC address; reverse-lookup device ID bytes
-                if let Ok(map) = DEVICE_ID_TO_ADDR.try_lock() {
-                    for (dev_key, mac) in map.iter() {
-                        if mac.eq_ignore_ascii_case(&addr_lc) {
-                            dev_bytes = Some(*dev_key);
-                            break;
-                        }
-                    }
-                } else {
-                    log::warn!("DEVICE_ID_TO_ADDR lock contention, skipping reverse lookup");
-                }
-            }
-
-            let dev_bytes = dev_bytes.unwrap_or([0u8; 32]);
-
-            let tip = get_contact_chain_tip(&dev_bytes);
-            let out = tip.unwrap_or([0u8; 32]);
-            env.byte_array_from_slice(&out)
                 .map(|a| a.into_raw())
                 .unwrap_or_else(|_| empty_byte_array_or_empty(&mut env).into_raw())
         }),

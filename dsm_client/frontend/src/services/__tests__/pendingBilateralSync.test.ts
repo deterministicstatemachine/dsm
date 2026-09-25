@@ -54,8 +54,6 @@ describe('pendingBilateralSync', () => {
             senderId: counterpartyDeviceId as any,
             recipientId: new Uint8Array(32) as any,
             commitmentHash: commitmentHash as any,
-            senderStateHash: new Uint8Array(32) as any,
-            recipientStateHash: new Uint8Array(32) as any,
             status: pb.OfflineBilateralTransactionStatus.OFFLINE_TX_PENDING,
             metadata: {
               direction: 'incoming',

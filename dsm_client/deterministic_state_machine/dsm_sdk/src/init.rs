@@ -347,7 +347,6 @@ impl dsm::core::bridge::BilateralHandler for CoreBilateralBridge {
             Ok(pb::OpResult {
                 op_id: None,
                 accepted: true,
-                post_state_hash: None,
                 result: Some(pb::ResultPack {
                     schema_hash: None,
                     codec: pb::Codec::Proto as i32,
@@ -385,7 +384,6 @@ impl dsm::core::bridge::BilateralHandler for CoreBilateralBridge {
             Ok(pb::OpResult {
                 op_id: None,
                 accepted: true,
-                post_state_hash: None,
                 result: Some(pb::ResultPack {
                     schema_hash: None,
                     codec: pb::Codec::Proto as i32,
@@ -423,7 +421,6 @@ impl dsm::core::bridge::BilateralHandler for CoreBilateralBridge {
             Ok(pb::OpResult {
                 op_id: None,
                 accepted: true,
-                post_state_hash: None,
                 result: Some(pb::ResultPack {
                     schema_hash: None,
                     codec: pb::Codec::Proto as i32,
@@ -461,7 +458,6 @@ impl dsm::core::bridge::BilateralHandler for CoreBilateralBridge {
             Ok(pb::OpResult {
                 op_id: None,
                 accepted: true,
-                post_state_hash: None,
                 result: Some(pb::ResultPack {
                     schema_hash: None,
                     codec: pb::Codec::Proto as i32,

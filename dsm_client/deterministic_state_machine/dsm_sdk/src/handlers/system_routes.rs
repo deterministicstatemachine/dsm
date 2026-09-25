@@ -245,9 +245,9 @@ pub(crate) struct InstalledGenesis {
 }
 
 /// `[device_id 32][genesis_hash 32]` from the genesis route's local answer:
-/// its `GenesisCreatedResponse`, nothing else. Read by the Android JNI bridge.
-#[cfg(any(test, all(target_os = "android", feature = "jni")))]
-pub(crate) fn genesis_identity_from_answer(framed: &[u8]) -> Result<Vec<u8>, String> {
+/// its `GenesisCreatedResponse`, nothing else.
+#[cfg(test)]
+fn genesis_identity_from_answer(framed: &[u8]) -> Result<Vec<u8>, String> {
     let envelope = super::response_helpers::decode_local_envelope(framed)?;
     let Some(generated::envelope::Payload::GenesisCreatedResponse(created)) = envelope.payload
     else {

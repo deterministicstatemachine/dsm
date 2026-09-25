@@ -127,13 +127,7 @@ class McpService : Service() {
  * No timing logic: native/Rust side drives state transitions.
  */
 object McpServiceBus {
-    @Keep @JvmStatic external fun jniSubmitEnvelope(input: ByteArray): ByteArray
     @Keep @JvmStatic external fun jniGetDeviceId(): ByteArray
-    @Keep @JvmStatic external fun jniSendBleProto(bytes: ByteArray): Boolean
-    @Keep @JvmStatic external fun jniGetTransportHeaders(): ByteArray
 
-    fun submitEnvelope(input: ByteArray): ByteArray = jniSubmitEnvelope(input)
     fun getDeviceId(): ByteArray = jniGetDeviceId()
-    fun sendBleProto(bytes: ByteArray): Boolean = jniSendBleProto(bytes)
-    fun getTransportHeaders(): ByteArray = jniGetTransportHeaders()
 }

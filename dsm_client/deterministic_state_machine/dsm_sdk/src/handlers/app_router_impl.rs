@@ -2741,7 +2741,6 @@ impl AppRouter for AppRouterImpl {
             | "sofi.close" | "sofi.relay" | "sofi.resolve" => self.handle_sofi_invoke(i).await,
             // BLE
             // Bilateral reconcile
-            "bilateral.reconcile" => self.handle_bilateral_reconcile_invoke(i).await,
             // Faucet
             "faucet.claim" => self.handle_faucet_invoke(i).await,
             // Session invoke routes

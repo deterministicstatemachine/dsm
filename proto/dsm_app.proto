@@ -1772,8 +1772,9 @@ message OfflineBilateralTransaction {
   bytes sender_id = 2 [(dsm_fixed_len)=32];
   bytes recipient_id = 3 [(dsm_fixed_len)=32];
   bytes commitment_hash = 4 [(dsm_fixed_len)=32];
-  bytes sender_state_hash = 5 [(dsm_fixed_len)=32];
-  bytes recipient_state_hash = 6 [(dsm_fixed_len)=32];
+  // 5, 6 carried state hashes the SDK never had and filled with zeros.
+  reserved 5, 6;
+  reserved "sender_state_hash", "recipient_state_hash";
   OfflineBilateralTransactionStatus status = 7;
   map<string,string> metadata = 8; // transport/UI only
 }
@@ -2445,7 +2446,9 @@ message QueryOp { string path = 1; ArgPack params = 2; bool include_proofs = 3; 
 message UniversalOp {
   Hash32  op_id        = 1; // client-assigned match id
   bytes   actor        = 2 [(dsm_max_len)=96]; // initiator (genesis/key)
-  bytes   genesis_hash = 3 [(dsm_fixed_len)=32]; // actor’s chain root
+  // 3 was the actor's genesis: nothing read it, and one producer sent zeros.
+  reserved 3;
+  reserved "genesis_hash";
   reserved 18, 19, 27, 28; // Bilateral ops removed
   oneof kind {
     Invoke                  invoke                 = 10;
@@ -2479,7 +2482,15 @@ message Error {
   // Useful for human-readable diagnostics without introducing JSON.
   string debug_b32 = 6 [(dsm_max_len)=4096];
 }
-message OpResult { Hash32 op_id = 1; bool accepted = 2; Hash32 post_state_hash = 3; ResultPack result = 4; Error error = 5; }
+message OpResult {
+  Hash32 op_id = 1;
+  bool accepted = 2;
+  // 3 was a post-state hash no router produced.
+  reserved 3;
+  reserved "post_state_hash";
+  ResultPack result = 4;
+  Error error = 5;
+}
 message UniversalRx { repeated OpResult results = 1; }
 
 // ================================ BATCH ==============================
@@ -2634,7 +2645,6 @@ message Envelope {
     AppSessionStateProto              session_state_response           = 95;
     NfcRecoveryCapsule                nfc_recovery_capsule             = 96;
     TokenPolicyListResponse           token_policy_list_response       = 97;
-    BilateralReconciliationResponse   reconciliation_response          = 98;
 
     Error                             error                            = 99;
     GenesisLifecycleEvent             genesis_lifecycle                = 100;
@@ -2676,13 +2686,14 @@ message Envelope {
     TokenAdoptionQrResponse token_adoption_qr_response = 119;
   }
   reserved 110, 111; // removed v1 counter-era bearer round-trip (BilateralBearerPrepared/Proceed)
-  // 114 was a §16.6 reply-window payload variant. Storage nodes validate transport
-  // envelopes against a COMPILED-IN allowlist of payload tags (currently <= 106), so a
-  // new tag is unroutable until every node is redeployed. The return leg therefore
-  // rides inside UniversalTx (tag 10) as an explicit `receipt.countersign.b` invoke
-  // (ReceiptCountersignB) instead. Reserved so the number is never silently reused.
+  // 114 was a §16.6 reply-window payload variant; the return leg rides inside
+  // UniversalTx (tag 10) as an explicit `receipt.countersign.b` invoke
+  // (ReceiptCountersignB). Reserved so the number is never silently reused. The
+  // device's strict envelope validator reads this oneof and these reservations
+  // from the compiled proto; storage nodes do not open envelopes.
   reserved 114;
   reserved 115; // was token_mint_response: there is no minting after genesis (SoFi §48)
+  reserved 98; // was reconciliation_response: bilateral.reconcile had no caller
 }
 
 // ===================== Sealed spool payloads (DSM Amendment A7) =====================
@@ -3382,7 +3393,9 @@ message TransactionInfo {
   bytes  to_device_id  = 3 [(dsm_fixed_len)=32];
   string token_id      = 4;
   uint64 amount        = 5;
-  uint64 fee           = 6;
+  // 6 was a fee: a transfer carries none, and the field was always 0.
+  reserved 6;
+  reserved "fee";
   // No history ordinal or time: the history is returned in order.
   reserved 7;
   reserved "logical_index";
@@ -3421,7 +3434,9 @@ message InboxItem {
   reserved 3;
   reserved "tick";
   optional string sender_id = 4;
-  bytes  payload         = 5;
+  // 5 was a payload the SDK always sent empty.
+  reserved 5;
+  reserved "payload";
   bool   is_stale_route  = 6; // arrived via previous (non-current) relationship tip
 }
 message InboxRequest {

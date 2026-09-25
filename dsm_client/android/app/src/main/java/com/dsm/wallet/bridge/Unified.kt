@@ -27,7 +27,7 @@ import androidx.annotation.Keep
 //   - All crypto (SPHINCS+, ML-KEM-768, DBRW) handled in Rust beneath.
 //
 // DOMAIN GROUPS:
-//   Identity:  extractGenesisIdentity, recordPeerIdentity
+//   Identity:  recordPeerIdentity
 //   Protocol:  processEnvelopeV3, processEnvelopeV3WithAddress
 //   Shared boundary: dispatchStartup, dispatchIngress
 //   Bilateral: bilateralOfflineSend, acceptBilateralByCommitment, ...
@@ -531,13 +531,6 @@ object Unified {
      */
     @Keep @JvmStatic fun resolvePeerIdentityForBleAddressBin(address: String): ByteArray =
         UnifiedNativeApi.resolvePeerIdentityForBleAddressBin(address)
-    /**
-     * Retrieve 32-byte local chain tip for a remote device (for identity payload composition).
-     * @param deviceAddress MAC address or hex device ID
-     * @return 32-byte chain tip or empty array if unavailable
-     */
-    @Keep @JvmStatic fun getLocalChainTipBin(deviceAddress: String): ByteArray =
-        UnifiedNativeApi.getLocalChainTipBin(deviceAddress)
     @Keep @JvmStatic fun isRejectEnvelope(envelopeBytes: ByteArray): ByteArray =
         UnifiedNativeApi.isRejectEnvelope(envelopeBytes)
     @Keep @JvmStatic fun isErrorEnvelope(envelopeBytes: ByteArray): Int =

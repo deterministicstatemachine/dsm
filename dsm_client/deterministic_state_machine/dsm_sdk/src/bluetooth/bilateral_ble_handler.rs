@@ -1773,7 +1773,6 @@ impl BilateralBleHandler {
                             v: pre_commitment.bilateral_commitment_hash.to_vec(),
                         }),
                         actor: self.device_id.to_vec(),
-                        genesis_hash: local_genesis_hash.to_vec(),
                         kind: Some(generated::universal_op::Kind::Invoke(generated::Invoke {
                             method: "bilateral.prepare".to_string(),
                             args: Some(generated::ArgPack {
@@ -3519,10 +3518,6 @@ impl BilateralBleHandler {
         };
 
         // 8. Wrap in envelope
-        let local_genesis = {
-            let m = self.bilateral_tx_manager.read().await;
-            m.local_genesis_hash()
-        };
         let envelope = self
             .create_envelope(generated::envelope::Payload::UniversalTx(
                 generated::UniversalTx {
@@ -3531,7 +3526,6 @@ impl BilateralBleHandler {
                             v: commitment_hash.to_vec(),
                         }),
                         actor: self.device_id.to_vec(),
-                        genesis_hash: local_genesis.to_vec(),
                         kind: Some(generated::universal_op::Kind::Invoke(generated::Invoke {
                             method: "bilateral.confirm".to_string(),
                             args: Some(generated::ArgPack {
@@ -6171,7 +6165,6 @@ mod tests {
                     ops: vec![generated::UniversalOp {
                         op_id: None,
                         actor: sender.to_vec(),
-                        genesis_hash: vec![0x64u8; 32],
                         kind: Some(generated::universal_op::Kind::Invoke(generated::Invoke {
                             program: None,
                             method: "bilateral.prepare".to_string(),
@@ -6215,7 +6208,6 @@ mod tests {
                     ops: vec![generated::UniversalOp {
                         op_id: None,
                         actor: sender.to_vec(),
-                        genesis_hash: vec![0x74u8; 32],
                         kind: Some(generated::universal_op::Kind::Invoke(generated::Invoke {
                             program: None,
                             method: "bilateral.confirm".to_string(),

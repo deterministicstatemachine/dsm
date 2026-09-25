@@ -203,7 +203,6 @@ fn op_error(op_id: Option<gp::Hash32>, code: u32, message: &str) -> gp::OpResult
     gp::OpResult {
         op_id,
         accepted: false,
-        post_state_hash: None,
         result: None,
         error: Some(gp::Error {
             code,
@@ -227,7 +226,6 @@ fn op_success(
     gp::OpResult {
         op_id,
         accepted: true,
-        post_state_hash: None,
         result: Some(gp::ResultPack {
             schema_hash,
             codec: codec as i32,
@@ -735,7 +733,6 @@ pub fn handle_envelope_universal(env_bytes: &[u8]) -> Vec<u8> {
             | gp::envelope::Payload::ContactAddResponse(_)
             | gp::envelope::Payload::BalanceGetResponse(_)
             | gp::envelope::Payload::BleCommandResponse(_)
-            | gp::envelope::Payload::ReconciliationResponse(_)
             | gp::envelope::Payload::StateInfoResponse(_)
             | gp::envelope::Payload::SecondaryDeviceResponse(_)
             | gp::envelope::Payload::ContactQrResponse(_)
@@ -1062,7 +1059,6 @@ mod tests {
         let op = gp::UniversalOp {
             op_id: Some(gp::Hash32 { v: vec![0; 32] }),
             actor: vec![0xEE; 32],
-            genesis_hash: vec![0xFF; 32],
             kind: Some(gp::universal_op::Kind::Invoke(gp::Invoke {
                 method: "bilateral.prepare".to_string(),
                 args: Some(gp::ArgPack {

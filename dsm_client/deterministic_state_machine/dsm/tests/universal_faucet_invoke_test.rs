@@ -18,7 +18,6 @@ fn universal_faucet_claim_invoke_routes_to_approuter_claim() {
     let op = gp::UniversalOp {
         op_id: Some(gp::Hash32 { v: vec![1u8; 32] }),
         actor: vec![2u8; 32],
-        genesis_hash: vec![3u8; 32],
         kind: Some(gp::universal_op::Kind::FaucetClaim(req)),
     };
 
