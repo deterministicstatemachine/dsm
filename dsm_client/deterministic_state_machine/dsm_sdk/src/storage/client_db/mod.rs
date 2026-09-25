@@ -415,7 +415,10 @@ fn get_database_path() -> Result<PathBuf> {
 /// commits in its advance's transaction, so it cannot be applied twice), and
 /// so is `pending_confirm_delivery` (a confirm envelope kept "for re-delivery"
 /// that nothing ever read back or re-delivered); `bilateral_sessions` keeps
-/// the receiver's counter-signed receipt beside the sender's own.
+/// the receiver's counter-signed receipt beside the sender's own, and each
+/// session's commit inputs (the step's parent tip, the receiver challenge, the
+/// sent root, a bearer step's anchor leaf and allocation spend), so a restart
+/// continues a session instead of failing it.
 pub const CLIENT_DB_SCHEMA_VERSION: i64 = 23;
 
 /// A 32-byte column, exactly. Any other length is a corrupt row and an error —
@@ -1256,7 +1259,15 @@ fn create_schema(conn: &Connection) -> Result<()> {
             counterparty_signature    BLOB,
             sender_ble_address        TEXT,
             stitched_receipt_bytes    BLOB,
-            counter_signed_receipt    BLOB
+            counter_signed_receipt    BLOB,
+            parent_tip                BLOB,
+            receiver_challenge        BLOB,
+            sent_child_root           BLOB,
+            anchor_leaf_key           BLOB,
+            anchor_leaf_value         BLOB,
+            spend_anchor_bundle       BLOB,
+            spend_asset               BLOB,
+            spend_amount              INTEGER
         );
 
         CREATE TABLE IF NOT EXISTS transactions(
