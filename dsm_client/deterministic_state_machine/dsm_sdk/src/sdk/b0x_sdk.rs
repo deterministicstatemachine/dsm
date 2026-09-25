@@ -263,6 +263,16 @@ pub struct RetrievalOutcome {
     pub coverage: SpoolCoverage,
 }
 
+/// What a polled entry carries, as its request states it. Nothing here is
+/// verified: the transfer pipeline checks the signed bytes it retains.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum B0xEntryKind {
+    /// An online transfer request: the amount and token it names.
+    Transfer { amount: u64, token_id: String },
+    /// An online message: the payload's size.
+    Message { payload_len: usize },
+}
+
 #[derive(Debug, Clone)]
 pub struct B0xEntry {
     pub transaction_id: String,
@@ -271,8 +281,8 @@ pub struct B0xEntry {
     pub sender_device_id: String,
     pub sender_genesis_hash: String,
     pub recipient_device_id: String,
-    pub transaction: Operation,
-    pub signature: Vec<u8>,
+    /// What the entry carries, as its request states it.
+    pub kind: B0xEntryKind,
     /// Sender's SPHINCS+ public key (optional, embedded in envelope evidence)
     pub sender_signing_public_key: Vec<u8>,
     /// §4.2.1 Canonical unsigned Operation bytes (signing preimage).
@@ -2658,62 +2668,6 @@ impl B0xSDK {
 
                                 let recipient_id =
                                     text_id::encode_base32_crockford(&transfer_req.to_device_id);
-                                // Prefer an explicit signature embedded in the OnlineTransferRequest
-                                // Fall back to any Evidence::oracle.signature attached to the Invoke if present
-                                let sig = if !transfer_req.signature.is_empty() {
-                                    transfer_req.signature.clone()
-                                } else if let Some(evd) = &invoke.evidence {
-                                    match &evd.kind {
-                                        Some(dsm::types::proto::evidence::Kind::Oracle(oracle)) => {
-                                            oracle.signature.clone()
-                                        }
-                                        _ => vec![],
-                                    }
-                                } else {
-                                    vec![]
-                                };
-
-                                // The sender signs the Operation with recipient = receiver's
-                                // PUBLIC KEY (not device_id).  The receiver must reconstruct
-                                // the same Operation for signature verification.  Use local
-                                // public key since we ARE the recipient.
-                                let recipient_owner =
-                                    crate::sdk::app_state::AppState::get_public_key()
-                                        .unwrap_or_else(|| transfer_req.to_device_id.clone());
-
-                                // §9.5: take the sender's signed policy_commit from the
-                                // canonical preimage so the reconstructed op matches what
-                                // was signed. The receiver independently re-resolves and
-                                // rejects on mismatch at apply (no peer-policy absorption).
-                                let policy_commit: [u8; 32] = match Operation::from_bytes(
-                                    &transfer_req.canonical_operation_bytes,
-                                ) {
-                                    Ok(Operation::Transfer { policy_commit, .. }) => policy_commit,
-                                    _ => [0u8; 32],
-                                };
-
-                                let transfer_op = Operation::Transfer {
-                                    to_device_id: transfer_req.to_device_id.clone(),
-                                    amount: dsm::types::token_types::Balance::amount(
-                                        transfer_req.amount,
-                                    ),
-                                    token_id: if transfer_req.token_id.is_empty() {
-                                        b"ERA".to_vec()
-                                    } else {
-                                        transfer_req.token_id.clone().into_bytes()
-                                    },
-                                    policy_commit,
-                                    mode: dsm::types::operations::TransactionMode::Unilateral,
-                                    nonce: transfer_req.nonce.clone(),
-                                    verification:
-                                        dsm::types::operations::VerificationType::Standard,
-                                    pre_commit: None,
-                                    recipient: recipient_owner,
-                                    to: recipient_id.clone().into_bytes(),
-                                    message: transfer_req.memo.clone(),
-                                    signature: sig.clone(),
-                                    authority_policy: None,
-                                };
 
                                 // Capture sender signing public key from Evidence.oracle.oracle_key if present
                                 let sender_pk = match &invoke.evidence {
@@ -2726,7 +2680,10 @@ impl B0xSDK {
                                     None => Vec::new(),
                                 };
 
-                                info!("📥 envelope_to_b0x_entry: extracted Transfer (amount={}, to={}, sig_len={})", transfer_req.amount, recipient_id, sig.len());
+                                info!(
+                                    "📥 envelope_to_b0x_entry: extracted Transfer (amount={}, to={})",
+                                    transfer_req.amount, recipient_id
+                                );
                                 return Some(B0xEntry {
                                     // Verbatim, from the SAME buffer the decode read.
                                     transfer_wire_bytes: arg_pack.body.clone(),
@@ -2738,8 +2695,10 @@ impl B0xSDK {
                                     sender_device_id: sender_dev,
                                     sender_genesis_hash: genesis_b32,
                                     recipient_device_id: recipient_id,
-                                    transaction: transfer_op,
-                                    signature: sig,
+                                    kind: B0xEntryKind::Transfer {
+                                        amount: transfer_req.amount,
+                                        token_id: transfer_req.token_id.clone(),
+                                    },
                                     sender_signing_public_key: sender_pk,
                                     canonical_operation_bytes: transfer_req
                                         .canonical_operation_bytes
@@ -2754,26 +2713,6 @@ impl B0xSDK {
                             {
                                 let recipient_id =
                                     text_id::encode_base32_crockford(&msg_req.to_device_id);
-                                let msg_op = Operation::Generic {
-                                    operation_type: b"online.message".to_vec(),
-                                    data: msg_req.payload.clone(),
-                                    message: msg_req.memo.clone(),
-                                    signature: vec![],
-                                };
-
-                                let sig = if !msg_req.signature.is_empty() {
-                                    msg_req.signature.clone()
-                                } else if let Some(evd) = &invoke.evidence {
-                                    match &evd.kind {
-                                        Some(dsm::types::proto::evidence::Kind::Oracle(oracle)) => {
-                                            oracle.signature.clone()
-                                        }
-                                        _ => vec![],
-                                    }
-                                } else {
-                                    vec![]
-                                };
-
                                 let sender_pk = match &invoke.evidence {
                                     Some(ev) => match &ev.kind {
                                         Some(dsm::types::proto::evidence::Kind::Oracle(oracle)) => {
@@ -2785,10 +2724,9 @@ impl B0xSDK {
                                 };
 
                                 info!(
-                                    "📥 envelope_to_b0x_entry: extracted OnlineMessage (payload_len={}, to={}, sig_len={})",
+                                    "📥 envelope_to_b0x_entry: extracted OnlineMessage (payload_len={}, to={})",
                                     msg_req.payload.len(),
                                     recipient_id,
-                                    sig.len(),
                                 );
                                 return Some(B0xEntry {
                                     // This branch decoded an OnlineMessageRequest, not a
@@ -2802,8 +2740,9 @@ impl B0xSDK {
                                     sender_device_id: sender_dev,
                                     sender_genesis_hash: genesis_b32,
                                     recipient_device_id: recipient_id,
-                                    transaction: msg_op,
-                                    signature: sig,
+                                    kind: B0xEntryKind::Message {
+                                        payload_len: msg_req.payload.len(),
+                                    },
                                     sender_signing_public_key: sender_pk,
                                     canonical_operation_bytes: Vec::new(),
                                 });
@@ -3157,7 +3096,7 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial]
-    async fn test_envelope_to_b0x_entry_preserves_signature(
+    async fn test_envelope_to_b0x_entry_names_the_requested_transfer(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let (device_b32, core, fleet) = test_device();
         let sdk = B0xSDK::new(device_b32, core, fleet.endpoints()).unwrap();
@@ -3224,95 +3163,20 @@ mod tests {
         let entry = sdk
             .envelope_to_b0x_entry(env)
             .expect("should extract B0xEntry");
-        assert_eq!(entry.signature, vec![1, 2, 3, 4, 5]);
+        assert_eq!(
+            entry.kind,
+            B0xEntryKind::Transfer {
+                amount: 42,
+                token_id: "ERA".to_string()
+            }
+        );
+        assert_eq!(entry.transfer_wire_bytes, transfer_req_bytes);
         Ok(())
     }
 
     #[tokio::test]
     #[serial_test::serial]
-    async fn test_envelope_to_b0x_entry_prefers_transfer_sig_but_falls_back_to_evidence(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let (device_b32, core, fleet) = test_device();
-        let sdk = B0xSDK::new(device_b32, core, fleet.endpoints()).unwrap();
-
-        // Build an OnlineTransferRequest WITHOUT an embedded signature
-        let transfer_req = dsm::types::proto::OnlineTransferRequest {
-            token_id: "ERA".to_string(),
-            to_device_id: vec![0x11; 32],
-            amount: 42,
-            memo: "test".to_string(),
-            signature: vec![],
-            nonce: vec![0xBB; 32],
-            from_device_id: vec![0x44; 32],
-            canonical_operation_bytes: vec![],
-            receipt_evidence_digest: Vec::new(),
-            sender_economic_position: 0,
-            sender_debit_mutation_index: 0,
-        };
-        let mut transfer_req_bytes = Vec::with_capacity(transfer_req.encoded_len());
-        transfer_req.encode(&mut transfer_req_bytes).map_err(|e| {
-            DsmError::internal(
-                format!("OnlineTransferRequest encode failed: {e}"),
-                None::<std::io::Error>,
-            )
-        })?;
-
-        let arg_pack = dsm::types::proto::ArgPack {
-            schema_hash: None,
-            codec: dsm::types::proto::Codec::Proto as i32,
-            body: transfer_req_bytes.clone(),
-        };
-
-        let evidence = Some(dsm::types::proto::Evidence {
-            kind: Some(dsm::types::proto::evidence::Kind::Oracle(
-                dsm::types::proto::EvidenceOracle {
-                    payload: vec![],
-                    signature: vec![9, 8, 7],
-                    oracle_key: vec![],
-                },
-            )),
-        });
-
-        let invoke = dsm::types::proto::Invoke {
-            program: None,
-            method: "wallet.send".to_string(),
-            args: Some(arg_pack),
-            cosigners: vec![],
-            evidence,
-            nonce: None,
-        };
-
-        let op = dsm::types::proto::UniversalOp {
-            op_id: Some(dsm::types::proto::Hash32 { v: vec![9; 32] }),
-            actor: vec![2; 32],
-            kind: Some(dsm::types::proto::universal_op::Kind::Invoke(invoke)),
-        };
-
-        let env = dsm::types::proto::Envelope {
-            version: 3,
-            headers: Some(dsm::types::proto::Headers {
-                device_id: vec![0xAB; 32],
-                genesis_hash: vec![0; 32],
-            }),
-            message_id: vec![8; 16],
-            payload: Some(dsm::types::proto::envelope::Payload::UniversalTx(
-                dsm::types::proto::UniversalTx {
-                    ops: vec![op],
-                    atomic: true,
-                },
-            )),
-        };
-
-        let entry = sdk
-            .envelope_to_b0x_entry(env)
-            .expect("should extract B0xEntry");
-        assert_eq!(entry.signature, vec![9, 8, 7]);
-        Ok(())
-    }
-
-    #[tokio::test]
-    #[serial_test::serial]
-    async fn test_envelope_to_b0x_entry_online_message_payload_and_signature(
+    async fn test_envelope_to_b0x_entry_names_an_online_message(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let (device_b32, core, fleet) = test_device();
         let sdk = B0xSDK::new(device_b32, core, fleet.endpoints()).unwrap();
@@ -3380,21 +3244,12 @@ mod tests {
             entry.recipient_device_id,
             crate::util::text_id::encode_base32_crockford(&[0x11u8; 32])
         );
-        assert_eq!(entry.signature, vec![9, 9, 9]);
-
-        match entry.transaction {
-            Operation::Generic {
-                operation_type,
-                data,
-                message,
-                ..
-            } => {
-                assert_eq!(operation_type.as_slice(), b"online.message");
-                assert_eq!(data, payload);
-                assert_eq!(message, memo);
+        assert_eq!(
+            entry.kind,
+            B0xEntryKind::Message {
+                payload_len: payload.len()
             }
-            other => panic!("expected Generic op, got {other:?}"),
-        }
+        );
 
         Ok(())
     }
@@ -3499,8 +3354,6 @@ mod tests {
                 policy_commit: [0x0F; 32],
                 mode: dsm::types::operations::TransactionMode::Unilateral,
                 nonce: vec![0x7E; 32],
-                verification: dsm::types::operations::VerificationType::Standard,
-                pre_commit: None,
                 recipient: vec![0x44; 32],
                 to: vec![0x44; 32],
                 message: String::new(),

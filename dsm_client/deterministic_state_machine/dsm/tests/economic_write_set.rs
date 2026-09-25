@@ -21,7 +21,7 @@ use dsm::economic::witness::{verify_mutation_sequence, EconomicTransitionWitness
 use dsm::economic::write_set::{
     EconomicPreState, build_write_set, verify_operation_write_set, CreditSourceFacts, WriteSetError,
 };
-use dsm::types::operations::{Operation, TransactionMode, VerificationType};
+use dsm::types::operations::{Operation, TransactionMode};
 use dsm::types::token_types::Balance;
 
 const G: [u8; 32] = [0x11; 32];
@@ -45,8 +45,6 @@ fn transfer(to: [u8; 32], amount: u64, policy_commit: [u8; 32]) -> Operation {
         policy_commit,
         mode: TransactionMode::Unilateral,
         nonce: vec![7; 32],
-        verification: VerificationType::Standard,
-        pre_commit: None,
         recipient: Vec::new(),
         to: Vec::new(),
         message: String::new(),

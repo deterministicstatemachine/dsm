@@ -5820,7 +5820,7 @@ mod tests {
     use super::*;
     use dsm::core::contact_manager::DsmContactManager;
     use dsm::crypto::signatures::SignatureKeyPair;
-    use dsm::types::operations::{TransactionMode, VerificationType};
+    use dsm::types::operations::{TransactionMode};
     use dsm::types::token_types::Balance;
     use serial_test::serial;
 
@@ -6069,8 +6069,6 @@ mod tests {
             token_id: b"ERA".to_vec(),
             mode: TransactionMode::Bilateral,
             nonce: vec![9],
-            verification: VerificationType::Standard,
-            pre_commit: None,
             recipient: counterparty.to_vec(),
             to: counterparty.to_vec(),
             message: "online".to_string(),
@@ -6436,8 +6434,6 @@ mod tests {
             token_id: b"ERA".to_vec(),
             mode: TransactionMode::Bilateral,
             nonce: vec![1],
-            verification: VerificationType::Standard,
-            pre_commit: None,
             recipient: counterparty_device_id.to_vec(),
             to: counterparty_device_id.to_vec(),
             message: "stale".to_string(),
@@ -6451,8 +6447,6 @@ mod tests {
             token_id: b"ERA".to_vec(),
             mode: TransactionMode::Bilateral,
             nonce: vec![2],
-            verification: VerificationType::Standard,
-            pre_commit: None,
             recipient: counterparty_device_id.to_vec(),
             to: counterparty_device_id.to_vec(),
             message: "fresh".to_string(),
@@ -6556,8 +6550,6 @@ mod tests {
             token_id: b"ERA".to_vec(),
             mode: TransactionMode::Bilateral,
             nonce: vec![1],
-            verification: VerificationType::Standard,
-            pre_commit: None,
             recipient: counterparty_device_id.to_vec(),
             to: counterparty_device_id.to_vec(),
             message: "accepted".to_string(),

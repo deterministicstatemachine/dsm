@@ -332,7 +332,7 @@ impl BilateralSettlementDelegate for DefaultBilateralSettlementDelegate {
 mod tests {
     use super::parse_transfer_fields;
     use crate::sdk::token_state::canonicalize_token_id;
-    use dsm::types::operations::{Operation, TransactionMode, VerificationType};
+    use dsm::types::operations::{Operation, TransactionMode};
     use dsm::types::token_types::Balance;
 
     #[test]
@@ -351,8 +351,6 @@ mod tests {
             token_id: b"DBTC".to_vec(),
             mode: TransactionMode::Bilateral,
             nonce: vec![],
-            verification: VerificationType::Bilateral,
-            pre_commit: None,
             recipient: vec![0x11; 32],
             to: b"recipient".to_vec(),
             message: "memo".to_string(),
@@ -375,8 +373,6 @@ mod tests {
             token_id: b"ERA".to_vec(),
             mode: TransactionMode::Bilateral,
             nonce: vec![],
-            verification: VerificationType::Bilateral,
-            pre_commit: None,
             recipient: recipient_owner.clone(),
             to: b"recipient".to_vec(),
             message: "memo".to_string(),

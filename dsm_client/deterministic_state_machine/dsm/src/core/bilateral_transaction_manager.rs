@@ -840,7 +840,7 @@ fn bytes32(slice: &[u8]) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::operations::{Operation, TransactionMode, VerificationType};
+    use crate::types::operations::{Operation, TransactionMode};
     use crate::types::token_types::Balance;
     use tokio; // for #[tokio::test]
 
@@ -996,8 +996,6 @@ mod tests {
             amount: Balance::amount(1),
             mode: TransactionMode::Bilateral,
             nonce: vec![nonce; 8],
-            verification: VerificationType::Standard,
-            pre_commit: None,
             recipient: vec![9u8; 32],
             to: b"b32recipient".to_vec(),
             message: message.to_string(),

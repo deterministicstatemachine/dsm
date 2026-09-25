@@ -17,7 +17,7 @@ use dsm::economic::provenance::PeerLineageFailure;
 use dsm::economic::successor_evidence::{
     sign_dsm_successor_evidence, verify_dsm_successor_evidence, SuccessorEvidenceError,
 };
-use dsm::types::operations::{Operation, TransactionMode, VerificationType};
+use dsm::types::operations::{Operation, TransactionMode};
 use dsm::types::proto as generated;
 use dsm::types::receipt_types::{
     compute_receipt_b_canonical_target, compute_receipt_challenge_response_target,
@@ -41,8 +41,6 @@ fn transfer_to(recipient: [u8; 32], amount: u64) -> Operation {
         policy_commit: era(),
         mode: TransactionMode::Bilateral,
         nonce: vec![9; 32],
-        verification: VerificationType::Standard,
-        pre_commit: None,
         recipient: Vec::new(),
         to: Vec::new(),
         message: String::new(),

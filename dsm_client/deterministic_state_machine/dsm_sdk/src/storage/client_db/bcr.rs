@@ -631,7 +631,7 @@ mod tests {
 
     use super::*;
     use dsm::types::device_state::{BalanceDelta, BalanceDirection, DeviceState};
-    use dsm::types::operations::{Operation, TransactionMode, VerificationType};
+    use dsm::types::operations::{Operation, TransactionMode};
     use dsm::types::token_types::Balance as TokenBalance;
     use serial_test::serial;
 
@@ -733,8 +733,6 @@ mod tests {
             token_id: b"ERA".to_vec(),
             mode: TransactionMode::Bilateral,
             nonce: vec![0xCC; 8],
-            verification: VerificationType::Bilateral,
-            pre_commit: None,
             recipient: vec![0xDD; 64],
             to: tag.to_vec(),
             message: String::from_utf8_lossy(tag).into_owned(),

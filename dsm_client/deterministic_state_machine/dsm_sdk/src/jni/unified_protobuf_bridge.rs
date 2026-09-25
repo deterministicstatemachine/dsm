@@ -1865,8 +1865,6 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_bilateralOffl
                                     token_id: token_id.as_bytes().to_vec(),
                                     mode: dsm::types::operations::TransactionMode::Bilateral,
                                     nonce: vec![],
-                                    verification: dsm::types::operations::VerificationType::Bilateral,
-                                    pre_commit: None,
                                     recipient: cid_arr.to_vec(),
                                     to: crate::util::text_id::encode_base32_crockford(&cid_arr)
                                         .as_bytes()

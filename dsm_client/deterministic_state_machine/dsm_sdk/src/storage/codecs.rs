@@ -9,59 +9,8 @@
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use dsm::crypto::blake3::dsm_domain_hasher;
-use dsm::types::operations::{AuthorityMode, AuthorityPolicy, Operation, AUTHORITY_POLICY_TAG_V1};
+use dsm::types::operations::Operation;
 use crate::storage::client_db::GenesisRecord;
-
-/// Operation tag for a `Transfer` row carrying `signature` and `authority_policy`.
-const TRANSFER_TAG_V2: u8 = 2;
-
-/// Read the canonical, versioned authority-policy tail written by
-/// [`AuthorityPolicy::append_canonical`]: version tag, mode tag, then the two
-/// length-prefixed 32-byte identifiers.
-fn read_authority_policy(cursor: &mut &[u8]) -> Result<AuthorityPolicy> {
-    fn take_u8(cursor: &mut &[u8]) -> Result<u8> {
-        let (first, rest) = cursor
-            .split_first()
-            .ok_or_else(|| anyhow!("Insufficient bytes for authority_policy tag"))?;
-        *cursor = rest;
-        Ok(*first)
-    }
-
-    fn take_id32(cursor: &mut &[u8]) -> Result<[u8; 32]> {
-        if cursor.len() < 4 {
-            return Err(anyhow!("Insufficient bytes for authority_policy id length"));
-        }
-        let len = u32::from_le_bytes([cursor[0], cursor[1], cursor[2], cursor[3]]) as usize;
-        *cursor = &cursor[4..];
-        if len != 32 {
-            return Err(anyhow!("authority_policy id must be 32 bytes, got {len}"));
-        }
-        if cursor.len() < 32 {
-            return Err(anyhow!("Insufficient bytes for authority_policy id"));
-        }
-        let mut id = [0u8; 32];
-        id.copy_from_slice(&cursor[..32]);
-        *cursor = &cursor[32..];
-        Ok(id)
-    }
-
-    let version = take_u8(cursor)?;
-    if version != AUTHORITY_POLICY_TAG_V1 {
-        return Err(anyhow!("Unknown authority_policy version tag: {version}"));
-    }
-
-    let mode = match take_u8(cursor)? {
-        0 => AuthorityMode::OnlineChecked,
-        1 => AuthorityMode::OfflineBearerRequired,
-        other => return Err(anyhow!("Unknown authority mode tag: {other}")),
-    };
-
-    Ok(AuthorityPolicy {
-        mode,
-        policy_id: take_id32(cursor)?,
-        anchor_set_id: take_id32(cursor)?,
-    })
-}
 
 pub fn hash_blake3_bytes(data: &[u8]) -> [u8; 32] {
     *dsm::crypto::blake3::domain_hash(dsm::common::domain_tags::TAG_DSM_CODEC_HASH, data).as_bytes()
@@ -78,318 +27,15 @@ pub fn generate_hash_chain_proof_bytes(data: &[u8]) -> [u8; 32] {
     hash_blake3_bytes(data)
 }
 
-/// Serialize Operation to bytes using a deterministic binary format
+/// An operation as it is persisted: its canonical encoding, the bytes it is
+/// signed and hashed over. One encoding, every variant.
 pub fn serialize_operation(op: &Operation) -> Vec<u8> {
-    // Simple deterministic encoding: tag byte + payload
-    let mut bytes = Vec::new();
-
-    match op {
-        Operation::Genesis => {
-            bytes.push(0u8);
-        }
-        Operation::Transfer {
-            to_device_id,
-            amount,
-            token_id,
-            policy_commit,
-            mode,
-            nonce,
-            verification,
-            pre_commit,
-            recipient,
-            to,
-            message,
-            signature,
-            authority_policy,
-        } => {
-            bytes.push(TRANSFER_TAG_V2);
-
-            // Encode each field with length prefix
-            let to_device_bytes = to_device_id.as_slice();
-            bytes.extend_from_slice(&(to_device_bytes.len() as u32).to_le_bytes());
-            bytes.extend_from_slice(to_device_bytes);
-
-            // Full balance: value, locked portion, and the state hash it was
-            // derived from. Persisting only `value` silently dropped the locked
-            // amount and forced the decoder to invent a state hash.
-            bytes.extend_from_slice(&amount.value().to_le_bytes());
-            bytes.extend_from_slice(&amount.locked().to_le_bytes());
-            match amount.state_hash() {
-                Some(h) => {
-                    bytes.push(1u8);
-                    bytes.extend_from_slice(&h);
-                }
-                None => bytes.push(0u8),
-            }
-
-            let token_bytes = token_id.as_slice();
-            bytes.extend_from_slice(&(token_bytes.len() as u32).to_le_bytes());
-            bytes.extend_from_slice(token_bytes);
-
-            // CPTA policy commitment (§9.5) — fixed 32 bytes.
-            bytes.extend_from_slice(policy_commit);
-
-            let mode_byte = match mode {
-                dsm::types::operations::TransactionMode::Unilateral => 0u8,
-                dsm::types::operations::TransactionMode::Bilateral => 1u8,
-            };
-            bytes.push(mode_byte);
-
-            bytes.extend_from_slice(&(nonce.len() as u32).to_le_bytes());
-            bytes.extend_from_slice(nonce);
-
-            let verification_byte = match verification {
-                dsm::types::operations::VerificationType::Standard => 0u8,
-                dsm::types::operations::VerificationType::Enhanced => 1u8,
-                dsm::types::operations::VerificationType::Bilateral => 2u8,
-                dsm::types::operations::VerificationType::Directory => 3u8,
-                dsm::types::operations::VerificationType::StandardBilateral => 4u8,
-                dsm::types::operations::VerificationType::PreCommitted => 5u8,
-                dsm::types::operations::VerificationType::UnilateralIdentityAnchor => 6u8,
-                dsm::types::operations::VerificationType::Custom(_) => 255u8,
-            };
-            bytes.push(verification_byte);
-
-            match pre_commit {
-                Some(pc) => {
-                    bytes.push(1u8);
-                    let mut keys: Vec<&String> = pc.fixed_parameters.keys().collect();
-                    keys.sort();
-                    bytes.extend_from_slice(&(keys.len() as u32).to_le_bytes());
-                    for k in keys {
-                        let kb = k.as_bytes();
-                        bytes.extend_from_slice(&(kb.len() as u32).to_le_bytes());
-                        bytes.extend_from_slice(kb);
-                        let v = &pc.fixed_parameters[k];
-                        bytes.extend_from_slice(&(v.len() as u32).to_le_bytes());
-                        bytes.extend_from_slice(v);
-                    }
-                    bytes.extend_from_slice(&(pc.variable_parameters.len() as u32).to_le_bytes());
-                    for v in &pc.variable_parameters {
-                        let vb = v.as_bytes();
-                        bytes.extend_from_slice(&(vb.len() as u32).to_le_bytes());
-                        bytes.extend_from_slice(vb);
-                    }
-                }
-                None => bytes.push(0u8),
-            }
-
-            let recipient_bytes = recipient.as_slice();
-            bytes.extend_from_slice(&(recipient_bytes.len() as u32).to_le_bytes());
-            bytes.extend_from_slice(recipient_bytes);
-
-            let to_bytes = to.as_slice();
-            bytes.extend_from_slice(&(to_bytes.len() as u32).to_le_bytes());
-            bytes.extend_from_slice(to_bytes);
-
-            let msg_bytes = message.as_bytes();
-            bytes.extend_from_slice(&(msg_bytes.len() as u32).to_le_bytes());
-            bytes.extend_from_slice(msg_bytes);
-
-            // Sender's SPHINCS+ signature. Dropping it made a restored bearer
-            // session indistinguishable from an unsigned one.
-            bytes.extend_from_slice(&(signature.len() as u32).to_le_bytes());
-            bytes.extend_from_slice(signature);
-
-            // Authority policy (§ offline-bearer tier). Encoded with the same
-            // canonical writer the operation's own `to_bytes` uses, so the
-            // persisted tail is byte-identical to the signed one.
-            match authority_policy {
-                Some(ap) => {
-                    bytes.push(1u8);
-                    ap.append_canonical(&mut bytes);
-                }
-                None => bytes.push(0u8),
-            }
-        }
-        _ => {
-            // For other operations, use a simplified encoding
-            // In production, implement full serialization for all variants
-            bytes.push(255u8); // Unknown tag
-        }
-    }
-
-    bytes
+    op.to_bytes()
 }
 
-/// Deserialize Operation from bytes
+/// A persisted operation, decoded by the canonical decoder.
 pub fn deserialize_operation(bytes: &[u8]) -> Result<Operation> {
-    if bytes.is_empty() {
-        return Err(anyhow!("Empty operation bytes"));
-    }
-
-    let tag = bytes[0];
-    let mut cursor = &bytes[1..];
-
-    fn read_u32(cursor: &mut &[u8]) -> Result<u32> {
-        if cursor.len() < 4 {
-            return Err(anyhow!("Insufficient bytes for u32"));
-        }
-        let val = u32::from_le_bytes([cursor[0], cursor[1], cursor[2], cursor[3]]);
-        *cursor = &cursor[4..];
-        Ok(val)
-    }
-
-    fn read_u64(cursor: &mut &[u8]) -> Result<u64> {
-        if cursor.len() < 8 {
-            return Err(anyhow!("Insufficient bytes for u64"));
-        }
-        let val = u64::from_le_bytes([
-            cursor[0], cursor[1], cursor[2], cursor[3], cursor[4], cursor[5], cursor[6], cursor[7],
-        ]);
-        *cursor = &cursor[8..];
-        Ok(val)
-    }
-
-    fn read_bytes(cursor: &mut &[u8]) -> Result<Vec<u8>> {
-        let len = read_u32(cursor)? as usize;
-        const MAX_FIELD_SIZE: usize = 10 * 1024 * 1024; // 10MB
-        if len > MAX_FIELD_SIZE {
-            return Err(anyhow!("Field size {} exceeds maximum", len));
-        }
-        if cursor.len() < len {
-            return Err(anyhow!("Insufficient bytes for data"));
-        }
-        let data = cursor[..len].to_vec();
-        *cursor = &cursor[len..];
-        Ok(data)
-    }
-
-    fn read_string(cursor: &mut &[u8]) -> Result<String> {
-        let bytes = read_bytes(cursor)?;
-        String::from_utf8(bytes).map_err(|e| anyhow!("Invalid UTF-8: {}", e))
-    }
-
-    match tag {
-        0 => Ok(Operation::Genesis),
-        TRANSFER_TAG_V2 => {
-            // Transfer
-            let to_device_id = read_bytes(&mut cursor)?;
-            let amount = read_u64(&mut cursor)?;
-            let locked = read_u64(&mut cursor)?;
-            if cursor.is_empty() {
-                return Err(anyhow!("Incomplete Transfer balance state_hash flag"));
-            }
-            let has_state_hash = cursor[0];
-            cursor = &cursor[1..];
-            let state_hash = match has_state_hash {
-                0 => None,
-                1 => {
-                    if cursor.len() < 32 {
-                        return Err(anyhow!("Insufficient bytes for balance state_hash"));
-                    }
-                    let mut h = [0u8; 32];
-                    h.copy_from_slice(&cursor[..32]);
-                    cursor = &cursor[32..];
-                    Some(h)
-                }
-                other => return Err(anyhow!("Invalid balance state_hash flag: {other}")),
-            };
-            let token_id = read_bytes(&mut cursor)?;
-
-            // CPTA policy commitment (§9.5) — fixed 32 bytes.
-            if cursor.len() < 32 {
-                return Err(anyhow!("Incomplete Transfer policy_commit"));
-            }
-            let mut policy_commit = [0u8; 32];
-            policy_commit.copy_from_slice(&cursor[..32]);
-            cursor = &cursor[32..];
-
-            if cursor.is_empty() {
-                return Err(anyhow!("Incomplete Transfer data"));
-            }
-            let mode_byte = cursor[0];
-            cursor = &cursor[1..];
-            let mode = match mode_byte {
-                0 => dsm::types::operations::TransactionMode::Unilateral,
-                1 => dsm::types::operations::TransactionMode::Bilateral,
-                _ => dsm::types::operations::TransactionMode::Unilateral,
-            };
-
-            let nonce = read_bytes(&mut cursor)?;
-
-            if cursor.is_empty() {
-                return Err(anyhow!("Incomplete Transfer verification"));
-            }
-            let verification_byte = cursor[0];
-            cursor = &cursor[1..];
-            let verification = match verification_byte {
-                0 => dsm::types::operations::VerificationType::Standard,
-                1 => dsm::types::operations::VerificationType::Enhanced,
-                2 => dsm::types::operations::VerificationType::Bilateral,
-                3 => dsm::types::operations::VerificationType::Directory,
-                4 => dsm::types::operations::VerificationType::StandardBilateral,
-                5 => dsm::types::operations::VerificationType::PreCommitted,
-                6 => dsm::types::operations::VerificationType::UnilateralIdentityAnchor,
-                _ => dsm::types::operations::VerificationType::Standard,
-            };
-
-            if cursor.is_empty() {
-                return Err(anyhow!("Incomplete Transfer pre_commit flag"));
-            }
-            let has_precommit = cursor[0];
-            cursor = &cursor[1..];
-            let pre_commit = if has_precommit == 1 {
-                let mut pc = dsm::types::operations::PreCommitmentOp::default();
-                let n = read_u32(&mut cursor)? as usize;
-                for _ in 0..n {
-                    let k = read_string(&mut cursor)?;
-                    let v = read_bytes(&mut cursor)?;
-                    pc.fixed_parameters.insert(k, v);
-                }
-                let m = read_u32(&mut cursor)? as usize;
-                for _ in 0..m {
-                    pc.variable_parameters.push(read_string(&mut cursor)?);
-                }
-                Some(pc)
-            } else {
-                None
-            };
-
-            let recipient = read_bytes(&mut cursor)?;
-            let to = read_bytes(&mut cursor)?;
-            let message = read_string(&mut cursor)?;
-
-            // Rebuild the balance exactly as persisted. The previous code
-            // substituted a zero state hash here, asserting a state the balance
-            // never referenced.
-            // `Balance::zero()` anchors to the current canonical state, so it
-            // cannot be used here: it would substitute a hash this balance never
-            // referenced. `from_parts` is the exact inverse of the encoder.
-            let balance = dsm::types::token_types::Balance::from_parts(amount, locked, state_hash);
-
-            let signature = read_bytes(&mut cursor)?;
-
-            if cursor.is_empty() {
-                return Err(anyhow!("Incomplete Transfer authority_policy flag"));
-            }
-            let has_authority = cursor[0];
-            cursor = &cursor[1..];
-            let authority_policy = match has_authority {
-                0 => None,
-                1 => Some(read_authority_policy(&mut cursor)?),
-                other => return Err(anyhow!("Invalid authority_policy flag: {other}")),
-            };
-
-            Ok(Operation::Transfer {
-                to_device_id,
-                amount: balance,
-                token_id,
-                policy_commit,
-                mode,
-                nonce,
-                verification,
-                pre_commit,
-                recipient,
-                to,
-                message,
-                signature,
-                authority_policy,
-            })
-        }
-        255 => Ok(Operation::Noop),
-        _ => Err(anyhow!("Unknown operation tag: {}", tag)),
-    }
+    Operation::from_bytes(bytes).map_err(|e| anyhow!("stored operation does not decode: {e}"))
 }
 
 pub fn meta_to_blob(map: &HashMap<String, Vec<u8>>) -> Vec<u8> {
@@ -620,22 +266,22 @@ mod tests {
 
     #[test]
     fn deserialize_rejects_empty_bytes() {
-        let err = deserialize_operation(&[]).unwrap_err();
-        assert!(err.to_string().contains("Empty operation bytes"));
+        assert!(deserialize_operation(&[]).is_err());
     }
 
     #[test]
     fn deserialize_rejects_unknown_tag() {
-        let err = deserialize_operation(&[200u8]).unwrap_err();
-        assert!(err.to_string().contains("Unknown operation tag"));
+        assert!(deserialize_operation(&[200u8]).is_err());
     }
 
+    /// Every variant round-trips: a stored operation is never read back as a
+    /// different one.
     #[test]
-    fn serialize_deserialize_noop_via_tag_255() {
-        let bytes = serialize_operation(&Operation::Noop);
-        assert_eq!(bytes, vec![255u8]);
-        let back = deserialize_operation(&bytes).expect("deserialize noop");
-        assert!(matches!(back, Operation::Noop));
+    fn a_stored_operation_is_read_back_as_itself() {
+        for op in [Operation::Noop, Operation::Genesis] {
+            let back = deserialize_operation(&serialize_operation(&op)).expect("decodes");
+            assert_eq!(back.to_bytes(), op.to_bytes());
+        }
     }
 
     #[test]
@@ -648,8 +294,6 @@ mod tests {
             token_id: b"dBTC".to_vec(),
             mode: dsm::types::operations::TransactionMode::Bilateral,
             nonce: vec![0xBBu8; 16],
-            verification: dsm::types::operations::VerificationType::Bilateral,
-            pre_commit: None,
             recipient: vec![0xCCu8; 32],
             to: vec![0xDDu8; 32],
             message: "test transfer".to_string(),
@@ -665,8 +309,6 @@ mod tests {
                 token_id,
                 mode,
                 nonce,
-                verification,
-                pre_commit,
                 recipient,
                 to,
                 message,
@@ -680,11 +322,6 @@ mod tests {
                     dsm::types::operations::TransactionMode::Bilateral
                 ));
                 assert_eq!(nonce, vec![0xBBu8; 16]);
-                assert!(matches!(
-                    verification,
-                    dsm::types::operations::VerificationType::Bilateral
-                ));
-                assert!(pre_commit.is_none());
                 assert_eq!(recipient, vec![0xCCu8; 32]);
                 assert_eq!(to, vec![0xDDu8; 32]);
                 assert_eq!(message, "test transfer");

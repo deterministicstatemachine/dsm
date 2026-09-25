@@ -403,7 +403,12 @@ fn get_database_path() -> Result<PathBuf> {
 /// an accepted parent/child pair the responder does not hold, and is keyed by
 /// epoch, one row per resync. `system_peers` and `system_peer_events` are gone:
 /// they held a chain tip the device computed for a protocol actor by itself.
-pub const CLIENT_DB_SCHEMA_VERSION: i64 = 21;
+///
+/// 22: operations are stored in their canonical encoding (`Operation::to_bytes`)
+/// and the transfer carries no `verification` or `pre_commit`; the storage
+/// codec that wrote a second encoding (and every non-transfer as one byte)
+/// is gone.
+pub const CLIENT_DB_SCHEMA_VERSION: i64 = 22;
 
 /// A 32-byte column, exactly. Any other length is a corrupt row and an error —
 /// never padded, never truncated.
