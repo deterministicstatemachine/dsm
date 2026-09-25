@@ -272,14 +272,11 @@ export interface WalletInboxItem {
 // -- Missing Types from Refactor --
 
 /**
- * Identity information
+ * The device's identity as its transport headers carry it.
  */
 export interface IdentityInfo {
   deviceId: string; // Base32
-  deviceEntropy: string; // Hex or B32
-  isRegistered: boolean;
   genesisHash: string; // Base32
-  networkId: string;
 }
 
 /**

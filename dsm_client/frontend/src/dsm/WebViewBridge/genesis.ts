@@ -31,7 +31,6 @@ export async function generateMnemonic(): Promise<string> {
 export async function createGenesisViaRouter(
   mnemonic: string,
   locale: string,
-  networkId: string
 ): Promise<Uint8Array> {
   if (!mnemonic || mnemonic.trim().length === 0) {
     throw new Error("createGenesisViaRouter: mnemonic is required (Genesis v2)");
@@ -39,7 +38,6 @@ export async function createGenesisViaRouter(
   const req = new WalletCreateGenesisV2Request({
     mnemonic: String(mnemonic),
     locale: String(locale ?? ""),
-    networkId: String(networkId ?? ""),
   });
   const res = await maybeThrowOnEmpty(
     await bridgeGate.enqueue(() => callBin("createGenesisV2", req.toBinary())),
