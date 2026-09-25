@@ -260,6 +260,25 @@ impl ParentClaimRef {
         let v = Self::at(&mut c)?;
         finish(&c, v)
     }
+
+    /// The typed parent reference `𝒞_E^pre` carries for this parent, named by
+    /// the trader `(genesis, device_id)` at the position `P` extends (P
+    /// conformance rule 2): a single-root claim by its exact envelope digest,
+    /// a conditional position by `(G, DevID, p)` and the fulfillment that
+    /// installed it.
+    pub fn validation_ref(&self, genesis: &D32, device_id: &D32, position: u64) -> ValidationRef {
+        match self {
+            Self::SingleRoot { claim_ref } => ValidationRef::SingleRootClaim {
+                claim_ref: *claim_ref,
+            },
+            Self::Conditional { fulfillment_id } => ValidationRef::ConditionalClaim {
+                genesis: *genesis,
+                device_id: *device_id,
+                position,
+                fulfillment_id: *fulfillment_id,
+            },
+        }
+    }
 }
 
 // ── 0x0037 TraderPrecommitBody ─────────────────────────────────────────────
@@ -336,6 +355,11 @@ impl TraderPrecommitBody {
     }
     pub fn parent_claim_ref(&self) -> &ParentClaimRef {
         &self.parent_claim_ref
+    }
+    /// The typed parent reference this `P` requires `𝒞_E^pre` to carry.
+    pub fn parent_reference(&self) -> ValidationRef {
+        self.parent_claim_ref
+            .validation_ref(&self.genesis, &self.device_id, self.position)
     }
     pub fn external_commitment(&self) -> &D32 {
         &self.external_commitment
@@ -1055,6 +1079,17 @@ impl PreEClosureIndex {
 
     pub fn refs(&self) -> &[ValidationRef] {
         &self.refs
+    }
+
+    /// This index with `reference` among its refs, in canonical order. An
+    /// index that already references it is returned unchanged.
+    pub fn with(&self, reference: ValidationRef) -> Result<Self, SofiWireError> {
+        let mut refs = self.refs.clone();
+        if !refs.contains(&reference) {
+            refs.push(reference);
+            refs.sort_by_key(ValidationRef::encode);
+        }
+        Self::new(refs)
     }
 
     pub fn encode(&self) -> Vec<u8> {

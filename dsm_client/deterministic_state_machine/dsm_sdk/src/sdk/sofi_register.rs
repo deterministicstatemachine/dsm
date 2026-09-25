@@ -34,7 +34,8 @@ use dsm::sofi::registration::{
 };
 use dsm::sofi::storage::Resolved;
 use dsm::sofi::wire::{
-    SettlementPreimage, SofiWireError, TraderFulfillmentBody, TraderPrecommitBody, ValidationRef,
+    ParentClaimRef, SettlementPreimage, SofiWireError, TraderFulfillmentBody, TraderPrecommitBody,
+    ValidationRef,
 };
 use dsm::types::error::DsmError;
 
@@ -43,7 +44,7 @@ use crate::sdk::route_seats::{
 };
 use crate::sdk::sofi_evidence::{Acquired, ACQUIRE_ROUNDS, LOCATOR_BUDGET};
 use crate::sdk::sofi_exercise::read_attempt_cell;
-use crate::sdk::sofi_publish::{fetch_precommit, fetch_setup_bytes};
+use crate::sdk::sofi_publish::{fetch_fulfillment, fetch_precommit, fetch_setup_bytes};
 use crate::sdk::storage_io::read_stored_bytes;
 use crate::sdk::storage_set::StorageSet;
 
@@ -227,6 +228,17 @@ async fn gather_conformance(
             closure.insert(*reference, bytes);
         }
     }
+    // Item 1 for a conditional parent: the F whose id P names, by that id.
+    // Its id is the hash of its body, so the kept bytes are that F.
+    let parent_fulfillment = match request.precommit.parent_claim_ref() {
+        ParentClaimRef::Conditional { fulfillment_id } => {
+            match fetch_fulfillment(set, fulfillment_id).await? {
+                Resolved::Kept(signed) => Some(signed.body),
+                Resolved::None | Resolved::Unavailable => None,
+            }
+        }
+        ParentClaimRef::SingleRoot { .. } => None,
+    };
     Ok(ConformanceEvidence {
         precommit: Signed {
             body: request.precommit.clone(),
@@ -242,6 +254,7 @@ async fn gather_conformance(
             PRIOR_ATTEMPT_BUDGET,
         )
         .await?,
+        parent_fulfillment,
     })
 }
 

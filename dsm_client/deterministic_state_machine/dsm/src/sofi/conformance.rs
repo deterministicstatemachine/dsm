@@ -28,8 +28,8 @@ use super::derive::{self, policy_fulfillment_id, precommit_id};
 use super::publication::{recognize_setup, Signed};
 use super::signature::{verify_fulfillment, verify_precommit, SignatureError};
 use super::wire::{
-    next_position, DlvPolicyFulfillmentBody, SettlementPreimage, SofiResolutionClaim,
-    SofiWireError, TraderFulfillmentBody, TraderPrecommitBody, ValidationRef,
+    ParentClaimRef, next_position, DlvPolicyFulfillmentBody, SettlementPreimage,
+    SofiResolutionClaim, SofiWireError, TraderFulfillmentBody, TraderPrecommitBody, ValidationRef,
 };
 use crate::ccb::decode::policy_object_address;
 
@@ -68,6 +68,21 @@ pub enum FulfillmentConformanceError {
     PrecommitMismatch,
     /// `F.position` is not `P.position + 1`. Item 1.
     PositionNotSuccessor { expected: u64, got: u64 },
+    /// `𝒞_E^pre` does not carry the typed reference of the parent P names
+    /// (P conformance rule 2). Item 1.
+    ParentReferenceNotInClosure,
+    /// The bytes at the `claim_ref` P names are not a verifying root claim:
+    /// P names a parent that is not a claim. Item 1.
+    ParentClaimDoesNotVerify,
+    /// The parent claim is not the position P extends: it names another
+    /// trader or position, or a root other than `P.void_root = T°.pre_root`
+    /// (P conformance rules 2 and 3). Item 1.
+    ParentClaimIsAnotherPosition,
+    /// P is signed under an algorithm or key other than its parent's: the
+    /// single-root claim's, or the key of the parent `F` a conditional parent
+    /// was installed by (P conformance rule 8, "the key binds to the parent
+    /// claim"). Item 1.
+    KeyIsNotTheParentClaimants,
     /// F is signed under a different algorithm or key than P commits. Item 2.
     KeyMismatch,
     /// The envelope of F carries no signature. Item 2.
@@ -171,6 +186,9 @@ pub enum ConformanceMissing {
     /// `P(E)` was not fetched, or the fetched preimage does not recompute the
     /// `E` that P commits.
     Preimage,
+    /// P's parent is conditional, and the `F` whose `FulfillmentId` it names
+    /// was not fetched: the key P must bind to is that F's.
+    ParentFulfillment { fulfillment_id: D32 },
     /// A reference of `𝒞_E^pre` whose object was not fetched, or whose
     /// fetched bytes do not re-derive the reference.
     ClosureObject(ValidationRef),
@@ -224,6 +242,10 @@ pub struct ConformanceEvidence {
     /// Item 5: the storage fact at `K^(a)` of a vault, by `(v, a)`, for the
     /// attempts `F` skips past, as Core evaluated its route chains.
     pub prior_attempts: BTreeMap<(D32, u64), CellFact>,
+    /// Item 1, for a conditional parent: the body of the `F` whose
+    /// `FulfillmentId` P names. Its identity is the hash of its body, key
+    /// included, so bytes that do not re-derive the id are not that `F`.
+    pub parent_fulfillment: Option<TraderFulfillmentBody>,
 }
 
 /// The canonical `G_j` identity for every DLV leg of `P`, in P's leg order.
@@ -343,6 +365,74 @@ pub fn check_fulfillment_against_precommit(
     attempts_cover_legs(precommit, fulfillment)
 }
 
+/// Item 1, P conformance rules 3 and 8: P's key binds to the parent claim.
+///
+/// A single-root parent is the claim envelope at the `claim_ref` P names,
+/// in hand as the closure object `𝒞_E^pre` references (rule 2): it must
+/// verify, name P's trader and position, commit the root P voids to, and be
+/// signed under P's key. A conditional parent's claim `C_p` carries no key:
+/// it names the `F` that installed it, and P's key is that `F`'s. `Err`
+/// carries the item's outcome: Invalid, or the object still missing.
+fn parent_binds_the_key(
+    precommit: &TraderPrecommitBody,
+    evidence: &ConformanceEvidence,
+) -> Result<(), Item> {
+    let key_is_ps = |alg: u16, key: &[u8]| {
+        alg == precommit.signature_alg() && key == precommit.claimant_public_key()
+    };
+    match precommit.parent_claim_ref() {
+        ParentClaimRef::SingleRoot { claim_ref } => {
+            let reference = precommit.parent_reference();
+            let bytes = evidence
+                .closure
+                .get(&reference)
+                .filter(|bytes| derive::claim_ref(bytes) == *claim_ref)
+                .ok_or(Item::Missing(ConformanceMissing::ClosureObject(reference)))?;
+            let claim =
+                crate::economic::claim_envelope::decode_and_verify_economic_root_claim(bytes)
+                    .map_err(|_| {
+                        Item::Invalid(FulfillmentConformanceError::ParentClaimDoesNotVerify)
+                    })?;
+            let parent = claim.body();
+            if parent.trader_genesis != *precommit.genesis()
+                || parent.trader_devid != *precommit.device_id()
+                || parent.economic_position != precommit.position()
+                || parent.post_economic_root != *precommit.void_root()
+            {
+                return Err(Item::Invalid(
+                    FulfillmentConformanceError::ParentClaimIsAnotherPosition,
+                ));
+            }
+            if !key_is_ps(parent.signature_alg, &parent.claimant_public_key) {
+                return Err(Item::Invalid(
+                    FulfillmentConformanceError::KeyIsNotTheParentClaimants,
+                ));
+            }
+            Ok(())
+        }
+        ParentClaimRef::Conditional { fulfillment_id } => {
+            let parent = evidence
+                .parent_fulfillment
+                .as_ref()
+                .filter(|f| derive::fulfillment_id(f) == *fulfillment_id)
+                .ok_or(Item::Missing(ConformanceMissing::ParentFulfillment {
+                    fulfillment_id: *fulfillment_id,
+                }))?;
+            if parent.position() != precommit.position() {
+                return Err(Item::Invalid(
+                    FulfillmentConformanceError::ParentClaimIsAnotherPosition,
+                ));
+            }
+            if !key_is_ps(parent.signature_alg(), parent.claimant_public_key()) {
+                return Err(Item::Invalid(
+                    FulfillmentConformanceError::KeyIsNotTheParentClaimants,
+                ));
+            }
+            Ok(())
+        }
+    }
+}
+
 // ── The predicate ──────────────────────────────────────────────────────────
 
 /// One item's outcome: a value over the bytes in hand, or the object the
@@ -376,6 +466,9 @@ impl Items {
             Ok(()) => self.valid(item),
             Err(why) => self.invalid(item, why),
         }
+    }
+    fn outcome(&mut self, item: u8, r: Result<(), Item>) {
+        self.0.push((item, r.err().unwrap_or(Item::Valid)));
     }
     fn fold(self) -> Result<FulfillmentConformance, ConformanceMissing> {
         let mut invalid: Option<(u8, FulfillmentConformanceError)> = None;
@@ -492,6 +585,7 @@ pub fn fulfillment_conformance(
     let precommit = &fetched.body;
 
     items.note(1, successor_position(precommit, fulfillment));
+    items.outcome(1, parent_binds_the_key(precommit, evidence));
     items.note(2, key_is_the_precommitted_one(precommit, fulfillment));
     items.note(4, attempts_cover_legs(precommit, fulfillment));
 
@@ -568,6 +662,16 @@ pub fn fulfillment_conformance(
         return items.fold();
     }
     items.valid(8);
+    // Item 1, P conformance rule 2: `𝒞_E^pre` carries the typed reference of
+    // the parent P names, so E commits to it.
+    if !preimage
+        .settlement()
+        .closure()
+        .refs()
+        .contains(&precommit.parent_reference())
+    {
+        items.invalid(1, FulfillmentConformanceError::ParentReferenceNotInClosure);
+    }
     for reference in preimage.settlement().closure().refs() {
         match evidence
             .closure
@@ -663,6 +767,7 @@ pub fn conformance_invalid_in_hand(
         closure,
         setups: BTreeMap::new(),
         prior_attempts: BTreeMap::new(),
+        parent_fulfillment: None,
     };
     match fulfillment_conformance(fulfillment, fulfillment_signature, &in_hand) {
         Ok(FulfillmentConformance::Invalid(why)) => Some(why),
@@ -701,8 +806,6 @@ mod tests {
     fn token(byte: u8) -> D32 {
         [byte; 32]
     }
-
-    const CLAIM_BYTES: &[u8] = b"the exact registered claim envelope at p";
 
     fn pk() -> &'static [u8] {
         &trader_keys().0
@@ -850,12 +953,6 @@ mod tests {
                 market_bytes,
             ),
             (
-                ValidationRef::SingleRootClaim {
-                    claim_ref: derive::claim_ref(CLAIM_BYTES),
-                },
-                CLAIM_BYTES.to_vec(),
-            ),
-            (
                 ValidationRef::ConditionalClaim {
                     genesis: G,
                     device_id: DEV,
@@ -874,6 +971,10 @@ mod tests {
         let mut refs: Vec<ValidationRef> = closure.keys().copied().collect();
         refs.sort_by_key(ValidationRef::encode);
         let f = swap_fixture_with(2, PreEClosureIndex::new(refs).unwrap());
+        // The fixture adds the single-root parent P names; the closure holds
+        // its exact envelope under that reference.
+        let mut closure = closure;
+        closure.insert(f.precommit.parent_reference(), f.parent_claim.clone());
         let precommit = f.precommit;
         let precommit_sig = sign_p(&precommit);
         let e = derive::recompute_e(&f.preimage).unwrap();
@@ -925,6 +1026,7 @@ mod tests {
                     state: ChainState::Final,
                 },
             )]),
+            parent_fulfillment: None,
         }
     }
 
@@ -1095,6 +1197,310 @@ mod tests {
                 expected: r.precommit.position() + 1,
                 got: r.precommit.position() + 2,
             })
+        );
+    }
+
+    // ── Item 1: P's key binds to the parent claim (P conformance 2, 3, 8) ──
+
+    /// A root claim of the fixture trader at `position` over `root`, naming
+    /// the manifest `manifest`, signed under `(pk, sk)`.
+    fn root_claim(position: u64, root: D32, manifest: D32, pk: &[u8], sk: &[u8]) -> Vec<u8> {
+        root_claim_of(G, DEV, position, root, manifest, pk, sk)
+    }
+
+    /// The same claim, naming the trader `(genesis, device)`.
+    fn root_claim_of(
+        genesis: D32,
+        device: D32,
+        position: u64,
+        root: D32,
+        manifest: D32,
+        pk: &[u8],
+        sk: &[u8],
+    ) -> Vec<u8> {
+        let body = crate::economic::claim::EconomicRootClaimBody::new(
+            genesis,
+            device,
+            position,
+            root,
+            manifest,
+            token(0x77),
+            SIG_ALG,
+            pk,
+        )
+        .unwrap();
+        crate::economic::claim_envelope::sign_economic_root_claim(&body, sk).unwrap()
+    }
+
+    /// The root every one-hop fixture's P voids to: its trader tree's.
+    fn one_hop_root() -> D32 {
+        *crate::sofi::validation::fixtures::swap_fixture_n(1)
+            .precommit
+            .void_root()
+    }
+
+    /// A one-hop operation whose `𝒞_E^pre` also references `extra`, and the
+    /// closure objects in hand: `extra` and the fixture's own parent claim.
+    fn one_hop_with(
+        extra: BTreeMap<ValidationRef, Vec<u8>>,
+    ) -> (
+        crate::sofi::validation::fixtures::Fixture,
+        BTreeMap<ValidationRef, Vec<u8>>,
+    ) {
+        let mut refs: Vec<ValidationRef> = extra.keys().copied().collect();
+        refs.sort_by_key(ValidationRef::encode);
+        let f = swap_fixture_with(1, PreEClosureIndex::new(refs).unwrap());
+        let mut closure = extra;
+        closure.insert(f.precommit.parent_reference(), f.parent_claim.clone());
+        (f, closure)
+    }
+
+    /// `f`'s P naming `parent` under `(pk, sk)`, its canonical F at attempt 0
+    /// signed under the same key, and everything in hand.
+    fn exercised(
+        f: &crate::sofi::validation::fixtures::Fixture,
+        closure: BTreeMap<ValidationRef, Vec<u8>>,
+        parent: ParentClaimRef,
+        pk: &[u8],
+        sk: &[u8],
+    ) -> (TraderFulfillmentBody, Vec<u8>, ConformanceEvidence) {
+        let base = &f.precommit;
+        let precommit = TraderPrecommitBody::new(
+            *base.genesis(),
+            *base.device_id(),
+            base.position(),
+            parent,
+            *base.external_commitment(),
+            base.legs().to_vec(),
+            *base.realize_root(),
+            *base.void_root(),
+            *base.storage_set_id(),
+            SIG_ALG,
+            pk,
+        )
+        .unwrap();
+        let p_sig = sphincs_sign(sk, &derive::precommit_signing_digest(&precommit)).unwrap();
+        let attempts: Vec<AttemptEntry> = precommit
+            .legs()
+            .iter()
+            .map(|leg| AttemptEntry {
+                vault_id: leg.vault_id,
+                attempt: 0,
+            })
+            .collect();
+        let fulfillment = fulfillment_of(&precommit, &f.preimage, attempts);
+        let f_sig = sphincs_sign(sk, &derive::fulfillment_signing_digest(&fulfillment)).unwrap();
+        let vault = vault_id_of(0);
+        let evidence = ConformanceEvidence {
+            precommit: PrecommitEnvelope {
+                body: precommit,
+                signature: p_sig,
+            },
+            preimage: f.preimage.clone(),
+            closure,
+            setups: BTreeMap::from([(setup_ref_for(vault), setup_envelope_for(vault))]),
+            prior_attempts: BTreeMap::new(),
+            parent_fulfillment: None,
+        };
+        (fulfillment, f_sig, evidence)
+    }
+
+    fn own_parent(f: &crate::sofi::validation::fixtures::Fixture) -> ParentClaimRef {
+        *f.precommit.parent_claim_ref()
+    }
+
+    /// MR-SOFI-0151, P conformance rule 8: a P that names the trader's
+    /// registered claim but is signed under any other key does not conform,
+    /// though P, F and every setup verify under the key P commits. Under the
+    /// claim's own key the same operation conforms.
+    #[test]
+    fn a_precommit_under_a_key_its_parent_claim_does_not_carry_does_not_conform() {
+        let (f, closure) = one_hop_with(BTreeMap::new());
+        let (other_pk, other_sk) = generate_sphincs_keypair().unwrap();
+        let (fb, f_sig, ev) = exercised(&f, closure.clone(), own_parent(&f), &other_pk, &other_sk);
+        assert_eq!(
+            fulfillment_conformance(&fb, &f_sig, &ev),
+            invalid(FulfillmentConformanceError::KeyIsNotTheParentClaimants)
+        );
+        let (fb, f_sig, ev) = exercised(&f, closure, own_parent(&f), pk(), sk());
+        assert_eq!(
+            fulfillment_conformance(&fb, &f_sig, &ev),
+            Ok(FulfillmentConformance::Valid)
+        );
+    }
+
+    /// P conformance rules 2 and 3: a claim under the trader's key that names
+    /// another genesis, device, position or root is not the parent P extends.
+    #[test]
+    fn a_parent_claim_of_another_position_or_root_does_not_conform() {
+        let root = one_hop_root();
+        for claim in [
+            root_claim_of(token(0x12), DEV, P_POS, root, token(0x78), pk(), sk()),
+            root_claim_of(G, token(0x23), P_POS, root, token(0x78), pk(), sk()),
+            root_claim(P_POS + 1, root, token(0x78), pk(), sk()),
+            root_claim(P_POS, token(0x5A), token(0x78), pk(), sk()),
+        ] {
+            let reference = ValidationRef::SingleRootClaim {
+                claim_ref: derive::claim_ref(&claim),
+            };
+            let (f, closure) = one_hop_with(BTreeMap::from([(reference, claim.clone())]));
+            let parent = ParentClaimRef::SingleRoot {
+                claim_ref: derive::claim_ref(&claim),
+            };
+            let (fb, f_sig, ev) = exercised(&f, closure, parent, pk(), sk());
+            assert_eq!(
+                fulfillment_conformance(&fb, &f_sig, &ev),
+                invalid(FulfillmentConformanceError::ParentClaimIsAnotherPosition)
+            );
+        }
+    }
+
+    /// Bytes at the `claim_ref` P names that are not a claim, or a claim
+    /// whose signature does not verify, bind P to nothing.
+    #[test]
+    fn a_parent_that_is_not_a_verifying_claim_does_not_conform() {
+        let mut tampered = root_claim(P_POS, one_hop_root(), token(0x78), pk(), sk());
+        // The signature is the envelope's last field: its last byte flipped
+        // leaves a claim that decodes and does not verify.
+        *tampered.last_mut().unwrap() ^= 0x01;
+        for bytes in [b"not a claim".to_vec(), tampered] {
+            let reference = ValidationRef::SingleRootClaim {
+                claim_ref: derive::claim_ref(&bytes),
+            };
+            let (f, closure) = one_hop_with(BTreeMap::from([(reference, bytes.clone())]));
+            let parent = ParentClaimRef::SingleRoot {
+                claim_ref: derive::claim_ref(&bytes),
+            };
+            let (fb, f_sig, ev) = exercised(&f, closure, parent, pk(), sk());
+            assert_eq!(
+                fulfillment_conformance(&fb, &f_sig, &ev),
+                invalid(FulfillmentConformanceError::ParentClaimDoesNotVerify)
+            );
+        }
+    }
+
+    /// P conformance rule 2: a parent `𝒞_E^pre` does not reference is not the
+    /// parent E commits to, even when its claim is in hand and binds. A parent
+    /// the closure references but whose bytes are not in hand is missing.
+    #[test]
+    fn a_parent_the_closure_does_not_reference_does_not_conform() {
+        let (f, closure) = one_hop_with(BTreeMap::new());
+        let elsewhere = root_claim(P_POS, one_hop_root(), token(0x79), pk(), sk());
+        let reference = ValidationRef::SingleRootClaim {
+            claim_ref: derive::claim_ref(&elsewhere),
+        };
+        let parent = ParentClaimRef::SingleRoot {
+            claim_ref: derive::claim_ref(&elsewhere),
+        };
+        let (fb, f_sig, mut ev) = exercised(&f, closure.clone(), parent, pk(), sk());
+        ev.closure.insert(reference, elsewhere);
+        assert_eq!(
+            fulfillment_conformance(&fb, &f_sig, &ev),
+            invalid(FulfillmentConformanceError::ParentReferenceNotInClosure)
+        );
+
+        let (fb, f_sig, mut ev) = exercised(&f, closure, own_parent(&f), pk(), sk());
+        let own = f.precommit.parent_reference();
+        ev.closure.remove(&own);
+        assert_eq!(
+            fulfillment_conformance(&fb, &f_sig, &ev),
+            Err(ConformanceMissing::ClosureObject(own))
+        );
+    }
+
+    /// The parent `F` at `P_POS` under `pk`, and the conditional claim `C_p`
+    /// its position installed.
+    fn conditional_parent(
+        position: u64,
+        pk: &[u8],
+    ) -> (TraderFulfillmentBody, ValidationRef, Vec<u8>) {
+        let parent = TraderFulfillmentBody::new(
+            token(0x31),
+            vec![token(0x32)],
+            vec![AttemptEntry {
+                vault_id: token(0x33),
+                attempt: 0,
+            }],
+            position,
+            SIG_ALG,
+            pk,
+        )
+        .unwrap();
+        let fulfillment_id = derive::fulfillment_id(&parent);
+        let claim = SofiResolutionClaim {
+            genesis: G,
+            device_id: DEV,
+            position: P_POS,
+            fulfillment_id,
+            realize_root: token(0x34),
+            void_root: token(0x35),
+        };
+        let reference = ValidationRef::ConditionalClaim {
+            genesis: G,
+            device_id: DEV,
+            position: P_POS,
+            fulfillment_id,
+        };
+        (parent, reference, claim.encode())
+    }
+
+    /// P conformance rule 8 for a conditional parent: `C_p` carries no key,
+    /// so P's key is the key of the `F` whose id P names — in hand, or the
+    /// item is missing; another key, or an `F` at another position, does not
+    /// conform. An `F` that is not the one P names binds nothing, whatever
+    /// key it carries.
+    #[test]
+    fn a_conditional_parent_binds_p_to_the_key_of_the_f_that_installed_it() {
+        let (other_pk, _) = generate_sphincs_keypair().unwrap();
+        let case = |named: &TraderFulfillmentBody,
+                    in_hand: Option<&TraderFulfillmentBody>,
+                    reference,
+                    claim: Vec<u8>| {
+            let (f, closure) = one_hop_with(BTreeMap::from([(reference, claim)]));
+            let parent = ParentClaimRef::Conditional {
+                fulfillment_id: derive::fulfillment_id(named),
+            };
+            let (fb, f_sig, mut ev) = exercised(&f, closure, parent, pk(), sk());
+            ev.parent_fulfillment = in_hand.cloned();
+            fulfillment_conformance(&fb, &f_sig, &ev)
+        };
+
+        let (ours, reference, claim) = conditional_parent(P_POS, pk());
+        assert_eq!(
+            case(&ours, Some(&ours), reference, claim.clone()),
+            Ok(FulfillmentConformance::Valid)
+        );
+        assert_eq!(
+            case(&ours, None, reference, claim),
+            Err(ConformanceMissing::ParentFulfillment {
+                fulfillment_id: derive::fulfillment_id(&ours)
+            })
+        );
+        let (theirs, reference, claim) = conditional_parent(P_POS, &other_pk);
+        assert_eq!(
+            case(&theirs, Some(&theirs), reference, claim.clone()),
+            invalid(FulfillmentConformanceError::KeyIsNotTheParentClaimants)
+        );
+        // P names their F; an F of ours at the same position is not it.
+        let substitute = TraderFulfillmentBody::new(
+            token(0x3F),
+            ours.policy_fulfillment_set().to_vec(),
+            ours.attempts().to_vec(),
+            P_POS,
+            SIG_ALG,
+            pk(),
+        )
+        .unwrap();
+        assert_eq!(
+            case(&theirs, Some(&substitute), reference, claim),
+            Err(ConformanceMissing::ParentFulfillment {
+                fulfillment_id: derive::fulfillment_id(&theirs)
+            })
+        );
+        let (elsewhere, reference, claim) = conditional_parent(P_POS + 1, pk());
+        assert_eq!(
+            case(&elsewhere, Some(&elsewhere), reference, claim),
+            invalid(FulfillmentConformanceError::ParentClaimIsAnotherPosition)
         );
     }
 

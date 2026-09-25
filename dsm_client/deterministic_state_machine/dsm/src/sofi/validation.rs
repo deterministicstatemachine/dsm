@@ -60,6 +60,10 @@ pub enum Invalid {
     CoreIdentityMismatch,
     /// `P.void_root != T°.pre_root` (P15-2).
     VoidRootIsNotThePreRoot,
+    /// `𝒞_E^pre` does not carry the typed parent reference of the parent `P`
+    /// names, so `E` does not commit to the parent the operation extends
+    /// (P conformance rule 2).
+    ParentReferenceNotInClosure,
     /// `P.realize_root` is not what the trader core folds to under `E` (P15-2).
     RealizeRootIsNotTheFold,
     /// A core's entries do not fold: the paths are not of one tree.
@@ -953,6 +957,18 @@ pub fn validate(
         *trader_core.pre_root() == *precommit.void_root(),
         Invalid::VoidRootIsNotThePreRoot,
     ));
+    // P conformance rule 2: the parent P names is the typed parent reference
+    // `𝒞_E^pre` carries. The closure is inside `B°`, so `E` commits to the
+    // exact parent claim (ExactRegisteredParentClaim → 𝒞_E^pre → B° → E), and
+    // a verifier fetches that claim by the reference.
+    verdict.note(require(
+        preimage
+            .settlement()
+            .closure()
+            .refs()
+            .contains(&precommit.parent_reference()),
+        Invalid::ParentReferenceNotInClosure,
+    ));
     // B° names its cores by digest. Those references are what bind the body to
     // the objects P(E) carries, so they are checked rather than assumed.
     verdict.note(check_settlement_core_references(precommit, preimage));
@@ -1834,7 +1850,7 @@ pub(crate) mod fixtures {
     use super::*;
     use crate::sofi::smt::batch_fold;
     use crate::economic::tree::EconomicSmt;
-    use crate::sofi::wire::{PreEClosureIndex, PrecommitLeg, SofiSetupBody};
+    use crate::sofi::wire::{PreEClosureIndex, PrecommitLeg, SofiSetupBody, ValidationRef};
 
     pub(crate) const G: D32 = [0x11; 32];
     pub(crate) const DEV: D32 = [0x22; 32];
@@ -2100,6 +2116,36 @@ pub(crate) mod fixtures {
         pub(crate) precommit: TraderPrecommitBody,
         pub(crate) preimage: SettlementPreimage,
         pub(crate) evidence: Evidence,
+        /// The exact envelope of the claim the trader registered at `P_POS`:
+        /// the single-root parent `P` names, and `𝒞_E^pre` references.
+        pub(crate) parent_claim: Vec<u8>,
+    }
+
+    /// The trader's registered claim at [`P_POS`] over `root`, signed under
+    /// the trader's key: the parent every fixture operation extends.
+    pub(crate) fn parent_claim_envelope(root: D32) -> Vec<u8> {
+        let body = crate::economic::claim::EconomicRootClaimBody::new(
+            G,
+            DEV,
+            P_POS,
+            root,
+            token(0x78),
+            token(0x77),
+            SIG_ALG,
+            &trader_keys().0,
+        )
+        .expect("a root claim body");
+        crate::economic::claim_envelope::sign_economic_root_claim(&body, &trader_keys().1)
+            .expect("a root claim envelope")
+    }
+
+    /// `closure` with the typed reference of `parent_claim`, in canonical order.
+    pub(crate) fn with_parent(closure: PreEClosureIndex, parent_claim: &[u8]) -> PreEClosureIndex {
+        closure
+            .with(ValidationRef::SingleRootClaim {
+                claim_ref: derive::claim_ref(parent_claim),
+            })
+            .expect("a closure with room for the parent")
     }
 
     /// One vault's worth of a swap: its tree, its core, and the hop it prices.
@@ -2269,6 +2315,8 @@ pub(crate) mod fixtures {
         trader_entries.sort_by_key(|e| e.key());
         let trader_core =
             TraderCore::new(G, DEV, P_POS + 1, trader_tree.root(), trader_entries).unwrap();
+        let parent_claim = parent_claim_envelope(trader_tree.root());
+        let closure = with_parent(closure, &parent_claim);
 
         let mut cores: Vec<DlvCore> = parts.iter().map(|p| p.core.clone()).collect();
         cores.sort_by_key(|c| *c.vault_id());
@@ -2346,7 +2394,7 @@ pub(crate) mod fixtures {
             DEV,
             P_POS,
             crate::sofi::wire::ParentClaimRef::SingleRoot {
-                claim_ref: token(0x66),
+                claim_ref: derive::claim_ref(&parent_claim),
             },
             e,
             legs,
@@ -2361,6 +2409,7 @@ pub(crate) mod fixtures {
             precommit,
             preimage,
             evidence,
+            parent_claim,
         }
     }
 
@@ -2724,6 +2773,47 @@ mod tests {
         );
     }
 
+    /// P conformance rule 2, before publication: a P naming a parent its
+    /// `𝒞_E^pre` does not reference is Invalid, a single-root parent and a
+    /// conditional one alike. The fixture's own parent is referenced.
+    #[test]
+    fn a_precommit_naming_a_parent_its_closure_does_not_carry_is_invalid() {
+        let f = swap_fixture();
+        assert!(f
+            .preimage
+            .settlement()
+            .closure()
+            .refs()
+            .contains(&f.precommit.parent_reference()));
+        for parent in [
+            crate::sofi::wire::ParentClaimRef::SingleRoot {
+                claim_ref: token(0x66),
+            },
+            crate::sofi::wire::ParentClaimRef::Conditional {
+                fulfillment_id: token(0x67),
+            },
+        ] {
+            let precommit = TraderPrecommitBody::new(
+                *f.precommit.genesis(),
+                *f.precommit.device_id(),
+                f.precommit.position(),
+                parent,
+                *f.precommit.external_commitment(),
+                f.precommit.legs().to_vec(),
+                *f.precommit.realize_root(),
+                *f.precommit.void_root(),
+                *f.precommit.storage_set_id(),
+                f.precommit.signature_alg(),
+                f.precommit.claimant_public_key(),
+            )
+            .unwrap();
+            assert_eq!(
+                validate(&precommit, &f.preimage, &f.evidence),
+                Err(Refusal::Invalid(Invalid::ParentReferenceNotInClosure))
+            );
+        }
+    }
+
     #[test]
     fn a_token_outside_the_vaults_pair_is_invalid() {
         let f = swap_fixture();
@@ -2748,7 +2838,7 @@ mod tests {
                 dlv_cores: vec![derive::dlv_core_digest(
                     &f.preimage.dlv_cores()[0].encode().unwrap(),
                 )],
-                closure: PreEClosureIndex::new(Vec::new()).unwrap(),
+                closure: f.preimage.settlement().closure().clone(),
             },
             f.preimage.trader_core().clone(),
             f.preimage.dlv_cores().to_vec(),
@@ -3064,6 +3154,7 @@ mod tests {
         trader_entries.sort_by_key(|e| e.key());
         let trader_core =
             TraderCore::new(G, DEV, P_POS + 1, trader_tree.root(), trader_entries).unwrap();
+        let parent_claim = parent_claim_envelope(trader_tree.root());
 
         let settlement = SettlementBody::Close {
             vault_id,
@@ -3074,7 +3165,7 @@ mod tests {
             reserve_b: RESERVE_B,
             trader_core: derive::trader_core_digest(&trader_core.encode().unwrap()),
             dlv_core: derive::dlv_core_digest(&dlv_core.encode().unwrap()),
-            closure: PreEClosureIndex::new(Vec::new()).unwrap(),
+            closure: with_parent(PreEClosureIndex::new(Vec::new()).unwrap(), &parent_claim),
         };
         let preimage =
             SettlementPreimage::new(settlement, trader_core.clone(), vec![dlv_core]).unwrap();
@@ -3114,7 +3205,7 @@ mod tests {
             DEV,
             P_POS,
             crate::sofi::wire::ParentClaimRef::SingleRoot {
-                claim_ref: token(0x66),
+                claim_ref: derive::claim_ref(&parent_claim),
             },
             e,
             vec![PrecommitLeg {
@@ -3133,6 +3224,7 @@ mod tests {
             precommit,
             preimage,
             evidence,
+            parent_claim,
         }
     }
 
