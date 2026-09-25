@@ -20,12 +20,16 @@ struct MemoryTips {
 }
 
 impl dsm::core::chain_tip_store::ChainTipStore for MemoryTips {
-    fn get_contact_chain_tip(&self, device_id: &[u8; 32]) -> Option<[u8; 32]> {
-        self.tips
+    fn get_contact_chain_tip(
+        &self,
+        device_id: &[u8; 32],
+    ) -> Result<Option<[u8; 32]>, dsm::types::error::DsmError> {
+        Ok(self
+            .tips
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .get(device_id)
-            .copied()
+            .copied())
     }
 
     fn set_contact_chain_tip(

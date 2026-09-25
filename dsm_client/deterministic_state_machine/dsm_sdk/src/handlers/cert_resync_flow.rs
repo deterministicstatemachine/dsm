@@ -134,20 +134,13 @@ impl super::app_router_impl::AppRouterImpl {
         // device polls for this relationship. The initiator's own tip may have
         // diverged from `agreed_tip`, so addressing the ack to `agreed_tip` would
         // strand it.
-        let local_genesis = crate::sdk::app_state::AppState::get_genesis_hash()
-            .and_then(|g| <[u8; 32]>::try_from(g.as_slice()).ok())
-            .unwrap_or([0u8; 32]);
-        let reply_to_tip = client_db::get_contact_by_device_id(&peer_device)
-            .ok()
-            .flatten()
-            .and_then(|c| {
-                super::app_router_impl::relationship_tip_for_contact_restore(
-                    self.device_id_bytes,
-                    local_genesis,
-                    &c,
-                )
-            })
-            .unwrap_or(agreed_tip);
+        let peer_contact = client_db::get_contact_by_device_id(&peer_device)
+            .map_err(|e| {
+                DsmError::storage(format!("cert-resync: contact: {e}"), None::<std::io::Error>)
+            })?
+            .ok_or_else(|| DsmError::relationship("cert-resync: the peer is not a contact"))?;
+        let reply_to_tip = super::app_router_impl::contact_relationship_tip(&peer_contact)
+            .map_err(DsmError::relationship)?;
 
         let req = CertResyncRequest {
             relationship_key: rel_key,

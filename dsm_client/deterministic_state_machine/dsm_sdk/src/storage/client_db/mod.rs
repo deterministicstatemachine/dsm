@@ -1674,10 +1674,18 @@ mod tests {
         assert!(latest.smt_proof.is_some());
     }
 
-    fn seed_contact_for_chain_tip_tests(device_id: [u8; 32], genesis_hash: [u8; 32], status: &str) {
+    /// The one contact these tests run on, starting at `tip` (its h_0 as far
+    /// as the tests are concerned: both tip columns hold it).
+    fn seed_contact_for_chain_tip_tests(
+        device_id: [u8; 32],
+        genesis_hash: [u8; 32],
+        status: &str,
+        tip: [u8; 32],
+    ) {
         let binding = get_connection().expect("db connection");
         let conn = binding.lock().expect("db lock");
-        let _ = conn.execute("DELETE FROM contacts", []);
+        conn.execute("DELETE FROM contacts", [])
+            .expect("clear contacts");
         drop(conn);
 
         let contact = ContactRecord {
@@ -1686,8 +1694,8 @@ mod tests {
             alias: "peer".to_string(),
             genesis_hash: genesis_hash.to_vec(),
             public_key: vec![7u8; 32],
-            kyber_public_key: Vec::new(),
-            current_chain_tip: None,
+            kyber_public_key: vec![0x4B; 1184],
+            current_chain_tip: Some(tip.to_vec()),
             verified: true,
             verification_proof: None,
             metadata: HashMap::new(),
@@ -1711,7 +1719,7 @@ mod tests {
         let local_tip = [0xA1u8; 32];
         let observed_tip = [0xB2u8; 32];
 
-        seed_contact_for_chain_tip_tests(device_id, genesis_hash, "BleCapable");
+        seed_contact_for_chain_tip_tests(device_id, genesis_hash, "BleCapable", [0x70u8; 32]);
         update_local_bilateral_chain_tip(&device_id, &local_tip).expect("seed local tip");
 
         record_observed_remote_chain_tip(
@@ -1721,8 +1729,14 @@ mod tests {
         )
         .expect("record observed tip");
 
-        assert_eq!(get_contact_chain_tip_raw(&device_id), None);
-        assert_eq!(get_local_bilateral_chain_tip(&device_id), Some(local_tip));
+        assert_eq!(
+            get_contact_chain_tip(&device_id).expect("read tip"),
+            Some([0x70u8; 32])
+        );
+        assert_eq!(
+            get_local_bilateral_chain_tip(&device_id).expect("read tip"),
+            Some(local_tip)
+        );
         assert_eq!(
             get_observed_remote_chain_tip(&device_id).expect("load observed tip"),
             Some(observed_tip)
@@ -1748,9 +1762,7 @@ mod tests {
         let canonical_tip = [0x62u8; 32];
         let deferred_tip = [0x72u8; 32];
 
-        seed_contact_for_chain_tip_tests(device_id, genesis_hash, "BleCapable");
-        restore_finalized_bilateral_chain_tip(&device_id, &canonical_tip)
-            .expect("seed canonical tip");
+        seed_contact_for_chain_tip_tests(device_id, genesis_hash, "BleCapable", canonical_tip);
         record_observed_remote_chain_tip(
             &device_id,
             &deferred_tip,
@@ -1779,9 +1791,7 @@ mod tests {
         let canonical_tip = [0x63u8; 32];
         let peer_claim_tip = [0x73u8; 32];
 
-        seed_contact_for_chain_tip_tests(device_id, genesis_hash, "BleCapable");
-        restore_finalized_bilateral_chain_tip(&device_id, &canonical_tip)
-            .expect("seed canonical tip");
+        seed_contact_for_chain_tip_tests(device_id, genesis_hash, "BleCapable", canonical_tip);
         record_observed_remote_chain_tip(
             &device_id,
             &peer_claim_tip,
@@ -1818,8 +1828,7 @@ mod tests {
         let stale_local = [0x65u8; 32];
         let deferred_tip = [0x66u8; 32];
 
-        seed_contact_for_chain_tip_tests(device_id, genesis_hash, "BleCapable");
-        restore_finalized_bilateral_chain_tip(&device_id, &target_tip).expect("seed canonical");
+        seed_contact_for_chain_tip_tests(device_id, genesis_hash, "BleCapable", target_tip);
         update_local_bilateral_chain_tip(&device_id, &stale_local).expect("seed stale local");
         record_observed_remote_chain_tip(
             &device_id,
@@ -1855,16 +1864,19 @@ mod tests {
         let stale_local_tip = [0x11u8; 32];
         let finalized_tip = [0x22u8; 32];
 
-        seed_contact_for_chain_tip_tests(device_id, genesis_hash, "BleCapable");
+        seed_contact_for_chain_tip_tests(device_id, genesis_hash, "BleCapable", finalized_tip);
         update_local_bilateral_chain_tip(&device_id, &stale_local_tip).expect("seed local tip");
         mark_contact_needs_online_reconcile(&device_id).expect("mark reconcile");
 
         restore_finalized_bilateral_chain_tip(&device_id, &finalized_tip)
             .expect("restore finalized tip");
 
-        assert_eq!(get_contact_chain_tip_raw(&device_id), Some(finalized_tip));
         assert_eq!(
-            get_local_bilateral_chain_tip(&device_id),
+            get_contact_chain_tip(&device_id).expect("read tip"),
+            Some(finalized_tip)
+        );
+        assert_eq!(
+            get_local_bilateral_chain_tip(&device_id).expect("read tip"),
             Some(finalized_tip)
         );
 
@@ -1888,16 +1900,21 @@ mod tests {
         let stale_parent = [0x44u8; 32];
         let new_tip = [0x55u8; 32];
 
-        seed_contact_for_chain_tip_tests(device_id, genesis_hash, "BleCapable");
-        restore_finalized_bilateral_chain_tip(&device_id, &current_tip).expect("seed current tip");
+        seed_contact_for_chain_tip_tests(device_id, genesis_hash, "BleCapable", current_tip);
 
         let advanced =
             try_advance_finalized_bilateral_chain_tip(&device_id, &stale_parent, &new_tip)
                 .expect("advance should not error");
 
         assert!(!advanced, "stale parent must be rejected");
-        assert_eq!(get_contact_chain_tip_raw(&device_id), Some(current_tip));
-        assert_eq!(get_local_bilateral_chain_tip(&device_id), Some(current_tip));
+        assert_eq!(
+            get_contact_chain_tip(&device_id).expect("read tip"),
+            Some(current_tip)
+        );
+        assert_eq!(
+            get_local_bilateral_chain_tip(&device_id).expect("read tip"),
+            Some(current_tip)
+        );
     }
 
     #[test]
@@ -1912,14 +1929,19 @@ mod tests {
         let parent_tip = [0xC1u8; 32];
         let next_tip = [0xD1u8; 32];
 
-        seed_contact_for_chain_tip_tests(device_id, genesis_hash, "BleCapable");
-        restore_finalized_bilateral_chain_tip(&device_id, &parent_tip).expect("seed parent tip");
+        seed_contact_for_chain_tip_tests(device_id, genesis_hash, "BleCapable", parent_tip);
 
         record_pending_online_transition(&device_id, "0Q4T3ZGMVR8JKPGS", &parent_tip, &next_tip)
             .expect("persist pending transition");
 
-        assert_eq!(get_contact_chain_tip_raw(&device_id), Some(parent_tip));
-        assert_eq!(get_local_bilateral_chain_tip(&device_id), Some(next_tip));
+        assert_eq!(
+            get_contact_chain_tip(&device_id).expect("read tip"),
+            Some(parent_tip)
+        );
+        assert_eq!(
+            get_local_bilateral_chain_tip(&device_id).expect("read tip"),
+            Some(next_tip)
+        );
 
         let pending = get_pending_online_outbox(&device_id)
             .expect("load pending row")
@@ -1942,8 +1964,7 @@ mod tests {
         let next_tip = [0xE1u8; 32];
         let divergent_next_tip = [0xF1u8; 32];
 
-        seed_contact_for_chain_tip_tests(device_id, genesis_hash, "BleCapable");
-        restore_finalized_bilateral_chain_tip(&device_id, &parent_tip).expect("seed parent tip");
+        seed_contact_for_chain_tip_tests(device_id, genesis_hash, "BleCapable", parent_tip);
         record_pending_online_transition(&device_id, "MSG-1", &parent_tip, &next_tip)
             .expect("persist initial gate");
 
@@ -1957,7 +1978,10 @@ mod tests {
             .expect("pending row exists");
         assert_eq!(pending.message_id, "MSG-1");
         assert_eq!(pending.next_tip, next_tip.to_vec());
-        assert_eq!(get_local_bilateral_chain_tip(&device_id), Some(next_tip));
+        assert_eq!(
+            get_local_bilateral_chain_tip(&device_id).expect("read tip"),
+            Some(next_tip)
+        );
     }
 
     #[test]
@@ -1972,14 +1996,22 @@ mod tests {
         let current_tip = [0x41u8; 32];
         let conflicting_tip = [0x51u8; 32];
 
-        seed_contact_for_chain_tip_tests(device_id, genesis_hash, "BleCapable");
-        restore_finalized_bilateral_chain_tip(&device_id, &current_tip).expect("seed current tip");
+        seed_contact_for_chain_tip_tests(device_id, genesis_hash, "BleCapable", current_tip);
 
         let err = restore_finalized_bilateral_chain_tip(&device_id, &conflicting_tip)
             .expect_err("conflicting restore must fail");
-        assert!(err.to_string().contains("Refusing to overwrite"));
-        assert_eq!(get_contact_chain_tip_raw(&device_id), Some(current_tip));
-        assert_eq!(get_local_bilateral_chain_tip(&device_id), Some(current_tip));
+        assert!(
+            err.to_string().contains("no contact holds that tip"),
+            "{err}"
+        );
+        assert_eq!(
+            get_contact_chain_tip(&device_id).expect("read tip"),
+            Some(current_tip)
+        );
+        assert_eq!(
+            get_local_bilateral_chain_tip(&device_id).expect("read tip"),
+            Some(current_tip)
+        );
     }
 
     #[test]
@@ -2191,7 +2223,7 @@ mod tests {
             alias: "peer".to_string(),
             genesis_hash: [0x33u8; 32].to_vec(),
             public_key: vec![0x44u8; 64],
-            kyber_public_key: Vec::new(),
+            kyber_public_key: vec![0x4B; 1184],
             current_chain_tip: Some(original_tip.to_vec()),
             verified: true,
             verification_proof: None,
@@ -2209,8 +2241,8 @@ mod tests {
             alias: "peer-fixed".to_string(),
             genesis_hash: [0x55u8; 32].to_vec(),
             public_key: vec![0x66u8; 64],
-            kyber_public_key: Vec::new(),
-            current_chain_tip: None,
+            kyber_public_key: vec![0x4B; 1184],
+            current_chain_tip: Some(vec![0x70; 32]),
             verified: true,
             verification_proof: None,
             metadata: HashMap::new(),
@@ -2249,8 +2281,7 @@ mod tests {
         let parent_tip = [0x01u8; 32];
         let new_tip = [0x02u8; 32];
 
-        seed_contact_for_chain_tip_tests(device_id, genesis_hash, "BleCapable");
-        restore_finalized_bilateral_chain_tip(&device_id, &parent_tip).expect("seed");
+        seed_contact_for_chain_tip_tests(device_id, genesis_hash, "BleCapable", parent_tip);
 
         let request = bilateral_tip_sync::TipSyncRequest {
             counterparty_device_id: device_id,
@@ -2264,8 +2295,14 @@ mod tests {
             outcome,
             bilateral_tip_sync::TipSyncOutcome::Advanced { .. }
         ));
-        assert_eq!(get_contact_chain_tip_raw(&device_id), Some(new_tip));
-        assert_eq!(get_local_bilateral_chain_tip(&device_id), Some(new_tip));
+        assert_eq!(
+            get_contact_chain_tip(&device_id).expect("read tip"),
+            Some(new_tip)
+        );
+        assert_eq!(
+            get_local_bilateral_chain_tip(&device_id).expect("read tip"),
+            Some(new_tip)
+        );
     }
 
     #[test]
@@ -2280,8 +2317,7 @@ mod tests {
         let target_tip = [0x03u8; 32];
         let stale_local = [0x04u8; 32];
 
-        seed_contact_for_chain_tip_tests(device_id, genesis_hash, "BleCapable");
-        restore_finalized_bilateral_chain_tip(&device_id, &target_tip).expect("seed canonical");
+        seed_contact_for_chain_tip_tests(device_id, genesis_hash, "BleCapable", target_tip);
         update_local_bilateral_chain_tip(&device_id, &stale_local).expect("seed stale local");
 
         let request = bilateral_tip_sync::TipSyncRequest {
@@ -2296,8 +2332,14 @@ mod tests {
             outcome,
             bilateral_tip_sync::TipSyncOutcome::RepairedAtTarget { .. }
         ));
-        assert_eq!(get_contact_chain_tip_raw(&device_id), Some(target_tip));
-        assert_eq!(get_local_bilateral_chain_tip(&device_id), Some(target_tip));
+        assert_eq!(
+            get_contact_chain_tip(&device_id).expect("read tip"),
+            Some(target_tip)
+        );
+        assert_eq!(
+            get_local_bilateral_chain_tip(&device_id).expect("read tip"),
+            Some(target_tip)
+        );
     }
 
     #[test]
@@ -2311,8 +2353,7 @@ mod tests {
         let genesis_hash = [0xF3u8; 32];
         let tip = [0x05u8; 32];
 
-        seed_contact_for_chain_tip_tests(device_id, genesis_hash, "BleCapable");
-        restore_finalized_bilateral_chain_tip(&device_id, &tip).expect("seed");
+        seed_contact_for_chain_tip_tests(device_id, genesis_hash, "BleCapable", tip);
 
         let request = bilateral_tip_sync::TipSyncRequest {
             counterparty_device_id: device_id,
@@ -2341,8 +2382,7 @@ mod tests {
         let wrong_parent = [0x07u8; 32];
         let new_tip = [0x08u8; 32];
 
-        seed_contact_for_chain_tip_tests(device_id, genesis_hash, "BleCapable");
-        restore_finalized_bilateral_chain_tip(&device_id, &current_tip).expect("seed");
+        seed_contact_for_chain_tip_tests(device_id, genesis_hash, "BleCapable", current_tip);
 
         let request = bilateral_tip_sync::TipSyncRequest {
             counterparty_device_id: device_id,
@@ -2357,8 +2397,14 @@ mod tests {
             bilateral_tip_sync::TipSyncOutcome::CanonicalMovedToDifferentTip { .. }
         ));
         // Tips unchanged
-        assert_eq!(get_contact_chain_tip_raw(&device_id), Some(current_tip));
-        assert_eq!(get_local_bilateral_chain_tip(&device_id), Some(current_tip));
+        assert_eq!(
+            get_contact_chain_tip(&device_id).expect("read tip"),
+            Some(current_tip)
+        );
+        assert_eq!(
+            get_local_bilateral_chain_tip(&device_id).expect("read tip"),
+            Some(current_tip)
+        );
     }
 
     /// The tip sync NEVER touches the pending online gate (finality barrier:
@@ -2376,8 +2422,7 @@ mod tests {
         let parent_tip = [0x09u8; 32];
         let next_tip = [0x0Au8; 32];
 
-        seed_contact_for_chain_tip_tests(device_id, genesis_hash, "BleCapable");
-        restore_finalized_bilateral_chain_tip(&device_id, &parent_tip).expect("seed");
+        seed_contact_for_chain_tip_tests(device_id, genesis_hash, "BleCapable", parent_tip);
         store_pending_online_outbox(&device_id, "msg123", &parent_tip, &next_tip)
             .expect("insert gate");
 
@@ -2392,8 +2437,14 @@ mod tests {
             outcome,
             bilateral_tip_sync::TipSyncOutcome::Advanced { .. }
         ));
-        assert_eq!(get_contact_chain_tip_raw(&device_id), Some(next_tip));
-        assert_eq!(get_local_bilateral_chain_tip(&device_id), Some(next_tip));
+        assert_eq!(
+            get_contact_chain_tip(&device_id).expect("read tip"),
+            Some(next_tip)
+        );
+        assert_eq!(
+            get_local_bilateral_chain_tip(&device_id).expect("read tip"),
+            Some(next_tip)
+        );
         assert_eq!(
             get_pending_online_outbox(&device_id)
                 .expect("load")
@@ -2418,7 +2469,7 @@ mod tests {
 
         // Insert gate A
         let genesis = [0xF7u8; 32];
-        seed_contact_for_chain_tip_tests(device_id, genesis, "BleCapable");
+        seed_contact_for_chain_tip_tests(device_id, genesis, "BleCapable", [0x70u8; 32]);
         store_pending_online_outbox(&device_id, "old_msg", &old_parent, &old_next)
             .expect("insert gate A");
 
@@ -2523,7 +2574,7 @@ mod tests {
         init_database().expect("init db");
 
         let device_id = [0x6Bu8; 32];
-        seed_contact_for_chain_tip_tests(device_id, [0x6Cu8; 32], "BleCapable");
+        seed_contact_for_chain_tip_tests(device_id, [0x6Cu8; 32], "BleCapable", [0x70u8; 32]);
 
         {
             let binding = get_connection().expect("conn");
@@ -2649,7 +2700,7 @@ mod tests {
         let new_parent = [0x22u8; 32];
         let new_next = [0x23u8; 32];
 
-        seed_contact_for_chain_tip_tests(device_id, new_parent, "BleCapable");
+        seed_contact_for_chain_tip_tests(device_id, new_parent, "BleCapable", [0x70u8; 32]);
         store_pending_online_outbox(&device_id, "old_msg", &old_parent, &old_next)
             .expect("insert gate A");
         clear_pending_online_outbox(&device_id).expect("clear A");
@@ -2681,7 +2732,7 @@ mod tests {
         let parent = [0x30u8; 32];
         let next = [0x31u8; 32];
 
-        seed_contact_for_chain_tip_tests(device_id, [0x32u8; 32], "BleCapable");
+        seed_contact_for_chain_tip_tests(device_id, [0x32u8; 32], "BleCapable", [0x70u8; 32]);
         store_pending_online_outbox(&device_id, "settled_msg", &parent, &next)
             .expect("insert gate");
         // A fully released send (gc_pending) does not hold the gate.
@@ -2716,7 +2767,7 @@ mod tests {
         let next = [0x41u8; 32];
 
         // Tip already at the gate's TARGET (post-finalization shape).
-        seed_contact_for_chain_tip_tests(device_id, next, "BleCapable");
+        seed_contact_for_chain_tip_tests(device_id, next, "BleCapable", [0x70u8; 32]);
         store_pending_online_outbox(&device_id, "live_msg", &parent, &next).expect("insert gate");
         seed_outbox_row_for(
             local,
@@ -2745,7 +2796,7 @@ mod tests {
         init_database().expect("init db");
 
         let device_id = [0xEBu8; 32];
-        seed_contact_for_chain_tip_tests(device_id, [0x50u8; 32], "BleCapable");
+        seed_contact_for_chain_tip_tests(device_id, [0x50u8; 32], "BleCapable", [0x70u8; 32]);
 
         let outcome = clear_stale_pending_online_gate(&device_id).expect("decision must not error");
         assert_eq!(outcome, StaleGateOutcome::NoGate);
@@ -2764,7 +2815,7 @@ mod tests {
         init_database().expect("init db");
 
         let device_id = [0xECu8; 32];
-        seed_contact_for_chain_tip_tests(device_id, [0x60u8; 32], "BleCapable");
+        seed_contact_for_chain_tip_tests(device_id, [0x60u8; 32], "BleCapable", [0x70u8; 32]);
 
         // Written by raw SQL: every public writer validates length 32, so this is
         // only reachable through external corruption — which is exactly when a
@@ -2807,8 +2858,7 @@ mod tests {
         let tip_b = [0x21u8; 32];
         let tip_c = [0x22u8; 32];
 
-        seed_contact_for_chain_tip_tests(device_id, genesis, "BleCapable");
-        restore_finalized_bilateral_chain_tip(&device_id, &tip_a).expect("seed");
+        seed_contact_for_chain_tip_tests(device_id, genesis, "BleCapable", tip_a);
 
         // Advance A→B
         let req1 = bilateral_tip_sync::TipSyncRequest {
@@ -2817,8 +2867,14 @@ mod tests {
             target_tip: tip_b,
         };
         bilateral_tip_sync::sync_bilateral_tips_atomically(&req1).expect("advance A→B");
-        assert_eq!(get_contact_chain_tip_raw(&device_id), Some(tip_b));
-        assert_eq!(get_local_bilateral_chain_tip(&device_id), Some(tip_b));
+        assert_eq!(
+            get_contact_chain_tip(&device_id).expect("read tip"),
+            Some(tip_b)
+        );
+        assert_eq!(
+            get_local_bilateral_chain_tip(&device_id).expect("read tip"),
+            Some(tip_b)
+        );
 
         // Advance B→C
         let req2 = bilateral_tip_sync::TipSyncRequest {
@@ -2827,8 +2883,14 @@ mod tests {
             target_tip: tip_c,
         };
         bilateral_tip_sync::sync_bilateral_tips_atomically(&req2).expect("advance B→C");
-        assert_eq!(get_contact_chain_tip_raw(&device_id), Some(tip_c));
-        assert_eq!(get_local_bilateral_chain_tip(&device_id), Some(tip_c));
+        assert_eq!(
+            get_contact_chain_tip(&device_id).expect("read tip"),
+            Some(tip_c)
+        );
+        assert_eq!(
+            get_local_bilateral_chain_tip(&device_id).expect("read tip"),
+            Some(tip_c)
+        );
 
         // Invariant: both columns equal at every step
     }

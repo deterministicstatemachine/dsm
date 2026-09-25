@@ -117,6 +117,7 @@ pub(crate) fn resolve_trusted_sender_ak(
     wire_supplied: &[u8],
 ) -> Result<Vec<u8>, String> {
     let trusted = crate::storage::client_db::get_contact_public_key_by_device_id(sender_device_id)
+        .map_err(|e| format!("the trusted sender AK for {sender_device_id} is unreadable: {e}"))?
         .ok_or_else(|| {
             format!(
                 "no locally trusted sender AK for {sender_device_id}; wire-supplied keys are \
@@ -166,76 +167,6 @@ pub(crate) fn verify_inbound_receipt_sig_a(
         commitment,
     )
     .map_err(|e| e.to_string())
-}
-
-/// AUTHENTICATED CAPABILITY HYDRATION (§16.6) — not migration residue.
-///
-/// A valid relationship can exist locally while its cached ML-KEM capability is
-/// absent; the B-side receipt encapsulates `kyber_ct_b` to the sender's key, so
-/// that gap fail-closes every inbound acceptance. This hydrates the missing
-/// capability from the sender's own directory entry:
-///
-///   * runs ONLY when the local key is missing (a present key is returned as-is);
-///   * NEVER replaces a nonempty locally-bound key — persist is first-write-wins;
-///   * the entry must prove itself for the contact's genesis and device, and its
-///     AK must be the STORED pairing AK;
-///   * at least the finality count of the pinned set's members must hold it.
-///
-/// Nothing is persisted on any error path.
-async fn hydrate_missing_sender_kyber_capability(
-    sender_device_id: [u8; 32],
-    contact: &crate::storage::client_db::ContactRecord,
-) -> Result<Vec<u8>, String> {
-    if !contact.kyber_public_key.is_empty() {
-        return Ok(contact.kyber_public_key.clone());
-    }
-    let contact_genesis = <[u8; 32]>::try_from(contact.genesis_hash.as_slice())
-        .map_err(|e| format!("contact genesis_hash is not 32 bytes: {e}"))?;
-    let network = crate::sdk::economic_admission_flow::committed_network_id()
-        .map_err(|e| format!("no committed network: {e}"))?;
-    let set = crate::sdk::storage_set::canonical_set(&network)
-        .map_err(|e| format!("no pinned storage set: {e}"))?;
-    let read = crate::sdk::device_directory::read_entry(&set, &contact_genesis, &sender_device_id)
-        .await
-        .map_err(|e| format!("directory read failed: {e}"))?
-        .ok_or_else(|| {
-            "no member of the pinned set holds a directory entry for the sender that proves \
-             itself"
-                .to_string()
-        })?;
-    if read.entry.body.ak_public_key != contact.public_key {
-        return Err(
-            "the sender's directory entry names another AK than the pairing-established \
-             contact AK"
-                .to_string(),
-        );
-    }
-    let required = dsm::sofi::wire::STORAGE_FINALITY_COUNT;
-    if read.holders.len() < required {
-        return Err(format!(
-            "{} members hold the sender's directory entry; {required} needed",
-            read.holders.len()
-        ));
-    }
-    let kyber_public_key = read.entry.body.kyber_public_key;
-
-    // First-write-wins. Losing the race means another path bound a key
-    // concurrently; that stored key is authoritative and is used instead.
-    let bound = crate::storage::client_db::bind_contact_kyber_key_if_absent(
-        &sender_device_id,
-        &kyber_public_key,
-    )
-    .map_err(|e| format!("failed to persist verified sender Kyber key: {e}"))?;
-    if bound {
-        return Ok(kyber_public_key);
-    }
-    match crate::storage::client_db::get_contact_by_device_id(&sender_device_id) {
-        Ok(Some(stored)) if !stored.kyber_public_key.is_empty() => Ok(stored.kyber_public_key),
-        Ok(Some(..)) | Ok(None) => {
-            Err("Kyber capability vanished between bind and read — failing closed".to_string())
-        }
-        Err(e) => Err(format!("contact lookup after the Kyber bind failed: {e}")),
-    }
 }
 
 /// Where a polled inbox entry goes. Pure — the poll loop only acts on it, so
@@ -527,22 +458,18 @@ async fn finalize_from_countersign_delta(
     let recipient_ak_pk = match crate::storage::client_db::get_contact_public_key_by_device_id(
         &crate::util::text_id::encode_base32_crockford(&proposal.counterparty_device_id),
     ) {
-        Some(pk) => pk,
-        None => {
-            match crate::storage::client_db::get_contact_by_device_id(
-                &proposal.counterparty_device_id,
-            ) {
-                Ok(Some(c)) if !c.public_key.is_empty() => c.public_key,
-                _ => {
-                    log::warn!(
-                        "[storage.sync] ADR 0003 countersign delta {short}..: no stored AK for \
-                         the recipient — cannot verify sig_b, gate retained"
-                    );
-                    return CountersignOutcome::Unverifiable(
-                        "no stored AK for the recipient".to_string(),
-                    );
-                }
-            }
+        Ok(Some(pk)) => pk,
+        Ok(None) => {
+            log::warn!(
+                "[storage.sync] ADR 0003 countersign delta {short}..: the recipient is not a \
+                 contact — cannot verify sig_b, gate retained"
+            );
+            return CountersignOutcome::Unverifiable("the recipient is not a contact".to_string());
+        }
+        Err(e) => {
+            return CountersignOutcome::Unverifiable(format!(
+                "the recipient's stored AK is unreadable: {e}"
+            ));
         }
     };
 
@@ -1622,22 +1549,14 @@ impl AppRouterImpl {
                                     continue;
                                 }
                             };
-                            if !c.kyber_public_key.is_empty() {
-                                (c.kyber_public_key.clone(), genesis)
-                            } else {
-                                match hydrate_missing_sender_kyber_capability(sender_device, &c)
-                                    .await
-                                {
-                                    Ok(k) => (k, genesis),
-                                    Err(e) => {
-                                        log::error!("[storage.sync] ADR 0003 completion: {key}: sender Kyber capability missing and hydration failed: {e} — fail closed");
-                                        continue;
-                                    }
-                                }
-                            }
+                            (c.kyber_public_key.clone(), genesis)
                         }
-                        _ => {
+                        Ok(None) => {
                             log::error!("[storage.sync] ADR 0003 completion: {key}: no contact for sender — fail closed");
+                            continue;
+                        }
+                        Err(e) => {
+                            log::error!("[storage.sync] ADR 0003 completion: {key}: sender contact unreadable: {e}");
                             continue;
                         }
                     };
@@ -1748,13 +1667,11 @@ impl AppRouterImpl {
                         &transition_entropy,
                     );
                     let projection_parent: [u8; 32] =
-                        match crate::storage::client_db::get_contact_chain_tip_raw(&sender_device) {
-                            Some(t) if t != [0u8; 32] => t,
-                            _ => dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-                                &self_device,
-                                &sender_device,
-                            ),
-                        };
+                        crate::storage::client_db::get_contact_chain_tip(&sender_device)
+                            .map_err(|e| {
+                                format!("the sender's relationship tip is unreadable: {e}")
+                            })?
+                            .ok_or_else(|| "the sender is not a contact".to_string())?;
                     let projection_target: [u8; 32] = {
                         let sigma_sym = dsm::core::bilateral_transaction_manager::compute_precommit(
                             &projection_parent,

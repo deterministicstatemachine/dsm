@@ -739,7 +739,10 @@ impl BilateralTransactionManager {
             .clone();
 
         // Refresh shared chain tip from persistent store before tripwire.
-        if let Some(tip) = self.chain_tip_store.get_contact_chain_tip(remote_device_id) {
+        if let Some(tip) = self
+            .chain_tip_store
+            .get_contact_chain_tip(remote_device_id)?
+        {
             if let Some(anchor_mut) = self.relationships.get_mut(remote_device_id) {
                 anchor_mut.chain_tip = tip;
             }
@@ -782,10 +785,11 @@ impl BilateralTransactionManager {
                         labeling::hash_to_short_id(&anchor.chain_tip),
                         labeling::hash_to_short_id(&contact_tip),
                         labeling::hash_to_short_id(&pre.parent_tip),
-                        self.chain_tip_store
-                            .get_contact_chain_tip(remote_device_id)
-                            .map(|t| labeling::hash_to_short_id(&t))
-                            .unwrap_or_else(|| "None".to_string()),
+                        match self.chain_tip_store.get_contact_chain_tip(remote_device_id) {
+                            Ok(Some(t)) => labeling::hash_to_short_id(&t),
+                            Ok(None) => "none".to_string(),
+                            Err(e) => format!("unreadable: {e}"),
+                        },
                     );
                     return Err(DsmError::deterministic_safety(
                         DeterministicSafetyClass::ParentConsumed,

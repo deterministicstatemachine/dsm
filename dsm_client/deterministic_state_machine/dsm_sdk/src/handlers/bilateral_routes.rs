@@ -226,8 +226,17 @@ impl AppRouterImpl {
         let local_status = self
             .calibrate_local_relationship_send_status(&remote_device_id)
             .await;
-        let remote_tip = crate::storage::client_db::get_contact_chain_tip_raw(&remote_device_id)
-            .unwrap_or([0u8; 32]);
+        let remote_tip = match crate::storage::client_db::get_contact_chain_tip(&remote_device_id) {
+            Ok(Some(tip)) => tip,
+            Ok(None) => {
+                return err("bilateral.reconcile: the remote device is not a contact".into())
+            }
+            Err(e) => {
+                return err(format!(
+                    "bilateral.reconcile: relationship tip unreadable: {e}"
+                ))
+            }
+        };
         let peer_status = None;
         let resp = generated::BilateralReconciliationResponse {
             mismatch_detected: !local_status.send_ready,
