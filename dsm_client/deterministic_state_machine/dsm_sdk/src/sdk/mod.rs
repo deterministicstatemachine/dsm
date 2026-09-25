@@ -14,10 +14,6 @@
 //! * `core_sdk`: Central integration point for all DSM functionality
 //! * `token_sdk`: Provides token operations and policy enforcement
 //!
-//! ### Smart Contract Functionality
-//!
-//! * `smart_commitment_sdk`: Creates and verifies cryptographic commitments
-//!
 //! ### Application-Specific Implementations
 //!
 //! * `contact_sdk`: Manages peer relationships and communications
@@ -75,7 +71,6 @@ pub mod bitcoin_key_store;
 pub mod bitcoin_tap_sdk;
 pub mod bitcoin_tx_builder;
 pub mod identity_presentation;
-pub mod smart_commitment_sdk;
 pub mod transfer_hooks;
 
 // Recovery system SDK
@@ -101,7 +96,6 @@ pub mod wallet_sdk;
 pub use core_sdk::CoreSDK;
 pub use wallet_sdk::WalletSDK;
 // Note: BilateralContactManager and BilateralOfflineTransactionManager are not public types
-pub use smart_commitment_sdk::SmartCommitmentSDK;
 pub use bitcoin_tap_sdk::BitcoinTapSdk;
 pub use bitcoin_key_store::BitcoinKeyStore;
 pub use recovery_sdk::RecoverySDK;

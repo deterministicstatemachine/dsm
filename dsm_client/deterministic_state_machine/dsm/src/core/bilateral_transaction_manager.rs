@@ -14,7 +14,6 @@ use crate::crypto::blake3::dsm_domain_hasher;
 use tracing::{info, error};
 
 use crate::core::contact_manager::DsmContactManager;
-use crate::commitments::precommit::PreCommitment as CanonicalPreCommitment;
 use crate::core::chain_tip_store::ChainTipStore;
 use crate::crypto::canonical_lp;
 use crate::crypto::signatures::SignatureKeyPair;
@@ -118,7 +117,7 @@ pub fn compute_smt_key(dev_id_a: &[u8; 32], dev_id_b: &[u8; 32]) -> [u8; 32] {
 ///
 /// `C_pre = H("DSM/precommit/commitment-hash/v2\0" || h_n || payload_i || e_i)`.
 pub fn compute_precommit(h_n: &[u8; 32], op_bytes: &[u8], entropy: &[u8]) -> [u8; 32] {
-    CanonicalPreCommitment::branch_commitment_hash(h_n, op_bytes, entropy)
+    crate::commitments::precommit::branch_commitment_hash(h_n, op_bytes, entropy)
 }
 
 /// §16.6: h_{n+1} = BLAKE3("DSM/tip\0" || h_n || op || e || σ) — successor shared tip.

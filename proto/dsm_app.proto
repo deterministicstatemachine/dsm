@@ -1901,15 +1901,10 @@ message ReceiptCommit {
   // commit form (§4.2.1).
   bytes kyber_ct_a = 18 [(dsm_max_len)=2048];
   bytes kyber_ct_b = 19 [(dsm_max_len)=2048];
-  // Fork-aware finalization witness (whitepaper §4.1.1 + §4.3). Present only
-  // when the successor was stitched under the fork-aware precommit family
-  // (multiple candidates committed under C_pre^root). Carried in the envelope
-  // ONLY — explicitly excluded from the canonical commit preimage so that the
-  // §4.2.1 ten-field commit form is preserved unchanged. The recipient's
-  // verifier rebuilds C_pre^j for every unselected branch and checks
-  //   pi_inv == invalidation_proof_commitment(C_pre^j for j != selected)
-  // before parent-consumption Tripwire admits the successor.
-  ForkAwareWitness fork_witness = 20;
+  // 20 was a fork-aware finalization witness: no producer made one, and the
+  // receiver checked the sender's candidate set only against itself.
+  reserved 20;
+  reserved "fork_witness";
   // The sender's transition entropy e_{n+1} (Part VII step 3, §39.3): the one
   // value Core derived inside DeviceState::advance for this step. CANONICAL —
   // part of the commit preimage, so sig_a binds it. The recipient cannot
@@ -1917,49 +1912,6 @@ message ReceiptCommit {
   // and the symmetric tip and recomputes child_tip from it. Required.
   bytes transition_entropy = 21 [(dsm_fixed_len)=32];
 }
-
-// Fork-aware finalization witness (whitepaper §4.1.1 + §4.3).
-//
-// A successor stitched under the fork-aware precommit family is acceptable
-// iff (a) the selected branch's `C_pre^i` is a member of the committed
-// candidate set under `C_pre^root`, and (b) the supplied `pi_inv`
-// byte-exactly matches `H("DSM/precommit/invalidation-proof/v2\0" ||
-// enc(unselected C_pre^j))`.
-//
-// The witness rides in the receipt envelope (not in the canonical commit
-// preimage). For a non-fork (single-candidate) successor this message is
-// omitted entirely.
-message ForkAwareWitness {
-  // Parent tip h_n that anchors the C_pre^i derivation. MUST equal the
-  // receipt's parent_tip; encoded here so the verifier can independently
-  // recompute the canonical branch commitments without consulting state.
-  bytes parent_tip = 1 [(dsm_fixed_len)=32];
-  // Full ordered candidate set committed under C_pre^root. The verifier
-  // rebuilds each candidate's C_pre^i under the canonical v2 domain
-  // `DSM/precommit/commitment-hash/v2\0`. At least one entry; in practice
-  // bounded by the operator's deterministic state-machine fan-out.
-  repeated ForkAwareCandidate candidates = 2;
-  // The fork_id of the selected candidate. MUST match exactly one entry in
-  // `candidates`; otherwise the witness is rejected.
-  string selected_fork_id = 3 [(dsm_max_len)=128];
-  // Canonical invalidation-proof commitment over the C_pre^j of every
-  // unselected branch (i.e. all candidates except `selected_fork_id`).
-  bytes pi_inv = 4 [(dsm_fixed_len)=32];
-}
-
-// Single candidate inside a fork-aware precommit family.
-//
-// `fork_id` is a deterministic short label (bounded to MAX_ID_LEN) and is
-// the same id used at construction time (`select_fork`). `payload` and
-// `entropy` reproduce the inputs to `branch_commitment_hash` so the
-// verifier can recompute `C_pre^i = H("DSM/precommit/commitment-hash/v2\0"
-// || parent_tip || payload || entropy)`.
-message ForkAwareCandidate {
-  string fork_id = 1 [(dsm_max_len)=128];
-  bytes payload = 2 [(dsm_max_len)=262144];
-  bytes entropy = 3 [(dsm_max_len)=65536];
-}
-
 
 // Bilateral event notifications for frontend
 enum BilateralEventType {

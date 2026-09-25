@@ -10,11 +10,6 @@ use crate::types::error::DsmError;
 use crate::types::operations::Operation;
 use crate::types::state_types::State;
 
-pub use random_walk::algorithms::{
-    generate_positions, generate_random_walk_coordinates, generate_seed, verify_positions,
-    verify_random_walk_coordinates, Position, RandomWalkConfig,
-};
-
 pub use utils::constant_time_eq;
 
 /// Core state machine — Per-Device SMT head (§2.2).

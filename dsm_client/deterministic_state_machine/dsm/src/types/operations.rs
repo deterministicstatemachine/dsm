@@ -13,10 +13,7 @@
 
 use std::{collections::HashMap, fmt::Debug};
 
-use crate::{
-    commitments::precommit::SecurityParameters,
-    types::{error::DsmError, token_types::Balance},
-};
+use crate::types::{error::DsmError, token_types::Balance};
 
 /// State transition execution mode (canonical encoded; no Serde).
 ///
@@ -904,7 +901,6 @@ impl Operation {
             for v in vars {
                 put_str(out, &v);
             }
-            // Note: security_params intentionally not included in canonical op bytes
         }
 
         match self {
@@ -1526,7 +1522,6 @@ impl Operation {
             Ok(PreCommitmentOp {
                 fixed_parameters: fixed,
                 variable_parameters: vars,
-                security_params: SecurityParameters::default(),
             })
         }
 
@@ -2293,8 +2288,6 @@ pub struct PreCommitmentOp {
     pub fixed_parameters: HashMap<String, Vec<u8>>,
     /// Parameter names whose values will be provided at execution time.
     pub variable_parameters: Vec<String>,
-    /// Security parameters governing the commitment (not included in canonical bytes).
-    pub security_params: SecurityParameters,
 }
 
 // Implement PartialEq, Eq, PartialOrd and Ord for consistent ordering
@@ -2477,7 +2470,6 @@ mod tests {
             let pc = PreCommitmentOp {
                 fixed_parameters: fixed,
                 variable_parameters: vec!["nonce".into(), "timestamp".into()],
-                security_params: SecurityParameters::default(),
             };
             roundtrip(&Operation::Transfer {
                 policy_commit: [0u8; 32],
@@ -3350,7 +3342,6 @@ mod tests {
                     pre_commit: Some(PreCommitmentOp {
                         fixed_parameters: fixed,
                         variable_parameters: vec![],
-                        security_params: SecurityParameters::default(),
                     }),
                     recipient: vec![],
                     to: vec![],

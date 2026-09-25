@@ -125,19 +125,6 @@ pub struct StitchedReceiptV2 {
     /// Per-step Kyber ciphertext for party B's contribution.
     /// Mirrors `kyber_ct_a` but encapsulated by B against A's Kyber pubkey.
     pub kyber_ct_b: Vec<u8>,
-
-    /// Fork-aware finalization witness (whitepaper §4.1.1 + §4.3).
-    ///
-    /// `Some` when the successor was stitched under the fork-aware precommit
-    /// family (multiple candidates committed under `C_pre^root`); `None`
-    /// otherwise. Wire-only — explicitly excluded from the canonical commit
-    /// preimage (§4.2.1) so the frozen ten-field commit form is preserved.
-    ///
-    /// The recipient verifier rebuilds `C_pre^j` for every unselected branch
-    /// under the canonical v2 domain and checks
-    /// `pi_inv == invalidation_proof_commitment(unselected_C_pre^j)`
-    /// before parent-consumption Tripwire admits the successor.
-    pub fork_witness: Option<crate::types::proto::ForkAwareWitness>,
 }
 
 /// Per-field bound for a strict length-delimited wire message.
@@ -518,14 +505,7 @@ impl StitchedReceiptV2 {
             ek_pk_b: Vec::new(),
             kyber_ct_a: Vec::new(),
             kyber_ct_b: Vec::new(),
-            fork_witness: None,
         }
-    }
-
-    /// Attach a fork-aware finalization witness. Set only when the successor
-    /// was stitched under the fork-aware precommit family.
-    pub fn set_fork_witness(&mut self, witness: crate::types::proto::ForkAwareWitness) {
-        self.fork_witness = Some(witness);
     }
 
     /// Convert to prost-generated `ReceiptCommit` (canonical form, no sigs):
@@ -553,11 +533,10 @@ impl StitchedReceiptV2 {
             ek_pk_b: vec![],
             kyber_ct_a: vec![],
             kyber_ct_b: vec![],
-            fork_witness: None,
         }
     }
 
-    /// Convert to prost-generated `ReceiptCommit` (full form, with sigs + certs + EK pks + Kyber ct + fork witness).
+    /// Convert to prost-generated `ReceiptCommit` (full form, with sigs + certs + EK pks + Kyber ct).
     fn to_proto_full(&self) -> crate::types::proto::ReceiptCommit {
         let mut proto = self.to_proto_canonical();
         proto.sig_a.clone_from(&self.sig_a);
@@ -568,7 +547,6 @@ impl StitchedReceiptV2 {
         proto.ek_pk_b.clone_from(&self.ek_pk_b);
         proto.kyber_ct_a.clone_from(&self.kyber_ct_a);
         proto.kyber_ct_b.clone_from(&self.kyber_ct_b);
-        proto.fork_witness.clone_from(&self.fork_witness);
         proto
     }
 
@@ -621,9 +599,6 @@ impl StitchedReceiptV2 {
         }
         if !rc.kyber_ct_b.is_empty() {
             receipt.set_kyber_ct_b(rc.kyber_ct_b);
-        }
-        if let Some(witness) = rc.fork_witness {
-            receipt.set_fork_witness(witness);
         }
         Ok(receipt)
     }
