@@ -260,12 +260,12 @@ pub struct LocalResyncKey<'a> {
     pub wrap_key: &'a [u8; 32],
 }
 
-/// Everything the audit row records about WHY the chain restarted. Content
-/// identity — never a runtime `tx_id`.
+/// Everything the audit row records about WHY the chain restarted: the
+/// jointly-authorized restart statement, both devices' cosigned facts and
+/// nothing either side would have to supply from its own partial record.
 pub struct ResyncAudit<'a> {
     pub preserved_acceptance_commitment: &'a [u8; 32],
-    pub accepted_parent_tip: &'a [u8; 32],
-    pub accepted_child_tip: &'a [u8; 32],
+    pub agreed_tip: &'a [u8; 32],
     pub joint_auth_hash: &'a [u8; 32],
     pub reason_code: &'a str,
 }
@@ -359,19 +359,17 @@ pub fn finalize_cert_resync_atomically(
         }
     }
 
-    // (3) Durable audit — content-keyed, one per agreed accepted transition.
+    // (3) Durable audit, one row per epoch.
     tx.execute(
-        "INSERT OR IGNORE INTO cert_chain_resync_audit(
-            relationship_key, preserved_acceptance_commitment, accepted_parent_tip,
-            accepted_child_tip, joint_auth_hash, epoch, old_local_head,
-            old_counterparty_head, new_local_head, new_counterparty_head,
-            reason_code)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+        "INSERT INTO cert_chain_resync_audit(
+            relationship_key, preserved_acceptance_commitment, agreed_tip,
+            joint_auth_hash, epoch, old_local_head, old_counterparty_head,
+            new_local_head, new_counterparty_head, reason_code)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
         params![
             relationship_key.as_slice(),
             audit.preserved_acceptance_commitment.as_slice(),
-            audit.accepted_parent_tip.as_slice(),
-            audit.accepted_child_tip.as_slice(),
+            audit.agreed_tip.as_slice(),
             audit.joint_auth_hash.as_slice(),
             epoch,
             expected_local,
@@ -475,17 +473,15 @@ pub fn finalize_cert_resync_responder_atomically(
     }
 
     tx.execute(
-        "INSERT OR IGNORE INTO cert_chain_resync_audit(
-            relationship_key, preserved_acceptance_commitment, accepted_parent_tip,
-            accepted_child_tip, joint_auth_hash, epoch, old_local_head,
-            old_counterparty_head, new_local_head, new_counterparty_head,
-            reason_code)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+        "INSERT INTO cert_chain_resync_audit(
+            relationship_key, preserved_acceptance_commitment, agreed_tip,
+            joint_auth_hash, epoch, old_local_head, old_counterparty_head,
+            new_local_head, new_counterparty_head, reason_code)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
         params![
             relationship_key.as_slice(),
             audit.preserved_acceptance_commitment.as_slice(),
-            audit.accepted_parent_tip.as_slice(),
-            audit.accepted_child_tip.as_slice(),
+            audit.agreed_tip.as_slice(),
             audit.joint_auth_hash.as_slice(),
             epoch,
             responder_local_head, // old_local_head == kept (unchanged)
@@ -759,12 +755,12 @@ mod tests {
     const CP_EK: [u8; 8] = [0xC2u8; 8];
     const WRAP: [u8; 32] = [0x77u8; 32];
 
-    fn audit() -> ([u8; 32], [u8; 32], [u8; 32], [u8; 32]) {
-        ([0xEFu8; 32], [0x3Fu8; 32], [0x1Bu8; 32], [0x9Au8; 32])
+    fn audit() -> ([u8; 32], [u8; 32], [u8; 32]) {
+        ([0xEFu8; 32], [0x1Bu8; 32], [0x9Au8; 32])
     }
 
     fn do_finalize(epoch: i64) -> Result<()> {
-        let (commit, parent, child, joint) = audit();
+        let (commit, agreed_tip, joint) = audit();
         finalize_cert_resync_atomically(
             &REL,
             epoch,
@@ -778,8 +774,7 @@ mod tests {
             None,
             ResyncAudit {
                 preserved_acceptance_commitment: &commit,
-                accepted_parent_tip: &parent,
-                accepted_child_tip: &child,
+                agreed_tip: &agreed_tip,
                 joint_auth_hash: &joint,
                 reason_code: "head-loss-recovery",
             },
@@ -970,7 +965,7 @@ mod tests {
         // Healthy responder: has its own Local head P_D3 and a stale Counterparty EK_N.
         init_cert_chain_head(&REL, CertChainSide::Local, &[0xD3u8; 8]).unwrap();
         init_cert_chain_head(&REL, CertChainSide::Counterparty, &[0xE0u8; 8]).unwrap();
-        let (commit, parent, child, joint) = audit();
+        let (commit, agreed_tip, joint) = audit();
 
         finalize_cert_resync_responder_atomically(
             &REL,
@@ -979,8 +974,7 @@ mod tests {
             Some(&[0xE0u8; 8]),
             ResyncAudit {
                 preserved_acceptance_commitment: &commit,
-                accepted_parent_tip: &parent,
-                accepted_child_tip: &child,
+                agreed_tip: &agreed_tip,
                 joint_auth_hash: &joint,
                 reason_code: "peer-head-loss",
             },
@@ -1014,8 +1008,7 @@ mod tests {
             Some(&[0xA1u8; 8]),
             ResyncAudit {
                 preserved_acceptance_commitment: &commit,
-                accepted_parent_tip: &parent,
-                accepted_child_tip: &child,
+                agreed_tip: &agreed_tip,
                 joint_auth_hash: &joint,
                 reason_code: "x"
             },

@@ -29,58 +29,59 @@ impl AppRouterImpl {
 
                 for s in sessions {
                     let phase = s.phase.as_str();
-                    // Include active AND terminal phases so the frontend poller
-                    // can distinguish real failures from completed transfers.
-                    if !matches!(
-                        phase,
-                        "pending_user_action"
-                            | "accepted"
-                            | "committed"
-                            | "failed"
-                            | "rejected"
-                            | "confirm_pending"
-                            | "preparing"
-                            | "prepared"
-                    ) {
-                        continue;
-                    }
-
-                    if s.commitment_hash.len() != 32 || s.counterparty_device_id.len() != 32 {
-                        continue;
-                    }
-
-                    let mut commitment_hash_arr = [0u8; 32];
-                    commitment_hash_arr.copy_from_slice(&s.commitment_hash);
-
-                    let mut counterparty_device_id_arr = [0u8; 32];
-                    counterparty_device_id_arr.copy_from_slice(&s.counterparty_device_id);
-
-                    let mut amount: Option<u64> = None;
-                    let mut token_id: Option<Vec<u8>> = None;
-                    let mut to_device_id: Option<Vec<u8>> = None;
-
-                    if let Ok(dsm::types::operations::Operation::Transfer {
-                        amount: amt,
-                        token_id: tok,
-                        to_device_id: to_dev,
-                        ..
-                    }) = deserialize_operation(&s.operation_bytes)
-                    {
-                        amount = Some(amt.available());
-                        token_id = Some(tok);
-                        to_device_id = Some(to_dev);
-                    }
-
-                    let direction = if let Some(to_dev) = &to_device_id {
-                        if to_dev.len() == 32
-                            && to_dev.as_slice() == self.device_id_bytes.as_slice()
-                        {
-                            "incoming"
-                        } else {
-                            "outgoing"
+                    // Active AND terminal phases, so the frontend poller can
+                    // distinguish real failures from completed transfers.
+                    use generated::OfflineBilateralTransactionStatus as Status;
+                    let status = match phase {
+                        "pending_user_action" => Status::OfflineTxPending,
+                        "committed" => Status::OfflineTxConfirmed,
+                        "failed" => Status::OfflineTxFailed,
+                        "rejected" => Status::OfflineTxRejected,
+                        "accepted" | "confirm_pending" | "preparing" | "prepared" => {
+                            Status::OfflineTxInProgress
                         }
-                    } else {
+                        _ => continue,
+                    };
+
+                    let (Ok(commitment_hash_arr), Ok(counterparty_device_id_arr)) = (
+                        <[u8; 32]>::try_from(s.commitment_hash.as_slice()),
+                        <[u8; 32]>::try_from(s.counterparty_device_id.as_slice()),
+                    ) else {
+                        return err(format!(
+                            "bilateral.pending_list: a stored session has a {}-byte commitment \
+                             and a {}-byte counterparty id, not 32 and 32",
+                            s.commitment_hash.len(),
+                            s.counterparty_device_id.len()
+                        ));
+                    };
+
+                    let (amount, token_id, to_device_id) =
+                        match deserialize_operation(&s.operation_bytes) {
+                            Ok(dsm::types::operations::Operation::Transfer {
+                                amount,
+                                token_id,
+                                to_device_id,
+                                ..
+                            }) => (amount.available(), token_id, to_device_id),
+                            Ok(other) => {
+                                return err(format!(
+                                    "bilateral.pending_list: a stored session carries a {} \
+                                     operation, not a transfer",
+                                    other.get_operation_type()
+                                ))
+                            }
+                            Err(e) => {
+                                return err(format!(
+                                    "bilateral.pending_list: a stored session's operation \
+                                     does not decode: {e}"
+                                ))
+                            }
+                        };
+
+                    let direction = if to_device_id.as_slice() == self.device_id_bytes.as_slice() {
                         "incoming"
+                    } else {
+                        "outgoing"
                     };
 
                     let (sender_id, recipient_id) = if direction == "incoming" {
@@ -95,41 +96,28 @@ impl AppRouterImpl {
                         )
                     };
 
-                    let status = match phase {
-                        "pending_user_action" => {
-                            generated::OfflineBilateralTransactionStatus::OfflineTxPending
-                        }
-                        "committed" => {
-                            generated::OfflineBilateralTransactionStatus::OfflineTxConfirmed
-                        }
-                        "failed" => generated::OfflineBilateralTransactionStatus::OfflineTxFailed,
-                        "rejected" => {
-                            generated::OfflineBilateralTransactionStatus::OfflineTxRejected
-                        }
-                        _ => generated::OfflineBilateralTransactionStatus::OfflineTxInProgress,
-                    };
-
                     let mut metadata: HashMap<String, String> = HashMap::new();
                     metadata.insert("phase".to_string(), phase.to_string());
                     metadata.insert("direction".to_string(), direction.to_string());
-                    if let Some(amt) = amount {
-                        metadata.insert("amount".to_string(), amt.to_string());
-                    }
-                    if let Some(tok) = token_id.clone() {
-                        metadata.insert(
-                            "token_id".to_string(),
-                            String::from_utf8_lossy(&tok).into_owned(),
-                        );
-                    }
+                    metadata.insert("amount".to_string(), amount.to_string());
+                    metadata.insert(
+                        "token_id".to_string(),
+                        String::from_utf8_lossy(&token_id).into_owned(),
+                    );
                     if let Some(addr) = s.sender_ble_address.clone() {
                         if !addr.is_empty() {
                             metadata.insert("sender_ble_address".to_string(), addr);
                         }
                     }
-                    if let Ok(Some(contact)) = get_contact_by_device_id(&counterparty_device_id_arr)
-                    {
-                        if !contact.alias.is_empty() {
+                    match get_contact_by_device_id(&counterparty_device_id_arr) {
+                        Ok(Some(contact)) if !contact.alias.is_empty() => {
                             metadata.insert("counterparty_alias".to_string(), contact.alias);
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            return err(format!(
+                                "bilateral.pending_list: counterparty contact unreadable: {e}"
+                            ))
                         }
                     }
 

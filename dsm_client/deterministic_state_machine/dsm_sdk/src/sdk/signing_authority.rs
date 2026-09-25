@@ -74,17 +74,6 @@ pub(crate) fn current_secret_key() -> Result<Vec<u8>, DsmError> {
     Ok(derive_current_signing_keypair()?.secret_key().to_vec())
 }
 
-/// Sign `payload` with this device's signing key (SPHINCS+).
-pub(crate) fn sign_bytes(payload: &[u8]) -> Result<Vec<u8>, DsmError> {
-    let sk = current_secret_key()?;
-    dsm::crypto::sphincs::sphincs_sign(&sk, payload).map_err(|e| {
-        DsmError::crypto(
-            format!("SPHINCS+ byte signing failed: {e}"),
-            None::<std::io::Error>,
-        )
-    })
-}
-
 /// Both halves of the device signing keypair, for callers that sign and embed
 /// the public key in one object.
 pub fn current_keypair() -> Result<(Vec<u8>, Vec<u8>), dsm::types::error::DsmError> {

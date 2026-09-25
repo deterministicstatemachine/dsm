@@ -2233,11 +2233,15 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_bilateralOffl
                                 let transfer_amount = if req.transfer_amount_display.trim().is_empty() {
                                     req.transfer_amount
                                 } else {
-                                    let decimals = crate::handlers::wallet_routes::resolve_token_decimals(&token_id);
-                                    match crate::handlers::wallet_routes::parse_display_amount_to_base_units(
-                                        &req.transfer_amount_display,
-                                        decimals,
-                                    ) {
+                                    let parsed = crate::handlers::wallet_routes::token_decimals(&token_id)
+                                        .and_then(|decimals| {
+                                            crate::handlers::wallet_routes::parse_display_amount_to_base_units(
+                                                &req.transfer_amount_display,
+                                                decimals,
+                                            )
+                                            .map_err(|e| e.to_string())
+                                        });
+                                    match parsed {
                                         Ok(amount) => amount,
                                         Err(e) => {
                                             results.push(gp::OpResult {

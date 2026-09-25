@@ -17,8 +17,6 @@ pub const TAG_DSM_FAUCET_CLAIM: TaggedHashDomain<'static> =
 pub const TAG_DSM_MOMENT: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DSM/moment");
 pub const TAG_DSM_MOMENT_NODE: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/moment-node");
-pub const TAG_DSM_SYSTEM_OWNER: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/system-owner");
 pub const TAG_DSM_TOKEN_FACTORY: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/token-factory");
 pub const TAG_DSM_TOKEN_ID: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/token-id");

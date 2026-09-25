@@ -551,8 +551,6 @@ fn configure_env_core(config_path_utf8: String) -> Result<Vec<u8>, pb::Error> {
     }
 
     crate::network::set_env_config_path(config_path_utf8);
-    #[cfg(debug_assertions)]
-    std::env::set_var("DSM_ALLOW_LOCALHOST", "1");
     Ok(startup_ok())
 }
 

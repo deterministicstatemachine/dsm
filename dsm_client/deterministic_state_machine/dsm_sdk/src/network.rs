@@ -33,16 +33,23 @@ pub fn get_env_config_path() -> Option<&'static str> {
     ENV_CONFIG_PATH.get().map(|s| s.as_str())
 }
 
+/// The env config every reader loads: the path set at init, else
+/// `DSM_ENV_CONFIG_PATH`. One resolution, so the node list and the CA
+/// certificates always come from the same file.
+pub(crate) fn resolved_env_config_path() -> Option<String> {
+    ENV_CONFIG_PATH
+        .get()
+        .cloned()
+        .or_else(|| std::env::var("DSM_ENV_CONFIG_PATH").ok())
+}
+
 /// Environment config with serde support.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct EnvConfig {
-    pub protocol: String, // e.g., "http"
-    pub lan_ip: String,   // e.g., "127.0.0.1" (informational)
-    #[serde(default)]
-    pub ports: Vec<u16>, // optional, informational
     pub nodes: Vec<NodeConfig>, // REQUIRED
     /// Set `allow_localhost = true` in the TOML to permit 127.0.0.1 endpoints
-    /// on Android release builds when using `adb reverse` for local dev.
+    /// on Android when using `adb reverse` for local dev. The TOML is the only
+    /// switch: no environment variable and no build profile changes it.
     #[serde(default)]
     pub allow_localhost: bool,
     /// Bitcoin network for dBTC key derivation and address format.
@@ -106,19 +113,13 @@ impl NetworkConfigLoader {
     /// (`set_env_config_path`), else `DSM_ENV_CONFIG_PATH`. Nothing else: with
     /// neither there is no network config.
     pub fn load_env_config() -> Result<EnvConfig, DsmError> {
-        let path = match ENV_CONFIG_PATH.get() {
-            Some(p) => {
-                log::info!("NetworkConfigLoader: using global ENV_CONFIG_PATH={p}");
-                p.clone()
-            }
-            None => std::env::var("DSM_ENV_CONFIG_PATH").map_err(|_| {
-                DsmError::storage(
-                    "STRICT: DSM_ENV_CONFIG_PATH not set and global config path not initialized; \
-                     no network config available.",
-                    Option::<std::io::Error>::None,
-                )
-            })?,
-        };
+        let path = resolved_env_config_path().ok_or_else(|| {
+            DsmError::storage(
+                "STRICT: DSM_ENV_CONFIG_PATH not set and global config path not initialized; \
+                 no network config available.",
+                Option::<std::io::Error>::None,
+            )
+        })?;
 
         let p = PathBuf::from(&path);
         if !p.exists() {
@@ -165,14 +166,6 @@ fn parse_env_config_toml(toml_str: &str) -> Result<EnvConfig, DsmError> {
         ));
     }
 
-    // Set defaults for optional fields
-    if config.protocol.is_empty() {
-        config.protocol = "http".to_string();
-    }
-    if config.lan_ip.is_empty() {
-        config.lan_ip = "127.0.0.1".to_string();
-    }
-
     // Validate and normalize nodes
     config.nodes = validate_and_normalize_nodes(config.nodes, config.allow_localhost)?;
 
@@ -185,7 +178,7 @@ fn parse_env_config_toml(toml_str: &str) -> Result<EnvConfig, DsmError> {
 }
 
 /// Validate node endpoints and apply platform-specific hardening.
-/// - On Android, disallow localhost/127.0.0.1 unless explicitly allowed via DSM_ALLOW_LOCALHOST=1
+/// - On Android, disallow localhost/127.0.0.1 unless the TOML sets `allow_localhost = true`,
 ///   because each device would talk to its own loopback and never see each other's messages.
 fn validate_and_normalize_nodes(
     nodes: Vec<NodeConfig>,
@@ -205,22 +198,10 @@ fn validate_and_normalize_nodes(
         Ok(nodes)
     }
 
-    // Android hardening: ban localhost unless an explicit opt-in is set.
+    // Android hardening: ban localhost unless the TOML opts in.
     #[cfg(target_os = "android")]
     {
-        let allow_localhost_env = std::env::var("DSM_ALLOW_LOCALHOST").ok();
-        // Allow localhost endpoints in debug/dev builds as a convenience for adb reverse / local testing.
-        // Production builds still require explicit opt-in via DSM_ALLOW_LOCALHOST=1.
-        let allow_localhost = allow_localhost_env.as_deref() == Some("1")
-            || cfg!(debug_assertions)
-            || toml_allow_localhost;
-        log::info!(
-            "NetworkConfigLoader: Android localhost policy — DSM_ALLOW_LOCALHOST={:?} => allow_localhost={} (debug_override={})",
-            allow_localhost_env,
-            allow_localhost,
-            cfg!(debug_assertions)
-        );
-        if allow_localhost {
+        if toml_allow_localhost {
             log::info!(
                 "NetworkConfigLoader: localhost endpoints permitted; accepting {} node(s)",
                 nodes.len()
@@ -263,7 +244,7 @@ fn validate_and_normalize_nodes(
                     "STRICT: Localhost endpoints are not allowed on Android device builds. \
 Update dsm_env_config.toml to use LAN/IP or domain reachable by all devices. \
 Offending endpoints: {}. \
-To override for dev with adb reverse, set DSM_ALLOW_LOCALHOST=1 before init.",
+For dev with adb reverse, set allow_localhost = true in the config TOML.",
                     bad.join(", ")
                 ),
                 Option::<std::io::Error>::None,
@@ -497,10 +478,6 @@ mod tests {
 
     fn sample_toml() -> String {
         r#"
-protocol = "http"
-lan_ip = "10.0.0.1"
-ports = [8080, 8081]
-
 [[nodes]]
 name = "node-a"
 endpoint = "http://10.0.0.1:8080"
@@ -517,34 +494,14 @@ register_incarnation = "BHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE0"
     #[test]
     fn parse_env_config_toml_valid() {
         let cfg = parse_env_config_toml(&sample_toml()).unwrap();
-        assert_eq!(cfg.protocol, "http");
-        assert_eq!(cfg.lan_ip, "10.0.0.1");
         assert_eq!(cfg.nodes.len(), 2);
         assert_eq!(cfg.nodes[0].name, "node-a");
         assert_eq!(cfg.nodes[1].endpoint, "http://10.0.0.2:8081");
     }
 
     #[test]
-    fn parse_env_config_toml_defaults_protocol_and_ip() {
-        let toml = r#"
-protocol = ""
-lan_ip = ""
-
-[[nodes]]
-name = "n1"
-endpoint = "http://1.2.3.4:80"
-register_incarnation = "BHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE0"
-"#;
-        let cfg = parse_env_config_toml(toml).unwrap();
-        assert_eq!(cfg.protocol, "http");
-        assert_eq!(cfg.lan_ip, "127.0.0.1");
-    }
-
-    #[test]
     fn parse_env_config_toml_rejects_empty_nodes() {
         let toml = r#"
-protocol = "http"
-lan_ip = "127.0.0.1"
 nodes = []
 "#;
         assert!(parse_env_config_toml(toml).is_err());
@@ -558,8 +515,6 @@ nodes = []
     #[test]
     fn parse_env_config_toml_optional_fields() {
         let toml = r#"
-protocol = "https"
-lan_ip = "10.0.0.5"
 allow_localhost = true
 bitcoin_network = "signet"
 dbtc_dust_floor_sats = 1000
@@ -656,9 +611,6 @@ register_incarnation = "BHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE0"
     #[test]
     fn env_config_serialization_roundtrip() {
         let cfg = EnvConfig {
-            protocol: "http".into(),
-            lan_ip: "10.0.0.1".into(),
-            ports: vec![8080],
             nodes: vec![NodeConfig {
                 name: "n1".into(),
                 register_incarnation: crate::util::text_id::encode_base32_crockford(&[0x5C_u8; 32]),
@@ -676,7 +628,6 @@ register_incarnation = "BHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE0"
         };
         let toml_str = toml::to_string(&cfg).unwrap();
         let reparsed = parse_env_config_toml(&toml_str).unwrap();
-        assert_eq!(reparsed.protocol, "http");
         assert_eq!(reparsed.nodes.len(), 1);
         assert_eq!(reparsed.bitcoin_network.as_deref(), Some("signet"));
     }

@@ -2672,8 +2672,7 @@ impl AppRouter for AppRouterImpl {
             // Identity routes
             "identity.transport_headers_v3"
             | "identity.pairing_qr"
-            | "identity.pairing_compact"
-            | "identity.devtree.snapshot" => self.handle_identity_query(q).await,
+            | "identity.pairing_compact" => self.handle_identity_query(q).await,
             // Balance/wallet query routes
             "balance.get" | "balance.list" | "wallet.history" => self.handle_wallet_query(q).await,
             // Contacts routes
@@ -2761,7 +2760,6 @@ impl AppRouter for AppRouterImpl {
                 self.handle_recovery_invoke(i).await
             }
             // Secondary-device admission invoke routes (gated additional-device enrollment)
-            m if m.starts_with("device.") => self.handle_device_invoke(i).await,
             // Bitcoin invoke routes
             m if m.starts_with("bitcoin.") => self.handle_bitcoin_invoke(i).await,
             _ => err(format!(

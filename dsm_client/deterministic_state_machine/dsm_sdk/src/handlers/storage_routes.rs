@@ -475,8 +475,6 @@ async fn finalize_from_countersign_delta(
         receipt,
         &proposal,
         &recipient_ak_pk,
-        None,
-        None,
         bound.b_pair(),
     ) {
         Ok(crate::handlers::online_finalize::ReceiptVerifyOutcome::Verified { .. }) => {}
@@ -2694,7 +2692,7 @@ impl AppRouterImpl {
                 &self.device_id_bytes,
                 &relationship,
             ) {
-                Some(peer) => {
+                Ok(Some(peer)) => {
                     if let Err(e) = self
                         .initiate_cert_resync(peer, storage_endpoints.to_vec())
                         .await
@@ -2702,9 +2700,10 @@ impl AppRouterImpl {
                         report.errors.push(format!("cert resync initiate: {e}"));
                     }
                 }
-                None => report
+                Ok(None) => report
                     .errors
                     .push("a relationship requiring resync has no resolvable peer".to_string()),
+                Err(e) => report.errors.push(format!("cert resync peer lookup: {e}")),
             }
         }
     }

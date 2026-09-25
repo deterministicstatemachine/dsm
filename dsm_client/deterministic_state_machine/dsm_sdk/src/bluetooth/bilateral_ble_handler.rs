@@ -471,13 +471,20 @@ impl BilateralBleHandler {
             // remember the display form is how the balance path ended up
             // enriching only the rows that needed it least.
             let mut event = event.clone();
-            if let Some(amount) = event.amount {
-                let decimals = crate::handlers::wallet_routes::decimals_for_token(
-                    event.token_id.as_deref().unwrap_or("ERA"),
-                );
-                event.display_amount = Some(
-                    crate::handlers::wallet_routes::format_base_units_for_display(amount, decimals),
-                );
+            // The display form needs the token's decimals; an event that names
+            // no token, or a token whose decimals are unknown, carries only its
+            // base-unit amount.
+            if let (Some(amount), Some(token_id)) = (event.amount, event.token_id.as_deref()) {
+                match crate::handlers::wallet_routes::token_decimals(token_id) {
+                    Ok(decimals) => {
+                        event.display_amount = Some(
+                            crate::handlers::wallet_routes::format_base_units_for_display(
+                                amount, decimals,
+                            ),
+                        );
+                    }
+                    Err(e) => warn!("bilateral event {token_id}: no display amount: {e}"),
+                }
             }
             callback(&event.encode_to_vec());
         }

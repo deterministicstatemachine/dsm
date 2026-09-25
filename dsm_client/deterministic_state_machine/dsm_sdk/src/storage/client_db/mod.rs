@@ -49,7 +49,6 @@ pub mod sender_outbox;
 pub mod sender_proposal;
 pub mod sofi_vault_head; // the vault head and evidence store (spec §44.4)
 pub mod storage_sync_runs;
-mod system_peers;
 pub mod token_registry;
 mod tokens;
 mod transactions;
@@ -80,7 +79,6 @@ pub use manifold_seeds::*;
 pub use nonces::*;
 pub use online_outbox::*;
 pub use vault_records::*;
-pub use system_peers::*;
 pub use tokens::*;
 pub use transactions::*;
 pub use withdrawals::*;
@@ -400,7 +398,12 @@ fn get_database_path() -> Result<PathBuf> {
 ///
 /// 20: `genesis_records` holds what the mnemonic-rooted genesis produces and
 /// nothing else: no participant or contribution columns.
-pub const CLIENT_DB_SCHEMA_VERSION: i64 = 20;
+///
+/// 21: `cert_chain_resync_audit` records the cosigned `agreed_tip` in place of
+/// an accepted parent/child pair the responder does not hold, and is keyed by
+/// epoch, one row per resync. `system_peers` and `system_peer_events` are gone:
+/// they held a chain tip the device computed for a protocol actor by itself.
+pub const CLIENT_DB_SCHEMA_VERSION: i64 = 21;
 
 /// A 32-byte column, exactly. Any other length is a corrupt row and an error —
 /// never padded, never truncated.
@@ -952,11 +955,10 @@ fn create_schema(conn: &Connection) -> Result<()> {
 
         CREATE TABLE IF NOT EXISTS cert_chain_resync_audit(
             relationship_key              BLOB NOT NULL,
-            -- The PRESERVED accepted commitment this restart is anchored to
-            -- (content identity — one resync per agreed accepted transition).
+            -- The PRESERVED accepted commitment this restart is anchored to.
             preserved_acceptance_commitment BLOB NOT NULL,
-            accepted_parent_tip           BLOB NOT NULL,
-            accepted_child_tip            BLOB NOT NULL,
+            -- The tip both devices cosigned the restart at.
+            agreed_tip                    BLOB NOT NULL,
             -- Digest of the jointly-authorized restart statement.
             joint_auth_hash               BLOB NOT NULL,
             epoch                         INTEGER NOT NULL,
@@ -965,7 +967,7 @@ fn create_schema(conn: &Connection) -> Result<()> {
             new_local_head                BLOB NOT NULL,
             new_counterparty_head         BLOB NOT NULL,
             reason_code                   TEXT NOT NULL,
-            PRIMARY KEY (relationship_key, preserved_acceptance_commitment)
+            PRIMARY KEY (relationship_key, epoch)
         );
 
         CREATE TABLE IF NOT EXISTS projection_repair_queue(
@@ -1249,36 +1251,6 @@ fn create_schema(conn: &Connection) -> Result<()> {
             counterparty_device_id BLOB NOT NULL,
             confirm_envelope       BLOB NOT NULL
         );
-
-        CREATE TABLE IF NOT EXISTS system_peers(
-            peer_key       TEXT PRIMARY KEY,
-            device_id      BLOB NOT NULL UNIQUE,
-            display_name   TEXT NOT NULL,
-            peer_type      TEXT NOT NULL,
-            chain_tip      BLOB,
-            metadata       BLOB
-        );
-        CREATE INDEX IF NOT EXISTS idx_system_peers_type ON system_peers(peer_type);
-
-        CREATE TABLE IF NOT EXISTS system_peer_events(
-            peer_key             TEXT NOT NULL,
-            peer_type            TEXT NOT NULL,
-            parent_tip           BLOB NOT NULL,
-            child_tip            BLOB NOT NULL,
-            transition_digest    BLOB NOT NULL,
-            source_state_hash    BLOB NOT NULL,
-            source_state_number  INTEGER NOT NULL,
-            payload_bytes        BLOB NOT NULL,
-            PRIMARY KEY(peer_key, child_tip),
-            FOREIGN KEY(peer_key) REFERENCES system_peers(peer_key)
-        );
-        -- §4.3: there is no counter. Two distinct events may legitimately
-        -- carry the same `source_state_number` (it is now derived material,
-        -- e.g. hash[0]). Drop any pre-migration UNIQUE index, then create a
-        -- non-unique companion index for lookup.
-        DROP INDEX IF EXISTS idx_system_peer_events_source_state;
-        CREATE INDEX IF NOT EXISTS idx_system_peer_events_source_state_nonunique
-            ON system_peer_events(peer_key, source_state_number);
 
         CREATE TABLE IF NOT EXISTS transactions(
             tx_id              TEXT PRIMARY KEY,
@@ -2012,200 +1984,6 @@ mod tests {
             get_local_bilateral_chain_tip(&device_id).expect("read tip"),
             Some(current_tip)
         );
-    }
-
-    #[test]
-    #[serial]
-    fn test_advance_system_chain_tip_tracks_sovereign_lineage() {
-        crate::economic_fixtures::use_test_storage_dir();
-        reset_database_for_tests();
-        init_database().expect("init db");
-
-        let peer = SystemPeerRecord {
-            peer_key: "era-source-dlv".to_string(),
-            device_id: [0xABu8; 32].to_vec(),
-            display_name: "ERA Source DLV".to_string(),
-            peer_type: SystemPeerType::Dlv,
-            current_chain_tip: None,
-            metadata: HashMap::new(),
-        };
-        store_system_peer(&peer).expect("store peer");
-
-        let payload_one = b"faucet.claim:first".to_vec();
-        let payload_two = b"faucet.claim:second".to_vec();
-        let source_hash_one = [0x11u8; 32];
-        let source_hash_two = [0x22u8; 32];
-
-        let first = advance_system_chain_tip(
-            "era-source-dlv",
-            SystemPeerType::Dlv,
-            &[0u8; 32],
-            &payload_one,
-            &source_hash_one,
-            5,
-        )
-        .expect("advance first event");
-        let second = advance_system_chain_tip(
-            "era-source-dlv",
-            SystemPeerType::Dlv,
-            &first.child_tip,
-            &payload_two,
-            &source_hash_two,
-            6,
-        )
-        .expect("advance second event");
-
-        assert_eq!(first.parent_tip, vec![0u8; 32]);
-        assert_ne!(first.child_tip, source_hash_one.to_vec());
-        assert_eq!(second.parent_tip, first.child_tip);
-        assert_ne!(second.child_tip, source_hash_two.to_vec());
-
-        let stored = get_system_peer("era-source-dlv")
-            .expect("load peer")
-            .expect("peer exists");
-        assert_eq!(stored.current_chain_tip, Some(second.child_tip.clone()));
-
-        let events = get_system_peer_events("era-source-dlv").expect("load events");
-        assert_eq!(events.len(), 2);
-        assert_eq!(events[0].child_tip, first.child_tip);
-        assert_eq!(events[1].child_tip, second.child_tip);
-    }
-
-    #[test]
-    #[serial]
-    fn test_store_system_peer_is_insert_only_for_existing_identity() {
-        crate::economic_fixtures::use_test_storage_dir();
-        reset_database_for_tests();
-        init_database().expect("init db");
-
-        let peer = SystemPeerRecord {
-            peer_key: "era-source-dlv".to_string(),
-            device_id: [0xABu8; 32].to_vec(),
-            display_name: "ERA Source DLV".to_string(),
-            peer_type: SystemPeerType::Dlv,
-            current_chain_tip: None,
-            metadata: HashMap::new(),
-        };
-        store_system_peer(&peer).expect("store peer");
-        let advanced = advance_system_chain_tip(
-            "era-source-dlv",
-            SystemPeerType::Dlv,
-            &[0u8; 32],
-            b"faucet.claim:first",
-            &[0x11u8; 32],
-            5,
-        )
-        .expect("advance peer");
-
-        let attempted_overwrite = SystemPeerRecord {
-            peer_key: "era-source-dlv".to_string(),
-            device_id: [0xABu8; 32].to_vec(),
-            display_name: "mutated".to_string(),
-            peer_type: SystemPeerType::Dlv,
-            current_chain_tip: None,
-            metadata: HashMap::from([("note".to_string(), b"overwrite".to_vec())]),
-        };
-        let err =
-            store_system_peer(&attempted_overwrite).expect_err("duplicate system peer must fail");
-        assert!(err.to_string().contains("already exists"));
-
-        let stored = get_system_peer("era-source-dlv")
-            .expect("load peer")
-            .expect("peer exists");
-        assert_eq!(stored.display_name, "ERA Source DLV");
-        assert_eq!(stored.current_chain_tip, Some(advanced.child_tip));
-        assert!(stored.metadata.is_empty());
-    }
-
-    #[test]
-    #[serial]
-    fn test_advance_system_chain_tip_rejects_stale_expected_parent() {
-        crate::economic_fixtures::use_test_storage_dir();
-        reset_database_for_tests();
-        init_database().expect("init db");
-
-        let peer = SystemPeerRecord {
-            peer_key: "era-source-dlv".to_string(),
-            device_id: [0xCBu8; 32].to_vec(),
-            display_name: "ERA Source DLV".to_string(),
-            peer_type: SystemPeerType::Dlv,
-            current_chain_tip: None,
-            metadata: HashMap::new(),
-        };
-        store_system_peer(&peer).expect("store peer");
-
-        let first = advance_system_chain_tip(
-            "era-source-dlv",
-            SystemPeerType::Dlv,
-            &[0u8; 32],
-            b"faucet.claim:first",
-            &[0x61u8; 32],
-            7,
-        )
-        .expect("advance first event");
-
-        let err = advance_system_chain_tip(
-            "era-source-dlv",
-            SystemPeerType::Dlv,
-            &[0xEEu8; 32],
-            b"faucet.claim:second",
-            &[0x62u8; 32],
-            8,
-        )
-        .expect_err("stale expected parent must fail");
-        assert!(err.to_string().contains("expected parent tip"));
-
-        let stored = get_system_peer("era-source-dlv")
-            .expect("load peer")
-            .expect("peer exists");
-        assert_eq!(stored.current_chain_tip, Some(first.child_tip));
-    }
-
-    #[test]
-    #[serial]
-    fn test_advance_system_chain_tip_accepts_duplicate_source_state_number_per_section_4_3() {
-        // Per §4.3 there is no `state_number`. The prior test asserted that a
-        // duplicate `source_state_number` was rejected — that check was a
-        // residual counter check that bricked beta-tester faucet claims when
-        // `state.hash[0]` happened to fall (e.g. 2 ≤ 17). Acceptance now
-        // depends only on structural parent-tip continuity (verified below
-        // by the second advance succeeding from `first.child_tip`).
-        crate::economic_fixtures::use_test_storage_dir();
-        reset_database_for_tests();
-        init_database().expect("init db");
-
-        let peer = SystemPeerRecord {
-            peer_key: "era-source-dlv".to_string(),
-            device_id: [0xDBu8; 32].to_vec(),
-            display_name: "ERA Source DLV".to_string(),
-            peer_type: SystemPeerType::Dlv,
-            current_chain_tip: None,
-            metadata: HashMap::new(),
-        };
-        store_system_peer(&peer).expect("store peer");
-
-        let first = advance_system_chain_tip(
-            "era-source-dlv",
-            SystemPeerType::Dlv,
-            &[0u8; 32],
-            b"faucet.claim:first",
-            &[0x71u8; 32],
-            9,
-        )
-        .expect("advance first event");
-
-        // Duplicate source_state_number must NOT block the advance under §4.3.
-        let second = advance_system_chain_tip(
-            "era-source-dlv",
-            SystemPeerType::Dlv,
-            &first.child_tip,
-            b"faucet.claim:duplicate-number",
-            &[0x72u8; 32],
-            9,
-        )
-        .expect("duplicate source_state_number must succeed (§4.3, no counter)");
-        assert_eq!(second.parent_tip, first.child_tip);
-        assert_eq!(second.source_state_number, 9);
     }
 
     #[test]

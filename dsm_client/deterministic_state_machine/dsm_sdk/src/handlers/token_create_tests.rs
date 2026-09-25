@@ -185,12 +185,12 @@ async fn a_created_tokens_amounts_render_at_its_own_decimals() {
     };
 
     let mut outgoing = tx(25_000, -25_000);
-    enrich_transaction_display(&mut outgoing);
+    enrich_transaction_display(&mut outgoing).expect("the token's decimals are known");
     assert_eq!(outgoing.display_amount, "-250.00");
     assert_eq!((outgoing.amount, outgoing.amount_signed), (25_000, -25_000));
 
     let mut incoming = tx(25_000, 25_000);
-    enrich_transaction_display(&mut incoming);
+    enrich_transaction_display(&mut incoming).expect("the token's decimals are known");
     assert_eq!(incoming.display_amount, "250.00");
 
     let mut era = generated::TransactionInfo {
@@ -199,7 +199,7 @@ async fn a_created_tokens_amounts_render_at_its_own_decimals() {
         amount_signed: -100,
         ..Default::default()
     };
-    enrich_transaction_display(&mut era);
+    enrich_transaction_display(&mut era).expect("the token's decimals are known");
     assert_eq!(era.display_amount, "-100", "ERA is whole units");
 }
 

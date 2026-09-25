@@ -85,31 +85,25 @@ pub trait AppRouter: Send + Sync {
     /// installed by `execute_on_relationship` at the AdvanceOutcome
     /// chokepoint; settlement-layer state never needs to be pushed back
     /// into CoreSDK.
-    fn sync_balance_cache(&self) {}
+    fn sync_balance_cache(&self);
 
     /// Read-only snapshot of the canonical [`DeviceState`] head (§2.2 `r_A`).
     ///
     /// Used by settlement delegates to materialise display-layer projections
     /// from the device head's authoritative balance scalar — never to mutate
-    /// it. Returns `None` when the router does not yet hold an identity
-    /// (pre-genesis bootstrap router).
-    fn device_head(&self) -> Option<dsm::types::device_state::DeviceState> {
-        None
-    }
+    /// it. `None` when the router does not yet hold an identity (the
+    /// pre-genesis bootstrap router).
+    fn device_head(&self) -> Option<dsm::types::device_state::DeviceState>;
 
     /// §9.5: resolve a token's canonical `policy_commit` from the local
     /// source-of-truth installed policy (builtins -> canonical constants;
     /// custom -> the device's own registration history). Returns `Err` when the
     /// policy is not locally installed — callers MUST fail closed and never
-    /// absorb a peer-supplied commit. Default impl fails closed.
+    /// absorb a peer-supplied commit.
     fn resolve_policy_commit_strict(
         &self,
-        _token_id: &[u8],
-    ) -> Result<[u8; 32], dsm::types::error::DsmError> {
-        Err(dsm::types::error::DsmError::invalid_operation(
-            "resolve_policy_commit_strict: unsupported by this router",
-        ))
-    }
+        token_id: &[u8],
+    ) -> Result<[u8; 32], dsm::types::error::DsmError>;
 
     /// Pure-prepare view of the canonical AdvanceOutcome — used by the BLE
     /// sender to build a stitched receipt with the real post-advance SMT
@@ -120,17 +114,13 @@ pub trait AppRouter: Send + Sync {
     #[allow(clippy::too_many_arguments)]
     fn simulate_advance_for_confirm(
         &self,
-        _rel_key: [u8; 32],
-        _counterparty_devid: [u8; 32],
-        _operation: dsm::types::operations::Operation,
-        _deltas: &[dsm::types::device_state::BalanceDelta],
-        _anchor_leaf: Option<dsm::types::device_state::AnchorLeafUpdate>,
-        _offline_spend: Option<dsm::types::device_state::OfflineSpend>,
-    ) -> Result<dsm::types::device_state::AdvanceOutcome, dsm::types::error::DsmError> {
-        Err(dsm::types::error::DsmError::invalid_operation(
-            "simulate_advance_for_confirm not implemented on this router",
-        ))
-    }
+        rel_key: [u8; 32],
+        counterparty_devid: [u8; 32],
+        operation: dsm::types::operations::Operation,
+        deltas: &[dsm::types::device_state::BalanceDelta],
+        anchor_leaf: Option<dsm::types::device_state::AnchorLeafUpdate>,
+        offline_spend: Option<dsm::types::device_state::OfflineSpend>,
+    ) -> Result<dsm::types::device_state::AdvanceOutcome, dsm::types::error::DsmError>;
 
     /// v2 producer phase 1 (Software-Authority / Hardware-Identity): stage the next offline-bearer
     /// transition from the appliance's active state — the transition `Δ`, the successor frontier,
@@ -141,44 +131,33 @@ pub trait AppRouter: Send + Sync {
     #[allow(clippy::too_many_arguments)]
     fn stage_offline_bearer_transition(
         &self,
-        _relationship_id: [u8; 32],
-        _recipient_device_id: [u8; 32],
-        _object_id: [u8; 32],
-        _payload_hash: [u8; 32],
-        _authority_policy_hash: [u8; 32],
-        _action_type: u32,
-        _action_fields: Vec<u8>,
-        _receiver_challenge: [u8; 32],
-    ) -> Result<crate::sdk::core_sdk::StagedBearerTransition, dsm::types::error::DsmError> {
-        Err(dsm::types::error::DsmError::invalid_operation(
-            "stage_offline_bearer_transition not implemented on this router",
-        ))
-    }
+        relationship_id: [u8; 32],
+        recipient_device_id: [u8; 32],
+        object_id: [u8; 32],
+        payload_hash: [u8; 32],
+        authority_policy_hash: [u8; 32],
+        action_type: u32,
+        action_fields: Vec<u8>,
+        receiver_challenge: [u8; 32],
+    ) -> Result<crate::sdk::core_sdk::StagedBearerTransition, dsm::types::error::DsmError>;
 
     /// v2 producer phase 2: PREPARE(t, r_R, R_i, R_{i+1}) → COMMIT → EMIT → FINALIZE with the real
     /// device SMT roots from the caller's advance simulation, attaching `Π_i`/`Π_{i+1}` to the
     /// release package. Delegates to [`CoreSDK::release_offline_bearer`].
     fn release_offline_bearer(
         &self,
-        _staged: &crate::sdk::core_sdk::StagedBearerTransition,
-        _receiver_challenge: [u8; 32],
-        _sender_device_root_before: [u8; 32],
-        _sender_device_root_after: [u8; 32],
-        _anchor_smt_proof_before: Vec<u8>,
-        _anchor_smt_proof_after: Vec<u8>,
-    ) -> Result<crate::sdk::core_sdk::OfflineBearerArtifacts, dsm::types::error::DsmError> {
-        Err(dsm::types::error::DsmError::invalid_operation(
-            "release_offline_bearer not implemented on this router",
-        ))
-    }
+        staged: &crate::sdk::core_sdk::StagedBearerTransition,
+        receiver_challenge: [u8; 32],
+        sender_device_root_before: [u8; 32],
+        sender_device_root_after: [u8; 32],
+        anchor_smt_proof_before: Vec<u8>,
+        anchor_smt_proof_after: Vec<u8>,
+    ) -> Result<crate::sdk::core_sdk::OfflineBearerArtifacts, dsm::types::error::DsmError>;
 
     /// Cleanup: release an ABANDONED prepared bearer (e.g. the confirm build failed between
     /// PREPARE and COMMIT) so the appliance returns to `Ready` and future offline-bearer sends do
-    /// not fail closed. Best-effort no-op default; overridden to delegate to
-    /// [`CoreSDK::cancel_offline_bearer_release`].
-    fn cancel_offline_bearer_release(&self) -> Result<(), dsm::types::error::DsmError> {
-        Ok(())
-    }
+    /// not fail closed. Delegates to [`CoreSDK::cancel_offline_bearer_release`].
+    fn cancel_offline_bearer_release(&self) -> Result<(), dsm::types::error::DsmError>;
 
     /// Execute a prepared bilateral advance through the canonical
     /// [`CoreSDK::execute_on_relationship`] chokepoint.
@@ -199,17 +178,13 @@ pub trait AppRouter: Send + Sync {
     #[allow(clippy::too_many_arguments)]
     fn execute_on_relationship_for_bilateral(
         &self,
-        _rel_key: [u8; 32],
-        _counterparty_devid: [u8; 32],
-        _operation: dsm::types::operations::Operation,
-        _deltas: &[dsm::types::device_state::BalanceDelta],
-        _anchor_leaf: Option<dsm::types::device_state::AnchorLeafUpdate>,
-        _offline_spend: Option<dsm::types::device_state::OfflineSpend>,
-    ) -> Result<dsm::types::device_state::AdvanceOutcome, dsm::types::error::DsmError> {
-        Err(dsm::types::error::DsmError::invalid_operation(
-            "execute_on_relationship_for_bilateral not implemented on this router",
-        ))
-    }
+        rel_key: [u8; 32],
+        counterparty_devid: [u8; 32],
+        operation: dsm::types::operations::Operation,
+        deltas: &[dsm::types::device_state::BalanceDelta],
+        anchor_leaf: Option<dsm::types::device_state::AnchorLeafUpdate>,
+        offline_spend: Option<dsm::types::device_state::OfflineSpend>,
+    ) -> Result<dsm::types::device_state::AdvanceOutcome, dsm::types::error::DsmError>;
 }
 
 /// App router storage. Uses RwLock to allow replacement (MinimalBootstrapRouter → AppRouterImpl).
@@ -282,13 +257,10 @@ pub fn app_router() -> Option<Arc<dyn AppRouter>> {
     APP_ROUTER.read().ok()?.clone()
 }
 
-/// The local device's CURRENT ML-KEM-768 (Kyber) encapsulation key. Installed by
-/// `AppRouterImpl::new` right after `WalletSDK` initializes device keys — the keypair is
-/// deliberately RANDOMIZED per wallet init (no persisted device secret), so this snapshot is
-/// valid for the life of the wallet instance and is re-installed on every router (re)build.
-/// The bilateral BLE prepare exchange attaches it so counterparties can refresh their contact
-/// record (per-step EK receipts encapsulate to it). `None` -> prepare messages carry an empty
-/// key and the counterparty's receipt build fail-closes exactly as before.
+/// A cache of the local device's ML-KEM-768 (Kyber) encapsulation key, the key derived from
+/// `Smaster` under `DSM/kyber\0`. Installed by `AppRouterImpl::new` once `WalletSDK` has
+/// derived the device keys; `kyber_identity::local_kyber_public_key` re-derives it when the
+/// cache is cold.
 static LOCAL_KYBER_PUBKEY: Lazy<RwLock<Option<Vec<u8>>>> = Lazy::new(|| RwLock::new(None));
 
 /// Install (or replace) the local wallet's Kyber public key snapshot.
@@ -625,6 +597,70 @@ mod tests {
                 data: vec![],
                 error_message: None,
             }
+        }
+        fn sync_balance_cache(&self) {
+            unreachable!("the router tests never sync a balance cache")
+        }
+        fn device_head(&self) -> Option<dsm::types::device_state::DeviceState> {
+            unreachable!("the router tests never read a head")
+        }
+        fn resolve_policy_commit_strict(
+            &self,
+            _token_id: &[u8],
+        ) -> Result<[u8; 32], dsm::types::error::DsmError> {
+            unreachable!("the router tests never resolve a policy")
+        }
+        fn simulate_advance_for_confirm(
+            &self,
+            _rel_key: [u8; 32],
+            _counterparty_devid: [u8; 32],
+            _operation: dsm::types::operations::Operation,
+            _deltas: &[dsm::types::device_state::BalanceDelta],
+            _anchor_leaf: Option<dsm::types::device_state::AnchorLeafUpdate>,
+            _offline_spend: Option<dsm::types::device_state::OfflineSpend>,
+        ) -> Result<dsm::types::device_state::AdvanceOutcome, dsm::types::error::DsmError> {
+            unreachable!("the router tests never advance")
+        }
+        #[allow(clippy::too_many_arguments)]
+        fn stage_offline_bearer_transition(
+            &self,
+            _relationship_id: [u8; 32],
+            _recipient_device_id: [u8; 32],
+            _object_id: [u8; 32],
+            _payload_hash: [u8; 32],
+            _authority_policy_hash: [u8; 32],
+            _action_type: u32,
+            _action_fields: Vec<u8>,
+            _receiver_challenge: [u8; 32],
+        ) -> Result<crate::sdk::core_sdk::StagedBearerTransition, dsm::types::error::DsmError>
+        {
+            unreachable!("the router tests never stage a bearer")
+        }
+        fn release_offline_bearer(
+            &self,
+            _staged: &crate::sdk::core_sdk::StagedBearerTransition,
+            _receiver_challenge: [u8; 32],
+            _sender_device_root_before: [u8; 32],
+            _sender_device_root_after: [u8; 32],
+            _anchor_smt_proof_before: Vec<u8>,
+            _anchor_smt_proof_after: Vec<u8>,
+        ) -> Result<crate::sdk::core_sdk::OfflineBearerArtifacts, dsm::types::error::DsmError>
+        {
+            unreachable!("the router tests never release a bearer")
+        }
+        fn cancel_offline_bearer_release(&self) -> Result<(), dsm::types::error::DsmError> {
+            unreachable!("the router tests never cancel a bearer")
+        }
+        fn execute_on_relationship_for_bilateral(
+            &self,
+            _rel_key: [u8; 32],
+            _counterparty_devid: [u8; 32],
+            _operation: dsm::types::operations::Operation,
+            _deltas: &[dsm::types::device_state::BalanceDelta],
+            _anchor_leaf: Option<dsm::types::device_state::AnchorLeafUpdate>,
+            _offline_spend: Option<dsm::types::device_state::OfflineSpend>,
+        ) -> Result<dsm::types::device_state::AdvanceOutcome, dsm::types::error::DsmError> {
+            unreachable!("the router tests never advance")
         }
     }
 

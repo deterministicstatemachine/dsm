@@ -819,7 +819,7 @@ class AndroidLayerProofTest {
             .open("dsm_env_config.instrumented.toml").use { input ->
             FileOutputStream(cfgFile, false).use { out -> input.copyTo(out) }
         }
-        // 3. Tell Rust where the config is (sets ENV_CONFIG_PATH + DSM_ALLOW_LOCALHOST)
+        // 3. Tell Rust where the config is (sets ENV_CONFIG_PATH)
         Unified.initDsmSdk(cfgFile.absolutePath)
         // 4. Initialize the SDK the way MainActivity.initDsmAndSignalReady does:
         //    this is the step that installs the app router behind the ingress;

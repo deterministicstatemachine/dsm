@@ -100,7 +100,7 @@ pub fn point_sdk_at(members: &[(String, String, [u8; 32])]) -> FleetGuard {
     let config_path =
         std::env::temp_dir().join(format!("dsm_sdk_fleet_{}.toml", std::process::id()));
     let mut cfg = String::from(
-        "protocol = \"http\"\nlan_ip = \"127.0.0.1\"\nallow_localhost = true\n\
+        "allow_localhost = true\n\
          bitcoin_network = \"signet\"\n",
     );
     for (member_id, endpoint, incarnation) in members {

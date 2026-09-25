@@ -4,11 +4,7 @@
 # Nodes (ECS, VPC vpc-rj9oepiel1c2517avaboj, sg dsm-storage-sg):
 #   us-west-1a: 47.251.246.93, 47.251.250.159, 47.251.88.58
 
-protocol = "https"
-lan_ip = "0.0.0.0"
 allow_localhost = false
-storage_node_mode = "remote"
-ports = [8080]
 
 bitcoin_network = "signet"
 dbtc_min_confirmations = 1
