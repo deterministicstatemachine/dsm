@@ -35,7 +35,7 @@ impl StorageNodeId {
     }
 
     pub fn from_base32(value: &str) -> Option<Self> {
-        let bytes = dsm_sdk::util::text_id::decode_base32_crockford(value)?;
+        let bytes = dsm::utils::text_id::decode_base32_crockford(value)?;
         let arr: [u8; 32] = bytes.try_into().ok()?;
         Some(Self(arr))
     }
@@ -53,7 +53,7 @@ impl StorageNodeId {
     }
 
     pub fn to_base32(self) -> String {
-        dsm_sdk::util::text_id::encode_base32_crockford(&self.0)
+        dsm::utils::text_id::encode_base32_crockford(&self.0)
     }
 }
 

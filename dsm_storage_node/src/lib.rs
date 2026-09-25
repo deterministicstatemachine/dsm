@@ -92,13 +92,15 @@ impl NodeStorageSet {
                 "storage_set.members lists a register incarnation for this node ({}) that is \
                  not the one this node's database holds ({}) — this node's register was \
                  rebuilt or restored, so it is no longer the member the configured set names",
-                dsm_sdk::util::text_id::encode_base32_crockford(configured_own),
-                dsm_sdk::util::text_id::encode_base32_crockford(&own_incarnation)
+                dsm::utils::text_id::encode_base32_crockford(configured_own),
+                dsm::utils::text_id::encode_base32_crockford(&own_incarnation)
             );
         }
-        let entries: Vec<(&str, [u8; 32])> =
-            members.iter().map(|(m, i)| (m.as_str(), *i)).collect();
-        let id = dsm_sdk::sdk::storage_set::compute_storage_set_id(&entries)
+        let pairs: Vec<(&[u8], [u8; 32])> =
+            members.iter().map(|(m, i)| (m.as_bytes(), *i)).collect();
+        let committed = dsm::ccb::StorageSetMembers::new(&pairs)
+            .map_err(|e| anyhow::anyhow!("storage_set.members: {e}"))?;
+        let id = dsm::ccb::storage_set_id(&committed)
             .map_err(|e| anyhow::anyhow!("storage_set.members: {e}"))?;
         Ok(Self {
             id,

@@ -33,7 +33,7 @@ use axum::{
 use prost::Message;
 
 use crate::AppState;
-use dsm_sdk::util::text_id;
+use dsm::utils::text_id;
 
 /// The namespace a cell or locator belongs to, as the immutable store takes
 /// it: `DSM/`- or `DJTE.`-prefixed, NUL-free, bounded. It scopes the key; the

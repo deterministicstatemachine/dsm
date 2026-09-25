@@ -39,7 +39,7 @@ use crate::api::cells::{digest32, namespace, octets};
 use crate::db;
 use crate::AppState;
 use dsm::storage_cell::ByteCommit;
-use dsm_sdk::util::text_id;
+use dsm::utils::text_id;
 
 const CYCLE_HEADER: &str = "x-cycle";
 const ECHO_HEADER: &str = "x-dsm-node-id";

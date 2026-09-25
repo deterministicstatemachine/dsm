@@ -146,7 +146,7 @@ pub fn assemble_recovery_activation(
         let cin = inputs.counterparties.get(c).ok_or_else(|| {
             DsmError::verification(format!(
                 "assembly: gate member {} has no fetched posted state (fail closed)",
-                crate::types::identifiers::encode_crockford(c)
+                crate::utils::text_id::encode_base32_crockford(c)
             ))
         })?;
         let ev = assemble_one_evidence(inputs, c, cin)?;
@@ -404,7 +404,7 @@ mod tests {
     /// value-capable in A_old's head. Returns (inputs, K_A_pub).
     fn fixture_one(c: [u8; 32], c_seed: u8) -> (RecoveryAssemblyInputs, Vec<u8>) {
         let ka = generate_keypair_from_seed(SphincsVariant::SPX256f, &[0x42; 32]).expect("ka");
-        let a_old_str = crate::types::identifiers::encode_crockford(&A_OLD);
+        let a_old_str = crate::utils::text_id::encode_base32_crockford(&A_OLD);
         let tombstone =
             create_tombstone(&[0x01; 32], 0, &[0x02; 32], &a_old_str, &ka.secret_key).expect("t");
         let succession = create_succession(

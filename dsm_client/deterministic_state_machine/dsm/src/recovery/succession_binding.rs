@@ -230,7 +230,7 @@ pub fn verify_recovery_reestablish_request(
     }
 
     // 2. A_new is the mnemonic-authorized successor of A_old (genesis-anchored authority).
-    let a_old_str = crate::types::identifiers::encode_crockford(a_old);
+    let a_old_str = crate::utils::text_id::encode_base32_crockford(a_old);
     if tombstone.device_id != a_old_str {
         return Err(DsmError::verification(
             "reestablish: tombstone is not for A_old",
@@ -342,7 +342,7 @@ impl CrossRelationshipSuccessionEvidence {
         }
 
         // 2. A_new is the mnemonic-authorized successor of A_old (genesis-anchored auth).
-        let a_old_str = crate::types::identifiers::encode_crockford(&self.a_old);
+        let a_old_str = crate::utils::text_id::encode_base32_crockford(&self.a_old);
         if self.tombstone.device_id != a_old_str {
             return Err(DsmError::verification(
                 "succession: tombstone is not for A_old",
@@ -517,7 +517,7 @@ mod tests {
     /// Build a fully-valid evidence (recovery semantics) + the authority pubkey.
     fn fixture() -> (CrossRelationshipSuccessionEvidence, Vec<u8>) {
         let kp = generate_keypair_from_seed(SphincsVariant::SPX256f, &[0x42; 32]).expect("kp");
-        let a_old_str = crate::types::identifiers::encode_crockford(&A_OLD);
+        let a_old_str = crate::utils::text_id::encode_base32_crockford(&A_OLD);
 
         let tombstone = create_tombstone(&[0x01; 32], 0, &[0x02; 32], &a_old_str, &kp.secret_key)
             .expect("tombstone");
@@ -661,7 +661,7 @@ mod tests {
         // Rebuild succession binding a different successor.
         let kp = generate_keypair_from_seed(SphincsVariant::SPX256f, &[0x42; 32]).expect("kp");
         let (mut ev, pk) = fixture();
-        let a_old_str = crate::types::identifiers::encode_crockford(&A_OLD);
+        let a_old_str = crate::utils::text_id::encode_base32_crockford(&A_OLD);
         ev.succession = create_succession(
             &ev.tombstone.tombstone_hash,
             [0xBB; 32].as_ref(),

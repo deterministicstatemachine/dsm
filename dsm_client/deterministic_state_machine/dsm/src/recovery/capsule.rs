@@ -132,7 +132,7 @@ pub fn compute_contact_set_commit(counterparty_tips: &HashMap<String, (u64, Vec<
 pub fn contact_set_commit_from_device_ids(ids: &std::collections::BTreeSet<[u8; 32]>) -> [u8; 32] {
     let mut strs: Vec<String> = ids
         .iter()
-        .map(|id| crate::types::identifiers::encode_crockford(id))
+        .map(|id| crate::utils::text_id::encode_base32_crockford(id))
         .collect();
     strs.sort_unstable();
     hash_sorted_contact_ids(&strs)

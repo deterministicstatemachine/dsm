@@ -43,7 +43,7 @@ const MAX_DEVTREE_STATE_BYTES: usize = 128 * 1024;
 
 fn key_root(genesis_b: &[u8]) -> String {
     let k = blake3_tagged(DOM_IDENTITY_DEVTREE_ROOT, genesis_b);
-    dsm_sdk::util::text_id::encode_base32_crockford(&k)
+    dsm::utils::text_id::encode_base32_crockford(&k)
 }
 
 pub fn create_router(state: Arc<AppState>) -> Router<()> {
@@ -72,8 +72,8 @@ async fn get_root(
     // been published yet, so pre-Phase-B.4 callers still see whatever
     // bytes they wrote. New writes only land in `device_tree_states`.
     let genesis_b =
-        dsm_sdk::util::text_id::decode_base32_crockford(&genesis).ok_or(StatusCode::BAD_REQUEST)?;
-    let genesis_key = dsm_sdk::util::text_id::encode_base32_crockford(&genesis_b);
+        dsm::utils::text_id::decode_base32_crockford(&genesis).ok_or(StatusCode::BAD_REQUEST)?;
+    let genesis_key = dsm::utils::text_id::encode_base32_crockford(&genesis_b);
     let payload = crate::db::get_device_tree_state_payload(&state.db_pool, &genesis_key)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -218,7 +218,7 @@ async fn put_root(
     }
 
     let genesis_b =
-        dsm_sdk::util::text_id::decode_base32_crockford(&genesis).ok_or(StatusCode::BAD_REQUEST)?;
+        dsm::utils::text_id::decode_base32_crockford(&genesis).ok_or(StatusCode::BAD_REQUEST)?;
     if genesis_b.len() != 32 {
         return Err(StatusCode::BAD_REQUEST);
     }
@@ -238,7 +238,7 @@ async fn put_root(
 
     // Use the canonical 32-byte-Base32 form for the table key so future
     // GETs that decode the same genesis path land on the same row.
-    let genesis_key = dsm_sdk::util::text_id::encode_base32_crockford(&genesis_b);
+    let genesis_key = dsm::utils::text_id::encode_base32_crockford(&genesis_b);
 
     // CHECK 4 (monotonic version) is enforced atomically here.
     let now_tick = state.current_tick.load(std::sync::atomic::Ordering::SeqCst);
@@ -318,7 +318,7 @@ async fn get_proof(
     RawQuery(raw): RawQuery,
 ) -> Result<impl IntoResponse, StatusCode> {
     let genesis_b =
-        dsm_sdk::util::text_id::decode_base32_crockford(&genesis).ok_or(StatusCode::BAD_REQUEST)?;
+        dsm::utils::text_id::decode_base32_crockford(&genesis).ok_or(StatusCode::BAD_REQUEST)?;
     if genesis_b.len() != 32 {
         return Err(StatusCode::BAD_REQUEST);
     }
@@ -329,7 +329,7 @@ async fn get_proof(
     let mut devid_arr = [0u8; 32];
     devid_arr.copy_from_slice(&devid_b);
 
-    let genesis_key = dsm_sdk::util::text_id::encode_base32_crockford(&genesis_b);
+    let genesis_key = dsm::utils::text_id::encode_base32_crockford(&genesis_b);
     let payload = crate::db::get_device_tree_state_payload(&state.db_pool, &genesis_key)
         .await
         .map_err(|e| {
@@ -346,7 +346,7 @@ async fn get_proof(
         log::warn!(
             "GET /devtree/proof for genesis={} devid={}: {}",
             genesis,
-            dsm_sdk::util::text_id::encode_base32_crockford(&devid_arr),
+            dsm::utils::text_id::encode_base32_crockford(&devid_arr),
             e.reason()
         );
         e.http_status()
@@ -490,7 +490,7 @@ fn parse_devid(raw: Option<&str>) -> Result<Vec<u8>, StatusCode> {
         let val = it.next().unwrap_or("");
         if key == "devid" {
             let val = decode_percent(val)?;
-            return dsm_sdk::util::text_id::decode_base32_crockford(&val)
+            return dsm::utils::text_id::decode_base32_crockford(&val)
                 .ok_or(StatusCode::BAD_REQUEST);
         }
     }
@@ -561,7 +561,7 @@ mod tests {
 
     #[test]
     fn parse_devid_extracts_value() {
-        let b32 = dsm_sdk::util::text_id::encode_base32_crockford(&[0x42u8; 32]);
+        let b32 = dsm::utils::text_id::encode_base32_crockford(&[0x42u8; 32]);
         let raw = format!("devid={b32}");
         assert_eq!(parse_devid(Some(&raw)), Ok(vec![0x42u8; 32]));
     }
@@ -574,7 +574,7 @@ mod tests {
 
     #[test]
     fn parse_devid_with_multiple_params() {
-        let b32 = dsm_sdk::util::text_id::encode_base32_crockford(&[0x33u8; 32]);
+        let b32 = dsm::utils::text_id::encode_base32_crockford(&[0x33u8; 32]);
         let raw = format!("foo=bar&devid={b32}&baz=qux");
         assert_eq!(parse_devid(Some(&raw)), Ok(vec![0x33u8; 32]));
     }

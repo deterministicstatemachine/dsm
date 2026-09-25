@@ -13,7 +13,7 @@ mod common;
 use std::sync::Arc;
 
 use axum::{body::Body, http::Request, http::StatusCode, Router};
-use dsm_sdk::util::text_id;
+use dsm::utils::text_id;
 use dsm_storage_node::{
     replication::{ReplicationConfig, ReplicationManager},
     AppState,

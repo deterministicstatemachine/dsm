@@ -23,7 +23,7 @@ use axum::{
 use prost::Message;
 
 use crate::AppState;
-use dsm_sdk::util::text_id;
+use dsm::utils::text_id;
 
 const MAX_ENVELOPE_BYTES: usize = 128 * 1024; // 128 KiB (normalized)
 const MAX_BATCH_RETRIEVE: i64 = 64;

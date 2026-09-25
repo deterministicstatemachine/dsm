@@ -20,7 +20,7 @@ use log::info;
 use rustls::crypto::{self, CryptoProvider};
 use std::sync::Once;
 
-use dsm_sdk::util::text_id;
+use dsm::utils::text_id;
 
 use dsm_storage_node::{api, db, replication, AppState};
 

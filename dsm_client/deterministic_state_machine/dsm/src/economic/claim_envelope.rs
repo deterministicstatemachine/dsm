@@ -272,7 +272,7 @@ impl core::fmt::Display for ClaimIsConditional {
             "the claim at position {} is conditional on fulfillment {}: it commits \
              two roots and has selected neither",
             self.economic_position,
-            crate::types::identifiers::encode_crockford(&self.fulfillment_id)
+            crate::utils::text_id::encode_base32_crockford(&self.fulfillment_id)
         )
     }
 }
@@ -395,10 +395,10 @@ mod tests {
         );
         // The message names the fulfillment and NEITHER root.
         let rendered = refusal.to_string();
-        assert!(rendered.contains(&crate::types::identifiers::encode_crockford(&[0xF1; 32])));
+        assert!(rendered.contains(&crate::utils::text_id::encode_base32_crockford(&[0xF1; 32])));
         for root in [claim.realize_root, claim.void_root] {
             assert!(
-                !rendered.contains(&crate::types::identifiers::encode_crockford(&root)),
+                !rendered.contains(&crate::utils::text_id::encode_base32_crockford(&root)),
                 "a committed root leaked into the refusal: {rendered}"
             );
         }

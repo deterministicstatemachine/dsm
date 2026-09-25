@@ -1344,7 +1344,6 @@ dependencies = [
  "config",
  "deadpool-postgres",
  "dsm",
- "dsm_sdk",
  "futures",
  "log",
  "metrics",

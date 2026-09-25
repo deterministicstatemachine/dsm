@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use crate::db;
 use crate::AppState;
-use dsm_sdk::util::text_id;
+use dsm::utils::text_id;
 
 const HDR_CAPACITY: &str = "x-capacity-bytes"; // i64
 const HDR_STAKE_HASH: &str = "x-stake-hash"; // base32 bytes
