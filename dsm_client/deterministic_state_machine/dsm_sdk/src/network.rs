@@ -259,65 +259,23 @@ For dev with adb reverse, set allow_localhost = true in the config TOML.",
     }
 }
 
-/// Global, multi-node registry of the configured storage endpoints.
+/// Global registry of the configured storage endpoints: what the env config
+/// names, never edited at runtime. Protocol paths use the network's pinned set
+/// (`sdk::storage_set`), never this list (storage spec §10: the set is
+/// committed).
 struct NodeRegistry {
-    nodes: std::sync::RwLock<Vec<NodeConfig>>,
+    nodes: Vec<NodeConfig>,
 }
 
 static REGISTRY: OnceLock<Arc<NodeRegistry>> = OnceLock::new();
 
 impl NodeRegistry {
     fn new(nodes: Vec<NodeConfig>) -> Self {
-        Self {
-            nodes: std::sync::RwLock::new(nodes),
-        }
+        Self { nodes }
     }
 
     fn list_endpoints(&self) -> Vec<String> {
-        let nodes = self.nodes.read().unwrap_or_else(|p| p.into_inner());
-        nodes.iter().map(|n| n.endpoint.clone()).collect()
-    }
-
-    fn add_endpoint(&self, endpoint: &str) -> Result<(), DsmError> {
-        let mut nodes = self.nodes.write().unwrap_or_else(|p| p.into_inner());
-        if nodes.iter().any(|n| n.endpoint == endpoint) {
-            return Ok(()); // already present, idempotent
-        }
-        let name = format!("node-{}", nodes.len() + 1);
-        nodes.push(NodeConfig {
-            name,
-            endpoint: endpoint.to_string(),
-            // DISCOVERY IS NOT AUTHORITY. A node found at runtime has no
-            // known register incarnation, and inventing one would let
-            // discovery mint storage-set membership. The empty string fails
-            // `from_env_config` closed, so such a node can carry transport
-            // and never contribute to a set id.
-            register_incarnation: String::new(),
-        });
-        log::info!(
-            "NodeRegistry: added endpoint {}, total={}",
-            endpoint,
-            nodes.len()
-        );
-        Ok(())
-    }
-
-    fn remove_endpoint(&self, endpoint: &str) -> Result<(), DsmError> {
-        let mut nodes = self.nodes.write().unwrap_or_else(|p| p.into_inner());
-        let before = nodes.len();
-        nodes.retain(|n| n.endpoint != endpoint);
-        if nodes.len() == before {
-            return Err(DsmError::storage(
-                format!("Endpoint not found in registry: {endpoint}"),
-                None::<std::io::Error>,
-            ));
-        }
-        log::info!(
-            "NodeRegistry: removed endpoint {}, total={}",
-            endpoint,
-            nodes.len()
-        );
-        Ok(())
+        self.nodes.iter().map(|n| n.endpoint.clone()).collect()
     }
 }
 
@@ -351,125 +309,6 @@ pub fn list_storage_endpoints() -> Result<Vec<String>, DsmError> {
             )
         })
         .map(|r| r.list_endpoints())
-}
-
-/// Add a storage endpoint to the live registry.
-pub fn add_storage_endpoint(endpoint: &str) -> Result<(), DsmError> {
-    REGISTRY
-        .get()
-        .ok_or_else(|| {
-            DsmError::storage(
-                "STRICT: node registry not installed.",
-                None::<std::io::Error>,
-            )
-        })?
-        .add_endpoint(endpoint)
-}
-
-/// Remove a storage endpoint from the live registry (Fisher-Yates placement recalculates automatically).
-pub fn remove_storage_endpoint(endpoint: &str) -> Result<(), DsmError> {
-    REGISTRY
-        .get()
-        .ok_or_else(|| {
-            DsmError::storage(
-                "STRICT: node registry not installed.",
-                None::<std::io::Error>,
-            )
-        })?
-        .remove_endpoint(endpoint)
-}
-
-/// Auto-assign the next storage node via keyed Fisher-Yates.
-///
-/// Protocol rule: the device does not choose which storage node to add.
-/// The SDK selects deterministically from the known pool (all nodes in
-/// dsm_env_config.toml) minus the currently active set, using a
-/// BLAKE3-keyed unbiased sampling seeded by the device's own ID bytes.
-///
-/// Domain: `BLAKE3("DSM/place\0" || device_id_bytes)` → 32-byte seed.
-/// PRF per draw: `BLAKE3("DSM/perm\0" || seed || ctr_le64)`.
-/// Rejection-sampled to be unbiased for any pool size.
-///
-/// Returns the URL of the newly added node.
-pub fn auto_assign_storage_node(device_id_bytes: &[u8]) -> Result<String, DsmError> {
-    // Full pool from TOML (all known nodes).
-    let all_nodes = NetworkConfigLoader::load_env_config()?.nodes;
-
-    // Currently active endpoints in the live registry.
-    let active = list_storage_endpoints()?;
-    let active_set: std::collections::HashSet<&str> = active.iter().map(|s| s.as_str()).collect();
-
-    // Candidates: pool nodes not already active.
-    let candidates: Vec<String> = all_nodes
-        .into_iter()
-        .filter(|n| !active_set.contains(n.endpoint.as_str()))
-        .map(|n| n.endpoint)
-        .collect();
-
-    if candidates.is_empty() {
-        return Err(DsmError::storage(
-            "auto-assign: no new storage nodes available (all configured nodes already active)",
-            None::<std::io::Error>,
-        ));
-    }
-
-    // Seed: BLAKE3("DSM/place\0" || device_id_bytes).
-    let seed = {
-        let mut input = Vec::with_capacity(10 + device_id_bytes.len());
-        input.extend_from_slice(b"DSM/place\0");
-        input.extend_from_slice(device_id_bytes);
-        *dsm::crypto::blake3::domain_hash(dsm::common::domain_tags::TAG_DSM_NETWORK_HASH, &input)
-            .as_bytes()
-    };
-
-    // Unbiased sample one index from [0, candidates.len()).
-    let selected_idx = fisher_yates_sample_one(seed, candidates.len() as u64) as usize;
-    let selected = candidates[selected_idx].clone();
-
-    // Add to live registry.
-    add_storage_endpoint(&selected)?;
-
-    log::info!(
-        "auto_assign_storage_node: selected {} (pool={}, active={})",
-        selected,
-        candidates.len(),
-        active.len()
-    );
-
-    Ok(selected)
-}
-
-/// Return one unbiased index in [0, range) using BLAKE3 PRF rejection sampling.
-///
-/// PRF block: `BLAKE3("DSM/perm\0" || seed || ctr_le64)` → first 8 bytes as u64.
-/// Rejection threshold eliminates modular bias.
-fn fisher_yates_sample_one(seed: [u8; 32], range: u64) -> u64 {
-    // Threshold = lowest multiple of `range` that fits in u64.
-    // Reject values below `threshold` to get an unbiased sample.
-    // threshold = (2^64 % range) — we compute it as (u64::MAX - range + 1) % range.
-    let threshold = u64::MAX.wrapping_sub(range).wrapping_add(1) % range;
-    let mut ctr: u64 = 0;
-    loop {
-        let v = fisher_yates_prf_u64(seed, ctr);
-        ctr += 1;
-        if v >= threshold {
-            return v % range;
-        }
-    }
-}
-
-/// Single PRF draw: `BLAKE3("DSM/perm\0" || seed || ctr_le64)` → u64.
-fn fisher_yates_prf_u64(seed: [u8; 32], ctr: u64) -> u64 {
-    let domain: &[u8] = b"DSM/perm\0";
-    let mut buf = Vec::with_capacity(domain.len() + 32 + 8);
-    buf.extend_from_slice(domain);
-    buf.extend_from_slice(&seed);
-    buf.extend_from_slice(&ctr.to_le_bytes());
-    let h = dsm::crypto::blake3::domain_hash(dsm::common::domain_tags::TAG_DSM_NETWORK_HASH, &buf);
-    let bytes = h.as_bytes();
-    let mut le8 = [0u8; 8];
-    le8.copy_from_slice(&bytes[..8]);
-    u64::from_le_bytes(le8)
 }
 
 #[cfg(test)]
@@ -531,57 +370,14 @@ register_incarnation = "BHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE0"
     }
 
     #[test]
-    fn node_registry_add_and_remove() {
-        let nodes = vec![NodeConfig {
-            name: "a".into(),
+    fn node_registry_lists_the_configured_endpoints_in_order() {
+        let node = |name: &str, endpoint: &str| NodeConfig {
+            name: name.into(),
             register_incarnation: crate::util::text_id::encode_base32_crockford(&[0x5C_u8; 32]),
-            endpoint: "http://a".into(),
-        }];
-        let reg = NodeRegistry::new(nodes);
-
-        assert_eq!(reg.list_endpoints(), vec!["http://a"]);
-
-        reg.add_endpoint("http://b").unwrap();
-        assert_eq!(reg.list_endpoints().len(), 2);
-
-        // Adding duplicate is idempotent
-        reg.add_endpoint("http://b").unwrap();
-        assert_eq!(reg.list_endpoints().len(), 2);
-
-        reg.remove_endpoint("http://a").unwrap();
-        assert_eq!(reg.list_endpoints(), vec!["http://b"]);
-
-        // Removing non-existent returns error
-        assert!(reg.remove_endpoint("http://z").is_err());
-    }
-
-    #[test]
-    fn fisher_yates_prf_deterministic() {
-        let seed = [42u8; 32];
-        let a = fisher_yates_prf_u64(seed, 0);
-        let b = fisher_yates_prf_u64(seed, 0);
-        assert_eq!(a, b);
-
-        // Different counter yields different value (overwhelmingly likely)
-        let c = fisher_yates_prf_u64(seed, 1);
-        assert_ne!(a, c);
-    }
-
-    #[test]
-    fn fisher_yates_sample_one_in_range() {
-        let seed = [7u8; 32];
-        for range in [1u64, 2, 3, 5, 10, 100, 1000] {
-            let idx = fisher_yates_sample_one(seed, range);
-            assert!(idx < range, "sample {idx} out of range {range}");
-        }
-    }
-
-    #[test]
-    fn fisher_yates_sample_one_deterministic() {
-        let seed = [99u8; 32];
-        let a = fisher_yates_sample_one(seed, 50);
-        let b = fisher_yates_sample_one(seed, 50);
-        assert_eq!(a, b);
+            endpoint: endpoint.into(),
+        };
+        let reg = NodeRegistry::new(vec![node("a", "http://a"), node("b", "http://b")]);
+        assert_eq!(reg.list_endpoints(), vec!["http://a", "http://b"]);
     }
 
     #[test]

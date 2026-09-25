@@ -1,11 +1,10 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
 import * as pb from '../proto/dsm_app_pb';
-import { syncWithStorageStrictBridge, routerQueryBin, routerInvokeBin } from './WebViewBridge';
+import { syncWithStorageStrictBridge, routerQueryBin } from './WebViewBridge';
 import { decodeFramedEnvelopeV3 } from './decoding';
-import { StorageStatus } from './types';
-import { bytesToBase32CrockfordPrefix } from '../utils/textId';
+import type { StorageMember, StorageMemberAnswer, StorageStatus } from './types';
+import { bytesToBase32CrockfordPrefix, encodeBase32Crockford } from '../utils/textId';
 import { emitWalletRefresh } from './events';
 import logger from '../utils/logger';
 
@@ -86,11 +85,12 @@ export async function syncWithStorage(params?: { pullInbox?: boolean; pushPendin
 }
 
 /**
- * Get storage-node status via SDK bridge (storage.status route).
- * Returns StorageStatusResponse proto fields directly.
+ * The storage set this device's traffic uses, and what each member answered
+ * when asked for its latest ByteCommit (SDK `storage.status`). The SDK names
+ * the set and reads the members; this only renders what it reports.
  */
 export async function getStorageStatus(): Promise<StorageStatus> {
-  const arg = new pb.ArgPack({ codec: pb.Codec.PROTO, body: new Uint8Array(0) });
+  const arg = new pb.ArgPack({ codec: pb.Codec.PROTO, body: new Uint8Array(new pb.StorageStatusRequest().toBinary()) });
   const resBytes = await routerQueryBin('storage.status', new Uint8Array(arg.toBinary()));
   if (!resBytes || resBytes.length === 0) {
     throw new Error('getStorageStatus: empty response from bridge');
@@ -105,107 +105,49 @@ export async function getStorageStatus(): Promise<StorageStatus> {
   }
 
   const resp = env.payload.value;
-  if (!resp) {
-    throw new Error('getStorageStatus: storageStatusResponse payload is null');
-  }
-
   return {
-    nodeId: 'storage',
-    isReachable: resp.connectedNodes > 0,
-    latencyMs: 0,
-    lastSyncTick: BigInt(resp.lastSyncIter ?? 0),
-    storageUsedBytes: 0,
-    quotaBytes: 0,
-    isPaid: true,
-    subscriptions: [],
-    totalNodes: resp.totalNodes,
-    connectedNodes: resp.connectedNodes,
-    dataSize: resp.dataSize,
-    backupStatus: resp.backupStatus,
+    networkId: resp.networkId,
+    storageSetIdB32: encodeBase32Crockford(resp.storageSetId),
+    members: resp.members.map(toStorageMember),
+    completedSyncs: resp.completedSyncs,
+    databaseBytes: resp.databaseBytes,
   };
 }
 
-/**
- * Fetch per-node health stats from all configured storage nodes.
- * Routes through SDK → storage.nodeHealth → Prometheus scrape.
- */
-export async function getNodeHealth(endpoints?: string[]): Promise<pb.StorageNodeStatsResponse> {
-  const req = new pb.StorageNodeStatsRequest({ endpoints: endpoints ?? [] });
-  const arg = new pb.ArgPack({ codec: pb.Codec.PROTO, body: new Uint8Array(req.toBinary()) });
-  const resBytes = await routerQueryBin('storage.nodeHealth', new Uint8Array(arg.toBinary()));
+const utf8 = new TextDecoder('utf-8', { fatal: true });
 
-  if (!resBytes || resBytes.length === 0) {
-    throw new Error('getNodeHealth: empty response from bridge');
-  }
-
-  const env = decodeFramedEnvelopeV3(resBytes);
-  if (env.payload.case === 'error') {
-    throw new Error(`getNodeHealth: ${env.payload.value.message || 'unknown error'}`);
-  }
-  if (env.payload.case !== 'storageNodeStatsResponse') {
-    throw new Error(`getNodeHealth: unexpected payload ${env.payload.case}`);
-  }
-
-  return env.payload.value;
+function toStorageMember(m: pb.StorageMemberStatus): StorageMember {
+  const memberId = utf8.decode(m.memberId);
+  return {
+    memberId,
+    registerIncarnationB32: encodeBase32Crockford(m.registerIncarnationId),
+    endpoint: m.endpoint,
+    answer: toMemberAnswer(memberId, m.answer),
+    answeredAs: m.answeredAs === undefined ? undefined : utf8.decode(m.answeredAs),
+  };
 }
 
-/**
- * Request the SDK to auto-assign the next storage node via keyed Fisher-Yates.
- *
- * The caller does NOT choose which node is added — the SDK selects
- * deterministically from the known pool (dsm_env_config.toml nodes minus
- * already-active nodes) using BLAKE3-seeded Fisher-Yates permutation.
- * `assigned_url` in the response identifies the selected node.
- */
-export async function addStorageNode(): Promise<pb.StorageNodeManageResponse> {
-  const req = new pb.StorageNodeManageRequest({ action: 'add', autoAssign: true });
-  const arg = new pb.ArgPack({ codec: pb.Codec.PROTO, body: new Uint8Array(req.toBinary()) });
-  const resBytes = await routerInvokeBin('storage.addNode', new Uint8Array(arg.toBinary()));
-
-  if (!resBytes || resBytes.length === 0) {
-    throw new Error('addStorageNode: empty response from bridge');
+function toMemberAnswer(memberId: string, answer: pb.StorageMemberStatus['answer']): StorageMemberAnswer {
+  switch (answer.case) {
+    case 'latest': {
+      const commit = answer.value.commit;
+      if (!commit) {
+        throw new Error(`getStorageStatus: member ${memberId} answered a ByteCommit the SDK did not include`);
+      }
+      return {
+        kind: 'latest',
+        cycle: commit.cycleIndex,
+        bytesUsed: commit.bytesUsed,
+        rootB32: encodeBase32Crockford(commit.smtRoot),
+        parentB32: encodeBase32Crockford(commit.parentDigest),
+        digestB32: encodeBase32Crockford(answer.value.digest),
+      };
+    }
+    case 'noCycle':
+      return { kind: 'noCycle' };
+    case 'unanswered':
+      return { kind: 'unanswered', why: answer.value };
+    default:
+      throw new Error(`getStorageStatus: member ${memberId} carries no answer`);
   }
-
-  const env = decodeFramedEnvelopeV3(resBytes);
-  if (env.payload.case === 'error') {
-    throw new Error(`addStorageNode: ${env.payload.value.message || 'unknown error'}`);
-  }
-  if (env.payload.case !== 'storageNodeManageResponse') {
-    throw new Error(`addStorageNode: unexpected payload ${env.payload.case}`);
-  }
-
-  return env.payload.value;
-}
-
-/**
- * Remove a storage node endpoint via SDK bridge.
- */
-export async function removeStorageNode(url: string): Promise<pb.StorageNodeManageResponse> {
-  const req = new pb.StorageNodeManageRequest({ action: 'remove', url });
-  const arg = new pb.ArgPack({ codec: pb.Codec.PROTO, body: new Uint8Array(req.toBinary()) });
-  const resBytes = await routerInvokeBin('storage.removeNode', new Uint8Array(arg.toBinary()));
-
-  if (!resBytes || resBytes.length === 0) {
-    throw new Error('removeStorageNode: empty response from bridge');
-  }
-
-  const env = decodeFramedEnvelopeV3(resBytes);
-  if (env.payload.case === 'error') {
-    throw new Error(`removeStorageNode: ${env.payload.value.message || 'unknown error'}`);
-  }
-  if (env.payload.case !== 'storageNodeManageResponse') {
-    throw new Error(`removeStorageNode: unexpected payload ${env.payload.case}`);
-  }
-
-  return env.payload.value;
-}
-
-
-/**
- * Create a local backup file.
- * Not yet implemented — NFC ring backup is the primary backup mechanism.
- * See NFC Recovery screen for functional backup/restore.
- */
-export function createBackup(): Promise<string> {
-  return Promise.reject(new Error('Local file backup not implemented. Use NFC ring backup.'));
 }

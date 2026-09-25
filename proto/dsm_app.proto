@@ -2589,10 +2589,7 @@ message Envelope {
     BitcoinWalletCreateRequest        bitcoin_wallet_create_request    = 86;
     BitcoinWalletCreateResponse       bitcoin_wallet_create_response   = 87;
 
-    // Storage node health & management
-    StorageNodeStatsResponse          storage_node_stats_response      = 88;
-    StorageNodeManageResponse         storage_node_manage_response     = 89;
-    BitcoinWithdrawalPlanRequest      bitcoin_withdrawal_plan_request  = 91;
+    BitcoinWithdrawalPlanRequest     bitcoin_withdrawal_plan_request  = 91;
     BitcoinWithdrawalPlanResponse     bitcoin_withdrawal_plan_response = 92;
     BitcoinWithdrawalExecuteRequest   bitcoin_withdrawal_execute_request = 93;
     BitcoinWithdrawalExecuteResponse  bitcoin_withdrawal_execute_response = 94;
@@ -2650,6 +2647,10 @@ message Envelope {
   reserved 114;
   reserved 115; // was token_mint_response: there is no minting after genesis (SoFi §48)
   reserved 98; // was reconciliation_response: bilateral.reconcile had no caller
+  // 88 and 89 were storage_node_stats_response and storage_node_manage_response:
+  // node counters the nodes never exposed, and a client-edited node list
+  // nothing on a protocol path read (storage spec §10: the set is committed).
+  reserved 88, 89;
 }
 
 // ===================== Sealed spool payloads (DSM Amendment A7) =====================
@@ -3588,164 +3589,46 @@ message DeviceTreeEntry {
   repeated bytes merkle_proof = 5 [(dsm_fixed_len)=32];
 }
 
-// ========================= Storage Object Messages =========================
-// Protobuf-based storage object submission (no hex, no headers)
-message StorageObjectPut {
-  bytes dlv_id = 1 [(dsm_fixed_len)=32]; // 32-byte DLV identifier (raw bytes)
-  string path = 2; // object path within DLV
-  bytes payload = 3; // object data (raw bytes)
-  reserved 4; // retention field removed (clockless)
-}
-
-message StorageObjectPutResponse {
-  bool success = 1;
-  string message = 2;
-  bytes object_key = 3; // computed storage key
-}
-
-message StorageObjectGet {
-  bytes dlv_id = 1 [(dsm_fixed_len)=32]; // 32-byte DLV identifier (raw bytes)
-  string path = 2; // object path within DLV
-}
-
-message StorageObjectGetResponse {
-  bool success = 1;
-  bytes payload = 2; // object data (raw bytes)
-  string message = 3;
-}
-
-message StorageObjectDelete {
-  bytes dlv_id = 1 [(dsm_fixed_len)=32]; // 32-byte DLV identifier (raw bytes)
-  string path = 2; // object path within DLV
-}
-
-message StorageObjectDeleteResponse {
-  bool success = 1;
-  string message = 2;
-}
-
 // ========================= Storage Status =========================
-message StorageStatusRequest {
-  // No params needed for now
-}
+// `storage.status`: the storage set this device's traffic uses — its
+// network's pinned set (storage spec §10) — and what each member answered
+// when asked for its latest ByteCommit (§14). Every answer is an observation,
+// never a verdict (§4): a member that did not answer has not failed, and a
+// ByteCommit is as the member stated it, not as a verifier accepted it.
+message StorageStatusRequest {}
 
 message StorageStatusResponse {
-  uint32 total_nodes = 1;
-  uint32 connected_nodes = 2;
-  uint64 last_sync_iter = 3; // deterministic sync counter
-  string data_size = 4;
-  string backup_status = 5;
+  // A node count, a reachable count, a formatted size and the recovery
+  // capsule status. The members and their answers replace the counts; the
+  // capsule status is the recovery screen's.
+  reserved 1, 2, 3, 4, 5;
+  reserved "total_nodes", "connected_nodes", "last_sync_iter", "data_size", "backup_status";
+  string network_id = 6;                          // the committed network the set is pinned for
+  bytes  storage_set_id = 7 [(dsm_fixed_len)=32]; // re-derived from the members' (id, incarnation) pairs
+  repeated StorageMemberStatus members = 8;       // in the set's member order
+  uint64 completed_syncs = 9;                     // storage.sync runs that ran to their end on this device
+  uint64 database_bytes = 10;                     // the size of this device's database file
 }
 
-// ========================= Storage Node Stats =========================
-// Per-node health and Prometheus metrics (display-only operational data)
-message StorageNodeStatsRequest {
-  repeated string endpoints = 1; // if empty, use all configured endpoints
+// One member of the pinned set, and its answer to `bytecommit/latest`.
+message StorageMemberStatus {
+  bytes  member_id               = 1 [(dsm_max_len)=128]; // exactly as the set commits it
+  bytes  register_incarnation_id = 2 [(dsm_fixed_len)=32];
+  string endpoint                = 3;                     // transport, resolved outside committed state (§11)
+  oneof answer {
+    StorageMemberByteCommit latest = 4; // the member's latest ByteCommit, as it stated it
+    StorageMemberNoCycle no_cycle  = 5; // the member states it has closed no cycle yet
+    string unanswered              = 6; // why there is no ByteCommit of this member's to show
+  }
+  optional bytes answered_as = 7 [(dsm_max_len)=128]; // the member id the answering node echoed, when it echoed one
 }
 
-message StorageNodeStats {
-  string url = 1;
-  string name = 2; // human-readable label (e.g. "dsm-node-1")
-  string region = 3; // geographic region (e.g. "us-east-1")
-  string status = 4; // "healthy" | "degraded" | "down"
-  uint32 latency_ms = 5; // display-only round-trip time
-  string last_error = 6;
-  uint64 objects_put_total = 7;
-  uint64 objects_get_total = 8;
-  uint64 bytes_written_total = 9;
-  uint64 bytes_read_total = 10;
-  uint64 cleanup_runs_total = 11;
-  uint64 replication_failures = 12;
+message StorageMemberByteCommit {
+  ByteCommitV4 commit = 1;
+  bytes digest = 2 [(dsm_fixed_len)=32]; // d_t, computed by Core from the commit's fields
 }
 
-message StorageNodeStatsResponse {
-  repeated StorageNodeStats nodes = 1;
-  uint32 total_nodes = 2;
-  uint32 healthy_nodes = 3;
-}
-
-// Storage node management (add/remove)
-message StorageNodeManageRequest {
-  string action = 1; // "add" | "remove"
-  string url = 2; // used only for "remove"; ignored when auto_assign = true
-  string name = 3; // unused (reserved for remove display purposes)
-  string region = 4; // unused (reserved for remove display purposes)
-  // When true, the SDK selects the next node via keyed Fisher-Yates over
-  // the known pool (dsm_env_config.toml nodes minus currently active nodes).
-  // The user does NOT choose which node is added — required for security
-  // and even distribution across the network.
-  bool auto_assign = 5;
-}
-
-message StorageNodeManageResponse {
-  bool success = 1;
-  string error = 2;
-  repeated string current_endpoints = 3; // updated list after operation
-  // Populated when auto_assign = true: the URL of the node the SDK assigned.
-  string assigned_url = 4;
-}
-
-// ========================= Storage Replica Set Config =========================
-// UI/local configuration persisted via protobuf (no JSON/localStorage).
-// Storage nodes are independent, free-market participants — any N nodes can
-// serve as a device's replica set. Keyed Fisher-Yates reshuffles on churn.
-// There is no fixed cluster; each device independently selects its replica set.
-enum StorageNodeAuthType {
-  STORAGE_NODE_AUTH_UNSPECIFIED = 0;
-  STORAGE_NODE_AUTH_NONE = 1;
-  STORAGE_NODE_AUTH_BEARER = 2;
-  STORAGE_NODE_AUTH_BASIC = 3;
-}
-
-message StorageNodeAuthProto {
-  StorageNodeAuthType type = 1;
-  string token = 2;
-  string username = 3;
-  string password = 4;
-}
-
-message StorageNodeEndpointProto {
-  string url = 1;
-  bool is_primary = 2;
-  StorageNodeAuthProto auth = 3;
-  string tls_cert = 4;
-  reserved 5;
-  string name = 6; // human-readable label
-  string region = 7; // AWS region or geographic label
-}
-
-message StorageReplicaSetConfig {
-  repeated StorageNodeEndpointProto nodes = 1;
-  string primary_node = 2;
-  bool read_failover_enabled = 3;
-  string write_strategy = 4;
-  uint32 retry_max = 5;
-  uint32 retry_backoff_ms = 6;
-  uint32 verification_quorum = 7;
-}
-
-// ============================ DIAGNOSTICS EXPORT ============================
-message NodeHealthEntry {
-  string url = 1;
-  string status = 2; // "healthy" | "degraded" | "down" | "unknown"
-  string last_error = 3;
-  string name = 4;
-  string region = 5;
-  uint32 latency_ms = 6;
-  uint64 objects_put_total = 7;
-  uint64 objects_get_total = 8;
-  uint64 bytes_written_total = 9;
-  uint64 bytes_read_total = 10;
-}
-
-message DiagnosticsExport {
-  StorageReplicaSetConfig replica_set_config = 1;
-  repeated NodeHealthEntry node_health = 2;
-  repeated string recent_errors = 3;
-  string mode = 4; // "local" | "production"
-  string platform = 5;
-  string version = 6;
-}
+message StorageMemberNoCycle {}
 
 // ============================ POLICY FILE (Canonical) ============================
 message PolicyRoleProto {
