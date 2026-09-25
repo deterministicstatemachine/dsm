@@ -205,25 +205,6 @@ impl StateMachine {
         self.commit_advance(&outcome);
         Ok(outcome)
     }
-
-    /// Initialize the state machine with a genesis state
-    ///
-    /// This method sets up the state machine with a genesis state,
-    /// ensuring the system starts from a valid initial state.
-    ///
-    /// # Returns
-    ///
-    /// * `Ok(())` - If initialization was successful
-    /// * `Err(DsmError)` - If initialization failed
-    pub fn initialize_with_genesis(&mut self) -> Result<(), DsmError> {
-        if self.device_state.is_some() {
-            Ok(())
-        } else {
-            Err(DsmError::state_machine(
-                "No DeviceState — call set_state with genesis first",
-            ))
-        }
-    }
 }
 
 impl Default for StateMachine {

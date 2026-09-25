@@ -604,7 +604,7 @@ mod tests {
         });
         let b2 = p2.canonical_bytes().unwrap();
 
-        assert_eq!(blake3::hash(&b1).as_bytes(), blake3::hash(&b2).as_bytes());
+        assert_eq!(b1, b2);
     }
 
     #[test]

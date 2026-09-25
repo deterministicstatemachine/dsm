@@ -132,11 +132,7 @@ fn test_operation_serialization() {
     let op = Operation::Transfer {
         policy_commit: [0u8; 32],
         to_device_id: b"recipient_123".to_vec(),
-        amount: {
-            let mut b = Balance::zero();
-            b.update_add(100);
-            b
-        },
+        amount: Balance::amount(100),
         token_id: b"DSM_TOKEN".to_vec(),
         mode: TransactionMode::Bilateral,
         nonce: vec![1, 2, 3, 4],

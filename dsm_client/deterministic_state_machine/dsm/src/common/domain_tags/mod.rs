@@ -165,7 +165,7 @@ mod tests {
     // no state, and a zero balance no invented one.
     // -3 with three genesis tags nothing derives from: an identity id, a
     // token participant and a sub-genesis device entropy.
-    const EXPECTED_TAG_COUNT: usize = 367;
+    const EXPECTED_TAG_COUNT: usize = 362;
 
     /// Scan the crate source for every declared domain-tag constant.
     ///

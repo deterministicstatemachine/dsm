@@ -114,18 +114,17 @@ pub trait RecoveryHandler: Send + Sync {
     ) -> Result<gp::OpResult, String>;
 }
 
-/// Install (or replace) an application router for integrations that rely on the core crate.
+/// Install the application router the core bridge routes to. It is installed
+/// once: a second install is refused, never a silent replacement.
 pub fn install_app_router(router: Arc<dyn AppRouter>) -> Result<(), DsmError> {
     let mut guard = APP_ROUTER.write().map_err(|_| DsmError::LockError)?;
-    let was_none = guard.is_none();
-    *guard = Some(router);
-    drop(guard);
-
-    if was_none {
-        log::info!("[CORE] AppRouter installed (first time)");
-    } else {
-        log::info!("[CORE] AppRouter replaced (upgrade to full router)");
+    if guard.is_some() {
+        return Err(DsmError::invalid_operation(
+            "an app router is already installed in the core bridge; it is installed once",
+        ));
     }
+    *guard = Some(router);
+    log::info!("[CORE] AppRouter installed");
     Ok(())
 }
 

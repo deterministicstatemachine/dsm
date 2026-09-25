@@ -2104,48 +2104,6 @@ impl Operation {
         Ok(op)
     }
 
-    pub fn get_state_number(&self) -> Option<u64> {
-        None
-    }
-
-    /// Get proof of authorization if available
-    pub fn get_proof_of_authorization(&self) -> Option<Vec<u8>> {
-        match self {
-            // For Transfer, the signature IS the proof of authorization
-            Operation::Transfer { signature, .. } if !signature.is_empty() => {
-                Some(signature.clone())
-            }
-            Operation::Create { proof, .. } => Some(proof.clone()),
-            Operation::Update { proof, .. } => Some(proof.clone()),
-            Operation::AddRelationship { proof, .. } => Some(proof.clone()),
-            Operation::CreateRelationship { proof, .. } => Some(proof.clone()),
-            Operation::RemoveRelationship { proof, .. } => Some(proof.clone()),
-            Operation::Delete { proof, .. } => Some(proof.clone()),
-            Operation::Link { proof, .. } => Some(proof.clone()),
-            Operation::Unlink { proof, .. } => Some(proof.clone()),
-            Operation::Invalidate { proof, .. } => Some(proof.clone()),
-            Operation::Recovery {
-                compromise_proof, ..
-            } => Some(compromise_proof.clone()),
-            Operation::CreateToken { signature, .. }
-            | Operation::AdoptToken { signature, .. }
-            | Operation::Lock { signature, .. }
-            | Operation::Unlock { signature, .. }
-            | Operation::LockToken { signature, .. }
-            | Operation::UnlockToken { signature, .. }
-            | Operation::Generic { signature, .. }
-            | Operation::DlvCreate { signature, .. }
-            | Operation::DlvUnlock { signature, .. }
-            | Operation::DlvClaim { signature, .. }
-            | Operation::DlvInvalidate { signature, .. }
-                if !signature.is_empty() =>
-            {
-                Some(signature.clone())
-            }
-            _ => None,
-        }
-    }
-
     /// Get signature if available.
     /// Per whitepaper: receipts are signed by both parties with SPHINCS+ ephemeral keys.
     pub fn get_signature(&self) -> Option<Vec<u8>> {

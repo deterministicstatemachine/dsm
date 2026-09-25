@@ -791,16 +791,17 @@ impl StitchedReceiptV2 {
         !self.sig_a.is_empty() && !self.sig_b.is_empty()
     }
 
-    /// Get total serialized size (canonical protobuf + signatures)
-    pub fn serialized_size(&self) -> usize {
-        let pb_size = self.to_canonical_protobuf().map(|b| b.len()).unwrap_or(0);
-        pb_size + self.sig_a.len() + self.sig_b.len()
+    /// Total serialized size (canonical protobuf + signatures). A receipt that
+    /// does not encode has no size: an error, never 0 (which would pass any cap).
+    pub fn serialized_size(&self) -> Result<usize, DsmError> {
+        let pb_size = self.to_canonical_protobuf()?.len();
+        Ok(pb_size + self.sig_a.len() + self.sig_b.len())
     }
 
     /// Validate size cap (≤128 KiB per whitepaper)
     pub fn validate_size_cap(&self) -> Result<(), DsmError> {
         const MAX_SIZE: usize = 128 * 1024; // 128 KiB
-        let size = self.serialized_size();
+        let size = self.serialized_size()?;
         if size > MAX_SIZE {
             return Err(DsmError::InvalidOperation(format!(
                 "Receipt exceeds size cap: {} > {} bytes",
@@ -1475,11 +1476,14 @@ mod tests {
             vec![],
             vec![],
         );
-        let base_size = receipt.serialized_size();
+        let base_size = receipt.serialized_size().expect("the receipt encodes");
 
         receipt.add_sig_a(vec![0xAA; 100]);
         receipt.add_sig_b(vec![0xBB; 200]);
-        assert_eq!(receipt.serialized_size(), base_size + 300);
+        assert_eq!(
+            receipt.serialized_size().expect("the receipt encodes"),
+            base_size + 300
+        );
     }
 
     #[test]

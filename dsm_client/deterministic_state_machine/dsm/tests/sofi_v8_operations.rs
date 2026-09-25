@@ -287,7 +287,7 @@ fn each_sofi_operation_signs_its_own_rule_and_not_the_other() {
     let create_over_a_digest = unsigned_create.with_signature(
         sphincs_sign(
             &sk,
-            dsm::crypto::blake3::hash_blake3(&unsigned_create.signing_bytes()).as_bytes(),
+            blake3::hash(&unsigned_create.signing_bytes()).as_bytes(),
         )
         .unwrap(),
     );
