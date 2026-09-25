@@ -26,7 +26,7 @@ use dsm::sofi::publication::{
     recognize_fulfillment, recognize_policy_fulfillment, recognize_precommit, recognize_preimage,
     recognize_setup, recognize_setup_by_relationship, Locator, Publication, Signed,
 };
-use dsm::sofi::storage::Resolved;
+use dsm::sofi::storage::{Discovered, Resolved};
 use dsm::sofi::wire::{
     DlvPolicyFulfillmentBody, SettlementPreimage, SofiSetupBody, TraderFulfillmentBody,
     TraderPrecommitBody,
@@ -165,7 +165,7 @@ pub async fn fetch_setup_for(
     genesis: &D32,
     device_id: &D32,
     vault_id: &D32,
-) -> Result<Resolved<Vec<Signed<SofiSetupBody>>>, DsmError> {
+) -> Result<Discovered<Signed<SofiSetupBody>>, DsmError> {
     resolve_locator_all(
         set,
         TAG_DSM_SOFI_REL_INDEX.source_bytes(),
