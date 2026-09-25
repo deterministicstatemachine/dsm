@@ -10,16 +10,17 @@
 //! | Table | Holds | Why |
 //! |---|---|---|
 //! | `sofi_vault_root` | `(vault, generation) -> root` | the chain this verifier established, one row per generation, kept forever because a parent's status is asked about a GENERATION |
-//! | `sofi_vault_leaf` | `(vault, leaf_key) -> value + preimage` | the CURRENT head's leaves, replaced wholesale, because evidence needs leaf PREIMAGES and a later acquisition reads them |
+//! | `sofi_vault_leaf` | `(vault, generation, leaf_key) -> value + preimage` | the whole tree of every generation this verifier established, kept as long as the generation is, because evidence for an operation built on generation `g` needs `g`'s leaf PREIMAGES — and it is read after this device has walked past `g`: its own position resolves after the walk recorded the generation its exercise produced |
 //!
 //! **A read is checked, never trusted.** The leaves are a cache of this
-//! device's own conclusions, so `leaves_at_head` rebuilds the tree from them
-//! and requires the recomputed root to equal the recorded one. That equality
-//! is exactly what detects an INCOMPLETE record: a vault another trader moved
-//! between our own trades leaves us missing their relationship leaf, and a
-//! record that cannot reproduce its own root is not evidence. The caller then
-//! gets `None`, Core answers `Unavailable`, and the position waits — which is
-//! the right answer, because this device has not established that state.
+//! device's own conclusions, so `leaves_at` rebuilds the generation's tree
+//! from them and requires the recomputed root to equal the recorded one. That
+//! equality is exactly what detects an INCOMPLETE record: a vault another
+//! trader moved between our own trades leaves us missing their relationship
+//! leaf, and a record that cannot reproduce its own root is not evidence. The
+//! caller then gets `None`, Core answers `Unavailable`, and the position
+//! waits — which is the right answer, because this device has not
+//! established that state.
 //!
 //! This replaces the persistent node store R14 deleted. A node store returned
 //! leaf VALUES; evidence needs the preimages, so the values alone could never
@@ -43,8 +44,8 @@ fn digest32(v: Vec<u8>, what: &str) -> Result<D32> {
     <D32>::try_from(v.as_slice()).map_err(|e| anyhow!("{what} is not 32 bytes: {e}"))
 }
 
-/// What this verifier established about one vault: the root of the highest
-/// generation it resolved, and that generation.
+/// One generation this verifier established for a vault: its root and its
+/// generation. [`head`] is the highest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VaultHead {
     pub vault_id: D32,
@@ -56,13 +57,16 @@ pub struct VaultHead {
 /// transaction — the same one that makes the position durable, so a head and
 /// the position that chose it cannot disagree.
 ///
-/// The leaves REPLACE this vault's previous set rather than merging into it,
-/// because a head is a whole tree and a mixture of two generations is not one.
+/// The post generation's leaves are the pre generation's with the state leaf
+/// and the trader's relationship leaf replaced: a whole tree, because a
+/// mixture of two generations is not one. The pre generation's own set
+/// stays. At the genesis generation nothing is stored — its tree is exactly
+/// the state leaf (SoFi §19.8), which the post state replaces.
 pub fn record_resolved_with_conn(tx: &Transaction<'_>, post: &VaultPostState) -> Result<()> {
     // The previous set is read through the CALLER'S transaction, not a second
     // connection: the admit path already holds the connection mutex, and a
     // nested acquisition would deadlock rather than fail.
-    let previous = rows_with_conn(tx, &post.vault_id)?;
+    let previous = rows_with_conn(tx, &post.vault_id, post.pre_generation)?;
     let mut leaves: Vec<(D32, D32, i64, Vec<u8>)> = previous
         .iter()
         .filter(|(key, ..)| *key != derive::vault_state_key(&post.vault_id))
@@ -122,16 +126,18 @@ fn write(
     leaves: &[(D32, D32, i64, Vec<u8>)],
 ) -> Result<()> {
     write_root(tx, vault_id, generation, root)?;
+    let generation = i64::try_from(generation).map_err(|e| anyhow!("generation overflow: {e}"))?;
     tx.execute(
-        "DELETE FROM sofi_vault_leaf WHERE vault_id = ?1",
-        params![vault_id.as_slice()],
+        "DELETE FROM sofi_vault_leaf WHERE vault_id = ?1 AND generation = ?2",
+        params![vault_id.as_slice(), generation],
     )?;
     for (key, value, kind, preimage) in leaves {
         tx.execute(
-            "INSERT INTO sofi_vault_leaf (vault_id, leaf_key, leaf_value, kind, preimage)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO sofi_vault_leaf (vault_id, generation, leaf_key, leaf_value, kind, preimage)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 vault_id.as_slice(),
+                generation,
                 key.as_slice(),
                 value.as_slice(),
                 kind,
@@ -226,21 +232,24 @@ pub fn record_walked(post: &VaultPostState) -> Result<()> {
     Ok(())
 }
 
-/// The stored leaves of a vault, as rows.
-pub fn leaf_rows(vault_id: &D32) -> Result<Vec<(D32, D32, i64, Vec<u8>)>> {
+/// The stored leaves of a vault at one generation, as rows.
+pub fn leaf_rows(vault_id: &D32, generation: u64) -> Result<Vec<(D32, D32, i64, Vec<u8>)>> {
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
-    rows_with_conn(&conn, vault_id)
+    rows_with_conn(&conn, vault_id, generation)
 }
 
 fn rows_with_conn(
     conn: &rusqlite::Connection,
     vault_id: &D32,
+    generation: u64,
 ) -> Result<Vec<(D32, D32, i64, Vec<u8>)>> {
+    let generation = i64::try_from(generation).map_err(|e| anyhow!("generation overflow: {e}"))?;
     let mut stmt = conn.prepare(
-        "SELECT leaf_key, leaf_value, kind, preimage FROM sofi_vault_leaf WHERE vault_id = ?1",
+        "SELECT leaf_key, leaf_value, kind, preimage FROM sofi_vault_leaf
+          WHERE vault_id = ?1 AND generation = ?2",
     )?;
-    let rows = stmt.query_map(params![vault_id.as_slice()], |r| {
+    let rows = stmt.query_map(params![vault_id.as_slice(), generation], |r| {
         Ok((
             r.get::<_, Vec<u8>>(0)?,
             r.get::<_, Vec<u8>>(1)?,
@@ -270,7 +279,7 @@ pub fn tree_at_head(vault_id: &D32) -> Result<Option<(VaultHead, EconomicSmt, Va
     let Some(head) = head(vault_id)? else {
         return Ok(None);
     };
-    let rows = leaf_rows(vault_id)?;
+    let rows = leaf_rows(vault_id, head.generation)?;
     let mut tree = EconomicSmt::new();
     for (key, value, ..) in &rows {
         tree.insert(*key, *value);
@@ -289,16 +298,39 @@ pub fn tree_at_head(vault_id: &D32) -> Result<Option<(VaultHead, EconomicSmt, Va
     Ok(Some((head, tree, state)))
 }
 
-/// The vault's leaves at its established head, for the keys an acquisition
-/// needs — CHECKED against the head's own root.
+/// The generation this verifier established `root` at for `vault_id`, if it
+/// established one: the highest, when a generation repeats its
+/// predecessor's root.
+fn generation_of_with_conn(
+    conn: &rusqlite::Connection,
+    vault_id: &D32,
+    root: &D32,
+) -> Result<Option<u64>> {
+    conn.query_row(
+        "SELECT generation FROM sofi_vault_root WHERE vault_id = ?1 AND root = ?2
+          ORDER BY generation DESC LIMIT 1",
+        params![vault_id.as_slice(), root.as_slice()],
+        |r| r.get::<_, i64>(0),
+    )
+    .optional()?
+    .map(|g| u64::try_from(g).map_err(|e| anyhow!("generation negative: {e}")))
+    .transpose()
+}
+
+/// The vault's leaves at the generation this verifier established `root`
+/// at, for the keys an acquisition needs — CHECKED against that root. The
+/// generation is whichever one the root names, not the head: an operation is
+/// built on the generation it names, and this device may have walked past it
+/// before it resolves that operation.
 ///
 /// The cache is this device's own conclusions, so it proves nothing by
 /// existing. The tree is rebuilt from every stored leaf and its root must
 /// equal the recorded one; a record that cannot reproduce its own root is
 /// incomplete (a vault another trader moved between our trades) and yields
 /// `None`, so Core answers `Unavailable` and the position waits.
-pub fn leaves_at_head(
+pub fn leaves_at(
     vault_id: &D32,
+    root: &D32,
     keys: &std::collections::BTreeSet<D32>,
 ) -> Result<
     Option<(
@@ -306,10 +338,17 @@ pub fn leaves_at_head(
         std::collections::BTreeMap<(D32, D32), VaultLeafPre>,
     )>,
 > {
-    let Some(head) = head(vault_id)? else {
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    let Some(generation) = generation_of_with_conn(&conn, vault_id, root)? else {
         return Ok(None);
     };
-    let rows = leaf_rows(vault_id)?;
+    let head = VaultHead {
+        vault_id: *vault_id,
+        generation,
+        root: *root,
+    };
+    let rows = rows_with_conn(&conn, vault_id, generation)?;
     let mut tree = EconomicSmt::new();
     for (key, value, ..) in &rows {
         tree.insert(*key, *value);
