@@ -115,12 +115,11 @@ describe('identity.ts', () => {
       const genesisHash = makeValidGenesisHash();
       (queryTransportHeadersV3 as jest.Mock).mockResolvedValue(makeHeadersBinary(deviceId, genesisHash));
 
-      const identity = await getIdentity();
-      expect(identity).not.toBeNull();
-      expect(identity!.deviceId).toBe(encodeBase32Crockford(deviceId));
-      expect(identity!.genesisHash).toBe(encodeBase32Crockford(genesisHash));
-      expect(identity!.isRegistered).toBe(true);
-      expect(identity!.networkId).toBe('dsm-main');
+      // Exactly what the headers carry: nothing the frontend made up beside it.
+      expect(await getIdentity()).toEqual({
+        deviceId: encodeBase32Crockford(deviceId),
+        genesisHash: encodeBase32Crockford(genesisHash),
+      });
     });
 
     test('returns null after all retries fail', async () => {

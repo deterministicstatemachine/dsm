@@ -37,10 +37,15 @@ pub(crate) fn handle_create_genesis_v2_query(q: AppQuery) -> AppResult {
     if req.mnemonic.trim().is_empty() {
         return err("system.createGenesisV2: mnemonic is required".into());
     }
-    let network_id = if req.network_id.is_empty() {
-        String::from_utf8_lossy(dsm::economic::register::BETA_NETWORK_ID).into_owned()
-    } else {
-        req.network_id.clone()
+    // The network this build's root register is pinned for. The caller does
+    // not choose which network a wallet joins.
+    let network_id = match std::str::from_utf8(dsm::economic::register::BETA_NETWORK_ID) {
+        Ok(network) => network.to_string(),
+        Err(e) => {
+            return err(format!(
+                "system.createGenesisV2: the network id is not text: {e}"
+            ))
+        }
     };
 
     // FAIL CLOSED on re-genesis: one wallet identity per process/app-data. The full router,
@@ -387,8 +392,6 @@ mod tests {
                 body: generated::WalletCreateGenesisV2Request {
                     mnemonic: crate::economic_fixtures::test_mnemonic(0x5B),
                     locale: String::new(),
-                    network_id: String::from_utf8(crate::economic_fixtures::NETWORK.to_vec())
-                        .expect("the network id is UTF-8"),
                 }
                 .encode_to_vec(),
                 ..Default::default()
@@ -407,6 +410,58 @@ mod tests {
             Some(identity[32..].to_vec()),
             AppState::get_genesis_hash(),
             "the genesis the wallet installed"
+        );
+    }
+
+    /// The network a wallet joins is the one this build's root register is
+    /// pinned for, never the caller's choice. A request that still names a
+    /// network in the field the wire retired (3) creates the wallet on the
+    /// pinned network: the answer names it, and it is the network the device
+    /// then resolves its storage set for.
+    #[test]
+    #[serial_test::serial]
+    fn a_new_wallet_joins_the_pinned_network_whatever_the_request_names() {
+        crate::economic_fixtures::use_test_storage_dir();
+        crate::storage::client_db::reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("init db");
+        crate::reset_sdk_context_for_testing();
+        AppState::reset_for_testing();
+
+        let mut body = generated::WalletCreateGenesisV2Request {
+            mnemonic: crate::economic_fixtures::test_mnemonic(0x5C),
+            locale: String::new(),
+        }
+        .encode_to_vec();
+        // Field 3, length-delimited: the network id a caller used to choose.
+        body.extend_from_slice(&[0x1A, 8]);
+        body.extend_from_slice(b"dsm-main");
+
+        let answer = handle_create_genesis_v2_query(AppQuery {
+            path: "system.createGenesisV2".to_string(),
+            params: generated::ArgPack {
+                codec: generated::Codec::Proto as i32,
+                body,
+                ..Default::default()
+            }
+            .encode_to_vec(),
+        });
+        assert!(answer.success, "{:?}", answer.error_message);
+
+        let env = crate::handlers::response_helpers::decode_local_envelope(&answer.data)
+            .expect("a local envelope");
+        let Some(generated::envelope::Payload::GenesisCreatedResponse(created)) = env.payload
+        else {
+            panic!("createGenesisV2 answered {:?}", env.payload);
+        };
+        assert_eq!(
+            created.network_id.as_bytes(),
+            dsm::economic::register::BETA_NETWORK_ID,
+            "the wallet is on the pinned network"
+        );
+        assert_eq!(
+            crate::sdk::economic_admission_flow::committed_network_id().expect("committed"),
+            dsm::economic::register::BETA_NETWORK_ID,
+            "the device's committed network is the pinned one"
         );
     }
 }

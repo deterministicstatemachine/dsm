@@ -343,7 +343,6 @@ class SinglePathWebViewBridge(private val context: Context) {
                     inst.createGenesisV2(
                         mnemonic = req.mnemonic,
                         locale = req.locale,
-                        networkId = req.networkId,
                     )
                 }
 
@@ -686,7 +685,7 @@ class SinglePathWebViewBridge(private val context: Context) {
      * Canonical mnemonic-rooted Genesis v2 wallet creation. The (backed-up) mnemonic is the sole
      * root. Returns framed Envelope v3 bytes; failures may be returned as error envelopes.
      */
-    fun createGenesisV2(mnemonic: String, locale: String, networkId: String): ByteArray {
+    fun createGenesisV2(mnemonic: String, locale: String): ByteArray {
         if (!ready) {
             Log.e(TAG, "createGenesisV2: bridge not ready")
             return ByteArray(0)
@@ -700,7 +699,6 @@ class SinglePathWebViewBridge(private val context: Context) {
             keyGenesisEnvelope = KEY_GENESIS_ENVELOPE,
             mnemonic = mnemonic,
             locale = locale,
-            networkId = networkId,
         )
     }
 

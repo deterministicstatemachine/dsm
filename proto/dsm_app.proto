@@ -1536,7 +1536,10 @@ message TokenMetadataProto {
 message WalletCreateGenesisV2Request {
   string mnemonic   = 1;
   string locale     = 2;
-  string network_id = 3;
+  // The network is the one this build's root register is pinned for, never
+  // the caller's choice.
+  reserved 3;
+  reserved "network_id";
 }
 message GenesisCreated {
   bytes  device_id     = 1 [(dsm_fixed_len)=32];
