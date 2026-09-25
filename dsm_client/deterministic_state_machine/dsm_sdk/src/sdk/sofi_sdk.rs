@@ -410,6 +410,19 @@ pub struct TraderContext<'a> {
     pub trader_core: TraderCore,
 }
 
+/// `𝒞_E^pre` of a draft: the typed reference of the parent `P` names (P
+/// conformance rule 2), so `E` commits to the exact claim the operation
+/// extends. Beta references no other pre-E object.
+fn pre_e_closure(ctx: &TraderContext<'_>) -> Result<PreEClosureIndex, BuildError> {
+    Ok(PreEClosureIndex::new(vec![ctx
+        .parent_claim
+        .validation_ref(
+            &ctx.genesis,
+            &ctx.device_id,
+            ctx.position,
+        )])?)
+}
+
 /// Assemble `P(E)` and `P`, refusing anything beta will not run.
 ///
 /// Neither root is the caller's: `R_void` is `T°.pre_root` (P15-2), and
@@ -509,7 +522,7 @@ pub fn draft_route(
         hops,
         trader_core: derive::trader_core_digest(&ctx.trader_core.encode()?),
         dlv_cores: core_digests,
-        closure: PreEClosureIndex::new(Vec::new())?,
+        closure: pre_e_closure(ctx)?,
     };
     draft(settlement, ctx, sorted_cores, legs, local)
 }
@@ -539,7 +552,7 @@ pub fn draft_close(
         reserve_b,
         trader_core: derive::trader_core_digest(&ctx.trader_core.encode()?),
         dlv_core: derive::dlv_core_digest(&core.encode()?),
-        closure: PreEClosureIndex::new(Vec::new())?,
+        closure: pre_e_closure(ctx)?,
     };
     draft(
         settlement,

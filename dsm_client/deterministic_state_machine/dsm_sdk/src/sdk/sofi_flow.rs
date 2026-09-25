@@ -40,8 +40,8 @@ use crate::sdk::economic_admission_flow::{
 };
 use crate::sdk::economic_registers::{resolve_peer_with_cache, LiveRegisterResolver};
 use crate::sdk::sofi_advance::{
-    complete_pending_fulfillment, fulfill, own_parent_claim, resolve_pending_position, Advanced,
-    FulfillRequest,
+    complete_pending_fulfillment, fulfill, own_closure_objects, own_parent_claim,
+    resolve_pending_position, Advanced, FulfillRequest,
 };
 use crate::sdk::sofi_chain::ChainWalker;
 use crate::sdk::sofi_evidence::{
@@ -1035,8 +1035,10 @@ async fn exercise_draft(
         })
         .ok_or_else(|| refuse("the fulfillment was not produced"))?;
 
-    // Stages 6 and 7: the transition, then the install.
-    let own_objects = BTreeMap::new();
+    // Stages 6 and 7: the transition, then the install. The closure objects
+    // only this trader holds exactly — the parent claim P names — come from
+    // its own durable state.
+    let own_objects = own_closure_objects(set, checked.precommit(), checked.preimage()).await?;
     let fulfilled = fulfill(
         core,
         set,
