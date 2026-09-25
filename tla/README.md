@@ -251,6 +251,13 @@ outside beta.
 | `_CountWithoutLeader` | further links count without a valid leader link | `ChainUniqueness` |
 | `_NodeRemoves` | a seat drops what it holds | `FinalityStable` |
 
+The configs state the five seats as a set (`Seats = {s1, …, s5}`; a `.cfg`
+cannot state a tuple, so the module chooses the route ordering) and set
+`CHECK_DEADLOCK FALSE`: a finished write has no successor, and that is not a
+deadlock. The model is finite and exhausts in about a second. It runs in CI
+through `dsm_vertical_validation tla-check` (`RouteChain` and its three
+falsifications).
+
 ```
 java -cp tla2tools.jar tlc2.TLC -config DSM_RouteChain.cfg DSM_RouteChain.tla
 ```

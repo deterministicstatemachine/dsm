@@ -31,18 +31,19 @@
 \*   "AnyArrivalLeads"    any value that reached the leader has a leader link
 \*   "CountWithoutLeader" further links count without a valid leader link
 \*   "NodeRemoves"        a seat may drop what it holds
-------------------------------------------------------------------------------
 EXTENDS Naturals, Sequences, FiniteSets
 
 CONSTANTS Values,    \* the values writers may write at the cell
-          Route,     \* <<r0, r1, r2, r3, r4>>: distinct seats, r0 the leader
+          Seats,     \* the five distinct seats of the committed set
           Mutation   \* "none" or one of the mutations above
 
-ASSUME Len(Route) = 5
-ASSUME \A i, j \in 1..5 : i # j => Route[i] # Route[j]
+ASSUME Cardinality(Seats) = 5
 ASSUME Mutation \in {"none", "AnyArrivalLeads", "CountWithoutLeader", "NodeRemoves"}
 
-Seats  == {Route[i] : i \in 1..5}
+\* The route <<r0, r1, r2, r3, r4>>: one fixed ordering of the seats, r0 the
+\* leader. Which ordering is immaterial (the seats are symmetric), and a
+\* configuration file cannot state a tuple, so it is chosen here.
+Route  == CHOOSE r \in [1..5 -> Seats] : \A i, j \in 1..5 : i # j => r[i] # r[j]
 Leader == Route[1]
 
 VARIABLES

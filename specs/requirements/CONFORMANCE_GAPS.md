@@ -605,8 +605,6 @@ Auditor finding 4 on `61d273a3`: status was written by hand and had drifted from
 | `dsm` · core/bilateral_transaction_manager.rs · `compute_smt_key` (MR-DSM-0115, 0249) | The tag is `DSM/smt-key`, not the `DSM/smt-key/v1` the requirement names. |
 | `dsm` · commitments/external_commitment.rs (MR-DSM-0184) | Y is `H(DSM/external-commit-id, source_id, X, evidence_hash)`, not the `H(DSM/external/v1, X)` the requirement defines. |
 | `dsm_sdk` · economic_admission_flow.rs · `record_ble_ek_steps_from_receipt` | Freezes the ek-cert-step artifact with a zero `bound_root`. Offline is a dependency boundary this round; recorded, not audited. |
-| `dsm_sdk` · handlers/node_e2e_tests.rs · `a_transfer_reaches_the_nodes_only_sealed_and_arrives` | Its memo check searches for a memo that is never sent, so it cannot fail. |
-| `tools/vertical_validation` · tla_runner.rs | `DSM_RouteChain` is not registered, so CI never model-checks it. |
 
 ### 6.15 An unestablished candidate is never read as absence (branch `fix/unestablished-candidate-is-not-absence`, 2026-09-24)
 
@@ -618,6 +616,17 @@ MR-STOR-0021 (storage §4): a storage fact not established from the reads in han
 |---|---|---|
 | `dsm` · sofi/storage.rs · `keep_verifying`, `keep_all_verifying`; `lean4/DSMSofiStorage.lean` · `keep`, `keepAll` | A candidate under a locator whose bytes fewer than three members returned was skipped as if examined, and a scan in which nothing verified answered `Resolved::None`: an unestablished candidate read as "nothing is published here". The Lean model had the same skip, and `within_budget_exhausted_is_none` proved it. | `keep_verifying` is `Unavailable` when it kept nothing past an unestablished candidate (a verifying candidate elsewhere is still kept: the identity is the locator). `keep_all_verifying` returns `Discovered::Complete` only when every candidate was examined and established, else `Partial` with what verified. Lean: `keep` and `keepAll` rewritten to match, `within_budget_exhausted_is_none` now requires every candidate established, and `an_unestablished_candidate_is_never_none` and `an_unestablished_candidate_makes_discovery_partial` proved. The Lean mutation (the old skip restored) breaks `kept_verifies` and the new theorem. |
 | `dsm_sdk` · sdk/sofi_evidence.rs · `fetch_vault_genesis`; sdk/sofi_flow.rs · `own_setup_ref` | A vault whose genesis candidate could not be fetched was reported `NotPublished`; a device whose setup candidate could not be fetched was refused as having no admitted setup. | Both answer "not published" only on a `Complete` discovery; a `Partial` one is a storage error. Node-backed tests on Postgres: `an_unestablished_genesis_candidate_is_not_read_as_unpublished`, `a_setup_scan_that_met_an_unestablished_candidate_is_not_a_refusal`. Each gate removed → its test red; each Core flag removed → its test red. |
+
+### 6.16 The route-chain model is checked, and the sealed-transfer test searches for the memo that was sent (branch `fix/sealed-transfer-memo-and-routechain-tlc`, 2026-09-24)
+
+Two findings of the evidence pass (§6.14 in `feat/conformance-status-from-evidence`).
+
+**Resolved**
+
+| Location | Finding | State |
+|---|---|---|
+| `tla/DSM_RouteChain.tla`, its four `.cfg` files; `tools/vertical_validation` · tla_runner.rs (MR-STOR-0143, MR-DSM-0270) | The model had never been checked: its configs stated the route as a tuple (`Route = <<s1, …, s5>>`), which a `.cfg` cannot express, so TLC refused every config at line 4; the module itself put a `----` separator before `EXTENDS`, which the parser refuses; and the model was not registered in the runner, so CI never ran it. | The seats are a set constant and the module chooses the route ordering; `CHECK_DEADLOCK FALSE` because a finished write has no successor. Registered as `RouteChain` with its three falsifications; `EXPECTED_STANDARD_SPECS` 75 → 79. The runner now names an action-property violation ("Action property X is violated") as it names an invariant's, so `NodeRemoves` is expected by name. TLC: the base config exhausts 1040 distinct states in about a second with no error; `AnyArrivalLeads` and `CountWithoutLeader` violate `ChainUniqueness`; `NodeRemoves` violates `FinalityStable`. |
+| `dsm_sdk` · handlers/node_e2e_tests.rs · `a_transfer_reaches_the_nodes_only_sealed_and_arrives` (DSM Amendment A7) | The test searched every node's bytes for the memo `A->B #0`, which the harness never sends (its first send is `A->B #1`), so the memo assertion could not fail. | The memo is the one the harness builds, and the test first finds it in the sender's `wallet.history` answer, so the bytes searched for at the nodes are bytes that exist in plaintext on the device. Searching for the old memo again → red. |
 
 ## 7 Totals
 
