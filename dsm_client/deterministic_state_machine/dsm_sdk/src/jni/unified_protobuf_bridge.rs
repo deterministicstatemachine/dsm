@@ -1288,11 +1288,13 @@ pub(crate) fn handle_ble_identity_observed_from_envelope(
         }
 
         if contact.ble_address.as_ref() != Some(&address) && !address.is_empty() {
-            let _ = crate::storage::client_db::update_contact_ble_status(
+            if let Err(e) = crate::storage::client_db::update_contact_ble_status(
                 &device_id,
                 None,
                 Some(&address),
-            );
+            ) {
+                log::warn!("identity_observed: BLE address not persisted: {e}");
+            }
             // Register in in-memory resolution map
             register_ble_address_mapping(&device_id, &address);
             // Verify persistence

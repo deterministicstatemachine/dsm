@@ -1397,16 +1397,17 @@ impl BilateralBleHandler {
                     {
                         if let Ok(map) = DEVICE_ID_TO_ADDR.try_lock() {
                             if let Some(addr) = map.get(&counterparty_device_id) {
-                                // Persist it to the contact
-                                let _ = crate::storage::client_db::update_contact_ble_status(
+                                // Persist it to the contact (transport state only).
+                                if let Err(e) = crate::storage::client_db::update_contact_ble_status(
                                     &counterparty_device_id,
-                                    None, // no chain tip
+                                    None,
                                     Some(addr),
-                                );
-                                debug!(
-                                    "[BLE_HANDLER] Persisted BLE address from in-memory map: {}",
-                                    addr
-                                );
+                                ) {
+                                    warn!(
+                                        "[BLE_HANDLER] BLE address {} not persisted for the contact: {}",
+                                        addr, e
+                                    );
+                                }
                                 addr.clone()
                             } else {
                                 warn!("[BLE_HANDLER] No BLE address found for counterparty device (contact exists but no address persisted or in map)");
@@ -2855,7 +2856,7 @@ impl BilateralBleHandler {
                         Some(r_r),
                         Operation::Transfer {
                             token_id,
-                            authority_policy,
+                            authority_policy: Some(authority_policy),
                             ..
                         },
                     ) => {
@@ -2871,10 +2872,7 @@ impl BilateralBleHandler {
                             ),
                             &op_bytes,
                         );
-                        let authority_policy_hash = authority_policy
-                            .as_ref()
-                            .map(|ap| ap.policy_id)
-                            .unwrap_or([0u8; 32]);
+                        let authority_policy_hash = authority_policy.policy_id;
                         // Policy-binding trace (sender → chip PREPARE): the value the chip commits as
                         // `authority_policy_hash` MUST equal the receiver's canonical policy_id, or the
                         // proof is meaningless. Compared against the canonical value here.
@@ -3045,7 +3043,8 @@ impl BilateralBleHandler {
         // subsequent one; ordinary transfers carry no disclosure.
         let anchor_disclosure = bearer_artifacts
             .as_ref()
-            .map(|art| self.build_anchor_disclosure(&art.pin, &session.operation));
+            .map(|art| self.build_anchor_disclosure(&art.pin, &session.operation))
+            .transpose()?;
         // Stash the driven successor leaf AND the sim post-root so the canonical commit in
         // `mark_sender_committed_with_post_state_hash` applies the byte-exact same leaf the on-wire
         // proofs were built from, and can enforce both-or-neither (committed root == this sent sim
@@ -3224,22 +3223,26 @@ impl BilateralBleHandler {
         &self,
         pin: &crate::anchor::AnchorPin,
         operation: &Operation,
-    ) -> generated::AnchorDisclosure {
-        let policy_hash = match operation {
-            Operation::Transfer {
-                authority_policy: Some(ap),
-                ..
-            } => ap.policy_id,
-            _ => [0u8; 32],
-        };
-        generated::AnchorDisclosure {
+    ) -> Result<generated::AnchorDisclosure, DsmError> {
+        let policy_hash =
+            match operation {
+                Operation::Transfer {
+                    authority_policy: Some(ap),
+                    ..
+                } => ap.policy_id,
+                _ => return Err(DsmError::invalid_operation(
+                    "an anchor disclosure rides only a bearer transfer, which names its authority \
+                     policy",
+                )),
+            };
+        Ok(generated::AnchorDisclosure {
             bundle: pin.bundle.to_vec(),
             anchor_id: pin.anchor_id.to_vec(),
             enrolled_counter: pin.enrolled_counter,
             partition_pk: pin.partition_pk.clone(),
             policy_hash: policy_hash.to_vec(),
             pk_chip: pin.pk_chip.clone(),
-        }
+        })
     }
 
     /// Receiver-admit fold: admit (pin) the sender's disclosed fused anchor, bound to a VERIFIED
