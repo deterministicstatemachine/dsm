@@ -928,8 +928,10 @@ impl AppRouterImpl {
                         &prepare_envelope,
                     ) {
                         Ok(chunks) => chunks,
+                        // A prepare that cannot be framed can never be sent: the
+                        // proposal, which reached no one, ends here.
                         Err(e) => {
-                            let _ = transport_adapter
+                            transport_adapter
                                 .fail_session_by_commitment(
                                     commitment_hash,
                                     "wallet.sendOffline: failed to frame BLE prepare payload",
@@ -942,17 +944,16 @@ impl AppRouterImpl {
                     };
 
                     use crate::jni::jni_common::get_java_vm_borrowed;
+                    // From here the proposal is prepared and its prepare is owed:
+                    // a send that does not complete fails nothing, and the prepare
+                    // is sent again when the link returns.
                     let vm = match get_java_vm_borrowed() {
                         Some(vm) => vm,
                         None => {
-                            let _ = transport_adapter
-                                .fail_session_by_commitment(
-                                    commitment_hash,
-                                    "wallet.sendOffline: Java VM unavailable for BLE dispatch",
-                                )
-                                .await;
                             return err(
-                                "wallet.sendOffline: Java VM unavailable for BLE dispatch".into()
+                                "wallet.sendOffline: Java VM unavailable for BLE dispatch; the \
+                                 prepare is sent when the link returns"
+                                    .into(),
                             );
                         }
                     };
@@ -975,25 +976,16 @@ impl AppRouterImpl {
                     match ble_send_result {
                         Ok(true) => {}
                         Ok(false) => {
-                            let _ = transport_adapter
-                                .fail_session_by_commitment(
-                                    commitment_hash,
-                                    "wallet.sendOffline: BLE bridge rejected the prepared chunks",
-                                )
-                                .await;
                             return err(
-                                "wallet.sendOffline: BLE bridge rejected the prepared chunks"
+                                "wallet.sendOffline: BLE bridge rejected the prepared chunks; the \
+                                 prepare is sent again when the link returns"
                                     .into(),
                             );
                         }
                         Err(e) => {
-                            let _ = transport_adapter
-                                .fail_session_by_commitment(
-                                    commitment_hash,
-                                    "wallet.sendOffline: BLE dispatch failed after prepare authoring",
-                                )
-                                .await;
-                            return err(e);
+                            return err(format!(
+                                "{e}; the prepare is sent again when the link returns"
+                            ));
                         }
                     }
 

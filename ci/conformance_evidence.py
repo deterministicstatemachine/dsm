@@ -100,6 +100,28 @@ def read(path):
         return f.read()
 
 
+# CI runs cargo with CARGO_TERM_COLOR=always: its status lines carry ANSI
+# colour codes (`\x1b[1m\x1b[92m     Running\x1b[0m unittests ...`).
+ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def main_rs_binaries():
+    """A crate's `src/main.rs` binary is named by its `[[bin]]` entry, and the
+    board names the binary, not the crate: bin name → crate."""
+    owners = {}
+    for crate, path in CRATES.items():
+        try:
+            manifest = read(os.path.join(path, "Cargo.toml"))
+        except FileNotFoundError:
+            continue
+        for block in manifest.split("[[bin]]")[1:]:
+            name = re.search(r'^\s*name\s*=\s*"([^"]+)"', block, re.M)
+            src = re.search(r'^\s*path\s*=\s*"([^"]+)"', block, re.M)
+            if name and src and src.group(1) == "src/main.rs":
+                owners[name.group(1)] = crate
+    return owners
+
+
 # ── Rust test index ─────────────────────────────────────────────────────────
 
 
@@ -294,6 +316,7 @@ def parse_logs(paths, stems):
     the process, a signal, a killed job) leaves every test it started as
     'crashed', never as passed."""
     results = {}
+    main_bins = main_rs_binaries()
     for p in paths:
         binary, started, failures, finished = None, [], set(), False
 
@@ -307,7 +330,7 @@ def parse_logs(paths, stems):
                     results[(binary, t)] = "failed" if t in failures else "ok"
 
         in_failures = False
-        for line in read(p).splitlines():
+        for line in ANSI.sub("", read(p)).splitlines():
             m = re.match(r"\s*Running (unittests )?(\S+) \(.*?/deps/([A-Za-z0-9_]+)-[0-9a-f]+\)", line)
             if m:
                 if binary:
@@ -317,7 +340,7 @@ def parse_logs(paths, stems):
                 if src.endswith("src/lib.rs"):
                     binary = (dep, "lib")
                 elif src.endswith("src/main.rs"):
-                    binary = (dep, "bin:main")
+                    binary = (main_bins.get(dep, dep), "bin:main")
                 elif "/bin/" in src or src.startswith("src/bin/"):
                     binary = (next((c for c in CRATES if src.startswith(CRATES[c])), dep), "bin:" + os.path.basename(src)[:-3])
                 else:

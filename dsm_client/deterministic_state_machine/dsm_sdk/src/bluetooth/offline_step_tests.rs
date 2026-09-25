@@ -219,7 +219,8 @@ async fn offline_steps_commit_on_both_devices_over_a_byte_carrier() {
             assert!(
                 crate::storage::client_db::transaction_exists(
                     &crate::util::text_id::encode_base32_crockford(&commitment)
-                ),
+                )
+                .expect("read the history"),
                 "step {step}: {} holds no history row",
                 device.device.slot
             );
@@ -350,7 +351,8 @@ async fn a_sender_whose_head_moved_since_its_confirm_commits_nothing() {
     assert!(
         !crate::storage::client_db::transaction_exists(
             &crate::util::text_id::encode_base32_crockford(&commitment)
-        ),
+        )
+        .expect("read the history"),
         "the sender kept a history row"
     );
     assert_eq!(
@@ -379,6 +381,7 @@ fn history_row_exists(commitment: &[u8; 32]) -> bool {
     crate::storage::client_db::transaction_exists(&crate::util::text_id::encode_base32_crockford(
         commitment,
     ))
+    .expect("read the history")
 }
 
 /// Both devices hold the step: one history row each, the same tip, no
@@ -565,4 +568,216 @@ async fn a_restored_step_that_does_not_hash_to_its_commitment_commits_nothing() 
         !history_row_exists(&commitment),
         "the sender kept a history row"
     );
+}
+
+/// The confirm frame `confirm` with its sender signature replaced.
+fn with_sender_signature(confirm: &[u8], signature: Vec<u8>) -> Vec<u8> {
+    use prost::Message;
+    let mut envelope = crate::envelope::from_canonical_bytes(confirm).expect("the confirm decodes");
+    let Some(crate::generated::envelope::Payload::UniversalTx(tx)) = envelope.payload.as_mut()
+    else {
+        panic!("a confirm is a universal transaction");
+    };
+    let Some(crate::generated::universal_op::Kind::Invoke(invoke)) = tx.ops[0].kind.as_mut() else {
+        panic!("a confirm invokes bilateral.confirm");
+    };
+    let args = invoke.args.as_mut().expect("the confirm's arguments");
+    let mut request =
+        crate::generated::BilateralConfirmRequest::decode(args.body.as_slice()).expect("decodes");
+    request.sender_signature = signature;
+    args.body = request.encode_to_vec();
+    envelope.encode_to_vec()
+}
+
+/// The history rows the entered device holds for the step.
+fn history_rows(commitment: &[u8; 32]) -> usize {
+    let tx_id = crate::util::text_id::encode_base32_crockford(commitment);
+    crate::storage::client_db::get_transaction_history(None, Some(1000))
+        .expect("read the history")
+        .into_iter()
+        .filter(|row| row.tx_id == tx_id)
+        .count()
+}
+
+/// The ack is lost after the receiver committed. The sender still owes its
+/// confirm; when the link returns it delivers it again, and the receiver —
+/// whose session ended in its commit — answers with the ack the step
+/// committed, from its history. The sender commits; each device holds the
+/// step once.
+/// MUTATION CONTROL: answering a committed step's confirm with "no session"
+/// (the behaviour replaced) turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_lost_ack_is_answered_again_and_the_step_commits_once_on_each_side() {
+    let pair = Pair::boot(0, 0).await;
+    let a = OfflineDevice::new(&pair.a);
+    let b = OfflineDevice::new(&pair.b);
+
+    let (commitment, _lost_ack) = to_the_ack(&a, &b, Operation::Noop).await;
+    let owed = a.handler.frames_owed_to(&b.device.device_id).await;
+    assert_eq!(owed.len(), 1, "the sender owes its confirm");
+    assert_eq!(
+        owed[0].kind,
+        crate::bluetooth::bilateral_session::OfflineFrameKind::Confirm
+    );
+
+    b.device.enter();
+    let ack = b
+        .handler
+        .handle_confirm_request(&owed[0].bytes)
+        .await
+        .expect("the receiver answers its committed step again");
+    a.device.enter();
+    a.handler
+        .handle_commit_response(&ack)
+        .await
+        .expect("the sender commits on the ack answered again");
+    assert_committed_on_both(&a, &b, &commitment);
+    for device in [&a, &b] {
+        device.device.enter();
+        assert_eq!(
+            history_rows(&commitment),
+            1,
+            "{} holds the step twice",
+            device.device.slot
+        );
+    }
+    assert!(a
+        .handler
+        .frames_owed_to(&b.device.device_id)
+        .await
+        .is_empty());
+}
+
+/// A confirm for a committed step is answered again only as its pinned
+/// sender signed it: one carrying another signature gets no ack.
+/// MUTATION CONTROL: answering without Core's `decide_committed_confirm`
+/// turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_committed_steps_confirm_not_signed_by_its_sender_is_not_answered() {
+    let pair = Pair::boot(0, 0).await;
+    let a = OfflineDevice::new(&pair.a);
+    let b = OfflineDevice::new(&pair.b);
+
+    let (_commitment, _lost_ack) = to_the_ack(&a, &b, Operation::Noop).await;
+    let owed = a.handler.frames_owed_to(&b.device.device_id).await;
+    let forged = with_sender_signature(&owed[0].bytes, vec![0x5A; 64]);
+    b.device.enter();
+    let refused = b
+        .handler
+        .handle_confirm_request(&forged)
+        .await
+        .expect_err("a confirm its sender did not sign is not answered");
+    assert!(
+        refused
+            .to_string()
+            .contains("not signed over its commitment by the pinned AK"),
+        "{refused}"
+    );
+}
+
+/// The acceptance delivered again is answered with the confirm it was
+/// answered with the first time; the step completes on either copy.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_response_delivered_again_is_answered_with_the_confirm_it_owes() {
+    let pair = Pair::boot(0, 0).await;
+    let a = OfflineDevice::new(&pair.a);
+    let b = OfflineDevice::new(&pair.b);
+
+    a.device.enter();
+    let (prepare, commitment) = a
+        .handler
+        .prepare_bilateral_transaction(b.device.device_id, Operation::Noop)
+        .await
+        .expect("the sender prepares");
+    b.device.enter();
+    b.handler
+        .handle_prepare_request(&prepare, None)
+        .await
+        .expect("the receiver takes the proposal");
+    let response = b
+        .handler
+        .create_prepare_accept_envelope(commitment)
+        .await
+        .expect("the receiver's user accepts");
+    a.device.enter();
+    let (confirm, _) = a
+        .handler
+        .handle_prepare_response(&response)
+        .await
+        .expect("the sender confirms");
+    let (again, _) = a
+        .handler
+        .handle_prepare_response(&response)
+        .await
+        .expect("the response delivered again is answered");
+    assert_eq!(again, confirm, "the confirm owed is the confirm sent");
+
+    b.device.enter();
+    let ack = b
+        .handler
+        .handle_confirm_request(&again)
+        .await
+        .expect("the receiver commits");
+    a.device.enter();
+    a.handler
+        .handle_commit_response(&ack)
+        .await
+        .expect("the sender commits");
+    assert_committed_on_both(&a, &b, &commitment);
+}
+
+/// The proposal delivered again to a receiver that accepted it is answered
+/// with the response it owes — also after the receiver restarts, since the
+/// response is written with the acceptance.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_prepare_delivered_again_to_an_acceptance_is_answered_with_its_response() {
+    let pair = Pair::boot(0, 0).await;
+    let a = OfflineDevice::new(&pair.a);
+    let b = OfflineDevice::new(&pair.b);
+
+    a.device.enter();
+    let (prepare, commitment) = a
+        .handler
+        .prepare_bilateral_transaction(b.device.device_id, Operation::Noop)
+        .await
+        .expect("the sender prepares");
+    b.device.enter();
+    let (first, _) = b
+        .handler
+        .handle_prepare_request(&prepare, None)
+        .await
+        .expect("the receiver takes the proposal");
+    assert!(first.is_empty(), "the proposal waits for the user");
+    let (again, _) = b
+        .handler
+        .handle_prepare_request(&prepare, None)
+        .await
+        .expect("the proposal delivered again");
+    assert!(
+        again.is_empty(),
+        "a proposal awaiting its user has nothing to send"
+    );
+    let response = b
+        .handler
+        .create_prepare_accept_envelope(commitment)
+        .await
+        .expect("the receiver's user accepts");
+
+    let b = b.restarted().await;
+    let owed = b.handler.frames_owed_to(&a.device.device_id).await;
+    assert_eq!(owed.len(), 1);
+    assert_eq!(
+        owed[0].bytes, response,
+        "the restarted receiver owes its response"
+    );
+    let (answered, _) = b
+        .handler
+        .handle_prepare_request(&prepare, None)
+        .await
+        .expect("the proposal delivered again after the restart");
+    assert_eq!(answered, response, "answered with the response it owes");
 }
