@@ -25,5 +25,3 @@ pub const TAG_DSM_GENESIS_DEVICE_COMMIT: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/genesis-device-commit");
 pub const TAG_DSM_GENESIS_DEVICE_ENTROPY: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/genesis-device-entropy");
-pub const TAG_DSM_SUB_GENESIS_DEVICE_ENTROPY: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/sub-genesis-device-entropy");

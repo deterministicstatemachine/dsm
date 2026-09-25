@@ -46,7 +46,7 @@ describe("protobuf-only bridge payloads", () => {
         value: new GenesisCreated({
           deviceId,
           genesisHash: new Hash32({ v: genesisHash }),
-          deviceEntropy: new Uint8Array(32).fill(0x33), // v2: carries the PUBLIC genesis_nonce
+          genesisNonce: new Uint8Array(32).fill(0x33),
           networkId: "testnet",
           locale: "en-US",
         }),

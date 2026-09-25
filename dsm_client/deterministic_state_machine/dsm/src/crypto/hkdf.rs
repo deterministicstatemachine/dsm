@@ -2,13 +2,8 @@
 
 //! HKDF (RFC 5869) over BLAKE3.
 //!
-//! Used by Genesis MPC for the master-seed derivation chain per
-//! whitepaper §11.1 eq.13:
-//!
-//! ```text
-//! S_master = HKDF-Extract(salt = "DSM/dev\0",
-//!                         IKM  = G ‖ DevID ‖ s_0  (GenesisV2: mnemonic-rooted, no DBRW))
-//! ```
+//! The KDF of the Genesis v2/v3 key tree (`genesis_v2::kdf32`): the domain
+//! tag is the salt, the secret the IKM, the bound context the info.
 //!
 //! The HMAC primitive is constructed per RFC 2104 with BLAKE3 as the
 //! underlying hash function (BLAKE3 internal block size 64 bytes,

@@ -9,21 +9,18 @@ use anyhow::{anyhow, Result};
 pub struct GenesisRecord {
     pub genesis_id: String,
     pub device_id: String,
-    pub mpc_proof: String,
     pub device_birth_binding: String,
     pub merkle_root: String,
-    pub participant_count: u32,
     pub progress_marker: String,
     pub publication_hash: String,
-    pub storage_nodes: Vec<String>,
     pub entropy_hash: String,
     pub protocol_version: String,
     pub hash_chain_proof: Option<Vec<u8>>,
     pub smt_proof: Option<Vec<u8>>,
     pub verification_step: Option<u64>,
-    /// Public Genesis v2 nonce (Base32-Crockford); empty for legacy/MPC records.
+    /// Public genesis nonce (Base32-Crockford).
     pub genesis_nonce: String,
-    /// Genesis entropy profile: "MnemonicV2" (canonical) / "CommitRevealMpcV1" (legacy); empty for old rows.
+    /// Genesis derivation profile: "MnemonicV2" or "MnemonicV3".
     pub genesis_profile: String,
     /// The network id the genesis was created under (v3: a GRK derivation
     /// input, so the authority chain is re-derivable after restart).

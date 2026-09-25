@@ -475,13 +475,10 @@ pub fn encode_genesis_record_bytes(r: &GenesisRecord) -> Vec<u8> {
     let mut out = Vec::new();
     put_str(&r.genesis_id, &mut out);
     put_str(&r.device_id, &mut out);
-    put_str(&r.mpc_proof, &mut out);
     put_str(&r.device_birth_binding, &mut out);
     put_str(&r.merkle_root, &mut out);
-    out.extend_from_slice(&r.participant_count.to_le_bytes());
     put_str(&r.progress_marker, &mut out);
     put_str(&r.publication_hash, &mut out);
-    put_str(&r.storage_nodes.join(","), &mut out);
     put_str(&r.entropy_hash, &mut out);
     put_str(&r.protocol_version, &mut out);
     put_str(&r.genesis_nonce, &mut out);
@@ -701,13 +698,10 @@ mod tests {
         let rec = GenesisRecord {
             genesis_id: "gen-1".into(),
             device_id: "dev-1".into(),
-            mpc_proof: "mpc".into(),
             device_birth_binding: "bind".into(),
             merkle_root: "root".into(),
-            participant_count: 3,
             progress_marker: "P".into(),
             publication_hash: "pub".into(),
-            storage_nodes: vec!["n1".into(), "n2".into()],
             entropy_hash: "ent".into(),
             protocol_version: "1.0".into(),
             hash_chain_proof: None,

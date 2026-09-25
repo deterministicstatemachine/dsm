@@ -50,10 +50,6 @@ pub mod event_dispatch;
 #[cfg(target_os = "android")]
 pub mod unified_protobuf_bridge;
 
-/// Create genesis via MPC (Android only)
-#[cfg(target_os = "android")]
-#[cfg(target_os = "android")]
-
 /// BLE bridge JNI entrypoints (Android + bluetooth only)
 #[cfg(all(target_os = "android", feature = "bluetooth"))]
 pub mod ble_bridge;

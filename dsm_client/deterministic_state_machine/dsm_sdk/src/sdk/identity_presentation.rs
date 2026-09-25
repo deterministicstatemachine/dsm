@@ -97,7 +97,7 @@ pub fn derive_own_authority_context(
     wallet_seed: &[u8],
     inputs: OwnerIdentityInputs<'_>,
 ) -> Result<OwnAuthorityContext, DsmError> {
-    let aph = dsm::core::identity::genesis_session::genesis_authority_policy_hash();
+    let aph = dsm::core::identity::genesis_v2::genesis_authority_policy_hash();
     let genesis = derive_genesis_v3_self_attested(
         wallet_seed,
         inputs.network_id,
@@ -146,7 +146,7 @@ pub fn build_own_anchor_presentation(
     expected_g: &[u8; 32],
     c_n: &[u8; 32],
 ) -> Result<generated::AnchorPresentationV3, DsmError> {
-    let aph = dsm::core::identity::genesis_session::genesis_authority_policy_hash();
+    let aph = dsm::core::identity::genesis_v2::genesis_authority_policy_hash();
     let genesis = derive_genesis_v3_self_attested(
         wallet_seed,
         inputs.network_id,
@@ -248,7 +248,7 @@ pub fn build_authority_evidence(
     expected_g: &[u8; 32],
 ) -> Result<(Vec<u8>, [u8; 32]), DsmError> {
     use prost::Message;
-    let aph = dsm::core::identity::genesis_session::genesis_authority_policy_hash();
+    let aph = dsm::core::identity::genesis_v2::genesis_authority_policy_hash();
     let genesis = derive_genesis_v3_self_attested(
         wallet_seed,
         inputs.network_id,

@@ -10522,175 +10522,6 @@ export class TokenMetadataProto extends Message<TokenMetadataProto> {
 }
 
 /**
- * MPC Token creation request (canonical).
- *
- * @generated from message dsm.TokenMpcRequest
- */
-export class TokenMpcRequest extends Message<TokenMpcRequest> {
-  /**
-   * @generated from field: string session_id = 1;
-   */
-  sessionId = "";
-
-  /**
-   * @generated from field: string token_name = 2;
-   */
-  tokenName = "";
-
-  /**
-   * @generated from field: string token_symbol = 3;
-   */
-  tokenSymbol = "";
-
-  /**
-   * @generated from field: uint32 threshold = 4;
-   */
-  threshold = 0;
-
-  /**
-   * @generated from field: string creator_genesis_id = 5;
-   */
-  creatorGenesisId = "";
-
-  /**
-   * @generated from field: bool anchored_token = 6;
-   */
-  anchoredToken = false;
-
-  /**
-   * @generated from field: uint64 request_iteration = 7;
-   */
-  requestIteration = protoInt64.zero;
-
-  constructor(data?: PartialMessage<TokenMpcRequest>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.TokenMpcRequest";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "session_id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 2, name: "token_name", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 3, name: "token_symbol", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 4, name: "threshold", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
-    { no: 5, name: "creator_genesis_id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 6, name: "anchored_token", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
-    { no: 7, name: "request_iteration", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): TokenMpcRequest {
-    return new TokenMpcRequest().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): TokenMpcRequest {
-    return new TokenMpcRequest().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): TokenMpcRequest {
-    return new TokenMpcRequest().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: TokenMpcRequest | PlainMessage<TokenMpcRequest> | undefined, b: TokenMpcRequest | PlainMessage<TokenMpcRequest> | undefined): boolean {
-    return proto3.util.equals(TokenMpcRequest, a, b);
-  }
-}
-
-/**
- * ======================= System Genesis (binary) ====================
- *
- * @generated from message dsm.SystemGenesisRequest
- */
-export class SystemGenesisRequest extends Message<SystemGenesisRequest> {
-  /**
-   * @generated from field: string locale = 1;
-   */
-  locale = "";
-
-  /**
-   * @generated from field: string network_id = 2;
-   */
-  networkId = "";
-
-  /**
-   * @generated from field: bytes device_entropy = 3;
-   */
-  deviceEntropy = new Uint8Array(0);
-
-  constructor(data?: PartialMessage<SystemGenesisRequest>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.SystemGenesisRequest";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "locale", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 2, name: "network_id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 3, name: "device_entropy", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SystemGenesisRequest {
-    return new SystemGenesisRequest().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): SystemGenesisRequest {
-    return new SystemGenesisRequest().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): SystemGenesisRequest {
-    return new SystemGenesisRequest().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: SystemGenesisRequest | PlainMessage<SystemGenesisRequest> | undefined, b: SystemGenesisRequest | PlainMessage<SystemGenesisRequest> | undefined): boolean {
-    return proto3.util.equals(SystemGenesisRequest, a, b);
-  }
-}
-
-/**
- * @generated from message dsm.SystemGenesisResponse
- */
-export class SystemGenesisResponse extends Message<SystemGenesisResponse> {
-  /**
-   * @generated from field: dsm.Hash32 genesis_hash = 1;
-   */
-  genesisHash?: Hash32;
-
-  /**
-   * @generated from field: bytes public_key = 2;
-   */
-  publicKey = new Uint8Array(0);
-
-  constructor(data?: PartialMessage<SystemGenesisResponse>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.SystemGenesisResponse";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "genesis_hash", kind: "message", T: Hash32 },
-    { no: 2, name: "public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SystemGenesisResponse {
-    return new SystemGenesisResponse().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): SystemGenesisResponse {
-    return new SystemGenesisResponse().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): SystemGenesisResponse {
-    return new SystemGenesisResponse().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: SystemGenesisResponse | PlainMessage<SystemGenesisResponse> | undefined, b: SystemGenesisResponse | PlainMessage<SystemGenesisResponse> | undefined): boolean {
-    return proto3.util.equals(SystemGenesisResponse, a, b);
-  }
-}
-
-/**
  * Canonical mnemonic-rooted Genesis v2 wallet-creation request (system.createGenesisV2).
  * The BIP39 mnemonic is the sole root: the SDK derives wallet_seed, caches it in the unlocked
  * session, and runs create_genesis_v2 (no storage nodes, no silicon, no random genesis entropy).
@@ -10768,24 +10599,11 @@ export class GenesisCreated extends Message<GenesisCreated> {
   smtRoot?: Hash32;
 
   /**
-   * @generated from field: bytes device_entropy = 5;
+   * the PUBLIC nonce G commits
+   *
+   * @generated from field: bytes genesis_nonce = 5;
    */
-  deviceEntropy = new Uint8Array(0);
-
-  /**
-   * @generated from field: string session_id = 6;
-   */
-  sessionId = "";
-
-  /**
-   * @generated from field: uint32 threshold = 7;
-   */
-  threshold = 0;
-
-  /**
-   * @generated from field: repeated string storage_nodes = 8;
-   */
-  storageNodes: string[] = [];
+  genesisNonce = new Uint8Array(0);
 
   /**
    * @generated from field: string network_id = 9;
@@ -10809,10 +10627,7 @@ export class GenesisCreated extends Message<GenesisCreated> {
     { no: 2, name: "genesis_hash", kind: "message", T: Hash32 },
     { no: 3, name: "public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 4, name: "smt_root", kind: "message", T: Hash32 },
-    { no: 5, name: "device_entropy", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 6, name: "session_id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 7, name: "threshold", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
-    { no: 8, name: "storage_nodes", kind: "scalar", T: 9 /* ScalarType.STRING */, repeated: true },
+    { no: 5, name: "genesis_nonce", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 9, name: "network_id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 10, name: "locale", kind: "scalar", T: 9 /* ScalarType.STRING */ },
   ]);
@@ -21585,69 +21400,6 @@ export class OnlineMessageResponse extends Message<OnlineMessageResponse> {
 }
 
 /**
- * =================== Discovery / Publish Diagnostics =================
- *
- * @generated from message dsm.PublishGenesisResponse
- */
-export class PublishGenesisResponse extends Message<PublishGenesisResponse> {
-  /**
-   * @generated from field: bool success = 1;
-   */
-  success = false;
-
-  /**
-   * @generated from field: bool published = 2;
-   */
-  published = false;
-
-  /**
-   * @generated from field: string key = 3;
-   */
-  key = "";
-
-  /**
-   * @generated from field: uint32 published_to_nodes = 4;
-   */
-  publishedToNodes = 0;
-
-  /**
-   * @generated from field: uint64 event_counter = 5;
-   */
-  eventCounter = protoInt64.zero;
-
-  constructor(data?: PartialMessage<PublishGenesisResponse>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.PublishGenesisResponse";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "success", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
-    { no: 2, name: "published", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
-    { no: 3, name: "key", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 4, name: "published_to_nodes", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
-    { no: 5, name: "event_counter", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): PublishGenesisResponse {
-    return new PublishGenesisResponse().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): PublishGenesisResponse {
-    return new PublishGenesisResponse().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): PublishGenesisResponse {
-    return new PublishGenesisResponse().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: PublishGenesisResponse | PlainMessage<PublishGenesisResponse> | undefined, b: PublishGenesisResponse | PlainMessage<PublishGenesisResponse> | undefined): boolean {
-    return proto3.util.equals(PublishGenesisResponse, a, b);
-  }
-}
-
-/**
  * @generated from message dsm.TokenPolicyCacheEntry
  */
 export class TokenPolicyCacheEntry extends Message<TokenPolicyCacheEntry> {
@@ -24951,12 +24703,6 @@ export class BridgeRpcRequest extends Message<BridgeRpcRequest> {
     case: "appRouter";
   } | {
     /**
-     * @generated from field: dsm.CreateGenesisPayload create_genesis = 7;
-     */
-    value: CreateGenesisPayload;
-    case: "createGenesis";
-  } | {
-    /**
      * @generated from field: dsm.BleContactPayload ble_contact = 8;
      */
     value: BleContactPayload;
@@ -24995,7 +24741,6 @@ export class BridgeRpcRequest extends Message<BridgeRpcRequest> {
     { no: 4, name: "string", kind: "message", T: StringPayload, oneof: "payload" },
     { no: 5, name: "preference", kind: "message", T: PreferencePayload, oneof: "payload" },
     { no: 6, name: "app_router", kind: "message", T: AppRouterPayload, oneof: "payload" },
-    { no: 7, name: "create_genesis", kind: "message", T: CreateGenesisPayload, oneof: "payload" },
     { no: 8, name: "ble_contact", kind: "message", T: BleContactPayload, oneof: "payload" },
     { no: 9, name: "ble_address", kind: "message", T: BleAddressPayload, oneof: "payload" },
     { no: 10, name: "ble_identity", kind: "message", T: BleIdentityPayload, oneof: "payload" },
@@ -25259,55 +25004,6 @@ export class AppRouterPayload extends Message<AppRouterPayload> {
 
   static equals(a: AppRouterPayload | PlainMessage<AppRouterPayload> | undefined, b: AppRouterPayload | PlainMessage<AppRouterPayload> | undefined): boolean {
     return proto3.util.equals(AppRouterPayload, a, b);
-  }
-}
-
-/**
- * @generated from message dsm.CreateGenesisPayload
- */
-export class CreateGenesisPayload extends Message<CreateGenesisPayload> {
-  /**
-   * @generated from field: string locale = 1;
-   */
-  locale = "";
-
-  /**
-   * @generated from field: string network_id = 2;
-   */
-  networkId = "";
-
-  /**
-   * @generated from field: bytes entropy = 3;
-   */
-  entropy = new Uint8Array(0);
-
-  constructor(data?: PartialMessage<CreateGenesisPayload>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.CreateGenesisPayload";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "locale", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 2, name: "network_id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 3, name: "entropy", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): CreateGenesisPayload {
-    return new CreateGenesisPayload().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): CreateGenesisPayload {
-    return new CreateGenesisPayload().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): CreateGenesisPayload {
-    return new CreateGenesisPayload().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: CreateGenesisPayload | PlainMessage<CreateGenesisPayload> | undefined, b: CreateGenesisPayload | PlainMessage<CreateGenesisPayload> | undefined): boolean {
-    return proto3.util.equals(CreateGenesisPayload, a, b);
   }
 }
 

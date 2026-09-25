@@ -31,7 +31,7 @@ pub fn build_own_entry(
     kyber_public_key: Vec<u8>,
     counter: u64,
 ) -> Result<DirectoryEntry, DsmError> {
-    let aph = dsm::core::identity::genesis_session::genesis_authority_policy_hash();
+    let aph = dsm::core::identity::genesis_v2::genesis_authority_policy_hash();
     let genesis = derive_genesis_v3_self_attested(
         wallet_seed,
         inputs.network_id,

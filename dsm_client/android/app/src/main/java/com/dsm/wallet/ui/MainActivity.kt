@@ -993,10 +993,10 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
                 return
             }
 
-            // Both genesis routes: the legacy MPC path AND the canonical mnemonic-rooted v2 path.
-            // Each must publish a fresh session snapshot after completing — without it React never
-            // sees phase=wallet_ready and the UI sits on the start screen despite the wallet existing.
-            val isLongRunningGenesisRequest = method == "createGenesis" || method == "createGenesisV2"
+            // Wallet creation must publish a fresh session snapshot after completing — without it
+            // React never sees phase=wallet_ready and the UI sits on the start screen despite the
+            // wallet existing.
+            val isLongRunningGenesisRequest = method == "createGenesisV2"
 
             // Genesis + heavy JNI run on the dedicated executor to avoid starving the general
             // bridge worker pool (Genesis v2 is mnemonic-rooted; no silicon enrollment).

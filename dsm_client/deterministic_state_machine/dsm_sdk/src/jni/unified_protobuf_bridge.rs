@@ -2571,8 +2571,8 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_forceBleCoord
                 None => return jni::sys::JNI_FALSE,
             };
             // Attempt to get the coordinator; if present, return true. We do not attempt
-            // to construct or inject a coordinator here — injection is performed by
-            // create_genesis when appropriate. This keeps the function safe and idempotent.
+            // to construct or inject a coordinator here — SDK initialization
+            // (`init_dsm_sdk`) injects it. This keeps the function safe and idempotent.
             let ok = if Handle::try_current().is_ok() {
                 Handle::current()
                     .block_on(crate::bridge::get_ble_coordinator())

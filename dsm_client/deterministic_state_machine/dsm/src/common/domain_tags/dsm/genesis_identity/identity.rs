@@ -18,7 +18,5 @@ pub const TAG_DSM_IDENTITY_ID: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/identity-id");
 pub const TAG_DSM_IDENTITY_LABEL: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/identity-label");
-pub const TAG_DSM_IDENTITY_MPC_ID: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/identity-mpc-id");
 pub const TAG_DSM_IDENTITY_SEED_ENTROPY: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/identity-seed-entropy");
