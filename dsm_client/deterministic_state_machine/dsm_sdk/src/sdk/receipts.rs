@@ -7,55 +7,11 @@
 //! (`dsm::verification::receipt_verification`); nothing here re-implements it.
 
 use dsm::types::error::DsmError;
-use dsm::types::receipt_types::{DeviceTreeAcceptanceCommitment, StitchedReceiptV2};
-
-/// Compute the receipt challenge-response target.
-///
-/// `sig_a` and `sig_b` are the responses to the proposed transition
-/// challenge. The canonical receipt commitment carries the transition facts;
-/// production bilateral flows also pass the session `commitment_hash`, so the
-/// target becomes
-/// `BLAKE3("DSM/receipt-bind-session\0" || receipt_commitment ||
-/// commitment_hash)`. The fresh EK key that signs this target is derived from
-/// h_n, C_pre, k_step (keyed under Smaster), so a copied database cannot answer the
-/// next receipt challenge on different hardware.
-///
-/// The §4.2.1 canonical commit form remains unchanged in both modes — the
-/// session binding is added at the response-target level, not in the receipt body.
-pub fn compute_receipt_challenge_response_target(
-    receipt_commitment: &[u8; 32],
-    session_binding: &[u8; 32],
-) -> [u8; 32] {
-    // ONE preimage, ONE home: the construction lives in core beside the
-    // receipt type, where the foreign acceptance verifier also uses it.
-    dsm::types::receipt_types::compute_receipt_challenge_response_target(
-        receipt_commitment,
-        session_binding,
-    )
-}
-
-/// The ONLINE recipient's B-side response target: the standard session-bound
-/// target extended with the recipient's own canonical relationship pair for
-/// the applied step —
-/// `BLAKE3("DSM/receipt-b-canonical/v1" || standard_target || b_parent || b_child)`.
-///
-/// `sig_b` over this target authenticates the pair, so the sender can pin the
-/// peer's lineage head from the delta and a substituted pair fails the
-/// countersignature check. Used only by the online return leg; the BLE and
-/// A-side paths sign the standard target unchanged.
-pub fn compute_receipt_b_canonical_target(
-    receipt_commitment: &[u8; 32],
-    session_binding: &[u8; 32],
-    b_parent_tip: &[u8; 32],
-    b_child_tip: &[u8; 32],
-) -> [u8; 32] {
-    dsm::types::receipt_types::compute_receipt_b_canonical_target(
-        receipt_commitment,
-        session_binding,
-        b_parent_tip,
-        b_child_tip,
-    )
-}
+use dsm::types::receipt_types::{
+    compute_receipt_challenge_response_target, DeviceTreeAcceptanceCommitment, StitchedReceiptV2,
+};
+#[cfg(test)]
+use dsm::verification::receipt_verification::{verify_per_step_ek_signing, BilateralSide};
 
 /// Inputs for per-step ephemeral SPHINCS+ key derivation (whitepaper §11.1/§12 Eq.14).
 ///
@@ -280,7 +236,7 @@ pub fn sign_receipt_with_per_step_ek(
 /// [`sign_receipt_with_per_step_ek`] over an EXPLICIT response target. The
 /// per-step EK derivation, Kyber encapsulation and cert are identical; only the
 /// bytes `EK_sk` signs differ. The online recipient passes
-/// [`compute_receipt_b_canonical_target`] so `sig_b` also authenticates its
+/// [`compute_receipt_b_canonical_target`](dsm::types::receipt_types::compute_receipt_b_canonical_target) so `sig_b` also authenticates its
 /// canonical pair; every other caller uses the standard-target wrapper.
 pub fn sign_receipt_with_per_step_ek_target(
     inputs: &PerStepSigningInputs,
@@ -398,170 +354,6 @@ pub fn advance_local_chain_head_after_signing(
         .map_err(|e| DsmError::invalid_operation(format!("chain-head SK advance: {e}")))?;
     }
     Ok(())
-}
-
-/// Which side of a bilateral receipt is being inspected for per-step EK
-/// signing verification.
-///
-/// Used by [`verify_per_step_ek_signing`] to select between the A-side
-/// (`ek_pk_a`/`ek_cert_a`/`sig_a`) and B-side fields on a stitched receipt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BilateralSide {
-    /// Sender / initiating party.
-    A,
-    /// Receiver / counter-signing party.
-    B,
-}
-
-/// Verify the per-step EK signing artifacts on one side of a stitched
-/// receipt (whitepaper §11.1).
-///
-/// Checks two cryptographic invariants for the requested `side`:
-///
-/// 1. **Cert chain link**: `ek_cert_{side}` is a valid SPHINCS+ signature by
-///    `expected_prev_pk` over `BLAKE3("DSM/ek-cert\0" || ek_pk_{side} || h_n)`.
-///    `expected_prev_pk` is the signer of the cert — AK_pk at relationship
-///    genesis (step 0) or `EK_pk_{n-1}` for steady-state transitions, loaded
-///    from `cert_chain_heads`.
-///
-/// 2. **Receipt response**: `sig_{side}` is a valid SPHINCS+ signature by
-///    `ek_pk_{side}` over
-///    `compute_receipt_challenge_response_target(receipt.compute_commitment(),
-///    session_binding)`. The signed target binds to the bilateral session's
-///    `commitment_hash`.
-///
-/// Returns `Ok(())` on success and a structured `DsmError` on the first
-/// failed check (cert link error vs. signature error are distinguished in the
-/// error message). The Kyber ciphertext (`kyber_ct_{side}`) is NOT checked
-/// here — it is consumed by recipient-side k_step recovery, not by the
-/// sender's signature verification.
-///
-/// Use this from the receiver's bilateral confirm handler to verify the
-/// sender's A-side signing before applying the advance, and symmetrically
-/// from the sender's commit-response handler when the protocol carries the
-/// counter-signed receipt back. Both BLE handler call sites should pass
-/// `&commitment_hash` for the session binding.
-pub fn verify_per_step_ek_signing(
-    receipt: &StitchedReceiptV2,
-    side: BilateralSide,
-    expected_prev_pk: &[u8],
-    h_n: &[u8; 32],
-    session_binding: &[u8; 32],
-) -> Result<(), DsmError> {
-    let commitment = receipt.compute_commitment()?;
-    let signing_target = compute_receipt_challenge_response_target(&commitment, session_binding);
-    verify_per_step_ek_signing_target(receipt, side, expected_prev_pk, h_n, &signing_target)
-}
-
-/// [`verify_per_step_ek_signing`] against an EXPLICIT response target: the
-/// cert-chain link is checked exactly as before; `sig_{side}` must verify
-/// under `ek_pk_{side}` over `signing_target`. The sender's online finalizer
-/// passes [`compute_receipt_b_canonical_target`] recomputed from the delta's
-/// pair, so a pair the recipient did not sign fails here.
-pub fn verify_per_step_ek_signing_target(
-    receipt: &StitchedReceiptV2,
-    side: BilateralSide,
-    expected_prev_pk: &[u8],
-    h_n: &[u8; 32],
-    signing_target: &[u8; 32],
-) -> Result<(), DsmError> {
-    use dsm::crypto::ephemeral_key::verify_ek_cert;
-    use dsm::crypto::sphincs::sphincs_verify;
-
-    let (ek_pk, ek_cert, sig, label) = match side {
-        BilateralSide::A => (&receipt.ek_pk_a, &receipt.ek_cert_a, &receipt.sig_a, "A"),
-        BilateralSide::B => (&receipt.ek_pk_b, &receipt.ek_cert_b, &receipt.sig_b, "B"),
-    };
-
-    if ek_pk.is_empty() {
-        return Err(DsmError::invalid_operation(format!(
-            "verify_per_step_ek_signing: receipt missing ek_pk_{label}"
-        )));
-    }
-    if ek_cert.is_empty() {
-        return Err(DsmError::invalid_operation(format!(
-            "verify_per_step_ek_signing: receipt missing ek_cert_{label}"
-        )));
-    }
-    if sig.is_empty() {
-        return Err(DsmError::invalid_operation(format!(
-            "verify_per_step_ek_signing: receipt missing sig_{label}"
-        )));
-    }
-    if expected_prev_pk.is_empty() {
-        return Err(DsmError::invalid_operation(format!(
-            "verify_per_step_ek_signing: expected_prev_pk for {label}-side is empty — \
-             caller must supply AK_pk at step 0 or the prior chain head EK_pk for steady state"
-        )));
-    }
-
-    // Step 1: cert chain link (prev_sk over hash(ek_pk_next || h_n)).
-    let cert_ok = verify_ek_cert(expected_prev_pk, ek_pk, h_n, ek_cert).map_err(|e| {
-        DsmError::crypto(
-            format!("verify_per_step_ek_signing: cert chain verify error ({label}-side): {e}"),
-            None::<std::io::Error>,
-        )
-    })?;
-    if !cert_ok {
-        return Err(DsmError::invalid_operation(format!(
-            "verify_per_step_ek_signing: ek_cert_{label} does NOT chain ek_pk_{label} \
-             back to expected_prev_pk over h_n — sig_{label} cannot be trusted"
-        )));
-    }
-
-    // Step 2: receipt response using ek_pk over the caller's response target.
-    // Bilateral ingress requires a session binding so signatures cannot be
-    // replayed across sessions.
-    let sig_ok = sphincs_verify(ek_pk, signing_target, sig).map_err(|e| {
-        DsmError::crypto(
-            format!("verify_per_step_ek_signing: sig verify error ({label}-side): {e}"),
-            None::<std::io::Error>,
-        )
-    })?;
-    if !sig_ok {
-        return Err(DsmError::invalid_operation(format!(
-            "verify_per_step_ek_signing: sig_{label} does NOT verify under ek_pk_{label} \
-             over receipt challenge-response target — check that signer used the same \
-             commitment_hash"
-        )));
-    }
-
-    Ok(())
-}
-
-/// Outcome of [`verify_per_step_ek_signing_strict_aware`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PerStepEkVerifyOutcome {
-    /// Receipt carried per-step EK artifacts and they verified successfully.
-    Verified,
-}
-
-/// Required per-step EK verification wrapper.
-///
-/// Missing `ek_pk`, `ek_cert`, or receipt signature artifacts are always a
-/// protocol error. Parent/root inclusion alone is not spend authority.
-pub fn verify_per_step_ek_signing_strict_aware(
-    receipt: &StitchedReceiptV2,
-    side: BilateralSide,
-    expected_prev_pk: &[u8],
-    h_n: &[u8; 32],
-    session_binding: &[u8; 32],
-) -> Result<PerStepEkVerifyOutcome, DsmError> {
-    let (ek_pk, ek_cert, sig, label) = match side {
-        BilateralSide::A => (&receipt.ek_pk_a, &receipt.ek_cert_a, &receipt.sig_a, "A"),
-        BilateralSide::B => (&receipt.ek_pk_b, &receipt.ek_cert_b, &receipt.sig_b, "B"),
-    };
-
-    let has_artifacts = !ek_pk.is_empty() && !ek_cert.is_empty() && !sig.is_empty();
-    if !has_artifacts {
-        return Err(DsmError::invalid_operation(format!(
-            "receipt carries no §11.1 per-step EK {label}-side artifacts \
-             (ek_pk_{label} / ek_cert_{label} / sig_{label}); rejecting"
-        )));
-    }
-
-    verify_per_step_ek_signing(receipt, side, expected_prev_pk, h_n, session_binding)?;
-    Ok(PerStepEkVerifyOutcome::Verified)
 }
 
 /// Build the canonical receipt of one relationship step (§4.2).
@@ -1497,7 +1289,7 @@ mod tests {
             load_cert_chain_head_pubkey(&sender_rel_key, CertChainSide::Counterparty)
                 .unwrap()
                 .expect("Counterparty row should be initialized");
-        verify_per_step_ek_signing_strict_aware(
+        verify_per_step_ek_signing(
             &receipt_step0,
             BilateralSide::A,
             &prev_pk_loaded,
@@ -1565,7 +1357,7 @@ mod tests {
             prev_pk_loaded_step1, out0.ek_pk,
             "Counterparty must now point to EK_pk_0, not AK_pk"
         );
-        verify_per_step_ek_signing_strict_aware(
+        verify_per_step_ek_signing(
             &receipt_step1,
             BilateralSide::A,
             &prev_pk_loaded_step1,
@@ -1576,7 +1368,7 @@ mod tests {
 
         // If step 1 is checked against the relationship-genesis AK_pk
         // instead of the advanced chain head, verification must fail.
-        let stale_check = verify_per_step_ek_signing_strict_aware(
+        let stale_check = verify_per_step_ek_signing(
             &receipt_step1,
             BilateralSide::A,
             &sender_ak_pk,
@@ -2028,7 +1820,7 @@ mod tests {
                     step - 1
                 );
             }
-            verify_per_step_ek_signing_strict_aware(
+            verify_per_step_ek_signing(
                 &receipt,
                 BilateralSide::A,
                 &prev_pk_a_loaded,
@@ -2093,7 +1885,7 @@ mod tests {
             } else {
                 assert_eq!(prev_pk_b_loaded, ek_pks_b[(step - 1) as usize]);
             }
-            verify_per_step_ek_signing_strict_aware(
+            verify_per_step_ek_signing(
                 &receipt,
                 BilateralSide::B,
                 &prev_pk_b_loaded,
@@ -2165,7 +1957,7 @@ mod tests {
         // (the head right before this signing). Any earlier head
         // (ak_pk_a, ek_pks_a[0], ek_pks_a[1]) MUST fail the cert link.
         for (idx, stale_pk) in [&ak_pk_a, &ek_pks_a[0], &ek_pks_a[1]].iter().enumerate() {
-            let result = verify_per_step_ek_signing_strict_aware(
+            let result = verify_per_step_ek_signing(
                 &substitution_check_receipt,
                 BilateralSide::A,
                 stale_pk,
@@ -2179,7 +1971,7 @@ mod tests {
         }
     }
 
-    // ── verify_per_step_ek_signing_strict_aware ────────────────────────
+    // ── verify_per_step_ek_signing ─────────────────────────────────────
 
     /// Session-bound verification accepts a correctly signed receipt.
     #[test]
@@ -2225,7 +2017,7 @@ mod tests {
         receipt.set_kyber_ct_a(out.kyber_ct);
         receipt.add_sig_a(out.sig);
 
-        let outcome = verify_per_step_ek_signing_strict_aware(
+        verify_per_step_ek_signing(
             &receipt,
             BilateralSide::A,
             &ak_pk,
@@ -2233,7 +2025,6 @@ mod tests {
             &session_binding,
         )
         .expect("session-bound A-side must verify");
-        assert_eq!(outcome, PerStepEkVerifyOutcome::Verified);
     }
 
     /// A receipt without per-step EK artifacts always fails closed.
@@ -2255,7 +2046,7 @@ mod tests {
             vec![0x09; 16],
         );
 
-        let err = verify_per_step_ek_signing_strict_aware(
+        let err = verify_per_step_ek_signing(
             &receipt,
             BilateralSide::A,
             &[0x99u8; 32],
@@ -2279,7 +2070,7 @@ mod tests {
             build_signed_receipt_for_verifier_test(BilateralSide::A, &[0xC3; 32]);
         receipt.parent_root = [0xDE; 32];
 
-        let err = verify_per_step_ek_signing_strict_aware(
+        let err = verify_per_step_ek_signing(
             &receipt,
             BilateralSide::A,
             &ak_pk,
@@ -2314,7 +2105,7 @@ mod tests {
             &TEST_SESSION_BINDING,
         )
         .expect_err("empty sig_a must fail-closed");
-        assert!(err.to_string().contains("missing sig_A"));
+        assert!(err.to_string().contains("per-step EK A-side artifacts"));
 
         // B-side never signed for this receipt, so all B fields are empty.
         let err_b = verify_per_step_ek_signing(
@@ -2325,7 +2116,7 @@ mod tests {
             &TEST_SESSION_BINDING,
         )
         .expect_err("requesting B-side verification on an A-only receipt must fail-closed");
-        assert!(err_b.to_string().contains("missing ek_pk_B"));
+        assert!(err_b.to_string().contains("per-step EK B-side artifacts"));
     }
 
     // ── encode_protocol_transition_payload ──

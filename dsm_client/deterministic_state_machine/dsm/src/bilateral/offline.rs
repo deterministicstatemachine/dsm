@@ -12,7 +12,12 @@
 //! nothing.
 
 use crate::core::bilateral_transaction_manager::{
-    bilateral_sign_message, operation_requires_offline_bearer, BilateralPreCommitment,
+    bilateral_sign_message, compute_precommit, compute_successor_tip,
+    operation_requires_offline_bearer, BilateralPreCommitment,
+};
+use crate::types::receipt_types::{DeviceTreeAcceptanceCommitment, StitchedReceiptV2};
+use crate::verification::receipt_verification::{
+    verify_per_step_ek_signing, verify_receipt_state, BilateralSide,
 };
 use crate::crypto::signatures::SignatureKeyPair;
 use crate::types::error::DsmError;
@@ -222,6 +227,108 @@ pub fn decide_prepare_response(
     Ok(Acceptance {
         signature: claims.signature.to_vec(),
         receiver_challenge,
+    })
+}
+
+/// The largest stitched receipt a confirm may carry (§11.1 strict-fail).
+pub const MAX_STITCHED_RECEIPT_BYTES: usize = 131_072;
+
+/// What a confirm claims: its sender's σ_A over the commitment, the step's
+/// stitched receipt, the entropy the sender derived the step with, and the
+/// successor tip h_{n+1} it computed.
+#[derive(Clone, Copy, Debug)]
+pub struct ConfirmClaims<'a> {
+    pub signature: &'a [u8],
+    pub receipt: &'a [u8],
+    pub pre_entropy: &'a [u8],
+    pub successor_tip: Option<[u8; 32]>,
+}
+
+/// What the receiver holds for a step it accepted.
+#[derive(Clone, Copy, Debug)]
+pub struct AcceptedStep<'a> {
+    pub commitment_hash: [u8; 32],
+    pub operation: &'a Operation,
+    /// The relationship tip h_n this device holds durably.
+    pub held_tip: [u8; 32],
+    pub receiver_device_id: [u8; 32],
+    /// The Device Tree commitment `R_G` kept for the sender.
+    pub sender_device_tree_root: [u8; 32],
+    /// The sender's EK chain head on this relationship, once a step has been
+    /// received; before that, its pinned AK signs the first EK.
+    pub sender_chain_head: Option<&'a [u8]>,
+}
+
+/// A confirm the receiver may commit.
+#[derive(Debug)]
+pub struct VerifiedConfirm {
+    pub receipt: StitchedReceiptV2,
+    pub successor_tip: [u8; 32],
+}
+
+/// The receiver's decision on a confirm for a step it accepted: σ_A under
+/// the sender's pinned AK; the stitched receipt from this sender to this
+/// device, holding its state rules against the sender's Device Tree
+/// commitment and its A-side EK chaining from the sender's chain head; and
+/// the successor tip reproduced from the held tip, the operation and the
+/// sender's entropy. The receipt's tips are the sender's own (per-device)
+/// lineage and are bound by its EK chain, never compared with the
+/// relationship tip.
+pub fn decide_confirm(
+    claims: ConfirmClaims<'_>,
+    step: AcceptedStep<'_>,
+    sender: &PinnedPeer<'_>,
+) -> Result<VerifiedConfirm, DsmError> {
+    if claims.receipt.len() > MAX_STITCHED_RECEIPT_BYTES {
+        return Err(DsmError::invalid_operation(format!(
+            "stitched_receipt exceeds 128 KiB strict-fail limit (§11.1): {} bytes",
+            claims.receipt.len()
+        )));
+    }
+    verify_step_signature(sender, &step.commitment_hash, claims.signature, "confirm")?;
+    if claims.receipt.is_empty() {
+        return Err(DsmError::invalid_operation(
+            "incoming bilateral confirm omits stitched_receipt; rejecting",
+        ));
+    }
+    let receipt = StitchedReceiptV2::from_canonical_protobuf(claims.receipt).map_err(|e| {
+        DsmError::invalid_operation(format!(
+            "bilateral confirm: the stitched receipt does not decode: {e}"
+        ))
+    })?;
+    if receipt.devid_a != sender.device_id || receipt.devid_b != step.receiver_device_id {
+        return Err(DsmError::invalid_operation(
+            "bilateral confirm: the receipt is not from this session's sender to this device",
+        ));
+    }
+    verify_receipt_state(
+        &receipt,
+        &DeviceTreeAcceptanceCommitment::from_root(step.sender_device_tree_root),
+    )?;
+    verify_per_step_ek_signing(
+        &receipt,
+        BilateralSide::A,
+        step.sender_chain_head.unwrap_or(sender.signing_key),
+        &receipt.parent_tip,
+        &step.commitment_hash,
+    )?;
+
+    let pre_entropy = <[u8; 32]>::try_from(claims.pre_entropy).map_err(|_| {
+        DsmError::invalid_operation("pre_entropy must be present and 32 bytes in confirm")
+    })?;
+    let successor_tip = claims
+        .successor_tip
+        .ok_or_else(|| DsmError::invalid_operation("missing shared_chain_tip_new in confirm"))?;
+    let op_bytes = step.operation.to_bytes();
+    let sigma = compute_precommit(&step.held_tip, &op_bytes, &pre_entropy);
+    if compute_successor_tip(&step.held_tip, &op_bytes, &pre_entropy, &sigma) != successor_tip {
+        return Err(DsmError::invalid_operation(
+            "h_{n+1} mismatch: pre_entropy cannot reproduce shared_chain_tip_new (§4.1)",
+        ));
+    }
+    Ok(VerifiedConfirm {
+        receipt,
+        successor_tip,
     })
 }
 
@@ -509,6 +616,216 @@ mod tests {
         refused(
             decide(commitment, &receiver.sign_step(&commitment), &[1, 2, 3]),
             "not 32 bytes",
+        );
+    }
+
+    /// A confirm for `step`, genuinely built: the sender's first step toward
+    /// the receiver from a real advance, its A-side EK certified by the
+    /// sender's AK and answering the session-bound target, and σ_A.
+    struct BuiltConfirm {
+        sender: Peer,
+        receiver_device_id: [u8; 32],
+        commitment_hash: [u8; 32],
+        receipt: Vec<u8>,
+        device_tree_root: [u8; 32],
+        held_tip: [u8; 32],
+        pre_entropy: [u8; 32],
+        successor_tip: [u8; 32],
+    }
+
+    fn built_confirm() -> BuiltConfirm {
+        use crate::common::device_tree::DeviceTree;
+        use crate::core::bilateral_transaction_manager::compute_smt_key;
+        use crate::crypto::ephemeral_key::{generate_ephemeral_keypair, sign_ek_cert};
+        use crate::types::device_state::DeviceState;
+        use crate::types::receipt_types::compute_receipt_challenge_response_target;
+
+        let sender = Peer::new(0x61);
+        let receiver_device_id = [0x62u8; 32];
+        let commitment_hash = [0x63u8; 32];
+        let head = DeviceState::new(sender.genesis, sender.device_id, vec![0x77u8; 64])
+            .establish_relationship(receiver_device_id)
+            .expect("establish");
+        let outcome = head
+            .advance(
+                compute_smt_key(&sender.device_id, &receiver_device_id),
+                receiver_device_id,
+                Operation::Noop,
+                &[],
+                None,
+                None,
+            )
+            .expect("the first step");
+        let parent_tip = outcome
+            .smt_proofs
+            .parent_proof
+            .value
+            .expect("the path carries the established leaf");
+        let device_tree = DeviceTree::single(sender.device_id);
+        let mut receipt = StitchedReceiptV2::new(
+            sender.genesis,
+            sender.device_id,
+            receiver_device_id,
+            parent_tip,
+            outcome.new_chain_state.compute_chain_tip(),
+            outcome.smt_proofs.pre_root,
+            outcome.child_r_a,
+            outcome.smt_proofs.parent_proof.to_bytes(),
+            device_tree
+                .proof(&sender.device_id)
+                .expect("device proof")
+                .to_bytes(),
+        );
+        receipt.set_transition_entropy(outcome.transition_entropy());
+        let commitment = receipt.compute_commitment().expect("commitment");
+        let (ek_pk, ek_sk) = generate_ephemeral_keypair(&[0x64u8; 32]).expect("ek");
+        receipt.set_ek_cert_a(
+            sign_ek_cert(sender.keys.secret_key(), &ek_pk, &receipt.parent_tip).expect("cert"),
+        );
+        receipt.set_ek_pk_a(ek_pk);
+        receipt.add_sig_a(
+            crate::crypto::sphincs::sphincs_sign(
+                &ek_sk,
+                &compute_receipt_challenge_response_target(&commitment, &commitment_hash),
+            )
+            .expect("sig_a"),
+        );
+
+        let held_tip = [0x70u8; 32];
+        let pre_entropy = [0x44u8; 32];
+        let op_bytes = Operation::Noop.to_bytes();
+        let successor_tip = compute_successor_tip(
+            &held_tip,
+            &op_bytes,
+            &pre_entropy,
+            &compute_precommit(&held_tip, &op_bytes, &pre_entropy),
+        );
+        BuiltConfirm {
+            receiver_device_id,
+            commitment_hash,
+            receipt: receipt.to_full_protobuf().expect("encode"),
+            device_tree_root: device_tree.root(),
+            held_tip,
+            pre_entropy,
+            successor_tip,
+            sender,
+        }
+    }
+
+    /// The receiver commits only a confirm its pinned sender signed, whose
+    /// receipt is from that sender to this device and holds (state rules,
+    /// A-side EK chaining from the sender's head), and whose successor tip
+    /// the held tip, the operation and the sender's entropy reproduce.
+    /// MUTATION CONTROLS: dropping the σ_A check, the receipt's device
+    /// binding, or the successor recompute lets a refused confirm through and
+    /// turns this red.
+    #[test]
+    fn a_confirm_is_committed_only_as_its_sender_signed_and_derived_it() {
+        let c = built_confirm();
+        let operation = Operation::Noop;
+        let other = Peer::new(0x65);
+        let decide = |signature: &[u8],
+                      receipt: &[u8],
+                      pre_entropy: &[u8],
+                      successor_tip: [u8; 32],
+                      receiver_device_id: [u8; 32],
+                      sender_chain_head: Option<&[u8]>| {
+            decide_confirm(
+                ConfirmClaims {
+                    signature,
+                    receipt,
+                    pre_entropy,
+                    successor_tip: Some(successor_tip),
+                },
+                AcceptedStep {
+                    commitment_hash: c.commitment_hash,
+                    operation: &operation,
+                    held_tip: c.held_tip,
+                    receiver_device_id,
+                    sender_device_tree_root: c.device_tree_root,
+                    sender_chain_head,
+                },
+                &c.sender.pinned(),
+            )
+        };
+        let sigma_a = c.sender.sign_step(&c.commitment_hash);
+
+        let verified = decide(
+            &sigma_a,
+            &c.receipt,
+            &c.pre_entropy,
+            c.successor_tip,
+            c.receiver_device_id,
+            None,
+        )
+        .expect("the sender's own confirm");
+        assert_eq!(verified.successor_tip, c.successor_tip);
+
+        refused(
+            decide(
+                &[],
+                &c.receipt,
+                &c.pre_entropy,
+                c.successor_tip,
+                c.receiver_device_id,
+                None,
+            ),
+            "carries no signature",
+        );
+        refused(
+            decide(
+                &other.sign_step(&c.commitment_hash),
+                &c.receipt,
+                &c.pre_entropy,
+                c.successor_tip,
+                c.receiver_device_id,
+                None,
+            ),
+            "not signed over its commitment by the pinned AK",
+        );
+        refused(
+            decide(
+                &sigma_a,
+                &c.receipt,
+                &c.pre_entropy,
+                c.successor_tip,
+                [0x66u8; 32],
+                None,
+            ),
+            "not from this session's sender to this device",
+        );
+        refused(
+            decide(
+                &sigma_a,
+                &c.receipt,
+                &c.pre_entropy,
+                c.successor_tip,
+                c.receiver_device_id,
+                Some(other.keys.public_key()),
+            ),
+            "does NOT chain",
+        );
+        refused(
+            decide(
+                &sigma_a,
+                &c.receipt,
+                &[0x45u8; 32],
+                c.successor_tip,
+                c.receiver_device_id,
+                None,
+            ),
+            "h_{n+1} mismatch",
+        );
+        refused(
+            decide(
+                &sigma_a,
+                &vec![0u8; MAX_STITCHED_RECEIPT_BYTES + 1],
+                &c.pre_entropy,
+                c.successor_tip,
+                c.receiver_device_id,
+                None,
+            ),
+            "128 KiB",
         );
     }
 }

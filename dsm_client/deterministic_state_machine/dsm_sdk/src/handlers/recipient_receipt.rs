@@ -348,10 +348,9 @@ pub fn generate_b_artifacts_from_inbound(
     wrap_key: &[u8; 32],
     b_pair: ([u8; 32], [u8; 32]),
 ) -> Result<GeneratedBArtifacts> {
-    use crate::sdk::receipts::{
-        compute_receipt_b_canonical_target, sign_receipt_with_per_step_ek_target,
-        verify_per_step_ek_signing_target, BilateralSide, PerStepSigningInputs,
-    };
+    use crate::sdk::receipts::{sign_receipt_with_per_step_ek_target, PerStepSigningInputs};
+    use dsm::types::receipt_types::compute_receipt_b_canonical_target;
+    use dsm::verification::receipt_verification::{verify_per_step_ek_signing_target, BilateralSide};
     use crate::storage::client_db::cert_chain::{
         encrypt_chain_sk, load_cert_chain_head_pubkey, CertChainSide,
     };

@@ -27,9 +27,8 @@
 //! relationship id; the relationship is identified by `compute_smt_key(devid_a,
 //! devid_b)` and matched to the pending gate by counterparty device id.
 
-use crate::sdk::receipts::{
-    compute_receipt_b_canonical_target, verify_per_step_ek_signing_target, BilateralSide,
-};
+use dsm::types::receipt_types::compute_receipt_b_canonical_target;
+use dsm::verification::receipt_verification::{verify_per_step_ek_signing_target, BilateralSide};
 use crate::storage::client_db::sender_proposal::SenderOnlineProposal;
 use crate::storage::client_db::{load_cert_chain_head_pubkey, CertChainSide};
 use anyhow::{anyhow, Result};

@@ -158,9 +158,9 @@ pub(crate) fn verify_inbound_receipt_sig_a(
         }
     };
 
-    crate::sdk::receipts::verify_per_step_ek_signing(
+    dsm::verification::receipt_verification::verify_per_step_ek_signing(
         receipt,
-        crate::sdk::receipts::BilateralSide::A,
+        dsm::verification::receipt_verification::BilateralSide::A,
         &expected_prev_pk,
         &receipt.parent_tip,
         commitment,

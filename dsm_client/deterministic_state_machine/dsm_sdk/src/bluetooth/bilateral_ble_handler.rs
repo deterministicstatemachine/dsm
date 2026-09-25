@@ -3503,9 +3503,9 @@ impl BilateralBleHandler {
                             }
                         };
 
-                        crate::sdk::receipts::verify_per_step_ek_signing_strict_aware(
+                        dsm::verification::receipt_verification::verify_per_step_ek_signing(
                             &counter_signed,
-                            crate::sdk::receipts::BilateralSide::B,
+                            dsm::verification::receipt_verification::BilateralSide::B,
                             &expected_prev_pk,
                             &counter_signed.parent_tip,
                             &commitment_hash,
@@ -3603,15 +3603,6 @@ impl BilateralBleHandler {
         // Extract confirm request
         let confirm_request = self.extract_confirm_request(&envelope)?;
 
-        // §11.1 strict-fail: stitched_receipt MUST be ≤128 KiB.
-        const RECEIPT_SIZE_LIMIT: usize = 131_072; // 128 KiB
-        if confirm_request.stitched_receipt.len() > RECEIPT_SIZE_LIMIT {
-            return Err(DsmError::invalid_operation(format!(
-                "stitched_receipt exceeds 128 KiB strict-fail limit (§11.1): {} bytes",
-                confirm_request.stitched_receipt.len()
-            )));
-        }
-
         let commitment_hash: [u8; 32] = confirm_request
             .commitment_hash
             .as_ref()
@@ -3690,67 +3681,31 @@ impl BilateralBleHandler {
             return Err(DsmError::invalid_operation("session not in accepted phase"));
         }
 
-        // Verify sender's signature (σ_A) against DSM_BILATERAL_SIGN || commitment_hash
-        let counterparty_pubkey = {
-            let manager = self.bilateral_tx_manager.read().await;
-            manager
-                .get_contact(&session.counterparty_device_id)
-                .ok_or_else(|| DsmError::invalid_operation("missing counterparty contact"))?
-                .public_key
-                .clone()
-        };
-
-        // §ISSUE-B4 FIX: use canonical "DSM/<domain>\0" format.
-        let mut signature_msg = Vec::with_capacity(22 + 32);
-        signature_msg.extend_from_slice(b"DSM/bilateral-sign\0");
-        signature_msg.extend_from_slice(&commitment_hash);
-
-        if confirm_request.sender_signature.is_empty() {
-            return Err(DsmError::invalid_operation(
-                "missing sender_signature in confirm",
-            ));
-        }
-
-        if !crate::crypto::signatures::SignatureKeyPair::verify_raw(
-            &signature_msg,
-            &confirm_request.sender_signature,
-            &counterparty_pubkey,
-        )
-        .map_err(|e| {
-            DsmError::crypto(
-                format!("verify sender signature (σ_A) failed: {e}"),
-                None::<std::io::Error>,
-            )
-        })? {
-            return Err(DsmError::invalid_operation(
-                "invalid sender signature (σ_A)",
-            ));
-        }
-
-        // The stitched receipt is the step's one statement of the sender's
-        // state (§4.2–4.3): its relationship path authenticates h_n under the
-        // sender's pre-root r_A, and the same siblings folded with h_{n+1} are
-        // r'_A; its device proof puts the sender under the Device Tree
-        // commitment this receiver kept for the contact — never one the
-        // confirm supplies.
-        if confirm_request.stitched_receipt.is_empty() {
-            return Err(DsmError::invalid_operation(
-                "incoming bilateral confirm omits stitched_receipt; rejecting",
-            ));
-        }
-        let receipt = dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(
-            &confirm_request.stitched_receipt,
-        )
-        .map_err(|e| {
-            DsmError::invalid_operation(format!(
-                "bilateral confirm: the stitched receipt does not decode: {e}"
-            ))
-        })?;
-        if receipt.devid_a != session.counterparty_device_id || receipt.devid_b != self.device_id {
-            return Err(DsmError::invalid_operation(
-                "bilateral confirm: the receipt is not from this session's sender to this device",
-            ));
-        }
+        // Core decides on the confirm from the sender's pinned identity, the
+        // tip this device holds durably, the Device Tree commitment kept for
+        // the sender and the sender's EK chain head on this relationship.
+        let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
+            &self.device_id,
+            &session.counterparty_device_id,
+        );
+        let sender_contact =
+            crate::storage::client_db::get_contact_by_device_id(&session.counterparty_device_id)
+                .map_err(|e| {
+                    DsmError::storage(format!("the sender's contact: {e}"), None::<std::io::Error>)
+                })?
+                .ok_or_else(|| DsmError::relationship("the sender is not a contact"))?;
+        let sender_genesis: [u8; 32] =
+            sender_contact
+                .genesis_hash
+                .as_slice()
+                .try_into()
+                .map_err(|_| {
+                    DsmError::invalid_operation("the sender's pinned genesis is not 32 bytes")
+                })?;
+        let held_tip = stored_contact_tip(crate::storage::client_db::get_contact_chain_tip(
+            &session.counterparty_device_id,
+        ))?
+        .ok_or_else(|| DsmError::relationship("the sender is not a contact"))?;
         let sender_device_tree = crate::storage::client_db::get_contact_device_tree_root(
             &session.counterparty_device_id,
         )?
@@ -3759,32 +3714,7 @@ impl BilateralBleHandler {
                 "bilateral confirm: no Device Tree commitment is kept for the sender",
             )
         })?;
-        dsm::verification::receipt_verification::verify_receipt_state(
-            &receipt,
-            &dsm::types::receipt_types::DeviceTreeAcceptanceCommitment::from_root(
-                sender_device_tree,
-            ),
-        )?;
-
-        // §11.1 per-step EK signing verification: the receiver checks the
-        // sender's A-side artifacts on the stitched receipt before applying
-        // the advance. `expected_prev_pk` is the sender's prior cert-chain
-        // head if recorded (steady state), else AK_pk from the contact record
-        // (relationship genesis root); ek_cert_a must chain ek_pk_a back to it
-        // over h_n (= receipt.parent_tip), and sig_a must verify under ek_pk_a
-        // over the receipt's commitment.
-        //
-        // Captured for the post-commit Counterparty chain-head advance: the
-        // sender's outbound chain has moved to this EK_pk and is mirrored
-        // locally so the next step's `expected_prev_pk` resolves to the fresh
-        // head, not the relationship-genesis AK_pk.
-        let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
-            &self.device_id,
-            &session.counterparty_device_id,
-        );
-        // From the receiver's viewpoint, the SENDER is the counterparty in the
-        // cert-chain-heads table.
-        let prev_pk_from_chain = crate::storage::client_db::load_cert_chain_head_pubkey(
+        let sender_chain_head = crate::storage::client_db::load_cert_chain_head_pubkey(
             &rel_key,
             crate::storage::client_db::CertChainSide::Counterparty,
         )
@@ -3794,74 +3724,38 @@ impl BilateralBleHandler {
                 None::<std::io::Error>,
             )
         })?;
-        let had_cp_head = prev_pk_from_chain.is_some();
-        let expected_prev_pk = prev_pk_from_chain.unwrap_or_else(|| counterparty_pubkey.clone());
-        debug!(
-            "[BILATERAL] §11.1 A-side verify: counterparty_head_row={} expected_prev_pk={} parent_tip={}",
-            had_cp_head,
-            bytes_to_base32(&expected_prev_pk[..8.min(expected_prev_pk.len())]),
-            bytes_to_base32(&receipt.parent_tip[..8]),
-        );
-        crate::sdk::receipts::verify_per_step_ek_signing_strict_aware(
-            &receipt,
-            crate::sdk::receipts::BilateralSide::A,
-            &expected_prev_pk,
-            &receipt.parent_tip,
-            // §11.1 Item 7: receipt's sig_a must verify under the
-            // challenge-response target for this bilateral session's
-            // commitment_hash.
-            &commitment_hash,
+        let verified = dsm::bilateral::offline::decide_confirm(
+            dsm::bilateral::offline::ConfirmClaims {
+                signature: &confirm_request.sender_signature,
+                receipt: &confirm_request.stitched_receipt,
+                pre_entropy: &confirm_request.pre_entropy,
+                successor_tip: confirm_request
+                    .shared_chain_tip_new
+                    .as_ref()
+                    .and_then(|h| <[u8; 32]>::try_from(h.v.as_slice()).ok()),
+            },
+            dsm::bilateral::offline::AcceptedStep {
+                commitment_hash,
+                operation: &session.operation,
+                held_tip,
+                receiver_device_id: self.device_id,
+                sender_device_tree_root: sender_device_tree,
+                sender_chain_head: sender_chain_head.as_deref(),
+            },
+            &dsm::bilateral::offline::PinnedPeer {
+                device_id: session.counterparty_device_id,
+                genesis: sender_genesis,
+                signing_key: &sender_contact.public_key,
+                kyber_public_key: &sender_contact.kyber_public_key,
+            },
         )?;
-        info!(
-            "[BILATERAL] §11.1 per-step EK A-side verification PASS for commitment {}",
-            bytes_to_base32(&commitment_hash[..8])
-        );
+        let dsm::bilateral::offline::VerifiedConfirm {
+            receipt,
+            successor_tip: new_chain_tip,
+        } = verified;
+        // The sender's outbound EK chain has moved to this key; it is mirrored
+        // after the commit so the next step chains from it.
         let verified_a_side_ek_pk: Vec<u8> = receipt.ek_pk_a.clone();
-
-        // Extract h_{n+1} from confirm request
-        let new_chain_tip: [u8; 32] = confirm_request
-            .shared_chain_tip_new
-            .as_ref()
-            .ok_or_else(|| DsmError::invalid_operation("missing shared_chain_tip_new in confirm"))?
-            .v
-            .clone()
-            .try_into()
-            .map_err(|_| DsmError::invalid_operation("shared_chain_tip_new must be 32 bytes"))?;
-
-        // RECEIVER-SIDE FINALIZE: route through canonical advance chokepoint
-        // (§2.2 Per-Device SMT, §4.3 acceptance, §8 balance binding).
-
-        // §C1: Verify h_{n+1} = compute_successor_tip(h_n, op, pre_entropy, σ)
-        // using the sender's pre_entropy. A mismatch means the sender forged
-        // shared_chain_tip_new without using the agreed entropy (§4.1).
-        if confirm_request.pre_entropy.len() != 32 {
-            return Err(DsmError::invalid_operation(
-                "pre_entropy must be present and 32 bytes in confirm",
-            ));
-        }
-        let pre_entropy: [u8; 32] = confirm_request
-            .pre_entropy
-            .clone()
-            .try_into()
-            .map_err(|_| DsmError::invalid_operation("pre_entropy must be 32 bytes"))?;
-
-        let h_n = {
-            let manager = self.bilateral_tx_manager.read().await;
-            let anchor = manager
-                .get_relationship(&session.counterparty_device_id)
-                .ok_or_else(|| {
-                    DsmError::relationship("remote device relationship not found".to_string())
-                })?;
-            anchor.chain_tip
-        };
-        let op_bytes = session.operation.to_bytes();
-        let expected_sigma = compute_precommit(&h_n, &op_bytes, &pre_entropy);
-        let expected_h_next = compute_successor_tip(&h_n, &op_bytes, &pre_entropy, &expected_sigma);
-        if expected_h_next != new_chain_tip {
-            return Err(DsmError::invalid_operation(
-                "h_{n+1} mismatch: pre_entropy cannot reproduce shared_chain_tip_new (§4.1)",
-            ));
-        }
 
         // Offline-bearer acceptance (OFFLINE_BEARER_REQUIRED transfers only). Canonical predicate:
         // the v2 Software-Authority / Hardware-Identity `accept_offline` via `anchor_accept` —

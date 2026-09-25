@@ -245,6 +245,95 @@ fn verify_sphincs_signature(
     crate::crypto::signatures::SignatureKeyPair::verify_raw(commitment, signature, public_key)
 }
 
+/// The side of a stitched receipt: its sender (A) or its receiver (B).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BilateralSide {
+    /// The sender, which initiates the step.
+    A,
+    /// The receiver, which counter-signs it.
+    B,
+}
+
+/// One side's per-step EK artifacts on `receipt` (§11.1) answer the standard
+/// session-bound response target of the receipt's commitment. See
+/// [`verify_per_step_ek_signing_target`].
+pub fn verify_per_step_ek_signing(
+    receipt: &StitchedReceiptV2,
+    side: BilateralSide,
+    expected_prev_pk: &[u8],
+    h_n: &[u8; 32],
+    session_binding: &[u8; 32],
+) -> Result<(), DsmError> {
+    let commitment = receipt.compute_commitment()?;
+    let signing_target = crate::types::receipt_types::compute_receipt_challenge_response_target(
+        &commitment,
+        session_binding,
+    );
+    verify_per_step_ek_signing_target(receipt, side, expected_prev_pk, h_n, &signing_target)
+}
+
+/// One side's per-step EK artifacts on `receipt` (§11.1), against an explicit
+/// response target:
+///
+/// 1. `ek_cert_{side}` is `expected_prev_pk`'s signature over
+///    `ek_pk_{side} ‖ h_n` — `expected_prev_pk` is the side's AK at the
+///    relationship's first step, else its previous EK;
+/// 2. `sig_{side}` verifies under `ek_pk_{side}` over `signing_target`.
+///
+/// Missing artifacts are refused.
+pub fn verify_per_step_ek_signing_target(
+    receipt: &StitchedReceiptV2,
+    side: BilateralSide,
+    expected_prev_pk: &[u8],
+    h_n: &[u8; 32],
+    signing_target: &[u8; 32],
+) -> Result<(), DsmError> {
+    use crate::crypto::ephemeral_key::verify_ek_cert;
+    use crate::crypto::sphincs::sphincs_verify;
+    let (ek_pk, ek_cert, sig, label) = match side {
+        BilateralSide::A => (&receipt.ek_pk_a, &receipt.ek_cert_a, &receipt.sig_a, "A"),
+        BilateralSide::B => (&receipt.ek_pk_b, &receipt.ek_cert_b, &receipt.sig_b, "B"),
+    };
+    if ek_pk.is_empty() || ek_cert.is_empty() || sig.is_empty() {
+        return Err(DsmError::invalid_operation(format!(
+            "receipt carries no §11.1 per-step EK {label}-side artifacts \
+             (ek_pk_{label} / ek_cert_{label} / sig_{label}); rejecting"
+        )));
+    }
+    if expected_prev_pk.is_empty() {
+        return Err(DsmError::invalid_operation(format!(
+            "verify_per_step_ek_signing: expected_prev_pk for {label}-side is empty — the \
+             caller supplies the AK at the first step or the prior chain-head EK"
+        )));
+    }
+    let cert_ok = verify_ek_cert(expected_prev_pk, ek_pk, h_n, ek_cert).map_err(|e| {
+        DsmError::crypto(
+            format!("verify_per_step_ek_signing: cert chain verify error ({label}-side): {e}"),
+            None::<std::io::Error>,
+        )
+    })?;
+    if !cert_ok {
+        return Err(DsmError::invalid_operation(format!(
+            "verify_per_step_ek_signing: ek_cert_{label} does NOT chain ek_pk_{label} \
+             back to expected_prev_pk over h_n — sig_{label} cannot be trusted"
+        )));
+    }
+    let sig_ok = sphincs_verify(ek_pk, signing_target, sig).map_err(|e| {
+        DsmError::crypto(
+            format!("verify_per_step_ek_signing: sig verify error ({label}-side): {e}"),
+            None::<std::io::Error>,
+        )
+    })?;
+    if !sig_ok {
+        return Err(DsmError::invalid_operation(format!(
+            "verify_per_step_ek_signing: sig_{label} does NOT verify under ek_pk_{label} \
+             over receipt challenge-response target — check that signer used the same \
+             commitment_hash"
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
