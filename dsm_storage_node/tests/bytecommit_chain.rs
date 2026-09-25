@@ -25,7 +25,7 @@ const NS: &str = "DSM/bytecommit-contract";
 
 fn rm(id: &str, endpoint: &str) -> Arc<ReplicationManager> {
     Arc::new(
-        ReplicationManager::new_for_tests(
+        ReplicationManager::new(
             ReplicationConfig {
                 replication_factor: 3,
                 gossip_interval_ticks: 100,
@@ -35,6 +35,8 @@ fn rm(id: &str, endpoint: &str) -> Arc<ReplicationManager> {
             },
             id.to_string(),
             endpoint.to_string(),
+            &common::set_ca_pem(),
+            Vec::new(),
         )
         .expect("replication manager"),
     )

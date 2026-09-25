@@ -8,7 +8,7 @@
 //! replication. (Capacity/scaling parameters are configured at runtime via the
 //! `[replication]` config section and `ReplicationConfig`, not hardcoded here.)
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -22,32 +22,28 @@ use std::sync::Once;
 
 use dsm::utils::text_id;
 
-use dsm_storage_node::{api, db, replication, AppState};
-
-use api::infra::network_config::NetworkDetector;
+use dsm_storage_node::{db, replication, AppState};
 
 #[derive(Parser, Debug)]
 #[clap(version = "1.0", author = "DSM Core Team")]
 struct Opts {
-    #[clap(short, long, default_value = "config.toml")]
+    #[clap(short, long)]
     config: String,
     #[clap(short, long)]
     verbose: bool,
-    #[clap(short, long, help = "Node index for automatic configuration (0-4)")]
-    node_index: Option<usize>,
-    #[clap(long, help = "Use automatic network detection instead of config file")]
-    auto_detect: bool,
 }
 
 struct ServerConfig {
     bind_addr: SocketAddr,
     node_id: String,
     concurrency_limit: usize,
-    tls_enabled: bool,
-    tls_cert_path: Option<String>,
-    tls_key_path: Option<String>,
+    tls_cert_path: String,
+    tls_key_path: String,
+    /// The storage set's CA certificate: the one anchor this node pins its
+    /// peers to.
+    set_ca_path: String,
     body_limit_bytes: usize,
-    hsts_max_age: Option<u64>,
+    hsts_max_age: u64,
     database_url: String,
     seed_peers: Vec<String>,
     /// `[[storage_set.members]]` — each member's id and register incarnation.
@@ -57,52 +53,32 @@ struct ServerConfig {
     storage_set_endpoints: Vec<(String, String)>,
 }
 
+/// A setting the node cannot start without: absent is an error, never a
+/// value made up in its place.
+fn required(settings: &Config, key: &str) -> Result<String> {
+    settings
+        .get_string(key)
+        .with_context(|| format!("the node's config names no `{key}`"))
+}
+
 fn load_server_config(opts: &Opts) -> Result<ServerConfig> {
     let settings = Config::builder()
-        .add_source(File::with_name(&opts.config).required(false))
+        .add_source(File::with_name(&opts.config).required(true))
         .build()?;
 
     let concurrency_limit = settings
         .get_int("network.max_connections")
-        .or_else(|_| settings.get_int("network.max_concurrency"))
-        .or_else(|_| settings.get_int("api.max_connections"))
         .unwrap_or(256)
         .max(1) as usize;
-
-    let tls_enabled = settings.get_bool("tls.enabled").unwrap_or(false);
-    let tls_cert_path = if tls_enabled {
-        Some(
-            settings
-                .get_string("tls.cert_path")
-                .unwrap_or_else(|_| "certs/node.crt".to_string()),
-        )
-    } else {
-        None
-    };
-    let tls_key_path = if tls_enabled {
-        Some(
-            settings
-                .get_string("tls.key_path")
-                .unwrap_or_else(|_| "certs/node.key".to_string()),
-        )
-    } else {
-        None
-    };
-
     let body_limit_bytes = settings.get_int("http.body_limit_bytes").unwrap_or(1048576) as usize;
-    let hsts_max_age = if tls_enabled {
-        Some(
-            settings
-                .get_int("security_headers.hsts_max_age")
-                .unwrap_or(31536000) as u64,
-        )
-    } else {
-        None
-    };
+    let hsts_max_age = settings
+        .get_int("security_headers.hsts_max_age")
+        .unwrap_or(31536000) as u64;
 
-    let database_url = settings
-        .get_string("database.url")
-        .unwrap_or_else(|_| "postgresql://localhost:5432/dsm_storage".to_string());
+    let tls_cert_path = required(&settings, "tls.cert_path")?;
+    let tls_key_path = required(&settings, "tls.key_path")?;
+    let set_ca_path = required(&settings, "tls.ca_path")?;
+    let database_url = required(&settings, "database.url")?;
 
     // Extract seed peers from [replication] config section.
     let seed_peers: Vec<String> = settings
@@ -175,61 +151,20 @@ fn load_server_config(opts: &Opts) -> Result<ServerConfig> {
         .map(|(id, inc, _)| (id, inc))
         .collect();
 
-    if opts.auto_detect {
-        let node_index = opts.node_index.unwrap_or(0);
-        let detected = NetworkDetector::detect_network_config_with_tls(node_index, tls_enabled)?;
-        let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), detected.port);
-
-        return Ok(ServerConfig {
-            bind_addr,
-            node_id: detected.node_id,
-            concurrency_limit,
-            tls_enabled,
-            tls_cert_path,
-            tls_key_path,
-            body_limit_bytes,
-            hsts_max_age,
-            database_url,
-            seed_peers,
-            storage_set_members,
-            storage_set_endpoints,
-        });
-    }
-
-    let listen_ip = settings
-        .get_string("network.listen_addr")
-        .or_else(|_| settings.get_string("api.bind_address"))
-        .unwrap_or_else(|_| "0.0.0.0".to_string());
-
+    let listen_ip = required(&settings, "network.listen_addr")?;
     let port = settings
         .get_int("network.port")
-        .or_else(|_| settings.get_int("api.port"))
-        .unwrap_or(8080) as u16;
-
+        .context("the node's config names no `network.port`")?;
     let bind_addr: SocketAddr = format!("{listen_ip}:{port}").parse()?;
-
-    let node_id = settings
-        .get_string("node.id")
-        .or_else(|_| settings.get_string("node.node_id"))
-        .unwrap_or_else(|_| {
-            // Generate deterministic node ID from hostname and port
-            let hostname = std::env::var("HOSTNAME").unwrap_or_else(|_| "unknown".to_string());
-            let mut material = Vec::new();
-            material.extend_from_slice(hostname.as_bytes());
-            material.extend_from_slice(&port.to_be_bytes());
-            text_id::encode_base32_crockford(&api::infra::hardening::blake3_tagged(
-                api::infra::hardening::DOM_NODE_ID,
-                &material,
-            ))
-        });
+    let node_id = required(&settings, "node.id")?;
 
     Ok(ServerConfig {
         bind_addr,
         node_id,
         concurrency_limit,
-        tls_enabled,
         tls_cert_path,
         tls_key_path,
+        set_ca_path,
         body_limit_bytes,
         hsts_max_age,
         database_url,
@@ -263,11 +198,6 @@ fn main() -> Result<()> {
 
 async fn async_main() -> Result<()> {
     let opts = Opts::parse();
-
-    // Enforce production safety in release builds.
-    if let Err(msg) = api::infra::hardening::enforce_release_safety(&opts.config) {
-        anyhow::bail!(msg);
-    }
 
     // Bridge `log` records into `tracing` subscriber so `log::{info,warn,...}` work
     let _ = tracing_log::LogTracer::init();
@@ -304,56 +234,30 @@ async fn async_main() -> Result<()> {
         .await
         .context("failed to initialize database schema")?;
 
-    let replication_config = if cfg!(debug_assertions) {
-        replication::ReplicationConfig {
-            replication_factor: 1,
-            gossip_interval_ticks: 100,
-            failure_timeout_ticks: 500,
-            gossip_fanout: 1,
-            max_concurrent_jobs: 2,
-        }
-    } else {
-        replication::default_production_config()
-    };
-
-    let replication_manager = if cfg!(debug_assertions) {
-        info!("Initializing replication manager (test-mode for dev)...");
-        Arc::new(
-            replication::ReplicationManager::new_for_tests(
-                replication_config,
-                server_config.node_id.clone(),
-                format!(
-                    "http://{}:{}",
-                    server_config.bind_addr.ip(),
-                    server_config.bind_addr.port()
-                ),
-            )
-            .map_err(|e| anyhow::anyhow!("Failed to create test replication manager: {}", e))?,
+    info!(
+        "Initializing replication manager (pinned to the set's CA, {} seed peers)...",
+        server_config.seed_peers.len()
+    );
+    let set_ca_pem = std::fs::read(&server_config.set_ca_path).with_context(|| {
+        format!(
+            "failed to read the storage set's CA certificate at {}",
+            server_config.set_ca_path
         )
-    } else {
-        info!(
-            "Initializing replication manager (production TLS pinning, {} seed peers)...",
-            server_config.seed_peers.len()
-        );
-        let cert_path = server_config
-            .tls_cert_path
-            .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("missing TLS cert_path for replication"))?;
-        Arc::new(
-            replication::ReplicationManager::new(
-                replication_config,
-                server_config.node_id.clone(),
-                format!(
-                    "https://{}:{}",
-                    server_config.bind_addr.ip(),
-                    server_config.bind_addr.port()
-                ),
-                std::path::Path::new(cert_path),
-                server_config.seed_peers.clone(),
-            )
-            .map_err(|e| anyhow::anyhow!("Failed to create replication manager: {}", e))?,
+    })?;
+    let replication_manager = Arc::new(
+        replication::ReplicationManager::new(
+            replication::default_production_config(),
+            server_config.node_id.clone(),
+            format!(
+                "https://{}:{}",
+                server_config.bind_addr.ip(),
+                server_config.bind_addr.port()
+            ),
+            &set_ca_pem,
+            server_config.seed_peers.clone(),
         )
-    };
+        .map_err(|e| anyhow::anyhow!("Failed to create replication manager: {}", e))?,
+    );
 
     let bind_addr_str = format!(
         "https://{}:{}",
@@ -363,7 +267,7 @@ async fn async_main() -> Result<()> {
     let mut state = AppState::new(
         server_config.node_id.clone(),
         &bind_addr_str,
-        server_config.hsts_max_age,
+        Some(server_config.hsts_max_age),
         db_pool.clone(),
         replication_manager,
     );
@@ -423,10 +327,8 @@ async fn async_main() -> Result<()> {
     );
 
     info!(
-        "DSM storage node ready: deterministic storage APIs (ByteCommit/ObjectStore + Registry) (node {} addr {} tls {})",
-        server_config.node_id,
-        server_config.bind_addr,
-        server_config.tls_enabled
+        "DSM storage node ready (node {} addr {})",
+        server_config.node_id, server_config.bind_addr
     );
 
     // ---------------------------------------------------------------------
@@ -465,38 +367,97 @@ async fn async_main() -> Result<()> {
         shutdown_handle.graceful_shutdown(None);
     });
 
-    if server_config.tls_enabled {
-        let cert_path = server_config
-            .tls_cert_path
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("missing TLS cert_path"))?;
-        let key_path = server_config
-            .tls_key_path
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("missing TLS key_path"))?;
-        let tls_config = RustlsConfig::from_pem_file(cert_path, key_path)
+    let tls_config =
+        RustlsConfig::from_pem_file(&server_config.tls_cert_path, &server_config.tls_key_path)
             .await
             .context("failed to load TLS certificates")?;
-
-        axum_server::bind_rustls(server_config.bind_addr, tls_config)
-            .handle(handle)
-            .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
-            .await
-            .context("storage node TLS server error")?;
-    } else {
-        axum_server::bind(server_config.bind_addr)
-            .handle(handle)
-            .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
-            .await
-            .context("storage node server error")?;
-    }
+    axum_server::bind_rustls(server_config.bind_addr, tls_config)
+        .handle(handle)
+        .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
+        .await
+        .context("storage node TLS server error")?;
 
     Ok(())
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // unwrap/expect acceptable in deterministic tests
 mod tests {
     use dsm::common::domain_tags::{TAG_DSM_BYTECOMMIT, TAG_DSM_NODE_ID};
+
+    const WHOLE_CONFIG: &str = r#"
+[node]
+id = "node-under-test"
+
+[network]
+listen_addr = "127.0.0.1"
+port = 8443
+
+[tls]
+cert_path = "/certs/node.crt"
+key_path = "/certs/node.key"
+ca_path = "/certs/ca.crt"
+
+[database]
+url = "postgresql://127.0.0.1:5432/node"
+"#;
+
+    fn load(body: &str) -> anyhow::Result<super::ServerConfig> {
+        let path = std::env::temp_dir().join(format!(
+            "dsm-node-config-{}.toml",
+            dsm::utils::text_id::encode_base32_crockford(&rand::random::<[u8; 16]>())
+        ));
+        std::fs::write(&path, body).expect("write the config");
+        let loaded = super::load_server_config(&super::Opts {
+            config: path.to_string_lossy().into_owned(),
+            verbose: false,
+        });
+        std::fs::remove_file(&path).expect("remove the config");
+        loaded
+    }
+
+    /// Ruling #2: a node starts from what its config states. A setting it
+    /// cannot run without is refused by name when absent — no identity, TLS
+    /// material, trust anchor or database is made up in its place.
+    #[test]
+    fn a_config_missing_a_required_setting_is_refused_by_name() {
+        let whole = load(WHOLE_CONFIG).expect("the whole config loads");
+        assert_eq!(whole.node_id, "node-under-test");
+        assert_eq!(whole.set_ca_path, "/certs/ca.crt");
+        for (line, key) in [
+            ("id = \"node-under-test\"", "node.id"),
+            ("listen_addr = \"127.0.0.1\"", "network.listen_addr"),
+            ("port = 8443", "network.port"),
+            ("cert_path = \"/certs/node.crt\"", "tls.cert_path"),
+            ("key_path = \"/certs/node.key\"", "tls.key_path"),
+            ("ca_path = \"/certs/ca.crt\"", "tls.ca_path"),
+            ("url = \"postgresql://127.0.0.1:5432/node\"", "database.url"),
+        ] {
+            assert!(WHOLE_CONFIG.contains(line), "fixture line {line}");
+            let err = match load(&WHOLE_CONFIG.replace(line, "")) {
+                Ok(_) => panic!("a config without `{key}` is refused"),
+                Err(e) => format!("{e:#}"),
+            };
+            assert!(err.contains(key), "the refusal names `{key}`: {err}");
+        }
+    }
+
+    /// A config file that does not exist is refused as missing, before any
+    /// setting is read — not treated as an empty config.
+    #[test]
+    fn a_missing_config_file_is_refused() {
+        let err = match super::load_server_config(&super::Opts {
+            config: "/nonexistent/dsm-node-config.toml".to_string(),
+            verbose: false,
+        }) {
+            Ok(_) => panic!("a config file that does not exist is refused"),
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(
+            err.contains("/nonexistent/dsm-node-config.toml") && err.contains("not found"),
+            "the refusal names the missing file: {err}"
+        );
+    }
 
     /// Central storage-related tags remain ASCII `DSM/` domains.
     ///

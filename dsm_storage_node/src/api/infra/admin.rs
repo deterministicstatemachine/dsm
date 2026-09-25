@@ -20,10 +20,6 @@ use crate::AppState;
 
 const ADMIN_TOKEN_HEADER: &str = "x-dsm-admin-token";
 const ADMIN_TOKEN_ENV: &str = "DSM_ADMIN_TOKEN";
-/// Explicit, opt-in escape hatch for local development only. When the admin
-/// token is unset, auth stays fail-closed unless this is set to `1` in a debug
-/// build.
-const ADMIN_INSECURE_ENV: &str = "DSM_INSECURE_ALLOW_NO_ADMIN_TOKEN";
 
 fn token_matches(provided: &str, expected: &str) -> bool {
     provided.as_bytes().ct_eq(expected.as_bytes()).into()
@@ -32,17 +28,8 @@ fn token_matches(provided: &str, expected: &str) -> bool {
 async fn require_admin_token(headers: HeaderMap) -> Result<(), StatusCode> {
     let expected = env::var(ADMIN_TOKEN_ENV).unwrap_or_default();
     if expected.trim().is_empty() {
-        // Fail closed by default — a missing admin token must never silently
-        // authorize an admin endpoint (maintenance mutates current_tick). Local dev can
-        // explicitly opt out of admin auth by setting ADMIN_INSECURE_ENV=1; a
-        // plain debug build no longer disables auth on its own.
-        if cfg!(debug_assertions) && env::var(ADMIN_INSECURE_ENV).as_deref() == Ok("1") {
-            log::warn!(
-                "admin auth explicitly disabled via {}=1 (debug build)",
-                ADMIN_INSECURE_ENV
-            );
-            return Ok(());
-        }
+        // A missing admin token never authorizes an admin endpoint
+        // (maintenance mutates current_tick), in any build.
         log::error!("admin auth required but {} not set", ADMIN_TOKEN_ENV);
         return Err(StatusCode::UNAUTHORIZED);
     }
@@ -184,14 +171,13 @@ mod tests {
     /// and is answered on its own merits (400 here, because each of these
     /// handlers validates its input before touching the database).
     #[tokio::test]
+    #[serial_test::serial]
     async fn every_admin_route_refuses_an_unauthenticated_caller() {
         use axum::body::Body;
         use axum::http::Request;
         use tower::ServiceExt;
 
-        // Hermetic posture: a real token, and no debug escape hatch.
         std::env::set_var(ADMIN_TOKEN_ENV, "test-admin-token");
-        std::env::remove_var(ADMIN_INSECURE_ENV);
 
         // The auth layer refuses before any handler touches the database, and
         // every authenticated request below is rejected by its handler on
@@ -201,7 +187,7 @@ mod tests {
             db::create_pool("postgresql://127.0.0.1:5432/dsm-admin-auth-test").expect("pool");
 
         let rm = Arc::new(
-            crate::replication::ReplicationManager::new_for_tests(
+            crate::replication::ReplicationManager::new(
                 crate::replication::ReplicationConfig {
                     replication_factor: 3,
                     gossip_interval_ticks: 100,
@@ -211,6 +197,8 @@ mod tests {
                 },
                 "n1".to_string(),
                 "http://localhost:8080".to_string(),
+                &crate::replication::test_set_ca_pem(),
+                Vec::new(),
             )
             .expect("replication manager for tests"),
         );
@@ -280,6 +268,26 @@ mod tests {
         }
 
         std::env::remove_var(ADMIN_TOKEN_ENV);
+    }
+
+    /// Ruling #2: with no admin token configured, the endpoint admits no one,
+    /// in any build — the retired debug opt-out variable opens nothing.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn with_no_admin_token_configured_no_one_is_admitted() {
+        std::env::remove_var(ADMIN_TOKEN_ENV);
+        std::env::set_var("DSM_INSECURE_ALLOW_NO_ADMIN_TOKEN", "1");
+        let mut headers = HeaderMap::new();
+        headers.insert(ADMIN_TOKEN_HEADER, "anything".parse().expect("header"));
+        assert_eq!(
+            require_admin_token(HeaderMap::new()).await,
+            Err(StatusCode::UNAUTHORIZED)
+        );
+        assert_eq!(
+            require_admin_token(headers).await,
+            Err(StatusCode::UNAUTHORIZED)
+        );
+        std::env::remove_var("DSM_INSECURE_ALLOW_NO_ADMIN_TOKEN");
     }
 
     #[test]

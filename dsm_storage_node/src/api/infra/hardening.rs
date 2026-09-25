@@ -6,7 +6,6 @@
 
 use blake3::Hasher;
 use dsm::crypto::domain::TaggedHashDomain;
-use std::env;
 
 /// Domain-separated BLAKE3-256, storage-node side: `domain || 0x00 || body`.
 ///
@@ -67,8 +66,6 @@ pub fn spool_drain_preflight(unacked_rows: i64) -> Result<(), String> {
     Ok(())
 }
 
-pub const DOM_IDENTITY_DEVTREE_ROOT: TaggedHashDomain<'static> =
-    dsm::tagged_domain!(b"DSM/identity/devtree/root");
 pub const DOM_IDENTITY_TIPS_HEAD: TaggedHashDomain<'static> =
     dsm::tagged_domain!(b"DSM/identity/tips/head");
 pub const DOM_IDENTITY_TIPS_LEAF: TaggedHashDomain<'static> =
@@ -80,53 +77,6 @@ pub const DOM_POLICY: TaggedHashDomain<'static> = TaggedHashDomain::from_static(
 pub const DOM_POLICY_ANCHOR: TaggedHashDomain<'static> = dsm::tagged_domain!(b"DSM/policy/anchor");
 pub const DOM_RECOVERY_CAPSULE: TaggedHashDomain<'static> =
     dsm::tagged_domain!(b"DSM/recovery/capsule");
-
-/// Enforce production-only safety in release builds.
-/// Rejects dev/test toggles and dev config paths when compiled without debug assertions.
-pub fn enforce_release_safety(config_path: &str) -> Result<(), String> {
-    if cfg!(debug_assertions) {
-        return Ok(());
-    }
-
-    // Reject dev/test flags in release builds.
-    let forbidden_envs = [
-        "DSM_DEV_MODE",
-        "DSM_DEV_ENABLE_DEBUG_ENDPOINTS",
-        "DSM_DEV_ENABLE_HOT_RELOAD",
-        "DSM_DEV_SKIP_AUTH",
-        "DSM_DEV_NODE_PORTS",
-        "DSM_TEST_MODE",
-        "DSM_TEST_MODE_ENV",
-        "DSM_DEV_GENESIS",
-        "DSM_DEV_VAULT",
-        "DSM_DEV_ALLOW_INSECURE",
-        "DSM_DISABLE_REPLAY_GUARD",
-    ];
-
-    for key in forbidden_envs.iter() {
-        if let Ok(val) = env::var(key) {
-            let v = val.trim().to_lowercase();
-            let enabled = !v.is_empty() && v != "0" && v != "false" && v != "no";
-            if enabled {
-                return Err(format!(
-                    "release build refused: env {} is set (value={})",
-                    key, val
-                ));
-            }
-        }
-    }
-
-    // Guard against accidentally running dev configs in release mode.
-    let path_lc = config_path.to_lowercase();
-    if path_lc.contains("dev") || path_lc.contains("local") || path_lc.contains("test") {
-        return Err(format!(
-            "release build refused: config path looks non-production ({})",
-            config_path
-        ));
-    }
-
-    Ok(())
-}
 
 /// Coalesce ops within a node cycle to their last op per (addr,h) logical key.
 #[cfg(test)]

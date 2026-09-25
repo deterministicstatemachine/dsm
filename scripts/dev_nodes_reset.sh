@@ -5,7 +5,7 @@
 # - Stops any running dev nodes by pid files (dev-node*.pid in repo root)
 # - Cleans stale pid/log files
 # - Optionally restarts the 5 dev nodes (ports 8080..8084)
-# - Health-checks HTTP ports
+# - Health-checks the nodes over verified TLS
 #
 # Usage:
 #   ./scripts/dev_nodes_reset.sh            # stop + clean only
@@ -64,22 +64,10 @@ start_nodes() {
   (cd dsm_storage_node && ./scripts/dev/start_dev_nodes.sh)
 }
 
-# 4) Health check
+# 4) Health check over verified TLS (the launcher trusts its dev CA)
 health_check() {
-  local ports=(8080 8081 8082 8083 8084)
-  for p in "${ports[@]}"; do
-    local ok=0
-    for i in {1..10}; do
-      if curl -fsS "http://127.0.0.1:$p/health" >/dev/null 2>&1; then
-        log "Node on :$p healthy."
-        ok=1; break
-      fi
-      sleep 0.3
-    done
-    if [[ $ok -eq 0 ]]; then
-      warn "No /health response on :$p — this may be fine if your node API differs."
-    fi
-  done
+  (cd dsm_storage_node && ./scripts/dev/start_dev_nodes.sh status) \
+    || warn "not every dev node answered; see dsm_storage_node/logs/"
 }
 
 main() {

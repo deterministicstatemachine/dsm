@@ -28,7 +28,7 @@ async fn member(store: &str) -> Router {
     let endpoint = "http://member.local:8080".to_string();
     let pool = common::fresh_store(store).await;
     let rm = Arc::new(
-        ReplicationManager::new_for_tests(
+        ReplicationManager::new(
             ReplicationConfig {
                 replication_factor: 3,
                 gossip_interval_ticks: 100,
@@ -38,6 +38,8 @@ async fn member(store: &str) -> Router {
             },
             "member".to_string(),
             endpoint.clone(),
+            &common::set_ca_pem(),
+            Vec::new(),
         )
         .expect("replication manager"),
     );
