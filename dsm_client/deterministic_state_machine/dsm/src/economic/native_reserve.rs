@@ -419,6 +419,11 @@ pub enum ReleaseRefusal {
     ZeroRelease,
     /// Releases more than remains: the one arm that would mint.
     ExceedsReserve { remaining: u64, amount: u64 },
+    /// Releases an amount the release rule of its source does not name. A
+    /// faucet claim releases exactly [`ERA_FAUCET_PAYOUT`]: the beta claim
+    /// policy fixes it, and a release the policy does not allow cannot exist
+    /// (SoFi §51), so it is not an object naming the cell.
+    NotTheReleaseRulesAmount { amount: u64, rule: u64 },
 }
 
 impl core::fmt::Display for ReleaseRefusal {
@@ -435,6 +440,10 @@ impl core::fmt::Display for ReleaseRefusal {
                 f,
                 "release of {amount} exceeds the {remaining} remaining — no valid reserve \
                  transition mints"
+            ),
+            Self::NotTheReleaseRulesAmount { amount, rule } => write!(
+                f,
+                "release of {amount}; its source's release rule releases exactly {rule}"
             ),
         }
     }
@@ -472,6 +481,19 @@ pub fn release_constructible(
         return Err(ReleaseRefusal::ExceedsReserve {
             remaining: parent.remaining_supply,
             amount: body.amount,
+        });
+    }
+    // The release rule of the source (SoFi §51 rule 3: units come out only
+    // under the conditions the policy commits). Checked here, at the cell's
+    // construction predicate, so a release the rule does not allow never
+    // holds the cell — not merely later, when a credit would consume it.
+    let rule = match &body.source {
+        ReleaseSource::FaucetClaimant { .. } => ERA_FAUCET_PAYOUT,
+    };
+    if body.amount != rule {
+        return Err(ReleaseRefusal::NotTheReleaseRulesAmount {
+            amount: body.amount,
+            rule,
         });
     }
     Ok(NativeReserveState {
@@ -831,13 +853,13 @@ mod tests {
     #[test]
     fn no_valid_reserve_transition_can_mint_era() {
         let mut low = genesis();
-        low.remaining_supply = 50;
-        let release = signed(&low, 51);
+        low.remaining_supply = ERA_FAUCET_PAYOUT - 1;
+        let release = signed(&low, ERA_FAUCET_PAYOUT);
         assert_eq!(
             release_constructible(&low, &release),
             Err(ReleaseRefusal::ExceedsReserve {
-                remaining: 50,
-                amount: 51
+                remaining: ERA_FAUCET_PAYOUT - 1,
+                amount: ERA_FAUCET_PAYOUT
             })
         );
         assert!(
@@ -846,11 +868,57 @@ mod tests {
         );
         // Exactly what remains is the last legal release; the reserve is then
         // exhausted, and nothing replenishes it.
-        let last = signed(&low, 50);
-        let exhausted = release_constructible(&low, &last).expect("the last unit");
+        low.remaining_supply = ERA_FAUCET_PAYOUT;
+        let last = signed(&low, ERA_FAUCET_PAYOUT);
+        let exhausted = release_constructible(&low, &last).expect("the last payout");
         assert_eq!(exhausted.remaining_supply, 0);
-        let more = signed(&exhausted, 1);
+        let more = signed(&exhausted, ERA_FAUCET_PAYOUT);
         assert!(release_constructible(&exhausted, &more).is_err());
+    }
+
+    /// SoFi §51 rule 3 and the shortcut audit of 2026-09-25: a faucet release
+    /// is constructible only for the amount the claim policy fixes. A release
+    /// of the whole remaining supply under any key — the one write that
+    /// would otherwise leave nothing for anyone — is not an object naming the
+    /// cell: first at the leader and final along its route, it holds nothing,
+    /// and the payout release behind it is final. Mutation: drop the release
+    /// rule's amount check and the drain holds the cell.
+    #[test]
+    fn a_release_of_any_amount_but_the_payout_never_holds_the_cell() {
+        let r0 = genesis();
+        for amount in [
+            1,
+            ERA_FAUCET_PAYOUT - 1,
+            ERA_FAUCET_PAYOUT + 1,
+            r0.remaining_supply,
+        ] {
+            let off_rule = signed(&r0, amount);
+            assert_eq!(
+                release_constructible(&r0, &off_rule),
+                Err(ReleaseRefusal::NotTheReleaseRulesAmount {
+                    amount,
+                    rule: ERA_FAUCET_PAYOUT
+                })
+            );
+            assert!(recognize_release(&r0, &off_rule.envelope_bytes).is_none());
+        }
+        let drain = signed(&r0, r0.remaining_supply);
+        let payout = signed(&r0, ERA_FAUCET_PAYOUT);
+        let (at, mut cell) = successor_cell(&r0);
+        cell.write(&drain.envelope_bytes, ROUTE_LEN - 1, &[]);
+        cell.write(&payout.envelope_bytes, ROUTE_LEN - 1, &[]);
+        let child = release_constructible(&r0, &payout).unwrap();
+        assert_eq!(
+            child.remaining_supply,
+            r0.remaining_supply - ERA_FAUCET_PAYOUT
+        );
+        assert_eq!(
+            resolve_successor(&at, &cell.evidence()),
+            SuccessorRead::Final {
+                release: Box::new(payout),
+                child
+            }
+        );
     }
 
     /// `total ERA conserved`: along any lineage,
@@ -859,7 +927,7 @@ mod tests {
     fn total_era_is_conserved_along_the_lineage() {
         let mut state = genesis();
         let mut released = 0u64;
-        for amount in [100u64, 7, 100, 1] {
+        for amount in [ERA_FAUCET_PAYOUT; 4] {
             let release = signed(&state, amount);
             state = release_constructible(&state, &release).expect("constructible");
             released += amount;
@@ -1050,7 +1118,7 @@ mod tests {
         let r0 = genesis();
         let rel1 = signed(&r0, 100);
         let r1 = release_constructible(&r0, &rel1).unwrap();
-        let rel2 = signed(&r1, 7);
+        let rel2 = signed(&r1, ERA_FAUCET_PAYOUT);
         let r2 = release_constructible(&r1, &rel2).unwrap();
         let mut visited = Vec::new();
         let stop = walk_lineage(
@@ -1078,7 +1146,10 @@ mod tests {
         );
         assert_eq!(stop, Ok(WalkStop::Head(r2)));
         assert_eq!(visited, vec![(0, 1, 1), (1, 2, 2)]);
-        assert_eq!(r2.remaining_supply, ERA_RESERVE_GENESIS_SUPPLY - 107);
+        assert_eq!(
+            r2.remaining_supply,
+            ERA_RESERVE_GENESIS_SUPPLY - 2 * ERA_FAUCET_PAYOUT
+        );
     }
 
     #[test]
