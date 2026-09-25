@@ -38,13 +38,11 @@ core bilateral manager       // Forward-only state updates
 
 ## CI Enforcement
 
-`ci_gates.sh` contains BLE guards that will fail the build if:
-
-1. Any deleted deprecated file (`connection.rs`, `messaging.rs`, `bluetooth_impl.rs`, `discovery.rs`) reappears.
-2. Any banned deprecated symbol is referenced anywhere in Rust sources.
-3. A transport-runtime timer leaks into protocol semantics or acceptance logic.
-
-These gates run early for fail‑fast feedback. To extend enforcement add new patterns to the BLE section at the top of `ci_gates.sh`.
+`scripts/check_forbidden_symbols.sh` fails the build on the deprecated
+`BluetoothMessage` symbol and on the blocked artifacts it lists. Nothing in CI
+checks that a transport timer stays out of protocol semantics:
+`ci/no_clock_and_no_json.sh` allowlists the BLE transport files, so that
+invariant is held by review. There is no `ci_gates.sh`.
 
 ## Interaction Pattern
 
@@ -69,7 +67,7 @@ Extend only via the handler or coordinator with protobuf-compatible frame types.
 
 ## Maintenance
 
-If this path changes, update: `ci_gates.sh`, this README, and any frontend bridge utilities expecting frame semantics.
+If this path changes, update `scripts/check_forbidden_symbols.sh`, this README, and any frontend bridge utilities expecting frame semantics.
 
 ## Summary
 

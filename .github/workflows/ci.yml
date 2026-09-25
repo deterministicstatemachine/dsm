@@ -150,7 +150,6 @@ jobs:
           bash scripts/flow_mapping_assertions.sh
           bash scripts/check_forbidden_symbols.sh
           bash scripts/ci_scan.sh
-          bash ci/canonical_bilateral_gates.sh
 
       - name: Production safety lints
         run: bash ci/production_safety_checks.sh
@@ -310,8 +309,22 @@ jobs:
 
       - name: Test (whole workspace)
         run: |
-          cargo test --locked --workspace --exclude dsm_storage_node --release -- --nocapture --test-threads=1
-          cargo test --locked -p dsm_storage_node --release -- --nocapture --test-threads=1
+          set -o pipefail
+          cargo test --locked --workspace --exclude dsm_storage_node --release -- --nocapture --test-threads=1 2>&1 | tee board.log
+          cargo test --locked -p dsm_storage_node --release -- --nocapture --test-threads=1 2>&1 | tee -a board.log
+
+      # A requirement is Met only on tests that ran and passed on this board:
+      # the same gate the PR jobs run statically, given the logs. A test a row
+      # names that was not in these logs, crashed, or failed fails the board.
+      - name: Conformance evidence, executed
+        run: python3 ci/conformance_evidence.py --board-log board.log
+
+      - name: Keep the board log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: board-log
+          path: board.log
 
   # --------------------------------------------------------------------------
   # Storage node on Postgres — its only store, the one the fleet deploys.
@@ -456,6 +469,19 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      # The frontend's own gates: the bytes-only bridge contract and eslint.
+      # Both used to run only in `rust-gates`, which a frontend-only change
+      # never selects.
+      - name: Install ripgrep
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
+
+      - name: Bridge contract gate
+        working-directory: .
+        run: bash ci/bridge_contracts_gate.sh
+
+      - name: Lint
+        run: npm run lint
 
       - name: Type check
         run: npm run type-check

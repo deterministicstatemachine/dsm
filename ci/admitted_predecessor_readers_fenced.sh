@@ -44,7 +44,7 @@ echo "[1/4] the fence exists and decides both conditional cases..."
 fdef="$core/dsm/src/sofi/lineage.rs"
 # PRODUCTION lines only. The tests mention every arm several times, so grepping
 # the whole file would stay green with the real match arm deleted.
-prod=$(awk '/^#\[cfg\(test\)\]/{exit} {print}' "$fdef")
+prod=$(python3 ci/production_text.py "$fdef")
 for arm in ConditionalUnresolved ConditionalResolved; do
   if ! grep -c "PredecessorClaim::$arm" <<<"$prod" >/dev/null 2>&1; then
     echo "[FAIL] $fdef no longer decides PredecessorClaim::$arm"
@@ -89,26 +89,28 @@ done
 # 4. No UNCLASSIFIED production reader exists. This is the check that catches
 #    a new path: it is in neither list, so it fails until someone rules.
 #
-#    "Production" means OUTSIDE the file's own `#[cfg(test)]` module. Several
-#    files read the predecessor only to build fixtures, and a name-based
-#    allow-list for those would rot silently the first time one of them grew a
-#    real caller — so the module boundary is detected, not assumed.
+#    "Production" means OUTSIDE the file's own `#[cfg(test)]` items
+#    (ci/production_text.py). Several files read the predecessor only to
+#    build fixtures, and a name-based allow-list for those would rot silently
+#    the first time one of them grew a real caller — so the module boundary is
+#    detected, not assumed.
 echo "[4/4] no unclassified production reader..."
 declared=$(printf '%s\n' "${FENCED_READERS[@]}"; printf '%s\n' "${EXEMPT[@]%%|*}")
 unknown=$(python3 - "$core" "$reader" <<'PYEOF'
-import pathlib, re, sys
+import importlib.util, pathlib, sys
 core, reader = sys.argv[1], sys.argv[2]
+spec = importlib.util.spec_from_file_location("production_text", "ci/production_text.py")
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
 for f in sorted(pathlib.Path(core).glob('*/src/**/*.rs')):
     # Whole-file fixtures: `*_tests.rs` and test_support modules.
     if f.name.endswith('_tests.rs') or 'test_support' in f.parts:
         continue
     try:
-        lines = f.read_text().splitlines()
+        prod = mod.production_text(str(f))
     except OSError:
         continue
-    # First top-level `#[cfg(test)]`: everything below it is fixture code.
-    cut = next((i for i, l in enumerate(lines) if l.startswith('#[cfg(test)]')), len(lines))
-    if any(reader in l for l in lines[:cut]):
+    if reader in prod:
         print(f)
 PYEOF
 )

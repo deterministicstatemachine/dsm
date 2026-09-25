@@ -7,9 +7,8 @@ if ! command -v rg &>/dev/null; then
     sudo apt-get update -qq && sudo apt-get install -y -qq ripgrep 2>/dev/null || true
   fi
   if ! command -v rg &>/dev/null; then
-    echo "WARN: ripgrep (rg) not available; skipping protocol purity checks" >&2
-    echo "Clockless + protobuf-only gate: SKIPPED (no rg)"
-    exit 0
+    echo "[FAIL] ripgrep (rg) is not available: the clockless + protobuf-only gate cannot run" >&2
+    exit 1
   fi
 fi
 

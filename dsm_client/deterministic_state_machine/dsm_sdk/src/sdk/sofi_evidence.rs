@@ -12,7 +12,7 @@
 //! | item | from |
 //! |---|---|
 //! | trader leaf pre values | this device's own leaves, checked against its validated root — for its own routes only |
-//! | vault leaf pre values | the vault's accepted genesis (SoFi §19.8) at `R_0`; past it, the vault head this device resolved |
+//! | vault leaf pre values | the vault's accepted genesis (SoFi §19.8) at `R_0`; past it, the generation this device established at the root the operation names |
 //! | policy objects | the immutable store, under the address the vault state commits, `Stored` on three members |
 //! | token policies | the policy each market token commits, rooted by this device |
 //! | setups | the envelope `Stored` at each leg's `ρ` |
@@ -498,9 +498,9 @@ fn accepted_claim_at(
 
 /// The pre values of vault `v`'s leaves at the root the operation's core
 /// names, into `vault_leaves`, and the vault state they hold. At `R_0` they
-/// are the accepted genesis; past it, the vault head this device resolved,
-/// which must be the head the core was built on and reproduce its own root.
-/// `None` when they are not in hand.
+/// are the accepted genesis; past it, the generation this device established
+/// at the root the core was built on, which must reproduce that root. `None`
+/// when they are not in hand.
 async fn vault_pre(
     set: &StorageSet,
     preimage: &SettlementPreimage,
@@ -530,9 +530,8 @@ async fn vault_pre(
         vault_leaves.extend(vault_leaves_at_genesis(vault_id, genesis.state(), keys));
         return Ok(Some(genesis.state().clone()));
     }
-    let Some((.., leaves)) = sofi_vault_head::leaves_at_head(vault_id, keys)
+    let Some((.., leaves)) = sofi_vault_head::leaves_at(vault_id, &pre_root, keys)
         .map_err(|e| storage_err("vault head", e))?
-        .filter(|(head, ..)| head.root == pre_root)
     else {
         return Ok(None);
     };

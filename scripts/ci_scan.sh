@@ -22,14 +22,25 @@ CORE_DIR="dsm_client/deterministic_state_machine/dsm/src"
 red()  { printf "\033[31m%s\033[0m\n" "$*"; }
 green(){ printf "\033[32m%s\033[0m\n" "$*"; }
 
+# rg exits 0 on a match, 1 on none, and 2 on an error such as a path that is
+# not there. Only 1 passes: a rule pinned to a file that no longer exists is a
+# failed scan, not a clean one.
 fail_if_found() {
   local desc="$1"; shift
   local cmd=("rg" "-n" "$@")
-  if "${cmd[@]}" > /dev/null; then
-    red "[CI-SCAN] FAIL: ${desc}"
-    "${cmd[@]}" || true
-    exit 1
-  fi
+  local status=0
+  "${cmd[@]}" > /dev/null || status=$?
+  case "$status" in
+    0)
+      red "[CI-SCAN] FAIL: ${desc}"
+      "${cmd[@]}" || true
+      exit 1 ;;
+    1) ;;
+    *)
+      red "[CI-SCAN] ERROR: ${desc}: rg exited $status (a scanned path is missing?)"
+      "${cmd[@]}" || true
+      exit 1 ;;
+  esac
 }
 
 # Common ripgrep excludes
@@ -282,19 +293,6 @@ fail_if_found "static: policy_commit derived from a metadata cache" \
   -e 'policy_commit = metadata\.policy_anchor' \
   -e 'from_policy_anchor\(&metadata\.policy_anchor' \
   "$SDK_SRC/"
-
-# Path search is pure route arithmetic. If it could build RouteCommits or drive
-# the state machine, quote-time code would be able to move value.
-fail_if_found "static: routing_path_sdk reaches into RouteCommit or settlement" \
-  -e 'RouteCommitV1|execute_on_relationship|Operation::Dlv' \
-  "$SDK_SRC/sdk/routing_path_sdk.rs"
-
-# RouteCommit construction is likewise pure: it binds a quote, it does not
-# settle one. Emitting operations here would put value movement outside the
-# handler that gates it.
-fail_if_found "static: route_commit_sdk emits state-machine operations" \
-  -e 'execute_on_relationship|Operation::DlvUnlock|Operation::DlvClaim|Operation::DlvCreate' \
-  "$SDK_SRC/sdk/route_commit_sdk.rs"
 
 # Business logic stays in Rust: a frontend that can hash can derive identity,
 # and then two implementations decide what an asset is.

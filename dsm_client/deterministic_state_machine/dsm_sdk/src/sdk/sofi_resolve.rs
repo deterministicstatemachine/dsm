@@ -3,10 +3,13 @@
 //! resolution over the cells' route chains.
 //!
 //! Core decides; this module only fetches. For one exercise at one key it
-//! first asks Core what the exercise's own bytes refute (MR-DSM-0041): a
-//! refuted exercise is classified with nothing more read. Otherwise it builds
-//! the facts the ladder reads (`RouteFacts`): registration from the position
-//! pair (R10), `FulfillmentConformance` and `RouteValidation` over acquired
+//! first asks Core what the exercise's own bytes refute (MR-DSM-0041,
+//! MR-DSM-0042): a refuted exercise is classified with nothing read about it
+//! — at a walked key, nothing beyond the cell it was found at; for the
+//! trader's own position, nothing beyond the registration its caller read to
+//! find it, the one fact the ladder asks of a refuted exercise (§24 step 0).
+//! Otherwise it builds the facts the ladder reads (`RouteFacts`):
+//! registration from the position pair (R10), `FulfillmentConformance` and `RouteValidation` over acquired
 //! evidence (R5, R7), each leg's cell at its successor key (R11), attempt
 //! liveness from the walk over the earlier keys of that leg's chain, and the
 //! trader parent from the positions this verifier resolved itself. Then
@@ -26,7 +29,7 @@ use dsm::route_chain::{CellFact, ChainState, Missing as CellMissing};
 use dsm::sofi::conformance::{
     conformance_invalid_in_hand, fulfillment_conformance, ConformanceMissing, Validation,
 };
-use dsm::sofi::exercise::{recognize_exercise, RecognizedExercise};
+use dsm::sofi::exercise::RecognizedExercise;
 use dsm::sofi::registration::Registration;
 use dsm::sofi::resolution::{
     effect_of, resolve_position, resolve_refuted_in_hand, walk, Incomplete, KeyFacts, LegFacts,
@@ -34,7 +37,7 @@ use dsm::sofi::resolution::{
     VaultChain, WalkOutcome,
 };
 use dsm::sofi::validation::{route_invalid_in_hand, route_validation, vault_post_states, Missing};
-use dsm::sofi::wire::{ParentClaimRef, SofiExercise, ValidationRef};
+use dsm::sofi::wire::{ParentClaimRef, ValidationRef};
 use dsm::types::error::DsmError;
 
 use crate::sdk::sofi_evidence::{acquire_evidence, Acquired, LocalLeaves};
@@ -268,52 +271,29 @@ impl Resolver<'_> {
     }
 
     /// Stage 9 of §31: the trader's own position, resolved over the exercise
-    /// it built (R11).
-    pub async fn resolve_trader_position(
-        &self,
-        exercise: &SofiExercise,
-    ) -> Result<PositionOutcome, DsmError> {
-        let recognized = recognize_exercise(&exercise.encode()).ok_or_else(|| {
-            DsmError::verification("resolve: the bytes are not one operation's exercise")
-        })?;
-        self.resolve_recognized(recognized).await
-    }
-
-    /// The same, over an exercise already recognized — the one read back from
-    /// a leg's cell (`read_attempt_cell`), which is how the device finds its
-    /// own exercise again after a restart (R13). A refuted exercise reads
-    /// only its registration, the one fact the ladder asks of it.
+    /// read back from a leg's cell (`read_attempt_cell`), which is how the
+    /// device finds its own exercise again after a restart (R13), and over
+    /// the registration of its position, which the caller read to find that
+    /// exercise. A refuted exercise reads nothing more: its registration is
+    /// the one fact the ladder asks of it (§24 step 0), and it is in hand.
     pub async fn resolve_recognized(
         &self,
         recognized: RecognizedExercise,
+        registration: &Registration,
     ) -> Result<PositionOutcome, DsmError> {
-        let precommit = &recognized.precommit.body;
         let fulfillment = &recognized.fulfillment.body;
-        let known = match self.facts_of(&recognized, None, CHAIN_DEPTH).await? {
+        let known = match self
+            .facts_of(&recognized, None, CHAIN_DEPTH, Some(registration))
+            .await?
+        {
             Ok(known) => known,
             Err(why) => return Ok(PositionOutcome::NotEstablished(why)),
         };
         Ok(match known {
             Known::Facts(fetched) => PositionOutcome::of(resolve_position(&fetched.facts())),
             Known::RefutedInHand(..) => {
-                let registration = match read_registration(
-                    self.set,
-                    precommit.genesis(),
-                    precommit.device_id(),
-                    fulfillment.position(),
-                    precommit.void_root(),
-                )
-                .await?
-                {
-                    Ok(registration) => registration,
-                    Err(missing) => {
-                        return Ok(PositionOutcome::NotEstablished(
-                            NotEstablished::Registration(missing),
-                        ))
-                    }
-                };
                 let registered = matches!(
-                    &registration,
+                    registration,
                     Registration::Registered(signed) if signed.body == *fulfillment
                 );
                 PositionOutcome::of(resolve_refuted_in_hand(registered))
@@ -372,7 +352,7 @@ impl Resolver<'_> {
                             attempt,
                             cell: read.fact,
                         };
-                        match self.facts_of(&exercise, Some(key), depth).await? {
+                        match self.facts_of(&exercise, Some(key), depth, None).await? {
                             Ok(facts) => {
                                 known.insert(
                                     attempt,
@@ -416,12 +396,15 @@ impl Resolver<'_> {
     /// What is known about one exercise: refuted by its own bytes, or the
     /// complete facts the ladder reads. `walked` is the key the exercise was
     /// found at, whose cell is in hand and whose liveness the walk
-    /// established by reaching it.
+    /// established by reaching it. `registration` is the position's
+    /// registration when the caller already read it; otherwise it is read
+    /// here.
     fn facts_of<'s>(
         &'s self,
         exercise: &'s RecognizedExercise,
         walked: Option<WalkedKey>,
         depth: usize,
+        registration: Option<&'s Registration>,
     ) -> Fut<'s, Result<Known, NotEstablished>> {
         Box::pin(async move {
             if let Some(refuted) = refuted_in_hand(exercise) {
@@ -434,17 +417,20 @@ impl Resolver<'_> {
             // Registration from the position pair (R10). The pair decides
             // for every F at q at once: a position held by another claim is
             // this F's position lost (Section 21.1) — arm (v).
-            let registration = match read_registration(
-                self.set,
-                precommit.genesis(),
-                precommit.device_id(),
-                fulfillment.position(),
-                precommit.void_root(),
-            )
-            .await?
-            {
-                Ok(registration) => registration,
-                Err(missing) => return Ok(Err(NotEstablished::Registration(missing))),
+            let registration = match registration {
+                Some(registration) => registration.clone(),
+                None => match read_registration(
+                    self.set,
+                    precommit.genesis(),
+                    precommit.device_id(),
+                    fulfillment.position(),
+                    precommit.void_root(),
+                )
+                .await?
+                {
+                    Ok(registration) => registration,
+                    Err(missing) => return Ok(Err(NotEstablished::Registration(missing))),
+                },
             };
             let (registered, position_lost) = match &registration {
                 Registration::Registered(signed) => {
