@@ -4152,13 +4152,24 @@ mod tests {
         );
     }
 
+    /// A setup is the trader's when its body commits the key `P` commits.
+    /// Two different things can go wrong, and they get different answers:
+    ///
+    /// - The trader's setup body under a signature its committed key did not
+    ///   make is not a setup at all — signing is deterministic, so one body
+    ///   has exactly one valid envelope, and anyone can publish a copy with a
+    ///   junk signature under the same `ρ`. It is not established, never
+    ///   Invalid: a copy cannot condemn the trader's route.
+    /// - A setup that verifies under its own key, and that key is not the one
+    ///   `P` commits, is this `P`'s setup signed by someone else: Invalid.
     #[test]
-    fn a_setup_not_signed_by_the_traders_key_is_invalid() {
+    fn a_setup_is_the_traders_only_under_the_key_p_commits() {
         let f = swap_fixture();
         let rho = f.precommit.legs()[0].setup_ref;
         let (other_pk, other_sk) = crate::crypto::sphincs::generate_sphincs_keypair().unwrap();
+        assert_ne!(other_pk, trader_keys().0);
         let body = setup_body_for(vault_id_of(0));
-        let forged = crate::sofi::publication::Publication::Setup {
+        let copy = crate::sofi::publication::Publication::Setup {
             body: &body,
             signature: &crate::crypto::sphincs::sphincs_sign(
                 &other_sk,
@@ -4168,13 +4179,44 @@ mod tests {
         }
         .object_bytes()
         .unwrap();
-        assert_ne!(other_pk, trader_keys().0);
         let mut evidence = f.evidence.clone();
-        evidence.setups.insert(rho, forged);
+        evidence.setups.insert(rho, copy);
+        assert_eq!(
+            validate(&f.precommit, &f.preimage, &evidence),
+            Err(Refusal::Incomplete(Missing::NonVerifyingObject {
+                addr: rho
+            }))
+        );
+
+        let theirs = crate::sofi::wire::SofiSetupBody::new(
+            G,
+            DEV,
+            SETUP_POS,
+            vault_id_of(0),
+            SETUP_CLAIM_REF,
+            token(0xB0),
+            SIG_ALG,
+            &other_pk,
+        )
+        .unwrap();
+        let f = with_setup(theirs.clone());
+        let rho = f.precommit.legs()[0].setup_ref;
+        let signed_by_them = crate::sofi::publication::Publication::Setup {
+            body: &theirs,
+            signature: &crate::crypto::sphincs::sphincs_sign(
+                &other_sk,
+                &derive::setup_signing_digest(&theirs),
+            )
+            .unwrap(),
+        }
+        .object_bytes()
+        .unwrap();
+        let mut evidence = f.evidence.clone();
+        evidence.setups.insert(rho, signed_by_them);
         assert_eq!(
             validate(&f.precommit, &f.preimage, &evidence),
             Err(Refusal::Invalid(Invalid::SetupSignature(
-                crate::sofi::signature::SignatureError::DoesNotVerify { what: "SofiSetup" }
+                crate::sofi::signature::SignatureError::NotTheExpectedSigner { what: "SofiSetup" }
             )))
         );
     }

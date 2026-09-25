@@ -66,6 +66,13 @@ pub fn names_fulfillment_key(
     if precommit.genesis() != genesis || precommit.device_id() != device_id {
         return None;
     }
+    // F is signed under the key its P commits; each was verified under its
+    // own body's key when it was recognized.
+    if signed.body.signature_alg() != precommit.signature_alg()
+        || signed.body.claimant_public_key() != precommit.claimant_public_key()
+    {
+        return None;
+    }
     Some(signed)
 }
 
@@ -262,13 +269,20 @@ mod tests {
     use super::*;
     use crate::ccb::sigalg::SPHINCS_PLUS_SPX256F as ALG;
     use crate::sofi::publication::Publication;
-    use crate::sofi::validation::fixtures::{swap_fixture_n, DEV, G};
+    use crate::sofi::validation::fixtures::{swap_fixture_n, trader_keys, DEV, G};
     use crate::route_chain::fixtures::{committed_set, committed_set_id, Cell};
     use crate::route_chain::ROUTE_LEN;
     use crate::sofi::wire::AttemptEntry;
 
-    const KEY: [u8; 64] = [0x31; 64];
-    const SIG: [u8; 8] = [0x77; 8];
+    /// The trader's key, as every fixture `P` commits it.
+    fn key() -> &'static [u8] {
+        &trader_keys().0
+    }
+
+    /// The trader's signature over `digest`.
+    fn signed(digest: D32) -> Vec<u8> {
+        crate::crypto::sphincs::sphincs_sign(&trader_keys().1, &digest).unwrap()
+    }
 
     fn fulfillment(p: &TraderPrecommitBody, position: u64) -> TraderFulfillmentBody {
         TraderFulfillmentBody::new(
@@ -283,7 +297,7 @@ mod tests {
                 .collect(),
             position,
             ALG,
-            &KEY,
+            key(),
         )
         .unwrap()
     }
@@ -291,7 +305,7 @@ mod tests {
     fn envelope(f: &TraderFulfillmentBody) -> Vec<u8> {
         Publication::Fulfillment {
             body: f,
-            signature: &SIG,
+            signature: &signed(derive::fulfillment_signing_digest(f)),
         }
         .object_bytes()
         .unwrap()
@@ -322,6 +336,69 @@ mod tests {
             "without P neither the trader nor C_q is known"
         );
         assert!(names_fulfillment_key(b"not an envelope", &G, &DEV, q, &known).is_none());
+    }
+
+    /// `K_ful(q)` is named only by a fulfillment the trader signed: its
+    /// signature verifies under the key its body commits, and that key is the
+    /// one its `P` commits. An unsigned or foreign-key `F` naming the right
+    /// trader, position and `P` is nothing, so first at the leader it holds
+    /// nothing.
+    #[test]
+    fn only_a_fulfillment_signed_under_its_precommits_key_names_the_key() {
+        let p = swap_fixture_n(2).precommit;
+        let q = p.position() + 1;
+        let f = fulfillment(&p, q);
+        let known = lookup(&p);
+        let unsigned = Publication::Fulfillment {
+            body: &f,
+            signature: &[0x77; 8],
+        }
+        .object_bytes()
+        .unwrap();
+        assert!(names_fulfillment_key(&unsigned, &G, &DEV, q, &known).is_none());
+
+        let (other_pk, other_sk) = crate::crypto::sphincs::generate_sphincs_keypair().unwrap();
+        let foreign = TraderFulfillmentBody::new(
+            *f.precommit_id(),
+            f.policy_fulfillment_set().to_vec(),
+            f.attempts().to_vec(),
+            q,
+            ALG,
+            &other_pk,
+        )
+        .unwrap();
+        let foreign_bytes = Publication::Fulfillment {
+            body: &foreign,
+            signature: &crate::crypto::sphincs::sphincs_sign(
+                &other_sk,
+                &derive::fulfillment_signing_digest(&foreign),
+            )
+            .unwrap(),
+        }
+        .object_bytes()
+        .unwrap();
+        assert!(names_fulfillment_key(&foreign_bytes, &G, &DEV, q, &known).is_none());
+
+        // First at the leader, the unsigned F blocks nothing.
+        let cells = PositionCells::new(
+            &G,
+            &DEV,
+            q,
+            &[0x5E; 32],
+            &committed_set(),
+            &committed_set_id(),
+        )
+        .expect("the committed set");
+        let claim = derive::resolution_claim(&p, &f).encode();
+        let mut ful = Cell::at(cells.fulfillment());
+        ful.write(&unsigned, ROUTE_LEN - 1, &[]);
+        ful.write(&envelope(&f), ROUTE_LEN - 1, &[]);
+        let mut root = Cell::at(cells.root().routed());
+        root.write(&claim, ROUTE_LEN - 1, &[]);
+        assert!(matches!(
+            fulfillment_registered(&cells, &ful.evidence(), &root.evidence(), &known),
+            Ok(Registration::Registered(ref s)) if s.body == f
+        ));
     }
 
     /// A fulfillment final at `K_ful(q)` has a completion proof built from
@@ -378,7 +455,7 @@ mod tests {
             f.attempts().to_vec(),
             q,
             ALG,
-            &KEY,
+            key(),
         )
         .unwrap();
         let other_claim = derive::resolution_claim(&p, &rival).encode();
@@ -403,7 +480,7 @@ mod tests {
         };
         let registered = Signed {
             body: f.clone(),
-            signature: SIG.to_vec(),
+            signature: signed(derive::fulfillment_signing_digest(&f)),
         };
         let final_ful = ful_cell(&bytes, ROUTE_LEN - 1);
         assert_eq!(

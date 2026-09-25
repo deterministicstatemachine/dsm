@@ -109,6 +109,55 @@ async fn a_full_claim_credits_100_era_and_admits_position_1() {
     );
 }
 
+/// SoFi §51 and the shortcut audit of 2026-09-25: a release of the whole
+/// remaining supply, signed by a key nobody proved and written final along
+/// the whole route of the reserve's first successor cell before anyone
+/// claims, is not a release the claim policy allows. It holds nothing: the
+/// claimant takes generation 1, and the reserve gave up exactly one payout.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_release_of_the_whole_supply_holds_nothing_and_the_claim_lands() {
+    let d = Device::start(0xA1).await;
+    let set = canonical_set(NETWORK).expect("canonical set");
+    let r0 = reserve_genesis();
+    let (pk, sk) = dsm::crypto::sphincs::generate_sphincs_keypair().expect("a key");
+    let drain = dsm::economic::native_reserve::sign_release(
+        &dsm::economic::native_reserve::NativeReserveReleaseBody {
+            reserve_id: r0.reserve_id,
+            parent_root: r0.root(),
+            generation: 1,
+            amount: r0.remaining_supply,
+            recipient_genesis: [0x5A; 32],
+            recipient_devid: [0x5B; 32],
+            recipient_economic_position: 1,
+            recipient_operation_digest: [0x5C; 32],
+            storage_set_id: r0.storage_set_id,
+            source: dsm::economic::native_reserve::ReleaseSource::FaucetClaimant {
+                claimant_public_key: pk,
+            },
+        },
+        &sk,
+    )
+    .expect("signed");
+    let write = crate::sdk::native_reserve::write_release(&set, &r0, &drain)
+        .await
+        .expect("the nodes keep whatever they are given");
+    assert!(write.reached_leader());
+
+    let outcome = claim_era_faucet(d.core(), NETWORK)
+        .await
+        .expect("the claim lands");
+    assert_eq!(outcome.tokens_received, 100);
+    assert_eq!(
+        recipient_of(&release_at(1).await),
+        d.identity.device_id,
+        "generation 1 is the claimant's, not the drain's"
+    );
+    let head = reserve_head().await;
+    assert_eq!(head.generation, 1);
+    assert_eq!(head.remaining_supply, ERA_RESERVE_GENESIS_SUPPLY - 100);
+}
+
 /// The route claims for the device that makes the request, and for no other:
 /// a request naming another device is refused before anything is claimed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

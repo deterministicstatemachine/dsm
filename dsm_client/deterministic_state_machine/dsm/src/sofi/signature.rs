@@ -13,11 +13,13 @@
 //! A setup and a fulfillment sign their PROTOCOL OBJECT, not the operation
 //! that carries it, and they do not additionally carry a generic operation
 //! signature. That is not a detail of local bookkeeping: the same `F` reaches
-//! a storage member as bare object bytes with no operation around them, and
-//! the member verifies `m_F` there. One object, one signature, verified
-//! identically wherever it arrives — a second rule at the operation layer
-//! would be a signature the member could not check and the trader would have
-//! to produce twice.
+//! storage as bare object bytes with no operation around them, and every
+//! reader verifies `m_F` there — Core's recognizer, when it reads the cell or
+//! the index (`publication::recognize_fulfillment`); the member verifies
+//! nothing (storage spec §9 rule 6). One object, one signature, verified
+//! identically wherever it is read — a second rule at the operation layer
+//! would be a signature a reader of the bare object could not check and the
+//! trader would have to produce twice.
 //!
 //! A vault creation has no protocol object of its own to sign: `R_0` and the
 //! `vault_id` are derivations of a preimage the operation carries, so what it
