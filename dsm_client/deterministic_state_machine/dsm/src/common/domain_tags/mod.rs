@@ -163,8 +163,8 @@ mod tests {
     // -1 with the forward-linked commitment (ruling #4): its hash domain.
     // -2 with the balance anchors (ruling #7): an operation's amount references
     // no state, and a zero balance no invented one.
-    // -3 with the MPC genesis path: its identity id, token participant and
-    // sub-genesis device entropy.
+    // -3 with three genesis tags nothing derives from: an identity id, a
+    // token participant and a sub-genesis device entropy.
     const EXPECTED_TAG_COUNT: usize = 370;
 
     /// Scan the crate source for every declared domain-tag constant.
