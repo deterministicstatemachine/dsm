@@ -21,8 +21,10 @@
 //! A-side and B-side calls must never overlap in-process, because `AppState`,
 //! the cached wallet seed, the SDK context and the bridge's Kyber slot are
 //! process-global — one process stands in for two devices' processes, and
-//! [`TestDevice::enter`] brings up the entered device's process state. This
-//! harness proves protocol SEQUENCING, not concurrency.
+//! [`TestDevice::enter`] brings up the entered device's process state. The
+//! process's background inbox poller is held off while a [`Pair`] lives: it
+//! would sync whichever device is entered at times of its own. This harness
+//! proves protocol SEQUENCING, not concurrency.
 
 use crate::bridge::{AppInvoke, AppRouter};
 use crate::economic_fixtures::{self, FleetGuard};
@@ -287,12 +289,17 @@ pub struct Pair {
     pub fleet: FleetGuard,
     pub a: TestDevice,
     pub b: TestDevice,
+    /// The background poller is held off while the pair lives; released on
+    /// drop, or by [`Pair::release_background_poller`].
+    _poller_hold: Option<crate::sdk::inbox_poller::PollerHold>,
 }
 
 impl Pair {
     /// Start the nodes, create and boot both devices, add each as the other's
     /// contact and fund them.
     pub async fn boot(a_funding: u64, b_funding: u64) -> Self {
+        // No background poller syncs a device behind the harness's back.
+        let poller_hold = crate::sdk::inbox_poller::hold_off_for_two_device_harness().await;
         economic_fixtures::use_test_storage_dir();
         client_db::reset_database_for_tests();
         // Fresh nodes per pair: each test gets empty registers, so no earlier
@@ -311,7 +318,19 @@ impl Pair {
         if b_funding > 0 {
             b.fund_admitted(b_funding).await;
         }
-        Self { nodes, fleet, a, b }
+        Self {
+            nodes,
+            fleet,
+            a,
+            b,
+            _poller_hold: Some(poller_hold),
+        }
+    }
+
+    /// Release the pair's hold on the background poller before the pair ends:
+    /// a start it deferred runs now.
+    pub fn release_background_poller(&mut self) {
+        self._poller_hold = None;
     }
 
     /// The message ids of every envelope node `node` holds in its spool, in

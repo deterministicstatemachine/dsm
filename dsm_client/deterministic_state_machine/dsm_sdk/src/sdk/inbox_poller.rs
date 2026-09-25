@@ -39,10 +39,80 @@ static POLLER_STOP: AtomicBool = AtomicBool::new(false);
 static POLLER_WAKE: once_cell::sync::Lazy<Arc<Notify>> =
     once_cell::sync::Lazy::new(|| Arc::new(Notify::new()));
 
+/// Holds the two-device test harness has on the background poller (see
+/// [`hold_off_for_two_device_harness`]).
+#[cfg(test)]
+static POLLER_HOLDS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// A start the harness's hold deferred, or a poller the hold stopped: the
+/// poller starts again when the last hold is released.
+#[cfg(test)]
+static POLLER_START_DEFERRED: AtomicBool = AtomicBool::new(false);
+
+/// Signalled after every poller cycle, for tests that wait on one.
+#[cfg(test)]
+pub(crate) static POLLER_CYCLE_DONE: once_cell::sync::Lazy<Notify> =
+    once_cell::sync::Lazy::new(Notify::new);
+
+/// The two-device test harness stands in for two devices' processes in one
+/// and drives each device's `storage.sync` itself. A background poller in that
+/// process syncs whichever device the harness has entered, at times of its
+/// own: a second actor the harness's serialization excludes, and one that
+/// races every assertion about a state a sync moves on from. The harness
+/// holds it off for a pair's life: a running poller is stopped and waited out
+/// before the pair is set up, a start while the hold stands is deferred, and
+/// the poller starts again once the hold is dropped — on teardown, a failing
+/// test's included.
+#[cfg(test)]
+#[must_use]
+pub(crate) struct PollerHold(());
+
+#[cfg(test)]
+pub(crate) async fn hold_off_for_two_device_harness() -> PollerHold {
+    POLLER_HOLDS.fetch_add(1, Ordering::SeqCst);
+    if POLLER_RUNNING.load(Ordering::SeqCst) {
+        POLLER_START_DEFERRED.store(true, Ordering::SeqCst);
+    }
+    stop_poller();
+    while POLLER_RUNNING.load(Ordering::SeqCst) {
+        POLLER_WAKE.notify_one();
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    PollerHold(())
+}
+
+#[cfg(test)]
+impl Drop for PollerHold {
+    fn drop(&mut self) {
+        if POLLER_HOLDS.fetch_sub(1, Ordering::SeqCst) == 1
+            && POLLER_START_DEFERRED.swap(false, Ordering::SeqCst)
+        {
+            start_poller();
+        }
+    }
+}
+
+/// Whether the background poller task is running.
+#[cfg(test)]
+pub(crate) fn poller_running() -> bool {
+    POLLER_RUNNING.load(Ordering::SeqCst)
+}
+
+/// Whether a start is deferred until the harness's hold is released.
+#[cfg(test)]
+pub(crate) fn poller_start_deferred() -> bool {
+    POLLER_START_DEFERRED.load(Ordering::SeqCst)
+}
+
 /// Start the inbox poller background task on the SDK runtime.
 ///
 /// Idempotent: if already running, returns immediately.
 pub fn start_poller() {
+    #[cfg(test)]
+    if POLLER_HOLDS.load(Ordering::SeqCst) > 0 {
+        POLLER_START_DEFERRED.store(true, Ordering::SeqCst);
+        return;
+    }
     if POLLER_RUNNING
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_err()
@@ -68,6 +138,8 @@ pub fn start_poller() {
             }
 
             let (processed, _pulled) = run_inbox_sync_cycle_counted("poll").await;
+            #[cfg(test)]
+            POLLER_CYCLE_DONE.notify_waiters();
             // Settlement-urgent covers BOTH directions: the sender awaiting an
             // acceptance receipt AND the recipient still holding an undelivered
             // countersigned reply. Polling the reply side at the idle interval
@@ -437,6 +509,29 @@ mod tests {
     }
 
     // ── Poller state flags ──
+
+    /// A test that fails while it holds the poller off still releases the
+    /// hold as it unwinds, and a start deferred under it runs then.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_hold_is_released_when_its_test_fails() {
+        stop_poller();
+        POLLER_RUNNING.store(false, Ordering::SeqCst);
+        POLLER_START_DEFERRED.store(false, Ordering::SeqCst);
+        let hold = hold_off_for_two_device_harness().await;
+        let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _hold = hold;
+            start_poller();
+            assert!(!poller_running() && poller_start_deferred());
+            panic!("the test fails while it holds the poller off");
+        }));
+        assert!(failed.is_err());
+        assert!(
+            poller_running() && !poller_start_deferred(),
+            "the hold was not released as the failing test unwound"
+        );
+        stop_poller();
+    }
 
     #[test]
     #[serial_test::serial]
