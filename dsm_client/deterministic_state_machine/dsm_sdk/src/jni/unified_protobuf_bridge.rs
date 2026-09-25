@@ -939,17 +939,24 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_onAppBackgrou
     _env: jni::sys::JNIEnv,
     _clazz: jni::sys::jclass,
 ) -> jni::sys::jboolean {
-    let keep_alive = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    // Only a readable "nothing owed" lets the host go: the poller was stopped.
+    // Outstanding work, an unreadable settlement state, or a panic keep it
+    // alive.
+    let stopped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         crate::logging::init_android_device_logging();
-        // Declines internally while settlement work is outstanding.
-        crate::sdk::inbox_poller::stop_poller_for_lifecycle();
-        crate::sdk::inbox_poller::has_pending_settlement_work()
-    }))
-    .unwrap_or(false);
-    if keep_alive {
-        1
-    } else {
-        0
+        crate::sdk::inbox_poller::stop_poller_for_lifecycle()
+    }));
+    match stopped {
+        Ok(Ok(true)) => 0,
+        Ok(Ok(false)) => 1,
+        Ok(Err(e)) => {
+            log::error!("onAppBackgrounded: settlement state unreadable, keeping alive: {e}");
+            1
+        }
+        Err(_) => {
+            log::error!("onAppBackgrounded: the lifecycle stop panicked, keeping alive");
+            1
+        }
     }
 }
 

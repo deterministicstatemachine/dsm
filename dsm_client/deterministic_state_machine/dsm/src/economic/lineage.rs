@@ -880,10 +880,8 @@ pub fn advance_validated(
     // candidates; this is where they stop being taken on trust.
     let candidate = resolver
         .root_register_candidate_set(network_id)
-        .map_err(|_| {
-            EconomicValidationError::Provenance(ProvenanceError::RegisterNotResolvable(
-                "the network's register set could not be resolved",
-            ))
+        .map_err(|failure| {
+            EconomicValidationError::Provenance(ProvenanceError::RegisterNotEstablished(failure))
         })?;
     // The candidate must re-derive the network's PINNED set id. Membership
     // alone would leave the incarnations to whatever the catalog offered.

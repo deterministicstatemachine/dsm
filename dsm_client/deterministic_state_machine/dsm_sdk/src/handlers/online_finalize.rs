@@ -148,15 +148,23 @@ pub fn verify_acceptance_receipt(
     // ---- 4. B-side per-step EK countersignature ----
     // From the SENDER's viewpoint the recipient (B) is the Counterparty. At
     // relationship genesis (no Counterparty head yet) ek_cert_b chains back to
-    // the recipient's AK — its legitimate predecessor.
+    // the recipient's AK — its legitimate predecessor. A head that could not
+    // be READ is not "no head": the check cannot be made, and the delta is
+    // retried rather than judged against the root AK.
     let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
         &receipt.devid_a,
         &receipt.devid_b,
     );
-    let expected_prev_pk_b = load_cert_chain_head_pubkey(&rel_key, CertChainSide::Counterparty)
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| recipient_ak_pk.to_vec());
+    let expected_prev_pk_b =
+        match load_cert_chain_head_pubkey(&rel_key, CertChainSide::Counterparty) {
+            Ok(Some(head)) => head,
+            Ok(None) => recipient_ak_pk.to_vec(),
+            Err(e) => {
+                return Err(anyhow!(
+                    "the counterparty's cert-chain head could not be read: {e}"
+                ))
+            }
+        };
 
     let commitment = receipt
         .compute_commitment()
@@ -545,7 +553,11 @@ mod tests {
     /// the assertion is specifically that the rejection is NOT about parent,
     /// child, or commitment — i.e. it survived the structural binding stage.
     #[test]
+    #[serial_test::serial]
     fn divergent_projection_does_not_reject_a_valid_canonical_pair() {
+        // A readable, empty store: the relationship has no counterparty head
+        // yet, so the predecessor is the recipient's AK.
+        with_a_store();
         let (a, b, parent, child) = ([0x11u8; 32], [0x22u8; 32], [0x33u8; 32], [0x44u8; 32]);
         let receipt = base_receipt(a, b, parent, child);
         let commitment = receipt.compute_commitment().expect("commitment");
@@ -579,6 +591,91 @@ mod tests {
             }
             ReceiptVerifyOutcome::Verified { .. } => {}
         }
+    }
+
+    /// A readable, empty client store.
+    fn with_a_store() {
+        crate::economic_fixtures::use_test_storage_dir();
+        crate::storage::client_db::reset_database_for_tests();
+    }
+
+    /// The counterparty head table, out of reach until dropped: every read of
+    /// a head fails while it is held.
+    struct HeadsUnreadable;
+    impl HeadsUnreadable {
+        fn hide() -> Self {
+            crate::storage::client_db::get_connection()
+                .expect("the store")
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .execute_batch("ALTER TABLE cert_chain_heads RENAME TO cert_chain_heads_unreadable")
+                .expect("hide the head table");
+            Self
+        }
+    }
+    impl Drop for HeadsUnreadable {
+        fn drop(&mut self) {
+            let restored = crate::storage::client_db::get_connection().and_then(|conn| {
+                conn.lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .execute_batch(
+                        "ALTER TABLE cert_chain_heads_unreadable RENAME TO cert_chain_heads",
+                    )
+                    .map_err(anyhow::Error::from)
+            });
+            if let Err(e) = restored {
+                eprintln!("the head table was not restored; later tests will fail on it: {e}");
+            }
+        }
+    }
+
+    /// Storage spec §4: a counterparty cert-chain head that could not be READ
+    /// is not "no head yet". Both verifiers refuse to judge the chain rather
+    /// than take the root AK as the predecessor: the sender's check of the
+    /// recipient's countersignature returns an error (the delta is retried),
+    /// never a rejection; the recipient's check of the sender's signature
+    /// names the unreadable head. With the store readable again, the same
+    /// inputs reach the chain check itself.
+    #[test]
+    #[serial_test::serial]
+    fn an_unreadable_counterparty_head_is_never_read_as_genesis() {
+        with_a_store();
+        let (a, b, parent, child) = ([0x11u8; 32], [0x22u8; 32], [0x33u8; 32], [0x44u8; 32]);
+        let receipt = base_receipt(a, b, parent, child);
+        let commitment = receipt.compute_commitment().expect("commitment");
+        let p = proposal_with_commitment(b, parent, child, commitment);
+        let verify = || {
+            verify_acceptance_receipt(
+                &a,
+                &b,
+                &receipt,
+                &p,
+                &[0x55u8; 32],
+                None,
+                None,
+                ([0u8; 32], [0u8; 32]),
+            )
+        };
+        let sig_a = || {
+            crate::handlers::storage_routes::verify_inbound_receipt_sig_a(
+                &receipt,
+                &commitment,
+                &[0x55u8; 32],
+            )
+        };
+        {
+            let _hidden = HeadsUnreadable::hide();
+            let err = verify().expect_err("an unreadable head is not a verdict");
+            assert!(err.to_string().contains("could not be read"), "{err}");
+            let err = sig_a().expect_err("an unreadable head is not a verdict");
+            assert!(err.contains("could not be read"), "{err}");
+        }
+        assert!(
+            verify().is_ok(),
+            "readable again: the chain check itself answers"
+        );
+        let err = sig_a().expect_err("no per-step EK material in this receipt");
+        assert!(!err.contains("could not be read"), "{err}");
     }
 
     /// A forged canonical child must still fail closed — retargeting the check

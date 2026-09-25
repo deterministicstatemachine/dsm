@@ -120,7 +120,10 @@ async fn a_release_of_the_whole_supply_holds_nothing_and_the_claim_lands() {
     let d = Device::start(0xA1).await;
     let set = canonical_set(NETWORK).expect("canonical set");
     let r0 = reserve_genesis();
+    // A key of its own, and the device id it derives: the release's signer
+    // IS the device it names, so only the release rule's amount refuses it.
     let (pk, sk) = dsm::crypto::sphincs::generate_sphincs_keypair().expect("a key");
+    let att_a = [0x5D; 32];
     let drain = dsm::economic::native_reserve::sign_release(
         &dsm::economic::native_reserve::NativeReserveReleaseBody {
             reserve_id: r0.reserve_id,
@@ -128,12 +131,13 @@ async fn a_release_of_the_whole_supply_holds_nothing_and_the_claim_lands() {
             generation: 1,
             amount: r0.remaining_supply,
             recipient_genesis: [0x5A; 32],
-            recipient_devid: [0x5B; 32],
+            recipient_devid: dsm::core::identity::genesis_v2::derive_devid(&pk, &att_a),
             recipient_economic_position: 1,
             recipient_operation_digest: [0x5C; 32],
             storage_set_id: r0.storage_set_id,
             source: dsm::economic::native_reserve::ReleaseSource::FaucetClaimant {
                 claimant_public_key: pk,
+                claimant_att_a: att_a,
             },
         },
         &sk,
@@ -156,6 +160,54 @@ async fn a_release_of_the_whole_supply_holds_nothing_and_the_claim_lands() {
     let head = reserve_head().await;
     assert_eq!(head.generation, 1);
     assert_eq!(head.remaining_supply, ERA_RESERVE_GENESIS_SUPPLY - 100);
+}
+
+/// Owner ruling 2026-09-25: a faucet release occupies a reserve cell only
+/// when its signer is the device it credits. A payout release naming the
+/// claimant's own device, signed by another key, written final along the
+/// whole route of the first successor cell before the claimant claims, holds
+/// nothing: the claimant takes generation 1 with its own release.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_release_naming_a_device_its_key_does_not_derive_holds_nothing() {
+    let d = Device::start(0xA1).await;
+    let set = canonical_set(NETWORK).expect("canonical set");
+    let r0 = reserve_genesis();
+    let (pk, sk) = dsm::crypto::sphincs::generate_sphincs_keypair().expect("a key");
+    let impostor = dsm::economic::native_reserve::sign_release(
+        &dsm::economic::native_reserve::NativeReserveReleaseBody {
+            reserve_id: r0.reserve_id,
+            parent_root: r0.root(),
+            generation: 1,
+            amount: dsm::economic::native_reserve::ERA_FAUCET_PAYOUT,
+            recipient_genesis: d.identity.genesis,
+            recipient_devid: d.identity.device_id,
+            recipient_economic_position: 1,
+            recipient_operation_digest: [0x5C; 32],
+            storage_set_id: r0.storage_set_id,
+            source: dsm::economic::native_reserve::ReleaseSource::FaucetClaimant {
+                claimant_public_key: pk,
+                claimant_att_a: [0x5D; 32],
+            },
+        },
+        &sk,
+    )
+    .expect("signed");
+    let write = crate::sdk::native_reserve::write_release(&set, &r0, &impostor)
+        .await
+        .expect("the nodes keep whatever they are given");
+    assert!(write.reached_leader());
+
+    let outcome = claim_era_faucet(d.core(), NETWORK)
+        .await
+        .expect("the claim lands");
+    assert_eq!(outcome.tokens_received, 100);
+    let won = release_at(1).await;
+    assert_ne!(
+        won.envelope_bytes, impostor,
+        "the impostor's release holds nothing"
+    );
+    assert_eq!(recipient_of(&won), d.identity.device_id);
 }
 
 /// The route claims for the device that makes the request, and for no other:

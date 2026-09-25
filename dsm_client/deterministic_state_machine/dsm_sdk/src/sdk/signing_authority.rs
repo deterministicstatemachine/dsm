@@ -46,6 +46,26 @@ pub(crate) fn derive_current_signing_keypair() -> Result<SignatureKeyPair, DsmEr
     crate::init::derive_device_signing_keypair(&wallet_seed, &genesis)
 }
 
+/// This device's birth attestation digest, `AttA = KDF(wallet_seed, G,
+/// device_slot)`: with the AK it derives the device id (`DevID = H(AK ‖
+/// AttA)`), so an object carrying both proves which device signed it.
+pub(crate) fn current_att_a() -> Result<[u8; 32], DsmError> {
+    let genesis = genesis_from_app_state()?;
+    let wallet_seed =
+        crate::sdk::recovery_sdk::RecoverySDK::get_cached_wallet_seed().ok_or_else(|| {
+            DsmError::InvalidState("wallet seed unavailable for AttA (wallet locked)".into())
+        })?;
+    let slot = crate::sdk::identity_presentation::OwnerIdentityInputs::beta(
+        dsm::economic::register::BETA_NETWORK_ID,
+    )
+    .device_slot;
+    Ok(dsm::core::identity::genesis_v2::derive_atta(
+        &wallet_seed,
+        &genesis,
+        slot,
+    ))
+}
+
 pub(crate) fn current_public_key() -> Result<Vec<u8>, DsmError> {
     Ok(derive_current_signing_keypair()?.public_key().to_vec())
 }

@@ -9,7 +9,7 @@
 use serial_test::serial;
 
 use crate::storage::client_db;
-use crate::test_support::two_device::{Pair, TestDevice};
+use crate::test_support::two_device::{assert_incomplete, Pair, TestDevice};
 
 /// The transfer halves `B` staged on receipt — its transfer request and A's
 /// receipt evidence, exactly as delivered.
@@ -369,7 +369,7 @@ async fn an_outage_holds_the_transfer_cleanly_and_it_recovers() {
     let down = crate::economic_fixtures::members_to_break_quorum();
     p.nodes.take_down(&down).await;
     let held_sync = p.b.sync().await;
-    assert!(held_sync.success, "{:?}", held_sync.errors);
+    assert_incomplete(&held_sync);
     assert_eq!(p.b.era_balance(), 0, "nothing credited under the outage");
     p.b.enter();
     assert!(

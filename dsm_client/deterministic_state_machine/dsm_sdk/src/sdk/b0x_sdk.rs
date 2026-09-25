@@ -228,6 +228,41 @@ pub struct FrozenSendDelivery {
     pub artifact_ids: Vec<String>,
 }
 
+/// What one spool read covered (storage spec §8 item 2; owner ruling
+/// 2026-09-25). A delivery lands on exactly `quorum_k` of the set's members
+/// ([`B0xSDK::delivery_quorum`]), so a read that reached at least
+/// `members - quorum_k + 1` of them met every delivered message at least once:
+/// `Complete`. Fewer is `Partial`: what was read is real, and a message held
+/// only by members that did not answer is still there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpoolCoverage {
+    Complete,
+    Partial { responded: usize, needed: usize },
+}
+
+impl SpoolCoverage {
+    /// The coverage of a read `responded` members answered, of `members`,
+    /// when every delivery lands on `quorum_k` of them.
+    pub fn of(responded: usize, members: usize, quorum_k: usize) -> Self {
+        let needed = members.saturating_sub(quorum_k) + 1;
+        if responded >= needed {
+            Self::Complete
+        } else {
+            Self::Partial { responded, needed }
+        }
+    }
+}
+
+/// One spool read: what it found, how many members answered, and what that
+/// covers.
+#[derive(Debug)]
+pub struct RetrievalOutcome {
+    pub entries: Vec<B0xEntry>,
+    pub responded: usize,
+    pub members: usize,
+    pub coverage: SpoolCoverage,
+}
+
 #[derive(Debug, Clone)]
 pub struct B0xEntry {
     pub transaction_id: String,
@@ -2361,10 +2396,16 @@ impl B0xSDK {
     /// The next call continues from the stored position.
     const MAX_RETRIEVE_PAGES_PER_NODE: usize = 16;
 
+    /// Read the spool at `b0x_address` from every member that answers. `Err`
+    /// when no member answered: nothing was read, which is not an empty
+    /// inbox. Otherwise the entries found and what the read covers
+    /// ([`SpoolCoverage`]): a read that did not reach enough members to meet
+    /// every delivery is partial, and no caller may take it for "nothing
+    /// more".
     pub async fn retrieve_from_b0x_v2(
         &mut self,
         b0x_address: &str,
-    ) -> Result<Vec<B0xEntry>, DsmError> {
+    ) -> Result<RetrievalOutcome, DsmError> {
         use crate::storage::client_db::b0x_consumed;
         let local = |e: anyhow::Error| {
             DsmError::storage(format!("b0x consumed record: {e}"), None::<std::io::Error>)
@@ -2392,6 +2433,9 @@ impl B0xSDK {
         }
 
         let mut map: HashMap<String, dsm::types::proto::Envelope> = HashMap::new();
+        // Members whose spool was read to an answer. None is not an empty
+        // inbox: nothing was read (storage spec §4).
+        let mut answered = 0usize;
         for epc in endpoints {
             // `position`: below it, everything on this node is consumed.
             // `cursor`: where the next page is read from. A message still
@@ -2479,9 +2523,18 @@ impl B0xSDK {
             if failed {
                 self.circuit_breaker.mark_node_failed(&epc).await;
             } else {
+                answered += 1;
                 self.circuit_breaker.mark_node_healthy(&epc).await;
             }
         }
+        if answered == 0 {
+            return Err(DsmError::network(
+                "b0x retrieve: no storage node answered; nothing was read",
+                None::<std::io::Error>,
+            ));
+        }
+        let members = self.storage_node_endpoints.len();
+        let coverage = SpoolCoverage::of(answered, members, self.quorum_k);
 
         let mut entries = Vec::new();
         for env in map.into_values() {
@@ -2538,8 +2591,16 @@ impl B0xSDK {
                 entries.push(e);
             }
         }
-        info!("📬 retrieve_from_b0x_v2: merged {} entries", entries.len());
-        Ok(entries)
+        info!(
+            "📬 retrieve_from_b0x_v2: merged {} entries from {answered} of {members} members ({coverage:?})",
+            entries.len()
+        );
+        Ok(RetrievalOutcome {
+            entries,
+            responded: answered,
+            members,
+            coverage,
+        })
     }
 
     /// Record `message_ids` (base32 transport ids) as consumed from
@@ -3470,6 +3531,28 @@ mod tests {
     /// THE FAN-OUT FOLLOWS THE REGISTER QUORUM, not the fleet size (#867): a
     /// send's transfer and its evidence each land on exactly K members of the
     /// pinned set, K the resolved profile's quorum, never on all of them.
+    /// A delivery lands on `quorum_k` of `members`, so a read meets every
+    /// delivery exactly when at least `members - quorum_k + 1` answered —
+    /// the quorum-intersection boundary, pinned on both sides for the 5/3
+    /// and 3/2 profiles.
+    #[test]
+    fn a_read_covers_every_delivery_only_from_the_quorum_intersection_up() {
+        for (members, quorum_k) in [(5, 3), (3, 2)] {
+            let needed = members - quorum_k + 1;
+            assert_eq!(
+                SpoolCoverage::of(needed, members, quorum_k),
+                SpoolCoverage::Complete
+            );
+            assert_eq!(
+                SpoolCoverage::of(needed - 1, members, quorum_k),
+                SpoolCoverage::Partial {
+                    responded: needed - 1,
+                    needed
+                }
+            );
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[serial_test::serial]
     async fn a_send_lands_on_exactly_the_register_quorum_of_members() {

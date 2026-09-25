@@ -178,6 +178,64 @@ async fn a_transfer_reaches_the_nodes_only_sealed_and_arrives() {
     assert!(held > 0, "the transfer went through the nodes");
 }
 
+/// DSM Amendment A1, storage spec §3, §4 and §8 (owner ruling 2026-09-25):
+/// an inbox read that did not cover every delivery is not a complete sync. A
+/// delivery lands on the register quorum of members, so a read covers every
+/// delivery only once `members - quorum + 1` of them answer. With fewer up,
+/// B's sync reports a partial read; with none up, it reports that no member
+/// answered; either way it fails and is not counted as a completed run. With
+/// every member back, the same sync pulls the transfer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn an_inbox_read_that_did_not_cover_every_delivery_is_not_a_complete_sync() {
+    let mut p = Pair::boot(100, 0).await;
+    let sent = p.a.send(&p.b, 10).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+    let everyone: Vec<String> = p.nodes.members().into_iter().map(|(id, ..)| id).collect();
+    let quorum = canonical_set(NETWORK).expect("the pinned set").quorum() as usize;
+    let needed = everyone.len() - quorum + 1;
+    let count = || crate::storage::client_db::storage_sync_runs::completed().expect("count");
+
+    // Fewer members up than a read needs to meet every delivery.
+    let down: Vec<String> = everyone[..everyone.len() - (needed - 1)].to_vec();
+    p.nodes.take_down(&down).await;
+    p.b.enter();
+    let before = count();
+    let partial = p.b.sync().await;
+    assert!(!partial.success, "a partial read reported a complete sync");
+    assert!(
+        partial.errors.iter().any(|e| e.contains("partial")),
+        "{:?}",
+        partial.errors
+    );
+    p.b.enter();
+    assert_eq!(count(), before, "a partial run is not counted as completed");
+
+    // No member up.
+    let rest: Vec<String> = everyone[everyone.len() - (needed - 1)..].to_vec();
+    p.nodes.take_down(&rest).await;
+    let outage = p.b.sync().await;
+    assert!(!outage.success, "a sync that read nothing reported success");
+    assert_eq!(outage.pulled, 0);
+    assert!(
+        outage
+            .errors
+            .iter()
+            .any(|e| e.contains("no storage node answered")),
+        "{:?}",
+        outage.errors
+    );
+    p.b.enter();
+    assert_eq!(count(), before, "a failed run is not counted as completed");
+
+    p.nodes.bring_up(&everyone).await;
+    let back = p.b.sync().await;
+    assert!(back.success, "{:?}", back.errors);
+    assert_eq!(p.b.era_balance(), 10);
+    p.b.enter();
+    assert_eq!(count(), before + 1);
+}
+
 /// SoFi §51 (`ReleaseRule::AllAtCreation`): creating a token puts its whole
 /// genesis supply in the creator's balance, in the creating transition.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -145,11 +145,18 @@ pub(crate) fn verify_inbound_receipt_sig_a(
     );
     // From the receiver's viewpoint the SENDER (A-side) is the Counterparty.
     // At relationship genesis (no Counterparty head yet) the sender's ek_cert_a
-    // chains back to the sender's AK — the legitimate predecessor.
-    let expected_prev_pk = load_cert_chain_head_pubkey(&rel_key, CertChainSide::Counterparty)
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| ak_pk_genesis.to_vec());
+    // chains back to the sender's AK — the legitimate predecessor. A head that
+    // could not be READ is not "no head": the check cannot be made.
+    let expected_prev_pk = match load_cert_chain_head_pubkey(&rel_key, CertChainSide::Counterparty)
+    {
+        Ok(Some(head)) => head,
+        Ok(None) => ak_pk_genesis.to_vec(),
+        Err(e) => {
+            return Err(format!(
+                "the counterparty's cert-chain head could not be read: {e}"
+            ))
+        }
+    };
 
     crate::sdk::receipts::verify_per_step_ek_signing(
         receipt,
@@ -2404,6 +2411,10 @@ struct StorageSyncReport {
     processed: u32,
     pushed: u32,
     errors: Vec<String>,
+    /// Why the inbox read did not cover every delivery, if it did not: a
+    /// route no member answered for, or one read from too few members. What
+    /// was read is processed; the run is not complete (storage spec §4).
+    inbox_incomplete: Option<String>,
 }
 
 /// A sync that could not run to its end, with what it did before it stopped.
@@ -2434,6 +2445,7 @@ impl AppRouterImpl {
             processed: 0,
             pushed: 0,
             errors: Vec::new(),
+            inbox_incomplete: None,
         };
         let storage_endpoints = match crate::sdk::storage_set::pinned_endpoints() {
             Ok(endpoints) => endpoints,
@@ -2448,6 +2460,9 @@ impl AppRouterImpl {
         if request.push_pending {
             self.push_owed(&mut report, &storage_endpoints, &device_id_b32)
                 .await;
+        }
+        if let Some(why) = report.inbox_incomplete.take() {
+            return Err(report.stop(why));
         }
         if let Err(e) = crate::storage::client_db::storage_sync_runs::record_completed() {
             return Err(report.stop(format!("could not count the completed sync: {e}")));
@@ -2493,6 +2508,9 @@ impl AppRouterImpl {
         // the advanced cert head), yet the sender's gate waits on them.
         let mut stale_duplicates: std::collections::BTreeMap<String, Vec<String>> =
             std::collections::BTreeMap::new();
+        // Routes read to full coverage, routes read partially, and routes no
+        // member answered for. Only the first kind says "nothing more there".
+        let (mut routes_read, mut routes_partial, mut routes_unread) = (0usize, 0usize, 0usize);
         for tagged in tagged_addresses {
             if items.len() >= limit {
                 break;
@@ -2523,8 +2541,24 @@ impl AppRouterImpl {
                 .await;
 
             let polled = match retrieved {
-                Ok(polled) => polled,
+                Ok(outcome) => {
+                    if let crate::sdk::b0x_sdk::SpoolCoverage::Partial { responded, needed } =
+                        outcome.coverage
+                    {
+                        routes_partial += 1;
+                        report.errors.push(format!(
+                            "inbox read partial on {}..: {responded} of {} members answered, \
+                             {needed} needed to meet every delivery",
+                            short_route(&tagged.address),
+                            outcome.members
+                        ));
+                    } else {
+                        routes_read += 1;
+                    }
+                    outcome.entries
+                }
                 Err(e) => {
+                    routes_unread += 1;
                     report.errors.push(format!(
                         "inbox pull failed on {}..: {e}",
                         short_route(&tagged.address)
@@ -2627,6 +2661,13 @@ impl AppRouterImpl {
                 }
             }
             Err(e) => report.errors.push(format!("outbox collection: {e}")),
+        }
+        if routes_partial > 0 || routes_unread > 0 {
+            report.inbox_incomplete = Some(format!(
+                "inbox read incomplete: {routes_read} route(s) fully read, {routes_partial} \
+                 partially, {routes_unread} not at all; what was read is processed, and nothing \
+                 unread is reported as absent"
+            ));
         }
         Ok(report)
     }
