@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 # ci/sofi_reachability.py: every public SoFi function has a production caller
 # (Gate G1). Production code is every .rs file under CORE, SDK and NODE,
-# excluding tests/ directories, *_tests.rs, everything after the first
-# #[cfg(test)] in a file, and every file whose own `mod` declaration is
-# cfg(test)-gated — a fixture module is test support wherever it lives, and a
-# file with no in-file #[cfg(test)] marker would otherwise be read whole.
+# excluding tests/ directories, *_tests.rs, every `#[cfg(test)]`-attributed
+# item (ci/production_text.py), and every file whose own `mod` declaration is
+# cfg(test)-gated — a fixture module is test support wherever it lives.
 #
 # The baseline: ci/sofi_reachability_baseline.txt lists functions that the
 # rebuild (R1..R14) has not wired yet, one per line as `path fn  # R<n>`. A
@@ -37,6 +36,7 @@
 # passed by value as a whole argument (`, name,` / `(name)`) counts: R8 hands
 # recognizers to a locator scan without calling them.
 import glob
+import importlib.util
 import os
 import re
 import sys
@@ -68,9 +68,11 @@ def cfg_test_module_files():
 
 
 def production_text(path):
-    text = open(path, encoding="utf-8").read()
-    cut = text.find("#[cfg(test)]")
-    return text if cut < 0 else text[:cut]
+    """The file with every `#[cfg(test)]`-attributed item removed."""
+    spec = importlib.util.spec_from_file_location("production_text", "ci/production_text.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.production_text(path)
 
 
 def without_prose(text):

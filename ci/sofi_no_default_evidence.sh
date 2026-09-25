@@ -9,8 +9,8 @@ set -euo pipefail
 # evidence it never fetched would answer Unavailable for everything it should
 # have fetched — or, worse, Valid over nothing — and a producer building on
 # that would publish an operation nothing validates. Production code is every
-# `.rs` file under CORE, SDK and NODE, excluding `tests/` directories and
-# everything after the first `#[cfg(test)]` in a file.
+# `.rs` file under CORE, SDK and NODE, excluding `tests/` directories and every
+# `#[cfg(test)]`-attributed item (ci/production_text.py).
 
 echo "=== SoFi evidence: never defaulted ==="
 
@@ -36,7 +36,7 @@ echo "  ✓ Evidence derives Default only under cfg(test)"
 # 2. No production code constructs one by default.
 fail=0
 while IFS= read -r f; do
-  prod=$(awk '/#\[cfg\(test\)\]/{exit} {print}' "$f")
+  prod=$(python3 ci/production_text.py "$f")
   if grep -nq 'Evidence::default()' <<<"$prod"; then
     echo "[FAIL] Evidence::default() in production code: $f"
     grep -n 'Evidence::default()' <<<"$prod"
