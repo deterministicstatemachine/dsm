@@ -107,6 +107,10 @@ impl TestDevice {
         if !self.kyber_pk.is_empty() {
             crate::bridge::install_local_kyber_pubkey(self.kyber_pk.clone());
         }
+        // One process has one router: the entered device's.
+        if let Some(router) = &self.router {
+            crate::bridge::install_app_router(router.clone()).expect("install the router");
+        }
     }
 
     /// Bring the device up on `fleet`: build its `AppRouterImpl` (which loads
