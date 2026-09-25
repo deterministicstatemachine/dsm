@@ -131,14 +131,31 @@ pub fn merge_index_reads(reads: &[Option<Vec<D32>>]) -> IndexCandidates {
 /// §11: what a scan of the candidates under a locator established.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Resolved<T> {
-    /// The first candidate whose bytes are `Stored` and whose recomputed
-    /// identity is the locator.
+    /// A candidate whose bytes are `Stored` and whose recomputed identity is
+    /// the locator. The identity is the locator, so any one that verifies is
+    /// the object, whatever else is still unknown.
     Kept(T),
-    /// Every candidate was examined within the budget and none verifies.
+    /// Every candidate was examined within the budget, every one's bytes were
+    /// established, and none verifies.
     None,
-    /// The scan ran out of budget before a verifying candidate was found, or
-    /// no member answered. Never `Invalid`.
+    /// Nothing verified and the scan cannot say there is nothing: a
+    /// candidate's bytes were not established (storage §4: a fact not
+    /// established from the reads in hand is never read as its negation), the
+    /// budget ran out, or no member answered. Never `Invalid`.
     Unavailable,
+}
+
+/// §11: what a discovery scan under an index of references established.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Discovered<T> {
+    /// Every candidate was examined within the budget and every one's bytes
+    /// were established: these are all the objects that verify, possibly
+    /// none.
+    Complete(Vec<T>),
+    /// These verify, and others may: a candidate's bytes were not
+    /// established, the budget ran out, or no member answered the index
+    /// read. An object missing from the list is not thereby absent.
+    Partial(Vec<T>),
 }
 
 /// §11: keep the one candidate that verifies.
@@ -149,18 +166,22 @@ pub enum Resolved<T> {
 /// identity Core recomputes from the bytes, or nothing. A candidate is kept
 /// only when that identity is `locator`. Examining a candidate — verifying
 /// or not, fetched or not — spends one unit of `budget`; a scan that would
-/// examine more than `budget` candidates is `Unavailable`.
+/// examine more than `budget` candidates is `Unavailable`, and so is a scan
+/// that kept nothing while a candidate's bytes were not established: that
+/// candidate may be the object.
 pub fn keep_verifying<T>(
     locator: &D32,
     candidates: &[Option<Vec<u8>>],
     budget: usize,
     recognize: impl Fn(&[u8]) -> Option<(D32, T)>,
 ) -> Resolved<T> {
+    let mut unestablished = false;
     for (examined, candidate) in candidates.iter().enumerate() {
         if examined >= budget {
             return Resolved::Unavailable;
         }
         let Some(bytes) = candidate else {
+            unestablished = true;
             continue;
         };
         let Some((identity, object)) = recognize(bytes) else {
@@ -170,7 +191,11 @@ pub fn keep_verifying<T>(
             return Resolved::Kept(object);
         }
     }
-    Resolved::None
+    if unestablished {
+        Resolved::Unavailable
+    } else {
+        Resolved::None
+    }
 }
 
 /// §11, discovery: EVERY candidate that verifies, in examination order.
@@ -181,20 +206,23 @@ pub fn keep_verifying<T>(
 /// scan establishes which objects are recognized under the locator and
 /// nothing about which of them applies: that is Core's, by the identity the
 /// operation names (`ρ` in a precommit leg) and the leaf the trader's tree
-/// admitted. Order of arrival confers nothing. The budget is spent and
-/// answered exactly as in [`keep_verifying`].
+/// admitted. Order of arrival confers nothing. The budget is spent as in
+/// [`keep_verifying`]; running out of it, or meeting a candidate whose bytes
+/// are not established, makes the discovery `Partial`.
 pub fn keep_all_verifying<T>(
     locator: &D32,
     candidates: &[Option<Vec<u8>>],
     budget: usize,
     recognize: impl Fn(&[u8]) -> Option<(D32, T)>,
-) -> Resolved<Vec<T>> {
+) -> Discovered<T> {
     let mut kept = Vec::new();
+    let mut complete = true;
     for (examined, candidate) in candidates.iter().enumerate() {
         if examined >= budget {
-            return Resolved::Unavailable;
+            return Discovered::Partial(kept);
         }
         let Some(bytes) = candidate else {
+            complete = false;
             continue;
         };
         let Some((identity, object)) = recognize(bytes) else {
@@ -204,10 +232,10 @@ pub fn keep_all_verifying<T>(
             kept.push(object);
         }
     }
-    if kept.is_empty() {
-        Resolved::None
+    if complete {
+        Discovered::Complete(kept)
     } else {
-        Resolved::Kept(kept)
+        Discovered::Partial(kept)
     }
 }
 
@@ -381,7 +409,6 @@ mod tests {
         let candidates = [
             Some(b"garbage".to_vec()),
             Some(b"ok:Q".to_vec()),
-            None,
             Some(b"ok:R".to_vec()),
         ];
         assert_eq!(
@@ -425,7 +452,7 @@ mod tests {
     #[test]
     fn within_budget_exhausted_is_none() {
         let locator = *blake3::hash(b"P").as_bytes();
-        let garbage = [Some(b"g".to_vec()), None];
+        let garbage = [Some(b"g".to_vec()), Some(b"ok:Q".to_vec())];
         assert_eq!(
             keep_verifying(&locator, &garbage, 2, recognize),
             Resolved::None
@@ -433,10 +460,28 @@ mod tests {
         assert_eq!(keep_verifying(&locator, &[], 0, recognize), Resolved::None);
     }
 
+    /// `an_unestablished_candidate_is_never_none` (Lean): a candidate whose
+    /// bytes were not established may be the object, so a scan that kept
+    /// nothing past it is Unavailable (storage §4, MR-STOR-0021). One that
+    /// verifies elsewhere is still kept: the identity is the locator.
+    #[test]
+    fn an_unestablished_candidate_is_never_none() {
+        let locator = *blake3::hash(b"P").as_bytes();
+        let unknown = [Some(b"g".to_vec()), None, Some(b"ok:Q".to_vec())];
+        assert_eq!(
+            keep_verifying(&locator, &unknown, 3, recognize),
+            Resolved::Unavailable
+        );
+        let found = [None, Some(b"ok:P".to_vec())];
+        assert_eq!(
+            keep_verifying(&locator, &found, 2, recognize),
+            Resolved::Kept(b"P".to_vec())
+        );
+    }
+
     /// Discovery under an index of references: every recognized candidate is
     /// returned in examination order, a candidate of another identity or
-    /// garbage is passed over, the budget answers Unavailable exactly as the
-    /// single-object scan does, and nothing about order confers preference.
+    /// garbage is passed over, and nothing about order confers preference.
     #[test]
     fn discovery_returns_every_recognized_candidate_and_prefers_none() {
         let locator = [0xAB; 32];
@@ -449,27 +494,56 @@ mod tests {
         let candidates = vec![
             Some(vec![0xAB, 1]),
             Some(vec![0xCD, 9]),
-            None,
             Some(b"garbage".to_vec()),
             Some(vec![0xAB, 2]),
         ];
         assert_eq!(
-            keep_all_verifying(&locator, &candidates, 5, recognize),
-            Resolved::Kept(vec![1, 2])
+            keep_all_verifying(&locator, &candidates, 4, recognize),
+            Discovered::Complete(vec![1, 2])
         );
         // The same scan, kept singly, is the first — which is exactly why an
         // index of references must not be read through it.
         assert_eq!(
-            keep_verifying(&locator, &candidates, 5, recognize),
+            keep_verifying(&locator, &candidates, 4, recognize),
             Resolved::Kept(1)
         );
         assert_eq!(
+            keep_all_verifying(&locator, &candidates[1..3], 2, recognize),
+            Discovered::<u8>::Complete(Vec::new())
+        );
+    }
+
+    /// `an_unestablished_candidate_makes_discovery_partial` (Lean): a
+    /// discovery that met a candidate whose bytes were not established, or
+    /// ran out of budget, keeps what verified and says it may not be all
+    /// (storage §4, MR-STOR-0021).
+    #[test]
+    fn an_unestablished_candidate_makes_discovery_partial() {
+        let locator = [0xAB; 32];
+        let recognize = |bytes: &[u8]| -> Option<([u8; 32], u8)> {
+            match bytes {
+                [id, value] => Some(([*id; 32], *value)),
+                _ => None,
+            }
+        };
+        let candidates = vec![
+            Some(vec![0xAB, 1]),
+            None,
+            Some(vec![0xCD, 9]),
+            Some(vec![0xAB, 2]),
+        ];
+        assert_eq!(
             keep_all_verifying(&locator, &candidates, 4, recognize),
-            Resolved::<Vec<u8>>::Unavailable
+            Discovered::Partial(vec![1, 2])
         );
         assert_eq!(
-            keep_all_verifying(&locator, &candidates[1..4], 3, recognize),
-            Resolved::<Vec<u8>>::None
+            keep_all_verifying(&locator, &candidates[1..3], 2, recognize),
+            Discovered::<u8>::Partial(Vec::new())
+        );
+        // Over budget: what was examined, and no claim about the rest.
+        assert_eq!(
+            keep_all_verifying(&locator, &candidates, 1, recognize),
+            Discovered::Partial(vec![1])
         );
     }
 }

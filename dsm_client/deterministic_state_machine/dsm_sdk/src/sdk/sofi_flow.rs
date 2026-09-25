@@ -24,7 +24,7 @@ use dsm::sofi::derive;
 use dsm::sofi::publication::{Publication, VaultPolicyClass};
 use dsm::sofi::registration::Registration;
 use dsm::sofi::resolution::{ParentPosition, VaultChain, WalkOutcome};
-use dsm::sofi::storage::Resolved;
+use dsm::sofi::storage::Discovered;
 use dsm::sofi::validation::{close_vault_post, swap_vault_post, Evidence, EvidenceNeeds, Policies};
 use dsm::sofi::wire::{
     next_attempt, next_position, CoreEntry, DlvCore, SwapHop, TraderCore, VaultGenesisPreimage,
@@ -720,24 +720,14 @@ pub async fn find_route(
 /// is the root this device admitted right after the setup's position.
 async fn own_setup_ref(
     set: &StorageSet,
-    standing: &Standing,
+    genesis: &D32,
+    device_id: &D32,
     vault_id: &D32,
 ) -> Result<D32, DsmError> {
-    let setups =
-        match fetch_setup_for(set, &standing.genesis, &standing.device_id, vault_id).await? {
-            Resolved::Kept(setups) => setups,
-            Resolved::None => {
-                return Err(refuse(
-                    "no setup of this device with the vault is published",
-                ))
-            }
-            Resolved::Unavailable => {
-                return Err(storage(
-                    "setup",
-                    "the relationship index scan did not complete",
-                ))
-            }
-        };
+    let (setups, complete) = match fetch_setup_for(set, genesis, device_id, vault_id).await? {
+        Discovered::Complete(setups) => (setups, true),
+        Discovered::Partial(setups) => (setups, false),
+    };
     for signed in setups {
         let admitted_at = next_position(signed.body.position()).map_err(refuse)?;
         if let Some(AdmittedEconomicPosition::SingleRoot { economic_root, .. }) =
@@ -749,9 +739,18 @@ async fn own_setup_ref(
             }
         }
     }
-    Err(refuse(
-        "no published setup with this vault is one this device admitted",
-    ))
+    // A setup the scan could not establish may be the one this device
+    // admitted: only a complete scan says it is not published.
+    if complete {
+        Err(refuse(
+            "no published setup with this vault is one this device admitted",
+        ))
+    } else {
+        Err(storage(
+            "setup",
+            "the relationship index scan did not establish every candidate",
+        ))
+    }
 }
 
 /// The live attempt of a leg at `parent_root`: the walk's first unresolved
@@ -1083,7 +1082,8 @@ pub async fn trade(
     let mut vaults = Vec::new();
     for (index, vault_id) in intent.vault_ids.iter().enumerate() {
         let (vault, ..) = vault_at_head(set, &walker, vault_id).await?;
-        let setup_ref = own_setup_ref(set, &standing, vault_id).await?;
+        let setup_ref =
+            own_setup_ref(set, &standing.genesis, &standing.device_id, vault_id).await?;
         let base = relationship_base(&standing, vault_id)?;
         let (hop, post) = price_hop(&vault, token, amount, setup_ref, index)?;
         cores.push(vault_core(&standing, &vault, &post, base)?);
@@ -1134,7 +1134,13 @@ pub async fn close(
     {
         return Err(refuse("only the vault's origin owner closes it"));
     }
-    let setup_ref = own_setup_ref(set, &standing, &intent.vault_id).await?;
+    let setup_ref = own_setup_ref(
+        set,
+        &standing.genesis,
+        &standing.device_id,
+        &intent.vault_id,
+    )
+    .await?;
     let base = relationship_base(&standing, &intent.vault_id)?;
     let retired =
         close_vault_post(&vault.state).map_err(|refusal| refuse(format!("{refusal:?}")))?;
@@ -1241,4 +1247,51 @@ pub async fn relay(set: &StorageSet, intent: &RelayIntent) -> Result<Relayed, Ds
 pub async fn resolve(core: &CoreSDK, set: &StorageSet) -> Result<PositionOutcome, DsmError> {
     complete_pending_fulfillment(core, set).await?;
     settle(core, set).await
+}
+
+#[cfg(test)]
+#[allow(clippy::disallowed_methods)]
+mod tests {
+    use super::*;
+    use crate::sdk::storage_node_sdk::SetClient;
+    use dsm::common::domain_tags::TAG_DSM_SOFI_REL_INDEX;
+    use dsm::crypto::domain::TaggedHashDomain;
+
+    /// MR-STOR-0021 (storage §4): a setup candidate whose bytes no member
+    /// holds may be this device's setup, so a relationship-index scan that
+    /// met one is a network failure; only a scan whose every candidate was
+    /// established says no admitted setup is published. On the storage node's
+    /// own code, on Postgres.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn a_setup_scan_that_met_an_unestablished_candidate_is_not_a_refusal() {
+        let _fleet = crate::test_support::one_device::Fleet::start();
+        let set = crate::sdk::storage_set::canonical_set(crate::economic_fixtures::NETWORK)
+            .expect("the pinned set");
+        let client = SetClient::new(&set).expect("a client of the set");
+        let index = TAG_DSM_SOFI_REL_INDEX.source_bytes();
+        let (genesis, device_id) = ([0x61; 32], [0x62; 32]);
+
+        // Held bytes that are not a setup: every candidate established.
+        let held_vault = [0x63; 32];
+        let domain = TaggedHashDomain::try_new(b"DSM/test/not-a-setup").expect("domain");
+        let garbage = b"these bytes decode as no setup";
+        assert_eq!(client.put_immutable(domain, garbage).await, 5);
+        let held = dsm::storage_object::immutable_addr(domain, garbage);
+        let locator = derive::relationship_index_key(&genesis, &device_id, &held_vault);
+        assert_eq!(client.append_index(index, &locator, &held).await, 5);
+        assert!(matches!(
+            own_setup_ref(&set, &genesis, &device_id, &held_vault).await,
+            Err(DsmError::InvalidOperation(_))
+        ));
+
+        // An address whose bytes no member holds: not established.
+        let unknown_vault = [0x64; 32];
+        let locator = derive::relationship_index_key(&genesis, &device_id, &unknown_vault);
+        assert_eq!(client.append_index(index, &locator, &[0x98; 32]).await, 5);
+        assert!(matches!(
+            own_setup_ref(&set, &genesis, &device_id, &unknown_vault).await,
+            Err(DsmError::Storage { .. })
+        ));
+    }
 }

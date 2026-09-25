@@ -44,7 +44,7 @@ use dsm::sofi::lineage::{
     GenesisMissing, GenesisRefusal,
 };
 use dsm::sofi::publication::recognize_setup;
-use dsm::sofi::storage::Resolved;
+use dsm::sofi::storage::{Discovered, Resolved};
 use dsm::sofi::conformance::Validation;
 use dsm::sofi::validation::{
     route_validation, Evidence, EvidenceNeeds, Missing, TraderLeafPre, VaultLeafPre,
@@ -256,18 +256,24 @@ pub async fn fetch_vault_genesis(
         },
     )
     .await?;
-    let candidates = match resolved {
-        Resolved::Kept(candidates) => candidates,
-        Resolved::None => return Ok(VaultGenesis::NotPublished),
-        Resolved::Unavailable => {
-            return Err(storage_err(
+    // A candidate the scan could not establish may be the owner's genesis,
+    // so only a complete scan says it is not published (storage §4).
+    let (candidates, complete) = match resolved {
+        Discovered::Complete(candidates) => (candidates, true),
+        Discovered::Partial(candidates) => (candidates, false),
+    };
+    let not_published = || {
+        if complete {
+            Ok(VaultGenesis::NotPublished)
+        } else {
+            Err(storage_err(
                 "vault genesis",
-                "the locator scan did not complete",
+                "the locator scan did not establish every candidate",
             ))
         }
     };
     let Some((first, ..)) = candidates.first() else {
-        return Ok(VaultGenesis::NotPublished);
+        return not_published();
     };
     let network = crate::sdk::economic_admission_flow::committed_network_id()?;
     let resolver = LiveRegisterResolver {
@@ -299,10 +305,10 @@ pub async fn fetch_vault_genesis(
             Err(why) => refused = Some(why),
         }
     }
-    Ok(match refused {
-        Some(why) => VaultGenesis::Refused(format!("{why:?}")),
-        None => VaultGenesis::NotPublished,
-    })
+    match refused {
+        Some(why) => Ok(VaultGenesis::Refused(format!("{why:?}"))),
+        None => not_published(),
+    }
 }
 
 /// `GenesisAccepted` over one candidate, fetching the token policies Core
@@ -536,4 +542,49 @@ async fn vault_pre(
     };
     vault_leaves.extend(leaves);
     Ok(Some(state))
+}
+
+#[cfg(test)]
+#[allow(clippy::disallowed_methods)]
+mod tests {
+    use super::*;
+    use crate::sdk::storage_node_sdk::SetClient;
+    use dsm::crypto::domain::TaggedHashDomain;
+
+    /// MR-STOR-0021 (storage §4): a candidate under a vault's genesis locator
+    /// whose bytes no member holds may be the genesis, so the scan is a
+    /// network failure, never "not published"; a candidate whose bytes are
+    /// held and are not a genesis is established, and nothing. On the storage
+    /// node's own code, on Postgres.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn an_unestablished_genesis_candidate_is_not_read_as_unpublished() {
+        let _fleet = crate::test_support::one_device::Fleet::start();
+        let set = crate::sdk::storage_set::canonical_set(crate::economic_fixtures::NETWORK)
+            .expect("the pinned set");
+        let client = SetClient::new(&set).expect("a client of the set");
+        let index = TAG_DSM_SOFI_VAULT_GENESIS_LOCATOR.source_bytes();
+
+        // Held bytes that are not a genesis: every candidate established.
+        let held_vault = [0x71; 32];
+        let domain = TaggedHashDomain::try_new(b"DSM/test/not-a-vault-genesis").expect("domain");
+        let garbage = b"these bytes decode as no vault genesis preimage";
+        assert_eq!(client.put_immutable(domain, garbage).await, 5);
+        let held = dsm::storage_object::immutable_addr(domain, garbage);
+        let locator = derive::vault_genesis_locator(&held_vault);
+        assert_eq!(client.append_index(index, &locator, &held).await, 5);
+        assert!(matches!(
+            fetch_vault_genesis(&set, &held_vault).await,
+            Ok(VaultGenesis::NotPublished)
+        ));
+
+        // An address whose bytes no member holds: not established.
+        let unknown_vault = [0x72; 32];
+        let locator = derive::vault_genesis_locator(&unknown_vault);
+        assert_eq!(client.append_index(index, &locator, &[0x99; 32]).await, 5);
+        assert!(
+            fetch_vault_genesis(&set, &unknown_vault).await.is_err(),
+            "a candidate nobody holds must not read as an unpublished genesis"
+        );
+    }
 }

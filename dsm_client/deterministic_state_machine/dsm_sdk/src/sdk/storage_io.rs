@@ -12,7 +12,7 @@
 //! along their routes (`sdk::route_seats`).
 
 use dsm::crypto::domain::TaggedHashDomain;
-use dsm::sofi::storage::{IndexCandidates, Resolved, StoredFact};
+use dsm::sofi::storage::{Discovered, IndexCandidates, Resolved, StoredFact};
 use dsm::types::error::DsmError;
 
 use crate::sdk::storage_node_sdk::SetClient;
@@ -141,17 +141,18 @@ pub async fn resolve_locator<T>(
 }
 
 /// Every candidate under `locator` whose `Stored` bytes recognize to
-/// `locator`, in append order. It establishes what is published under the
-/// locator and decides nothing about which applies.
+/// `locator`, in append order, and whether that is all of them. It
+/// establishes what is published under the locator and decides nothing about
+/// which applies.
 pub async fn resolve_locator_all<T>(
     set: &StorageSet,
     index_namespace: &[u8],
     locator: &[u8; 32],
     budget: usize,
     recognize: impl Fn(&[u8]) -> Option<([u8; 32], T)>,
-) -> Result<Resolved<Vec<T>>, DsmError> {
+) -> Result<Discovered<T>, DsmError> {
     let candidates = match read_index_candidates(set, index_namespace, locator, budget).await? {
-        IndexCandidates::Unavailable => return Ok(Resolved::Unavailable),
+        IndexCandidates::Unavailable => return Ok(Discovered::Partial(Vec::new())),
         IndexCandidates::Candidates(c) => c,
     };
     let fetched = stored_candidates(set, &candidates, budget).await?;
