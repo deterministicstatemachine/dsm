@@ -795,6 +795,31 @@ impl BilateralTransactionManager {
         })
     }
 
+    /// Hold again, after a restart, the precommitment a persisted session
+    /// proposed: the step `operation` on `parent_tip`. It is held only if it
+    /// is the step the session names — its commitment hash must be
+    /// `commitment_hash` — and on a relationship this manager has
+    /// established.
+    pub fn restore_pre_commitment(
+        &mut self,
+        remote_device_id: &[u8; 32],
+        parent_tip: [u8; 32],
+        operation: Operation,
+        commitment_hash: &[u8; 32],
+    ) -> Result<(), DsmError> {
+        if !self.relationships.contains_key(remote_device_id) {
+            return Err(DsmError::RelationshipNotFound("remote device".into()));
+        }
+        let pre = BilateralPreCommitment::new(parent_tip, operation);
+        if &pre.bilateral_commitment_hash != commitment_hash {
+            return Err(DsmError::invalid_operation(
+                "the persisted step does not hash to the session's commitment",
+            ));
+        }
+        self.pending_commitments.insert(*commitment_hash, pre);
+        Ok(())
+    }
+
     /// Drop a precommitment from the pending set — after its bilateral
     /// advance commits, or when its session ends without one — returning it
     /// if it was pending.
@@ -1126,6 +1151,45 @@ mod tests {
             .await
             .expect("pre");
         assert!(manager.has_pending_commitment(&pre.bilateral_commitment_hash));
+    }
+
+    /// A restarted manager holds a persisted step's precommitment again only
+    /// when the step hashes to the session's commitment; a parent tip or an
+    /// operation that is not the one committed to is refused, and nothing is
+    /// held.
+    #[tokio::test]
+    async fn a_precommitment_is_restored_only_as_the_step_it_committed_to() {
+        let (mut manager, _kp, store) = make_manager_with_store();
+        let contact = make_verified_contact("Remote", true, true);
+        let remote = contact.device_id;
+        add_contact(&mut manager, &store, contact);
+        manager
+            .establish_relationship(&remote)
+            .await
+            .expect("establish");
+        let pre = manager
+            .create_bilateral_precommitment(&remote, Operation::Noop)
+            .await
+            .expect("precommit");
+        let commitment = pre.bilateral_commitment_hash;
+
+        let (mut restarted, _kp, restarted_store) = make_manager_with_store();
+        let contact = make_verified_contact("Remote", true, true);
+        add_contact(&mut restarted, &restarted_store, contact);
+        restarted
+            .establish_relationship(&remote)
+            .await
+            .expect("establish");
+        let other_tip = [0x5Au8; 32];
+        assert!(restarted
+            .restore_pre_commitment(&remote, other_tip, Operation::Noop, &commitment)
+            .is_err());
+        assert!(!restarted.has_pending_commitment(&commitment));
+
+        restarted
+            .restore_pre_commitment(&remote, pre.parent_tip, Operation::Noop, &commitment)
+            .expect("the persisted step is the one committed to");
+        assert!(restarted.has_pending_commitment(&commitment));
     }
 
     #[tokio::test]

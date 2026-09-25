@@ -50,6 +50,18 @@ impl OfflineDevice {
         }
     }
 
+    /// This device after a restart: a new handler and manager over the same
+    /// durable state, its sessions restored from storage.
+    async fn restarted(&self) -> OfflineDevice {
+        let restarted = OfflineDevice::new(&self.device);
+        restarted
+            .handler
+            .restore_sessions_from_storage()
+            .await
+            .expect("restore the sessions");
+        restarted
+    }
+
     /// The relationship tip this device holds with `peer`.
     fn tip_with(&self, peer: &OfflineDevice) -> [u8; 32] {
         self.device.enter();
@@ -359,5 +371,198 @@ async fn a_sender_whose_head_moved_since_its_confirm_commits_nothing() {
             .expect("B is a contact")
             .needs_online_reconcile,
         "the relationship is not held for online reconcile"
+    );
+}
+
+/// The step's history row on the entered device, if it has one.
+fn history_row_exists(commitment: &[u8; 32]) -> bool {
+    crate::storage::client_db::transaction_exists(&crate::util::text_id::encode_base32_crockford(
+        commitment,
+    ))
+}
+
+/// Both devices hold the step: one history row each, the same tip, no
+/// session left.
+fn assert_committed_on_both(a: &OfflineDevice, b: &OfflineDevice, commitment: &[u8; 32]) {
+    assert_eq!(
+        a.tip_with(b),
+        b.tip_with(a),
+        "the devices disagree on the tip"
+    );
+    for device in [a, b] {
+        device.device.enter();
+        assert!(
+            history_row_exists(commitment),
+            "{} holds no history row",
+            device.device.slot
+        );
+        assert!(
+            crate::storage::client_db::get_bilateral_session(commitment)
+                .expect("read the session")
+                .is_none(),
+            "{} kept the committed step's session",
+            device.device.slot
+        );
+    }
+}
+
+/// A receiver that restarts after accepting takes the proposal up again as it
+/// was — the acceptance and its challenge were durable before the response
+/// went out — and commits the confirm when it arrives.
+/// MUTATION CONTROL: failing in-flight sessions on restart turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_receiver_restarted_after_accepting_commits_the_confirm() {
+    let pair = Pair::boot(0, 0).await;
+    let a = OfflineDevice::new(&pair.a);
+    let b = OfflineDevice::new(&pair.b);
+
+    a.device.enter();
+    let (prepare, commitment) = a
+        .handler
+        .prepare_bilateral_transaction(b.device.device_id, Operation::Noop)
+        .await
+        .expect("the sender prepares");
+    b.device.enter();
+    b.handler
+        .handle_prepare_request(&prepare, None)
+        .await
+        .expect("the receiver takes the proposal");
+    let response = b
+        .handler
+        .create_prepare_accept_envelope(commitment)
+        .await
+        .expect("the receiver's user accepts");
+
+    let b = b.restarted().await;
+
+    a.device.enter();
+    let (confirm, _meta) = a
+        .handler
+        .handle_prepare_response(&response)
+        .await
+        .expect("the sender confirms");
+    b.device.enter();
+    let ack = b
+        .handler
+        .handle_confirm_request(&confirm)
+        .await
+        .expect("the restarted receiver commits");
+    a.device.enter();
+    a.handler
+        .handle_commit_response(&ack)
+        .await
+        .expect("the sender commits");
+    assert_committed_on_both(&a, &b, &commitment);
+}
+
+/// A sender that restarts after its confirm went out holds its step again —
+/// its precommitment, checked against the commitment, and every commit input
+/// were durable before the confirm — and commits when the ack arrives.
+/// MUTATION CONTROL: not holding the precommitment again on restart turns
+/// this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_sender_restarted_after_its_confirm_commits_on_the_ack() {
+    let pair = Pair::boot(0, 0).await;
+    let a = OfflineDevice::new(&pair.a);
+    let b = OfflineDevice::new(&pair.b);
+
+    let (commitment, ack) = to_the_ack(&a, &b, Operation::Noop).await;
+    let a = a.restarted().await;
+    a.device.enter();
+    a.handler
+        .handle_commit_response(&ack)
+        .await
+        .expect("the restarted sender commits");
+    assert_committed_on_both(&a, &b, &commitment);
+}
+
+/// A sender that restarts holding a verified ack it had not yet committed
+/// commits the step on restart, through the one commit path (the ack is
+/// verified again first).
+/// MUTATION CONTROL: not finalizing a held ack on restart turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_sender_restarted_holding_its_ack_commits_on_restart() {
+    let pair = Pair::boot(0, 0).await;
+    let a = OfflineDevice::new(&pair.a);
+    let b = OfflineDevice::new(&pair.b);
+
+    let (commitment, ack) = to_the_ack(&a, &b, Operation::Noop).await;
+    let envelope = crate::envelope::from_canonical_bytes(&ack).expect("the ack decodes");
+    let Some(crate::generated::envelope::Payload::BilateralCommitResponse(response)) =
+        envelope.payload
+    else {
+        panic!("the ack is a commit response");
+    };
+    a.device.enter();
+    assert!(a
+        .handler
+        .record_commit_ack(commitment, &response.counter_signed_receipt)
+        .await
+        .expect("the sender records the verified ack"));
+    assert!(
+        !history_row_exists(&commitment),
+        "recorded is not committed"
+    );
+
+    let a = a.restarted().await;
+    assert_committed_on_both(&a, &b, &commitment);
+}
+
+/// A persisted sender step whose parent tip and operation do not hash to its
+/// commitment is not taken up again on restart: it fails, the relationship
+/// is held for online reconcile (the receiver may have committed), and an ack
+/// arriving for it commits nothing.
+/// MUTATION CONTROL: holding the precommitment without checking it against
+/// the commitment turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_restored_step_that_does_not_hash_to_its_commitment_commits_nothing() {
+    let pair = Pair::boot(0, 0).await;
+    let a = OfflineDevice::new(&pair.a);
+    let b = OfflineDevice::new(&pair.b);
+    let h_0 = a.tip_with(&b);
+
+    let (commitment, ack) = to_the_ack(&a, &b, Operation::Noop).await;
+    a.device.enter();
+    {
+        let conn = crate::storage::client_db::get_connection().expect("db connection");
+        let conn = conn.lock().expect("db lock");
+        let rows = conn
+            .execute(
+                "UPDATE bilateral_sessions SET parent_tip = ?1 WHERE commitment_hash = ?2",
+                rusqlite::params![vec![0x5A_u8; 32], commitment.to_vec()],
+            )
+            .expect("rewrite the stored parent tip");
+        assert_eq!(rows, 1);
+    }
+
+    let a = a.restarted().await;
+    a.device.enter();
+    assert_eq!(
+        crate::storage::client_db::get_bilateral_session(&commitment)
+            .expect("read the session")
+            .expect("the session row is kept")
+            .phase,
+        "failed"
+    );
+    assert!(
+        crate::storage::client_db::get_contact_by_device_id(&b.device.device_id)
+            .expect("read the contact")
+            .expect("B is a contact")
+            .needs_online_reconcile,
+        "the relationship is not held for online reconcile"
+    );
+    a.handler
+        .handle_commit_response(&ack)
+        .await
+        .expect_err("an ack for a step not taken up commits nothing");
+    assert_eq!(a.tip_with(&b), h_0, "the sender's tip moved");
+    a.device.enter();
+    assert!(
+        !history_row_exists(&commitment),
+        "the sender kept a history row"
     );
 }

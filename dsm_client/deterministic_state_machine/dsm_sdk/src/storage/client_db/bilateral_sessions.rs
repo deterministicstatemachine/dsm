@@ -14,9 +14,59 @@ fn get_db_connection() -> Result<std::sync::Arc<std::sync::Mutex<rusqlite::Conne
     get_connection()
 }
 
-/// Store or update a bilateral session
+const SESSION_COLUMNS: &str = "commitment_hash, counterparty_device_id, operation_bytes, phase,
+    counterparty_genesis_hash, local_signature, counterparty_signature, sender_ble_address,
+    stitched_receipt_bytes, counter_signed_receipt, parent_tip, receiver_challenge,
+    sent_child_root, anchor_leaf_key, anchor_leaf_value, spend_anchor_bundle, spend_asset,
+    spend_amount";
+
+fn session_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<BilateralSessionRecord> {
+    Ok(BilateralSessionRecord {
+        commitment_hash: row.get(0)?,
+        counterparty_device_id: row.get(1)?,
+        operation_bytes: row.get(2)?,
+        phase: row.get(3)?,
+        counterparty_genesis_hash: row.get(4)?,
+        local_signature: row.get(5)?,
+        counterparty_signature: row.get(6)?,
+        sender_ble_address: row.get(7)?,
+        stitched_receipt_bytes: row.get(8)?,
+        counter_signed_receipt: row.get(9)?,
+        parent_tip: row.get(10)?,
+        receiver_challenge: row.get(11)?,
+        sent_child_root: row.get(12)?,
+        anchor_leaf_key: row.get(13)?,
+        anchor_leaf_value: row.get(14)?,
+        spend_anchor_bundle: row.get(15)?,
+        spend_asset: row.get(16)?,
+        spend_amount: row.get(17)?,
+    })
+}
+
+/// Store or update a bilateral session in its own transaction.
 pub fn store_bilateral_session(session: &BilateralSessionRecord) -> Result<()> {
-    // Validate inputs
+    let binding = get_db_connection()?;
+    let mut conn = binding
+        .lock()
+        .map_err(|_| anyhow!("Database lock poisoned - concurrent access error"))?;
+    let tx = conn.transaction()?;
+    store_bilateral_session_with_conn(&tx, session)?;
+    tx.commit()?;
+    debug!(
+        "[CLIENT_DB] Stored bilateral session: phase={} commitment={}",
+        session.phase,
+        encode_base32_crockford(&session.commitment_hash[..8.min(session.commitment_hash.len())])
+    );
+    Ok(())
+}
+
+/// Store or update a bilateral session inside `conn`, the transaction the
+/// session's step state commits in. A commit input once written is kept: an
+/// update that does not carry it leaves it as it was.
+pub fn store_bilateral_session_with_conn(
+    conn: &rusqlite::Connection,
+    session: &BilateralSessionRecord,
+) -> Result<()> {
     if session.commitment_hash.len() != 32 {
         return Err(anyhow!(
             "Invalid commitment_hash length: {} bytes (must be exactly 32)",
@@ -41,9 +91,6 @@ pub fn store_bilateral_session(session: &BilateralSessionRecord) -> Result<()> {
         }
     }
     if ![
-        "prepare",
-        "accept",
-        "commit",
         "preparing",
         "prepared",
         "pending_user_action",
@@ -55,23 +102,16 @@ pub fn store_bilateral_session(session: &BilateralSessionRecord) -> Result<()> {
     ]
     .contains(&session.phase.as_str())
     {
-        return Err(anyhow!(
-            "Invalid phase: '{}' (must be one of prepare/accept/commit/preparing/prepared/pending_user_action/accepted/rejected/confirm_pending/committed/failed)",
-            session.phase
-        ));
+        return Err(anyhow!("Invalid phase: '{}'", session.phase));
     }
-
-    let binding = get_db_connection()?;
-    let conn = binding
-        .lock()
-        .map_err(|_| anyhow!("Database lock poisoned - concurrent access error"))?;
-    conn.execute("BEGIN IMMEDIATE", [])?;
-    let result = conn.execute(
+    conn.execute(
         "INSERT INTO bilateral_sessions(
-            commitment_hash, counterparty_device_id, counterparty_genesis_hash, operation_bytes, phase,
-            local_signature, counterparty_signature,
-                sender_ble_address, stitched_receipt_bytes, counter_signed_receipt)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            commitment_hash, counterparty_device_id, operation_bytes, phase,
+            counterparty_genesis_hash, local_signature, counterparty_signature, sender_ble_address,
+            stitched_receipt_bytes, counter_signed_receipt, parent_tip, receiver_challenge,
+            sent_child_root, anchor_leaf_key, anchor_leaf_value, spend_anchor_bundle, spend_asset,
+            spend_amount)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
          ON CONFLICT(commitment_hash) DO UPDATE SET
             phase = excluded.phase,
             local_signature = excluded.local_signature,
@@ -79,35 +119,36 @@ pub fn store_bilateral_session(session: &BilateralSessionRecord) -> Result<()> {
             counterparty_genesis_hash = excluded.counterparty_genesis_hash,
             sender_ble_address = excluded.sender_ble_address,
             stitched_receipt_bytes = COALESCE(excluded.stitched_receipt_bytes, bilateral_sessions.stitched_receipt_bytes),
-            counter_signed_receipt = COALESCE(excluded.counter_signed_receipt, bilateral_sessions.counter_signed_receipt)",
+            counter_signed_receipt = COALESCE(excluded.counter_signed_receipt, bilateral_sessions.counter_signed_receipt),
+            parent_tip = COALESCE(excluded.parent_tip, bilateral_sessions.parent_tip),
+            receiver_challenge = COALESCE(excluded.receiver_challenge, bilateral_sessions.receiver_challenge),
+            sent_child_root = COALESCE(excluded.sent_child_root, bilateral_sessions.sent_child_root),
+            anchor_leaf_key = COALESCE(excluded.anchor_leaf_key, bilateral_sessions.anchor_leaf_key),
+            anchor_leaf_value = COALESCE(excluded.anchor_leaf_value, bilateral_sessions.anchor_leaf_value),
+            spend_anchor_bundle = COALESCE(excluded.spend_anchor_bundle, bilateral_sessions.spend_anchor_bundle),
+            spend_asset = COALESCE(excluded.spend_asset, bilateral_sessions.spend_asset),
+            spend_amount = COALESCE(excluded.spend_amount, bilateral_sessions.spend_amount)",
         params![
             &session.commitment_hash,
             &session.counterparty_device_id,
-            &session.counterparty_genesis_hash,
             &session.operation_bytes,
             &session.phase,
+            &session.counterparty_genesis_hash,
             &session.local_signature,
             &session.counterparty_signature,
             &session.sender_ble_address,
             &session.stitched_receipt_bytes,
             &session.counter_signed_receipt,
+            &session.parent_tip,
+            &session.receiver_challenge,
+            &session.sent_child_root,
+            &session.anchor_leaf_key,
+            &session.anchor_leaf_value,
+            &session.spend_anchor_bundle,
+            &session.spend_asset,
+            &session.spend_amount,
         ],
-    );
-    match result {
-        Ok(_) => {
-            conn.execute("COMMIT", [])?;
-        }
-        Err(e) => {
-            let _ = conn.execute("ROLLBACK", []);
-            return Err(anyhow!("Failed to store bilateral session: {}", e));
-        }
-    }
-
-    debug!(
-        "[CLIENT_DB] Stored bilateral session: phase={} commitment={}",
-        session.phase,
-        encode_base32_crockford(&session.commitment_hash[..8.min(session.commitment_hash.len())])
-    );
+    )?;
     Ok(())
 }
 
@@ -117,34 +158,11 @@ pub fn get_all_bilateral_sessions() -> Result<Vec<BilateralSessionRecord>> {
     let conn = binding
         .lock()
         .map_err(|_| anyhow!("Database lock poisoned - concurrent access error"))?;
-    let mut stmt = conn.prepare(
-        "SELECT commitment_hash, counterparty_device_id, operation_bytes, phase,
-               counterparty_genesis_hash, local_signature, counterparty_signature,
-               sender_ble_address, stitched_receipt_bytes, counter_signed_receipt
-         FROM bilateral_sessions
-           ORDER BY rowid DESC",
-    )?;
-
-    let iter = stmt.query_map([], |row| {
-        Ok(BilateralSessionRecord {
-            commitment_hash: row.get(0)?,
-            counterparty_device_id: row.get(1)?,
-            operation_bytes: row.get(2)?,
-            phase: row.get(3)?,
-            counterparty_genesis_hash: row.get(4)?,
-            local_signature: row.get(5)?,
-            counterparty_signature: row.get(6)?,
-            sender_ble_address: row.get(7)?,
-            stitched_receipt_bytes: row.get(8)?,
-            counter_signed_receipt: row.get(9)?,
-        })
-    })?;
-
-    let mut sessions = Vec::new();
-    for s in iter {
-        sessions.push(s?);
-    }
-    Ok(sessions)
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {SESSION_COLUMNS} FROM bilateral_sessions ORDER BY rowid DESC"
+    ))?;
+    let rows = stmt.query_map([], session_from_row)?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
 /// Get a single bilateral session by commitment hash.
@@ -153,28 +171,10 @@ pub fn get_bilateral_session(commitment_hash: &[u8]) -> Result<Option<BilateralS
     let conn = binding
         .lock()
         .map_err(|_| anyhow!("Database lock poisoned - concurrent access error"))?;
-
     conn.query_row(
-        "SELECT commitment_hash, counterparty_device_id, operation_bytes, phase,
-                counterparty_genesis_hash, local_signature, counterparty_signature,
-                sender_ble_address, stitched_receipt_bytes, counter_signed_receipt
-           FROM bilateral_sessions
-          WHERE commitment_hash = ?1",
+        &format!("SELECT {SESSION_COLUMNS} FROM bilateral_sessions WHERE commitment_hash = ?1"),
         params![commitment_hash],
-        |row| {
-            Ok(BilateralSessionRecord {
-                commitment_hash: row.get(0)?,
-                counterparty_device_id: row.get(1)?,
-                operation_bytes: row.get(2)?,
-                phase: row.get(3)?,
-                counterparty_genesis_hash: row.get(4)?,
-                local_signature: row.get(5)?,
-                counterparty_signature: row.get(6)?,
-                sender_ble_address: row.get(7)?,
-                stitched_receipt_bytes: row.get(8)?,
-                counter_signed_receipt: row.get(9)?,
-            })
-        },
+        session_from_row,
     )
     .optional()
     .map_err(Into::into)
@@ -243,12 +243,20 @@ mod tests {
             sender_ble_address: None,
             stitched_receipt_bytes: None,
             counter_signed_receipt: None,
+            parent_tip: None,
+            receiver_challenge: None,
+            sent_child_root: None,
+            anchor_leaf_key: None,
+            anchor_leaf_value: None,
+            spend_anchor_bundle: None,
+            spend_asset: None,
+            spend_amount: None,
         }
     }
 
     #[test]
     fn store_bilateral_session_rejects_empty_commitment_hash() {
-        let mut s = make_session("prepare");
+        let mut s = make_session("prepared");
         s.commitment_hash = vec![];
         let err = store_bilateral_session(&s).unwrap_err();
         assert!(err.to_string().contains("commitment_hash"));
@@ -256,7 +264,7 @@ mod tests {
 
     #[test]
     fn store_bilateral_session_rejects_oversized_commitment_hash() {
-        let mut s = make_session("prepare");
+        let mut s = make_session("prepared");
         s.commitment_hash = vec![0; 33];
         let err = store_bilateral_session(&s).unwrap_err();
         assert!(err.to_string().contains("commitment_hash"));
@@ -264,7 +272,7 @@ mod tests {
 
     #[test]
     fn store_bilateral_session_rejects_short_commitment_hash() {
-        let mut s = make_session("prepare");
+        let mut s = make_session("prepared");
         s.commitment_hash = vec![0; 31];
         let err = store_bilateral_session(&s).unwrap_err();
         assert!(err.to_string().contains("commitment_hash"));
@@ -272,7 +280,7 @@ mod tests {
 
     #[test]
     fn store_bilateral_session_rejects_wrong_counterparty_length() {
-        let mut s = make_session("prepare");
+        let mut s = make_session("prepared");
         s.counterparty_device_id = vec![0; 16];
         let err = store_bilateral_session(&s).unwrap_err();
         assert!(err.to_string().contains("counterparty_device_id"));
@@ -280,7 +288,7 @@ mod tests {
 
     #[test]
     fn store_bilateral_session_rejects_empty_operation_bytes() {
-        let mut s = make_session("prepare");
+        let mut s = make_session("prepared");
         s.operation_bytes = vec![];
         let err = store_bilateral_session(&s).unwrap_err();
         assert!(err.to_string().contains("operation_bytes"));
@@ -288,7 +296,7 @@ mod tests {
 
     #[test]
     fn store_bilateral_session_rejects_wrong_counterparty_genesis_length() {
-        let mut s = make_session("prepare");
+        let mut s = make_session("prepared");
         s.counterparty_genesis_hash = Some(vec![0; 31]);
         let err = store_bilateral_session(&s).unwrap_err();
         assert!(err.to_string().contains("counterparty_genesis_hash"));
@@ -303,13 +311,20 @@ mod tests {
 
     #[test]
     #[serial]
+    fn store_bilateral_session_refuses_the_retired_phase_names() {
+        init_test_db();
+        for phase in ["prepare", "accept", "commit"] {
+            let err = store_bilateral_session(&make_session(phase)).unwrap_err();
+            assert!(err.to_string().contains("Invalid phase"), "{phase}: {err}");
+        }
+    }
+
+    #[test]
+    #[serial]
     fn store_bilateral_session_accepts_all_valid_phases() {
         init_test_db();
 
         let valid_phases = [
-            "prepare",
-            "accept",
-            "commit",
             "preparing",
             "prepared",
             "pending_user_action",
@@ -336,12 +351,12 @@ mod tests {
     #[serial]
     fn store_and_get_all_bilateral_sessions() {
         init_test_db();
-        let s = make_session("prepare");
+        let s = make_session("prepared");
         store_bilateral_session(&s).unwrap();
 
         let all = get_all_bilateral_sessions().unwrap();
         assert_eq!(all.len(), 1);
-        assert_eq!(all[0].phase, "prepare");
+        assert_eq!(all[0].phase, "prepared");
         assert_eq!(all[0].commitment_hash, vec![0x11; 32]);
     }
 
@@ -349,7 +364,7 @@ mod tests {
     #[serial]
     fn delete_bilateral_session_removes_entry() {
         init_test_db();
-        let s = make_session("commit");
+        let s = make_session("committed");
         store_bilateral_session(&s).unwrap();
 
         delete_bilateral_session(&[0x11; 32]).unwrap();
@@ -361,7 +376,7 @@ mod tests {
     #[serial]
     fn store_bilateral_session_upserts_phase_on_conflict() {
         init_test_db();
-        let s = make_session("prepare");
+        let s = make_session("prepared");
         store_bilateral_session(&s).unwrap();
 
         let mut updated = s.clone();
@@ -379,10 +394,10 @@ mod tests {
     #[serial]
     fn store_multiple_bilateral_sessions() {
         init_test_db();
-        let s1 = make_session("prepare");
+        let s1 = make_session("prepared");
         store_bilateral_session(&s1).unwrap();
 
-        let mut s2 = make_session("accept");
+        let mut s2 = make_session("accepted");
         s2.commitment_hash = vec![0x99; 32];
         store_bilateral_session(&s2).unwrap();
 
@@ -403,7 +418,7 @@ mod tests {
     #[serial]
     fn bilateral_session_preserves_ble_address() {
         init_test_db();
-        let mut s = make_session("prepare");
+        let mut s = make_session("prepared");
         s.sender_ble_address = Some("AA:BB:CC:DD:EE:FF".to_string());
         store_bilateral_session(&s).unwrap();
 

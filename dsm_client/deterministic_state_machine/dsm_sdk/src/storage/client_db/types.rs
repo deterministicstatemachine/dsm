@@ -144,6 +144,22 @@ pub struct BilateralSessionRecord {
     pub stitched_receipt_bytes: Option<Vec<u8>>,
     /// The receiver's counter-signed receipt from the sender's verified ack.
     pub counter_signed_receipt: Option<Vec<u8>>,
+    /// Sender: the relationship tip the proposed step extends.
+    pub parent_tip: Option<Vec<u8>>,
+    /// The receiver challenge `r_R` (issued by the receiver, bound by the
+    /// sender).
+    pub receiver_challenge: Option<Vec<u8>>,
+    /// Sender: the post-advance root its confirm's receipt names.
+    pub sent_child_root: Option<Vec<u8>>,
+    /// Sender, bearer steps: the fused-anchor leaf update the confirm's
+    /// proofs were built from (key and new value, both or neither).
+    pub anchor_leaf_key: Option<Vec<u8>>,
+    pub anchor_leaf_value: Option<Vec<u8>>,
+    /// Sender, bearer steps: the offline-cash allocation debit (all three or
+    /// none).
+    pub spend_anchor_bundle: Option<Vec<u8>>,
+    pub spend_asset: Option<Vec<u8>>,
+    pub spend_amount: Option<i64>,
 }
 
 /// Persisted BLE chunk for durable reassembly across connection drops.
