@@ -554,6 +554,17 @@ class SinglePathWebViewBridge(private val context: Context) {
                     }
                 }
 
+                "cancelBilateralByCommitment" -> {
+                    val parsed = BridgeEnvelopeCodec.decodeBilateralPayload(payload)
+                        ?: return ByteArray(0)
+                    try {
+                        Unified.cancelBilateralByCommitment(parsed.commitment, parsed.reason ?: "")
+                    } catch (t: Throwable) {
+                        Log.w(TAG, "cancelBilateralByCommitment failed", t)
+                        ByteArray(0)
+                    }
+                }
+
                 "setBleIdentityForAdvertising" -> {
                     val parsed = try {
                         dsm.types.proto.BleIdentityPayload.parseFrom(payload)
