@@ -102,6 +102,16 @@ pub async fn claim_era_faucet(core: &CoreSDK, network_id: &[u8]) -> Result<Claim
     let reserve_id = era_reserve_id(network_id);
     let (public_key, secret_key) = crate::sdk::signing_authority::current_keypair()
         .map_err(|e| storage_err("signing authority", e))?;
+    // This device's AttA: the release binds its key to this device id
+    // (`DevID = H(AK ‖ AttA)`), which the reserve cell checks from the bytes.
+    let att_a = crate::sdk::signing_authority::current_att_a()
+        .map_err(|e| storage_err("signing authority", e))?;
+    if dsm::core::identity::genesis_v2::derive_devid(&public_key, &att_a) != devid {
+        return Err(DsmError::invalid_operation(
+            "faucet: this device's key and AttA do not derive its device id — local identity \
+             incoherent; refusing to sign a release for it",
+        ));
+    }
     let runtime = tokio::runtime::Handle::current();
 
     // ── Win a generation of the reserve (leader first at the head) ────────
@@ -183,6 +193,7 @@ pub async fn claim_era_faucet(core: &CoreSDK, network_id: &[u8]) -> Result<Claim
                     storage_set_id: set.id(),
                     source: ReleaseSource::FaucetClaimant {
                         claimant_public_key: public_key.clone(),
+                        claimant_att_a: att_a,
                     },
                 };
                 let bytes =

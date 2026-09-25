@@ -32,10 +32,25 @@ use dsm::types::operations::{Operation, TransactionMode, VerificationType};
 use dsm::types::token_types::Balance;
 
 const G: [u8; 32] = [0x11; 32];
-const DEV: [u8; 32] = [0x22; 32];
 const ERA: [u8; 32] = [0xAA; 32];
 
 const SOFI: [u8; 32] = [0xBB; 32];
+
+/// The trader's one key pair, and its `AttA`: the device id a faucet release
+/// names is the one they derive (`DevID = H(AK ‖ AttA)`), because the reserve
+/// cell recognizes a release only when its signer is the device it credits.
+fn trader() -> &'static (Vec<u8>, Vec<u8>) {
+    static KEYS: std::sync::OnceLock<(Vec<u8>, Vec<u8>)> = std::sync::OnceLock::new();
+    KEYS.get_or_init(|| dsm::crypto::sphincs::generate_sphincs_keypair().expect("keypair"))
+}
+
+const ATTA: [u8; 32] = [0x4A; 32];
+
+/// The trader's device id, derived from its key and `AttA`.
+fn dev() -> &'static [u8; 32] {
+    static DEVID: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
+    DEVID.get_or_init(|| dsm::core::identity::genesis_v2::derive_devid(&trader().0, &ATTA))
+}
 
 fn pending(kind: PendingAdmissionKind, state: EconomicAdmissionState) -> PendingEconomicAdmission {
     let prepared = PendingEconomicAdmission::prepared(kind, 4, [1; 32], [3; 32]);
@@ -239,7 +254,7 @@ fn faucet_fixture(position: u64) -> FaucetFixture {
         release_evidence_addr, sign_release, NativeReserveReleaseBody, ReleaseSource,
         ERA_FAUCET_PAYOUT,
     };
-    let (pk, sk) = dsm::crypto::sphincs::generate_sphincs_keypair().expect("keypair");
+    let (pk, sk) = trader().clone();
     let parent = reserve_genesis();
     let reserve_id = parent.reserve_id;
     let generation = 1u64;
@@ -255,12 +270,13 @@ fn faucet_fixture(position: u64) -> FaucetFixture {
             generation,
             amount: ERA_FAUCET_PAYOUT,
             recipient_genesis: G,
-            recipient_devid: DEV,
+            recipient_devid: *dev(),
             recipient_economic_position: position,
             recipient_operation_digest: op_digest,
             storage_set_id: canonical_set_id(),
             source: ReleaseSource::FaucetClaimant {
                 claimant_public_key: pk.clone(),
+                claimant_att_a: ATTA,
             },
         },
         &sk,
@@ -271,7 +287,7 @@ fn faucet_fixture(position: u64) -> FaucetFixture {
     let mut tree = EconomicSmt::new();
     let pre_root = tree.root();
     let credit = bal(era, ERA_FAUCET_PAYOUT);
-    let key = credit.leaf_key(&G, &DEV);
+    let key = credit.leaf_key(&G, dev());
     let siblings = tree.siblings(&key).to_vec();
     let mutation =
         EconomicLeafMutation::new(None, Some(credit.clone()), siblings).expect("well-formed");
@@ -281,7 +297,7 @@ fn faucet_fixture(position: u64) -> FaucetFixture {
     let witness = EconomicTransitionWitness::new(
         pre_root,
         post_root,
-        dsm_economic_operation_id(&G, &DEV, &C_DSM_PLUS),
+        dsm_economic_operation_id(&G, dev(), &C_DSM_PLUS),
         op_digest,
         vec![mutation],
         vec![CreditSource::NativeReserveRelease(
@@ -453,7 +469,7 @@ fn registered_naming(
     post_root: [u8; 32],
     manifest_addr: [u8; 32],
 ) -> RegisteredEconomicRoot {
-    registered_for_trader(G, DEV, position, post_root, manifest_addr)
+    registered_for_trader(G, *dev(), position, post_root, manifest_addr)
 }
 
 /// A registered root of the trader `(genesis, device)`.
@@ -508,7 +524,7 @@ fn run(
             envelope: fx.envelope.clone(),
         },
         &G,
-        &DEV,
+        dev(),
         b"dsm-testnet",
         &fx.pk,
     )
@@ -532,7 +548,7 @@ fn a_faucet_claim_transition_advances_the_validated_lineage() {
             advanced.claim.economic_position(),
             advanced.claim.claim_ref()
         ),
-        (G, DEV, 1, registered.claim_ref())
+        (G, *dev(), 1, registered.claim_ref())
     );
 }
 
@@ -557,7 +573,7 @@ fn a_register_set_not_established_is_not_a_verdict_about_the_claimant() {
             envelope: fx.envelope.clone(),
         }),
         &G,
-        &DEV,
+        dev(),
         b"dsm-testnet",
         &fx.pk,
     );
@@ -583,7 +599,7 @@ fn a_registered_claim_of_another_trader_is_refused() {
     let manifest = manifest_for(&fx.witness);
     let accepted = accepted_for(&fx.op);
     let addr = manifest.addr().expect("addressable");
-    for (genesis, device) in [([0x99; 32], DEV), (G, [0x98; 32])] {
+    for (genesis, device) in [([0x99; 32], *dev()), (G, [0x98; 32])] {
         let foreign = registered_for_trader(genesis, device, 1, fx.post_root, addr);
         assert!(matches!(
             run(&fx, &foreign, &manifest, &fx.witness, &accepted),
@@ -607,7 +623,7 @@ fn a_witness_that_is_not_the_operations_exact_effect_is_refused() {
         source_id: [0x5C; 32],
         consumer_economic_operation_id: [0x0E; 32],
     });
-    let key = record.leaf_key(&G, &DEV);
+    let key = record.leaf_key(&G, dev());
     let siblings = tree.siblings(&key).to_vec();
     let mutation =
         EconomicLeafMutation::new(None, Some(record.clone()), siblings).expect("well-formed");
@@ -615,7 +631,7 @@ fn a_witness_that_is_not_the_operations_exact_effect_is_refused() {
     let forged = EconomicTransitionWitness::new(
         pre_root,
         tree.root(),
-        dsm::economic::admission::dsm_economic_operation_id(&G, &DEV, &C_DSM_PLUS),
+        dsm::economic::admission::dsm_economic_operation_id(&G, dev(), &C_DSM_PLUS),
         fx.witness.operation_digest,
         vec![mutation],
         Vec::new(),
@@ -786,10 +802,10 @@ fn a_setup_transition_binds_its_position_and_its_derived_root() {
     use dsm::economic::state::EconomicLeafState;
     use dsm::economic::tree::EconomicSmt;
 
-    let vault_id = dsm::sofi::derive::vault_id(&G, &DEV, 7);
+    let vault_id = dsm::sofi::derive::vault_id(&G, dev(), 7);
     // The predecessor is the activation root at position 0, so `p` is 0.
     let zero = activate(EconomicActivationSnapshot::fresh()).expect("fresh");
-    let sigma = dsm::sofi::derive::setup_id(&G, &DEV, zero.economic_position(), &vault_id);
+    let sigma = dsm::sofi::derive::setup_id(&G, dev(), zero.economic_position(), &vault_id);
     let state = EconomicLeafState::Relationship(dsm::sofi::wire::TraderRelationshipLeaf {
         vault_id,
         leaf: dsm::sofi::derive::relationship_leaf_genesis(&sigma),
@@ -797,7 +813,7 @@ fn a_setup_transition_binds_its_position_and_its_derived_root() {
     let mut tree = EconomicSmt::new();
     let pre_root = tree.root();
     tree.insert(
-        state.leaf_key(&G, &DEV),
+        state.leaf_key(&G, dev()),
         state.leaf_value().expect("a leaf value"),
     );
     let derived_root = tree.root();
@@ -807,7 +823,7 @@ fn a_setup_transition_binds_its_position_and_its_derived_root() {
     let body = |position: u64, setup_root: [u8; 32]| {
         dsm::sofi::wire::SofiSetupBody::new(
             G,
-            DEV,
+            *dev(),
             position,
             vault_id,
             [0x66; 32],
@@ -833,8 +849,8 @@ fn a_setup_transition_binds_its_position_and_its_derived_root() {
         let built = dsm::economic::write_set::build_write_set(
             &op,
             &G,
-            &DEV,
-            &dsm::economic::admission::dsm_economic_operation_id(&G, &DEV, &C_DSM_PLUS),
+            dev(),
+            &dsm::economic::admission::dsm_economic_operation_id(&G, dev(), &C_DSM_PLUS),
             &dsm::economic::write_set::EconomicPreState::new(&std::collections::BTreeMap::new(), 0),
             &mut build_tree,
             &dsm::economic::write_set::CreditSourceFacts::None,
@@ -848,7 +864,7 @@ fn a_setup_transition_binds_its_position_and_its_derived_root() {
         let witness = EconomicTransitionWitness::new(
             pre_root,
             built.post_root,
-            dsm::economic::admission::dsm_economic_operation_id(&G, &DEV, &C_DSM_PLUS),
+            dsm::economic::admission::dsm_economic_operation_id(&G, dev(), &C_DSM_PLUS),
             dsm::economic::admission::dsm_operation_digest(&op.to_bytes()),
             built.mutations,
             built.credit_sources,
@@ -866,7 +882,7 @@ fn a_setup_transition_binds_its_position_and_its_derived_root() {
                 envelope: fx.envelope.clone(),
             },
             &G,
-            &DEV,
+            dev(),
             b"dsm-testnet",
             &fx.pk,
         )

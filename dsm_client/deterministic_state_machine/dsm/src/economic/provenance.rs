@@ -1043,6 +1043,7 @@ pub fn verify_credit_source(
             //    P0–P6-proven AK. `FaucetClaim(A, x) ⇒ recipient = A`.
             let ReleaseSource::FaucetClaimant {
                 claimant_public_key,
+                ..
             } = &release.body.source;
             if release.body.recipient_genesis != *ctx.genesis
                 || release.body.recipient_devid != *ctx.device_id
