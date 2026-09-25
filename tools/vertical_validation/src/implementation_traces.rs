@@ -1491,11 +1491,21 @@ where
 /// The two device pairs the bilateral traces run on: `(device_id, genesis)`
 /// for each side. Pair 1 is `[0x21..] <-> [0x31..]`, pair 2 `[0x41..] <-> [0x51..]`.
 /// Relationship chain tips over process memory, with the store trait's
-/// compare-and-set: an update applies only on the expected parent, and an
-/// absent tip reads as the zero parent a relationship starts from.
+/// compare-and-set: an update applies only on the expected parent of a
+/// relationship its contact add recorded.
 #[derive(Default)]
 struct TraceTips {
     tips: std::sync::Mutex<std::collections::HashMap<[u8; 32], [u8; 32]>>,
+}
+
+impl TraceTips {
+    /// What adding the contact records: the relationship at its `h_0`.
+    fn record_contact_added(&self, device_id: [u8; 32], h_0: [u8; 32]) {
+        self.tips
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(device_id, h_0);
+    }
 }
 
 impl dsm::core::chain_tip_store::ChainTipStore for TraceTips {
@@ -1518,7 +1528,12 @@ impl dsm::core::chain_tip_store::ChainTipStore for TraceTips {
         new_tip: [u8; 32],
     ) -> Result<bool, dsm::types::error::DsmError> {
         let mut tips = self.tips.lock().unwrap_or_else(|p| p.into_inner());
-        if tips.get(device_id).copied().unwrap_or([0u8; 32]) != expected_parent_tip {
+        let current = tips.get(device_id).copied().ok_or_else(|| {
+            dsm::types::error::DsmError::InvalidState(
+                "no relationship with that device".to_string(),
+            )
+        })?;
+        if current != expected_parent_tip {
             return Ok(false);
         }
         tips.insert(*device_id, new_tip);
@@ -1588,7 +1603,14 @@ fn trace_side(
             ble_address: None,
         })
         .map_err(|e| format!("failed to add the trace contact: {e}"))?;
-    // The contact add establishes the relationship on the device head.
+    // The contact add records the relationship at its h_0 in the tip store and
+    // establishes it on the device head.
+    tips.record_contact_added(
+        remote.0,
+        dsm::core::bilateral_transaction_manager::initial_relationship_chain_tip(
+            &local.0, &local.1, &remote.0, &remote.1,
+        ),
+    );
     let head = trace_local_head(local, &local_kp)?
         .establish_relationship(remote.0)
         .map_err(|e| format!("establishing the trace relationship: {e}"))?;

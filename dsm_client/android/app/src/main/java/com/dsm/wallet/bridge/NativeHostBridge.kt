@@ -13,8 +13,6 @@ import com.google.protobuf.InvalidProtocolBufferException
 import com.dsm.wallet.bridge.ble.BleCoordinator
 import com.dsm.wallet.ui.MainActivity
 import dsm.types.proto.BiometricAuthorizePayload
-import dsm.types.proto.BleTransportSendChunksPayload
-import dsm.types.proto.BleTransportSendChunksResult
 import dsm.types.proto.HostPermissionsRequestPayload
 import dsm.types.proto.HostPermissionsResult
 import dsm.types.proto.NativeHostAck
@@ -94,7 +92,6 @@ internal object NativeHostBridge {
                             .addSupportedRequests(NativeHostRequestKind.NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_BIOMETRIC_AUTHORIZE)
                             .addSupportedRequests(NativeHostRequestKind.NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_NFC_TAG_READ_PAYLOAD)
                             .addSupportedRequests(NativeHostRequestKind.NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_NFC_TAG_WRITE_PAYLOAD)
-                            .addSupportedRequests(NativeHostRequestKind.NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_BLE_TRANSPORT_SEND_CHUNKS)
                             .build()
                     )
                     .build()
@@ -277,28 +274,6 @@ internal object NativeHostBridge {
                 )
             }
 
-            NativeHostRequestKind.NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_BLE_TRANSPORT_SEND_CHUNKS -> {
-                val payload = try {
-                    BleTransportSendChunksPayload.parseFrom(request.payload)
-                } catch (e: InvalidProtocolBufferException) {
-                    return errorResponse(400, "ble.transport.send_chunks: invalid payload: ${e.message}")
-                }
-                val responseEnvelope = Unified.bilateralOfflineSendSafe(
-                    payload.bleAddress,
-                    payload.envelopeBytes.toByteArray(),
-                )
-                okBytes(
-                    BleTransportSendChunksResult.newBuilder()
-                        .setResponseEnvelope(ByteString.copyFrom(responseEnvelope))
-                        .build()
-                        .toByteArray()
-                )
-            }
-
-            NativeHostRequestKind.NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_SECURE_HARDWARE_GENERATE_KEY,
-            NativeHostRequestKind.NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_SECURE_HARDWARE_SIGN,
-            NativeHostRequestKind.NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_BLE_TRANSPORT_OPEN,
-            NativeHostRequestKind.NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_BLE_TRANSPORT_CLOSE,
             NativeHostRequestKind.UNRECOGNIZED,
             NativeHostRequestKind.NATIVE_HOST_REQUEST_KIND_UNSPECIFIED -> {
                 errorResponse(501, "unsupported native host request kind: ${request.kind}")

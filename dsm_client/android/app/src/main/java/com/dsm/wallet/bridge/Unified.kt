@@ -30,7 +30,7 @@ import androidx.annotation.Keep
 //   Identity:  recordPeerIdentity
 //   Protocol:  processEnvelopeV3, processEnvelopeV3WithAddress
 //   Shared boundary: dispatchStartup, dispatchIngress
-//   Bilateral: bilateralOfflineSend, acceptBilateralByCommitment, ...
+//   Bilateral: acceptBilateralByCommitment, ...
 //   BLE:       initBleCoordinator, processBleChunk, chunkEnvelopeForBle, ...
 //   Contacts:  removeContact, handleContactQrV3, hasContactForDeviceId
 //
@@ -153,9 +153,6 @@ object Unified {
         UnifiedNativeApi.getWalletHistoryStrict()
 
     // BLE bilateral operations
-    @Keep @JvmStatic fun bilateralOfflineSend(deviceAddress: String, envelope: ByteArray): ByteArray {
-        return UnifiedNativeApi.bilateralOfflineSend(envelope, deviceAddress)
-    }
 
     /**
      * Ensure the AppRouter is installed (safe to call multiple times; idempotent).
@@ -481,24 +478,6 @@ object Unified {
      */
     @Keep @JvmStatic fun rejectBilateralByCommitment(commitmentHashBytes: ByteArray, reason: String): ByteArray =
         UnifiedNativeApi.rejectBilateralByCommitment(commitmentHashBytes, reason)
-
-    /**
-     * Canonical offline send validation + response generation.
-     * Returns a response Envelope (UniversalRx) with BilateralPrepareResponse results or an error Envelope.
-     * Rust prepends 0x03 framing; both success and error paths return Envelope v3.
-     */
-    @Keep @JvmStatic fun bilateralOfflineSend(envelopeBytes: ByteArray, bleAddress: String): ByteArray =
-        UnifiedNativeApi.bilateralOfflineSend(envelopeBytes, bleAddress)
-
-    /**
-     * Passthrough for bilateralOfflineSend — propagates Rust exceptions to the caller.
-     * Rust returns Envelope v3 (0x03 framed) for both success and error; no status-byte
-     * framing is applied here. Callers should wrap with try/catch.
-     */
-    @Keep @JvmStatic fun bilateralOfflineSendSafe(deviceAddress: String, envelope: ByteArray): ByteArray =
-        bilateralOfflineSend(envelope, deviceAddress)
-
-
 
     // Device + envelope inspection helpers
     @Keep @JvmStatic fun getDeviceIdBin(): ByteArray = UnifiedNativeApi.getDeviceIdBin()

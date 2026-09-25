@@ -2,7 +2,7 @@
 //! Contact record persistence and BLE status management.
 
 use anyhow::{anyhow, Result};
-use log::{info, warn};
+use log::info;
 use rusqlite::{params, OptionalExtension};
 
 use super::get_connection;
@@ -69,6 +69,28 @@ pub fn store_contact(contact: &ContactRecord) -> Result<()> {
         log::warn!("DB lock poisoned, recovering");
         poisoned.into_inner()
     });
+    // Adding a contact again pins nothing new: its genesis, AK and Kyber key
+    // are the ones first pinned, and its relationship state (tips, pairing
+    // state, the online-reconcile hold) is not the add's to reset.
+    let pinned: Option<(Vec<u8>, Vec<u8>, Vec<u8>)> = conn
+        .query_row(
+            "SELECT genesis_hash, public_key, kyber_public_key FROM contacts WHERE device_id = ?1",
+            params![contact.device_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    if let Some((genesis_hash, public_key, kyber_public_key)) = pinned {
+        if genesis_hash != contact.genesis_hash
+            || public_key != contact.public_key
+            || kyber_public_key != contact.kyber_public_key
+        {
+            return Err(anyhow!(
+                "contact {:?} is pinned to another genesis or key; a contact's pinned identity is \
+                 not replaced",
+                contact.alias
+            ));
+        }
+    }
     conn.execute(
         "INSERT INTO contacts (
             contact_id, device_id, alias, genesis_hash, public_key, kyber_public_key, chain_tip,
@@ -77,19 +99,13 @@ pub fn store_contact(contact: &ContactRecord) -> Result<()> {
         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?7,?8,?9,?10,?11,?12,?13)
         ON CONFLICT(device_id) DO UPDATE SET
             alias = excluded.alias,
-            genesis_hash = excluded.genesis_hash,
-            public_key = excluded.public_key,
-            kyber_public_key = excluded.kyber_public_key,
-            chain_tip = COALESCE(contacts.chain_tip, excluded.chain_tip),
             verified = CASE
                 WHEN excluded.verified != 0 OR contacts.verified != 0 THEN 1
                 ELSE 0
             END,
             verification_proof = COALESCE(excluded.verification_proof, contacts.verification_proof),
             metadata = excluded.metadata,
-            ble_address = COALESCE(excluded.ble_address, contacts.ble_address),
-            status = excluded.status,
-            needs_online_reconcile = excluded.needs_online_reconcile",
+            ble_address = COALESCE(excluded.ble_address, contacts.ble_address)",
         params![
             contact.contact_id,
             contact.device_id,
@@ -319,13 +335,14 @@ pub fn get_contact_public_key_by_device_id(device_id_str: &str) -> Result<Option
     Ok(get_contact_by_device_id(&device_id_bytes)?.map(|contact| contact.public_key))
 }
 
-/// Update contact status after BLE identity validation.
-/// Sets status to BleCapable if chain tips match, or sets needs_online_reconcile if mismatch.
+/// Record what a BLE identity observation says about a contact's transport:
+/// its BLE address, the pairing state that drives scanning (`BleCapable`),
+/// and a chain tip the peer reported, kept as an observed claim only.
 ///
-/// If the contact does not exist yet (common during BLE auto-pairing when the advertiser
-/// receives the scanner's identity before a contact record is persisted), this function
-/// returns Ok(()) with a warning instead of failing. The contact will be auto-created by
-/// `processBleIdentityEnvelope` and updated on the next BLE interaction.
+/// Transport facts decide nothing about the relationship: this never touches
+/// the relationship tips or the online-reconcile hold. A tip the peer reports
+/// that differs from the stored one leaves the pairing state as it was; the
+/// observed claim blocks sending until the relationship is reconciled.
 pub fn update_contact_ble_status(
     device_id: &[u8],
     observed_chain_tip: Option<&[u8]>,
@@ -334,53 +351,26 @@ pub fn update_contact_ble_status(
     if device_id.len() != 32 {
         return Err(anyhow!("Invalid device_id length"));
     }
-
-    let contact = match get_contact_by_device_id(device_id)? {
-        Some(c) => c,
-        None => {
-            log::warn!(
-                "update_contact_ble_status: contact not found for device {:02x}{:02x}... — \
-                 skipping (will be created by BLE auto-pairing)",
-                device_id[0],
-                device_id[1]
-            );
-            return Ok(());
+    let contact = get_contact_by_device_id(device_id)?
+        .ok_or_else(|| anyhow!("no contact has that device id"))?;
+    let observed_tip_bytes = match observed_chain_tip {
+        Some(tip) if tip.len() == 32 => Some(tip),
+        Some(tip) => {
+            return Err(anyhow!(
+                "an observed chain tip is {} bytes, expected 32",
+                tip.len()
+            ))
         }
+        None => None,
     };
-
-    // Determine new status and reconciliation flag
-    let (new_status, needs_reconcile) = if observed_chain_tip.is_some() {
-        // Chain tip provided: validate it matches
-        match (contact.current_chain_tip.as_deref(), observed_chain_tip) {
-            (Some(stored_tip), Some(observed_tip))
-                if stored_tip.len() == 32 && observed_tip.len() == 32 =>
-            {
-                if stored_tip == observed_tip {
-                    // Tips match: BLE capable
-                    ("BleCapable".to_string(), false)
-                } else {
-                    // Tips diverged: flag for online reconciliation
-                    info!(
-                        "Chain tip mismatch for device: stored={:?} observed={:?}",
-                        &stored_tip[..8],
-                        &observed_tip[..8]
-                    );
-                    (contact.status.clone(), true) // Keep existing status, flag reconcile
-                }
-            }
-            (None, Some(_)) => {
-                // First tip observation from BLE
-                ("OnlineCapable".to_string(), false)
-            }
-            _ => {
-                // Invalid data
-                (contact.status.clone(), contact.needs_online_reconcile)
-            }
-        }
+    let diverged = match (contact.current_chain_tip.as_deref(), observed_tip_bytes) {
+        (Some(stored), Some(observed)) => stored != observed,
+        _ => false,
+    };
+    let new_status = if diverged {
+        contact.status.clone()
     } else {
-        // No chain tip provided (BLE identity observation without chain tip)
-        // Promote to BleCapable since we confirmed BLE connectivity and validated identity
-        ("BleCapable".to_string(), false)
+        "BleCapable".to_string()
     };
 
     let binding = get_connection()?;
@@ -390,7 +380,6 @@ pub fn update_contact_ble_status(
     });
 
     let updated_ble_address = ble_address.or(contact.ble_address.as_deref());
-    let observed_tip_bytes = observed_chain_tip.filter(|tip| tip.len() == 32);
     let observed_tip_source = observed_tip_bytes
         .as_ref()
         .map(|_| ObservedRemoteTipSource::LivePeerClaim.db_value());
@@ -398,17 +387,15 @@ pub fn update_contact_ble_status(
     conn.execute(
         "UPDATE contacts SET
             status = ?1,
-            needs_online_reconcile = ?2,
-            ble_address = ?3,
-            observed_remote_chain_tip = COALESCE(?4, observed_remote_chain_tip),
+            ble_address = ?2,
+            observed_remote_chain_tip = COALESCE(?3, observed_remote_chain_tip),
             observed_remote_tip_source = CASE
-                WHEN ?4 IS NULL THEN observed_remote_tip_source
-                ELSE ?5
+                WHEN ?3 IS NULL THEN observed_remote_tip_source
+                ELSE ?4
             END
-         WHERE device_id = ?6",
+         WHERE device_id = ?5",
         params![
             new_status,
-            if needs_reconcile { 1i32 } else { 0i32 },
             updated_ble_address,
             observed_tip_bytes,
             observed_tip_source,
@@ -417,8 +404,8 @@ pub fn update_contact_ble_status(
     )?;
 
     info!(
-        "Updated contact BLE status: {} (reconcile: {})",
-        new_status, needs_reconcile
+        "Updated contact BLE status: {} (observed tip diverged: {})",
+        new_status, diverged
     );
 
     Ok(())
@@ -619,102 +606,6 @@ pub fn contact_chain_tip_matches_expected(
     let current_tip = get_contact_chain_tip(device_id)?
         .ok_or_else(|| anyhow!("no contact has this device id"))?;
     Ok(current_tip.as_slice() == expected_parent_tip)
-}
-
-/// Atomically advance a finalized relationship tip only if the persisted parent
-/// tip still matches `expected_parent_tip`.
-///
-/// Returns `Ok(true)` when the advance succeeds, `Ok(false)` when the parent no
-/// longer matches (Tripwire / ParentConsumed), and `Err(_)` for actual storage
-/// failures.
-pub fn try_advance_finalized_bilateral_chain_tip(
-    device_id: &[u8],
-    expected_parent_tip: &[u8],
-    new_chain_tip: &[u8],
-) -> Result<bool> {
-    if device_id.len() != 32 {
-        return Err(anyhow!("Invalid device_id length"));
-    }
-    if expected_parent_tip.len() != 32 {
-        return Err(anyhow!("Invalid expected_parent_tip length"));
-    }
-    if new_chain_tip.len() != 32 {
-        return Err(anyhow!("Invalid chain_tip length"));
-    }
-    if expected_parent_tip == new_chain_tip {
-        return Err(anyhow!(
-            "Finalized bilateral chain tip advance requires child tip different from parent tip"
-        ));
-    }
-
-    let binding = get_connection()?;
-    let conn = binding.lock().unwrap_or_else(|poisoned| {
-        log::warn!("DB lock poisoned, recovering");
-        poisoned.into_inner()
-    });
-
-    let rows_changed = conn.execute(
-        "UPDATE contacts SET
-            previous_chain_tip = chain_tip,
-            chain_tip = ?1,
-            local_bilateral_chain_tip = ?1,
-            observed_remote_chain_tip = NULL,
-            observed_remote_tip_source = NULL,
-            needs_online_reconcile = 0,
-            status = CASE
-                WHEN status = 'BleCapable' THEN 'BleCapable'
-                ELSE 'OnlineCapable'
-            END
-         WHERE device_id = ?2
-           AND chain_tip = ?3",
-        params![new_chain_tip, device_id, expected_parent_tip],
-    )?;
-
-    if rows_changed > 0 {
-        info!(
-            "Advanced finalized bilateral chain tip with parent match: parent={:?} tip={:?}",
-            &expected_parent_tip[..8],
-            &new_chain_tip[..8]
-        );
-        Ok(true)
-    } else {
-        warn!(
-            "Rejected finalized bilateral chain tip advance: expected_parent={:?} new_tip={:?}",
-            &expected_parent_tip[..8],
-            &new_chain_tip[..8]
-        );
-        Ok(false)
-    }
-}
-
-/// Clear the `needs_online_reconcile` flag for a contact WITHOUT touching the
-/// chain tip. This is the only correct way to mark a reconcile as done —
-/// the observed-tip namespace must NOT be written into canonical chain-tip
-/// columns just to clear this flag, as doing so destroys the real chain tip and
-/// causes every subsequent Prepare to be rejected with TipMismatch.
-pub fn clear_contact_reconcile_flag(device_id: &[u8]) -> Result<()> {
-    if device_id.len() != 32 {
-        return Err(anyhow!("Invalid device_id length"));
-    }
-
-    let binding = get_connection()?;
-    let conn = binding.lock().unwrap_or_else(|poisoned| {
-        log::warn!("DB lock poisoned, recovering");
-        poisoned.into_inner()
-    });
-
-    conn.execute(
-        "UPDATE contacts SET needs_online_reconcile = 0 WHERE device_id = ?1",
-        params![device_id],
-    )?;
-
-    log::info!(
-        "Cleared reconcile flag for contact {:02x}{:02x}..",
-        device_id[0],
-        device_id[1]
-    );
-
-    Ok(())
 }
 
 /// Flag a contact for online reconciliation without changing status.
@@ -1121,13 +1012,6 @@ mod tests {
     }
 
     #[test]
-    fn try_advance_rejects_same_parent_and_child_tip() {
-        let tip = [0x11u8; 32];
-        let err = try_advance_finalized_bilateral_chain_tip(&[0u8; 32], &tip, &tip).unwrap_err();
-        assert!(err.to_string().contains("different from parent"));
-    }
-
-    #[test]
     fn get_contact_device_tree_root_refuses_a_malformed_device_id() {
         assert!(get_contact_device_tree_root(&[0u8; 10]).is_err());
     }
@@ -1146,6 +1030,40 @@ mod tests {
         assert_eq!(loaded.alias, "alice");
         assert_eq!(loaded.device_id, device_id.to_vec());
         assert_eq!(loaded.public_key, vec![0xBBu8; 64]);
+    }
+
+    /// A BLE identity observation records transport facts only. It never
+    /// lifts the online-reconcile hold a failed step set — not on a plain
+    /// address write, and not on a reported tip equal to the stored one — and
+    /// a contact that does not exist is not "updated". MUTATION CONTROL:
+    /// clearing the hold on a matching observation turns this red.
+    #[test]
+    #[serial]
+    fn a_ble_observation_never_lifts_the_reconcile_hold() {
+        init_test_db();
+        let device_id = [0x0Bu8; 32];
+        let mut contact = make_contact(device_id, "held");
+        contact.needs_online_reconcile = true;
+        store_contact(&contact).expect("store contact");
+
+        update_contact_ble_status(&device_id, None, Some("AA:BB:CC:DD:EE:02"))
+            .expect("record the address");
+        update_contact_ble_status(&device_id, Some(&[0x70u8; 32]), None)
+            .expect("record a matching observation");
+
+        let stored = get_contact_by_device_id(&device_id)
+            .expect("read")
+            .expect("the contact");
+        assert!(
+            stored.needs_online_reconcile,
+            "a BLE observation lifted the reconcile hold"
+        );
+        assert_eq!(stored.ble_address.as_deref(), Some("AA:BB:CC:DD:EE:02"));
+        assert_eq!(stored.status, "BleCapable");
+        assert!(
+            update_contact_ble_status(&[0x0Cu8; 32], None, Some("AA:BB:CC:DD:EE:03")).is_err(),
+            "an observation of a device that is not a contact updated nothing and says so"
+        );
     }
 
     /// Cold-peer RPA rotation: after a paired peer's BLE address rotates, the canonical re-persist

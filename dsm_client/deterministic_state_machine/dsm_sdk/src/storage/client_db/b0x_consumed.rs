@@ -95,6 +95,7 @@ mod tests {
     use super::*;
 
     fn fresh() {
+        crate::economic_fixtures::use_test_storage_dir();
         crate::storage::client_db::reset_database_for_tests();
     }
 

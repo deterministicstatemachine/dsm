@@ -44,8 +44,8 @@
 //!
 //! ---
 //!
-//! Defines the minimal traits (`AppRouter`, `BilateralHandler`), dispatch
-//! types (`AppQuery`, `AppInvoke`, `BiPrepare`, etc.), and `OnceLock`-based installer functions
+//! Defines the minimal router trait (`AppRouter`), dispatch types
+//! (`AppQuery`, `AppInvoke`), the BLE runtime slot, and `OnceLock`-based installer functions
 //! used by the SDK handler implementations. This keeps the transport/UI
 //! bridge entirely out of the pure `dsm` core crate.
 
@@ -349,7 +349,7 @@ pub(crate) unsafe fn reset_bridge_handlers_for_tests() {
         *guard = None;
     }
     std::ptr::write(
-        std::ptr::addr_of!(BILATERAL_HANDLER) as *mut OnceCell<Arc<dyn BilateralHandler>>,
+        std::ptr::addr_of!(BLE_RUNTIME) as *mut OnceCell<Arc<crate::handlers::BiImpl>>,
         OnceCell::new(),
     );
 }
@@ -434,143 +434,71 @@ pub fn get_wallet_history_strict() -> Result<crate::generated::WalletHistoryResp
     crate::generated::WalletHistoryResponse::decode(&*arg.body)
         .map_err(|e| format!("Failed to decode WalletHistoryResponse from ArgPack body: {e}"))
 }
-// ---------- Bilateral Ops (offline) ----------
+// ---------- The BLE runtime (offline) ----------
 
-#[derive(Debug, Clone, Default)]
-pub struct BiPrepare {
-    pub payload: Vec<u8>,
+/// The slots the offline session engine's BLE carrier is injected into. Not
+/// a protocol handler: offline bilateral steps run in `BilateralBleHandler`,
+/// and the envelope bridge routes none of them.
+static BLE_RUNTIME: OnceCell<Arc<crate::handlers::BiImpl>> = OnceCell::new();
+
+pub fn install_ble_runtime(runtime: Arc<crate::handlers::BiImpl>) {
+    if BLE_RUNTIME.set(runtime).is_err() {
+        log::warn!("[SDK] BLE runtime already installed; the first one stays");
+    }
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct BiTransfer {
-    pub payload: Vec<u8>,
+pub fn ble_runtime() -> Option<Arc<crate::handlers::BiImpl>> {
+    BLE_RUNTIME.get().cloned()
 }
 
-#[derive(Debug, Clone)]
-pub struct BiResult {
-    pub success: bool,
-    pub result_data: Vec<u8>,
-    pub error_message: Option<String>,
+#[cfg(all(target_os = "android", feature = "bluetooth"))]
+fn installed_ble_runtime() -> Result<Arc<crate::handlers::BiImpl>, String> {
+    ble_runtime().ok_or_else(|| "BLE runtime not installed".to_string())
 }
 
-#[derive(Debug, Clone)]
-pub struct BiAccept {
-    pub payload: Vec<u8>,
-}
-
-#[derive(Debug, Clone)]
-pub struct BiCommit {
-    pub payload: Vec<u8>,
-}
-
-#[async_trait::async_trait]
-pub trait BilateralHandler: Send + Sync {
-    async fn prepare(&self, p: BiPrepare) -> BiResult;
-    async fn transfer(&self, t: BiTransfer) -> BiResult;
-    async fn accept(&self, a: BiAccept) -> BiResult;
-    async fn commit(&self, c: BiCommit) -> BiResult;
-
-    /// Allow downcasting to concrete type for SDK injection.
-    fn as_any(&self) -> &dyn std::any::Any;
-}
-
-static BILATERAL_HANDLER: OnceCell<Arc<dyn BilateralHandler>> = OnceCell::new();
-
-pub fn install_bilateral_handler(handler: Arc<dyn BilateralHandler>) {
-    let _ = BILATERAL_HANDLER.set(handler);
-}
-
-pub fn bilateral_handler() -> Option<Arc<dyn BilateralHandler>> {
-    BILATERAL_HANDLER.get().cloned()
-}
-
-/// Inject the BleFrameCoordinator into the bilateral handler (Android only).
+/// Inject the BleFrameCoordinator into the BLE runtime (Android only).
 #[cfg(all(target_os = "android", feature = "bluetooth"))]
 pub async fn inject_ble_coordinator(
     coordinator: std::sync::Arc<crate::bluetooth::ble_frame_coordinator::BleFrameCoordinator>,
 ) -> Result<(), String> {
-    use crate::handlers::BiImpl;
-
-    let handler = BILATERAL_HANDLER
-        .get()
-        .ok_or_else(|| "Bilateral handler not installed".to_string())?;
-
-    let bi_impl = handler
-        .as_ref()
-        .as_any()
-        .downcast_ref::<BiImpl>()
-        .ok_or_else(|| "Bilateral handler is not BiImpl".to_string())?;
-
-    bi_impl.set_ble_coordinator(coordinator).await;
-    log::info!("BleFrameCoordinator injected into BiImpl via bridge");
+    installed_ble_runtime()?
+        .set_ble_coordinator(coordinator)
+        .await;
+    log::info!("BleFrameCoordinator injected into the BLE runtime");
     Ok(())
 }
 
-/// Inject the bilateral transport adapter into the bilateral handler (Android only).
+/// Inject the bilateral transport adapter into the BLE runtime (Android only).
 #[cfg(all(target_os = "android", feature = "bluetooth"))]
 pub async fn inject_ble_transport_adapter(
     adapter: std::sync::Arc<
         crate::bluetooth::bilateral_transport_adapter::BilateralTransportAdapter,
     >,
 ) -> Result<(), String> {
-    use crate::handlers::BiImpl;
-
-    let handler = BILATERAL_HANDLER
-        .get()
-        .ok_or_else(|| "Bilateral handler not installed".to_string())?;
-
-    let bi_impl = handler
-        .as_ref()
-        .as_any()
-        .downcast_ref::<BiImpl>()
-        .ok_or_else(|| "Bilateral handler is not BiImpl".to_string())?;
-
-    bi_impl.set_ble_transport_adapter(adapter).await;
-    log::info!("Ble transport adapter injected into BiImpl via bridge");
+    installed_ble_runtime()?
+        .set_ble_transport_adapter(adapter)
+        .await;
+    log::info!("Ble transport adapter injected into the BLE runtime");
     Ok(())
 }
 
-/// Get the BleFrameCoordinator from the bilateral handler (Android only).
+/// Get the BleFrameCoordinator from the BLE runtime (Android only).
 #[cfg(all(target_os = "android", feature = "bluetooth"))]
 pub async fn get_ble_coordinator(
 ) -> Result<std::sync::Arc<crate::bluetooth::ble_frame_coordinator::BleFrameCoordinator>, String> {
-    use crate::handlers::BiImpl;
-
-    let handler = BILATERAL_HANDLER
-        .get()
-        .ok_or_else(|| "Bilateral handler not installed".to_string())?;
-
-    let bi_impl = handler
-        .as_ref()
-        .as_any()
-        .downcast_ref::<BiImpl>()
-        .ok_or_else(|| "Bilateral handler is not BiImpl".to_string())?;
-
-    bi_impl
+    installed_ble_runtime()?
         .get_ble_coordinator()
         .await
         .ok_or_else(|| "BleFrameCoordinator not injected yet".to_string())
 }
 
-/// Get the bilateral transport adapter from the bilateral handler (Android only).
+/// Get the bilateral transport adapter from the BLE runtime (Android only).
 #[cfg(all(target_os = "android", feature = "bluetooth"))]
 pub async fn get_ble_transport_adapter() -> Result<
     std::sync::Arc<crate::bluetooth::bilateral_transport_adapter::BilateralTransportAdapter>,
     String,
 > {
-    use crate::handlers::BiImpl;
-
-    let handler = BILATERAL_HANDLER
-        .get()
-        .ok_or_else(|| "Bilateral handler not installed".to_string())?;
-
-    let bi_impl = handler
-        .as_ref()
-        .as_any()
-        .downcast_ref::<BiImpl>()
-        .ok_or_else(|| "Bilateral handler is not BiImpl".to_string())?;
-
-    bi_impl
+    installed_ble_runtime()?
         .get_ble_transport_adapter()
         .await
         .ok_or_else(|| "Ble transport adapter not injected yet".to_string())

@@ -5,3 +5,8 @@
 //! Receipt primitives are centralized in [`crate::types::receipt_types`]
 //! and verification logic in the verification sub-module. The core bilateral
 //! transaction manager lives in [`crate::core::bilateral_transaction_manager`].
+//! The offline protocol's decisions are [`offline`]; the Kyber identity
+//! binding they check is [`identity_binding`].
+
+pub mod identity_binding;
+pub mod offline;

@@ -158,26 +158,6 @@ describe('E2E: Offline BLE exchange -> wallet refresh', () => {
         }
         if (method === 'nativeHostRequest') {
           const hostRequest = pb.NativeHostRequest.fromBinary(payload);
-          if (hostRequest.kind === pb.NativeHostRequestKind.PLATFORM_PRIMITIVE_BLE_TRANSPORT_SEND_CHUNKS) {
-            const resp = new pb.BilateralPrepareResponse({
-              commitmentHash: new pb.Hash32({ v: new Uint8Array(32) } as any),
-              localSignature: new Uint8Array(64),
-            });
-            const env = new pb.Envelope({
-              version: 3,
-              payload: { case: 'bilateralPrepareResponse', value: resp },
-            } as any);
-            return wrapSuccessEnvelope(
-              new pb.NativeHostResponse({
-              result: {
-                case: 'okBytes',
-                value: new pb.BleTransportSendChunksResult({
-                    responseEnvelope: new Uint8Array(frameEnvelope(env)),
-                  }).toBinary(),
-                },
-              }).toBinary(),
-            );
-          }
           throw new Error(`unhandled nativeHostRequest kind: ${hostRequest.kind}`);
         }
         throw new Error(`unhandled __callBin method: ${method} (payloadLen=${payload.length})`);

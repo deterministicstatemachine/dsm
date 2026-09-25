@@ -8,8 +8,6 @@ import { bridgeGate } from './BridgeGate';
 import {
   BiometricAuthorizePayload,
   BiometricAuthorizeResult,
-  BleTransportSendChunksPayload,
-  BleTransportSendChunksResult,
   BridgeRpcRequest,
   BridgeRpcResponse,
   BytesPayload,
@@ -214,20 +212,6 @@ export async function writeNfcTagPayloadHost(payload?: Uint8Array, mimeType = 'a
     ),
   );
   return NfcTagWriteResult.fromBinary(bytes);
-}
-
-export async function sendBleTransportChunksHost(envelopeBytes: Uint8Array, bleAddress: string): Promise<Uint8Array> {
-  const payload = new BleTransportSendChunksPayload({
-    bleAddress,
-    envelopeBytes: new Uint8Array(envelopeBytes),
-  });
-  const bytes = await hostRequestOk(
-    buildHostRequest(
-      NativeHostRequestKind.PLATFORM_PRIMITIVE_BLE_TRANSPORT_SEND_CHUNKS,
-      payload.toBinary(),
-    ),
-  );
-  return BleTransportSendChunksResult.fromBinary(bytes).responseEnvelope;
 }
 
 export function decodeNativeHostEventToLegacyTopic(eventBytes: Uint8Array): { topic: string; payload: Uint8Array } | null {

@@ -184,11 +184,12 @@ async fn test_ble_address_persistence_after_ensure() {
 }
 
 // =============================================================================
-// Test 4: BLE status update does not auto-create a missing contact
+// Test 4: a BLE status update for a device that is not a contact creates
+// nothing and says so
 // =============================================================================
 #[tokio::test]
 #[serial_test::serial]
-async fn test_ble_status_update_skips_missing_contact() {
+async fn test_ble_status_update_refuses_a_missing_contact() {
     reset_db();
 
     let device_id = dev(0x77);
@@ -198,9 +199,12 @@ async fn test_ble_status_update_skips_missing_contact() {
         .unwrap()
         .is_none());
 
-    // Strict path: missing contacts are not created implicitly.
-    client_db::update_contact_ble_status(&device_id, None, Some("AA:BB:CC:DD:EE:FF"))
-        .expect("update should succeed");
+    // Strict path: missing contacts are not created implicitly, and an
+    // update that updated nothing is not reported as done.
+    assert!(
+        client_db::update_contact_ble_status(&device_id, None, Some("AA:BB:CC:DD:EE:FF")).is_err(),
+        "an update of a device that is not a contact reported success"
+    );
 
     assert!(
         client_db::get_contact_by_device_id(&device_id)

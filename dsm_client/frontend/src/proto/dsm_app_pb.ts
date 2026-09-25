@@ -1017,16 +1017,6 @@ export enum NativeHostRequestKind {
   PLATFORM_PRIMITIVE_BIOMETRIC_AUTHORIZE = 102,
 
   /**
-   * @generated from enum value: NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_SECURE_HARDWARE_GENERATE_KEY = 103;
-   */
-  PLATFORM_PRIMITIVE_SECURE_HARDWARE_GENERATE_KEY = 103,
-
-  /**
-   * @generated from enum value: NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_SECURE_HARDWARE_SIGN = 104;
-   */
-  PLATFORM_PRIMITIVE_SECURE_HARDWARE_SIGN = 104,
-
-  /**
    * @generated from enum value: NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_NFC_TAG_READ_PAYLOAD = 105;
    */
   PLATFORM_PRIMITIVE_NFC_TAG_READ_PAYLOAD = 105,
@@ -1035,21 +1025,6 @@ export enum NativeHostRequestKind {
    * @generated from enum value: NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_NFC_TAG_WRITE_PAYLOAD = 106;
    */
   PLATFORM_PRIMITIVE_NFC_TAG_WRITE_PAYLOAD = 106,
-
-  /**
-   * @generated from enum value: NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_BLE_TRANSPORT_OPEN = 107;
-   */
-  PLATFORM_PRIMITIVE_BLE_TRANSPORT_OPEN = 107,
-
-  /**
-   * @generated from enum value: NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_BLE_TRANSPORT_SEND_CHUNKS = 108;
-   */
-  PLATFORM_PRIMITIVE_BLE_TRANSPORT_SEND_CHUNKS = 108,
-
-  /**
-   * @generated from enum value: NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_BLE_TRANSPORT_CLOSE = 109;
-   */
-  PLATFORM_PRIMITIVE_BLE_TRANSPORT_CLOSE = 109,
 }
 // Retrieve enum metadata with: proto3.getEnumType(NativeHostRequestKind)
 proto3.util.setEnumType(NativeHostRequestKind, "dsm.NativeHostRequestKind", [
@@ -1065,13 +1040,8 @@ proto3.util.setEnumType(NativeHostRequestKind, "dsm.NativeHostRequestKind", [
   { no: 9, name: "NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_NFC_READER_STOP" },
   { no: 10, name: "NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_PERMISSIONS_REQUEST" },
   { no: 102, name: "NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_BIOMETRIC_AUTHORIZE" },
-  { no: 103, name: "NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_SECURE_HARDWARE_GENERATE_KEY" },
-  { no: 104, name: "NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_SECURE_HARDWARE_SIGN" },
   { no: 105, name: "NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_NFC_TAG_READ_PAYLOAD" },
   { no: 106, name: "NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_NFC_TAG_WRITE_PAYLOAD" },
-  { no: 107, name: "NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_BLE_TRANSPORT_OPEN" },
-  { no: 108, name: "NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_BLE_TRANSPORT_SEND_CHUNKS" },
-  { no: 109, name: "NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_BLE_TRANSPORT_CLOSE" },
 ]);
 
 /**
@@ -11166,13 +11136,6 @@ export class BilateralPrepareRequest extends Message<BilateralPrepareRequest> {
   senderGenesisHash?: Hash32;
 
   /**
-   * Sender's current chain tip for state synchronization
-   *
-   * @generated from field: dsm.Hash32 sender_chain_tip = 10;
-   */
-  senderChainTip?: Hash32;
-
-  /**
    * Transfer intent fields. Rust builds canonical operation_data from these
    * when operation_data is empty.
    *
@@ -11204,13 +11167,10 @@ export class BilateralPrepareRequest extends Message<BilateralPrepareRequest> {
   transferAmountDisplay = "";
 
   /**
-   * Sender's ML-KEM-768 encapsulation key (1184 bytes; empty = legacy peer).
-   * The device Kyber keypair is DETERMINISTIC — derived from the wallet master secret
-   * with the Genesis v2 derivation ("DSM/kyber\0"), so it is stable across restarts and
-   * reinstalls-from-seed. It still rides every prepare exchange (like
-   * sender_signing_public_key above) so a peer paired before this key existed is
-   * upgraded in place. The receiver persists it on the contact record; the §11.1
-   * per-step EK receipt (kyber_ct encapsulation) fail-closes without it.
+   * Sender's ML-KEM-768 encapsulation key (1184 bytes). The device Kyber keypair is
+   * derived from the wallet master secret ("DSM/kyber\0"). The receiver refuses the
+   * prepare unless it equals the key pinned on the sender's contact record; nothing
+   * sent is stored.
    *
    * @generated from field: bytes sender_kyber_public_key = 16;
    */
@@ -11218,15 +11178,21 @@ export class BilateralPrepareRequest extends Message<BilateralPrepareRequest> {
 
   /**
    * Detached SPHINCS+ (device AK) signature over
-   * binding_digest(device_id, genesis, sender_kyber_public_key), per ADR 0002. The
-   * receiver verifies this against the PINNED peer AK (never the wire signing key)
-   * BEFORE caching the Kyber key — the one identity-binding primitive shared with
-   * storage-fetch and repair. Empty = unverifiable: the receiver fail-closes and does
-   * not cache the Kyber key (no implicit TOFU).
+   * binding_digest(device_id, genesis, sender_kyber_public_key), per ADR 0002, verified
+   * against the PINNED peer AK (never the wire signing key). Required.
    *
    * @generated from field: bytes sender_kyber_binding_sig = 17;
    */
   senderKyberBindingSig = new Uint8Array(0);
+
+  /**
+   * The proposer's SPHINCS+ signature (σ_A) over
+   * "DSM/bilateral-sign\0" || the proposal's commitment, under its pinned AK:
+   * the receiver puts to its user only a proposal the sender signed.
+   *
+   * @generated from field: bytes sender_signature = 18;
+   */
+  senderSignature = new Uint8Array(0);
 
   constructor(data?: PartialMessage<BilateralPrepareRequest>) {
     super();
@@ -11244,13 +11210,13 @@ export class BilateralPrepareRequest extends Message<BilateralPrepareRequest> {
     { no: 7, name: "sender_signing_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 8, name: "sender_device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 9, name: "sender_genesis_hash", kind: "message", T: Hash32 },
-    { no: 10, name: "sender_chain_tip", kind: "message", T: Hash32 },
     { no: 11, name: "transfer_amount", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
     { no: 12, name: "token_id_hint", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 13, name: "memo_hint", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 14, name: "transfer_amount_display", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 16, name: "sender_kyber_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 17, name: "sender_kyber_binding_sig", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 18, name: "sender_signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BilateralPrepareRequest {
@@ -11393,9 +11359,9 @@ export class BilateralPrepareResponse extends Message<BilateralPrepareResponse> 
   receiverChallenge = new Uint8Array(0);
 
   /**
-   * Responder's CURRENT ML-KEM-768 encapsulation key (1184 bytes; empty = legacy peer).
-   * Mirrors responder_signing_public_key: the sender persists it on the contact record so the
-   * §11.1 per-step EK receipt built in the immediately following confirm can encapsulate to it.
+   * Responder's ML-KEM-768 encapsulation key (1184 bytes). The sender refuses the
+   * response unless it equals the key pinned on the responder's contact record; nothing
+   * sent is stored.
    *
    * @generated from field: bytes responder_kyber_public_key = 9;
    */
@@ -11403,9 +11369,8 @@ export class BilateralPrepareResponse extends Message<BilateralPrepareResponse> 
 
   /**
    * Detached SPHINCS+ (device AK) signature over
-   * binding_digest(device_id, genesis, responder_kyber_public_key), per ADR 0002. The
-   * sender verifies this against the PINNED peer AK (never the wire signing key) BEFORE
-   * caching the responder's Kyber key. Empty = unverifiable: fail-closed, no cache, no TOFU.
+   * binding_digest(device_id, genesis, responder_kyber_public_key), per ADR 0002, verified
+   * against the PINNED peer AK (never the wire signing key). Required.
    *
    * @generated from field: bytes responder_kyber_binding_sig = 10;
    */
@@ -11525,6 +11490,16 @@ export class BilateralPrepareReject extends Message<BilateralPrepareReject> {
    */
   sendStatus?: RelationshipSendStatus;
 
+  /**
+   * SPHINCS+ signature of the rejector's AK over
+   * "DSM/bilateral-reject\0" || commitment_hash || rejector_device_id || reason.
+   * The proposer abandons its proposal only for a rejection its counterparty
+   * signed under the key the contact pins.
+   *
+   * @generated from field: bytes rejector_signature = 5;
+   */
+  rejectorSignature = new Uint8Array(0);
+
   constructor(data?: PartialMessage<BilateralPrepareReject>) {
     super();
     proto3.util.initPartial(data, this);
@@ -11537,6 +11512,7 @@ export class BilateralPrepareReject extends Message<BilateralPrepareReject> {
     { no: 2, name: "reason", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 3, name: "rejector_device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 4, name: "send_status", kind: "message", T: RelationshipSendStatus },
+    { no: 5, name: "rejector_signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BilateralPrepareReject {
@@ -11972,26 +11948,6 @@ export class BilateralCommitRequest extends Message<BilateralCommitRequest> {
  */
 export class BilateralCommitResponse extends Message<BilateralCommitResponse> {
   /**
-   * @generated from field: bool success = 1;
-   */
-  success = false;
-
-  /**
-   * @generated from field: dsm.Hash32 post_state_hash = 2;
-   */
-  postStateHash?: Hash32;
-
-  /**
-   * @generated from field: dsm.Hash32 transaction_hash = 3;
-   */
-  transactionHash?: Hash32;
-
-  /**
-   * @generated from field: string message = 4;
-   */
-  message = "";
-
-  /**
    * @generated from field: dsm.Hash32 commitment_hash = 5;
    */
   commitmentHash?: Hash32;
@@ -12016,10 +11972,6 @@ export class BilateralCommitResponse extends Message<BilateralCommitResponse> {
   static readonly runtime: typeof proto3 = proto3;
   static readonly typeName = "dsm.BilateralCommitResponse";
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "success", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
-    { no: 2, name: "post_state_hash", kind: "message", T: Hash32 },
-    { no: 3, name: "transaction_hash", kind: "message", T: Hash32 },
-    { no: 4, name: "message", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 5, name: "commitment_hash", kind: "message", T: Hash32 },
     { no: 6, name: "counter_signed_receipt", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
@@ -26206,172 +26158,6 @@ export class BiometricAuthorizeResult extends Message<BiometricAuthorizeResult> 
 }
 
 /**
- * @generated from message dsm.SecureHardwareGenerateKeyPayload
- */
-export class SecureHardwareGenerateKeyPayload extends Message<SecureHardwareGenerateKeyPayload> {
-  /**
-   * @generated from field: string key_alias = 1;
-   */
-  keyAlias = "";
-
-  /**
-   * @generated from field: bytes key_context = 2;
-   */
-  keyContext = new Uint8Array(0);
-
-  constructor(data?: PartialMessage<SecureHardwareGenerateKeyPayload>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.SecureHardwareGenerateKeyPayload";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "key_alias", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 2, name: "key_context", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SecureHardwareGenerateKeyPayload {
-    return new SecureHardwareGenerateKeyPayload().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): SecureHardwareGenerateKeyPayload {
-    return new SecureHardwareGenerateKeyPayload().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): SecureHardwareGenerateKeyPayload {
-    return new SecureHardwareGenerateKeyPayload().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: SecureHardwareGenerateKeyPayload | PlainMessage<SecureHardwareGenerateKeyPayload> | undefined, b: SecureHardwareGenerateKeyPayload | PlainMessage<SecureHardwareGenerateKeyPayload> | undefined): boolean {
-    return proto3.util.equals(SecureHardwareGenerateKeyPayload, a, b);
-  }
-}
-
-/**
- * @generated from message dsm.SecureHardwareGenerateKeyResult
- */
-export class SecureHardwareGenerateKeyResult extends Message<SecureHardwareGenerateKeyResult> {
-  /**
-   * @generated from field: bytes key_handle = 1;
-   */
-  keyHandle = new Uint8Array(0);
-
-  constructor(data?: PartialMessage<SecureHardwareGenerateKeyResult>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.SecureHardwareGenerateKeyResult";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "key_handle", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SecureHardwareGenerateKeyResult {
-    return new SecureHardwareGenerateKeyResult().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): SecureHardwareGenerateKeyResult {
-    return new SecureHardwareGenerateKeyResult().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): SecureHardwareGenerateKeyResult {
-    return new SecureHardwareGenerateKeyResult().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: SecureHardwareGenerateKeyResult | PlainMessage<SecureHardwareGenerateKeyResult> | undefined, b: SecureHardwareGenerateKeyResult | PlainMessage<SecureHardwareGenerateKeyResult> | undefined): boolean {
-    return proto3.util.equals(SecureHardwareGenerateKeyResult, a, b);
-  }
-}
-
-/**
- * @generated from message dsm.SecureHardwareSignPayload
- */
-export class SecureHardwareSignPayload extends Message<SecureHardwareSignPayload> {
-  /**
-   * @generated from field: string key_alias = 1;
-   */
-  keyAlias = "";
-
-  /**
-   * @generated from field: bytes message = 2;
-   */
-  message = new Uint8Array(0);
-
-  /**
-   * @generated from field: bytes key_handle = 3;
-   */
-  keyHandle = new Uint8Array(0);
-
-  constructor(data?: PartialMessage<SecureHardwareSignPayload>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.SecureHardwareSignPayload";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "key_alias", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 2, name: "message", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 3, name: "key_handle", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SecureHardwareSignPayload {
-    return new SecureHardwareSignPayload().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): SecureHardwareSignPayload {
-    return new SecureHardwareSignPayload().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): SecureHardwareSignPayload {
-    return new SecureHardwareSignPayload().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: SecureHardwareSignPayload | PlainMessage<SecureHardwareSignPayload> | undefined, b: SecureHardwareSignPayload | PlainMessage<SecureHardwareSignPayload> | undefined): boolean {
-    return proto3.util.equals(SecureHardwareSignPayload, a, b);
-  }
-}
-
-/**
- * @generated from message dsm.SecureHardwareSignResult
- */
-export class SecureHardwareSignResult extends Message<SecureHardwareSignResult> {
-  /**
-   * @generated from field: bytes signature = 1;
-   */
-  signature = new Uint8Array(0);
-
-  constructor(data?: PartialMessage<SecureHardwareSignResult>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.SecureHardwareSignResult";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SecureHardwareSignResult {
-    return new SecureHardwareSignResult().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): SecureHardwareSignResult {
-    return new SecureHardwareSignResult().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): SecureHardwareSignResult {
-    return new SecureHardwareSignResult().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: SecureHardwareSignResult | PlainMessage<SecureHardwareSignResult> | undefined, b: SecureHardwareSignResult | PlainMessage<SecureHardwareSignResult> | undefined): boolean {
-    return proto3.util.equals(SecureHardwareSignResult, a, b);
-  }
-}
-
-/**
  * @generated from message dsm.NfcTagReadPayload
  */
 export class NfcTagReadPayload extends Message<NfcTagReadPayload> {
@@ -26522,234 +26308,6 @@ export class NfcTagWriteResult extends Message<NfcTagWriteResult> {
 
   static equals(a: NfcTagWriteResult | PlainMessage<NfcTagWriteResult> | undefined, b: NfcTagWriteResult | PlainMessage<NfcTagWriteResult> | undefined): boolean {
     return proto3.util.equals(NfcTagWriteResult, a, b);
-  }
-}
-
-/**
- * @generated from message dsm.BleTransportOpenPayload
- */
-export class BleTransportOpenPayload extends Message<BleTransportOpenPayload> {
-  /**
-   * @generated from field: string ble_address = 1;
-   */
-  bleAddress = "";
-
-  constructor(data?: PartialMessage<BleTransportOpenPayload>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.BleTransportOpenPayload";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "ble_address", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BleTransportOpenPayload {
-    return new BleTransportOpenPayload().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): BleTransportOpenPayload {
-    return new BleTransportOpenPayload().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): BleTransportOpenPayload {
-    return new BleTransportOpenPayload().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: BleTransportOpenPayload | PlainMessage<BleTransportOpenPayload> | undefined, b: BleTransportOpenPayload | PlainMessage<BleTransportOpenPayload> | undefined): boolean {
-    return proto3.util.equals(BleTransportOpenPayload, a, b);
-  }
-}
-
-/**
- * @generated from message dsm.BleTransportOpenResult
- */
-export class BleTransportOpenResult extends Message<BleTransportOpenResult> {
-  /**
-   * @generated from field: bool ready = 1;
-   */
-  ready = false;
-
-  constructor(data?: PartialMessage<BleTransportOpenResult>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.BleTransportOpenResult";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "ready", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BleTransportOpenResult {
-    return new BleTransportOpenResult().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): BleTransportOpenResult {
-    return new BleTransportOpenResult().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): BleTransportOpenResult {
-    return new BleTransportOpenResult().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: BleTransportOpenResult | PlainMessage<BleTransportOpenResult> | undefined, b: BleTransportOpenResult | PlainMessage<BleTransportOpenResult> | undefined): boolean {
-    return proto3.util.equals(BleTransportOpenResult, a, b);
-  }
-}
-
-/**
- * @generated from message dsm.BleTransportSendChunksPayload
- */
-export class BleTransportSendChunksPayload extends Message<BleTransportSendChunksPayload> {
-  /**
-   * @generated from field: string ble_address = 1;
-   */
-  bleAddress = "";
-
-  /**
-   * @generated from field: bytes envelope_bytes = 2;
-   */
-  envelopeBytes = new Uint8Array(0);
-
-  constructor(data?: PartialMessage<BleTransportSendChunksPayload>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.BleTransportSendChunksPayload";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "ble_address", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 2, name: "envelope_bytes", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BleTransportSendChunksPayload {
-    return new BleTransportSendChunksPayload().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): BleTransportSendChunksPayload {
-    return new BleTransportSendChunksPayload().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): BleTransportSendChunksPayload {
-    return new BleTransportSendChunksPayload().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: BleTransportSendChunksPayload | PlainMessage<BleTransportSendChunksPayload> | undefined, b: BleTransportSendChunksPayload | PlainMessage<BleTransportSendChunksPayload> | undefined): boolean {
-    return proto3.util.equals(BleTransportSendChunksPayload, a, b);
-  }
-}
-
-/**
- * @generated from message dsm.BleTransportSendChunksResult
- */
-export class BleTransportSendChunksResult extends Message<BleTransportSendChunksResult> {
-  /**
-   * @generated from field: bytes response_envelope = 1;
-   */
-  responseEnvelope = new Uint8Array(0);
-
-  constructor(data?: PartialMessage<BleTransportSendChunksResult>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.BleTransportSendChunksResult";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "response_envelope", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BleTransportSendChunksResult {
-    return new BleTransportSendChunksResult().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): BleTransportSendChunksResult {
-    return new BleTransportSendChunksResult().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): BleTransportSendChunksResult {
-    return new BleTransportSendChunksResult().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: BleTransportSendChunksResult | PlainMessage<BleTransportSendChunksResult> | undefined, b: BleTransportSendChunksResult | PlainMessage<BleTransportSendChunksResult> | undefined): boolean {
-    return proto3.util.equals(BleTransportSendChunksResult, a, b);
-  }
-}
-
-/**
- * @generated from message dsm.BleTransportClosePayload
- */
-export class BleTransportClosePayload extends Message<BleTransportClosePayload> {
-  /**
-   * @generated from field: string ble_address = 1;
-   */
-  bleAddress = "";
-
-  constructor(data?: PartialMessage<BleTransportClosePayload>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.BleTransportClosePayload";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "ble_address", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BleTransportClosePayload {
-    return new BleTransportClosePayload().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): BleTransportClosePayload {
-    return new BleTransportClosePayload().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): BleTransportClosePayload {
-    return new BleTransportClosePayload().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: BleTransportClosePayload | PlainMessage<BleTransportClosePayload> | undefined, b: BleTransportClosePayload | PlainMessage<BleTransportClosePayload> | undefined): boolean {
-    return proto3.util.equals(BleTransportClosePayload, a, b);
-  }
-}
-
-/**
- * @generated from message dsm.BleTransportCloseResult
- */
-export class BleTransportCloseResult extends Message<BleTransportCloseResult> {
-  /**
-   * @generated from field: bool closed = 1;
-   */
-  closed = false;
-
-  constructor(data?: PartialMessage<BleTransportCloseResult>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.BleTransportCloseResult";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "closed", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BleTransportCloseResult {
-    return new BleTransportCloseResult().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): BleTransportCloseResult {
-    return new BleTransportCloseResult().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): BleTransportCloseResult {
-    return new BleTransportCloseResult().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: BleTransportCloseResult | PlainMessage<BleTransportCloseResult> | undefined, b: BleTransportCloseResult | PlainMessage<BleTransportCloseResult> | undefined): boolean {
-    return proto3.util.equals(BleTransportCloseResult, a, b);
   }
 }
 

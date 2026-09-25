@@ -52,7 +52,7 @@ assert_pattern "$SDK_ROUTER" "process_online_transfer_logic" "sdk online transfe
 # Offline bilateral prepare path
 assert_pattern "$FRONT_TX" "offlineSend(" "frontend offline send entrypoint missing"
 assert_pattern "$FRONT_TX" "routerInvokeBin('wallet.sendOffline'" "frontend offline send must route via wallet.sendOffline"
-assert_pattern "$JNI_BRIDGE" "Java_com_dsm_wallet_bridge_UnifiedNativeApi_bilateralOfflineSend" "jni bilateral offline entrypoint missing"
+assert_pattern "dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/wallet_routes.rs" "\"wallet.sendOffline\" =>" "sdk offline send handler missing"
 
 # Unified ingress boundary (replaced legacy appRouterInvokeFramed/appRouterQueryFramed post-16f0763)
 assert_pattern "$FRONT_NBB" "case: 'routerInvoke'" "ingress routerInvoke case missing in NativeBoundaryBridge"

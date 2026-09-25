@@ -48,7 +48,4 @@ pub mod utility;
 pub use error::DsmCoreError;
 
 // Re-export bridge types for convenience
-pub use bridge::{
-    AppRouter, BilateralHandler, install_app_router, install_bilateral_handler,
-    handle_envelope_universal,
-};
+pub use bridge::{AppRouter, install_app_router, handle_envelope_universal};

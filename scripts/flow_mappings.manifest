@@ -14,10 +14,10 @@ dsm_client/frontend/src/dsm/NativeBoundaryBridge.ts|nativeBoundaryIngress|native
 # JNI framed/native entrypoints
 dsm_client/deterministic_state_machine/dsm_sdk/src/jni/unified_protobuf_bridge.rs|Java_com_dsm_wallet_bridge_UnifiedNativeApi_dispatchIngress|jni dispatchIngress export exists
 dsm_client/deterministic_state_machine/dsm_sdk/src/jni/unified_protobuf_bridge.rs|Java_com_dsm_wallet_bridge_UnifiedNativeApi_dispatchStartup|jni dispatchStartup export exists
-dsm_client/deterministic_state_machine/dsm_sdk/src/jni/unified_protobuf_bridge.rs|Java_com_dsm_wallet_bridge_UnifiedNativeApi_bilateralOfflineSend|jni bilateral offline export exists
 
 # SDK router method handlers
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/app_router_impl.rs|"wallet.send" | "wallet.sendSmart"|sdk router invoke handler for wallet.send exists
+dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/wallet_routes.rs|"wallet.sendOffline" =>|sdk router invoke handler for the offline send exists
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/app_router_impl.rs|"message.send" =>|sdk router invoke handler for message.send exists
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/app_router_impl.rs|"contacts.handle_contact_qr_v3"|sdk router query handler for contacts.handle_contact_qr_v3 exists
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/app_router_impl.rs|"inbox.pull"|sdk router query handler for inbox.pull exists

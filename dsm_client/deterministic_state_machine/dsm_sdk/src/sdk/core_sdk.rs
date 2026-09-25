@@ -1908,7 +1908,7 @@ impl CoreSDK {
     /// Used by the BLE sender in `send_bilateral_confirm` to build the
     /// stitched receipt (§4.2) with the real post-advance SMT roots + proofs
     /// *before* the sender advances canonical state — the canonical commit
-    /// happens later in `mark_sender_committed_with_post_state_hash` via
+    /// happens later in `finalize_sender_step` via
     /// `execute_on_relationship_for_bilateral`, which re-runs prepare and
     /// then commits. Identical inputs → identical outcome, so the simulated
     /// receipt is byte-exact with the eventual canonical advance.

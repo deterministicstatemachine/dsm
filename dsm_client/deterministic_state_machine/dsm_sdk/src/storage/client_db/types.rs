@@ -141,7 +141,7 @@ pub struct BilateralSessionRecord {
     pub sender_ble_address: Option<String>,
     /// Sender-cached signed stitched receipt (full protobuf, with per-step EK
     /// signing artifacts already stamped). Persisted here so that post-crash
-    /// recovery in `mark_sender_committed_with_post_state_hash` can reuse the
+    /// recovery in `finalize_sender_step` can reuse the
     /// already-signed bytes verbatim instead of attempting to rebuild from
     /// the canonical `AdvanceOutcome` (which would lack §11.1 per-step EK
     /// signing artifacts).

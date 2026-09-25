@@ -24,29 +24,11 @@
 //! re-derives the keypair solely to take its public half and drops the secret
 //! at the end of that expression.
 
-use dsm::crypto::{blake3::domain_hash, kyber, sphincs};
+use dsm::bilateral::identity_binding::binding_digest;
+use dsm::crypto::{kyber, sphincs};
 use dsm::types::error::DsmError;
 
 use crate::sdk::app_state::AppState;
-
-/// Domain tag binding an ML-KEM public key to a device identity + genesis.
-pub const KYBER_IDENTITY_BINDING_TAG: dsm::crypto::domain::TaggedHashDomain<'static> =
-    dsm::tagged_domain!(b"DSM/kyber-identity-binding");
-
-/// Canonical binding digest over `device_id || genesis_hash || kyber_pubkey`,
-/// domain-separated by [`KYBER_IDENTITY_BINDING_TAG`]. This is the message the
-/// device AK signs and a verifier re-derives.
-pub(crate) fn binding_digest(
-    device_id: &[u8; 32],
-    genesis_hash: &[u8; 32],
-    kyber_pubkey: &[u8],
-) -> [u8; 32] {
-    let mut preimage = Vec::with_capacity(64 + kyber_pubkey.len());
-    preimage.extend_from_slice(device_id);
-    preimage.extend_from_slice(genesis_hash);
-    preimage.extend_from_slice(kyber_pubkey);
-    *domain_hash(KYBER_IDENTITY_BINDING_TAG, &preimage).as_bytes()
-}
 
 fn as_array_32(bytes: &[u8], what: &str) -> Result<[u8; 32], DsmError> {
     <[u8; 32]>::try_from(bytes).map_err(|_| {
@@ -127,46 +109,11 @@ pub fn local_kyber_public_key() -> Result<Vec<u8>, DsmError> {
     Ok(kyber_pk)
 }
 
-/// Verify a peer's Kyber identity binding before persisting it to a contact.
-///
-/// `signing_public_key` is the peer's AK public key, already trusted via the
-/// registry attestation that binds it to `device_id` + `genesis`. Fail-closed
-/// on missing, malformed-length, or unbound (substituted/mismatched) material —
-/// there is no fallback that would accept an unbound Kyber key.
-pub fn verify_kyber_identity_binding(
-    device_id: &[u8; 32],
-    genesis_hash: &[u8; 32],
-    kyber_pubkey: &[u8],
-    binding_sig: &[u8],
-    signing_public_key: &[u8],
-) -> Result<(), DsmError> {
-    if kyber_pubkey.is_empty() || binding_sig.is_empty() {
-        return Err(DsmError::invalid_operation(
-            "kyber identity binding: missing Kyber public key or binding signature (fail-closed)",
-        ));
-    }
-    if kyber_pubkey.len() != kyber::public_key_bytes() {
-        return Err(DsmError::invalid_operation(format!(
-            "kyber identity binding: Kyber public key must be {} bytes (ML-KEM-768), got {}",
-            kyber::public_key_bytes(),
-            kyber_pubkey.len()
-        )));
-    }
-    let digest = binding_digest(device_id, genesis_hash, kyber_pubkey);
-    let ok = sphincs::sphincs_verify(signing_public_key, &digest, binding_sig)?;
-    if !ok {
-        return Err(DsmError::invalid_operation(
-            "kyber identity binding: signature does not bind this Kyber key to (device_id, genesis) \
-             under the peer's AK — rejecting (possible substitution/equivocation)",
-        ));
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 #[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
+    use dsm::bilateral::identity_binding::verify_kyber_identity_binding;
 
     /// THE FIRST-RUN CONDITION, REPRODUCED. On a fresh device the router is
     /// built before genesis exists, so `WalletSDK::new()` cannot hand over a
@@ -241,8 +188,8 @@ mod tests {
     /// B4 CACHE TRACE, second half: verification is RECOMPUTED from the binding
     /// every call, never read from a stored verdict.
     ///
-    /// The inventory found no acceptance cache anywhere —
-    /// `verify_kyber_identity_binding` has zero production callers, the storage
+    /// There is no acceptance cache anywhere — the offline protocol verifies
+    /// the binding on every message (`dsm::bilateral::offline`), the storage
     /// node persists `kyber_binding_sig` without checking it, `contacts` caches
     /// the peer KEY not a verdict, and there is no Android reference. This test
     /// pins the remaining half: the verifier is a pure function of its

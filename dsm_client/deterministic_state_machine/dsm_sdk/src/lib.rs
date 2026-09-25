@@ -49,7 +49,7 @@
 //! | [`ingress`] | Shared platform-agnostic ingress dispatch |
 //! | [`sdk`] | High-level SDK facades (wallet, token, bilateral, DLV, Bitcoin tap) |
 //! | `jni` | Android JNI ABI shim (87+ `extern "system"` functions, cfg-gated) |
-//! | [`handlers`] | `AppRouter`, `BilateralHandler` implementations |
+//! | [`handlers`] | `AppRouter` implementation and the BLE runtime |
 //! | [`bluetooth`] | BLE bilateral sessions, frame chunking, pairing orchestration |
 //! | [`bridge`] | Trait-object dispatch layer connecting handlers to core |
 //! | [`envelope`] | Envelope v3 construction, framing (`0x03` prefix), guard rails |
@@ -400,10 +400,8 @@ pub async fn initialize_bilateral_sdk() -> Result<(), dsm::types::error::DsmErro
         ));
     }
 
-    if crate::bridge::bilateral_handler().is_none() {
-        return Err(DsmError::invalid_operation(
-            "Bilateral handler not installed (BiImpl)",
-        ));
+    if crate::bridge::ble_runtime().is_none() {
+        return Err(DsmError::invalid_operation("BLE runtime not installed"));
     }
 
     log::info!(
