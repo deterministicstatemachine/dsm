@@ -170,8 +170,13 @@ pub struct MemberClient {
     client: reqwest::Client,
 }
 
-/// A member's answer: `Ok(Some)` for a `200` body, `Ok(None)` for `204` or
-/// `404` (the member holds nothing there), `Err` for anything else.
+/// A member's answer: `Ok(Some)` for a `200`/`201` body, `Ok(None)` for `204`
+/// (the member answered with nothing), `Err` for anything else. A `404` is not
+/// an answer: no route of the member's answers it on success, so it means a
+/// wrong path or a member without the route, and reading it as an
+/// acknowledgement would count a write that never happened (storage spec §4:
+/// nothing a member returns is a verdict, and a fact that is not established
+/// is never read as its opposite).
 async fn answer(request: reqwest::RequestBuilder) -> Result<Option<Vec<u8>>, String> {
     let response = request
         .send()
@@ -183,7 +188,7 @@ async fn answer(request: reqwest::RequestBuilder) -> Result<Option<Vec<u8>>, Str
             .await
             .map(|b| Some(b.to_vec()))
             .map_err(|e| format!("reading the answer: {e}")),
-        204 | 404 => Ok(None),
+        204 => Ok(None),
         status => Err(format!("answered HTTP {status}")),
     }
 }
@@ -654,7 +659,47 @@ impl SetClient {
 #[cfg(test)]
 #[allow(clippy::disallowed_methods)]
 mod tests {
-    use super::read_ca_certs;
+    use super::{build_ca_aware_client, read_ca_certs, MemberClient};
+
+    /// A write the member did not take is not acknowledged. The same running
+    /// node, reached at a path it does not serve, answers `404`: the put, the
+    /// index append, the mirror sync and the health check are all errors,
+    /// never acknowledgements. Reached at its real path, every one is taken.
+    /// On the storage node's own app, on Postgres.
+    #[test]
+    #[serial_test::serial]
+    fn a_member_that_answers_404_took_nothing() {
+        let fleet = crate::test_support::one_device::Fleet::start();
+        let endpoint = fleet.endpoints()[0].clone();
+        let client = build_ca_aware_client().expect("a client");
+        let ns = dsm::crypto::domain::TaggedHashDomain::try_new(b"DSM/test/404-is-not-an-answer")
+            .expect("a domain");
+        crate::runtime::get_runtime().block_on(async {
+            let wrong = MemberClient::new(
+                "dsm-node-1",
+                &format!("{endpoint}/not-the-api"),
+                client.clone(),
+            );
+            assert!(wrong.put_immutable(ns, b"bytes").await.is_err());
+            assert!(wrong
+                .append_index(b"DSM/test/index", &[0x41; 32], &[0x42; 32])
+                .await
+                .is_err());
+            assert!(wrong.sync_mirror().await.is_err());
+            assert!(wrong.check_health().await.is_err());
+
+            let right = MemberClient::new("dsm-node-1", &endpoint, client);
+            right
+                .put_immutable(ns, b"bytes")
+                .await
+                .expect("the put is taken");
+            right
+                .append_index(b"DSM/test/index", &[0x41; 32], &[0x42; 32])
+                .await
+                .expect("the append is taken");
+            right.check_health().await.expect("the member is healthy");
+        });
+    }
 
     fn config(body: &str) -> (tempfile::TempDir, String) {
         let dir = tempfile::tempdir().expect("tempdir");

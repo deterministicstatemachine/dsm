@@ -369,6 +369,49 @@ impl ProvenanceResolver for OneTicket {
     }
 }
 
+/// [`OneTicket`] whose catalog could not be read: the network's register
+/// set is not established.
+struct NoRegisterSet(OneTicket);
+impl ProvenanceResolver for NoRegisterSet {
+    fn root_register_candidate_set(
+        &self,
+        _network_id: &[u8],
+    ) -> Result<dsm::ccb::StorageSetMembers, PeerLineageFailure> {
+        Err(PeerLineageFailure::Incomplete(
+            "the local catalog could not be read".to_string(),
+        ))
+    }
+    fn validated_peer_transition(
+        &self,
+        genesis: &[u8; 32],
+        device_id: &[u8; 32],
+        position: u64,
+    ) -> Result<ValidatedPeerTransition, PeerLineageFailure> {
+        self.0
+            .validated_peer_transition(genesis, device_id, position)
+    }
+    fn native_reserve_release(
+        &self,
+        reserve_id: &[u8; 32],
+        generation: u64,
+    ) -> Result<ReserveReleaseWin, PeerLineageFailure> {
+        self.0.native_reserve_release(reserve_id, generation)
+    }
+    fn immutable_evidence(
+        &self,
+        namespace: dsm::crypto::domain::TaggedHashDomain<'static>,
+        addr: &[u8; 32],
+    ) -> Result<Vec<u8>, PeerLineageFailure> {
+        self.0.immutable_evidence(namespace, addr)
+    }
+    fn anchored_policy_bytes(
+        &self,
+        policy_commit: &[u8; 32],
+    ) -> Result<Vec<u8>, PeerLineageFailure> {
+        self.0.anchored_policy_bytes(policy_commit)
+    }
+}
+
 fn accepted_for(op: &Operation) -> AcceptedSubstrate {
     AcceptedSubstrate::from_verified_dsm_successor(
         op.clone(),
@@ -491,6 +534,45 @@ fn a_faucet_claim_transition_advances_the_validated_lineage() {
         ),
         (G, DEV, 1, registered.claim_ref())
     );
+}
+
+/// Storage spec §4: the verifier's register set not established is not a
+/// verdict about the claimant. The resolver's own class survives into the
+/// error — an unreadable catalog stays `Incomplete`, never Invalid; the same
+/// transition validates once the set is established.
+#[test]
+fn a_register_set_not_established_is_not_a_verdict_about_the_claimant() {
+    let fx = faucet_fixture(1);
+    let manifest = manifest_for(&fx.witness);
+    let registered = registered_for(&manifest, 1, fx.post_root);
+    let accepted = accepted_for(&fx.op);
+    let zero = activate(EconomicActivationSnapshot::fresh()).expect("fresh");
+    let refused = advance_validated(
+        &zero,
+        &registered,
+        &manifest,
+        &fx.witness,
+        &accepted,
+        &NoRegisterSet(OneTicket {
+            envelope: fx.envelope.clone(),
+        }),
+        &G,
+        &DEV,
+        b"dsm-testnet",
+        &fx.pk,
+    );
+    assert!(
+        matches!(
+            refused,
+            Err(EconomicValidationError::Provenance(
+                dsm::economic::provenance::ProvenanceError::RegisterNotEstablished(
+                    PeerLineageFailure::Incomplete(_)
+                )
+            ))
+        ),
+        "{refused:?}"
+    );
+    run(&fx, &registered, &manifest, &fx.witness, &accepted).expect("validates once established");
 }
 
 /// A registered claim of another trader is not a registration of this

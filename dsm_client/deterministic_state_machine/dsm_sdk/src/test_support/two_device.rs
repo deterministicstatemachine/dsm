@@ -256,6 +256,25 @@ impl TestDevice {
     }
 }
 
+/// A sync run while too few members serve to meet every delivery: it ran —
+/// what it read was processed and what it owed was pushed — and it is not a
+/// complete sync, because a delivery held only by members that did not
+/// answer is still there (storage spec §4; owner ruling 2026-09-25).
+pub fn assert_incomplete(sync: &generated::StorageSyncResponse) {
+    assert!(
+        !sync.success,
+        "a sync that did not read every delivery reported success: {:?}",
+        sync.errors
+    );
+    assert!(
+        sync.errors
+            .iter()
+            .any(|e| e.contains("inbox read incomplete")),
+        "{:?}",
+        sync.errors
+    );
+}
+
 /// A booted A/B pair on the network's pinned set of storage nodes, each device
 /// published, mutually added as contacts and funded. The starting point of
 /// every protocol test.

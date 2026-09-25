@@ -473,8 +473,14 @@ pub enum ProvenanceError {
     ReleaseForeignSet,
     /// The release's bytes do not hash to the descriptor's evidence address.
     ReleaseEvidenceAddrMismatch,
-    /// The claimant's network has no resolvable pinned register.
+    /// The claimant's network has no resolvable pinned register, decided
+    /// from what is in hand: an unknown network, or a candidate set that does
+    /// not re-derive the pinned id.
     RegisterNotResolvable(&'static str),
+    /// The resolver could not establish the network's register set. Its
+    /// class is kept: an outage stays `Incomplete` and is retried, never read
+    /// as a verdict about the claimant (storage spec §4).
+    RegisterNotEstablished(PeerLineageFailure),
 }
 
 impl core::fmt::Display for ProvenanceError {
@@ -608,6 +614,12 @@ impl core::fmt::Display for ProvenanceError {
                 write!(
                     f,
                     "credit provenance: the network's register is not resolvable: {why}"
+                )
+            }
+            Self::RegisterNotEstablished(e) => {
+                write!(
+                    f,
+                    "credit provenance: the network's register set is not established: {e}"
                 )
             }
         }
