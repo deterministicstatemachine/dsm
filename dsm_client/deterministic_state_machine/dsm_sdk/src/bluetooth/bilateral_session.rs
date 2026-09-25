@@ -53,7 +53,7 @@ pub struct BilateralSettlementContext {
     /// `true` when the local device is the sender of the transfer.
     pub is_sender: bool,
     /// Transaction type label stored in the history record
-    /// (e.g. `"bilateral_offline"`, `"bilateral_offline_recovered"`).
+    /// (e.g. `"bilateral_offline"`).
     pub tx_type: &'static str,
     /// New bilateral chain tip required for the receiver-side atomic persistence
     /// boundary.  Set to `[0u8; 32]` on sender paths where it is not needed.
@@ -124,7 +124,7 @@ pub struct BilateralBleSession {
     /// `shared_chain_tip_new` sent in the BilateralConfirmRequest.
     pub pre_finalize_entropy: Option<[u8; 32]>,
     /// Stitched receipt bytes built during `send_bilateral_confirm` (sender-only).
-    /// Cached here so `mark_sender_committed_with_post_state_hash` can persist
+    /// Cached here so `finalize_sender_step` can persist
     /// the same verifiable receipt instead of building a degraded one after the
     /// Per-Device SMT has already been mutated.
     pub stitched_receipt_bytes: Option<Vec<u8>>,
@@ -134,7 +134,7 @@ pub struct BilateralBleSession {
     /// transfers.
     pub receiver_challenge: Option<[u8; 32]>,
     /// SENDER-only: the fused-anchor-state leaf update the appliance produced for this bearer
-    /// transfer, stashed at confirm-build time so `mark_sender_committed_with_post_state_hash`
+    /// transfer, stashed at confirm-build time so `finalize_sender_step`
     /// commits the SAME successor state the on-wire proofs were built from (both-or-neither). `None`
     /// for ordinary transfers and on the receiver side.
     pub anchor_leaf: Option<dsm::types::device_state::AnchorLeafUpdate>,

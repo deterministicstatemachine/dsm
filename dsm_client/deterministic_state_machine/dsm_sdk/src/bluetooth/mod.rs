@@ -342,7 +342,7 @@ pub async fn ensure_bluetooth_manager_and_sync_contact(
     log::info!("[BLE] ensure_bluetooth_manager_and_sync_contact: late BluetoothManager registered");
 
     // CRITICAL: Also inject the coordinator into BiImpl so that processBleChunk,
-    // acceptBilateralByCommitment, and bilateralOfflineSend all use the SAME
+    // acceptBilateralByCommitment and wallet.sendOffline all use the SAME
     // BilateralBleHandler instance. Without this, sessions created by one path
     // are invisible to the other, causing "NO SESSION FOUND" failures.
     let coordinator = mgr_arc.frame_coordinator().clone();

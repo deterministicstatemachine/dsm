@@ -47,8 +47,8 @@ pub(crate) mod memory {
     use std::collections::HashMap;
     use std::sync::Mutex;
 
-    /// The tip recorded per counterparty device id; an absent tip reads as
-    /// the zero parent a relationship starts from.
+    /// The tip recorded per counterparty device id. A relationship exists once
+    /// its contact is added at h_0; a step on any other relationship is refused.
     #[derive(Default)]
     pub(crate) struct InMemoryChainTipStore {
         tips: Mutex<HashMap<[u8; 32], [u8; 32]>>,
@@ -57,6 +57,14 @@ pub(crate) mod memory {
     impl InMemoryChainTipStore {
         pub(crate) fn new() -> Self {
             Self::default()
+        }
+
+        /// What adding the contact records: the relationship at its `h_0`.
+        pub(crate) fn record_contact_added(&self, device_id: [u8; 32], h_0: [u8; 32]) {
+            self.tips
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .insert(device_id, h_0);
         }
     }
 
@@ -80,7 +88,9 @@ pub(crate) mod memory {
             new_tip: [u8; 32],
         ) -> Result<bool, DsmError> {
             let mut tips = self.tips.lock().unwrap_or_else(|p| p.into_inner());
-            let current = tips.get(device_id).copied().unwrap_or([0u8; 32]);
+            let current = tips.get(device_id).copied().ok_or_else(|| {
+                DsmError::InvalidState("no relationship with that device".to_string())
+            })?;
             if current != expected_parent_tip {
                 return Ok(false);
             }
@@ -104,13 +114,17 @@ mod tests {
     }
 
     #[test]
-    fn in_memory_store_set_then_get() {
+    fn in_memory_store_holds_a_relationship_from_its_contact_add() {
         let store = InMemoryChainTipStore::new();
         let id = [42u8; 32];
-        let tip = [99u8; 32];
+        let h_0 = [99u8; 32];
         assert!(store.get_contact_chain_tip(&id).expect("read").is_none());
-        assert!(store.set_contact_chain_tip(&id, [0u8; 32], tip).unwrap());
-        assert_eq!(store.get_contact_chain_tip(&id).expect("read"), Some(tip));
+        assert!(
+            store.set_contact_chain_tip(&id, [0u8; 32], h_0).is_err(),
+            "a step on a relationship nobody added is refused"
+        );
+        store.record_contact_added(id, h_0);
+        assert_eq!(store.get_contact_chain_tip(&id).expect("read"), Some(h_0));
     }
 
     #[test]
@@ -119,7 +133,7 @@ mod tests {
         let id = [1u8; 32];
         let tip1 = [10u8; 32];
         let tip2 = [20u8; 32];
-        store.set_contact_chain_tip(&id, [0u8; 32], tip1).unwrap();
+        store.record_contact_added(id, tip1);
 
         let wrong_parent = [0xFFu8; 32];
         let applied = store
@@ -135,7 +149,7 @@ mod tests {
         let id = [5u8; 32];
         let tip1 = [10u8; 32];
         let tip2 = [20u8; 32];
-        store.set_contact_chain_tip(&id, [0u8; 32], tip1).unwrap();
+        store.record_contact_added(id, tip1);
         let applied = store.set_contact_chain_tip(&id, tip1, tip2).unwrap();
         assert!(applied);
         assert_eq!(store.get_contact_chain_tip(&id).expect("read"), Some(tip2));

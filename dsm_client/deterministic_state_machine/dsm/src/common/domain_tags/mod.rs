@@ -165,7 +165,9 @@ mod tests {
     // no state, and a zero balance no invented one.
     // -3 with three genesis tags nothing derives from: an identity id, a
     // token participant and a sub-genesis device entropy.
-    const EXPECTED_TAG_COUNT: usize = 353;
+    // +1 with the Kyber identity binding moving into Core (the SDK declared
+    // it outside the registry).
+    const EXPECTED_TAG_COUNT: usize = 354;
 
     /// Scan the crate source for every declared domain-tag constant.
     ///

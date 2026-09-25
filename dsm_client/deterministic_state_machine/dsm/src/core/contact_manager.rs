@@ -93,27 +93,6 @@ impl DsmContactManager {
     pub fn remove_contact(&mut self, device_id: &[u8; 32]) -> Option<DsmVerifiedContact> {
         self.contacts.remove(device_id)
     }
-
-    /// Update the public key for a contact (used during BLE bilateral exchange)
-    pub fn update_contact_public_key(
-        &mut self,
-        device_id: &[u8; 32],
-        public_key: Vec<u8>,
-    ) -> Result<(), DsmError> {
-        let contact = self.contacts.get_mut(device_id).ok_or_else(|| {
-            DsmError::ContactNotFound(labeling::hash_to_short_id(device_id).to_string())
-        })?;
-
-        contact.public_key = public_key;
-
-        info!(
-            "Updated public_key for contact (id_dec={}, key_len={})",
-            labeling::hash_to_short_id(device_id),
-            contact.public_key.len()
-        );
-
-        Ok(())
-    }
 }
 
 #[cfg(test)]

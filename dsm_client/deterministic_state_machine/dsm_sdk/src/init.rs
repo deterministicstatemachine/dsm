@@ -16,14 +16,11 @@
 //! deterministic errors for operations requiring identity.
 
 use std::sync::Arc;
-use crate::bridge::install_bilateral_handler as install_sdk_bilateral_handler;
 use crate::bridge::install_app_router as install_sdk_app_router;
 use crate::handlers::{
     handle_create_genesis_v2_query, handle_generate_mnemonic_query, install_app_router_adapter,
     AppRouterImpl, BiImpl,
 };
-use dsm::types::proto as pb;
-use prost::Message;
 
 /// Deterministically derive the device's identity signing keypair (SPHINCS+), Genesis v2.
 ///
@@ -317,177 +314,12 @@ fn spawn_acceptance_recovery_sweep(origin: &'static str) {
     });
 }
 
-/// Core bilateral handler that wraps SDK's async BiImpl
-struct CoreBilateralBridge {
-    sdk_handler: Arc<dyn crate::bridge::BilateralHandler>,
-}
-
-impl dsm::core::bridge::BilateralHandler for CoreBilateralBridge {
-    fn handle_bilateral_prepare(
-        &self,
-        operation: pb::BilateralPrepareRequest,
-    ) -> Result<pb::OpResult, String> {
-        let payload = operation.encode_to_vec();
-        let req = crate::bridge::BiPrepare { payload };
-
-        // Spawn async work and block on completion using channel
-        let (tx, rx) = std::sync::mpsc::channel();
-        let handler = self.sdk_handler.clone();
-
-        crate::runtime::get_runtime().spawn(async move {
-            let result = handler.prepare(req).await;
-            let _ = tx.send(result);
-        });
-
-        let result = rx
-            .recv()
-            .map_err(|e| format!("Bilateral prepare channel error: {}", e))?;
-
-        if result.success {
-            Ok(pb::OpResult {
-                op_id: None,
-                accepted: true,
-                result: Some(pb::ResultPack {
-                    schema_hash: None,
-                    codec: pb::Codec::Proto as i32,
-                    body: result.result_data,
-                }),
-                error: None,
-            })
-        } else {
-            Err(result
-                .error_message
-                .unwrap_or_else(|| "Bilateral prepare failed".to_string()))
-        }
-    }
-
-    fn handle_bilateral_transfer(
-        &self,
-        operation: pb::BilateralTransferRequest,
-    ) -> Result<pb::OpResult, String> {
-        let payload = operation.encode_to_vec();
-        let req = crate::bridge::BiTransfer { payload };
-
-        let (tx, rx) = std::sync::mpsc::channel();
-        let handler = self.sdk_handler.clone();
-
-        crate::runtime::get_runtime().spawn(async move {
-            let result = handler.transfer(req).await;
-            let _ = tx.send(result);
-        });
-
-        let result = rx
-            .recv()
-            .map_err(|e| format!("Bilateral transfer channel error: {}", e))?;
-
-        if result.success {
-            Ok(pb::OpResult {
-                op_id: None,
-                accepted: true,
-                result: Some(pb::ResultPack {
-                    schema_hash: None,
-                    codec: pb::Codec::Proto as i32,
-                    body: result.result_data,
-                }),
-                error: None,
-            })
-        } else {
-            Err(result
-                .error_message
-                .unwrap_or_else(|| "Bilateral transfer failed".to_string()))
-        }
-    }
-
-    fn handle_bilateral_accept(
-        &self,
-        operation: pb::BilateralAcceptRequest,
-    ) -> Result<pb::OpResult, String> {
-        let payload = operation.encode_to_vec();
-        let req = crate::bridge::BiAccept { payload };
-
-        let (tx, rx) = std::sync::mpsc::channel();
-        let handler = self.sdk_handler.clone();
-
-        crate::runtime::get_runtime().spawn(async move {
-            let result = handler.accept(req).await;
-            let _ = tx.send(result);
-        });
-
-        let result = rx
-            .recv()
-            .map_err(|e| format!("Bilateral accept channel error: {}", e))?;
-
-        if result.success {
-            Ok(pb::OpResult {
-                op_id: None,
-                accepted: true,
-                result: Some(pb::ResultPack {
-                    schema_hash: None,
-                    codec: pb::Codec::Proto as i32,
-                    body: result.result_data,
-                }),
-                error: None,
-            })
-        } else {
-            Err(result
-                .error_message
-                .unwrap_or_else(|| "Bilateral accept failed".to_string()))
-        }
-    }
-
-    fn handle_bilateral_commit(
-        &self,
-        operation: pb::BilateralCommitRequest,
-    ) -> Result<pb::OpResult, String> {
-        let payload = operation.encode_to_vec();
-        let req = crate::bridge::BiCommit { payload };
-
-        let (tx, rx) = std::sync::mpsc::channel();
-        let handler = self.sdk_handler.clone();
-
-        crate::runtime::get_runtime().spawn(async move {
-            let result = handler.commit(req).await;
-            let _ = tx.send(result);
-        });
-
-        let result = rx
-            .recv()
-            .map_err(|e| format!("Bilateral commit channel error: {}", e))?;
-
-        if result.success {
-            Ok(pb::OpResult {
-                op_id: None,
-                accepted: true,
-                result: Some(pb::ResultPack {
-                    schema_hash: None,
-                    codec: pb::Codec::Proto as i32,
-                    body: result.result_data,
-                }),
-                error: None,
-            })
-        } else {
-            Err(result
-                .error_message
-                .unwrap_or_else(|| "Bilateral commit failed".to_string()))
-        }
-    }
-}
-
 pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
     // 1) Validate cfg strictly (no probing)
     cfg.validate()?;
 
-    // 2) Install bilateral handler into BOTH SDK and core layers
-    let bi_impl = Arc::new(BiImpl::new(cfg.clone()));
-
-    // Install in SDK layer (for app router invoke paths)
-    install_sdk_bilateral_handler(bi_impl.clone());
-
-    // Install in core layer (for envelope-level bilateral operations)
-    let core_bridge = Arc::new(CoreBilateralBridge {
-        sdk_handler: bi_impl,
-    });
-    dsm::core::bridge::install_bilateral_handler(core_bridge);
+    // 2) Install the BLE runtime slots the offline carrier is injected into.
+    crate::bridge::install_ble_runtime(Arc::new(BiImpl::new()));
 
     // 4) Install AppRouter into BOTH SDK and core layers
     //    - If canonical identity context is ready: full AppRouter

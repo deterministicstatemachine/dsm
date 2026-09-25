@@ -55,6 +55,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn the_first_seal_of_a_message_stands() {
+        crate::economic_fixtures::use_test_storage_dir();
         crate::storage::client_db::reset_database_for_tests();
         assert_eq!(get_sealed("M1").unwrap(), None);
         put_sealed("M1", b"sealed-a").unwrap();

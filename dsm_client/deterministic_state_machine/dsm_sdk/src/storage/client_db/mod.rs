@@ -1866,36 +1866,6 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_try_advance_finalized_bilateral_chain_tip_rejects_stale_parent() {
-        crate::economic_fixtures::use_test_storage_dir();
-        reset_database_for_tests();
-        init_database().expect("init db");
-
-        let device_id = [0x81u8; 32];
-        let genesis_hash = [0x91u8; 32];
-        let current_tip = [0x33u8; 32];
-        let stale_parent = [0x44u8; 32];
-        let new_tip = [0x55u8; 32];
-
-        seed_contact_for_chain_tip_tests(device_id, genesis_hash, "BleCapable", current_tip);
-
-        let advanced =
-            try_advance_finalized_bilateral_chain_tip(&device_id, &stale_parent, &new_tip)
-                .expect("advance should not error");
-
-        assert!(!advanced, "stale parent must be rejected");
-        assert_eq!(
-            get_contact_chain_tip(&device_id).expect("read tip"),
-            Some(current_tip)
-        );
-        assert_eq!(
-            get_local_bilateral_chain_tip(&device_id).expect("read tip"),
-            Some(current_tip)
-        );
-    }
-
-    #[test]
-    #[serial]
     fn test_record_pending_online_transition_persists_gate_and_local_tip() {
         crate::economic_fixtures::use_test_storage_dir();
         reset_database_for_tests();
@@ -1991,9 +1961,15 @@ mod tests {
         );
     }
 
+    /// Adding a contact again updates what the add owns (alias, metadata, a
+    /// BLE address it brings) and nothing else: the pinned genesis and keys
+    /// stay, a different one is refused, and the relationship tip, pairing
+    /// state and online-reconcile hold are not reset. MUTATION CONTROLS:
+    /// dropping the pinned-identity check lets the second add through;
+    /// updating the hold from the add clears it — either turns this red.
     #[test]
     #[serial]
-    fn test_store_contact_upserts_by_device_id_and_repairs_identity_fields() {
+    fn a_re_added_contact_keeps_its_pinned_identity_and_its_state() {
         crate::economic_fixtures::use_test_storage_dir();
         reset_database_for_tests();
         init_database().expect("init db");
@@ -2012,40 +1988,70 @@ mod tests {
             verification_proof: None,
             metadata: HashMap::new(),
             ble_address: None,
-            status: "Created".to_string(),
+            status: "BleCapable".to_string(),
             needs_online_reconcile: true,
             previous_chain_tip: None,
         };
         store_contact(&original).expect("store original contact");
 
-        let repaired = ContactRecord {
+        let re_added = ContactRecord {
             contact_id: "new-contact-id".to_string(),
-            device_id: device_id.to_vec(),
-            alias: "peer-fixed".to_string(),
-            genesis_hash: [0x55u8; 32].to_vec(),
-            public_key: vec![0x66u8; 64],
-            kyber_public_key: vec![0x4B; 1184],
+            alias: "peer-renamed".to_string(),
             current_chain_tip: Some(vec![0x70; 32]),
-            verified: true,
-            verification_proof: None,
-            metadata: HashMap::new(),
             ble_address: Some("11:22:33:44:55:66".to_string()),
-            status: "Active".to_string(),
+            status: "Created".to_string(),
             needs_online_reconcile: false,
-            previous_chain_tip: None,
+            ..original.clone()
         };
-        store_contact(&repaired).expect("repair contact by device id");
+        store_contact(&re_added).expect("add the same contact again");
 
         let stored = get_contact_by_device_id(&device_id)
-            .expect("load repaired contact")
+            .expect("load the contact")
             .expect("contact exists");
         assert_eq!(stored.contact_id, "original-contact");
-        assert_eq!(stored.alias, "peer-fixed");
-        assert_eq!(stored.genesis_hash, [0x55u8; 32].to_vec());
-        assert_eq!(stored.public_key, vec![0x66u8; 64]);
+        assert_eq!(stored.alias, "peer-renamed");
+        assert_eq!(stored.ble_address.as_deref(), Some("11:22:33:44:55:66"));
         assert_eq!(stored.current_chain_tip, Some(original_tip.to_vec()));
-        assert_eq!(stored.status, "Active");
-        assert!(!stored.needs_online_reconcile);
+        assert_eq!(stored.status, "BleCapable");
+        assert!(
+            stored.needs_online_reconcile,
+            "adding the contact again lifted the reconcile hold"
+        );
+
+        for (what, substituted) in [
+            (
+                "genesis",
+                ContactRecord {
+                    genesis_hash: [0x55u8; 32].to_vec(),
+                    ..original.clone()
+                },
+            ),
+            (
+                "AK",
+                ContactRecord {
+                    public_key: vec![0x66u8; 64],
+                    ..original.clone()
+                },
+            ),
+            (
+                "Kyber key",
+                ContactRecord {
+                    kyber_public_key: vec![0x4C; 1184],
+                    ..original.clone()
+                },
+            ),
+        ] {
+            assert!(
+                store_contact(&substituted).is_err(),
+                "a contact's pinned {what} was replaced"
+            );
+        }
+        let stored = get_contact_by_device_id(&device_id)
+            .expect("load the contact")
+            .expect("contact exists");
+        assert_eq!(stored.genesis_hash, [0x33u8; 32].to_vec());
+        assert_eq!(stored.public_key, vec![0x44u8; 64]);
+        assert_eq!(stored.kyber_public_key, vec![0x4B; 1184]);
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -2332,12 +2338,12 @@ mod tests {
 
     /// B4 CACHE INVENTORY, pinned rather than asserted in prose.
     ///
-    /// The trace found NO cached verification verdict for the ML-KEM identity
+    /// There is NO cached verification verdict for the ML-KEM identity
     /// binding anywhere:
     ///
-    ///   - `verify_kyber_identity_binding` has ZERO production callers; only
-    ///     `build_local_kyber_identity_binding` is used (b0x_sdk ×2,
-    ///     storage_node_sdk ×1).
+    ///   - `verify_kyber_identity_binding` runs on every offline message that
+    ///     carries a binding (`dsm::bilateral::offline::verify_pinned_peer_keys`);
+    ///     its answer is kept nowhere.
     ///   - the storage node PERSISTS `kyber_public_key` + `kyber_binding_sig`
     ///     in its device registry and never verifies the signature.
     ///   - `contacts.kyber_public_key` caches the peer's KEY, not the binding

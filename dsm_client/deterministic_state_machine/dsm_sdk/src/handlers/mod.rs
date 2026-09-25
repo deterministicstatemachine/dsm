@@ -3,10 +3,9 @@
 //! # SDK Handler Implementations
 //!
 //! Concrete implementations of the core bridge traits (`AppRouter`,
-//! `BilateralHandler`, `RecoveryHandler`,
-//! `BootstrapHandler`) that connect the JNI/FFI boundary to the pure
-//! `dsm` core library. Each handler is installed into both the SDK
-//! dispatch layer and the core bridge layer during [`init_dsm_sdk`](crate::init::init_dsm_sdk).
+//! `RecoveryHandler`) that connect the JNI/FFI boundary to the pure
+//! `dsm` core library, installed during [`init_dsm_sdk`](crate::init::init_dsm_sdk),
+//! and the BLE runtime slot the offline carrier is injected into.
 
 pub mod app_router_impl;
 pub mod bilateral_impl;

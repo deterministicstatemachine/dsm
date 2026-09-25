@@ -28,6 +28,8 @@ pub const TAG_DSM_ENVELOPE_ID: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/ENVELOPE_ID");
 pub const TAG_DSM_ENVELOPE_MSGID: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/envelope-msgid");
+pub const TAG_DSM_KYBER_IDENTITY_BINDING: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/kyber-identity-binding");
 pub const TAG_DSM_OFFLINE_KEY_CTX: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/offline-key-ctx");
 pub const TAG_DSM_OFFLINE_TX_CTX: TaggedHashDomain<'static> =
@@ -59,6 +61,7 @@ pub(super) const TAGS: &[TaggedHashDomain<'static>] = &[
     TAG_DSM_CHAIN_TIP_ID,
     TAG_DSM_ENVELOPE_ID,
     TAG_DSM_ENVELOPE_MSGID,
+    TAG_DSM_KYBER_IDENTITY_BINDING,
     TAG_DSM_OFFLINE_KEY_CTX,
     TAG_DSM_OFFLINE_TX_CTX,
     TAG_DSM_ONLINE_MESSAGE_NONCE_V3,

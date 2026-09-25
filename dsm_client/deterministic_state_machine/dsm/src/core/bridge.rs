@@ -8,8 +8,6 @@
 //!
 //! - **Queries** are routed to the installed [`AppRouter`] (or handled inline for
 //!   special-case paths like `system.genesis`).
-//! - **Bilateral invocations** (`bilateral.*`) are decoded into their specific protobuf
-//!   request types and forwarded to the [`BilateralHandler`].
 //! - **Recovery operations** are delegated to the [`RecoveryHandler`].
 //!
 //! Handlers are installed at runtime via `install_*` functions, stored in global `RwLock`
@@ -28,8 +26,6 @@ use crate::DsmError;
 
 /// Core app router storage. Uses RwLock to allow replacement (bootstrap → full router).
 static APP_ROUTER: Lazy<RwLock<Option<Arc<dyn AppRouter>>>> = Lazy::new(|| RwLock::new(None));
-static BILATERAL_HANDLER: Lazy<RwLock<Option<Arc<dyn BilateralHandler>>>> =
-    Lazy::new(|| RwLock::new(None));
 static RECOVERY_HANDLER: Lazy<RwLock<Option<Arc<dyn RecoveryHandler>>>> =
     Lazy::new(|| RwLock::new(None));
 
@@ -51,39 +47,6 @@ pub trait AppRouter: Send + Sync {
     /// Handle a state-mutating invocation identified by `method`. Returns a
     /// protobuf-encoded `ArgPack`.
     fn handle_invoke(&self, method: &str, args_proto: &[u8]) -> Result<Vec<u8>, String>;
-}
-
-/// Handler trait for the three-phase bilateral transfer protocol.
-///
-/// Bilateral operations involve two devices that must coordinate state transitions
-/// via the prepare-accept-commit protocol described in whitepaper Section 3.4.
-/// Each phase produces a protobuf `OpResult` that is embedded in the response envelope.
-///
-/// The SDK implements this trait and installs it via [`install_bilateral_handler`].
-/// The core bridge decodes the specific request type from the invoke arguments
-/// before calling the appropriate method.
-pub trait BilateralHandler: Send + Sync {
-    /// Phase 1: Validate and create a pre-commitment for a bilateral transfer.
-    fn handle_bilateral_prepare(
-        &self,
-        operation: gp::BilateralPrepareRequest,
-    ) -> Result<gp::OpResult, String>;
-
-    /// Phase 1b: Process a bilateral transfer request with operation data.
-    fn handle_bilateral_transfer(
-        &self,
-        operation: gp::BilateralTransferRequest,
-    ) -> Result<gp::OpResult, String>;
-
-    fn handle_bilateral_accept(
-        &self,
-        operation: gp::BilateralAcceptRequest,
-    ) -> Result<gp::OpResult, String>;
-
-    fn handle_bilateral_commit(
-        &self,
-        operation: gp::BilateralCommitRequest,
-    ) -> Result<gp::OpResult, String>;
 }
 
 /// Recovery operation handler trait for core recovery transaction processing.
@@ -133,23 +96,6 @@ pub fn get_app_router() -> Option<Arc<dyn AppRouter>> {
     APP_ROUTER.read().ok()?.clone()
 }
 
-/// Install a bilateral operation handler for core bilateral transaction processing.
-pub fn install_bilateral_handler(handler: Arc<dyn BilateralHandler>) {
-    let mut guard = match BILATERAL_HANDLER.write() {
-        Ok(g) => g,
-        Err(_) => {
-            log::warn!("[CORE] Bilateral handler lock poisoned");
-            return;
-        }
-    };
-    if guard.is_none() {
-        *guard = Some(handler);
-        log::info!("[CORE] Bilateral handler installed successfully");
-    } else {
-        log::warn!("[CORE] Bilateral handler already installed (idempotent call)");
-    }
-}
-
 /// Install a recovery operation handler for core recovery transaction processing.
 pub fn install_recovery_handler(handler: Arc<dyn RecoveryHandler>) {
     let mut guard = match RECOVERY_HANDLER.write() {
@@ -170,26 +116,6 @@ pub fn install_recovery_handler(handler: Arc<dyn RecoveryHandler>) {
 #[inline]
 fn app_router() -> Option<Arc<dyn AppRouter>> {
     APP_ROUTER.read().ok()?.clone()
-}
-
-#[inline]
-fn bilateral_handler() -> Option<Arc<dyn BilateralHandler>> {
-    let handler = BILATERAL_HANDLER.read().ok()?.clone();
-    if handler.is_none() {
-        // High-frequency logging guard: only log once every ~256 misses to avoid spam
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        static MISS_COUNT: AtomicUsize = AtomicUsize::new(0);
-        if MISS_COUNT
-            .fetch_add(1, Ordering::Relaxed)
-            .is_multiple_of(256)
-        {
-            log::warn!(
-                "[CORE] Bilateral handler not installed (miss count: {})",
-                MISS_COUNT.load(Ordering::Relaxed)
-            );
-        }
-    }
-    handler
 }
 
 #[inline]
@@ -333,85 +259,12 @@ pub fn handle_envelope_universal(env_bytes: &[u8]) -> Vec<u8> {
                         }
                     }
 
-                    // -------- Invoke routing (bilateral / app) --------
+                    // -------- Invoke routing (app) --------
                     Some(gp::universal_op::Kind::Invoke(invoke)) => {
-                        // Bilateral methods are decoded here then forwarded to the BilateralHandler.
-                        if invoke.method.starts_with("bilateral.") {
-                            if let Some(handler) = bilateral_handler() {
-                                let args_bytes: Vec<u8> = invoke
-                                    .args
-                                    .as_ref()
-                                    .map(|a| a.body.clone())
-                                    .unwrap_or_default();
-
-                                let result = match invoke.method.as_str() {
-                                    "bilateral.prepare" => {
-                                        match gp::BilateralPrepareRequest::decode(
-                                            args_bytes.as_slice(),
-                                        ) {
-                                            Ok(req) => handler.handle_bilateral_prepare(req),
-                                            Err(e) => Err(format!(
-                                                "Failed to decode BilateralPrepareRequest: {e}"
-                                            )),
-                                        }
-                                    }
-                                    "bilateral.transfer" => {
-                                        match gp::BilateralTransferRequest::decode(
-                                            args_bytes.as_slice(),
-                                        ) {
-                                            Ok(req) => handler.handle_bilateral_transfer(req),
-                                            Err(e) => Err(format!(
-                                                "Failed to decode BilateralTransferRequest: {e}"
-                                            )),
-                                        }
-                                    }
-                                    "bilateral.accept" => {
-                                        match gp::BilateralAcceptRequest::decode(
-                                            args_bytes.as_slice(),
-                                        ) {
-                                            Ok(req) => handler.handle_bilateral_accept(req),
-                                            Err(e) => Err(format!(
-                                                "Failed to decode BilateralAcceptRequest: {e}"
-                                            )),
-                                        }
-                                    }
-                                    "bilateral.commit" => {
-                                        match gp::BilateralCommitRequest::decode(
-                                            args_bytes.as_slice(),
-                                        ) {
-                                            Ok(req) => handler.handle_bilateral_commit(req),
-                                            Err(e) => Err(format!(
-                                                "Failed to decode BilateralCommitRequest: {e}"
-                                            )),
-                                        }
-                                    }
-                                    other => Err(format!("Unknown bilateral method: {other}")),
-                                };
-
-                                match result {
-                                    Ok(ok) => ok,
-                                    Err(e) if e.starts_with("Failed to decode ") => {
-                                        op_error(op_id, 400, &e)
-                                    }
-                                    Err(e) if e.starts_with("Unknown bilateral method:") => {
-                                        op_error(op_id, 404, &e)
-                                    }
-                                    Err(e) => op_error(
-                                        op_id,
-                                        500,
-                                        &format!("Bilateral operation failed: {e}"),
-                                    ),
-                                }
-                            } else {
-                                op_error(
-                                    op_id,
-                                    501,
-                                    "Bilateral operations require a handler to be installed",
-                                )
-                            }
-
-                        // Application invocations (non-bilateral) go to AppRouter.
-                        } else if let Some(router) = app_router() {
+                        // Invocations go to the AppRouter. Offline bilateral steps
+                        // are not envelope-bridge methods: they run in the offline
+                        // session engine, over its own transport.
+                        if let Some(router) = app_router() {
                             // Pass the FULL ArgPack bytes to the AppRouter (protobuf-only boundary).
                             let args_bytes: Vec<u8> = invoke
                                 .args
@@ -1041,27 +894,15 @@ mod tests {
         }
     }
 
-    #[test]
-    fn universal_bilateral_without_handler_requires_handler() {
-        let prep = gp::BilateralPrepareRequest {
-            counterparty_device_id: vec![0xAA; 32],
-            operation_data: vec![1, 2, 3],
-            expected_genesis_hash: Some(gp::Hash32 { v: vec![0; 32] }),
-            expected_counterparty_state_hash: Some(gp::Hash32 { v: vec![0; 32] }),
-            ble_address: String::new(),
-            sender_device_id: vec![0xBB; 32],
-            sender_genesis_hash: Some(gp::Hash32 { v: vec![0xCC; 32] }),
-            sender_signing_public_key: vec![0xDD; 32],
-            sender_chain_tip: None,
-            ..Default::default()
-        };
+    /// The single result of invoking `method` with `body` through the bridge.
+    fn invoke_result(method: &str, body: Vec<u8>) -> gp::OpResult {
         let op = gp::UniversalOp {
-            op_id: Some(gp::Hash32 { v: vec![0; 32] }),
+            op_id: Some(gp::Hash32 { v: vec![7; 32] }),
             actor: vec![0xEE; 32],
             kind: Some(gp::universal_op::Kind::Invoke(gp::Invoke {
-                method: "bilateral.prepare".to_string(),
+                method: method.to_string(),
                 args: Some(gp::ArgPack {
-                    body: prep.encode_to_vec(),
+                    body,
                     ..Default::default()
                 }),
                 program: None,
@@ -1070,12 +911,11 @@ mod tests {
                 nonce: None,
             })),
         };
-
         let envelope = gp::Envelope {
             version: 3,
             headers: Some(gp::Headers {
-                device_id: vec![0; 32],
-                genesis_hash: vec![0; 32],
+                device_id: vec![0xAB; 32],
+                genesis_hash: vec![0xCD; 32],
             }),
             message_id: vec![1; 16],
             payload: Some(gp::envelope::Payload::UniversalTx(gp::UniversalTx {
@@ -1083,25 +923,50 @@ mod tests {
                 atomic: false,
             })),
         };
-
-        let response_bytes = handle_envelope_universal(&envelope.encode_to_vec());
-        let response = decode_response_envelope(response_bytes.as_slice());
-
+        let response =
+            decode_response_envelope(&handle_envelope_universal(&envelope.encode_to_vec()));
         match response.payload {
-            Some(gp::envelope::Payload::UniversalRx(rx)) => {
+            Some(gp::envelope::Payload::UniversalRx(mut rx)) => {
                 assert_eq!(rx.results.len(), 1);
-                let result = &rx.results[0];
-                let err = result.error.as_ref().expect("error must be set");
-                assert_eq!(err.code, 501);
-                assert!(
-                    err.message
-                        .contains("Bilateral operations require a handler to be installed"),
-                    "unexpected error message: {}",
-                    err.message
-                );
+                rx.results.remove(0)
             }
-            Some(payload) => panic!("unexpected payload: {payload:?}"),
-            None => panic!("payload is None"),
+            other => panic!("expected a UniversalRx, got {other:?}"),
+        }
+    }
+
+    /// An offline bilateral step is not an envelope-bridge method: a
+    /// `bilateral.*` invoke has no handler of its own and is answered exactly
+    /// as any other invocation is, never with a success for work nobody did.
+    #[test]
+    fn a_bilateral_invoke_is_not_an_envelope_bridge_method() {
+        let prepare = gp::BilateralPrepareRequest {
+            counterparty_device_id: vec![0xAA; 32],
+            operation_data: vec![1, 2, 3],
+            sender_device_id: vec![0xBB; 32],
+            sender_genesis_hash: Some(gp::Hash32 { v: vec![0xCC; 32] }),
+            sender_signing_public_key: vec![0xDD; 32],
+            ..Default::default()
+        }
+        .encode_to_vec();
+
+        let other = invoke_result("an.unrouted.method", prepare.clone());
+        for method in [
+            "bilateral.prepare",
+            "bilateral.accept",
+            "bilateral.commit",
+            "bilateral.transfer",
+        ] {
+            let result = invoke_result(method, prepare.clone());
+            assert!(!result.accepted, "{method} was accepted");
+            let (err, other_err) = (
+                result.error.as_ref().expect("an error"),
+                other.error.as_ref().expect("an error"),
+            );
+            assert_eq!(
+                (err.code, &err.message),
+                (other_err.code, &other_err.message),
+                "{method} is answered differently from any other invocation"
+            );
         }
     }
 }

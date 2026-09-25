@@ -183,14 +183,12 @@ impl BilateralSettlementDelegate for DefaultBilateralSettlementDelegate {
         let (transfer_amount, token_id_opt) = parse_transfer_fields(&ctx.operation_bytes);
         let token_id_str = token_id_opt.clone().unwrap_or_default();
 
-        // (§2.3.1) Recovery-path settlements are allowed to have None proof_data
-        // (BLE GATT failure scenario where receipt delivery failed).
-        // Sender must always have proof_data (receipt from its own SMT-Replace).
+        // The sender always settles with its proof (the receipt from its own
+        // SMT replace).
         // Receiver receipt is speculative — built for archival, not a settlement
         // precondition.  Blocking receiver settlement on receipt construction
         // silently drops balance + history when AppState is not yet populated.
-        let is_recovery = ctx.tx_type == "bilateral_offline_recovered";
-        if transfer_amount > 0 && !is_recovery && ctx.is_sender {
+        if transfer_amount > 0 && ctx.is_sender {
             let has_proof = ctx
                 .proof_data
                 .as_ref()
