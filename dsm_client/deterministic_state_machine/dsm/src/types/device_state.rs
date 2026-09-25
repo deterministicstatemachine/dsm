@@ -373,7 +373,7 @@ pub enum BalanceDirection {
 /// online balance is NOT touched (it was already debited when the cash was loaded) and
 /// `deltas` MUST be empty. The allocation debit and the relationship + anchor-state advance land in
 /// ONE atomic device-root replacement, so the value move and the transition are inseparable.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OfflineSpend {
     /// Chip-rooted anchor bundle `B` binding the allocation to this device's offline-bearer island.
     pub anchor_bundle_b: [u8; 32],
@@ -614,7 +614,7 @@ fn validate_conservation(
 /// SUCCESSOR commit `H("DSM/fused-anchor-state/v1" ‖ B ‖ A_{i+1} ‖ J_{b'} ‖ uᵢ+1)`. The key is
 /// stable; only the value changes, so the successor root changes because the value changes and a
 /// receiver verifies both roots independently.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AnchorLeafUpdate {
     pub key: [u8; 32],
     pub new_value: [u8; 32],
