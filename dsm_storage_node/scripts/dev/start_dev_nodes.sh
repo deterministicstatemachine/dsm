@@ -3,9 +3,8 @@
 #
 # DSM storage dev nodes: five nodes on localhost, running the production
 # binary on the production path (owner ruling #2). Nothing is relaxed for
-# development: every node serves TLS under a certificate from a local dev CA,
-# pins its peers to that CA, and requires admin and gossip tokens. This script
-# generates that material once, under dev-pki/ (never in git), and creates
+# development: every node serves TLS under a certificate from a local dev CA and
+# pins its set-mates to that CA. This script generates that material once, under dev-pki/ (never in git), and creates
 # each node's database. A database left at another schema version is refused
 # by the node (ruling #3); `reset` drops the dev databases so they are created
 # fresh.
@@ -35,8 +34,8 @@ need() {
     command -v "$1" >/dev/null 2>&1 || { echo "error: $1 is required" >&2; exit 1; }
 }
 
-# The dev CA, one certificate per node for 127.0.0.1/localhost, and the
-# tokens. Existing material is kept, so restarts keep the same identities.
+# The dev CA and one certificate per node for 127.0.0.1/localhost. Existing
+# material is kept, so restarts keep the same identities.
 ensure_pki() {
     need openssl
     mkdir -p "$PKI_DIR"
@@ -62,12 +61,6 @@ ensure_pki() {
         fi
     done
     chmod 600 "$PKI_DIR"/*.key
-    for t in admin gossip; do
-        if [ ! -f "$PKI_DIR/$t.token" ]; then
-            openssl rand -base64 33 | tr -d '\n/+=' > "$PKI_DIR/$t.token"
-            chmod 600 "$PKI_DIR/$t.token"
-        fi
-    done
 }
 
 ensure_databases() {
@@ -105,8 +98,6 @@ start() {
             echo "dev-node-$n already serving on :$(port_of "$n")"
             continue
         fi
-        DSM_ADMIN_TOKEN="$(cat "$PKI_DIR/admin.token")" \
-        DSM_GOSSIP_TOKEN="$(cat "$PKI_DIR/gossip.token")" \
         RUST_LOG=info nohup "$BIN" --config "config/dev/node$n.toml" \
             > "logs/dev-node$n.log" 2>&1 &
         echo $! > "dev-node$n.pid"

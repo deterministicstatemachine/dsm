@@ -311,13 +311,14 @@ impl Pair {
     }
 
     /// The message ids of every envelope node `node` holds in its spool, in
-    /// arrival order, as the node recorded them.
+    /// arrival order, as a reader decodes them. Every entry in these suites
+    /// is an envelope a device sent.
     pub async fn spooled_message_ids(&self, node: usize) -> Vec<String> {
         self.nodes.nodes[node]
             .spool()
             .await
             .into_iter()
-            .map(|spooled| spooled.message_id)
+            .map(|spooled| spooled.message_id.expect("a spooled entry is an envelope"))
             .collect()
     }
 
@@ -329,7 +330,7 @@ impl Pair {
                 .spool()
                 .await
                 .iter()
-                .any(|spooled| spooled.message_id == message_id)
+                .any(|spooled| spooled.message_id.as_deref() == Some(message_id))
             {
                 holders += 1;
             }

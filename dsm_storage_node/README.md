@@ -1,70 +1,40 @@
 # DSM Storage Node
 
-Index-only, clockless, signature-free storage node for the DSM network.
+Clockless storage node for the DSM network. The normative contract is
+`specs/DSM_Storage_Node_Specification.md`.
 
 ## What Storage Nodes Do
 
-Storage nodes are **dumb persistence servers**. They store and retrieve encrypted state blobs on behalf of clients. They:
+A storage node keeps bytes and hands them back. It:
 
-- **Never sign** protocol messages
-- **Never validate** protocol rules or balances
-- **Never gate acceptance** of state transitions
-- **Never affect** unlock predicates or transaction logic
-
-All business logic runs on-device. Storage nodes are simply an index layer for state anchoring and replication.
-
-## Architecture
+- **never establishes validity** — Core's construction predicates do, on the
+  device, from the bytes;
+- **refuses no value** at a key and deduplicates nothing; which value counts is
+  the reader's question (storage spec §6, §9);
+- **never opens** a spool envelope (storage spec §8);
+- **signs nothing** a client relies on for authority; its ByteCommits are
+  evidence a verifier checks (storage spec §14).
 
 ```
 Client (Android / Web)
-  │
-  │  HTTP + protobuf (Envelope v3)
+  │  HTTPS + protobuf
   ▼
 Storage Node (Rust / Axum)
-  ├── Genesis anchoring
-  ├── ByteCommit mirroring
-  ├── DLV slot management
-  ├── Unilateral b0x transport
-  ├── Recovery capsule storage
-  ├── Identity + Device Tree indexing
-  └── Inter-node gossip (state sync, not consensus)
+  ├── Keyed cells and indexes           (storage contract, Part II §12)
+  ├── Immutable content-addressed store (storage contract)
+  ├── ByteCommits and the set-mate mirror (§14)
+  └── b0x inbox spool                   (§8)
        │
        ▼
   PostgreSQL (per-node persistence)
 ```
 
-### Key Design Properties
+There is no consensus, no leader election and no gossip between nodes. A node
+reaches a set-mate only to mirror its ByteCommits, at the endpoint its own
+configuration names, over a client pinned to the storage set's CA.
 
-- **Clockless** — no wall-clock time in any protocol-relevant path. Ordering uses logical ticks derived from hash chain adjacency.
-- **Signature-free** — storage nodes never produce cryptographic signatures. They are pure index/store services.
-- **Protobuf-only** — all operational endpoints accept and return protobuf (`application/octet-stream`). JSON is banned from the protocol layer.
-- **No consensus** — there is no Byzantine agreement, Raft, Paxos, or leader election. Nodes use simple gossip for state propagation.
-
-### Replication Parameters
-
-| Parameter | Value | Description                     |
-| --------- | ----- | ------------------------------- |
-| N         | 6     | Total replica count             |
-| K         | 3     | Minimum replicas for durability |
-| U_up      | 0.85  | Upscale utilization threshold   |
-| U_down    | 0.35  | Downscale utilization threshold |
-
-Replica placement uses keyed Fisher-Yates shuffle (deterministic, no coordination required).
-
-## Production Cluster (AWS)
-
-The default app config (`dsm_env_config.toml`) connects to 6 production storage nodes on AWS:
-
-| Node       | Region         | IP             | Endpoint                      |
-| ---------- | -------------- | -------------- | ----------------------------- |
-| dsm-node-1 | us-east-1      | 13.218.83.69   | `https://13.218.83.69:8080`   |
-| dsm-node-2 | us-east-1      | 44.223.31.184  | `https://44.223.31.184:8080`  |
-| dsm-node-3 | eu-west-1      | 54.74.145.172  | `https://54.74.145.172:8080`  |
-| dsm-node-4 | eu-west-1      | 3.249.79.215   | `https://3.249.79.215:8080`   |
-| dsm-node-5 | ap-southeast-1 | 18.141.56.252  | `https://18.141.56.252:8080`  |
-| dsm-node-6 | ap-southeast-1 | 13.215.175.231 | `https://13.215.175.231:8080` |
-
-No local setup, PostgreSQL, or port forwarding is required. The app works out of the box.
+The environment config the app ships (`dsm_env_config.toml`) names the fleet
+it connects to.
 
 ## Local Multi-Node Development (Optional)
 
@@ -81,8 +51,8 @@ For offline development or testing against local nodes (not required for normal 
 cd dsm_storage_node
 
 # Start 5 local dev nodes: the production binary, serving TLS under a local
-# dev CA, with admin and gossip tokens. The first run generates dev-pki/ and
-# creates the databases dsm_storage_node1..5.
+# dev CA. The first run generates dev-pki/ and creates the databases
+# dsm_storage_node1..5.
 ./scripts/dev/start_dev_nodes.sh
 
 # Health over verified TLS
@@ -123,50 +93,37 @@ adb shell run-as com.dsm.wallet rm files/dsm_env_config.override.toml
 
 ## API Endpoints
 
-All operational endpoints use protobuf encoding. The health endpoint is a lightweight plain-text check outside the protobuf data path.
+Every route is protobuf or raw bytes; `/api/v2/health` answers plain `ok`.
 
-### Health
-
-```
-GET /api/v2/health
-```
-
-### Operational (protobuf-only)
-
-| Endpoint                   | Method   | Purpose                             |
-| -------------------------- | -------- | ----------------------------------- |
-| `/api/v2/envelope`         | POST     | Submit Envelope v3 (protobuf bytes) |
-| `/api/v2/genesis/entropy`  | GET/POST | Genesis entropy contribution        |
-| `/api/v2/bytecommit`       | POST     | ByteCommit anchoring                |
-| `/api/v2/dlv/slot`         | POST     | DLV slot management                 |
-| `/api/v2/unilateral`       | POST     | Unilateral (b0x) transport          |
-| `/api/v2/recovery/capsule` | POST     | Recovery capsule storage            |
-| `/api/v2/identity`         | GET/POST | Identity and Device Tree queries    |
-| `/api/v2/gossip`           | POST     | Inter-node state sync               |
+| Endpoint | Method | Purpose |
+| --- | --- | --- |
+| `/api/v2/health` | GET | Liveness |
+| `/api/v2/cell/{key}` | POST, GET | Keep a value at a key; every value held there, in arrival order |
+| `/api/v2/cells` | POST | Keep values at several keys |
+| `/api/v2/index/{locator}` | POST, GET | Append a content address; read the index in append order |
+| `/api/v2/immutable/put` | POST | Write-once object; the node computes the address |
+| `/api/v2/immutable/{addr}` | GET | Read an object by content address |
+| `/api/v2/bytecommit/close` | POST | Close a ByteCommit cycle |
+| `/api/v2/bytecommit/latest` | GET | This node's latest ByteCommit |
+| `/api/v2/bytecommit/cycle/{cycle}` | GET | This node's ByteCommit at a cycle |
+| `/api/v2/bytecommit/proof/{key}` | GET | Proof that a ByteCommit commits a cell's entries |
+| `/api/v2/bytecommit/mirror/sync` | POST | Mirror every set-mate's new ByteCommits |
+| `/api/v2/bytecommit/mirror/{member}/{cycle}` | GET | Every ByteCommit mirrored for a member at a cycle |
+| `/api/v2/b0x/submit` | POST | Append bytes to a spool |
+| `/api/v2/b0x/retrieve/{from_seq}` | GET | A spool's entries from a position |
 
 ## Source Layout
 
 ```
 src/
-├── main.rs              # Axum server, TLS, CLI args
-├── lib.rs               # AppState, shared types
+├── main.rs            # config, TLS listener, startup checks
+├── lib.rs             # AppState, NodeStorageSet, the served app (build_app)
+├── set_client.rs      # the client pinned to the storage set's CA
 ├── api/
-│   ├── genesis.rs       # Genesis entropy endpoints
-│   ├── bytecommit.rs    # ByteCommit mirroring
-│   ├── dlv_slot.rs      # DLV vault slot management
-│   ├── gossip.rs        # Inter-node gossip (state sync)
-│   ├── device_api.rs    # Device registration/lookup
-│   ├── identity_tips.rs # Identity tip queries
-│   ├── identity_devtree.rs # Device tree endpoints
-│   ├── object_store.rs  # Generic object storage
-│   ├── unilateral_api.rs # b0x unilateral transport
-│   ├── recovery_capsule.rs # Recovery capsule CRUD
-│   └── hardening.rs     # Request validation, size limits
-├── auth/                # Token-based gossip auth
-├── db/                  # PostgreSQL schema, migrations, queries
-├── replication.rs       # Replica placement (Fisher-Yates)
-├── partitioning.rs      # Deterministic shard assignment
-└── operational.rs       # Operational metrics
+│   ├── cells.rs       # keyed cells and indexes
+│   ├── objects/       # immutable store, ByteCommits and mirror
+│   └── transport/     # b0x spool
+└── db/                # Postgres schema, durable writes, queries
 ```
 
 ## Configuration
@@ -174,9 +131,11 @@ src/
 A node starts from its TOML config (`--config`, required). It refuses to start
 without `node.id`, `network.listen_addr`, `network.port`, `database.url`, and
 `tls.cert_path` / `tls.key_path` / `tls.ca_path` (the storage set's CA, which
-replication pins peers to). It serves TLS only, and admin and gossip requests
-need `DSM_ADMIN_TOKEN` / `DSM_GOSSIP_TOKEN`; there is no debug-build exception.
-See `config/production.toml` and `config/dev/`.
+mirror sync pins set-mates to). `network.max_connections` and
+`http.body_limit_bytes` default when absent and are refused when of the wrong
+type. The database connection requires TLS unless its URL says
+`sslmode=disable`. It serves TLS only. See `config/production.toml` and
+`config/dev/`.
 
 The database carries an explicit schema version: an empty database is created
 at the version this build serves, a database at that version must hold exactly
@@ -188,7 +147,7 @@ database is reprovisioned.
 ```bash
 cd dsm_storage_node
 cargo build --release
-# Binary: target/release/dsm_storage_node
+# Binary: target/release/storage_node
 ```
 
 ## Cryptographic Stack
@@ -316,7 +275,6 @@ Each node runs:
 | --------------- | ------------------- | -------------- |
 | 6x EC2 t3.small | 2 vCPU, 2GB RAM     | ~$75           |
 | 6x 20GB gp3 EBS | SSD storage         | ~$10           |
-| Data transfer   | Inter-region gossip | ~$5            |
 | **Total**       |                     | **~$90/month** |
 
 ### Cloud Commands

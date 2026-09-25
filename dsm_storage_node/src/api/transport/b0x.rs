@@ -1,16 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-// tests are appended at end to not break module-level inner doc comments
-// SPDX-License-Identifier: Apache-2.0
-//! DSM API v2: Protobuf-only b0x spool (deterministic, clockless)
-//! - Envelope v3 only (strict-fail if != 3)
-//! - Deterministic ordering (BIGSERIAL)
-//! - Per-key ACK scoping
-//! - No genesis_hash persistence in spool
-//! - Protobuf-only; no JSON; no wall-clock markers.
-//! - Admission: deterministic protobuf, auth, and routing-key gates only
+//! The b0x inbox spool (storage spec §8): bytes in under a recipient's spool
+//! key, bytes out by that key from a position on. Protobuf-only, clockless.
 
-#[cfg(test)]
-use crate::replication::{ReplicationConfig, ReplicationManager};
 use std::sync::Arc;
 
 use axum::{
@@ -35,13 +26,13 @@ fn valid_spool_key(value: &str) -> bool {
     )
 }
 
-/// The b0x spool: bytes in under a recipient's spool key, bytes out by that
-/// key from a position on. No write authorization and no reader authorization
+/// The b0x spool. No write authorization and no reader authorization
 /// (storage spec §4, DSM Amendment A3): the node never checks who writes or
-/// reads, and never branches on what an envelope carries. The spool is
-/// append-only: nothing is marked read, hidden, expired or removed. Which
-/// messages a device has consumed is the device's own state, kept on the
-/// device (owner, 2026-09-23).
+/// reads, never opens an envelope and refuses none (storage spec §8). The
+/// spool is append-only: nothing is marked read, hidden, expired, removed or
+/// deduplicated. Canonical encoding, the replay-protected message id and the
+/// recipient key are checked by the devices at both ends; which messages a
+/// device has consumed is the device's own state.
 pub fn router(app: Arc<AppState>) -> Router<()> {
     Router::new()
         .route("/api/v2/b0x/submit", post(submit_b0x_envelope))
@@ -63,159 +54,79 @@ fn require_protobuf(headers: &HeaderMap) -> Result<(), StatusCode> {
     }
 }
 
-// ------------------- v2 (protobuf-only) -------------------
-
-/// Submit a protobuf Envelope (v3) into the b0x spool under the recipient's inbox.
-///
-/// **Protocol contract:**
-/// - Requires `content-type: application/protobuf` or `application/octet-stream`.
-/// - Requires `x-dsm-recipient: <base32>` header specifying the recipient spool key.
-///   This may be the canonical device_id or a rotated b0x routing key, but it must
-///   always decode from Base32 Crockford to exactly 32 bytes.
-/// - Body: prost-encoded Envelope v3 (version field MUST be 3; message_id MUST be 16 bytes).
-/// - Returns `204 No Content` on success (idempotent).
-///
-/// The envelope is stored in the recipient's inbox spool (keyed by x-dsm-recipient).
-/// Ordering is deterministic via BIGSERIAL. No wall-clock markers, no genesis_hash persistence.
+/// Append the request body to the spool named by `x-dsm-recipient` (Base32
+/// Crockford of 32 bytes: the recipient's device id or a b0x routing key).
+/// Answers `204 No Content` once the bytes are durably appended.
 async fn submit_b0x_envelope(
     Extension(app): Extension<Arc<AppState>>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<impl IntoResponse, StatusCode> {
-    log::info!("b0x submit: recv bytes={}", body.len());
-
     require_protobuf(&headers)?;
 
-    // Extract the recipient spool key from the header. This may be the recipient
-    // device_id or a rotated b0x routing key, but either way it must be base32(32).
     let recipient_spool_key = headers
         .get("x-dsm-recipient")
         .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string())
-        .ok_or_else(|| {
-            log::warn!("Missing x-dsm-recipient header");
-            StatusCode::BAD_REQUEST
-        })?;
-
-    if !valid_spool_key(&recipient_spool_key) {
-        log::warn!(
-            "Invalid x-dsm-recipient header (must be canonical base32(32)): {}",
-            recipient_spool_key
-        );
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    if !valid_spool_key(recipient_spool_key) {
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    let env = dsm::envelope::from_canonical_bytes(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
-
-    // NOTE: Storage nodes are dumb mirrors.
-    // Do NOT validate protocol semantics here (clients verify).
-
-    // Derive message id string (base32 text-id) for idempotency
-    let msg_id_b32 = text_id::encode_base32_crockford(&env.message_id);
-
-    // Store in the recipient inbox spool using the explicit routing key.
-    let pool = &*app.db_pool;
-    crate::db::spool_insert(pool, &recipient_spool_key, &msg_id_b32, &body)
+    crate::db::spool_insert(&app.db_pool, recipient_spool_key, &body)
         .await
         .map_err(|e| {
-            log::error!(
-                "spool_insert failed for recipient {}: {:?}",
-                recipient_spool_key,
-                e
-            );
+            log::error!("b0x submit: spool_insert failed: {e:?}");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
-
-    log::info!(
-        "📥 b0x envelope stored for recipient {} (msg_id={})",
-        &recipient_spool_key[..8.min(recipient_spool_key.len())],
-        &msg_id_b32[..16.min(msg_id_b32.len())]
-    );
-
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Retrieve a batch of Envelopes starting from a specific sequence number.
-/// Returns SequencedBatchEnvelope (protobuf) with envelopes and their sequence numbers.
-/// Supports idempotent retrieval - same envelopes can be retrieved multiple times safely.
+/// Up to [`MAX_BATCH_RETRIEVE`] entries of the spool named by
+/// `x-dsm-b0x-address`, from position `from_seq` on, as a
+/// `SequencedBatchEnvelope` of the bytes exactly as they were submitted.
+/// `204 No Content` when nothing is held there.
 async fn retrieve_b0x_batch_from_seq(
     axum::extract::Path(from_seq): axum::extract::Path<i64>,
     Extension(app): Extension<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Result<axum::response::Response, StatusCode> {
-    // §16.4: the spool key names the inbox. There is no authenticated device
-    // to fall back to: without the key there is nothing to read.
     let lookup_key = headers
         .get("x-dsm-b0x-address")
         .and_then(|v| v.to_str().ok())
         .filter(|v| !v.is_empty())
         .ok_or(StatusCode::BAD_REQUEST)?;
     if !valid_spool_key(lookup_key) {
-        log::warn!(
-            "Invalid x-dsm-b0x-address header (must be canonical base32(32)): {}",
-            lookup_key
-        );
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    log::info!(
-        "📬 retrieve_b0x_batch_from_seq: GET /api/v2/b0x/retrieve/{} (lookup_key={})",
-        from_seq,
-        &lookup_key[..16.min(lookup_key.len())]
-    );
-
-    let pool = &*app.db_pool;
-    let rows = crate::db::spool_list_from_seq(pool, lookup_key, from_seq, MAX_BATCH_RETRIEVE)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
+    let rows =
+        crate::db::spool_list_from_seq(&app.db_pool, lookup_key, from_seq, MAX_BATCH_RETRIEVE)
+            .await
+            .map_err(|e| {
+                log::error!("b0x retrieve: spool_list_from_seq failed: {e:?}");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
     if rows.is_empty() {
-        log::info!(
-            "📭 retrieve_b0x_batch_from_seq: no envelopes >= seq {} for {}",
-            from_seq,
-            &lookup_key[..16.min(lookup_key.len())]
-        );
         return Ok(StatusCode::NO_CONTENT.into_response());
     }
 
-    // Build SequencedBatchEnvelope protobuf
     let mut batch = dsm::types::proto::SequencedBatchEnvelope::default();
     let mut next_seq = from_seq;
-    for (envelope_bytes, seq_num) in rows {
-        match dsm::envelope::from_canonical_bytes(envelope_bytes.as_slice()) {
-            Ok(env) => {
-                let sequenced = dsm::types::proto::SequencedEnvelope {
-                    envelope: Some(env),
-                    seq_num: seq_num as u64,
-                };
-                batch.envelopes.push(sequenced);
-                next_seq = next_seq.max(seq_num + 1);
-            }
-            Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
-        }
+    for (envelope, seq_num) in rows {
+        next_seq = next_seq.max(seq_num + 1);
+        batch.envelopes.push(dsm::types::proto::SequencedEnvelope {
+            envelope,
+            seq_num: u64::try_from(seq_num).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+        });
     }
-    batch.next_seq = next_seq as u64;
-
-    let mut bytes = Vec::with_capacity(batch.encoded_len());
-    batch
-        .encode(&mut bytes)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    log::info!(
-        "📬 retrieve_b0x_batch_from_seq: returning {} envelopes (seq {}-{}, next={}) for {}",
-        batch.envelopes.len(),
-        from_seq,
-        next_seq - 1,
-        batch.next_seq,
-        &lookup_key[..16.min(lookup_key.len())]
-    );
+    batch.next_seq = u64::try_from(next_seq).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let mut headers = axum::http::HeaderMap::new();
     headers.insert(
         axum::http::header::CONTENT_TYPE,
         axum::http::HeaderValue::from_static("application/octet-stream"),
     );
-    Ok((StatusCode::OK, headers, bytes).into_response())
+    Ok((StatusCode::OK, headers, batch.encode_to_vec()).into_response())
 }
 
 #[cfg(test)]
@@ -236,29 +147,14 @@ mod tests {
     /// The b0x router on the Postgres test database.
     async fn spool() -> Router {
         let pool = Arc::new(crate::db::test_store::fresh_pool().await);
-        let replication_manager = Arc::new(
-            ReplicationManager::new(
-                ReplicationConfig {
-                    replication_factor: 3,
-                    gossip_interval_ticks: 100,
-                    failure_timeout_ticks: 300,
-                    gossip_fanout: 3,
-                    max_concurrent_jobs: 10,
-                },
+        let app_state = Arc::new(
+            AppState::new(
                 "test-node".to_string(),
-                "http://localhost:8080".to_string(),
-                &crate::replication::test_set_ca_pem(),
-                Vec::new(),
+                pool,
+                crate::db::test_store::set_client(),
             )
-            .unwrap_or_else(|e| panic!("Failed to create replication manager: {e}")),
+            .unwrap_or_else(|e| panic!("app state: {e}")),
         );
-        let app_state = Arc::new(AppState::new(
-            "test-node".to_string(),
-            "http://localhost:8080",
-            None,
-            pool,
-            replication_manager,
-        ));
         super::router(app_state)
     }
 
@@ -345,6 +241,19 @@ mod tests {
         (status, body.to_vec())
     }
 
+    /// The entries the spool at `address` holds from position 0, as the node
+    /// answers them.
+    async fn spooled(app: &Router, address: &str) -> Vec<Vec<u8>> {
+        let (status, bytes) = retrieve(app, address, 0).await;
+        assert_eq!(status, HttpStatus::OK);
+        dsm::types::proto::SequencedBatchEnvelope::decode(bytes.as_slice())
+            .expect("batch")
+            .envelopes
+            .into_iter()
+            .map(|e| e.envelope)
+            .collect()
+    }
+
     /// A sealed envelope submitted with no authorization is spooled under its
     /// recipient's key, read back from position 0 by that key byte for byte,
     /// and opens with the recipient's Kyber secret.
@@ -365,12 +274,12 @@ mod tests {
         let batch =
             dsm::types::proto::SequencedBatchEnvelope::decode(bytes.as_slice()).expect("batch");
         assert_eq!(batch.envelopes.len(), 1);
-        let held = batch.envelopes[0].envelope.as_ref().expect("envelope");
         assert_eq!(
-            held.encode_to_vec(),
-            body,
+            batch.envelopes[0].envelope, body,
             "the spool returns the bytes it was sent"
         );
+        let held = dsm::envelope::from_canonical_bytes(&batch.envelopes[0].envelope)
+            .expect("the reader decodes what it was sent");
         let Some(Payload::Sealed(seal)) = &held.payload else {
             panic!("the held envelope is not sealed");
         };
@@ -394,6 +303,62 @@ mod tests {
         assert!(bytes.is_empty());
     }
 
+    /// Storage spec §8: the node refuses nothing and deduplicates nothing. A
+    /// second envelope carrying a message id already spooled — a different
+    /// envelope under the same id, or the same bytes again — is appended and
+    /// read back after the first; telling them apart is the recipient's
+    /// replay check. The node used to keep only the first holder of an id,
+    /// across every spool, and answer the second writer 204.
+    #[tokio::test]
+    async fn an_envelope_reusing_a_message_id_is_kept_after_the_first() {
+        let app = spool().await;
+        let spool_key = crate::db::test_store::unique_name(0x65);
+        let first = sealed_envelope();
+        let mut second = sealed_envelope();
+        second.outer.message_id = first.outer.message_id.clone();
+        let (first, second) = (first.outer.encode_to_vec(), second.outer.encode_to_vec());
+        assert_ne!(first, second);
+        for body in [&first, &second, &first] {
+            assert_eq!(
+                submit(&app, &spool_key, "application/octet-stream", body.clone()).await,
+                HttpStatus::NO_CONTENT
+            );
+        }
+        let other_key = crate::db::test_store::unique_name(0x66);
+        assert_eq!(
+            submit(&app, &other_key, "application/octet-stream", first.clone()).await,
+            HttpStatus::NO_CONTENT
+        );
+
+        let held = spooled(&app, &spool_key).await;
+        assert_eq!(held, vec![first.clone(), second, first.clone()]);
+        let held_elsewhere = spooled(&app, &other_key).await;
+        assert_eq!(held_elsewhere, vec![first]);
+    }
+
+    /// Storage spec §8: envelopes are never opened by the node. Bytes that are
+    /// not an envelope at all — here a v3 envelope with a 15-byte message id,
+    /// and plain junk — are kept and returned exactly; the recipient decides
+    /// what they are. The node used to decode every envelope on the way in and
+    /// again on the way out.
+    #[tokio::test]
+    async fn bytes_the_node_cannot_read_are_kept_and_returned_unopened() {
+        let app = spool().await;
+        let spool_key = crate::db::test_store::unique_name(0x63);
+        let mut short_id = sealed_envelope();
+        short_id.outer.message_id.truncate(15);
+        let short_id = short_id.outer.encode_to_vec();
+        let junk = vec![0xFF, 0x00, 0x13, 0x37];
+        for body in [&short_id, &junk] {
+            assert_eq!(
+                submit(&app, &spool_key, "application/octet-stream", body.clone()).await,
+                HttpStatus::NO_CONTENT
+            );
+        }
+        let held = spooled(&app, &spool_key).await;
+        assert_eq!(held, vec![short_id, junk]);
+    }
+
     /// A spool nothing was sent to answers with no content.
     #[tokio::test]
     async fn an_empty_spool_answers_no_content() {
@@ -401,24 +366,6 @@ mod tests {
         let (status, bytes) = retrieve(&app, &crate::db::test_store::unique_name(0x62), 0).await;
         assert_eq!(status, HttpStatus::NO_CONTENT);
         assert!(bytes.is_empty());
-    }
-
-    #[tokio::test]
-    async fn v2_b0x_submit_rejects_bad_msg_id_len() {
-        let app = spool().await;
-        let spool_key = crate::db::test_store::unique_name(0x63);
-        let mut sent = sealed_envelope();
-        sent.outer.message_id.truncate(15);
-        assert_eq!(
-            submit(
-                &app,
-                &spool_key,
-                "application/octet-stream",
-                sent.outer.encode_to_vec()
-            )
-            .await,
-            HttpStatus::BAD_REQUEST
-        );
     }
 
     #[tokio::test]

@@ -41,9 +41,6 @@ pub struct EnvConfig {
     #[serde(default)]
     pub ports: Vec<u16>, // optional, informational
     pub nodes: Vec<NodeConfig>, // REQUIRED
-    // Optional MPC-only genesis endpoint (strictly for genesis flow)
-    pub mpc_genesis_url: Option<String>,
-    pub mpc_api_key: Option<String>,
     /// Set `allow_localhost = true` in the TOML to permit 127.0.0.1 endpoints
     /// on Android release builds when using `adb reverse` for local dev.
     #[serde(default)]
@@ -563,8 +560,6 @@ nodes = []
         let toml = r#"
 protocol = "https"
 lan_ip = "10.0.0.5"
-mpc_genesis_url = "https://mpc.example.com"
-mpc_api_key = "secret"
 allow_localhost = true
 bitcoin_network = "signet"
 dbtc_dust_floor_sats = 1000
@@ -575,11 +570,6 @@ endpoint = "http://10.0.0.5:9090"
 register_incarnation = "BHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE0"
 "#;
         let cfg = parse_env_config_toml(toml).unwrap();
-        assert_eq!(
-            cfg.mpc_genesis_url.as_deref(),
-            Some("https://mpc.example.com")
-        );
-        assert_eq!(cfg.mpc_api_key.as_deref(), Some("secret"));
         assert!(cfg.allow_localhost);
         assert_eq!(cfg.bitcoin_network.as_deref(), Some("signet"));
         assert_eq!(cfg.dbtc_dust_floor_sats, Some(1000));
@@ -674,8 +664,6 @@ register_incarnation = "BHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE0"
                 register_incarnation: crate::util::text_id::encode_base32_crockford(&[0x5C_u8; 32]),
                 endpoint: "http://10.0.0.1:8080".into(),
             }],
-            mpc_genesis_url: None,
-            mpc_api_key: None,
             allow_localhost: false,
             bitcoin_network: Some("signet".into()),
             dbtc_dust_floor_sats: None,

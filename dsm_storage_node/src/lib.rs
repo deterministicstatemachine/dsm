@@ -1,43 +1,33 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Library crate for dsm_storage_node: shared types and routers for tests
+//! The storage node: its state, the storage contract's routes (storage spec
+//! Part II §12), the b0x spool, and the one assembly the binary serves.
 #![deny(warnings)]
 
 use axum::Extension;
-use std::sync::atomic::AtomicI64;
 use std::sync::Arc;
 
 pub mod api;
 pub mod db;
-pub mod replication;
-pub mod timing;
-
-use replication::StorageNodeId;
+pub mod set_client;
 
 #[derive(Clone)]
 pub struct AppState {
-    pub node_id: StorageNodeId,
-    /// The protocol identity EXACTLY as configured (`[node] id`) — the string
-    /// a client's catalog names, the value the identity echo layer emits, and
-    /// therefore the `member_id` every generic-binding answer carries. Kept
-    /// beside the canonical 32-byte `node_id` because the two are different
-    /// facts: one is how peers address this node, the other is who a quorum
-    /// counts.
+    /// The protocol identity EXACTLY as configured (`[node] id`): the string
+    /// the storage set names, the value the identity echo layer emits, and
+    /// the `member_id` of every ByteCommit and arrival record this node
+    /// signs for.
     pub configured_member_id: String,
-    pub hsts_max_age: Option<u64>,
+    /// `configured_member_id` as the header value the echo layer sends.
+    member_id_header: axum::http::HeaderValue,
     pub db_pool: Arc<db::DBPool>,
-    pub replication_manager: Arc<replication::ReplicationManager>,
-    pub current_tick: Arc<AtomicI64>,
+    /// The client pinned to the storage set's CA (see [`set_client`]).
+    pub set_client: reqwest::Client,
     /// The canonical storage set this node is a member of (`[storage_set]
     /// members = [...]` in config, canonical id derived exactly as clients derive
-    /// it). `None` = not configured: the settlement-slot register refuses every
-    /// claim (fail closed) rather than accepting claims for an unknown set.
+    /// it). `None` = not configured: the node serves the storage contract but
+    /// has no set-mates to mirror.
     pub storage_set: Option<Arc<NodeStorageSet>>,
-    /// The register incarnation THIS node is serving — minted once into its
-    /// own database at first boot, established before anything is served.
-    /// Stamped on every generic-binding answer so a caller can tell this
-    /// register history from a rebuilt one wearing the same node id.
-    pub own_register_incarnation: Option<[u8; 32]>,
     /// Held for the whole of a ByteCommit mirror sync, so one sync runs at a
     /// time and a caller asking again waits for it instead of repeating it.
     pub mirror_sync: Arc<tokio::sync::Mutex<()>>,
@@ -53,9 +43,8 @@ pub struct NodeStorageSet {
     /// them, and its configured incarnation must be the one this node's
     /// database actually holds.
     pub members: Vec<(String, [u8; 32])>,
-    /// This node's own register incarnation — the value it echoes on every
-    /// register read so a reader can tell it apart from a rebuilt member
-    /// wearing the same node id.
+    /// This node's own register incarnation, as its database holds it and
+    /// the set commits it.
     pub own_incarnation: [u8; 32],
     /// Where each set-mate is reached, from this node's own configuration
     /// (`endpoint` on `[[storage_set.members]]`). A node mirrors every
@@ -151,42 +140,29 @@ impl NodeStorageSet {
 }
 
 impl AppState {
-    /// Build an AppState. The supplied `node_id_input` is canonicalised exactly
-    /// like `canonical_node_info` does for gossip: if it is a valid 32-byte
-    /// base32-crockford string, it is decoded as-is; otherwise a 32-byte node
-    /// id is derived from `address_or_seed`. The result is the single
-    /// canonical operator identity used across replication, ByteCommit
-    /// emission, HTTP headers, and DB chain anchoring.
+    /// The state of the node configured as `member_id`. Refuses a member id
+    /// that cannot be sent as the identity echo: a set-mate mirroring this
+    /// node keeps a ByteCommit only when the echo names the member the
+    /// ByteCommit names (storage spec §14, mirror sync).
     pub fn new(
-        node_id_input: String,
-        address_or_seed: &str,
-        hsts_max_age: Option<u64>,
+        member_id: String,
         db_pool: Arc<db::DBPool>,
-        replication_manager: Arc<replication::ReplicationManager>,
-    ) -> Self {
-        let configured_member_id = node_id_input.clone();
-        let node_id =
-            StorageNodeId::from_base32_or_derive(&node_id_input, address_or_seed.as_bytes());
-        Self {
-            node_id,
-            configured_member_id,
-            hsts_max_age,
+        set_client: reqwest::Client,
+    ) -> anyhow::Result<Self> {
+        let member_id_header = axum::http::HeaderValue::from_str(&member_id).map_err(|e| {
+            anyhow::anyhow!("node id {member_id:?} cannot be sent as the identity echo: {e}")
+        })?;
+        Ok(Self {
+            configured_member_id: member_id,
+            member_id_header,
             db_pool,
-            replication_manager,
-            current_tick: Arc::new(AtomicI64::new(0)),
+            set_client,
             storage_set: None,
-            own_register_incarnation: None,
             mirror_sync: Arc::new(tokio::sync::Mutex::new(())),
-        }
+        })
     }
 
     /// Attach this node's canonical storage set (see [`NodeStorageSet`]).
-    /// Record the register incarnation this node established at startup.
-    pub fn with_register_incarnation(mut self, incarnation: [u8; 32]) -> Self {
-        self.own_register_incarnation = Some(incarnation);
-        self
-    }
-
     pub fn with_storage_set(mut self, set: NodeStorageSet) -> Self {
         self.storage_set = Some(Arc::new(set));
         self
@@ -205,10 +181,9 @@ pub fn cells_router(state: Arc<AppState>) -> axum::Router<()> {
 /// binary and by the contract suites, so what the suites drive is what the
 /// binary serves.
 ///
-/// No write authorization on any of them (rebuild step R2): a member never
-/// checks who carries the bytes, because every object carries its own
-/// authority and derived objects need none. The device token stays only on
-/// the other mounts (the DLV object store, the identity mirrors), never here.
+/// No write authorization on any of them: a member never checks who carries
+/// the bytes, because every object carries its own authority and derived
+/// objects need none.
 pub fn storage_contract_router(state: Arc<AppState>) -> axum::Router<()> {
     api::cells::create_router(state.clone())
         .merge(api::objects::bytecommit::create_router(state.clone()))
@@ -216,22 +191,17 @@ pub fn storage_contract_router(state: Arc<AppState>) -> axum::Router<()> {
         .merge(api::objects::immutable::create_write_router().layer(Extension(state)))
 }
 
-/// Echo this node's configured protocol identity on EVERY response.
-///
-/// A client fanning a keyed write out over a canonical storage set counts an
-/// acceptance only when the answering node IS the member its catalog says
-/// lives at that endpoint — "distinct members" is executable, not
-/// administrative. This is identity, not authentication (crash-fault node
-/// model): it prevents two catalog entries on one physical node from yielding
-/// two acceptances; it does not prove the node is honest. The value is the
-/// RAW configured id, byte-for-byte what the client's catalog names.
+/// Echo this node's configured protocol identity on every response, byte
+/// for byte what the storage set names. A set-mate mirroring this node's
+/// ByteCommits keeps one only when the echo names the member the ByteCommit
+/// names (storage spec §14, mirror sync). This is identity, not
+/// authentication: it does not prove the node is honest.
 pub fn node_identity_echo_layer(
-    node_id: &str,
+    member_id: axum::http::HeaderValue,
 ) -> tower_http::set_header::SetResponseHeaderLayer<axum::http::HeaderValue> {
     tower_http::set_header::SetResponseHeaderLayer::overriding(
         axum::http::header::HeaderName::from_static("x-dsm-node-id"),
-        axum::http::HeaderValue::from_str(node_id)
-            .unwrap_or_else(|_| axum::http::HeaderValue::from_static("invalid-node-id")),
+        member_id,
     )
 }
 
@@ -319,63 +289,26 @@ pub struct AppLimits {
 /// The node's whole app: every route it serves, with its limits and layers.
 /// The binary serves exactly this, and so do tests that stand up real nodes,
 /// so no test ever runs against an assembly the binary does not serve.
-pub fn build_app(
-    state: std::sync::Arc<AppState>,
-    node_id: &str,
-    limits: AppLimits,
-) -> axum::Router<()> {
+pub fn build_app(state: std::sync::Arc<AppState>, limits: AppLimits) -> axum::Router<()> {
     use axum::http::StatusCode;
     use axum::routing::get;
-    use axum::{Extension, Router};
+    use axum::Router;
     use tower::limit::ConcurrencyLimitLayer;
     use tower_http::{limit::RequestBodyLimitLayer, trace::TraceLayer};
 
-    let b0x_router = crate::api::transport::b0x::router(state.clone());
-    let app: Router<()> = {
-        // The storage contract's four operations (Part II §12): the immutable
-        // content-addressed store and the keyed cells and indexes, ONE public
-        // assembly with no write authorization (R2). The node is content-blind on
-        // every one of them — no payload decode, ever.
-        let storage_contract_router = crate::storage_contract_router(state.clone());
-        // Identity mirrors
-        let devtree_router = crate::api::identity::devtree::create_router(state.clone());
-        // Genesis mirror
-        let genesis_router = crate::api::identity::genesis::create_router(state.clone());
-        // DLV slot + Recovery Capsule
-        let dlv_slot_router = crate::api::vault::slot::create_router(state.clone());
-        // Gossip protocol for replication
-        let gossip_router = crate::api::transport::gossip::gossip_routes(state.clone());
-        // Node discovery for SDK auto-discovery
-        let discovery_router = crate::api::registry::discovery::create_router(state.clone());
-
-        // EVERY `/admin` endpoint, assembled in one place behind one token check.
-        // Two sibling admin routers nested at the same path is how the registry's
-        // update and seed endpoints came to be reachable unauthenticated.
-        let admin_router = crate::api::infra::admin::admin_surface(state.clone());
-
-        // Compose routes and layers, then install `state`.
-        // Returning `Router<()>` here is important (see Axum docs).
-        // Request metrics for Prometheus scraping
-
-        Router::new()
-            // Health check endpoint (lightweight, no DB access)
-            .route("/api/v2/health", get(|| async { (StatusCode::OK, "ok") }))
-            .merge(storage_contract_router)
-            .merge(devtree_router)
-            .merge(genesis_router)
-            .merge(dlv_slot_router)
-            .merge(gossip_router) // Gossip protocol endpoints
-            .merge(discovery_router) // Node discovery for SDK auto-discovery
-            .nest("/admin", admin_router) // Every /admin/* endpoint, auth applied once
-            .layer(RequestBodyLimitLayer::new(limits.body_limit_bytes))
-            .layer(ConcurrencyLimitLayer::new(limits.concurrency_limit))
-            .layer(TraceLayer::new_for_http())
-            // The node-identity echo (see `node_identity_echo_layer`): NORMATIVE
-            // for every quorum read and write, so it is the one shared layer.
-            .layer(crate::node_identity_echo_layer(node_id))
-            .layer(Extension(state))
-    };
-    // b0x v2 (protobuf-only, clockless): no writer or reader authorization
-    // (storage spec §4, DSM Amendment A3).
-    app.merge(b0x_router)
+    Router::new()
+        .route("/api/v2/health", get(|| async { (StatusCode::OK, "ok") }))
+        // The storage contract's four operations (Part II §12): no write
+        // authorization, content-blind.
+        .merge(crate::storage_contract_router(state.clone()))
+        // The b0x spool (storage spec §8): no writer or reader authorization,
+        // envelopes never opened.
+        .merge(crate::api::transport::b0x::router(state.clone()))
+        .layer(RequestBodyLimitLayer::new(limits.body_limit_bytes))
+        .layer(ConcurrencyLimitLayer::new(limits.concurrency_limit))
+        .layer(TraceLayer::new_for_http())
+        .layer(crate::node_identity_echo_layer(
+            state.member_id_header.clone(),
+        ))
+        .layer(Extension(state))
 }

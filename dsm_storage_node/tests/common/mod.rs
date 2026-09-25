@@ -67,13 +67,25 @@ fn with_database(url: &str, database: &str) -> String {
     }
 }
 
-/// A storage set CA for tests: a real self-signed certificate to pin.
-pub fn set_ca_pem() -> Vec<u8> {
-    ok_or_panic(
+/// A client pinned to a freshly generated storage set CA.
+pub fn set_client() -> reqwest::Client {
+    let ca = ok_or_panic(
         rcgen::generate_simple_self_signed(vec!["localhost".to_string()]),
         "generate a test CA",
+    );
+    ok_or_panic(
+        dsm_storage_node::set_client::pinned_set_client(ca.cert.pem().as_bytes()),
+        "pinned client",
     )
-    .cert
-    .pem()
-    .into_bytes()
+}
+
+/// The app the binary serves for `state`, with the deployed fleet's limits.
+pub fn served(state: std::sync::Arc<dsm_storage_node::AppState>) -> axum::Router {
+    dsm_storage_node::build_app(
+        state,
+        dsm_storage_node::AppLimits {
+            body_limit_bytes: 1_048_576,
+            concurrency_limit: 256,
+        },
+    )
 }

@@ -65,15 +65,6 @@ resource "aws_security_group" "dsm_storage" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  # Prometheus metrics
-  ingress {
-    description = "Prometheus metrics"
-    from_port   = 9090
-    to_port     = 9090
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
   # SSH access (restricted)
   ingress {
     description = "SSH"

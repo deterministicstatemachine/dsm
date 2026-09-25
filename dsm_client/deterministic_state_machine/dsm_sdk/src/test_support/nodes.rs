@@ -35,7 +35,7 @@
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
-use dsm_storage_node::{db, replication, AppLimits, AppState, NodeStorageSet};
+use dsm_storage_node::{db, set_client, AppLimits, AppState, NodeStorageSet};
 
 /// The network whose pinned register the nodes are.
 const NETWORK: &[u8] = b"dsm-testnet";
@@ -113,11 +113,10 @@ struct Serving {
 fn serve(
     listener: tokio::net::TcpListener,
     state: Arc<AppState>,
-    member_id: &str,
     requests: Arc<Mutex<Vec<String>>>,
 ) -> Serving {
-    let app = dsm_storage_node::build_app(state, member_id, deployed_limits()).layer(
-        axum::middleware::from_fn(
+    let app =
+        dsm_storage_node::build_app(state, deployed_limits()).layer(axum::middleware::from_fn(
             move |request: axum::extract::Request, next: axum::middleware::Next| {
                 let requests = requests.clone();
                 async move {
@@ -129,8 +128,7 @@ fn serve(
                     next.run(request).await
                 }
             },
-        ),
-    );
+        ));
     let stop = Arc::new(tokio::sync::Notify::new());
     let signal = stop.clone();
     let task = tokio::spawn(async move {
@@ -153,12 +151,13 @@ pub struct Node {
     requests: Arc<Mutex<Vec<String>>>,
 }
 
-/// One envelope a node holds in its spool, exactly as the node stored it:
-/// the b0x address it was submitted under, its message id, and the sealed
-/// bytes.
+/// One entry a node holds in its spool, exactly as the node stored it: the
+/// b0x address it was submitted under and the bytes. The node never opens
+/// them; `message_id` is what a reader decodes from them, when they are an
+/// envelope.
 pub struct Spooled {
     pub address: String,
-    pub message_id: String,
+    pub message_id: Option<String>,
     pub envelope: Vec<u8>,
 }
 
@@ -180,16 +179,21 @@ impl Node {
         let client = self.state.db_pool.get().await.expect("node db connection");
         client
             .query(
-                "SELECT device_id, message_id, envelope FROM inbox_spool ORDER BY id",
+                "SELECT device_id, envelope FROM inbox_spool ORDER BY id",
                 &[],
             )
             .await
             .expect("query")
             .iter()
-            .map(|row| Spooled {
-                address: row.get(0),
-                message_id: row.get(1),
-                envelope: row.get(2),
+            .map(|row| {
+                let envelope: Vec<u8> = row.get(1);
+                Spooled {
+                    address: row.get(0),
+                    message_id: dsm::envelope::from_canonical_bytes(&envelope)
+                        .ok()
+                        .map(|e| dsm::utils::text_id::encode_base32_crockford(&e.message_id)),
+                    envelope,
+                }
             })
             .collect()
     }
@@ -268,27 +272,21 @@ impl NodeSet {
         let mut nodes = Vec::with_capacity(prepared.len());
         for p in prepared {
             let endpoint = endpoint_of(&p.address);
-            let replication = Arc::new(
-                replication::ReplicationManager::new(
-                    replication::default_production_config(),
-                    p.member_id.clone(),
-                    endpoint.clone(),
-                    &set_ca_pem,
-                    Vec::new(),
-                )
-                .expect("replication manager"),
-            );
             let set = NodeStorageSet::new(members.clone(), &p.member_id, p.incarnation)
                 .expect("set against own register")
                 .with_endpoints(&p.member_id, endpoints.clone())
                 .expect("set endpoints");
             let state = Arc::new(
-                AppState::new(p.member_id.clone(), &endpoint, None, p.pool, replication)
-                    .with_register_incarnation(p.incarnation)
-                    .with_storage_set(set),
+                AppState::new(
+                    p.member_id.clone(),
+                    p.pool,
+                    set_client::pinned_set_client(&set_ca_pem).expect("pinned set client"),
+                )
+                .expect("app state")
+                .with_storage_set(set),
             );
             let requests = Arc::new(Mutex::new(Vec::new()));
-            let serving = serve(p.listener, state.clone(), &p.member_id, requests.clone());
+            let serving = serve(p.listener, state.clone(), requests.clone());
             nodes.push(Node {
                 member_id: p.member_id,
                 endpoint,
@@ -338,12 +336,7 @@ impl NodeSet {
             let listener = tokio::net::TcpListener::bind(node.address)
                 .await
                 .expect("rebind node address");
-            node.serving = Some(serve(
-                listener,
-                node.state.clone(),
-                &node.member_id,
-                node.requests.clone(),
-            ));
+            node.serving = Some(serve(listener, node.state.clone(), node.requests.clone()));
         }
     }
 

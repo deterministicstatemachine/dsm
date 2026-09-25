@@ -3365,7 +3365,7 @@ mod tests {
             spools
                 .iter()
                 .flatten()
-                .filter(|s| s.message_id == transfer_id)
+                .filter(|s| s.message_id.as_deref() == Some(transfer_id.as_str()))
                 .count()
         };
         let mut before = Vec::new();

@@ -420,20 +420,22 @@ impl MemberClient {
     }
 
     /// Ask the member to fetch its set-mates' new ByteCommits into its mirror
-    /// (§14 mirror sync).
+    /// (§14 mirror sync). The member answers `204 No Content` once every
+    /// set-mate answered; anything else is why its mirror is not current.
     pub async fn sync_mirror(&self) -> Result<(), String> {
-        answer(
+        match answer(
             self.client
                 .post(format!("{}/api/v2/bytecommit/mirror/sync", self.endpoint)),
         )
-        .await
-        .map(|body| {
-            log::debug!(
-                "mirror sync at {}: {} bytes answered",
+        .await?
+        {
+            None => Ok(()),
+            Some(body) => Err(format!(
+                "mirror sync at {} answered {} bytes where no content is the answer",
                 self.member_id,
-                body.map_or(0, |b| b.len())
-            )
-        })
+                body.len()
+            )),
+        }
     }
 
     /// Every distinct ByteCommit this member's mirror holds for `member` at

@@ -120,13 +120,11 @@ async fn put_immutable(
         }
     }
 
-    let now_tick = state.current_tick.load(std::sync::atomic::Ordering::SeqCst);
     let outcome = crate::db::insert_immutable_object_if_absent(
         &state.db_pool,
         &addr_b32,
         &ns_raw,
         body.as_ref(),
-        now_tick.max(0) as u64,
     )
     .await
     .map_err(|e| {

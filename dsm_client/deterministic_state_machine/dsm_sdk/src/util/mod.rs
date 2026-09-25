@@ -3,5 +3,4 @@
 
 pub mod domain_helpers;
 pub mod protobuf_persist;
-pub mod registry_addr;
 pub use dsm::utils::text_id;

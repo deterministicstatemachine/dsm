@@ -2036,15 +2036,15 @@ impl CoreSDK {
     /// construct this `CoreSDK` with the v2 `DeviceInfo` (DevID + AK public key) so the installed
     /// state + device head carry the canonical identity. Returns the installed genesis hash `G`.
     ///
-    /// No MPC, no storage nodes, no silicon: the GenesisState came from
-    /// `create_genesis_v2_self_attested` over the unlocked wallet seed.
+    /// The GenesisState came from `create_genesis_v3_self_attested` over the
+    /// unlocked wallet seed.
     pub fn install_v2_genesis(
         &self,
         genesis_state: &dsm::core::identity::genesis::GenesisState,
     ) -> Result<[u8; 32], DsmError> {
         let genesis_state_hash = {
             let mut sm = self.state_machine.lock();
-            let mut s = State::new_genesis(genesis_state.initial_entropy, self.device_info.clone());
+            let mut s = State::new_genesis(genesis_state.genesis_nonce, self.device_info.clone());
             s.hash = genesis_state.hash;
             let snapshot = s.clone();
             sm.set_state(s);
@@ -2632,7 +2632,7 @@ impl CoreSDK {
     }
 
     pub async fn local_genesis_hash(&self) -> Result<Vec<u8>, DsmError> {
-        // Return the MPC-issued genesis hash from the genesis_records table.
+        // Return the genesis hash `G` from the genesis_records table.
         // This MUST match the genesis hash that contacts store during pairing,
         // otherwise b0x routing addresses will diverge between sender and receiver.
         match crate::storage::client_db::get_verified_genesis_record() {
@@ -2644,7 +2644,7 @@ impl CoreSDK {
                 )),
             },
             Ok(None) => Err(DsmError::internal(
-                "no genesis record found; MPC genesis has not been created yet",
+                "no genesis record found; genesis has not been created yet",
                 None::<std::convert::Infallible>,
             )),
             Err(e) => Err(DsmError::internal(

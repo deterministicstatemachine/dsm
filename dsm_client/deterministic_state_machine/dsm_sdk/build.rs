@@ -60,7 +60,6 @@ fn write_min_schema_hash_module() {
 
     for base in [
         "contact_add_response_schema_hash",
-        "system_genesis_response_schema_hash",
         "balance_get_response_schema_hash",
         "wallet_history_response_schema_hash",
         "contacts_list_response_schema_hash",

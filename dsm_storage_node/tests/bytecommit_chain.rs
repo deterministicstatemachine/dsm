@@ -13,45 +13,21 @@ use std::sync::Arc;
 use axum::{body::Body, http::Request, http::StatusCode, Router};
 use dsm::storage_cell::{ArrivalRecord, ByteCommit, CellCommitProof};
 use dsm::utils::text_id;
-use dsm_storage_node::{
-    db,
-    replication::{ReplicationConfig, ReplicationManager},
-    AppState, NodeStorageSet,
-};
+use dsm_storage_node::{db, AppState, NodeStorageSet};
 use prost::Message;
 use tower::ServiceExt;
 
 const NS: &str = "DSM/bytecommit-contract";
-
-fn rm(id: &str, endpoint: &str) -> Arc<ReplicationManager> {
-    Arc::new(
-        ReplicationManager::new(
-            ReplicationConfig {
-                replication_factor: 3,
-                gossip_interval_ticks: 100,
-                failure_timeout_ticks: 300,
-                gossip_fanout: 3,
-                max_concurrent_jobs: 10,
-            },
-            id.to_string(),
-            endpoint.to_string(),
-            &common::set_ca_pem(),
-            Vec::new(),
-        )
-        .expect("replication manager"),
-    )
-}
 
 /// A node over `pool`, a member of `set`, knowing its set-mates only at the
 /// `endpoints` its own configuration names.
 fn node_state_on(
     pool: Arc<db::DBPool>,
     id: &str,
-    endpoint: &str,
     set: &[&str],
     endpoints: &[(&str, &str)],
 ) -> Arc<AppState> {
-    let state = AppState::new(id.to_string(), endpoint, None, pool, rm(id, endpoint));
+    let state = AppState::new(id.to_string(), pool, common::set_client()).expect("app state");
     let members: Vec<(String, [u8; 32])> = set.iter().map(|m| (m.to_string(), [7u8; 32])).collect();
     let endpoints = endpoints
         .iter()
@@ -68,17 +44,10 @@ fn node_state_on(
 async fn node_state(
     store: &str,
     id: &str,
-    endpoint: &str,
     set: &[&str],
     endpoints: &[(&str, &str)],
 ) -> Arc<AppState> {
-    node_state_on(
-        common::fresh_store(store).await,
-        id,
-        endpoint,
-        set,
-        endpoints,
-    )
+    node_state_on(common::fresh_store(store).await, id, set, endpoints)
 }
 
 async fn listener() -> (tokio::net::TcpListener, String) {
@@ -87,13 +56,14 @@ async fn listener() -> (tokio::net::TcpListener, String) {
     (l, url)
 }
 
-async fn sync(app: &Router) -> u64 {
+/// What the node answers when asked to sync its mirror.
+async fn sync(app: &Router) -> StatusCode {
     let req = Request::post("/api/v2/bytecommit/mirror/sync")
         .body(Body::empty())
         .unwrap();
-    let (s, n) = call(app, req).await;
-    assert_eq!(s, StatusCode::OK);
-    u64::from_be_bytes(n.try_into().unwrap())
+    let (s, body) = call(app, req).await;
+    assert!(body.is_empty(), "a mirror sync answers with a status alone");
+    s
 }
 
 async fn mirrored(app: &Router, member: &[u8], cycle: u64) -> Vec<ByteCommit> {
@@ -112,9 +82,7 @@ async fn mirrored(app: &Router, member: &[u8], cycle: u64) -> Vec<ByteCommit> {
 }
 
 fn app(state: Arc<AppState>) -> Router {
-    let id = state.configured_member_id.clone();
-    dsm_storage_node::storage_contract_router(state)
-        .layer(dsm_storage_node::node_identity_echo_layer(&id))
+    common::served(state)
 }
 
 async fn call(app: &Router, req: Request<Body>) -> (StatusCode, Vec<u8>) {
@@ -196,14 +164,7 @@ async fn proof(app: &Router, key: [u8; 32], cycle: u64) -> Option<CellCommitProo
 /// ByteCommit that covers it, and not against one that closed before it.
 #[tokio::test]
 async fn cycles_close_over_new_entries_and_commit_their_records() {
-    let a = app(node_state(
-        "bc_close_a",
-        "dsm-node-a",
-        "http://a.local",
-        &["dsm-node-a"],
-        &[],
-    )
-    .await);
+    let a = app(node_state("bc_close_a", "dsm-node-a", &["dsm-node-a"], &[]).await);
     assert_eq!(close(&a).await, None, "nothing held, nothing to commit");
 
     let key = [0x11; 32];
@@ -244,14 +205,7 @@ async fn cycles_close_over_new_entries_and_commit_their_records() {
 /// The old open publish path is gone: nobody can post a ByteCommit to a node.
 #[tokio::test]
 async fn there_is_no_path_to_post_a_bytecommit() {
-    let a = app(node_state(
-        "bc_nopost_a",
-        "dsm-node-a",
-        "http://a.local",
-        &["dsm-node-a"],
-        &[],
-    )
-    .await);
+    let a = app(node_state("bc_nopost_a", "dsm-node-a", &["dsm-node-a"], &[]).await);
     let (s, _) = call(
         &a,
         Request::post("/api/v2/bytecommit/publish")
@@ -273,22 +227,8 @@ async fn there_is_no_path_to_post_a_bytecommit() {
 async fn a_set_mate_mirrors_by_fetching_from_the_member_itself() {
     let ((la, ua), (lb, ub)) = (listener().await, listener().await);
     let set = ["dsm-node-a", "dsm-node-b"];
-    let sa = node_state(
-        "bc_mirror_a",
-        "dsm-node-a",
-        &ua,
-        &set,
-        &[("dsm-node-b", &ub)],
-    )
-    .await;
-    let sb = node_state(
-        "bc_mirror_b",
-        "dsm-node-b",
-        &ub,
-        &set,
-        &[("dsm-node-a", &ua)],
-    )
-    .await;
+    let sa = node_state("bc_mirror_a", "dsm-node-a", &set, &[("dsm-node-b", &ub)]).await;
+    let sb = node_state("bc_mirror_b", "dsm-node-b", &set, &[("dsm-node-a", &ua)]).await;
     let (a, b) = (app(sa), app(sb));
     tokio::spawn(axum::serve(la, a.clone()).into_future());
     tokio::spawn(axum::serve(lb, b.clone()).into_future());
@@ -297,9 +237,17 @@ async fn a_set_mate_mirrors_by_fetching_from_the_member_itself() {
     let rec = put(&a, key, b"at a").await;
     let c1 = close(&a).await.expect("A closes cycle 1");
 
-    assert_eq!(sync(&b).await, 1, "one ByteCommit mirrored");
-    let mirrored = mirrored(&b, b"dsm-node-a", 1).await;
-    assert_eq!(mirrored, vec![c1.clone()], "B holds exactly A's ByteCommit");
+    assert_eq!(
+        sync(&b).await,
+        StatusCode::NO_CONTENT,
+        "every set-mate answered"
+    );
+    let held_by_b = mirrored(&b, b"dsm-node-a", 1).await;
+    assert_eq!(
+        held_by_b,
+        vec![c1.clone()],
+        "B holds exactly A's ByteCommit"
+    );
 
     // The verifier's check: A's record, A's values, B's mirror of A, A's proof.
     let held = values(&a, key).await;
@@ -307,24 +255,24 @@ async fn a_set_mate_mirrors_by_fetching_from_the_member_itself() {
     assert!(dsm::storage_cell::record_is_committed(
         &rec,
         &held,
-        &mirrored[0],
+        &held_by_b[0],
         &p
     ));
 
-    // A second sync with nothing new mirrors nothing.
-    assert_eq!(sync(&b).await, 0);
+    // A second sync with nothing new keeps what is mirrored.
+    assert_eq!(sync(&b).await, StatusCode::NO_CONTENT);
+    assert_eq!(mirrored(&b, b"dsm-node-a", 1).await, vec![c1]);
 }
 
 /// A node answering at the endpoint B's configuration names for set-mate A,
 /// but which is not A, fills no mirror: neither under A's id nor its own.
 #[tokio::test]
 async fn an_impostor_at_a_set_mates_endpoint_is_not_mirrored() {
-    let ((lc, uc), (lb, ub)) = (listener().await, listener().await);
-    let sc = node_state("bc_impostor_c", "dsm-node-c", &uc, &["dsm-node-c"], &[]).await;
+    let ((lc, uc), lb) = (listener().await, listener().await.0);
+    let sc = node_state("bc_impostor_c", "dsm-node-c", &["dsm-node-c"], &[]).await;
     let sb = node_state(
         "bc_impostor_b",
         "dsm-node-b",
-        &ub,
         &["dsm-node-a", "dsm-node-b"],
         &[("dsm-node-a", &uc)],
     )
@@ -336,7 +284,11 @@ async fn an_impostor_at_a_set_mates_endpoint_is_not_mirrored() {
     put(&c, [0x31; 32], b"at c").await;
     close(&c).await.expect("C closes cycle 1");
 
-    assert_eq!(sync(&b).await, 0, "nothing from the impostor is mirrored");
+    assert_eq!(
+        sync(&b).await,
+        StatusCode::BAD_GATEWAY,
+        "a set-mate that is not who the configuration names fails the sync"
+    );
     assert!(mirrored(&b, b"dsm-node-a", 1).await.is_empty());
     assert!(mirrored(&b, b"dsm-node-c", 1).await.is_empty());
 }
@@ -348,8 +300,8 @@ async fn a_rewritten_cycle_is_kept_beside_the_first() {
     let ((la, ua), (la2, ua2)) = (listener().await, listener().await);
     let set = ["dsm-node-a", "dsm-node-b"];
     // A, and a rebuilt A: two stores answering as dsm-node-a.
-    let a = app(node_state("bc_rewrite_a", "dsm-node-a", &ua, &["dsm-node-a"], &[]).await);
-    let a2 = app(node_state("bc_rewrite_a2", "dsm-node-a", &ua2, &["dsm-node-a"], &[]).await);
+    let a = app(node_state("bc_rewrite_a", "dsm-node-a", &["dsm-node-a"], &[]).await);
+    let a2 = app(node_state("bc_rewrite_a2", "dsm-node-a", &["dsm-node-a"], &[]).await);
     tokio::spawn(axum::serve(la, a.clone()).into_future());
     tokio::spawn(axum::serve(la2, a2.clone()).into_future());
     // B, then B again over the same store with its configuration pointing at
@@ -358,14 +310,12 @@ async fn a_rewritten_cycle_is_kept_beside_the_first() {
     let b = app(node_state_on(
         b_db.clone(),
         "dsm-node-b",
-        "http://b.local",
         &set,
         &[("dsm-node-a", &ua)],
     ));
     let b2 = app(node_state_on(
         b_db,
         "dsm-node-b",
-        "http://b.local",
         &set,
         &[("dsm-node-a", &ua2)],
     ));
@@ -377,9 +327,36 @@ async fn a_rewritten_cycle_is_kept_beside_the_first() {
     let c1_rewritten = close(&a2).await.expect("rebuilt A closes cycle 1");
     assert_ne!(c1, c1_rewritten);
 
-    assert_eq!(sync(&b).await, 1);
-    assert_eq!(sync(&b2).await, 1, "the rewritten cycle 1 is new evidence");
+    assert_eq!(sync(&b).await, StatusCode::NO_CONTENT);
+    assert_eq!(sync(&b2).await, StatusCode::NO_CONTENT);
     let held = mirrored(&b, b"dsm-node-a", 1).await;
     assert_eq!(held.len(), 2, "both ByteCommits for cycle 1 are kept");
     assert!(held.contains(&c1) && held.contains(&c1_rewritten));
+}
+
+/// A node in no storage set has no set-mate to mirror: a sync is refused,
+/// never answered as though it found nothing new.
+#[tokio::test]
+async fn a_node_in_no_set_refuses_a_mirror_sync() {
+    let pool = common::fresh_store("bc_no_set").await;
+    let state = Arc::new(
+        AppState::new("dsm-node-z".to_string(), pool, common::set_client()).expect("app state"),
+    );
+    assert_eq!(sync(&app(state)).await, StatusCode::CONFLICT);
+}
+
+/// A set-mate that does not answer at its configured endpoint fails the
+/// sync; the node does not report the sync as done.
+#[tokio::test]
+async fn an_unreachable_set_mate_fails_the_sync() {
+    let (dead, dead_url) = listener().await;
+    drop(dead);
+    let b = app(node_state(
+        "bc_unreachable_b",
+        "dsm-node-b",
+        &["dsm-node-a", "dsm-node-b"],
+        &[("dsm-node-a", &dead_url)],
+    )
+    .await);
+    assert_eq!(sync(&b).await, StatusCode::BAD_GATEWAY);
 }

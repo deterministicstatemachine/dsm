@@ -1,6 +1,6 @@
 # DSM storage dev node 5: the production binary on localhost (ruling #2).
 # scripts/dev/start_dev_nodes.sh generates dev-pki/ (the dev CA, this node's
-# certificate, and the admin and gossip tokens) and creates the database.
+# certificate) and creates the database.
 
 [node]
 id = "dev-node-5"
@@ -15,12 +15,4 @@ key_path = "dev-pki/node5.key"
 ca_path = "dev-pki/ca.crt"
 
 [database]
-url = "postgresql://localhost:5432/dsm_storage_node5"
-
-[replication]
-peers = [
-  "https://127.0.0.1:8080",
-  "https://127.0.0.1:8081",
-  "https://127.0.0.1:8082",
-  "https://127.0.0.1:8083",
-]
+url = "postgresql://localhost:5432/dsm_storage_node5?sslmode=disable"

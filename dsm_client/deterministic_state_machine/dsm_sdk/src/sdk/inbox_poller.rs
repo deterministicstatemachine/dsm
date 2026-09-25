@@ -227,9 +227,9 @@ async fn run_inbox_sync_cycle_counted(source: &str) -> (u32, u32) {
 
     // Decode the Envelope response to get StorageSyncResponse.
     let (processed, pulled) = match decode_sync_response(&result.data) {
-        Some((p, pu)) => (p, pu),
-        None => {
-            log::debug!("[inbox_poller] Could not decode storage.sync response");
+        Ok(counts) => counts,
+        Err(e) => {
+            log::error!("[inbox_poller] storage.sync answer is not readable: {e}");
             return (0, 0);
         }
     };
@@ -272,17 +272,11 @@ fn push_inbox_event_to_webview(_pulled: u32, _processed: u32) {
     // No-op on non-Android / non-JNI builds.
 }
 
-/// Decode the framed Envelope response from storage.sync to extract
-/// the processed/pulled counts from StorageSyncResponse.
-fn decode_sync_response(data: &[u8]) -> Option<(u32, u32)> {
-    // Data is framed Envelope v3: [0x03][Envelope proto]
-    let envelope_bytes = if !data.is_empty() && data[0] == 0x03 {
-        &data[1..]
-    } else {
-        data
-    };
-
-    let envelope = dsm::envelope::from_canonical_bytes(envelope_bytes).ok()?;
+/// The `(processed, pulled)` counts of `storage.sync`'s answer. The router
+/// answers its own caller with a local answer (`pack_envelope_ok`: `[0x03]`
+/// framing, no sender headers, no message id), so it is read as one.
+fn decode_sync_response(data: &[u8]) -> Result<(u32, u32), String> {
+    let envelope = crate::handlers::response_helpers::decode_local_envelope(data)?;
     match envelope.payload {
         Some(generated::envelope::Payload::StorageSyncResponse(resp)) => {
             if !resp.errors.is_empty() {
@@ -292,9 +286,9 @@ fn decode_sync_response(data: &[u8]) -> Option<(u32, u32)> {
                     resp.errors
                 );
             }
-            Some((resp.processed, resp.pulled))
+            Ok((resp.processed, resp.pulled))
         }
-        _ => None,
+        _ => Err("storage.sync answered with a payload that is not a StorageSyncResponse".into()),
     }
 }
 
@@ -385,126 +379,61 @@ mod tests {
 
     // ── decode_sync_response ──
 
+    /// The answer as the router builds it for its own caller.
+    fn router_answer(payload: generated::envelope::Payload) -> Vec<u8> {
+        crate::handlers::response_helpers::pack_envelope_ok(payload).data
+    }
+
+    fn sync_answer(pulled: u32, processed: u32, errors: Vec<String>) -> Vec<u8> {
+        router_answer(generated::envelope::Payload::StorageSyncResponse(
+            generated::StorageSyncResponse {
+                success: true,
+                pulled,
+                processed,
+                pushed: 0,
+                errors,
+            },
+        ))
+    }
+
+    /// The poller reads `storage.sync`'s answer in the shape the router sends
+    /// it: a local answer, with no headers and no message id. Reading it as an
+    /// addressed envelope failed on every cycle, so the poller saw `(0, 0)`
+    /// and never announced a sync.
     #[test]
-    fn decode_empty_returns_none() {
-        assert!(decode_sync_response(&[]).is_none());
+    fn a_storage_sync_answer_as_the_router_frames_it_is_read() {
+        assert_eq!(decode_sync_response(&sync_answer(7, 3, vec![])), Ok((3, 7)));
+        assert_eq!(
+            decode_sync_response(&sync_answer(u32::MAX, u32::MAX - 1, vec!["e".into()])),
+            Ok((u32::MAX - 1, u32::MAX))
+        );
     }
 
     #[test]
-    fn decode_garbage_returns_none() {
-        assert!(decode_sync_response(&[0xFF, 0x01, 0x02, 0x03]).is_none());
+    fn an_answer_with_another_payload_is_an_error() {
+        let data = router_answer(generated::envelope::Payload::AppStateResponse(
+            generated::AppStateResponse {
+                key: "test".to_string(),
+                value: Some("val".to_string()),
+            },
+        ));
+        assert!(decode_sync_response(&data).is_err());
     }
 
     #[test]
-    fn decode_valid_envelope_with_sync_response() {
-        let sync_resp = generated::StorageSyncResponse {
-            success: true,
-            pulled: 7,
-            processed: 3,
-            pushed: 0,
-            errors: vec![],
-        };
-        let envelope = generated::Envelope {
-            version: 3,
-            headers: Some(generated::Headers {
-                device_id: vec![1; 32],
-                genesis_hash: vec![3; 32],
-            }),
-            message_id: vec![0u8; 16],
-            payload: Some(generated::envelope::Payload::StorageSyncResponse(sync_resp)),
-        };
-        let envelope_bytes = envelope.encode_to_vec();
-
-        // Without v3 frame prefix
-        let result = decode_sync_response(&envelope_bytes);
-        assert!(result.is_some());
-        let (processed, pulled) = result.unwrap();
-        assert_eq!(processed, 3);
-        assert_eq!(pulled, 7);
-    }
-
-    #[test]
-    fn decode_valid_envelope_with_v3_frame_prefix() {
-        let sync_resp = generated::StorageSyncResponse {
-            success: true,
-            pulled: 10,
-            processed: 5,
-            pushed: 2,
-            errors: vec![],
-        };
-        let envelope = generated::Envelope {
-            version: 3,
-            headers: Some(generated::Headers {
-                device_id: vec![1; 32],
-                genesis_hash: vec![3; 32],
-            }),
-            message_id: vec![0u8; 16],
-            payload: Some(generated::envelope::Payload::StorageSyncResponse(sync_resp)),
-        };
-        let envelope_bytes = envelope.encode_to_vec();
-
-        // With 0x03 frame prefix
-        let mut framed = vec![0x03];
-        framed.extend_from_slice(&envelope_bytes);
-
-        let result = decode_sync_response(&framed);
-        assert!(result.is_some());
-        let (processed, pulled) = result.unwrap();
-        assert_eq!(processed, 5);
-        assert_eq!(pulled, 10);
-    }
-
-    #[test]
-    fn decode_envelope_without_sync_payload_returns_none() {
-        let envelope = generated::Envelope {
-            version: 3,
-            headers: None,
-            message_id: vec![0u8; 16],
-            payload: None,
-        };
-        let data = envelope.encode_to_vec();
-        assert!(decode_sync_response(&data).is_none());
-    }
-
-    #[test]
-    fn decode_envelope_with_different_payload_returns_none() {
-        let app_state_resp = generated::AppStateResponse {
-            key: "test".to_string(),
-            value: Some("val".to_string()),
-        };
-        let envelope = generated::Envelope {
-            version: 3,
-            headers: None,
-            message_id: vec![0u8; 16],
-            payload: Some(generated::envelope::Payload::AppStateResponse(
-                app_state_resp,
-            )),
-        };
-        let data = envelope.encode_to_vec();
-        assert!(decode_sync_response(&data).is_none());
-    }
-
-    #[test]
-    fn decode_sync_response_zero_counts() {
-        let sync_resp = generated::StorageSyncResponse {
-            success: true,
-            pulled: 0,
-            processed: 0,
-            pushed: 0,
-            errors: vec![],
-        };
-        let envelope = generated::Envelope {
-            version: 3,
-            headers: Some(generated::Headers {
-                device_id: vec![1; 32],
-                genesis_hash: vec![3; 32],
-            }),
-            message_id: vec![0u8; 16],
-            payload: Some(generated::envelope::Payload::StorageSyncResponse(sync_resp)),
-        };
-        let data = envelope.encode_to_vec();
-        let result = decode_sync_response(&data).unwrap();
-        assert_eq!(result, (0, 0));
+    fn bytes_that_are_not_a_local_answer_are_an_error() {
+        for data in [
+            &[][..],
+            &[0x00],
+            &[0x03],
+            &[0xFF, 0x01, 0x02, 0x03],
+            &[0x03, 0xFF, 0xFF],
+        ] {
+            assert!(decode_sync_response(data).is_err(), "{data:?}");
+        }
+        // Unframed: the router always frames its answer.
+        let framed = sync_answer(1, 1, vec![]);
+        assert!(decode_sync_response(&framed[1..]).is_err());
     }
 
     // ── Poller state flags ──
@@ -529,72 +458,6 @@ mod tests {
         assert!(POLLER_RUNNING.load(Ordering::SeqCst));
         // Reset for other tests
         POLLER_RUNNING.store(false, Ordering::SeqCst);
-    }
-
-    // ── decode_sync_response: additional edge cases ──
-
-    #[test]
-    fn decode_single_byte_zero_returns_none() {
-        assert!(decode_sync_response(&[0x00]).is_none());
-    }
-
-    #[test]
-    fn decode_single_byte_v3_prefix_returns_none() {
-        assert!(decode_sync_response(&[0x03]).is_none());
-    }
-
-    #[test]
-    fn decode_v3_prefix_with_garbage_returns_none() {
-        let data = vec![0x03, 0xFF, 0xFF, 0xFF, 0xFF];
-        assert!(decode_sync_response(&data).is_none());
-    }
-
-    #[test]
-    fn decode_valid_response_large_counts() {
-        let sync_resp = generated::StorageSyncResponse {
-            success: true,
-            pulled: u32::MAX,
-            processed: u32::MAX - 1,
-            pushed: 100,
-            errors: vec!["err1".to_string()],
-        };
-        let envelope = generated::Envelope {
-            version: 3,
-            headers: Some(generated::Headers {
-                device_id: vec![1; 32],
-                genesis_hash: vec![3; 32],
-            }),
-            message_id: vec![0u8; 16],
-            payload: Some(generated::envelope::Payload::StorageSyncResponse(sync_resp)),
-        };
-        let data = envelope.encode_to_vec();
-        let (processed, pulled) = decode_sync_response(&data).unwrap();
-        assert_eq!(processed, u32::MAX - 1);
-        assert_eq!(pulled, u32::MAX);
-    }
-
-    #[test]
-    fn decode_ignores_success_flag() {
-        let sync_resp = generated::StorageSyncResponse {
-            success: false,
-            pulled: 1,
-            processed: 2,
-            pushed: 0,
-            errors: vec![],
-        };
-        let envelope = generated::Envelope {
-            version: 3,
-            headers: Some(generated::Headers {
-                device_id: vec![1; 32],
-                genesis_hash: vec![3; 32],
-            }),
-            message_id: vec![0u8; 16],
-            payload: Some(generated::envelope::Payload::StorageSyncResponse(sync_resp)),
-        };
-        let data = envelope.encode_to_vec();
-        let result = decode_sync_response(&data);
-        assert!(result.is_some());
-        assert_eq!(result.unwrap(), (2, 1));
     }
 
     // ── Constants: relationships ──

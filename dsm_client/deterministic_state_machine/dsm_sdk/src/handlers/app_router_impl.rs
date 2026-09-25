@@ -203,7 +203,8 @@ impl AppRouterImpl {
 
         // CoreSDK init uses the persisted device identity.
         // Note: AppRouterImpl is only installed AFTER genesis creation via BootstrapAdapter.
-        // Genesis state must exist before this constructor is called (MPC flow enforces this).
+        // Genesis state must exist before this constructor is called
+        // (`system.createGenesisV2` installs it first).
         let public_key = crate::sdk::app_state::AppState::get_public_key().ok_or_else(|| {
             dsm::types::error::DsmError::InvalidState(
                 "AppState public_key missing. Run genesis/identity setup before AppRouter init."

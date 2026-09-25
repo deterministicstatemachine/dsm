@@ -209,13 +209,6 @@ pub enum CutPreflight {
     OutstandingResyncs(usize),
 }
 
-// NOTE ON SCOPE, learned the hard way: `inbox_spool` is a STORAGE-NODE table
-// (`dsm_storage_node/src/db/{sqlite,pg}.rs`), not a client one. The B5/B6 drain
-// therefore cannot be checked from here — it runs per node, via
-// `dsm_storage_node::api::infra::hardening::spool_drain_preflight`. This
-// client-side half covers B3 only. A preflight that queried a table it does not
-// own would have failed closed at best and lied at worst.
-
 impl CutPreflight {
     /// Only `Clear` permits the upgrade.
     pub fn may_upgrade(&self) -> bool {
@@ -226,10 +219,11 @@ impl CutPreflight {
 /// Deployment preflight for the canonical tagged-hash cut — executable, not
 /// prose. See `docs/adr/0001-impact-table.md`.
 ///
-/// CLIENT-SIDE HALF, covering B3 only. A resync already in flight cannot be
-/// completed across the cut: the digest moves, so the two sides would derive
-/// different joint statements. The B5/B6 spool drain is the NODE-side half —
-/// `inbox_spool` lives on the storage node — and both must be clear.
+/// Covers B3: a resync already in flight cannot be completed across the cut,
+/// because the digest moves and the two sides would derive different joint
+/// statements. The B5/B6 message ids need no drain: the node's spool keeps
+/// every entry and deduplicates none (storage spec §8), and the recipient's
+/// replay check is keyed by what it decodes.
 ///
 /// **This check is only meaningful while producers are disabled.** Run it as
 /// step 3 of the documented sequence — disable producers and retries, let

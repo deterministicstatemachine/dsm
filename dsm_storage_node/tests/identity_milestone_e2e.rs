@@ -133,7 +133,6 @@ async fn the_milestone_path_works_end_to_end_with_no_legacy_anywhere() {
         &addr_b32,
         TAG_DSM_VAULT_STATE.source_bytes(),
         &ccb,
-        1,
     )
     .await
     .expect("put");
@@ -144,8 +143,7 @@ async fn the_milestone_path_works_end_to_end_with_no_legacy_anywhere() {
             &pool,
             &addr_b32,
             TAG_DSM_VAULT_STATE.source_bytes(),
-            &ccb,
-            2
+            &ccb
         )
         .await
         .expect("replay"),

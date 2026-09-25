@@ -27,7 +27,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  * to the Rust `system.createGenesisV2` handler. Rust derives `wallet_seed`, caches it in the
  * unlocked session, runs `create_genesis_v2`, installs the state, persists the public GenesisV2
  * record, and initializes the SDK context. There is NO C-DBRW, NO AntiCloneGate/silicon
- * enrollment, NO storage-node MPC, NO random genesis entropy, and NO persisted s0/Smaster.
+ * enrollment, NO random genesis entropy, and NO persisted s0/Smaster.
  * Anti-clone (offline bearer only) is the Boot Fenced Fused Anchor, never this path.
  *
  * Cold start ([bootstrapFromPrefs]) re-primes the persisted identity via `restore_identity_context`;

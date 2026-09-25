@@ -152,36 +152,40 @@ async fn mirror_read(
 /// Fetch every set-mate's new ByteCommits from the set-mate itself, at the
 /// endpoint this node's own configuration names for it. Anyone may ask;
 /// nothing the caller sends chooses a peer or supplies a byte. One sync runs
-/// at a time, and set-mates are fetched concurrently. Answers with the number
-/// of ByteCommits newly mirrored.
+/// at a time, and set-mates are fetched concurrently.
+///
+/// `204 No Content` once every set-mate answered and what it holds is
+/// mirrored. `409 Conflict` when this node is in no set, so has no set-mate
+/// to mirror. `502 Bad Gateway` when any set-mate did not answer or answered
+/// with something that is not its ByteCommit; what the others answered is
+/// kept.
 async fn mirror_sync(
     Extension(state): Extension<Arc<AppState>>,
     _body: Bytes,
 ) -> Result<Response, StatusCode> {
     let Some(set) = state.storage_set.clone() else {
-        // A node that is in no set mirrors no one.
-        return Ok(octets(0u64.to_be_bytes().to_vec()));
+        log::warn!("bytecommit mirror: this node is in no storage set");
+        return Err(StatusCode::CONFLICT);
     };
     let _one_at_a_time = state.mirror_sync.lock().await;
     let own = state.configured_member_id.as_str();
-    let client = state.replication_manager.http_client().clone();
+    let client = &state.set_client;
     let syncs = set
         .member_endpoints()
         .filter(|(member, _)| *member != own)
         .map(|(member, endpoint)| {
-            let (state, client) = (&state, &client);
+            let state = &state;
             async move {
                 sync_one(state, client, endpoint, member.as_bytes())
                     .await
-                    // One unreachable set-mate is liveness, never a reason to stop.
-                    .unwrap_or_else(|e| {
-                        log::warn!("bytecommit mirror: {member} at {endpoint}: {e}");
-                        0
-                    })
+                    .map_err(|e| log::warn!("bytecommit mirror: {member} at {endpoint}: {e}"))
             }
         });
-    let added: u64 = futures::future::join_all(syncs).await.into_iter().sum();
-    Ok(octets(added.to_be_bytes().to_vec()))
+    let outcomes = futures::future::join_all(syncs).await;
+    if outcomes.iter().any(Result::is_err) {
+        return Err(StatusCode::BAD_GATEWAY);
+    }
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 /// Fetch `path` from `member`'s configured endpoint and return its

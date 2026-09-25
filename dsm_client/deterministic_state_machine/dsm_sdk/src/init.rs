@@ -44,7 +44,7 @@ pub fn derive_device_signing_keypair(
         wallet_seed,
         genesis,
         0,
-        &dsm::core::identity::genesis_session::genesis_authority_policy_hash(),
+        &dsm::core::identity::genesis_v2::genesis_authority_policy_hash(),
     )
 }
 
@@ -95,7 +95,7 @@ pub fn current_smaster() -> Result<[u8; 32], dsm::types::error::DsmError> {
                 "wallet seed unavailable for Smaster re-derivation (wallet locked)".into(),
             )
         })?;
-    let aph = dsm::core::identity::genesis_session::genesis_authority_policy_hash();
+    let aph = dsm::core::identity::genesis_v2::genesis_authority_policy_hash();
     let s0 = derive_s0(&wallet_seed, &g, 0, &aph);
     Ok(derive_smaster(&s0, &g, &devid, &aph))
 }
@@ -123,7 +123,7 @@ pub fn current_chain_head_at_rest_key() -> Result<[u8; 32], dsm::types::error::D
                 "wallet seed unavailable for chain-head at-rest key (wallet locked)".into(),
             )
         })?;
-    let aph = dsm::core::identity::genesis_session::genesis_authority_policy_hash();
+    let aph = dsm::core::identity::genesis_v2::genesis_authority_policy_hash();
     let s0 = derive_s0(&wallet_seed, &g, 0, &aph);
     let mut hasher = dsm::crypto::blake3::dsm_domain_hasher_keyed(
         dsm::common::domain_tags::TAG_DSM_CHAIN_HEAD_AT_REST_V2,
@@ -689,7 +689,7 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
         // Inject BLE frame coordinator into BiImpl so offline sends dispatch over BLE.
         // Use a separate thread with its own runtime to avoid "Cannot start a runtime
         // within a runtime" when init_dsm_sdk is called from an async context (e.g.
-        // createGenesis's block_on future).
+        // the `system.createGenesisV2` route's block_on future).
         let coordinator = manager_arc.frame_coordinator().clone();
         let transport_adapter = manager_arc.transport_adapter().clone();
         let ble_inject_result = std::thread::spawn(move || {

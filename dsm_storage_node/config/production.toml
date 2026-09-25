@@ -4,25 +4,16 @@
 #   __NODE_ID__         — e.g. "dsm-node-1"
 #   __LISTEN_ADDR__     — e.g. "0.0.0.0"
 #   __PORT__            — e.g. 8080
-#   __DATABASE_URL__    — injected at deploy time from operator-provided settings
+#   __DATABASE_URL__    — injected at deploy time from operator-provided settings;
+#                         TLS is required unless the URL says sslmode=disable
 #
 # The storage set is NOT a placeholder: see the two-phase bring-up below.
 
 [node]
 id = "__NODE_ID__"
 
-# The network this node serves. NOT optional in practice: the canonical ERA
-# faucet identity is network-scoped (`era_faucet_id(network_id)`), so a node
-# without it logs "the faucet-ticket register is INACTIVE" and refuses every
-# ticket claim — economic admission cannot complete on a fleet missing this.
-# It is spelled here rather than left to the operator because the 2026-09-05
-# Alibaba fleet shipped without it and the gap went unnoticed until a device
-# run needed the faucet.
-network_id = "dsm-testnet"
-
-# THE CANONICAL STORAGE SET this node belongs to — required before the
-# settlement-slot claim register will accept anything (absent ⇒ the register is
-# INACTIVE on this node and every claim is refused, fail-closed).
+# THE CANONICAL STORAGE SET this node belongs to. Absent, the node serves the
+# storage contract and mirrors no set-mate (the phase-1 state below).
 #
 # Rules, all load-bearing:
 #   * list EVERY member of the set, including this node; this node's own
@@ -46,9 +37,7 @@ network_id = "dsm-testnet"
 # a node that kept its key but lost its register MUST come back as a different
 # member. So no generator can know these values in advance:
 #
-#   Phase 1 — deploy every node with this section COMMENTED OUT. The register is
-#             inactive and every claim is refused, which is the correct state for
-#             a fleet that has not yet agreed on a set. Each node logs
+#   Phase 1 — deploy every node with this section COMMENTED OUT. Each node logs
 #             `register incarnation for node <id>: <Base32-Crockford>` at startup.
 #   Phase 2 — collect those values, write the full member list into EVERY node's
 #             config below and into the client env config's `[[nodes]]` entries,
@@ -82,28 +71,10 @@ max_connections = 256
 [tls]
 cert_path = "/certs/node.crt"
 key_path  = "/certs/node.key"
-ca_path   = "/certs/ca.crt"    # the storage set's CA: replication pins peers to it
+ca_path   = "/certs/ca.crt"    # the storage set's CA: mirror sync pins set-mates to it
 
 [database]
 url = "__DATABASE_URL__"
 
 [http]
 body_limit_bytes = 1048576    # 1 MiB
-
-[security_headers]
-hsts_max_age = 31536000       # 1 year
-
-[replication]
-# Peers are listed here; generate_node_configs.sh fills them in at deploy time.
-peers = []
-
-[paidk]
-flat_rate = 1000     # Minimum payment amount per operator
-k = 3                # Distinct operators required for spend-gate satisfaction
-
-[registry]
-grace_cycles = 8     # New nodes protected from Down signals for this many cycles
-discovery_window = 4 # Signal aggregation window (cycles)
-n = 6                # Target node count
-u_up = 0.85          # Utilization threshold for Up signal validity
-u_down = 0.35        # Utilization threshold for Down signal validity

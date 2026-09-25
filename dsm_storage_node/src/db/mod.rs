@@ -14,7 +14,7 @@ pub(crate) mod test_store;
 #[cfg(test)]
 mod cell_properties;
 
-/// The immutable-object and device-tree properties of the store.
+/// The immutable-object properties of the store.
 #[cfg(test)]
 mod store_properties;
 

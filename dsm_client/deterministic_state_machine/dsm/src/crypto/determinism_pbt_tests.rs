@@ -9,7 +9,7 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::core::identity::genesis_session::derive_smaster;
+    use crate::core::identity::genesis_v2::derive_smaster;
     use crate::crypto::sphincs::{generate_keypair_from_seed, SphincsVariant};
     use crate::crypto::kyber::generate_kyber_keypair_from_entropy;
     use crate::crypto::canonical_lp::{hash_lp1, hash_lp2, hash_lp3};

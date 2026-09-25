@@ -1,7 +1,0 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
-
-//! Cross-cutting infrastructure: admin endpoints, hardening helpers,
-//! rate-limiting middleware, and network-config detection.
-
-pub mod admin;
-pub mod hardening;
