@@ -2,11 +2,9 @@
 
 //! # DSM Storage Node Binary
 //!
-//! Index-only, clockless, signature-free storage node for the DSM network.
-//! Serves protobuf-only HTTP/2 endpoints for genesis anchoring, ByteCommit
-//! mirroring, DLV slot management, unilateral b0x transport, and inter-node
-//! replication. (Capacity/scaling parameters are configured at runtime via the
-//! `[replication]` config section and `ReplicationConfig`, not hardcoded here.)
+//! Clockless storage node for the DSM network. Serves protobuf-only
+//! endpoints for the storage contract (keyed cells, indexes, the immutable
+//! object store), ByteCommits and their mirror, and the b0x inbox spool.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -22,7 +20,7 @@ use std::sync::Once;
 
 use dsm::utils::text_id;
 
-use dsm_storage_node::{db, replication, AppState};
+use dsm_storage_node::{db, set_client, AppState};
 
 #[derive(Parser, Debug)]
 #[clap(version = "1.0", author = "DSM Core Team")]
@@ -43,9 +41,7 @@ struct ServerConfig {
     /// peers to.
     set_ca_path: String,
     body_limit_bytes: usize,
-    hsts_max_age: u64,
     database_url: String,
-    seed_peers: Vec<String>,
     /// `[[storage_set.members]]` — each member's id and register incarnation.
     storage_set_members: Vec<(String, [u8; 32])>,
     /// `endpoint` on `[[storage_set.members]]` — where each set-mate is
@@ -61,32 +57,31 @@ fn required(settings: &Config, key: &str) -> Result<String> {
         .with_context(|| format!("the node's config names no `{key}`"))
 }
 
+/// A setting the node has a stated default for: absent is the default, and a
+/// value of the wrong type or out of range is an error, never the default.
+fn optional_positive(settings: &Config, key: &str, default: usize) -> Result<usize> {
+    match settings.get_int(key) {
+        Ok(v) => usize::try_from(v)
+            .ok()
+            .filter(|v| *v > 0)
+            .with_context(|| format!("`{key}` is {v}; it must be a positive integer")),
+        Err(config::ConfigError::NotFound(_)) => Ok(default),
+        Err(e) => Err(e).with_context(|| format!("`{key}` is not an integer")),
+    }
+}
+
 fn load_server_config(opts: &Opts) -> Result<ServerConfig> {
     let settings = Config::builder()
         .add_source(File::with_name(&opts.config).required(true))
         .build()?;
 
-    let concurrency_limit = settings
-        .get_int("network.max_connections")
-        .unwrap_or(256)
-        .max(1) as usize;
-    let body_limit_bytes = settings.get_int("http.body_limit_bytes").unwrap_or(1048576) as usize;
-    let hsts_max_age = settings
-        .get_int("security_headers.hsts_max_age")
-        .unwrap_or(31536000) as u64;
+    let concurrency_limit = optional_positive(&settings, "network.max_connections", 256)?;
+    let body_limit_bytes = optional_positive(&settings, "http.body_limit_bytes", 1_048_576)?;
 
     let tls_cert_path = required(&settings, "tls.cert_path")?;
     let tls_key_path = required(&settings, "tls.key_path")?;
     let set_ca_path = required(&settings, "tls.ca_path")?;
     let database_url = required(&settings, "database.url")?;
-
-    // Extract seed peers from [replication] config section.
-    let seed_peers: Vec<String> = settings
-        .get_array("replication.peers")
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|v| v.into_string().ok())
-        .collect();
 
     // The canonical storage set this node is a member of:
     //
@@ -95,7 +90,7 @@ fn load_server_config(opts: &Opts) -> Result<ServerConfig> {
     //     register_incarnation = "<Base32-Crockford of 32 bytes>"
     //     endpoint = "https://10.0.0.1:8080"   # required for every other member
     //
-    // Absent = the settlement-slot register is inactive (fail closed);
+    // Absent = this node is in no set yet (it has no set-mates to mirror);
     // present but not containing this node's own id = misconfiguration,
     // refused at startup. The incarnation is REQUIRED per member: a set id is
     // a function of `(member_id, register_incarnation)` pairs, so a member
@@ -103,45 +98,45 @@ fn load_server_config(opts: &Opts) -> Result<ServerConfig> {
     // derived over. A malformed entry refuses rather than defaulting, because
     // a defaulted incarnation would resolve every set to whatever the default
     // hashed to.
-    let storage_set_entries: Vec<(String, [u8; 32], Option<String>)> = settings
+    let storage_set_entries: Vec<(String, [u8; 32], Option<String>)> = match settings
         .get_array("storage_set.members")
-        .unwrap_or_default()
-        .into_iter()
-        .map(|v| {
-            let t = v
-                .into_table()
-                .map_err(|e| anyhow::anyhow!("[[storage_set.members]] is not a table: {e}"))?;
-            let id = t
-                .get("id")
-                .and_then(|v| v.clone().into_string().ok())
-                .ok_or_else(|| anyhow::anyhow!("[[storage_set.members]] is missing `id`"))?;
-            let inc_text = t
-                .get("register_incarnation")
-                .and_then(|v| v.clone().into_string().ok())
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "[[storage_set.members]] {id:?} is missing `register_incarnation`"
-                    )
-                })?;
-            let raw = text_id::decode_base32_crockford(&inc_text).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "[[storage_set.members]] {id:?} register_incarnation is not Base32-Crockford"
-                )
+    {
+        Ok(members) => members,
+        Err(config::ConfigError::NotFound(_)) => Vec::new(),
+        Err(e) => return Err(e).context("`storage_set.members` is not an array of tables"),
+    }
+    .into_iter()
+    .map(|v| {
+        let t = v
+            .into_table()
+            .map_err(|e| anyhow::anyhow!("[[storage_set.members]] is not a table: {e}"))?;
+        let id = t
+            .get("id")
+            .and_then(|v| v.clone().into_string().ok())
+            .ok_or_else(|| anyhow::anyhow!("[[storage_set.members]] is missing `id`"))?;
+        let inc_text = t
+            .get("register_incarnation")
+            .and_then(|v| v.clone().into_string().ok())
+            .ok_or_else(|| {
+                anyhow::anyhow!("[[storage_set.members]] {id:?} is missing `register_incarnation`")
             })?;
-            let inc: [u8; 32] = raw.try_into().map_err(|_| {
-                anyhow::anyhow!(
-                    "[[storage_set.members]] {id:?} register_incarnation is not 32 bytes"
-                )
-            })?;
-            let endpoint = match t.get("endpoint") {
-                None => None,
-                Some(v) => Some(v.clone().into_string().map_err(|_| {
-                    anyhow::anyhow!("[[storage_set.members]] {id:?} endpoint is not a string")
-                })?),
-            };
-            Ok((id, inc, endpoint))
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
+        let raw = text_id::decode_base32_crockford(&inc_text).ok_or_else(|| {
+            anyhow::anyhow!(
+                "[[storage_set.members]] {id:?} register_incarnation is not Base32-Crockford"
+            )
+        })?;
+        let inc: [u8; 32] = raw.try_into().map_err(|_| {
+            anyhow::anyhow!("[[storage_set.members]] {id:?} register_incarnation is not 32 bytes")
+        })?;
+        let endpoint = match t.get("endpoint") {
+            None => None,
+            Some(v) => Some(v.clone().into_string().map_err(|_| {
+                anyhow::anyhow!("[[storage_set.members]] {id:?} endpoint is not a string")
+            })?),
+        };
+        Ok((id, inc, endpoint))
+    })
+    .collect::<anyhow::Result<Vec<_>>>()?;
     let storage_set_endpoints: Vec<(String, String)> = storage_set_entries
         .iter()
         .filter_map(|(id, _, e)| e.clone().map(|e| (id.clone(), e)))
@@ -166,9 +161,7 @@ fn load_server_config(opts: &Opts) -> Result<ServerConfig> {
         tls_key_path,
         set_ca_path,
         body_limit_bytes,
-        hsts_max_age,
         database_url,
-        seed_peers,
         storage_set_members,
         storage_set_endpoints,
     })
@@ -234,43 +227,15 @@ async fn async_main() -> Result<()> {
         .await
         .context("failed to initialize database schema")?;
 
-    info!(
-        "Initializing replication manager (pinned to the set's CA, {} seed peers)...",
-        server_config.seed_peers.len()
-    );
     let set_ca_pem = std::fs::read(&server_config.set_ca_path).with_context(|| {
         format!(
             "failed to read the storage set's CA certificate at {}",
             server_config.set_ca_path
         )
     })?;
-    let replication_manager = Arc::new(
-        replication::ReplicationManager::new(
-            replication::default_production_config(),
-            server_config.node_id.clone(),
-            format!(
-                "https://{}:{}",
-                server_config.bind_addr.ip(),
-                server_config.bind_addr.port()
-            ),
-            &set_ca_pem,
-            server_config.seed_peers.clone(),
-        )
-        .map_err(|e| anyhow::anyhow!("Failed to create replication manager: {}", e))?,
-    );
-
-    let bind_addr_str = format!(
-        "https://{}:{}",
-        server_config.bind_addr.ip(),
-        server_config.bind_addr.port()
-    );
-    let mut state = AppState::new(
-        server_config.node_id.clone(),
-        &bind_addr_str,
-        Some(server_config.hsts_max_age),
-        db_pool.clone(),
-        replication_manager,
-    );
+    let set_client = set_client::pinned_set_client(&set_ca_pem)
+        .context("failed to build the client pinned to the storage set's CA")?;
+    let mut state = AppState::new(server_config.node_id.clone(), db_pool.clone(), set_client)?;
     // ESTABLISHED AND LOGGED UNCONDITIONALLY, before any set is considered.
     //
     // The incarnation is a property of this node's register, not of its
@@ -281,7 +246,6 @@ async fn async_main() -> Result<()> {
     let own_incarnation = db::register_incarnation(&db_pool)
         .await
         .context("failed to establish this node's register incarnation")?;
-    state = state.with_register_incarnation(own_incarnation);
     log::info!(
         "register incarnation for node {}: {}",
         server_config.node_id,
@@ -307,19 +271,17 @@ async fn async_main() -> Result<()> {
         state = state.with_storage_set(set);
     } else {
         log::warn!(
-            "no [storage_set] configured — the settlement-slot register is INACTIVE on this node \
-             (every claim is refused)"
+            "no [storage_set] configured: this node serves the storage contract and mirrors no \
+             set-mate; name its members, with the incarnation above for this node, to join a set"
         );
     }
 
     let app_state = Arc::new(state.clone());
 
     // The one assembly the node serves (`dsm_storage_node::build_app`), shared
-    // with tests that stand up real nodes. No wall-clock maintenance loop:
-    // maintenance is invoked explicitly with deterministic tick inputs.
+    // with tests that stand up real nodes.
     let app = dsm_storage_node::build_app(
         app_state.clone(),
-        &server_config.node_id,
         dsm_storage_node::AppLimits {
             body_limit_bytes: server_config.body_limit_bytes,
             concurrency_limit: server_config.concurrency_limit,
@@ -330,14 +292,6 @@ async fn async_main() -> Result<()> {
         "DSM storage node ready (node {} addr {})",
         server_config.node_id, server_config.bind_addr
     );
-
-    // ---------------------------------------------------------------------
-    // Cleanup policy (clockless)
-    // ---------------------------------------------------------------------
-    // IMPORTANT: This storage node is clockless at the protocol boundary.
-    // We intentionally do NOT run periodic cleanup using wall-clock time.
-    // Expired object pruning is instead invoked explicitly via admin tooling
-    // by supplying a deterministic `before_iter` value.
 
     // Graceful shutdown with handle pattern
     let handle = axum_server::Handle::new();
@@ -383,8 +337,6 @@ async fn async_main() -> Result<()> {
 #[cfg(test)]
 #[allow(clippy::disallowed_methods)] // unwrap/expect acceptable in deterministic tests
 mod tests {
-    use dsm::common::domain_tags::{TAG_DSM_BYTECOMMIT, TAG_DSM_NODE_ID};
-
     const WHOLE_CONFIG: &str = r#"
 [node]
 id = "node-under-test"
@@ -459,28 +411,51 @@ url = "postgresql://127.0.0.1:5432/node"
         );
     }
 
-    /// Central storage-related tags remain ASCII `DSM/` domains.
-    ///
-    /// REWRITTEN for the canonical encoder. This used to build `format!("{tag}\0")`
-    /// and assert the result ended with a NUL — i.e. it checked that the TEST
-    /// could append a delimiter, which was true by construction and proved
-    /// nothing about the hasher. The delimiter now belongs to `tagged_hasher`
-    /// alone and a tag carrying its own is unrepresentable, so the meaningful
-    /// statement is about the SOURCE bytes.
+    /// A setting with a stated default takes the default only when it is
+    /// absent. A value of the wrong type, zero or negative is refused by name
+    /// rather than quietly read as the default.
     #[test]
-    fn node_id_domain_tags_are_ascii_dsm_and_carry_no_delimiter() {
-        for tag in [TAG_DSM_NODE_ID, TAG_DSM_BYTECOMMIT] {
-            let b = tag.source_bytes();
-            let shown = String::from_utf8_lossy(b);
-            assert!(b.is_ascii(), "domain tag must be ASCII: {shown}");
-            assert!(
-                b.starts_with(b"DSM/"),
-                "domain tag must use DSM/ prefix: {shown}"
-            );
-            assert!(
-                !b.contains(&0),
-                "the delimiter belongs to the encoder, never the tag: {shown}"
-            );
+    fn a_limit_of_the_wrong_type_or_out_of_range_is_refused_by_name() {
+        let whole = load(WHOLE_CONFIG).expect("the whole config loads");
+        assert_eq!(whole.concurrency_limit, 256);
+        assert_eq!(whole.body_limit_bytes, 1_048_576);
+
+        let with = |extra: &str| format!("{WHOLE_CONFIG}\n{extra}\n");
+        let set = load(&with("[http]\nbody_limit_bytes = 4096")).expect("a stated limit loads");
+        assert_eq!(set.body_limit_bytes, 4096);
+        for (extra, key) in [
+            (
+                "[http]\nbody_limit_bytes = \"lots\"",
+                "http.body_limit_bytes",
+            ),
+            ("[http]\nbody_limit_bytes = 0", "http.body_limit_bytes"),
+            ("[http]\nbody_limit_bytes = -1", "http.body_limit_bytes"),
+        ] {
+            let err = match load(&with(extra)) {
+                Ok(_) => panic!("`{extra}` is refused"),
+                Err(e) => format!("{e:#}"),
+            };
+            assert!(err.contains(key), "the refusal names `{key}`: {err}");
         }
+        let err = match load(
+            &WHOLE_CONFIG.replace("port = 8443", "port = 8443\nmax_connections = [1]"),
+        ) {
+            Ok(_) => panic!("a non-integer max_connections is refused"),
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(err.contains("network.max_connections"), "{err}");
+    }
+
+    /// `storage_set.members` of the wrong shape is refused, never read as
+    /// "no set".
+    #[test]
+    fn storage_set_members_of_the_wrong_shape_are_refused() {
+        let err = match load(&format!(
+            "{WHOLE_CONFIG}\n[storage_set]\nmembers = \"n1\"\n"
+        )) {
+            Ok(_) => panic!("a string for storage_set.members is refused"),
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(err.contains("storage_set.members"), "{err}");
     }
 }

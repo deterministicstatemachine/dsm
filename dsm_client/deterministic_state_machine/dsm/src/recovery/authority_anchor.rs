@@ -12,7 +12,7 @@
 //! `K_A_pub` CANNOT be a genesis field: the recovery mnemonic is generated only when
 //! the user enables NFC backup (`recovery_sdk::derive_and_cache_key`, reached via the
 //! `recovery.enable` route), which happens AFTER genesis creation — the mnemonic is
-//! not in scope when `create_genesis_via_blind_mpc*` runs. So the authority is
+//! not in scope when genesis is created. So the authority is
 //! anchored by a separate **declaration chained off genesis**:
 //!
 //! - It is signed by the device's **genesis signing key** (`GenesisState::signing_key`),

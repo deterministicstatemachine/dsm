@@ -397,7 +397,10 @@ fn get_database_path() -> Result<PathBuf> {
 /// device's own position resolves after its walk recorded the generation its
 /// exercise produced, and the resolution needs the leaves of the generation
 /// the exercise was built on.
-pub const CLIENT_DB_SCHEMA_VERSION: i64 = 19;
+///
+/// 20: `genesis_records` holds what the mnemonic-rooted genesis produces and
+/// nothing else: no participant or contribution columns.
+pub const CLIENT_DB_SCHEMA_VERSION: i64 = 20;
 
 /// A 32-byte column, exactly. Any other length is a corrupt row and an error —
 /// never padded, never truncated.
@@ -466,13 +469,10 @@ fn create_schema(conn: &Connection) -> Result<()> {
         CREATE TABLE IF NOT EXISTS genesis_records(
             genesis_id        TEXT PRIMARY KEY,
             device_id         TEXT NOT NULL,
-            mpc_proof         TEXT NOT NULL,
             device_birth_binding      TEXT NOT NULL,
             merkle_root       TEXT NOT NULL,
-            participant_count INTEGER NOT NULL,
             chain_tip         TEXT NOT NULL,
             publication_hash  TEXT NOT NULL,
-            storage_nodes     TEXT NOT NULL,
             entropy_hash      TEXT NOT NULL,
             protocol_version  TEXT NOT NULL,
             hash_chain_proof  BLOB,
@@ -1647,13 +1647,10 @@ mod tests {
         let rec = GenesisRecord {
             genesis_id: "gen-123".into(),
             device_id: "dev-456".into(),
-            mpc_proof: "mpc".into(),
             device_birth_binding: "bind".into(),
             merkle_root: "root".into(),
-            participant_count: 3,
             progress_marker: "P".into(),
             publication_hash: "pub".into(),
-            storage_nodes: vec!["n1".into(), "n2".into()],
             entropy_hash: "e".into(),
             protocol_version: "1.0".into(),
             hash_chain_proof: None,
@@ -1673,7 +1670,6 @@ mod tests {
         };
         let latest = latest_opt.unwrap_or_else(|| panic!("no verified genesis record"));
         assert_eq!(latest.genesis_id, "gen-123");
-        assert_eq!(latest.participant_count, 3);
         assert!(latest.hash_chain_proof.is_some());
         assert!(latest.smt_proof.is_some());
     }
@@ -2469,10 +2465,8 @@ mod tests {
             "a relationship mid-resync cannot complete across the cut — its \
              in-flight joint statement was derived under the pre-cut digest"
         );
-        // The spool half is NODE-side, and scoped to the holders of the
-        // affected traffic rather than to the fleet — see
-        // dsm_storage_node::api::infra::hardening::spool_drain_preflight.
-        // This enum deliberately does not model a table this process does not own.
+        // The node's spool keeps every entry and deduplicates none, so no
+        // spool row has to be drained before the cut.
     }
 
     /// ANTI-VACUITY for the B3 arm, and the third of the three B3 checks: a

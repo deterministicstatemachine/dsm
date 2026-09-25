@@ -32,7 +32,6 @@ services:
         condition: service_healthy
     ports:
       - "${DSM_PORT:-8080}:8080"
-      - "${DSM_METRICS_PORT:-9090}:9090"
     volumes:
       - ./config:/config:ro
       - ./certs:/certs:ro

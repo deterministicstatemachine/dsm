@@ -196,7 +196,7 @@ pub fn create_identity(seed: u8) -> TestIdentity {
         inputs.wallet_index,
         inputs.device_slot,
         inputs.genesis_version,
-        &dsm::core::identity::genesis_session::genesis_authority_policy_hash(),
+        &dsm::core::identity::genesis_v2::genesis_authority_policy_hash(),
     )
     .expect("v3 genesis");
     let network = String::from_utf8(NETWORK.to_vec()).expect("network id is UTF-8");

@@ -13,8 +13,8 @@
 //! - **Bilateral management** ([`bilateral_transaction_manager`]):
 //!   Isolated bilateral state pairs with cross-chain continuity verification, forward-linked
 //!   commitments, and chain-tip tracking as described in whitepaper Section 3.4.
-//! - **Identity lifecycle** ([`identity`]): Genesis state creation via MPC, hierarchical
-//!   device management, and device tree maintenance.
+//! - **Identity** ([`identity`]): mnemonic-rooted genesis (Genesis v2/v3), the
+//!   device directory entry, and the P0–P6 device-authority resolver.
 //! - **Token subsystem** ([`token`]): Token type definitions, conservation invariant
 //!   enforcement (`B_{n+1} = B_n + Delta, B >= 0`), and policy validation via CPTA anchors.
 //! - **Contact management** ([`contact_manager`]): Counterparty identity storage and

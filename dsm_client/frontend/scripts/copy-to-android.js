@@ -90,40 +90,5 @@ if (fs.existsSync(overlayDir)) {
   copyRecursive(overlayDir, targetDir);
 }
 
-// Inject MPC API key from environment into the assets TOML if provided.
-// Single source of truth for config: android/app/src/main/assets/dsm_env_config.toml
-// Do NOT add any other code that copies over that file — it will break allow_localhost.
-try {
-  const assetsToml = path.join(targetDir, 'dsm_env_config.toml');
-  const envKey = process.env.DSM_MPC_API_KEY && String(process.env.DSM_MPC_API_KEY);
-  const envKeyFile = process.env.DSM_MPC_API_KEY_FILE && String(process.env.DSM_MPC_API_KEY_FILE);
-  let keyToUse = '';
-  if (envKey && envKey.trim().length > 0) {
-    keyToUse = envKey.trim();
-  } else if (envKeyFile && envKeyFile.trim().length > 0) {
-    try {
-      keyToUse = fs.readFileSync(envKeyFile.trim(), 'utf8').trim();
-    } catch (e) {
-      console.warn(`Warning: Failed to read DSM_MPC_API_KEY_FILE: ${e.message}`);
-    }
-  }
-
-  if (keyToUse && keyToUse.length > 0 && fs.existsSync(assetsToml)) {
-    let toml = fs.readFileSync(assetsToml, 'utf8');
-    const line = `mpc_api_key = "${keyToUse.replace(/"/g, '\\"')}"`;
-    if (/^\s*mpc_api_key\s*=\s*".*"/m.test(toml)) {
-      toml = toml.replace(/^\s*mpc_api_key\s*=\s*".*"/m, line);
-    } else if (/^\s*#\s*mpc_api_key\s*=\s*".*"/m.test(toml)) {
-      toml = toml.replace(/^\s*#\s*mpc_api_key\s*=\s*".*"/m, line);
-    } else {
-      toml = toml.trimEnd() + "\n" + line + "\n";
-    }
-    fs.writeFileSync(assetsToml, toml);
-    const masked = keyToUse.length <= 6 ? '*'.repeat(keyToUse.length) : `${keyToUse.slice(0,3)}***${keyToUse.slice(-2)}`;
-    console.log(`Injected DSM_MPC_API_KEY into dsm_env_config.toml (value masked: ${masked})`);
-  } else {
-    console.log('Info: DSM_MPC_API_KEY not set; dsm_env_config.toml left as-is.');
-  }
-} catch (e) {
-  console.warn('Warning: Failed to inject DSM_MPC_API_KEY into TOML:', e.message);
-}
+// Single source of truth for config: android/app/src/main/assets/dsm_env_config.toml.
+// Do NOT add code that copies over that file — it will break allow_localhost.

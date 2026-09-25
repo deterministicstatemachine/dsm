@@ -447,13 +447,10 @@ impl CircuitBreaker {
     }
 }
 
-/// Transport-local spool id for an acceptance reply. 16 opaque bytes derived
-/// from the transition's own commitment (never wall-clock), stable across
-/// reposts so a redelivery collapses onto the same `inbox_spool` row.
-///
-/// IMPACT-TABLE ROW B5. The domain literal used to carry its own NUL and was
-/// handed to `dsm_domain_hasher`, which appends another — a DOUBLED NUL.
-/// Extracted from `submit_acceptance_reply` so the move can carry a vector.
+/// Spool message id for an acceptance reply: 16 opaque bytes derived from the
+/// transition's own commitment (never wall-clock), stable across reposts so
+/// the recipient's replay check recognizes a redelivery (impact-table row
+/// B5).
 pub(crate) fn reply_message_id(commitment: &[u8], sender_projection_tip: &[u8]) -> Vec<u8> {
     let mut h =
         dsm::crypto::blake3::dsm_domain_hasher(dsm::tagged_domain!(b"DSM/b0x-reply-message-id"));
@@ -2491,13 +2488,21 @@ impl B0xSDK {
                     break;
                 }
                 for sequenced in batch.envelopes {
-                    let Some(env) = sequenced.envelope else {
-                        warn!(
-                            "b0x retrieve from {}: seq {} carries no envelope",
-                            epc, sequenced.seq_num
-                        );
-                        consumed_run = false;
-                        continue;
+                    // The node never opens what it holds (storage spec §8);
+                    // this device decodes. Bytes that are not a canonical
+                    // envelope never will be, so nothing waits on them.
+                    let env = match dsm::envelope::from_canonical_bytes(&sequenced.envelope) {
+                        Ok(env) => env,
+                        Err(e) => {
+                            warn!(
+                                "b0x retrieve from {}: seq {} is not an envelope: {}",
+                                epc, sequenced.seq_num, e
+                            );
+                            if consumed_run {
+                                position = position.max(sequenced.seq_num + 1);
+                            }
+                            continue;
+                        }
                     };
                     let id = text_id::encode_base32_crockford(&env.message_id);
                     if b0x_consumed::is_consumed(b0x_address, &id).map_err(local)? {
@@ -2827,15 +2832,10 @@ mod tests {
 
     /// IMPACT-TABLE ROWS B5 and B6, asserted in both directions.
     ///
-    /// Both derive a transport-local `inbox_spool` id. The old spelling carried
-    /// its own NUL into `dsm_domain_hasher`, which appends another, so the
-    /// preimage began `"…id" || 0x00 || 0x00`. Reconstructed explicitly below.
-    ///
-    /// Consequence of the move, and why the drain procedure exists: the spool
-    /// dedupes on `message_id UNIQUE` with `INSERT OR IGNORE`, so a message
-    /// spooled under the old id will NOT collapse onto a repost computed under
-    /// the new one. An unacked row with a NULL `expires_at_iter` is purged by
-    /// neither expiry sweep, so it persists until drained.
+    /// Both derive a spool message id. The double-NUL spelling carried its own
+    /// NUL into `dsm_domain_hasher`, which appends another, so its preimage
+    /// began `"…id" || 0x00 || 0x00`; it is reconstructed below to show the
+    /// id moved.
     #[test]
     fn b5_and_b6_message_ids_moved_off_the_double_nul_digest() {
         fn old_id(tag_with_nul: &[u8], parts: &[&[u8]]) -> Vec<u8> {

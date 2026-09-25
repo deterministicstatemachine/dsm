@@ -1,12 +1,10 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Storage node DB layer (clean, DLV-only)
-//! Minimal schema + helpers used by the DLV-backed object store.
+//! Storage node DB layer: the Postgres schema this build serves, the
+//! durable-write posture, and every query a handler makes.
 
 use anyhow::{anyhow, bail, Result};
-use deadpool_postgres::Runtime; // Added Runtime import
-use deadpool_postgres::{ManagerConfig, Pool, RecyclingMethod};
-// use tokio_postgres::Row; // removed: no longer mapping rows to SlotRecord
+use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod, Runtime};
 use tokio_postgres_rustls::MakeRustlsConnect;
 
 /// Create a TLS connector for PostgreSQL connections using webpki root certificates.
@@ -207,7 +205,7 @@ pub async fn register_incarnation(pool: &Pool) -> Result<[u8; 32]> {
 /// older, newer or unversioned database is refused, and is reprovisioned, not
 /// transformed. The schema version is its own axis — not the protocol version,
 /// and not the register incarnation, which names this node's register history.
-pub const SCHEMA_VERSION: i32 = 1;
+pub const SCHEMA_VERSION: i32 = 2;
 
 /// The DDL of [`SCHEMA_VERSION`], run once, on an empty database, in one
 /// transaction with the version row.
@@ -249,43 +247,24 @@ const SCHEMA_DDL: &str = r#"
     );
     CREATE INDEX index_entries_by_locator ON index_entries (locator, seq);
 
-    CREATE TABLE dlv_slots (
-        dlv_id         BYTEA PRIMARY KEY,
-        capacity_bytes BIGINT NOT NULL,
-        used_bytes     BIGINT NOT NULL,
-        stake_hash     BYTEA NOT NULL
-    );
-
-    -- The b0x inbox spool: append-only, per device, read from a position.
-    -- Which messages a device has consumed is the device's own state.
+    -- The b0x inbox spool: append-only, per spool key, read from a
+    -- position. Envelopes are bytes the node never opens; nothing is
+    -- deduplicated. Which messages a device has consumed is the device's own
+    -- state (storage spec §8).
     CREATE TABLE inbox_spool (
         id         BIGSERIAL PRIMARY KEY,
         device_id  TEXT NOT NULL,
-        message_id TEXT NOT NULL UNIQUE,
         envelope   BYTEA NOT NULL,
         seq_num    BIGINT NOT NULL
     );
-    CREATE INDEX idx_inbox_spool_device_seq ON inbox_spool (device_id, seq_num);
-
-    -- One validated Device Tree state per genesis; `version_number` is the
-    -- monotone counter the PUT /devtree/root validator enforces.
-    CREATE TABLE device_tree_states (
-        genesis_b32     TEXT PRIMARY KEY,
-        version_number  BIGINT NOT NULL,
-        device_count    BIGINT NOT NULL,
-        root_hash       BYTEA NOT NULL,
-        payload         BYTEA NOT NULL,
-        updated_at_tick BIGINT NOT NULL
-    );
-    CREATE INDEX idx_device_tree_states_version ON device_tree_states (genesis_b32, version_number);
+    CREATE UNIQUE INDEX idx_inbox_spool_device_seq ON inbox_spool (device_id, seq_num);
 
     -- The immutable object store, keyed by the content address addr(N, P);
     -- write-once: no UPDATE and no DELETE statement exists against it.
     CREATE TABLE immutable_objects (
-        addr_b32           TEXT PRIMARY KEY,
-        namespace          BYTEA NOT NULL,
-        payload            BYTEA NOT NULL,
-        first_written_tick BIGINT NOT NULL
+        addr_b32  TEXT PRIMARY KEY,
+        namespace BYTEA NOT NULL,
+        payload   BYTEA NOT NULL
     );
 
     -- This node's own ByteCommits, one per cycle (storage spec §14).
@@ -336,32 +315,11 @@ pub const SCHEMA_LAYOUT: &[(&str, &[ExpectedColumn])] = &[
         ],
     ),
     (
-        "device_tree_states",
-        &[
-            ("genesis_b32", "text", false),
-            ("version_number", "int8", false),
-            ("device_count", "int8", false),
-            ("root_hash", "bytea", false),
-            ("payload", "bytea", false),
-            ("updated_at_tick", "int8", false),
-        ],
-    ),
-    (
-        "dlv_slots",
-        &[
-            ("dlv_id", "bytea", false),
-            ("capacity_bytes", "int8", false),
-            ("used_bytes", "int8", false),
-            ("stake_hash", "bytea", false),
-        ],
-    ),
-    (
         "immutable_objects",
         &[
             ("addr_b32", "text", false),
             ("namespace", "bytea", false),
             ("payload", "bytea", false),
-            ("first_written_tick", "int8", false),
         ],
     ),
     (
@@ -369,7 +327,6 @@ pub const SCHEMA_LAYOUT: &[(&str, &[ExpectedColumn])] = &[
         &[
             ("id", "int8", false),
             ("device_id", "text", false),
-            ("message_id", "text", false),
             ("envelope", "bytea", false),
             ("seq_num", "int8", false),
         ],
@@ -408,12 +365,8 @@ pub const SCHEMA_INDEXES: &[&str] = &[
     "cells_by_key",
     "cells_pkey",
     "cells_uncommitted",
-    "device_tree_states_pkey",
-    "dlv_slots_pkey",
-    "idx_device_tree_states_version",
     "idx_inbox_spool_device_seq",
     "immutable_objects_pkey",
-    "inbox_spool_message_id_key",
     "inbox_spool_pkey",
     "index_entries_by_locator",
     "index_entries_pkey",
@@ -549,194 +502,18 @@ async fn verify_schema_layout(client: &deadpool_postgres::Object) -> Result<()> 
     Ok(())
 }
 
-pub async fn create_slot(
-    pool: &Pool,
-    dlv_id: &[u8],
-    capacity_bytes: i64,
-    stake_hash: &[u8],
-) -> Result<()> {
-    let client = pool.get().await?;
-    client
-        .execute(
-            "INSERT INTO dlv_slots (dlv_id, capacity_bytes, used_bytes, stake_hash) VALUES ($1,$2,0,$3)
-             ON CONFLICT (dlv_id) DO NOTHING",
-            &[&dlv_id, &capacity_bytes, &stake_hash],
-        )
-        .await?;
-    Ok(())
-}
-
-// Removed unused helpers: bump_used_bytes, get_object_size
-
-// ============================================================
-// Phase B.4 (issue #275): Device Tree state — bounded validator
-// ============================================================
-
-/// Outcome of a [`upsert_device_tree_state_if_monotonic`] call.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DeviceTreeUpsertOutcome {
-    /// No prior row existed for this genesis; the row was newly inserted.
-    Inserted,
-    /// A prior row existed and was replaced because
-    /// `new_version > prior_version`.
-    Updated { prior_version: u64 },
-    /// A prior row existed and the write was rejected because
-    /// `new_version <= prior_version`. The persisted state is unchanged.
-    RejectedStale { prior_version: u64 },
-}
-
-/// Atomically upsert a `DeviceTreeStateV1` row for `genesis_b32`,
-/// enforcing strictly-monotonic `version_number`. Runs as a single
-/// `SERIALIZABLE` transaction so concurrent writers cannot bypass the
-/// monotonicity check.
-#[allow(clippy::too_many_arguments)]
-pub async fn upsert_device_tree_state_if_monotonic(
-    pool: &Pool,
-    genesis_b32: &str,
-    new_version: u64,
-    device_count: u32,
-    root_hash: &[u8],
-    payload: &[u8],
-    updated_at_tick: u64,
-) -> Result<DeviceTreeUpsertOutcome> {
-    use tokio_postgres::IsolationLevel;
-
-    let new_version_i64 = i64::try_from(new_version)
-        .map_err(|_| anyhow::anyhow!("version_number {new_version} does not fit in i64"))?;
-    let device_count_i64 = i64::from(device_count);
-    let updated_at_tick_i64 = i64::try_from(updated_at_tick)
-        .map_err(|_| anyhow::anyhow!("updated_at_tick {updated_at_tick} does not fit in i64"))?;
-
-    let mut client = pool.get().await?;
-    let tx = client
-        .build_transaction()
-        .isolation_level(IsolationLevel::Serializable)
-        .start()
-        .await?;
-
-    let row = tx
-        .query_opt(
-            "SELECT version_number FROM device_tree_states WHERE genesis_b32 = $1 FOR UPDATE",
-            &[&genesis_b32],
-        )
-        .await?;
-
-    let outcome = match row {
-        Some(r) => {
-            let prior_i64: i64 = r.get(0);
-            let prior_u64 = u64::try_from(prior_i64).unwrap_or(0);
-            if new_version_i64 <= prior_i64 {
-                DeviceTreeUpsertOutcome::RejectedStale {
-                    prior_version: prior_u64,
-                }
-            } else {
-                let stmt = tx
-                    .prepare_cached(
-                        "UPDATE device_tree_states
-                         SET version_number=$2, device_count=$3, root_hash=$4,
-                             payload=$5, updated_at_tick=$6
-                         WHERE genesis_b32=$1",
-                    )
-                    .await?;
-                tx.execute(
-                    &stmt,
-                    &[
-                        &genesis_b32,
-                        &new_version_i64,
-                        &device_count_i64,
-                        &root_hash,
-                        &payload,
-                        &updated_at_tick_i64,
-                    ],
-                )
-                .await?;
-                DeviceTreeUpsertOutcome::Updated {
-                    prior_version: prior_u64,
-                }
-            }
-        }
-        None => {
-            let stmt = tx
-                .prepare_cached(
-                    "INSERT INTO device_tree_states
-                       (genesis_b32, version_number, device_count, root_hash, payload, updated_at_tick)
-                     VALUES ($1, $2, $3, $4, $5, $6)",
-                )
-                .await?;
-            tx.execute(
-                &stmt,
-                &[
-                    &genesis_b32,
-                    &new_version_i64,
-                    &device_count_i64,
-                    &root_hash,
-                    &payload,
-                    &updated_at_tick_i64,
-                ],
-            )
-            .await?;
-            DeviceTreeUpsertOutcome::Inserted
-        }
-    };
-
-    tx.commit().await?;
-    Ok(outcome)
-}
-
-/// Return the persisted `DeviceTreeStateV1` payload bytes for a
-/// genesis, or `None` if no state has been written yet.
-pub async fn get_device_tree_state_payload(
-    pool: &Pool,
-    genesis_b32: &str,
-) -> Result<Option<Vec<u8>>> {
-    let client = pool.get().await?;
-    let row = client
-        .query_opt(
-            "SELECT payload FROM device_tree_states WHERE genesis_b32 = $1",
-            &[&genesis_b32],
-        )
-        .await?;
-    Ok(row.map(|r| {
-        let payload: Vec<u8> = r.get(0);
-        payload
-    }))
-}
-
-/// Return only the current `version_number` for a genesis's persisted
-/// Device Tree state, or `None`. Used by tests asserting monotonic
-/// enforcement without re-decoding the full proto.
-pub async fn get_device_tree_state_version(pool: &Pool, genesis_b32: &str) -> Result<Option<u64>> {
-    let client = pool.get().await?;
-    let row = client
-        .query_opt(
-            "SELECT version_number FROM device_tree_states WHERE genesis_b32 = $1",
-            &[&genesis_b32],
-        )
-        .await?;
-    Ok(row.map(|r| {
-        let v: i64 = r.get(0);
-        u64::try_from(v).unwrap_or(0)
-    }))
-}
-
-// ============================================================
-// Recovery-authority anchor — single-assignment (spec §0.5 bind-once)
-// ============================================================
-
 /// Begin a write transaction whose commit is durable BEFORE it is
 /// acknowledged.
 ///
 /// DURABILITY IS SET HERE, NOT INHERITED. `SET LOCAL synchronous_commit = on`
 /// applies to this transaction only and does not depend on the server's
 /// default, the connection pool, or the image this node happens to run: a
-/// claim this node acknowledges has reached disk before the acknowledgement.
-/// An earlier doc-string credited "the pool's default", which set nothing —
-/// the guarantee was the upstream image's default and would have changed
-/// silently with it. `require_durable_commit_posture` additionally refuses to
+/// write this node acknowledges has reached disk before the acknowledgement.
+/// `require_durable_commit_posture` additionally refuses to
 /// start a node whose server-level settings could defeat this.
 ///
-/// Every one-shot register claim goes through this one function so the posture
-/// cannot hold for one register and silently lapse for another.
+/// Cell, index, ByteCommit and spool writes go through this function; the
+/// immutable store's serializable transaction sets the same posture itself.
 async fn begin_durable_write(
     client: &mut deadpool_postgres::Client,
 ) -> Result<deadpool_postgres::Transaction<'_>> {
@@ -763,19 +540,16 @@ pub async fn insert_immutable_object_if_absent(
     addr_b32: &str,
     namespace: &[u8],
     payload: &[u8],
-    first_written_tick: u64,
 ) -> Result<ImmutablePutOutcome> {
     use tokio_postgres::IsolationLevel;
-
-    let tick_i64 = i64::try_from(first_written_tick).map_err(|_| {
-        anyhow::anyhow!("first_written_tick {first_written_tick} does not fit in i64")
-    })?;
 
     let mut client = pool.get().await?;
     let tx = client
         .build_transaction()
         .isolation_level(IsolationLevel::Serializable)
         .start()
+        .await?;
+    tx.batch_execute("SET LOCAL synchronous_commit = on")
         .await?;
 
     let row = tx
@@ -798,12 +572,11 @@ pub async fn insert_immutable_object_if_absent(
         None => {
             let stmt = tx
                 .prepare_cached(
-                    "INSERT INTO immutable_objects
-                       (addr_b32, namespace, payload, first_written_tick)
-                     VALUES ($1, $2, $3, $4)",
+                    "INSERT INTO immutable_objects (addr_b32, namespace, payload)
+                     VALUES ($1, $2, $3)",
                 )
                 .await?;
-            tx.execute(&stmt, &[&addr_b32, &namespace, &payload, &tick_i64])
+            tx.execute(&stmt, &[&addr_b32, &namespace, &payload])
                 .await?;
             ImmutablePutOutcome::Inserted
         }
@@ -828,34 +601,27 @@ pub async fn get_immutable_object(
     Ok(row.map(|r| (r.get(0), r.get(1))))
 }
 
-// ===================== b0x Inbox Spool (clockless) =====================
+// ===================== b0x inbox spool =====================
 
-/// Insert an envelope into the per-device spool (idempotent by message_id).
-/// Assigns sequence number and optional expiration.
-pub async fn spool_insert(
-    pool: &Pool,
-    device_id: &str,
-    message_id: &str,
-    envelope: &[u8],
-) -> Result<()> {
+/// Append `envelope` to the spool under `device_id` at the next position,
+/// durably, refusing and deduplicating nothing (storage spec §8).
+pub async fn spool_insert(pool: &Pool, device_id: &str, envelope: &[u8]) -> Result<()> {
     let mut client = pool.get().await?;
-    let tx = client.transaction().await?;
-    // Serialize seq_num assignment per device_id to avoid MAX+1 races.
+    let tx = begin_durable_write(&mut client).await?;
+    // Serialize seq_num assignment per spool key to avoid MAX+1 races.
     tx.execute("SELECT pg_advisory_xact_lock(hashtext($1))", &[&device_id])
         .await?;
 
     let stmt = tx
         .prepare_cached(
-            "INSERT INTO inbox_spool(device_id, message_id, envelope, seq_num)
-             VALUES ($1, $2, $3, COALESCE(
+            "INSERT INTO inbox_spool(device_id, envelope, seq_num)
+             VALUES ($1, $2, COALESCE(
                (SELECT MAX(seq_num) + 1 FROM inbox_spool WHERE device_id = $1),
                1
-             ))
-             ON CONFLICT (message_id) DO NOTHING",
+             ))",
         )
         .await?;
-    tx.execute(&stmt, &[&device_id, &message_id, &envelope])
-        .await?;
+    tx.execute(&stmt, &[&device_id, &envelope]).await?;
     tx.commit().await?;
     Ok(())
 }
@@ -887,42 +653,32 @@ pub async fn spool_list_from_seq(
         .collect())
 }
 
-// ===================== Centralized Query Functions =====================
-// All SQL queries should go through these functions, not be inlined in API handlers.
-
-/// Fetch a DLV slot's capacity and used bytes.
-pub async fn get_dlv_slot_capacity(pool: &Pool, dlv_id: &[u8]) -> Result<Option<(i64, i64)>> {
-    let client = pool.get().await?;
-    let stmt = client
-        .prepare_cached("SELECT capacity_bytes, used_bytes FROM dlv_slots WHERE dlv_id=$1 LIMIT 1")
-        .await?;
-    let row_opt = client.query_opt(&stmt, &[&dlv_id]).await?;
-    Ok(row_opt.map(|r| (r.get::<_, i64>(0), r.get::<_, i64>(1))))
-}
-
-/// Create a connection pool from a database URL.
-/// Public alias used by the server for clarity
+/// The node's connection pool type.
 pub type DBPool = Pool;
 
-/// Create a connection pool to Postgres (synchronous constructor)
-/// Uses TLS if available, falls back to NoTls for localhost dev environments
+/// A pool on the Postgres database `database_url` names. TLS is required,
+/// verified against the public web roots, unless the URL itself says
+/// `sslmode=disable` — the operator's explicit statement, never inferred
+/// from the host name. `sslmode=prefer` (the Postgres default) would fall
+/// back to plaintext when the server offers no TLS, so every other mode is
+/// held to `require`.
 pub fn create_pool(database_url: &str) -> anyhow::Result<DBPool> {
-    let mut cfg = deadpool_postgres::Config::new();
-    cfg.url = Some(database_url.to_string());
-    cfg.manager = Some(ManagerConfig {
-        recycling_method: RecyclingMethod::Fast,
-    });
+    use tokio_postgres::config::SslMode;
 
-    // Enable TLS for production, allow NoTls for localhost development
-    let pool = if database_url.contains("localhost") || database_url.contains("127.0.0.1") {
-        log::warn!("Database TLS disabled for localhost connection");
-        cfg.create_pool(Some(Runtime::Tokio1), tokio_postgres::NoTls)?
-    } else {
-        log::info!("Database TLS enabled for production connection");
-        let tls = create_tls_connector();
-        cfg.create_pool(Some(Runtime::Tokio1), tls)?
+    let mut pg: tokio_postgres::Config = database_url
+        .parse()
+        .map_err(|e| anyhow!("the database URL does not parse: {e}"))?;
+    let manager_config = ManagerConfig {
+        recycling_method: RecyclingMethod::Fast,
     };
-    Ok(pool)
+    let manager = if pg.get_ssl_mode() == SslMode::Disable {
+        log::warn!("database TLS disabled: the database URL says sslmode=disable");
+        Manager::from_config(pg, tokio_postgres::NoTls, manager_config)
+    } else {
+        pg.ssl_mode(SslMode::Require);
+        Manager::from_config(pg, create_tls_connector(), manager_config)
+    };
+    Ok(Pool::builder(manager).runtime(Runtime::Tokio1).build()?)
 }
 
 // ── keyed cells and indexes: bytes in, bytes out ───────────────────────────
@@ -1340,13 +1096,14 @@ pub async fn mirror_last_cycle(pool: &Pool, member_id: &[u8]) -> Result<u64> {
 
 /// Append a content address under `locator`. Never removed.
 pub async fn append_index(pool: &Pool, locator: &[u8], addr: &[u8]) -> Result<()> {
-    let client = pool.get().await?;
-    client
-        .execute(
-            "INSERT INTO index_entries (locator, addr) VALUES ($1, $2)",
-            &[&locator, &addr],
-        )
-        .await?;
+    let mut client = pool.get().await?;
+    let tx = begin_durable_write(&mut client).await?;
+    tx.execute(
+        "INSERT INTO index_entries (locator, addr) VALUES ($1, $2)",
+        &[&locator, &addr],
+    )
+    .await?;
+    tx.commit().await?;
     Ok(())
 }
 

@@ -109,9 +109,8 @@ impl StateMachine {
         // was right; the state was fabricated.
         //
         // Every production caller either holds `G` and writes the head itself
-        // immediately after (`install_v2_genesis`,
-        // `initialize_with_genesis_state`, `create_genesis_with_passive_contributors`
-        // all call `write_genesis_device_head`), or already has a head
+        // immediately after (`install_v2_genesis` calls
+        // `write_genesis_device_head`), or already has a head
         // (`migrate_token_balance_keys`). None needs a pre-genesis head, so
         // nothing legitimate is lost by refusing to invent one.
         if let Some(ds) = self.device_state.as_mut() {

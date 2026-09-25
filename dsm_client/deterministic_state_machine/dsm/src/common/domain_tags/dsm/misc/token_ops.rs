@@ -24,6 +24,4 @@ pub const TAG_DSM_TOKEN_FACTORY: TaggedHashDomain<'static> =
 pub const TAG_DSM_TOKEN_ID: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/token-id");
 pub const TAG_DSM_TOKEN_METADATA: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/token-metadata");
-pub const TAG_DSM_TOKEN_MPC_PARTICIPANT: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/token-mpc/participant");
 pub const TAG_DSM_TOKEN_OP: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/token-op");

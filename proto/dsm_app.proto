@@ -1353,39 +1353,6 @@ message RoutingVaultAdvertisementV1 {
   uint64 economic_proof_position  = 16;
 }
 
-// ===================== STORAGE NODE ADMIN/GOSSIP/LIST (V1) ==================
-// Protobuf-only responses for admin and gossip endpoints (no JSON, no clocks).
-
-enum StorageNodeStatus {
-  STORAGE_NODE_STATUS_UNSPECIFIED = 0;
-  STORAGE_NODE_STATUS_ALIVE       = 1;
-  STORAGE_NODE_STATUS_SUSPECTED   = 2;
-  STORAGE_NODE_STATUS_DEAD        = 3;
-}
-
-message StorageNodeInfoV1 {
-  string node_id       = 1;
-  string address       = 2;
-  int64  last_seen_tick = 3; // deterministic counter (transport/admin only)
-  StorageNodeStatus status = 4;
-}
-
-message GossipMessageV1 {
-  string sender_node_id = 1;
-  int64  sender_tick    = 2; // deterministic counter (transport/admin only)
-  repeated StorageNodeInfoV1 node_states = 3;
-}
-
-message GossipStatusV1 {
-  uint32 alive_nodes_count = 1;
-  repeated StorageNodeInfoV1 nodes = 2;
-}
-
-message AdminMaintenanceResponseV1 {
-  int64 tick = 1; // deterministic counter (admin only)
-  bool  ok   = 2;
-}
-
 // =================== UNIVERSAL ARG/RESULT PACKS =====================
 enum Codec { CODEC_UNSPECIFIED = 0; CODEC_PROTO = 1; }   // canonical: PROTO only
 // No artifact body may exceed the storage node's 128 KiB envelope cap; the largest
@@ -1563,25 +1530,6 @@ message TokenMetadataProto {
   reserved "creation_index";
 }
 
-// MPC Token creation request (canonical).
-message TokenMpcRequest {
-  string session_id = 1;
-  string token_name = 2;
-  string token_symbol = 3;
-  uint32 threshold = 4;
-  string creator_genesis_id = 5;
-  bool   anchored_token = 6;
-  uint64 request_iteration = 7;
-}
-
-// ======================= System Genesis (binary) ====================
-message SystemGenesisRequest {
-  string locale = 1;
-  string network_id = 2;
-  bytes device_entropy = 3 [(dsm_fixed_len)=32];
-}
-message SystemGenesisResponse { Hash32 genesis_hash = 1; bytes public_key = 2 [(dsm_max_len)=512]; }
-
 // Canonical mnemonic-rooted Genesis v2 wallet-creation request (system.createGenesisV2).
 // The BIP39 mnemonic is the sole root: the SDK derives wallet_seed, caches it in the unlocked
 // session, and runs create_genesis_v2 (no storage nodes, no silicon, no random genesis entropy).
@@ -1591,16 +1539,15 @@ message WalletCreateGenesisV2Request {
   string network_id = 3;
 }
 message GenesisCreated {
-  bytes  device_id    = 1 [(dsm_fixed_len)=32];
-  Hash32 genesis_hash = 2;
-  bytes  public_key   = 3 [(dsm_max_len)=512];
-  Hash32 smt_root     = 4;
-  bytes  device_entropy = 5 [(dsm_fixed_len)=32];
-  string session_id   = 6;
-  uint32 threshold    = 7;
-  repeated string storage_nodes = 8;
-  string network_id   = 9;
-  string locale       = 10;
+  bytes  device_id     = 1 [(dsm_fixed_len)=32];
+  Hash32 genesis_hash  = 2;
+  bytes  public_key    = 3 [(dsm_max_len)=512];
+  Hash32 smt_root      = 4;
+  bytes  genesis_nonce = 5 [(dsm_fixed_len)=32]; // the PUBLIC nonce G commits
+  reserved 6, 7, 8;
+  reserved "session_id", "threshold", "storage_nodes";
+  string network_id    = 9;
+  string locale        = 10;
 }
 
 // Secondary device initialization (binds to existing genesis via QR scan)
@@ -2542,9 +2489,11 @@ message BatchEnvelope {
   bool    atomic_execution    = 3; // deterministic local ordering
 }
 
+// One spool entry: the bytes submitted, exactly as the node holds them. The
+// node never opens an envelope (storage spec §8); the reader decodes it.
 message SequencedEnvelope {
-  Envelope envelope = 1;
-  uint64   seq_num   = 2; // sequence number for idempotent retrieval
+  bytes  envelope = 1;
+  uint64 seq_num  = 2; // the entry's position in the spool
 }
 
 message SequencedBatchEnvelope {
@@ -3369,9 +3318,6 @@ message OnlineMessageResponse {
   bytes message_id = 3 [(dsm_fixed_len)=16];
 }
 
-// =================== Discovery / Publish Diagnostics =================
-message DiscoverLocalResponse { repeated string discovered_nodes = 1; string discovery_method = 2; uint64 event_counter = 3; }
-message PublishGenesisResponse { bool success = 1; bool published = 2; string key = 3; uint32 published_to_nodes = 4; uint64 event_counter = 5; }
 
 message TokenPolicyCacheEntry {
   bytes  policy_commit = 1 [(dsm_fixed_len)=32];
@@ -3917,6 +3863,8 @@ message StoredPolicy {
 // Replaces manual byte slicing with protobuf serialization
 
 message BridgeRpcRequest {
+  reserved 7;
+  reserved "create_genesis";
   string method = 1 [(dsm_max_len)=128];
   oneof payload {
     EmptyPayload empty = 2;
@@ -3924,7 +3872,6 @@ message BridgeRpcRequest {
     StringPayload string = 4;
     PreferencePayload preference = 5;
     AppRouterPayload app_router = 6;
-    CreateGenesisPayload create_genesis = 7;
     BleContactPayload ble_contact = 8;
     BleAddressPayload ble_address = 9;
     BleIdentityPayload ble_identity = 10;
@@ -3957,12 +3904,6 @@ message PreferencePayload {
 message AppRouterPayload {
   string method_name = 1 [(dsm_max_len)=256];
   bytes args = 2 [(dsm_max_len)=65535];
-}
-
-message CreateGenesisPayload {
-  string locale = 1 [(dsm_max_len)=16];
-  string network_id = 2 [(dsm_max_len)=64];
-  bytes entropy = 3 [(dsm_fixed_len)=32];
 }
 
 message BleContactPayload {
