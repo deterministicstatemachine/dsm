@@ -38,8 +38,9 @@ core bilateral manager       // Forward-only state updates
 
 ## CI Enforcement
 
-`scripts/check_forbidden_symbols.sh` fails the build on the deprecated
-`BluetoothMessage` symbol and on the blocked artifacts it lists. Nothing in CI
+`scripts/check_forbidden_symbols.sh` fails the build if the retired
+Bluetooth message type (the one symbol it names) or one of the blocked
+artifacts it lists reappears. Nothing in CI
 checks that a transport timer stays out of protocol semantics:
 `ci/no_clock_and_no_json.sh` allowlists the BLE transport files, so that
 invariant is held by review. There is no `ci_gates.sh`.
