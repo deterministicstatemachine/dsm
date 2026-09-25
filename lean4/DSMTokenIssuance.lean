@@ -11,7 +11,7 @@
   The rule under proof:
 
     [0] if fee_amount > 0: one ERA Debit  of exactly fee_amount
-    [1] if initial_supply > 0: one Credit of exactly initial_supply,
+    [1] one Credit of exactly initial_supply, which is never zero (SoFi §50),
         under the NEW token's own policy_commit
     and no other deltas.
 
@@ -98,13 +98,27 @@ theorem create_touches_two_distinct_assets
   · omega
 
 /--
-  A zero-allocation creation still burns the fee. Creation is a canonical
-  event regardless of whether it issues anything, so the fee leg stands
-  alone and conservation still closes.
+  A token with no genesis supply is not a token (SoFi §50): a creation that
+  would issue nothing is refused before the fee leg, so it burns nothing and
+  issues nothing. In the implementation this is the conservation guard's
+  refusal of a zero `initial_supply` in `validate_conservation`, which runs
+  before any write.
 -/
-theorem create_zero_allocation_still_burns
-    (era burned : Nat) (h : creationFee ≤ era) :
-    (era - creationFee) + (burned + creationFee) = era + burned := by
-  omega
+def tryCreateWithSupply (era burned fee initialSupply : Nat) : Nat × Nat × Nat :=
+  if 0 < initialSupply ∧ fee ≤ era then (era - fee, burned + fee, initialSupply)
+  else (era, burned, 0)
+
+theorem create_with_no_supply_is_refused (era burned fee : Nat) :
+    tryCreateWithSupply era burned fee 0 = (era, burned, 0) := by
+  unfold tryCreateWithSupply
+  simp
+
+/-- With a supply and an affordable fee, the creation is exactly the burn
+    and the whole supply, released. -/
+theorem create_with_supply_burns_and_releases
+    (era burned fee initialSupply : Nat) (hs : 0 < initialSupply) (hf : fee ≤ era) :
+    tryCreateWithSupply era burned fee initialSupply = (era - fee, burned + fee, initialSupply) := by
+  unfold tryCreateWithSupply
+  simp [hs, hf]
 
 end DSMTokenIssuance
