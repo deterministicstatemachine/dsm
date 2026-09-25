@@ -597,7 +597,6 @@ Auditor finding 4 on `61d273a3`: status was written by hand and had drifted from
 | Location | Finding |
 |---|---|
 | `dsm_sdk` · handlers/token_routes.rs · `derive_policy_file`; `dsm` · policy_enforcement.rs · `TokenAuthority` (MR-SOFI-0310) | Every token gets a TokenAuthority condition requiring the signer set's k-of-n signatures for burn and create_token. The signer set authorizes only what the policy's own rules name, and the standard release rule names none (§47, §49): burns are the burn flag's (§54), creation the creator device's (S8). |
-| `dsm` · sofi/storage.rs · `keep_verifying`, `keep_all_verifying` (MR-STOR-0021) | A candidate whose bytes are not established is skipped, and a scan in which nothing verifies returns `Resolved::None`, which `fetch_vault_genesis` reports as not published: an unestablished fact read as its negation. |
 | `dsm_sdk` · client_db token registry (MR-SOFI-0305) | `UNIQUE(ticker)`; `token.create` and `tokens.addByAnchor` refuse a second token with a ticker already held. The ticker is display only and two tokens may share one. |
 | `dsm_sdk` · sdk/sofi_resolve.rs · `facts_of` (MR-SOFI-0241) | Returns NotEstablished until conformance and route evidence are complete, before arms (ii)–(iv) are evaluated; those arms need no validation evidence, so a stranded cell of an impossible operation cannot be skipped while evidence is outstanding. |
 | `dsm` · sofi/resolution.rs · `ImpossibleArm::PositionLost` (MR-SOFI-0239) | A fifth RouteImpossible arm, set when the F registered at q is not this F, which §23.5 does not list and which depends on a particular F. The code comment cites the TLA `LostPosition` trace it prevents. Specification conflict: for the owner. |
@@ -609,6 +608,17 @@ Auditor finding 4 on `61d273a3`: status was written by hand and had drifted from
 | `dsm_sdk` · handlers/node_e2e_tests.rs · `a_transfer_reaches_the_nodes_only_sealed_and_arrives` | Its memo check searches for a memo that is never sent, so it cannot fail. |
 | `tools/vertical_validation` · tla_runner.rs | `DSM_RouteChain` is not registered, so CI never model-checks it. |
 
+### 6.15 An unestablished candidate is never read as absence (branch `fix/unestablished-candidate-is-not-absence`, 2026-09-24)
+
+MR-STOR-0021 (storage §4): a storage fact not established from the reads in hand is never read as its negation.
+
+**Resolved**
+
+| Location | Finding | State |
+|---|---|---|
+| `dsm` · sofi/storage.rs · `keep_verifying`, `keep_all_verifying`; `lean4/DSMSofiStorage.lean` · `keep`, `keepAll` | A candidate under a locator whose bytes fewer than three members returned was skipped as if examined, and a scan in which nothing verified answered `Resolved::None`: an unestablished candidate read as "nothing is published here". The Lean model had the same skip, and `within_budget_exhausted_is_none` proved it. | `keep_verifying` is `Unavailable` when it kept nothing past an unestablished candidate (a verifying candidate elsewhere is still kept: the identity is the locator). `keep_all_verifying` returns `Discovered::Complete` only when every candidate was examined and established, else `Partial` with what verified. Lean: `keep` and `keepAll` rewritten to match, `within_budget_exhausted_is_none` now requires every candidate established, and `an_unestablished_candidate_is_never_none` and `an_unestablished_candidate_makes_discovery_partial` proved. The Lean mutation (the old skip restored) breaks `kept_verifies` and the new theorem. |
+| `dsm_sdk` · sdk/sofi_evidence.rs · `fetch_vault_genesis`; sdk/sofi_flow.rs · `own_setup_ref` | A vault whose genesis candidate could not be fetched was reported `NotPublished`; a device whose setup candidate could not be fetched was refused as having no admitted setup. | Both answer "not published" only on a `Complete` discovery; a `Partial` one is a storage error. Node-backed tests on Postgres: `an_unestablished_genesis_candidate_is_not_read_as_unpublished`, `a_setup_scan_that_met_an_unestablished_candidate_is_not_a_refusal`. Each gate removed → its test red; each Core flag removed → its test red. |
+
 ## 7 Totals
 
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |
@@ -616,9 +626,9 @@ Auditor finding 4 on `61d273a3`: status was written by hand and had drifted from
 | DSM high-level (MR-DSM) | 272 | 63 | 124 | 29 | 9 | 29 | 18 |
 | SoFi (MR-SOFI) | 333 | 200 | 86 | 19 | 11 | 17 | 0 |
 | dBTC (MR-DBTC) | 135 | 0 | 0 | 0 | 0 | 0 | 135 |
-| Storage node (MR-STOR) | 158 | 31 | 41 | 50 | 17 | 18 | 1 |
+| Storage node (MR-STOR) | 158 | 32 | 41 | 50 | 16 | 18 | 1 |
 | Storage §14 lines added after the pin (STOR-014) | 11 | 9 | 1 | 1 | 0 | 0 | 0 |
-| **All** | **909** | **303** | **252** | **99** | **37** | **64** | **154** |
+| **All** | **909** | **304** | **252** | **99** | **36** | **64** | **154** |
 
 ## 8 Per-requirement results
 
@@ -1269,7 +1279,7 @@ The deferral also covers MR-DSM-0198 and MR-DSM-0221–0237 (§6.1), and the dBT
 | MR-STOR-0018 | Met | `dsm::route_chain::evaluate`; `dsm::route_chain::check_completion_proof`; `dsm_storage_node::db::pg::require_durable_commit_posture` | `dsm::route_chain::tests::an_unread_leader_is_missing_and_no_other_seat_stands_in`; `dsm::route_chain::tests::the_state_is_the_count_of_valid_links`; `dsm_storage_node::db::pg::durable_posture_tests::a_weaker_posture_is_refused_and_the_refusal_names_the_setting` | sofi/arith.rs was deleted in #976; an unread leader leaves the cell waiting, a chain short of two further links stays below Final, and a node without durable commit settings refuses to start. |
 | MR-STOR-0019 | Missing | no code found | — | "seat" is comment vocabulary only |
 | MR-STOR-0020 | Partial | dsm · sofi/storage.rs `stored`; sofi/arith.rs `resolve` | arith/storage tests | LeaderHeld/Final implemented with the superseded count rule |
-| MR-STOR-0021 | Violated | `dsm::sofi::storage::keep_verifying`; `dsm::sofi::storage::keep_all_verifying`; `dsm_sdk::sdk::sofi_evidence::fetch_vault_genesis` | — | keep_verifying skips a candidate whose bytes are not established as Stored and, when nothing verifies, returns Resolved::None, which fetch_vault_genesis reports as NotPublished: an unestablished fact read as its negation. |
+| MR-STOR-0021 | Met | `dsm::sofi::storage::keep_verifying`; `dsm::sofi::storage::keep_all_verifying`; `dsm_sdk::sdk::sofi_evidence::fetch_vault_genesis` | `dsm::sofi::storage::tests::an_unestablished_candidate_is_never_none`; `dsm::sofi::storage::tests::an_unestablished_candidate_makes_discovery_partial`; `dsm_sdk::sdk::sofi_evidence::tests::an_unestablished_genesis_candidate_is_not_read_as_unpublished`; `dsm_sdk::sdk::sofi_flow::tests::a_setup_scan_that_met_an_unestablished_candidate_is_not_a_refusal` | A candidate whose bytes were not established is never read as absence: the single scan is Unavailable past it, discovery is Partial, and the SDK reports a network failure, never "not published" (§6.15). |
 | MR-STOR-0022 | Met | `dsm::storage_object::immutable_addr`; `dsm_storage_node::api::objects::immutable::put_immutable` | `dsm::storage_object::tests::the_address_matches_the_spec_construction` | — |
 | MR-STOR-0023 | Partial | dsm_storage_node · api/objects/immutable.rs `put_immutable` (x-expected-addr) | no test found | No test sends a mismatching address |
 | MR-STOR-0024 | Violated | dsm_storage_node · db/pg.rs `upsert_object` (legacy store, mounted beside the immutable store) | none | The immutable store has no update path; the legacy store in the same router overwrites |
