@@ -66,3 +66,14 @@ fn with_database(url: &str, database: &str) -> String {
         None => format!("{}/{database}", &head[..slash]),
     }
 }
+
+/// A storage set CA for tests: a real self-signed certificate to pin.
+pub fn set_ca_pem() -> Vec<u8> {
+    ok_or_panic(
+        rcgen::generate_simple_self_signed(vec!["localhost".to_string()]),
+        "generate a test CA",
+    )
+    .cert
+    .pem()
+    .into_bytes()
+}

@@ -1,341 +1,172 @@
-#!/bin/bash
-
-# DSM Storage Node - Development Node Launcher
-# Starts 5 independent storage nodes on localhost for development testing
+#!/usr/bin/env bash
+# SPDX-License-Identifier: MIT OR Apache-2.0
+#
+# DSM storage dev nodes: five nodes on localhost, running the production
+# binary on the production path (owner ruling #2). Nothing is relaxed for
+# development: every node serves TLS under a certificate from a local dev CA,
+# pins its peers to that CA, and requires admin and gossip tokens. This script
+# generates that material once, under dev-pki/ (never in git), and creates
+# each node's database. A database left at another schema version is refused
+# by the node (ruling #3); `reset` drops the dev databases so they are created
+# fresh.
+#
+# Usage (from anywhere):
+#   start_dev_nodes.sh [start]   generate what is missing, create databases, start
+#   start_dev_nodes.sh stop      stop the nodes this script started
+#   start_dev_nodes.sh status    health-check every node over verified TLS
+#   start_dev_nodes.sh reset     stop, then drop the dev databases
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NODE_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+REPO_DIR="$(cd "$NODE_DIR/.." && pwd)"
 cd "$NODE_DIR"
 
-echo "Starting DSM storage dev nodes..."
+PKI_DIR="dev-pki"
+NODES=(1 2 3 4 5)
+PG_SERVER="${DSM_DEV_PG_SERVER:-postgresql://localhost:5432}"
+BIN="$REPO_DIR/target/release/storage_node"
 
-# Colors for output
-GREEN='\033[0;32m'
-BLUE='\033[0;34m'
-YELLOW='\033[1;33m'
-RED='\033[0;31m'
-NC='\033[0m' # No Color
+port_of() { echo $((8079 + $1)); }
+db_of() { echo "dsm_storage_node$1"; }
 
-# Function to check if storage node API is responding
-# Accepts: port, optional config file path. If config enables TLS, uses https -k.
-check_api_responding() {
-    local port=$1
-    local cfg=${2:-}
-    local proto="http"
-    # If a config file is provided and contains a '[tls]' section with 'enabled = true', use https
-    if [ -n "$cfg" ] && [ -f "$cfg" ]; then
-        # crude but reliable parse: find [tls] section then look for enabled = true
-        if awk '/^\s*\[tls\]/ { in_tls=1; next } /^\s*\[/ { in_tls=0 } in_tls && /^\s*enabled\s*=/' "$cfg" | grep -Eiq 'enabled\s*=\s*true'; then
-            proto="https"
-        fi
-    fi
-
-    local url="${proto}://127.0.0.1:${port}/api/v2/health"
-
-    if [ "$proto" = "https" ]; then
-        if curl -s -k --connect-timeout 2 --max-time 5 "$url" >/dev/null 2>&1; then
-            return 0
-        fi
-    else
-        if curl -s --connect-timeout 2 --max-time 5 "$url" >/dev/null 2>&1; then
-            return 0
-        fi
-    fi
-    return 1
+need() {
+    command -v "$1" >/dev/null 2>&1 || { echo "error: $1 is required" >&2; exit 1; }
 }
 
-# Function to start a node
-start_node() {
-    local node_num=$1
-    local config_file="config/dev/node${node_num}.toml"
-    local port=$((8079 + node_num))
-    local log_file="logs/dev-node${node_num}.log"
-    
-    echo -e "${BLUE}Starting Node ${node_num} on port ${port}...${NC}"
-    echo "PWD=$(pwd)"; echo "Looking for storage_node at: $(cd .. && pwd)/target/release/storage_node"
-    
-    # Check if storage node API is already responding (pass config path so TLS can be detected)
-    if check_api_responding $port "$config_file"; then
-        echo -e "${GREEN}✓ Node ${node_num} already running and responding on port ${port}${NC}"
-        return 0
+# The dev CA, one certificate per node for 127.0.0.1/localhost, and the
+# tokens. Existing material is kept, so restarts keep the same identities.
+ensure_pki() {
+    need openssl
+    mkdir -p "$PKI_DIR"
+    chmod 700 "$PKI_DIR"
+    if [ ! -f "$PKI_DIR/ca.crt" ]; then
+        echo "generating the dev CA"
+        openssl genrsa -out "$PKI_DIR/ca.key" 4096 2>/dev/null
+        openssl req -new -x509 -days 3650 -key "$PKI_DIR/ca.key" \
+            -subj "/CN=DSM dev storage CA" -out "$PKI_DIR/ca.crt"
     fi
-    
-    # If port is in use but API not responding, there might be a dead process
-    if lsof -Pi :$port -sTCP:LISTEN -t >/dev/null 2>&1; then
-        echo -e "${YELLOW}⚠ Port ${port} in use but API not responding - attempting to clear${NC}"
-        # Kill any process using this port
-        local existing_pid=$(lsof -ti:$port 2>/dev/null)
-        if [ -n "$existing_pid" ]; then
-            echo "Killing existing process on port ${port}: $existing_pid"
-            kill -9 $existing_pid 2>/dev/null || true
-            sleep 1
+    for n in "${NODES[@]}"; do
+        if [ ! -f "$PKI_DIR/node$n.crt" ]; then
+            echo "issuing the certificate of dev-node-$n"
+            openssl genrsa -out "$PKI_DIR/node$n.key" 2048 2>/dev/null
+            openssl req -new -key "$PKI_DIR/node$n.key" \
+                -subj "/CN=dev-node-$n" -out "$PKI_DIR/node$n.csr"
+            printf 'basicConstraints=CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName=IP:127.0.0.1,DNS:localhost\n' \
+                > "$PKI_DIR/node$n.ext"
+            openssl x509 -req -days 825 -in "$PKI_DIR/node$n.csr" \
+                -CA "$PKI_DIR/ca.crt" -CAkey "$PKI_DIR/ca.key" -CAcreateserial \
+                -extfile "$PKI_DIR/node$n.ext" -out "$PKI_DIR/node$n.crt" 2>/dev/null
+            rm -f "$PKI_DIR/node$n.csr" "$PKI_DIR/node$n.ext"
         fi
+    done
+    chmod 600 "$PKI_DIR"/*.key
+    for t in admin gossip; do
+        if [ ! -f "$PKI_DIR/$t.token" ]; then
+            openssl rand -base64 33 | tr -d '\n/+=' > "$PKI_DIR/$t.token"
+            chmod 600 "$PKI_DIR/$t.token"
+        fi
+    done
+}
+
+ensure_databases() {
+    need psql
+    for n in "${NODES[@]}"; do
+        local db
+        db="$(db_of "$n")"
+        if ! psql "$PG_SERVER/postgres" -Atc "SELECT 1 FROM pg_database WHERE datname = '$db'" | grep -q 1; then
+            echo "creating database $db"
+            psql "$PG_SERVER/postgres" -qc "CREATE DATABASE $db"
+        fi
+    done
+}
+
+ensure_binary() {
+    if [ ! -x "$BIN" ]; then
+        echo "building the release storage_node"
+        (cd "$REPO_DIR" && cargo build --release --locked -p dsm_storage_node)
     fi
-    
-    # Create log directory if it doesn't exist
+}
+
+healthy() {
+    curl -fsS --cacert "$PKI_DIR/ca.crt" --connect-timeout 2 --max-time 5 \
+        "https://127.0.0.1:$(port_of "$1")/api/v2/health" >/dev/null 2>&1
+}
+
+start() {
+    ensure_pki
+    ensure_databases
+    ensure_binary
     mkdir -p logs
-    mkdir -p keys
-    mkdir -p "data-dev-node${node_num}"
-    
-    # Start the node in background (detached). Use nohup to avoid SIGHUP when caller shell exits.
-    # Use absolute path to avoid cwd surprises
-    BIN_PATH="$(cd .. && pwd)/target/release/storage_node"
-    if [ ! -x "$BIN_PATH" ]; then
-        echo -e "${YELLOW}Release binary not found at $BIN_PATH, attempting to build...${NC}"
-        (cd .. && cargo build --release -p dsm_storage_node --locked --all-features) || true
-    fi
-
-    # Fall back to debug binary if release build refuses to run with dev config
-    if [ ! -x "$BIN_PATH" ]; then
-        echo -e "${YELLOW}Release binary unavailable; trying debug binary...${NC}"
-        BIN_PATH="$(cd .. && pwd)/target/debug/storage_node"
-        if [ ! -x "$BIN_PATH" ]; then
-            echo -e "${YELLOW}Debug binary not found at $BIN_PATH, attempting to build debug...${NC}"
-            (cd .. && cargo build -p dsm_storage_node --locked --all-features) || true
+    local failed=0
+    for n in "${NODES[@]}"; do
+        if healthy "$n"; then
+            echo "dev-node-$n already serving on :$(port_of "$n")"
+            continue
         fi
-    fi
-
-    if [ ! -x "$BIN_PATH" ]; then
-        echo -e "${RED}✗ Could not find storage_node binary (release or debug). Aborting node start.${NC}"
-        return 1
-    fi
-
-    # Enable verbose logging for diagnostics and detach from terminal
-    nohup env RUST_LOG=info "$BIN_PATH" --config "$config_file" --verbose > "$log_file" 2>&1 &
-    local pid=$!
-    
-    echo "Node ${node_num} PID: $pid"
-    echo "$pid" > "dev-node${node_num}.pid"
-    
-    # Wait for startup and check if API responds
-    echo "Waiting for Node ${node_num} API to respond..."
-    for attempt in {1..20}; do
-        sleep 1
-        if check_api_responding $port "$config_file"; then
-            echo -e "${GREEN}✓ Node ${node_num} started successfully and API responding${NC}"
-            return 0
-        fi
-        echo -n "."
-    done
-    
-    echo ""
-    # Check if process is still running
-    if kill -0 "$pid" 2>/dev/null; then
-        echo -e "${YELLOW}⚠ Node ${node_num} process running but API not responding yet${NC}"
-        return 1
-    else
-        # If release binary exited immediately (e.g., refused due to dev config), attempt debug fallback once
-        if echo "$BIN_PATH" | grep -q "/target/release/" ; then
-            echo -e "${YELLOW}Release binary exited; attempting to start debug binary as fallback...${NC}"
-            BIN_PATH="$(cd .. && pwd)/target/debug/storage_node"
-            if [ ! -x "$BIN_PATH" ]; then
-                echo -e "${YELLOW}Debug binary missing, building debug...${NC}"
-                (cd .. && cargo build -p dsm_storage_node --locked --all-features) || true
-            fi
-            if [ ! -x "$BIN_PATH" ]; then
-                echo -e "${RED}✗ Debug binary not found; cannot start node${NC}"
-                return 1
-            fi
-            nohup env RUST_LOG=info "$BIN_PATH" --config "$config_file" --verbose > "$log_file" 2>&1 &
-            pid=$!
-            echo "Node ${node_num} fallback PID: $pid"
-            echo "$pid" > "dev-node${node_num}.pid"
-            echo "Waiting for Node ${node_num} API to respond (debug fallback)..."
-            for attempt in {1..20}; do
-                sleep 1
-                if check_api_responding $port; then
-                    echo -e "${GREEN}✓ Node ${node_num} started successfully and API responding (debug)${NC}"
-                    return 0
-                fi
-                echo -n "."
-            done
-            echo ""
-            if kill -0 "$pid" 2>/dev/null; then
-                echo -e "${YELLOW}⚠ Node ${node_num} debug process running but API not responding${NC}"
-                return 1
-            else
-                echo -e "${RED}✗ Node ${node_num} debug fallback failed to start${NC}"
-                return 1
-            fi
-        fi
-        echo -e "${RED}✗ Node ${node_num} failed to start${NC}"
-        return 1
-    fi
-}
-
-# Function to stop all nodes
-stop_nodes() {
-    echo -e "${YELLOW}Stopping all development nodes...${NC}"
-    
-    for i in {1..5}; do
-        local port=$((8079 + i))
-        echo "Stopping Node ${i} on port ${port}..."
-        
-        # Check if PID file exists
-        if [ -f "dev-node${i}.pid" ]; then
-            local pid=$(cat "dev-node${i}.pid")
-            if kill -0 "$pid" 2>/dev/null; then
-                echo "  Stopping Node ${i} using PID file (PID: $pid)"
-                kill -TERM "$pid" 2>/dev/null || true
-                sleep 1
-                # Force kill if still running
-                if kill -0 "$pid" 2>/dev/null; then
-                    echo "  Force killing PID $pid"
-                    kill -9 "$pid" 2>/dev/null || true
-                fi
-            fi
-            rm -f "dev-node${i}.pid"
-        fi
-        
-        # Also check for processes using the port (multiple times to be thorough)
-        for attempt in {1..3}; do
-            local port_pids=$(lsof -ti:$port 2>/dev/null)
-            if [ -n "$port_pids" ]; then
-                echo "  Found processes using port ${port}: $port_pids"
-                echo "$port_pids" | xargs kill -TERM 2>/dev/null || true
-                sleep 1
-                # Force kill if still running
-                echo "$port_pids" | while read pid; do
-                    if kill -0 "$pid" 2>/dev/null; then
-                        echo "  Force killing process $pid on port $port"
-                        kill -9 "$pid" 2>/dev/null || true
-                    fi
-                done
-            else
-                break
-            fi
-        done
-        
-        # Also look for storage_node processes by name and port
-        local dsm_pids=$(pgrep -f "storage_node.*$port" 2>/dev/null || true)
-        if [ -n "$dsm_pids" ]; then
-            echo "  Found storage_node processes for port $port: $dsm_pids"
-            echo "$dsm_pids" | xargs kill -TERM 2>/dev/null || true
+        DSM_ADMIN_TOKEN="$(cat "$PKI_DIR/admin.token")" \
+        DSM_GOSSIP_TOKEN="$(cat "$PKI_DIR/gossip.token")" \
+        RUST_LOG=info nohup "$BIN" --config "config/dev/node$n.toml" \
+            > "logs/dev-node$n.log" 2>&1 &
+        echo $! > "dev-node$n.pid"
+        local up=0
+        for _ in $(seq 1 20); do
             sleep 1
-            # Force kill remaining processes
-            echo "$dsm_pids" | while read pid; do
-                if kill -0 "$pid" 2>/dev/null; then
-                    echo "  Force killing storage_node process $pid"
-                    kill -9 "$pid" 2>/dev/null || true
-                fi
-            done
-        fi
-    done
-    
-    # Final cleanup - kill any remaining storage_node processes
-    local remaining_pids=$(pgrep -f "storage_node" 2>/dev/null || true)
-    if [ -n "$remaining_pids" ]; then
-        echo "Cleaning up remaining storage_node processes: $remaining_pids"
-        echo "$remaining_pids" | xargs kill -TERM 2>/dev/null || true
-        sleep 2
-        echo "$remaining_pids" | xargs kill -9 2>/dev/null || true
-    fi
-    
-    echo -e "${GREEN}All nodes stopped${NC}"
-}
-
-# Function to show status
-show_status() {
-    echo -e "${BLUE}Dev Node Status:${NC}"
-    for i in {1..5}; do
-        local port=$((8079 + i))
-        if lsof -Pi :$port -sTCP:LISTEN -t >/dev/null 2>&1; then
-            echo -e "${GREEN}✓ Node ${i} - Running on port ${port}${NC}"
+            if healthy "$n"; then up=1; break; fi
+            kill -0 "$(cat "dev-node$n.pid")" 2>/dev/null || break
+        done
+        if [ "$up" = 1 ]; then
+            echo "dev-node-$n serving on https://127.0.0.1:$(port_of "$n")"
         else
-            echo -e "${RED}✗ Node ${i} - Not running on port ${port}${NC}"
+            echo "dev-node-$n did not start; see logs/dev-node$n.log" >&2
+            failed=1
         fi
+    done
+    echo "trust anchor for clients: $NODE_DIR/$PKI_DIR/ca.crt"
+    return "$failed"
+}
+
+stop() {
+    for n in "${NODES[@]}"; do
+        local pid_file="dev-node$n.pid"
+        [ -f "$pid_file" ] || continue
+        local pid
+        pid="$(cat "$pid_file")"
+        if kill -0 "$pid" 2>/dev/null; then
+            kill "$pid"
+            echo "stopped dev-node-$n (pid $pid)"
+        fi
+        rm -f "$pid_file"
     done
 }
 
-# Function to check API endpoints
-check_endpoints() {
-    echo -e "${BLUE}Checking API endpoints...${NC}"
-    for i in {1..5}; do
-        local port=$((8079 + i))
-        local config_file="config/dev/node${i}.toml"
-        local proto="http"
-        # Detect TLS and check with https -k when necessary
-        if [ -f "$config_file" ] && awk '/^\s*\[tls\]/ { in_tls=1; next } /^\s*\[/ { in_tls=0 } in_tls && /^\s*enabled\s*=/' "$config_file" | grep -Eiq 'enabled\s*=\s*true'; then
-            proto="https"
-        fi
-        local url="${proto}://127.0.0.1:${port}/api/v2/health"
-        
-        if check_api_responding $port "$config_file"; then
-            echo -e "${GREEN}✓ Node ${i} API responding at ${url}${NC}"
+status() {
+    local down=0
+    for n in "${NODES[@]}"; do
+        if healthy "$n"; then
+            echo "dev-node-$n healthy on :$(port_of "$n")"
         else
-            echo -e "${YELLOW}⚠ Node ${i} API not responding at ${url}${NC}"
+            echo "dev-node-$n not answering on :$(port_of "$n")"
+            down=1
         fi
+    done
+    return "$down"
+}
+
+reset() {
+    stop
+    need psql
+    for n in "${NODES[@]}"; do
+        psql "$PG_SERVER/postgres" -qc "DROP DATABASE IF EXISTS $(db_of "$n")"
+        echo "dropped $(db_of "$n")"
     done
 }
 
-# Main script logic
 case "${1:-start}" in
-    "start")
-        echo -e "${BLUE}Starting dev nodes...${NC}"
-        success_count=0
-        
-        for i in {1..5}; do
-            if start_node $i; then
-                ((success_count++))
-            fi
-        done
-        
-        echo ""
-        echo "Started $success_count/5 nodes"
-        
-        if [ $success_count -gt 0 ]; then
-            echo -e "${GREEN}Dev nodes are starting up...${NC}"
-            echo "Wait a few seconds for full initialization, then run:"
-            echo "  $0 status    - Check node status"
-            echo "  $0 check     - Check API endpoints"
-            echo "  $0 stop      - Stop all nodes"
-            echo "  $0 logs      - Show recent logs"
-        fi
-        ;;
-        
-    "stop")
-        stop_nodes
-        ;;
-        
-    "status")
-        show_status
-        ;;
-        
-    "check")
-        check_endpoints
-        ;;
-        
-    "logs")
-        echo -e "${BLUE}Recent logs from all nodes:${NC}"
-        for i in {1..5}; do
-            echo -e "${YELLOW}=== Node ${i} ===${NC}"
-            if [ -f "logs/dev-node${i}.log" ]; then
-                tail -5 "logs/dev-node${i}.log"
-            else
-                echo "No log file found"
-            fi
-            echo ""
-        done
-        ;;
-        
-    "restart")
-        stop_nodes
-        sleep 3
-        "${BASH_SOURCE[0]}" start
-        ;;
-        
-    *)
-        echo "Usage: $0 {start|stop|status|check|logs|restart}"
-        echo ""
-        echo "Commands:"
-        echo "  start   - Start all development nodes"
-        echo "  stop    - Stop all development nodes"
-        echo "  status  - Show node status"
-        echo "  check   - Check API endpoints"
-        echo "  logs    - Show recent logs"
-        echo "  restart - Restart all nodes"
-    exit 1
-    ;;
+    start) start ;;
+    stop) stop ;;
+    status) status ;;
+    reset) reset ;;
+    *) echo "usage: $0 [start|stop|status|reset]" >&2; exit 2 ;;
 esac

@@ -113,10 +113,12 @@ mod tests {
             max_concurrent_jobs: 10,
         };
         let replication_manager = Arc::new(
-            ReplicationManager::new_for_tests(
+            ReplicationManager::new(
                 replication_config,
                 "test-node".to_string(),
                 "http://localhost:8080".to_string(),
+                &crate::replication::test_set_ca_pem(),
+                Vec::new(),
             )
             .unwrap_or_else(|e| panic!("Failed to create replication manager: {e}")),
         );

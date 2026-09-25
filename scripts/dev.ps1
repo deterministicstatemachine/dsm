@@ -246,16 +246,6 @@ function Invoke-DbSetup {
         }
     }
 
-    # Apply schema if present
-    $SchemaFile = Join-Path $RepoRoot "dsm_storage_node\setup_dsm_db.sql"
-    if (Test-Path $SchemaFile) {
-        for ($i = 1; $i -le 5; $i++) {
-            $dbName = "dsm_storage_$i"
-            & psql -h $Env:PGHOST -p $Env:PGPORT -U $DbUser -d $dbName -f $SchemaFile | Out-Null
-        }
-        Ok "Schema applied to all databases."
-    }
-
     Ok "Database setup complete."
 }
 

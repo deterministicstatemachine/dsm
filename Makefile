@@ -395,9 +395,8 @@ deny: ## Run cargo-deny license and advisory checks
 # ---------------------------------------------------------------------------
 
 .PHONY: nodes-up
-nodes-up: ## Set up the dev database and start the 5 local storage nodes
-	@bash $(REPO_ROOT)/scripts/setup_dev_db.sh
-	@cd $(STORAGE_NODE_DIR) && ./scripts/dev/start_dev_nodes.sh
+nodes-up: ## Start the 5 local storage dev nodes (TLS under a local dev CA)
+	@$(STORAGE_NODE_DIR)/scripts/dev/start_dev_nodes.sh
 
 .PHONY: nodes-down
 nodes-down: ## Stop the 5 local storage dev nodes

@@ -31,7 +31,6 @@ use axum::{
 use prost::Message;
 use std::sync::Arc;
 
-use crate::api::infra::hardening::{blake3_tagged, DOM_IDENTITY_DEVTREE_ROOT};
 use crate::AppState;
 use dsm::types::proto as generated;
 
@@ -40,11 +39,6 @@ use dsm::types::proto as generated;
 /// 64 KiB. We cap at 128 KiB to leave headroom and reject obvious DoS
 /// payloads at the boundary before decode.
 const MAX_DEVTREE_STATE_BYTES: usize = 128 * 1024;
-
-fn key_root(genesis_b: &[u8]) -> String {
-    let k = blake3_tagged(DOM_IDENTITY_DEVTREE_ROOT, genesis_b);
-    dsm::utils::text_id::encode_base32_crockford(&k)
-}
 
 pub fn create_router(state: Arc<AppState>) -> Router<()> {
     Router::new()
@@ -67,10 +61,8 @@ async fn get_root(
     Extension(state): Extension<Arc<AppState>>,
     Path(genesis): Path<String>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    // GET reads from the bounded-validator table first; falls back to
-    // the legacy /devtree/root KV slot only if no validated state has
-    // been published yet, so pre-Phase-B.4 callers still see whatever
-    // bytes they wrote. New writes only land in `device_tree_states`.
+    // The one store of a published Device Tree state is the bounded
+    // validator's table.
     let genesis_b =
         dsm::utils::text_id::decode_base32_crockford(&genesis).ok_or(StatusCode::BAD_REQUEST)?;
     let genesis_key = dsm::utils::text_id::encode_base32_crockford(&genesis_b);
@@ -78,13 +70,7 @@ async fn get_root(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let bytes = match payload {
-        Some(b) => b,
-        None => crate::db::get_object_by_key(&state.db_pool, &key_root(&genesis_b))
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-            .ok_or(StatusCode::NOT_FOUND)?,
-    };
+    let bytes = payload.ok_or(StatusCode::NOT_FOUND)?;
 
     let mut headers = axum::http::HeaderMap::new();
     headers.insert(
@@ -538,26 +524,6 @@ fn from_hex(b: u8) -> Result<u8, StatusCode> {
 #[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn key_root_is_deterministic() {
-        let genesis = [0xABu8; 32];
-        let k1 = key_root(&genesis);
-        let k2 = key_root(&genesis);
-        assert_eq!(k1, k2, "same genesis must produce same root key");
-    }
-
-    #[test]
-    fn key_root_differs_for_different_genesis() {
-        let g1 = [0x01u8; 32];
-        let g2 = [0x02u8; 32];
-        assert_ne!(key_root(&g1), key_root(&g2));
-    }
-
-    // key_proof was removed alongside the PUT /devtree/proof endpoint
-    // (Phase B.5, issue #276). Inclusion proofs are now derived on GET
-    // from the persisted DeviceTreeStateV1, so the storage node no
-    // longer needs an opaque proof-keyed KV slot.
 
     #[test]
     fn parse_devid_extracts_value() {

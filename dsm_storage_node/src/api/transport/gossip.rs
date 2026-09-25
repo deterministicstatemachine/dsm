@@ -21,10 +21,6 @@ use subtle::ConstantTimeEq;
 
 const GOSSIP_TOKEN_HEADER: &str = "x-dsm-gossip-token";
 const GOSSIP_TOKEN_ENV: &str = "DSM_GOSSIP_TOKEN";
-/// Explicit, opt-in escape hatch for local development only. When the gossip
-/// token is unset, auth stays fail-closed unless this is set to `1` in a debug
-/// build.
-const GOSSIP_INSECURE_ENV: &str = "DSM_INSECURE_ALLOW_NO_GOSSIP_TOKEN";
 
 fn token_matches(provided: &str, expected: &str) -> bool {
     provided.as_bytes().ct_eq(expected.as_bytes()).into()
@@ -33,17 +29,8 @@ fn token_matches(provided: &str, expected: &str) -> bool {
 async fn require_gossip_token(headers: HeaderMap) -> Result<(), StatusCode> {
     let expected = env::var(GOSSIP_TOKEN_ENV).unwrap_or_default();
     if expected.trim().is_empty() {
-        // Fail closed by default — a missing gossip token must never silently
-        // authorize /gossip, which mutates current_tick and feeds node-state /
-        // replication. Local dev can explicitly opt out by setting
-        // GOSSIP_INSECURE_ENV=1 (debug builds only).
-        if cfg!(debug_assertions) && env::var(GOSSIP_INSECURE_ENV).as_deref() == Ok("1") {
-            log::warn!(
-                "gossip auth explicitly disabled via {}=1 (debug build)",
-                GOSSIP_INSECURE_ENV
-            );
-            return Ok(());
-        }
+        // A missing gossip token never authorizes /gossip, which mutates
+        // current_tick and feeds node state, in any build.
         log::error!("gossip auth required but {} not set", GOSSIP_TOKEN_ENV);
         return Err(StatusCode::UNAUTHORIZED);
     }
@@ -129,6 +116,38 @@ pub fn gossip_routes(state: Arc<AppState>) -> Router<()> {
 mod tests {
     use super::*;
     use prost::Message;
+
+    /// Ruling #2: with no gossip token configured, /gossip admits no one, in
+    /// any build — the retired debug opt-out variable opens nothing — and with
+    /// one configured, only its holder.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn gossip_admits_only_the_configured_token_holder() {
+        std::env::remove_var(GOSSIP_TOKEN_ENV);
+        std::env::set_var("DSM_INSECURE_ALLOW_NO_GOSSIP_TOKEN", "1");
+        let with = |token: &str| {
+            let mut headers = HeaderMap::new();
+            headers.insert(GOSSIP_TOKEN_HEADER, token.parse().expect("header"));
+            headers
+        };
+        assert_eq!(
+            require_gossip_token(HeaderMap::new()).await,
+            Err(StatusCode::UNAUTHORIZED)
+        );
+        assert_eq!(
+            require_gossip_token(with("anything")).await,
+            Err(StatusCode::UNAUTHORIZED)
+        );
+        std::env::remove_var("DSM_INSECURE_ALLOW_NO_GOSSIP_TOKEN");
+
+        std::env::set_var(GOSSIP_TOKEN_ENV, "gossip-secret");
+        assert_eq!(
+            require_gossip_token(with("wrong")).await,
+            Err(StatusCode::UNAUTHORIZED)
+        );
+        assert_eq!(require_gossip_token(with("gossip-secret")).await, Ok(()));
+        std::env::remove_var(GOSSIP_TOKEN_ENV);
+    }
 
     #[test]
     fn token_matches_equal() {

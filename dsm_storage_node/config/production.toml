@@ -80,9 +80,9 @@ port = 8080
 max_connections = 256
 
 [tls]
-enabled = true
 cert_path = "/certs/node.crt"
 key_path  = "/certs/node.key"
+ca_path   = "/certs/ca.crt"    # the storage set's CA: replication pins peers to it
 
 [database]
 url = "__DATABASE_URL__"

@@ -17,3 +17,7 @@ mod cell_properties;
 /// The immutable-object and device-tree properties of the store.
 #[cfg(test)]
 mod store_properties;
+
+/// The schema version a node starts on, and what it refuses.
+#[cfg(test)]
+mod schema_properties;
