@@ -1806,9 +1806,8 @@ message BilateralCommitRequest {
 message BilateralCommitResponse {
   // A receiver that does not commit sends no acknowledgment: an ack is its
   // counter-signed receipt, and nothing else in it is authority.
-  reserved 1, 3, 4;
-  reserved "success", "transaction_hash", "message";
-  Hash32 post_state_hash  = 2;
+  reserved 1, 2, 3, 4;
+  reserved "success", "post_state_hash", "transaction_hash", "message";
   Hash32 commitment_hash  = 5;
   // §11.1 receiver counter-sign: receiver's locally-built copy of the
   // stitched receipt with B-side per-step EK signing artifacts

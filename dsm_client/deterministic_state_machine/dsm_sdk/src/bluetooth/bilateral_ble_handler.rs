@@ -277,7 +277,7 @@ impl BilateralBleHandler {
                 receipt.add_sig_a(signing_out.sig);
 
                 // §11.1 sender side: DEFER the Local chain-head advance to
-                // commit-response time (`mark_sender_committed_with_post_state_hash`
+                // commit-response time (`finalize_sender_step`
                 // promotes it). Advancing here — at confirm BUILD — moved the
                 // Local head past a step the receiver could still reject
                 // (e.g. offline-bearer MissingRelease) or never see; every
@@ -2755,7 +2755,7 @@ impl BilateralBleHandler {
         // 4. Build sender SMT proofs via a prepare-only simulation of the
         // canonical advance (§2.2). No canonical state mutation yet — that
         // happens after the receiver ACKs, inside
-        // `mark_sender_committed_with_post_state_hash`. Identical inputs
+        // `finalize_sender_step`. Identical inputs
         // produce an identical outcome there, so the simulated receipt
         // proofs are byte-exact with the eventual advance.
         //
@@ -2984,7 +2984,7 @@ impl BilateralBleHandler {
             .map(|art| self.build_anchor_disclosure(&art.pin, &session.operation))
             .transpose()?;
         // Stash the driven successor leaf AND the sim post-root so the canonical commit in
-        // `mark_sender_committed_with_post_state_hash` applies the byte-exact same leaf the on-wire
+        // `finalize_sender_step` applies the byte-exact same leaf the on-wire
         // proofs were built from, and can enforce both-or-neither (committed root == this sent sim
         // root). Mirrors the `pre_finalize_entropy` stash; only set for bearer transfers.
         {
@@ -3042,7 +3042,7 @@ impl BilateralBleHandler {
             .await?;
 
         // Cache the signed receipt on the sender's session so post-restart
-        // recovery (mark_sender_committed_with_post_state_hash) can reuse the
+        // recovery (finalize_sender_step) can reuse the
         // already-signed bytes verbatim instead of attempting to re-sign with
         // a chain head that has since advanced past this step.
         {
@@ -3112,7 +3112,7 @@ impl BilateralBleHandler {
 
         // 9. Mark session ConfirmPending and persist confirm for re-delivery.
         // Sender does NOT finalize here. Finalization happens in
-        // mark_sender_committed_with_post_state_hash after delivery is confirmed.
+        // finalize_sender_step after delivery is confirmed.
         // The confirm envelope is persisted to pending_confirm_delivery for
         // crash-safe re-delivery if BLE drops.
         //
@@ -3366,195 +3366,105 @@ impl BilateralBleHandler {
             }
         };
 
-        let post_state_hash: [u8; 32] = response
-            .post_state_hash
-            .as_ref()
-            .ok_or_else(|| DsmError::invalid_operation("missing post_state_hash in commit ack"))?
-            .v
-            .clone()
+        // Core decides on the ack: it is the receiver's counter-signed receipt,
+        // verified against the receiver's pinned identity, the Device Tree
+        // commitment kept for it and its EK chain head on this relationship.
+        let counterparty_device_id = {
+            let sessions = self.sessions.sessions.lock().await;
+            sessions
+                .get(&commitment_hash)
+                .map(|s| s.counterparty_device_id)
+        }
+        .ok_or_else(|| {
+            DsmError::invalid_operation(format!(
+                "commit ack for {}: the session ended before the ack was verified; nothing \
+                 is finalized",
+                bytes_to_base32(&commitment_hash[..8])
+            ))
+        })?;
+        let receiver_contact =
+            crate::storage::client_db::get_contact_by_device_id(&counterparty_device_id)
+                .map_err(|e| {
+                    DsmError::storage(
+                        format!("the receiver's contact: {e}"),
+                        None::<std::io::Error>,
+                    )
+                })?
+                .ok_or_else(|| DsmError::relationship("the receiver is not a contact"))?;
+        let receiver_genesis: [u8; 32] = receiver_contact
+            .genesis_hash
+            .as_slice()
             .try_into()
             .map_err(|_| {
-                DsmError::invalid_operation("commit ack post_state_hash must be 32 bytes")
+                DsmError::invalid_operation("the receiver's pinned genesis is not 32 bytes")
             })?;
+        let receiver_device_tree =
+            crate::storage::client_db::get_contact_device_tree_root(&counterparty_device_id)?
+                .ok_or_else(|| {
+                    DsmError::invalid_operation(
+                        "counter_signed_receipt: no Device Tree commitment is kept for the \
+                         receiver",
+                    )
+                })?;
+        let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
+            &self.device_id,
+            &counterparty_device_id,
+        );
+        let receiver_chain_head = crate::storage::client_db::load_cert_chain_head_pubkey(
+            &rel_key,
+            crate::storage::client_db::CertChainSide::Counterparty,
+        )
+        .map_err(|e| {
+            DsmError::storage(
+                format!(
+                    "counter_signed_receipt verify: the receiver's cert-chain head is unreadable: {e}"
+                ),
+                None::<std::io::Error>,
+            )
+        })?;
+        dsm::bilateral::offline::decide_commit_ack(
+            response
+                .commitment_hash
+                .as_ref()
+                .and_then(|h| <[u8; 32]>::try_from(h.v.as_slice()).ok()),
+            &response.counter_signed_receipt,
+            dsm::bilateral::offline::ConfirmedStep {
+                commitment_hash,
+                sender_device_id: self.device_id,
+                receiver_device_tree_root: receiver_device_tree,
+                receiver_chain_head: receiver_chain_head.as_deref(),
+            },
+            &dsm::bilateral::offline::PinnedPeer {
+                device_id: counterparty_device_id,
+                genesis: receiver_genesis,
+                signing_key: &receiver_contact.public_key,
+                kyber_public_key: &receiver_contact.kyber_public_key,
+            },
+        )?;
 
-        // §11.1 sender-side B-side verification: the receiver counter-signs
-        // their locally-built copy of the stitched receipt with B-side
-        // per-step EK signing artifacts and ships those bytes back in
-        // `counter_signed_receipt`. Verify that:
-        //   1. The bytes parse as a `StitchedReceiptV2`.
-        //   2. The receipt's identity fields match this transfer (anti-
-        //      substitution: `devid_a` is the counterparty, `devid_b` is
-        //      this sender).
-        //   3. Cert chain link: `ek_cert_b` chains `ek_pk_b` back to the
-        //      receiver's prior cert-chain head — loaded from
-        //      `cert_chain_heads` (Local-side from the receiver's POV =
-        //      Counterparty-side from this sender's POV) or falling back
-        //      to the contact's AK_pk at relationship genesis.
-        //   4. Receipt sig: `sig_b` verifies under `ek_pk_b` over the
-        //      receipt's canonical commitment.
-        // On success we replace the in-memory cached A-only receipt with
-        // the fully co-signed bytes so settlement archives both sigs. A
-        // commit response without a counter-signed receipt is not a valid
-        // offline receipt authorization path.
-        // §11.1 Item 8 (B-tight): the Counterparty chain-head advance
-        // that was previously here has been moved INSIDE
-        // `mark_sender_committed_with_post_state_hash`, where it sits
-        // tightly adjacent to canonical commit + session deletion.
-        // Sourcing `ek_pk_b` from the in-session cached receipt
-        // (replaced below on B-side verify success) lets the advance
-        // happen at the right SQL boundary without plumbing extra
-        // context through the function call. The startup
-        // reconciliation sweep covers any remaining wedge window.
-
-        if response.counter_signed_receipt.is_empty() {
-            return Err(DsmError::invalid_operation(
-                "BilateralCommitResponse omits counter_signed_receipt; rejecting",
-            ));
-        }
-        {
-            // Fetch the counterparty (receiver) device_id from the session
-            // store. Required for identity checks and chain-head lookup; if
-            // the session is gone we skip verification (recovery path).
-            let counterparty_device_id_opt: Option<[u8; 32]> = {
-                let sessions = self.sessions.sessions.lock().await;
-                sessions
-                    .get(&commitment_hash)
-                    .map(|s| s.counterparty_device_id)
-            };
-
-            if let Some(counterparty_device_id) = counterparty_device_id_opt {
-                match dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(
-                    &response.counter_signed_receipt,
-                ) {
-                    Ok(counter_signed) => {
-                        // Identity check — the receiver builds the receipt
-                        // with their own device_id as devid_a and the
-                        // sender's as devid_b. Anti-substitution: any
-                        // counter-signed receipt for an unrelated transfer
-                        // would carry mismatched ids.
-                        if counter_signed.devid_a != counterparty_device_id {
-                            return Err(DsmError::invalid_operation(
-                                "counter_signed_receipt: devid_a does not match the counterparty \
-                                 of this session — possible substitution",
-                            ));
-                        }
-                        if counter_signed.devid_b != self.device_id {
-                            return Err(DsmError::invalid_operation(
-                                "counter_signed_receipt: devid_b does not match this sender \
-                                 device_id — possible substitution",
-                            ));
-                        }
-
-                        // The receipt this sender archives as the step's proof
-                        // holds its state rules against the Device Tree
-                        // commitment kept for the receiver.
-                        let receiver_device_tree =
-                            crate::storage::client_db::get_contact_device_tree_root(
-                                &counterparty_device_id,
-                            )?
-                            .ok_or_else(|| {
-                                DsmError::invalid_operation(
-                                    "counter_signed_receipt: no Device Tree commitment is kept \
-                                     for the receiver",
-                                )
-                            })?;
-                        dsm::verification::receipt_verification::verify_receipt_state(
-                            &counter_signed,
-                            &dsm::types::receipt_types::DeviceTreeAcceptanceCommitment::from_root(
-                                receiver_device_tree,
-                            ),
-                        )?;
-
-                        let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
-                            &self.device_id,
-                            &counterparty_device_id,
-                        );
-                        // From this sender's view, the RECEIVER's chain head
-                        // lives in the Counterparty-side row of
-                        // cert_chain_heads.
-                        let prev_pk_from_chain =
-                            crate::storage::client_db::load_cert_chain_head_pubkey(
-                                &rel_key,
-                                crate::storage::client_db::CertChainSide::Counterparty,
-                            )
-                            .map_err(|e| {
-                                DsmError::storage(
-                                    format!(
-                                        "counter_signed_receipt verify: the receiver's cert-chain \
-                                         head is unreadable: {e}"
-                                    ),
-                                    None::<std::io::Error>,
-                                )
-                            })?;
-                        let expected_prev_pk = match prev_pk_from_chain {
-                            Some(pk) => pk,
-                            None => {
-                                let manager = self.bilateral_tx_manager.read().await;
-                                manager
-                                    .get_contact(&counterparty_device_id)
-                                    .ok_or_else(|| {
-                                        DsmError::invalid_operation(
-                                            "counter_signed_receipt verify: contact missing \
-                                             for AK_pk root",
-                                        )
-                                    })?
-                                    .public_key
-                                    .clone()
-                            }
-                        };
-
-                        dsm::verification::receipt_verification::verify_per_step_ek_signing(
-                            &counter_signed,
-                            dsm::verification::receipt_verification::BilateralSide::B,
-                            &expected_prev_pk,
-                            &counter_signed.parent_tip,
-                            &commitment_hash,
-                        )?;
-
-                        let snapshot_for_persist: BilateralBleSession;
-                        {
-                            let mut sessions = self.sessions.sessions.lock().await;
-                            if let Some(s) = sessions.get_mut(&commitment_hash) {
-                                s.stitched_receipt_bytes =
-                                    Some(response.counter_signed_receipt.clone());
-                                snapshot_for_persist = s.clone();
-                            } else {
-                                info!(
-                                    "[BILATERAL] §11.1 per-step EK B-side verification PASS for commitment {} (session vanished before persist)",
-                                    bytes_to_base32(&commitment_hash[..8])
-                                );
-                                return Ok(());
-                            }
-                        }
-                        if let Err(e) = self.persist_session(&snapshot_for_persist, None).await {
-                            warn!(
-                                "[BILATERAL] §11.1 (B-tight) failed to persist counter-signed receipt before canonical commit: {}",
-                                e
-                            );
-                        }
-                        info!(
-                            "[BILATERAL] §11.1 per-step EK B-side verification PASS for commitment {}",
-                            bytes_to_base32(&commitment_hash[..8])
-                        );
-                    }
-                    Err(e) => {
-                        return Err(DsmError::invalid_operation(format!(
-                            "sender per-step EK verify: failed to decode \
-                             counter_signed_receipt: {e}"
-                        )));
-                    }
-                }
-            } else {
-                return Err(DsmError::invalid_operation(format!(
+        // The counter-signed receipt is the step's proof: it replaces the
+        // confirm-time copy and is written before the step is finalized.
+        let with_receipt = {
+            let sessions = self.sessions.sessions.lock().await;
+            let mut session = sessions.get(&commitment_hash).cloned().ok_or_else(|| {
+                DsmError::invalid_operation(format!(
                     "commit ack for {}: the session ended before the ack was verified; nothing \
                      is finalized",
                     bytes_to_base32(&commitment_hash[..8])
-                )));
-            }
-        }
+                ))
+            })?;
+            session.stitched_receipt_bytes = Some(response.counter_signed_receipt.clone());
+            session
+        };
+        self.persist_session(&with_receipt, None).await?;
+        self.sessions
+            .sessions
+            .lock()
+            .await
+            .insert(commitment_hash, with_receipt);
 
         let meta = self
-            .mark_sender_committed_with_post_state_hash(&commitment_hash, Some(post_state_hash))
+            .finalize_sender_step(&commitment_hash)
             .await
             .ok_or_else(|| {
                 DsmError::invalid_operation("sender finalize failed after receiver acknowledgment")
@@ -3566,7 +3476,7 @@ impl BilateralBleHandler {
         self.clear_pending_confirm_delivery(&commitment_hash);
 
         // §11.1 Counterparty chain-head advance sits INSIDE
-        // `mark_sender_committed_with_post_state_hash`, adjacent to the
+        // `finalize_sender_step`, adjacent to the
         // canonical commit and the session deletion.
 
         crate::sdk::transfer_hooks::post_transfer_cleanup(
@@ -4231,17 +4141,9 @@ impl BilateralBleHandler {
             failure_reason: None,
         });
 
-        // Receiver's post-state hash broadcast to sender = symmetric h_{n+1}.
-        // Sender verifies this independently from (h_n, op, entropy, σ) — no
-        // access to T_receiver needed (§16.6 shared-tip derivation).
-        let receiver_post_state_hash = new_chain_tip;
-
         let ack_envelope = self
             .create_envelope(generated::envelope::Payload::BilateralCommitResponse(
                 generated::BilateralCommitResponse {
-                    post_state_hash: Some(generated::Hash32 {
-                        v: receiver_post_state_hash.to_vec(),
-                    }),
                     commitment_hash: Some(generated::Hash32 {
                         v: commitment_hash.to_vec(),
                     }),
@@ -4392,12 +4294,11 @@ impl BilateralBleHandler {
         }
     }
 
-    /// Precisely mark a single session committed by commitment id, optionally using
-    /// a post_state_hash (for session recovery on restart).
-    pub async fn mark_sender_committed_with_post_state_hash(
+    /// Finalize the sender's side of the step `commitment_hash` once its ack
+    /// verified: the canonical advance, the settlement and the session's end.
+    pub async fn finalize_sender_step(
         &self,
         commitment_hash: &[u8; 32],
-        post_state_hash: Option<[u8; 32]>,
     ) -> Option<crate::sdk::transfer_hooks::TransferMeta> {
         info!("Marking session committed and finalizing sender transaction");
 
@@ -4711,24 +4612,6 @@ impl BilateralBleHandler {
             "Sender advance committed via canonical chokepoint, tx_hash: {:?}",
             bytes_to_base32(&transaction_hash)
         );
-
-        // Record the receiver's observed post-state tip (matches our h_{n+1} symmetric).
-        if let Some(post_tip) = post_state_hash {
-            info!(
-                "[BILATERAL] Sender recording receiver-reported post_state_hash: {}",
-                bytes_to_base32(&post_tip[..8])
-            );
-            if let Err(e) = crate::storage::client_db::record_observed_remote_chain_tip(
-                &counterparty_device_id,
-                &post_tip,
-                crate::storage::client_db::ObservedRemoteTipSource::LivePeerClaim,
-            ) {
-                warn!(
-                    "[BILATERAL] Failed to persist observed receiver post_state_hash: {}",
-                    e
-                );
-            }
-        }
 
         // Note: contacts.chain_tip + local_bilateral_chain_tip advancement is
         // now owned by the delegate's `apply_bilateral_settlement_bundle_atomic`
@@ -6133,10 +6016,7 @@ mod tests {
         sender_step_whose_prepare_refuses(&handler, counterparty, tip, commitment).await;
 
         assert!(
-            handler
-                .mark_sender_committed_with_post_state_hash(&commitment, Some([9u8; 32]))
-                .await
-                .is_none(),
+            handler.finalize_sender_step(&commitment).await.is_none(),
             "a commit whose prepare refuses finalizes nothing"
         );
 
@@ -6190,7 +6070,6 @@ mod tests {
                     commitment_hash: Some(generated::Hash32 {
                         v: commitment.to_vec(),
                     }),
-                    post_state_hash: Some(generated::Hash32 { v: vec![8; 32] }),
                     counter_signed_receipt: vec![9; 16],
                 },
             )),
@@ -6235,7 +6114,6 @@ mod tests {
                         commitment_hash: Some(generated::Hash32 {
                             v: commitment.to_vec(),
                         }),
-                        post_state_hash: Some(generated::Hash32 { v: vec![8; 32] }),
                         counter_signed_receipt: vec![9; 16],
                     },
                 )),
@@ -6251,10 +6129,7 @@ mod tests {
         let counterparty = [0x66u8; 32];
         let failed = [0x67u8; 32];
         sender_step_whose_prepare_refuses(&handler, counterparty, [0x71u8; 32], failed).await;
-        assert!(handler
-            .mark_sender_committed_with_post_state_hash(&failed, None)
-            .await
-            .is_none());
+        assert!(handler.finalize_sender_step(&failed).await.is_none());
         let refused = handler
             .handle_commit_response(&ack(failed))
             .await
