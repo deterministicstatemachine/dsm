@@ -25,7 +25,7 @@ use dsm::crypto::signatures::SignatureKeyPair;
 use dsm::economic::native_reserve::{era_reserve_id, ERA_FAUCET_PAYOUT};
 use dsm::types::device_state::{AdvanceOutcome, BalanceDelta, BalanceDirection, DeviceState};
 use dsm::types::error::DsmError;
-use dsm::types::operations::{Operation, TransactionMode, VerificationType};
+use dsm::types::operations::{Operation, TransactionMode};
 use dsm::types::receipt_types::{
     DeviceTreeAcceptanceCommitment, ReceiptVerificationContext, StitchedReceiptV2,
 };
@@ -112,8 +112,6 @@ impl LiveDevice {
             policy_commit: era_policy_commit(),
             mode: TransactionMode::Unilateral,
             nonce: nonce.to_vec(),
-            verification: VerificationType::Standard,
-            pre_commit: None,
             recipient: to.devid.to_vec(),
             to: to.label.as_bytes().to_vec(),
             message: String::new(),

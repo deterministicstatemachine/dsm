@@ -350,55 +350,29 @@ fn encode_offline_transfer_operation_canonical(
     memo: &str,
     policy_commit: &[u8; 32],
 ) -> Vec<u8> {
-    let mut out = Vec::new();
-
-    let push_u8 = |out: &mut Vec<u8>, v: u8| out.push(v);
-    let push_u32 = |out: &mut Vec<u8>, v: u32| out.extend_from_slice(&v.to_le_bytes());
-    let push_bytes = |out: &mut Vec<u8>, bytes: &[u8]| {
-        push_u32(out, bytes.len() as u32);
-        out.extend_from_slice(bytes);
-    };
-    let push_str = |out: &mut Vec<u8>, value: &str| push_bytes(out, value.as_bytes());
-
-    push_u8(&mut out, 3); // Operation::Transfer tag
-    push_bytes(&mut out, to_device_id);
-
-    // §4.3 canonical Balance encoding: value (u64 le) ‖ locked (u64 le).
-    // No counter, no tick. Optional state_hash (32B) is omitted for offline
-    // transfer authoring — the receiver derives it on settlement.
-    let mut balance_bytes = Vec::with_capacity(16);
-    balance_bytes.extend_from_slice(&amount.to_le_bytes());
-    balance_bytes.extend_from_slice(&0u64.to_le_bytes());
-    push_bytes(&mut out, &balance_bytes);
-
-    let canonical_token_id = canonicalize_token_id(token_id);
-    push_str(&mut out, &canonical_token_id);
-    // §9.5 policy_commit — length-prefixed 32 bytes, matching Operation::to_bytes.
-    push_bytes(&mut out, policy_commit);
-    push_u8(&mut out, 0); // TransactionMode::Bilateral
-    push_bytes(&mut out, &[]);
-    push_u8(&mut out, 2); // VerificationType::Bilateral
-    push_u8(&mut out, 0); // pre_commit: None
-    push_bytes(&mut out, to_device_id);
-    push_str(
-        &mut out,
-        &crate::util::text_id::encode_base32_crockford(to_device_id),
-    );
-    push_str(&mut out, memo);
-    push_bytes(&mut out, &[]);
-
-    // Offline mode is HARD-REQUIRED to be chip-attested ("offline = chips"): append the canonical
-    // offline-bearer authority-policy tail so `operation_requires_offline_bearer` fires and the send
-    // drives the physical anchor (fail-closed if no chip). Uses the real `append_canonical` codec, so
-    // the bytes are exactly what `Operation::from_bytes` decodes on the receiver.
+    // Offline mode is HARD-REQUIRED to be chip-attested ("offline = chips"):
+    // the canonical offline-bearer authority policy rides on the transfer so
+    // `operation_requires_offline_bearer` fires and the send drives the
+    // physical anchor (fail-closed if no chip).
     let policy = dsm::types::operations::canonical_offline_bearer_policy();
-    policy.append_canonical(&mut out);
     log::info!(
         "[wallet.sendOffline] offline-bearer authority policy bound: policy_id={}",
         crate::util::text_id::encode_base32_crockford(&policy.policy_id)
     );
-
-    out
+    dsm::types::operations::Operation::Transfer {
+        to_device_id: to_device_id.to_vec(),
+        amount: dsm::types::token_types::Balance::amount(amount),
+        token_id: canonicalize_token_id(token_id).into_bytes(),
+        policy_commit: *policy_commit,
+        mode: dsm::types::operations::TransactionMode::Bilateral,
+        nonce: Vec::new(),
+        recipient: to_device_id.to_vec(),
+        to: crate::util::text_id::encode_base32_crockford(to_device_id).into_bytes(),
+        message: memo.to_string(),
+        signature: Vec::new(),
+        authority_policy: Some(policy),
+    }
+    .to_bytes()
 }
 
 impl AppRouterImpl {
