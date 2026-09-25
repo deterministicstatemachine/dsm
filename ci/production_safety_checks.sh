@@ -69,6 +69,10 @@ bash ci/admitted_predecessor_readers_fenced.sh
 # The storage node holds bytes and knows nothing about SoFi.
 bash ci/storage_is_dumb.sh
 
+# Requirement status is derived from evidence: pins, counts, and every named
+# code item and test exist (specs/requirements/CONFORMANCE_GAPS.md §2 rule 6).
+python3 ci/conformance_evidence.py
+
 # Gate G2 (spec §37): SoFi evidence is fetched, never defaulted.
 bash ci/sofi_no_default_evidence.sh
 

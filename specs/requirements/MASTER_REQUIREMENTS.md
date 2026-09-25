@@ -2,7 +2,7 @@
 
 Derived artifact. Not a source of protocol truth; `specs/README.md` governs.
 
-**Status:** Round 1 — independent extraction open. The canonical list (§8) stays empty until every extractor has finished and reconciliation (§7) has run.
+**Status:** Reconciled (§7.1). §8 is the canonical list; amendments add rows with source `amendment`. `ci/conformance_evidence.py` fails CI when a specification's bytes differ from the §1 pins, and when §8's counts differ from the rows.
 
 Several extractors produce this list independently and the results are cross-referenced: Claude (chat), Claude Code, Gemini, and possibly ChatGPT. This file defines the one format they all use, so that their outputs can be compared mechanically rather than by reading.
 
@@ -15,11 +15,11 @@ Every extraction in this round is taken against exactly these bytes:
 | File | `git hash-object` | Lines |
 |---|---|---|
 | `specs/DSM_High_Level_Explainer.md` | `bc34c8f8a64f772471625d14d4d728e80e4cc02f` | 4305 |
-| `specs/SoFi_Settlement_Specification.md` | `653e35c8ca2f579faf11b46c78f5705db6a35d15` | 2608 |
+| `specs/SoFi_Settlement_Specification.md` | `ebe9d7cfe904ba25449e5e8b91744a04e216382a` | 2614 |
 | `specs/dBTC_Native_Specification.md` | `233a3e72a5b16a023af830f4c8ffaad4ba9391a8` | 2160 |
-| `specs/DSM_Storage_Node_Specification.md` | `37fbeec10674b218557ca8c492e3d4cd624c1c5e` | 597 |
+| `specs/DSM_Storage_Node_Specification.md` | `415a9b9c67c7a2b4b6df78b0af85fb3bc7282ae8` | 636 |
 
-Pins updated 2026-09-23 after storage §14 (#974), the set-identity amendment (SoFi Amendment S6, storage §10), the replication amendment (storage §12.5), the vault-consistency recommendation (SoFi §31), Amendment S7 (SoFi §24) and Amendment A7 (DSM §11, storage §8). The extractions of 2026-09-22 were taken against SoFi `4c62ee78…` (2597 lines) and storage `8d43ac02…` (571 lines); their line-based IDs refer to those bytes.
+Pins updated 2026-09-24 after SoFi Amendments S8, S9 and S10 and the storage §9 rule on the leader first, one chain in route order and the completion proof (#977); before that, 2026-09-23 after storage §14 (#974), the set-identity amendment (SoFi Amendment S6, storage §10), the replication amendment (storage §12.5), the vault-consistency recommendation (SoFi §31), Amendment S7 (SoFi §24) and Amendment A7 (DSM §11, storage §8). The extractions of 2026-09-22 were taken against SoFi `4c62ee78…` (2597 lines) and storage `8d43ac02…` (571 lines); their line-based IDs refer to those bytes.
 
 The DSM and SoFi specifications were amended on 2026-09-22 (marked "Amendment" in their text). The storage-node specification was added to the corpus on 2026-09-22, before any other extractor started. The owner accepted it in full the same day. Extract its items marked **Open** with Flags `ambiguous` and a Requirement text that says so, never as settled requirements.
 
@@ -150,6 +150,7 @@ Each extraction also has a Findings table:
 - **No Pending (2026-09-23).** Owner: a predicate has two values and network status is separate, so a trader position resolves Realized, Void or Invalid only; an attempt that cannot complete its facts fails on the network (SoFi Amendment S7). Rows MR-DSM-0017, MR-SOFI-0061, 0064, 0224, 0227, 0235, 0247, 0248 and 0252 rewritten.
 - **Replication amendment (2026-09-23).** Conformance finding on MR-STOR-0082 (ChatGPT CG-07): the storage spec still said an operator must replicate a role's memory before acknowledging, which predates route chains. Owner: the route chain is the replication (leader's link plus two further links, each committing the one before). Storage §12.5 amended; the row rewritten.
 - **Set identity amendment (2026-09-23).** Conformance finding on MR-STOR-0055 / MR-SOFI-0068: the code commits each member's register incarnation in `storage_set_id` (CCB storage-set schema 3) and the specs said member ids only. Owner decision: the specs follow the code (SoFi Amendment S6, storage §10). Both rows rewritten.
+- **Completion proofs, ClaimRef and the token creator (2026-09-23, landed in #977 without rows; added 2026-09-24).** Owner decisions: storage §9 gains the rule on the leader first, one chain in route order and the completion proof; SoFi Amendment S10 requires a completion proof for every Final a DLV unlock relies on, S9 checks ClaimRef against the verifier's own accepted claim, and S8 commits the creator in the policy blob and records a token's creation once. MR-SOFI-0330–0333 and MR-STOR-0148–0158 added with source `amendment`; §1 re-pinned.
 - **Post-reconciliation amendment (2026-09-22): route-chain finality.** For finding GPT-4, finality was redefined as a route chain (storage spec §9, §12.6, §14, §22; DSM Amendment A6; SoFi Amendment S4). §1 pins the amended files. Canonical rows restating the old rule were rewritten, and rows for the new rules were added at the end of §8.1, §8.2 and §8.4 with source `amendment`. The extraction files in `extractions/` remain as extracted against the earlier hashes.
 
 ## 8 Canonical requirements
@@ -164,7 +165,7 @@ Reconciled on 2026-09-22 from two extractions: `claude-chat` (798 rows) and `cha
 | DSM_Storage_Node_Specification.md | 128 | 122 | 6 |
 | **Total** | **859** | **652** | **207** |
 
-Added afterwards by amendment (§7.1): DSM 1, SoFi 2, storage 16, for 878 canonical requirements in all.
+Added afterwards by amendment (§7.1): DSM 3, SoFi 6, storage 30, for 898 canonical requirements in all.
 
 Columns: **ID** is the canonical ID (`MR-<spec>-nnnn`, in document order). **Sources** are the extraction IDs merged into the row (`cc:` claude-chat, `gpt:` chatgpt); the first source locates the quote. **Flags** carry the findings in §8.7 that bear on the row.
 
@@ -778,6 +779,10 @@ Columns: **ID** is the canonical ID (`MR-<spec>-nnnn`, in document order). **Sou
 | MR-SOFI-0327 | conformance-test | derived | Token-policy rule changes have named tests that fail when their checks are removed. | gpt: SOFI-054/L2586 | 1/2: chatgpt | none |
 | MR-SOFI-0328 | invariant | explicit | Final(K, x) and every use of it in SoFi are replaced by the storage-spec route chain: x is final with a valid leader link and two further valid links; LeaderHeld(K, y) means y has the valid leader link and still settles that no other value is final at K. | amendment: SoFi Amendment S4 (2026-09-22) | amendment | none |
 | MR-SOFI-0329 | transition | explicit | A position whose drop claim won under the challenge rule resolves Void (ladder step 3a) unless it is shown Invalid on evidence in hand; nothing executes, no balance moves, the lineage continues from the previous root, and it can never move to Invalid. | amendment: SoFi Amendment S5 (2026-09-22) | amendment | none |
+| MR-SOFI-0330 | evidence | explicit | Every Final a DLV unlock relies on is shown by a completion proof: FulfillmentRegistered(F) by the proofs at K_ful(q) and K_root(q), and each StorageFinalE(K(F.a_j), E) in ConsumedRoute by the proof at that successor key; the client keeps the proof of each Final it relies on, Core checks each proof against its own reads of the seats, and an unlock whose proofs do not check does not unlock. | amendment: SoFi Amendment S10 (2026-09-23) | owner | none |
+| MR-SOFI-0331 | evidence | explicit | SetupValid compares the setup's claim_ref with the digest of the claim the verifier accepted at the setup's position p when it validated the trader's lineage (the registered root claim of an ordinary position, or C_p of a resolved SoFi position); RouteValidation's evidence carries that accepted claim as a value only lineage validation (or the device's own admitted store, for its own positions) produces, so RouteValidation reads no storage for it; a setup naming any other claim is Invalid, and until the accepted claim is in hand the setup is not evaluated. | amendment: SoFi Amendment S9 (2026-09-23) | owner | none |
+| MR-SOFI-0332 | authority | explicit | A token policy blob commits its creator, the genesis G and device id DevID of the creating device, after the release rule; a native token's genesis release is admissible only in a CreateToken of that device, so anyone else holding the same policy bytes releases nothing. | amendment: SoFi Amendment S8 (2026-09-23) | owner | none |
+| MR-SOFI-0333 | invariant | explicit | The creating transition inserts a creation record for the policy commit into the creator's economic tree from zero (class 0x0060, key H(DSM/economic-token-creation-key/v1; G ‖ DevID ‖ policy_commit)); its presence under a validated root proves the creation, a second creation of the same commit on that lineage cannot build its write set, and so the genesis supply is released exactly once. | amendment: SoFi Amendment S8 (2026-09-23) | owner | none |
 
 ### 8.3 dBTC native specification
 
@@ -1070,6 +1075,17 @@ Columns: **ID** is the canonical ID (`MR-<spec>-nnnn`, in document order). **Sou
 | MR-STOR-0145 | prohibition | explicit | A node never marks, hides, expires or removes a spool envelope after it is written, and serves a spool only from a position. | amendment: storage §8 (2026-09-23) | owner | none |
 | MR-STOR-0146 | invariant | explicit | Every spool payload a node holds is ciphertext. | amendment: storage §8 (2026-09-23) | owner | none |
 | MR-STOR-0147 | authority | explicit | A node may refuse a write addressed to an account whose storage credits are exhausted, keyed on the account written to and never on the writer; a vault's storage after creation never depends on anyone's payment. Outside beta. | amendment: storage §17 (2026-09-23) | owner | none |
+| MR-STOR-0148 | transition | explicit | A write begins at the leader (position 0): nothing is written to a later seat until the leader has returned its arrival record for the value. | amendment: storage §9 (2026-09-23) | owner | none |
+| MR-STOR-0149 | prohibition | explicit | A writer whose leader stored the value but whose answer was lost recovers the leader link from the leader's arrival log, as the record of the value's first position-0 copy, and never writes the value to the leader a second time. | amendment: storage §9 (2026-09-23) | owner | none |
+| MR-STOR-0150 | invariant | explicit | The only race is for the leader link: the value that holds it has the cell, no other value ever can, and nobody races it for the later seats. | amendment: storage §9 (2026-09-23) | owner | none |
+| MR-STOR-0151 | transition | explicit | Links and empties are appended strictly in route order; at a position the writer may retry that seat, or record an empty and advance to the next position. | amendment: storage §9 (2026-09-23) | owner | none |
+| MR-STOR-0152 | prohibition | explicit | Once a later position is recorded, every earlier position is closed for that chain and is never written again. | amendment: storage §9 (2026-09-23) | owner | none |
+| MR-STOR-0153 | liveness-boundary | explicit | A writer that records empties at positions 1 and 2 needs links at both 3 and 4; if either fails, the value stays short of Final and the writer cannot recover through a closed position. | amendment: storage §9 (2026-09-23) | owner | none |
+| MR-STOR-0154 | invariant | explicit | Final(K, x) holds when one chain of x has three links: the leader link and two further links, at any two of positions 1 to 4. | amendment: storage §9 (2026-09-23) | owner | none |
+| MR-STOR-0155 | evidence | explicit | The completion proof of x at K is x and the prefix of one chain of x from position 0 through the chain's third link: for every position in that range, in route order, the link recorded there or an empty. | amendment: storage §9 (2026-09-23) | owner | none |
+| MR-STOR-0156 | evidence | explicit | A completion proof is checked online: the verifier reads the seats itself and accepts it only if x holds the leader link at K, every link in it is valid under the route-chain rules, and the copy holding the third link carries exactly the proof's earlier positions; the proof carries no seat logs. | amendment: storage §9 (2026-09-23) | owner | none |
+| MR-STOR-0157 | obligation | explicit | The completion digest is c = H_dom(DSM/storage/route-completion/v1, len(N) ‖ N ‖ K ‖ d_x ‖ n ‖ s_0 ‖ … ‖ s_(n−1)), with d_x = H_dom(DSM/storage/route-value/v1, x), a link at position j encoded 0x01 ‖ i ‖ h_i and an empty 0x00, len(N) 2 bytes, n 1 byte and i 8 bytes big-endian; it is computed from the proof's fields, never from a transport encoding, and excludes the ByteCommits, so every verifier of the same proof computes the same digest. | amendment: storage §9 (2026-09-23) | owner | none |
+| MR-STOR-0158 | obligation | explicit | The client that relies on a Final keeps its completion proof; nothing else stores or commits the proof or its digest. | amendment: storage §9 (2026-09-23) | owner | none |
 
 ### 8.5 Open items (not requirements)
 
