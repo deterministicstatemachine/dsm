@@ -2588,18 +2588,18 @@ impl CoreSDK {
         // re-derives BLAKE3(TAG_DSM_POLICY, policy_bytes) and refuses bytes
         // that do not hash to the commitment they are stored under, so a row
         // that does not carry the real policy cannot resolve through here.
-        for row in [
-            crate::storage::client_db::token_registry::get_token(token_id),
-            crate::storage::client_db::token_registry::get_token_by_ticker(token_id),
-        ]
-        .into_iter()
-        .flatten()
-        .flatten()
-        {
-            if matches!(
-                crate::storage::client_db::token_registry::load_policy_verified(&row.policy_commit),
-                Ok(Some(_))
-            ) {
+        let registry = |e: anyhow::Error| {
+            DsmError::storage(format!("token registry: {e}"), None::<std::io::Error>)
+        };
+        let by_id =
+            crate::storage::client_db::token_registry::get_token(token_id).map_err(registry)?;
+        let by_ticker = crate::storage::client_db::token_registry::get_token_by_ticker(token_id)
+            .map_err(registry)?;
+        for row in [by_id, by_ticker].into_iter().flatten() {
+            if crate::storage::client_db::token_registry::load_policy_verified(&row.policy_commit)
+                .map_err(registry)?
+                .is_some()
+            {
                 return Ok(row.policy_commit);
             }
         }

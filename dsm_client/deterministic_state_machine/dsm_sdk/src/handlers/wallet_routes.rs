@@ -480,11 +480,13 @@ impl AppRouterImpl {
                     crate::util::text_id::encode_base32_crockford(&self.device_id_bytes);
 
                 // CRITICAL: Read from SQLite client_db - this is where bilateral transfers store transactions
-                let sqlite_txs = crate::storage::client_db::get_transaction_history(
+                let sqlite_txs = match crate::storage::client_db::get_transaction_history(
                     Some(&my_device_id_str),
                     limit,
-                )
-                .unwrap_or_default();
+                ) {
+                    Ok(txs) => txs,
+                    Err(e) => return err(format!("wallet.history: history unreadable: {e}")),
+                };
 
                 // Debug: log what we got from SQLite
                 log::info!(
@@ -504,18 +506,28 @@ impl AppRouterImpl {
 
                 // Build a lookup map from device_id text to alias for resolving transaction counterparties
                 // Use sync contact lookup from SQLite storage
-                let alias_lookup: std::collections::HashMap<String, String> =
-                    crate::storage::client_db::get_all_contacts()
-                        .unwrap_or_default()
-                        .into_iter()
-                        .map(|c| {
-                            let device_txt =
-                                crate::util::text_id::encode_base32_crockford(&c.device_id);
-                            (device_txt, c.alias)
-                        })
-                        .collect();
+                let contacts = match crate::storage::client_db::get_all_contacts() {
+                    Ok(contacts) => contacts,
+                    Err(e) => return err(format!("wallet.history: contacts unreadable: {e}")),
+                };
+                let alias_lookup: std::collections::HashMap<String, String> = contacts
+                    .into_iter()
+                    .map(|c| {
+                        let device_txt =
+                            crate::util::text_id::encode_base32_crockford(&c.device_id);
+                        (device_txt, c.alias)
+                    })
+                    .collect();
 
-                let txs: Vec<generated::TransactionInfo> = sqlite_txs
+                // A stored row is this device's own record: a device id or hash
+                // that does not decode, or a transfer with no token, is a
+                // corrupt row and an error, never an empty field.
+                let bytes32 = |what: &str, text: &str| -> Result<Vec<u8>, String> {
+                    crate::util::text_id::decode_base32_crockford(text)
+                        .filter(|b| b.len() == 32)
+                        .ok_or_else(|| format!("wallet.history: a stored {what} is not 32 bytes"))
+                };
+                let txs: Result<Vec<generated::TransactionInfo>, String> = sqlite_txs
                     .into_iter()
                     .map(|t| {
                         // PROTO SAFETY:
@@ -573,34 +585,26 @@ impl AppRouterImpl {
                             _ => generated::TransactionType::TxTypeUnspecified,
                         };
 
-                        generated::TransactionInfo {
+                        let token_id = t
+                            .metadata
+                            .get("token_id")
+                            .and_then(|b| String::from_utf8(b.clone()).ok())
+                            .ok_or_else(|| {
+                                format!("wallet.history: transaction {} names no token", t.tx_id)
+                            })?;
+                        Ok(generated::TransactionInfo {
                             // Filled at the encoding boundary by enrich_transaction_display.
                             display_amount: String::new(),
                             id: safe_id,
                             // Protocol/UI contract: device ids are binary 32-byte values.
                             // We store canonical base32 in SQLite for indexing, but must return bytes here.
-                            from_device_id: crate::util::text_id::decode_base32_crockford(
-                                &t.from_device,
-                            )
-                            .filter(|b| b.len() == 32)
-                            .unwrap_or_default(),
-                            to_device_id: crate::util::text_id::decode_base32_crockford(
-                                &t.to_device,
-                            )
-                            .filter(|b| b.len() == 32)
-                            .unwrap_or_default(),
-                            token_id: canonicalize_token_id(
-                                &t.metadata
-                                    .get("token_id")
-                                    .and_then(|b| String::from_utf8(b.clone()).ok())
-                                    .unwrap_or_else(|| "ERA".to_string()),
-                            ),
+                            from_device_id: bytes32("sender device id", &t.from_device)?,
+                            to_device_id: bytes32("recipient device id", &t.to_device)?,
+                            token_id: canonicalize_token_id(&token_id),
                             amount: t.amount,
                             fee: 0,
                             // tx_hash is stored as canonical base32 text in SQLite.
-                            tx_hash: crate::util::text_id::decode_base32_crockford(&t.tx_hash)
-                                .filter(|b| b.len() == 32)
-                                .unwrap_or_default(),
+                            tx_hash: bytes32("transaction hash", &t.tx_hash)?,
                             amount_signed,
                             tx_type: tx_type_enum as i32,
                             status: t.status.clone(),
@@ -625,9 +629,13 @@ impl AppRouterImpl {
                                     .as_ref()
                                     .is_some_and(|b| receipt_state_holds(b))
                             },
-                        }
+                        })
                     })
                     .collect();
+                let txs = match txs {
+                    Ok(txs) => txs,
+                    Err(e) => return err(e),
+                };
 
                 // Rendered at the encoding boundary, for the same reason
                 // balances are: a producer that builds a row without the

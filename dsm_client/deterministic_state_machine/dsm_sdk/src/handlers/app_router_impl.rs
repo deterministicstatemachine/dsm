@@ -2268,203 +2268,84 @@ pub(crate) struct TaggedInboxAddress {
 
 /// Collect per-contact B0x addresses tagged with route freshness.
 ///
-/// Returns up to TWO addresses per contact:
-/// 1. Current tip address (always, tagged `Current`)
-/// 2. Previous tip address (if stored, non-zero, and different from current; tagged `PreviousTip`)
-///
-/// This enables stale-route delivery: messages sent to a previous tip's address
-/// become visible but are NOT auto-applied to wallet state.
+/// Per contact: the current tip's address (`Current`), the previous tip's
+/// (`PreviousTip`) when one is stored and differs, and the pending online
+/// outbox's next tip (`Current`) — the counterparty replies there before it
+/// sees this device's canonical tip advance. Then every route a split
+/// transfer's first half arrived on, until the pair completes. Any route that
+/// cannot be derived, or any store that cannot be read, is an error: a route
+/// silently left out is an inbox never polled.
 pub(crate) fn collect_tagged_inbox_addresses(
     local_genesis: [u8; 32],
     local_device_id: [u8; 32],
     contacts: &[crate::storage::client_db::ContactRecord],
-) -> Vec<TaggedInboxAddress> {
-    if local_genesis == [0u8; 32] {
-        log::warn!(
-            "[collect_tagged_inbox_addresses] genesis is ZERO — returning empty address list"
-        );
-        return Vec::new();
-    }
-
+) -> Result<Vec<TaggedInboxAddress>, String> {
+    let address_for = |tip: &[u8; 32]| {
+        crate::sdk::b0x_sdk::B0xSDK::compute_b0x_address(&local_genesis, &local_device_id, tip)
+            .map_err(|e| format!("inbox address derivation failed: {e}"))
+    };
     let mut addresses = Vec::with_capacity(contacts.len() * 2);
 
     for contact in contacts {
-        let restored_tip = contact_relationship_tip(contact);
-        let tip_status = match &restored_tip {
-            Ok(_) => "stored",
-            Err(_) => "unreadable",
-        };
-        log::info!(
-            "[collect_tagged_inbox_addresses] contact={} tip_status={} device_prefix={}",
-            contact.alias,
-            tip_status,
-            crate::util::text_id::encode_base32_crockford(
-                &contact.device_id[..8.min(contact.device_id.len())]
-            )
-            .get(..8)
-            .unwrap_or("?"),
-        );
+        let current_tip = contact_relationship_tip(contact)?;
+        addresses.push(TaggedInboxAddress {
+            address: address_for(&current_tip)?,
+            freshness: RouteFreshness::Current,
+        });
 
-        let current_tip = match restored_tip {
-            Ok(tip) => tip,
-            Err(e) => {
-                log::error!("[collect_tagged_inbox_addresses] {e}");
-                continue;
-            }
-        };
-
-        // DIAGNOSTIC: mirror wallet.send §16.4 inputs for cross-device comparison
-        log::info!(
-            "[collect_tagged_inbox_addresses] contact={} genesis={}.. device={}.. tip={}.. (tip_zero={})",
-            contact.alias,
-            crate::util::text_id::encode_base32_crockford(&local_genesis).get(..8).unwrap_or("?"),
-            crate::util::text_id::encode_base32_crockford(&local_device_id).get(..8).unwrap_or("?"),
-            crate::util::text_id::encode_base32_crockford(&current_tip).get(..8).unwrap_or("?"),
-            current_tip == [0u8; 32],
-        );
-
-        // 1. Current tip address (always)
-        match crate::sdk::b0x_sdk::B0xSDK::compute_b0x_address(
-            &local_genesis,
-            &local_device_id,
-            &current_tip,
-        ) {
-            Ok(addr) => {
-                log::info!(
-                    "[collect_tagged_inbox_addresses] contact={} addr={}",
+        if let Some(prev_tip_bytes) = contact.previous_chain_tip.as_deref() {
+            let prev_tip: [u8; 32] = prev_tip_bytes.try_into().map_err(|_| {
+                format!(
+                    "contact {}'s previous tip is {} bytes, expected 32",
                     contact.alias,
-                    &addr[..16.min(addr.len())],
-                );
+                    prev_tip_bytes.len()
+                )
+            })?;
+            if prev_tip != current_tip {
                 addresses.push(TaggedInboxAddress {
-                    address: addr,
-                    freshness: RouteFreshness::Current,
+                    address: address_for(&prev_tip)?,
+                    freshness: RouteFreshness::PreviousTip,
                 });
             }
-            Err(e) => {
-                log::warn!(
-                    "[collect_tagged_inbox_addresses] contact {} current-tip address derivation failed: {}",
+        }
+
+        let pending = crate::storage::client_db::get_pending_online_outbox(&contact.device_id)
+            .map_err(|e| format!("pending online outbox unreadable: {e}"))?;
+        if let Some(pending) = pending {
+            let next_tip: [u8; 32] = pending.next_tip.as_slice().try_into().map_err(|_| {
+                format!(
+                    "contact {}'s pending next tip is {} bytes, expected 32",
                     contact.alias,
-                    e
-                );
-            }
-        }
-
-        // 2. Previous tip address (bounded lookback of 1)
-        if let Some(prev_tip_bytes) = contact.previous_chain_tip.as_deref() {
-            if prev_tip_bytes.len() == 32 && prev_tip_bytes != [0u8; 32] {
-                let mut prev_tip = [0u8; 32];
-                prev_tip.copy_from_slice(prev_tip_bytes);
-                if prev_tip != current_tip {
-                    match crate::sdk::b0x_sdk::B0xSDK::compute_b0x_address(
-                        &local_genesis,
-                        &local_device_id,
-                        &prev_tip,
-                    ) {
-                        Ok(addr) => {
-                            log::info!(
-                                "[collect_tagged_inbox_addresses] contact {} stale-route address added (previous tip)",
-                                contact.alias
-                            );
-                            addresses.push(TaggedInboxAddress {
-                                address: addr,
-                                freshness: RouteFreshness::PreviousTip,
-                            });
-                        }
-                        Err(e) => {
-                            log::warn!(
-                                "[collect_tagged_inbox_addresses] contact {} previous-tip address derivation failed: {}",
-                                contact.alias,
-                                e
-                            );
-                        }
-                    }
-                }
-            }
-        }
-
-        // 3. Pending-outbox next_tip address.
-        //
-        // When this device has a pending online outbox for `contact` (i.e. we sent
-        // an online transfer that the counterparty hasn't yet ACKed), `record_pending_
-        // online_transition` advances `contacts.local_bilateral_chain_tip` to T_{n+1}
-        // without touching `current_chain_tip`. The counterparty sees our local tip as
-        // T_{n+1} and will therefore deposit any reply using:
-        //   compute_b0x_address(our_genesis, our_device_id, T_{n+1})
-        //
-        // But `current_chain_tip` still holds T_n, so address (1) above would miss it.
-        // Adding the pending next_tip as a live `Current` address closes this gap.
-        if contact.device_id.len() == 32 {
-            if let Ok(Some(pending)) =
-                crate::storage::client_db::get_pending_online_outbox(&contact.device_id)
-            {
-                if pending.next_tip.len() == 32 {
-                    let mut next_tip = [0u8; 32];
-                    next_tip.copy_from_slice(&pending.next_tip);
-                    if next_tip != current_tip && next_tip != [0u8; 32] {
-                        match crate::sdk::b0x_sdk::B0xSDK::compute_b0x_address(
-                            &local_genesis,
-                            &local_device_id,
-                            &next_tip,
-                        ) {
-                            Ok(addr) => {
-                                log::info!(
-                                    "[collect_tagged_inbox_addresses] contact {} pending-outbox next-tip address added (T_n+1 reply window)",
-                                    contact.alias
-                                );
-                                addresses.push(TaggedInboxAddress {
-                                    address: addr,
-                                    freshness: RouteFreshness::Current,
-                                });
-                            }
-                            Err(e) => {
-                                log::warn!(
-                                    "[collect_tagged_inbox_addresses] contact {} pending-outbox next-tip address derivation failed: {}",
-                                    contact.alias,
-                                    e
-                                );
-                            }
-                        }
-                    }
-                }
+                    pending.next_tip.len()
+                )
+            })?;
+            if next_tip != current_tip {
+                addresses.push(TaggedInboxAddress {
+                    address: address_for(&next_tip)?,
+                    freshness: RouteFreshness::Current,
+                });
             }
         }
     }
 
-    // 4. Retained routes from incomplete or unACKed split-transfer staging.
-    //
-    // A split send's two halves may land polls — or relationship advancements
-    // — apart. Sources 1-3 hold a route for one advancement at most, and a
-    // partner artifact replayed by the sender under its ORIGINAL frozen route
-    // (it is never re-routed: the node dedups on message id alone) would land
-    // where nobody is listening. So the route the first half arrived on stays
-    // in the poll set until the pair completes and both ACKs succeed. Read from
+    // A split transfer's halves may land polls — or relationship
+    // advancements — apart, and a partner artifact the sender replays keeps
+    // its original frozen route. The route the first half arrived on stays in
+    // the poll set until the pair completes and both ACKs succeed; read from
     // the database every poll, so it survives restart. `Current`, not
     // `PreviousTip`: the previous-tip adjacency filter would drop or mis-ACK a
-    // split half. Dedup below folds it into any live route it collides with.
-    match crate::storage::client_db::recipient_staging::retained_routes_for_polling() {
-        Ok(routes) => {
-            for route in routes {
-                log::info!(
-                    "[collect_tagged_inbox_addresses] retained split-transfer route added {}..",
-                    &route[..route.len().min(12)]
-                );
-                addresses.push(TaggedInboxAddress {
-                    address: route,
-                    freshness: RouteFreshness::Current,
-                });
-            }
-        }
-        Err(e) => log::warn!(
-            "[collect_tagged_inbox_addresses] retained-route lookup failed (continuing with \
-             tip-derived routes only): {e}"
-        ),
-    }
+    // split half.
+    let retained = crate::storage::client_db::recipient_staging::retained_routes_for_polling()
+        .map_err(|e| format!("retained split-transfer routes unreadable: {e}"))?;
+    addresses.extend(retained.into_iter().map(|route| TaggedInboxAddress {
+        address: route,
+        freshness: RouteFreshness::Current,
+    }));
 
-    // Dedup by address: if current and previous collide, keep Current
+    // Dedup by address: if current and previous collide, keep Current.
     addresses.sort_by(|a, b| a.address.cmp(&b.address));
     addresses.dedup_by(|a, b| {
         if a.address == b.address {
-            // Keep whichever is Current
             if a.freshness == RouteFreshness::Current {
                 b.freshness = RouteFreshness::Current;
             }
@@ -2473,7 +2354,7 @@ pub(crate) fn collect_tagged_inbox_addresses(
             false
         }
     });
-    addresses
+    Ok(addresses)
 }
 
 /// Outcome of the pure contact-repair trust decision.
@@ -2992,6 +2873,7 @@ mod tests {
         contacts: &[ContactRecord],
     ) -> Vec<String> {
         collect_tagged_inbox_addresses(genesis, device, contacts)
+            .expect("inbox routes")
             .into_iter()
             .map(|t| t.address)
             .collect()
@@ -3222,7 +3104,8 @@ mod tests {
             previous_chain_tip: Some(previous_tip.to_vec()),
         };
 
-        let tagged = collect_tagged_inbox_addresses(genesis, device, &[contact]);
+        let tagged =
+            collect_tagged_inbox_addresses(genesis, device, &[contact]).expect("inbox routes");
         assert_eq!(tagged.len(), 2);
         assert!(tagged
             .iter()
@@ -3256,7 +3139,8 @@ mod tests {
             previous_chain_tip: Some(tip.to_vec()), // same as current
         };
 
-        let tagged = collect_tagged_inbox_addresses(genesis, device, &[contact]);
+        let tagged =
+            collect_tagged_inbox_addresses(genesis, device, &[contact]).expect("inbox routes");
         assert_eq!(tagged.len(), 1);
         assert_eq!(tagged[0].freshness, RouteFreshness::Current);
     }
@@ -3283,7 +3167,8 @@ mod tests {
             previous_chain_tip: None,
         };
 
-        let tagged = collect_tagged_inbox_addresses(genesis, device, &[contact]);
+        let tagged =
+            collect_tagged_inbox_addresses(genesis, device, &[contact]).expect("inbox routes");
         assert_eq!(tagged.len(), 1);
         assert_eq!(tagged[0].freshness, RouteFreshness::Current);
     }

@@ -21,17 +21,12 @@ fn emit_authoritative_wallet_refresh() {
 #[cfg(not(all(target_os = "android", feature = "jni")))]
 fn emit_authoritative_wallet_refresh() {}
 
-fn mark_contact_needs_online_reconcile_and_refresh(device_id: &[u8]) {
-    match crate::storage::client_db::mark_contact_needs_online_reconcile(device_id) {
-        Ok(()) => emit_authoritative_wallet_refresh(),
-        Err(e) => {
-            log::warn!(
-                "[storage.sync] failed to mark relationship blocked for {} bytes of device id: {}",
-                device_id.len(),
-                e
-            );
-        }
-    }
+/// Block the relationship with `device_id` until it is reconciled online.
+fn mark_contact_needs_online_reconcile_and_refresh(device_id: &[u8]) -> Result<(), String> {
+    crate::storage::client_db::mark_contact_needs_online_reconcile(device_id)
+        .map_err(|e| format!("failed to mark a relationship blocked for reconcile: {e}"))?;
+    emit_authoritative_wallet_refresh();
+    Ok(())
 }
 
 /// Non-authoritative history/UI residue after a split transfer is accepted.
@@ -1397,9 +1392,11 @@ impl AppRouterImpl {
     /// Returns `(route, message_id)` pairs to ACK — two per accepted key, one
     /// for each half — plus the keys whose route should be released once those
     /// ACKs succeed.
+    /// Complete every staged split transfer that is ready: the acks to
+    /// record, the release keys, and every failure the pass met.
     pub(crate) async fn complete_ready_split_transfers(
         &self,
-    ) -> (Vec<(String, String)>, Vec<String>) {
+    ) -> (Vec<(String, String)>, Vec<String>, Vec<String>) {
         use crate::handlers::recipient_dispatch::{decide_ack, AckDecision};
         use crate::handlers::recipient_receipt as rr;
         use crate::storage::client_db::recipient_staging::{
@@ -1408,25 +1405,26 @@ impl AppRouterImpl {
 
         let mut acks: Vec<(String, String)> = Vec::new();
         let mut release_after_ack: Vec<String> = Vec::new();
+        let mut failures: Vec<String> = Vec::new();
 
         let rows = match staging_rows_needing_completion() {
             Ok(r) => r,
             Err(e) => {
-                log::warn!("[storage.sync] ADR 0003 completion: staging read failed: {e}");
-                return (acks, release_after_ack);
+                failures.push(format!("split-transfer staging is unreadable: {e}"));
+                return (acks, release_after_ack, failures);
             }
         };
         if rows.is_empty() {
-            return (acks, release_after_ack);
+            return (acks, release_after_ack, failures);
         }
 
         let Some(self_device_vec) = crate::sdk::app_state::AppState::get_device_id() else {
-            log::warn!("[storage.sync] ADR 0003 completion: local device id unavailable");
-            return (acks, release_after_ack);
+            failures.push("split-transfer completion: no local device id".to_string());
+            return (acks, release_after_ack, failures);
         };
         let Ok(self_device) = <[u8; 32]>::try_from(self_device_vec.as_slice()) else {
-            log::warn!("[storage.sync] ADR 0003 completion: local device id is not 32 bytes");
-            return (acks, release_after_ack);
+            failures.push("split-transfer completion: the local device id is not 32 bytes".into());
+            return (acks, release_after_ack, failures);
         };
         let self_device_b32 = crate::util::text_id::encode_base32_crockford(&self_device);
 
@@ -1454,7 +1452,7 @@ impl AppRouterImpl {
                     "[storage.sync] ADR 0003 completion: pending economic admission could not \
                      be finished ({e}) — all pairs held for resume"
                 );
-                return (acks, release_after_ack);
+                return (acks, release_after_ack, failures);
             }
         }
 
@@ -1828,7 +1826,11 @@ impl AppRouterImpl {
                         };
                         if let Err(e) = converged {
                             log::warn!("[storage.sync] ADR 0003 completion: {key} accepted but convergence deferred: {e}");
-                            mark_contact_needs_online_reconcile_and_refresh(&sender_device);
+                            if let Err(e) =
+                                mark_contact_needs_online_reconcile_and_refresh(&sender_device)
+                            {
+                                failures.push(e);
+                            }
                             // Do NOT ACK yet — the reply is not enqueued.
                             continue;
                         }
@@ -1877,7 +1879,9 @@ impl AppRouterImpl {
                                      economic admission HELD for resume ({e}) — release \
                                      undelivered, no ACK"
                                 );
-                                mark_contact_needs_online_reconcile_and_refresh(&sender_device);
+                                if let Err(e) = mark_contact_needs_online_reconcile_and_refresh(&sender_device) {
+                                failures.push(e);
+                            }
                                 continue;
                             }
                         }
@@ -1946,7 +1950,7 @@ impl AppRouterImpl {
             release_after_ack.push(key);
         }
 
-        (acks, release_after_ack)
+        (acks, release_after_ack, failures)
     }
 
     pub(crate) async fn run_storage_sync_request(
@@ -2417,7 +2421,10 @@ impl AppRouterImpl {
             Err(e) => return Err(report.stop(format!("load contacts failed: {e}"))),
         };
         let tagged_addresses =
-            collect_tagged_inbox_addresses(my_genesis, self.device_id_bytes, &contacts);
+            match collect_tagged_inbox_addresses(my_genesis, self.device_id_bytes, &contacts) {
+                Ok(addresses) => addresses,
+                Err(e) => return Err(report.stop(e)),
+            };
 
         let mut items = Vec::new();
         // Already-accepted stale-route duplicates (§5.2), consumed directly:
@@ -2710,7 +2717,8 @@ impl AppRouterImpl {
         b0x_sdk: &mut crate::sdk::b0x_sdk::B0xSDK,
         report: &mut StorageSyncReport,
     ) {
-        let (split_acks, release_keys) = self.complete_ready_split_transfers().await;
+        let (split_acks, release_keys, failures) = self.complete_ready_split_transfers().await;
+        report.errors.extend(failures);
         // Each release key is one transfer this pass completed.
         report.processed += release_keys.len() as u32;
         let mut groups: std::collections::BTreeMap<String, Vec<String>> =
@@ -2771,6 +2779,9 @@ impl AppRouterImpl {
             Err(e) => report
                 .errors
                 .push(format!("artifact republish sweep failed: {e}")),
+        }
+        if let Err(e) = crate::handlers::artifact_republish::continue_route_writes().await {
+            report.errors.push(e);
         }
         // An admission the head already carried when this process restored
         // it; one created after startup belongs to the handler that created it.

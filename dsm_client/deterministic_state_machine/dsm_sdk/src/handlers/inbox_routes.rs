@@ -10,7 +10,7 @@ use dsm::types::proto as generated;
 
 use crate::bridge::{AppInvoke, AppQuery, AppResult};
 use super::app_router_impl::AppRouterImpl;
-use super::response_helpers::{pack_envelope_ok, err};
+use super::response_helpers::{err, pack_bytes_ok, pack_envelope_ok};
 use super::app_router_impl::{collect_tagged_inbox_addresses, RouteFreshness};
 
 /// The most items one `inbox.pull` returns.
@@ -69,8 +69,14 @@ impl AppRouterImpl {
                     Ok(contacts) => contacts,
                     Err(e) => return err(format!("inbox.pull: load contacts failed: {e}")),
                 };
-                let tagged_addresses =
-                    collect_tagged_inbox_addresses(my_genesis, self.device_id_bytes, &contacts);
+                let tagged_addresses = match collect_tagged_inbox_addresses(
+                    my_genesis,
+                    self.device_id_bytes,
+                    &contacts,
+                ) {
+                    Ok(addresses) => addresses,
+                    Err(e) => return err(format!("inbox.pull: {e}")),
+                };
 
                 let mut all_items: Vec<(crate::sdk::b0x_sdk::B0xEntry, RouteFreshness)> =
                     Vec::new();
@@ -175,15 +181,7 @@ impl AppRouterImpl {
             "inbox.startPoller" => {
                 log::info!("[DSM_SDK] inbox.startPoller called");
                 crate::sdk::inbox_poller::start_poller();
-                pack_envelope_ok(generated::envelope::Payload::StorageSyncResponse(
-                    generated::StorageSyncResponse {
-                        success: true,
-                        pulled: 0,
-                        processed: 0,
-                        pushed: 0,
-                        errors: vec![],
-                    },
-                ))
+                pack_bytes_ok(Vec::new())
             }
             "inbox.stopPoller" => {
                 // Lifecycle stop (Activity.onStop). Declines while a transfer is
@@ -195,28 +193,12 @@ impl AppRouterImpl {
                         "inbox.stopPoller: settlement state unreadable, the poller keeps running: {e}"
                     ));
                 }
-                pack_envelope_ok(generated::envelope::Payload::StorageSyncResponse(
-                    generated::StorageSyncResponse {
-                        success: true,
-                        pulled: 0,
-                        processed: 0,
-                        pushed: 0,
-                        errors: vec![],
-                    },
-                ))
+                pack_bytes_ok(Vec::new())
             }
             "inbox.resume" => {
                 log::info!("[DSM_SDK] inbox.resume called");
                 crate::sdk::inbox_poller::resume_poller();
-                pack_envelope_ok(generated::envelope::Payload::StorageSyncResponse(
-                    generated::StorageSyncResponse {
-                        success: true,
-                        pulled: 0,
-                        processed: 0,
-                        pushed: 0,
-                        errors: vec![],
-                    },
-                ))
+                pack_bytes_ok(Vec::new())
             }
             other => err(format!("inbox invoke: unknown method '{other}'")),
         }
