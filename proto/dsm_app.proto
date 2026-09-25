@@ -1741,6 +1741,11 @@ message BilateralPrepareReject {
   string reason                 = 2;
   bytes  rejector_device_id     = 3 [(dsm_fixed_len)=32];
   RelationshipSendStatus send_status = 4;
+  // SPHINCS+ signature of the rejector's AK over
+  // "DSM/bilateral-reject\0" || commitment_hash || rejector_device_id || reason.
+  // The proposer abandons its proposal only for a rejection its counterparty
+  // signed under the key the contact pins.
+  bytes  rejector_signature     = 5 [(dsm_max_len)=65535];
 }
 
 message BilateralTransferRequest {

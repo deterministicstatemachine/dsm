@@ -443,6 +443,67 @@ impl BilateralTransactionManager {
         Ok(sig)
     }
 
+    /// The bytes a refusal of the proposal `commitment_hash` signs: the
+    /// proposal, the device refusing it and its reason.
+    fn rejection_message(
+        commitment_hash: &[u8; 32],
+        rejector_device_id: &[u8; 32],
+        reason: &str,
+    ) -> Vec<u8> {
+        let mut msg = Vec::with_capacity(21 + 64 + reason.len());
+        msg.extend_from_slice(b"DSM/bilateral-reject\0");
+        msg.extend_from_slice(commitment_hash);
+        msg.extend_from_slice(rejector_device_id);
+        msg.extend_from_slice(reason.as_bytes());
+        msg
+    }
+
+    /// This device's signature refusing the proposal `commitment_hash`.
+    pub fn sign_rejection(
+        &self,
+        commitment_hash: &[u8; 32],
+        reason: &str,
+    ) -> Result<Vec<u8>, DsmError> {
+        self.signature_keypair.sign(&Self::rejection_message(
+            commitment_hash,
+            &self.local_device_id,
+            reason,
+        ))
+    }
+
+    /// A refusal of a proposal holds only when the device it was sent to
+    /// signed it, under the key that device's contact pins.
+    pub fn verify_rejection(
+        &self,
+        rejector_device_id: &[u8; 32],
+        commitment_hash: &[u8; 32],
+        reason: &str,
+        signature: &[u8],
+    ) -> Result<(), DsmError> {
+        if signature.is_empty() {
+            return Err(DsmError::InvalidOperation(
+                "a rejection carries its rejector's signature".into(),
+            ));
+        }
+        let pinned_key = &self
+            .contact_manager
+            .get_contact(rejector_device_id)
+            .ok_or_else(|| DsmError::InvalidOperation("the rejector is not a contact".into()))?
+            .public_key;
+        let valid = SignatureKeyPair::verify_raw(
+            &Self::rejection_message(commitment_hash, rejector_device_id, reason),
+            signature,
+            pinned_key,
+        )
+        .map_err(|e| DsmError::InvalidOperation(format!("rejection signature: {e}")))?;
+        if !valid {
+            return Err(DsmError::InvalidOperation(
+                "the rejection is not signed by the rejector's pinned key".into(),
+            ));
+        }
+        Ok(())
+    }
+
     pub fn add_verified_contact(&mut self, c: DsmVerifiedContact) -> Result<(), DsmError> {
         self.contact_manager.add_verified_contact(c)
     }
@@ -1093,6 +1154,71 @@ mod tests {
         let op = signed_transfer_op(&manager.signature_keypair, "m", 5);
         let res = manager.create_bilateral_precommitment(&remote_id, op).await;
         assert!(matches!(res, Err(DsmError::InvalidContact(_))));
+    }
+
+    /// A rejection verifies only under the rejector's pinned key, over the
+    /// proposal, the rejector and the reason it signed.
+    #[tokio::test]
+    async fn a_rejection_verifies_only_as_its_rejector_signed_it() {
+        let (receiver, _kp) = make_manager();
+        let (receiver_id, _) = make_manager_ids();
+        let receiver_kp = SignatureKeyPair::generate_from_entropy(
+            &[receiver_id.as_slice(), make_manager_ids().1.as_slice()].concat(),
+        )
+        .expect("receiver keys");
+        let commitment = [0x31u8; 32];
+        let signature = receiver
+            .sign_rejection(&commitment, "no")
+            .expect("sign the rejection");
+
+        // The proposer, holding the receiver as a contact under its pinned key.
+        let (proposer_id, proposer_genesis) = make_remote_ids();
+        let proposer_kp = SignatureKeyPair::generate_from_entropy(b"rejection-proposer").unwrap();
+        let mut proposer = BilateralTransactionManager::new(
+            DsmContactManager::new(proposer_id),
+            proposer_kp.clone(),
+            proposer_id,
+            proposer_genesis,
+            std::sync::Arc::new(MemoryStore::new()),
+        );
+        proposer
+            .add_verified_contact(DsmVerifiedContact {
+                alias: "receiver".into(),
+                device_id: receiver_id,
+                genesis_hash: make_manager_ids().1,
+                public_key: receiver_kp.public_key().to_vec(),
+                chain_tip: None,
+                genesis_verified_online: true,
+                verifying_storage_nodes: vec![],
+                ble_address: None,
+            })
+            .expect("add the receiver");
+
+        proposer
+            .verify_rejection(&receiver_id, &commitment, "no", &signature)
+            .expect("the receiver's own rejection verifies");
+        assert!(proposer
+            .verify_rejection(&receiver_id, &commitment, "no", &[])
+            .is_err());
+        assert!(proposer
+            .verify_rejection(&receiver_id, &commitment, "changed", &signature)
+            .is_err());
+        assert!(proposer
+            .verify_rejection(&receiver_id, &[0x32u8; 32], "no", &signature)
+            .is_err());
+        let forged = proposer_kp
+            .sign(&BilateralTransactionManager::rejection_message(
+                &commitment,
+                &receiver_id,
+                "no",
+            ))
+            .unwrap();
+        assert!(
+            proposer
+                .verify_rejection(&receiver_id, &commitment, "no", &forged)
+                .is_err(),
+            "a rejection signed by any key but the rejector's pinned one verified"
+        );
     }
 
     // Regression for issue #191: sign_commitment must be fail-closed.

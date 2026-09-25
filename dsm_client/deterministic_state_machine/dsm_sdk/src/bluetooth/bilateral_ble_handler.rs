@@ -600,7 +600,13 @@ impl BilateralBleHandler {
         };
         let send_status = sdk_send_status_from_router_status(send_status);
 
-        // Build reject message
+        // Build reject message, signed: the proposer abandons its proposal only
+        // for a rejection this device signed.
+        let rejector_signature = self
+            .bilateral_tx_manager
+            .read()
+            .await
+            .sign_rejection(&commitment_hash, &reason)?;
         let reject = generated::BilateralPrepareReject {
             commitment_hash: Some(generated::Hash32 {
                 v: commitment_hash.to_vec(),
@@ -608,6 +614,7 @@ impl BilateralBleHandler {
             reason: reason.clone(),
             rejector_device_id: self.device_id.to_vec(),
             send_status: Some(send_status),
+            rejector_signature,
         };
 
         // Wrap in envelope with per-relationship chain tip
@@ -2025,6 +2032,11 @@ impl BilateralBleHandler {
                     &counterparty_device_id,
                 );
             let send_status = sdk_send_status_from_router_status(send_status);
+            let rejector_signature = self
+                .bilateral_tx_manager
+                .read()
+                .await
+                .sign_rejection(&origin_commitment_hash, &reason)?;
             let reject = generated::BilateralPrepareReject {
                 commitment_hash: Some(generated::Hash32 {
                     v: origin_commitment_hash.to_vec(),
@@ -2032,6 +2044,7 @@ impl BilateralBleHandler {
                 reason,
                 rejector_device_id: self.device_id.to_vec(),
                 send_status: Some(send_status),
+                rejector_signature,
             };
             let envelope = self
                 .create_envelope(generated::envelope::Payload::BilateralPrepareReject(reject))
@@ -2370,7 +2383,12 @@ impl BilateralBleHandler {
         };
         let send_status = sdk_send_status_from_router_status(send_status);
 
-        // Build reject envelope
+        // Build reject envelope, signed.
+        let rejector_signature = self
+            .bilateral_tx_manager
+            .read()
+            .await
+            .sign_rejection(&origin_commitment_hash, &reason)?;
         let reject = generated::BilateralPrepareReject {
             commitment_hash: Some(generated::Hash32 {
                 v: origin_commitment_hash.to_vec(),
@@ -2378,6 +2396,7 @@ impl BilateralBleHandler {
             reason,
             rejector_device_id: self.device_id.to_vec(),
             send_status: Some(send_status),
+            rejector_signature,
         };
 
         let envelope = self
@@ -2432,54 +2451,55 @@ impl BilateralBleHandler {
             .try_into()
             .map_err(|_| DsmError::invalid_operation("rejector device_id must be 32 bytes"))?;
 
-        // CRITICAL: Clean up sender's pending commitment from BilateralTransactionManager
-        // This ensures the sender's chain tip stays at the previous state
-        {
-            let mut mgr = self.bilateral_tx_manager.write().await;
-            if let Some(removed) = mgr.consume_pre_commitment(&commitment_hash) {
-                info!(
-                    "[BLE_HANDLER] Cleaned up sender pre-commitment {} after rejection",
-                    bytes_to_base32(&removed.bilateral_commitment_hash[..8])
-                );
-            } else {
-                warn!(
-                    "[BLE_HANDLER] No pending commitment found for {} to clean up",
-                    bytes_to_base32(&commitment_hash[..8])
-                );
-            }
-        }
-
-        // Update session to rejected
-        let updated_session = {
-            let mut sessions = self.sessions.sessions.lock().await;
-            if let Some(session) = sessions.get_mut(&commitment_hash) {
-                session.phase = BilateralPhase::Rejected;
-                info!("Session moved to Rejected phase");
-                session.clone()
-            } else {
+        // A rejection ends only a proposal this device sent to the rejector, and
+        // only when the rejector signed it under the key its contact pins.
+        // Anything else changes nothing.
+        let rejected_session = {
+            let sessions = self.sessions.sessions.lock().await;
+            let session = sessions.get(&commitment_hash).ok_or_else(|| {
+                DsmError::invalid_operation("no session found for commitment hash")
+            })?;
+            if session.counterparty_device_id != rejector_device_id {
                 return Err(DsmError::invalid_operation(
-                    "no session found for commitment hash",
+                    "the rejection is not from the device the proposal went to",
                 ));
             }
+            // Past its prepare the proposal was accepted: a rejection then is the
+            // counterparty contradicting its own signature, not an answer.
+            if !matches!(
+                session.phase,
+                BilateralPhase::Preparing | BilateralPhase::Prepared
+            ) {
+                return Err(DsmError::invalid_operation(
+                    "a rejection answers only a proposal still awaiting its answer",
+                ));
+            }
+            let mut rejected = session.clone();
+            rejected.phase = BilateralPhase::Rejected;
+            rejected
         };
+        self.bilateral_tx_manager.read().await.verify_rejection(
+            &rejector_device_id,
+            &commitment_hash,
+            &reject.reason,
+            &reject.rejector_signature,
+        )?;
 
-        // Persist rejected session (sender side)
-        if let Err(e) = self.persist_session(&updated_session, None).await {
-            warn!(
-                "[BLE_HANDLER] Failed to persist rejected session (sender): {}",
-                e
-            );
-        }
-
-        // Persist rejected phase (keep session visible for frontend poller)
-        if let Err(e) =
-            crate::storage::client_db::update_bilateral_session_phase(&commitment_hash, "rejected")
+        self.persist_session(&rejected_session, None).await?;
+        if let Some(session) = self
+            .sessions
+            .sessions
+            .lock()
+            .await
+            .get_mut(&commitment_hash)
         {
-            warn!(
-                "[BLE_HANDLER] Failed to update rejected session phase: {}",
-                e
-            );
+            session.phase = BilateralPhase::Rejected;
         }
+        // The proposal is abandoned: the sender's relationship tip stays where it was.
+        self.bilateral_tx_manager
+            .write()
+            .await
+            .consume_pre_commitment(&commitment_hash);
 
         self.prune_terminal_sessions_for_counterparty(&rejector_device_id)
             .await;
@@ -5881,6 +5901,147 @@ mod tests {
         assert!(
             manager.read().await.list_pending_commitments().is_empty(),
             "no precommitment is made on a stale expectation"
+        );
+    }
+
+    /// A proposal is abandoned only for a rejection its counterparty signed
+    /// under the key its contact pins: an unsigned one, one signed by another
+    /// key, one from another device, or one for a proposal already answered
+    /// changes nothing. MUTATION CONTROL: skipping the signature check lets the
+    /// unsigned rejection end the proposal and turns this red.
+    #[tokio::test]
+    #[serial]
+    async fn a_proposal_is_abandoned_only_for_a_rejection_its_counterparty_signed() {
+        init_test_db();
+        let proposer = [0xA1u8; 32];
+        let counterparty = [0xA2u8; 32];
+        let counterparty_keys =
+            SignatureKeyPair::generate_from_entropy(b"signed-reject-counterparty").expect("keys");
+        let (manager, handler) =
+            make_test_handler(proposer, [0xA3u8; 32], b"signed-reject-proposer");
+        manager
+            .write()
+            .await
+            .add_verified_contact(dsm::types::contact_types::DsmVerifiedContact {
+                alias: "counterparty".to_string(),
+                device_id: counterparty,
+                genesis_hash: [0xA4u8; 32],
+                public_key: counterparty_keys.public_key().to_vec(),
+                chain_tip: Some([0xA5u8; 32]),
+                genesis_verified_online: true,
+                verifying_storage_nodes: vec![],
+                ble_address: None,
+            })
+            .expect("add the counterparty");
+        let session = |commitment_hash: [u8; 32], phase: BilateralPhase| BilateralBleSession {
+            commitment_hash,
+            local_commitment_hash: None,
+            counterparty_device_id: counterparty,
+            counterparty_genesis_hash: Some([0xA4u8; 32]),
+            operation: Operation::Noop,
+            phase,
+            local_signature: Some(vec![1u8; 32]),
+            counterparty_signature: None,
+            sender_ble_address: None,
+            created_at_wall: Instant::now(),
+            pre_finalize_entropy: None,
+            stitched_receipt_bytes: None,
+            receiver_challenge: None,
+            anchor_leaf: None,
+            anchor_sim_root: None,
+            offline_spend: None,
+        };
+        let pending = [0xA6u8; 32];
+        let answered = [0xA7u8; 32];
+        handler
+            .test_insert_session(session(pending, BilateralPhase::Prepared))
+            .await;
+        handler
+            .test_insert_session(session(answered, BilateralPhase::Accepted))
+            .await;
+
+        let rejection = |commitment_hash: [u8; 32], rejector: [u8; 32], signature: Vec<u8>| {
+            let reject = generated::BilateralPrepareReject {
+                commitment_hash: Some(generated::Hash32 {
+                    v: commitment_hash.to_vec(),
+                }),
+                reason: "declined".to_string(),
+                rejector_device_id: rejector.to_vec(),
+                send_status: None,
+                rejector_signature: signature,
+            };
+            crate::envelope::to_canonical_bytes(&generated::Envelope {
+                version: 3,
+                headers: Some(generated::Headers {
+                    device_id: rejector.to_vec(),
+                    genesis_hash: vec![0xA4u8; 32],
+                }),
+                message_id: vec![0xA8u8; 16],
+                payload: Some(generated::envelope::Payload::BilateralPrepareReject(reject)),
+            })
+        };
+        let signed_by = |keys: &SignatureKeyPair, commitment_hash: [u8; 32], rejector: [u8; 32]| {
+            let mut msg = b"DSM/bilateral-reject\0".to_vec();
+            msg.extend_from_slice(&commitment_hash);
+            msg.extend_from_slice(&rejector);
+            msg.extend_from_slice(b"declined");
+            keys.sign(&msg).expect("sign")
+        };
+        let other_keys = SignatureKeyPair::generate_from_entropy(b"signed-reject-other").unwrap();
+
+        for (what, envelope) in [
+            ("unsigned", rejection(pending, counterparty, Vec::new())),
+            (
+                "signed by another key",
+                rejection(
+                    pending,
+                    counterparty,
+                    signed_by(&other_keys, pending, counterparty),
+                ),
+            ),
+            (
+                "from another device",
+                rejection(
+                    pending,
+                    [0xA9u8; 32],
+                    signed_by(&counterparty_keys, pending, [0xA9u8; 32]),
+                ),
+            ),
+            (
+                "for an answered proposal",
+                rejection(
+                    answered,
+                    counterparty,
+                    signed_by(&counterparty_keys, answered, counterparty),
+                ),
+            ),
+        ] {
+            assert!(
+                handler.handle_prepare_reject(&envelope).await.is_err(),
+                "a rejection {what} was accepted"
+            );
+        }
+        assert_eq!(
+            handler.get_session_phase(&pending).await,
+            Some(BilateralPhase::Prepared),
+            "a refused rejection changed the proposal"
+        );
+        assert_eq!(
+            handler.get_session_phase(&answered).await,
+            Some(BilateralPhase::Accepted)
+        );
+
+        handler
+            .handle_prepare_reject(&rejection(
+                pending,
+                counterparty,
+                signed_by(&counterparty_keys, pending, counterparty),
+            ))
+            .await
+            .expect("the counterparty's signed rejection ends the proposal");
+        assert_eq!(
+            handler.get_session_phase(&pending).await,
+            Some(BilateralPhase::Rejected)
         );
     }
 

@@ -11510,6 +11510,16 @@ export class BilateralPrepareReject extends Message<BilateralPrepareReject> {
    */
   sendStatus?: RelationshipSendStatus;
 
+  /**
+   * SPHINCS+ signature of the rejector's AK over
+   * "DSM/bilateral-reject\0" || commitment_hash || rejector_device_id || reason.
+   * The proposer abandons its proposal only for a rejection its counterparty
+   * signed under the key the contact pins.
+   *
+   * @generated from field: bytes rejector_signature = 5;
+   */
+  rejectorSignature = new Uint8Array(0);
+
   constructor(data?: PartialMessage<BilateralPrepareReject>) {
     super();
     proto3.util.initPartial(data, this);
@@ -11522,6 +11532,7 @@ export class BilateralPrepareReject extends Message<BilateralPrepareReject> {
     { no: 2, name: "reason", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 3, name: "rejector_device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 4, name: "send_status", kind: "message", T: RelationshipSendStatus },
+    { no: 5, name: "rejector_signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BilateralPrepareReject {
