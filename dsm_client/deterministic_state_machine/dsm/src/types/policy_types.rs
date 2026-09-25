@@ -165,19 +165,6 @@ pub enum PolicyCondition {
         min_confirmations: u64,
     },
 
-    /// Who may burn this token or create it, and how many must co-sign.
-    ///
-    /// The `signers` list is the "N" in k-of-N. Verification takes the public
-    /// key from HERE, never from the caller's own proof, which would authorise
-    /// anyone able to sign with a key they generated themselves. There is no
-    /// minting after genesis (SoFi §48); this gates burn and create_token.
-    TokenAuthority {
-        /// Raw SPHINCS+ public keys permitted to burn or create.
-        signers: Vec<Vec<u8>>,
-        /// Distinct signers required (`k`).
-        threshold: u32,
-    },
-
     /// The whole supply the token is created with: nothing is minted after
     /// genesis (SoFi §48), and no supply is unlimited (§54).
     SupplyCap { max_supply: u128 },
@@ -446,16 +433,6 @@ impl From<&PolicyCondition> for crate::types::proto::PolicyConditionProto {
                 dust_floor_sats: *dust_floor_sats,
                 min_confirmations: *min_confirmations,
             }),
-            PolicyCondition::TokenAuthority { signers, threshold } => {
-                // Sorted so the canonical bytes — and therefore the policy
-                // commitment — do not depend on signer ordering.
-                let mut sorted = signers.clone();
-                sorted.sort();
-                Kind::TokenAuthority(TokenAuthorityProto {
-                    signers: sorted,
-                    threshold: *threshold,
-                })
-            }
             PolicyCondition::SupplyCap { max_supply } => Kind::SupplyCap(SupplyCapProto {
                 max_supply_u128: max_supply.to_be_bytes().to_vec(),
             }),
@@ -508,24 +485,6 @@ impl TryFrom<&crate::types::proto::PolicyConditionProto> for PolicyCondition {
                 dust_floor_sats: p.dust_floor_sats,
                 min_confirmations: p.min_confirmations,
             }),
-            Some(Kind::TokenAuthority(p)) => {
-                if p.signers.is_empty() {
-                    return Err(DsmError::SerializationError(
-                        "TokenAuthority must name at least one signer".into(),
-                    ));
-                }
-                if p.threshold == 0 || p.threshold as usize > p.signers.len() {
-                    // An unsatisfiable threshold would permanently freeze
-                    // burn and creation; reject rather than materialise it.
-                    return Err(DsmError::SerializationError(
-                        "TokenAuthority threshold must be 1..=signers.len()".into(),
-                    ));
-                }
-                Ok(PolicyCondition::TokenAuthority {
-                    signers: p.signers.clone(),
-                    threshold: p.threshold,
-                })
-            }
             Some(Kind::SupplyCap(p)) => {
                 if p.max_supply_u128.len() != 16 {
                     return Err(DsmError::SerializationError(

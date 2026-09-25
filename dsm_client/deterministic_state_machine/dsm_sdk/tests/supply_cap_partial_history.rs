@@ -9,7 +9,7 @@
 //! exactly when the chain was least trustworthy — and the enforcer refuses a
 //! capped operation whose circulating supply it cannot establish (see
 //! `supply_cap_fails_closed_without_circulating_supply` in
-//! token_authority_enforcement.rs).
+//! supply_cap_enforcement.rs).
 //!
 //! This pins the enforcement half: an absent figure denies rather than allows,
 //! and the cap arithmetic is exact, so only a wrong total could get through.

@@ -65,49 +65,6 @@ pub(crate) fn sign_bytes(payload: &[u8]) -> Result<Vec<u8>, DsmError> {
     })
 }
 
-/// A token creation or burn authorization by this device: the witness record
-/// `(u32 pk_len, pk, u32 sig_len, sig)` over `token_authorization_preimage`.
-///
-/// That preimage is what the policy's `TokenAuthority` condition rebuilds from
-/// the operation it gates, and the key is matched against the policy's signer
-/// list, so the witness authorizes that operation and nothing else.
-/// `authorized_by` MUST equal what the enforcement context carries for the
-/// operation; a mismatch is indistinguishable from a forged signature, which is
-/// how it should behave.
-pub(crate) fn token_authorization_witness(
-    policy_commit: &[u8; 32],
-    op: &str,
-    token_id: &[u8],
-    amount: u64,
-    authorized_by: &[u8],
-) -> Result<Vec<u8>, DsmError> {
-    let preimage = dsm::core::token::policy::policy_enforcement::token_authorization_preimage(
-        policy_commit,
-        op,
-        token_id,
-        amount,
-        authorized_by,
-    );
-    let keypair = derive_current_signing_keypair()?;
-    let pk = keypair.public_key();
-    let sig = dsm::crypto::sphincs::sphincs_sign(keypair.secret_key(), &preimage).map_err(|e| {
-        DsmError::crypto(
-            format!("token {op} authorization signing failed: {e}"),
-            None::<std::io::Error>,
-        )
-    })?;
-    let pk_len = u32::try_from(pk.len())
-        .map_err(|_| DsmError::invalid_operation("signing key too large for a witness record"))?;
-    let sig_len = u32::try_from(sig.len())
-        .map_err(|_| DsmError::invalid_operation("signature too large for a witness record"))?;
-    let mut witness = Vec::with_capacity(8 + pk.len() + sig.len());
-    witness.extend_from_slice(&pk_len.to_le_bytes());
-    witness.extend_from_slice(pk);
-    witness.extend_from_slice(&sig_len.to_le_bytes());
-    witness.extend_from_slice(&sig);
-    Ok(witness)
-}
-
 /// Both halves of the device signing keypair, for callers that sign and embed
 /// the public key in one object.
 pub fn current_keypair() -> Result<(Vec<u8>, Vec<u8>), dsm::types::error::DsmError> {
