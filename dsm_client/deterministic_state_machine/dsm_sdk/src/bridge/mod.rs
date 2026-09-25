@@ -172,8 +172,11 @@ pub trait AppRouter: Send + Sync {
     /// entropy inside `advance`), along with the parent chain tip for
     /// CAS-style linkage.
     ///
-    /// `settle` writes the step's relationship tip, projection and history in
-    /// the transaction that commits the head.
+    /// `before_commit` runs on the prepared advance before its transaction
+    /// opens, with no other advance in between: the receiver signs its
+    /// receipt there, from the advance that commits. `settle` writes the
+    /// step's relationship tip, projection and history in the transaction
+    /// that commits the head.
     ///
     /// Returns `Err` if the router is not yet attached to an identity, or if
     /// the underlying advance fails (§4.3 acceptance, §6.1 tripwire, §8
@@ -187,6 +190,11 @@ pub trait AppRouter: Send + Sync {
         deltas: &[dsm::types::device_state::BalanceDelta],
         anchor_leaf: Option<dsm::types::device_state::AnchorLeafUpdate>,
         offline_spend: Option<dsm::types::device_state::OfflineSpend>,
+        before_commit: Option<
+            &dyn Fn(
+                &dsm::types::device_state::AdvanceOutcome,
+            ) -> Result<(), dsm::types::error::DsmError>,
+        >,
         settle: &dyn Fn(
             &rusqlite::Transaction<'_>,
             &dsm::types::device_state::AdvanceOutcome,

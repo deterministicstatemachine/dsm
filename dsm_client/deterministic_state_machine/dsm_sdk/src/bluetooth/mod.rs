@@ -14,9 +14,9 @@ pub mod bilateral_session;
 pub mod bilateral_transport_adapter;
 pub mod ble_frame_coordinator;
 pub mod frame_classify;
-pub mod pairing_orchestrator;
 #[cfg(test)]
 mod offline_step_tests;
+pub mod pairing_orchestrator;
 
 // Re-export bilateral transaction components
 pub use bilateral_ble_handler::{

@@ -64,16 +64,14 @@ pub struct BilateralBleSession {
     pub sender_ble_address: Option<String>,
     /// Wall-clock creation time for staleness detection (in-memory only, not persisted)
     pub created_at_wall: Instant,
-    /// Pre-generated entropy for sender finalize (sender-only).
-    /// Stored during commit construction so finalize reuses the same entropy,
-    /// ensuring the actual post-finalize tip matches the pre-computed
-    /// `shared_chain_tip_new` sent in the BilateralConfirmRequest.
-    pub pre_finalize_entropy: Option<[u8; 32]>,
-    /// Stitched receipt bytes built during `send_bilateral_confirm` (sender-only).
-    /// Cached here so `finalize_sender_step` can persist
-    /// the same verifiable receipt instead of building a degraded one after the
-    /// Per-Device SMT has already been mutated.
+    /// SENDER-only: its own signed receipt of the step, built at confirm (its
+    /// A-side per-step EK, cert and signature). Its EK step is recorded from
+    /// it when the step commits.
     pub stitched_receipt_bytes: Option<Vec<u8>>,
+    /// SENDER-only: the receiver's counter-signed receipt from the verified
+    /// ack — the step's proof in the sender's history, and the receiver's EK
+    /// step.
+    pub counter_signed_receipt: Option<Vec<u8>>,
     /// Offline-bearer receiver challenge r_R. RECEIVER: the fresh challenge it issued in
     /// `BilateralPrepareResponse` (checked vs the release on confirm). SENDER: the challenge
     /// received from that response, bound into the appliance PREPARE. `None` for ordinary
@@ -84,12 +82,12 @@ pub struct BilateralBleSession {
     /// commits the SAME successor state the on-wire proofs were built from (both-or-neither). `None`
     /// for ordinary transfers and on the receiver side.
     pub anchor_leaf: Option<dsm::types::device_state::AnchorLeafUpdate>,
-    /// SENDER-only: the simulated post-advance Per-Device SMT root (`child_r_a`) that was placed on
-    /// the `BilateralConfirmRequest` and sent to the receiver. Stashed at confirm-build time so the
-    /// canonical commit can enforce both-or-neither: the committed root MUST equal this sent sim
-    /// root, else the sender fails closed to recovery (the receiver verified proofs against this
-    /// value). `None` for ordinary transfers and on the receiver side.
-    pub anchor_sim_root: Option<[u8; 32]>,
+    /// SENDER-only: the simulated post-advance Per-Device SMT root (`child_r_a`) the confirm's
+    /// receipt names, as sent to the receiver. Stashed at confirm-build time so the canonical
+    /// commit can enforce both-or-neither: the committed root MUST equal it, else the sender fails
+    /// closed to recovery (the receiver verified the receipt against this value). `None` on the
+    /// receiver side and before a confirm is built.
+    pub sent_child_root: Option<[u8; 32]>,
     /// SENDER-only: the offline-cash allocation debit for a bearer transfer, created ONCE at confirm-build
     /// and stashed here so the canonical commit draws value from the allocation identically to the sim.
     /// It carries the anchor bundle `B` — which is NOT recoverable from `anchor_leaf` (whose key is
@@ -244,6 +242,7 @@ impl SessionStore {
             counterparty_signature: session.counterparty_signature.clone(),
             sender_ble_address: session.sender_ble_address.clone(),
             stitched_receipt_bytes: session.stitched_receipt_bytes.clone(),
+            counter_signed_receipt: session.counter_signed_receipt.clone(),
         };
         store_bilateral_session(&record).map_err(|e| {
             DsmError::invalid_operation(format!("Failed to persist bilateral session: {e}"))
@@ -458,11 +457,11 @@ impl SessionStore {
             counterparty_signature: record.counterparty_signature.clone(),
             sender_ble_address: record.sender_ble_address.clone(),
             created_at_wall: Instant::now(),
-            pre_finalize_entropy: None,
             stitched_receipt_bytes: None,
+            counter_signed_receipt: None,
             receiver_challenge: None,
             anchor_leaf: None,
-            anchor_sim_root: None,
+            sent_child_root: None,
             offline_spend: None,
         })
     }
@@ -485,10 +484,10 @@ mod tests {
             sender_ble_address: None,
             created_at_wall: Instant::now(),
             stitched_receipt_bytes: None,
-            pre_finalize_entropy: None,
+            counter_signed_receipt: None,
             receiver_challenge: None,
             anchor_leaf: None,
-            anchor_sim_root: None,
+            sent_child_root: None,
             offline_spend: None,
         }
     }
