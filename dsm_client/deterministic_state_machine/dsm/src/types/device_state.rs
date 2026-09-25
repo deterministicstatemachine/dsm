@@ -2025,8 +2025,6 @@ mod tests {
             policy_commit,
             mode: crate::types::operations::TransactionMode::Bilateral,
             nonce: vec![0x11; 32],
-            verification: crate::types::operations::VerificationType::Standard,
-            pre_commit: None,
             recipient: devid(0xAA).to_vec(),
             to: Vec::new(),
             message: String::new(),
@@ -2115,8 +2113,6 @@ mod tests {
             policy_commit: pcv,
             mode: crate::types::operations::TransactionMode::Unilateral,
             nonce: vec![],
-            verification: crate::types::operations::VerificationType::Standard,
-            pre_commit: None,
             recipient: vec![],
             to: vec![],
             message: String::new(),
@@ -2206,8 +2202,6 @@ mod tests {
                     policy_commit,
                     mode,
                     nonce,
-                    verification,
-                    pre_commit,
                     recipient,
                     to,
                     message,
@@ -2220,8 +2214,6 @@ mod tests {
                     policy_commit,
                     mode,
                     nonce,
-                    verification,
-                    pre_commit,
                     recipient,
                     to,
                     message,
@@ -2263,8 +2255,6 @@ mod tests {
             policy_commit,
             mode: TransactionMode::Bilateral,
             nonce: vec![0x5C; 32],
-            verification: crate::types::operations::VerificationType::Standard,
-            pre_commit: None,
             recipient: to.devid.to_vec(),
             to: Vec::new(),
             message: String::new(),
@@ -2682,9 +2672,7 @@ mod tests {
     fn bearer_advance_draws_from_allocation_not_online_balance() {
         use crate::core::bilateral_transaction_manager::{anchor_state_leaf_key, compute_smt_key};
         use crate::types::offline_allocation_leaf::offline_allocation_key;
-        use crate::types::operations::{
-            AuthorityMode, AuthorityPolicy, Operation, TransactionMode, VerificationType,
-        };
+        use crate::types::operations::{AuthorityMode, AuthorityPolicy, Operation, TransactionMode};
 
         let b = [0xB2u8; 32];
         let key = anchor_state_leaf_key(&b);
@@ -2719,8 +2707,6 @@ mod tests {
             policy_commit: token,
             mode: TransactionMode::Bilateral,
             nonce: vec![],
-            verification: VerificationType::Standard,
-            pre_commit: None,
             recipient: vec![],
             to: vec![],
             message: String::new(),

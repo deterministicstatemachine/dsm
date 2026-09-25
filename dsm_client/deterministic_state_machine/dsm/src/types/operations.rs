@@ -11,7 +11,7 @@
 //! on the canonical path; all encoding uses length-prefixed binary with fixed
 //! variant tags.
 
-use std::{collections::HashMap, fmt::Debug};
+use std::fmt::Debug;
 
 use crate::types::{error::DsmError, token_types::Balance};
 
@@ -26,31 +26,6 @@ pub enum TransactionMode {
     Bilateral,
     /// Only the initiating party signs; used for self-directed operations.
     Unilateral,
-}
-
-/// Verification strategy for a state transition (canonical encoded; no Serde).
-///
-/// Specifies which verification path is used to validate the state transition,
-/// ranging from simple standard checks to full bilateral verification with
-/// pre-committed parameters.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum VerificationType {
-    /// Default verification using hash chain adjacency.
-    Standard,
-    /// Enhanced verification with additional cryptographic proofs.
-    Enhanced,
-    /// Full bilateral verification requiring both parties' signatures.
-    Bilateral,
-    /// Verification through decentralized directory lookup.
-    Directory,
-    /// Standard verification within a bilateral relationship context.
-    StandardBilateral,
-    /// Verification against a previously submitted forward commitment.
-    PreCommitted,
-    /// Unilateral verification anchored to the initiator's identity.
-    UnilateralIdentityAnchor,
-    /// Application-defined custom verification with raw parameter bytes.
-    Custom(Vec<u8>),
 }
 
 /// The authority-proof requirement for a value operation — WHAT proof of authority a transition
@@ -194,10 +169,6 @@ pub enum Operation {
         mode: TransactionMode,
         /// Unique nonce preventing replay of this transfer.
         nonce: Vec<u8>,
-        /// Verification strategy for validating this transfer.
-        verification: VerificationType,
-        /// Optional pre-commitment parameters binding this transfer to a prior commitment.
-        pre_commit: Option<PreCommitmentOp>,
         /// Raw recipient identifier for policy/precommit matching (kept as bytes).
         recipient: Vec<u8>,
         /// Binary recipient address or alias.
@@ -451,8 +422,6 @@ pub enum Operation {
         mode: TransactionMode,
         /// Unique nonce matching the sender's Transfer nonce.
         nonce: Vec<u8>,
-        /// Verification strategy matching the sender's Transfer verification.
-        verification: VerificationType,
         /// Hash of the sender's state at the time of transfer (for cross-chain verification).
         sender_state_hash: Option<Vec<u8>>,
     },
@@ -857,49 +826,10 @@ impl Operation {
             put_u8(out, enc_mode(m));
         }
 
-        fn put_verification(out: &mut Vec<u8>, v: &VerificationType) {
-            match v {
-                VerificationType::Standard => put_u8(out, 0),
-                VerificationType::Enhanced => put_u8(out, 1),
-                VerificationType::Bilateral => put_u8(out, 2),
-                VerificationType::Directory => put_u8(out, 3),
-                VerificationType::StandardBilateral => put_u8(out, 4),
-                VerificationType::PreCommitted => put_u8(out, 5),
-                VerificationType::UnilateralIdentityAnchor => put_u8(out, 6),
-                VerificationType::Custom(b) => {
-                    put_u8(out, 255);
-                    put_bytes(out, b);
-                }
-            }
-        }
-
         fn put_vec_bytes(out: &mut Vec<u8>, v: &Vec<Vec<u8>>) {
             put_u32(out, v.len() as u32);
             for item in v {
                 put_bytes(out, item);
-            }
-        }
-
-        // PreCommitmentOp canonical encoding
-        fn put_precommit_op(out: &mut Vec<u8>, pc: &PreCommitmentOp) {
-            // fixed_parameters: sort by key
-            let mut keys: Vec<_> = pc.fixed_parameters.keys().collect();
-            keys.sort();
-            put_u32(out, keys.len() as u32);
-            for k in keys {
-                put_str(out, k);
-                if let Some(v) = pc.fixed_parameters.get(k) {
-                    put_bytes(out, v);
-                } else {
-                    put_u32(out, 0);
-                }
-            }
-            // variable_parameters: already Vec<String>; encode in lexicographic order for determinism
-            let mut vars = pc.variable_parameters.clone();
-            vars.sort();
-            put_u32(out, vars.len() as u32);
-            for v in vars {
-                put_str(out, &v);
             }
         }
 
@@ -1001,8 +931,6 @@ impl Operation {
                 policy_commit,
                 mode,
                 nonce,
-                verification,
-                pre_commit,
                 recipient,
                 to,
                 message,
@@ -1019,14 +947,6 @@ impl Operation {
                 put_bytes(&mut out, policy_commit);
                 put_mode(&mut out, mode);
                 put_bytes(&mut out, nonce);
-                put_verification(&mut out, verification);
-                match pre_commit {
-                    Some(pc) => {
-                        put_u8(&mut out, 1);
-                        put_precommit_op(&mut out, pc);
-                    }
-                    None => put_u8(&mut out, 0),
-                }
                 put_bytes(&mut out, recipient);
                 put_bytes(&mut out, to);
                 put_str(&mut out, message.as_str());
@@ -1253,7 +1173,6 @@ impl Operation {
                 message,
                 mode,
                 nonce,
-                verification,
                 sender_state_hash,
             } => {
                 put_u8(&mut out, 19);
@@ -1265,7 +1184,6 @@ impl Operation {
                 put_str(&mut out, message);
                 put_mode(&mut out, mode);
                 put_bytes(&mut out, nonce);
-                put_verification(&mut out, verification);
                 match sender_state_hash {
                     Some(h) => {
                         put_u8(&mut out, 1);
@@ -1460,22 +1378,6 @@ impl Operation {
                 _ => Err(DsmError::invalid_operation("bad mode")),
             }
         }
-        fn dec_verification(inp: &mut &[u8]) -> Result<VerificationType, DsmError> {
-            Ok(match get_u8(inp)? {
-                0 => VerificationType::Standard,
-                1 => VerificationType::Enhanced,
-                2 => VerificationType::Bilateral,
-                3 => VerificationType::Directory,
-                4 => VerificationType::StandardBilateral,
-                5 => VerificationType::PreCommitted,
-                6 => VerificationType::UnilateralIdentityAnchor,
-                255 => {
-                    let b = get_bytes(inp)?;
-                    VerificationType::Custom(b)
-                }
-                _ => return Err(DsmError::invalid_operation("bad verification tag")),
-            })
-        }
         fn dec_vec_bytes(inp: &mut &[u8]) -> Result<Vec<Vec<u8>>, DsmError> {
             let n = get_u32(inp)? as usize;
             let mut v = Vec::with_capacity(n);
@@ -1503,26 +1405,6 @@ impl Operation {
                 u64::from_le_bytes(locked),
                 None,
             ))
-        }
-        fn dec_precommit_op(inp: &mut &[u8]) -> Result<PreCommitmentOp, DsmError> {
-            // fixed_parameters
-            let mut fixed = HashMap::new();
-            let cnt = get_u32(inp)? as usize;
-            for _ in 0..cnt {
-                let k = get_str(inp)?;
-                let v = get_bytes(inp)?;
-                fixed.insert(k, v);
-            }
-            // variable_parameters (encoded sorted; here we just read in order)
-            let vcnt = get_u32(inp)? as usize;
-            let mut vars = Vec::with_capacity(vcnt);
-            for _ in 0..vcnt {
-                vars.push(get_str(inp)?);
-            }
-            Ok(PreCommitmentOp {
-                fixed_parameters: fixed,
-                variable_parameters: vars,
-            })
         }
 
         let tag = get_u8(&mut input)?;
@@ -1575,21 +1457,12 @@ impl Operation {
                     })?;
                 let mode = dec_mode(&mut input)?;
                 let nonce = get_bytes(&mut input)?;
-                let verification = dec_verification(&mut input)?;
-                let pre_commit = match get_u8(&mut input)? {
-                    0 => None,
-                    1 => Some(dec_precommit_op(&mut input)?),
-                    _ => return Err(DsmError::invalid_operation("bad opt flag")),
-                };
                 let recipient = get_bytes(&mut input)?;
                 let to = get_bytes(&mut input)?;
                 let message = get_str(&mut input)?;
-                // Signature: try to read if available; empty if not present (backwards compat)
-                let signature = if input.is_empty() {
-                    vec![]
-                } else {
-                    get_bytes(&mut input)?
-                };
+                // The signature field is always encoded (empty when the
+                // signatures ride in the receipt): one transfer, one encoding.
+                let signature = get_bytes(&mut input)?;
                 // Append-only authority-policy tail (symmetric with
                 // `AuthorityPolicy::append_canonical`). Absent (no remaining bytes) => None, so
                 // every pre-existing transfer round-trips byte-identically; present => the
@@ -1631,8 +1504,6 @@ impl Operation {
                     policy_commit,
                     mode,
                     nonce,
-                    verification,
-                    pre_commit,
                     recipient,
                     to,
                     message,
@@ -1905,7 +1776,6 @@ impl Operation {
                 let message = get_str(&mut input)?;
                 let mode = dec_mode(&mut input)?;
                 let nonce = get_bytes(&mut input)?;
-                let verification = dec_verification(&mut input)?;
                 let sender_state_hash = match get_u8(&mut input)? {
                     0 => None,
                     1 => Some(get_bytes(&mut input)?),
@@ -1919,7 +1789,6 @@ impl Operation {
                     message,
                     mode,
                     nonce,
-                    verification,
                     sender_state_hash,
                 }
             }
@@ -2277,54 +2146,6 @@ impl Operation {
     }
 }
 
-/// Pre-commitment parameters for binding a future state transition.
-///
-/// A pre-commitment constrains a future operation by fixing certain parameters
-/// at commitment time while leaving others variable. This enables deterministic
-/// verification without requiring all values to be known in advance.
-#[derive(Debug, Clone, Default)]
-pub struct PreCommitmentOp {
-    /// Parameters whose values are fixed at commitment time (sorted by key for determinism).
-    pub fixed_parameters: HashMap<String, Vec<u8>>,
-    /// Parameter names whose values will be provided at execution time.
-    pub variable_parameters: Vec<String>,
-}
-
-// Implement PartialEq, Eq, PartialOrd and Ord for consistent ordering
-impl PartialEq for PreCommitmentOp {
-    fn eq(&self, other: &Self) -> bool {
-        self.fixed_parameters == other.fixed_parameters
-            && self.variable_parameters == other.variable_parameters
-    }
-}
-
-impl PartialOrd for PreCommitmentOp {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Eq for PreCommitmentOp {}
-
-impl Ord for PreCommitmentOp {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        let fixed_params_cmp = self
-            .fixed_parameters
-            .len()
-            .cmp(&other.fixed_parameters.len());
-        if fixed_params_cmp != std::cmp::Ordering::Equal {
-            return fixed_params_cmp;
-        }
-
-        let var_params_cmp = self.variable_parameters.cmp(&other.variable_parameters);
-        if var_params_cmp != std::cmp::Ordering::Equal {
-            return var_params_cmp;
-        }
-
-        std::cmp::Ordering::Equal
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2342,8 +2163,6 @@ mod tests {
             policy_commit: [7u8; 32],
             mode: TransactionMode::Bilateral,
             nonce: vec![1, 2, 3],
-            verification: VerificationType::Bilateral,
-            pre_commit: None,
             recipient: b"rcpt".to_vec(),
             to: b"rcpt".to_vec(),
             message: "m".to_string(),
@@ -2452,57 +2271,10 @@ mod tests {
                 token_id: b"ERA".to_vec(),
                 mode: TransactionMode::Bilateral,
                 nonce: vec![0xFF; 16],
-                verification: VerificationType::Standard,
-                pre_commit: None,
                 recipient: vec![0x02; 32],
                 to: vec![0x03; 32],
                 message: "send tokens".into(),
                 signature: vec![0xAA; 64],
-                authority_policy: None,
-            });
-        }
-
-        #[test]
-        fn transfer_with_precommit() {
-            let mut fixed = HashMap::new();
-            fixed.insert("recipient".into(), vec![0x01; 32]);
-            fixed.insert("amount".into(), vec![0, 0, 0, 100]);
-            let pc = PreCommitmentOp {
-                fixed_parameters: fixed,
-                variable_parameters: vec!["nonce".into(), "timestamp".into()],
-            };
-            roundtrip(&Operation::Transfer {
-                policy_commit: [0u8; 32],
-                to_device_id: vec![0x01; 32],
-                amount: test_balance(1000),
-                token_id: b"TKN".to_vec(),
-                mode: TransactionMode::Unilateral,
-                nonce: vec![0x11; 8],
-                verification: VerificationType::PreCommitted,
-                pre_commit: Some(pc),
-                recipient: vec![0x02; 32],
-                to: vec![0x03; 32],
-                message: "pre-committed transfer".into(),
-                signature: vec![0xBB; 48],
-                authority_policy: None,
-            });
-        }
-
-        #[test]
-        fn transfer_custom_verification() {
-            roundtrip(&Operation::Transfer {
-                policy_commit: [0u8; 32],
-                to_device_id: vec![0x01; 32],
-                amount: test_balance(42),
-                token_id: b"ERA".to_vec(),
-                mode: TransactionMode::Bilateral,
-                nonce: vec![0x99],
-                verification: VerificationType::Custom(vec![0xDE, 0xAD]),
-                pre_commit: None,
-                recipient: vec![],
-                to: vec![],
-                message: String::new(),
-                signature: vec![],
                 authority_policy: None,
             });
         }
@@ -2674,7 +2446,6 @@ mod tests {
                 message: "receive tokens".into(),
                 mode: TransactionMode::Bilateral,
                 nonce: vec![0x03; 16],
-                verification: VerificationType::StandardBilateral,
                 sender_state_hash: Some(vec![0x04; 32]),
             });
         }
@@ -2689,7 +2460,6 @@ mod tests {
                 message: String::new(),
                 mode: TransactionMode::Unilateral,
                 nonce: vec![],
-                verification: VerificationType::Standard,
                 sender_state_hash: None,
             });
         }
@@ -2813,37 +2583,6 @@ mod tests {
                 mode: TransactionMode::Unilateral,
             });
         }
-
-        #[test]
-        fn all_verification_types() {
-            let types = vec![
-                VerificationType::Standard,
-                VerificationType::Enhanced,
-                VerificationType::Bilateral,
-                VerificationType::Directory,
-                VerificationType::StandardBilateral,
-                VerificationType::PreCommitted,
-                VerificationType::UnilateralIdentityAnchor,
-                VerificationType::Custom(vec![0xCA, 0xFE]),
-            ];
-            for vt in types {
-                roundtrip(&Operation::Transfer {
-                    policy_commit: [0u8; 32],
-                    to_device_id: vec![0x01; 32],
-                    amount: test_balance(1),
-                    token_id: b"ERA".to_vec(),
-                    mode: TransactionMode::Bilateral,
-                    nonce: vec![],
-                    verification: vt,
-                    pre_commit: None,
-                    recipient: vec![],
-                    to: vec![],
-                    message: String::new(),
-                    signature: vec![],
-                    authority_policy: None,
-                });
-            }
-        }
     }
 
     // ------------------------------------------------------------------ //
@@ -2864,8 +2603,6 @@ mod tests {
                 token_id: vec![],
                 mode: TransactionMode::Bilateral,
                 nonce: vec![],
-                verification: VerificationType::Standard,
-                pre_commit: None,
                 recipient: vec![],
                 to: vec![],
                 message: String::new(),
@@ -2959,8 +2696,6 @@ mod tests {
                 token_id: b"ERA".to_vec(),
                 mode: TransactionMode::Bilateral,
                 nonce: vec![0xFF; 16],
-                verification: VerificationType::Standard,
-                pre_commit: None,
                 recipient: vec![],
                 to: vec![],
                 message: String::new(),
@@ -3084,8 +2819,6 @@ mod tests {
                 policy_commit: [0u8; 32],
                 mode: TransactionMode::Unilateral,
                 nonce: vec![0xFF; 16],
-                verification: VerificationType::Standard,
-                pre_commit: None,
                 recipient: vec![0x02; 32],
                 to: vec![0x03; 32],
                 message: "x".into(),
@@ -3138,8 +2871,6 @@ mod tests {
                 policy_commit: [0u8; 32],
                 mode: TransactionMode::Unilateral,
                 nonce: vec![0xAB; 16],
-                verification: VerificationType::Standard,
-                pre_commit: None,
                 recipient: vec![0x22; 32],
                 to: vec![0x33; 32],
                 message: "unit".into(),
@@ -3311,8 +3042,6 @@ mod tests {
                 token_id: b"ERA".to_vec(),
                 mode: TransactionMode::Bilateral,
                 nonce: vec![0xAA; 16],
-                verification: VerificationType::Standard,
-                pre_commit: None,
                 recipient: vec![0x02; 32],
                 to: vec![0x03; 32],
                 message: "test".into(),
@@ -3322,37 +3051,6 @@ mod tests {
             let b1 = op.to_bytes();
             let b2 = op.to_bytes();
             assert_eq!(b1, b2);
-        }
-
-        #[test]
-        fn precommit_map_order_independent() {
-            let make_op = |insert_order: &[(&str, Vec<u8>)]| {
-                let mut fixed = HashMap::new();
-                for (k, v) in insert_order {
-                    fixed.insert(k.to_string(), v.clone());
-                }
-                Operation::Transfer {
-                    policy_commit: [0u8; 32],
-                    to_device_id: vec![],
-                    amount: test_balance(1),
-                    token_id: vec![],
-                    mode: TransactionMode::Bilateral,
-                    nonce: vec![],
-                    verification: VerificationType::Standard,
-                    pre_commit: Some(PreCommitmentOp {
-                        fixed_parameters: fixed,
-                        variable_parameters: vec![],
-                    }),
-                    recipient: vec![],
-                    to: vec![],
-                    message: String::new(),
-                    signature: vec![],
-                    authority_policy: None,
-                }
-            };
-            let a = make_op(&[("alpha", vec![1]), ("beta", vec![2])]);
-            let b = make_op(&[("beta", vec![2]), ("alpha", vec![1])]);
-            assert_eq!(a.to_bytes(), b.to_bytes());
         }
     }
 }

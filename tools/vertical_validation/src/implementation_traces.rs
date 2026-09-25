@@ -29,7 +29,7 @@ use dsm::emissions::{
 use dsm::merkle::sparse_merkle_tree::SmtInclusionProof;
 use dsm::types::contact_types::DsmVerifiedContact;
 use dsm::types::device_state::{BalanceDelta, BalanceDirection, DeviceState};
-use dsm::types::operations::{Operation, TransactionMode, VerificationType};
+use dsm::types::operations::{Operation, TransactionMode};
 use dsm::types::receipt_types::{
     ParentConsumptionTracker, ReceiptVerificationContext, StitchedReceiptV2,
 };
@@ -1757,8 +1757,6 @@ fn build_signed_bilateral_transfer(
         amount: Balance::amount(TRACE_BILATERAL_AMOUNT),
         mode: TransactionMode::Bilateral,
         nonce: vec![nonce; 8],
-        verification: VerificationType::Standard,
-        pre_commit: None,
         recipient: remote_device_id.to_vec(),
         to: b"trace-bilateral-recipient".to_vec(),
         message: message.into(),

@@ -8,7 +8,7 @@
 use dsm::core::bilateral_transaction_manager::BilateralTransactionManager;
 use dsm::core::contact_manager::DsmContactManager;
 use dsm::crypto::signatures::SignatureKeyPair;
-use dsm::types::operations::{Operation, TransactionMode, VerificationType};
+use dsm::types::operations::{Operation, TransactionMode};
 use dsm::types::token_types::Balance;
 
 /// Relationship chain tips over process memory, with the store trait's
@@ -136,8 +136,6 @@ fn test_operation_serialization() {
         token_id: b"DSM_TOKEN".to_vec(),
         mode: TransactionMode::Bilateral,
         nonce: vec![1, 2, 3, 4],
-        verification: VerificationType::Bilateral,
-        pre_commit: None,
         recipient: b"Bob".to_vec(),
         to: b"recipient_123".to_vec(),
         message: "Test transfer".to_string(),

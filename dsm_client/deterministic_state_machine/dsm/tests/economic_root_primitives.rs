@@ -343,7 +343,7 @@ fn a_witness_cannot_be_replayed_under_another_identity() {
 
 #[test]
 fn the_offline_bearer_tier_is_classified_by_authority_policy_not_by_variant() {
-    use dsm::types::operations::{Operation, TransactionMode, VerificationType};
+    use dsm::types::operations::{Operation, TransactionMode};
     use dsm::types::token_types::Balance;
 
     let online = Operation::Transfer {
@@ -353,8 +353,6 @@ fn the_offline_bearer_tier_is_classified_by_authority_policy_not_by_variant() {
         policy_commit: ERA,
         mode: TransactionMode::Bilateral,
         nonce: vec![0; 8],
-        verification: VerificationType::Standard,
-        pre_commit: None,
         recipient: Vec::new(),
         to: Vec::new(),
         message: String::new(),

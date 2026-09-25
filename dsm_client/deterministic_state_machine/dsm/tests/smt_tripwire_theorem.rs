@@ -26,7 +26,7 @@ use dsm::core::bilateral_transaction_manager::{compute_smt_key, compute_successo
 use dsm::crypto::blake3::{domain_hash_bytes, dsm_domain_hasher};
 use dsm::crypto::signatures::SignatureKeyPair;
 use dsm::merkle::sparse_merkle_tree::ZERO_LEAF;
-use dsm::types::operations::{Operation, TransactionMode, VerificationType};
+use dsm::types::operations::{Operation, TransactionMode};
 use dsm::types::receipt_types::ParentConsumptionTracker;
 use dsm::types::token_types::Balance;
 use dsm::merkle::sparse_merkle_tree::{hash_smt_leaf, hash_smt_node, verify_smt_replace};
@@ -97,8 +97,6 @@ fn make_transfer_op(recipient: &[u8; 32], amount: u64) -> (Operation, Vec<u8>) {
         token_id: b"ERA".to_vec(),
         mode: TransactionMode::Bilateral,
         nonce: vec![0u8; 16],
-        verification: VerificationType::Standard,
-        pre_commit: None,
         recipient: recipient.to_vec(),
         to: recipient.to_vec(),
         message: String::new(),

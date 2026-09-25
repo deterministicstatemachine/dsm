@@ -8,8 +8,11 @@ EXCLUDE_DIRS=(scripts docs .claude .github node_modules target build ci)
 if command -v rg >/dev/null 2>&1; then
   _rg_excludes=()
   for d in "${EXCLUDE_DIRS[@]}"; do _rg_excludes+=(--glob "!**/${d}/**"); done
+  # Code only, like every tree-scanning gate: CI skips markdown-only changes
+  # (paths-ignore '**/*.md' in ci.yml), so a gate that read markdown could
+  # fail on text a skipped run never checked.
   _bt_hits=$(rg -n --hidden --no-ignore-vcs -S '\bBluetoothMessage\b' \
-    "${_rg_excludes[@]}" . || true)
+    "${_rg_excludes[@]}" --glob '!*.md' . || true)
 else
   _grep_excludes=()
   for d in "${EXCLUDE_DIRS[@]}"; do _grep_excludes+=(--exclude-dir="$d"); done

@@ -28,7 +28,7 @@ use dsm::economic::provenance::{
 use dsm::economic::state::{EconomicBalanceState, EconomicConsumedSourceState, EconomicLeafState};
 use dsm::economic::tree::EconomicSmt;
 use dsm::economic::witness::EconomicTransitionWitness;
-use dsm::types::operations::{Operation, TransactionMode, VerificationType};
+use dsm::types::operations::{Operation, TransactionMode};
 use dsm::types::token_types::Balance;
 
 const G: [u8; 32] = [0x11; 32];
@@ -78,8 +78,6 @@ fn bearer_transfer(policy_commit: [u8; 32]) -> Operation {
         policy_commit,
         mode: TransactionMode::Bilateral,
         nonce: vec![0; 8],
-        verification: VerificationType::Standard,
-        pre_commit: None,
         recipient: Vec::new(),
         to: Vec::new(),
         message: String::new(),

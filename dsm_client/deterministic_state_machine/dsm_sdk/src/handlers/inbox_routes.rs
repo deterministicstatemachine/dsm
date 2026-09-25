@@ -125,41 +125,31 @@ impl AppRouterImpl {
                     .iter()
                     .map(|(e, freshness)| generated::InboxItem {
                         id: e.transaction_id.clone(),
-                        preview: match &e.transaction {
-                            dsm::types::operations::Operation::Transfer {
-                                amount,
-                                token_id,
-                                ..
-                            } => {
-                                let raw = amount.value();
-                                let tid_upper = String::from_utf8_lossy(token_id).to_uppercase();
-                                let formatted = if tid_upper == "DBTC" || tid_upper == "BTC" {
-                                    let scale: u64 = 100_000_000;
-                                    let whole = raw / scale;
-                                    let frac = raw % scale;
-                                    if frac == 0 {
-                                        format!("{}.0", whole)
-                                    } else {
-                                        let frac_str = format!("{:08}", frac);
-                                        let trimmed = frac_str.trim_end_matches('0');
-                                        format!("{}.{}", whole, trimmed)
-                                    }
-                                } else {
-                                    raw.to_string()
-                                };
+                        preview: match &e.kind {
+                            crate::sdk::b0x_sdk::B0xEntryKind::Transfer { amount, token_id } => {
+                                // The amount as the request states it, in the
+                                // token's own decimals when they are known.
+                                match super::wallet_routes::token_decimals(token_id) {
+                                    Ok(decimals) => format!(
+                                        "From: {} Amount: {} {}",
+                                        e.sender_device_id,
+                                        super::wallet_routes::format_base_units_for_display(
+                                            *amount, decimals
+                                        ),
+                                        token_id
+                                    ),
+                                    Err(_) => format!(
+                                        "From: {} Amount: {} base units of {}",
+                                        e.sender_device_id, amount, token_id
+                                    ),
+                                }
+                            }
+                            crate::sdk::b0x_sdk::B0xEntryKind::Message { payload_len } => {
                                 format!(
-                                    "From: {} Amount: {} {}",
-                                    e.sender_device_id, formatted, tid_upper
+                                    "From: {} message:{} bytes",
+                                    e.sender_device_id, payload_len
                                 )
                             }
-                            dsm::types::operations::Operation::Generic { data, .. } => {
-                                format!("From: {} message:{} bytes", e.sender_device_id, data.len())
-                            }
-                            other => format!(
-                                "From: {} operation: {}",
-                                e.sender_device_id,
-                                other.get_operation_type()
-                            ),
                         },
                         sender_id: Some(e.sender_device_id.clone()),
                         is_stale_route: *freshness == RouteFreshness::PreviousTip,

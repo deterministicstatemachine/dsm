@@ -13,7 +13,7 @@ use std::{collections::HashMap, sync::Arc};
 use dsm::{
     types::{
         error::DsmError,
-        operations::{Operation, TransactionMode, VerificationType},
+        operations::{Operation, TransactionMode},
         state_types::State,
         token_types::{Balance, TokenMetadata, TokenOperation, TokenSupply, TokenType},
     },
@@ -583,8 +583,6 @@ impl TokenSDK {
                     policy_commit,
                     mode: TransactionMode::Bilateral,
                     nonce: Vec::new(),
-                    verification: VerificationType::Standard,
-                    pre_commit: None,
                     message: "Transfer operation via TokenSDK".to_string(),
                     recipient: recipient.to_vec(),
                     to: crate::util::text_id::encode_base32_crockford(recipient).into_bytes(),
@@ -844,7 +842,6 @@ impl TokenSDK {
                     message,
                     mode: TransactionMode::Bilateral,
                     nonce: self.generate_nonce(),
-                    verification: VerificationType::Standard,
                     sender_state_hash: sender_state_hash.clone(),
                 };
 
@@ -1059,8 +1056,6 @@ impl TokenSDK {
             policy_commit: fee_policy_commit,
             mode: TransactionMode::Bilateral,
             nonce: self.generate_nonce(),
-            verification: VerificationType::Standard,
-            pre_commit: None,
             message: "Fee payment".to_string(),
             recipient: b"system.fee.device_id".to_vec(),
             to: b"system.fee.device_id".to_vec(),

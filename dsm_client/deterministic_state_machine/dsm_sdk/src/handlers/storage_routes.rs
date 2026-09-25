@@ -189,8 +189,8 @@ pub(crate) fn route_polled_entry(entry: &crate::sdk::b0x_sdk::B0xEntry) -> Polle
         return PolledEntryRoute::SplitTransferHalf;
     }
     if matches!(
-        entry.transaction,
-        dsm::types::operations::Operation::Transfer { .. }
+        entry.kind,
+        crate::sdk::b0x_sdk::B0xEntryKind::Transfer { .. }
     ) {
         PolledEntryRoute::TransferWithoutEvidence
     } else {
@@ -2964,7 +2964,7 @@ mod tests {
     use prost::Message;
 
     fn polled_entry(
-        transaction: dsm::types::operations::Operation,
+        kind: crate::sdk::b0x_sdk::B0xEntryKind,
         receipt_evidence_digest: Vec<u8>,
     ) -> crate::sdk::b0x_sdk::B0xEntry {
         crate::sdk::b0x_sdk::B0xEntry {
@@ -2973,8 +2973,7 @@ mod tests {
             sender_device_id: crate::util::text_id::encode_base32_crockford(&[0x0Au8; 32]),
             sender_genesis_hash: crate::util::text_id::encode_base32_crockford(&[0xAAu8; 32]),
             recipient_device_id: crate::util::text_id::encode_base32_crockford(&[0x0Bu8; 32]),
-            transaction,
-            signature: vec![0xA5; 8],
+            kind,
             sender_signing_public_key: vec![0x88; 64],
             canonical_operation_bytes: vec![0xCD; 16],
             transfer_wire_bytes: vec![0xEE; 16],
@@ -2982,21 +2981,10 @@ mod tests {
         }
     }
 
-    fn transfer_op() -> dsm::types::operations::Operation {
-        dsm::types::operations::Operation::Transfer {
-            to_device_id: vec![0x0B; 32],
-            amount: dsm::types::token_types::Balance::amount(5),
-            token_id: b"ERA".to_vec(),
-            policy_commit: [0x0F; 32],
-            mode: dsm::types::operations::TransactionMode::Unilateral,
-            nonce: vec![0x7E; 32],
-            verification: dsm::types::operations::VerificationType::Standard,
-            pre_commit: None,
-            recipient: vec![0x0B; 32],
-            to: vec![0x0B; 32],
-            message: String::new(),
-            signature: vec![0xA5; 8],
-            authority_policy: None,
+    fn transfer_kind() -> crate::sdk::b0x_sdk::B0xEntryKind {
+        crate::sdk::b0x_sdk::B0xEntryKind::Transfer {
+            amount: 5,
+            token_id: "ERA".to_string(),
         }
     }
 
@@ -3007,18 +2995,18 @@ mod tests {
     #[test]
     fn a_transfer_without_an_evidence_reference_is_refused_not_staged() {
         assert_eq!(
-            route_polled_entry(&polled_entry(transfer_op(), Vec::new())),
+            route_polled_entry(&polled_entry(transfer_kind(), Vec::new())),
             PolledEntryRoute::TransferWithoutEvidence
         );
         // Positive control: the same entry with a reference is a split half.
         assert_eq!(
-            route_polled_entry(&polled_entry(transfer_op(), vec![0x5A; 32])),
+            route_polled_entry(&polled_entry(transfer_kind(), vec![0x5A; 32])),
             PolledEntryRoute::SplitTransferHalf
         );
         // Non-transfers are not the transfer pipeline's business either way.
         assert_eq!(
             route_polled_entry(&polled_entry(
-                dsm::types::operations::Operation::Noop,
+                crate::sdk::b0x_sdk::B0xEntryKind::Message { payload_len: 0 },
                 Vec::new()
             )),
             PolledEntryRoute::NotATransfer

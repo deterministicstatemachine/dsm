@@ -1698,8 +1698,6 @@ mod tests {
             policy_commit: [0u8; 32],
             mode: TransactionMode::Unilateral,
             nonce: vec![],
-            verification: dsm::types::operations::VerificationType::Standard,
-            pre_commit: None,
             recipient: vec![],
             to: vec![],
             message: String::new(),
