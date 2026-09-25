@@ -4063,13 +4063,15 @@ enum NativeHostRequestKind {
 
   // platform_primitive.*
   NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_BIOMETRIC_AUTHORIZE = 102;
-  NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_SECURE_HARDWARE_GENERATE_KEY = 103;
-  NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_SECURE_HARDWARE_SIGN = 104;
   NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_NFC_TAG_READ_PAYLOAD = 105;
   NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_NFC_TAG_WRITE_PAYLOAD = 106;
-  NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_BLE_TRANSPORT_OPEN = 107;
-  NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_BLE_TRANSPORT_SEND_CHUNKS = 108;
-  NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_BLE_TRANSPORT_CLOSE = 109;
+  // Declared host primitives no host implemented and no caller issued.
+  reserved 103, 104, 107 to 109;
+  reserved "NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_SECURE_HARDWARE_GENERATE_KEY",
+           "NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_SECURE_HARDWARE_SIGN",
+           "NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_BLE_TRANSPORT_OPEN",
+           "NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_BLE_TRANSPORT_SEND_CHUNKS",
+           "NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_BLE_TRANSPORT_CLOSE";
 }
 
 message NativeHostRequest {
@@ -4129,25 +4131,6 @@ message BiometricAuthorizeResult {
   string error_message = 3 [(dsm_max_len)=256];
 }
 
-message SecureHardwareGenerateKeyPayload {
-  string key_alias = 1 [(dsm_max_len)=128];
-  bytes key_context = 2 [(dsm_max_len)=4096];
-}
-
-message SecureHardwareGenerateKeyResult {
-  bytes key_handle = 1 [(dsm_max_len)=4096];
-}
-
-message SecureHardwareSignPayload {
-  string key_alias = 1 [(dsm_max_len)=128];
-  bytes message = 2 [(dsm_max_len)=65535];
-  bytes key_handle = 3 [(dsm_max_len)=4096];
-}
-
-message SecureHardwareSignResult {
-  bytes signature = 1 [(dsm_max_len)=65535];
-}
-
 message NfcTagReadPayload {
   string mime_type = 1 [(dsm_max_len)=128];
 }
@@ -4163,31 +4146,6 @@ message NfcTagWritePayload {
 
 message NfcTagWriteResult {
   bool launched = 1;
-}
-
-message BleTransportOpenPayload {
-  string ble_address = 1 [(dsm_max_len)=128];
-}
-
-message BleTransportOpenResult {
-  bool ready = 1;
-}
-
-message BleTransportSendChunksPayload {
-  string ble_address = 1 [(dsm_max_len)=128];
-  bytes envelope_bytes = 2 [(dsm_max_len)=65535];
-}
-
-message BleTransportSendChunksResult {
-  bytes response_envelope = 1 [(dsm_max_len)=65535];
-}
-
-message BleTransportClosePayload {
-  string ble_address = 1 [(dsm_max_len)=128];
-}
-
-message BleTransportCloseResult {
-  bool closed = 1;
 }
 
 message QrScanResultPayload {

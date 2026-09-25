@@ -234,21 +234,6 @@ function installBridge(opts?: { contactBleAddress?: string }) {
 
       if (method === 'nativeHostRequest') {
         const hostRequest = pb.NativeHostRequest.fromBinary(payload);
-        if (hostRequest.kind === pb.NativeHostRequestKind.PLATFORM_PRIMITIVE_BLE_TRANSPORT_SEND_CHUNKS) {
-          const responseEnvelope = bilateralResponseOverride
-            ? bilateralResponseOverride()
-            : makeBilateralPrepareResponseEnvelope(COMMITMENT_HASH);
-          return wrapSuccess(
-            new pb.NativeHostResponse({
-              result: {
-                case: 'okBytes',
-                value: new pb.BleTransportSendChunksResult({
-                  responseEnvelope: new Uint8Array(responseEnvelope),
-                }).toBinary(),
-              },
-            }).toBinary(),
-          );
-        }
         return wrapError(`unhandled nativeHostRequest kind: ${hostRequest.kind}`);
       }
 
