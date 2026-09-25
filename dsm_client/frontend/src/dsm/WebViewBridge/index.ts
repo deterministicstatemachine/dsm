@@ -11,7 +11,6 @@
 
 import * as ble from "./ble";
 import * as bilateral from "./bilateral";
-import * as devtree from "./devtree";
 import * as diagnostics from "./diagnostics";
 import * as events from "./events";
 import * as genesis from "./genesis";
@@ -66,9 +65,8 @@ export const {
 } = diagnostics;
 
 export const { addDsmEventListener } = events;
-export const { addSecondaryDeviceBin, createGenesisViaRouter, generateMnemonic } = genesis;
+export const { createGenesisViaRouter, generateMnemonic } = genesis;
 
-export const { fetchDeviceTreeSnapshot } = devtree;
 export const { getPreference, setPreference } = preferences;
 export const {
   configureLockViaRouter,
