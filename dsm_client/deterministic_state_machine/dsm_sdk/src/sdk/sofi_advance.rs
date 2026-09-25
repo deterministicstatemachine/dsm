@@ -583,11 +583,11 @@ pub async fn resolve_pending_position(
             Ok(registration) => registration,
             Err(missing) => return not_yet(NotResolved::Registration(missing)),
         };
-    let fulfillment = match registration {
+    let fulfillment = match &registration {
         Registration::Registered(signed)
             if derive::fulfillment_id(&signed.body) == fulfillment_id =>
         {
-            signed
+            signed.clone()
         }
         Registration::Registered(..) | Registration::NeverRegistered { .. } => {
             return Err(refuse(format!(
@@ -660,7 +660,10 @@ pub async fn resolve_pending_position(
         parents: &parents,
         chains: &chains,
     };
-    let (resolution, effect) = match resolver.resolve_recognized(exercise.clone()).await? {
+    let (resolution, effect) = match resolver
+        .resolve_recognized(exercise.clone(), &registration)
+        .await?
+    {
         PositionOutcome::Resolved { resolution, effect } => (resolution, effect),
         PositionOutcome::NotYet(incomplete) => return not_yet(NotResolved::Ladder(incomplete)),
         PositionOutcome::NotEstablished(why) => return not_yet(NotResolved::Facts(why)),

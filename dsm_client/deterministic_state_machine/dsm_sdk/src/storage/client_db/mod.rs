@@ -391,7 +391,13 @@ fn get_database_path() -> Result<PathBuf> {
 /// rowid. `transactions.chain_height`/`step_index`,
 /// `balance_projections.source_state_number` and `pending_transactions` are
 /// gone.
-pub const CLIENT_DB_SCHEMA_VERSION: i64 = 18;
+///
+/// 19: `sofi_vault_leaf` is keyed by generation — every generation this
+/// device established keeps its whole tree, not the head only, because the
+/// device's own position resolves after its walk recorded the generation its
+/// exercise produced, and the resolution needs the leaves of the generation
+/// the exercise was built on.
+pub const CLIENT_DB_SCHEMA_VERSION: i64 = 19;
 
 /// A 32-byte column, exactly. Any other length is a corrupt row and an error —
 /// never padded, never truncated.
@@ -541,9 +547,11 @@ fn create_schema(conn: &Connection) -> Result<()> {
         -- canonicality: `advance_resolved` already selected the state.
         --
         -- The roots are a chain, one row per generation, kept forever because
-        -- a parent's status is asked about a GENERATION. The leaves are the
-        -- CURRENT head's only and are replaced wholesale, because evidence
-        -- needs leaf PREIMAGES and a mixture of two generations is not a tree.
+        -- a parent's status is asked about a GENERATION. The leaves are every
+        -- established generation's whole tree, one set per generation,
+        -- because evidence for an operation built on generation g needs g's
+        -- leaf PREIMAGES after this device has walked past g, and a mixture
+        -- of two generations is not a tree.
         CREATE TABLE IF NOT EXISTS sofi_vault_root(
             vault_id   BLOB NOT NULL CHECK (length(vault_id) = 32),
             generation INTEGER NOT NULL CHECK (generation >= 0),
@@ -552,11 +560,12 @@ fn create_schema(conn: &Connection) -> Result<()> {
         ) WITHOUT ROWID;
         CREATE TABLE IF NOT EXISTS sofi_vault_leaf(
             vault_id   BLOB NOT NULL CHECK (length(vault_id) = 32),
+            generation INTEGER NOT NULL CHECK (generation >= 0),
             leaf_key   BLOB NOT NULL CHECK (length(leaf_key) = 32),
             leaf_value BLOB NOT NULL CHECK (length(leaf_value) = 32),
             kind       INTEGER NOT NULL,
             preimage   BLOB NOT NULL,
-            PRIMARY KEY (vault_id, leaf_key)
+            PRIMARY KEY (vault_id, generation, leaf_key)
         ) WITHOUT ROWID;
 
         -- v15: the native ERA reserve (R4). This device's frozen release at

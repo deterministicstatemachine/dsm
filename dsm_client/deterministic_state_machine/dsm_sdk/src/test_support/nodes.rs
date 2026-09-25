@@ -33,7 +33,7 @@
 //! at the nodes is `economic_fixtures::point_sdk_at`.
 
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use dsm_storage_node::{db, replication, AppLimits, AppState, NodeStorageSet};
 
@@ -107,9 +107,30 @@ struct Serving {
     task: tokio::task::JoinHandle<()>,
 }
 
-/// Serve the binary's app for `state` on `listener` until stopped.
-fn serve(listener: tokio::net::TcpListener, state: Arc<AppState>, member_id: &str) -> Serving {
-    let app = dsm_storage_node::build_app(state, member_id, deployed_limits());
+/// Serve the binary's app for `state` on `listener` until stopped. Every
+/// request the app is handed is recorded in `requests` first, as the method
+/// and the path: what an operator of this node can see the node was asked.
+fn serve(
+    listener: tokio::net::TcpListener,
+    state: Arc<AppState>,
+    member_id: &str,
+    requests: Arc<Mutex<Vec<String>>>,
+) -> Serving {
+    let app = dsm_storage_node::build_app(state, member_id, deployed_limits()).layer(
+        axum::middleware::from_fn(
+            move |request: axum::extract::Request, next: axum::middleware::Next| {
+                let requests = requests.clone();
+                async move {
+                    requests.lock().expect("request log").push(format!(
+                        "{} {}",
+                        request.method(),
+                        request.uri().path()
+                    ));
+                    next.run(request).await
+                }
+            },
+        ),
+    );
     let stop = Arc::new(tokio::sync::Notify::new());
     let signal = stop.clone();
     let task = tokio::spawn(async move {
@@ -129,6 +150,7 @@ pub struct Node {
     address: SocketAddr,
     state: Arc<AppState>,
     serving: Option<Serving>,
+    requests: Arc<Mutex<Vec<String>>>,
 }
 
 /// One envelope a node holds in its spool, exactly as the node stored it:
@@ -141,6 +163,17 @@ pub struct Spooled {
 }
 
 impl Node {
+    /// Every request this node was asked since it started or was last told
+    /// to forget them, in arrival order, as `METHOD /path`.
+    pub fn requests(&self) -> Vec<String> {
+        self.requests.lock().expect("request log").clone()
+    }
+
+    /// Forget the requests recorded so far.
+    pub fn forget_requests(&self) {
+        self.requests.lock().expect("request log").clear();
+    }
+
     /// Every envelope this node holds in its spool, in arrival order, read
     /// from the node's own database: what an operator of this node can see.
     pub async fn spool(&self) -> Vec<Spooled> {
@@ -254,7 +287,8 @@ impl NodeSet {
                     .with_register_incarnation(p.incarnation)
                     .with_storage_set(set),
             );
-            let serving = serve(p.listener, state.clone(), &p.member_id);
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let serving = serve(p.listener, state.clone(), &p.member_id, requests.clone());
             nodes.push(Node {
                 member_id: p.member_id,
                 endpoint,
@@ -262,6 +296,7 @@ impl NodeSet {
                 address: p.address,
                 state,
                 serving: Some(serving),
+                requests,
             });
         }
         Self { nodes }
@@ -303,7 +338,12 @@ impl NodeSet {
             let listener = tokio::net::TcpListener::bind(node.address)
                 .await
                 .expect("rebind node address");
-            node.serving = Some(serve(listener, node.state.clone(), &node.member_id));
+            node.serving = Some(serve(
+                listener,
+                node.state.clone(),
+                &node.member_id,
+                node.requests.clone(),
+            ));
         }
     }
 
@@ -332,12 +372,60 @@ impl NodeSet {
     }
 
     async fn spool_ddl(&self, member_id: &str, statement: &str) {
-        let node = self
-            .nodes
-            .iter()
-            .find(|n| n.member_id == member_id)
-            .unwrap_or_else(|| panic!("no node for member {member_id}"));
-        node.state
+        self.ddl(member_id, statement).await;
+    }
+
+    /// Refuse every write of `keys` at member `member_id`: the member's store
+    /// raises on the insert, so the put fails whole (§6) and the member
+    /// answers an error — a member whose storage failed the write. Every
+    /// read, and every other write, serves as before.
+    pub async fn refuse_cell_writes(&self, member_id: &str, keys: &[[u8; 32]]) {
+        self.ddl(
+            member_id,
+            "CREATE TABLE IF NOT EXISTS refused_cell_key (cell_key BYTEA PRIMARY KEY);
+             CREATE OR REPLACE FUNCTION refuse_cell_write() RETURNS trigger LANGUAGE plpgsql AS $$
+             BEGIN
+                 IF EXISTS (SELECT 1 FROM refused_cell_key WHERE cell_key = NEW.cell_key) THEN
+                     RAISE EXCEPTION 'the store refused the write';
+                 END IF;
+                 RETURN NEW;
+             END $$;
+             DROP TRIGGER IF EXISTS refuse_cell_write ON cells;
+             CREATE TRIGGER refuse_cell_write BEFORE INSERT ON cells
+                 FOR EACH ROW EXECUTE FUNCTION refuse_cell_write();",
+        )
+        .await;
+        let client = self
+            .node(member_id)
+            .state
+            .db_pool
+            .get()
+            .await
+            .expect("node db connection");
+        for key in keys {
+            client
+                .execute(
+                    "INSERT INTO refused_cell_key (cell_key) VALUES ($1) ON CONFLICT DO NOTHING",
+                    &[&key.to_vec()],
+                )
+                .await
+                .unwrap_or_else(|e| panic!("{member_id}: refuse a cell key: {e}"));
+        }
+    }
+
+    /// The member's store takes every write again.
+    pub async fn accept_cell_writes(&self, member_id: &str) {
+        self.ddl(
+            member_id,
+            "DROP TRIGGER IF EXISTS refuse_cell_write ON cells;
+             DROP TABLE IF EXISTS refused_cell_key",
+        )
+        .await;
+    }
+
+    async fn ddl(&self, member_id: &str, statement: &str) {
+        self.node(member_id)
+            .state
             .db_pool
             .get()
             .await
@@ -345,6 +433,13 @@ impl NodeSet {
             .batch_execute(statement)
             .await
             .unwrap_or_else(|e| panic!("{member_id}: {statement}: {e}"));
+    }
+
+    fn node(&self, member_id: &str) -> &Node {
+        self.nodes
+            .iter()
+            .find(|n| n.member_id == member_id)
+            .unwrap_or_else(|| panic!("no node for member {member_id}"))
     }
 
     fn node_mut(&mut self, member_id: &str) -> &mut Node {
