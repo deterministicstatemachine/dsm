@@ -18,8 +18,7 @@ pub mod pairing_orchestrator;
 
 // Re-export bilateral transaction components
 pub use bilateral_ble_handler::{
-    BilateralBleHandler, BilateralBleSession, BilateralPhase, BilateralSettlementContext,
-    BilateralSettlementDelegate,
+    BilateralBleHandler, BilateralBleSession, BilateralPhase, BilateralSettlementDelegate,
 };
 pub use bilateral_transport_adapter::{
     BilateralTransportAdapter, BleTransportDelegate, TransportInboundMessage, TransportOutbound,

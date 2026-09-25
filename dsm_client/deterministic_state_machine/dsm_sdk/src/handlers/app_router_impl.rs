@@ -2570,17 +2570,20 @@ impl AppRouter for AppRouterImpl {
         deltas: &[dsm::types::device_state::BalanceDelta],
         anchor_leaf: Option<dsm::types::device_state::AnchorLeafUpdate>,
         offline_spend: Option<dsm::types::device_state::OfflineSpend>,
+        settle: &dyn Fn(
+            &rusqlite::Transaction<'_>,
+            &dsm::types::device_state::AdvanceOutcome,
+        ) -> Result<(), dsm::types::error::DsmError>,
     ) -> Result<dsm::types::device_state::AdvanceOutcome, dsm::types::error::DsmError> {
-        self.core_sdk
-            .execute_on_relationship_with_anchor_leaf(
-                rel_key,
-                counterparty_devid,
-                operation,
-                deltas,
-                anchor_leaf,
-                offline_spend,
-            )
-            .map(|(_state, outcome)| outcome)
+        self.core_sdk.execute_offline_step(
+            rel_key,
+            counterparty_devid,
+            operation,
+            deltas,
+            anchor_leaf,
+            offline_spend,
+            settle,
+        )
     }
 
     fn simulate_advance_for_confirm(

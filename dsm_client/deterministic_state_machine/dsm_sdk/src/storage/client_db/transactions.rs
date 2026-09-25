@@ -50,243 +50,98 @@ fn upsert_transaction_row(conn: &Connection, tx: &TransactionRecord) -> Result<u
     Ok(affected)
 }
 
-/// Atomically persist sender-side settlement metadata.
-///
-/// Canonical DSM state is authoritative for every token, including ERA. This
-/// function stores sender-side transaction history only.
-pub fn apply_sender_settlement_and_store_transaction_atomic(
-    sender_device_id: &str,
-    token_id: Option<&str>,
-    amount: u64,
-    tx: &TransactionRecord,
-) -> Result<()> {
-    let binding = get_connection()?;
-    let mut conn = binding.lock().unwrap_or_else(|poisoned| {
-        log::warn!(
-            "DB lock poisoned in apply_sender_settlement_and_store_transaction_atomic, recovering"
-        );
-        poisoned.into_inner()
-    });
-
-    let txdb = conn.transaction()?;
-
-    let token = token_id.unwrap_or("ERA");
-
-    let affected = upsert_transaction_row(&txdb, tx)?;
-    txdb.execute(
-        "INSERT OR REPLACE INTO bilateral_sender_settlements(
-            tx_id, sender_device_id
-         ) VALUES (?1, ?2)",
-        params![tx.tx_id, sender_device_id],
-    )?;
-    txdb.commit()?;
-
-    if affected > 0 {
-        info!(
-            "Atomic sender settlement stored: device={} token={} amount={} tx_id={}",
-            sender_device_id, token, amount, tx.tx_id
-        );
-    }
-
-    Ok(())
+/// How a relationship step's tip write ended when it did not refuse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TipAdvance {
+    /// The tip moved from the step's parent to its child.
+    Applied,
+    /// The tip is already the step's child, moved there by this same step.
+    AlreadyApplied,
 }
 
-pub struct BilateralSenderSettlementBundle<'a> {
-    pub counterparty_device_id: &'a [u8],
-    pub new_chain_tip: &'a [u8],
-    pub sender_device_id: &'a str,
-    pub token_id: Option<&'a str>,
-    pub amount: u64,
+/// Move the relationship tip with `counterparty` from `parent` to `child`,
+/// recording the step `commitment` that moved it — inside `conn`, the
+/// transaction the step commits in. Idempotent: when the tip is not
+/// `parent`, it is read again, and a tip that is already `child` under the
+/// same commitment is [`TipAdvance::AlreadyApplied`]; any other tip is a
+/// conflict and nothing is written.
+pub(crate) fn advance_relationship_tip_in_tx(
+    conn: &Connection,
+    counterparty: &[u8; 32],
+    parent: &[u8; 32],
+    child: &[u8; 32],
+    commitment: &[u8; 32],
+) -> Result<TipAdvance> {
+    let moved = conn.execute(
+        "UPDATE contacts SET
+            previous_chain_tip = chain_tip,
+            chain_tip = ?1,
+            local_bilateral_chain_tip = ?1,
+            chain_tip_commitment = ?2,
+            observed_remote_chain_tip = NULL,
+            observed_remote_tip_source = NULL,
+            needs_online_reconcile = 0,
+            status = CASE
+                WHEN status = 'BleCapable' THEN 'BleCapable'
+                ELSE 'OnlineCapable'
+            END
+         WHERE device_id = ?3 AND chain_tip = ?4",
+        params![&child[..], &commitment[..], &counterparty[..], &parent[..]],
+    )?;
+    if moved == 1 {
+        return Ok(TipAdvance::Applied);
+    }
+    let (tip, bound): (Option<Vec<u8>>, Option<Vec<u8>>) = conn
+        .query_row(
+            "SELECT chain_tip, chain_tip_commitment FROM contacts WHERE device_id = ?1",
+            params![&counterparty[..]],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?
+        .ok_or_else(|| anyhow::anyhow!("relationship tip: the counterparty is not a contact"))?;
+    if tip.as_deref() == Some(&child[..]) && bound.as_deref() == Some(&commitment[..]) {
+        return Ok(TipAdvance::AlreadyApplied);
+    }
+    Err(anyhow::anyhow!(
+        "relationship tip conflict: the tip is neither this step's parent nor its child under \
+         this step's commitment"
+    ))
+}
+
+/// A relationship step's effects outside the device head: its tip, its
+/// balance projection (a display cache) and its history row.
+pub(crate) struct SettledStep<'a> {
+    pub counterparty_device_id: &'a [u8; 32],
+    pub parent_tip: &'a [u8; 32],
+    pub child_tip: &'a [u8; 32],
+    pub commitment_hash: &'a [u8; 32],
     pub tx: &'a TransactionRecord,
     pub projection: Option<&'a BalanceProjectionRecord>,
 }
 
-/// Atomic sender-side settlement persistence (§4.2 full-persistence boundary):
-/// - Advance contact `chain_tip` + `local_bilateral_chain_tip` to the new symmetric h_{n+1}.
-/// - Upsert optional balance projection (display cache; non-authoritative).
-/// - Upsert the transaction history row.
-/// - Record the sender-settlements idempotency row.
-///
-/// Single SQLite transaction; fail-closed on any row error. Replaces the
-/// previous two-step pattern of `apply_sender_settlement_bundle_atomic`
-/// followed by a separate `bilateral_tip_sync::sync_bilateral_tips_atomically`
-/// contacts.chain_tip write — those two writes could interleave, leaving a
-/// "tip advanced but no history" window.
-///
-/// Canonical state (chain state + device head) is written upstream at the
-/// `AdvanceOutcome` chokepoint (`CoreSDK::execute_on_relationship` →
-/// `dual_write_advance_outcome`). This function MUST NOT touch any
-/// canonical-state table.
-pub fn apply_bilateral_settlement_bundle_atomic(
-    bundle: BilateralSenderSettlementBundle<'_>,
-) -> Result<()> {
-    let binding = get_connection()?;
-    let mut conn = binding.lock().unwrap_or_else(|poisoned| {
-        log::warn!("DB lock poisoned in apply_bilateral_settlement_bundle_atomic, recovering");
-        poisoned.into_inner()
-    });
-
-    let txdb = conn.transaction()?;
-    let token = bundle.token_id.unwrap_or("ERA");
-
-    // 1. Advance contact chain_tip to the new symmetric h_{n+1}.
-    txdb.execute(
-        "UPDATE contacts SET
-            previous_chain_tip = chain_tip,
-            chain_tip = ?1,
-            local_bilateral_chain_tip = ?1,
-            observed_remote_chain_tip = NULL,
-            observed_remote_tip_source = NULL,
-            needs_online_reconcile = 0,
-            status = CASE
-                WHEN status = 'BleCapable' THEN 'BleCapable'
-                ELSE 'OnlineCapable'
-            END
-         WHERE device_id = ?2",
-        params![bundle.new_chain_tip, bundle.counterparty_device_id],
-    )?;
-
-    // 2. Balance projection (display cache only).
-    if let Some(record) = bundle.projection {
-        upsert_balance_projection_with_conn(&txdb, record)?;
+/// Write a step's effects inside `conn`, the transaction its canonical
+/// advance commits in, so the head and the relationship cannot disagree. A
+/// step already applied is refused here: in the same transaction the head
+/// would otherwise take it twice.
+pub(crate) fn settle_step_in_tx(conn: &Connection, step: &SettledStep<'_>) -> Result<()> {
+    match advance_relationship_tip_in_tx(
+        conn,
+        step.counterparty_device_id,
+        step.parent_tip,
+        step.child_tip,
+        step.commitment_hash,
+    )? {
+        TipAdvance::Applied => {}
+        TipAdvance::AlreadyApplied => {
+            return Err(anyhow::anyhow!(
+                "relationship step already applied: nothing is written again"
+            ))
+        }
     }
-
-    // 3. Transaction history row.
-    let affected = upsert_transaction_row(&txdb, bundle.tx)?;
-
-    // 4. Sender-settlements idempotency row.
-    txdb.execute(
-        "INSERT OR REPLACE INTO bilateral_sender_settlements(
-            tx_id, sender_device_id
-         ) VALUES (?1, ?2)",
-        params![bundle.tx.tx_id, bundle.sender_device_id],
-    )?;
-
-    txdb.commit()?;
-
-    if affected > 0 {
-        info!(
-            "Atomic bilateral sender bundle stored (tip+projection+history+bookkeeping): device={} token={} amount={} tx_id={}",
-            bundle.sender_device_id, token, bundle.amount, bundle.tx.tx_id
-        );
+    if let Some(record) = step.projection {
+        upsert_balance_projection_with_conn(conn, record)?;
     }
-
-    Ok(())
-}
-
-/// Atomically persist chain-tip advancement and receiver-side settlement metadata.
-///
-/// This is the full-persistence atomic boundary for BLE receiver confirm (§4.2).
-/// Canonical DSM state is authoritative for every token, including ERA. This
-/// function persists bilateral chain-tip advancement plus transaction history.
-///
-/// Callers must have a `SmtReplaceResult` from `commit_bilateral_smt_update()`
-/// and use `update_anchor_in_memory_from_replace_public()` for the in-memory
-/// anchor update before calling this function for all SQLite writes.
-pub fn apply_receiver_confirm_and_store_transaction_atomic(
-    counterparty_device_id: &[u8],
-    new_chain_tip: &[u8],
-    receiver_device_id: &str,
-    token_id: Option<&str>,
-    amount: u64,
-    tx: &TransactionRecord,
-) -> Result<()> {
-    let binding = get_connection()?;
-    let mut conn = binding.lock().unwrap_or_else(|poisoned| {
-        log::warn!(
-            "DB lock poisoned in apply_receiver_confirm_and_store_transaction_atomic, recovering"
-        );
-        poisoned.into_inner()
-    });
-
-    let txdb = conn.transaction()?;
-
-    // 1. Advance chain tip (mirrors update_finalized_bilateral_chain_tip)
-    txdb.execute(
-        "UPDATE contacts SET
-            previous_chain_tip = chain_tip,
-            chain_tip = ?1,
-            local_bilateral_chain_tip = ?1,
-            observed_remote_chain_tip = NULL,
-            observed_remote_tip_source = NULL,
-            needs_online_reconcile = 0,
-            status = CASE
-                WHEN status = 'BleCapable' THEN 'BleCapable'
-                ELSE 'OnlineCapable'
-            END
-         WHERE device_id = ?2",
-        params![new_chain_tip, counterparty_device_id],
-    )?;
-
-    // 2. Store transaction history
-    let affected = upsert_transaction_row(&txdb, tx)?;
-    txdb.commit()?;
-
-    if affected > 0 {
-        info!(
-            "Atomic receiver settlement stored (tip+history): device={} token={:?} amount={} tx_id={}",
-            receiver_device_id, token_id, amount, tx.tx_id
-        );
-    }
-
-    Ok(())
-}
-
-pub struct ReceiverConfirmBundle<'a> {
-    pub counterparty_device_id: &'a [u8],
-    pub new_chain_tip: &'a [u8],
-    pub receiver_device_id: &'a str,
-    pub token_id: Option<&'a str>,
-    pub amount: u64,
-    pub tx: &'a TransactionRecord,
-    pub projection: Option<&'a BalanceProjectionRecord>,
-}
-
-/// Atomic receiver-side settlement persistence: contact chain-tip CAS,
-/// optional balance projection (display cache), and transaction history.
-///
-/// Canonical state (chain state + device head) is written upstream at the
-/// `AdvanceOutcome` chokepoint. This function MUST NOT touch any
-/// canonical-state table.
-pub fn apply_receiver_confirm_bundle_atomic(bundle: ReceiverConfirmBundle<'_>) -> Result<()> {
-    let binding = get_connection()?;
-    let mut conn = binding.lock().unwrap_or_else(|poisoned| {
-        log::warn!("DB lock poisoned in apply_receiver_confirm_bundle_atomic, recovering");
-        poisoned.into_inner()
-    });
-
-    let txdb = conn.transaction()?;
-
-    txdb.execute(
-        "UPDATE contacts SET
-            previous_chain_tip = chain_tip,
-            chain_tip = ?1,
-            local_bilateral_chain_tip = ?1,
-            observed_remote_chain_tip = NULL,
-            observed_remote_tip_source = NULL,
-            needs_online_reconcile = 0,
-            status = CASE
-                WHEN status = 'BleCapable' THEN 'BleCapable'
-                ELSE 'OnlineCapable'
-            END
-         WHERE device_id = ?2",
-        params![bundle.new_chain_tip, bundle.counterparty_device_id],
-    )?;
-
-    if let Some(record) = bundle.projection {
-        upsert_balance_projection_with_conn(&txdb, record)?;
-    }
-
-    let affected = upsert_transaction_row(&txdb, bundle.tx)?;
-    txdb.commit()?;
-
-    if affected > 0 {
-        info!(
-            "Atomic receiver settlement bundle stored (tip+history): device={} token={:?} amount={} tx_id={}",
-            bundle.receiver_device_id, bundle.token_id, bundle.amount, bundle.tx.tx_id
-        );
-    }
-
+    upsert_transaction_row(conn, step.tx)?;
     Ok(())
 }
 
@@ -378,24 +233,6 @@ pub fn transaction_exists(tx_id: &str) -> bool {
     .unwrap_or(false)
 }
 
-pub fn is_sender_settlement_completed(tx_id: &str, sender_device_id: &str) -> Result<bool> {
-    let binding = get_connection()?;
-    let conn = binding.lock().unwrap_or_else(|poisoned| {
-        log::warn!("DB lock poisoned, recovering");
-        poisoned.into_inner()
-    });
-    Ok(conn
-        .query_row(
-            "SELECT 1 FROM bilateral_sender_settlements
-             WHERE tx_id = ?1 AND sender_device_id = ?2
-             LIMIT 1",
-            params![tx_id, sender_device_id],
-            |_| Ok(()),
-        )
-        .optional()?
-        .is_some())
-}
-
 pub fn get_transaction_history(
     device_id: Option<&str>,
     limit: Option<usize>,
@@ -468,120 +305,25 @@ mod tests {
     use serial_test::serial;
     use std::collections::HashMap;
 
-    #[test]
-    #[serial]
-    fn sender_settlement_clears_stale_live_peer_claim() {
-        crate::economic_fixtures::use_test_storage_dir();
-        reset_database_for_tests();
-        init_database().expect("init db");
-
-        let counterparty_device_id = [0x51u8; 32];
-        let counterparty_genesis = [0x61u8; 32];
-        let stale_tip = [0x71u8; 32];
-        let observed_tip = [0x81u8; 32];
-        let settled_tip = [0x91u8; 32];
-        let local_device = [0xA1u8; 32];
-        let local_b32 = crate::util::text_id::encode_base32_crockford(&local_device);
-        let counterparty_b32 =
-            crate::util::text_id::encode_base32_crockford(&counterparty_device_id);
-
-        crate::storage::client_db::store_contact(&crate::storage::client_db::ContactRecord {
-            contact_id: "sender-contact".to_string(),
-            device_id: counterparty_device_id.to_vec(),
-            alias: "sender-peer".to_string(),
-            genesis_hash: counterparty_genesis.to_vec(),
-            public_key: vec![0x11; 32],
-            kyber_public_key: vec![0x4B; 1184],
-            current_chain_tip: Some(stale_tip.to_vec()),
-            verified: true,
-            verification_proof: None,
-            metadata: HashMap::new(),
-            ble_address: None,
-            status: "BleCapable".to_string(),
-            needs_online_reconcile: true,
-            previous_chain_tip: None,
-        })
-        .expect("store contact");
-        crate::storage::client_db::update_local_bilateral_chain_tip(
-            &counterparty_device_id,
-            &stale_tip,
-        )
-        .expect("seed local tip");
-        crate::storage::client_db::record_observed_remote_chain_tip(
-            &counterparty_device_id,
-            &observed_tip,
-            crate::storage::client_db::ObservedRemoteTipSource::LivePeerClaim,
-        )
-        .expect("record observed tip");
-
-        let tx = TransactionRecord {
-            tx_id: "sender-settlement".to_string(),
-            tx_hash: crate::util::text_id::encode_base32_crockford(&settled_tip),
-            from_device: local_b32.clone(),
-            to_device: counterparty_b32,
-            amount: 7,
-            tx_type: "bilateral_offline".to_string(),
-            status: "completed".to_string(),
-            commitment_hash: None,
-            proof_data: None,
-            metadata: HashMap::new(),
-        };
-
-        apply_bilateral_settlement_bundle_atomic(BilateralSenderSettlementBundle {
-            counterparty_device_id: &counterparty_device_id,
-            new_chain_tip: &settled_tip,
-            sender_device_id: &local_b32,
-            token_id: None,
-            amount: 7,
-            tx: &tx,
-            projection: None,
-        })
-        .expect("apply sender bundle");
-
-        assert!(
-            crate::storage::client_db::get_observed_remote_tip_record(&counterparty_device_id)
-                .expect("load observed tip")
-                .is_none(),
-            "successful sender settlement should retire stale live-peer claims"
-        );
-
-        let stored = crate::storage::client_db::get_contact_by_device_id(&counterparty_device_id)
-            .expect("load contact")
-            .expect("contact exists");
-        assert_eq!(stored.current_chain_tip, Some(settled_tip.to_vec()));
-        assert!(!stored.needs_online_reconcile);
-        assert_eq!(
-            crate::storage::client_db::get_local_bilateral_chain_tip(&counterparty_device_id)
-                .expect("read tip"),
-            Some(settled_tip)
-        );
+    /// Runs `f` in one transaction and commits it — as the step's advance does.
+    fn in_tx<T>(f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
+        let binding = get_connection()?;
+        let mut conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+        let tx = conn.transaction()?;
+        let out = f(&tx)?;
+        tx.commit()?;
+        Ok(out)
     }
 
-    #[test]
-    #[serial]
-    fn receiver_settlement_clears_stale_live_peer_claim() {
-        crate::economic_fixtures::use_test_storage_dir();
-        reset_database_for_tests();
-        init_database().expect("init db");
-
-        let counterparty_device_id = [0x52u8; 32];
-        let counterparty_genesis = [0x62u8; 32];
-        let stale_tip = [0x72u8; 32];
-        let observed_tip = [0x82u8; 32];
-        let settled_tip = [0x92u8; 32];
-        let local_device = [0xA2u8; 32];
-        let local_b32 = crate::util::text_id::encode_base32_crockford(&local_device);
-        let counterparty_b32 =
-            crate::util::text_id::encode_base32_crockford(&counterparty_device_id);
-
+    fn contact_at(counterparty: [u8; 32], tip: [u8; 32]) {
         crate::storage::client_db::store_contact(&crate::storage::client_db::ContactRecord {
-            contact_id: "receiver-contact".to_string(),
-            device_id: counterparty_device_id.to_vec(),
-            alias: "receiver-peer".to_string(),
-            genesis_hash: counterparty_genesis.to_vec(),
-            public_key: vec![0x22; 32],
+            contact_id: "peer".to_string(),
+            device_id: counterparty.to_vec(),
+            alias: "peer".to_string(),
+            genesis_hash: vec![0x61u8; 32],
+            public_key: vec![0x11; 32],
             kyber_public_key: vec![0x4B; 1184],
-            current_chain_tip: Some(stale_tip.to_vec()),
+            current_chain_tip: Some(tip.to_vec()),
             verified: true,
             verification_proof: None,
             metadata: HashMap::new(),
@@ -591,58 +333,132 @@ mod tests {
             previous_chain_tip: None,
         })
         .expect("store contact");
-        crate::storage::client_db::update_local_bilateral_chain_tip(
-            &counterparty_device_id,
-            &stale_tip,
-        )
-        .expect("seed local tip");
-        crate::storage::client_db::record_observed_remote_chain_tip(
-            &counterparty_device_id,
-            &observed_tip,
-            crate::storage::client_db::ObservedRemoteTipSource::LivePeerClaim,
-        )
-        .expect("record observed tip");
+    }
 
-        let tx = TransactionRecord {
-            tx_id: "receiver-settlement".to_string(),
-            tx_hash: crate::util::text_id::encode_base32_crockford(&settled_tip),
-            from_device: counterparty_b32,
-            to_device: local_b32.clone(),
-            amount: 9,
+    fn history_row(tx_id: &str) -> TransactionRecord {
+        TransactionRecord {
+            tx_id: tx_id.to_string(),
+            tx_hash: tx_id.to_string(),
+            from_device: "from".to_string(),
+            to_device: "to".to_string(),
+            amount: 7,
             tx_type: "bilateral_offline".to_string(),
             status: "completed".to_string(),
             commitment_hash: None,
             proof_data: None,
             metadata: HashMap::new(),
-        };
+        }
+    }
 
-        apply_receiver_confirm_bundle_atomic(ReceiverConfirmBundle {
-            counterparty_device_id: &counterparty_device_id,
-            new_chain_tip: &settled_tip,
-            receiver_device_id: &local_b32,
-            token_id: None,
-            amount: 9,
-            tx: &tx,
-            projection: None,
+    /// A settled step moves the relationship tip from its parent to its child
+    /// and writes its history row in the same transaction; the reconcile hold
+    /// and a stale live-peer claim are retired with it.
+    #[test]
+    #[serial]
+    fn a_settled_step_moves_the_tip_and_writes_its_history_together() {
+        crate::economic_fixtures::use_test_storage_dir();
+        reset_database_for_tests();
+        init_database().expect("init db");
+        let counterparty = [0x51u8; 32];
+        let (parent, child, commitment) = ([0x71u8; 32], [0x91u8; 32], [0xC1u8; 32]);
+        contact_at(counterparty, parent);
+        crate::storage::client_db::record_observed_remote_chain_tip(
+            &counterparty,
+            &[0x81u8; 32],
+            crate::storage::client_db::ObservedRemoteTipSource::LivePeerClaim,
+        )
+        .expect("record observed tip");
+
+        let row = history_row("step-1");
+        in_tx(|tx| {
+            settle_step_in_tx(
+                tx,
+                &SettledStep {
+                    counterparty_device_id: &counterparty,
+                    parent_tip: &parent,
+                    child_tip: &child,
+                    commitment_hash: &commitment,
+                    tx: &row,
+                    projection: None,
+                },
+            )
         })
-        .expect("apply receiver bundle");
+        .expect("settle the step");
 
-        assert!(
-            crate::storage::client_db::get_observed_remote_tip_record(&counterparty_device_id)
-                .expect("load observed tip")
-                .is_none(),
-            "successful receiver settlement should retire stale live-peer claims"
-        );
-
-        let stored = crate::storage::client_db::get_contact_by_device_id(&counterparty_device_id)
+        let stored = crate::storage::client_db::get_contact_by_device_id(&counterparty)
             .expect("load contact")
             .expect("contact exists");
-        assert_eq!(stored.current_chain_tip, Some(settled_tip.to_vec()));
+        assert_eq!(stored.current_chain_tip, Some(child.to_vec()));
         assert!(!stored.needs_online_reconcile);
         assert_eq!(
-            crate::storage::client_db::get_local_bilateral_chain_tip(&counterparty_device_id)
+            crate::storage::client_db::get_local_bilateral_chain_tip(&counterparty)
                 .expect("read tip"),
-            Some(settled_tip)
+            Some(child)
+        );
+        assert!(
+            crate::storage::client_db::get_observed_remote_tip_record(&counterparty)
+                .expect("load observed tip")
+                .is_none()
+        );
+        assert!(transaction_exists("step-1"));
+
+        // The same step again is refused as already applied, and writes nothing.
+        let again = history_row("step-1-again");
+        let err = in_tx(|tx| {
+            settle_step_in_tx(
+                tx,
+                &SettledStep {
+                    counterparty_device_id: &counterparty,
+                    parent_tip: &parent,
+                    child_tip: &child,
+                    commitment_hash: &commitment,
+                    tx: &again,
+                    projection: None,
+                },
+            )
+        })
+        .expect_err("a step already applied is not applied again");
+        assert!(err.to_string().contains("already applied"), "{err}");
+        assert!(!transaction_exists("step-1-again"));
+    }
+
+    /// The tip is a compare-and-set bound to the step: it moves only from the
+    /// step's parent; a replay of the same step is `AlreadyApplied`; the same
+    /// child claimed under another commitment, or a parent the tip no longer
+    /// holds, is a conflict and moves nothing. MUTATION CONTROL: dropping the
+    /// commitment from the replay check reads the foreign step as already
+    /// applied and turns this red.
+    #[test]
+    #[serial]
+    fn the_tip_moves_only_from_the_steps_parent_and_a_replay_is_recognised() {
+        crate::economic_fixtures::use_test_storage_dir();
+        reset_database_for_tests();
+        init_database().expect("init db");
+        let counterparty = [0x52u8; 32];
+        let (parent, child, commitment) = ([0x72u8; 32], [0x92u8; 32], [0xC2u8; 32]);
+        contact_at(counterparty, parent);
+        let advance = |p: [u8; 32], c: [u8; 32], k: [u8; 32]| {
+            in_tx(|tx| advance_relationship_tip_in_tx(tx, &counterparty, &p, &c, &k))
+        };
+
+        assert_eq!(
+            advance(parent, child, commitment).expect("from its parent"),
+            TipAdvance::Applied
+        );
+        assert_eq!(
+            advance(parent, child, commitment).expect("the same step again"),
+            TipAdvance::AlreadyApplied
+        );
+        let foreign = advance(parent, child, [0xC3u8; 32])
+            .expect_err("the same child under another commitment is a conflict");
+        assert!(foreign.to_string().contains("conflict"), "{foreign}");
+        let stale = advance([0x7Fu8; 32], [0x93u8; 32], [0xC4u8; 32])
+            .expect_err("a parent the tip no longer holds is a conflict");
+        assert!(stale.to_string().contains("conflict"), "{stale}");
+        assert_eq!(
+            crate::storage::client_db::get_contact_chain_tip(&counterparty).expect("read"),
+            Some(child),
+            "a refused step moved the tip"
         );
     }
 
