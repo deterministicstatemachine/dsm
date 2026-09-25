@@ -36,3 +36,14 @@
 # where a deleted file would be a claim.
 dsm_client/deterministic_state_machine/dsm/src/sofi/exercise.rs check_attempt_completion
 dsm_client/deterministic_state_machine/dsm/src/sofi/registration.rs check_fulfillment_completion
+#
+# A THIRD ENTRY (2026-09-25), found when the gate started reading whole files
+# (ci/production_text.py) instead of stopping at a file's first `#[cfg(test)]`
+# item: `verify_signed_object` is the one verifier that binds a signed SoFi
+# object's key to an EXPECTED signer, and no production path calls it. P is
+# verified under the key it carries, a setup under P's key, and F under P's
+# key (MR-SOFI-0151; the shortcut audit of 2026-09-25, "No production SoFi
+# path binds a precommit's key to the trader it names"). The change that
+# binds the claimant key to the trader's proven AK wires it and deletes this
+# line.
+dsm_client/deterministic_state_machine/dsm/src/sofi/signature.rs verify_signed_object

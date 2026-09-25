@@ -18,9 +18,27 @@ android_roots=(
 frontend_strict_roots=(
   # NOTE: `index.ts` is a UI/client facade and may format identifiers for display.
   # The strict bytes-only contract applies to the actual bridge plumbing only.
-  dsm_client/frontend/src/dsm/WebViewBridge.ts
+  dsm_client/frontend/src/dsm/WebViewBridge
   dsm_client/frontend/src/dsm/BridgeGate.ts
 )
+
+# A root this gate names must exist: a scan of a path that is not there is
+# not a scan. (The bridge became a folder, and the gate kept naming the file.)
+for p in "${roots[@]}" "${frontend_strict_roots[@]}"; do
+  [[ -e "$p" ]] || { echo "[FAIL] bridge contract gate: $p does not exist" >&2; exit 2; }
+done
+
+# rg exits 0 on a match, 1 on none, and 2 on an error such as a missing path.
+# Only 1 is a pass; an error is a failed scan, never a clean one.
+scan() {
+  local status=0
+  rg "$@" || status=$?
+  case "$status" in
+    0) return 0 ;;
+    1) return 1 ;;
+    *) echo "[FAIL] bridge contract gate: rg failed (exit $status)" >&2; exit 2 ;;
+  esac
+}
 
 # Allowlist some files that are explicitly UI/display/recovery and not transport acceptance.
 # IMPORTANT: keep this list small and intentional.
@@ -81,7 +99,7 @@ fail_if_rg() {
   for p in "${allow_paths[@]}"; do
     rg_exclude_files+=(--glob "!$p")
   done
-  if rg -n --hidden --ignore-case "${rg_allow[@]}" "${rg_exclude_files[@]}" -e "$pattern" "${roots[@]}"; then
+  if scan -n --hidden --ignore-case "${rg_allow[@]}" "${rg_exclude_files[@]}" -e "$pattern" "${roots[@]}"; then
     echo "[FAIL] ${label}" >&2
     exit 2
   fi
@@ -92,7 +110,7 @@ fail_if_rg_frontend_strict() {
   local label="$1"; shift
   local pattern="$1"; shift
   # No allowlist exclusions here; the whole point is "no exceptions" on these files.
-  if rg -n --hidden --ignore-case "${rg_allow[@]}" -e "$pattern" "${frontend_strict_roots[@]}"; then
+  if scan -n --hidden --ignore-case "${rg_allow[@]}" -e "$pattern" "${frontend_strict_roots[@]}"; then
     echo "[FAIL] ${label}" >&2
     exit 2
   fi
@@ -101,7 +119,7 @@ fail_if_rg_frontend_strict() {
 fail_if_rg_frontend_strict_case_sensitive() {
   local label="$1"; shift
   local pattern="$1"; shift
-  if rg -n --hidden "${rg_allow[@]}" -e "$pattern" "${frontend_strict_roots[@]}"; then
+  if scan -n --hidden "${rg_allow[@]}" -e "$pattern" "${frontend_strict_roots[@]}"; then
     echo "[FAIL] ${label}" >&2
     exit 2
   fi
@@ -114,7 +132,7 @@ fail_if_rg_case_sensitive() {
   for p in "${allow_paths[@]}"; do
     rg_exclude_files+=(--glob "!$p")
   done
-  if rg -n --hidden "${rg_allow[@]}" "${rg_exclude_files[@]}" -e "$pattern" "${roots[@]}"; then
+  if scan -n --hidden "${rg_allow[@]}" "${rg_exclude_files[@]}" -e "$pattern" "${roots[@]}"; then
     echo "[FAIL] ${label}" >&2
     exit 2
   fi

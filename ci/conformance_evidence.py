@@ -26,6 +26,8 @@
 #          `dsm_sdk::supply_cap_partial_history::cap_is_exact_...`   (tests/*.rs)
 #          `dsm_storage_node::main::tests::...`                      (src/main.rs)
 #      or a formal property: `tla/<File>.tla::<Name>`, `lean4/<File>.lean::<name>`.
+#      A Met row and a matrix Negative-test cell need at least one CARGO test:
+#      a formal property beside it is evidence too, but never the only one.
 #      Every test reference in CONFORMANCE §8, the verification matrix's
 #      Negative test column and the §5A Evidence column must resolve to a test
 #      function (or property) that exists. A "Met" row must name at least one code item and at least one
@@ -285,14 +287,23 @@ def formal_exists(ref):
 
 
 def parse_logs(paths, stems):
-    """(binary, cargo test path) -> 'ok' | 'failed' | 'ignored'."""
+    """(binary, cargo test path) -> 'ok' | 'failed' | 'ignored' | 'crashed'.
+
+    A binary's tests are 'ok' only once its `test result:` line closed the
+    run; a binary whose output ends before that line (a panic that aborted
+    the process, a signal, a killed job) leaves every test it started as
+    'crashed', never as passed."""
     results = {}
     for p in paths:
-        binary, started, failures = None, [], set()
+        binary, started, failures, finished = None, [], set(), False
 
         def close():
             for t in started:
-                if results.get((binary, t)) != "ignored":
+                if results.get((binary, t)) == "ignored":
+                    continue
+                if not finished:
+                    results[(binary, t)] = "crashed"
+                else:
                     results[(binary, t)] = "failed" if t in failures else "ok"
 
         in_failures = False
@@ -301,7 +312,7 @@ def parse_logs(paths, stems):
             if m:
                 if binary:
                     close()
-                started, failures, in_failures = [], set(), False
+                started, failures, in_failures, finished = [], set(), False, False
                 src, dep = m.group(2), m.group(3)
                 if src.endswith("src/lib.rs"):
                     binary = (dep, "lib")
@@ -332,8 +343,9 @@ def parse_logs(paths, stems):
                 if m:
                     failures.add(m.group(1))
             if line.startswith("test result:"):
+                finished = True
                 close()
-                started, failures, in_failures = [], set(), False
+                started, failures, in_failures, finished = [], set(), False, False
         if binary:
             close()
     return results
@@ -386,6 +398,11 @@ def check_ref(ref, index, results, where, use_logs):
 def is_test_ref(ref):
     head = ref.split("::")[0]
     return (CANON.match(ref) and head in CRATES) or FORMAL.match(ref)
+
+
+def is_cargo_test_ref(ref):
+    """A canonical cargo test name, as opposed to a formal property."""
+    return bool(CANON.match(ref)) and ref.split("::")[0] in CRATES
 
 
 def main():
@@ -477,6 +494,8 @@ def main():
                 for t in named:
                     if not is_test_ref(t):
                         fail(f"{where}: Met names {t!r} as a {label}, which is not a canonical name")
+            if not any(is_cargo_test_ref(t) for t in refs(test_cell)):
+                fail(f"{where}: Met names no cargo test; a formal property alone is not executed evidence")
 
     # The matrix's Negative test column (the third) names tests only by their
     # canonical names; prose may describe what has no cargo test.
@@ -485,10 +504,10 @@ def main():
             continue
         where = f"{MATRIX} {r[0][:40]}"
         for ref in refs(r[2]):
-            if is_test_ref(ref):
+            if is_cargo_test_ref(ref):
                 check_ref(ref, index, results, where, use_logs)
             else:
-                fail(f"{where}: negative test {ref!r} is not a canonical test name")
+                fail(f"{where}: negative test {ref!r} is not a canonical cargo test name")
 
     # §5A: the Evidence column (the last) names the end-to-end tests. A
     # ticked row needs one, and every name there must be a test that exists

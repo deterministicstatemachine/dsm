@@ -79,6 +79,40 @@ if [[ "$count" -ne 1 ]]; then
 fi
 echo "  ✓ one caller of the memo start, inside the peer walk"
 
+# 2c. The resume puncture, `rehydrate_from_admitted_store`, is public — this
+#     device resuming its OWN admitted coordinate needs it from the SDK — so
+#     its callers are enumerated rather than counted. Each is a place that
+#     rebuilds the local device's own coordinate from its own admitted store;
+#     a new caller fails here until it is ruled to be one too. (A caller that
+#     labels the local claim as another trader's is not one; see
+#     CONFORMANCE_GAPS §6.22.)
+echo "[2c] rehydrate_from_admitted_store is called only where this device resumes itself..."
+known_rehydrate_callers=(
+  "$core/dsm/src/sofi/lineage.rs"                       # advance_resolved: the resolved predecessor, own device
+  "$core/dsm/src/economic/lineage.rs"                   # its own definition and the store-backed rehydration tests
+  "$core/dsm_sdk/src/sdk/core_sdk.rs"                   # the head's validated root from the admitted store
+  "$core/dsm_sdk/src/sdk/economic_admission_flow.rs"    # the validated predecessor of a pending admission
+  "$core/dsm_sdk/src/sdk/sofi_advance.rs"               # the pending SoFi position's validated predecessor
+  "$core/dsm_sdk/src/sdk/sofi_evidence.rs"              # accepted_claim_at: the accepted claim at a setup's position
+)
+rehydrate_callers=$(grep -rl 'rehydrate_from_admitted_store' "$core/dsm/src" "$core/dsm_sdk/src" dsm_storage_node/src 2>/dev/null \
+  | grep -v '_tests\.rs$' | grep -v '/test_support/' | sort)
+unknown=""
+while IFS= read -r f; do
+  [[ -z "$f" ]] && continue
+  prod=$(python3 ci/production_text.py "$f")
+  grep -q 'rehydrate_from_admitted_store' <<<"$prod" || continue
+  printf '%s\n' "${known_rehydrate_callers[@]}" | grep -qxF "$f" || unknown="$unknown$f"$'\n'
+done <<<"$rehydrate_callers"
+if [[ -n "${unknown// /}" ]]; then
+  echo "[FAIL] rehydrate_from_admitted_store has a caller this gate has not ruled on:"
+  echo "$unknown"
+  echo "       A validated root is verifier-derived; rehydration is for THIS device"
+  echo "       resuming its own admitted coordinate. Rule on the caller and add it."
+  exit 1
+fi
+echo "  ✓ every caller of the resume puncture is a ruled one"
+
 # 2b. `AcceptedClaim` (SoFi Amendment S9) is verifier-derived on the same
 #     terms: private fields, so a caller cannot name a claim it never accepted.
 body=$(awk '/^pub struct AcceptedClaim \{/{f=1} f{print} f&&/^\}/{exit}' "$lineage")
@@ -123,8 +157,9 @@ if ! grep -q 'pub fn from_verified_single_root' "$register"; then
   echo "       VerifiedEconomicRootClaim, not loose fields"
   exit 1
 fi
-# Any other `-> Self` in that impl would be a second way in.
-ctors=$(awk '/^impl RegisteredEconomicRoot \{/{f=1} f&&/-> Self/{print} f&&/^\}/{exit}' "$register" | wc -l | tr -d ' ')
+# Any other constructor in that impl — `-> Self`, `-> Result<Self, …>`,
+# `-> Option<Self>` — would be a second way in.
+ctors=$(awk '/^impl RegisteredEconomicRoot \{/{f=1} f&&/-> (Self|Result<Self|Option<Self)/{print} f&&/^\}/{exit}' "$register" | wc -l | tr -d ' ')
 if [[ "$ctors" -ne 1 ]]; then
   echo "[FAIL] RegisteredEconomicRoot has $ctors constructors; exactly one projects a verified claim"
   exit 1

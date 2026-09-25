@@ -152,7 +152,7 @@ jobs:
           VERSION: ${{ needs.validate-tag.outputs.version }}
         run: |
           mkdir -p dist
-          cp target/release/dsm_storage_node "dist/dsm_storage_node-${VERSION}-linux-x86_64"
+          cp target/release/storage_node "dist/dsm_storage_node-${VERSION}-linux-x86_64"
 
       - name: Compute SHA-256
         id: hash

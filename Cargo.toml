@@ -32,6 +32,14 @@ exclude = [
 [workspace.package]
 license = "MIT OR Apache-2.0"
 
+# The shipped profile keeps integer overflow a panic, never a silent wrap.
+# This used to sit in dsm/.cargo/config.toml as a rustflag, where Cargo never
+# read it: config is read from the invocation directory upward, and every
+# build — CI from this root, Android from deterministic_state_machine/ — ran
+# from above it. A profile setting is read wherever the workspace is built.
+[profile.release]
+overflow-checks = true
+
 [workspace.lints.clippy]
 # Keep only targeted denials; allow formatting/doc/style lints to warn, not fail
 uninlined_format_args = "warn"
