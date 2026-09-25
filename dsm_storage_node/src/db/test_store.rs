@@ -43,5 +43,5 @@ pub(crate) fn unique_key(tag: u8) -> [u8; 32] {
 
 /// [`unique_key`] as Base32, for tables keyed by text.
 pub(crate) fn unique_name(tag: u8) -> String {
-    dsm_sdk::util::text_id::encode_base32_crockford(&unique_key(tag))
+    dsm::utils::text_id::encode_base32_crockford(&unique_key(tag))
 }

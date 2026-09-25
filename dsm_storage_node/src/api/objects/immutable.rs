@@ -104,10 +104,10 @@ async fn put_immutable(
     // never the storage key; when present it is compared, and disagreement is
     // the caller's encoder disagreeing with the registry — a storage error.
     let addr = immutable_addr(namespace, body.as_ref());
-    let addr_b32 = dsm_sdk::util::text_id::encode_base32_crockford(&addr);
+    let addr_b32 = dsm::utils::text_id::encode_base32_crockford(&addr);
 
     if let Some(expected) = headers.get("x-expected-addr").and_then(|v| v.to_str().ok()) {
-        let expected_bytes = dsm_sdk::util::text_id::decode_base32_crockford(expected.trim())
+        let expected_bytes = dsm::utils::text_id::decode_base32_crockford(expected.trim())
             .ok_or(StatusCode::BAD_REQUEST)?;
         if expected_bytes != addr {
             log::warn!(
@@ -160,12 +160,12 @@ async fn get_immutable(
     Extension(state): Extension<Arc<AppState>>,
     Path(addr): Path<String>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    let addr_bytes = dsm_sdk::util::text_id::decode_base32_crockford(addr.trim())
-        .ok_or(StatusCode::BAD_REQUEST)?;
+    let addr_bytes =
+        dsm::utils::text_id::decode_base32_crockford(addr.trim()).ok_or(StatusCode::BAD_REQUEST)?;
     if addr_bytes.len() != 32 {
         return Err(StatusCode::BAD_REQUEST);
     }
-    let addr_b32 = dsm_sdk::util::text_id::encode_base32_crockford(&addr_bytes);
+    let addr_b32 = dsm::utils::text_id::encode_base32_crockford(&addr_bytes);
 
     let Some((namespace, payload)) = crate::db::get_immutable_object(&state.db_pool, &addr_b32)
         .await

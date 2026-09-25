@@ -1460,9 +1460,9 @@ impl RecoverySDK {
     /// succeeds A_old, from the persisted recovery context. SPHINCS+ signing is deterministic,
     /// so the re-derived receipts are byte-identical to the ones the recovery pipeline
     /// propagated (their hashes match the persisted `tombstone_proposal_digest`); reconstructing
-    /// avoids depending on partial receipt persistence. The device-id string MUST match dsm's
-    /// `encode_crockford` (the verifiers compare `tombstone.device_id == encode_crockford(a_old)`);
-    /// the SDK encoder is the documented byte-identical twin. Returns `(K_A_pub, tombstone,
+    /// avoids depending on partial receipt persistence. The device-id string is
+    /// `dsm::utils::text_id::encode_base32_crockford`, the one encoder the verifiers compare
+    /// with (`tombstone.device_id == encode_base32_crockford(a_old)`). Returns `(K_A_pub, tombstone,
     /// succession)`. Fail-closed: requires a cached recovery-authority keypair.
     fn recreate_identity_succession(
         ctx: &RecoveryActivationContext,

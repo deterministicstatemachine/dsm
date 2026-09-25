@@ -164,6 +164,19 @@ mod tests {
         let dec = decode_base32_crockford(&enc).unwrap();
         assert_eq!(dec, data);
     }
+    /// The encoding is pinned, not only self-consistent: recovery's
+    /// contact-set commitment hashes these strings, so the algorithm is part
+    /// of what a device commits to.
+    #[test]
+    fn bytes_encode_to_their_fixed_crockford_text() {
+        assert_eq!(encode_base32_crockford(&[0xFF]), "ZW");
+        assert_eq!(encode_base32_crockford(b"hello"), "D1JPRV3F");
+        assert_eq!(
+            encode_base32_crockford(&[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]),
+            "000G40R40M30E209"
+        );
+    }
+
     #[test]
     fn test_crockford_case_insensitive() {
         let data = [5u8; 10];

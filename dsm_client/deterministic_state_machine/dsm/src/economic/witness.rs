@@ -38,7 +38,7 @@
 
 use crate::ccb::{class, push_digest32, push_envelope, push_u32, CcbError, CcbObject};
 use crate::economic::credit::CreditSource;
-use crate::types::identifiers::encode_crockford;
+use crate::utils::text_id::encode_base32_crockford;
 use crate::economic::mutation::EconomicLeafMutation;
 
 /// `0x001D` schema 1 — a complete pre-root → post-root economic transition.
@@ -264,14 +264,14 @@ impl core::fmt::Display for EconomicWitnessError {
                 f,
                 "economic witness: mutation {index} pre-state is not in the standing root \
                  (expected {}, path derives {})",
-                encode_crockford(expected_root),
-                encode_crockford(derived_root)
+                encode_base32_crockford(expected_root),
+                encode_base32_crockford(derived_root)
             ),
             Self::PostRootMismatch { claimed, derived } => write!(
                 f,
                 "economic witness: mutations derive root {} but the witness claims {}",
-                encode_crockford(derived),
-                encode_crockford(claimed)
+                encode_base32_crockford(derived),
+                encode_base32_crockford(claimed)
             ),
             Self::Malformed { index, cause } => {
                 write!(
