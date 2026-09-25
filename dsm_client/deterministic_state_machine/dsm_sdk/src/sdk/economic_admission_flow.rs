@@ -1691,64 +1691,94 @@ pub(crate) async fn verify_release_against_register(
     Ok(())
 }
 
-/// Record BOTH signers' `EkCertStepV1` objects for one completed BLE
-/// bilateral step from its countersigned receipt (3.5b PR4, correction 3):
-/// the signer-chain rows are appended and the exact step bytes FROZEN as
-/// publication debt through the generic frozen-artifact backlog — fully
-/// offline; the republish sweep publishes them when connectivity returns. A
-/// later ONLINE acceptance bundle may not depend on these predecessors until
-/// that exact closure is Stored (prevalidation checks per exact address).
-///
-/// Idempotent: re-recording the same step (same content address) is a no-op,
-/// so crash-replay and both directions of the sweep converge.
-pub(crate) fn record_ble_ek_steps_from_receipt(
+/// The set a completed BLE step's EK step objects are frozen for: the
+/// committed network's canonical storage set. Read before the step's advance
+/// opens its transaction.
+pub(crate) fn ble_ek_step_set_id() -> Result<[u8; 32], DsmError> {
+    let network_id = committed_network_id()?;
+    Ok(canonical_set(&network_id)?.id())
+}
+
+/// One signer's EK step of a bilateral step: the EK its receipt signed with,
+/// the cert chaining it from the signer's previous head, and the parent tip
+/// `h_n` the cert is bound to — all from the receipt that signer signed.
+pub(crate) struct EkStep<'a> {
+    pub signer: &'a [u8; 32],
+    pub ek_pk: &'a [u8],
+    pub ek_cert: &'a [u8],
+    pub h_n: &'a [u8; 32],
+}
+
+impl<'a> EkStep<'a> {
+    /// The sender's step, from its own receipt (A side).
+    pub(crate) fn of_sender(
+        sender: &'a [u8; 32],
+        receipt: &'a dsm::types::receipt_types::StitchedReceiptV2,
+    ) -> Self {
+        Self {
+            signer: sender,
+            ek_pk: &receipt.ek_pk_a,
+            ek_cert: &receipt.ek_cert_a,
+            h_n: &receipt.parent_tip,
+        }
+    }
+
+    /// The receiver's step, from its counter-signed receipt (B side).
+    pub(crate) fn of_receiver(
+        receiver: &'a [u8; 32],
+        receipt: &'a dsm::types::receipt_types::StitchedReceiptV2,
+    ) -> Self {
+        Self {
+            signer: receiver,
+            ek_pk: &receipt.ek_pk_b,
+            ek_cert: &receipt.ek_cert_b,
+            h_n: &receipt.parent_tip,
+        }
+    }
+}
+
+/// Record both signers' `EkCertStepV1` objects for one completed BLE
+/// bilateral step (3.5b PR4, correction 3), sender first, inside `tx` — the
+/// transaction the step commits in: the signer-chain rows are appended and
+/// the exact step bytes FROZEN as publication debt, bound to the head root
+/// the step produced; the republish sweep publishes them when connectivity
+/// returns. Both devices record the same two objects. A later ONLINE
+/// acceptance bundle may not depend on these predecessors until that exact
+/// closure is Stored (prevalidation checks per exact address).
+pub(crate) fn record_ble_ek_steps_in_tx(
+    tx: &rusqlite::Connection,
+    set_id: &[u8; 32],
+    bound_root: &[u8; 32],
     rel_key: &[u8; 32],
-    devid_a: &[u8; 32],
-    devid_b: &[u8; 32],
-    receipt: &dsm::types::receipt_types::StitchedReceiptV2,
+    steps: [EkStep<'_>; 2],
 ) -> Result<(), DsmError> {
     use prost::Message;
-    let network_id = committed_network_id()?;
-    let set = canonical_set(&network_id)?;
-    let binding =
-        crate::storage::client_db::get_connection().map_err(|e| storage_err("connection", e))?;
-    let mut conn = binding.lock().unwrap_or_else(|p| p.into_inner());
-    let tx = conn
-        .transaction()
-        .map_err(|e| storage_err("ek step tx", e))?;
-    for (signer, ek_pk, ek_cert) in [
-        (devid_a, &receipt.ek_pk_a, &receipt.ek_cert_a),
-        (devid_b, &receipt.ek_pk_b, &receipt.ek_cert_b),
-    ] {
-        if ek_pk.is_empty() || ek_cert.is_empty() {
-            continue;
-        }
-        let prior = economic_lineage::latest_ek_step_with_conn(&tx, rel_key, signer)
+    for step in steps {
+        let prior = economic_lineage::latest_ek_step_with_conn(tx, rel_key, step.signer)
             .map_err(|e| storage_err("ek step chain", e))?
             .map(|(_, addr, _)| addr);
         let step_bytes = dsm::types::proto::EkCertStepV1 {
-            ek_pk: ek_pk.clone(),
-            ek_cert: ek_cert.clone(),
-            h_n: receipt.parent_tip.to_vec(),
+            ek_pk: step.ek_pk.to_vec(),
+            ek_cert: step.ek_cert.to_vec(),
+            h_n: step.h_n.to_vec(),
             prior_step_addr: prior.map(|a| a.to_vec()),
         }
         .encode_to_vec();
         let addr = dsm::economic::peer_acceptance::ek_cert_step_addr(&step_bytes);
-        economic_lineage::append_ek_step_with_conn(&tx, rel_key, signer, &addr, ek_pk)
+        economic_lineage::append_ek_step_with_conn(tx, rel_key, step.signer, &addr, step.ek_pk)
             .map_err(|e| storage_err("ek step append", e))?;
         crate::storage::client_db::frozen_publication_artifact::freeze_artifact_with_conn(
-            &tx,
-            &set.id(),
+            tx,
+            set_id,
             &crate::sdk::economic_registers::immutable_object_key(
                 dsm::common::domain_tags::TAG_DSM_EK_CERT_STEP,
                 &step_bytes,
             ),
             &step_bytes,
-            &[0u8; 32],
+            bound_root,
             "ek-cert-step",
         )
         .map_err(|e| storage_err("ek step freeze", e))?;
     }
-    tx.commit().map_err(|e| storage_err("ek step commit", e))?;
     Ok(())
 }

@@ -2570,6 +2570,11 @@ impl AppRouter for AppRouterImpl {
         deltas: &[dsm::types::device_state::BalanceDelta],
         anchor_leaf: Option<dsm::types::device_state::AnchorLeafUpdate>,
         offline_spend: Option<dsm::types::device_state::OfflineSpend>,
+        before_commit: Option<
+            &dyn Fn(
+                &dsm::types::device_state::AdvanceOutcome,
+            ) -> Result<(), dsm::types::error::DsmError>,
+        >,
         settle: &dyn Fn(
             &rusqlite::Transaction<'_>,
             &dsm::types::device_state::AdvanceOutcome,
@@ -2582,6 +2587,7 @@ impl AppRouter for AppRouterImpl {
             deltas,
             anchor_leaf,
             offline_spend,
+            before_commit,
             settle,
         )
     }

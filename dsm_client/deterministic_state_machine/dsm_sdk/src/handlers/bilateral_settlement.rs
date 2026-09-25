@@ -94,7 +94,6 @@ pub(crate) struct StepSettlement {
     commitment_hash: [u8; 32],
     parent_tip: [u8; 32],
     operation_bytes: Vec<u8>,
-    proof_data: Option<Vec<u8>>,
     is_sender: bool,
     transfer: Option<SettledTransfer>,
 }
@@ -110,7 +109,6 @@ impl StepSettlement {
         commitment_hash: [u8; 32],
         parent_tip: [u8; 32],
         operation_bytes: Vec<u8>,
-        proof_data: Option<Vec<u8>>,
         is_sender: bool,
     ) -> Result<Self, String> {
         let transfer = match parse_transfer(&operation_bytes) {
@@ -133,22 +131,12 @@ impl StepSettlement {
             }
             _ => None,
         };
-        if is_sender
-            && transfer.is_some()
-            && proof_data.as_ref().is_none_or(|proof| proof.is_empty())
-        {
-            return Err(
-                "missing proof_data for bilateral transfer settlement (strict fail-closed path)"
-                    .to_string(),
-            );
-        }
         Ok(Self {
             local_device_id,
             counterparty_device_id,
             commitment_hash,
             parent_tip,
             operation_bytes,
-            proof_data,
             is_sender,
             transfer,
         })
@@ -167,12 +155,14 @@ impl StepSettlement {
 
     /// Write the step's relationship tip (`parent_tip` → `child_tip`, bound to
     /// the step's commitment), its balance projection from `outcome`'s head,
-    /// and its history row, in `tx` — the transaction the advance commits in.
+    /// and its history row with the step's signed `receipt`, in `tx` — the
+    /// transaction the advance commits in.
     pub(crate) fn write_in_tx(
         &self,
         tx: &rusqlite::Transaction<'_>,
         outcome: &dsm::types::device_state::AdvanceOutcome,
         child_tip: [u8; 32],
+        receipt: &[u8],
     ) -> Result<(), DsmError> {
         let local_txt = encode_base32_crockford(&self.local_device_id);
         let head = &outcome.new_device_state;
@@ -219,7 +209,7 @@ impl StepSettlement {
             tx_type: "bilateral_offline".to_string(),
             status: "completed".to_string(),
             commitment_hash: Some(encode_base32_crockford(&self.commitment_hash).into_bytes()),
-            proof_data: self.proof_data.clone(),
+            proof_data: Some(receipt.to_vec()),
             metadata: {
                 let mut m = std::collections::HashMap::new();
                 if let Some(t) = &self.transfer {
@@ -351,7 +341,6 @@ mod tests {
             [0x34u8; 32],
             [0x71u8; 32],
             Operation::Noop.to_bytes(),
-            None,
             false,
         )
         .expect("resolve");
@@ -366,7 +355,9 @@ mod tests {
                 &[],
                 None,
                 None,
-                &|tx, o| settlement.write_in_tx(tx, o, [0x72u8; 32]),
+                None,
+                // The settlement refuses at the tip, before a receipt is kept.
+                &|tx, o| settlement.write_in_tx(tx, o, [0x72u8; 32], &[]),
             )
             .expect_err("a step whose settlement refuses does not commit");
         assert!(err.to_string().contains("conflict"), "{err}");

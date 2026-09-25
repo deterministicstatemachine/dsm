@@ -1342,10 +1342,12 @@ impl CoreSDK {
         )
     }
 
-    /// An offline bilateral step's advance. `settle` writes the step's other
-    /// effects (its relationship tip, projection and history) inside the
-    /// transaction that commits the head, so the head and the relationship
-    /// commit together or not at all.
+    /// An offline bilateral step's advance. `before_commit` runs on the
+    /// prepared advance under the state-machine lock, before its transaction
+    /// opens (the receiver signs its receipt there, from the advance that
+    /// commits); `settle` writes the step's other effects (its relationship
+    /// tip, projection and history) inside the transaction that commits the
+    /// head, so the head and the relationship commit together or not at all.
     #[allow(clippy::too_many_arguments)]
     pub fn execute_offline_step(
         &self,
@@ -1355,6 +1357,9 @@ impl CoreSDK {
         deltas: &[dsm::types::device_state::BalanceDelta],
         anchor_leaf: Option<dsm::types::device_state::AnchorLeafUpdate>,
         offline_spend: Option<dsm::types::device_state::OfflineSpend>,
+        before_commit: Option<
+            &dyn Fn(&dsm::types::device_state::AdvanceOutcome) -> Result<(), DsmError>,
+        >,
         settle: &dyn Fn(
             &rusqlite::Transaction<'_>,
             &dsm::types::device_state::AdvanceOutcome,
@@ -1368,7 +1373,7 @@ impl CoreSDK {
             anchor_leaf,
             offline_spend,
             Some(settle),
-            None,
+            before_commit,
             None,
         )
         .map(|(_state, outcome)| outcome)

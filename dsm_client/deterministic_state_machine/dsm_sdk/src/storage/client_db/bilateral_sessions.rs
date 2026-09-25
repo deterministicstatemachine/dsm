@@ -70,15 +70,16 @@ pub fn store_bilateral_session(session: &BilateralSessionRecord) -> Result<()> {
         "INSERT INTO bilateral_sessions(
             commitment_hash, counterparty_device_id, counterparty_genesis_hash, operation_bytes, phase,
             local_signature, counterparty_signature,
-                sender_ble_address, stitched_receipt_bytes)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                sender_ble_address, stitched_receipt_bytes, counter_signed_receipt)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
          ON CONFLICT(commitment_hash) DO UPDATE SET
             phase = excluded.phase,
             local_signature = excluded.local_signature,
             counterparty_signature = excluded.counterparty_signature,
             counterparty_genesis_hash = excluded.counterparty_genesis_hash,
             sender_ble_address = excluded.sender_ble_address,
-            stitched_receipt_bytes = COALESCE(excluded.stitched_receipt_bytes, bilateral_sessions.stitched_receipt_bytes)",
+            stitched_receipt_bytes = COALESCE(excluded.stitched_receipt_bytes, bilateral_sessions.stitched_receipt_bytes),
+            counter_signed_receipt = COALESCE(excluded.counter_signed_receipt, bilateral_sessions.counter_signed_receipt)",
         params![
             &session.commitment_hash,
             &session.counterparty_device_id,
@@ -89,6 +90,7 @@ pub fn store_bilateral_session(session: &BilateralSessionRecord) -> Result<()> {
             &session.counterparty_signature,
             &session.sender_ble_address,
             &session.stitched_receipt_bytes,
+            &session.counter_signed_receipt,
         ],
     );
     match result {
@@ -118,7 +120,7 @@ pub fn get_all_bilateral_sessions() -> Result<Vec<BilateralSessionRecord>> {
     let mut stmt = conn.prepare(
         "SELECT commitment_hash, counterparty_device_id, operation_bytes, phase,
                counterparty_genesis_hash, local_signature, counterparty_signature,
-               sender_ble_address, stitched_receipt_bytes
+               sender_ble_address, stitched_receipt_bytes, counter_signed_receipt
          FROM bilateral_sessions
            ORDER BY rowid DESC",
     )?;
@@ -134,6 +136,7 @@ pub fn get_all_bilateral_sessions() -> Result<Vec<BilateralSessionRecord>> {
             counterparty_signature: row.get(6)?,
             sender_ble_address: row.get(7)?,
             stitched_receipt_bytes: row.get(8)?,
+            counter_signed_receipt: row.get(9)?,
         })
     })?;
 
@@ -154,7 +157,7 @@ pub fn get_bilateral_session(commitment_hash: &[u8]) -> Result<Option<BilateralS
     conn.query_row(
         "SELECT commitment_hash, counterparty_device_id, operation_bytes, phase,
                 counterparty_genesis_hash, local_signature, counterparty_signature,
-                sender_ble_address, stitched_receipt_bytes
+                sender_ble_address, stitched_receipt_bytes, counter_signed_receipt
            FROM bilateral_sessions
           WHERE commitment_hash = ?1",
         params![commitment_hash],
@@ -169,6 +172,7 @@ pub fn get_bilateral_session(commitment_hash: &[u8]) -> Result<Option<BilateralS
                 counterparty_signature: row.get(6)?,
                 sender_ble_address: row.get(7)?,
                 stitched_receipt_bytes: row.get(8)?,
+                counter_signed_receipt: row.get(9)?,
             })
         },
     )
@@ -189,6 +193,18 @@ pub fn delete_bilateral_session(commitment_hash: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// Delete a bilateral session inside `conn`, the transaction its step commits in.
+pub fn delete_bilateral_session_with_conn(
+    conn: &rusqlite::Connection,
+    commitment_hash: &[u8],
+) -> Result<()> {
+    conn.execute(
+        "DELETE FROM bilateral_sessions WHERE commitment_hash = ?1",
+        params![commitment_hash],
+    )?;
+    Ok(())
+}
+
 /// Update a bilateral session's phase without deleting it.
 /// Used to persist terminal phases (failed, rejected) so the frontend
 /// poller can read them via bilateral.pending_list.
@@ -200,69 +216,6 @@ pub fn update_bilateral_session_phase(commitment_hash: &[u8], phase: &str) -> Re
     conn.execute(
         "UPDATE bilateral_sessions SET phase = ?1 WHERE commitment_hash = ?2",
         params![phase, commitment_hash],
-    )?;
-    Ok(())
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-// §5.3 Pending Confirm Delivery — crash-safe receipt persistence
-// ═══════════════════════════════════════════════════════════════════════
-
-/// Store a confirm envelope for re-delivery. Called atomically with sender
-/// finalization so the receipt survives crashes.
-pub fn store_pending_confirm_delivery(
-    commitment_hash: &[u8],
-    counterparty_device_id: &[u8],
-    confirm_envelope: &[u8],
-) -> Result<()> {
-    if commitment_hash.len() != 32 || counterparty_device_id.len() != 32 {
-        return Err(anyhow!("Invalid hash or device_id length"));
-    }
-    let binding = get_db_connection()?;
-    let conn = binding
-        .lock()
-        .map_err(|_| anyhow!("Database lock poisoned"))?;
-    conn.execute(
-        "INSERT OR REPLACE INTO pending_confirm_delivery (commitment_hash, counterparty_device_id, confirm_envelope) VALUES (?1, ?2, ?3)",
-        params![commitment_hash, counterparty_device_id, confirm_envelope],
-    )?;
-    Ok(())
-}
-
-/// Get a pending confirm envelope by commitment hash.
-pub fn get_pending_confirm_delivery(commitment_hash: &[u8]) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
-    if commitment_hash.len() != 32 {
-        return Err(anyhow!("Invalid commitment_hash length"));
-    }
-
-    let binding = get_db_connection()?;
-    let conn = binding
-        .lock()
-        .map_err(|_| anyhow!("Database lock poisoned"))?;
-
-    conn.query_row(
-        "SELECT counterparty_device_id, confirm_envelope
-           FROM pending_confirm_delivery
-          WHERE commitment_hash = ?1",
-        params![commitment_hash],
-        |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)),
-    )
-    .optional()
-    .map_err(Into::into)
-}
-
-/// Delete a pending confirm delivery after successful BLE delivery.
-pub fn delete_pending_confirm_delivery(commitment_hash: &[u8]) -> Result<()> {
-    if commitment_hash.len() != 32 {
-        return Err(anyhow!("Invalid commitment_hash length"));
-    }
-    let binding = get_db_connection()?;
-    let conn = binding
-        .lock()
-        .map_err(|_| anyhow!("Database lock poisoned"))?;
-    conn.execute(
-        "DELETE FROM pending_confirm_delivery WHERE commitment_hash = ?1",
-        params![commitment_hash],
     )?;
     Ok(())
 }
@@ -289,6 +242,7 @@ mod tests {
             counterparty_signature: None,
             sender_ble_address: None,
             stitched_receipt_bytes: None,
+            counter_signed_receipt: None,
         }
     }
 

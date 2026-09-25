@@ -90,18 +90,15 @@ pub fn load_accepted_anchor_root(device_id: &[u8; 32]) -> Result<Option<([u8; 32
     }
 }
 
-/// Adopt the holder's successor appliance root after an accepted release's
-/// canonical commit. INSERT OR REPLACE: each accepted transfer moves the
-/// lineage frontier forward.
-pub fn store_accepted_anchor_root(
+/// Adopt the holder's successor appliance root inside `conn`, the transaction
+/// the accepting step commits in. INSERT OR REPLACE: each accepted transfer
+/// moves the lineage frontier forward.
+pub fn store_accepted_anchor_root_with_conn(
+    conn: &rusqlite::Connection,
     device_id: &[u8; 32],
     accepted_root: &[u8; 32],
     next_anchor_counter: u64,
 ) -> Result<()> {
-    let binding = get_connection()?;
-    let conn = binding
-        .lock()
-        .map_err(|_| anyhow!("anchor_accepted_roots: db lock poisoned"))?;
     conn.execute(
         "INSERT OR REPLACE INTO anchor_accepted_roots
             (device_id, accepted_root, next_anchor_counter)
