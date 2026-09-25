@@ -2516,7 +2516,18 @@ impl AppRouterImpl {
             // One this device already accepted is consumed so the sender's
             // gate releases; any other is skipped.
             for item in polled.into_iter().take(remaining) {
-                if crate::storage::client_db::transaction_exists(&item.transaction_id) {
+                let seen = match crate::storage::client_db::transaction_exists(&item.transaction_id)
+                {
+                    Ok(seen) => seen,
+                    Err(e) => {
+                        report.errors.push(format!(
+                            "stale-route item {}: history unreadable: {e}",
+                            item.transaction_id
+                        ));
+                        continue;
+                    }
+                };
+                if seen {
                     stale_duplicates
                         .entry(item.inbox_key.clone())
                         .or_default()

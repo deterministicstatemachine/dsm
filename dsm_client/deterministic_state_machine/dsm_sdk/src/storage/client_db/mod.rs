@@ -417,8 +417,9 @@ fn get_database_path() -> Result<PathBuf> {
 /// that nothing ever read back or re-delivered); `bilateral_sessions` keeps
 /// the receiver's counter-signed receipt beside the sender's own, and each
 /// session's commit inputs (the step's parent tip, the receiver challenge, the
-/// sent root, a bearer step's anchor leaf and allocation spend), so a restart
-/// continues a session instead of failing it.
+/// sent root, a bearer step's anchor leaf and allocation spend) and the frame
+/// it owes its counterparty, so a restart continues a session instead of
+/// failing it and a returning link delivers what is owed.
 pub const CLIENT_DB_SCHEMA_VERSION: i64 = 23;
 
 /// A 32-byte column, exactly. Any other length is a corrupt row and an error —
@@ -1267,7 +1268,8 @@ fn create_schema(conn: &Connection) -> Result<()> {
             anchor_leaf_value         BLOB,
             spend_anchor_bundle       BLOB,
             spend_asset               BLOB,
-            spend_amount              INTEGER
+            spend_amount              INTEGER,
+            owed_frame                BLOB
         );
 
         CREATE TABLE IF NOT EXISTS transactions(

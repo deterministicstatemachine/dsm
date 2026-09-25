@@ -17,7 +17,6 @@ internal object UnifiedNativeDiagnostics {
                 val st = Unified.getTransportHeadersV3Status()
                 add("getTransportHeadersV3Status", st.toInt() >= 0, "status=$st")
             } catch (t: Throwable) { add("getTransportHeadersV3Status", false, t.message ?: "err") }
-            try { Unified.setManualAcceptEnabled(false); add("setManualAcceptEnabled", true) } catch (t: Throwable) { add("setManualAcceptEnabled", false, t.message ?: "err") }
             try {
                 val resp = Unified.processEnvelopeV3(ByteArray(0))
                 add("processEnvelopeV3(empty)", true, "bytes=${resp.size}")

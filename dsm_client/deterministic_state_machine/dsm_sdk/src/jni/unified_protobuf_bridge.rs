@@ -1611,42 +1611,42 @@ pub extern "system" fn Java_com_dsm_native_DsmNative_initializeBilateralSdk(
     )
 }
 
-/* ====================================================================================
-Manual Accept Toggle (BLE deterministic gate)
-==================================================================================== */
+// -------------------- BLE helpers (non-envelope) --------------------
+
+/// A link event. A lost link fails nothing: each offline step keeps what it
+/// owes. A link that comes up delivers, to the contact at that address, every
+/// frame this device owes it (see `BilateralBleHandler::frames_owed_to`).
 #[cfg(all(target_os = "android", feature = "bluetooth"))]
 #[no_mangle]
-pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_setManualAcceptEnabled(
-    _env: jni::sys::JNIEnv,
+pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_bleNotifyConnectionState(
+    env: jni::sys::JNIEnv,
     _clazz: jni::sys::jclass,
-    enabled: jni::sys::jboolean,
+    jaddress: jni::sys::jstring,
+    connected: jni::sys::jboolean,
 ) {
     crate::jni::bridge_utils::jni_catch_unwind_void(
-        "setManualAcceptEnabled",
+        "bleNotifyConnectionState",
         std::panic::AssertUnwindSafe(|| {
-            crate::bluetooth::set_manual_accept_enabled(enabled != 0);
-            log::info!("[JNI] setManualAcceptEnabled: {}", enabled != 0);
+            if connected == 0 {
+                return;
+            }
+            let Some(mut env) = (unsafe { env_from(env) }) else {
+                return;
+            };
+            let address: String =
+                match env.get_string(&unsafe { jni::objects::JString::from_raw(jaddress) }) {
+                    Ok(s) => s.into(),
+                    Err(e) => {
+                        log::error!("[BLE link] link-up address unreadable: {e}");
+                        return;
+                    }
+                };
+            deliver_owed_frames(&mut env, &address);
         }),
-    );
+    )
 }
 
 #[cfg(not(all(target_os = "android", feature = "bluetooth")))]
-#[no_mangle]
-pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_setManualAcceptEnabled(
-    _env: jni::sys::JNIEnv,
-    _clazz: jni::sys::jclass,
-    _enabled: jni::sys::jboolean,
-) {
-    crate::jni::bridge_utils::jni_catch_unwind_void(
-        "setManualAcceptEnabled",
-        std::panic::AssertUnwindSafe(|| {
-            // No-op on non-Android/non-BLE builds.
-        }),
-    );
-}
-
-// -------------------- BLE helpers (non-envelope) --------------------
-
 #[no_mangle]
 pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_bleNotifyConnectionState(
     _env: jni::sys::JNIEnv,
@@ -1657,10 +1657,70 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_bleNotifyConn
     crate::jni::bridge_utils::jni_catch_unwind_void(
         "bleNotifyConnectionState",
         std::panic::AssertUnwindSafe(|| {
-            // No-op: the app may call this to inform native layer of BLE state.
-            // When BLE coordinator is not compiled in, silently ignore.
+            // No BLE transport in this build: there is no link to come up.
         }),
     )
+}
+
+/// Deliver every frame this device owes the contact at `address`. A frame
+/// that cannot be sent now stays owed; the next link-up delivers it again.
+#[cfg(all(target_os = "android", feature = "bluetooth"))]
+fn deliver_owed_frames(env: &mut jni::JNIEnv, address: &str) {
+    let contact = match crate::storage::client_db::get_contact_by_ble_address(address) {
+        Ok(Some(contact)) => contact,
+        Ok(None) => return,
+        Err(e) => {
+            log::error!("[BLE link] contact for {address} unreadable: {e}");
+            return;
+        }
+    };
+    let Ok(counterparty) = <[u8; 32]>::try_from(contact.device_id.as_slice()) else {
+        log::error!("[BLE link] contact for {address} has no 32-byte device id");
+        return;
+    };
+    let rt = crate::runtime::get_runtime();
+    let (coord, adapter) = match (
+        rt.block_on(crate::bridge::get_ble_coordinator()),
+        rt.block_on(crate::bridge::get_ble_transport_adapter()),
+    ) {
+        (Ok(coord), Ok(adapter)) => (coord, adapter),
+        _ => {
+            log::warn!("[BLE link] link up at {address} before the BLE transport is ready");
+            return;
+        }
+    };
+    let owed = rt.block_on(adapter.bilateral_handler().frames_owed_to(&counterparty));
+    for frame in owed {
+        let frame_type = match frame.kind {
+            crate::bluetooth::bilateral_session::OfflineFrameKind::Prepare => {
+                pb::BleFrameType::BilateralPrepare
+            }
+            crate::bluetooth::bilateral_session::OfflineFrameKind::PrepareResponse => {
+                pb::BleFrameType::BilateralPrepareResponse
+            }
+            crate::bluetooth::bilateral_session::OfflineFrameKind::Confirm => {
+                pb::BleFrameType::BilateralConfirm
+            }
+        };
+        let sent = coord
+            .encode_message(frame_type, &frame.bytes)
+            .map_err(|e| e.to_string())
+            .and_then(|chunks| {
+                send_ble_chunks_via_unified(env, address, &chunks).map_err(|e| e.to_string())
+            });
+        match sent {
+            Ok(true) => log::info!(
+                "[BLE link] delivered owed {:?} for step {} to {address}",
+                frame.kind,
+                crate::util::text_id::encode_base32_crockford(&frame.commitment_hash[..8])
+            ),
+            Ok(false) | Err(_) => log::warn!(
+                "[BLE link] owed {:?} for step {} not delivered to {address}; it stays owed",
+                frame.kind,
+                crate::util::text_id::encode_base32_crockford(&frame.commitment_hash[..8])
+            ),
+        }
+    }
 }
 
 // BLE coordinator helpers: availability checks and late-initialization attempt.
@@ -2764,16 +2824,8 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_acceptBilater
             .block_on(transport_adapter.create_prepare_accept_envelope_with_counterparty(ch))
         {
             Ok(v) => v,
+            // Nothing was accepted: the proposal still awaits its user.
             Err(e) => {
-                eprintln!("create_prepare_accept_envelope_with_counterparty failed: {e}");
-                crate::runtime::get_runtime().block_on(async {
-                    let _ = transport_adapter
-                        .fail_session_by_commitment(
-                            ch,
-                            "The connection was interrupted before the other device could respond.",
-                        )
-                        .await;
-                });
                 return error_byte_array(
                     &mut env,
                     helpers::JniErrorCode::ProcessingFailed as u32,
@@ -2809,16 +2861,9 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_acceptBilater
             .encode_message(pb::BleFrameType::BilateralPrepareResponse, &envelope_bytes)
         {
             Ok(c) => c,
+            // The acceptance is kept, and its response is owed: it is sent
+            // again when the link returns.
             Err(e) => {
-                eprintln!("chunking accept envelope failed: {e}");
-                crate::runtime::get_runtime().block_on(async {
-                    let _ = transport_adapter
-                        .fail_session_by_commitment(
-                            ch,
-                            "Transfer failed due to a protocol error. Please try again.",
-                        )
-                        .await;
-                });
                 return error_byte_array(
                     &mut env,
                     helpers::JniErrorCode::ProcessingFailed as u32,
@@ -2830,33 +2875,18 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_acceptBilater
 
         match send_ble_chunks_via_unified(&mut env, &addr, &chunks) {
             Ok(true) => {}
+            // A send that did not complete fails nothing: the acceptance is
+            // kept and its response is sent again when the link returns.
             Ok(false) => {
-                eprintln!("requestGattWriteChunks returned false — BLE send incomplete");
-                crate::runtime::get_runtime().block_on(async {
-                    let _ = transport_adapter
-                        .fail_session_by_commitment(
-                            ch,
-                            "BLE send failed. Please move closer and try again.",
-                        )
-                        .await;
-                });
                 return error_byte_array(
                     &mut env,
                     helpers::JniErrorCode::ProcessingFailed as u32,
-                    "requestGattWriteChunks returned false",
+                    "requestGattWriteChunks returned false; the response is sent again when the \
+                     link returns",
                 )
                 .into_raw();
             }
             Err(e) => {
-                eprintln!("BLE send failed: {e}");
-                crate::runtime::get_runtime().block_on(async {
-                    let _ = transport_adapter
-                        .fail_session_by_commitment(
-                            ch,
-                            "BLE send failed. Please move closer and try again.",
-                        )
-                        .await;
-                });
                 return error_byte_array(
                     &mut env,
                     helpers::JniErrorCode::ProcessingFailed as u32,
