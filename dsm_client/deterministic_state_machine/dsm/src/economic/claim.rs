@@ -271,3 +271,64 @@ pub fn verify_manifest_provenance_index(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod fanout_bound_tests {
+    use super::*;
+    use crate::economic::credit::{CreditSource, CreditSourceValidatedPeerDebit};
+    use crate::economic::witness::EconomicTransitionWitness;
+
+    fn witness_with_external_sources(n: u8) -> EconomicTransitionWitness {
+        EconomicTransitionWitness {
+            pre_economic_root: [0x01; 32],
+            post_economic_root: [0x02; 32],
+            economic_operation_id: [0x03; 32],
+            operation_digest: [0x04; 32],
+            mutations: Vec::new(),
+            credit_sources: (0..n)
+                .map(|i| {
+                    CreditSource::ValidatedPeerDebit(CreditSourceValidatedPeerDebit {
+                        credit_mutation_index: u32::from(i),
+                        peer_genesis: [0x10; 32],
+                        peer_devid: [0x11; 32],
+                        peer_economic_position: 1,
+                        peer_debit_mutation_index: 0,
+                        acceptance_evidence_addr: [i; 32],
+                    })
+                })
+                .collect(),
+        }
+    }
+
+    /// SoFi §18.4: more external provenance than `MAX_PROVENANCE_FANOUT` in
+    /// one transition is refused from the witness alone, whatever the
+    /// manifest names; exactly the bound is not.
+    #[test]
+    fn a_provenance_fanout_over_the_bound_is_refused() {
+        let max = crate::sofi::wire::MAX_PROVENANCE_FANOUT;
+        let over = witness_with_external_sources(max as u8 + 1);
+        let manifest = EconomicAdmissionManifest::new(
+            [0xA1; 32],
+            [0xA2; 32],
+            [0xA3; 32],
+            AdmissionSubstrate::DsmSuccessor {
+                evidence_addr: [0xA4; 32],
+            },
+            Vec::new(),
+        )
+        .expect("a manifest with an empty index");
+        assert_eq!(
+            verify_manifest_provenance_index(&manifest, &over),
+            Err(CcbError::ProvenanceFanoutExceeded {
+                count: max + 1,
+                max
+            })
+        );
+        let at = witness_with_external_sources(max as u8);
+        assert_ne!(
+            verify_manifest_provenance_index(&manifest, &at),
+            Err(CcbError::ProvenanceFanoutExceeded { count: max, max }),
+            "exactly the bound is not a fanout refusal"
+        );
+    }
+}

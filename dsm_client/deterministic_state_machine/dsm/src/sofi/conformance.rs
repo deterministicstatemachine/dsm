@@ -684,7 +684,10 @@ mod tests {
         swap_fixture_with, swap_fixture_with_setups, trader_keys, vault_id_of, DEV, G, P_POS,
         SETUP_POS, SIG_ALG,
     };
-    use crate::sofi::wire::{AttemptEntry, PreEClosureIndex, PrecommitLeg, SofiSetupBody};
+    use crate::sofi::wire::{
+        AttemptEntry, PreEClosureIndex, PrecommitLeg, SofiSetupBody, MAX_AUTH_ENVELOPES,
+        MAX_CLOSURE_OBJECT_BYTES, MAX_VALIDATION_FETCH_BYTES,
+    };
 
     #[test]
     fn invalid_dominates_the_conjunction() {
@@ -936,6 +939,106 @@ mod tests {
         why: FulfillmentConformanceError,
     ) -> Result<FulfillmentConformance, ConformanceMissing> {
         Ok(FulfillmentConformance::Invalid(why))
+    }
+
+    // ── SoFi §18.4: a known bound violation is Invalid, from the evidence alone ──
+
+    /// One closure object over `MAX_CLOSURE_OBJECT_BYTES` is Invalid by that
+    /// bound, before any item is evaluated.
+    #[test]
+    fn a_closure_object_over_the_bound_is_invalid() {
+        let r = rig();
+        let mut ev = everything(r);
+        let (reference, _) = ev
+            .closure
+            .iter()
+            .next()
+            .map(|(k, v)| (*k, v.clone()))
+            .unwrap();
+        let bytes = MAX_CLOSURE_OBJECT_BYTES + 1;
+        ev.closure.insert(reference, vec![0u8; bytes]);
+        assert_eq!(
+            conformance(r, &ev),
+            invalid(FulfillmentConformanceError::ClosureObjectTooLarge { bytes })
+        );
+        // Exactly at the bound, the object itself is not what refuses.
+        let mut at = everything(r);
+        at.closure
+            .insert(reference, vec![0u8; MAX_CLOSURE_OBJECT_BYTES]);
+        assert_ne!(
+            conformance(r, &at),
+            invalid(FulfillmentConformanceError::ClosureObjectTooLarge {
+                bytes: MAX_CLOSURE_OBJECT_BYTES
+            })
+        );
+    }
+
+    /// Objects each within the per-object bound whose total exceeds
+    /// `MAX_VALIDATION_FETCH_BYTES` are Invalid by the fetch bound. Setups
+    /// outside the closure count toward it.
+    #[test]
+    fn a_validation_fetch_over_the_bound_is_invalid() {
+        let r = rig();
+        let mut ev = everything(r);
+        // What the bound sums: every closure object, and every setup not
+        // already among them.
+        fn fetched(ev: &ConformanceEvidence) -> usize {
+            ev.closure.values().map(Vec::len).sum::<usize>()
+                + ev.setups
+                    .iter()
+                    .filter(|(r, _)| {
+                        !ev.closure
+                            .contains_key(&ValidationRef::Setup { setup_ref: **r })
+                    })
+                    .map(|(_, b)| b.len())
+                    .sum::<usize>()
+        }
+        let each = MAX_CLOSURE_OBJECT_BYTES;
+        let mut n = 0u8;
+        while fetched(&ev) <= MAX_VALIDATION_FETCH_BYTES {
+            n += 1;
+            ev.setups.insert([n; 32], vec![0u8; each]);
+        }
+        let total = fetched(&ev);
+        assert!(total > MAX_VALIDATION_FETCH_BYTES);
+        assert_eq!(
+            conformance(r, &ev),
+            invalid(FulfillmentConformanceError::ValidationFetchTooLarge { bytes: total })
+        );
+    }
+
+    /// The fulfillment, the precommit and one envelope per parent claim in
+    /// the closure are the authenticated envelopes; more than
+    /// `MAX_AUTH_ENVELOPES` of them is Invalid by that bound.
+    #[test]
+    fn too_many_auth_envelopes_is_invalid() {
+        let r = rig();
+        let mut ev = everything(r);
+        let parents = ev
+            .closure
+            .keys()
+            .filter(|k| {
+                matches!(
+                    k,
+                    ValidationRef::SingleRootClaim { .. } | ValidationRef::ConditionalClaim { .. }
+                )
+            })
+            .count();
+        let mut added = 0usize;
+        while 2 + parents + added <= MAX_AUTH_ENVELOPES {
+            added += 1;
+            ev.closure.insert(
+                ValidationRef::SingleRootClaim {
+                    claim_ref: [added as u8; 32],
+                },
+                vec![0u8; 8],
+            );
+        }
+        let envelopes = 2 + parents + added;
+        assert_eq!(
+            conformance(r, &ev),
+            invalid(FulfillmentConformanceError::TooManyAuthEnvelopes { envelopes })
+        );
     }
 
     #[test]
