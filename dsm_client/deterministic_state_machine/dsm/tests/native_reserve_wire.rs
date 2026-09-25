@@ -312,8 +312,8 @@ fn a_final_release_funds_exactly_what_it_released() {
 fn credits_funded_along_a_lineage_sum_to_what_the_reserve_released() {
     let mut parent = genesis();
     let mut credited = 0u64;
-    for (position, amount) in [(1u64, ERA_FAUCET_PAYOUT), (2, 7), (3, ERA_FAUCET_PAYOUT)] {
-        let fx = fixture_at(parent, position, amount);
+    for position in 1u64..=3 {
+        let fx = fixture_at(parent, position, ERA_FAUCET_PAYOUT);
         let funded = verify_credit_source(
             &fx.witness.credit_sources[0],
             &fx.witness,
@@ -331,6 +331,17 @@ fn credits_funded_along_a_lineage_sum_to_what_the_reserve_released() {
         );
     }
     assert_eq!(parent.generation, 3);
+
+    // A release of any other amount funds nothing: it is not a release the
+    // claim policy allows, so it never became the reserve's successor.
+    let off_rule = fixture_at(parent, 4, 7);
+    assert!(verify_credit_source(
+        &off_rule.witness.credit_sources[0],
+        &off_rule.witness,
+        &OneRelease::of(&off_rule),
+        &ctx(4, &off_rule.pk),
+    )
+    .is_err());
 }
 
 /// `no valid reserve transition can mint ERA`, at the verifier: a release

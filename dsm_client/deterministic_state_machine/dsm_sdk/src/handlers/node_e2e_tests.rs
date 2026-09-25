@@ -401,7 +401,7 @@ async fn a_sofi_trade_executes_end_to_end() {
 
 /// B's own exercise re-aimed at the vault's next generation: `P` names the
 /// next parent root, `F` names attempt 0 there, the witnesses derive from the
-/// re-aimed `P`, and B signs both new bodies with its own key. Every
+/// re-aimed `P`, and `sign` signs both new bodies' digests. Signed by B, every
 /// signature verifies, so it is one operation's exercise signed by the trader
 /// it names; and its own bytes refute it, because `P`'s legs are no longer
 /// the legs its `P(E)` derives (conformance item 7).
@@ -409,7 +409,7 @@ fn reaimed(
     honest: &RecognizedExercise,
     vault_id: &[u8; 32],
     parent_root: &[u8; 32],
-    secret_key: &[u8],
+    sign: &dyn Fn([u8; 32]) -> Vec<u8>,
 ) -> SofiExercise {
     let p = &honest.precommit.body;
     let legs: Vec<PrecommitLeg> = p
@@ -479,9 +479,6 @@ fn reaimed(
         f.claimant_public_key(),
     )
     .expect("a well-formed F");
-    let sign = |digest: [u8; 32]| {
-        dsm::crypto::sphincs::sphincs_sign(secret_key, &digest).expect("B signs")
-    };
     let fulfillment_signature = sign(derive::fulfillment_signing_digest(&fulfillment));
     let precommit_signature = sign(derive::precommit_signing_digest(&precommit));
     SofiExercise::new(
@@ -550,7 +547,9 @@ async fn a_key_held_by_an_exercise_its_own_bytes_refute_is_skipped_on_those_byte
         .expect("B's exercise holds the key it consumed");
     p.b.enter();
     let secret_key = crate::sdk::signing_authority::current_secret_key().expect("B's signing key");
-    let hostile = reaimed(&honest, &m.vault_id, &r1, &secret_key);
+    let hostile = reaimed(&honest, &m.vault_id, &r1, &|digest| {
+        dsm::crypto::sphincs::sphincs_sign(&secret_key, &digest).expect("B signs")
+    });
     let recognized = recognize_exercise(&hostile.encode())
         .expect("the re-aimed bytes are one operation's exercise");
     let refuted = conformance_invalid_in_hand(
@@ -651,6 +650,62 @@ async fn a_key_held_by_an_exercise_its_own_bytes_refute_is_skipped_on_those_byte
         .expect("the vault prices the second trade");
     assert_eq!(balance(&p.b, &m.era), 180);
     assert_eq!(balance(&p.b, &m.tkn), out1 + out2);
+    head_agrees_with_admitted_root(&p.b, &[m.era, m.tkn]);
+}
+
+/// SoFi §17.5 and §9, storage spec §9 rule 3: bytes shaped like an exercise
+/// whose signatures do not verify are nothing at a successor key. B's own
+/// exercise, re-aimed at the vault's next generation with signatures that
+/// verify under no key, is written final along the whole route of that
+/// generation's first key; the key still reads open, and B's next trade takes
+/// attempt 0 there and realizes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn an_unsigned_exercise_at_a_successor_key_takes_nothing() {
+    let p = Pair::boot(500, 200).await;
+    let m = open_market(&p).await;
+    realized_trade(&p, &m, 10).await;
+    let set = canonical_set(NETWORK).expect("the pinned set");
+    let (local, parents) = standing_of(&p.b);
+    let chain = ChainWalker {
+        set: &set,
+        local: &local,
+        parents: &parents,
+    }
+    .chain(&m.vault_id)
+    .await
+    .expect("the vault's chain");
+    assert_eq!(chain.roots.len(), 2, "genesis and one consumption");
+    let (r0, r1) = (chain.roots[0], chain.roots[1]);
+    let honest = read_attempt_cell(&set, &m.vault_id, &r0, 0)
+        .await
+        .expect("read")
+        .expect("decided")
+        .exercise
+        .expect("B's exercise holds the key it consumed");
+
+    let unsigned = reaimed(&honest, &m.vault_id, &r1, &|_| vec![0x77; 8]);
+    assert!(recognize_exercise(&unsigned.encode()).is_none());
+    let cell = attempt_cell(&set, &m.vault_id, &r1, 0).expect("the first key at R1");
+    let write = crate::sdk::route_seats::write_recorded(&set, cell.routed(), &unsigned.encode())
+        .await
+        .expect("the nodes keep whatever they are given");
+    assert!(write.reached_leader());
+    let read = read_attempt_cell(&set, &m.vault_id, &r1, 0)
+        .await
+        .expect("read")
+        .expect("decided");
+    assert_eq!(read.fact, CellFact::Open, "unsigned bytes hold nothing");
+
+    let q2 = realized_trade(&p, &m, 10).await;
+    let second = read_attempt_cell(&set, &m.vault_id, &r1, 0)
+        .await
+        .expect("read")
+        .expect("decided")
+        .exercise
+        .expect("B's second exercise holds the first key at R1");
+    assert_eq!(second.fulfillment.body.position(), q2);
+    assert_eq!(balance(&p.b, &m.era), 180);
     head_agrees_with_admitted_root(&p.b, &[m.era, m.tkn]);
 }
 
