@@ -32,125 +32,15 @@
 //! - [`token_domain_hasher`] -- hierarchical hasher for token operations.
 //! - [`token_domain_hash`] -- one-shot hierarchical token hash.
 //! - [`token_domain_hash_bytes`] -- one-shot hierarchical token hash returning bytes.
-//! - [`hash_blake3`] -- plain (non-domain-separated) BLAKE3 hash.
-//! - (entropy evolution moved to `core::state_machine::utils::calculate_next_entropy`).
-//! - [`create_random_walk_seed`] -- seed derivation for hash chain verification.
 //!
 //! # Thread Safety
 //!
 //! All hashers are stack-allocated and free of shared mutable state.
 
 // Re-export Blake3 types for use throughout the DSM crypto module
-pub use blake3::{hash, Hash, Hasher};
+pub use blake3::{Hash, Hasher};
 
-/// Hash the input data using the Blake3 algorithm.
-///
-/// This is the primary hashing function used throughout the DSM system
-/// as specified in the whitepaper Section 3.5.
-///
-/// # Arguments
-/// * `data` - The data to be hashed
-///
-/// # Returns
-/// * `Hash` - The Blake3 hash of the input data
-pub fn hash_blake3(data: &[u8]) -> Hash {
-    let mut hasher = Hasher::new();
-    hasher.update(data);
-    hasher.finalize()
-}
-
-/// NOTE: Base64 helpers are forbidden in Core. Keep any convenience encoders under tests only.
-#[cfg(test)]
-pub fn hash_blake3_as_base64(data: &[u8]) -> String {
-    let hash = blake3::hash(data);
-    base64_encode_for_test(hash.as_bytes())
-}
-
-#[cfg(test)]
-fn base64_encode_for_test(input: &[u8]) -> String {
-    const BASE64_CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut result = String::new();
-    let mut i = 0;
-    while i < input.len() {
-        let b0 = input[i] as u32;
-        let b1 = if i + 1 < input.len() {
-            input[i + 1] as u32
-        } else {
-            0
-        };
-        let b2 = if i + 2 < input.len() {
-            input[i + 2] as u32
-        } else {
-            0
-        };
-        let triple = (b0 << 16) | (b1 << 8) | b2;
-        result.push(BASE64_CHARS[((triple >> 18) & 63) as usize] as char);
-        result.push(BASE64_CHARS[((triple >> 12) & 63) as usize] as char);
-        if i + 1 < input.len() {
-            result.push(BASE64_CHARS[((triple >> 6) & 63) as usize] as char);
-        } else {
-            result.push('=');
-        }
-        if i + 2 < input.len() {
-            result.push(BASE64_CHARS[(triple & 63) as usize] as char);
-        } else {
-            result.push('=');
-        }
-        i += 3;
-    }
-    result
-}
-
-// `generate_deterministic_entropy(prev_entropy, op, state_number)` was
-// removed per §4.3 (state_number no longer participates in entropy
-// derivation). Use `crate::core::state_machine::utils::calculate_next_entropy`
-// which implements §11 eq.14:
-//   e_{n+1} = H("DSM/state-entropy" || e_n || op || prev_hash)
-//
-// `generate_deterministic_entropy_concurrent` was removed for the same reason.
-
-/// Create a seed for hash chain verification.
-///
-/// This is used to create a seed for the deterministic random walk
-/// as described in whitepaper Section 3.1.
-///
-/// # Arguments
-/// * `state_hash` - Hash of the current state
-/// * `operation` - Operation data
-/// * `entropy` - New entropy value
-///
-/// # Returns
-/// * `Hash` - The generated seed
-pub fn create_random_walk_seed(state_hash: &[u8], operation: &[u8], entropy: &[u8]) -> Hash {
-    let mut hasher = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_RANDOM_WALK_SEED);
-
-    hasher.update(state_hash);
-    hasher.update(operation);
-    hasher.update(entropy);
-
-    hasher.finalize()
-}
-
-/// Hash raw bytes using plain (non-domain-separated) BLAKE3 and return the
-/// digest as a `Vec<u8>`.
-///
-/// This is a convenience wrapper around [`blake3::hash`]. For protocol-path
-/// hashing, prefer [`domain_hash`] or [`domain_hash_bytes`] to ensure proper
-/// domain separation.
-///
-/// # Returns
-///
-/// A 32-byte BLAKE3 digest as `Vec<u8>`.
-pub fn hash_bytes(input: &[u8]) -> Vec<u8> {
-    hash(input).as_bytes().to_vec()
-}
-
-/// Create a fresh, non-domain-separated BLAKE3 [`Hasher`].
-///
-/// Callers that need domain separation should use [`dsm_domain_hasher`] instead.
-pub fn new_hasher() -> Hasher {
-    Hasher::new()
-}
+use crate::crypto::domain::TaggedHashDomain;
 
 /// Create a domain-separated BLAKE3 hasher.
 ///
@@ -162,8 +52,6 @@ pub fn new_hasher() -> Hasher {
 ///
 /// # Panics
 /// Panics if `tag` does not start with `"DSM/"` or `"DJTE."`.
-use crate::crypto::domain::TaggedHashDomain;
-
 pub fn dsm_domain_hasher(tag: TaggedHashDomain<'_>) -> Hasher {
     assert!(
         tag.source_bytes().starts_with(b"DSM/") || tag.source_bytes().starts_with(b"DJTE."),
@@ -434,47 +322,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_hash_blake3() {
-        let data1 = b"test data";
-        let data2 = b"different data";
-
-        let hash1 = hash_blake3(data1);
-        let hash2 = hash_blake3(data2);
-
-        // Same input should produce the same hash
-        assert_eq!(hash_blake3(data1), hash1);
-
-        // Different inputs should produce different hashes
-        assert_ne!(hash1, hash2);
-    }
-
-    #[test]
-    fn test_create_random_walk_seed() {
-        let state_hash = b"state hash";
-        let operation = b"operation";
-        let entropy = b"entropy";
-
-        let seed1 = create_random_walk_seed(state_hash, operation, entropy);
-        let seed2 = create_random_walk_seed(state_hash, operation, entropy);
-
-        // Same input should produce the same seed
-        assert_eq!(seed1, seed2);
-
-        // Different inputs should produce different seeds
-        let seed3 = create_random_walk_seed(b"different hash", operation, entropy);
-        assert_ne!(seed1, seed3);
-    }
-
-    #[test]
-    fn empty_input_hash_matches_reference() {
-        // Hash of empty input should be well-defined and match library reference
-        let one_shot = hash_blake3(b"");
-        let reference = blake3::hash(b"");
-        assert_eq!(one_shot, reference);
-        assert_eq!(one_shot.as_bytes().len(), 32);
-    }
-
-    #[test]
     fn streaming_vs_one_shot_equivalence_small_and_large() {
         // Build test inputs
         let small = b"The quick brown fox jumps over the lazy dog";
@@ -489,7 +336,7 @@ mod tests {
             let one_shot = blake3::hash(data);
 
             // Streaming with uneven chunk sizes
-            let mut hasher = new_hasher();
+            let mut hasher = Hasher::new();
             let mut offset = 0usize;
             let chunk_sizes = [13usize, 257, 4096, 3, 8191, 1];
             let mut idx = 0;
@@ -523,14 +370,5 @@ mod tests {
         let h1 = domain_hash(crate::common::domain_tags::TAG_DSM_TAG1, data);
         let h2 = domain_hash(crate::common::domain_tags::TAG_DSM_TAG2, data);
         assert_ne!(h1.as_bytes(), h2.as_bytes());
-    }
-
-    #[test]
-    fn hash_bytes_matches_reference() {
-        let input = b"byte-test";
-        let v = hash_bytes(input);
-        let r = blake3::hash(input).as_bytes().to_vec();
-        assert_eq!(v, r);
-        assert_eq!(v.len(), 32);
     }
 }

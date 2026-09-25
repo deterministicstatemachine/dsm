@@ -29,7 +29,6 @@ pub mod bilateral_transaction_manager;
 pub mod bridge;
 pub mod chain_tip_store;
 pub mod contact_manager;
-pub mod debug_helpers;
 pub mod error;
 pub mod identity;
 // security module deleted: bilateral_control (BilateralControlResistance +

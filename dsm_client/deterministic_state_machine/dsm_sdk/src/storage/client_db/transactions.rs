@@ -491,7 +491,7 @@ mod tests {
             alias: "sender-peer".to_string(),
             genesis_hash: counterparty_genesis.to_vec(),
             public_key: vec![0x11; 32],
-            kyber_public_key: Vec::new(),
+            kyber_public_key: vec![0x4B; 1184],
             current_chain_tip: Some(stale_tip.to_vec()),
             verified: true,
             verification_proof: None,
@@ -551,7 +551,8 @@ mod tests {
         assert_eq!(stored.current_chain_tip, Some(settled_tip.to_vec()));
         assert!(!stored.needs_online_reconcile);
         assert_eq!(
-            crate::storage::client_db::get_local_bilateral_chain_tip(&counterparty_device_id),
+            crate::storage::client_db::get_local_bilateral_chain_tip(&counterparty_device_id)
+                .expect("read tip"),
             Some(settled_tip)
         );
     }
@@ -579,7 +580,7 @@ mod tests {
             alias: "receiver-peer".to_string(),
             genesis_hash: counterparty_genesis.to_vec(),
             public_key: vec![0x22; 32],
-            kyber_public_key: Vec::new(),
+            kyber_public_key: vec![0x4B; 1184],
             current_chain_tip: Some(stale_tip.to_vec()),
             verified: true,
             verification_proof: None,
@@ -639,7 +640,8 @@ mod tests {
         assert_eq!(stored.current_chain_tip, Some(settled_tip.to_vec()));
         assert!(!stored.needs_online_reconcile);
         assert_eq!(
-            crate::storage::client_db::get_local_bilateral_chain_tip(&counterparty_device_id),
+            crate::storage::client_db::get_local_bilateral_chain_tip(&counterparty_device_id)
+                .expect("read tip"),
             Some(settled_tip)
         );
     }

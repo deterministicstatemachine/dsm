@@ -44,7 +44,9 @@ pub async fn arrivals_for(device: &TestDevice, fleet: &FleetGuard) -> Arrived {
         device.genesis,
         device.device_id,
         &contacts,
-    ) {
+    )
+    .expect("inbox routes")
+    {
         let outcome = b0x
             .retrieve_from_b0x_v2(&tagged.address)
             .await

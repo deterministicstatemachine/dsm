@@ -225,7 +225,6 @@ mod tests {
         let op = generated::UniversalOp {
             op_id: None,
             actor: vec![],
-            genesis_hash: vec![],
             kind: Some(generated::universal_op::Kind::Invoke(invoke)),
         };
         generated::Envelope {

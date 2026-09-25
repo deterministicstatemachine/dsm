@@ -52,19 +52,21 @@ fn derive_resync_ek(
     crate::sdk::receipts::derive_per_step_ek(&ctx, &s_master)
 }
 
-/// Find the contact that forms `rel_key` with this device, returning
-/// `(device_id_bytes, genesis, ak_pubkey)`.
-fn peer_for_relationship(
+/// The contact that forms `rel_key` with this device, as
+/// `(device_id_bytes, genesis, ak_pubkey)`; `None` when no contact forms it.
+fn find_peer_for_relationship(
     self_device: &[u8; 32],
     rel_key: &[u8; 32],
-) -> Result<([u8; 32], [u8; 32], Vec<u8>), DsmError> {
+) -> Result<Option<([u8; 32], [u8; 32], Vec<u8>)>, DsmError> {
     let contacts = client_db::get_all_contacts()
         .map_err(|e| DsmError::internal(format!("contacts load: {e}"), None::<std::io::Error>))?;
     for c in contacts {
-        let cd: [u8; 32] = match c.device_id.as_slice().try_into() {
-            Ok(a) => a,
-            Err(_) => continue,
-        };
+        let cd: [u8; 32] = c.device_id.as_slice().try_into().map_err(|_| {
+            DsmError::invalid_operation(format!(
+                "a stored contact's device id is {} bytes, not 32",
+                c.device_id.len()
+            ))
+        })?;
         let rk = dsm::core::bilateral_transaction_manager::compute_smt_key(&cd, self_device);
         if &rk == rel_key {
             let genesis: [u8; 32] = c
@@ -75,21 +77,27 @@ fn peer_for_relationship(
             if c.public_key.is_empty() {
                 return err("peer contact has no AK public key for cosign verification");
             }
-            return Ok((cd, genesis, c.public_key));
+            return Ok(Some((cd, genesis, c.public_key)));
         }
     }
-    err("no contact forms this relationship")
+    Ok(None)
 }
 
-/// Resolve just the peer device id for a relationship (used by the poller's
-/// auto-initiate). `None` if no contact forms it.
+fn peer_for_relationship(
+    self_device: &[u8; 32],
+    rel_key: &[u8; 32],
+) -> Result<([u8; 32], [u8; 32], Vec<u8>), DsmError> {
+    find_peer_for_relationship(self_device, rel_key)?
+        .ok_or_else(|| DsmError::invalid_operation("no contact forms this relationship"))
+}
+
+/// The peer device of a relationship (the poller's auto-initiate); `None`
+/// when no contact forms it.
 pub(crate) fn peer_device_for_relationship(
     self_device: &[u8; 32],
     rel_key: &[u8; 32],
-) -> Option<[u8; 32]> {
-    peer_for_relationship(self_device, rel_key)
-        .ok()
-        .map(|(d, _, _)| d)
+) -> Result<Option<[u8; 32]>, DsmError> {
+    Ok(find_peer_for_relationship(self_device, rel_key)?.map(|(d, _, _)| d))
 }
 
 impl super::app_router_impl::AppRouterImpl {
@@ -134,20 +142,13 @@ impl super::app_router_impl::AppRouterImpl {
         // device polls for this relationship. The initiator's own tip may have
         // diverged from `agreed_tip`, so addressing the ack to `agreed_tip` would
         // strand it.
-        let local_genesis = crate::sdk::app_state::AppState::get_genesis_hash()
-            .and_then(|g| <[u8; 32]>::try_from(g.as_slice()).ok())
-            .unwrap_or([0u8; 32]);
-        let reply_to_tip = client_db::get_contact_by_device_id(&peer_device)
-            .ok()
-            .flatten()
-            .and_then(|c| {
-                super::app_router_impl::relationship_tip_for_contact_restore(
-                    self.device_id_bytes,
-                    local_genesis,
-                    &c,
-                )
-            })
-            .unwrap_or(agreed_tip);
+        let peer_contact = client_db::get_contact_by_device_id(&peer_device)
+            .map_err(|e| {
+                DsmError::storage(format!("cert-resync: contact: {e}"), None::<std::io::Error>)
+            })?
+            .ok_or_else(|| DsmError::relationship("cert-resync: the peer is not a contact"))?;
+        let reply_to_tip = super::app_router_impl::contact_relationship_tip(&peer_contact)
+            .map_err(DsmError::relationship)?;
 
         let req = CertResyncRequest {
             relationship_key: rel_key,
@@ -209,27 +210,20 @@ impl super::app_router_impl::AppRouterImpl {
         // We must be HEALTHY on this relationship: our own Local head present and a
         // (stale) Counterparty head to advance. Otherwise this is two-sided loss —
         // out of scope; refuse.
-        let responder_local_head =
-            client_db::load_cert_chain_head_pubkey(&rel_key, CertChainSide::Local)
-                .ok()
-                .flatten()
-                .ok_or_else(|| {
-                    DsmError::invalid_operation(
+        let head = |side| {
+            client_db::load_cert_chain_head_pubkey(&rel_key, side).map_err(|e| {
+                DsmError::storage(
+                    format!("cert resync request: cert-chain head unreadable: {e}"),
+                    None::<std::io::Error>,
+                )
+            })
+        };
+        let responder_local_head = head(CertChainSide::Local)?.ok_or_else(|| {
+            DsmError::invalid_operation(
                 "cert resync request: responder has no Local head (two-sided loss) — refusing",
             )
-                })?;
-        let stale_counterparty =
-            client_db::load_cert_chain_head_pubkey(&rel_key, CertChainSide::Counterparty)
-                .ok()
-                .flatten();
-
-        // Anchor evidence for the audit row (best-effort from our own record).
-        let (accepted_parent, accepted_child) =
-            client_db::get_finalized_proposal_for_relationship(&rel_key)
-                .ok()
-                .flatten()
-                .map(|p| (p.canonical_parent, p.canonical_child))
-                .unwrap_or(([0u8; 32], req.agreed_tip));
+        })?;
+        let stale_counterparty = head(CertChainSide::Counterparty)?;
 
         finalize_cert_resync_responder_atomically(
             &rel_key,
@@ -238,8 +232,7 @@ impl super::app_router_impl::AppRouterImpl {
             stale_counterparty.as_deref(),
             ResyncAudit {
                 preserved_acceptance_commitment: &req.preserved_acceptance_commitment,
-                accepted_parent_tip: &accepted_parent,
-                accepted_child_tip: &accepted_child,
+                agreed_tip: &req.agreed_tip,
                 joint_auth_hash: &joint,
                 reason_code: "peer-head-loss",
             },
@@ -316,13 +309,6 @@ impl super::app_router_impl::AppRouterImpl {
         let (ek_pk_a, ek_sk_a) = derive_resync_ek(&rel_key, &ack.agreed_tip, &joint, ack.epoch)?;
         let at_rest_key = crate::init::current_chain_head_at_rest_key()?;
 
-        let (accepted_parent, accepted_child) =
-            client_db::get_finalized_proposal_for_relationship(&rel_key)
-                .ok()
-                .flatten()
-                .map(|p| (p.canonical_parent, p.canonical_child))
-                .unwrap_or(([0u8; 32], ack.agreed_tip));
-
         finalize_cert_resync_atomically(
             &rel_key,
             ack.epoch,
@@ -336,8 +322,7 @@ impl super::app_router_impl::AppRouterImpl {
             None, // our Counterparty head is absent → GenesisInit
             ResyncAudit {
                 preserved_acceptance_commitment: &ack.preserved_acceptance_commitment,
-                accepted_parent_tip: &accepted_parent,
-                accepted_child_tip: &accepted_child,
+                agreed_tip: &ack.agreed_tip,
                 joint_auth_hash: &joint,
                 reason_code: "head-loss-recovery",
             },

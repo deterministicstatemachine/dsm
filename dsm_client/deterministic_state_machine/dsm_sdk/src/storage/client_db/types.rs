@@ -67,8 +67,7 @@ impl ContactRecord {
     pub fn validate_for_verification(&self) -> Result<()> {
         if self.public_key.is_empty() {
             return Err(anyhow!(
-                "ContactRecord for \"{}\" has empty public_key; cannot be used for verification.  \
-                 Use SystemPeerRecord for protocol-controlled actors like DLV/Faucet.",
+                "ContactRecord for \"{}\" has empty public_key; cannot be used for verification.",
                 self.alias
             ));
         }
@@ -112,75 +111,6 @@ impl ContactRecord {
             verifying_storage_nodes: Vec::new(),
             ble_address: self.ble_address.clone(),
         })
-    }
-}
-
-/// SystemPeerRecord: lightweight record for protocol-controlled actors (DLV, Faucet, etc.)
-///
-/// This type is intentionally separate from ContactRecord to enforce the trust boundary:
-/// - ContactRecord: authenticated counterparty with public key for bilateral verification
-/// - SystemPeerRecord: protocol-controlled actor without bilateral trust (no public key)
-///
-/// Any operation requiring verification MUST use ContactRecord, not SystemPeerRecord.
-#[derive(Debug, Clone)]
-pub struct SystemPeerRecord {
-    pub peer_key: String,          // Unique identifier (e.g., "dlv", "faucet")
-    pub device_id: Vec<u8>,        // Deterministic 32-byte identifier
-    pub display_name: String,      // Human-readable name for UI
-    pub peer_type: SystemPeerType, // Type of system peer
-    pub current_chain_tip: Option<Vec<u8>>, // Chain tip for state tracking
-    pub metadata: HashMap<String, Vec<u8>>,
-}
-
-/// Persisted protocol-actor transition under a stable `SystemPeerRecord`.
-///
-/// These events track sovereign DLV/faucet/protocol progression and are never
-/// interpreted as bilateral relationship receipts or contact chain tips.
-#[derive(Debug, Clone)]
-pub struct SystemPeerEvent {
-    pub peer_key: String,
-    pub peer_type: SystemPeerType,
-    pub parent_tip: Vec<u8>,
-    pub child_tip: Vec<u8>,
-    pub transition_digest: Vec<u8>,
-    pub source_state_hash: Vec<u8>,
-    pub source_state_number: u64,
-    pub payload_bytes: Vec<u8>,
-}
-
-/// Type of system peer for categorization
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SystemPeerType {
-    /// Deterministic Limbo Vault (protocol-controlled escrow)
-    Dlv,
-    /// Faucet for token distribution
-    Faucet,
-    /// Other protocol-controlled actor
-    Protocol,
-}
-
-impl SystemPeerType {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            SystemPeerType::Dlv => "dlv",
-            SystemPeerType::Faucet => "faucet",
-            SystemPeerType::Protocol => "protocol",
-        }
-    }
-}
-
-/// The inverse of [`SystemPeerType::as_str`], exactly. Any other spelling is
-/// not a peer type.
-impl std::str::FromStr for SystemPeerType {
-    type Err = ();
-
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        match s {
-            "dlv" => Ok(SystemPeerType::Dlv),
-            "faucet" => Ok(SystemPeerType::Faucet),
-            "protocol" => Ok(SystemPeerType::Protocol),
-            _ => Err(()),
-        }
     }
 }
 
@@ -241,27 +171,4 @@ pub struct ChunkPersistenceParams<'a> {
     pub chunk_data: &'a [u8],
     pub checksum: u32,
     pub counterparty_id: Option<&'a [u8; 32]>,
-}
-
-#[cfg(test)]
-mod system_peer_type_tests {
-    use super::SystemPeerType;
-
-    #[test]
-    fn system_peer_type_parse_inverts_as_str() {
-        for t in [
-            SystemPeerType::Dlv,
-            SystemPeerType::Faucet,
-            SystemPeerType::Protocol,
-        ] {
-            assert_eq!(t.as_str().parse::<SystemPeerType>(), Ok(t));
-        }
-    }
-
-    #[test]
-    fn system_peer_type_parse_refuses_any_other_spelling() {
-        for s in ["something-else", "", "DLV", "  faucet  "] {
-            assert_eq!(s.parse::<SystemPeerType>(), Err(()), "{s:?}");
-        }
-    }
 }

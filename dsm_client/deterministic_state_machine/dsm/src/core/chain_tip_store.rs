@@ -14,8 +14,10 @@ use crate::types::error::DsmError;
 ///
 /// Core stays storage-agnostic; callers can provide a DB-backed implementation.
 pub trait ChainTipStore: Send + Sync {
-    /// Get the latest chain tip for a contact relationship (if available).
-    fn get_contact_chain_tip(&self, device_id: &[u8; 32]) -> Option<[u8; 32]>;
+    /// The persisted chain tip of the relationship with `device_id`, or
+    /// `None` when the store holds no such relationship. A store that cannot
+    /// read it answers an error, never "no tip".
+    fn get_contact_chain_tip(&self, device_id: &[u8; 32]) -> Result<Option<[u8; 32]>, DsmError>;
 
     /// Persist the latest chain tip for a contact relationship if the parent still matches.
     ///
@@ -59,12 +61,16 @@ pub(crate) mod memory {
     }
 
     impl ChainTipStore for InMemoryChainTipStore {
-        fn get_contact_chain_tip(&self, device_id: &[u8; 32]) -> Option<[u8; 32]> {
-            self.tips
+        fn get_contact_chain_tip(
+            &self,
+            device_id: &[u8; 32],
+        ) -> Result<Option<[u8; 32]>, DsmError> {
+            Ok(self
+                .tips
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
                 .get(device_id)
-                .copied()
+                .copied())
         }
 
         fn set_contact_chain_tip(
@@ -102,9 +108,9 @@ mod tests {
         let store = InMemoryChainTipStore::new();
         let id = [42u8; 32];
         let tip = [99u8; 32];
-        assert!(store.get_contact_chain_tip(&id).is_none());
+        assert!(store.get_contact_chain_tip(&id).expect("read").is_none());
         assert!(store.set_contact_chain_tip(&id, [0u8; 32], tip).unwrap());
-        assert_eq!(store.get_contact_chain_tip(&id), Some(tip));
+        assert_eq!(store.get_contact_chain_tip(&id).expect("read"), Some(tip));
     }
 
     #[test]
@@ -120,7 +126,7 @@ mod tests {
             .set_contact_chain_tip(&id, wrong_parent, tip2)
             .unwrap();
         assert!(!applied, "CAS should reject wrong parent");
-        assert_eq!(store.get_contact_chain_tip(&id), Some(tip1));
+        assert_eq!(store.get_contact_chain_tip(&id).expect("read"), Some(tip1));
     }
 
     #[test]
@@ -132,6 +138,6 @@ mod tests {
         store.set_contact_chain_tip(&id, [0u8; 32], tip1).unwrap();
         let applied = store.set_contact_chain_tip(&id, tip1, tip2).unwrap();
         assert!(applied);
-        assert_eq!(store.get_contact_chain_tip(&id), Some(tip2));
+        assert_eq!(store.get_contact_chain_tip(&id).expect("read"), Some(tip2));
     }
 }

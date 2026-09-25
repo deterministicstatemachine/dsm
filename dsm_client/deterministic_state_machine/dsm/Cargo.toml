@@ -156,7 +156,9 @@ rstest = "0.26.1"
 serial_test = "3.5.0"
 
 [build-dependencies]
+prost = "0.14"
 prost-build = "0.14"
+prost-types = "0.14"
 protoc-bin-vendored = "3"
 
 [lib]

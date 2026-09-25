@@ -258,12 +258,13 @@ impl AppRouterImpl {
                         if record.device_id.len() == 32 && record.genesis_hash.len() == 32 {
                             let device_id_b32 =
                                 crate::util::text_id::encode_base32_crockford(&record.device_id);
-                            let initial_tip = relationship_tip_for_contact_restore(
-                                device_id_bytes,
-                                genesis_hash_bytes,
-                                &record,
-                            )
-                            .unwrap_or([0u8; 32]);
+                            let initial_tip = match contact_relationship_tip(&record) {
+                                Ok(tip) => tip,
+                                Err(e) => {
+                                    log::error!("[DSM_SDK] bilateral chain not initialized: {e}");
+                                    continue;
+                                }
+                            };
                             match wallet.initialize_bilateral_chain(&device_id_b32, &initial_tip) {
                                 Ok(tip) => {
                                     log::debug!(
@@ -566,17 +567,9 @@ impl AppRouterImpl {
                 }
             };
 
-        let chain_tip_arr: [u8; 32] = match relationship_tip_for_contact_restore(
-            self.device_id_bytes,
-            local_genesis_for_routing,
-            &contact_record,
-        ) {
-            Some(tip) => tip,
-            None => {
-                return err(
-                    "wallet.send: recipient relationship tip is unavailable or invalid".to_string(),
-                )
-            }
+        let chain_tip_arr: [u8; 32] = match contact_relationship_tip(&contact_record) {
+            Ok(tip) => tip,
+            Err(e) => return err(format!("wallet.send: {e}")),
         };
 
         // =====================================================================
@@ -2238,43 +2231,23 @@ impl AppRouterImpl {
     }
 }
 
-fn compute_initial_relationship_chain_tip(
-    local_device_id: [u8; 32],
-    local_genesis: [u8; 32],
-    remote_device_id: &[u8],
-    remote_genesis: &[u8],
-) -> Option<[u8; 32]> {
-    let remote_device: [u8; 32] = remote_device_id.try_into().ok()?;
-    let remote_genesis: [u8; 32] = remote_genesis.try_into().ok()?;
-    Some(
-        dsm::core::bilateral_transaction_manager::initial_relationship_chain_tip(
-            &local_device_id,
-            &local_genesis,
-            &remote_device,
-            &remote_genesis,
-        ),
-    )
-}
-
-pub(crate) fn relationship_tip_for_contact_restore(
-    local_device_id: [u8; 32],
-    local_genesis: [u8; 32],
+/// The contact's stored relationship tip. A contact is stored with the
+/// relationship's h_0 and only ever advanced, so one without a 32-byte tip is
+/// a corrupt row.
+pub(crate) fn contact_relationship_tip(
     contact: &crate::storage::client_db::ContactRecord,
-) -> Option<[u8; 32]> {
-    if let Some(stored_tip) = contact.current_chain_tip.as_deref() {
-        if stored_tip.len() == 32 {
-            let mut tip = [0u8; 32];
-            tip.copy_from_slice(stored_tip);
-            return Some(tip);
-        }
-    }
-
-    compute_initial_relationship_chain_tip(
-        local_device_id,
-        local_genesis,
-        &contact.device_id,
-        &contact.genesis_hash,
-    )
+) -> Result<[u8; 32], String> {
+    let tip = contact
+        .current_chain_tip
+        .as_deref()
+        .ok_or_else(|| format!("contact {} has no relationship tip", contact.alias))?;
+    tip.try_into().map_err(|_| {
+        format!(
+            "contact {}'s relationship tip is {} bytes, expected 32",
+            contact.alias,
+            tip.len()
+        )
+    })
 }
 
 /// Route freshness tag for stale-route delivery root.
@@ -2295,205 +2268,84 @@ pub(crate) struct TaggedInboxAddress {
 
 /// Collect per-contact B0x addresses tagged with route freshness.
 ///
-/// Returns up to TWO addresses per contact:
-/// 1. Current tip address (always, tagged `Current`)
-/// 2. Previous tip address (if stored, non-zero, and different from current; tagged `PreviousTip`)
-///
-/// This enables stale-route delivery: messages sent to a previous tip's address
-/// become visible but are NOT auto-applied to wallet state.
+/// Per contact: the current tip's address (`Current`), the previous tip's
+/// (`PreviousTip`) when one is stored and differs, and the pending online
+/// outbox's next tip (`Current`) — the counterparty replies there before it
+/// sees this device's canonical tip advance. Then every route a split
+/// transfer's first half arrived on, until the pair completes. Any route that
+/// cannot be derived, or any store that cannot be read, is an error: a route
+/// silently left out is an inbox never polled.
 pub(crate) fn collect_tagged_inbox_addresses(
     local_genesis: [u8; 32],
     local_device_id: [u8; 32],
     contacts: &[crate::storage::client_db::ContactRecord],
-) -> Vec<TaggedInboxAddress> {
-    if local_genesis == [0u8; 32] {
-        log::warn!(
-            "[collect_tagged_inbox_addresses] genesis is ZERO — returning empty address list"
-        );
-        return Vec::new();
-    }
-
+) -> Result<Vec<TaggedInboxAddress>, String> {
+    let address_for = |tip: &[u8; 32]| {
+        crate::sdk::b0x_sdk::B0xSDK::compute_b0x_address(&local_genesis, &local_device_id, tip)
+            .map_err(|e| format!("inbox address derivation failed: {e}"))
+    };
     let mut addresses = Vec::with_capacity(contacts.len() * 2);
 
     for contact in contacts {
-        let restored_tip =
-            relationship_tip_for_contact_restore(local_device_id, local_genesis, contact);
-        let tip_status = match restored_tip {
-            Some(tip) if tip == [0u8; 32] => "zero",
-            Some(_) => "restored",
-            None => "missing",
-        };
-        log::info!(
-            "[collect_tagged_inbox_addresses] contact={} tip_status={} device_prefix={}",
-            contact.alias,
-            tip_status,
-            crate::util::text_id::encode_base32_crockford(
-                &contact.device_id[..8.min(contact.device_id.len())]
-            )
-            .get(..8)
-            .unwrap_or("?"),
-        );
+        let current_tip = contact_relationship_tip(contact)?;
+        addresses.push(TaggedInboxAddress {
+            address: address_for(&current_tip)?,
+            freshness: RouteFreshness::Current,
+        });
 
-        let Some(current_tip) = restored_tip else {
-            log::warn!(
-                "[collect_tagged_inbox_addresses] contact {} has no valid canonical relationship tip",
-                contact.alias
-            );
-            continue;
-        };
-
-        // DIAGNOSTIC: mirror wallet.send §16.4 inputs for cross-device comparison
-        log::info!(
-            "[collect_tagged_inbox_addresses] contact={} genesis={}.. device={}.. tip={}.. (tip_zero={})",
-            contact.alias,
-            crate::util::text_id::encode_base32_crockford(&local_genesis).get(..8).unwrap_or("?"),
-            crate::util::text_id::encode_base32_crockford(&local_device_id).get(..8).unwrap_or("?"),
-            crate::util::text_id::encode_base32_crockford(&current_tip).get(..8).unwrap_or("?"),
-            current_tip == [0u8; 32],
-        );
-
-        // 1. Current tip address (always)
-        match crate::sdk::b0x_sdk::B0xSDK::compute_b0x_address(
-            &local_genesis,
-            &local_device_id,
-            &current_tip,
-        ) {
-            Ok(addr) => {
-                log::info!(
-                    "[collect_tagged_inbox_addresses] contact={} addr={}",
+        if let Some(prev_tip_bytes) = contact.previous_chain_tip.as_deref() {
+            let prev_tip: [u8; 32] = prev_tip_bytes.try_into().map_err(|_| {
+                format!(
+                    "contact {}'s previous tip is {} bytes, expected 32",
                     contact.alias,
-                    &addr[..16.min(addr.len())],
-                );
+                    prev_tip_bytes.len()
+                )
+            })?;
+            if prev_tip != current_tip {
                 addresses.push(TaggedInboxAddress {
-                    address: addr,
-                    freshness: RouteFreshness::Current,
+                    address: address_for(&prev_tip)?,
+                    freshness: RouteFreshness::PreviousTip,
                 });
             }
-            Err(e) => {
-                log::warn!(
-                    "[collect_tagged_inbox_addresses] contact {} current-tip address derivation failed: {}",
+        }
+
+        let pending = crate::storage::client_db::get_pending_online_outbox(&contact.device_id)
+            .map_err(|e| format!("pending online outbox unreadable: {e}"))?;
+        if let Some(pending) = pending {
+            let next_tip: [u8; 32] = pending.next_tip.as_slice().try_into().map_err(|_| {
+                format!(
+                    "contact {}'s pending next tip is {} bytes, expected 32",
                     contact.alias,
-                    e
-                );
-            }
-        }
-
-        // 2. Previous tip address (bounded lookback of 1)
-        if let Some(prev_tip_bytes) = contact.previous_chain_tip.as_deref() {
-            if prev_tip_bytes.len() == 32 && prev_tip_bytes != [0u8; 32] {
-                let mut prev_tip = [0u8; 32];
-                prev_tip.copy_from_slice(prev_tip_bytes);
-                if prev_tip != current_tip {
-                    match crate::sdk::b0x_sdk::B0xSDK::compute_b0x_address(
-                        &local_genesis,
-                        &local_device_id,
-                        &prev_tip,
-                    ) {
-                        Ok(addr) => {
-                            log::info!(
-                                "[collect_tagged_inbox_addresses] contact {} stale-route address added (previous tip)",
-                                contact.alias
-                            );
-                            addresses.push(TaggedInboxAddress {
-                                address: addr,
-                                freshness: RouteFreshness::PreviousTip,
-                            });
-                        }
-                        Err(e) => {
-                            log::warn!(
-                                "[collect_tagged_inbox_addresses] contact {} previous-tip address derivation failed: {}",
-                                contact.alias,
-                                e
-                            );
-                        }
-                    }
-                }
-            }
-        }
-
-        // 3. Pending-outbox next_tip address.
-        //
-        // When this device has a pending online outbox for `contact` (i.e. we sent
-        // an online transfer that the counterparty hasn't yet ACKed), `record_pending_
-        // online_transition` advances `contacts.local_bilateral_chain_tip` to T_{n+1}
-        // without touching `current_chain_tip`. The counterparty sees our local tip as
-        // T_{n+1} and will therefore deposit any reply using:
-        //   compute_b0x_address(our_genesis, our_device_id, T_{n+1})
-        //
-        // But `current_chain_tip` still holds T_n, so address (1) above would miss it.
-        // Adding the pending next_tip as a live `Current` address closes this gap.
-        if contact.device_id.len() == 32 {
-            if let Ok(Some(pending)) =
-                crate::storage::client_db::get_pending_online_outbox(&contact.device_id)
-            {
-                if pending.next_tip.len() == 32 {
-                    let mut next_tip = [0u8; 32];
-                    next_tip.copy_from_slice(&pending.next_tip);
-                    if next_tip != current_tip && next_tip != [0u8; 32] {
-                        match crate::sdk::b0x_sdk::B0xSDK::compute_b0x_address(
-                            &local_genesis,
-                            &local_device_id,
-                            &next_tip,
-                        ) {
-                            Ok(addr) => {
-                                log::info!(
-                                    "[collect_tagged_inbox_addresses] contact {} pending-outbox next-tip address added (T_n+1 reply window)",
-                                    contact.alias
-                                );
-                                addresses.push(TaggedInboxAddress {
-                                    address: addr,
-                                    freshness: RouteFreshness::Current,
-                                });
-                            }
-                            Err(e) => {
-                                log::warn!(
-                                    "[collect_tagged_inbox_addresses] contact {} pending-outbox next-tip address derivation failed: {}",
-                                    contact.alias,
-                                    e
-                                );
-                            }
-                        }
-                    }
-                }
+                    pending.next_tip.len()
+                )
+            })?;
+            if next_tip != current_tip {
+                addresses.push(TaggedInboxAddress {
+                    address: address_for(&next_tip)?,
+                    freshness: RouteFreshness::Current,
+                });
             }
         }
     }
 
-    // 4. Retained routes from incomplete or unACKed split-transfer staging.
-    //
-    // A split send's two halves may land polls — or relationship advancements
-    // — apart. Sources 1-3 hold a route for one advancement at most, and a
-    // partner artifact replayed by the sender under its ORIGINAL frozen route
-    // (it is never re-routed: the node dedups on message id alone) would land
-    // where nobody is listening. So the route the first half arrived on stays
-    // in the poll set until the pair completes and both ACKs succeed. Read from
+    // A split transfer's halves may land polls — or relationship
+    // advancements — apart, and a partner artifact the sender replays keeps
+    // its original frozen route. The route the first half arrived on stays in
+    // the poll set until the pair completes and both ACKs succeed; read from
     // the database every poll, so it survives restart. `Current`, not
     // `PreviousTip`: the previous-tip adjacency filter would drop or mis-ACK a
-    // split half. Dedup below folds it into any live route it collides with.
-    match crate::storage::client_db::recipient_staging::retained_routes_for_polling() {
-        Ok(routes) => {
-            for route in routes {
-                log::info!(
-                    "[collect_tagged_inbox_addresses] retained split-transfer route added {}..",
-                    &route[..route.len().min(12)]
-                );
-                addresses.push(TaggedInboxAddress {
-                    address: route,
-                    freshness: RouteFreshness::Current,
-                });
-            }
-        }
-        Err(e) => log::warn!(
-            "[collect_tagged_inbox_addresses] retained-route lookup failed (continuing with \
-             tip-derived routes only): {e}"
-        ),
-    }
+    // split half.
+    let retained = crate::storage::client_db::recipient_staging::retained_routes_for_polling()
+        .map_err(|e| format!("retained split-transfer routes unreadable: {e}"))?;
+    addresses.extend(retained.into_iter().map(|route| TaggedInboxAddress {
+        address: route,
+        freshness: RouteFreshness::Current,
+    }));
 
-    // Dedup by address: if current and previous collide, keep Current
+    // Dedup by address: if current and previous collide, keep Current.
     addresses.sort_by(|a, b| a.address.cmp(&b.address));
     addresses.dedup_by(|a, b| {
         if a.address == b.address {
-            // Keep whichever is Current
             if a.freshness == RouteFreshness::Current {
                 b.freshness = RouteFreshness::Current;
             }
@@ -2502,7 +2354,7 @@ pub(crate) fn collect_tagged_inbox_addresses(
             false
         }
     });
-    addresses
+    Ok(addresses)
 }
 
 /// Outcome of the pure contact-repair trust decision.
@@ -2585,7 +2437,7 @@ mod ak_trust_root_tests {
             genesis_hash: GENESIS.to_vec(),
             public_key: ak.to_vec(),
             kyber_public_key,
-            current_chain_tip: None,
+            current_chain_tip: Some(vec![0x70; 32]),
             verified: true,
             verification_proof: None,
             metadata: std::collections::HashMap::new(),
@@ -2820,8 +2672,7 @@ impl AppRouter for AppRouterImpl {
             // Identity routes
             "identity.transport_headers_v3"
             | "identity.pairing_qr"
-            | "identity.pairing_compact"
-            | "identity.devtree.snapshot" => self.handle_identity_query(q).await,
+            | "identity.pairing_compact" => self.handle_identity_query(q).await,
             // Balance/wallet query routes
             "balance.get" | "balance.list" | "wallet.history" => self.handle_wallet_query(q).await,
             // Contacts routes
@@ -2890,7 +2741,6 @@ impl AppRouter for AppRouterImpl {
             | "sofi.close" | "sofi.relay" | "sofi.resolve" => self.handle_sofi_invoke(i).await,
             // BLE
             // Bilateral reconcile
-            "bilateral.reconcile" => self.handle_bilateral_reconcile_invoke(i).await,
             // Faucet
             "faucet.claim" => self.handle_faucet_invoke(i).await,
             // Session invoke routes
@@ -2909,7 +2759,6 @@ impl AppRouter for AppRouterImpl {
                 self.handle_recovery_invoke(i).await
             }
             // Secondary-device admission invoke routes (gated additional-device enrollment)
-            m if m.starts_with("device.") => self.handle_device_invoke(i).await,
             // Bitcoin invoke routes
             m if m.starts_with("bitcoin.") => self.handle_bitcoin_invoke(i).await,
             _ => err(format!(
@@ -3007,9 +2856,9 @@ fn decide_counterparty(
 #[cfg(test)]
 mod tests {
     use super::{
-        collect_tagged_inbox_addresses, compute_initial_relationship_chain_tip,
-        relationship_tip_for_contact_restore, AppRouterImpl, RouteFreshness,
+        collect_tagged_inbox_addresses, contact_relationship_tip, AppRouterImpl, RouteFreshness,
     };
+    use dsm::core::bilateral_transaction_manager::initial_relationship_chain_tip;
     use crate::storage::client_db::ContactRecord;
     use serial_test::serial;
     use std::collections::HashMap;
@@ -3021,6 +2870,7 @@ mod tests {
         contacts: &[ContactRecord],
     ) -> Vec<String> {
         collect_tagged_inbox_addresses(genesis, device, contacts)
+            .expect("inbox routes")
             .into_iter()
             .map(|t| t.address)
             .collect()
@@ -3036,21 +2886,21 @@ mod tests {
         assert!(addresses.is_empty());
     }
 
+    /// A contact's inbox route is derived from its stored relationship tip.
     #[test]
-    fn inbox_addresses_uses_initial_tip_when_contact_tip_missing() {
+    fn inbox_addresses_route_each_contact_by_its_stored_tip() {
         let genesis = [0x66u8; 32];
         let device = [0x77u8; 32];
-        let remote_device = [0x88u8; 32];
-        let remote_genesis = [0x99u8; 32];
+        let stored_tip = [0x5Au8; 32];
 
         let contact = ContactRecord {
             contact_id: "c_test".to_string(),
-            device_id: remote_device.to_vec(),
+            device_id: [0x88u8; 32].to_vec(),
             alias: "peer".to_string(),
-            genesis_hash: remote_genesis.to_vec(),
-            public_key: vec![],
-            kyber_public_key: Vec::new(),
-            current_chain_tip: None,
+            genesis_hash: [0x99u8; 32].to_vec(),
+            public_key: vec![0x41; 64],
+            kyber_public_key: vec![0x4B; 1184],
+            current_chain_tip: Some(stored_tip.to_vec()),
             verified: true,
             verification_proof: None,
             metadata: HashMap::new(),
@@ -3061,15 +2911,8 @@ mod tests {
         };
 
         let addresses = inbox_addresses(genesis, device, &[contact]);
-        let initial_tip = compute_initial_relationship_chain_tip(
-            device,
-            genesis,
-            &remote_device,
-            &remote_genesis,
-        )
-        .expect("initial relationship tip");
         let expected =
-            crate::sdk::b0x_sdk::B0xSDK::compute_b0x_address(&genesis, &device, &initial_tip)
+            crate::sdk::b0x_sdk::B0xSDK::compute_b0x_address(&genesis, &device, &stored_tip)
                 .expect("canonical route");
 
         assert_eq!(addresses, vec![expected]);
@@ -3130,19 +2973,15 @@ mod tests {
         );
     }
 
-    #[test]
-    fn relationship_tip_restore_prefers_stored_contact_tip() {
-        let local_device = [0x01u8; 32];
-        let local_genesis = [0x02u8; 32];
-        let stored_tip = [0xABu8; 32];
-        let contact = ContactRecord {
+    fn contact_with_tip(tip: Option<Vec<u8>>) -> ContactRecord {
+        ContactRecord {
             contact_id: "c_tip".to_string(),
             device_id: [0x03u8; 32].to_vec(),
             alias: "peer".to_string(),
             genesis_hash: [0x04u8; 32].to_vec(),
-            public_key: vec![],
-            kyber_public_key: Vec::new(),
-            current_chain_tip: Some(stored_tip.to_vec()),
+            public_key: vec![0x41; 64],
+            kyber_public_key: vec![0x4B; 1184],
+            current_chain_tip: tip,
             verified: true,
             verification_proof: None,
             metadata: HashMap::new(),
@@ -3150,74 +2989,47 @@ mod tests {
             status: "Created".to_string(),
             needs_online_reconcile: false,
             previous_chain_tip: None,
-        };
-
-        let restored =
-            relationship_tip_for_contact_restore(local_device, local_genesis, &contact).unwrap();
-
-        assert_eq!(restored, stored_tip);
+        }
     }
 
     #[test]
-    fn relationship_tip_restore_computes_initial_tip_when_contact_tip_missing() {
-        let local_device = [0x10u8; 32];
-        let local_genesis = [0x20u8; 32];
-        let remote_device = [0x30u8; 32];
-        let remote_genesis = [0x40u8; 32];
-        let contact = ContactRecord {
-            contact_id: "c_init".to_string(),
-            device_id: remote_device.to_vec(),
-            alias: "peer".to_string(),
-            genesis_hash: remote_genesis.to_vec(),
-            public_key: vec![],
-            kyber_public_key: Vec::new(),
-            current_chain_tip: None,
-            verified: true,
-            verification_proof: None,
-            metadata: HashMap::new(),
-            ble_address: None,
-            status: "Created".to_string(),
-            needs_online_reconcile: false,
-            previous_chain_tip: None,
-        };
+    fn a_contacts_relationship_tip_is_its_stored_tip() {
+        let stored_tip = [0xABu8; 32];
+        assert_eq!(
+            contact_relationship_tip(&contact_with_tip(Some(stored_tip.to_vec()))),
+            Ok(stored_tip)
+        );
+    }
 
-        let restored =
-            relationship_tip_for_contact_restore(local_device, local_genesis, &contact).unwrap();
-        let expected = compute_initial_relationship_chain_tip(
-            local_device,
-            local_genesis,
-            &remote_device,
-            &remote_genesis,
-        )
-        .unwrap();
-
-        assert_eq!(restored, expected);
-        assert_ne!(restored, remote_genesis);
+    /// A contact without a 32-byte tip is corrupt: its tip is an error, never
+    /// an h_0 computed in its place.
+    #[test]
+    fn a_contact_without_a_32_byte_tip_has_no_relationship_tip() {
+        assert!(contact_relationship_tip(&contact_with_tip(None)).is_err());
+        assert!(contact_relationship_tip(&contact_with_tip(Some(vec![0x70; 31]))).is_err());
     }
 
     #[test]
-    fn compute_initial_relationship_chain_tip_is_symmetric() {
+    fn the_initial_relationship_tip_is_symmetric() {
         let alice_device = [0x11u8; 32];
         let alice_genesis = [0x22u8; 32];
         let bob_device = [0x33u8; 32];
         let bob_genesis = [0x44u8; 32];
 
-        let alice_view = compute_initial_relationship_chain_tip(
-            alice_device,
-            alice_genesis,
-            &bob_device,
-            &bob_genesis,
-        )
-        .expect("alice view");
-        let bob_view = compute_initial_relationship_chain_tip(
-            bob_device,
-            bob_genesis,
-            &alice_device,
-            &alice_genesis,
-        )
-        .expect("bob view");
-
-        assert_eq!(alice_view, bob_view);
+        assert_eq!(
+            initial_relationship_chain_tip(
+                &alice_device,
+                &alice_genesis,
+                &bob_device,
+                &bob_genesis
+            ),
+            initial_relationship_chain_tip(
+                &bob_device,
+                &bob_genesis,
+                &alice_device,
+                &alice_genesis
+            )
+        );
     }
 
     #[test]
@@ -3227,21 +3039,20 @@ mod tests {
         let bob_device = [0x33u8; 32];
         let bob_genesis = [0x44u8; 32];
 
-        let initial_tip = compute_initial_relationship_chain_tip(
-            alice_device,
-            alice_genesis,
+        let initial_tip = initial_relationship_chain_tip(
+            &alice_device,
+            &alice_genesis,
             &bob_device,
             &bob_genesis,
-        )
-        .expect("initial relationship tip");
+        );
 
         let alice_as_bob_contact = ContactRecord {
             contact_id: "alice".to_string(),
             device_id: alice_device.to_vec(),
             alias: "alice".to_string(),
             genesis_hash: alice_genesis.to_vec(),
-            public_key: vec![],
-            kyber_public_key: Vec::new(),
+            public_key: vec![0x41; 64],
+            kyber_public_key: vec![0x4B; 1184],
             current_chain_tip: Some(initial_tip.to_vec()),
             verified: true,
             verification_proof: None,
@@ -3278,8 +3089,8 @@ mod tests {
             device_id: [0xEEu8; 32].to_vec(),
             alias: "peer".to_string(),
             genesis_hash: [0xFFu8; 32].to_vec(),
-            public_key: vec![],
-            kyber_public_key: Vec::new(),
+            public_key: vec![0x41; 64],
+            kyber_public_key: vec![0x4B; 1184],
             current_chain_tip: Some(current_tip.to_vec()),
             verified: true,
             verification_proof: None,
@@ -3290,7 +3101,8 @@ mod tests {
             previous_chain_tip: Some(previous_tip.to_vec()),
         };
 
-        let tagged = collect_tagged_inbox_addresses(genesis, device, &[contact]);
+        let tagged =
+            collect_tagged_inbox_addresses(genesis, device, &[contact]).expect("inbox routes");
         assert_eq!(tagged.len(), 2);
         assert!(tagged
             .iter()
@@ -3312,8 +3124,8 @@ mod tests {
             device_id: [0xEEu8; 32].to_vec(),
             alias: "peer".to_string(),
             genesis_hash: [0xFFu8; 32].to_vec(),
-            public_key: vec![],
-            kyber_public_key: Vec::new(),
+            public_key: vec![0x41; 64],
+            kyber_public_key: vec![0x4B; 1184],
             current_chain_tip: Some(tip.to_vec()),
             verified: true,
             verification_proof: None,
@@ -3324,7 +3136,8 @@ mod tests {
             previous_chain_tip: Some(tip.to_vec()), // same as current
         };
 
-        let tagged = collect_tagged_inbox_addresses(genesis, device, &[contact]);
+        let tagged =
+            collect_tagged_inbox_addresses(genesis, device, &[contact]).expect("inbox routes");
         assert_eq!(tagged.len(), 1);
         assert_eq!(tagged[0].freshness, RouteFreshness::Current);
     }
@@ -3339,8 +3152,8 @@ mod tests {
             device_id: [0xEEu8; 32].to_vec(),
             alias: "peer".to_string(),
             genesis_hash: [0xFFu8; 32].to_vec(),
-            public_key: vec![],
-            kyber_public_key: Vec::new(),
+            public_key: vec![0x41; 64],
+            kyber_public_key: vec![0x4B; 1184],
             current_chain_tip: Some([0xCCu8; 32].to_vec()),
             verified: true,
             verification_proof: None,
@@ -3351,7 +3164,8 @@ mod tests {
             previous_chain_tip: None,
         };
 
-        let tagged = collect_tagged_inbox_addresses(genesis, device, &[contact]);
+        let tagged =
+            collect_tagged_inbox_addresses(genesis, device, &[contact]).expect("inbox routes");
         assert_eq!(tagged.len(), 1);
         assert_eq!(tagged[0].freshness, RouteFreshness::Current);
     }
@@ -3366,8 +3180,8 @@ mod tests {
             device_id: [0xEEu8; 32].to_vec(),
             alias: "peer".to_string(),
             genesis_hash: [0xFFu8; 32].to_vec(),
-            public_key: vec![],
-            kyber_public_key: Vec::new(),
+            public_key: vec![0x41; 64],
+            kyber_public_key: vec![0x4B; 1184],
             current_chain_tip: Some([0xCCu8; 32].to_vec()),
             verified: true,
             verification_proof: None,

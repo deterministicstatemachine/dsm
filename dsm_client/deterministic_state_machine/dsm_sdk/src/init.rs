@@ -347,7 +347,6 @@ impl dsm::core::bridge::BilateralHandler for CoreBilateralBridge {
             Ok(pb::OpResult {
                 op_id: None,
                 accepted: true,
-                post_state_hash: None,
                 result: Some(pb::ResultPack {
                     schema_hash: None,
                     codec: pb::Codec::Proto as i32,
@@ -385,7 +384,6 @@ impl dsm::core::bridge::BilateralHandler for CoreBilateralBridge {
             Ok(pb::OpResult {
                 op_id: None,
                 accepted: true,
-                post_state_hash: None,
                 result: Some(pb::ResultPack {
                     schema_hash: None,
                     codec: pb::Codec::Proto as i32,
@@ -423,7 +421,6 @@ impl dsm::core::bridge::BilateralHandler for CoreBilateralBridge {
             Ok(pb::OpResult {
                 op_id: None,
                 accepted: true,
-                post_state_hash: None,
                 result: Some(pb::ResultPack {
                     schema_hash: None,
                     codec: pb::Codec::Proto as i32,
@@ -461,7 +458,6 @@ impl dsm::core::bridge::BilateralHandler for CoreBilateralBridge {
             Ok(pb::OpResult {
                 op_id: None,
                 accepted: true,
-                post_state_hash: None,
                 result: Some(pb::ResultPack {
                     schema_hash: None,
                     codec: pb::Codec::Proto as i32,
@@ -531,6 +527,7 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
     } else {
         // Install minimal bootstrap router for pre-genesis queries
         use crate::bridge::{AppQuery, AppInvoke, AppResult};
+        use dsm::types::error::DsmError;
 
         struct MinimalBootstrapRouter;
 
@@ -565,6 +562,79 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
                     )),
                 }
             }
+
+            // Before genesis there is no device state: no balance cache to
+            // reload, no head, and nothing an advance, a policy lookup or an
+            // offline bearer could run over.
+            fn sync_balance_cache(&self) {}
+
+            fn device_head(&self) -> Option<dsm::types::device_state::DeviceState> {
+                None
+            }
+
+            fn resolve_policy_commit_strict(&self, _token_id: &[u8]) -> Result<[u8; 32], DsmError> {
+                Err(requires_genesis("resolve_policy_commit_strict"))
+            }
+
+            fn simulate_advance_for_confirm(
+                &self,
+                _rel_key: [u8; 32],
+                _counterparty_devid: [u8; 32],
+                _operation: dsm::types::operations::Operation,
+                _deltas: &[dsm::types::device_state::BalanceDelta],
+                _anchor_leaf: Option<dsm::types::device_state::AnchorLeafUpdate>,
+                _offline_spend: Option<dsm::types::device_state::OfflineSpend>,
+            ) -> Result<dsm::types::device_state::AdvanceOutcome, DsmError> {
+                Err(requires_genesis("simulate_advance_for_confirm"))
+            }
+
+            fn stage_offline_bearer_transition(
+                &self,
+                _relationship_id: [u8; 32],
+                _recipient_device_id: [u8; 32],
+                _object_id: [u8; 32],
+                _payload_hash: [u8; 32],
+                _authority_policy_hash: [u8; 32],
+                _action_type: u32,
+                _action_fields: Vec<u8>,
+                _receiver_challenge: [u8; 32],
+            ) -> Result<crate::sdk::core_sdk::StagedBearerTransition, DsmError> {
+                Err(requires_genesis("stage_offline_bearer_transition"))
+            }
+
+            fn release_offline_bearer(
+                &self,
+                _staged: &crate::sdk::core_sdk::StagedBearerTransition,
+                _receiver_challenge: [u8; 32],
+                _sender_device_root_before: [u8; 32],
+                _sender_device_root_after: [u8; 32],
+                _anchor_smt_proof_before: Vec<u8>,
+                _anchor_smt_proof_after: Vec<u8>,
+            ) -> Result<crate::sdk::core_sdk::OfflineBearerArtifacts, DsmError> {
+                Err(requires_genesis("release_offline_bearer"))
+            }
+
+            fn cancel_offline_bearer_release(&self) -> Result<(), DsmError> {
+                Err(requires_genesis("cancel_offline_bearer_release"))
+            }
+
+            fn execute_on_relationship_for_bilateral(
+                &self,
+                _rel_key: [u8; 32],
+                _counterparty_devid: [u8; 32],
+                _operation: dsm::types::operations::Operation,
+                _deltas: &[dsm::types::device_state::BalanceDelta],
+                _anchor_leaf: Option<dsm::types::device_state::AnchorLeafUpdate>,
+                _offline_spend: Option<dsm::types::device_state::OfflineSpend>,
+            ) -> Result<dsm::types::device_state::AdvanceOutcome, DsmError> {
+                Err(requires_genesis("execute_on_relationship_for_bilateral"))
+            }
+        }
+
+        fn requires_genesis(what: &str) -> DsmError {
+            DsmError::invalid_operation(format!(
+                "MinimalBootstrapRouter: {what} requires genesis; this device has no identity yet"
+            ))
         }
 
         install_sdk_app_router(Arc::new(MinimalBootstrapRouter))

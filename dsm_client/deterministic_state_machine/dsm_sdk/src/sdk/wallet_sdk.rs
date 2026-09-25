@@ -987,7 +987,6 @@ mod tests {
             to_device_id: vec![0u8; 32],
             token_id: "ERA".to_string(),
             amount: 1,
-            fee: 0,
             tx_hash: vec![0u8; 32],
             amount_signed: 1,
             tx_type: crate::generated::TransactionType::TxTypeUnspecified as i32,

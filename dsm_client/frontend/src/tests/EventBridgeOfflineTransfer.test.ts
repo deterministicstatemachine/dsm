@@ -38,7 +38,6 @@ describe('parseBleEnvelope offline transfer detection', () => {
     const uop = new pb.UniversalOp({
       opId: zeroHash32(),
       actor: new Uint8Array(32) as any,
-      genesisHash: new Uint8Array(32) as any,
       kind: { case: 'invoke', value: invoke },
     });
 

@@ -11654,16 +11654,6 @@ export class OfflineBilateralTransaction extends Message<OfflineBilateralTransac
   commitmentHash = new Uint8Array(0);
 
   /**
-   * @generated from field: bytes sender_state_hash = 5;
-   */
-  senderStateHash = new Uint8Array(0);
-
-  /**
-   * @generated from field: bytes recipient_state_hash = 6;
-   */
-  recipientStateHash = new Uint8Array(0);
-
-  /**
    * @generated from field: dsm.OfflineBilateralTransactionStatus status = 7;
    */
   status = OfflineBilateralTransactionStatus.OFFLINE_TX_STATUS_UNSPECIFIED;
@@ -11687,8 +11677,6 @@ export class OfflineBilateralTransaction extends Message<OfflineBilateralTransac
     { no: 2, name: "sender_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 3, name: "recipient_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 4, name: "commitment_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 5, name: "sender_state_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 6, name: "recipient_state_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 7, name: "status", kind: "enum", T: proto3.getEnumType(OfflineBilateralTransactionStatus) },
     { no: 8, name: "metadata", kind: "map", K: 9 /* ScalarType.STRING */, V: {kind: "scalar", T: 9 /* ScalarType.STRING */} },
   ]);
@@ -12302,20 +12290,6 @@ export class ReceiptCommit extends Message<ReceiptCommit> {
   kyberCtB = new Uint8Array(0);
 
   /**
-   * Fork-aware finalization witness (whitepaper §4.1.1 + §4.3). Present only
-   * when the successor was stitched under the fork-aware precommit family
-   * (multiple candidates committed under C_pre^root). Carried in the envelope
-   * ONLY — explicitly excluded from the canonical commit preimage so that the
-   * §4.2.1 ten-field commit form is preserved unchanged. The recipient's
-   * verifier rebuilds C_pre^j for every unselected branch and checks
-   *   pi_inv == invalidation_proof_commitment(C_pre^j for j != selected)
-   * before parent-consumption Tripwire admits the successor.
-   *
-   * @generated from field: dsm.ForkAwareWitness fork_witness = 20;
-   */
-  forkWitness?: ForkAwareWitness;
-
-  /**
    * The sender's transition entropy e_{n+1} (Part VII step 3, §39.3): the one
    * value Core derived inside DeviceState::advance for this step. CANONICAL —
    * part of the commit preimage, so sig_a binds it. The recipient cannot
@@ -12351,7 +12325,6 @@ export class ReceiptCommit extends Message<ReceiptCommit> {
     { no: 17, name: "ek_pk_b", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 18, name: "kyber_ct_a", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 19, name: "kyber_ct_b", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 20, name: "fork_witness", kind: "message", T: ForkAwareWitness },
     { no: 21, name: "transition_entropy", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
@@ -12369,145 +12342,6 @@ export class ReceiptCommit extends Message<ReceiptCommit> {
 
   static equals(a: ReceiptCommit | PlainMessage<ReceiptCommit> | undefined, b: ReceiptCommit | PlainMessage<ReceiptCommit> | undefined): boolean {
     return proto3.util.equals(ReceiptCommit, a, b);
-  }
-}
-
-/**
- * Fork-aware finalization witness (whitepaper §4.1.1 + §4.3).
- *
- * A successor stitched under the fork-aware precommit family is acceptable
- * iff (a) the selected branch's `C_pre^i` is a member of the committed
- * candidate set under `C_pre^root`, and (b) the supplied `pi_inv`
- * byte-exactly matches `H("DSM/precommit/invalidation-proof/v2\0" ||
- * enc(unselected C_pre^j))`.
- *
- * The witness rides in the receipt envelope (not in the canonical commit
- * preimage). For a non-fork (single-candidate) successor this message is
- * omitted entirely.
- *
- * @generated from message dsm.ForkAwareWitness
- */
-export class ForkAwareWitness extends Message<ForkAwareWitness> {
-  /**
-   * Parent tip h_n that anchors the C_pre^i derivation. MUST equal the
-   * receipt's parent_tip; encoded here so the verifier can independently
-   * recompute the canonical branch commitments without consulting state.
-   *
-   * @generated from field: bytes parent_tip = 1;
-   */
-  parentTip = new Uint8Array(0);
-
-  /**
-   * Full ordered candidate set committed under C_pre^root. The verifier
-   * rebuilds each candidate's C_pre^i under the canonical v2 domain
-   * `DSM/precommit/commitment-hash/v2\0`. At least one entry; in practice
-   * bounded by the operator's deterministic state-machine fan-out.
-   *
-   * @generated from field: repeated dsm.ForkAwareCandidate candidates = 2;
-   */
-  candidates: ForkAwareCandidate[] = [];
-
-  /**
-   * The fork_id of the selected candidate. MUST match exactly one entry in
-   * `candidates`; otherwise the witness is rejected.
-   *
-   * @generated from field: string selected_fork_id = 3;
-   */
-  selectedForkId = "";
-
-  /**
-   * Canonical invalidation-proof commitment over the C_pre^j of every
-   * unselected branch (i.e. all candidates except `selected_fork_id`).
-   *
-   * @generated from field: bytes pi_inv = 4;
-   */
-  piInv = new Uint8Array(0);
-
-  constructor(data?: PartialMessage<ForkAwareWitness>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.ForkAwareWitness";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "parent_tip", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 2, name: "candidates", kind: "message", T: ForkAwareCandidate, repeated: true },
-    { no: 3, name: "selected_fork_id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 4, name: "pi_inv", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ForkAwareWitness {
-    return new ForkAwareWitness().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ForkAwareWitness {
-    return new ForkAwareWitness().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ForkAwareWitness {
-    return new ForkAwareWitness().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: ForkAwareWitness | PlainMessage<ForkAwareWitness> | undefined, b: ForkAwareWitness | PlainMessage<ForkAwareWitness> | undefined): boolean {
-    return proto3.util.equals(ForkAwareWitness, a, b);
-  }
-}
-
-/**
- * Single candidate inside a fork-aware precommit family.
- *
- * `fork_id` is a deterministic short label (bounded to MAX_ID_LEN) and is
- * the same id used at construction time (`select_fork`). `payload` and
- * `entropy` reproduce the inputs to `branch_commitment_hash` so the
- * verifier can recompute `C_pre^i = H("DSM/precommit/commitment-hash/v2\0"
- * || parent_tip || payload || entropy)`.
- *
- * @generated from message dsm.ForkAwareCandidate
- */
-export class ForkAwareCandidate extends Message<ForkAwareCandidate> {
-  /**
-   * @generated from field: string fork_id = 1;
-   */
-  forkId = "";
-
-  /**
-   * @generated from field: bytes payload = 2;
-   */
-  payload = new Uint8Array(0);
-
-  /**
-   * @generated from field: bytes entropy = 3;
-   */
-  entropy = new Uint8Array(0);
-
-  constructor(data?: PartialMessage<ForkAwareCandidate>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.ForkAwareCandidate";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "fork_id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 2, name: "payload", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 3, name: "entropy", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ForkAwareCandidate {
-    return new ForkAwareCandidate().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ForkAwareCandidate {
-    return new ForkAwareCandidate().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ForkAwareCandidate {
-    return new ForkAwareCandidate().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: ForkAwareCandidate | PlainMessage<ForkAwareCandidate> | undefined, b: ForkAwareCandidate | PlainMessage<ForkAwareCandidate> | undefined): boolean {
-    return proto3.util.equals(ForkAwareCandidate, a, b);
   }
 }
 
@@ -16278,13 +16112,6 @@ export class UniversalOp extends Message<UniversalOp> {
   actor = new Uint8Array(0);
 
   /**
-   * actor’s chain root
-   *
-   * @generated from field: bytes genesis_hash = 3;
-   */
-  genesisHash = new Uint8Array(0);
-
-  /**
    * @generated from oneof dsm.UniversalOp.kind
    */
   kind: {
@@ -16377,7 +16204,6 @@ export class UniversalOp extends Message<UniversalOp> {
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
     { no: 1, name: "op_id", kind: "message", T: Hash32 },
     { no: 2, name: "actor", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 3, name: "genesis_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 10, name: "invoke", kind: "message", T: Invoke, oneof: "kind" },
     { no: 11, name: "precommit_oneof", kind: "message", T: PrecommitOneOf, oneof: "kind" },
     { no: 12, name: "resolve_precommit", kind: "message", T: ResolvePrecommit, oneof: "kind" },
@@ -16544,11 +16370,6 @@ export class OpResult extends Message<OpResult> {
   accepted = false;
 
   /**
-   * @generated from field: dsm.Hash32 post_state_hash = 3;
-   */
-  postStateHash?: Hash32;
-
-  /**
    * @generated from field: dsm.ResultPack result = 4;
    */
   result?: ResultPack;
@@ -16568,7 +16389,6 @@ export class OpResult extends Message<OpResult> {
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
     { no: 1, name: "op_id", kind: "message", T: Hash32 },
     { no: 2, name: "accepted", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
-    { no: 3, name: "post_state_hash", kind: "message", T: Hash32 },
     { no: 4, name: "result", kind: "message", T: ResultPack },
     { no: 5, name: "error", kind: "message", T: Error },
   ]);
@@ -17376,12 +17196,6 @@ export class Envelope extends Message<Envelope> {
     case: "tokenPolicyListResponse";
   } | {
     /**
-     * @generated from field: dsm.BilateralReconciliationResponse reconciliation_response = 98;
-     */
-    value: BilateralReconciliationResponse;
-    case: "reconciliationResponse";
-  } | {
-    /**
      * @generated from field: dsm.Error error = 99;
      */
     value: Error;
@@ -17610,7 +17424,6 @@ export class Envelope extends Message<Envelope> {
     { no: 95, name: "session_state_response", kind: "message", T: AppSessionStateProto, oneof: "payload" },
     { no: 96, name: "nfc_recovery_capsule", kind: "message", T: NfcRecoveryCapsule, oneof: "payload" },
     { no: 97, name: "token_policy_list_response", kind: "message", T: TokenPolicyListResponse, oneof: "payload" },
-    { no: 98, name: "reconciliation_response", kind: "message", T: BilateralReconciliationResponse, oneof: "payload" },
     { no: 99, name: "error", kind: "message", T: Error, oneof: "payload" },
     { no: 100, name: "genesis_lifecycle", kind: "message", T: GenesisLifecycleEvent, oneof: "payload" },
     { no: 101, name: "bootstrap_measurement_report", kind: "message", T: BootstrapMeasurementReport, oneof: "payload" },
@@ -21710,11 +21523,6 @@ export class TransactionInfo extends Message<TransactionInfo> {
   amount = protoInt64.zero;
 
   /**
-   * @generated from field: uint64 fee = 6;
-   */
-  fee = protoInt64.zero;
-
-  /**
    * @generated from field: bytes tx_hash = 8;
    */
   txHash = new Uint8Array(0);
@@ -21789,7 +21597,6 @@ export class TransactionInfo extends Message<TransactionInfo> {
     { no: 3, name: "to_device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 4, name: "token_id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 5, name: "amount", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
-    { no: 6, name: "fee", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
     { no: 8, name: "tx_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 9, name: "amount_signed", kind: "scalar", T: 18 /* ScalarType.SINT64 */ },
     { no: 10, name: "tx_type", kind: "enum", T: proto3.getEnumType(TransactionType) },
@@ -21974,11 +21781,6 @@ export class InboxItem extends Message<InboxItem> {
   senderId?: string;
 
   /**
-   * @generated from field: bytes payload = 5;
-   */
-  payload = new Uint8Array(0);
-
-  /**
    * arrived via previous (non-current) relationship tip
    *
    * @generated from field: bool is_stale_route = 6;
@@ -21996,7 +21798,6 @@ export class InboxItem extends Message<InboxItem> {
     { no: 1, name: "id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 2, name: "preview", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 4, name: "sender_id", kind: "scalar", T: 9 /* ScalarType.STRING */, opt: true },
-    { no: 5, name: "payload", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 6, name: "is_stale_route", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
   ]);
 

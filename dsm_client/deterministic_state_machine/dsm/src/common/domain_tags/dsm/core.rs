@@ -115,11 +115,6 @@ pub const TAG_SETTLEMENT_RECEIPT_ID: TaggedHashDomain<'static> =
 /// vault holds 10,000 ERA" into "the owner's device root commits it".
 pub const TAG_VAULT_RESERVE_INCLUSION: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/vault-reserve-inclusion/v1");
-pub const TAG_COMMITMENT: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/commitment");
-pub const TAG_COMMITMENT_OPEN: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/commitment-open");
-pub const TAG_COMMITMENT_FIELDS: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/commitment-fields");
 pub const TAG_MERKLE_NODE: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/merkle-node");
 pub const TAG_MERKLE_LEAF: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/merkle-leaf");
 // Device Tree (standard Merkle) — see Issue #182 Finding #2 for the
@@ -160,9 +155,6 @@ pub(super) const TAGS: &[TaggedHashDomain<'static>] = &[
     TAG_SETTLEMENT_RECEIPT_COMMIT,
     TAG_SETTLEMENT_RECEIPT_ID,
     TAG_VAULT_RESERVE_INCLUSION,
-    TAG_COMMITMENT,
-    TAG_COMMITMENT_OPEN,
-    TAG_COMMITMENT_FIELDS,
     TAG_MERKLE_NODE,
     TAG_MERKLE_LEAF,
     TAG_DEV_MERKLE,

@@ -473,7 +473,6 @@ describe('Online Transfer — Proto Fidelity', () => {
     const uop = new pb.UniversalOp({
       opId,
       actor: DEVICE_A as any,
-      genesisHash: GENESIS_A as any,
       kind: { case: 'invoke', value: invoke } as any,
     });
     const tx = new pb.UniversalTx({ ops: [uop], atomic: true });

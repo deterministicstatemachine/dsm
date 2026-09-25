@@ -19,20 +19,6 @@ pub static BILATERAL_INIT_POLL_STARTED: AtomicBool = AtomicBool::new(false);
 pub static DEVICE_ID_TO_ADDR: Lazy<Mutex<HashMap<[u8; 32], String>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
-/// Parse a 64-char lowercase hex string into `[u8; 32]`. Returns `None` on bad input.
-pub fn parse_hex_32(hex: &str) -> Option<[u8; 32]> {
-    if hex.len() != 64 {
-        return None;
-    }
-    let mut out = [0u8; 32];
-    for i in 0..32 {
-        let hi = (*hex.as_bytes().get(i * 2)? as char).to_digit(16)? as u8;
-        let lo = (*hex.as_bytes().get(i * 2 + 1)? as char).to_digit(16)? as u8;
-        out[i] = (hi << 4) | lo;
-    }
-    Some(out)
-}
-
 /// Resolve a peer's current BLE address from its device_id (the reverse of
 /// [`register_ble_address_mapping`]). Used by the Path-B relay round-trip to address the sender.
 /// Returns `None` if the peer has no observed address yet (relay then fails closed).

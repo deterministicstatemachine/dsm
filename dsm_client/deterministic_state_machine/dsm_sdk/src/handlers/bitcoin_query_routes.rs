@@ -449,7 +449,10 @@ impl AppRouterImpl {
                     locked,
                     ..Default::default()
                 };
-                crate::handlers::wallet_routes::enrich_balance_metadata(&mut reply);
+                if let Err(e) = crate::handlers::wallet_routes::enrich_balance_metadata(&mut reply)
+                {
+                    return err(format!("bitcoin balance: {e}"));
+                }
                 pack_envelope_ok(generated::envelope::Payload::BalanceGetResponse(reply))
             }
 

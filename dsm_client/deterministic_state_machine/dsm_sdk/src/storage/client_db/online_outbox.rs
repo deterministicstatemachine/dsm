@@ -191,7 +191,8 @@ pub fn record_pending_online_transition_with_conn(
         }
     };
 
-    let stored_parent = current_chain_tip.unwrap_or_else(|| vec![0u8; 32]);
+    let stored_parent: Vec<u8> =
+        current_chain_tip.ok_or_else(|| anyhow!("the contact has no finalized chain tip"))?;
     if stored_parent.len() != 32 {
         return Err(anyhow!(
             "Stored finalized chain tip has invalid length {}",

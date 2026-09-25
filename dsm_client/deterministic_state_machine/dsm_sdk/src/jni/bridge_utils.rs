@@ -5,7 +5,6 @@
 //! Shared helpers for JNI entry points: protobuf request/response
 //! marshalling and error-to-`OpResult` conversion.
 
-use crate::generated as pb;
 use jni::objects::{JByteArray, JString};
 use jni::JNIEnv;
 use prost::Message;
@@ -164,22 +163,4 @@ pub fn error_byte_array<'a>(env: &'a JNIEnv<'a>, code: u32, msg: &str) -> JByteA
             empty_byte_array_or_empty(env)
         }
     }
-}
-
-pub fn fetch_transport_headers_bytes() -> Result<Vec<u8>, String> {
-    crate::get_transport_headers_v3_bytes().map_err(|e| format!("headers fetch failed: {e}"))
-}
-
-pub fn build_transport_headers_pack() -> Result<Vec<u8>, String> {
-    let body = fetch_transport_headers_bytes()
-        .map_err(|e| format!("fetch_transport_headers_bytes failed: {}", e))?;
-    let pack = pb::ResultPack {
-        schema_hash: None,
-        codec: pb::Codec::Proto as i32,
-        body,
-    };
-    let mut out = Vec::new();
-    pack.encode(&mut out)
-        .map_err(|e| format!("ResultPack encode failed: {}", e))?;
-    Ok(out)
 }

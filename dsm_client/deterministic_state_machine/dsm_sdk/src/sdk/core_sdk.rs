@@ -882,87 +882,6 @@ impl CoreSDK {
         Self::restore_latest_archived_state(&self.state_machine, &self.device_info.device_id)
     }
 
-    /// Normalize stale balance key formats in the current state.
-    ///
-    /// Migrates:
-    ///  - `"{u128}|ERA"` → plain `"ERA"` (keep MAX if both exist)
-    ///  - `"{device_b32}.{token}"` dot-format entries are removed (pipe-format is authoritative)
-    pub fn migrate_token_balance_keys(&self) {
-        let mut sm = self.state_machine.lock();
-        let state = match sm.current_state() {
-            Some(s) => s,
-            None => return,
-        };
-
-        let mut updated = state;
-        let mut changed = false;
-
-        let canonical_era_key = dsm::core::token::derive_canonical_balance_key(
-            crate::policy::builtins::NATIVE_POLICY_COMMIT,
-            &updated.device_info.public_key,
-            "ERA",
-        );
-
-        // Collect keys to remove and entries to migrate
-        let mut keys_to_remove: Vec<String> = Vec::new();
-        let mut era_max: Option<dsm::types::token_types::Balance> = None;
-
-        for (key, balance) in &updated.token_balances {
-            if key == "ERA" {
-                keys_to_remove.push(key.clone());
-                era_max = Some(match era_max {
-                    Some(existing) if existing.value() >= balance.value() => existing,
-                    _ => balance.clone(),
-                });
-                continue;
-            }
-
-            // Detect pipe-format ERA keys like "{u128}|ERA"
-            if let Some((_, token_id)) = key.split_once('|') {
-                if token_id == "ERA" {
-                    if key != &canonical_era_key {
-                        keys_to_remove.push(key.clone());
-                    }
-                    era_max = Some(match era_max {
-                        Some(existing) if existing.value() >= balance.value() => existing,
-                        _ => balance.clone(),
-                    });
-                }
-            }
-            // Detect dot-format keys like "{device_b32}.{token}"
-            if key.contains('.') && !key.contains('|') {
-                keys_to_remove.push(key.clone());
-            }
-        }
-
-        // Apply removals
-        for key in &keys_to_remove {
-            updated.token_balances.remove(key);
-            changed = true;
-        }
-
-        // Merge migrated ERA balance into the canonical balance-key entry
-        if let Some(migrated) = era_max {
-            let existing = updated
-                .token_balances
-                .get(&canonical_era_key)
-                .map(|b| b.value())
-                .unwrap_or(0);
-            if migrated.value() > existing {
-                updated.token_balances.insert(canonical_era_key, migrated);
-                changed = true;
-            }
-        }
-
-        if changed {
-            if let Ok(h) = updated.compute_hash() {
-                updated.hash = h;
-            }
-            sm.set_state(updated);
-            log::info!("[CoreSDK] Migrated stale balance keys to canonical format");
-        }
-    }
-
     /// Deterministic transition (binary payloads only)
     pub fn execute_transition(&self, operation: Operation) -> Result<State, DsmError> {
         let (op_type, data, message) = match operation {
@@ -2588,18 +2507,18 @@ impl CoreSDK {
         // re-derives BLAKE3(TAG_DSM_POLICY, policy_bytes) and refuses bytes
         // that do not hash to the commitment they are stored under, so a row
         // that does not carry the real policy cannot resolve through here.
-        for row in [
-            crate::storage::client_db::token_registry::get_token(token_id),
-            crate::storage::client_db::token_registry::get_token_by_ticker(token_id),
-        ]
-        .into_iter()
-        .flatten()
-        .flatten()
-        {
-            if matches!(
-                crate::storage::client_db::token_registry::load_policy_verified(&row.policy_commit),
-                Ok(Some(_))
-            ) {
+        let registry = |e: anyhow::Error| {
+            DsmError::storage(format!("token registry: {e}"), None::<std::io::Error>)
+        };
+        let by_id =
+            crate::storage::client_db::token_registry::get_token(token_id).map_err(registry)?;
+        let by_ticker = crate::storage::client_db::token_registry::get_token_by_ticker(token_id)
+            .map_err(registry)?;
+        for row in [by_id, by_ticker].into_iter().flatten() {
+            if crate::storage::client_db::token_registry::load_policy_verified(&row.policy_commit)
+                .map_err(registry)?
+                .is_some()
+            {
                 return Ok(row.policy_commit);
             }
         }

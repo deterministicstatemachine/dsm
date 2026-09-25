@@ -196,9 +196,6 @@ for d in "${DEVICES[@]}"; do
     done
     ENV_TOML=$(mktemp /tmp/dsm_env_XXXXXX)
     cat >"$ENV_TOML" <<EOF
-protocol = "http"
-lan_ip = "$ENV_HOST"
-ports = [8080, 8081, 8082, 8083, 8084]
 allow_localhost = true
 bitcoin_network = "signet"
 dbtc_min_confirmations = 1

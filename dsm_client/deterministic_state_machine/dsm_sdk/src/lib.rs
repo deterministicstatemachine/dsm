@@ -177,8 +177,6 @@ pub use platform::ios::transport::{
 
 pub mod runtime;
 
-// #[cfg(feature = "ffi")]
-// pub use runtime::dsm_init_runtime;
 use crate::storage_utils::ensure_storage_base_dir;
 #[cfg(all(target_os = "android", feature = "bluetooth"))]
 use std::sync::atomic::{AtomicBool, Ordering};

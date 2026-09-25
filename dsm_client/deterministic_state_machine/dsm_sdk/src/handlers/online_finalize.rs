@@ -58,10 +58,8 @@ pub enum ReceiptVerifyOutcome {
 ///     proposal.canonical_child`, and the recomputed receipt commitment equals
 ///     `proposal.commitment` — all in the ASYMMETRIC canonical space. The gate's
 ///     SYMMETRIC projection pair is deliberately NOT used: cross-space comparison
-///     rejects valid countersignatures;
-///  3. `expected_parent_root` / `expected_child_root`, when known from the
-///     sender's stored proposal, equal the receipt's roots (pass `None` to skip
-///     until proposal storage lands — a `Some` mismatch is a hard reject);
+///     rejects valid countersignatures. The commitment covers the receipt's
+///     parent and child roots, so a receipt naming other roots fails here;
 ///  4. B-side per-step EK: `ek_cert_b` chains `ek_pk_b` back to the sender's
 ///     stored Counterparty (recipient) cert head over `h_n` (or `recipient_ak_pk`
 ///     at relationship genesis), then `sig_b` verifies under `ek_pk_b` over the
@@ -88,8 +86,6 @@ pub fn verify_acceptance_receipt(
     receipt: &StitchedReceiptV2,
     proposal: &SenderOnlineProposal,
     recipient_ak_pk: &[u8],
-    expected_parent_root: Option<&[u8; 32]>,
-    expected_child_root: Option<&[u8; 32]>,
     b_pair: ([u8; 32], [u8; 32]),
 ) -> Result<ReceiptVerifyOutcome> {
     // ---- 1-2. Structural binding: the receipt must name THIS exact transition ----
@@ -123,18 +119,6 @@ pub fn verify_acceptance_receipt(
         != proposal.commitment
     {
         return Ok(reject("receipt commitment != proposal commitment"));
-    }
-
-    // ---- 3. Root binding against the sender's stored proposal (when known) ----
-    if let Some(expected) = expected_parent_root {
-        if &receipt.parent_root != expected {
-            return Ok(reject("receipt parent_root != stored proposal parent_root"));
-        }
-    }
-    if let Some(expected) = expected_child_root {
-        if &receipt.child_root != expected {
-            return Ok(reject("receipt child_root != stored proposal child_root"));
-        }
     }
 
     // ---- 5. Kyber consistency (structural) ----
@@ -403,17 +387,9 @@ mod tests {
         let (a, b, parent, child) = ([0x11u8; 32], [0x22u8; 32], [0x33u8; 32], [0x44u8; 32]);
         let receipt = base_receipt([0x99u8; 32], b, parent, child);
         let g = proposal(b, parent, child);
-        let out = verify_acceptance_receipt(
-            &a,
-            &b,
-            &receipt,
-            &g,
-            &[0u8; 32],
-            None,
-            None,
-            ([0u8; 32], [0u8; 32]),
-        )
-        .unwrap();
+        let out =
+            verify_acceptance_receipt(&a, &b, &receipt, &g, &[0u8; 32], ([0u8; 32], [0u8; 32]))
+                .unwrap();
         assert!(matches!(out, ReceiptVerifyOutcome::Rejected { .. }));
     }
 
@@ -423,56 +399,41 @@ mod tests {
         let g = proposal(b, parent, child);
         let r1 = base_receipt(a, b, [0xEEu8; 32], child);
         assert!(matches!(
-            verify_acceptance_receipt(
-                &a,
-                &b,
-                &r1,
-                &g,
-                &[0u8; 32],
-                None,
-                None,
-                ([0u8; 32], [0u8; 32])
-            )
-            .unwrap(),
+            verify_acceptance_receipt(&a, &b, &r1, &g, &[0u8; 32], ([0u8; 32], [0u8; 32])).unwrap(),
             ReceiptVerifyOutcome::Rejected { .. }
         ));
         let r2 = base_receipt(a, b, parent, [0xEEu8; 32]);
         assert!(matches!(
-            verify_acceptance_receipt(
-                &a,
-                &b,
-                &r2,
-                &g,
-                &[0u8; 32],
-                None,
-                None,
-                ([0u8; 32], [0u8; 32])
-            )
-            .unwrap(),
+            verify_acceptance_receipt(&a, &b, &r2, &g, &[0u8; 32], ([0u8; 32], [0u8; 32])).unwrap(),
             ReceiptVerifyOutcome::Rejected { .. }
         ));
     }
 
     #[test]
-    fn rejects_receipt_with_mismatched_stored_root() {
+    fn a_receipt_naming_other_roots_than_the_committed_ones_is_rejected() {
         let (a, b, parent, child) = ([0x11u8; 32], [0x22u8; 32], [0x33u8; 32], [0x44u8; 32]);
-        let receipt = base_receipt(a, b, parent, child); // roots are [0u8;32]
-        let g = proposal(b, parent, child);
-        let expected_parent_root = [0x77u8; 32];
-        assert!(matches!(
-            verify_acceptance_receipt(
-                &a,
-                &b,
-                &receipt,
-                &g,
-                &[0u8; 32],
-                Some(&expected_parent_root),
-                None,
-                ([0u8; 32], [0u8; 32]),
-            )
-            .unwrap(),
-            ReceiptVerifyOutcome::Rejected { .. }
-        ));
+        let committed = base_receipt(a, b, parent, child);
+        let g = proposal_with_commitment(
+            b,
+            parent,
+            child,
+            committed.compute_commitment().expect("commitment"),
+        );
+        let mutations: [fn(&mut StitchedReceiptV2); 2] = [
+            |r| r.parent_root = [0x77u8; 32],
+            |r| r.child_root = [0x77u8; 32],
+        ];
+        for mutate in mutations {
+            let mut receipt = committed.clone();
+            mutate(&mut receipt);
+            let out =
+                verify_acceptance_receipt(&a, &b, &receipt, &g, &[0u8; 32], ([0u8; 32], [0u8; 32]))
+                    .unwrap();
+            assert!(
+                matches!(&out, ReceiptVerifyOutcome::Rejected { reason } if reason.contains("commitment")),
+                "{out:?}"
+            );
+        }
     }
 
     /// REPRODUCER (half 2 of 2) for the stranded-proposal defect: the live gate
@@ -496,17 +457,8 @@ mod tests {
         // Kyber gate is reachable with a stripped receipt.
         let commitment = receipt.compute_commitment().unwrap();
         let g = proposal_with_commitment(b, parent, child, commitment);
-        match verify_acceptance_receipt(
-            &a,
-            &b,
-            &receipt,
-            &g,
-            &[0x55u8; 32],
-            None,
-            None,
-            ([0u8; 32], [0u8; 32]),
-        )
-        .unwrap()
+        match verify_acceptance_receipt(&a, &b, &receipt, &g, &[0x55u8; 32], ([0u8; 32], [0u8; 32]))
+            .unwrap()
         {
             ReceiptVerifyOutcome::Rejected { reason } => {
                 assert!(
@@ -527,17 +479,9 @@ mod tests {
         let mut receipt = base_receipt(a, b, parent, child);
         receipt.sig_b = vec![0xADu8; 64]; // present but no ek_pk_b/ek_cert_b
         let g = proposal(b, parent, child);
-        let out = verify_acceptance_receipt(
-            &a,
-            &b,
-            &receipt,
-            &g,
-            &[0x55u8; 32],
-            None,
-            None,
-            ([0u8; 32], [0u8; 32]),
-        )
-        .unwrap();
+        let out =
+            verify_acceptance_receipt(&a, &b, &receipt, &g, &[0x55u8; 32], ([0u8; 32], [0u8; 32]))
+                .unwrap();
         assert!(matches!(out, ReceiptVerifyOutcome::Rejected { .. }));
     }
 
@@ -568,17 +512,9 @@ mod tests {
         assert_ne!(p.projection_parent, p.canonical_parent);
         assert_ne!(p.projection_target, p.canonical_child);
 
-        let out = verify_acceptance_receipt(
-            &a,
-            &b,
-            &receipt,
-            &p,
-            &[0x55u8; 32],
-            None,
-            None,
-            ([0u8; 32], [0u8; 32]),
-        )
-        .unwrap();
+        let out =
+            verify_acceptance_receipt(&a, &b, &receipt, &p, &[0x55u8; 32], ([0u8; 32], [0u8; 32]))
+                .unwrap();
         match out {
             ReceiptVerifyOutcome::Rejected { reason } => {
                 assert!(
@@ -645,16 +581,7 @@ mod tests {
         let commitment = receipt.compute_commitment().expect("commitment");
         let p = proposal_with_commitment(b, parent, child, commitment);
         let verify = || {
-            verify_acceptance_receipt(
-                &a,
-                &b,
-                &receipt,
-                &p,
-                &[0x55u8; 32],
-                None,
-                None,
-                ([0u8; 32], [0u8; 32]),
-            )
+            verify_acceptance_receipt(&a, &b, &receipt, &p, &[0x55u8; 32], ([0u8; 32], [0u8; 32]))
         };
         let sig_a = || {
             crate::handlers::storage_routes::verify_inbound_receipt_sig_a(
@@ -686,17 +613,9 @@ mod tests {
         let receipt = base_receipt(a, b, parent, [0xEEu8; 32]);
         let commitment = receipt.compute_commitment().expect("commitment");
         let p = proposal_with_commitment(b, parent, child, commitment);
-        let out = verify_acceptance_receipt(
-            &a,
-            &b,
-            &receipt,
-            &p,
-            &[0x55u8; 32],
-            None,
-            None,
-            ([0u8; 32], [0u8; 32]),
-        )
-        .unwrap();
+        let out =
+            verify_acceptance_receipt(&a, &b, &receipt, &p, &[0x55u8; 32], ([0u8; 32], [0u8; 32]))
+                .unwrap();
         match out {
             ReceiptVerifyOutcome::Rejected { reason } => {
                 assert!(reason.contains("child_tip"), "unexpected reason: {reason}");

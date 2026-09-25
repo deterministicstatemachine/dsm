@@ -25,26 +25,19 @@ pub(crate) const ARTIFACT_REPUBLISH_ROWS_PER_POLL: u32 = 8;
 pub(crate) async fn republish_unpublished_artifacts() -> Result<u32, String> {
     let rows = fpa::list_unpublished_artifacts(ARTIFACT_REPUBLISH_ROWS_PER_POLL)
         .map_err(|e| format!("list unpublished artifacts: {e}"))?;
-    let stored = republish_rows(rows).await?;
-    continue_route_writes().await;
-    Ok(stored)
+    republish_rows(rows).await
 }
 
 /// Continue this device's route-chain writes at the seats that did not
-/// answer (storage spec §9 rule 8). Never a condition of anything above.
-async fn continue_route_writes() {
-    let catalog = match StorageSetCatalog::from_env_config() {
-        Ok(catalog) => catalog,
-        Err(e) => {
-            log::warn!("[route continue] no storage-set catalog: {e}");
-            return;
-        }
-    };
-    match crate::sdk::route_seats::continue_recorded_writes(&catalog).await {
-        Ok(0) => {}
-        Ok(n) => log::info!("[route continue] {n} write(s) now linked at every seat"),
-        Err(e) => log::warn!("[route continue] deferred: {e}"),
-    }
+/// answer (storage spec §9 rule 8): how many writes are now linked at every
+/// seat. Independent of the republish pass; neither is a condition of the
+/// other.
+pub(crate) async fn continue_route_writes() -> Result<u32, String> {
+    let catalog =
+        StorageSetCatalog::from_env_config().map_err(|e| format!("no storage-set catalog: {e}"))?;
+    crate::sdk::route_seats::continue_recorded_writes(&catalog)
+        .await
+        .map_err(|e| format!("route-chain writes not continued: {e}"))
 }
 
 /// Put `payload` at every member of `set` and read it back: `Ok(true)` once
@@ -142,6 +135,11 @@ pub(crate) fn spawn_frozen_artifact_republish(origin: &'static str) {
             Ok(0) => {}
             Ok(n) => log::info!("[SDK] frozen artifact republish ({origin}): {n} Stored"),
             Err(e) => log::warn!("[SDK] frozen artifact republish ({origin}): {e}"),
+        }
+        match continue_route_writes().await {
+            Ok(0) => {}
+            Ok(n) => log::info!("[SDK] route-chain continuation ({origin}): {n} linked"),
+            Err(e) => log::warn!("[SDK] route-chain continuation ({origin}): {e}"),
         }
     });
 }

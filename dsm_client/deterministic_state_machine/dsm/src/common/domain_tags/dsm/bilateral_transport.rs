@@ -42,10 +42,6 @@ pub const TAG_DSM_RELATIONSHIP_KEY: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/relationship-key");
 pub const TAG_DSM_SDK_BILATERAL_ENTRY_V1: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/sdk/bilateral-entry/v1");
-pub const TAG_DSM_SYSTEM_PEER_TIP: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/system-peer-tip");
-pub const TAG_DSM_SYSTEM_PEER_TRANSITION: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/system-peer-transition");
 
 #[cfg(test)]
 pub(super) const TAGS: &[TaggedHashDomain<'static>] = &[
@@ -70,6 +66,4 @@ pub(super) const TAGS: &[TaggedHashDomain<'static>] = &[
     TAG_DSM_RELATIONSHIP,
     TAG_DSM_RELATIONSHIP_KEY,
     TAG_DSM_SDK_BILATERAL_ENTRY_V1,
-    TAG_DSM_SYSTEM_PEER_TIP,
-    TAG_DSM_SYSTEM_PEER_TRANSITION,
 ];

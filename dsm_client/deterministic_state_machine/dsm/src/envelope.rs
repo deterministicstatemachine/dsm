@@ -42,109 +42,11 @@ use prost::Message;
 const ENVELOPE_VERSION_TAG: u32 = 1;
 const ENVELOPE_HEADERS_TAG: u32 = 2;
 const ENVELOPE_MESSAGE_ID_TAG: u32 = 3;
-// 110/111 were the v1 counter-era bearer round-trip payloads (BilateralBearerPrepared/Proceed),
-// removed with the Software-Authority / Hardware-Identity rewrite — a stale peer emitting them is
-// rejected by the canonical validator, never routed.
-const RESERVED_PAYLOAD_TAGS: &[u32] = &[13, 14, 33, 110, 111];
-const ALLOWED_PAYLOAD_TAGS: &[u32] = &[
-    10,
-    11,
-    12,
-    15,
-    16,
-    17,
-    18,
-    19,
-    20,
-    21,
-    22,
-    23,
-    24,
-    25,
-    27,
-    28,
-    29,
-    31,
-    32,
-    34,
-    35,
-    36,
-    37,
-    38,
-    39,
-    40,
-    41,
-    42,
-    43,
-    44,
-    45,
-    46,
-    47,
-    48,
-    49,
-    50,
-    51,
-    52,
-    53,
-    54,
-    55,
-    56,
-    57,
-    58,
-    59,
-    60,
-    61,
-    62,
-    63,
-    64,
-    65,
-    66,
-    67,
-    68,
-    69,
-    70,
-    71,
-    72,
-    73,
-    74,
-    75,
-    76,
-    77,
-    78,
-    79,
-    80,
-    81,
-    82,
-    83,
-    84,
-    85,
-    86,
-    87,
-    88,
-    89,
-    90,
-    91,
-    92,
-    93,
-    94,
-    95,
-    96,
-    97,
-    98,
-    99,
-    100,
-    101,
-    102,
-    103,
-    104,
-    105,
-    106,
-    SEALED_PAYLOAD_TAG,
-];
-
-/// The sealed spool payload (DSM Amendment A7). An envelope carrying it has a
-/// version, a message id and the seal: no headers, which would name the sender.
-const SEALED_PAYLOAD_TAG: u32 = 125;
+// The payload fields and reserved numbers of `dsm.Envelope`, and the tag of
+// its sealed spool payload (DSM Amendment A7), generated from the proto by the
+// build script. A sealed envelope has a version, a message id and the seal: no
+// headers, which would name the sender.
+include!(concat!(env!("OUT_DIR"), "/envelope_payload_tags.rs"));
 
 fn parsing_error(message: impl Into<String>) -> DsmError {
     DsmError::parsing(message.into(), None::<std::io::Error>)
@@ -374,12 +276,12 @@ fn validate_envelope_v3_wire(bytes: &[u8], form: EnvelopeForm) -> Result<(), Dsm
                     )));
                 }
             }
-            tag if RESERVED_PAYLOAD_TAGS.contains(&tag) => {
+            tag if ENVELOPE_RESERVED_TAGS.contains(&tag) => {
                 return Err(parsing_error(format!(
                     "Envelope payload field {tag} is reserved"
                 )));
             }
-            tag if ALLOWED_PAYLOAD_TAGS.contains(&tag) => {
+            tag if ENVELOPE_PAYLOAD_TAGS.contains(&tag) => {
                 if wire_type != 2 {
                     return Err(parsing_error(format!(
                         "Envelope payload field {tag} must be length-delimited"
@@ -763,12 +665,44 @@ mod tests {
             message_id: vec![4; 16],
             payload: None,
         };
+        // Field 200, wire type 2, empty: a number the proto does not define.
         let mut bytes = to_canonical_bytes(&env);
-        bytes.extend_from_slice(&[0xda, 0x06]);
+        bytes.extend_from_slice(&[0xc2, 0x0c]);
         bytes.push(0);
 
         let err = from_canonical_bytes(&bytes).expect_err("unknown fields must reject");
-        assert!(err.to_string().contains("unknown Envelope field 107"));
+        assert!(
+            err.to_string().contains("unknown Envelope field 200"),
+            "{err}"
+        );
+    }
+
+    /// Every payload the proto defines passes the strict validator. The list
+    /// is read from the proto: a hand-kept one had drifted to refuse fourteen
+    /// defined payloads (107-124) and admit five numbers the proto no longer
+    /// has.
+    #[test]
+    fn a_payload_the_proto_defines_passes_the_strict_validator() {
+        let env = Envelope {
+            version: 3,
+            headers: Some(crate::types::proto::Headers {
+                device_id: vec![1; 32],
+                genesis_hash: vec![3; 32],
+            }),
+            message_id: vec![4; 16],
+            payload: Some(
+                crate::types::proto::envelope::Payload::SofiVaultCreatedResponse(Default::default()),
+            ),
+        };
+        from_canonical_bytes(&to_canonical_bytes(&env))
+            .expect("a SofiVaultCreatedResponse (field 120) is a defined payload");
+        assert!(ENVELOPE_PAYLOAD_TAGS.contains(&SEALED_PAYLOAD_TAG));
+        for gone in [90, 103, 104, 105, 106] {
+            assert!(
+                !ENVELOPE_PAYLOAD_TAGS.contains(&gone),
+                "{gone} is not a field of the proto's payload oneof"
+            );
+        }
     }
 
     #[test]

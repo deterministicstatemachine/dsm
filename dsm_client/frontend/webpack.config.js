@@ -111,19 +111,7 @@ module.exports = (env, argv) => {
             // Copy configuration files without any processing/minification
             from: 'src/config/*.json',
             to: 'config/[name][ext]'
-          },
-          // Only include Android env config; no web fallback
-          ...(
-            buildTarget === 'android'
-              ? [
-                  {
-                    from: '../android/app/src/main/dsm_env_config.json',
-                    to: 'dsm_env_config.json',
-                    noErrorOnMissing: true
-                  }
-                ]
-              : []
-          )
+          }
         ]
       })
     ].filter(Boolean),

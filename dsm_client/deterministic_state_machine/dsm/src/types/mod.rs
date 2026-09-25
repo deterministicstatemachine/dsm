@@ -45,4 +45,4 @@ pub use receipt_types::{
 // path. All remaining consumers spell out `types::state_types::State`.
 // The State struct is being decomposed into DeviceState + RelationshipChainState
 // per §2.2; the shorter re-export was unnecessary scaffolding.
-pub use token_types::{Token, TokenStatus};
+pub use token_types::TokenStatus;

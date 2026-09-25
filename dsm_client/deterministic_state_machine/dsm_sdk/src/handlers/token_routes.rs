@@ -575,42 +575,39 @@ impl AppRouterImpl {
         }
     }
 
-    /// Persist an anchored policy. The in-memory map is only a read cache;
-    /// `token_policies` is the durable store, so a policy survives restart.
-    async fn cache_policy_bytes(&self, anchor: [u8; 32], policy_bytes: Vec<u8>) {
-        {
-            let mut cache = self.policy_cache.lock().await;
-            cache.insert(anchor, policy_bytes.clone());
-        }
-        if let Err(e) =
-            crate::storage::client_db::token_registry::upsert_policy(&anchor, &policy_bytes)
-        {
-            log::error!("[token] failed to persist policy: {e}");
-        }
+    /// Persist an anchored policy, then cache it. `token_policies` is the
+    /// durable store, so a policy survives restart; the in-memory map only
+    /// ever holds what the store holds.
+    async fn cache_policy_bytes(
+        &self,
+        anchor: [u8; 32],
+        policy_bytes: Vec<u8>,
+    ) -> Result<(), String> {
+        crate::storage::client_db::token_registry::upsert_policy(&anchor, &policy_bytes)
+            .map_err(|e| format!("failed to persist policy: {e}"))?;
+        self.policy_cache.lock().await.insert(anchor, policy_bytes);
+        Ok(())
     }
 
     /// Resolve policy bytes: memory cache → durable table → storage nodes.
     ///
-    /// The table read re-verifies that the bytes hash to the anchor, so a
-    /// corrupted row reads as absent rather than yielding a policy that is not
-    /// the one the anchor names.
+    /// The table read re-verifies that the bytes hash to the anchor; a
+    /// corrupted row, or a table that cannot be read, is an error.
     async fn load_policy_bytes(&self, anchor: [u8; 32]) -> Result<Option<Vec<u8>>, String> {
         if let Some(bytes) = self.policy_cache.lock().await.get(&anchor).cloned() {
             return Ok(Some(bytes));
         }
 
-        match crate::storage::client_db::token_registry::load_policy_verified(&anchor) {
-            Ok(Some(bytes)) => {
-                let mut cache = self.policy_cache.lock().await;
-                cache.insert(anchor, bytes.clone());
-                return Ok(Some(bytes));
-            }
-            Ok(None) => {}
-            Err(e) => log::warn!("[token] policy table read failed: {e}"),
+        if let Some(bytes) =
+            crate::storage::client_db::token_registry::load_policy_verified(&anchor)
+                .map_err(|e| format!("the token policy table is unreadable: {e}"))?
+        {
+            self.policy_cache.lock().await.insert(anchor, bytes.clone());
+            return Ok(Some(bytes));
         }
 
         if let Some(bytes) = try_fetch_policy_from_network(&anchor).await? {
-            self.cache_policy_bytes(anchor, bytes.clone()).await;
+            self.cache_policy_bytes(anchor, bytes.clone()).await?;
             return Ok(Some(bytes));
         }
 
@@ -1151,8 +1148,12 @@ impl AppRouterImpl {
                          adopt this token until a later startup republishes it"
                     ),
                 }
-                self.cache_policy_bytes(policy_anchor, raw_proto.clone())
-                    .await;
+                if let Err(e) = self
+                    .cache_policy_bytes(policy_anchor, raw_proto.clone())
+                    .await
+                {
+                    return err(format!("token.create: {e}"));
+                }
 
                 let mut id_hasher = dsm::crypto::blake3::dsm_domain_hasher(
                     dsm::common::domain_tags::TAG_DSM_TOKEN_ID,
@@ -1466,20 +1467,21 @@ impl AppRouterImpl {
                     dsm::common::domain_tags::TAG_DSM_POLICY,
                     body,
                 );
-                if let PublishOutcome::NotStoredYet(why) =
-                    publish_policy_to_network(body, &anchor).await
-                {
-                    log::warn!(
-                        "[tokens.publishPolicy] policy not Stored ({why}); the anchor is its \
-                         content hash, but a remote fetch fails until it is"
-                    );
+                if let Err(e) = self.cache_policy_bytes(anchor, body.to_vec()).await {
+                    return err(format!("tokens.publishPolicy: {e}"));
                 }
-
-                self.cache_policy_bytes(anchor, body.to_vec()).await;
-                AppResult {
-                    success: true,
-                    data: anchor.to_vec(),
-                    error_message: None,
+                // Kept locally either way, and republished at startup; the
+                // route answers what happened on the network.
+                match publish_policy_to_network(body, &anchor).await {
+                    PublishOutcome::Stored => AppResult {
+                        success: true,
+                        data: anchor.to_vec(),
+                        error_message: None,
+                    },
+                    PublishOutcome::NotStoredYet(why) => err(format!(
+                        "tokens.publishPolicy: the policy is not Stored on the network ({why}); \
+                         it is kept on this device and republished at startup"
+                    )),
                 }
             }
 

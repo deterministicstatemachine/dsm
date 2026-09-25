@@ -127,7 +127,6 @@ mod tests {
             ops: vec![pb::UniversalOp {
                 op_id: Some(pb::Hash32 { v: vec![5; 32] }),
                 actor: vec![1; 32],
-                genesis_hash: vec![3; 32],
                 kind: Some(pb::universal_op::Kind::Invoke(pb::Invoke {
                     method: "bilateral.confirm".to_string(),
                     args: Some(pb::ArgPack {

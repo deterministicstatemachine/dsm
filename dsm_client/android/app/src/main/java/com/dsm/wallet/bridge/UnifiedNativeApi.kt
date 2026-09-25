@@ -117,7 +117,6 @@ internal object UnifiedNativeApi {
     @Keep @JvmStatic external fun getSigningPublicKeyBin(): ByteArray
     @Keep @JvmStatic external fun resolveBleAddressForDeviceIdBin(deviceId: ByteArray): ByteArray
     @Keep @JvmStatic external fun resolvePeerIdentityForBleAddressBin(address: String): ByteArray
-    @Keep @JvmStatic external fun getLocalChainTipBin(deviceAddress: String): ByteArray
     @Keep @JvmStatic external fun isRejectEnvelope(envelopeBytes: ByteArray): ByteArray
     @Keep @JvmStatic external fun isErrorEnvelope(envelopeBytes: ByteArray): Int
 

@@ -91,9 +91,6 @@ fi
 make_env_toml() {
   local host="$1"
   cat <<EOF
-protocol = "http"
-lan_ip = "$host"
-ports = [${PORTS[1]}, ${PORTS[2]}, ${PORTS[3]}, ${PORTS[4]}, ${PORTS[5]}]
 allow_localhost = true
 bitcoin_network = "signet"
 dbtc_min_confirmations = 1

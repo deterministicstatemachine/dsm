@@ -488,7 +488,11 @@ pub(crate) fn anchored_policy_bytes(
     match crate::storage::client_db::token_registry::load_policy_verified(policy_commit) {
         Ok(Some(bytes)) => return Ok(bytes),
         Ok(None) => {}
-        Err(e) => log::warn!("token policy store: unreadable, fetching instead: {e}"),
+        Err(e) => {
+            return Err(PeerLineageFailure::Incomplete(format!(
+                "the local token policy store is unreadable: {e}"
+            )))
+        }
     }
     let tag = dsm::common::domain_tags::TAG_DSM_POLICY;
     let bytes = tokio::task::block_in_place(|| {

@@ -24,8 +24,10 @@ impl SqliteChainTipStore {
 }
 
 impl ChainTipStore for SqliteChainTipStore {
-    fn get_contact_chain_tip(&self, device_id: &[u8; 32]) -> Option<[u8; 32]> {
-        client_db::get_contact_chain_tip_raw(device_id)
+    fn get_contact_chain_tip(&self, device_id: &[u8; 32]) -> Result<Option<[u8; 32]>, DsmError> {
+        client_db::get_contact_chain_tip(device_id).map_err(|e| {
+            DsmError::storage(format!("contact chain tip: {e}"), None::<std::io::Error>)
+        })
     }
 
     fn set_contact_chain_tip(

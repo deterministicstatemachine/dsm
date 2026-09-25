@@ -36,22 +36,3 @@ pub mod sparse_merkle_tree;
 // --- Tests ---
 #[cfg(test)]
 mod empty_leaf_tests;
-
-// --- Classic Merkle Tree API helpers (optional, for convenience) ---
-/// Create a new Merkle tree for a device or relationship.
-/// Returns the 32-byte root hash. All leaves must be 32 bytes (BLAKE3 output).
-pub fn create_merkle_tree(leaves: &[Vec<u8>]) -> [u8; 32] {
-    let tree = MerkleTree::new(leaves.to_vec());
-    tree.root_hash().unwrap_or([0u8; 32])
-}
-
-/// Generate a Merkle proof for a given leaf index in a device or relationship tree.
-pub fn generate_merkle_proof(leaves: &[Vec<u8>], leaf_index: usize) -> Option<MerkleProof> {
-    let tree = MerkleTree::new(leaves.to_vec());
-    Some(tree.generate_proof(leaf_index))
-}
-
-/// Verify a Merkle proof for a leaf and root in a device or relationship tree.
-pub fn verify_merkle_proof(root: &[u8; 32], leaf: &[u8; 32], proof: &MerkleProof) -> bool {
-    MerkleTree::verify_proof(root, leaf, &proof.path, proof.leaf_index)
-}

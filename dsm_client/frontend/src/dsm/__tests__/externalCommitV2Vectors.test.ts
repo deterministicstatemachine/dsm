@@ -49,7 +49,6 @@ const wrapExternalCommit = (ec: pb.ExternalCommit) => {
   const op = new pb.UniversalOp({
     opId: new pb.Hash32({ v: new Uint8Array(32) as any }),
     actor: new Uint8Array(32) as any,
-    genesisHash: new Uint8Array(32) as any,
     kind: { case: 'externalCommit', value: ec } as any,
   });
   const tx = new pb.UniversalTx({ ops: [op], atomic: true });

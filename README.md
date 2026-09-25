@@ -210,8 +210,6 @@ A storage node is index-only persistence: it stores and serves bytes, keeps writ
 - **Vertical validation** (`tools/vertical_validation`): `tla-check`, `proof-check`, `property-tests`, `implementation-traces` (transfer chain, signature rejection, fork divergence against the real state machine), `adversarial`, `crypto-kat`, `bilateral-throughput`, `benchmark`, `formal-report`, and `full`. The `formal-validation` CI job runs it.
 - **Production safety scan** (`ci/production_safety_checks.sh`): the ban list (wall clock, JSON in protocol paths, hex, envelope version) enforced as a CI gate.
 
-Audits: [docs/audits/](docs/audits/).
-
 ## Development workflow
 
 ```bash
@@ -249,7 +247,7 @@ It runs in `--release` because the shipped profile is what is gated and the cryp
 ## Documentation index
 
 - Where the code lives — core [dsm/src/](dsm_client/deterministic_state_machine/dsm/src/) (`core`, `bilateral`, `dlv`, `economic`, `ccb`, `vault`, `bitcoin`, `emissions`, `crypto`), SDK routes [dsm_sdk/src/handlers/](dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/), storage node [dsm_storage_node/](dsm_storage_node/), appliance [crates/](crates/), Android [dsm_client/android/](dsm_client/android/), frontend [dsm_client/frontend/](dsm_client/frontend/)
-- [Audits](docs/audits/) and [bench proofs](docs/bench-proofs/) — hardware and design audits, the silicon proof log
+- [Bench proofs](docs/bench-proofs/) — the silicon proof log
 - [Quickstart](QUICKSTART.md), [Contributing](CONTRIBUTING.md), [Code of Conduct](CODE_OF_CONDUCT.md), [Security](SECURITY.md), [Support](SUPPORT.md), [Changelog](CHANGELOG.md)
 - [Proto schema](proto/dsm_app.proto) — the wire format
 

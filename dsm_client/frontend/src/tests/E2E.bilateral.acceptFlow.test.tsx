@@ -36,7 +36,7 @@ describe('E2E bilateral accept: BLE accept flow triggers refresh and toast', () 
     // Fake bytes-only DsmBridge response for bilateral.accept
     const resp = new pb.BilateralAcceptResponse({ accepted: true, message: 'ok' } as any);
     const pack = new pb.ResultPack({ schemaHash: new pb.Hash32({ v: new Uint8Array(32) }), codec: pb.Codec.PROTO, body: resp.toBinary() as any });
-    const op = new pb.OpResult({ opId: new pb.Hash32({ v: new Uint8Array(32) }), accepted: true, postStateHash: new pb.Hash32({ v: new Uint8Array(32) }), result: pack } as any);
+    const op = new pb.OpResult({ opId: new pb.Hash32({ v: new Uint8Array(32) }), accepted: true, result: pack } as any);
     const rx = new pb.UniversalRx({ results: [op] });
     const env = new pb.Envelope({ version: 3, headers: new pb.Headers({ deviceId: new Uint8Array(32).fill(1), genesisHash: new Uint8Array(32).fill(1) } as any), payload: { case: 'universalRx', value: rx } } as any);
     // Helper: wrap raw Envelope bytes with 0x03 framing prefix
