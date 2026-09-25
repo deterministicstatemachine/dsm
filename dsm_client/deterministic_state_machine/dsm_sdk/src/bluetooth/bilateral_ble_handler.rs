@@ -22,9 +22,9 @@ use crate::jni::state::DEVICE_ID_TO_ADDR;
 
 // Re-export types from bilateral_session so existing import paths still work.
 pub use super::bilateral_session::{
-    BilateralBleSession, BilateralEventCallback, BilateralPhase, BilateralSettlementContext,
-    BilateralSettlementDelegate, BilateralSettlementOutcome, SessionStore, is_inflight_phase,
-    phase_to_str, phase_from_str, MAX_TERMINAL_SESSIONS_PER_COUNTERPARTY,
+    BilateralBleSession, BilateralEventCallback, BilateralPhase, BilateralSettlementDelegate,
+    SessionStore, is_inflight_phase, phase_to_str, phase_from_str,
+    MAX_TERMINAL_SESSIONS_PER_COUNTERPARTY,
 };
 
 /// Base32 Crockford encoding helper for logging
@@ -3825,6 +3825,20 @@ impl BilateralBleHandler {
             )
         })?;
 
+        // The step's settlement is resolved now and written in the advance's
+        // transaction: the credit, the relationship tip (moved from the held
+        // tip, bound to this commitment), the projection and the history
+        // commit together or not at all, and no ack is sent before they do.
+        let settlement = crate::handlers::bilateral_settlement::StepSettlement::resolve(
+            self.device_id,
+            session.counterparty_device_id,
+            commitment_hash,
+            held_tip,
+            session.operation.to_bytes(),
+            None,
+            false,
+        )
+        .map_err(|e| DsmError::invalid_operation(format!("receiver confirm: {e}")))?;
         let outcome = router
             .execute_on_relationship_for_bilateral(
                 rel_key,
@@ -3833,6 +3847,7 @@ impl BilateralBleHandler {
                 &receiver_deltas,
                 None, // the fused-anchor leaf is a sender-side concern
                 None, // offline_spend: never — the receiver credits received bearer value, it does not spend an allocation
+                &|tx, o| settlement.write_in_tx(tx, o, new_chain_tip),
             )
             .map_err(|e| {
                 DsmError::state_machine(format!("receiver confirm advance failed: {e}"))
@@ -4017,61 +4032,17 @@ impl BilateralBleHandler {
         // envelope below. The settlement context consumes its own copy.
         let counter_signed_receipt = receipt_bytes.clone();
 
-        let (_confirm_outcome, persistence_error) =
-            if let Some(ref delegate) = self.settlement_delegate {
-                // Canonical advance via `execute_on_relationship_for_bilateral`
-                // (above) already applied the receiver-side credit to the
-                // DeviceState head atomically with the SMT update. The
-                // delegate just materialises the SQLite balance projection
-                // from `head.balance(policy_commit)` + persists the
-                // transaction-history record.
-                let ctx = BilateralSettlementContext {
-                    local_device_id: self.device_id,
-                    counterparty_device_id: session.counterparty_device_id,
-                    commitment_hash,
-                    transaction_hash,
-
-                    operation_bytes: op_bytes.clone(),
-                    proof_data: Some(receipt_bytes),
-                    is_sender: false,
-                    tx_type: "bilateral_offline",
-                    new_chain_tip,
-                };
-                match delegate.settle(ctx) {
-                    Ok(outcome) => (outcome, None),
-                    Err(e) => {
-                        warn!(
-                            "[BILATERAL] Receiver settlement failed (device={}, amount={:?}): {}",
-                            bytes_to_base32(&self.device_id[..8]),
-                            amount_opt,
-                            e
-                        );
-                        (BilateralSettlementOutcome::default(), Some(e))
-                    }
-                }
-            } else {
-                (BilateralSettlementOutcome::default(), None)
-            };
-
-        if let Some(ref persist_error) = persistence_error {
-            // Receiver settlement delegate failed (e.g. missing proof_data,
-            // projection write error).  The cryptographic commitment is already
-            // finalized — do NOT bail here.  Log the error, mark for reconcile,
-            // but still fall through to archive state / push / sync so the
-            // receiver's balance and history can still update.
-            warn!(
-                "[BILATERAL] Receiver settlement delegate error (non-fatal, will still archive+sync): {}",
-                persist_error
+        // The receiver's own counter-signed copy is the step's archival proof;
+        // it is built from the committed advance and joins the history row the
+        // advance's transaction wrote.
+        if let Err(e) = crate::storage::client_db::update_transaction_proof_data(
+            &bytes_to_base32(&commitment_hash),
+            &receipt_bytes,
+        ) {
+            error!(
+                "[BILATERAL] receiver: the committed step's history row does not hold its \
+                 receipt: {e}"
             );
-
-            if let Err(e) = crate::storage::client_db::mark_contact_needs_online_reconcile(
-                &session.counterparty_device_id,
-            ) {
-                warn!(
-                    "[BILATERAL] Failed to mark contact for reconcile after receiver persistence error: {}",
-                    e
-                );
-            }
         }
 
         if let Some(router) = crate::bridge::app_router() {
@@ -4548,6 +4519,43 @@ impl BilateralBleHandler {
                 }
             }
         }
+        // The step's settlement is resolved now and written in the advance's
+        // transaction: the debit, the relationship tip (moved from the step's
+        // parent to the successor both parties derive from the advance's one
+        // transition entropy, bound to this commitment), the projection and the
+        // history commit together or not at all.
+        let settlement = match crate::handlers::bilateral_settlement::StepSettlement::resolve(
+            self.device_id,
+            counterparty_device_id,
+            *commitment_hash,
+            prepared.parent_tip,
+            op_bytes.clone(),
+            Some(cached_receipt.clone()),
+            true,
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                return self
+                    .fail_sender_commit(
+                        commitment_hash,
+                        &counterparty_device_id,
+                        &format!("the step's settlement cannot be resolved: {e}"),
+                        event_amount_opt,
+                        event_token_id_opt,
+                    )
+                    .await;
+            }
+        };
+        let parent_tip = prepared.parent_tip;
+        let settle = |tx: &rusqlite::Transaction<'_>,
+                      o: &dsm::types::device_state::AdvanceOutcome|
+         -> Result<(), DsmError> {
+            let entropy = o.transition_entropy();
+            let sigma = compute_precommit(&parent_tip, settlement.operation_bytes(), &entropy);
+            let child =
+                compute_successor_tip(&parent_tip, settlement.operation_bytes(), &entropy, &sigma);
+            settlement.write_in_tx(tx, o, child)
+        };
         let outcome = match router.execute_on_relationship_for_bilateral(
             prepared.rel_key,
             prepared.counterparty_devid,
@@ -4559,6 +4567,7 @@ impl BilateralBleHandler {
             // so the value is drawn from the offline-cash allocation, not the online balance, and the
             // committed sender root byte-matches the sent sim root.
             prepared.offline_spend,
+            &settle,
         ) {
             Ok(o) => o,
             Err(advance_err) => {
@@ -4612,60 +4621,6 @@ impl BilateralBleHandler {
             "Sender advance committed via canonical chokepoint, tx_hash: {:?}",
             bytes_to_base32(&transaction_hash)
         );
-
-        // Note: contacts.chain_tip + local_bilateral_chain_tip advancement is
-        // now owned by the delegate's `apply_bilateral_settlement_bundle_atomic`
-        // call (Step 7) — projection + history + tip CAS in one SQL tx. The
-        // old `sync_bilateral_tips_atomically` tip-write path is redundant.
-        // Stale `pending_online_outbox` gate clearing still lives below after
-        // settlement via `clear_pending_online_outbox_if_matches`.
-
-        // --- DELEGATE SETTLEMENT (post-advance projection + history + tip) ---
-        log::info!("[BILATERAL] Entering settlement block after advance commit");
-        log::info!(
-            "[BILATERAL] Settlement delegate present: {}",
-            self.settlement_delegate.is_some()
-        );
-        if let Some(ref delegate) = self.settlement_delegate {
-            // Canonical advance already applied sender-side debit to the
-            // DeviceState head inside `StateMachine::commit_advance`. The
-            // delegate here materialises the display-layer projection into
-            // SQLite + records the tx_history entry. It no longer mutates
-            // the canonical balance.
-            let ctx = BilateralSettlementContext {
-                local_device_id: self.device_id,
-                counterparty_device_id,
-                commitment_hash: *commitment_hash,
-                transaction_hash,
-                operation_bytes: op_bytes.clone(),
-                proof_data: Some(cached_receipt.clone()),
-                is_sender: true,
-                tx_type: "bilateral_offline",
-                new_chain_tip: h_next_symmetric,
-            };
-            if let Err(e) = delegate.settle(ctx) {
-                log::error!(
-                    "[BILATERAL] Sender settlement FAILED after advance commit: {e}. Canonical head is advanced; projection + history may lag."
-                );
-                self.emit_event(&generated::BilateralEventNotification {
-                    // Rendered in emit_event, the one boundary all emitters cross.
-                    display_amount: None,
-                    event_type: generated::BilateralEventType::BilateralEventFailed.into(),
-                    counterparty_device_id: counterparty_device_id.to_vec(),
-                    commitment_hash: commitment_hash.to_vec(),
-                    transaction_hash: Some(transaction_hash.to_vec()),
-                    amount: event_amount_opt,
-                    token_id: event_token_id_opt.clone(),
-                    status: "failed".to_string(),
-                    message: format!("Sender settlement failed after advance commit: {e}"),
-                    sender_ble_address: None,
-                    failure_reason: Some(
-                        generated::BilateralFailureReason::FailureReasonProtocolViolation as i32,
-                    ),
-                });
-                return None;
-            }
-        }
 
         if let Some(router) = crate::bridge::app_router() {
             router.sync_balance_cache();
@@ -4854,12 +4809,8 @@ impl BilateralBleHandler {
             failure_reason: None,
         });
 
-        // Return transfer metadata for orchestration layer to run post-transfer hooks.
-        // Use the metadata already resolved by the delegate.
-        Some(crate::sdk::transfer_hooks::TransferMeta {
-            token_id: event_token_id_opt.unwrap_or_default(),
-            amount: event_amount_opt.unwrap_or(0),
-        })
+        // The transfer the step settled, for the post-transfer hooks.
+        Some(settlement.transfer_meta())
     }
 
     /// A sender commit that did not pass its checks. Nothing advances,

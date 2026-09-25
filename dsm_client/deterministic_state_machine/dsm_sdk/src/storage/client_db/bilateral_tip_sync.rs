@@ -217,6 +217,7 @@ pub(crate) fn sync_tip_projections_in_tx(
                 previous_chain_tip = chain_tip, \
                 chain_tip = ?1, \
                 local_bilateral_chain_tip = ?1, \
+                chain_tip_commitment = NULL, \
                 needs_online_reconcile = 0 \
              WHERE device_id = ?2",
             params![&target[..], &request.counterparty_device_id[..]],

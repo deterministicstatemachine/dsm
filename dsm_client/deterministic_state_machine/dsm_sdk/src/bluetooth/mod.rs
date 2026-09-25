@@ -15,11 +15,12 @@ pub mod bilateral_transport_adapter;
 pub mod ble_frame_coordinator;
 pub mod frame_classify;
 pub mod pairing_orchestrator;
+#[cfg(test)]
+mod offline_step_tests;
 
 // Re-export bilateral transaction components
 pub use bilateral_ble_handler::{
-    BilateralBleHandler, BilateralBleSession, BilateralPhase, BilateralSettlementContext,
-    BilateralSettlementDelegate,
+    BilateralBleHandler, BilateralBleSession, BilateralPhase, BilateralSettlementDelegate,
 };
 pub use bilateral_transport_adapter::{
     BilateralTransportAdapter, BleTransportDelegate, TransportInboundMessage, TransportOutbound,

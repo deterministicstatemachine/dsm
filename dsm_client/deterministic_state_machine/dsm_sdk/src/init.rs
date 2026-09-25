@@ -458,6 +458,10 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
                 _deltas: &[dsm::types::device_state::BalanceDelta],
                 _anchor_leaf: Option<dsm::types::device_state::AnchorLeafUpdate>,
                 _offline_spend: Option<dsm::types::device_state::OfflineSpend>,
+                _settle: &dyn Fn(
+                    &rusqlite::Transaction<'_>,
+                    &dsm::types::device_state::AdvanceOutcome,
+                ) -> Result<(), DsmError>,
             ) -> Result<dsm::types::device_state::AdvanceOutcome, DsmError> {
                 Err(requires_genesis("execute_on_relationship_for_bilateral"))
             }

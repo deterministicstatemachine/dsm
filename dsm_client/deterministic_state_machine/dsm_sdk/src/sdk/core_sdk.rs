@@ -1321,9 +1321,7 @@ impl CoreSDK {
     /// view derived from the AdvanceOutcome's DeviceState + chain state. The
     /// `State` will be removed once all downstream readers migrate to
     /// `DeviceState`.
-    /// Ordinary advance (no fused-anchor-state leaf). Thin wrapper over
-    /// [`Self::execute_on_relationship_with_anchor_leaf`] with `anchor_leaf = None`, so the many
-    /// non-bearer callers stay unchanged.
+    /// Ordinary advance (no fused-anchor-state leaf, no allocation draw).
     pub fn execute_on_relationship(
         &self,
         rel_key: [u8; 32],
@@ -1331,18 +1329,25 @@ impl CoreSDK {
         operation: dsm::types::operations::Operation,
         deltas: &[dsm::types::device_state::BalanceDelta],
     ) -> Result<(State, dsm::types::device_state::AdvanceOutcome), DsmError> {
-        self.execute_on_relationship_with_anchor_leaf(
+        self.execute_on_relationship_inner(
             rel_key,
             counterparty_devid,
             operation,
             deltas,
-            None, // anchor_leaf — ordinary online transition
-            None, // offline_spend — ordinary online transition, no allocation draw
+            None,
+            None,
+            None,
+            None,
+            None,
         )
     }
 
+    /// An offline bilateral step's advance. `settle` writes the step's other
+    /// effects (its relationship tip, projection and history) inside the
+    /// transaction that commits the head, so the head and the relationship
+    /// commit together or not at all.
     #[allow(clippy::too_many_arguments)]
-    pub fn execute_on_relationship_with_anchor_leaf(
+    pub fn execute_offline_step(
         &self,
         rel_key: [u8; 32],
         counterparty_devid: [u8; 32],
@@ -1350,7 +1355,11 @@ impl CoreSDK {
         deltas: &[dsm::types::device_state::BalanceDelta],
         anchor_leaf: Option<dsm::types::device_state::AnchorLeafUpdate>,
         offline_spend: Option<dsm::types::device_state::OfflineSpend>,
-    ) -> Result<(State, dsm::types::device_state::AdvanceOutcome), DsmError> {
+        settle: &dyn Fn(
+            &rusqlite::Transaction<'_>,
+            &dsm::types::device_state::AdvanceOutcome,
+        ) -> Result<(), DsmError>,
+    ) -> Result<dsm::types::device_state::AdvanceOutcome, DsmError> {
         self.execute_on_relationship_inner(
             rel_key,
             counterparty_devid,
@@ -1358,10 +1367,11 @@ impl CoreSDK {
             deltas,
             anchor_leaf,
             offline_spend,
-            None,
+            Some(settle),
             None,
             None,
         )
+        .map(|(_state, outcome)| outcome)
     }
 
     /// A staged advance with an economic admission riding the SAME advance

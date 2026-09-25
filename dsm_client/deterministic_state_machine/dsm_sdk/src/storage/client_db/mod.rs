@@ -408,7 +408,12 @@ fn get_database_path() -> Result<PathBuf> {
 /// and the transfer carries no `verification` or `pre_commit`; the storage
 /// codec that wrote a second encoding (and every non-transfer as one byte)
 /// is gone.
-pub const CLIENT_DB_SCHEMA_VERSION: i64 = 22;
+///
+/// 23: `contacts.chain_tip_commitment` records the step commitment that moved
+/// an offline relationship's tip, so a replayed step is recognised as already
+/// applied; `bilateral_sender_settlements` is gone (a step's settlement
+/// commits in its advance's transaction, so it cannot be applied twice).
+pub const CLIENT_DB_SCHEMA_VERSION: i64 = 23;
 
 /// A 32-byte column, exactly. Any other length is a corrupt row and an error —
 /// never padded, never truncated.
@@ -765,7 +770,8 @@ fn create_schema(conn: &Connection) -> Result<()> {
             previous_chain_tip          BLOB,
             device_tree_root            BLOB,
             observed_remote_chain_tip   BLOB,
-            observed_remote_tip_source   INTEGER
+            observed_remote_tip_source   INTEGER,
+            chain_tip_commitment        BLOB
         );
 
         -- Storage-node auth tokens are gone with writer authorization
@@ -1275,15 +1281,6 @@ fn create_schema(conn: &Connection) -> Result<()> {
 
         CREATE INDEX IF NOT EXISTS idx_transactions_to_device
             ON transactions(to_device);
-
-        CREATE TABLE IF NOT EXISTS bilateral_sender_settlements(
-            tx_id             TEXT NOT NULL,
-            sender_device_id  TEXT NOT NULL,
-            PRIMARY KEY(tx_id, sender_device_id)
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_bilateral_sender_settlements_device
-            ON bilateral_sender_settlements(sender_device_id);
 
         CREATE UNIQUE INDEX IF NOT EXISTS idx_contacts_device_id
             ON contacts(device_id);

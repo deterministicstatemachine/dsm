@@ -3,8 +3,7 @@
 //! Bilateral BLE session types and session store.
 //!
 //! This module owns the core types for the 3-phase bilateral protocol
-//! (`BilateralBleSession`, `BilateralPhase`, `BilateralSettlementContext`,
-//! `BilateralSettlementDelegate`) and the [`SessionStore`] that manages
+//! (`BilateralBleSession`, `BilateralPhase`, `BilateralSettlementDelegate`) and the [`SessionStore`] that manages
 //! the in-memory session map plus SQLite persistence.
 //!
 //! The types are transport-layer-agnostic — no coin logic, no balance
@@ -29,50 +28,6 @@ use crate::util::text_id::encode_base32_crockford;
 // Transport–application separation boundary
 // ---------------------------------------------------------------------------
 
-/// Context passed to [`BilateralSettlementDelegate::settle`] when the BLE
-/// protocol has cryptographically completed a bilateral transfer.
-///
-/// The transport layer never inspects token-specific fields directly.  All
-/// business decisions (balance debit/credit, token type, transaction history)
-/// are delegated to the application layer via this type.
-#[derive(Debug)]
-pub struct BilateralSettlementContext {
-    /// Local device identifier.
-    pub local_device_id: [u8; 32],
-    /// Remote peer's device identifier.
-    pub counterparty_device_id: [u8; 32],
-    /// Canonical commitment hash that uniquely identifies this session.
-    pub commitment_hash: [u8; 32],
-    /// Transaction hash produced by the state-machine finalization step.
-    pub transaction_hash: [u8; 32],
-    /// Serialised [`dsm::types::operations::Operation`] bytes.
-    /// The delegate MUST parse this to determine token type, amount, and direction.
-    pub operation_bytes: Vec<u8>,
-    /// Optional serialised cryptographic receipt (proof data).
-    pub proof_data: Option<Vec<u8>>,
-    /// `true` when the local device is the sender of the transfer.
-    pub is_sender: bool,
-    /// Transaction type label stored in the history record
-    /// (e.g. `"bilateral_offline"`).
-    pub tx_type: &'static str,
-    /// New bilateral chain tip required for the receiver-side atomic persistence
-    /// boundary.  Set to `[0u8; 32]` on sender paths where it is not needed.
-    pub new_chain_tip: [u8; 32],
-}
-
-/// Result returned by [`BilateralSettlementDelegate::settle`].
-///
-/// The settlement layer no longer carries a "canonical state" snapshot back to
-/// the transport. The canonical [`DeviceState`](dsm::types::device_state::DeviceState)
-/// head is installed at the [`execute_on_relationship`](crate::sdk::core_sdk::CoreSDK::execute_on_relationship)
-/// chokepoint, so settlement only needs to materialise display projections
-/// (SQLite `balance_projections`) and fire transfer hooks.
-#[derive(Debug, Default)]
-pub struct BilateralSettlementOutcome {
-    /// Transfer metadata used by frontend hooks and notifications.
-    pub transfer_meta: crate::sdk::transfer_hooks::TransferMeta,
-}
-
 /// Application-layer callback installed on [`BilateralBleHandler`](super::BilateralBleHandler).
 ///
 /// Implementors live **outside** the `bluetooth` module so that the BLE
@@ -86,15 +41,6 @@ pub trait BilateralSettlementDelegate: Send + Sync {
     /// non-transfer operations.  Used to populate event notification fields;
     /// must not mutate any state.
     fn operation_metadata(&self, operation_bytes: &[u8]) -> (Option<u64>, Option<String>);
-
-    /// Apply token-specific settlement after a successful protocol run.
-    ///
-    /// Called once per completed bilateral transfer.  The delegate is
-    /// responsible for updating balances and persisting transaction history.
-    /// Returns [`TransferMeta`](crate::sdk::transfer_hooks::TransferMeta) for
-    /// upstream hooks, or an error string if persistence fails.
-    fn settle(&self, ctx: BilateralSettlementContext)
-        -> Result<BilateralSettlementOutcome, String>;
 }
 
 // ---------------------------------------------------------------------------
