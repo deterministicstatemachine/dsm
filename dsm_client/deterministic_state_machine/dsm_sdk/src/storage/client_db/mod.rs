@@ -261,12 +261,12 @@ pub fn reset_database_for_tests() {
     }
 }
 
+/// The size of the device database file. A file that does not exist has no
+/// size: that is an error, never zero bytes.
 pub fn get_db_size() -> Result<u64> {
     let path = get_database_path()?;
-    if !path.exists() {
-        return Ok(0);
-    }
-    let metadata = std::fs::metadata(path)?;
+    let metadata =
+        std::fs::metadata(&path).map_err(|e| anyhow!("database file {}: {e}", path.display()))?;
     Ok(metadata.len())
 }
 
@@ -1603,6 +1603,18 @@ mod tests {
                 let _ = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)", []);
             }
         }
+    }
+
+    /// A database file that does not exist has no size: asking is an error,
+    /// never zero bytes. Once the database is created it has one.
+    #[test]
+    #[serial]
+    fn a_database_that_does_not_exist_has_no_size() {
+        crate::economic_fixtures::use_test_storage_dir();
+        reset_database_for_tests();
+        assert!(get_db_size().is_err(), "there is no database file yet");
+        init_database().expect("init db");
+        assert!(get_db_size().expect("the database file") > 0);
     }
 
     #[test]

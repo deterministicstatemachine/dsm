@@ -110,15 +110,9 @@ fn build_client_from(material: &CaMaterial) -> Result<reqwest::Client, DsmError>
         })?;
         builder = builder.add_root_certificate(cert);
     }
-    let client = builder
+    builder
         .build()
-        .map_err(|e| ca_error(format!("storage client: {e}")))?;
-    CA_CERTS_LOADED.store(
-        u32::try_from(material.certs.len()).unwrap_or(u32::MAX),
-        std::sync::atomic::Ordering::SeqCst,
-    );
-    CA_AWARE_CLIENT_BUILDS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    Ok(client)
+        .map_err(|e| ca_error(format!("storage client: {e}")))
 }
 
 /// The HTTP client for storage members, one per CA material. The material is
@@ -141,21 +135,6 @@ pub fn build_ca_aware_client() -> Result<reqwest::Client, DsmError> {
 
 static CA_AWARE_CLIENT: std::sync::Mutex<Option<(CaMaterial, reqwest::Client)>> =
     std::sync::Mutex::new(None);
-
-static CA_AWARE_CLIENT_BUILDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-static CA_CERTS_LOADED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-
-/// How many clients were built rather than handed back from the cache.
-pub fn ca_aware_client_builds() -> u64 {
-    CA_AWARE_CLIENT_BUILDS.load(std::sync::atomic::Ordering::SeqCst)
-}
-
-/// How many CA certificates the current client trusts beyond the system
-/// store.
-pub fn ca_certs_loaded_count() -> u32 {
-    CA_CERTS_LOADED.load(std::sync::atomic::Ordering::SeqCst)
-}
 
 // ── One member ──────────────────────────────────────────────────────────────
 
@@ -192,6 +171,32 @@ async fn answer(request: reqwest::RequestBuilder) -> Result<Option<Vec<u8>>, Str
 
 fn namespace_header(namespace: &[u8]) -> Result<HeaderValue, String> {
     HeaderValue::from_bytes(namespace).map_err(|e| format!("namespace: {e}"))
+}
+
+/// The header every member answers with: the member id it is configured as
+/// (§14 mirror sync). Identity, not authentication.
+const ECHO_HEADER: &str = "x-dsm-node-id";
+
+/// What a member answered when asked for its latest ByteCommit (§14). An
+/// observation, never a verdict (§4): nothing here was checked against a
+/// mirror or a predecessor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LatestByteCommit {
+    /// `200`: the member's latest ByteCommit, as it stated it. It names this
+    /// member; a ByteCommit naming another member is `Unanswered`.
+    Stated(ByteCommit),
+    /// `204`: the member states it has closed no cycle yet.
+    NoCycle,
+    /// Why there is no ByteCommit of this member's to show.
+    Unanswered(String),
+}
+
+/// A member's answer to `bytecommit/latest`, with the member id the node
+/// that answered echoed, when it echoed one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LatestByteCommitRead {
+    pub answer: LatestByteCommit,
+    pub answered_as: Option<Vec<u8>>,
 }
 
 impl MemberClient {
@@ -476,17 +481,52 @@ impl MemberClient {
         CellCommitProof::from_proto(&proto::CellCommitProofV1::decode(body.as_slice()).ok()?)
     }
 
-    /// Whether the member answers its health route.
-    pub async fn check_health(&self) -> Result<(), String> {
-        answer(self.client.get(format!("{}/api/v2/health", self.endpoint)))
+    /// The member's latest ByteCommit, as it states it (§14).
+    pub async fn latest_bytecommit(&self) -> LatestByteCommitRead {
+        let response = match self
+            .client
+            .get(format!("{}/api/v2/bytecommit/latest", self.endpoint))
+            .send()
             .await
-            .map(|body| {
-                log::debug!(
-                    "health at {}: {} bytes answered",
-                    self.member_id,
-                    body.map_or(0, |b| b.len())
-                )
-            })
+        {
+            Ok(response) => response,
+            Err(e) => {
+                return LatestByteCommitRead {
+                    answer: LatestByteCommit::Unanswered(format!("transport: {e}")),
+                    answered_as: None,
+                }
+            }
+        };
+        let answered_as = response
+            .headers()
+            .get(ECHO_HEADER)
+            .map(|v| v.as_bytes().to_vec());
+        let answer = match response.status().as_u16() {
+            200 => match response.bytes().await {
+                Ok(body) => match proto::ByteCommitV4::decode(body.as_ref())
+                    .ok()
+                    .and_then(|p| ByteCommit::from_proto(&p))
+                {
+                    Some(commit) if commit.member_id == self.member_id.as_bytes() => {
+                        LatestByteCommit::Stated(commit)
+                    }
+                    Some(commit) => LatestByteCommit::Unanswered(format!(
+                        "answered with a ByteCommit naming {}",
+                        String::from_utf8_lossy(&commit.member_id)
+                    )),
+                    None => LatestByteCommit::Unanswered(
+                        "answered with bytes that are not a ByteCommit".to_string(),
+                    ),
+                },
+                Err(e) => LatestByteCommit::Unanswered(format!("reading the answer: {e}")),
+            },
+            204 => LatestByteCommit::NoCycle,
+            status => LatestByteCommit::Unanswered(format!("answered HTTP {status}")),
+        };
+        LatestByteCommitRead {
+            answer,
+            answered_as,
+        }
     }
 }
 
@@ -658,13 +698,13 @@ impl SetClient {
 #[cfg(test)]
 #[allow(clippy::disallowed_methods)]
 mod tests {
-    use super::{build_ca_aware_client, read_ca_certs, MemberClient};
+    use super::{build_ca_aware_client, read_ca_certs, LatestByteCommit, MemberClient};
 
     /// A write the member did not take is not acknowledged. The same running
     /// node, reached at a path it does not serve, answers `404`: the put, the
-    /// index append, the mirror sync and the health check are all errors,
-    /// never acknowledgements. Reached at its real path, every one is taken.
-    /// On the storage node's own app, on Postgres.
+    /// index append and the mirror sync are errors, never acknowledgements,
+    /// and there is no ByteCommit of its to show. Reached at its real path,
+    /// every one is taken. On the storage node's own app, on Postgres.
     #[test]
     #[serial_test::serial]
     fn a_member_that_answers_404_took_nothing() {
@@ -685,7 +725,10 @@ mod tests {
                 .await
                 .is_err());
             assert!(wrong.sync_mirror().await.is_err());
-            assert!(wrong.check_health().await.is_err());
+            assert_eq!(
+                wrong.latest_bytecommit().await.answer,
+                LatestByteCommit::Unanswered("answered HTTP 404".to_string())
+            );
 
             let right = MemberClient::new("dsm-node-1", &endpoint, client);
             right
@@ -696,7 +739,64 @@ mod tests {
                 .append_index(b"DSM/test/index", &[0x41; 32], &[0x42; 32])
                 .await
                 .expect("the append is taken");
-            right.check_health().await.expect("the member is healthy");
+            assert_eq!(
+                right.latest_bytecommit().await.answer,
+                LatestByteCommit::NoCycle,
+                "no cell entry has arrived, so no cycle has closed"
+            );
+        });
+    }
+
+    /// A member's latest ByteCommit is shown only as that member's own. The
+    /// member states "no cycle" until one closes, then the ByteCommit it
+    /// closed; the node that answers echoes the member id it is configured
+    /// as. Reached where the set names ANOTHER member, the same node's
+    /// ByteCommit names itself, so there is no ByteCommit of that member's to
+    /// show, and the echo says who answered. On the storage node's own app,
+    /// on Postgres.
+    #[test]
+    #[serial_test::serial]
+    fn a_members_latest_bytecommit_is_its_own_or_there_is_none() {
+        let fleet = crate::test_support::one_device::Fleet::start();
+        let endpoint = fleet.endpoints()[0].clone();
+        let client = build_ca_aware_client().expect("a client");
+        crate::runtime::get_runtime().block_on(async {
+            let member = MemberClient::new("dsm-node-1", &endpoint, client.clone());
+            let before = member.latest_bytecommit().await;
+            assert_eq!(before.answer, LatestByteCommit::NoCycle);
+            assert_eq!(before.answered_as.as_deref(), Some(&b"dsm-node-1"[..]));
+
+            member
+                .put_cells(&[(
+                    b"DSM/test/latest-bytecommit".to_vec(),
+                    [0x51; 32],
+                    b"value".to_vec(),
+                )])
+                .await
+                .expect("the entry is taken");
+            let cycle = member.close_cycle().await.expect("the cycle closes");
+
+            let after = member.latest_bytecommit().await;
+            let LatestByteCommit::Stated(commit) = after.answer else {
+                panic!(
+                    "the member states the ByteCommit it closed: {:?}",
+                    after.answer
+                );
+            };
+            assert_eq!(commit.member_id, b"dsm-node-1");
+            assert_eq!(commit.cycle_index, cycle);
+            assert_eq!(after.answered_as.as_deref(), Some(&b"dsm-node-1"[..]));
+
+            let misnamed = MemberClient::new("dsm-node-2", &endpoint, client);
+            let read = misnamed.latest_bytecommit().await;
+            assert_eq!(
+                read.answer,
+                LatestByteCommit::Unanswered(
+                    "answered with a ByteCommit naming dsm-node-1".to_string()
+                ),
+                "another member's ByteCommit is never shown as this member's"
+            );
+            assert_eq!(read.answered_as.as_deref(), Some(&b"dsm-node-1"[..]));
         });
     }
 

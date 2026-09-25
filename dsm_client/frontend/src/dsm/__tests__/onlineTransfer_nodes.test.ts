@@ -3,7 +3,6 @@
 import * as dsm from '../index';
 import * as contacts from '../contacts';
 import * as pb from '../../proto/dsm_app_pb';
-import { storageNodeService } from '../../services/storageNodeService';
 
 // Helper to create a successful online transfer envelope
 function makeOkEnvelope(): pb.Envelope {
@@ -55,12 +54,9 @@ function wrapIngressOk(data: Uint8Array): Uint8Array {
 
 describe('online send node fan-out', () => {
   beforeEach(() => {
-    // Storage node config is intentionally disabled (protobuf-only, no JSON/localStorage).
-    // This test asserts that onlineTransfer goes through the native binary bridge and
-    // does not require any JS-side HTTP fan-out.
-    jest
-      .spyOn(storageNodeService, 'selectNodesForAddr')
-      .mockReturnValue(['http://n1:8080', 'http://n2:8080', 'http://n3:8080']);
+    // The frontend holds no storage node list and talks to no node: this test
+    // asserts that onlineTransfer goes through the native binary bridge and
+    // makes no JS-side HTTP request.
     // Mock getContacts and bridge transports used by send
     (global as any).window = (global as any).window || {};
     const devId = new Uint8Array(32).fill(0xaa);

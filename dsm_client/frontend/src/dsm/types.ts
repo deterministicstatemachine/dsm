@@ -179,25 +179,45 @@ export type GenericTxResponse = {
 };
 
 /**
- * Storage Node Status View
+ * What a member of the pinned storage set answered when the SDK asked for its
+ * latest ByteCommit. An observation, never a verdict: a member that did not
+ * answer has not failed, and a ByteCommit is as the member stated it.
  */
+export type StorageMemberAnswer =
+  | {
+      kind: 'latest';
+      cycle: bigint;
+      bytesUsed: bigint;
+      rootB32: string;
+      parentB32: string;
+      /** d_t, computed by Core from the commit's fields. */
+      digestB32: string;
+    }
+  | { kind: 'noCycle' }
+  | { kind: 'unanswered'; why: string };
+
+/** One member of the pinned storage set, as `storage.status` reports it. */
+export interface StorageMember {
+  /** The member id exactly as the set commits it. */
+  memberId: string;
+  registerIncarnationB32: string;
+  /** Transport only; resolved outside committed state. */
+  endpoint: string;
+  answer: StorageMemberAnswer;
+  /** The member id the answering node echoed, when it echoed one. */
+  answeredAs?: string;
+}
+
+/** `storage.status`: the storage set this device's traffic uses. */
 export interface StorageStatus {
-  nodeId: string;
-  isReachable: boolean;
-  latencyMs: number;
-  lastSyncTick?: bigint; // logical tick
-  storageUsedBytes: number;
-  quotaBytes: number;
-  isPaid: boolean;
-  subscriptions: Array<{
-    topic: string;
-    expiresAtTick: bigint;
-  }>;
-  // Proto StorageStatusResponse fields (used by StorageScreen overview)
-  totalNodes?: number;
-  connectedNodes?: number;
-  dataSize?: string;
-  backupStatus?: string;
+  networkId: string;
+  storageSetIdB32: string;
+  /** In the set's member order. */
+  members: StorageMember[];
+  /** `storage.sync` runs that ran to their end on this device. */
+  completedSyncs: bigint;
+  /** The size of this device's database file. */
+  databaseBytes: bigint;
 }
 
 /**

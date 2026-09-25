@@ -804,10 +804,8 @@ pub fn handle_envelope_universal(env_bytes: &[u8]) -> Vec<u8> {
             })
         }
 
-        // Storage node stats/management responses — handled at the SDK layer
-        Some(gp::envelope::Payload::StorageNodeStatsResponse(_))
-        | Some(gp::envelope::Payload::StorageNodeManageResponse(_))
-        | Some(gp::envelope::Payload::SessionStateResponse(_))
+        // SDK-owned `session.status` query response.
+        Some(gp::envelope::Payload::SessionStateResponse(_))
         // Offline-bearer anchor status (signal (c)) — SDK-owned `anchor.status` query response.
         | Some(gp::envelope::Payload::AnchorStatusResponse(_))
         // Offline-cash load/unload — SDK-owned `wallet.loadOffline`/`unloadOffline` response.

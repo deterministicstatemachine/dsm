@@ -45,6 +45,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn completed_runs_count_up_from_zero() {
+        crate::economic_fixtures::use_test_storage_dir();
         crate::storage::client_db::reset_database_for_tests();
         crate::storage::client_db::init_database().expect("init db");
         assert_eq!(completed().expect("read"), 0);

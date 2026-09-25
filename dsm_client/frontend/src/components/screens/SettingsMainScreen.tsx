@@ -4,7 +4,6 @@
 // src/components/screens/SettingsMainScreen.tsx
 import React, { useCallback, useEffect, useRef, useState, memo } from 'react';
 import { dsmClient } from '../../services/dsmClient';
-import { exportStateBackupFile, importStateBackupFile } from '../../services/settings/backupService';
 import {
   getNfcBackupStatus,
   setAutoWriteEnabled,
@@ -26,8 +25,6 @@ interface ExtendedDsmClient {
   nfcReadRingId?: () => Promise<NfcReadResult | null>;
   nfcRegisterRingId?: (id: string) => Promise<boolean>;
   claimFaucet?: (tokenId?: string) => Promise<{ success: boolean; message?: string }>;
-  exportStateBackup?: () => Promise<Uint8Array | ArrayBuffer | Blob | string>;
-  importStateBackup?: (backup: Uint8Array) => Promise<{ success: boolean; message?: string }>;
 }
 
 const client = dsmClient as unknown as ExtendedDsmClient;
@@ -54,8 +51,6 @@ const SettingsMainScreen: React.FC<SettingsMainScreenProps> = ({ onNavigate }) =
   const devModeUnlockingRef = useRef(false);
   // ringId is stored in native prefs via setPreference; no React state needed.
   const [status, setStatus] = useState<string>('');
-  const [backupStatus, setBackupStatus] = useState<string>('');
-  const [backupProcessing, setBackupProcessing] = useState<boolean>(false);
 
   // --- Compact NFC status (full management is on NfcRecoveryScreen) ---
   const [nfcStatus, setNfcStatus] = useState<NfcBackupStatus>(emptyNfcStatus);
@@ -156,61 +151,6 @@ const SettingsMainScreen: React.FC<SettingsMainScreenProps> = ({ onNavigate }) =
     }
   }, []);
 
-  const onExportBackup = useCallback(async () => {
-    if (backupProcessing) return;
-    setBackupProcessing(true);
-    setBackupStatus('Exporting state...');
-    try {
-      const out = await exportStateBackupFile(client);
-      if (out.blob && out.filename) {
-        const url = URL.createObjectURL(out.blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = out.filename;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-      }
-      setBackupStatus(out.message || (out.ok ? 'Backup exported successfully' : 'Backup export failed'));
-    } catch (err) {
-      setBackupStatus(
-        `Export failed: ${err instanceof Error ? err.message : 'unknown'}`
-      );
-    } finally {
-      setBackupProcessing(false);
-    }
-  }, [backupProcessing]);
-
-  const onImportBackup = useCallback(async () => {
-    if (backupProcessing) return;
-
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.accept = '.bin,application/octet-stream';
-
-    input.onchange = async e => {
-      const file = (e.target as HTMLInputElement).files?.[0];
-      if (!file) return;
-
-      setBackupProcessing(true);
-      setBackupStatus('Importing state...');
-
-      try {
-        const result = await importStateBackupFile(client, file);
-        setBackupStatus(result.message);
-      } catch (err) {
-        setBackupStatus(
-          `Import failed: ${err instanceof Error ? err.message : 'unknown'}`
-        );
-      } finally {
-        setBackupProcessing(false);
-      }
-    };
-
-    input.click();
-  }, [backupProcessing]);
-
   const openDiagnosticsWorkspace = useCallback(() => {
     if (typeof window === 'undefined') return;
     window.dispatchEvent(new CustomEvent(OPEN_DIAGNOSTICS_EVENT, { detail: { autoGather: true } }));
@@ -286,78 +226,6 @@ const SettingsMainScreen: React.FC<SettingsMainScreenProps> = ({ onNavigate }) =
           </button>
         </div>
       </section>
-
-      <section
-        aria-labelledby="backup-section-title"
-        className="settings-shell__panel"
-      >
-        <div
-          id="backup-section-title"
-          style={{
-            fontSize: '10px',
-            fontWeight: 'bold',
-            marginBottom: '8px',
-            color: 'var(--text-dark)',
-            letterSpacing: '1px',
-          }}
-        >
-          BACKUP & RESTORE
-        </div>
-        <div
-          style={{
-            fontSize: '8px',
-            color: 'var(--text-dark)',
-            marginBottom: '12px',
-            lineHeight: '1.4',
-            opacity: 0.8,
-          }}
-        >
-          EXPORT YOUR STATE OR RESTORE FROM BACKUP
-        </div>
-
-        <div
-          className="settings-shell__button-row"
-          style={{
-            marginBottom: '8px',
-          }}
-        >
-          <button
-            className="settings-shell__button"
-            onClick={onExportBackup}
-            disabled={backupProcessing}
-            style={{
-              flex: '1 1 140px',
-              fontSize: '9px',
-              opacity: backupProcessing ? 0.5 : 1,
-              cursor: backupProcessing ? 'not-allowed' : 'pointer',
-            }}
-          >
-            {backupProcessing ? 'EXPORTING...' : 'EXPORT BACKUP'}
-          </button>
-
-          <button
-            className="settings-shell__button"
-            onClick={onImportBackup}
-            disabled={backupProcessing}
-            style={{
-              flex: '1 1 140px',
-              fontSize: '9px',
-              opacity: backupProcessing ? 0.5 : 1,
-              cursor: backupProcessing ? 'not-allowed' : 'pointer',
-            }}
-          >
-            {backupProcessing ? 'IMPORTING...' : 'IMPORT BACKUP'}
-          </button>
-        </div>
-        {backupStatus && (
-          <div className="settings-shell__status">
-            {backupStatus}
-          </div>
-        )}
-      </section>
-
-
-
 
       {/* Security / Wallet Lock */}
       <section
