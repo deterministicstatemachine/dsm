@@ -236,30 +236,37 @@ pub(crate) fn derive_policy_file(
     // there is neither committed in the anchor nor read by the enforcer, which
     // is why the previous transferable/allowed_operations metadata was inert.
     // Conditions are both committed and evaluated.
-    pf.add_condition(PolicyCondition::TokenAuthority {
-        signers: parsed.signers.clone(),
-        threshold: u32::from(parsed.threshold),
-    });
     // The whole supply exists from creation (SoFi §51): no unit is issued
     // after it.
     pf.add_condition(PolicyCondition::SupplyCap {
         max_supply: parsed.genesis_supply,
     });
-    if !parsed.transferable {
-        // A non-transferable token never moves between holders; its holder
-        // may only burn it, when the policy permits burns.
-        pf.add_condition(PolicyCondition::OperationRestriction {
-            allowed_operations: if parsed.burn_enabled {
-                vec!["burn".to_string()]
-            } else {
-                Vec::new()
-            },
-        });
-    }
+    // What each flag governs (SoFi §49, §54): `transferable` every transfer
+    // (vault creation and SoFi legs are refused in Core, at genesis
+    // acceptance and route validation), `burn_enabled` burns only. Creation
+    // is always the creator's own (Amendment S8, checked at the genesis
+    // release). The signer set the blob carries authorizes only what the
+    // policy's own rules name, and the standard release rule names none
+    // (§47), so no condition is built from it.
+    pf.add_condition(PolicyCondition::OperationRestriction {
+        allowed_operations: permitted_operations(parsed.transferable, parsed.burn_enabled),
+    });
 
     pf.add_metadata("created_by", "dsm_token_route")
         .add_metadata("token_name", ticker);
     pf
+}
+
+/// The operations a token's policy permits, from its two flags.
+pub(crate) fn permitted_operations(transferable: bool, burn_enabled: bool) -> Vec<String> {
+    let mut ops = vec!["create_token".to_string()];
+    if transferable {
+        ops.extend(["transfer", "lock", "unlock"].map(String::from));
+    }
+    if burn_enabled {
+        ops.push("burn".to_string());
+    }
+    ops
 }
 
 /// Tell the WebView its token set changed.
@@ -1034,11 +1041,10 @@ impl AppRouterImpl {
                 // cannot name a signer it does not control. The set authorizes
                 // only what the policy's own rules name, and never issuance.
                 //
-                // This MUST be the signing authority's public key, not the
-                // AppState identity blob: the authority condition verifies a
-                // signature made with `current_secret_key()`, so naming any
-                // other key would produce a policy whose own creator cannot
-                // satisfy it.
+                // The signing authority's public key, not the AppState
+                // identity blob: the blob commits the creator's own key, and
+                // a release rule that names the signer set (none does in beta)
+                // would verify against it.
                 let creator_pk = match crate::sdk::signing_authority::current_public_key() {
                     Ok(pk) => pk,
                     Err(e) => {
@@ -1303,21 +1309,6 @@ impl AppRouterImpl {
                     }
                 }
 
-                // Sign the creation with the device key — the sole signer in
-                // the policy we just packed. The authority condition verifies
-                // against the POLICY's signer list, so an unsigned creation is
-                // correctly refused.
-                let authorization = match crate::sdk::signing_authority::token_authorization_witness(
-                    &policy_commit,
-                    "create_token",
-                    token_id.as_bytes(),
-                    genesis_u64,
-                    &[],
-                ) {
-                    Ok(w) => w,
-                    Err(e) => return err(format!("token.create: {e}")),
-                };
-
                 let create_op = dsm::types::operations::Operation::CreateToken {
                     token_id: token_id.as_bytes().to_vec(),
                     initial_supply: dsm::types::token_types::Balance::amount(genesis_u64),
@@ -1327,7 +1318,11 @@ impl AppRouterImpl {
                     symbol: ticker.clone(),
                     decimals: parsed.decimals.min(18) as u8,
                     metadata_uri: Some(format!("dsm:policy:{anchor_b32}")),
-                    signature: authorization,
+                    // No verifier reads a self-loop operation's signature:
+                    // the creating transition is what the device signs, and
+                    // the creator is bound by the policy (Amendment S8).
+                    // Empty, rather than 50 KB nothing checks.
+                    signature: Vec::new(),
                 };
 
                 // Positional, exactly as the conservation guard requires:
@@ -1610,19 +1605,10 @@ impl AppRouterImpl {
             return Err("amount must be > 0".into());
         }
         let policy_commit = self.resolve_token_for_value_op(&req.token_id)?;
-        let authorization = crate::sdk::signing_authority::token_authorization_witness(
-            &policy_commit,
-            "burn",
-            req.token_id.as_bytes(),
-            req.amount,
-            &[],
-        )
-        .map_err(|e| e.to_string())?;
         let op = dsm::types::operations::Operation::Burn {
             amount: dsm::types::token_types::Balance::amount(req.amount),
             token_id: req.token_id.as_bytes().to_vec(),
             policy_commit,
-            proof_of_ownership: authorization,
             message: req.message.clone(),
         };
         let deltas = [dsm::types::device_state::BalanceDelta {
@@ -1749,6 +1735,53 @@ mod tests {
             threshold: 1,
             signers: vec![vec![0xAB; 64]],
             allowlist_device_ids: Vec::new(),
+        }
+    }
+
+    /// SoFi §49, §54: a token's operation restriction is exactly its two
+    /// flags — transfers (and the lock operation types) when transferable,
+    /// burns when burn-enabled, creation always — and the signer set builds
+    /// no condition, because the standard release rule names it for nothing
+    /// (§47).
+    #[test]
+    fn the_policy_permits_exactly_what_its_flags_name() {
+        use dsm::types::policy_types::PolicyCondition;
+        for (transferable, burn_enabled) in
+            [(true, true), (true, false), (false, true), (false, false)]
+        {
+            let parsed = ParsedTokenPolicy {
+                transferable,
+                burn_enabled,
+                ..fungible_fixture()
+            };
+            let pf = derive_policy_file("T", &parsed);
+            let restrictions: Vec<&Vec<String>> = pf
+                .conditions
+                .iter()
+                .filter_map(|c| match c {
+                    PolicyCondition::OperationRestriction { allowed_operations } => {
+                        Some(allowed_operations)
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                restrictions.len(),
+                1,
+                "one restriction ({transferable}, {burn_enabled})"
+            );
+            let ops = restrictions[0];
+            let has = |op: &str| ops.iter().any(|o| o == op);
+            assert!(has("create_token"));
+            assert_eq!(has("transfer"), transferable);
+            assert_eq!(has("lock"), transferable);
+            assert_eq!(has("unlock"), transferable);
+            assert_eq!(has("burn"), burn_enabled);
+            assert_eq!(
+                pf.conditions.len(),
+                2,
+                "the supply cap and the restriction, and nothing built from the signer set"
+            );
         }
     }
 

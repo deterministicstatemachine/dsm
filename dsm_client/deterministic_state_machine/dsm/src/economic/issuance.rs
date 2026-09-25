@@ -44,8 +44,9 @@ impl std::error::Error for MarketLegRefusal {}
 /// - `allowlist_device_ids` is ISSUANCE-RECIPIENT-scoped (who may receive
 ///   issuance) and has no market meaning — an allowlisted-issuance asset
 ///   trades freely once issued (§49).
-/// - `burn_enabled`, the signer set and the supply fields govern burns and
-///   releases and are likewise none of the market's business.
+/// - `burn_enabled` governs burns only (§54), the supply fields the
+///   creation, and the signer set only what a release rule names (§47);
+///   none of them is the market's business.
 /// - `transferable` is the ONE movement-relevant commitment the policy
 ///   carries, and it binds here.
 ///

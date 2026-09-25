@@ -258,8 +258,6 @@ pub enum Operation {
         /// CPTA commit of the asset being burned. Binds the applied debit to
         /// the asset the signed operation names.
         policy_commit: [u8; 32],
-        /// Cryptographic proof that the burner owns these tokens.
-        proof_of_ownership: Vec<u8>,
         /// Human-readable description of the burn event.
         message: String,
     },
@@ -1050,7 +1048,6 @@ impl Operation {
                 amount,
                 token_id,
                 policy_commit,
-                proof_of_ownership,
                 message,
             } => {
                 put_u8(&mut out, 5);
@@ -1058,7 +1055,6 @@ impl Operation {
                 put_bytes(&mut out, &bal);
                 put_bytes(&mut out, token_id);
                 put_bytes(&mut out, policy_commit);
-                put_bytes(&mut out, proof_of_ownership);
                 put_str(&mut out, message);
             }
             LockToken {
@@ -1656,13 +1652,11 @@ impl Operation {
                     get_bytes(&mut input)?.as_slice().try_into().map_err(|_| {
                         DsmError::invalid_operation("burn policy_commit must be 32 bytes")
                     })?;
-                let proof_of_ownership = get_bytes(&mut input)?;
                 let message = get_str(&mut input)?;
                 Burn {
                     amount,
                     token_id,
                     policy_commit,
-                    proof_of_ownership,
                     message,
                 }
             }
@@ -2569,7 +2563,6 @@ mod tests {
                 amount: test_balance(200),
                 token_id: b"TKN".to_vec(),
                 policy_commit: [0u8; 32],
-                proof_of_ownership: vec![0xCC; 64],
                 message: "burn tokens".into(),
             });
         }
@@ -2935,7 +2928,6 @@ mod tests {
                 amount: test_balance(1),
                 token_id: vec![],
                 policy_commit: [0u8; 32],
-                proof_of_ownership: vec![],
                 message: String::new(),
             };
             assert_eq!(burn.get_operation_type(), "burn");
@@ -3277,7 +3269,6 @@ mod tests {
                 amount,
                 token_id: b"T".to_vec(),
                 policy_commit: [0u8; 32],
-                proof_of_ownership: vec![],
                 message: String::new(),
             }
         }
@@ -3329,7 +3320,6 @@ mod tests {
                 amount: bal,
                 token_id: b"X".to_vec(),
                 policy_commit: [0u8; 32],
-                proof_of_ownership: vec![],
                 message: String::new(),
             };
             roundtrip(&op);

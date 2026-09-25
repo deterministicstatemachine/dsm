@@ -60,7 +60,6 @@ fn burn(amount: u64, policy_commit: [u8; 32]) -> Operation {
         amount: Balance::amount(amount),
         token_id: b"T".to_vec(),
         policy_commit,
-        proof_of_ownership: Vec::new(),
         message: String::new(),
     }
 }
