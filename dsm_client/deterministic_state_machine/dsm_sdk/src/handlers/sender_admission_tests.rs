@@ -501,6 +501,46 @@ async fn token_routes_admit_create_and_burn_end_to_end() {
     );
 }
 
+/// MR-DSM-0030: every value-moving advance registers its root at the next
+/// economic position. A transfer's sender registers the root of the position
+/// its debit occupies, and a FOREIGN verifier walking the sender's lineage
+/// with no local shortcuts validates that position as the transfer itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_transfer_registers_the_senders_root_at_the_next_position() {
+    let p = Pair::boot(100, 0).await;
+    p.a.enter();
+    let before = admitted_position();
+    let sent = p.a.send(&p.b, 10).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+    let b_sync = p.b.sync().await;
+    assert!(b_sync.success, "{:?}", b_sync.errors);
+    let a_sync = p.a.sync().await;
+    assert!(a_sync.success, "{:?}", a_sync.errors);
+    assert_eq!(p.a.era_balance(), 90);
+
+    p.a.enter();
+    let (position, admitted_root) = client_db::economic_lineage::get_admitted_coordinate()
+        .expect("read admitted")
+        .expect("admitted");
+    assert_eq!(
+        position,
+        before + 1,
+        "the transfer is the next admitted position"
+    );
+    let head = p.a.router().core_sdk.device_head().expect("head");
+    let peer = foreign_walk(head.genesis_digest(), head.devid(), position).await;
+    assert_eq!(peer.validated_root().economic_position(), position);
+    assert_eq!(peer.validated_root().economic_root(), admitted_root);
+    assert!(
+        matches!(
+            peer.verified_operation(),
+            dsm::types::operations::Operation::Transfer { .. }
+        ),
+        "the walked operation is the transfer itself"
+    );
+}
+
 /// The creation's release is walkable by a FOREIGN verifier with no local
 /// shortcuts: position 2 validates as the CreateToken itself.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
