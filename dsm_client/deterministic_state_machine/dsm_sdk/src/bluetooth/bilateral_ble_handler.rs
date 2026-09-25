@@ -3448,16 +3448,6 @@ impl BilateralBleHandler {
             }
         };
 
-        if !response.success {
-            let reason = option_string_or_default(
-                Some(response.message.clone()),
-                "Receiver rejected bilateral commit acknowledgment",
-            );
-            self.fail_session_by_commitment(commitment_hash, &reason)
-                .await;
-            return Err(DsmError::invalid_operation(reason));
-        }
-
         let post_state_hash: [u8; 32] = response
             .post_state_hash
             .as_ref()
@@ -4437,14 +4427,9 @@ impl BilateralBleHandler {
         let ack_envelope = self
             .create_envelope(generated::envelope::Payload::BilateralCommitResponse(
                 generated::BilateralCommitResponse {
-                    success: true,
                     post_state_hash: Some(generated::Hash32 {
                         v: receiver_post_state_hash.to_vec(),
                     }),
-                    transaction_hash: Some(generated::Hash32 {
-                        v: transaction_hash.to_vec(),
-                    }),
-                    message: "receiver finalized bilateral confirm".to_string(),
                     commitment_hash: Some(generated::Hash32 {
                         v: commitment_hash.to_vec(),
                     }),
@@ -6466,6 +6451,55 @@ mod tests {
         );
     }
 
+    /// An acknowledgment is the receiver's counter-signed receipt. One that
+    /// does not verify is not an answer: the step stays awaiting its ack
+    /// (the receiver may have committed), and nothing is finalized or failed.
+    /// MUTATION CONTROL: failing the session on an ack that does not verify
+    /// turns this red.
+    #[tokio::test]
+    #[serial]
+    async fn an_ack_that_does_not_verify_leaves_the_step_awaiting_its_ack() {
+        init_test_db();
+        let (_mgr, handler) = make_test_handler([0x68u8; 32], [0x69u8; 32], b"unverified-ack");
+        let counterparty = [0x6Au8; 32];
+        let commitment = [0x6Bu8; 32];
+        sender_step_whose_prepare_refuses(&handler, counterparty, [0x72u8; 32], commitment).await;
+        let ack = crate::envelope::to_canonical_bytes(&generated::Envelope {
+            version: 3,
+            headers: Some(generated::Headers {
+                device_id: counterparty.to_vec(),
+                genesis_hash: vec![0x54; 32],
+            }),
+            message_id: vec![7; 16],
+            payload: Some(generated::envelope::Payload::BilateralCommitResponse(
+                generated::BilateralCommitResponse {
+                    commitment_hash: Some(generated::Hash32 {
+                        v: commitment.to_vec(),
+                    }),
+                    post_state_hash: Some(generated::Hash32 { v: vec![8; 32] }),
+                    counter_signed_receipt: vec![9; 16],
+                },
+            )),
+        });
+
+        handler
+            .handle_commit_response(&ack)
+            .await
+            .expect_err("an ack whose receipt does not verify is refused");
+        assert_eq!(
+            handler.get_session_phase(&commitment).await,
+            Some(BilateralPhase::ConfirmPending),
+            "an unverified ack moved the step"
+        );
+        assert_eq!(
+            crate::storage::client_db::get_bilateral_session(&commitment)
+                .expect("read the session")
+                .expect("kept")
+                .phase,
+            "confirm_pending"
+        );
+    }
+
     /// A commit ack names a session by its hash; one this device is not
     /// committing (unknown, or already failed) cannot be verified against a
     /// session, so it finalizes nothing.
@@ -6487,10 +6521,8 @@ mod tests {
                         commitment_hash: Some(generated::Hash32 {
                             v: commitment.to_vec(),
                         }),
-                        success: true,
                         post_state_hash: Some(generated::Hash32 { v: vec![8; 32] }),
                         counter_signed_receipt: vec![9; 16],
-                        ..Default::default()
                     },
                 )),
             })

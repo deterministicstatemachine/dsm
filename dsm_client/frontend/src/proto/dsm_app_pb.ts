@@ -11938,24 +11938,9 @@ export class BilateralCommitRequest extends Message<BilateralCommitRequest> {
  */
 export class BilateralCommitResponse extends Message<BilateralCommitResponse> {
   /**
-   * @generated from field: bool success = 1;
-   */
-  success = false;
-
-  /**
    * @generated from field: dsm.Hash32 post_state_hash = 2;
    */
   postStateHash?: Hash32;
-
-  /**
-   * @generated from field: dsm.Hash32 transaction_hash = 3;
-   */
-  transactionHash?: Hash32;
-
-  /**
-   * @generated from field: string message = 4;
-   */
-  message = "";
 
   /**
    * @generated from field: dsm.Hash32 commitment_hash = 5;
@@ -11982,10 +11967,7 @@ export class BilateralCommitResponse extends Message<BilateralCommitResponse> {
   static readonly runtime: typeof proto3 = proto3;
   static readonly typeName = "dsm.BilateralCommitResponse";
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "success", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
     { no: 2, name: "post_state_hash", kind: "message", T: Hash32 },
-    { no: 3, name: "transaction_hash", kind: "message", T: Hash32 },
-    { no: 4, name: "message", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 5, name: "commitment_hash", kind: "message", T: Hash32 },
     { no: 6, name: "counter_signed_receipt", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
