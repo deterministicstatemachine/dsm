@@ -122,7 +122,6 @@ dsm_storage_node/deploy/*.tar
 # ---------------------------------------------------------------------------
 # Android environment config (contains local IPs / credentials)
 # ---------------------------------------------------------------------------
-dsm_client/frontend/android-assets/dsm_env_config.json
 dsm_client/frontend/android-assets/dsm_env_config.toml
 dsm_env_config.override.toml
 
@@ -250,7 +249,6 @@ Agent-Refinement-System-Final.md
 .agents/
 .claude/
 /docs/*
-!/docs/audits/
 !/docs/bench-proofs/
 /PAPER_ALIGNMENT.md
 /hooks/

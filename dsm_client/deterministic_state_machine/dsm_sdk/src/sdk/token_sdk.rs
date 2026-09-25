@@ -15,9 +15,7 @@ use dsm::{
         error::DsmError,
         operations::{Operation, TransactionMode, VerificationType},
         state_types::State,
-        token_types::{
-            Balance, TokenMetadata, TokenOperation, TokenStatus, TokenSupply, TokenType,
-        },
+        token_types::{Balance, TokenMetadata, TokenOperation, TokenSupply, TokenType},
     },
 };
 use parking_lot::RwLock;
@@ -199,81 +197,11 @@ pub struct CreateTokenParams {
     pub commitment: Vec<u8>,
 }
 
-// ---------- ERA token ----------
-
-#[derive(Debug, Clone)]
-pub struct EraToken {
-    pub token_id: String,
-    pub metadata: TokenMetadata,
-    pub status: TokenStatus,
-    pub total_supply: Balance,
-    pub circulating_supply: Balance,
-    pub fee_schedule: HashMap<String, Balance>,
-}
-
-impl EraToken {
-    pub fn new(total_supply: u64) -> Self {
-        let mut fields = HashMap::new();
-        fields.insert("ecosystem".to_string(), "DSM".to_string());
-        fields.insert("governance_model".to_string(), "meritocratic".to_string());
-        fields.insert("version".to_string(), "1.0".to_string());
-        fields.insert("token_standard".to_string(), "DSM-20".to_string());
-
-        let mut fee_schedule = HashMap::new();
-        fee_schedule.insert(
-            "token_creation".to_string(),
-            // Reads the CORE constant: the conservation guard validates this
-            // exact value, so a schedule that could disagree with it would be a
-            // second authority over a protocol rule.
-            Balance::amount(dsm::core::token::TOKEN_CREATION_FEE_ERA),
-        );
-        fee_schedule.insert("token_update".to_string(), Balance::zero());
-        fee_schedule.insert("token_transfer".to_string(), Balance::zero());
-        fee_schedule.insert("token_burn".to_string(), Balance::zero());
-        fee_schedule.insert("subscription_base".to_string(), Balance::zero());
-        fee_schedule.insert("state_transition".to_string(), Balance::zero());
-        fee_schedule.insert("smart_commitment".to_string(), Balance::amount(2));
-        fee_schedule.insert("storage_tier_1gb".to_string(), Balance::amount(5));
-        fee_schedule.insert("storage_tier_10gb".to_string(), Balance::amount(25));
-        fee_schedule.insert("storage_tier_100gb".to_string(), Balance::amount(100));
-        fee_schedule.insert("storage_tier_1tb".to_string(), Balance::amount(500));
-        fee_schedule.insert("storage_tier_unlimited".to_string(), Balance::amount(2000));
-
-        let metadata = TokenMetadata {
-            name: "ERA".to_string(),
-            symbol: "ERA".to_string(),
-            description: Some("Resilient Oracle-Optimized Trustless token - the native token of the DSM ecosystem".to_string()),
-            icon_url: None,
-            // ERA is whole-unit. The display path, the faucet and the fee
-            // schedule all treat it as 0 decimals; carrying 18 here was a
-            // second, contradicting answer that would mis-scale the fee
-            // display by 10^18 the moment anything read it.
-            decimals: 0,
-            fields,
-            token_id: "ERA".to_string(),
-            token_type: TokenType::Native,
-            owner_id: *dsm::crypto::blake3::domain_hash(dsm::common::domain_tags::TAG_DSM_SYSTEM_OWNER, b"").as_bytes(),
-            metadata_uri: None,
-            policy_anchor: builtin_policy_anchor_uri("ERA"),
-        };
-
-        Self {
-            token_id: "ERA".to_string(),
-            metadata,
-            status: TokenStatus::Active,
-            total_supply: Balance::amount(total_supply),
-            circulating_supply: Balance::zero(),
-            fee_schedule,
-        }
-    }
-}
-
 // ---------- Token SDK ----------
 
 pub struct TokenSDK {
     core_sdk: Arc<CoreSDK>,
     token_metadata: Arc<RwLock<HashMap<String, TokenMetadata>>>,
-    era_token: Arc<RwLock<EraToken>>,
     balances: Arc<RwLock<HashMap<DevId, HashMap<String, Balance>>>>,
 }
 
@@ -595,20 +523,9 @@ impl TokenSDK {
     }
 
     pub fn new(core_sdk: Arc<CoreSDK>) -> Self {
-        use std::sync::OnceLock;
-        static MIGRATION_DONE: OnceLock<()> = OnceLock::new();
-
-        let era = EraToken::new(1_000_000_000); // 1 billion units
-
-        // Run stale-key migration exactly once per process
-        MIGRATION_DONE.get_or_init(|| {
-            core_sdk.migrate_token_balance_keys();
-        });
-
         Self {
             core_sdk,
             token_metadata: Arc::new(RwLock::new(HashMap::new())),
-            era_token: Arc::new(RwLock::new(era)),
             balances: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -761,15 +678,6 @@ impl TokenSDK {
                     &burn_deltas,
                 )?;
                 self.project_balance_cache_from_state(owner_id, &new_state)?;
-
-                if token_id == "ERA" {
-                    let mut era_token = self.era_token.write();
-                    let new_circulation = Balance::from_state(
-                        era_token.circulating_supply.value().saturating_sub(*amount),
-                        new_state.hash,
-                    );
-                    era_token.circulating_supply = new_circulation;
-                }
 
                 Ok(new_state)
             }
@@ -1554,27 +1462,6 @@ mod tests {
         let fields = map_to_metadata_fields(&metadata);
         let back = metadata_fields_to_map(&fields);
         assert_eq!(metadata, back);
-    }
-
-    #[test]
-    fn era_token_new_has_expected_fields() {
-        let era = EraToken::new(1_000_000);
-        assert_eq!(era.token_id, "ERA");
-        assert_eq!(era.metadata.symbol, "ERA");
-        // ERA is whole-unit everywhere that reads it — the display path, the
-        // faucet and the fee schedule. This pins the ONE answer.
-        assert_eq!(era.metadata.decimals, 0);
-        assert_eq!(era.metadata.token_type, TokenType::Native);
-        assert_eq!(era.total_supply.value(), 1_000_000);
-        // The fee is the core constant, not a number this map may invent.
-        assert_eq!(
-            era.fee_schedule
-                .get("token_creation")
-                .expect("token_creation fee present")
-                .value(),
-            dsm::core::token::TOKEN_CREATION_FEE_ERA,
-        );
-        assert!(era.fee_schedule.contains_key("smart_commitment"));
     }
 
     #[test]

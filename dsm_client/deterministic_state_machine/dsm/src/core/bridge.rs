@@ -48,13 +48,9 @@ pub trait AppRouter: Send + Sync {
     /// The `params_proto` argument contains a protobuf-encoded `ArgPack`. The return
     /// value must also be a protobuf-encoded `ArgPack` with `codec = PROTO`.
     fn handle_query(&self, path: &str, params_proto: &[u8]) -> Result<Vec<u8>, String>;
-    /// Handle a state-mutating invocation identified by `method`.
-    ///
-    /// Returns `(result_body, post_state_hash_bytes)` where `result_body` is a
-    /// protobuf-encoded `ArgPack` and `post_state_hash_bytes` is the 32-byte hash
-    /// of the post-invocation state. If `post_state_hash_bytes.len() != 32`, it is
-    /// ignored by the caller.
-    fn handle_invoke(&self, method: &str, args_proto: &[u8]) -> Result<(Vec<u8>, Vec<u8>), String>;
+    /// Handle a state-mutating invocation identified by `method`. Returns a
+    /// protobuf-encoded `ArgPack`.
+    fn handle_invoke(&self, method: &str, args_proto: &[u8]) -> Result<Vec<u8>, String>;
 }
 
 /// Handler trait for the three-phase bilateral transfer protocol.
@@ -118,18 +114,17 @@ pub trait RecoveryHandler: Send + Sync {
     ) -> Result<gp::OpResult, String>;
 }
 
-/// Install (or replace) an application router for integrations that rely on the core crate.
+/// Install the application router the core bridge routes to. It is installed
+/// once: a second install is refused, never a silent replacement.
 pub fn install_app_router(router: Arc<dyn AppRouter>) -> Result<(), DsmError> {
     let mut guard = APP_ROUTER.write().map_err(|_| DsmError::LockError)?;
-    let was_none = guard.is_none();
-    *guard = Some(router);
-    drop(guard);
-
-    if was_none {
-        log::info!("[CORE] AppRouter installed (first time)");
-    } else {
-        log::info!("[CORE] AppRouter replaced (upgrade to full router)");
+    if guard.is_some() {
+        return Err(DsmError::invalid_operation(
+            "an app router is already installed in the core bridge; it is installed once",
+        ));
     }
+    *guard = Some(router);
+    log::info!("[CORE] AppRouter installed");
     Ok(())
 }
 
@@ -207,7 +202,6 @@ fn op_error(op_id: Option<gp::Hash32>, code: u32, message: &str) -> gp::OpResult
     gp::OpResult {
         op_id,
         accepted: false,
-        post_state_hash: None,
         result: None,
         error: Some(gp::Error {
             code,
@@ -225,14 +219,12 @@ fn op_error(op_id: Option<gp::Hash32>, code: u32, message: &str) -> gp::OpResult
 fn op_success(
     op_id: Option<gp::Hash32>,
     body: Vec<u8>,
-    post_state_hash: Option<gp::Hash32>,
     schema_hash: Option<gp::Hash32>,
     codec: gp::Codec,
 ) -> gp::OpResult {
     gp::OpResult {
         op_id,
         accepted: true,
-        post_state_hash,
         result: Some(gp::ResultPack {
             schema_hash,
             codec: codec as i32,
@@ -316,7 +308,6 @@ pub fn handle_envelope_universal(env_bytes: &[u8]) -> Vec<u8> {
                                                 op_success(
                                                     op_id,
                                                     pack.body,
-                                                    None,
                                                     pack.schema_hash,
                                                     gp::Codec::Proto,
                                                 )
@@ -428,14 +419,7 @@ pub fn handle_envelope_universal(env_bytes: &[u8]) -> Vec<u8> {
                                 .map(|a| a.encode_to_vec())
                                 .unwrap_or_default();
                             match router.handle_invoke(&invoke.method, &args_bytes) {
-                                Ok((result_body, post_state_hash_bytes)) => {
-                                    let post_hash = if post_state_hash_bytes.len() == 32 {
-                                        Some(gp::Hash32 {
-                                            v: post_state_hash_bytes,
-                                        })
-                                    } else {
-                                        None
-                                    };
+                                Ok(result_body) => {
                                     let pack = gp::ArgPack::decode(result_body.as_slice())
                                         .map_err(|e| {
                                             log::error!(
@@ -458,7 +442,6 @@ pub fn handle_envelope_universal(env_bytes: &[u8]) -> Vec<u8> {
                                                 op_success(
                                                     op_id,
                                                     pack.body,
-                                                    post_hash,
                                                     pack.schema_hash,
                                                     gp::Codec::Proto,
                                                 )
@@ -583,7 +566,7 @@ pub fn handle_envelope_universal(env_bytes: &[u8]) -> Vec<u8> {
                             let args_bytes = arg_pack.encode_to_vec();
 
                             match router.handle_invoke("faucet.claim", &args_bytes) {
-                                Ok((result_body, _events)) => {
+                                Ok(result_body) => {
                                     let pack = gp::ArgPack::decode(result_body.as_slice())
                                         .map_err(|e| {
                                             log::error!(
@@ -606,7 +589,6 @@ pub fn handle_envelope_universal(env_bytes: &[u8]) -> Vec<u8> {
                                                 op_success(
                                                     op_id,
                                                     pack.body,
-                                                    None,
                                                     pack.schema_hash,
                                                     gp::Codec::Proto,
                                                 )
@@ -750,7 +732,6 @@ pub fn handle_envelope_universal(env_bytes: &[u8]) -> Vec<u8> {
             | gp::envelope::Payload::ContactAddResponse(_)
             | gp::envelope::Payload::BalanceGetResponse(_)
             | gp::envelope::Payload::BleCommandResponse(_)
-            | gp::envelope::Payload::ReconciliationResponse(_)
             | gp::envelope::Payload::StateInfoResponse(_)
             | gp::envelope::Payload::SecondaryDeviceResponse(_)
             | gp::envelope::Payload::ContactQrResponse(_)
@@ -811,7 +792,7 @@ pub fn handle_envelope_universal(env_bytes: &[u8]) -> Vec<u8> {
                 if let Some(router) = app_router() {
                     let value_bytes = req.value.as_bytes();
                     match router.handle_invoke(&req.key, value_bytes) {
-                        Ok((_body, _post)) => {
+                        Ok(_body) => {
                             gp::envelope::Payload::AppStateResponse(gp::AppStateResponse {
                                 key: req.key,
                                 value: Some("App state set completed".to_string()),
@@ -989,12 +970,12 @@ pub fn handle_envelope_universal(env_bytes: &[u8]) -> Vec<u8> {
         | Some(gp::envelope::Payload::GenesisLifecycle(_))
         | Some(gp::envelope::Payload::BootstrapMeasurementReport(_))
         | Some(gp::envelope::Payload::BootstrapFinalizeResponse(_))
-        // Phase B.7 (issue #278) — DeviceTreeViewer payload is owned by
-        // the SDK's identity routes (`identity.devtree.snapshot`); the
-        // core bridge never constructs or consumes it.
+        // The device tree snapshot: the core bridge never constructs or
+        // consumes it, and no route answers it until the device tree store
+        // is built.
         | Some(gp::envelope::Payload::DeviceTreeSnapshotResponse(_))
-        // Secondary-device admission envelopes are BLE-transport payloads handled by the
-        // bilateral transport adapter; the core bridge never routes them directly.
+        // Secondary-device admission envelopes: the core bridge never routes them, and no
+        // SDK flow handles them until the device tree store they extend is built.
         | Some(gp::envelope::Payload::DeviceAdmissionRequest(_))
         | Some(gp::envelope::Payload::DeviceAdmission(_)) => {
             gp::envelope::Payload::Error(gp::Error {
@@ -1077,7 +1058,6 @@ mod tests {
         let op = gp::UniversalOp {
             op_id: Some(gp::Hash32 { v: vec![0; 32] }),
             actor: vec![0xEE; 32],
-            genesis_hash: vec![0xFF; 32],
             kind: Some(gp::universal_op::Kind::Invoke(gp::Invoke {
                 method: "bilateral.prepare".to_string(),
                 args: Some(gp::ArgPack {

@@ -1,11 +1,7 @@
 # DSM runtime environment configuration — AWS production nodes (6-node cluster)
 # This file is bundled into Android assets via webpack CopyPlugin.
 # The authoritative config read by the SDK is dsm_env_config.toml (same directory).
-protocol = "https"
-lan_ip = "0.0.0.0"
-ports = [8080]
 allow_localhost = false
-storage_node_mode = "remote"
 custom_ca_certs = ["ca.crt"]
 bitcoin_network = "signet"
 dbtc_min_confirmations = 1

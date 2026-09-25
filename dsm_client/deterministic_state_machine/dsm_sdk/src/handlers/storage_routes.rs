@@ -21,33 +21,29 @@ fn emit_authoritative_wallet_refresh() {
 #[cfg(not(all(target_os = "android", feature = "jni")))]
 fn emit_authoritative_wallet_refresh() {}
 
-fn mark_contact_needs_online_reconcile_and_refresh(device_id: &[u8]) {
-    match crate::storage::client_db::mark_contact_needs_online_reconcile(device_id) {
-        Ok(()) => emit_authoritative_wallet_refresh(),
-        Err(e) => {
-            log::warn!(
-                "[storage.sync] failed to mark relationship blocked for {} bytes of device id: {}",
-                device_id.len(),
-                e
-            );
-        }
-    }
+/// Block the relationship with `device_id` until it is reconciled online.
+fn mark_contact_needs_online_reconcile_and_refresh(device_id: &[u8]) -> Result<(), String> {
+    crate::storage::client_db::mark_contact_needs_online_reconcile(device_id)
+        .map_err(|e| format!("failed to mark a relationship blocked for reconcile: {e}"))?;
+    emit_authoritative_wallet_refresh();
+    Ok(())
 }
 
-/// Non-authoritative history/UI residue after a split transfer is accepted.
+/// History and UI residue after a split transfer is accepted.
 ///
 /// The balance is already materialized by the full-state apply; the acceptance
-/// reply is already enqueued by convergence. This only writes the local
-/// transaction row the History tab reads and refreshes the in-memory caches.
-/// Every failure is non-fatal and logged — none of this is protocol state.
+/// reply is already enqueued by convergence. This writes the local transaction
+/// row the History tab reads and refreshes this device's balance cache. None of
+/// it is protocol state, so a failure does not hold the ACK; it is reported.
 fn record_accepted_split_history(
+    wallet: &crate::sdk::wallet_sdk::WalletSDK,
     correlation_key: &str,
     receipt: &dsm::types::receipt_types::StitchedReceiptV2,
     sender_b32: &str,
     self_b32: &str,
     amount: u64,
     token_id: String,
-) {
+) -> Result<(), String> {
     use crate::storage::codecs::hash_blake3_bytes;
 
     let tx_hash = crate::util::text_id::encode_base32_crockford(&hash_blake3_bytes(
@@ -56,6 +52,9 @@ fn record_accepted_split_history(
     let mut meta: std::collections::HashMap<String, Vec<u8>> = std::collections::HashMap::new();
     meta.insert("token_id".to_string(), token_id.into_bytes());
     meta.insert("adr0003_split".to_string(), b"true".to_vec());
+    let proof_data = receipt
+        .to_full_protobuf()
+        .map_err(|e| format!("{correlation_key}: the receipt does not encode: {e}"))?;
     let rec = crate::storage::client_db::TransactionRecord {
         tx_id: correlation_key.to_string(),
         tx_hash,
@@ -65,16 +64,16 @@ fn record_accepted_split_history(
         tx_type: "online".to_string(),
         status: "confirmed".to_string(),
         commitment_hash: None,
-        proof_data: receipt.to_full_protobuf().ok(),
+        proof_data: Some(proof_data),
         metadata: meta,
     };
-    if let Err(e) = crate::storage::client_db::store_transaction(&rec) {
-        log::warn!("[storage.sync] ADR 0003 store_transaction failed for {correlation_key}: {e} (non-fatal)");
-    }
-    if let Some(router) = crate::bridge::app_router() {
-        router.sync_balance_cache();
-    }
+    crate::storage::client_db::store_transaction(&rec)
+        .map_err(|e| format!("{correlation_key}: history row not stored: {e}"))?;
+    wallet
+        .reload_balance_cache_for_self()
+        .map_err(|e| format!("{correlation_key}: balance cache not reloaded: {e}"))?;
     emit_authoritative_wallet_refresh();
+    Ok(())
 }
 
 /// Verify an inbound stitched receipt's sender authorization (`sig_a`) the way
@@ -117,6 +116,7 @@ pub(crate) fn resolve_trusted_sender_ak(
     wire_supplied: &[u8],
 ) -> Result<Vec<u8>, String> {
     let trusted = crate::storage::client_db::get_contact_public_key_by_device_id(sender_device_id)
+        .map_err(|e| format!("the trusted sender AK for {sender_device_id} is unreadable: {e}"))?
         .ok_or_else(|| {
             format!(
                 "no locally trusted sender AK for {sender_device_id}; wire-supplied keys are \
@@ -166,76 +166,6 @@ pub(crate) fn verify_inbound_receipt_sig_a(
         commitment,
     )
     .map_err(|e| e.to_string())
-}
-
-/// AUTHENTICATED CAPABILITY HYDRATION (§16.6) — not migration residue.
-///
-/// A valid relationship can exist locally while its cached ML-KEM capability is
-/// absent; the B-side receipt encapsulates `kyber_ct_b` to the sender's key, so
-/// that gap fail-closes every inbound acceptance. This hydrates the missing
-/// capability from the sender's own directory entry:
-///
-///   * runs ONLY when the local key is missing (a present key is returned as-is);
-///   * NEVER replaces a nonempty locally-bound key — persist is first-write-wins;
-///   * the entry must prove itself for the contact's genesis and device, and its
-///     AK must be the STORED pairing AK;
-///   * at least the finality count of the pinned set's members must hold it.
-///
-/// Nothing is persisted on any error path.
-async fn hydrate_missing_sender_kyber_capability(
-    sender_device_id: [u8; 32],
-    contact: &crate::storage::client_db::ContactRecord,
-) -> Result<Vec<u8>, String> {
-    if !contact.kyber_public_key.is_empty() {
-        return Ok(contact.kyber_public_key.clone());
-    }
-    let contact_genesis = <[u8; 32]>::try_from(contact.genesis_hash.as_slice())
-        .map_err(|e| format!("contact genesis_hash is not 32 bytes: {e}"))?;
-    let network = crate::sdk::economic_admission_flow::committed_network_id()
-        .map_err(|e| format!("no committed network: {e}"))?;
-    let set = crate::sdk::storage_set::canonical_set(&network)
-        .map_err(|e| format!("no pinned storage set: {e}"))?;
-    let read = crate::sdk::device_directory::read_entry(&set, &contact_genesis, &sender_device_id)
-        .await
-        .map_err(|e| format!("directory read failed: {e}"))?
-        .ok_or_else(|| {
-            "no member of the pinned set holds a directory entry for the sender that proves \
-             itself"
-                .to_string()
-        })?;
-    if read.entry.body.ak_public_key != contact.public_key {
-        return Err(
-            "the sender's directory entry names another AK than the pairing-established \
-             contact AK"
-                .to_string(),
-        );
-    }
-    let required = dsm::sofi::wire::STORAGE_FINALITY_COUNT;
-    if read.holders.len() < required {
-        return Err(format!(
-            "{} members hold the sender's directory entry; {required} needed",
-            read.holders.len()
-        ));
-    }
-    let kyber_public_key = read.entry.body.kyber_public_key;
-
-    // First-write-wins. Losing the race means another path bound a key
-    // concurrently; that stored key is authoritative and is used instead.
-    let bound = crate::storage::client_db::bind_contact_kyber_key_if_absent(
-        &sender_device_id,
-        &kyber_public_key,
-    )
-    .map_err(|e| format!("failed to persist verified sender Kyber key: {e}"))?;
-    if bound {
-        return Ok(kyber_public_key);
-    }
-    match crate::storage::client_db::get_contact_by_device_id(&sender_device_id) {
-        Ok(Some(stored)) if !stored.kyber_public_key.is_empty() => Ok(stored.kyber_public_key),
-        Ok(Some(..)) | Ok(None) => {
-            Err("Kyber capability vanished between bind and read — failing closed".to_string())
-        }
-        Err(e) => Err(format!("contact lookup after the Kyber bind failed: {e}")),
-    }
 }
 
 /// Where a polled inbox entry goes. Pure — the poll loop only acts on it, so
@@ -527,22 +457,18 @@ async fn finalize_from_countersign_delta(
     let recipient_ak_pk = match crate::storage::client_db::get_contact_public_key_by_device_id(
         &crate::util::text_id::encode_base32_crockford(&proposal.counterparty_device_id),
     ) {
-        Some(pk) => pk,
-        None => {
-            match crate::storage::client_db::get_contact_by_device_id(
-                &proposal.counterparty_device_id,
-            ) {
-                Ok(Some(c)) if !c.public_key.is_empty() => c.public_key,
-                _ => {
-                    log::warn!(
-                        "[storage.sync] ADR 0003 countersign delta {short}..: no stored AK for \
-                         the recipient — cannot verify sig_b, gate retained"
-                    );
-                    return CountersignOutcome::Unverifiable(
-                        "no stored AK for the recipient".to_string(),
-                    );
-                }
-            }
+        Ok(Some(pk)) => pk,
+        Ok(None) => {
+            log::warn!(
+                "[storage.sync] ADR 0003 countersign delta {short}..: the recipient is not a \
+                 contact — cannot verify sig_b, gate retained"
+            );
+            return CountersignOutcome::Unverifiable("the recipient is not a contact".to_string());
+        }
+        Err(e) => {
+            return CountersignOutcome::Unverifiable(format!(
+                "the recipient's stored AK is unreadable: {e}"
+            ));
         }
     };
 
@@ -553,8 +479,6 @@ async fn finalize_from_countersign_delta(
         receipt,
         &proposal,
         &recipient_ak_pk,
-        None,
-        None,
         bound.b_pair(),
     ) {
         Ok(crate::handlers::online_finalize::ReceiptVerifyOutcome::Verified { .. }) => {}
@@ -1470,9 +1394,11 @@ impl AppRouterImpl {
     /// Returns `(route, message_id)` pairs to ACK — two per accepted key, one
     /// for each half — plus the keys whose route should be released once those
     /// ACKs succeed.
+    /// Complete every staged split transfer that is ready: the acks to
+    /// record, the release keys, and every failure the pass met.
     pub(crate) async fn complete_ready_split_transfers(
         &self,
-    ) -> (Vec<(String, String)>, Vec<String>) {
+    ) -> (Vec<(String, String)>, Vec<String>, Vec<String>) {
         use crate::handlers::recipient_dispatch::{decide_ack, AckDecision};
         use crate::handlers::recipient_receipt as rr;
         use crate::storage::client_db::recipient_staging::{
@@ -1481,25 +1407,26 @@ impl AppRouterImpl {
 
         let mut acks: Vec<(String, String)> = Vec::new();
         let mut release_after_ack: Vec<String> = Vec::new();
+        let mut failures: Vec<String> = Vec::new();
 
         let rows = match staging_rows_needing_completion() {
             Ok(r) => r,
             Err(e) => {
-                log::warn!("[storage.sync] ADR 0003 completion: staging read failed: {e}");
-                return (acks, release_after_ack);
+                failures.push(format!("split-transfer staging is unreadable: {e}"));
+                return (acks, release_after_ack, failures);
             }
         };
         if rows.is_empty() {
-            return (acks, release_after_ack);
+            return (acks, release_after_ack, failures);
         }
 
         let Some(self_device_vec) = crate::sdk::app_state::AppState::get_device_id() else {
-            log::warn!("[storage.sync] ADR 0003 completion: local device id unavailable");
-            return (acks, release_after_ack);
+            failures.push("split-transfer completion: no local device id".to_string());
+            return (acks, release_after_ack, failures);
         };
         let Ok(self_device) = <[u8; 32]>::try_from(self_device_vec.as_slice()) else {
-            log::warn!("[storage.sync] ADR 0003 completion: local device id is not 32 bytes");
-            return (acks, release_after_ack);
+            failures.push("split-transfer completion: the local device id is not 32 bytes".into());
+            return (acks, release_after_ack, failures);
         };
         let self_device_b32 = crate::util::text_id::encode_base32_crockford(&self_device);
 
@@ -1527,7 +1454,7 @@ impl AppRouterImpl {
                     "[storage.sync] ADR 0003 completion: pending economic admission could not \
                      be finished ({e}) — all pairs held for resume"
                 );
-                return (acks, release_after_ack);
+                return (acks, release_after_ack, failures);
             }
         }
 
@@ -1562,7 +1489,7 @@ impl AppRouterImpl {
             let sender_ak = match resolve_trusted_sender_ak(&sender_b32, &[]) {
                 Ok(k) => k,
                 Err(e) => {
-                    log::warn!("[storage.sync] ADR 0003 completion: {key}: {e}");
+                    failures.push(format!("split transfer {key}: {e}"));
                     continue;
                 }
             };
@@ -1598,9 +1525,7 @@ impl AppRouterImpl {
                     }
                     Ok(false) => {}
                     Err(e) => {
-                        log::warn!(
-                            "[storage.sync] ADR 0003 completion: {key}: barrier read failed: {e}"
-                        );
+                        failures.push(format!("split transfer {key}: barrier read failed: {e}"));
                         continue;
                     }
                 }
@@ -1608,7 +1533,7 @@ impl AppRouterImpl {
                 let (ak_pk, ak_sk) = match self.wallet.ak_keypair_for_cert_chain() {
                     Ok(p) => p,
                     Err(e) => {
-                        log::error!("[storage.sync] ADR 0003 completion: {key}: AK keypair unavailable: {e}");
+                        failures.push(format!("split transfer {key}: AK keypair unavailable: {e}"));
                         continue;
                     }
                 };
@@ -1618,26 +1543,22 @@ impl AppRouterImpl {
                             let genesis: [u8; 32] = match c.genesis_hash.as_slice().try_into() {
                                 Ok(g) => g,
                                 Err(_) => {
-                                    log::error!("[storage.sync] ADR 0003 completion: {key}: contact genesis is not 32 bytes — fail closed");
+                                    failures.push(format!(
+                                        "split transfer {key}: the sender contact's genesis is not 32 bytes"
+                                    ));
                                     continue;
                                 }
                             };
-                            if !c.kyber_public_key.is_empty() {
-                                (c.kyber_public_key.clone(), genesis)
-                            } else {
-                                match hydrate_missing_sender_kyber_capability(sender_device, &c)
-                                    .await
-                                {
-                                    Ok(k) => (k, genesis),
-                                    Err(e) => {
-                                        log::error!("[storage.sync] ADR 0003 completion: {key}: sender Kyber capability missing and hydration failed: {e} — fail closed");
-                                        continue;
-                                    }
-                                }
-                            }
+                            (c.kyber_public_key.clone(), genesis)
                         }
-                        _ => {
+                        Ok(None) => {
                             log::error!("[storage.sync] ADR 0003 completion: {key}: no contact for sender — fail closed");
+                            continue;
+                        }
+                        Err(e) => {
+                            failures.push(format!(
+                                "split transfer {key}: sender contact unreadable: {e}"
+                            ));
                             continue;
                         }
                     };
@@ -1686,7 +1607,7 @@ impl AppRouterImpl {
                 let wrap_key = match crate::init::current_chain_head_at_rest_key() {
                     Ok(k) => k,
                     Err(e) => {
-                        log::error!("[storage.sync] ADR 0003 completion: {key}: wrap key unavailable (wallet locked?): {e}");
+                        failures.push(format!("split transfer {key}: wrap key unavailable: {e}"));
                         continue;
                     }
                 };
@@ -1694,7 +1615,7 @@ impl AppRouterImpl {
                 let (econ_genesis, econ_devid) = match core_sdk.device_head() {
                     Some(h) => (h.genesis_digest(), h.devid()),
                     None => {
-                        log::error!("[storage.sync] ADR 0003 completion: {key}: no device head");
+                        failures.push(format!("split transfer {key}: no device head"));
                         continue;
                     }
                 };
@@ -1748,13 +1669,11 @@ impl AppRouterImpl {
                         &transition_entropy,
                     );
                     let projection_parent: [u8; 32] =
-                        match crate::storage::client_db::get_contact_chain_tip_raw(&sender_device) {
-                            Some(t) if t != [0u8; 32] => t,
-                            _ => dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-                                &self_device,
-                                &sender_device,
-                            ),
-                        };
+                        crate::storage::client_db::get_contact_chain_tip(&sender_device)
+                            .map_err(|e| {
+                                format!("the sender's relationship tip is unreadable: {e}")
+                            })?
+                            .ok_or_else(|| "the sender is not a contact".to_string())?;
                     let projection_target: [u8; 32] = {
                         let sigma_sym = dsm::core::bilateral_transaction_manager::compute_precommit(
                             &projection_parent,
@@ -1911,7 +1830,11 @@ impl AppRouterImpl {
                         };
                         if let Err(e) = converged {
                             log::warn!("[storage.sync] ADR 0003 completion: {key} accepted but convergence deferred: {e}");
-                            mark_contact_needs_online_reconcile_and_refresh(&sender_device);
+                            if let Err(e) =
+                                mark_contact_needs_online_reconcile_and_refresh(&sender_device)
+                            {
+                                failures.push(e);
+                            }
                             // Do NOT ACK yet — the reply is not enqueued.
                             continue;
                         }
@@ -1927,10 +1850,10 @@ impl AppRouterImpl {
                             let built = admission_build.borrow_mut().take();
                             let signed_op = signed_op_stash.borrow_mut().take();
                             let (Some(built), Some(signed_op)) = (built, signed_op) else {
-                                log::error!(
-                                    "[storage.sync] ADR 0003 completion: {key}: admission \
-                                     accepted with no build — invariant violated; held for resume"
-                                );
+                                failures.push(format!(
+                                    "split transfer {key}: admission accepted with no build \
+                                     (invariant violated); held for resume"
+                                ));
                                 continue;
                             };
                             if let Err(e) = crate::sdk::economic_admission_flow::finish_admission(
@@ -1960,35 +1883,45 @@ impl AppRouterImpl {
                                      economic admission HELD for resume ({e}) — release \
                                      undelivered, no ACK"
                                 );
-                                mark_contact_needs_online_reconcile_and_refresh(&sender_device);
+                                if let Err(e) =
+                                    mark_contact_needs_online_reconcile_and_refresh(&sender_device)
+                                {
+                                    failures.push(e);
+                                }
                                 continue;
                             }
                         }
                         // Amount/token from the FROZEN transfer half (SIG A already verified
                         // over its canonical bytes by `verify_staged_transfer`).
-                        let (amount, token_id) = row
+                        let frozen = row
                             .transfer_bytes
                             .as_deref()
+                            .ok_or_else(|| "the frozen transfer half is missing".to_string())
                             .and_then(|b| {
-                                <dsm::types::proto::OnlineTransferRequest as prost::Message>::decode(b).ok()
-                            })
-                            .map(|r| (r.amount, r.token_id))
-                            .unwrap_or((0, "ERA".to_string()));
-                        record_accepted_split_history(
-                            &key,
-                            &evidence_receipt,
-                            &sender_b32,
-                            &self_device_b32,
-                            amount,
-                            token_id,
-                        );
+                                <dsm::types::proto::OnlineTransferRequest as prost::Message>::decode(b)
+                                    .map_err(|e| format!("the frozen transfer half does not decode: {e}"))
+                            });
+                        let history = frozen.and_then(|r| {
+                            record_accepted_split_history(
+                                &self.wallet,
+                                &key,
+                                &evidence_receipt,
+                                &sender_b32,
+                                &self_device_b32,
+                                r.amount,
+                                r.token_id,
+                            )
+                        });
+                        if let Err(e) = history {
+                            failures.push(format!("split transfer {key} history: {e}"));
+                        }
                     }
                     Ok(AckDecision::DoNotAck(why)) => {
                         log::info!("[storage.sync] ADR 0003 completion: {key} not ACK-able: {why}");
                         continue;
                     }
                     Err(e) => {
-                        log::warn!("[storage.sync] ADR 0003 completion: {key} failed: {e}");
+                        failures.push(format!("split transfer {key}: {e}"));
                         continue;
                     }
                 }
@@ -1999,7 +1932,9 @@ impl AppRouterImpl {
                 }) {
                     Ok(AckDecision::Ack(_)) => {}
                     other => {
-                        log::warn!("[storage.sync] ADR 0003 completion: {key} accepted row did not re-ACK: {other:?}");
+                        failures.push(format!(
+                            "split transfer {key}: the accepted row did not re-ACK: {other:?}"
+                        ));
                         continue;
                     }
                 }
@@ -2013,10 +1948,10 @@ impl AppRouterImpl {
             // accepted row without a route here is an invariant violation, not a
             // recoverable state.
             let Some(route) = row.retained_route.clone() else {
-                log::error!(
-                    "[storage.sync] ADR 0003 completion: {key} is accepted with no retained \
-                     route — invariant violated; cannot ACK by route"
-                );
+                failures.push(format!(
+                    "split transfer {key} is accepted with no retained route (invariant \
+                     violated); it cannot be ACKed by route"
+                ));
                 continue;
             };
             acks.push((route.clone(), key.clone()));
@@ -2029,7 +1964,7 @@ impl AppRouterImpl {
             release_after_ack.push(key);
         }
 
-        (acks, release_after_ack)
+        (acks, release_after_ack, failures)
     }
 
     pub(crate) async fn run_storage_sync_request(
@@ -2500,7 +2435,10 @@ impl AppRouterImpl {
             Err(e) => return Err(report.stop(format!("load contacts failed: {e}"))),
         };
         let tagged_addresses =
-            collect_tagged_inbox_addresses(my_genesis, self.device_id_bytes, &contacts);
+            match collect_tagged_inbox_addresses(my_genesis, self.device_id_bytes, &contacts) {
+                Ok(addresses) => addresses,
+                Err(e) => return Err(report.stop(e)),
+            };
 
         let mut items = Vec::new();
         // Already-accepted stale-route duplicates (§5.2), consumed directly:
@@ -2770,7 +2708,7 @@ impl AppRouterImpl {
                 &self.device_id_bytes,
                 &relationship,
             ) {
-                Some(peer) => {
+                Ok(Some(peer)) => {
                     if let Err(e) = self
                         .initiate_cert_resync(peer, storage_endpoints.to_vec())
                         .await
@@ -2778,9 +2716,10 @@ impl AppRouterImpl {
                         report.errors.push(format!("cert resync initiate: {e}"));
                     }
                 }
-                None => report
+                Ok(None) => report
                     .errors
                     .push("a relationship requiring resync has no resolvable peer".to_string()),
+                Err(e) => report.errors.push(format!("cert resync peer lookup: {e}")),
             }
         }
     }
@@ -2793,7 +2732,8 @@ impl AppRouterImpl {
         b0x_sdk: &mut crate::sdk::b0x_sdk::B0xSDK,
         report: &mut StorageSyncReport,
     ) {
-        let (split_acks, release_keys) = self.complete_ready_split_transfers().await;
+        let (split_acks, release_keys, failures) = self.complete_ready_split_transfers().await;
+        report.errors.extend(failures);
         // Each release key is one transfer this pass completed.
         report.processed += release_keys.len() as u32;
         let mut groups: std::collections::BTreeMap<String, Vec<String>> =
@@ -2854,6 +2794,9 @@ impl AppRouterImpl {
             Err(e) => report
                 .errors
                 .push(format!("artifact republish sweep failed: {e}")),
+        }
+        if let Err(e) = crate::handlers::artifact_republish::continue_route_writes().await {
+            report.errors.push(e);
         }
         // An admission the head already carried when this process restored
         // it; one created after startup belongs to the handler that created it.

@@ -7,11 +7,7 @@
 # entries only have to satisfy the loader's schema: at least one node, each
 # with name, endpoint and register_incarnation. Loopback endpoints need
 # allow_localhost, which the Android release loader otherwise refuses.
-protocol = "http"
-lan_ip = "127.0.0.1"
 allow_localhost = true
-storage_node_mode = "remote"
-ports = [8080]
 
 [[nodes]]
 name = "instrumented-node-1"

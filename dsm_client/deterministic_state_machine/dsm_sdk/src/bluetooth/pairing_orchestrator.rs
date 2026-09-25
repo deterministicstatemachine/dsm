@@ -1293,7 +1293,7 @@ mod tests {
             device_id: device_id.to_vec(),
             alias: "test-peer".to_string(),
             genesis_hash: vec![0x33; 32],
-            current_chain_tip: None,
+            current_chain_tip: Some(vec![0x70; 32]),
             verified: true,
             verification_proof: None,
             metadata: HashMap::new(),
@@ -1301,7 +1301,7 @@ mod tests {
             status: "Created".to_string(),
             needs_online_reconcile: false,
             public_key: vec![0u8; 32],
-            kyber_public_key: Vec::new(),
+            kyber_public_key: vec![0x4B; 1184],
             previous_chain_tip: None,
         };
         client_db::store_contact(&rec).expect("store contact");
@@ -1330,7 +1330,7 @@ mod tests {
             device_id: device_id.to_vec(),
             alias: "peer".to_string(),
             genesis_hash: genesis.to_vec(),
-            current_chain_tip: None,
+            current_chain_tip: Some(vec![0x70; 32]),
             verified: true,
             verification_proof: None,
             metadata: HashMap::new(),
@@ -1338,7 +1338,7 @@ mod tests {
             status: "Created".to_string(),
             needs_online_reconcile: false,
             public_key: vec![0u8; 32],
-            kyber_public_key: Vec::new(),
+            kyber_public_key: vec![0x4B; 1184],
             previous_chain_tip: None,
         };
         client_db::store_contact(&rec).expect("store contact");
@@ -1409,7 +1409,7 @@ mod tests {
             device_id: device_id.to_vec(),
             alias: "peer2".to_string(),
             genesis_hash: genesis_stored.to_vec(),
-            current_chain_tip: None,
+            current_chain_tip: Some(vec![0x70; 32]),
             verified: true,
             verification_proof: None,
             metadata: HashMap::new(),
@@ -1417,7 +1417,7 @@ mod tests {
             status: "Created".to_string(),
             needs_online_reconcile: false,
             public_key: vec![0u8; 32],
-            kyber_public_key: Vec::new(),
+            kyber_public_key: vec![0x4B; 1184],
             previous_chain_tip: None,
         };
         client_db::store_contact(&rec).expect("store contact");

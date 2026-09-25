@@ -20,7 +20,7 @@ if (!fs.existsSync(targetDir)) {
 }
 
 // Remove stale assets (but preserve whitelisted files such as env configs)
-const whitelist = new Set(['dsm_env_config.json', 'dsm_env_config.toml', 'ca.crt']);
+const whitelist = new Set(['dsm_env_config.toml', 'ca.crt']);
 console.log('Cleaning existing Android assets (preserving whitelist)...');
 try {
   const existing = fs.readdirSync(targetDir);

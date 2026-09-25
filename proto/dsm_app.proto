@@ -1772,8 +1772,9 @@ message OfflineBilateralTransaction {
   bytes sender_id = 2 [(dsm_fixed_len)=32];
   bytes recipient_id = 3 [(dsm_fixed_len)=32];
   bytes commitment_hash = 4 [(dsm_fixed_len)=32];
-  bytes sender_state_hash = 5 [(dsm_fixed_len)=32];
-  bytes recipient_state_hash = 6 [(dsm_fixed_len)=32];
+  // 5, 6 carried state hashes the SDK never had and filled with zeros.
+  reserved 5, 6;
+  reserved "sender_state_hash", "recipient_state_hash";
   OfflineBilateralTransactionStatus status = 7;
   map<string,string> metadata = 8; // transport/UI only
 }
@@ -1900,15 +1901,10 @@ message ReceiptCommit {
   // commit form (§4.2.1).
   bytes kyber_ct_a = 18 [(dsm_max_len)=2048];
   bytes kyber_ct_b = 19 [(dsm_max_len)=2048];
-  // Fork-aware finalization witness (whitepaper §4.1.1 + §4.3). Present only
-  // when the successor was stitched under the fork-aware precommit family
-  // (multiple candidates committed under C_pre^root). Carried in the envelope
-  // ONLY — explicitly excluded from the canonical commit preimage so that the
-  // §4.2.1 ten-field commit form is preserved unchanged. The recipient's
-  // verifier rebuilds C_pre^j for every unselected branch and checks
-  //   pi_inv == invalidation_proof_commitment(C_pre^j for j != selected)
-  // before parent-consumption Tripwire admits the successor.
-  ForkAwareWitness fork_witness = 20;
+  // 20 was a fork-aware finalization witness: no producer made one, and the
+  // receiver checked the sender's candidate set only against itself.
+  reserved 20;
+  reserved "fork_witness";
   // The sender's transition entropy e_{n+1} (Part VII step 3, §39.3): the one
   // value Core derived inside DeviceState::advance for this step. CANONICAL —
   // part of the commit preimage, so sig_a binds it. The recipient cannot
@@ -1916,49 +1912,6 @@ message ReceiptCommit {
   // and the symmetric tip and recomputes child_tip from it. Required.
   bytes transition_entropy = 21 [(dsm_fixed_len)=32];
 }
-
-// Fork-aware finalization witness (whitepaper §4.1.1 + §4.3).
-//
-// A successor stitched under the fork-aware precommit family is acceptable
-// iff (a) the selected branch's `C_pre^i` is a member of the committed
-// candidate set under `C_pre^root`, and (b) the supplied `pi_inv`
-// byte-exactly matches `H("DSM/precommit/invalidation-proof/v2\0" ||
-// enc(unselected C_pre^j))`.
-//
-// The witness rides in the receipt envelope (not in the canonical commit
-// preimage). For a non-fork (single-candidate) successor this message is
-// omitted entirely.
-message ForkAwareWitness {
-  // Parent tip h_n that anchors the C_pre^i derivation. MUST equal the
-  // receipt's parent_tip; encoded here so the verifier can independently
-  // recompute the canonical branch commitments without consulting state.
-  bytes parent_tip = 1 [(dsm_fixed_len)=32];
-  // Full ordered candidate set committed under C_pre^root. The verifier
-  // rebuilds each candidate's C_pre^i under the canonical v2 domain
-  // `DSM/precommit/commitment-hash/v2\0`. At least one entry; in practice
-  // bounded by the operator's deterministic state-machine fan-out.
-  repeated ForkAwareCandidate candidates = 2;
-  // The fork_id of the selected candidate. MUST match exactly one entry in
-  // `candidates`; otherwise the witness is rejected.
-  string selected_fork_id = 3 [(dsm_max_len)=128];
-  // Canonical invalidation-proof commitment over the C_pre^j of every
-  // unselected branch (i.e. all candidates except `selected_fork_id`).
-  bytes pi_inv = 4 [(dsm_fixed_len)=32];
-}
-
-// Single candidate inside a fork-aware precommit family.
-//
-// `fork_id` is a deterministic short label (bounded to MAX_ID_LEN) and is
-// the same id used at construction time (`select_fork`). `payload` and
-// `entropy` reproduce the inputs to `branch_commitment_hash` so the
-// verifier can recompute `C_pre^i = H("DSM/precommit/commitment-hash/v2\0"
-// || parent_tip || payload || entropy)`.
-message ForkAwareCandidate {
-  string fork_id = 1 [(dsm_max_len)=128];
-  bytes payload = 2 [(dsm_max_len)=262144];
-  bytes entropy = 3 [(dsm_max_len)=65536];
-}
-
 
 // Bilateral event notifications for frontend
 enum BilateralEventType {
@@ -2445,7 +2398,9 @@ message QueryOp { string path = 1; ArgPack params = 2; bool include_proofs = 3; 
 message UniversalOp {
   Hash32  op_id        = 1; // client-assigned match id
   bytes   actor        = 2 [(dsm_max_len)=96]; // initiator (genesis/key)
-  bytes   genesis_hash = 3 [(dsm_fixed_len)=32]; // actor’s chain root
+  // 3 was the actor's genesis: nothing read it, and one producer sent zeros.
+  reserved 3;
+  reserved "genesis_hash";
   reserved 18, 19, 27, 28; // Bilateral ops removed
   oneof kind {
     Invoke                  invoke                 = 10;
@@ -2479,7 +2434,15 @@ message Error {
   // Useful for human-readable diagnostics without introducing JSON.
   string debug_b32 = 6 [(dsm_max_len)=4096];
 }
-message OpResult { Hash32 op_id = 1; bool accepted = 2; Hash32 post_state_hash = 3; ResultPack result = 4; Error error = 5; }
+message OpResult {
+  Hash32 op_id = 1;
+  bool accepted = 2;
+  // 3 was a post-state hash no router produced.
+  reserved 3;
+  reserved "post_state_hash";
+  ResultPack result = 4;
+  Error error = 5;
+}
 message UniversalRx { repeated OpResult results = 1; }
 
 // ================================ BATCH ==============================
@@ -2634,7 +2597,6 @@ message Envelope {
     AppSessionStateProto              session_state_response           = 95;
     NfcRecoveryCapsule                nfc_recovery_capsule             = 96;
     TokenPolicyListResponse           token_policy_list_response       = 97;
-    BilateralReconciliationResponse   reconciliation_response          = 98;
 
     Error                             error                            = 99;
     GenesisLifecycleEvent             genesis_lifecycle                = 100;
@@ -2676,13 +2638,14 @@ message Envelope {
     TokenAdoptionQrResponse token_adoption_qr_response = 119;
   }
   reserved 110, 111; // removed v1 counter-era bearer round-trip (BilateralBearerPrepared/Proceed)
-  // 114 was a §16.6 reply-window payload variant. Storage nodes validate transport
-  // envelopes against a COMPILED-IN allowlist of payload tags (currently <= 106), so a
-  // new tag is unroutable until every node is redeployed. The return leg therefore
-  // rides inside UniversalTx (tag 10) as an explicit `receipt.countersign.b` invoke
-  // (ReceiptCountersignB) instead. Reserved so the number is never silently reused.
+  // 114 was a §16.6 reply-window payload variant; the return leg rides inside
+  // UniversalTx (tag 10) as an explicit `receipt.countersign.b` invoke
+  // (ReceiptCountersignB). Reserved so the number is never silently reused. The
+  // device's strict envelope validator reads this oneof and these reservations
+  // from the compiled proto; storage nodes do not open envelopes.
   reserved 114;
   reserved 115; // was token_mint_response: there is no minting after genesis (SoFi §48)
+  reserved 98; // was reconciliation_response: bilateral.reconcile had no caller
 }
 
 // ===================== Sealed spool payloads (DSM Amendment A7) =====================
@@ -3382,7 +3345,9 @@ message TransactionInfo {
   bytes  to_device_id  = 3 [(dsm_fixed_len)=32];
   string token_id      = 4;
   uint64 amount        = 5;
-  uint64 fee           = 6;
+  // 6 was a fee: a transfer carries none, and the field was always 0.
+  reserved 6;
+  reserved "fee";
   // No history ordinal or time: the history is returned in order.
   reserved 7;
   reserved "logical_index";
@@ -3421,7 +3386,9 @@ message InboxItem {
   reserved 3;
   reserved "tick";
   optional string sender_id = 4;
-  bytes  payload         = 5;
+  // 5 was a payload the SDK always sent empty.
+  reserved 5;
+  reserved "payload";
   bool   is_stale_route  = 6; // arrived via previous (non-current) relationship tip
 }
 message InboxRequest {

@@ -140,7 +140,6 @@ export async function getInbox(limit = 50): Promise<{ items: Array<{ id: string;
       id: item.id || '',
       preview: item.preview || '',
       sender_id: item.senderId,
-      payload: item.payload,
       isStaleRoute: item.isStaleRoute,
     }));
 
@@ -157,7 +156,6 @@ export async function listB0xMessages(): Promise<any[]> {
     id: item.id,
     preview: item.preview,
     senderId: item.sender_id,
-    payload: item.payload,
     isStaleRoute: item.isStaleRoute ?? false,
   }));
 }

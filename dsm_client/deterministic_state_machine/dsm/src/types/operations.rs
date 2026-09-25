@@ -13,10 +13,7 @@
 
 use std::{collections::HashMap, fmt::Debug};
 
-use crate::{
-    commitments::precommit::SecurityParameters,
-    types::{error::DsmError, token_types::Balance},
-};
+use crate::types::{error::DsmError, token_types::Balance};
 
 /// State transition execution mode (canonical encoded; no Serde).
 ///
@@ -904,7 +901,6 @@ impl Operation {
             for v in vars {
                 put_str(out, &v);
             }
-            // Note: security_params intentionally not included in canonical op bytes
         }
 
         match self {
@@ -1526,7 +1522,6 @@ impl Operation {
             Ok(PreCommitmentOp {
                 fixed_parameters: fixed,
                 variable_parameters: vars,
-                security_params: SecurityParameters::default(),
             })
         }
 
@@ -2104,48 +2099,6 @@ impl Operation {
         Ok(op)
     }
 
-    pub fn get_state_number(&self) -> Option<u64> {
-        None
-    }
-
-    /// Get proof of authorization if available
-    pub fn get_proof_of_authorization(&self) -> Option<Vec<u8>> {
-        match self {
-            // For Transfer, the signature IS the proof of authorization
-            Operation::Transfer { signature, .. } if !signature.is_empty() => {
-                Some(signature.clone())
-            }
-            Operation::Create { proof, .. } => Some(proof.clone()),
-            Operation::Update { proof, .. } => Some(proof.clone()),
-            Operation::AddRelationship { proof, .. } => Some(proof.clone()),
-            Operation::CreateRelationship { proof, .. } => Some(proof.clone()),
-            Operation::RemoveRelationship { proof, .. } => Some(proof.clone()),
-            Operation::Delete { proof, .. } => Some(proof.clone()),
-            Operation::Link { proof, .. } => Some(proof.clone()),
-            Operation::Unlink { proof, .. } => Some(proof.clone()),
-            Operation::Invalidate { proof, .. } => Some(proof.clone()),
-            Operation::Recovery {
-                compromise_proof, ..
-            } => Some(compromise_proof.clone()),
-            Operation::CreateToken { signature, .. }
-            | Operation::AdoptToken { signature, .. }
-            | Operation::Lock { signature, .. }
-            | Operation::Unlock { signature, .. }
-            | Operation::LockToken { signature, .. }
-            | Operation::UnlockToken { signature, .. }
-            | Operation::Generic { signature, .. }
-            | Operation::DlvCreate { signature, .. }
-            | Operation::DlvUnlock { signature, .. }
-            | Operation::DlvClaim { signature, .. }
-            | Operation::DlvInvalidate { signature, .. }
-                if !signature.is_empty() =>
-            {
-                Some(signature.clone())
-            }
-            _ => None,
-        }
-    }
-
     /// Get signature if available.
     /// Per whitepaper: receipts are signed by both parties with SPHINCS+ ephemeral keys.
     pub fn get_signature(&self) -> Option<Vec<u8>> {
@@ -2335,8 +2288,6 @@ pub struct PreCommitmentOp {
     pub fixed_parameters: HashMap<String, Vec<u8>>,
     /// Parameter names whose values will be provided at execution time.
     pub variable_parameters: Vec<String>,
-    /// Security parameters governing the commitment (not included in canonical bytes).
-    pub security_params: SecurityParameters,
 }
 
 // Implement PartialEq, Eq, PartialOrd and Ord for consistent ordering
@@ -2519,7 +2470,6 @@ mod tests {
             let pc = PreCommitmentOp {
                 fixed_parameters: fixed,
                 variable_parameters: vec!["nonce".into(), "timestamp".into()],
-                security_params: SecurityParameters::default(),
             };
             roundtrip(&Operation::Transfer {
                 policy_commit: [0u8; 32],
@@ -3392,7 +3342,6 @@ mod tests {
                     pre_commit: Some(PreCommitmentOp {
                         fixed_parameters: fixed,
                         variable_parameters: vec![],
-                        security_params: SecurityParameters::default(),
                     }),
                     recipient: vec![],
                     to: vec![],

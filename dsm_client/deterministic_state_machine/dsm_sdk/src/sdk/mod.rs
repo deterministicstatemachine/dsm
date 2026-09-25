@@ -14,14 +14,6 @@
 //! * `core_sdk`: Central integration point for all DSM functionality
 //! * `token_sdk`: Provides token operations and policy enforcement
 //!
-//! ### Smart Contract Functionality
-//!
-//! * `smart_commitment_sdk`: Creates and verifies cryptographic commitments
-//!
-//! ### Transport and Communication
-//!
-//! * `bluetooth_transport`: Enables device-to-device communication via Bluetooth
-//!
 //! ### Application-Specific Implementations
 //!
 //! * `contact_sdk`: Manages peer relationships and communications
@@ -49,7 +41,6 @@ pub mod apply_outcome; // §16.6 tri-state full-state apply outcome
 pub mod b0x_sdk;
 pub mod chain_tip_store;
 pub mod core_sdk;
-pub mod device_admission_sdk;
 pub mod identity_publication; // publication-quorum lifecycle for device identities
 pub mod inbox_poller;
 pub mod kyber_identity; // ML-KEM identity binding for online contact establishment (§11.1)
@@ -80,7 +71,6 @@ pub mod bitcoin_key_store;
 pub mod bitcoin_tap_sdk;
 pub mod bitcoin_tx_builder;
 pub mod identity_presentation;
-pub mod smart_commitment_sdk;
 pub mod transfer_hooks;
 
 // Recovery system SDK
@@ -91,8 +81,6 @@ pub mod recovery_store;
 pub mod seed_vault;
 
 // Transport and communication modules
-pub mod bluetooth_transport;
-pub mod secure_ble_transport;
 
 // Receipt primitives
 pub mod receipts;
@@ -105,17 +93,12 @@ pub mod contact_sdk;
 pub mod wallet_sdk;
 
 // Re-export primary SDK components for easier access
-pub use bluetooth_transport::{
-    BluetoothMode, BluetoothTransport, BleBridgeEvent, BilateralBluetoothMessage,
-};
 pub use core_sdk::CoreSDK;
 pub use wallet_sdk::WalletSDK;
 // Note: BilateralContactManager and BilateralOfflineTransactionManager are not public types
-pub use smart_commitment_sdk::SmartCommitmentSDK;
 pub use bitcoin_tap_sdk::BitcoinTapSdk;
 pub use bitcoin_key_store::BitcoinKeyStore;
 pub use recovery_sdk::RecoverySDK;
-pub use device_admission_sdk::DeviceAdmissionSDK;
 pub use token_sdk::TokenSDK;
 pub use runtime_config::RuntimeConfig;
 pub use b0x_sdk::B0xSDK;

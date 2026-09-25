@@ -3,7 +3,6 @@
 //! src/core/token/mod.rs
 
 pub mod policy;
-pub mod token_factory;
 pub mod token_state_manager;
 
 // Optional modules (enable via Cargo features)
@@ -12,10 +11,6 @@ pub mod token_state_manager;
 
 // Export main token manager types and helpers (only items that exist)
 pub use policy::TokenPolicySystem;
-
-pub use token_factory::{
-    create_token_genesis, derive_sub_token_genesis, ParticipantId, TokenContribution, TokenGenesis,
-};
 
 pub use token_state_manager::{
     builtin_policy_commit_for_token, builtin_token_id_for_policy_commit,

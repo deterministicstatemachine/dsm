@@ -110,8 +110,8 @@ pub(crate) fn sync_tip_projections_in_tx(
 ) -> Result<TipSyncOutcome> {
     // Step 1: Load current bilateral row
     let (chain_tip, local_tip, observed_remote_tip, observed_remote_tip_source): (
-        Vec<u8>,
-        Vec<u8>,
+        Option<Vec<u8>>,
+        Option<Vec<u8>>,
         Option<Vec<u8>>,
         Option<i64>,
     ) = {
@@ -121,8 +121,8 @@ pub(crate) fn sync_tip_projections_in_tx(
         )?;
         match stmt.query_row(params![&request.counterparty_device_id[..]], |row| {
             Ok((
-                row.get::<_, Option<Vec<u8>>>(0)?.unwrap_or_default(),
-                row.get::<_, Option<Vec<u8>>>(1)?.unwrap_or_default(),
+                row.get::<_, Option<Vec<u8>>>(0)?,
+                row.get::<_, Option<Vec<u8>>>(1)?,
                 row.get::<_, Option<Vec<u8>>>(2)?,
                 row.get::<_, Option<i64>>(3)?,
             ))
@@ -137,27 +137,25 @@ pub(crate) fn sync_tip_projections_in_tx(
         }
     };
 
-    let chain_tip_arr: [u8; 32] = match chain_tip.as_slice().try_into() {
-        Ok(a) => a,
-        Err(_) if chain_tip.is_empty() || chain_tip == vec![0u8; 32] => [0u8; 32],
-        Err(_) => {
-            return Ok(TipSyncOutcome::InvariantViolation {
-                message: format!("chain_tip is {} bytes, expected 32", chain_tip.len()),
-            });
-        }
+    // Every contact starts at its relationship's h_0: a missing tip, or one
+    // that is not 32 bytes, is a corrupt row.
+    let tip_of = |column: &str, tip: Option<Vec<u8>>| -> Result<[u8; 32], TipSyncOutcome> {
+        let tip = tip.ok_or_else(|| TipSyncOutcome::InvariantViolation {
+            message: format!("{column} is missing"),
+        })?;
+        tip.as_slice()
+            .try_into()
+            .map_err(|_| TipSyncOutcome::InvariantViolation {
+                message: format!("{column} is {} bytes, expected 32", tip.len()),
+            })
     };
-
-    let local_tip_arr: [u8; 32] = match local_tip.as_slice().try_into() {
-        Ok(a) => a,
-        Err(_) if local_tip.is_empty() || local_tip == vec![0u8; 32] => [0u8; 32],
-        Err(_) => {
-            return Ok(TipSyncOutcome::InvariantViolation {
-                message: format!(
-                    "local_bilateral_chain_tip is {} bytes, expected 32",
-                    local_tip.len()
-                ),
-            });
-        }
+    let chain_tip_arr = match tip_of("chain_tip", chain_tip) {
+        Ok(tip) => tip,
+        Err(violation) => return Ok(violation),
+    };
+    let local_tip_arr = match tip_of("local_bilateral_chain_tip", local_tip) {
+        Ok(tip) => tip,
+        Err(violation) => return Ok(violation),
     };
 
     let observed_remote_tip_record = match observed_remote_tip {
@@ -212,7 +210,7 @@ pub(crate) fn sync_tip_projections_in_tx(
             )?;
             TipSyncOutcome::RepairedAtTarget { tip: *target }
         }
-    } else if chain_tip_arr == *parent || (chain_tip_arr == [0u8; 32] && *parent == [0u8; 32]) {
+    } else if chain_tip_arr == *parent {
         // Case B: canonical at expected parent — advance both atomically
         tx.execute(
             "UPDATE contacts SET \

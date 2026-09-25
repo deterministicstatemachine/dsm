@@ -42,10 +42,7 @@ fn ca_error(what: String) -> DsmError {
 /// error: a client built without a certificate the config requires cannot
 /// reach the members that use it.
 fn resolve_ca_material() -> Result<CaMaterial, DsmError> {
-    let env_path = std::env::var("DSM_ENV_CONFIG_PATH")
-        .ok()
-        .or_else(|| crate::network::get_env_config_path().map(str::to_string))
-        .or_else(|| std::env::var("ENV_CONFIG_PATH").ok());
+    let env_path = crate::network::resolved_env_config_path();
     let Some(path) = env_path.as_ref() else {
         return Ok(CaMaterial {
             env_path,

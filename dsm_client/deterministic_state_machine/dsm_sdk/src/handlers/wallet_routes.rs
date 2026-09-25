@@ -18,15 +18,22 @@ use super::response_helpers::{pack_envelope_ok, err};
 /// token whose decimals live in the registry. There is no hardcoded table:
 /// one existed in TypeScript, knew only dBTC, and silently rendered every
 /// custom token as whole units.
-pub fn decimals_for_token(token_id: &str) -> u32 {
-    match token_id.trim().to_uppercase().as_str() {
-        "ERA" => 0,
-        "DBTC" | "BTC" => 8,
-        other => crate::storage::client_db::token_registry::get_token_by_ticker(other)
-            .ok()
-            .flatten()
+///
+/// A token the registry cannot be read for, or holds no entry for, has no
+/// known decimals: that is an error, never 0, because a wrong scale moves
+/// value when a display amount is parsed back into base units.
+pub fn token_decimals(token_id: &str) -> Result<u32, String> {
+    let canonical = canonicalize_token_id(token_id);
+    match canonical.to_ascii_uppercase().as_str() {
+        "" => Err("a token's decimals were asked for with no token named".to_string()),
+        "ERA" => Ok(0),
+        "DBTC" | "BTC" => Ok(8),
+        _ => crate::storage::client_db::token_registry::get_token_by_ticker(&canonical)
+            .map_err(|e| format!("token registry unreadable for {canonical}: {e}"))?
             .map(|row| row.decimals)
-            .unwrap_or(0),
+            .ok_or_else(|| {
+                format!("no registry entry for token {canonical}; its decimals are unknown")
+            }),
     }
 }
 
@@ -51,16 +58,19 @@ pub fn format_signed_base_units_for_display(amount: i64, decimals: u32) -> Strin
 /// the string a UI prints. Amounts that predate signed accounting carry
 /// `amount_signed == 0`, so fall back to the unsigned magnitude rather than
 /// rendering every historical row as zero.
-pub fn enrich_transaction_display(tx: &mut generated::TransactionInfo) {
-    let decimals = decimals_for_token(&tx.token_id);
+pub fn enrich_transaction_display(tx: &mut generated::TransactionInfo) -> Result<(), String> {
+    let decimals = token_decimals(&tx.token_id)?;
     tx.display_amount = if tx.amount_signed != 0 {
         format_signed_base_units_for_display(tx.amount_signed, decimals)
     } else {
         format_base_units_for_display(tx.amount, decimals)
     };
+    Ok(())
 }
 
-pub(crate) fn enrich_balance_metadata(reply: &mut generated::BalanceGetResponse) {
+pub(crate) fn enrich_balance_metadata(
+    reply: &mut generated::BalanceGetResponse,
+) -> Result<(), String> {
     let token_id = reply.token_id.trim().to_uppercase();
     match token_id.as_str() {
         "ERA" => {
@@ -89,36 +99,44 @@ pub(crate) fn enrich_balance_metadata(reply: &mut generated::BalanceGetResponse)
         // canonical allocation was correct. The registry is authoritative for
         // this mapping, so read it rather than defaulting.
         _ => {
-            if let Ok(Some(row)) =
+            let row =
                 crate::storage::client_db::token_registry::get_token_by_ticker(&reply.token_id)
-            {
-                reply.symbol = row.ticker.clone();
-                reply.token_name = if row.alias.is_empty() {
-                    row.ticker
-                } else {
-                    row.alias
-                };
-                reply.decimals = row.decimals;
-                reply.canonical_token_id = row.token_id.clone();
-                set_anchor(reply, &row.policy_commit);
-                reply.icon_url = policy_icon(&row.policy_commit);
-            }
+                    .map_err(|e| format!("token registry unreadable for {}: {e}", reply.token_id))?
+                    .ok_or_else(|| {
+                        format!(
+                            "no registry entry for token {}; its balance cannot be named",
+                            reply.token_id
+                        )
+                    })?;
+            reply.symbol = row.ticker.clone();
+            reply.token_name = if row.alias.is_empty() {
+                row.ticker
+            } else {
+                row.alias
+            };
+            reply.decimals = row.decimals;
+            reply.canonical_token_id = row.token_id.clone();
+            set_anchor(reply, &row.policy_commit);
+            reply.icon_url = policy_icon(&row.policy_commit)?;
             reply.display_amount = format_base_units_for_display(reply.available, reply.decimals);
         }
     }
+    Ok(())
 }
 
 /// The icon field of a token's anchored policy, from bytes verified against the commit.
 ///
-/// Carried as the policy states it: the wallet draws coin artwork from it. A policy that is not
-/// stored here, or does not parse, has no icon to carry.
-fn policy_icon(policy_commit: &[u8; 32]) -> String {
-    match crate::storage::client_db::token_registry::load_policy_verified(policy_commit) {
-        Ok(Some(bytes)) => super::token_routes::parse_token_policy(&bytes)
-            .and_then(|policy| policy.icon_url)
-            .unwrap_or_default(),
-        _ => String::new(),
-    }
+/// Carried as the policy states it: the wallet draws coin artwork from it; a policy
+/// without an icon field has none. A registered token's policy is stored with it, so
+/// a policy that is missing or does not parse is an error.
+fn policy_icon(policy_commit: &[u8; 32]) -> Result<String, String> {
+    let anchor = crate::util::text_id::encode_base32_crockford(policy_commit);
+    let bytes = crate::storage::client_db::token_registry::load_policy_verified(policy_commit)
+        .map_err(|e| format!("policy {anchor} unreadable: {e}"))?
+        .ok_or_else(|| format!("policy {anchor} of a registered token is not stored"))?;
+    let policy = super::token_routes::parse_token_policy(&bytes)
+        .ok_or_else(|| format!("stored policy {anchor} does not parse"))?;
+    Ok(policy.icon_url.unwrap_or_default())
 }
 
 /// How much of an anchor is enough to compare by eye.
@@ -141,7 +159,9 @@ fn set_anchor(reply: &mut generated::BalanceGetResponse, policy_commit: &[u8; 32
     reply.policy_anchor_b32 = b32;
 }
 
-fn ensure_default_visible_balances(items: &mut Vec<generated::BalanceGetResponse>) {
+fn ensure_default_visible_balances(
+    items: &mut Vec<generated::BalanceGetResponse>,
+) -> Result<(), String> {
     let push_zero = |items: &mut Vec<generated::BalanceGetResponse>, token_id: &str| {
         if items
             .iter()
@@ -149,35 +169,27 @@ fn ensure_default_visible_balances(items: &mut Vec<generated::BalanceGetResponse
         {
             return;
         }
-        let mut reply = generated::BalanceGetResponse {
+        items.push(generated::BalanceGetResponse {
             token_id: token_id.to_string(),
             available: 0,
             locked: 0,
             ..Default::default()
-        };
-        enrich_balance_metadata(&mut reply);
-        items.push(reply);
+        });
     };
 
     for token_id in ["ERA", "dBTC"] {
         push_zero(items, token_id);
     }
 
-    // Every token in the registry is visible, held or not.
-    //
-    // The list was built purely from balance projections, so a token this
-    // device had ADOPTED but held none of did not appear at all. On D3 the
-    // CPTA add succeeded — registry row written, policy stored — and the
-    // Tokens screen still showed only ERA and dBTC, which is indistinguishable
-    // from the add having failed. Worse, it hides the token you must be able
-    // to see in order to receive any of it.
-    //
-    // Registry membership, not balance, is what makes a token yours to hold.
-    if let Ok(rows) = crate::storage::client_db::token_registry::all_tokens() {
-        for row in rows {
-            push_zero(items, &row.ticker);
-        }
+    // Every token in the registry is visible, held or not: registry
+    // membership, not balance, is what makes a token yours to hold, and a
+    // token you cannot see is one you cannot receive.
+    let rows = crate::storage::client_db::token_registry::all_tokens()
+        .map_err(|e| format!("token registry unreadable: {e}"))?;
+    for row in rows {
+        push_zero(items, &row.ticker);
     }
+    Ok(())
 }
 
 /// Merge canonical projection rows over the head-synthesized `State` seed.
@@ -249,22 +261,6 @@ pub(crate) fn canonicalize_token_id(token_id: &str) -> String {
         "ERA" => "ERA".to_string(),
         "DBTC" => "dBTC".to_string(),
         _ => trimmed.to_string(),
-    }
-}
-
-pub(crate) fn resolve_token_decimals(token_id: &str) -> u32 {
-    let canonical = canonicalize_token_id(token_id);
-    match canonical.as_str() {
-        "ERA" => 0,
-        "dBTC" => 8,
-        // Created tokens carry their own decimals; read them from the durable
-        // registry rather than defaulting to 0, which silently mis-scaled every
-        // custom-token amount in the display path.
-        _ => crate::storage::client_db::token_registry::get_token_by_ticker(&canonical)
-            .ok()
-            .flatten()
-            .map(|row| row.decimals)
-            .unwrap_or(0),
     }
 }
 
@@ -447,7 +443,9 @@ impl AppRouterImpl {
                             locked: bal.locked(),
                             ..Default::default()
                         };
-                        enrich_balance_metadata(&mut reply);
+                        if let Err(e) = enrich_balance_metadata(&mut reply) {
+                            return err(format!("balance.get: {e}"));
+                        }
                         pack_envelope_ok(generated::envelope::Payload::BalanceGetResponse(reply))
                     }
                     Err(e) => err(format!("balance.get failed: {e}")),
@@ -480,11 +478,13 @@ impl AppRouterImpl {
                     crate::util::text_id::encode_base32_crockford(&self.device_id_bytes);
 
                 // CRITICAL: Read from SQLite client_db - this is where bilateral transfers store transactions
-                let sqlite_txs = crate::storage::client_db::get_transaction_history(
+                let sqlite_txs = match crate::storage::client_db::get_transaction_history(
                     Some(&my_device_id_str),
                     limit,
-                )
-                .unwrap_or_default();
+                ) {
+                    Ok(txs) => txs,
+                    Err(e) => return err(format!("wallet.history: history unreadable: {e}")),
+                };
 
                 // Debug: log what we got from SQLite
                 log::info!(
@@ -504,18 +504,28 @@ impl AppRouterImpl {
 
                 // Build a lookup map from device_id text to alias for resolving transaction counterparties
                 // Use sync contact lookup from SQLite storage
-                let alias_lookup: std::collections::HashMap<String, String> =
-                    crate::storage::client_db::get_all_contacts()
-                        .unwrap_or_default()
-                        .into_iter()
-                        .map(|c| {
-                            let device_txt =
-                                crate::util::text_id::encode_base32_crockford(&c.device_id);
-                            (device_txt, c.alias)
-                        })
-                        .collect();
+                let contacts = match crate::storage::client_db::get_all_contacts() {
+                    Ok(contacts) => contacts,
+                    Err(e) => return err(format!("wallet.history: contacts unreadable: {e}")),
+                };
+                let alias_lookup: std::collections::HashMap<String, String> = contacts
+                    .into_iter()
+                    .map(|c| {
+                        let device_txt =
+                            crate::util::text_id::encode_base32_crockford(&c.device_id);
+                        (device_txt, c.alias)
+                    })
+                    .collect();
 
-                let txs: Vec<generated::TransactionInfo> = sqlite_txs
+                // A stored row is this device's own record: a device id or hash
+                // that does not decode, or a transfer with no token, is a
+                // corrupt row and an error, never an empty field.
+                let bytes32 = |what: &str, text: &str| -> Result<Vec<u8>, String> {
+                    crate::util::text_id::decode_base32_crockford(text)
+                        .filter(|b| b.len() == 32)
+                        .ok_or_else(|| format!("wallet.history: a stored {what} is not 32 bytes"))
+                };
+                let txs: Result<Vec<generated::TransactionInfo>, String> = sqlite_txs
                     .into_iter()
                     .map(|t| {
                         // PROTO SAFETY:
@@ -573,34 +583,25 @@ impl AppRouterImpl {
                             _ => generated::TransactionType::TxTypeUnspecified,
                         };
 
-                        generated::TransactionInfo {
+                        let token_id = t
+                            .metadata
+                            .get("token_id")
+                            .and_then(|b| String::from_utf8(b.clone()).ok())
+                            .ok_or_else(|| {
+                                format!("wallet.history: transaction {} names no token", t.tx_id)
+                            })?;
+                        Ok(generated::TransactionInfo {
                             // Filled at the encoding boundary by enrich_transaction_display.
                             display_amount: String::new(),
                             id: safe_id,
                             // Protocol/UI contract: device ids are binary 32-byte values.
                             // We store canonical base32 in SQLite for indexing, but must return bytes here.
-                            from_device_id: crate::util::text_id::decode_base32_crockford(
-                                &t.from_device,
-                            )
-                            .filter(|b| b.len() == 32)
-                            .unwrap_or_default(),
-                            to_device_id: crate::util::text_id::decode_base32_crockford(
-                                &t.to_device,
-                            )
-                            .filter(|b| b.len() == 32)
-                            .unwrap_or_default(),
-                            token_id: canonicalize_token_id(
-                                &t.metadata
-                                    .get("token_id")
-                                    .and_then(|b| String::from_utf8(b.clone()).ok())
-                                    .unwrap_or_else(|| "ERA".to_string()),
-                            ),
+                            from_device_id: bytes32("sender device id", &t.from_device)?,
+                            to_device_id: bytes32("recipient device id", &t.to_device)?,
+                            token_id: canonicalize_token_id(&token_id),
                             amount: t.amount,
-                            fee: 0,
                             // tx_hash is stored as canonical base32 text in SQLite.
-                            tx_hash: crate::util::text_id::decode_base32_crockford(&t.tx_hash)
-                                .filter(|b| b.len() == 32)
-                                .unwrap_or_default(),
+                            tx_hash: bytes32("transaction hash", &t.tx_hash)?,
                             amount_signed,
                             tx_type: tx_type_enum as i32,
                             status: t.status.clone(),
@@ -625,9 +626,13 @@ impl AppRouterImpl {
                                     .as_ref()
                                     .is_some_and(|b| receipt_state_holds(b))
                             },
-                        }
+                        })
                     })
                     .collect();
+                let txs = match txs {
+                    Ok(txs) => txs,
+                    Err(e) => return err(e),
+                };
 
                 // Rendered at the encoding boundary, for the same reason
                 // balances are: a producer that builds a row without the
@@ -635,7 +640,9 @@ impl AppRouterImpl {
                 // the frontend has nothing to fall back on but a guess.
                 let mut txs = txs;
                 for tx in txs.iter_mut() {
-                    enrich_transaction_display(tx);
+                    if let Err(e) = enrich_transaction_display(tx) {
+                        return err(format!("wallet.history: {e}"));
+                    }
                 }
                 let reply = generated::WalletHistoryResponse { transactions: txs };
                 // NEW: Return as Envelope.walletHistoryResponse (field 38)
@@ -645,115 +652,62 @@ impl AppRouterImpl {
             // -------- balance.list --------
             "balance.list" => {
                 let current_state = match self.ensure_authoritative_wallet_state("balance.list") {
-                    Ok(state) => Some(state),
-                    Err(e) => {
-                        log::warn!("[balance.list] authoritative state refresh failed: {}", e);
-                        self.core_sdk.get_current_state().ok()
-                    }
+                    Ok(state) => state,
+                    Err(e) => return err(format!("balance.list: authoritative state: {e}")),
                 };
-                log::debug!("[balance.list] query handler entered");
 
-                // Log the restored BCR state for debugging
-                if let Some(cs) = current_state.as_ref() {
-                    let era_balance = cs
-                        .token_balances
-                        .values()
-                        .find_map(|b| if b.value() > 0 { Some(b.value()) } else { None })
-                        .unwrap_or(0);
-                    log::info!(
-                        "[balance.list] restored BCR state hash={} state_number={} era_balance={}",
-                        crate::util::text_id::encode_base32_crockford(&cs.hash),
-                        0u64,
-                        era_balance
-                    );
-                } else {
-                    log::warn!("[balance.list] no current state after restore");
-                }
-
-                // Enumerate token balances from the canonical token cache/projection path.
                 let mut items: Vec<generated::BalanceGetResponse> = Vec::new();
-
                 let device_id_txt =
                     crate::util::text_id::encode_base32_crockford(&self.device_id_bytes);
-                // Seed from legacy state first; the projection merge below
-                // overrides it wherever the canonical head has spoken.
-                if let Some(cs) = current_state.as_ref() {
-                    for (token_key, balance) in &cs.token_balances {
-                        let token_id = canonicalize_token_id(&if let Some((_, t)) =
-                            token_key.split_once('|')
-                        {
-                            t.to_string()
-                        } else {
-                            token_key.clone()
+                // Seed from the head's compat view; the projection merge below
+                // overrides it wherever the settled view names a token.
+                for (token_key, balance) in &current_state.token_balances {
+                    let Some((_, ticker)) = token_key.split_once('|') else {
+                        return err(format!(
+                            "balance.list: balance key {token_key:?} is not a canonical \
+                             {{prefix}}|{{token}} key"
+                        ));
+                    };
+                    let token_id = canonicalize_token_id(ticker);
+                    if token_id.is_empty()
+                        || token_id.chars().any(|c| c.is_control() || (c as u32) > 126)
+                    {
+                        return err(format!(
+                            "balance.list: balance key {token_key:?} names no printable token"
+                        ));
+                    }
+                    if !items.iter().any(|i| i.token_id == token_id) {
+                        items.push(generated::BalanceGetResponse {
+                            token_id,
+                            available: balance.available(),
+                            locked: balance.locked(),
+                            ..Default::default()
                         });
-                        if token_id.chars().any(|c| c.is_control() || (c as u32) > 126) {
-                            continue;
-                        }
-                        if !items.iter().any(|i| i.token_id == token_id) {
-                            items.push(generated::BalanceGetResponse {
-                                token_id,
-                                available: balance.available(),
-                                locked: balance.locked(),
-                                ..Default::default()
-                            });
-                        }
                     }
                 }
 
-                // Merge canonical projection rows over the legacy seed.
-                if let Ok(projected) =
-                    crate::storage::client_db::list_balance_projections(&device_id_txt)
-                {
-                    merge_balance_projections(&mut items, projected);
+                match crate::storage::client_db::list_balance_projections(&device_id_txt) {
+                    Ok(projected) => merge_balance_projections(&mut items, projected),
+                    Err(e) => return err(format!("balance.list: balance projections: {e}")),
                 }
 
-                // Ensure built-in tokens always appear (even at zero balance).
-                // Uses case-insensitive matching + metadata enrichment.
-                ensure_default_visible_balances(&mut items);
-
-                // Deterministic order by token_id
-                for item in &mut items {
-                    enrich_balance_metadata(item);
+                // Built-in and registered tokens appear even at zero balance.
+                if let Err(e) = ensure_default_visible_balances(&mut items) {
+                    return err(format!("balance.list: {e}"));
                 }
-                // EVERY row carries its metadata, however it got here.
-                //
-                // Projection-backed rows were pushed straight into `items`, so
-                // only the zero-balance rows synthesised by
-                // ensure_default_visible_balances were ever enriched. A token
-                // you actually HELD therefore went out with decimals 0, and the
-                // wallet had nothing to format with: 100_000 base units of a
-                // 2-decimal token rendered as "100000 RIGB" instead of
-                // "1,000.00". Enrichment belongs at the encoding boundary,
-                // where it cannot be skipped by whichever path produced a row.
+
+                // Every row carries its metadata, however it got here:
+                // enrichment belongs at the encoding boundary, where it cannot
+                // be skipped by whichever path produced a row.
                 for item in items.iter_mut() {
-                    enrich_balance_metadata(item);
+                    if let Err(e) = enrich_balance_metadata(item) {
+                        return err(format!("balance.list: {e}"));
+                    }
                 }
                 items.sort_by(|a, b| a.token_id.cmp(&b.token_id));
 
-                // Critical debug: log what we're actually returning
-                log::debug!("[balance.list] returning {} balance items", items.len());
-                for item in &items {
-                    log::debug!(
-                        "[balance.list] item: token_id={} available={} locked={} decimals={} symbol={}",
-                        item.token_id,
-                        item.available,
-                        item.locked,
-                        item.decimals,
-                        item.symbol
-                    );
-                }
-
                 let resp = generated::BalancesListResponse { balances: items };
-
-                // Return as Envelope.balancesListResponse (field 34)
-                let result =
-                    pack_envelope_ok(generated::envelope::Payload::BalancesListResponse(resp));
-                log::debug!(
-                    "[balance.list] pack_envelope_ok success={} data_len={}",
-                    result.success,
-                    result.data.len()
-                );
-                result
+                pack_envelope_ok(generated::envelope::Payload::BalancesListResponse(resp))
             }
 
             _ => err(format!("unknown wallet query path: {}", q.path)),
@@ -850,15 +804,18 @@ impl AppRouterImpl {
                 }
 
                 let operation_bytes = if req.operation_data.is_empty() {
-                    let token_id = if req.token_id_hint.trim().is_empty() {
-                        "ERA".to_string()
-                    } else {
-                        canonicalize_token_id(&req.token_id_hint)
-                    };
+                    // The token is named exactly: an omitted token is not ERA.
+                    let token_id = canonicalize_token_id(&req.token_id_hint);
+                    if token_id.is_empty() {
+                        return err("wallet.sendOffline: the request names no token".into());
+                    }
                     let transfer_amount = if req.transfer_amount_display.trim().is_empty() {
                         req.transfer_amount
                     } else {
-                        let decimals = resolve_token_decimals(&token_id);
+                        let decimals = match token_decimals(&token_id) {
+                            Ok(d) => d,
+                            Err(e) => return err(format!("wallet.sendOffline: {e}")),
+                        };
                         match parse_display_amount_to_base_units(
                             &req.transfer_amount_display,
                             decimals,
@@ -1138,7 +1095,10 @@ impl AppRouterImpl {
                 if token_id.is_empty() {
                     return err("wallet.sendSmart: the request names no token".into());
                 }
-                let token_decimals = resolve_token_decimals(&token_id);
+                let token_decimals = match token_decimals(&token_id) {
+                    Ok(d) => d,
+                    Err(e) => return err(format!("wallet.sendSmart: {e}")),
+                };
                 let amount: u64 =
                     match parse_display_amount_to_base_units(&smart_req.amount, token_decimals) {
                         Ok(v) => v,
@@ -1205,7 +1165,7 @@ mod tests {
         canonicalize_token_id, encode_offline_transfer_operation_canonical,
         ensure_default_visible_balances, format_base_units_for_display,
         format_signed_base_units_for_display, merge_balance_projections,
-        parse_display_amount_to_base_units,
+        parse_display_amount_to_base_units, token_decimals,
     };
     use crate::storage::client_db::BalanceProjectionRecord;
     use dsm::types::proto as generated;
@@ -1404,10 +1364,30 @@ mod tests {
         }
     }
 
+    /// A display amount is parsed back into base units with the token's
+    /// decimals, so an unknown scale is an error: read as 0, "10" of a
+    /// 2-decimal token would move 10 base units, a hundredth of what was meant.
     #[test]
+    #[serial_test::serial]
+    fn a_token_without_a_registry_entry_has_no_decimals() {
+        crate::economic_fixtures::use_test_storage_dir();
+        crate::storage::client_db::reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("init db");
+        assert_eq!(token_decimals("ERA"), Ok(0));
+        assert_eq!(token_decimals("dbtc"), Ok(8));
+        let unknown = token_decimals("NOPE").expect_err("no registry entry");
+        assert!(unknown.contains("no registry entry"), "{unknown}");
+        assert!(token_decimals("  ").is_err(), "no token named");
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn ensure_default_visible_balances_adds_era_and_dbtc() {
+        crate::economic_fixtures::use_test_storage_dir();
+        crate::storage::client_db::reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("init db");
         let mut items = Vec::<generated::BalanceGetResponse>::new();
-        ensure_default_visible_balances(&mut items);
+        ensure_default_visible_balances(&mut items).expect("the registry reads");
 
         assert!(items.iter().any(|item| item.token_id == "ERA"));
         assert!(items.iter().any(|item| item.token_id == "dBTC"));

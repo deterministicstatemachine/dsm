@@ -66,7 +66,7 @@ impl dsm::core::bridge::AppRouter for CoreAppRouterAdapter {
         .map_err(|_| "App router query panicked".to_string())?
     }
 
-    fn handle_invoke(&self, method: &str, args_proto: &[u8]) -> Result<(Vec<u8>, Vec<u8>), String> {
+    fn handle_invoke(&self, method: &str, args_proto: &[u8]) -> Result<Vec<u8>, String> {
         // Fetch the current SDK router dynamically (supports hot-swap from bootstrap to full router)
         let router =
             sdk_bridge::app_router().ok_or_else(|| "SDK app router not installed".to_string())?;
@@ -80,8 +80,7 @@ impl dsm::core::bridge::AppRouter for CoreAppRouterAdapter {
             handle.block_on(async move {
                 let result = router.invoke(sdk_bridge::AppInvoke { method, args }).await;
                 if result.success {
-                    // Second Vec<u8> slot reserved for future sideband bytes; keep empty for now.
-                    Ok((result.data, Vec::new()))
+                    Ok(result.data)
                 } else {
                     Err(result
                         .error_message

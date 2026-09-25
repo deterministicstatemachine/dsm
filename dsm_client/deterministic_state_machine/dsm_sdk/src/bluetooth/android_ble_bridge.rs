@@ -838,15 +838,15 @@ mod tests {
             device_id: device_id.to_vec(),
             alias: "peer-smoke".to_string(),
             genesis_hash: genesis.to_vec(),
-            current_chain_tip: None,
+            current_chain_tip: Some(vec![0x70; 32]),
             verified: true,
             verification_proof: None,
             metadata: HashMap::new(),
             ble_address: None,
             status: "Created".to_string(),
             needs_online_reconcile: false,
-            public_key: Vec::new(),
-            kyber_public_key: Vec::new(),
+            public_key: vec![0x41; 64],
+            kyber_public_key: vec![0x4B; 1184],
             previous_chain_tip: None,
         };
         client_db::store_contact(&rec).expect("store contact");
@@ -969,15 +969,15 @@ mod tests {
             device_id: device_id.to_vec(),
             alias: "peer-pre".to_string(),
             genesis_hash: genesis.to_vec(),
-            current_chain_tip: None,
+            current_chain_tip: Some(vec![0x70; 32]),
             verified: true,
             verification_proof: None,
             metadata: HashMap::new(),
             ble_address: None,
             status: "Created".to_string(),
             needs_online_reconcile: false,
-            public_key: Vec::new(),
-            kyber_public_key: Vec::new(),
+            public_key: vec![0x41; 64],
+            kyber_public_key: vec![0x4B; 1184],
             previous_chain_tip: None,
         };
         client_db::store_contact(&rec).expect("store contact");
@@ -1058,15 +1058,15 @@ mod tests {
             device_id: device_id.to_vec(),
             alias: "peer-mis".to_string(),
             genesis_hash: genesis_stored.to_vec(),
-            current_chain_tip: None,
+            current_chain_tip: Some(vec![0x70; 32]),
             verified: true,
             verification_proof: None,
             metadata: HashMap::new(),
             ble_address: None,
             status: "Created".to_string(),
             needs_online_reconcile: false,
-            public_key: Vec::new(),
-            kyber_public_key: Vec::new(),
+            public_key: vec![0x41; 64],
+            kyber_public_key: vec![0x4B; 1184],
             previous_chain_tip: None,
         };
         client_db::store_contact(&rec).expect("store contact");
@@ -1176,7 +1176,8 @@ mod tests {
                     verifying_storage_nodes: vec![],
                     ble_address: Some("AA:BB".to_string()),
                 };
-                let _ = mgr.add_verified_contact(contact);
+                crate::storage::client_db::store_contact_for_tests(&contact);
+                mgr.add_verified_contact(contact).expect("add contact");
             }
             if mgr.get_relationship(&counterparty).is_none() {
                 let _ = mgr.establish_relationship(&counterparty).await;
@@ -1249,6 +1250,7 @@ mod tests {
                 ble_address: Some(String::new()),
                 verifying_storage_nodes: vec![],
             };
+            crate::storage::client_db::store_contact_for_tests(&contact);
             if let Err(e) = m.add_verified_contact(contact) {
                 panic!("add_verified_contact failed in test: {}", e);
             }

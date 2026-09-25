@@ -3,7 +3,7 @@
 //! ──────────────────────────────────────────────────────────
 //! LAYER: SDK
 //! PURPOSE: JNI module organization and exports.
-//! USES: Refactored modules (identity, transport, ble, wallet)
+//! USES: the unified protobuf bridge, event dispatch and the BLE event creators
 //! ──────────────────────────────────────────────────────────
 
 #![allow(unsafe_code)]
@@ -18,18 +18,10 @@ pub mod jni_error;
 #[cfg(target_os = "android")]
 pub mod helpers;
 
-// --- Refactored Modules ---
 #[cfg(target_os = "android")]
 pub mod bridge_utils;
 #[cfg(target_os = "android")]
 pub mod state;
-
-#[cfg(target_os = "android")]
-pub mod identity;
-#[cfg(target_os = "android")]
-pub mod transport;
-#[cfg(target_os = "android")]
-pub mod wallet;
 
 /// Bilateral adaptive poller (Android + bluetooth only)
 #[cfg(all(target_os = "android", feature = "bluetooth"))]
@@ -39,9 +31,6 @@ pub mod bilateral_poll;
 #[cfg(target_os = "android")]
 pub mod ble_events;
 
-/// C-DBRW JNI implementation (Android only)
-#[cfg(target_os = "android")]
-
 /// Generic Rust→WebView event dispatch (Android only)
 #[cfg(target_os = "android")]
 pub mod event_dispatch;
@@ -50,31 +39,11 @@ pub mod event_dispatch;
 #[cfg(target_os = "android")]
 pub mod unified_protobuf_bridge;
 
-/// BLE bridge JNI entrypoints (Android + bluetooth only)
-#[cfg(all(target_os = "android", feature = "bluetooth"))]
-pub mod ble_bridge;
-
 // Re-export SDK_READY from its canonical home (always compiled, not cfg-gated).
 pub use crate::sdk::session_manager::set_sdk_ready;
 
 #[cfg(target_os = "android")]
-#[allow(unused_imports)]
-#[cfg(target_os = "android")]
-#[allow(unused_imports)]
-#[cfg(target_os = "android")]
-#[allow(unused_imports)]
-#[cfg(target_os = "android")]
-#[allow(unused_imports)]
 pub use self::ble_events::*;
-#[cfg(target_os = "android")]
-#[allow(unused_imports)]
-pub use self::identity::*;
-#[cfg(target_os = "android")]
-#[allow(unused_imports)]
-pub use self::transport::*;
-#[cfg(target_os = "android")]
-#[allow(unused_imports)]
-pub use self::wallet::*;
 
 // Unit tests for JNI-adjacent helpers (runs on host; does not require Android runtime).
 #[cfg(test)]

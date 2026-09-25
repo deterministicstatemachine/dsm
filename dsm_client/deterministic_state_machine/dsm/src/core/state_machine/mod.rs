@@ -10,11 +10,6 @@ use crate::types::error::DsmError;
 use crate::types::operations::Operation;
 use crate::types::state_types::State;
 
-pub use random_walk::algorithms::{
-    generate_positions, generate_random_walk_coordinates, generate_seed, verify_positions,
-    verify_random_walk_coordinates, Position, RandomWalkConfig,
-};
-
 pub use utils::constant_time_eq;
 
 /// Core state machine — Per-Device SMT head (§2.2).
@@ -204,25 +199,6 @@ impl StateMachine {
         )?;
         self.commit_advance(&outcome);
         Ok(outcome)
-    }
-
-    /// Initialize the state machine with a genesis state
-    ///
-    /// This method sets up the state machine with a genesis state,
-    /// ensuring the system starts from a valid initial state.
-    ///
-    /// # Returns
-    ///
-    /// * `Ok(())` - If initialization was successful
-    /// * `Err(DsmError)` - If initialization failed
-    pub fn initialize_with_genesis(&mut self) -> Result<(), DsmError> {
-        if self.device_state.is_some() {
-            Ok(())
-        } else {
-            Err(DsmError::state_machine(
-                "No DeviceState — call set_state with genesis first",
-            ))
-        }
     }
 }
 
