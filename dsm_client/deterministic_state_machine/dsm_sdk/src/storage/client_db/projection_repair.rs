@@ -287,7 +287,8 @@ pub fn reconcile_diverged_projection_tips() -> Result<usize> {
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
     let n = conn.execute(
         "UPDATE contacts
-            SET chain_tip = local_bilateral_chain_tip, needs_online_reconcile = 0
+            SET chain_tip = local_bilateral_chain_tip, chain_tip_commitment = NULL,
+                needs_online_reconcile = 0
           WHERE needs_online_reconcile != 0
             AND local_bilateral_chain_tip IS NOT NULL
             AND chain_tip IS NOT NULL

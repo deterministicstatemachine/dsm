@@ -172,9 +172,12 @@ pub trait AppRouter: Send + Sync {
     /// entropy inside `advance`), along with the parent chain tip for
     /// CAS-style linkage.
     ///
+    /// `settle` writes the step's relationship tip, projection and history in
+    /// the transaction that commits the head.
+    ///
     /// Returns `Err` if the router is not yet attached to an identity, or if
     /// the underlying advance fails (§4.3 acceptance, §6.1 tripwire, §8
-    /// balance binding).
+    /// balance binding) or `settle` does — then nothing is written.
     #[allow(clippy::too_many_arguments)]
     fn execute_on_relationship_for_bilateral(
         &self,
@@ -184,6 +187,10 @@ pub trait AppRouter: Send + Sync {
         deltas: &[dsm::types::device_state::BalanceDelta],
         anchor_leaf: Option<dsm::types::device_state::AnchorLeafUpdate>,
         offline_spend: Option<dsm::types::device_state::OfflineSpend>,
+        settle: &dyn Fn(
+            &rusqlite::Transaction<'_>,
+            &dsm::types::device_state::AdvanceOutcome,
+        ) -> Result<(), dsm::types::error::DsmError>,
     ) -> Result<dsm::types::device_state::AdvanceOutcome, dsm::types::error::DsmError>;
 }
 
