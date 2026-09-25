@@ -144,15 +144,12 @@ impl SmartCommitmentSDK {
                 amount,
                 token_id,
                 policy_commit,
-                proof_of_ownership,
                 message,
             } => {
                 buf.extend_from_slice(b"BURN");
                 Self::push_bytes(&mut buf, token_id);
                 buf.extend_from_slice(policy_commit);
                 buf.extend_from_slice(&amount.value().to_le_bytes());
-                buf.extend_from_slice(&(proof_of_ownership.len() as u32).to_le_bytes());
-                buf.extend_from_slice(proof_of_ownership);
                 Self::push_str(&mut buf, message);
             }
             Operation::Receive {
@@ -526,7 +523,6 @@ mod tests {
             amount: Balance::amount(250),
             token_id: b"ROOT".to_vec(),
             policy_commit: dsm::core::token::builtin_policy_commit_for_token("ERA").unwrap(),
-            proof_of_ownership: b"ownership_proof".to_vec(),
             message: "burn".to_string(),
         }
     }

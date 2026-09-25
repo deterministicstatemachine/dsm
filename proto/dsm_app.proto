@@ -3838,11 +3838,13 @@ message PolicyConditionProto {
     CreditBundlePolicyProto credit_bundle_policy = 6;
     CustomConstraintProto custom = 7;
     BitcoinTapConstraintProto bitcoin_tap_constraint = 8;
-    // Typed — deliberately NOT expressed via CustomConstraintProto, whose
-    // opaque payload the enforcer cannot validate and an attacker could shape.
-    TokenAuthorityProto token_authority = 9;
+    // 9 was a signer-set authority over burn and creation: the signer set
+    // authorizes only what the policy's own rules name, and none names it
+    // (SoFi §47, §49); burns are the burn flag's, creation the creator's.
     SupplyCapProto      supply_cap      = 10;
   }
+  reserved 9;
+  reserved "token_authority";
   // A logical-time window: DSM has no clock to evaluate it against.
   reserved 4;
   reserved "logical_time_constraint";
@@ -3850,14 +3852,6 @@ message PolicyConditionProto {
   // verifier derives the vault facts it names, so it cannot be checked.
   reserved 2;
   reserved "vault_enforcement";
-}
-
-// Who may burn this token or create it, and how many of them must co-sign.
-// `signers` are raw SPHINCS+ public keys; the verifier takes the key from
-// HERE, never from the caller's own proof.
-message TokenAuthorityProto {
-  repeated bytes signers = 1 [(dsm_max_len)=65535];
-  uint32 threshold       = 2;
 }
 
 // The whole supply a token is created with. Nothing is minted after genesis

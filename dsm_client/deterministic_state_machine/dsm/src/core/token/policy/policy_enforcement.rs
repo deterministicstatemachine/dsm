@@ -131,74 +131,12 @@ impl EnforcementContext {
 #[derive(Debug, Default)]
 pub struct PolicyEnforcer;
 
-/// Canonical preimage a burn or creation authorisation signs.
-///
-/// SINGLE definition, used by both the signer and the verifier. If each built
-/// its own, a drift between them would either reject honest operations or —
-/// far worse — accept a signature over a different message than the one being
-/// executed.
-///
-/// Binds the asset, the operation, the amount and the authorising identity, so
-/// a signature cannot be replayed onto a different asset, a different amount,
-/// or the opposite operation.
-pub fn token_authorization_preimage(
-    policy_commit: &[u8; 32],
-    op: &str,
-    token_id: &[u8],
-    amount: u64,
-    authorized_by: &[u8],
-) -> Vec<u8> {
-    let mut msg = Vec::new();
-    msg.extend_from_slice(b"dsm/token-auth/v1\0");
-    msg.extend_from_slice(op.as_bytes());
-    msg.push(0);
-    msg.extend_from_slice(policy_commit);
-    msg.extend_from_slice(&(token_id.len() as u32).to_le_bytes());
-    msg.extend_from_slice(token_id);
-    msg.extend_from_slice(&amount.to_le_bytes());
-    msg.extend_from_slice(&(authorized_by.len() as u32).to_le_bytes());
-    msg.extend_from_slice(authorized_by);
-    crate::crypto::blake3::token_domain_hash(policy_commit, op, &msg)
-        .as_bytes()
-        .to_vec()
-}
-
-/// Context keys carrying the burn or creation authorisation witness.
+/// Context keys carrying what the supply cap is evaluated against.
 pub mod witness_keys {
-    /// Concatenated `(u32 pk_len, pk, u32 sig_len, sig)` records.
-    pub const AUTHORIZATIONS: &str = "token_authorizations";
     pub const POLICY_COMMIT: &str = "policy_commit";
-    pub const TOKEN_ID: &str = "token_id";
     pub const AMOUNT: &str = "amount_le";
-    pub const AUTHORIZED_BY: &str = "authorized_by";
     /// Circulating supply DERIVED from canonical state (never a cached count).
     pub const CIRCULATING: &str = "circulating_le";
-}
-
-/// Split the concatenated witness into `(pk, sig)` pairs.
-fn parse_authorizations(blob: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
-    let mut out = Vec::new();
-    let mut off = 0usize;
-    while off + 4 <= blob.len() {
-        let pk_len =
-            u32::from_le_bytes([blob[off], blob[off + 1], blob[off + 2], blob[off + 3]]) as usize;
-        off += 4;
-        if off + pk_len + 4 > blob.len() {
-            return out;
-        }
-        let pk = blob[off..off + pk_len].to_vec();
-        off += pk_len;
-        let sig_len =
-            u32::from_le_bytes([blob[off], blob[off + 1], blob[off + 2], blob[off + 3]]) as usize;
-        off += 4;
-        if off + sig_len > blob.len() {
-            return out;
-        }
-        let sig = blob[off..off + sig_len].to_vec();
-        off += sig_len;
-        out.push((pk, sig));
-    }
-    out
 }
 
 impl PolicyEnforcer {
@@ -293,84 +231,6 @@ impl PolicyEnforcer {
                     Ok(EnforcementResult::allowed("Operation permitted"))
                 } else {
                     Ok(EnforcementResult::denied("Operation not permitted"))
-                }
-            }
-
-            PolicyCondition::TokenAuthority { signers, threshold } => {
-                // Gates burn and create_token, which authorize through the
-                // embedded `token_authorization_preimage` witness. There is
-                // no minting after genesis (SoFi §48). Other operations are
-                // governed by their own conditions.
-                if !matches!(ctx.operation_type.as_str(), "burn" | "create_token") {
-                    return Ok(EnforcementResult::allowed(
-                        "TokenAuthority does not gate this operation",
-                    ));
-                }
-
-                let Some(blob) = ctx.data.get(witness_keys::AUTHORIZATIONS) else {
-                    return Ok(EnforcementResult::denied(
-                        "No burn or creation authorization presented",
-                    ));
-                };
-                let (Some(pc), Some(token_id), Some(amount_le), Some(authorized_by)) = (
-                    ctx.data.get(witness_keys::POLICY_COMMIT),
-                    ctx.data.get(witness_keys::TOKEN_ID),
-                    ctx.data.get(witness_keys::AMOUNT),
-                    ctx.data.get(witness_keys::AUTHORIZED_BY),
-                ) else {
-                    return Ok(EnforcementResult::denied(
-                        "Authorization context incomplete",
-                    ));
-                };
-                let Ok(policy_commit) = <[u8; 32]>::try_from(pc.as_slice()) else {
-                    return Ok(EnforcementResult::denied(
-                        "Authorization policy_commit malformed",
-                    ));
-                };
-                let Ok(amount_bytes) = <[u8; 8]>::try_from(amount_le.as_slice()) else {
-                    return Ok(EnforcementResult::denied("Authorization amount malformed"));
-                };
-                let amount = u64::from_le_bytes(amount_bytes);
-
-                // The verifier builds the message ITSELF from the operation
-                // being executed. Accepting a caller-supplied preimage would
-                // let an attacker sign one message and execute another.
-                let expected = token_authorization_preimage(
-                    &policy_commit,
-                    &ctx.operation_type,
-                    token_id,
-                    amount,
-                    authorized_by,
-                );
-
-                // Count DISTINCT policy signers, so one key cannot satisfy a
-                // k>1 threshold by signing repeatedly.
-                let mut satisfied: Vec<usize> = Vec::new();
-                for (pk, sig) in parse_authorizations(blob) {
-                    // Key comes from the POLICY, never from the proof: match
-                    // first, verify second.
-                    let Some(idx) = signers.iter().position(|s| *s == pk) else {
-                        continue;
-                    };
-                    if satisfied.contains(&idx) {
-                        continue;
-                    }
-                    if matches!(
-                        crate::crypto::sphincs::sphincs_verify(&pk, &expected, &sig),
-                        Ok(true)
-                    ) {
-                        satisfied.push(idx);
-                    }
-                }
-
-                if satisfied.len() as u32 >= *threshold {
-                    Ok(EnforcementResult::allowed(
-                        "Burn or creation authority threshold satisfied",
-                    ))
-                } else {
-                    Ok(EnforcementResult::denied(
-                        "Burn or creation authority threshold not satisfied",
-                    ))
                 }
             }
 

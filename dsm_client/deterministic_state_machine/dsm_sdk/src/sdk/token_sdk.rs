@@ -737,20 +737,12 @@ impl TokenSDK {
                 let owner_id = self.core_sdk.get_current_state()?.device_info.device_id;
                 let policy_commit = self.resolve_policy_commit_strict(token_id)?;
 
-                // The burn is authorized by the signer set its policy names:
-                // the same witness `token.burn` carries, over the preimage the
-                // policy's `TokenAuthority` condition rebuilds from this burn.
+                // Whether the holder may burn is the policy's burn flag,
+                // enforced as its operation restriction (SoFi §54).
                 let op = Operation::Burn {
                     amount: Balance::amount(*amount),
                     token_id: token_id.as_bytes().to_vec(),
                     policy_commit,
-                    proof_of_ownership: crate::sdk::signing_authority::token_authorization_witness(
-                        &policy_commit,
-                        "burn",
-                        token_id.as_bytes(),
-                        *amount,
-                        &[],
-                    )?,
                     message: "Burn operation via TokenSDK".to_string(),
                 };
 

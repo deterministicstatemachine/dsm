@@ -24652,15 +24652,10 @@ export class PolicyConditionProto extends Message<PolicyConditionProto> {
     case: "bitcoinTapConstraint";
   } | {
     /**
-     * Typed — deliberately NOT expressed via CustomConstraintProto, whose
-     * opaque payload the enforcer cannot validate and an attacker could shape.
+     * 9 was a signer-set authority over burn and creation: the signer set
+     * authorizes only what the policy's own rules name, and none names it
+     * (SoFi §47, §49); burns are the burn flag's, creation the creator's.
      *
-     * @generated from field: dsm.TokenAuthorityProto token_authority = 9;
-     */
-    value: TokenAuthorityProto;
-    case: "tokenAuthority";
-  } | {
-    /**
      * @generated from field: dsm.SupplyCapProto supply_cap = 10;
      */
     value: SupplyCapProto;
@@ -24681,7 +24676,6 @@ export class PolicyConditionProto extends Message<PolicyConditionProto> {
     { no: 6, name: "credit_bundle_policy", kind: "message", T: CreditBundlePolicyProto, oneof: "kind" },
     { no: 7, name: "custom", kind: "message", T: CustomConstraintProto, oneof: "kind" },
     { no: 8, name: "bitcoin_tap_constraint", kind: "message", T: BitcoinTapConstraintProto, oneof: "kind" },
-    { no: 9, name: "token_authority", kind: "message", T: TokenAuthorityProto, oneof: "kind" },
     { no: 10, name: "supply_cap", kind: "message", T: SupplyCapProto, oneof: "kind" },
   ]);
 
@@ -24699,53 +24693,6 @@ export class PolicyConditionProto extends Message<PolicyConditionProto> {
 
   static equals(a: PolicyConditionProto | PlainMessage<PolicyConditionProto> | undefined, b: PolicyConditionProto | PlainMessage<PolicyConditionProto> | undefined): boolean {
     return proto3.util.equals(PolicyConditionProto, a, b);
-  }
-}
-
-/**
- * Who may burn this token or create it, and how many of them must co-sign.
- * `signers` are raw SPHINCS+ public keys; the verifier takes the key from
- * HERE, never from the caller's own proof.
- *
- * @generated from message dsm.TokenAuthorityProto
- */
-export class TokenAuthorityProto extends Message<TokenAuthorityProto> {
-  /**
-   * @generated from field: repeated bytes signers = 1;
-   */
-  signers: Uint8Array[] = [];
-
-  /**
-   * @generated from field: uint32 threshold = 2;
-   */
-  threshold = 0;
-
-  constructor(data?: PartialMessage<TokenAuthorityProto>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.TokenAuthorityProto";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "signers", kind: "scalar", T: 12 /* ScalarType.BYTES */, repeated: true },
-    { no: 2, name: "threshold", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): TokenAuthorityProto {
-    return new TokenAuthorityProto().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): TokenAuthorityProto {
-    return new TokenAuthorityProto().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): TokenAuthorityProto {
-    return new TokenAuthorityProto().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: TokenAuthorityProto | PlainMessage<TokenAuthorityProto> | undefined, b: TokenAuthorityProto | PlainMessage<TokenAuthorityProto> | undefined): boolean {
-    return proto3.util.equals(TokenAuthorityProto, a, b);
   }
 }
 

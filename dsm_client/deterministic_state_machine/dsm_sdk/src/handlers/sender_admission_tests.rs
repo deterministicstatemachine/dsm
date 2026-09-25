@@ -324,6 +324,104 @@ fn online_transfer_request_locators_round_trip_on_the_wire() {
     );
 }
 
+/// SoFi §54: the burn flag governs burns, and nothing else does. A token
+/// created with burns disabled refuses `token.burn` as an operation its
+/// policy does not permit, and nothing moves; the same route on a
+/// burn-enabled created token is admitted
+/// (`sequential_admissions_stay_monotonic_across_operation_kinds`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_burn_disabled_token_refuses_its_burn() {
+    let d = Device::funded(0xC6).await;
+    let mut request = create_request("NOBN", 2, 1_000);
+    request.burn_enabled = false;
+    let created = invoke(&d.router, "token.create", &request).await;
+    match payload(&created) {
+        crate::generated::envelope::Payload::TokenCreateResponse(_) => {}
+        other => panic!("expected TokenCreateResponse, got {other:?}"),
+    }
+    let row = client_db::token_registry::get_token_by_ticker("NOBN")
+        .expect("registry read")
+        .expect("registry row committed with the advance");
+    // 1_000 units at two decimals: the whole supply, in base units.
+    let supply = 1_000 * 100;
+    let head = d.core().device_head().expect("head");
+    assert_eq!(
+        head.balance(&row.policy_commit),
+        supply,
+        "the whole supply, released"
+    );
+    let position = admitted_position();
+
+    let burned = invoke(&d.router, "token.burn", &burn_request("NOBN", 25)).await;
+    assert!(
+        !burned.success,
+        "a burn-disabled token must refuse its burn: {:?}",
+        burned.error_message
+    );
+    let why = burned.error_message.clone().unwrap_or_default();
+    assert!(
+        why.contains("Operation not permitted"),
+        "refused by the policy's operation restriction, not for another reason: {why}"
+    );
+    let head = d.core().device_head().expect("head");
+    assert_eq!(head.balance(&row.policy_commit), supply, "nothing moved");
+    assert_eq!(admitted_position(), position, "no position was admitted");
+    assert!(
+        head.pending_economic_admission().is_none(),
+        "nothing left pending"
+    );
+}
+
+/// SoFi §49: `transferable` governs every transfer. A token created
+/// non-transferable refuses `wallet.send` as an operation its policy does not
+/// permit, and nothing moves; a transferable created token moves through the
+/// same handler (`token_adoption_tests::an_adopted_token_resolves_on_the_receiving_device`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_non_transferable_token_refuses_its_transfer() {
+    let p = Pair::boot(100, 0).await;
+    let mut request = create_request("NOTX", 2, 1_000);
+    request.transferable = false;
+    let created = invoke(p.a.router(), "token.create", &request).await;
+    match payload(&created) {
+        crate::generated::envelope::Payload::TokenCreateResponse(_) => {}
+        other => panic!("expected TokenCreateResponse, got {other:?}"),
+    }
+    p.a.enter();
+    let row = client_db::token_registry::get_token_by_ticker("NOTX")
+        .expect("registry read")
+        .expect("registry row committed with the advance");
+    let supply = 1_000 * 100;
+    let head = p.a.router().core_sdk.device_head().expect("head");
+    assert_eq!(
+        head.balance(&row.policy_commit),
+        supply,
+        "the whole supply, released"
+    );
+    let position = admitted_position();
+
+    let sent = p.a.send_token(&p.b, "NOTX", 25).await;
+    assert!(
+        !sent.success,
+        "a non-transferable token must refuse its transfer: {:?}",
+        sent.error_message
+    );
+    let why = sent.error_message.clone().unwrap_or_default();
+    assert!(
+        why.contains("Operation not permitted"),
+        "refused by the policy's operation restriction, not for another reason: {why}"
+    );
+    p.a.enter();
+    let head = p.a.router().core_sdk.device_head().expect("head");
+    assert_eq!(head.balance(&row.policy_commit), supply, "nothing moved");
+    assert_eq!(admitted_position(), position, "no position was admitted");
+    assert!(
+        head.pending_economic_admission().is_none(),
+        "nothing left pending"
+    );
+}
+
 /// Token creation through its route, end to end: the fee debit and the
 /// genesis-supply release to the creator are ONE admitted position, the
 /// anchor is the content hash of the stored policy, an identical resubmission

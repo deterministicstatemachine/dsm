@@ -342,7 +342,6 @@ fn a_genesis_release_rides_only_its_creating_operation() {
         amount: dsm::types::token_types::Balance::amount(1),
         token_id: b"TKN".to_vec(),
         policy_commit: pc,
-        proof_of_ownership: Vec::new(),
         message: String::new(),
     };
     for operation in [None, Some(&burn)] {

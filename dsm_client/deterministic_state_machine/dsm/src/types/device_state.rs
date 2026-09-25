@@ -2001,7 +2001,6 @@ mod tests {
             amount: bal(amount),
             token_id: b"ERA".to_vec(),
             policy_commit,
-            proof_of_ownership: vec![],
             message: String::new(),
         }
     }

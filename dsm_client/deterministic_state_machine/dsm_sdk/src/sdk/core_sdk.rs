@@ -1081,38 +1081,22 @@ impl CoreSDK {
             .filter(|s| !s.is_empty())
     }
 
-    /// Populate the authorisation witness the `TokenAuthority` condition reads.
-    ///
-    /// Only raw material goes in — the asset, the amount, the authorising
-    /// identity and the presented `(pk, sig)` records. The enforcer rebuilds
-    /// the signed preimage itself from the operation being executed; handing
-    /// it a ready-made message would let a caller sign one thing and execute
-    /// another.
-    fn insert_auth_witness(
+    /// What the supply cap is evaluated against: the asset and the amount
+    /// the operation names. The circulating supply is derived where the chain
+    /// is reachable (`enforce_policy_for_operation`), never here.
+    fn insert_supply_witness(
         context: &mut HashMap<String, Vec<u8>>,
         policy_commit: &[u8; 32],
-        token_id: &[u8],
         amount: u64,
-        authorized_by: &[u8],
-        authorizations: &[u8],
     ) {
         use dsm::core::token::policy::policy_enforcement::witness_keys;
         context.insert(
             witness_keys::POLICY_COMMIT.to_string(),
             policy_commit.to_vec(),
         );
-        context.insert(witness_keys::TOKEN_ID.to_string(), token_id.to_vec());
         context.insert(
             witness_keys::AMOUNT.to_string(),
             amount.to_le_bytes().to_vec(),
-        );
-        context.insert(
-            witness_keys::AUTHORIZED_BY.to_string(),
-            authorized_by.to_vec(),
-        );
-        context.insert(
-            witness_keys::AUTHORIZATIONS.to_string(),
-            authorizations.to_vec(),
         );
     }
 
@@ -1149,7 +1133,6 @@ impl CoreSDK {
                 token_id,
                 amount,
                 policy_commit,
-                proof_of_ownership,
                 ..
             } => {
                 let token_id = Self::canonical_token_id_str(token_id).ok_or_else(|| {
@@ -1160,25 +1143,19 @@ impl CoreSDK {
                 let amount_u64 = amount.value();
                 context.insert("amount_u64".to_string(), amount_u64.to_le_bytes().to_vec());
                 context.insert("amount".to_string(), amount_u64.to_string().into_bytes());
-                // A burn is authorised by the signer set its policy names.
-                Self::insert_auth_witness(
-                    &mut context,
-                    policy_commit,
-                    token_id.as_bytes(),
-                    amount_u64,
-                    &[],
-                    proof_of_ownership,
-                );
+                // Whether the holder may burn is the policy's burn flag,
+                // expressed as its operation restriction (SoFi §54).
+                Self::insert_supply_witness(&mut context, policy_commit, amount_u64);
                 Ok(Some((token_id.to_string(), "burn".to_string(), context)))
             }
 
-            // Creation is gated too: the fee burn and the issuance are one
-            // operation, so its authority is checked like any other issuance.
+            // Creation is gated by the token's own policy: the supply cap and
+            // the operation restriction; who may create is the creator the
+            // policy names (SoFi Amendment S8), checked at the genesis release.
             DsmOperation::CreateToken {
                 token_id,
                 initial_supply,
                 policy_commit,
-                signature,
                 ..
             } => {
                 let token_id = Self::canonical_token_id_str(token_id).ok_or_else(|| {
@@ -1189,14 +1166,7 @@ impl CoreSDK {
                 let amount_u64 = initial_supply.value();
                 context.insert("amount_u64".to_string(), amount_u64.to_le_bytes().to_vec());
                 context.insert("amount".to_string(), amount_u64.to_string().into_bytes());
-                Self::insert_auth_witness(
-                    &mut context,
-                    policy_commit,
-                    token_id.as_bytes(),
-                    amount_u64,
-                    &[],
-                    signature,
-                );
+                Self::insert_supply_witness(&mut context, policy_commit, amount_u64);
                 Ok(Some((
                     token_id.to_string(),
                     "create_token".to_string(),

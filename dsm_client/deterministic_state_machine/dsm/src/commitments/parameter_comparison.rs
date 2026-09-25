@@ -176,7 +176,6 @@ pub fn extract_operation_parameters(
             amount,
             token_id,
             policy_commit,
-            proof_of_ownership,
             message,
         } => {
             let mut params = HashMap::new();
@@ -184,7 +183,6 @@ pub fn extract_operation_parameters(
             params.insert("amount".to_string(), balance_to_bytes(amount));
             params.insert("token_id".to_string(), token_id.clone());
             params.insert("policy_commit".to_string(), policy_commit.to_vec());
-            params.insert("proof_of_ownership".to_string(), proof_of_ownership.clone());
             params.insert("message".to_string(), message.as_bytes().to_vec());
             Ok(params)
         }
