@@ -159,51 +159,40 @@ struct SignedStepKey {
 }
 
 impl BilateralBleHandler {
-    pub async fn transition_session_to_failed(&self, commitment_hash: &[u8; 32]) {
-        let pending_key = {
-            let mut sessions = self.sessions.sessions.lock().await;
-            if let Some(mut session) = sessions.remove(commitment_hash) {
-                session.phase = BilateralPhase::Failed;
-                session.local_commitment_hash.unwrap_or(*commitment_hash)
-            } else {
-                *commitment_hash
-            }
-        };
-        // Keep failed sessions in SQLite so bilateral.pending_list can return
-        // terminal status to the frontend poller. Only committed sessions are deleted.
-        if let Err(e) =
-            crate::storage::client_db::update_bilateral_session_phase(commitment_hash, "failed")
-        {
-            warn!(
-                "[BLE_HANDLER] Failed to update session phase to failed: {}",
-                e
-            );
-        }
-        let mut mgr = self.bilateral_tx_manager.write().await;
-        mgr.consume_pre_commitment(&pending_key);
-    }
-
-    pub async fn transition_session_to_rejected(&self, commitment_hash: &[u8; 32]) {
-        let pending_key = {
-            let mut sessions = self.sessions.sessions.lock().await;
-            if let Some(mut session) = sessions.remove(commitment_hash) {
-                session.phase = BilateralPhase::Rejected;
-                session.local_commitment_hash.unwrap_or(*commitment_hash)
-            } else {
-                *commitment_hash
-            }
-        };
-        // Keep rejected sessions in SQLite for same reason as failed.
-        if let Err(e) =
-            crate::storage::client_db::update_bilateral_session_phase(commitment_hash, "rejected")
-        {
-            warn!(
-                "[BLE_HANDLER] Failed to update session phase to rejected: {}",
-                e
-            );
-        }
-        let mut mgr = self.bilateral_tx_manager.write().await;
-        mgr.consume_pre_commitment(&pending_key);
+    /// End the step `commitment_hash`, which did not commit, as failed —
+    /// durably first. `hold` names the counterparty whose relationship is held
+    /// for online reconcile, when its receiver may already have committed; the
+    /// hold and the failed phase are one write. Only once it is written does
+    /// the step leave memory and its precommitment go: a failure that could
+    /// not be recorded is an error, and the step stays as it was.
+    async fn fail_session(
+        &self,
+        commitment_hash: &[u8; 32],
+        hold: Option<&[u8; 32]>,
+    ) -> Result<(), DsmError> {
+        crate::storage::client_db::fail_bilateral_session(
+            commitment_hash,
+            hold.map(|device_id| device_id.as_slice()),
+        )
+        .map_err(|e| {
+            DsmError::storage(
+                format!("the failed step could not be recorded: {e}"),
+                None::<std::io::Error>,
+            )
+        })?;
+        let pending_key = self
+            .sessions
+            .sessions
+            .lock()
+            .await
+            .remove(commitment_hash)
+            .and_then(|session| session.local_commitment_hash)
+            .unwrap_or(*commitment_hash);
+        self.bilateral_tx_manager
+            .write()
+            .await
+            .consume_pre_commitment(&pending_key);
+        Ok(())
     }
 
     /// Apply per-step EK signing (whitepaper §11.1) to an unsigned bilateral
@@ -574,20 +563,12 @@ impl BilateralBleHandler {
                         "[BLE_HANDLER] sender step {} is not taken up again: {e}",
                         bytes_to_base32(&session.commitment_hash[..8])
                     );
-                    self.transition_session_to_failed(&session.commitment_hash)
-                        .await;
-                    if session.phase == BilateralPhase::ConfirmPending {
-                        if let Err(e) =
-                            crate::storage::client_db::mark_contact_needs_online_reconcile(
-                                &session.counterparty_device_id,
-                            )
-                        {
-                            error!(
-                                "[BLE_HANDLER] the relationship with {} could not be held for reconcile: {e}",
-                                bytes_to_base32(&session.counterparty_device_id[..8])
-                            );
-                        }
-                    }
+                    let confirmed = session.phase == BilateralPhase::ConfirmPending;
+                    self.fail_session(
+                        &session.commitment_hash,
+                        confirmed.then_some(&session.counterparty_device_id),
+                    )
+                    .await?;
                     continue;
                 }
             }
@@ -614,9 +595,9 @@ impl BilateralBleHandler {
         for (commitment_hash, ack) in acknowledged {
             match self.record_commit_ack(commitment_hash, &ack).await {
                 Ok(true) => {
-                    if self.finalize_sender_step(&commitment_hash).await.is_none() {
+                    if let Err(e) = self.finalize_sender_step(&commitment_hash).await {
                         warn!(
-                            "[BLE_HANDLER] acknowledged step {} did not commit on restart",
+                            "[BLE_HANDLER] acknowledged step {} did not commit on restart: {e}",
                             bytes_to_base32(&commitment_hash[..8])
                         );
                     }
@@ -2921,11 +2902,7 @@ impl BilateralBleHandler {
         {
             return Ok(());
         }
-        self.finalize_sender_step(&commitment_hash)
-            .await
-            .ok_or_else(|| {
-                DsmError::invalid_operation("sender finalize failed after receiver acknowledgment")
-            })?;
+        self.finalize_sender_step(&commitment_hash).await?;
         Ok(())
     }
 
@@ -3745,10 +3722,13 @@ impl BilateralBleHandler {
 
     /// Finalize the sender's side of the step `commitment_hash` once its ack
     /// verified: the canonical advance, the settlement and the session's end.
+    /// Answers the transfer it committed, or why it did not: a step that cannot
+    /// be finalized yet stays awaiting its commit; one refused fails durably
+    /// (see `fail_sender_commit`).
     pub async fn finalize_sender_step(
         &self,
         commitment_hash: &[u8; 32],
-    ) -> Option<crate::sdk::transfer_hooks::TransferMeta> {
+    ) -> Result<crate::sdk::transfer_hooks::TransferMeta, DsmError> {
         info!("Marking session committed and finalizing sender transaction");
 
         // Get session info before locking manager
@@ -3766,16 +3746,18 @@ impl BilateralBleHandler {
             let sess = match sessions.get(commitment_hash) {
                 Some(s) => s,
                 None => {
-                    warn!("No session found for provided commitment");
-                    return None;
+                    return Err(DsmError::invalid_operation(
+                        "no session is committing this step",
+                    ))
                 }
             };
 
             let sig = match &sess.counterparty_signature {
                 Some(s) => s.clone(),
                 None => {
-                    warn!("No counterparty signature in session");
-                    return None;
+                    return Err(DsmError::invalid_operation(
+                        "the session holds no counterparty acceptance",
+                    ))
                 }
             };
             // The receiver's counter-signed receipt (kept from the verified
@@ -3787,8 +3769,9 @@ impl BilateralBleHandler {
             let (Some(own), Some(counter)) =
                 (&sess.stitched_receipt_bytes, &sess.counter_signed_receipt)
             else {
-                error!("[BILATERAL] commit refused: the session holds no signed receipts");
-                return None;
+                return Err(DsmError::invalid_operation(
+                    "the session holds no signed receipts to commit",
+                ));
             };
 
             (
@@ -3823,10 +3806,7 @@ impl BilateralBleHandler {
                 &counterparty_device_id,
             )) {
                 Ok(stored) => stored,
-                Err(e) => {
-                    error!("[BILATERAL] sender commit not finalized, nothing settled: {e}");
-                    return None;
-                }
+                Err(e) => return Err(e),
             };
             if let Some(sqlite_tip) = stored {
                 manager.advance_chain_tip(&counterparty_device_id, sqlite_tip);
@@ -3847,11 +3827,10 @@ impl BilateralBleHandler {
             if matches!(session_operation, Operation::Transfer { .. })
                 && session_offline_spend.is_none()
             {
-                error!(
-                    "[BILATERAL] commit refused: a Transfer session carries no allocation-spend \
-                     descriptor — bearer value never draws from the online balance"
-                );
-                return None;
+                return Err(DsmError::invalid_operation(
+                    "a Transfer session carries no allocation-spend descriptor: bearer value \
+                     never draws from the online balance",
+                ));
             }
 
             match manager
@@ -3868,7 +3847,7 @@ impl BilateralBleHandler {
                 Ok(p) => p,
                 Err(prepare_err) => {
                     drop(manager);
-                    return self
+                    return Err(self
                         .fail_sender_commit(
                             commitment_hash,
                             &counterparty_device_id,
@@ -3876,36 +3855,18 @@ impl BilateralBleHandler {
                             event_amount_opt,
                             event_token_id_opt,
                         )
-                        .await;
+                        .await);
                 }
             }
         };
 
         // Phase 2: commit via canonical advance chokepoint
         // (§2.2 Per-Device SMT, §4.3 acceptance, §8 balance binding).
-        let router = match crate::bridge::app_router() {
-            Some(r) => r,
-            None => {
-                error!("[BILATERAL] app_router not installed; cannot commit BLE bilateral advance");
-                self.emit_event(&generated::BilateralEventNotification {
-                    // Rendered in emit_event, the one boundary all emitters cross.
-                    display_amount: None,
-                    event_type: generated::BilateralEventType::BilateralEventFailed.into(),
-                    counterparty_device_id: counterparty_device_id.to_vec(),
-                    commitment_hash: commitment_hash.to_vec(),
-                    transaction_hash: None,
-                    amount: event_amount_opt,
-                    token_id: event_token_id_opt.clone(),
-                    status: "failed".to_string(),
-                    message: "App router unavailable for BLE bilateral commit".to_string(),
-                    sender_ble_address: None,
-                    failure_reason: Some(
-                        generated::BilateralFailureReason::FailureReasonProtocolViolation as i32,
-                    ),
-                });
-                return None;
-            }
-        };
+        let router = crate::bridge::app_router().ok_or_else(|| {
+            DsmError::invalid_operation(
+                "the app router is not installed: the step stays awaiting its commit",
+            )
+        })?;
 
         // The receipt the receiver verified names the confirm-time simulated
         // post-root, and the receiver built h_{n+1} from that simulation's
@@ -3916,7 +3877,7 @@ impl BilateralBleHandler {
         // transition (§39.3) is the value the receiver accepted. A session
         // with no sent root never built a confirm and cannot commit.
         let Some(sent_child_root) = session_sent_child_root else {
-            return self
+            return Err(self
                 .fail_sender_commit(
                     commitment_hash,
                     &counterparty_device_id,
@@ -3924,7 +3885,7 @@ impl BilateralBleHandler {
                     event_amount_opt,
                     event_token_id_opt,
                 )
-                .await;
+                .await);
         };
         // The step's settlement is resolved now and written in the advance's
         // transaction: the debit, the relationship tip (moved from the step's
@@ -3941,7 +3902,7 @@ impl BilateralBleHandler {
         ) {
             Ok(s) => s,
             Err(e) => {
-                return self
+                return Err(self
                     .fail_sender_commit(
                         commitment_hash,
                         &counterparty_device_id,
@@ -3949,7 +3910,7 @@ impl BilateralBleHandler {
                         event_amount_opt,
                         event_token_id_opt,
                     )
-                    .await;
+                    .await);
             }
         };
         // Everything else the step writes commits in the same transaction:
@@ -3971,7 +3932,7 @@ impl BilateralBleHandler {
         let (own, counter_signed) = match receipts {
             Ok(receipts) => receipts,
             Err(e) => {
-                return self
+                return Err(self
                     .fail_sender_commit(
                         commitment_hash,
                         &counterparty_device_id,
@@ -3979,7 +3940,7 @@ impl BilateralBleHandler {
                         event_amount_opt,
                         event_token_id_opt,
                     )
-                    .await;
+                    .await);
             }
         };
         let prepared_inputs = (|| -> Result<_, DsmError> {
@@ -4001,7 +3962,7 @@ impl BilateralBleHandler {
         let (receiver_chain_head, ek_step_set) = match prepared_inputs {
             Ok(v) => v,
             Err(e) => {
-                return self
+                return Err(self
                     .fail_sender_commit(
                         commitment_hash,
                         &counterparty_device_id,
@@ -4009,7 +3970,7 @@ impl BilateralBleHandler {
                         event_amount_opt,
                         event_token_id_opt,
                     )
-                    .await;
+                    .await);
             }
         };
         let parent_tip = prepared.parent_tip;
@@ -4098,7 +4059,7 @@ impl BilateralBleHandler {
         ) {
             Ok(o) => o,
             Err(advance_err) => {
-                return self
+                return Err(self
                     .fail_sender_commit(
                         commitment_hash,
                         &counterparty_device_id,
@@ -4106,7 +4067,7 @@ impl BilateralBleHandler {
                         event_amount_opt,
                         event_token_id_opt,
                     )
-                    .await;
+                    .await);
             }
         };
 
@@ -4184,13 +4145,15 @@ impl BilateralBleHandler {
         });
 
         // The transfer the step settled, for the post-transfer hooks.
-        Some(settlement.transfer_meta())
+        Ok(settlement.transfer_meta())
     }
 
     /// A sender commit that did not pass its checks. Nothing advances,
     /// nothing settles and no tip is written: the session fails durably and
-    /// the relationship is held for online reconciliation, because the
-    /// receiver may already have committed its side.
+    /// the relationship is held for online reconciliation — one write —
+    /// because the receiver may already have committed its side. Answers the
+    /// refusal; if the failure cannot be recorded, that is the answer instead,
+    /// and the step stays with its ack, to be finalized again.
     async fn fail_sender_commit(
         &self,
         commitment_hash: &[u8; 32],
@@ -4198,16 +4161,13 @@ impl BilateralBleHandler {
         reason: &str,
         event_amount_opt: Option<u64>,
         event_token_id_opt: Option<String>,
-    ) -> Option<crate::sdk::transfer_hooks::TransferMeta> {
+    ) -> DsmError {
         error!("[BILATERAL] sender commit refused, nothing settled: {reason}");
-        self.transition_session_to_failed(commitment_hash).await;
-        if let Err(e) =
-            crate::storage::client_db::mark_contact_needs_online_reconcile(counterparty_device_id)
+        if let Err(e) = self
+            .fail_session(commitment_hash, Some(counterparty_device_id))
+            .await
         {
-            error!(
-                "[BILATERAL] the relationship with {} could not be held for reconcile: {e}",
-                bytes_to_base32(&counterparty_device_id[..8])
-            );
+            return e;
         }
         self.emit_event(&generated::BilateralEventNotification {
             // Rendered in emit_event, the one boundary all emitters cross.
@@ -4225,7 +4185,7 @@ impl BilateralBleHandler {
                 generated::BilateralFailureReason::FailureReasonProtocolViolation as i32,
             ),
         });
-        None
+        DsmError::invalid_operation(format!("sender commit refused: {reason}"))
     }
 
     /// Lookup the counterparty device id for a given commitment hash
@@ -5249,6 +5209,54 @@ mod tests {
         handler.test_insert_session(session).await;
     }
 
+    /// A refused sender commit is recorded — the failed phase and the
+    /// relationship's hold for reconcile, one write — or the failure to record
+    /// it is the answer and nothing changes: the step stays ConfirmPending, in
+    /// memory and in storage, to be finalized again. Here the contact row is
+    /// gone, so the hold cannot be written.
+    /// MUTATION CONTROL: writing the failed phase without the hold lets the
+    /// step fail with no hold and turns this red.
+    #[tokio::test]
+    #[serial]
+    async fn a_refusal_that_cannot_be_recorded_changes_nothing() {
+        init_test_db();
+        let counterparty = [0x63u8; 32];
+        let tip = [0x70u8; 32];
+        let commitment = [0x6Cu8; 32];
+        let (_mgr, handler) = make_test_handler([0x61u8; 32], [0x62u8; 32], b"sender-unrecorded");
+        sender_step_whose_prepare_refuses(&handler, counterparty, tip, commitment).await;
+        {
+            let binding = crate::storage::client_db::get_connection().expect("the database");
+            let conn = binding.lock().expect("its lock");
+            conn.execute(
+                "DELETE FROM contacts WHERE device_id = ?1",
+                rusqlite::params![counterparty.to_vec()],
+            )
+            .expect("drop the contact row");
+        }
+
+        let unrecorded = handler
+            .finalize_sender_step(&commitment)
+            .await
+            .expect_err("the step is not finalized");
+        assert!(
+            unrecorded.to_string().contains("could not be recorded"),
+            "a refusal that was not recorded answered as recorded: {unrecorded}"
+        );
+        let row = crate::storage::client_db::get_bilateral_session(&commitment)
+            .expect("read the session")
+            .expect("the session row");
+        assert_eq!(
+            row.phase, "confirm_pending",
+            "the step failed without its relationship being held"
+        );
+        assert_eq!(
+            handler.get_session_status(&commitment).await,
+            Some(BilateralPhase::ConfirmPending),
+            "the step left memory"
+        );
+    }
+
     /// A sender commit that fails its checks settles nothing: no canonical
     /// advance, no tip write, no history, no "complete". The session fails
     /// durably and the relationship is held for online reconciliation,
@@ -5264,7 +5272,7 @@ mod tests {
         sender_step_whose_prepare_refuses(&handler, counterparty, tip, commitment).await;
 
         assert!(
-            handler.finalize_sender_step(&commitment).await.is_none(),
+            handler.finalize_sender_step(&commitment).await.is_err(),
             "a commit whose prepare refuses finalizes nothing"
         );
 
@@ -5377,7 +5385,7 @@ mod tests {
         let counterparty = [0x66u8; 32];
         let failed = [0x67u8; 32];
         sender_step_whose_prepare_refuses(&handler, counterparty, [0x71u8; 32], failed).await;
-        assert!(handler.finalize_sender_step(&failed).await.is_none());
+        assert!(handler.finalize_sender_step(&failed).await.is_err());
         let refused = handler
             .handle_commit_response(&ack(failed))
             .await

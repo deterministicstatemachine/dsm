@@ -1667,12 +1667,13 @@ impl CoreSDK {
         }
         // From here to commit, every error path must roll the attach off —
         // one restore point via the closure below, not scattered clears.
+        // The admission, when there is one, travels with the storage set it
+        // was built for.
         let admission_result = (|| -> Result<
             (
                 dsm::types::device_state::AdvanceOutcome,
-                Option<dsm::economic::admission::PendingEconomicAdmission>,
+                Option<(dsm::economic::admission::PendingEconomicAdmission, [u8; 32])>,
                 Vec<(String, Vec<u8>, &'static str)>,
-                [u8; 32],
             ),
             DsmError,
         > {
@@ -1717,19 +1718,14 @@ impl CoreSDK {
                         .prepared
                         .into_locally_accepted(coords)
                         .map_err(|e| DsmError::invalid_operation(e.to_string()))?;
-                    let outcome = dsm::types::device_state::AdvanceOutcome {
-                        new_device_state: outcome
-                            .new_device_state
-                            .with_pending_economic_admission(Some(accepted.clone())),
-                        ..outcome
-                    };
+                    let outcome = outcome.with_pending_economic_admission(Some(accepted.clone()));
                     *plan.accepted_out = Some(accepted.clone());
-                    Ok((outcome, Some(accepted), artifacts, plan.storage_set_id))
+                    Ok((outcome, Some((accepted, plan.storage_set_id)), artifacts))
                 }
-                None => Ok((outcome, None, Vec::new(), [0u8; 32])),
+                None => Ok((outcome, None, Vec::new())),
             }
         })();
-        let (outcome, accepted, artifacts, set_id) = match admission_result {
+        let (outcome, accepted, artifacts) = match admission_result {
             Ok(v) => v,
             Err(e) => {
                 // Restore the exact prior in-memory admission (None — the
@@ -1741,12 +1737,12 @@ impl CoreSDK {
         let commit_result = match &accepted {
             // The caller's in-tx writer (send prerequisites / token registry /
             // canonical apply) COMPOSES with the admission commit via `also`.
-            Some(accepted) => Self::commit_advance_with_pending_admission_and_artifacts(
+            Some((accepted, set_id)) => Self::commit_advance_with_pending_admission_and_artifacts(
                 &outcome,
                 frontier_changed,
                 accepted,
                 &artifacts,
-                &set_id,
+                set_id,
                 in_tx_extra,
             ),
             None => {

@@ -250,18 +250,37 @@ pub fn delete_bilateral_session_with_conn(
     Ok(())
 }
 
-/// Update a bilateral session's phase without deleting it.
-/// Used to persist terminal phases (failed, rejected) so the frontend
-/// poller can read them via bilateral.pending_list.
-pub fn update_bilateral_session_phase(commitment_hash: &[u8], phase: &str) -> Result<()> {
+/// End a step that did not commit, durably: its session's phase becomes
+/// `failed` and — when `hold_relationship_with` names the counterparty,
+/// whose receiver may already have committed — the relationship is held for
+/// online reconcile, in the same transaction. Both are written, or neither:
+/// a session or contact that is not stored is an error.
+pub fn fail_bilateral_session(
+    commitment_hash: &[u8],
+    hold_relationship_with: Option<&[u8]>,
+) -> Result<()> {
     let binding = get_db_connection()?;
-    let conn = binding
+    let mut conn = binding
         .lock()
         .map_err(|_| anyhow!("Database lock poisoned - concurrent access error"))?;
-    conn.execute(
-        "UPDATE bilateral_sessions SET phase = ?1 WHERE commitment_hash = ?2",
-        params![phase, commitment_hash],
+    let tx = conn.transaction()?;
+    let failed = tx.execute(
+        "UPDATE bilateral_sessions SET phase = 'failed' WHERE commitment_hash = ?1",
+        params![commitment_hash],
     )?;
+    if failed != 1 {
+        return Err(anyhow!("the step's session is not stored"));
+    }
+    if let Some(device_id) = hold_relationship_with {
+        let held = tx.execute(
+            "UPDATE contacts SET needs_online_reconcile = 1 WHERE device_id = ?1",
+            params![device_id],
+        )?;
+        if held != 1 {
+            return Err(anyhow!("the relationship's contact is not stored"));
+        }
+    }
+    tx.commit()?;
     Ok(())
 }
 
