@@ -72,32 +72,12 @@ export function persistBleMapping(args: {
   } catch {}
 }
 
-export function loadPersistedBleMappings(): void {
-  // No-op: BLE address persistence is native.
-}
-
-export function clearBleIdentityCache(): void {
-  bleIdentityMap.byDeviceId.clear();
-  bleIdentityMap.byGenesis.clear();
-}
-
 export function getBleIdentitySnapshot(): { deviceIds: Record<string, string>; genesis: Record<string, string> } {
   const deviceIds: Record<string, string> = {};
   const genesis: Record<string, string> = {};
   for (const [k, v] of bleIdentityMap.byDeviceId.entries()) deviceIds[k] = v;
   for (const [k, v] of bleIdentityMap.byGenesis.entries()) genesis[k] = v;
   return { deviceIds, genesis };
-}
-
-export function pruneBleIdentityMappings(args: { deviceIds?: Uint8Array[]; genesisHashes?: Uint8Array[] }): void {
-  const devKeys = (args.deviceIds || []).filter((b) => b instanceof Uint8Array).map((b) => base32Key32(b));
-  const genKeys = (args.genesisHashes || []).filter((b) => b instanceof Uint8Array).map((b) => base32Key32(b));
-  for (const k of devKeys) {
-    bleIdentityMap.byDeviceId.delete(k);
-  }
-  for (const k of genKeys) {
-    bleIdentityMap.byGenesis.delete(k);
-  }
 }
 
 // Strict version: single deterministic resolution path
@@ -152,39 +132,4 @@ export async function resolveBleAddressForContact(contact: any): Promise<string 
     return norm;
   }
   return undefined;
-}
-
-export function subscribeBleEvents(callback: (event: any) => void): () => void {
-  const unsubs: Array<() => void> = [];
-
-  unsubs.push(bridgeEvents.on('ble.deviceFound', (d) => {
-    try { callback({ type: 'deviceFound', state: 'scanning', ...d }); } catch {}
-  }));
-  unsubs.push(bridgeEvents.on('ble.scanStarted', () => {
-    try { callback({ type: 'scanStarted', state: 'scanning' }); } catch {}
-  }));
-  unsubs.push(bridgeEvents.on('ble.scanStopped', () => {
-    try { callback({ type: 'scanStopped', state: 'idle' }); } catch {}
-  }));
-  unsubs.push(bridgeEvents.on('ble.advertisingStarted', () => {
-    try { callback({ type: 'advertisingStarted', state: 'advertising' }); } catch {}
-  }));
-  unsubs.push(bridgeEvents.on('ble.advertisingStopped', () => {
-    try { callback({ type: 'advertisingStopped', state: 'idle' }); } catch {}
-  }));
-  unsubs.push(bridgeEvents.on('ble.deviceConnected', (d) => {
-    try { callback({ type: 'deviceConnected', state: 'connected', ...d }); } catch {}
-  }));
-  unsubs.push(bridgeEvents.on('ble.deviceDisconnected', (d) => {
-    try { callback({ type: 'deviceDisconnected', state: 'idle', ...d }); } catch {}
-  }));
-  unsubs.push(bridgeEvents.on('ble.connectionFailed', (d) => {
-    try { callback({ type: 'connectionFailed', state: 'idle', ...d }); } catch {}
-  }));
-
-  return () => {
-    for (const u of unsubs) {
-      try { u(); } catch {}
-    }
-  };
 }

@@ -46,6 +46,14 @@ describe('balance wire contract (Rust -> TypeScript)', () => {
     expect(row.policyAnchorB32.startsWith(row.anchorFingerprint)).toBe(true);
     // The policy's icon field, which the wallet draws the token's coin from.
     expect(row.iconUrl).toBe('dsm:coin:v1:FIXTURE');
+    // What the token is and what its committed policy fixes and permits. The
+    // permissions arrive PRESENT for a created token; absent means Rust holds
+    // no policy, which a defaulted pair of booleans could not say.
+    expect(row.protocolDefined).toBe(false);
+    expect(row.genesisSupplyDisplay).toBe('1000000.00');
+    expect(row.permissions).toBeDefined();
+    expect(row.permissions.burnEnabled).toBe(true);
+    expect(row.permissions.transferable).toBe(false);
   });
 
   /// decimals must arrive as a real number, since the mapper's guard is

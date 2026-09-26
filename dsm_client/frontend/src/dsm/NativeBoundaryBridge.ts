@@ -4,7 +4,7 @@
 import { getBridgeInstance } from '../bridge/BridgeRegistry';
 import { bridgeEvents } from '../bridge/bridgeEvents';
 import type { AndroidBridgeV3 } from './bridgeTypes';
-import { EnvelopeOp, IngressRequest, IngressResponse, RouterInvokeOp, RouterQueryOp, StartupRequest, StartupResponse } from '../proto/dsm_app_pb';
+import { IngressRequest, IngressResponse, RouterInvokeOp, RouterQueryOp } from '../proto/dsm_app_pb';
 
 function mustBridge(): AndroidBridgeV3 {
   const bridge = getBridgeInstance();
@@ -21,11 +21,12 @@ function normalizeToBytes(data: unknown): Uint8Array {
   throw new Error('expected Uint8Array response from native boundary');
 }
 
-async function callBoundaryMethod(method: 'nativeBoundaryStartup' | 'nativeBoundaryIngress', payload: Uint8Array): Promise<Uint8Array> {
-  // `startup` and `ingress` are the bridge object's own wrappers over the
-  // MessagePort (`index.html`); they answer the boundary's bytes or throw.
+async function callBoundaryMethod(method: 'nativeBoundaryIngress', payload: Uint8Array): Promise<Uint8Array> {
+  // `ingress` is the bridge object's own wrapper over the MessagePort
+  // (`index.html`); it answers the boundary's bytes or throws. The startup
+  // boundary is Kotlin's to cross, at app start; the WebView never crossed it.
   const bridge = mustBridge();
-  const call = method === 'nativeBoundaryStartup' ? bridge.startup : bridge.ingress;
+  const call = bridge.ingress;
   if (typeof call !== 'function') {
     throw new Error(`DSM bridge does not expose ${method}`);
   }
@@ -40,23 +41,8 @@ async function callBoundaryMethod(method: 'nativeBoundaryStartup' | 'nativeBound
   }
 }
 
-function encodeStartupRequest(request: StartupRequest | Uint8Array): Uint8Array {
-  return request instanceof Uint8Array ? new Uint8Array(request) : request.toBinary();
-}
-
 function encodeIngressRequest(request: IngressRequest | Uint8Array): Uint8Array {
   return request instanceof Uint8Array ? new Uint8Array(request) : request.toBinary();
-}
-
-function unwrapStartupResponse(responseBytes: Uint8Array): Uint8Array {
-  const response = StartupResponse.fromBinary(responseBytes);
-  if (response.result.case === 'okBytes') {
-    return response.result.value;
-  }
-  if (response.result.case === 'error') {
-    throw new Error(response.result.value?.message || 'startup boundary error');
-  }
-  throw new Error('startup boundary returned no result');
 }
 
 function unwrapIngressResponse(responseBytes: Uint8Array): Uint8Array {
@@ -70,16 +56,8 @@ function unwrapIngressResponse(responseBytes: Uint8Array): Uint8Array {
   throw new Error('ingress boundary returned no result');
 }
 
-export async function startupBoundary(request: StartupRequest | Uint8Array): Promise<Uint8Array> {
-  return callBoundaryMethod('nativeBoundaryStartup', encodeStartupRequest(request));
-}
-
 export async function ingressBoundary(request: IngressRequest | Uint8Array): Promise<Uint8Array> {
   return callBoundaryMethod('nativeBoundaryIngress', encodeIngressRequest(request));
-}
-
-export async function startupBoundaryOk(request: StartupRequest | Uint8Array): Promise<Uint8Array> {
-  return unwrapStartupResponse(await startupBoundary(request));
 }
 
 export async function ingressBoundaryOk(request: IngressRequest | Uint8Array): Promise<Uint8Array> {
@@ -106,15 +84,6 @@ export function buildRouterInvokeIngressRequest(method: string, args?: Uint8Arra
         method,
         args: args instanceof Uint8Array ? new Uint8Array(args) : new Uint8Array(0),
       }),
-    },
-  });
-}
-
-export function buildEnvelopeIngressRequest(envelopeBytes: Uint8Array): IngressRequest {
-  return new IngressRequest({
-    operation: {
-      case: 'envelope',
-      value: new EnvelopeOp({ envelopeBytes: new Uint8Array(envelopeBytes) }),
     },
   });
 }

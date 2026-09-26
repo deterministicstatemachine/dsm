@@ -39,7 +39,11 @@ describe('WalletContext bilateral committed event', () => {
     jest.useRealTimers();
   });
 
-  it('refreshes balances and history when wallet.bilateralCommitted fires', async () => {
+  // An accepted transfer reaches the provider as two events from the accept
+  // path: `wallet.bilateralCommitted` (the signal) and `wallet.refresh` (the
+  // reload). The provider reloads once, on the second; it used to reload on
+  // both.
+  it('reloads once for an accepted transfer, on the accept path’s wallet.refresh', async () => {
     const mockBalances = jest.spyOn(dsmClient, 'getAllBalances' as any).mockResolvedValue([]);
     const mockHistory = jest.spyOn(dsmClient, 'getWalletHistory' as any).mockResolvedValue({ transactions: [] });
     const mockIdentity = jest
@@ -48,7 +52,12 @@ describe('WalletContext bilateral committed event', () => {
         genesisHash: 'G'.repeat(32),
         deviceId: 'D'.repeat(32),
       });
-    jest.spyOn(dsmClient, 'isReady' as any).mockResolvedValue(true);
+    // The listener reloads on an animation frame; fake timers do not drive
+    // jsdom's, so run the frame callback at once.
+    jest.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => {
+      cb(0);
+      return 0;
+    });
 
     // Render provider so initialization happens and initial fetch may occur
     await renderWalletProvider(<div data-testid="inside-provider" />);
@@ -60,23 +69,30 @@ describe('WalletContext bilateral committed event', () => {
     mockBalances.mockClear();
     mockHistory.mockClear();
 
-    // Dispatch event that should trigger refreshAll()
+    // The signal alone reloads nothing.
     await act(async () => {
       bridgeEvents.emit('wallet.bilateralCommitted', {} as any);
       await Promise.resolve();
+      await Promise.resolve();
     });
+    expect(mockBalances).not.toHaveBeenCalled();
+    expect(mockHistory).not.toHaveBeenCalled();
 
-    // useSyncExternalStore triggers a synchronous snapshot update; timers not required.
-
-    // Expect the underlying refresh calls to be called
-    await waitFor(() => expect(mockBalances).toHaveBeenCalled());
-    await waitFor(() => expect(mockHistory).toHaveBeenCalled());
+    // The accept path's own refresh reloads, once.
+    await act(async () => {
+      bridgeEvents.emit('wallet.refresh', { source: 'bilateral.accept_followup' });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(mockBalances).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(mockHistory).toHaveBeenCalledTimes(1));
 
     await act(async () => {
       jest.runOnlyPendingTimers();
       await Promise.resolve();
       await Promise.resolve();
     });
+    expect(mockBalances).toHaveBeenCalledTimes(1);
   });
 
   it('does not reopen the transfer accepted toast when the user dismisses it', async () => {
@@ -86,7 +102,6 @@ describe('WalletContext bilateral committed event', () => {
       genesisHash: 'G'.repeat(32),
       deviceId: 'D'.repeat(32),
     });
-    jest.spyOn(dsmClient, 'isReady' as any).mockResolvedValue(true);
 
     await renderWalletProvider();
 

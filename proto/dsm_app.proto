@@ -3342,6 +3342,31 @@ message BalanceGetResponse {
   // through the coin. Empty for protocol assets and for policies that name no
   // icon. Rust never interprets it and nothing resolves a token by it.
   string icon_url = 11;
+  // Whether this is an asset the protocol defines (ERA, dBTC) rather than a
+  // token a device created and this device registered. Decided by Rust from
+  // the builtin policy commit the ticker resolves to. A screen that keyed it
+  // on the ticker text it displayed would call a created token "ERA" a
+  // protocol asset, and carried its own copy of what a protocol asset is.
+  bool protocol_defined = 12;
+  // The whole supply that will ever exist, in display units rendered by Rust
+  // with the token's decimals. A created token's policy fixes it at creation
+  // (SoFi §51); ERA's is the native reserve's genesis supply, from which every
+  // unit in circulation was released. Empty when Rust holds no supply for the
+  // token.
+  string genesis_supply_display = 13;
+  // What the token's committed policy permits, read from bytes verified
+  // against the anchor. Absent when Rust holds no committed policy for the
+  // token: "not stated" and "not permitted" are different facts, and a
+  // defaulted bool cannot tell them apart.
+  TokenPolicyPermissions permissions = 14;
+}
+// The permission flags of a committed token policy, as Core's one parser read
+// them (SoFi §47).
+message TokenPolicyPermissions {
+  // Holders may burn (§54).
+  bool burn_enabled = 1;
+  // The token may move between holders (§49).
+  bool transferable = 2;
 }
 // Multi-token enumeration (ordered lexicographically by token_id on server side)
 message BalancesListResponse { repeated BalanceGetResponse balances = 1; }

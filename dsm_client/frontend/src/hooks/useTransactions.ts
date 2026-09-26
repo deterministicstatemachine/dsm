@@ -6,6 +6,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { dsmClient } from '@/services/dsmClient';
+import { checkIdentityState } from '@/utils/identity';
 import type { DomainTransaction } from '@/domain/types';
 import logger from '@/utils/logger';
 
@@ -25,10 +26,12 @@ export function useTransactions() {
     let cancelled = false;
     (async () => {
       try {
-        // Only refresh if we have an identity
-        const hasIdentity = await dsmClient.isReady();
-        if (!hasIdentity) {
-          logger.debug('[useTransactions] Skipping refresh: no identity yet');
+        // History exists only for an identity. The native session is Rust's
+        // word on whether there is one; "missing" and "runtime not ready" are
+        // both no read, and each is logged as itself.
+        const state = await checkIdentityState();
+        if (state !== 'READY') {
+          logger.debug(`[useTransactions] no history read: identity ${state}`);
           return;
         }
         await refresh();

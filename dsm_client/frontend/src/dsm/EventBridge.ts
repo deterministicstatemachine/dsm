@@ -162,8 +162,6 @@ export function initializeEventBridge(): void {
   // Deterministic throttle for wallet.refresh from BLE envelopes.
   // Without this, every BLE envelope matching bilateral patterns
   // triggers a full balance+history refresh (~50 calls/sec).
-  let bleWalletRefreshCounter = 0;
-  const BLE_WALLET_REFRESH_EVERY = 8; // emit 1 in 8 BLE-triggered refreshes
 
   window.addEventListener('dsm-native-host-event-bin', (ev: Event) => {
     try {
@@ -222,7 +220,6 @@ export function initializeEventBridge(): void {
         try {
           const snapshot = decodeSessionState(bytes);
           bridgeEvents.emit('session.state', snapshot);
-          window.dispatchEvent(new CustomEvent('dsm-session-state', { detail: snapshot }));
         } catch (e) {
           logger.warn('[EventBridge] session.state decode failed:', e);
         }
@@ -237,13 +234,15 @@ export function initializeEventBridge(): void {
       }
 
       if (topic === 'dsm-identity-ready') {
-        try { document.dispatchEvent(new Event('dsm-identity-ready')); } catch (e) { logger.warn('[EventBridge] dsm-identity-ready dispatch failed:', e); }
+        // Straight to the bus. This used to be a `document` event that the
+        // adapter re-emitted, and that `getIdentity`'s wake-up listened for on
+        // `window`, where it never arrived.
+        bridgeEvents.emit('identity.ready', undefined as never);
         emit(topic, bytes);
         return;
       }
 
       if (topic === 'dsm-app-pause') {
-        try { window.dispatchEvent(new CustomEvent('dsm-app-pause')); } catch (e) { logger.warn('[EventBridge] dsm-app-pause dispatch failed:', e); }
         emit(topic, bytes);
         return;
       }
@@ -268,12 +267,7 @@ export function initializeEventBridge(): void {
         try {
           const text = new TextDecoder().decode(bytes);
           const parts = text.split('|');
-          const detail = {
-            type: parts[0] || 'UNKNOWN_ERROR',
-            message: parts[1] || 'Environment configuration error',
-            help: parts[2] || undefined,
-          };
-          document.dispatchEvent(new CustomEvent('dsm-env-config-error', { detail }));
+          bridgeEvents.emit('env.config.error', { message: parts[1] || 'Environment configuration error' });
         } catch {}
         emit(topic, bytes);
         return;
@@ -329,7 +323,7 @@ export function initializeEventBridge(): void {
       }
 
       if (topic === 'dsm-wallet-refresh') {
-        try { window.dispatchEvent(new CustomEvent('dsm-wallet-refresh', { detail: { source: 'native' } })); } catch {}
+        bridgeEvents.emit('wallet.refresh', { source: 'native' });
         emit(topic, bytes);
         return;
       }
@@ -384,22 +378,13 @@ export function initializeEventBridge(): void {
             } catch {}
           }
 
-          // Always fan out a typed DOM event so UI can react even if it doesn't subscribe via EventBridge.
-          try {
-            window.dispatchEvent(
-              new CustomEvent('dsm-bilateral-notification', {
-                detail: { notification: note, bytes },
-              })
-            );
-          } catch {}
-
           // The event type says a transfer completed; a status string is free text.
           const isComplete = note.eventType === pb.BilateralEventType.BILATERAL_EVENT_TRANSFER_COMPLETE;
 
           if (isComplete) {
             try { logger.debug('[BilateralTransfer] TRANSFER_COMPLETE - refreshing wallet state'); } catch {}
             try { bridgeEvents.emit('wallet.refresh', { source: 'bilateral.transfer_complete' }); } catch {}
-            // Direct signal so listeners can bypass the wallet.refresh throttle chain.
+            // For the reactions that are not reloads: the toast and the credit sound.
             try { bridgeEvents.emit('bilateral.transferComplete', undefined as any); } catch {}
           }
         } catch (e) {
@@ -459,10 +444,6 @@ export function initializeEventBridge(): void {
               try { bridgeEvents.emit('ble.deviceDisconnected', { address: info?.address ?? '' }); } catch {}
             } else if (evCase === 'connectionFailed') {
               try { bridgeEvents.emit('ble.connectionFailed', { reason: String(bleEvent.ev.value ?? '') }); } catch {}
-            } else if (evCase === 'advertisingStarted') {
-              try { bridgeEvents.emit('ble.advertisingStarted', undefined as any); } catch {}
-            } else if (evCase === 'advertisingStopped') {
-              try { bridgeEvents.emit('ble.advertisingStopped', undefined as any); } catch {}
             } else if (evCase === 'pairingStatus') {
               const ps = bleEvent.ev.value as pb.PairingStatusUpdate;
               const devId = ps?.deviceId instanceof Uint8Array && ps.deviceId.length === 32
@@ -493,17 +474,11 @@ export function initializeEventBridge(): void {
             return; // handled; do not fall through
           }
 
-          // Check for bilateral response (type 8 = BilateralPrepareResponse)
-          // Throttled: emit wallet.refresh only every Nth BLE envelope to avoid
-          // flooding the bridge with balance+history queries (~50/sec without this).
-          const uTx: any = (p?.case === 'universalTx' ? p.value : p?.universalTx);
-          const bpResp: any = (p?.case === 'bilateralPrepareResponse' ? p.value : p?.bilateralPrepareResponse);
-          if (uTx?.type === 8 || bpResp) {
-            bleWalletRefreshCounter = (bleWalletRefreshCounter + 1) | 0;
-            if ((bleWalletRefreshCounter % BLE_WALLET_REFRESH_EVERY) === 1) {
-              bridgeEvents.emit('wallet.refresh', { source: 'bilateral.transfer_complete' });
-            }
-          }
+          // A bilateral prepare response over BLE is not a wallet change and
+          // announces none: the wallet changes at TRANSFER_COMPLETE, which
+          // `bilateral.event` announces. This used to emit a `wallet.refresh`
+          // claiming `bilateral.transfer_complete` on one prepare response in
+          // eight.
           
           // Check for identity-like payload without depending on a specific generated type name
           const identity: any = (p?.case === 'bilateralIdentityExchange' ? p.value : p?.bilateralIdentityExchange);

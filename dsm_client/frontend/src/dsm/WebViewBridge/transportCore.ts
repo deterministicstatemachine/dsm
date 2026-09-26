@@ -16,9 +16,7 @@ import { bridgeEvents } from "../../bridge/bridgeEvents";
 import { getBridgeInstance } from "../../bridge/BridgeRegistry";
 import type { AndroidBridgeV3 } from "../bridgeTypes";
 import { emitDeterministicSafetyIfPresent } from "../../utils/deterministicSafety";
-import { decodeFramedEnvelopeV3 } from "../decoding";
 import {
-  buildEnvelopeIngressRequest,
   buildRouterInvokeIngressRequest,
   buildRouterQueryIngressRequest,
   ingressBoundaryOk,
@@ -163,10 +161,6 @@ export async function callBin(method: string, payload?: Uint8Array): Promise<Uin
   return sendBridgeRequestBytes(method, reqBytes);
 }
 
-export async function processEnvelopeV3Bin(envelopeBytes: Uint8Array): Promise<Uint8Array> {
-  return bridgeGate.enqueue(() => ingressBoundaryOk(buildEnvelopeIngressRequest(envelopeBytes)));
-}
-
 export async function routerInvokeBin(method: string, args?: Uint8Array): Promise<Uint8Array> {
   if (typeof method !== "string" || method.length === 0) {
     throw new Error("routerInvokeBin: method required");
@@ -179,16 +173,6 @@ export async function routerQueryBin(path: string, params?: Uint8Array): Promise
     throw new Error("routerQueryBin: path required");
   }
   return bridgeGate.enqueue(() => ingressBoundaryOk(buildRouterQueryIngressRequest(path, params)));
-}
-
-export async function invokeRouterEnvelope(method: string, args?: Uint8Array) {
-  const bytes = await routerInvokeBin(method, args);
-  return { bytes, envelope: decodeFramedEnvelopeV3(bytes) };
-}
-
-export async function queryRouterEnvelope(path: string, params?: Uint8Array) {
-  const bytes = await routerQueryBin(path, params);
-  return { bytes, envelope: decodeFramedEnvelopeV3(bytes) };
 }
 
 export async function queryTransportHeadersV3(): Promise<Uint8Array> {

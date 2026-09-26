@@ -2,19 +2,6 @@
 // Shared helpers and types for the wallet screen components.
 import type { DomainTransaction, DomainTxType } from '../../../domain/types';
 
-// Local UI types
-export type Balance = {
-  tokenId: string;
-  symbol: string;
-  /** Display form, rendered by Rust from the token's decimals. */
-  balance: string;
-  decimals: number;
-  /** The token policy's icon field, carried from Rust. */
-  iconUrl?: string;
-  /** CPTA policy anchor, Base32 Crockford, rendered by Rust. Carried, never derived. */
-  policyAnchorB32?: string;
-};
-
 /** The badge a history row's type shows. */
 export function txTypeLabel(txType: DomainTxType): string {
   switch (txType) {

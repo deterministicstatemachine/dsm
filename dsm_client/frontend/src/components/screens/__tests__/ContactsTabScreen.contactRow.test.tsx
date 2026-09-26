@@ -33,12 +33,11 @@ describe('ContactsTabScreen contact row', () => {
 
   it('labels a contact neither paired nor verified as not verified, and shows what Rust listed', async () => {
     mockContacts.push({
-      id: 'DEV1CE',
       alias: 'bob',
       deviceId: 'DEV1CE',
       genesisHash: 'GENES1S',
-      publicKey: 'PUBKEY',
-      isVerified: false,
+      signingPublicKey: 'PUBKEY',
+      genesisVerifiedOnline: false,
     });
 
     await act(async () => {

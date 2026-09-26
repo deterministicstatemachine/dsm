@@ -2,11 +2,13 @@
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import * as pb from '../proto/dsm_app_pb';
-import { queryTransportHeadersV3, getDeviceIdBinBridgeAsync, getPreference as getPreferenceBridge, setPreference as setPreferenceBridge } from './WebViewBridge';
+import { queryTransportHeadersV3, getPreference as getPreferenceBridge, setPreference as setPreferenceBridge } from './WebViewBridge';
 import { encodeBase32Crockford } from '../utils/textId';
 import { IdentityInfo } from './types';
 import logger from '../utils/logger';
 import { nativeSessionStore } from '../runtime/nativeSessionStore';
+import { bridgeEvents } from '../bridge/bridgeEvents';
+import { IdentityUnavailableError } from './identityUnavailable';
 
 // Cache the last known-good identity to avoid flip-flops.
 const g: any = globalThis as any;
@@ -71,7 +73,10 @@ export async function getHeaders(): Promise<pb.Headers> {
   throw new Error('DSM bridge identity not ready');
 }
 
-export async function getIdentity(): Promise<IdentityInfo | null> {
+export { IdentityUnavailableError, isIdentityUnavailable } from './identityUnavailable';
+export type { IdentityUnavailableState } from './identityUnavailable';
+
+export async function getIdentity(): Promise<IdentityInfo> {
   // Retry with increasing yields to handle the cold-start race where React
   // mounts before the Android MessagePort is delivered. The port arrival fires
   // 'dsm-bridge-ready' but loadWalletData may already be in-flight by then.
@@ -85,26 +90,34 @@ export async function getIdentity(): Promise<IdentityInfo | null> {
   //     from SQLite yet (common on slower devices). Keep retrying through the full window.
   // Do NOT fast-exit on "identity not ready" — genesis may already exist in the DB but the
   // SDK initialization is still in-flight. Let the full delay window play out.
+  //
+  // The one fast exit is Rust's own word: a native session reporting the
+  // identity `missing` means there is nothing to wait for, and it is answered
+  // as missing at once rather than as the same null a failed read produced.
   const retryDelays = [0, 150, 300, 600, 1000, 1500, 2200];
+  let lastFailure: unknown = null;
   for (let attempt = 0; attempt < retryDelays.length; attempt++) {
     if (attempt > 0) {
-      // Yield to event loop to allow bridge port delivery / gate drain.
-      // Also listen for the identity-ready event so we wake up early if it fires.
+      // Yield to event loop to allow bridge port delivery / gate drain, and
+      // wake early on Rust's `identity.ready` — on the bus, where the event
+      // bridge puts it; it used to be listened for on `window` after being
+      // dispatched on `document`, and never woke anything.
       const delay = retryDelays[attempt];
       await new Promise<void>(resolve => {
         let settled = false;
-        const settle = () => { if (!settled) { settled = true; resolve(); } };
-        const onReady = () => { settle(); };
-        if (typeof window !== 'undefined') {
-          window.addEventListener('dsm-identity-ready', onReady, { once: true });
-        }
-        setTimeout(() => {
-          if (typeof window !== 'undefined') {
-            window.removeEventListener('dsm-identity-ready', onReady);
-          }
-          settle();
-        }, delay);
+        const offReady = bridgeEvents.on('identity.ready', () => settle());
+        const settle = () => {
+          if (settled) return;
+          settled = true;
+          offReady();
+          resolve();
+        };
+        setTimeout(settle, delay);
       });
+    }
+    const session = nativeSessionStore.getSnapshot();
+    if (session.received && session.identity_status === 'missing') {
+      throw new IdentityUnavailableError('missing', 'no identity on this device (native session: missing)');
     }
     try {
       const h = await getHeaders();
@@ -113,34 +126,23 @@ export async function getIdentity(): Promise<IdentityInfo | null> {
         genesisHash: encodeBase32Crockford(h.genesisHash),
       };
     } catch (e) {
+      lastFailure = e;
       logger.warn(`[getIdentity] attempt ${attempt + 1}/${retryDelays.length} failed:`, e);
     }
   }
-  return null;
-}
-
-export async function getDeviceIdentity(): Promise<string | null> {
-  try {
-    const deviceIdBytes = await getDeviceIdBinBridgeAsync();
-    if (deviceIdBytes.length === 0) return null;
-    return encodeBase32Crockford(deviceIdBytes);
-  } catch (e) {
-    logger.warn('getDeviceIdentity failed:', e);
-    return null;
-  }
-}
-
-export async function getBluetoothStatus(): Promise<{ enabled: boolean; advertising: boolean; scanning: boolean }> {
+  const waited = retryDelays.reduce((a, b) => a + b, 0);
+  const reason = lastFailure instanceof Error ? lastFailure.message : String(lastFailure);
   const session = nativeSessionStore.getSnapshot();
-  return {
-    enabled: session.hardware_status.ble.enabled,
-    advertising: session.hardware_status.ble.advertising,
-    scanning: session.hardware_status.ble.scanning,
-  };
-}
-
-export function isReady(): Promise<boolean> {
-  return getDeviceIdentity().then(id => !!id).catch(() => false);
+  if (!session.received || session.identity_status !== 'ready') {
+    throw new IdentityUnavailableError(
+      'runtime_not_ready',
+      `native session not ready after ${waited} ms (${session.received ? session.identity_status : 'no session state received'}); last read: ${reason}`,
+    );
+  }
+  throw new IdentityUnavailableError(
+    'read_failed',
+    `identity not read although the native session reports it ready: ${reason}`,
+  );
 }
 
 // Preferences (strict bridge)

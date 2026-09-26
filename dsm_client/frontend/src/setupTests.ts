@@ -52,8 +52,8 @@ if (typeof window !== 'undefined' && typeof window.HTMLMediaElement !== 'undefin
 if (typeof (global as any).window !== 'undefined') {
   const g = (global as any);
   // The test bridge speaks the production interface: the object `index.html`
-  // installs — `__binary`, `isAvailable`, `sendMessageBin`, and `startup` /
-  // `ingress` / `hostRequest`, which are index.html's own wrappers over
+  // installs — `__binary`, `isAvailable`, `sendMessageBin`, and `ingress` /
+  // `hostRequest`, which are index.html's own wrappers over
   // `sendMessageBin`. A test supplies `sendMessageBin` (one BridgeRpcRequest in,
   // BridgeRpcResponse bytes out) and the setter completes the rest, so the
   // production transport runs unchanged; nothing in production branches on a
@@ -85,7 +85,6 @@ if (typeof (global as any).window !== 'undefined') {
     bridge.__binary = true;
     if (typeof bridge.isAvailable !== 'function') bridge.isAvailable = () => true;
     if (typeof bridge.getBridgeStatus !== 'function') bridge.getBridgeStatus = () => 3;
-    if (typeof bridge.startup !== 'function') bridge.startup = (p: Uint8Array) => callBridgeMethod('nativeBoundaryStartup', p);
     if (typeof bridge.ingress !== 'function') bridge.ingress = (p: Uint8Array) => callBridgeMethod('nativeBoundaryIngress', p);
     if (typeof bridge.hostRequest !== 'function') bridge.hostRequest = (p: Uint8Array) => callBridgeMethod('nativeHostRequest', p);
     return bridge;
@@ -135,13 +134,6 @@ if (typeof (global as any).window !== 'undefined') {
       if (method === 'setPreference') {
         // Return success for setting preferences
         return createDsmBridgeSuccessResponse(new Uint8Array(0));
-      }
-
-      if (method === 'nativeBoundaryStartup') {
-        const response = new pb.StartupResponse({
-          result: { case: 'okBytes', value: new Uint8Array(0) },
-        });
-        return createDsmBridgeSuccessResponse(response.toBinary());
       }
 
       if (method === 'nativeBoundaryIngress') {

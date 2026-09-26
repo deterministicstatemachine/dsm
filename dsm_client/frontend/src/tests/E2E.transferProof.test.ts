@@ -164,8 +164,6 @@ function installBridge(opts?: { contactBleAddress?: string }) {
 
   g.window.DsmBridge = {
     __binary: true,
-    getDeviceIdBin: () => encodeBase32Crockford(DEVICE_A),
-    getGenesisHashBin: () => encodeBase32Crockford(GENESIS_A),
 
     sendMessageBin: async (reqBytes: Uint8Array): Promise<Uint8Array> => {
       const { method, payload } = decodeBridgeReq(reqBytes);
@@ -175,10 +173,6 @@ function installBridge(opts?: { contactBleAddress?: string }) {
 
       if (method === 'getTransportHeadersV3Bin') {
         return wrapSuccess(headers.toBinary());
-      }
-
-      if (method === 'getSigningPublicKeyBin') {
-        return wrapSuccess(SIGNING_KEY);
       }
 
       if (method === 'getPreference' || method === 'setPreference') {

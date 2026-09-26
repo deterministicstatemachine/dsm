@@ -35,16 +35,6 @@ class NativeSessionStore {
 
   getServerSnapshot = (): NativeSessionSnapshot => this.snapshot;
 
-  setSnapshotForTest(next: NativeSessionSnapshot): void {
-    this.snapshot = next;
-    this.emit();
-  }
-
-  resetForTest(): void {
-    this.snapshot = DEFAULT_NATIVE_SESSION;
-    this.emit();
-  }
-
   private emit(): void {
     this.listeners.forEach((listener) => listener());
   }
@@ -58,12 +48,4 @@ export function useNativeSessionStore(): NativeSessionSnapshot {
     nativeSessionStore.getSnapshot,
     nativeSessionStore.getServerSnapshot,
   );
-}
-
-export function setNativeSessionSnapshotForTest(next: NativeSessionSnapshot): void {
-  nativeSessionStore.setSnapshotForTest(next);
-}
-
-export function resetNativeSessionStoreForTest(): void {
-  nativeSessionStore.resetForTest();
 }

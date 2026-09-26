@@ -60,31 +60,6 @@ export function decodeBilateralEvent(payload: Uint8Array): BilateralTransferEven
   }
 }
 
-export function encodeBilateralEventNotification(input: {
-  eventType: BilateralEventTypeValue;
-  status?: string;
-  message?: string;
-  amount?: bigint;
-  tokenId?: string;
-  counterpartyDeviceId?: Uint8Array;
-  commitmentHash?: Uint8Array;
-  transactionHash?: Uint8Array;
-  senderBleAddress?: string;
-}): Uint8Array {
-  const note = new pb.BilateralEventNotification({
-    eventType: input.eventType as any,
-    status: input.status || '',
-    message: input.message || '',
-    amount: input.amount,
-    tokenId: input.tokenId,
-    counterpartyDeviceId: input.counterpartyDeviceId as any,
-    commitmentHash: input.commitmentHash as any,
-    transactionHash: input.transactionHash as any,
-    senderBleAddress: input.senderBleAddress,
-  } as any);
-  return note.toBinary();
-}
-
 function decodeB32To32Bytes(value: string, label: string): Uint8Array {
   const bytes = decodeBase32Crockford(value);
   if (!(bytes instanceof Uint8Array) || bytes.length !== 32) {

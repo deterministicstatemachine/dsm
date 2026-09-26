@@ -92,39 +92,4 @@ describe('resolveBleAddressForContact', () => {
     expect(snap?.deviceIds?.[devIdB32]).toBe(address);
     expect(snap?.genesis?.[genesisB32]).toBe(address);
   });
-
-  it('clears cached identities via clearBleIdentityCache', async () => {
-    // Precondition: ensure at least one mapping exists (reuse previous test logic)
-    const devId = mkBytes(20);
-    const genesis = mkBytes(21);
-    const address = 'AA:11:22:33:44:55';
-    (globalThis as any).window.DsmBridge = {
-      __binary: true,
-      sendMessageBin: async (reqBytes: Uint8Array) => {
-        const pb = require('../../proto/dsm_app_pb');
-        const req = pb.BridgeRpcRequest.fromBinary(reqBytes);
-        const method = req.method || '';
-        const payload = req.payload?.case === 'bytes' ? req.payload.value.data : new Uint8Array(0);
-        if (method === 'resolveBleAddressForDeviceId') {
-          if (payload.length === devId.length && payload.every((b: number, i: number) => b === devId[i])) {
-            return createDsmBridgeSuccessResponse(new Uint8Array(enc.encode(address)));
-          }
-        }
-        return createDsmBridgeSuccessResponse(new Uint8Array(0));
-      },
-    };
-    const contact = { alias: 'Peer2', deviceId: devId, genesisHash: genesis };
-    const resolved = await dsmClient.resolveBleAddressForContact?.(contact as any);
-    expect(resolved).toBe(address);
-    // Clear cache
-    dsmClient.clearBleIdentityCache?.();
-    // Snapshot empty
-    const snap = dsmClient.getBleIdentitySnapshot?.();
-    expect(Object.keys(snap?.deviceIds || {}).length).toBe(0);
-    expect(Object.keys(snap?.genesis || {}).length).toBe(0);
-
-    // Native mapping still resolves and repopulates cache on demand.
-    const resolvedAgain = await dsmClient.resolveBleAddressForContact?.(contact as any);
-    expect(resolvedAgain).toBe(address);
-  });
 });

@@ -6,7 +6,7 @@ import { bridgeEvents } from '../bridge/bridgeEvents';
 import logger from '../utils/logger';
 import type { AndroidBridgeV3 } from './bridgeTypes';
 import { bridgeGate } from './BridgeGate';
-import { BiometricAuthorizePayload, BiometricAuthorizeResult, HostPermissionsRequestPayload, NativeHostAck, NativeHostCapabilities, NativeHostEvent, NativeHostEventKind, NativeHostRequest, NativeHostRequestKind, NativeHostResponse, NfcTagReadPayload, NfcTagReadResult, NfcTagWritePayload, NfcTagWriteResult, QrScanResultPayload } from '../proto/dsm_app_pb';
+import { BiometricAuthorizeResult, NativeHostAck, NativeHostEvent, NativeHostEventKind, NativeHostRequest, NativeHostRequestKind, NativeHostResponse, NfcTagWritePayload, NfcTagWriteResult, QrScanResultPayload } from '../proto/dsm_app_pb';
 
 function mustBridge(): AndroidBridgeV3 {
   const bridge = getBridgeInstance();
@@ -57,11 +57,6 @@ function unwrapHostResponse(responseBytes: Uint8Array): Uint8Array {
   throw new Error('native host boundary returned no result');
 }
 
-export function isNativeHostUnavailableError(error: unknown): boolean {
-  if (!(error instanceof Error)) return false;
-  return error.message.includes('Unknown binary RPC method: nativeHostRequest');
-}
-
 export async function hostRequest(request: NativeHostRequest | Uint8Array): Promise<Uint8Array> {
   return bridgeGate.enqueue(() => callHostMethod(encodeRequest(request)));
 }
@@ -77,24 +72,8 @@ export function buildHostRequest(kind: NativeHostRequestKind, payload?: Uint8Arr
   });
 }
 
-export async function getNativeHostCapabilities(): Promise<NativeHostCapabilities> {
-  const responseBytes = await hostRequest(buildHostRequest(NativeHostRequestKind.HOST_CONTROL_CAPABILITIES_GET));
-  const response = NativeHostResponse.fromBinary(responseBytes);
-  if (response.result.case === 'capabilities') {
-    return response.result.value;
-  }
-  if (response.result.case === 'error') {
-    throw new Error(response.result.value?.message || 'native host capabilities error');
-  }
-  throw new Error('native host capabilities response missing capabilities');
-}
-
 export async function startNativeQrScan(): Promise<void> {
   await hostRequestOk(buildHostRequest(NativeHostRequestKind.HOST_CONTROL_QR_START_SCAN));
-}
-
-export async function stopNativeQrScan(): Promise<void> {
-  await hostRequestOk(buildHostRequest(NativeHostRequestKind.HOST_CONTROL_QR_STOP_SCAN));
 }
 
 export async function startBleScanHost(): Promise<void> {
@@ -121,34 +100,6 @@ export async function startNfcReaderHost(): Promise<void> {
 
 export async function stopNfcReaderHost(): Promise<void> {
   await hostRequestOk(buildHostRequest(NativeHostRequestKind.HOST_CONTROL_NFC_READER_STOP));
-}
-
-export async function requestHostPermissions(permissions: string[]): Promise<void> {
-  const payload = new HostPermissionsRequestPayload({ permissions });
-  await hostRequestOk(
-    buildHostRequest(NativeHostRequestKind.HOST_CONTROL_PERMISSIONS_REQUEST, payload.toBinary()),
-  );
-}
-
-export async function authorizeBiometricHost(args?: Partial<BiometricAuthorizePayload>): Promise<void> {
-  const payload = new BiometricAuthorizePayload(args);
-  await hostRequestOk(
-    buildHostRequest(
-      NativeHostRequestKind.PLATFORM_PRIMITIVE_BIOMETRIC_AUTHORIZE,
-      payload.toBinary(),
-    ),
-  );
-}
-
-export async function readNfcTagPayloadHost(mimeType = 'application/vnd.dsm.recovery'): Promise<NfcTagReadResult> {
-  const payload = new NfcTagReadPayload({ mimeType });
-  const bytes = await hostRequestOk(
-    buildHostRequest(
-      NativeHostRequestKind.PLATFORM_PRIMITIVE_NFC_TAG_READ_PAYLOAD,
-      payload.toBinary(),
-    ),
-  );
-  return NfcTagReadResult.fromBinary(bytes);
 }
 
 export async function writeNfcTagPayloadHost(payload?: Uint8Array, mimeType = 'application/vnd.dsm.recovery'): Promise<NfcTagWriteResult> {

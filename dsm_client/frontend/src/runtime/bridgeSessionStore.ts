@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { useSyncExternalStore } from 'react';
-
 type BridgeSessionSnapshot = {
   bridgeBound: boolean;
   bridgeReady: boolean;
@@ -65,11 +63,3 @@ class BridgeSessionStore {
 }
 
 export const bridgeSessionStore = new BridgeSessionStore();
-
-export function useBridgeSessionStore(): BridgeSessionSnapshot {
-  return useSyncExternalStore(
-    bridgeSessionStore.subscribe,
-    bridgeSessionStore.getSnapshot,
-    bridgeSessionStore.getServerSnapshot,
-  );
-}

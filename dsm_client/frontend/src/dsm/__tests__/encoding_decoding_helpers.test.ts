@@ -8,17 +8,14 @@ declare const it: any;
 declare const expect: any;
 
 import * as pb from '../../proto/dsm_app_pb';
-import { decodeFramedEnvelopeV3, encodeEnvelope } from '../decoding';
+import { decodeFramedEnvelopeV3 } from '../decoding';
 
 describe('encoding/decoding helpers parity', () => {
-  it('encodeEnvelope matches native toBinary and decodeFramedEnvelopeV3 round-trips via framing', () => {
+  it('decodeFramedEnvelopeV3 round-trips a framed envelope', () => {
     const headers = new pb.Headers({ deviceId: new Uint8Array(32), genesisHash: new Uint8Array(32),} as any);
     const env = new pb.Envelope({ version: 3, headers } as any);
-    const direct = env.toBinary();
-    const encoded = encodeEnvelope(env);
-    expect(encoded).toEqual(direct);
     // Wrap with 0x03 framing for canonical decode path
-    const framed = new Uint8Array([0x03, ...encoded]);
+    const framed = new Uint8Array([0x03, ...env.toBinary()]);
     const decoded = decodeFramedEnvelopeV3(framed);
     expect(decoded.version).toBe(3);
     expect(decoded.headers?.deviceId?.length).toBe(32);

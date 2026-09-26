@@ -6,7 +6,8 @@ import { render } from '@testing-library/react';
 import { emit } from '../../dsm/EventBridge';
 import { BilateralTransferDialog } from '../BilateralTransferDialog';
 import { bridgeEvents } from '../../bridge/bridgeEvents';
-import { BilateralEventType, encodeBilateralEventNotification } from '../../services/bilateral/bilateralEventService';
+import { BilateralEventType } from '../../services/bilateral/bilateralEventService';
+import { encodeBilateralEventNotification } from '../../tests/helpers/bilateralEventFixture';
 
 jest.mock('../../contexts/UXContext', () => ({
   useUX: () => ({

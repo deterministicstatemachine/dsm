@@ -30,11 +30,11 @@ jest.mock('../../../dsm/index', () => ({
 import {
   BilateralEventType,
   decodeBilateralEvent,
-  encodeBilateralEventNotification,
   acceptIncomingTransfer,
   rejectIncomingTransfer,
   BilateralTransferEvent,
 } from '../bilateralEventService';
+import { encodeBilateralEventNotification } from '../../../tests/helpers/bilateralEventFixture';
 import { acceptOfflineTransfer, rejectOfflineTransfer } from '../../../dsm/index';
 
 describe('BilateralEventType', () => {

@@ -250,12 +250,17 @@ describe('useDiagnostics', () => {
   });
 
   it('a missing identity is reported as missing, not as empty fields', async () => {
-    mockGetIdentity.mockResolvedValueOnce(null);
+    mockGetIdentity.mockRejectedValueOnce(
+      Object.assign(new Error('no identity on this device (native session: missing)'), {
+        name: 'IdentityUnavailableError',
+        state: 'missing',
+      }),
+    );
     const { result } = renderHook(() => useDiagnostics(jest.fn()));
     await act(async () => {});
     await act(async () => { await result.current.gatherDiagnostics(); });
 
-    expect(result.current.diagnostics).toContain('identity=none (getIdentity answered null)');
+    expect(result.current.diagnostics).toContain('identity=missing: no identity on this device (native session: missing)');
   });
 
   // The bundle says why the native log was not read; it used to say "No

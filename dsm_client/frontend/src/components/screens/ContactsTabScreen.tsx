@@ -121,26 +121,11 @@ const ContactsTabScreen: React.FC<Props> = ({ eraTokenSrc = 'images/logos/era_to
     flexShrink: 0,
   };
 
-  // Listen for contact-added events - refresh and auto-switch to list.
-  // No loading overlay — the refresh is near-instant and the overlay
-  // just causes a visible flicker.
+  // Listen for BLE mapping events - refresh the list. No loading overlay —
+  // the refresh is near-instant and the overlay just causes a visible
+  // flicker. An added contact reaches this screen through the contacts
+  // store, which the add itself refreshes.
   useEffect(() => {
-    const handleContactAdded = (_e: Event) => {
-      if (CONTACTS_DEBUG) console.log('[ContactsTab] dsm-contact-added event received');
-
-      // Deterministic coalescing: no wall-clock debounce.
-      if (refreshPendingRef.current) return;
-      refreshPendingRef.current = true;
-      queueMicrotask(() => {
-        refreshPendingRef.current = false;
-        void (async () => {
-          await load('contact-added');
-          // Auto-switch to list tab to show the new contact
-          setActiveTab('list');
-        })();
-      });
-    };
-
     const offBleMapped = bridgeEvents.on('contact.bleMapped', () => {
       if (CONTACTS_DEBUG) console.log('[ContactsTab] contact.bleMapped event received');
       if (refreshPendingRef.current) return;
@@ -161,14 +146,9 @@ const ContactsTabScreen: React.FC<Props> = ({ eraTokenSrc = 'images/logos/era_to
       });
     });
 
-    const offContactAdded = bridgeEvents.on('contact.added', () => {
-      handleContactAdded(new Event('contact.added'));
-    });
-
     return () => {
       offBleMapped();
       offBleUpdated();
-      offContactAdded();
     };
   }, [load]);
 
@@ -484,7 +464,7 @@ const ContactsTabScreen: React.FC<Props> = ({ eraTokenSrc = 'images/logos/era_to
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 12, width: '100%' }}>
               {contacts.map((c, i) => (
-                <div key={c.id} style={{ width: '100%' }}>
+                <div key={c.deviceId} style={{ width: '100%' }}>
                   <div
                     className={focusedIndex === i + 3 ? 'dpad-focus-ring' : undefined}
                     onClick={() => setSelected(selected === i ? null : i)}
@@ -538,7 +518,7 @@ const ContactsTabScreen: React.FC<Props> = ({ eraTokenSrc = 'images/logos/era_to
                       boxSizing: 'border-box',
                     }}>
                       <div style={{ marginBottom: 6, fontSize: 8, fontWeight: 'bold' }}>
-                        {c.bleAddress ? 'BLE PAIRED' : c.isVerified ? 'VERIFIED' : 'NOT VERIFIED'}
+                        {c.bleAddress ? 'BLE PAIRED' : c.genesisVerifiedOnline ? 'VERIFIED' : 'NOT VERIFIED'}
                       </div>
                       <div style={{ display: 'grid', gap: 4 }}>
                         <div style={detailRowStyle}>
@@ -555,11 +535,11 @@ const ContactsTabScreen: React.FC<Props> = ({ eraTokenSrc = 'images/logos/era_to
                         </div>
                         <div style={detailRowStyle}>
                           <span style={detailLabelStyle}>Pub Key</span>
-                          <span>{c.publicKey.length > 24 ? `${c.publicKey.slice(0, 12)}...${c.publicKey.slice(-10)}` : c.publicKey}</span>
+                          <span>{c.signingPublicKey.length > 24 ? `${c.signingPublicKey.slice(0, 12)}...${c.signingPublicKey.slice(-10)}` : c.signingPublicKey}</span>
                         </div>
                         <div style={detailRowStyle}>
                           <span style={detailLabelStyle}>Verified</span>
-                          <span>{c.isVerified ? 'YES' : 'NO'}</span>
+                          <span>{c.genesisVerifiedOnline ? 'YES' : 'NO'}</span>
                         </div>
                       </div>
                       <div style={{ marginTop: 10 }}>

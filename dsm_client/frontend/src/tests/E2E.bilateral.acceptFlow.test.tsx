@@ -85,8 +85,6 @@ describe('E2E bilateral accept: BLE accept flow triggers refresh and toast', () 
         }
         throw new Error(`unhandled bridge method:${method}`);
       },
-      getDeviceIdBin: () => new Uint8Array(32).fill(1),
-      getGenesisHashBin: () => new Uint8Array(32).fill(1),
     };
 
     // Call accept — RAF mock fires synchronously so all 4 staggered
@@ -98,9 +96,12 @@ describe('E2E bilateral accept: BLE accept flow triggers refresh and toast', () 
     off();
 
     // schedulePostAcceptRefreshes emits wallet.refresh at frame intervals [1, 30, 60, 120].
-    // With sync RAF all 4 fire. Verify at least one arrived.
-    expect(refreshEvents.length).toBeGreaterThanOrEqual(1);
-    // Each event should carry the bilateral source tag
-    expect(refreshEvents[0]).toEqual(expect.objectContaining({ source: 'bilateral.transfer_complete' }));
+    // With sync RAF all 4 fire.
+    expect(refreshEvents.length).toBe(4);
+    // Each names itself as the accept's follow-up re-read: a completed
+    // transfer is Rust's to announce, and these used to claim to be one.
+    for (const event of refreshEvents) {
+      expect(event).toEqual(expect.objectContaining({ source: 'bilateral.accept_followup' }));
+    }
   });
 });

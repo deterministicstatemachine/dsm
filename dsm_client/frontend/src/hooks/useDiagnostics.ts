@@ -5,6 +5,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { dsmClient } from '../services/dsmClient';
+import { isIdentityUnavailable } from '../dsm/identityUnavailable';
 import { bridgeEvents } from '../bridge/bridgeEvents';
 import {
   BETA_BUG_TEMPLATE,
@@ -106,11 +107,12 @@ export function useDiagnostics(notifyToast: NotifyToast) {
       let identityLine: string;
       try {
         const id = await dsmClient.getIdentity();
-        identityLine = id
-          ? `identity=device ${id.deviceId} genesis ${id.genesisHash}`
-          : 'identity=none (getIdentity answered null)';
+        identityLine = `identity=device ${id.deviceId} genesis ${id.genesisHash}`;
       } catch (e) {
-        identityLine = `identity=not read: ${messageOf(e)}`;
+        // Missing, runtime not ready, or not read: each as Rust and the bridge report it.
+        identityLine = isIdentityUnavailable(e)
+          ? `identity=${e.state}: ${e.message}`
+          : `identity=not read: ${messageOf(e)}`;
       }
 
       let archLine: string;

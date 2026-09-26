@@ -1,39 +1,36 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 // SPDX-License-Identifier: Apache-2.0
-// eslint-env jest
-declare const describe: any;
-declare const test: any;
-declare const expect: any;
+// The native session reaches the store the way Rust's does: as a
+// `session.state` event on the bus. The store used to carry setters that
+// existed only for tests.
 
-import { hasIdentity, checkIdentityState } from '../identity';
-import {
-  DEFAULT_NATIVE_SESSION,
-  type NativeSessionSnapshot,
-} from '../../runtime/nativeSessionTypes';
-import {
-  resetNativeSessionStoreForTest,
-  setNativeSessionSnapshotForTest,
-} from '../../runtime/nativeSessionStore';
+import { DEFAULT_NATIVE_SESSION, type NativeSessionSnapshot } from '../../runtime/nativeSessionTypes';
 
-function publishSession(overrides: Partial<NativeSessionSnapshot>): void {
-  setNativeSessionSnapshotForTest({
-    ...DEFAULT_NATIVE_SESSION,
-    received: true,
-    ...overrides,
-  });
-}
+type IdentityModule = typeof import('../identity');
+type BusModule = typeof import('../../bridge/bridgeEvents');
 
 describe('identity', () => {
+  let identity: IdentityModule;
+  let bus: BusModule;
   let warnSpy: jest.SpyInstance;
 
+  // A fresh store per test: the session is module state, and "not received"
+  // is the state before any event, which nothing can bring back.
   beforeEach(() => {
     warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
-    resetNativeSessionStoreForTest();
+    jest.isolateModules(() => {
+      bus = require('../../bridge/bridgeEvents');
+      identity = require('../identity');
+    });
   });
 
   afterEach(() => {
     warnSpy.mockRestore();
   });
+
+  function publishSession(overrides: Partial<NativeSessionSnapshot>): void {
+    bus.bridgeEvents.emit('session.state', { ...DEFAULT_NATIVE_SESSION, ...overrides } as any);
+  }
 
   test('hasIdentity returns true when native session reports ready identity', async () => {
     publishSession({
@@ -41,8 +38,7 @@ describe('identity', () => {
       identity_status: 'ready',
       env_config_status: 'ready',
     });
-    const ok = await hasIdentity();
-    expect(ok).toBe(true);
+    expect(await identity.hasIdentity()).toBe(true);
   });
 
   test('hasIdentity returns false when native session reports missing identity', async () => {
@@ -51,13 +47,11 @@ describe('identity', () => {
       identity_status: 'missing',
       env_config_status: 'ready',
     });
-    const ok = await hasIdentity();
-    expect(ok).toBe(false);
+    expect(await identity.hasIdentity()).toBe(false);
   });
 
   test('checkIdentityState returns RUNTIME_NOT_READY before native session arrives', async () => {
-    const state = await checkIdentityState();
-    expect(state).toBe('RUNTIME_NOT_READY');
+    expect(await identity.checkIdentityState()).toBe('RUNTIME_NOT_READY');
   });
 
   test('checkIdentityState returns READY when native session reports ready identity', async () => {
@@ -66,8 +60,7 @@ describe('identity', () => {
       identity_status: 'ready',
       env_config_status: 'ready',
     });
-    const state = await checkIdentityState();
-    expect(state).toBe('READY');
+    expect(await identity.checkIdentityState()).toBe('READY');
   });
 
   test('checkIdentityState returns NO_IDENTITY when native session reports missing identity', async () => {
@@ -76,8 +69,7 @@ describe('identity', () => {
       identity_status: 'missing',
       env_config_status: 'ready',
     });
-    const state = await checkIdentityState();
-    expect(state).toBe('NO_IDENTITY');
+    expect(await identity.checkIdentityState()).toBe('NO_IDENTITY');
   });
 
   test('checkIdentityState returns RUNTIME_NOT_READY while env config is still loading', async () => {
@@ -86,7 +78,6 @@ describe('identity', () => {
       identity_status: 'runtime_not_ready',
       env_config_status: 'loading',
     });
-    const state = await checkIdentityState();
-    expect(state).toBe('RUNTIME_NOT_READY');
+    expect(await identity.checkIdentityState()).toBe('RUNTIME_NOT_READY');
   });
 });

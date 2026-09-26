@@ -9,8 +9,6 @@ export interface AndroidBridgeV3 {
   isAvailable: () => boolean;
   /** One BridgeRpcRequest over the port; answers the BridgeRpcResponse bytes Kotlin posted. */
   sendMessageBin: (payload: Uint8Array) => Promise<Uint8Array>;
-  /** `nativeBoundaryStartup`, unwrapped to the boundary's bytes. */
-  startup: (payload: Uint8Array) => Promise<Uint8Array>;
   /** `nativeBoundaryIngress`, unwrapped to the boundary's bytes. */
   ingress: (payload: Uint8Array) => Promise<Uint8Array>;
   /** `nativeHostRequest`, unwrapped to the host's bytes. */

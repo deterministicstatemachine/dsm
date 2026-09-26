@@ -83,6 +83,32 @@ describe('EventBridge announces only what the native payload states', () => {
     off();
   });
 
+  // A prepare response is not a wallet change; the wallet changes at
+  // TRANSFER_COMPLETE, which `bilateral.event` announces. This used to emit a
+  // `wallet.refresh` claiming `bilateral.transfer_complete` on one prepare
+  // response in eight.
+  test('a BLE prepare response announces no wallet change', async () => {
+    const refresh = jest.fn();
+    const off = bridgeEvents.on('wallet.refresh', refresh as any);
+
+    const env = new pb.Envelope({
+      version: 3,
+      payload: { case: 'bilateralPrepareResponse', value: new pb.BilateralPrepareResponse({}) },
+    });
+    const bytes = env.toBinary();
+    const framed = new Uint8Array(1 + bytes.length);
+    framed[0] = 0x03;
+    framed.set(bytes, 1);
+    for (let i = 0; i < 9; i++) {
+      window.dispatchEvent(new CustomEvent('dsm-event-bin', { detail: { topic: 'ble.envelope.bin', payload: framed } }));
+    }
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(refresh).not.toHaveBeenCalled();
+    off();
+  });
+
   test('a BLE contact update that names no device is not announced', async () => {
     const updated = jest.fn();
     const off = bridgeEvents.on('contact.bleUpdated', updated as any);

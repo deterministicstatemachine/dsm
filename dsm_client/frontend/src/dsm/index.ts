@@ -9,7 +9,6 @@
 //
 // MODULE MAP (kept in sync with the `export * from './<name>'` lines below):
 //   types         — TypeScript types for State, Token, Policy, etc.
-//   crypto        — Client-side crypto utilities (hashing, encoding)
 //   resolution    — Name/address resolution
 //   identity      — Device identity, genesis, pairing
 //   contacts      — Contact management (device IDs, metadata)
@@ -19,7 +18,6 @@
 //   storage       — Storage node communication
 //   transactions  — Bilateral/unilateral transfer logic
 //   diagnostics   — telemetry, debug
-//   nfc           — NFC ring backup (write/read recovery capsules)
 //
 // BRIDGE HELPER RE-EXPORTS (not part of the curated `dsmClient` namespace):
 //   eventBridgeOn / eventBridgeEmit  — pub/sub on the native bridge
@@ -28,9 +26,9 @@
 // CURATED FLAT NAMESPACE EXPORT (`dsmClient`):
 //   `dsmClient` exposes a curated, object-style API combining the modules
 //   that need name-collision-free access: identity, contacts, wallet,
-//   policies, dlv, storage, transactions, diagnostics, resolution, nfc.
-//   It intentionally OMITS `crypto` and `types` (too generic to flatten
-//   safely) and the bridge-helper re-exports above (imported by name).
+//   policies, dlv, storage, transactions, diagnostics, resolution.
+//   It intentionally OMITS `types` (too generic to flatten safely) and the
+//   bridge-helper re-exports above (imported by name).
 //
 // All exports ultimately call through WebViewBridge.ts (protobuf-only).
 // See docs/INTEGRATION_GUIDE.md for the full developer onboarding guide.
@@ -38,9 +36,6 @@
 
 // Export core types
 export * from './types';
-
-// Export crypto utilities
-export * from './crypto';
 
 // Export resolution logic
 export * from './resolution';
@@ -53,7 +48,6 @@ export * from './policies';
 export * from './storage';
 export * from './transactions';
 export * from './diagnostics';
-export * from './nfc';
 
 // Re-export bridge helpers used by external consumers.
 import { 
@@ -73,7 +67,6 @@ import * as Policies from './policies';
 import * as Storage from './storage';
 import * as Transactions from './transactions';
 import * as Diagnostics from './diagnostics';
-import * as Nfc from './nfc';
 import * as Resolution from './resolution';
 
 // Flat namespace export for consumers that prefer object-style access.
@@ -86,5 +79,4 @@ export const dsmClient = {
   ...Transactions,
   ...Diagnostics,
   ...Resolution,
-  ...Nfc,
 };

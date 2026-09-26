@@ -24,6 +24,10 @@ function row(fields: {
   tokenId: string;
   baseUnits: bigint;
   displayAmount: string;
+  /** Rust's word on what the token is; the screen never decides it from the ticker. */
+  protocolDefined: boolean;
+  genesisSupplyDisplay?: string;
+  permissions?: { burnEnabled: boolean; transferable: boolean };
   decimals?: number;
   canonicalTokenId?: string;
   policyAnchorB32?: string;
@@ -32,12 +36,28 @@ function row(fields: {
   return { symbol: fields.tokenId, tokenName: fields.tokenId, decimals: 0, ...fields };
 }
 
+/** A created token's row carries its policy's facts; Rust refuses one that does not. */
+const CREATED = {
+  protocolDefined: false,
+  genesisSupplyDisplay: '1000',
+  permissions: { burnEnabled: true, transferable: true },
+};
+
 const balances = [
-  row({ tokenId: 'ERA', baseUnits: 264n, displayAmount: '264', policyAnchorB32: 'ERAANCHOR0000', anchorFingerprint: 'ERAANCHO' }),
+  row({
+    tokenId: 'ERA',
+    baseUnits: 264n,
+    displayAmount: '264',
+    protocolDefined: true,
+    genesisSupplyDisplay: '80000000000',
+    policyAnchorB32: 'ERAANCHOR0000',
+    anchorFingerprint: 'ERAANCHO',
+  }),
   row({
     tokenId: 'MYTOK',
     baseUnits: 500n,
     displayAmount: '500',
+    ...CREATED,
     canonicalTokenId: 'QMK5SY91DSJDY8KHAP6CCTWW80X7GHTVKFZ0KXTHAGQSTMFGV3GG',
     policyAnchorB32: MYTOK_ANCHOR,
     anchorFingerprint: MYTOK_ANCHOR.slice(0, 8),
@@ -343,7 +363,7 @@ describe('AccountsScreen — the screen TOKENS actually opens', () => {
       // Rust persisted it; the next registry read is what must reveal it.
       (dsmClient.getAllBalances as jest.Mock).mockResolvedValue([
         ...balances,
-        row({ tokenId: 'RIGB', baseUnits: 0n, displayAmount: '0' }),
+        row({ tokenId: 'RIGB', baseUnits: 0n, displayAmount: '0', ...CREATED }),
       ]);
       return { success: true, ticker: 'RIGB', tokenId: 'Z68HWMYS' };
     });
@@ -384,6 +404,7 @@ describe('AccountsScreen — the screen TOKENS actually opens', () => {
         canonicalTokenId: 'Z68HWMYSPT9B',
         policyAnchorB32: REAL_ANCHOR,
         anchorFingerprint: REAL_ANCHOR.slice(0, 8),
+        ...CREATED,
       }),
     ]);
 
@@ -415,5 +436,69 @@ describe('AccountsScreen — the screen TOKENS actually opens', () => {
     fireEvent.click(screen.getByRole('button', { name: /^ADD$/ }));
 
     expect(await screen.findByText(/TICKER_CONFLICT/)).toBeInTheDocument();
+  });
+
+  /// Every line of the policy panel is a fact Rust reports on the row. The
+  /// screen used to carry its own table of what ERA and dBTC are.
+  it("shows a created token's supply and what its policy permits, as Rust reports them", async () => {
+    (dsmClient.getAllBalances as jest.Mock).mockResolvedValue(balances);
+    render(<AccountsScreen />);
+    fireEvent.click(await screen.findByText('MYTOK'));
+    expect((await screen.findByText('Total Supply')).nextElementSibling).toHaveTextContent('1000 MYTOK');
+    expect(screen.getByText('Burn').nextElementSibling).toHaveTextContent(/^permitted$/);
+    expect(screen.getByText('Transfer').nextElementSibling).toHaveTextContent(/^permitted$/);
+    expect(screen.getByText('Defined By').nextElementSibling).toHaveTextContent(/creator/);
+  });
+
+  /// A protocol asset's supply is what Rust reports; Rust holds no policy blob
+  /// for ERA and states no permissions, so the panel draws none.
+  it("shows a protocol asset's supply from Rust and states nothing Rust does not", async () => {
+    (dsmClient.getAllBalances as jest.Mock).mockResolvedValue(balances);
+    render(<AccountsScreen />);
+    fireEvent.click(await screen.findByText('ERA'));
+    expect((await screen.findByText('Total Supply')).nextElementSibling).toHaveTextContent('80000000000 ERA');
+    expect(screen.getByText('Defined By').nextElementSibling).toHaveTextContent('the protocol');
+    expect(screen.queryByText('Burn')).toBeNull();
+    expect(screen.queryByText('Transfer')).toBeNull();
+  });
+
+  /// BURN is offered only where the committed policy permits it, as Rust read
+  /// it. FORGET is not a policy action and stays.
+  it('offers no BURN where the policy forbids it, and says so', async () => {
+    (dsmClient.getAllBalances as jest.Mock).mockResolvedValue([
+      row({
+        tokenId: 'NOBURN',
+        baseUnits: 5n,
+        displayAmount: '5',
+        ...CREATED,
+        permissions: { burnEnabled: false, transferable: true },
+      }),
+    ]);
+    render(<AccountsScreen />);
+    fireEvent.click(await screen.findByText('NOBURN'));
+    expect((await screen.findByText('Burn')).nextElementSibling).toHaveTextContent(/^not permitted$/);
+    expect(screen.queryByRole('button', { name: /^BURN$/ })).toBeNull();
+    expect(screen.getByRole('button', { name: /^FORGET$/ })).toBeInTheDocument();
+  });
+
+  /// What a token is comes from Rust, never from its ticker: a created token
+  /// whose ticker reads ERA gets its supply controls, not the protocol asset's
+  /// treatment.
+  it('takes a token for a protocol asset only on Rust’s word, never on its ticker', async () => {
+    (dsmClient.getAllBalances as jest.Mock).mockResolvedValue([
+      row({
+        tokenId: 'ERA',
+        baseUnits: 5n,
+        displayAmount: '5',
+        ...CREATED,
+        policyAnchorB32: MYTOK_ANCHOR,
+        anchorFingerprint: MYTOK_ANCHOR.slice(0, 8),
+      }),
+    ]);
+    render(<AccountsScreen />);
+    fireEvent.click(await screen.findByText('ERA'));
+    expect(await screen.findByRole('button', { name: /^BURN$/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^FORGET$/ })).toBeInTheDocument();
+    expect(screen.getByText('Defined By').nextElementSibling).toHaveTextContent(/creator/);
   });
 });

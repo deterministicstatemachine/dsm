@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import {
   decodeBase32Crockford,
-  decodeBase32Crockford32,
   encodeBase32Crockford,
   encodeBase32Crockford32,
   normalizeBase32Crockford,
@@ -45,12 +44,8 @@ describe('base32Crockford centralized module', () => {
         .replace(/[IL]/g, '1')
     );
 
-    const back = decodeBase32Crockford32(messy);
+    const back = decodeBase32Crockford(messy);
+    expect(back.length).toBe(32);
     expect(Array.from(back)).toEqual(Array.from(bytes32));
-  });
-
-  test('decode32 throws if not exactly 32 bytes', () => {
-    expect(() => decodeBase32Crockford32(encodeBase32Crockford(u8(31, 1)))).toThrow();
-    expect(() => decodeBase32Crockford32(encodeBase32Crockford(u8(33, 1)))).toThrow();
   });
 });
