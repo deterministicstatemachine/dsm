@@ -524,16 +524,11 @@ impl AppRouterImpl {
                         let recipient = if t.tx_type == "dbtc_mint" || t.tx_type == "dbtc_burn" {
                             "Bitcoin Network".to_string()
                         } else if t.to_device == my_device_id_str {
-                            // Incoming: show who sent it
-                            if t.tx_type == "faucet" {
-                                "FAUCET".to_string()
-                            } else {
-                                // Try to resolve alias from from_device
-                                alias_lookup
-                                    .get(&t.from_device)
-                                    .cloned()
-                                    .unwrap_or_else(|| t.from_device.clone())
-                            }
+                            // Incoming: show who sent it - try to resolve alias
+                            alias_lookup
+                                .get(&t.from_device)
+                                .cloned()
+                                .unwrap_or_else(|| t.from_device.clone())
                         } else {
                             // Outgoing: show who received it - try to resolve alias
                             alias_lookup
@@ -542,19 +537,23 @@ impl AppRouterImpl {
                                 .unwrap_or_else(|| t.to_device.clone())
                         };
 
-                        // Convert string tx_type to enum value
+                        // The types this device writes. A stored type the wire
+                        // does not name is a row this history cannot report,
+                        // never an unspecified one.
                         let tx_type_enum = match t.tx_type.as_str() {
-                            "faucet" => generated::TransactionType::TxTypeFaucet,
                             "bilateral_offline" => {
                                 generated::TransactionType::TxTypeBilateralOffline
-                            }
-                            "bilateral_offline_recovered" => {
-                                generated::TransactionType::TxTypeBilateralOfflineRecovered
                             }
                             "online" => generated::TransactionType::TxTypeOnline,
                             "dbtc_mint" => generated::TransactionType::TxTypeDbtcMint,
                             "dbtc_burn" => generated::TransactionType::TxTypeDbtcBurn,
-                            _ => generated::TransactionType::TxTypeUnspecified,
+                            other => {
+                                return Err(format!(
+                                    "wallet.history: transaction {} has type {other:?}, which the \
+                                     wire does not name",
+                                    t.tx_id
+                                ))
+                            }
                         };
 
                         let token_id = t
@@ -580,11 +579,7 @@ impl AppRouterImpl {
                             tx_type: tx_type_enum as i32,
                             status: t.status.clone(),
                             recipient,
-                            stitched_receipt: if t.tx_type == "unilateral_send" {
-                                Vec::new()
-                            } else {
-                                t.proof_data.clone().unwrap_or_default()
-                            },
+                            stitched_receipt: t.proof_data.clone().unwrap_or_default(),
                             memo: t
                                 .metadata
                                 .get("memo")
@@ -593,13 +588,10 @@ impl AppRouterImpl {
                             // §4.3#3: Derive R_G from the stored receipt's devid_a for
                             // display-only consistency check. This is historical UI display
                             // only; protocol acceptance already enforced at ingest time.
-                            receipt_verified: if t.tx_type == "unilateral_send" {
-                                false
-                            } else {
-                                t.proof_data
-                                    .as_ref()
-                                    .is_some_and(|b| receipt_state_holds(b))
-                            },
+                            receipt_verified: t
+                                .proof_data
+                                .as_ref()
+                                .is_some_and(|b| receipt_state_holds(b)),
                         })
                     })
                     .collect();
@@ -1357,5 +1349,88 @@ mod tests {
 
         assert!(items.iter().any(|item| item.token_id == "ERA"));
         assert!(items.iter().any(|item| item.token_id == "dBTC"));
+    }
+}
+
+#[cfg(test)]
+mod history_tests {
+    use crate::bridge::{AppQuery, AppRouter};
+    use crate::handlers::app_router_impl::AppRouterImpl;
+    use crate::storage::client_db::{store_transaction, TransactionRecord};
+    use dsm::types::proto as generated;
+    use prost::Message;
+
+    /// `wallet.history` as the frontend asks for it: limit 16, offset 0.
+    async fn history_of(
+        router: &AppRouterImpl,
+    ) -> Result<generated::WalletHistoryResponse, String> {
+        let mut body = Vec::with_capacity(16);
+        body.extend_from_slice(&16u64.to_le_bytes());
+        body.extend_from_slice(&0u64.to_le_bytes());
+        let answer = router
+            .query(AppQuery {
+                path: "wallet.history".to_string(),
+                params: generated::ArgPack {
+                    codec: generated::Codec::Proto as i32,
+                    body,
+                    ..Default::default()
+                }
+                .encode_to_vec(),
+            })
+            .await;
+        if !answer.success {
+            return Err(answer.error_message.unwrap_or_default());
+        }
+        let env = crate::handlers::response_helpers::decode_local_envelope(&answer.data)?;
+        match env.payload {
+            Some(generated::envelope::Payload::WalletHistoryResponse(history)) => Ok(history),
+            other => Err(format!("wallet.history answered {other:?}")),
+        }
+    }
+
+    /// A history row is reported only as one of the types the wire names. A
+    /// stored row of any other type is refused by name: it is never sent as
+    /// "unspecified" for the frontend to relabel.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn history_refuses_a_row_of_a_type_the_wire_does_not_name() {
+        let device = crate::test_support::one_device::Device::start(0x71).await;
+        let me = crate::util::text_id::encode_base32_crockford(&device.router.device_id_bytes);
+        let peer = crate::util::text_id::encode_base32_crockford(&[0x72u8; 32]);
+        let row = |id: &str, tx_type: &str, hash: u8| TransactionRecord {
+            tx_id: id.to_string(),
+            tx_hash: crate::util::text_id::encode_base32_crockford(&[hash; 32]),
+            from_device: peer.clone(),
+            to_device: me.clone(),
+            amount: 7,
+            tx_type: tx_type.to_string(),
+            status: "confirmed".to_string(),
+            commitment_hash: None,
+            proof_data: None,
+            metadata: [("token_id".to_string(), b"ERA".to_vec())]
+                .into_iter()
+                .collect(),
+        };
+
+        store_transaction(&row("known", "online", 0x61)).expect("store the online row");
+        let reported = history_of(&device.router).await.expect("the history");
+        assert_eq!(reported.transactions.len(), 1);
+        let online = &reported.transactions[0];
+        assert_eq!(
+            online.tx_type,
+            generated::TransactionType::TxTypeOnline as i32
+        );
+        assert_eq!(online.status, "confirmed");
+        assert_eq!(online.amount_signed, 7, "incoming");
+        assert_eq!(online.recipient, peer, "no contact: the sender's device id");
+
+        store_transaction(&row("unnamed", "unilateral_send", 0x62)).expect("store the row");
+        let refused = history_of(&device.router)
+            .await
+            .expect_err("a row of an unnamed type is refused");
+        assert!(
+            refused.contains("unnamed") && refused.contains("unilateral_send"),
+            "{refused}"
+        );
     }
 }

@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
 import React from 'react';
 import { render } from '@testing-library/react';
 import TransactionItem from '../TransactionItem';
@@ -8,110 +7,67 @@ import type { DomainTransaction } from '../../../../domain/types';
 
 function buildTx(overrides: Partial<DomainTransaction> = {}): DomainTransaction {
   return {
-    txId: 'tx:test:1',
+    txId: 'tx_7NA3Y3KGQV3SABCDEFT8ER8Q8R',
+    txHash: '7NA3Y3KGQV3SABCDEFT8ER8Q8R',
+    txType: 'bilateral_offline',
     type: 'offline',
     amount: BigInt(25),
-    amountSigned: BigInt(25),
-    recipient: '',
-    status: 'confirmed',
-    txType: 'bilateral_offline',
+    displayAmount: '25',
+    tokenId: 'ERA',
+    recipient: 'Bob',
+    status: 'completed',
     fromDeviceId: '8796V9AXD123456789NQ83EXG',
     toDeviceId: 'AQP2VDM3DJABCDEF57C6G2R0',
-    txHash: '7NA3Y3KGQV3SABCDEFT8ER8Q8O',
-    tokenId: 'ERA',
     receiptVerified: true,
     ...overrides,
   };
 }
 
-describe('TransactionItem visual contract', () => {
+describe('TransactionItem renders the row Rust reported', () => {
   test('collapsed view places amount on its own row outside transaction-main', () => {
-    const tx = buildTx();
-    const aliasLookup = new Map<string, string>();
     const { container } = render(
-      <TransactionItem tx={tx} idx={0} expandedTxId={null} onToggle={() => {}} aliasLookup={aliasLookup} />,
+      <TransactionItem tx={buildTx()} expandedTxId={null} onToggle={() => {}} />,
     );
-    // Amount line exists as a direct child of .transaction-item.
     const item = container.querySelector('.transaction-item');
     expect(item).not.toBeNull();
     const amountLine = item!.querySelector(':scope > .transaction-amount-line');
     expect(amountLine).not.toBeNull();
-    // And the amount is NOT inside .transaction-main anymore.
-    const amountInsideMain = item!.querySelector('.transaction-main .transaction-amount-line');
-    expect(amountInsideMain).toBeNull();
-    // The amount-value contains sign+magnitude; token is shown separately.
-    expect(amountLine!.querySelector('.transaction-amount-value')!.textContent).toMatch(/\+25/);
+    expect(item!.querySelector('.transaction-main .transaction-amount-line')).toBeNull();
+    expect(amountLine!.querySelector('.transaction-amount-value')!.textContent).toBe('+25');
     expect(amountLine!.querySelector('.transaction-amount-token')!.textContent).toBe('ERA');
   });
 
-  test('collapsed view shows alias when counterparty is in aliasLookup', () => {
-    const tx = buildTx();
-    const aliasLookup = new Map<string, string>([[tx.fromDeviceId!, 'Bob']]);
+  test("the counterparty is Rust's label and the status is Rust's word", () => {
     const { container } = render(
-      <TransactionItem tx={tx} idx={0} expandedTxId={null} onToggle={() => {}} aliasLookup={aliasLookup} />,
+      <TransactionItem tx={buildTx()} expandedTxId={null} onToggle={() => {}} />,
     );
-    const recipientValue = container.querySelector('.transaction-recipient-value');
-    expect(recipientValue).not.toBeNull();
-    expect(recipientValue!.textContent).toBe('Bob');
+    expect(container.querySelector('.transaction-recipient-value')!.textContent).toBe('Bob');
+    expect(container.querySelector('.transaction-status')!.textContent).toBe('completed');
   });
 
-  test('collapsed view falls back to short hash when no alias exists', () => {
-    const tx = buildTx();
-    const aliasLookup = new Map<string, string>();
-    const { container } = render(
-      <TransactionItem tx={tx} idx={0} expandedTxId={null} onToggle={() => {}} aliasLookup={aliasLookup} />,
-    );
-    const recipientValue = container.querySelector('.transaction-recipient-value');
-    expect(recipientValue).not.toBeNull();
-    // shortStr(fromDeviceId, 8, 6) for 25-char string => first 8 + '...' + last 6
-    expect(recipientValue!.textContent).toMatch(/\.\.\./);
+  test("an outgoing row shows the magnitude of Rust's display form with its own sign", () => {
+    const tx = buildTx({ amount: BigInt(-1250), displayAmount: '-12.50', tokenId: 'USDX' });
+    const { container } = render(<TransactionItem tx={tx} expandedTxId={null} onToggle={() => {}} />);
+    expect(container.querySelector('.transaction-amount-line')!.className).toContain('outgoing');
+    expect(container.querySelector('.transaction-amount-value')!.textContent).toBe('-12.50');
+    expect(container.querySelector('.transaction-recipient-label')!.textContent).toBe('To');
   });
 
-  test('alias-first priority: aliasLookup wins even when tx.recipient is set (the bug-fix regression)', () => {
-    const tx = buildTx({ recipient: 'RAW_RECIPIENT_HASH_SHOULD_NOT_WIN' });
-    const aliasLookup = new Map<string, string>([[tx.fromDeviceId!, 'Alice']]);
-    const { container } = render(
-      <TransactionItem tx={tx} idx={0} expandedTxId={null} onToggle={() => {}} aliasLookup={aliasLookup} />,
-    );
-    const recipientValue = container.querySelector('.transaction-recipient-value')!.textContent;
-    expect(recipientValue).toBe('Alice');
-    expect(recipientValue).not.toContain('RAW_RECIPIENT_HASH_SHOULD_NOT_WIN');
+  test('a dBTC row carries no transport badge', () => {
+    const tx = buildTx({ txType: 'dbtc_mint', type: undefined });
+    const { container } = render(<TransactionItem tx={tx} expandedTxId={null} onToggle={() => {}} />);
+    expect(container.querySelector('.transaction-type')!.textContent).toBe('dBTC MINT');
+    expect(container.querySelector('.bilateral-badge')).toBeNull();
   });
 
   test('expanded view shows full (un-truncated) from/to/txhash', () => {
     const tx = buildTx();
-    const aliasLookup = new Map<string, string>();
     const { container } = render(
-      <TransactionItem tx={tx} idx={0} expandedTxId={tx.txId!} onToggle={() => {}} aliasLookup={aliasLookup} />,
+      <TransactionItem tx={tx} expandedTxId={tx.txId} onToggle={() => {}} />,
     );
     const hashValues = Array.from(
       container.querySelectorAll('.transaction-expanded-details .detail-value-hash'),
     ).map((el) => el.textContent!);
-    expect(hashValues).toContain(tx.fromDeviceId);
-    expect(hashValues).toContain(tx.toDeviceId);
-    expect(hashValues).toContain(tx.txHash);
-    // None of them should contain an ellipsis (no shortStr truncation in expanded).
-    for (const v of hashValues) {
-      expect(v).not.toMatch(/\.\.\./);
-    }
-  });
-
-  test('expanded view does NOT duplicate alias rows (redundant with collapsed counterparty)', () => {
-    const tx = buildTx();
-    const aliasLookup = new Map<string, string>([
-      [tx.fromDeviceId!, 'Bob'],
-      [tx.toDeviceId!, 'Carol'],
-    ]);
-    const { container } = render(
-      <TransactionItem tx={tx} idx={0} expandedTxId={tx.txId!} onToggle={() => {}} aliasLookup={aliasLookup} />,
-    );
-    const text = container.querySelector('.transaction-expanded-details')!.textContent!;
-    // The collapsed header already shows the counterparty with its alias;
-    // the expanded drawer should NOT repeat "From (alias)" / "To (alias)" rows.
-    expect(text).not.toContain('From (alias)');
-    expect(text).not.toContain('To (alias)');
-    // Full device-ID hash rows are still present for auditability.
-    expect(text).toContain(tx.fromDeviceId!);
-    expect(text).toContain(tx.toDeviceId!);
+    expect(hashValues).toEqual([tx.fromDeviceId, tx.toDeviceId, tx.txHash]);
   });
 });

@@ -1,11 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Data loading hook for the wallet screen — identity, balances, contacts, transactions.
 import { presentDisplayAmount } from '../../../../utils/tokenMeta';
-import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { dsmClient } from '../../../../services/dsmClient';
 import { useWalletRefreshListener } from '../../../../hooks/useWalletRefreshListener';
 import { bridgeEvents } from '../../../../bridge/bridgeEvents';
-import { buildAliasLookup } from '../helpers';
 import type { Balance } from '../helpers';
 import type { DomainContact, DomainIdentity, DomainTransaction } from '../../../../domain/types';
 import { mapContactList } from '../../../../domain/mappers';
@@ -18,7 +17,6 @@ export type WalletScreenData = {
   balances: Balance[];
   contacts: DomainContact[];
   transactions: DomainTransaction[];
-  aliasLookup: Map<string, string>;
   loading: boolean;
   error: string | null;
   warning: string | null;
@@ -47,7 +45,6 @@ export function useWalletScreenData(activeTab: string): WalletScreenData {
   const reloadQueuedRef = useRef(false);
   const hasLoadedOnceRef = useRef(false);
 
-  const aliasLookup = useMemo(() => buildAliasLookup(contacts), [contacts]);
 
   const performWalletDataLoad = useCallback(async () => {
     // Only show the full-screen "Loading wallet…" spinner on the very first
@@ -218,7 +215,6 @@ export function useWalletScreenData(activeTab: string): WalletScreenData {
     balances,
     contacts,
     transactions,
-    aliasLookup,
     loading,
     error,
     warning,

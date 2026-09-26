@@ -138,11 +138,21 @@ function makeBalancesFramedEnvelope(balances: Array<{ tokenId: string; available
 
 /** Build FramedEnvelopeV3 containing a WalletHistoryResponse */
 function makeHistoryFramedEnvelope(transactions: Array<{ amount: bigint; amountSigned: bigint }>): Uint8Array {
-  const txList = transactions.map(t => new pb.TransactionInfo({
-    id: `tx-${Math.random().toString(36).slice(2, 8)}`,
-    amount: t.amount as any,
-    amountSigned: t.amountSigned as any,
-  } as any));
+  // Complete rows, as wallet.history writes them: the boundary mapper refuses
+  // a row missing any field Rust always sets.
+  const txList = transactions.map((t, i) => new pb.TransactionInfo({
+    id: `tx-${i}`,
+    fromDeviceId: new Uint8Array(32).fill(0x11),
+    toDeviceId: new Uint8Array(32).fill(0x22),
+    tokenId: 'ERA',
+    amount: t.amount,
+    txHash: new Uint8Array(32).fill(0x30 + i),
+    amountSigned: t.amountSigned,
+    txType: pb.TransactionType.TX_TYPE_BILATERAL_OFFLINE,
+    status: 'completed',
+    recipient: 'peer',
+    displayAmount: t.amountSigned.toString(),
+  }));
   const resp = new pb.WalletHistoryResponse({ transactions: txList } as any);
   const env = new pb.Envelope({
     version: 3,
