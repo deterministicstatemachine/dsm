@@ -619,8 +619,11 @@ describe('Offline Transfer — Full Cycle', () => {
         commitmentHash: COMMITMENT_HASH,
         senderId: DEVICE_A,
         recipientId: DEVICE_B,
-        status: pb.OfflineBilateralTransactionStatus.OFFLINE_TX_FAILED,
-        metadata: { direction: 'outgoing', amount: '7' },
+        phase: pb.OfflineBilateralPhase.OFFLINE_PHASE_FAILED,
+        direction: pb.OfflineBilateralDirection.OFFLINE_DIRECTION_OUTGOING,
+        amount: BigInt(7),
+        displayAmount: '7',
+        tokenId: 'ERA',
       } as any),
     ];
 
@@ -766,22 +769,40 @@ describe('Offline Transfer — Proto Constraints', () => {
 describe('Offline Transfer — Timeout & Event Matching', () => {
   beforeEach(() => installBridge());
 
-  test('status polling resolves as success when session absent from pending list', async () => {
-    // With no events, the status poller eventually queries the backend.
-    // Default mock returns empty pending list → session absent → assumed committed.
+  test('a session absent from the pending list is not a completed transfer; its committed phase is', async () => {
+    // With no events, the status poller queries the backend. The default mock
+    // lists nothing: the step's absence says nothing about how it ended.
+    let settled = false;
     const promise = dsm.offlineSend({
       to: DEVICE_B,
       amount: BigInt(15000 + testIndex),
       tokenId: 'ERA',
       bleAddress: 'AA:BB:CC:DD:EE:FF',
     } as any);
+    void promise.then(() => { settled = true; });
 
-    // Allow bridge calls and first poll interval to fire
+    // Allow bridge calls and the first poll to fire against the empty list.
     await new Promise(r => setTimeout(r, 4000));
+    expect(settled).toBe(false);
+
+    // The backend now lists the step as committed; the next poll reads it.
+    bilateralPendingListOverride = () => [
+      new pb.OfflineBilateralTransaction({
+        id: encodeBase32Crockford(COMMITMENT_HASH),
+        commitmentHash: COMMITMENT_HASH,
+        senderId: DEVICE_A,
+        recipientId: DEVICE_B,
+        phase: pb.OfflineBilateralPhase.OFFLINE_PHASE_COMMITTED,
+        direction: pb.OfflineBilateralDirection.OFFLINE_DIRECTION_OUTGOING,
+        amount: BigInt(15000 + testIndex),
+        displayAmount: String(15000 + testIndex),
+        tokenId: 'ERA',
+      } as any),
+    ];
 
     const res = await promise;
     expect(res.accepted).toBe(true);
-  }, 10000);
+  }, 15000);
 
   test('event with wrong commitment hash does NOT resolve; correct hash does', async () => {
     const promise = dsm.offlineSend({
@@ -875,13 +896,10 @@ describe('Bridge Protocol Fidelity', () => {
     expect(() => decodeFramedEnvelopeV3(raw)).toThrow(/invalid framing byte 0x08/);
   });
 
-  test('OfflineBilateralTransaction status enum values match proto spec', () => {
-    expect(pb.OfflineBilateralTransactionStatus.OFFLINE_TX_STATUS_UNSPECIFIED).toBe(0);
-    expect(pb.OfflineBilateralTransactionStatus.OFFLINE_TX_PENDING).toBe(1);
-    expect(pb.OfflineBilateralTransactionStatus.OFFLINE_TX_IN_PROGRESS).toBe(2);
-    expect(pb.OfflineBilateralTransactionStatus.OFFLINE_TX_CONFIRMED).toBe(3);
-    expect(pb.OfflineBilateralTransactionStatus.OFFLINE_TX_FAILED).toBe(4);
-    expect(pb.OfflineBilateralTransactionStatus.OFFLINE_TX_REJECTED).toBe(5);
+  test('OfflineBilateralPhase numbers the terminal phases the send poller reads as the proto does', () => {
+    expect(pb.OfflineBilateralPhase.OFFLINE_PHASE_REJECTED).toBe(5);
+    expect(pb.OfflineBilateralPhase.OFFLINE_PHASE_COMMITTED).toBe(7);
+    expect(pb.OfflineBilateralPhase.OFFLINE_PHASE_FAILED).toBe(8);
   });
 
   test('BilateralEventType enum values exist for all completion states', () => {

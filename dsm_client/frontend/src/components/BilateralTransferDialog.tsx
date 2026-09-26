@@ -139,7 +139,7 @@ export const BilateralTransferDialog: React.FC<BilateralTransferDialogProps> = (
       if (result.success) {
         setIncomingTransfer(null);
       } else {
-        alert('Failed to accept transfer');
+        alert(`Failed to accept transfer: ${result.error}`);
       }
     } catch (err) {
       console.error('[BilateralTransfer] Accept error:', err);
@@ -154,8 +154,12 @@ export const BilateralTransferDialog: React.FC<BilateralTransferDialogProps> = (
     setProcessing(true);
     try {
       const result = await rejectIncomingTransfer(incomingTransfer, 'User rejected transfer');
-      if (!result.success) alert('Failed to reject transfer');
-      setIncomingTransfer(null);
+      if (result.success) {
+        setIncomingTransfer(null);
+      } else {
+        // The proposal still awaits a decision; the dialog stays.
+        alert(`Failed to reject transfer: ${result.error}`);
+      }
     } catch (err) {
       console.error('[BilateralTransfer] Reject error:', err);
       alert(`Error rejecting transfer: ${err}`);

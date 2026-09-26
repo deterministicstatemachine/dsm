@@ -173,6 +173,24 @@ function makeSuccessFramedEnvelope(): Uint8Array {
   return frameEnvelope(env);
 }
 
+/** The SDK's answer to an accept: the accept envelope it sends the proposer. */
+function makeAcceptFramedEnvelope(): Uint8Array {
+  const env = new pb.Envelope({
+    version: 3,
+    payload: { case: 'bilateralPrepareResponse', value: new pb.BilateralPrepareResponse({}) },
+  } as any);
+  return frameEnvelope(env);
+}
+
+/** The SDK's answer to a reject: the rejection it sends the proposer. */
+function makeRejectFramedEnvelope(): Uint8Array {
+  const env = new pb.Envelope({
+    version: 3,
+    payload: { case: 'bilateralPrepareReject', value: new pb.BilateralPrepareReject({ reason: 'User rejected transfer' }) },
+  } as any);
+  return frameEnvelope(env);
+}
+
 // ─── __callBin Mock State ────────────────────────────────────────────────────
 
 /** Mutable state that tests can modify to change what __callBin returns */
@@ -217,13 +235,11 @@ function installCallBinMock() {
       }
 
       if (method === 'acceptBilateralByCommitment') {
-        // Returns FramedEnvelopeV3 with success
-        return wrapSuccess(makeSuccessFramedEnvelope());
+        return wrapSuccess(makeAcceptFramedEnvelope());
       }
 
       if (method === 'rejectBilateralByCommitment') {
-        // Returns FramedEnvelopeV3 with success
-        return wrapSuccess(makeSuccessFramedEnvelope());
+        return wrapSuccess(makeRejectFramedEnvelope());
       }
 
       if (method === 'getPreference' || method === 'setPreference') {

@@ -285,49 +285,94 @@ proto3.util.setEnumType(RelationshipSendBlockReason, "dsm.RelationshipSendBlockR
 ]);
 
 /**
- * UI-friendly offline bilateral summary (transport-only; not hashed).
+ * One bilateral step this device holds a session for, as the SDK reads it from
+ * its own session store (transport/UI only; not hashed).
  *
- * @generated from enum dsm.OfflineBilateralTransactionStatus
+ * @generated from enum dsm.OfflineBilateralPhase
  */
-export enum OfflineBilateralTransactionStatus {
+export enum OfflineBilateralPhase {
   /**
-   * @generated from enum value: OFFLINE_TX_STATUS_UNSPECIFIED = 0;
+   * @generated from enum value: OFFLINE_PHASE_UNSPECIFIED = 0;
    */
-  OFFLINE_TX_STATUS_UNSPECIFIED = 0,
+  OFFLINE_PHASE_UNSPECIFIED = 0,
 
   /**
-   * @generated from enum value: OFFLINE_TX_PENDING = 1;
+   * @generated from enum value: OFFLINE_PHASE_PREPARING = 1;
    */
-  OFFLINE_TX_PENDING = 1,
+  OFFLINE_PHASE_PREPARING = 1,
 
   /**
-   * @generated from enum value: OFFLINE_TX_IN_PROGRESS = 2;
+   * @generated from enum value: OFFLINE_PHASE_PREPARED = 2;
    */
-  OFFLINE_TX_IN_PROGRESS = 2,
+  OFFLINE_PHASE_PREPARED = 2,
 
   /**
-   * @generated from enum value: OFFLINE_TX_CONFIRMED = 3;
+   * @generated from enum value: OFFLINE_PHASE_PENDING_USER_ACTION = 3;
    */
-  OFFLINE_TX_CONFIRMED = 3,
+  OFFLINE_PHASE_PENDING_USER_ACTION = 3,
 
   /**
-   * @generated from enum value: OFFLINE_TX_FAILED = 4;
+   * @generated from enum value: OFFLINE_PHASE_ACCEPTED = 4;
    */
-  OFFLINE_TX_FAILED = 4,
+  OFFLINE_PHASE_ACCEPTED = 4,
 
   /**
-   * @generated from enum value: OFFLINE_TX_REJECTED = 5;
+   * @generated from enum value: OFFLINE_PHASE_REJECTED = 5;
    */
-  OFFLINE_TX_REJECTED = 5,
+  OFFLINE_PHASE_REJECTED = 5,
+
+  /**
+   * @generated from enum value: OFFLINE_PHASE_CONFIRM_PENDING = 6;
+   */
+  OFFLINE_PHASE_CONFIRM_PENDING = 6,
+
+  /**
+   * @generated from enum value: OFFLINE_PHASE_COMMITTED = 7;
+   */
+  OFFLINE_PHASE_COMMITTED = 7,
+
+  /**
+   * @generated from enum value: OFFLINE_PHASE_FAILED = 8;
+   */
+  OFFLINE_PHASE_FAILED = 8,
 }
-// Retrieve enum metadata with: proto3.getEnumType(OfflineBilateralTransactionStatus)
-proto3.util.setEnumType(OfflineBilateralTransactionStatus, "dsm.OfflineBilateralTransactionStatus", [
-  { no: 0, name: "OFFLINE_TX_STATUS_UNSPECIFIED" },
-  { no: 1, name: "OFFLINE_TX_PENDING" },
-  { no: 2, name: "OFFLINE_TX_IN_PROGRESS" },
-  { no: 3, name: "OFFLINE_TX_CONFIRMED" },
-  { no: 4, name: "OFFLINE_TX_FAILED" },
-  { no: 5, name: "OFFLINE_TX_REJECTED" },
+// Retrieve enum metadata with: proto3.getEnumType(OfflineBilateralPhase)
+proto3.util.setEnumType(OfflineBilateralPhase, "dsm.OfflineBilateralPhase", [
+  { no: 0, name: "OFFLINE_PHASE_UNSPECIFIED" },
+  { no: 1, name: "OFFLINE_PHASE_PREPARING" },
+  { no: 2, name: "OFFLINE_PHASE_PREPARED" },
+  { no: 3, name: "OFFLINE_PHASE_PENDING_USER_ACTION" },
+  { no: 4, name: "OFFLINE_PHASE_ACCEPTED" },
+  { no: 5, name: "OFFLINE_PHASE_REJECTED" },
+  { no: 6, name: "OFFLINE_PHASE_CONFIRM_PENDING" },
+  { no: 7, name: "OFFLINE_PHASE_COMMITTED" },
+  { no: 8, name: "OFFLINE_PHASE_FAILED" },
+]);
+
+/**
+ * @generated from enum dsm.OfflineBilateralDirection
+ */
+export enum OfflineBilateralDirection {
+  /**
+   * @generated from enum value: OFFLINE_DIRECTION_UNSPECIFIED = 0;
+   */
+  OFFLINE_DIRECTION_UNSPECIFIED = 0,
+
+  /**
+   * @generated from enum value: OFFLINE_DIRECTION_INCOMING = 1;
+   */
+  OFFLINE_DIRECTION_INCOMING = 1,
+
+  /**
+   * @generated from enum value: OFFLINE_DIRECTION_OUTGOING = 2;
+   */
+  OFFLINE_DIRECTION_OUTGOING = 2,
+}
+// Retrieve enum metadata with: proto3.getEnumType(OfflineBilateralDirection)
+proto3.util.setEnumType(OfflineBilateralDirection, "dsm.OfflineBilateralDirection", [
+  { no: 0, name: "OFFLINE_DIRECTION_UNSPECIFIED" },
+  { no: 1, name: "OFFLINE_DIRECTION_INCOMING" },
+  { no: 2, name: "OFFLINE_DIRECTION_OUTGOING" },
 ]);
 
 /**
@@ -11340,16 +11385,54 @@ export class OfflineBilateralTransaction extends Message<OfflineBilateralTransac
   commitmentHash = new Uint8Array(0);
 
   /**
-   * @generated from field: dsm.OfflineBilateralTransactionStatus status = 7;
+   * @generated from field: dsm.OfflineBilateralPhase phase = 9;
    */
-  status = OfflineBilateralTransactionStatus.OFFLINE_TX_STATUS_UNSPECIFIED;
+  phase = OfflineBilateralPhase.OFFLINE_PHASE_UNSPECIFIED;
 
   /**
-   * transport/UI only
-   *
-   * @generated from field: map<string, string> metadata = 8;
+   * @generated from field: dsm.OfflineBilateralDirection direction = 10;
    */
-  metadata: { [key: string]: string } = {};
+  direction = OfflineBilateralDirection.OFFLINE_DIRECTION_UNSPECIFIED;
+
+  /**
+   * The transfer's amount in base units, as its operation states it.
+   *
+   * @generated from field: uint64 amount = 11;
+   */
+  amount = protoInt64.zero;
+
+  /**
+   * Rendered by the SDK from the token's decimals; absent when this device
+   * does not know them, and then only the base-unit amount is known.
+   *
+   * @generated from field: optional string display_amount = 12;
+   */
+  displayAmount?: string;
+
+  /**
+   * @generated from field: string token_id = 13;
+   */
+  tokenId = "";
+
+  /**
+   * The counterparty's contact alias, when the contact has one.
+   *
+   * @generated from field: optional string counterparty_alias = 14;
+   */
+  counterpartyAlias?: string;
+
+  /**
+   * @generated from field: optional string sender_ble_address = 15;
+   */
+  senderBleAddress?: string;
+
+  /**
+   * Whether this device may cancel the step now: the rule the SDK's cancel
+   * enforces, stated where the UI reads it.
+   *
+   * @generated from field: bool cancellable = 16;
+   */
+  cancellable = false;
 
   constructor(data?: PartialMessage<OfflineBilateralTransaction>) {
     super();
@@ -11363,8 +11446,14 @@ export class OfflineBilateralTransaction extends Message<OfflineBilateralTransac
     { no: 2, name: "sender_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 3, name: "recipient_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 4, name: "commitment_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 7, name: "status", kind: "enum", T: proto3.getEnumType(OfflineBilateralTransactionStatus) },
-    { no: 8, name: "metadata", kind: "map", K: 9 /* ScalarType.STRING */, V: {kind: "scalar", T: 9 /* ScalarType.STRING */} },
+    { no: 9, name: "phase", kind: "enum", T: proto3.getEnumType(OfflineBilateralPhase) },
+    { no: 10, name: "direction", kind: "enum", T: proto3.getEnumType(OfflineBilateralDirection) },
+    { no: 11, name: "amount", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 12, name: "display_amount", kind: "scalar", T: 9 /* ScalarType.STRING */, opt: true },
+    { no: 13, name: "token_id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 14, name: "counterparty_alias", kind: "scalar", T: 9 /* ScalarType.STRING */, opt: true },
+    { no: 15, name: "sender_ble_address", kind: "scalar", T: 9 /* ScalarType.STRING */, opt: true },
+    { no: 16, name: "cancellable", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): OfflineBilateralTransaction {

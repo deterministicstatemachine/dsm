@@ -9,6 +9,7 @@ import {
     getDeviceIdBinBridgeAsync,
     getSigningPublicKeyBinBridgeAsync,
     acceptBilateralByCommitmentBridge,
+    cancelBilateralByCommitmentBridge,
     rejectBilateralByCommitmentBridge,
     getPendingBilateralListStrictBridge,
     setBleIdentityForAdvertising,
@@ -324,23 +325,15 @@ export async function offlineSend(transfer: GenericTransaction): Promise<Generic
         const hashB32 = (await import('../utils/textId')).encodeBase32Crockford(commitmentHash);
         const session = pending.find(p => p.commitmentHash === hashB32);
 
-        if (!session) {
-          // Session absent — committed sessions are deleted from SQLite after success,
-          // so absence after a prepare+send means the transfer completed.
+        // A step the list does not hold has not completed: only its committed
+        // phase says that. Keep polling.
+        if (session?.phase === 'committed') {
           finish({ accepted: true, result: 'Bilateral transfer complete' });
-          return;
-        }
-        if (session.status === 'verified' || session.status === 'committed') {
-          // OFFLINE_TX_CONFIRMED — terminal success
-          finish({ accepted: true, result: 'Bilateral transfer complete' });
-        } else if (session.status === 'failed') {
-          // OFFLINE_TX_FAILED — terminal failure (session persisted for poller visibility)
+        } else if (session?.phase === 'failed') {
           finish({ accepted: false, result: 'Bilateral transfer failed' });
-        } else if (session.status === 'rejected') {
-          // OFFLINE_TX_REJECTED — terminal rejection (session persisted for poller visibility)
+        } else if (session?.phase === 'rejected') {
           finish({ accepted: false, result: 'Bilateral transfer rejected' });
         }
-        // 'pending', 'accepted', 'hash_mismatch' — still in progress, keep polling
       } catch {
         // Query failed — keep polling, don't declare failure
       }
@@ -501,15 +494,41 @@ export async function sendOfflineTransfer(params: {
   } as any);
 }
 
-export async function acceptOfflineTransfer(args: { commitmentHash: Uint8Array, counterpartyDeviceId: Uint8Array }): Promise<{ success: boolean }> {
+/** What the SDK answered a bilateral accept, reject or cancel: done, or its reason why not. */
+export type BilateralActionResult = { success: true } | { success: false; error: string };
+
+/**
+ * The SDK's answer to a bilateral action: the envelope `expected` names, or an
+ * error carrying the SDK's reason. Anything else is not the action's answer.
+ */
+function bilateralActionAnswer(
+  action: string,
+  response: Uint8Array,
+  expected: 'bilateralPrepareResponse' | 'bilateralPrepareReject',
+): BilateralActionResult {
+  const env = decodeFramedEnvelopeV3(response);
+  if (env.payload.case === 'error') {
+    const error = env.payload.value.message || `error code ${env.payload.value.code}`;
+    logger.error(`[DSM] ${action} failed:`, error);
+    return { success: false, error };
+  }
+  if (env.payload.case !== expected) {
+    return { success: false, error: `${action}: the SDK answered ${String(env.payload.case)}, not ${expected}` };
+  }
+  return { success: true };
+}
+
+function bilateralActionFailure(action: string, e: unknown): BilateralActionResult {
+  logger.error(`[DSM] ${action} error:`, e);
+  return { success: false, error: e instanceof Error ? e.message : String(e) };
+}
+
+export async function acceptOfflineTransfer(args: { commitmentHash: Uint8Array, counterpartyDeviceId: Uint8Array }): Promise<BilateralActionResult> {
   try {
     const response = await acceptBilateralByCommitmentBridge(new Uint8Array(args.commitmentHash));
-    // Canonical Envelope v3 decode
-    const env2 = decodeFramedEnvelopeV3(response);
-    if (env2.payload.case === 'error') {
-      const errMsg = env2.payload.value.message || `Error code ${env2.payload.value.code}`;
-      logger.error('[DSM] acceptOfflineTransfer failed:', errMsg);
-      return { success: false };
+    const answer = bilateralActionAnswer('acceptOfflineTransfer', response, 'bilateralPrepareResponse');
+    if (!answer.success) {
+      return answer;
     }
     // Emit through the real DOM/native adapter path so all app listeners see
     // the same bilateral acceptance signal as production.
@@ -543,177 +562,29 @@ export async function acceptOfflineTransfer(args: { commitmentHash: Uint8Array, 
     schedulePostAcceptRefreshes();
     return { success: true };
   } catch (error) {
-    logger.error('[DSM] acceptOfflineTransfer error:', error);
-    return { success: false };
+    return bilateralActionFailure('acceptOfflineTransfer', error);
   }
 }
 
-export async function commitOfflineTransfer(_args: { commitmentHash: Uint8Array, counterpartyDeviceId: Uint8Array }): Promise<{ success: boolean }> {
-  // Commit is handled by the sender's BLE state machine after accept.
-  // JS should not attempt to fabricate signatures.
-  logger.warn('[DSM] commitOfflineTransfer is handled natively; JS commit is disabled');
-  return { success: false };
-}
-
-export async function rejectOfflineTransfer(args: { commitmentHash: Uint8Array, counterpartyDeviceId: Uint8Array, reason?: string }): Promise<{ success: boolean }> {
-   try {
-     const response = await rejectBilateralByCommitmentBridge(new Uint8Array(args.commitmentHash), String(args.reason || ''));
-     // Canonical Envelope v3 decode
-     const env3 = decodeFramedEnvelopeV3(response);
-     if (env3.payload.case === 'error') {
-       const errMsg = env3.payload.value.message || `Error code ${env3.payload.value.code}`;
-       logger.error('[DSM] rejectOfflineTransfer failed:', errMsg);
-       return { success: false };
-     }
-   } catch (e) {
-     logger.warn('[DSM] rejectOfflineTransfer native reject failed:', e);
-     return { success: false };
-   }
-
-   return { success: true };
-}
-
-export async function sendOnlineMessage(recipientId: string, payload: any): Promise<boolean> {
+export async function rejectOfflineTransfer(args: { commitmentHash: Uint8Array, counterpartyDeviceId: Uint8Array, reason?: string }): Promise<BilateralActionResult> {
   try {
-    let toBytes: Uint8Array;
-    if (typeof recipientId === 'string') {
-      toBytes = new Uint8Array(decodeBase32Crockford(recipientId));
-    } else if ((recipientId as any) instanceof Uint8Array) {
-      toBytes = new Uint8Array(recipientId as any);
-    } else {
-      throw new Error('Invalid recipientId: must be base32 string or Uint8Array');
-    }
-
-    if (toBytes.length !== 32) {
-      throw new Error('to_device_id must be 32 bytes');
-    }
-
-    const headers = await getHeaders();
-    const fromDeviceId = headers.deviceId instanceof Uint8Array ? headers.deviceId : new Uint8Array();
-    if (fromDeviceId.length !== 32) {
-      throw new Error('from_device_id must be 32 bytes (bridge headers missing)');
-    }
-    const memo = typeof payload?.memo === 'string' ? payload.memo : '';
-    const rawPayload = payload?.data ?? payload;
-    let payloadBytes: Uint8Array;
-    if (rawPayload instanceof Uint8Array) {
-      payloadBytes = rawPayload;
-    } else if (rawPayload instanceof ArrayBuffer) {
-      payloadBytes = new Uint8Array(rawPayload);
-    } else if (typeof rawPayload === 'string') {
-      payloadBytes = new TextEncoder().encode(rawPayload);
-    } else {
-      throw new Error('payload must be Uint8Array, ArrayBuffer, or string');
-    }
-
-    const req = new pb.OnlineMessageRequest({
-      toDeviceId: toBytes as any,
-      payload: payloadBytes as any,
-      memo,
-      signature: new Uint8Array(0),
-      nonce: new Uint8Array(0),
-      fromDeviceId: fromDeviceId as any,
-      // chain_tip is RESERVED/IGNORED: SDK derives bilateral tip from SQLite
-    } as any);
-
-    const argPack = new pb.ArgPack({
-      codec: pb.Codec.PROTO as any,
-      body: new Uint8Array(req.toBinary()),
-    });
-
-    const resBytes = await routerInvokeBin('message.send', new Uint8Array(argPack.toBinary()));
-
-    // Canonical Envelope v3 decode
-    let resp: pb.OnlineMessageResponse | null = null;
-    try {
-      const env4 = decodeFramedEnvelopeV3(resBytes);
-      if (env4.payload.case === 'error') {
-        logger.warn('sendOnlineMessage native error:', env4.payload.value.message);
-        return false;
-      }
-      if (env4.payload.case !== 'onlineMessageResponse') {
-        logger.warn(`Expected onlineMessageResponse, got ${env4.payload.case}`);
-        return false;
-      }
-      resp = env4.payload.value;
-    } catch {
-      // ignore
-    }
-    if (!resp) {
-      return false;
-    }
-    return Boolean(resp.success);
+    const response = await rejectBilateralByCommitmentBridge(new Uint8Array(args.commitmentHash), String(args.reason || ''));
+    return bilateralActionAnswer('rejectOfflineTransfer', response, 'bilateralPrepareReject');
   } catch (e) {
-    logger.warn('sendOnlineMessage failed:', e);
-    return false;
+    return bilateralActionFailure('rejectOfflineTransfer', e);
   }
 }
 
-export async function initiateBilateral(payload: any): Promise<boolean> {
+/**
+ * The proposer cancels a proposal it has not confirmed. The SDK decides
+ * whether the step may still be cancelled; its refusal comes back as the error.
+ */
+export async function cancelOfflineTransfer(args: { commitmentHash: Uint8Array, reason?: string }): Promise<BilateralActionResult> {
   try {
-    if (!payload) throw new Error('initiateBilateral: payload required');
-
-    const toRaw = payload.to ?? payload.recipient ?? payload.deviceId;
-    if (!toRaw) throw new Error('initiateBilateral: recipient device id required');
-
-    const tokenId = String(payload.tokenId ?? 'ERA');
-    const amount = payload.amount ?? payload.value;
-    if (amount === undefined || amount === null) {
-      throw new Error('initiateBilateral: amount required');
-    }
-
-    const memo = typeof payload.memo === 'string' ? payload.memo : '';
-    const bleAddress = payload.bleAddress;
-
-    const res = await offlineSend({
-      tokenId: canonicalizeTransferTokenId(tokenId),
-      to: toRaw as any,
-      amount,
-      memo,
-      bleAddress: typeof bleAddress === 'string' ? bleAddress : undefined,
-    });
-
-    return Boolean(res.accepted);
+    const response = await cancelBilateralByCommitmentBridge(new Uint8Array(args.commitmentHash), String(args.reason || ''));
+    return bilateralActionAnswer('cancelOfflineTransfer', response, 'bilateralPrepareReject');
   } catch (e) {
-    logger.warn('initiateBilateral failed:', e);
-    return false;
-  }
-}
-
-export async function acceptBilateral(payload: any): Promise<boolean> {
-  try {
-    if (!payload) throw new Error('acceptBilateral: payload required');
-
-    const commitmentRaw = payload.commitmentHash ?? payload.commitment_hash;
-    if (!commitmentRaw) throw new Error('acceptBilateral: commitmentHash required');
-
-    const counterpartyRaw = payload.counterpartyDeviceId;
-    if (!counterpartyRaw) throw new Error('acceptBilateral: counterpartyDeviceId required');
-
-    const commitmentHash =
-      commitmentRaw instanceof Uint8Array
-        ? commitmentRaw
-        : new Uint8Array(decodeBase32Crockford(String(commitmentRaw)));
-    if (commitmentHash.length !== 32) {
-      throw new Error('acceptBilateral: commitmentHash must be 32 bytes');
-    }
-
-    const counterpartyDeviceId =
-      counterpartyRaw instanceof Uint8Array
-        ? counterpartyRaw
-        : new Uint8Array(decodeBase32Crockford(String(counterpartyRaw)));
-    if (counterpartyDeviceId.length !== 32) {
-      throw new Error('acceptBilateral: counterpartyDeviceId must be 32 bytes');
-    }
-
-    const result = await acceptOfflineTransfer({
-      commitmentHash,
-      counterpartyDeviceId,
-    });
-    return Boolean(result.success);
-  } catch (e) {
-    logger.warn('acceptBilateral failed:', e);
-    return false;
+    return bilateralActionFailure('cancelOfflineTransfer', e);
   }
 }
 
@@ -779,36 +650,6 @@ export async function claimFaucet(policyId: string): Promise<{ success: boolean;
   } catch (e) {
     return { success: false, message: e instanceof Error ? e.message : String(e), tokensReceived: 0, _debug: { resultBytesLen: 0, decodeNote: 'outer exception' } };
   }
-}
-
-export async function getPendingBilateralListStrict(): Promise<{ transactions: pb.OfflineBilateralTransaction[] }> {
-  const responseBytes = await getPendingBilateralListStrictBridge();
-
-  // CANONICAL PATH: All bridge responses are FramedEnvelopeV3
-  let env: pb.Envelope;
-  try {
-    env = decodeFramedEnvelopeV3(responseBytes);
-  } catch (e) {
-    logger.error('[getPendingBilateralListStrict] Failed to decode FramedEnvelopeV3:', e);
-    throw new Error(`Failed to decode FramedEnvelopeV3: ${e instanceof Error ? e.message : String(e)}`);
-  }
-
-  if (env.payload.case === 'error') {
-    const err = env.payload.value;
-    throw new Error(`DSM native error (pending-list): code=${err.code} msg=${err.message}`);
-  }
-
-  if (env.payload.case !== 'offlineBilateralPendingListResponse') {
-    logger.warn('[getPendingBilateralListStrict] Unexpected payload.case:', env.payload.case);
-    throw new Error(`Unexpected payload case for pending list: ${env.payload.case}`);
-  }
-
-  const resp = env.payload.value;
-  if (!resp) {
-    throw new Error('offlineBilateralPendingListResponse payload is null');
-  }
-
-  return { transactions: resp.transactions ?? [] };
 }
 
 /**

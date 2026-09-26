@@ -264,14 +264,6 @@ export class DsmClient {
     });
   }
 
-  async acceptBilateralTransfer(params: { commitmentHash: Uint8Array; counterpartyDeviceId: Uint8Array }): Promise<{ success: boolean; message?: string }> {
-    if (!(await this.isReady())) {
-      return { success: false, message: 'Identity not initialized' };
-    }
-
-    return dsm.acceptOfflineTransfer(params);
-  }
-
   async resolveBleAddressForContact(contact: DomainContact): Promise<string | undefined> {
 
     if (typeof dsm.resolveBleAddressForContact !== 'function') return undefined;
@@ -280,22 +272,6 @@ export class DsmClient {
       deviceId: contact.deviceId,
       genesisHash: contact.genesisHash,
     });
-  }
-
-  async commitBilateralTransfer(params: { commitmentHash: Uint8Array; counterpartyDeviceId: Uint8Array }): Promise<{ success: boolean; message?: string }> {
-    if (!(await this.isReady())) {
-      return { success: false, message: 'Identity not initialized' };
-    }
-
-    return dsm.commitOfflineTransfer(params);
-  }
-
-  async rejectBilateralTransfer(params: { commitmentHash: Uint8Array; counterpartyDeviceId: Uint8Array; reason?: string }): Promise<{ success: boolean; message?: string }> {
-    if (!(await this.isReady())) {
-      return { success: false, message: 'Identity not initialized' };
-    }
-
-    return dsm.rejectOfflineTransfer(params);
   }
 
   async claimFaucet(tokenId?: string): Promise<{ success: boolean; message?: string; tokensReceived?: number }> {
