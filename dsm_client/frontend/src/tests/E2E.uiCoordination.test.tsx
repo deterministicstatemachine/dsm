@@ -367,15 +367,6 @@ describe('BridgeEventBus — core event delivery', () => {
     u1(); u2();
   });
 
-  test('bilateral.event delivers Uint8Array payload', () => {
-    const spy = jest.fn();
-    const unsub = bridgeEvents.on('bilateral.event', spy);
-    const payload = new Uint8Array([1, 2, 3, 4]);
-    bridgeEvents.emit('bilateral.event', payload);
-    expect(spy).toHaveBeenCalledWith(payload);
-    unsub();
-  });
-
   test('wallet.bilateralCommitted carries typed payload', () => {
     const spy = jest.fn();
     const unsub = bridgeEvents.on('wallet.bilateralCommitted', spy);

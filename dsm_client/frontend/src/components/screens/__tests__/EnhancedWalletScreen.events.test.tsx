@@ -288,7 +288,7 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
     await waitFor(() => expect(screen.getByText('DSM Wallet')).toBeInTheDocument());
 
     await act(async () => {
-      bridgeEvents.emit('inbox.updated', { unreadCount: 2, newItems: 2, source: 'poll' });
+      bridgeEvents.emit('inbox.updated', { newItems: 2, source: 'poll' });
     });
 
     const button = screen.getByRole('button', { name: 'Inbox (2 new)' });
