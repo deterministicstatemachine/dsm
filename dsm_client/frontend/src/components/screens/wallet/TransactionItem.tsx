@@ -64,7 +64,8 @@ function TransactionItemInner({ tx, expandedTxId, onToggle }: Props): React.JSX.
           )}
           <div className="detail-row detail-row-hash">
             <span className="detail-label">From</span>
-            <span className="detail-value detail-value-hash">{tx.fromDeviceId}</span>
+            {/* A faucet row names no sender device: Rust's label for its source stands. */}
+            <span className="detail-value detail-value-hash">{tx.fromDeviceId ?? tx.recipient}</span>
           </div>
           <div className="detail-row detail-row-hash">
             <span className="detail-label">To</span>

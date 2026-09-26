@@ -82,6 +82,31 @@ describe('domain mappers', () => {
       expect(() => mapTransactions([row({ txType: 3 as TransactionType })])).toThrow(/tx_ROW has type 3/);
     });
 
+    // A faucet claim's source is the ERA reserve: Rust names no sender device,
+    // labels the source, and a faucet row that names a sender is corrupt.
+    it('maps a faucet claim with no sender device and no transport', () => {
+      const [claim] = mapTransactions([
+        row({
+          txType: TransactionType.TX_TYPE_FAUCET,
+          fromDeviceId: new Uint8Array(0),
+          recipient: 'ERA reserve (faucet)',
+          amountSigned: 100n,
+          displayAmount: '100',
+        }),
+      ]);
+      expect(claim.txType).toBe('faucet');
+      expect(claim.type).toBeUndefined();
+      expect(claim.fromDeviceId).toBeUndefined();
+      expect(claim.recipient).toBe('ERA reserve (faucet)');
+      expect(claim.amount).toBe(100n);
+    });
+
+    it('refuses a faucet claim that names a sender device', () => {
+      expect(() => mapTransactions([row({ txType: TransactionType.TX_TYPE_FAUCET })])).toThrow(
+        /faucet claim tx_ROW names a sender device/,
+      );
+    });
+
     it('refuses a row missing a field Rust always writes', () => {
       expect(() => mapTransactions([row({ status: '' })])).toThrow(/carries no status/);
       expect(() => mapTransactions([row({ tokenId: '' })])).toThrow(/carries no token id/);
