@@ -1999,7 +1999,7 @@ impl AppRouterImpl {
         }
     }
 
-    /// Dispatch handler for `storage.status` and `storage.sync` query routes.
+    /// Dispatch handler for the `storage.status` and `storage.sync` query routes.
     pub(crate) async fn handle_storage_query(&self, q: AppQuery) -> AppResult {
         match q.path.as_str() {
             "storage.status" => {
@@ -2009,56 +2009,12 @@ impl AppRouterImpl {
                 ) {
                     return err(e);
                 }
-                let set = match crate::sdk::economic_admission_flow::committed_network_id()
-                    .and_then(|network| crate::sdk::storage_set::canonical_set(&network))
-                {
-                    Ok(set) => set,
-                    Err(e) => return err(format!("storage.status: no pinned storage set: {e}")),
-                };
-                let client = match crate::sdk::storage_node_sdk::SetClient::new(&set) {
-                    Ok(client) => client,
-                    Err(e) => return err(format!("storage.status: storage client: {e}")),
-                };
-                let probes = futures::future::join_all(
-                    client.members().iter().map(|member| member.check_health()),
-                )
-                .await;
-                let connected_nodes = probes.iter().filter(|probe| probe.is_ok()).count() as u32;
-                let data_size = match crate::storage::client_db::get_db_size() {
-                    Ok(size) if size > 1024 * 1024 => {
-                        format!("{:.1} MB", size as f64 / (1024.0 * 1024.0))
+                match storage_status().await {
+                    Ok(resp) => {
+                        pack_envelope_ok(generated::envelope::Payload::StorageStatusResponse(resp))
                     }
-                    Ok(size) => format!("{:.1} KB", size as f64 / 1024.0),
-                    Err(e) => return err(format!("storage.status: database size: {e}")),
-                };
-                let last_sync_iter = match crate::storage::client_db::storage_sync_runs::completed()
-                {
-                    Ok(completed) => completed,
-                    Err(e) => return err(format!("storage.status: sync count: {e}")),
-                };
-                let backup_status = {
-                    let rs = crate::sdk::recovery_sdk::RecoverySDK::get_recovery_status();
-                    if !rs.enabled {
-                        "Not configured".to_string()
-                    } else if rs.pending_capsule {
-                        format!("Armed (capsule #{})", rs.last_capsule_index)
-                    } else if rs.capsule_count > 0 {
-                        format!(
-                            "Written (#{}, {} total)",
-                            rs.last_capsule_index, rs.capsule_count
-                        )
-                    } else {
-                        "Enabled (no capsule)".to_string()
-                    }
-                };
-                let resp = generated::StorageStatusResponse {
-                    total_nodes: set.len() as u32,
-                    connected_nodes,
-                    last_sync_iter,
-                    data_size,
-                    backup_status,
-                };
-                pack_envelope_ok(generated::envelope::Payload::StorageStatusResponse(resp))
+                    Err(e) => err(format!("storage.status: {e}")),
+                }
             }
 
             // -------- storage.sync (QueryOp) --------
@@ -2084,216 +2040,6 @@ impl AppRouterImpl {
                     },
                 };
                 pack_envelope_ok(generated::envelope::Payload::StorageSyncResponse(response))
-            }
-
-            // -------- storage.nodeHealth --------
-            // Each named storage node's health and Prometheus metrics: the
-            // endpoints the request names, else the pinned set's members.
-            "storage.nodeHealth" => {
-                let request = match decode_proto_request::<generated::StorageNodeStatsRequest>(
-                    &q.params,
-                    "storage.nodeHealth",
-                ) {
-                    Ok(request) => request,
-                    Err(e) => return err(e),
-                };
-                let nodes: Vec<(String, String)> = if request.endpoints.is_empty() {
-                    match pinned_members() {
-                        Ok(members) => members,
-                        Err(e) => return err(format!("storage.nodeHealth: {e}")),
-                    }
-                } else {
-                    request
-                        .endpoints
-                        .into_iter()
-                        .map(|endpoint| (endpoint.clone(), endpoint))
-                        .collect()
-                };
-                let client = match crate::sdk::storage_node_sdk::build_ca_aware_client() {
-                    Ok(client) => client,
-                    Err(e) => return err(format!("storage.nodeHealth: storage client: {e}")),
-                };
-                let node_stats = futures::future::join_all(
-                    nodes
-                        .iter()
-                        .map(|(name, endpoint)| check_single_node_stats(&client, name, endpoint)),
-                )
-                .await;
-                let healthy_nodes = node_stats
-                    .iter()
-                    .filter(|stats| stats.status == "healthy")
-                    .count() as u32;
-                let resp = generated::StorageNodeStatsResponse {
-                    total_nodes: node_stats.len() as u32,
-                    nodes: node_stats,
-                    healthy_nodes,
-                };
-                pack_envelope_ok(generated::envelope::Payload::StorageNodeStatsResponse(resp))
-            }
-
-            // -------- storage.connectivity --------
-            // Diagnostic route: the TLS handshake and HTTP answer of each
-            // member of the pinned set, with the CA certificates loaded.
-            "storage.connectivity" => {
-                let ca_certs = crate::sdk::storage_node_sdk::ca_certs_loaded_count();
-                let nodes = match pinned_members() {
-                    Ok(members) => members,
-                    Err(e) => return err(format!("storage.connectivity: {e}")),
-                };
-                let client = match crate::sdk::storage_node_sdk::build_ca_aware_client() {
-                    Ok(client) => client,
-                    Err(e) => return err(format!("storage.connectivity: storage client: {e}")),
-                };
-                let mut node_stats = Vec::with_capacity(nodes.len());
-                let mut healthy_nodes = 0u32;
-                for (name, endpoint) in &nodes {
-                    let start = std::time::Instant::now();
-                    let (status, diag) =
-                        match client.get(format!("{endpoint}/api/v2/health")).send().await {
-                            Ok(resp) if resp.status().is_success() => {
-                                healthy_nodes += 1;
-                                (
-                                    "healthy",
-                                    format!("tls=OK http={} ca_certs={ca_certs}", resp.status()),
-                                )
-                            }
-                            Ok(resp) => (
-                                "down",
-                                format!("tls=OK http={} ca_certs={ca_certs}", resp.status()),
-                            ),
-                            Err(e) => (
-                                "down",
-                                format!(
-                                    "tls={} ca_certs={ca_certs} err={e}",
-                                    if e.is_connect() || e.is_timeout() {
-                                        "UNREACHABLE"
-                                    } else {
-                                        "FAIL"
-                                    }
-                                ),
-                            ),
-                        };
-                    node_stats.push(generated::StorageNodeStats {
-                        url: endpoint.clone(),
-                        name: name.clone(),
-                        region: String::new(),
-                        status: status.to_string(),
-                        latency_ms: start.elapsed().as_millis() as u32,
-                        last_error: diag,
-                        objects_put_total: 0,
-                        objects_get_total: 0,
-                        bytes_written_total: 0,
-                        bytes_read_total: 0,
-                        cleanup_runs_total: 0,
-                        replication_failures: 0,
-                    });
-                }
-                let resp = generated::StorageNodeStatsResponse {
-                    total_nodes: node_stats.len() as u32,
-                    nodes: node_stats,
-                    healthy_nodes,
-                };
-                pack_envelope_ok(generated::envelope::Payload::StorageNodeStatsResponse(resp))
-            }
-
-            // -------- storage.addNode --------
-            "storage.addNode" => {
-                log::info!("[DSM_SDK] storage.addNode called");
-                match generated::ArgPack::decode(&*q.params) {
-                    Ok(pack) if pack.codec == generated::Codec::Proto as i32 => {
-                        match generated::StorageNodeManageRequest::decode(&*pack.body) {
-                            Ok(req) if req.auto_assign => {
-                                // Protocol enforcement: node assignment is decided by keyed
-                                // Fisher-Yates over the known pool (dsm_env_config.toml minus
-                                // active nodes). The caller does not choose which node is added.
-                                match crate::network::auto_assign_storage_node(
-                                    &self.device_id_bytes,
-                                ) {
-                                    Ok(assigned_url) => {
-                                        let current = crate::network::list_storage_endpoints()
-                                            .unwrap_or_default();
-                                        let resp = generated::StorageNodeManageResponse {
-                                            success: true,
-                                            error: String::new(),
-                                            current_endpoints: current,
-                                            assigned_url,
-                                        };
-                                        pack_envelope_ok(
-                                            generated::envelope::Payload::StorageNodeManageResponse(
-                                                resp,
-                                            ),
-                                        )
-                                    }
-                                    Err(e) => {
-                                        let resp = generated::StorageNodeManageResponse {
-                                            success: false,
-                                            error: format!("{}", e),
-                                            current_endpoints: vec![],
-                                            assigned_url: String::new(),
-                                        };
-                                        pack_envelope_ok(
-                                            generated::envelope::Payload::StorageNodeManageResponse(
-                                                resp,
-                                            ),
-                                        )
-                                    }
-                                }
-                            }
-                            Ok(_) => {
-                                // Reject manual URL selection — node assignment must be
-                                // determined by Fisher-Yates for security and even distribution.
-                                err("storage.addNode: direct node selection is not permitted; set auto_assign = true".into())
-                            }
-                            Err(_) => err("storage.addNode: failed to decode request".into()),
-                        }
-                    }
-                    _ => err("storage.addNode: invalid request encoding".into()),
-                }
-            }
-
-            // -------- storage.removeNode --------
-            "storage.removeNode" => {
-                log::info!("[DSM_SDK] storage.removeNode called");
-                match generated::ArgPack::decode(&*q.params) {
-                    Ok(pack) if pack.codec == generated::Codec::Proto as i32 => {
-                        match generated::StorageNodeManageRequest::decode(&*pack.body) {
-                            Ok(req) if !req.url.is_empty() => {
-                                match crate::network::remove_storage_endpoint(&req.url) {
-                                    Ok(()) => {
-                                        let current = crate::network::list_storage_endpoints()
-                                            .unwrap_or_default();
-                                        let resp = generated::StorageNodeManageResponse {
-                                            success: true,
-                                            error: String::new(),
-                                            current_endpoints: current,
-                                            assigned_url: String::new(),
-                                        };
-                                        pack_envelope_ok(
-                                            generated::envelope::Payload::StorageNodeManageResponse(
-                                                resp,
-                                            ),
-                                        )
-                                    }
-                                    Err(e) => {
-                                        let resp = generated::StorageNodeManageResponse {
-                                            success: false,
-                                            error: format!("{}", e),
-                                            current_endpoints: vec![],
-                                            assigned_url: String::new(),
-                                        };
-                                        pack_envelope_ok(
-                                            generated::envelope::Payload::StorageNodeManageResponse(
-                                                resp,
-                                            ),
-                                        )
-                                    }
-                                }
-                            }
-                            _ => err("storage.removeNode: missing or invalid url".into()),
-                        }
-                    }
-                    _ => err("storage.removeNode: invalid request encoding".into()),
-                }
             }
 
             other => err(format!("unknown storage query: {other}")),
@@ -2849,116 +2595,67 @@ fn decode_proto_request<M: Message + Default>(params: &[u8], route: &str) -> Res
     M::decode(&*pack.body).map_err(|e| format!("{route}: decode request failed: {e}"))
 }
 
-/// `(member id, endpoint)` for every member of the pinned set.
-fn pinned_members() -> Result<Vec<(String, String)>, String> {
+/// `storage.status`: the pinned set of this device's committed network, what
+/// each member answered for its latest ByteCommit, and this device's own sync
+/// count and database size. A member's answer is an observation, never a
+/// verdict (storage spec §4).
+async fn storage_status() -> Result<generated::StorageStatusResponse, String> {
     let network = crate::sdk::economic_admission_flow::committed_network_id()
         .map_err(|e| format!("no committed network: {e}"))?;
     let set = crate::sdk::storage_set::canonical_set(&network)
         .map_err(|e| format!("no pinned storage set: {e}"))?;
-    Ok(set
+    let client = crate::sdk::storage_node_sdk::SetClient::new(&set)
+        .map_err(|e| format!("storage client: {e}"))?;
+    let reads = futures::future::join_all(
+        client
+            .members()
+            .iter()
+            .map(|member| member.latest_bytecommit()),
+    )
+    .await;
+    let members = set
         .members()
         .iter()
-        .map(|member| (member.member_id.clone(), member.endpoint.clone()))
-        .collect())
+        .zip(reads)
+        .map(|(member, read)| member_status(member, read))
+        .collect();
+    let completed_syncs = crate::storage::client_db::storage_sync_runs::completed()
+        .map_err(|e| format!("sync count: {e}"))?;
+    let database_bytes =
+        crate::storage::client_db::get_db_size().map_err(|e| format!("database size: {e}"))?;
+    Ok(generated::StorageStatusResponse {
+        network_id: String::from_utf8(network)
+            .map_err(|e| format!("the committed network id is not text: {e}"))?,
+        storage_set_id: set.id().to_vec(),
+        members,
+        completed_syncs,
+        database_bytes,
+    })
 }
 
-/// One storage node's health and its Prometheus counters. Uses
-/// `Instant::now()` for display-only latency (non-authoritative operational
-/// data). A counter the node does not expose, or a scrape that fails, is
-/// named in `last_error`; the proto field is then absent (zero).
-async fn check_single_node_stats(
-    client: &reqwest::Client,
-    name: &str,
-    endpoint: &str,
-) -> dsm::types::proto::StorageNodeStats {
-    let start = std::time::Instant::now();
-    let (status, mut problems) = match client.get(format!("{endpoint}/api/v2/health")).send().await
-    {
-        Ok(resp) if resp.status().is_success() => ("healthy", Vec::new()),
-        Ok(resp) => ("degraded", vec![format!("HTTP {}", resp.status())]),
-        Err(e) => ("down", vec![e.to_string()]),
+/// One member of the pinned set and its answer, as `storage.status` reports
+/// them.
+fn member_status(
+    member: &crate::sdk::storage_set::StorageMember,
+    read: crate::sdk::storage_node_sdk::LatestByteCommitRead,
+) -> generated::StorageMemberStatus {
+    use crate::sdk::storage_node_sdk::LatestByteCommit;
+    use generated::storage_member_status::Answer;
+    let answer = match read.answer {
+        LatestByteCommit::Stated(commit) => Answer::Latest(generated::StorageMemberByteCommit {
+            digest: commit.digest().to_vec(),
+            commit: Some(commit.to_proto()),
+        }),
+        LatestByteCommit::NoCycle => Answer::NoCycle(generated::StorageMemberNoCycle {}),
+        LatestByteCommit::Unanswered(why) => Answer::Unanswered(why),
     };
-    let latency_ms = start.elapsed().as_millis() as u32;
-
-    let prom = if status == "down" {
-        std::collections::HashMap::new()
-    } else {
-        match client.get(format!("{endpoint}/metrics")).send().await {
-            Ok(resp) if resp.status().is_success() => match resp.text().await {
-                Ok(text) => parse_prometheus_text(&text),
-                Err(e) => {
-                    problems.push(format!("metrics body: {e}"));
-                    std::collections::HashMap::new()
-                }
-            },
-            Ok(resp) => {
-                problems.push(format!("metrics HTTP {}", resp.status()));
-                std::collections::HashMap::new()
-            }
-            Err(e) => {
-                problems.push(format!("metrics: {e}"));
-                std::collections::HashMap::new()
-            }
-        }
-    };
-    let mut counter = |key: &str| match prom.get(key) {
-        Some(value) => *value as u64,
-        None => {
-            if status != "down" {
-                problems.push(format!("{key} not exposed"));
-            }
-            0
-        }
-    };
-    let objects_put_total = counter("dsm_storage_objects_put_total");
-    let objects_get_total = counter("dsm_storage_objects_get_total");
-    let bytes_written_total = counter("dsm_storage_bytes_written_total");
-    let bytes_read_total = counter("dsm_storage_bytes_read_total");
-    let cleanup_runs_total = counter("dsm_storage_cleanup_runs_total");
-    let replication_failures = counter("dsm_replication_outbox_failures_total");
-
-    dsm::types::proto::StorageNodeStats {
-        url: endpoint.to_string(),
-        name: name.to_string(),
-        region: String::new(),
-        status: status.to_string(),
-        latency_ms,
-        last_error: problems.join("; "),
-        objects_put_total,
-        objects_get_total,
-        bytes_written_total,
-        bytes_read_total,
-        cleanup_runs_total,
-        replication_failures,
+    generated::StorageMemberStatus {
+        member_id: member.member_id.as_bytes().to_vec(),
+        register_incarnation_id: member.register_incarnation_id.to_vec(),
+        endpoint: member.endpoint.clone(),
+        answer: Some(answer),
+        answered_as: read.answered_as,
     }
-}
-
-/// Parse Prometheus exposition text into metric name → value. Handles
-/// `name value [ts]` and `name{labels} value [ts]`; display-only data.
-fn parse_prometheus_text(text: &str) -> std::collections::HashMap<String, f64> {
-    let mut metrics = std::collections::HashMap::new();
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-        let (name, rest) = match (trimmed.find('{'), trimmed.find('}')) {
-            (Some(open), Some(close)) if open < close => (&trimmed[..open], &trimmed[close + 1..]),
-            (Some(..), Some(..)) | (Some(..), None) | (None, Some(..)) => continue,
-            (None, None) => match trimmed.split_once(char::is_whitespace) {
-                Some((name, rest)) => (name, rest),
-                None => continue,
-            },
-        };
-        if let Some(value) = rest
-            .split_whitespace()
-            .next()
-            .and_then(|value| value.parse::<f64>().ok())
-        {
-            metrics.insert(name.to_string(), value);
-        }
-    }
-    metrics
 }
 
 #[cfg(test)]
@@ -3326,5 +3023,132 @@ mod tests {
         }
         assert_eq!(copies(after), before, "no resubmission");
         assert_eq!(p.holders_of(&transfer_id).await, holders);
+    }
+
+    /// `storage.status` through the router, as the app asks it.
+    async fn storage_status_of(
+        router: &crate::handlers::app_router_impl::AppRouterImpl,
+    ) -> dsm::types::proto::StorageStatusResponse {
+        let pack = dsm::types::proto::ArgPack {
+            codec: dsm::types::proto::Codec::Proto as i32,
+            body: dsm::types::proto::StorageStatusRequest {}.encode_to_vec(),
+            ..Default::default()
+        };
+        let answer = router
+            .handle_storage_query(crate::bridge::AppQuery {
+                path: "storage.status".to_string(),
+                params: pack.encode_to_vec(),
+            })
+            .await;
+        assert!(answer.success, "storage.status: {:?}", answer.error_message);
+        let env = crate::handlers::response_helpers::decode_local_envelope(&answer.data)
+            .expect("a local envelope");
+        match env.payload {
+            Some(dsm::types::proto::envelope::Payload::StorageStatusResponse(status)) => status,
+            other => panic!("storage.status answered {other:?}"),
+        }
+    }
+
+    /// `storage.status` reports the set this device's traffic uses — its
+    /// committed network's pinned set, by the id every provisioned member
+    /// logged — and each member's own answer, as that member gave it: the
+    /// ByteCommit it closed (with Core's digest of it), or its statement that
+    /// it has closed none. A member that stops serving is reported as not
+    /// answering, with the reason, while the others still answer. Real
+    /// nodes, on Postgres.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn storage_status_reports_the_pinned_set_and_each_members_own_answer() {
+        use dsm::types::proto::storage_member_status::Answer;
+
+        let mut device = crate::test_support::one_device::Device::start(0x5A).await;
+        let members = device.nodes.members();
+        let first = members[0].0.clone();
+        let closer = crate::sdk::storage_node_sdk::MemberClient::new(
+            &first,
+            &members[0].1,
+            crate::sdk::storage_node_sdk::build_ca_aware_client().expect("a client"),
+        );
+        closer
+            .put_cells(&[(
+                b"DSM/test/storage-status".to_vec(),
+                [0x5A; 32],
+                b"value".to_vec(),
+            )])
+            .await
+            .expect("the entry is taken");
+        let closed = closer.close_cycle().await.expect("the cycle closes");
+
+        let status = storage_status_of(&device.router).await;
+        let profile = dsm::economic::register::resolve_root_register_profile(b"dsm-testnet")
+            .expect("the beta network is provisioned");
+        assert_eq!(status.network_id, "dsm-testnet");
+        assert_eq!(status.storage_set_id, profile.storage_set_id.to_vec());
+        assert_eq!(status.members.len(), members.len());
+        assert!(status.database_bytes > 0, "the device database exists");
+        assert!(
+            status
+                .members
+                .windows(2)
+                .all(|w| w[0].member_id < w[1].member_id),
+            "in the set's member order"
+        );
+        for reported in &status.members {
+            let (member_id, endpoint, incarnation) = members
+                .iter()
+                .find(|(id, _, _)| id.as_bytes() == reported.member_id.as_slice())
+                .expect("every reported member is a member of the set");
+            assert_eq!(reported.endpoint, *endpoint);
+            assert_eq!(reported.register_incarnation_id, incarnation.to_vec());
+            assert_eq!(
+                reported.answered_as.as_deref(),
+                Some(member_id.as_bytes()),
+                "{member_id} answered as itself"
+            );
+            match reported
+                .answer
+                .as_ref()
+                .expect("every member has an answer")
+            {
+                Answer::Latest(latest) => {
+                    let commit = dsm::storage_cell::ByteCommit::from_proto(
+                        latest.commit.as_ref().expect("the ByteCommit"),
+                    )
+                    .expect("a ByteCommit");
+                    assert_eq!(commit.member_id, member_id.as_bytes());
+                    assert_eq!(latest.digest, commit.digest().to_vec(), "Core's digest");
+                    if *member_id == first {
+                        assert_eq!(commit.cycle_index, closed, "the cycle it closed");
+                    }
+                }
+                Answer::NoCycle(_) => assert_ne!(
+                    *member_id, first,
+                    "the member that closed a cycle states its ByteCommit"
+                ),
+                Answer::Unanswered(why) => panic!("{member_id} did not answer: {why}"),
+            }
+        }
+
+        let down = members[1].0.clone();
+        device.nodes.take_down(std::slice::from_ref(&down)).await;
+        let status = storage_status_of(&device.router).await;
+        for reported in &status.members {
+            let answer = reported
+                .answer
+                .as_ref()
+                .expect("every member has an answer");
+            if reported.member_id == down.as_bytes() {
+                assert!(
+                    matches!(answer, Answer::Unanswered(why) if why.starts_with("transport: ")),
+                    "the member that stopped serving did not answer: {answer:?}"
+                );
+                assert_eq!(reported.answered_as, None, "no node answered for it");
+            } else {
+                assert!(
+                    !matches!(answer, Answer::Unanswered(_)),
+                    "the members still serving answer: {answer:?}"
+                );
+            }
+        }
     }
 }

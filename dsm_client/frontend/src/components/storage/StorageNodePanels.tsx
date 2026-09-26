@@ -1,364 +1,170 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
-// Storage node dashboard panels — inverted design
-// Per spec: nodes are equal index-only mirrors. No primaries, no failover.
+// Storage panels: the pinned storage set this device's traffic uses, and what
+// each member answered for its latest ByteCommit (SDK `storage.status`).
+// Rendering only. A member's answer is an observation, never a verdict: a
+// member that did not answer has not failed, and a ByteCommit is shown as the
+// member stated it.
 
-import React, { useEffect, useState, useCallback } from "react";
-import type { DiagnosticsBundle } from "../../types/storage";
-import { displayOnlyNumberToNumber } from "../../types/storage";
-import { storageStore, useStorageStore } from "../../stores/storageStore";
+import React, { useState } from "react";
+import type { StorageMember, StorageStatus } from "../../dsm/types";
 
-function fmtBytes(n: number): string {
-  if (n <= 0) return "0 B";
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
-  return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+export function formatBytes(n: bigint): string {
+  const v = Number(n);
+  if (v < 1024) return `${v} B`;
+  if (v < 1024 * 1024) return `${(v / 1024).toFixed(1)} KB`;
+  if (v < 1024 * 1024 * 1024) return `${(v / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(v / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
-function fmtCount(n: number): string {
-  if (n < 1000) return String(n);
-  if (n < 1_000_000) return `${(n / 1000).toFixed(1)}K`;
-  return `${(n / 1_000_000).toFixed(1)}M`;
+function short(b32: string): string {
+  return b32.length <= 12 ? b32 : `${b32.slice(0, 12)}…`;
 }
 
-function extractHost(url: string): string {
-  try {
-    return new URL(url).host;
-  } catch {
-    return url;
-  }
+/** A member answered when its node returned a ByteCommit or said it has none. */
+function answered(m: StorageMember): boolean {
+  return m.answer.kind !== "unanswered";
 }
 
-function dton(v: any): number {
-  return typeof v === "number" ? v : displayOnlyNumberToNumber(v ?? (0 as any)) || 0;
+/** The node that answered echoed a member id other than the one the set names there. */
+function answeredAsAnother(m: StorageMember): boolean {
+  return m.answeredAs !== undefined && m.answeredAs !== m.memberId;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// NodeHealthPanel — inverted dark panels
+// StorageSetPanel — the set, this device's syncs and its database
 // ═══════════════════════════════════════════════════════════════════════
-export const NodeHealthPanel: React.FC = () => {
-  const storage = useStorageStore();
-  const [expanded, setExpanded] = useState<string | null>(null);
-
-  const [addError, setAddError] = useState<string | null>(null);
-  const [addLoading, setAddLoading] = useState(false);
-  const [assignedUrl, setAssignedUrl] = useState<string | null>(null);
-
-  const [removeTarget, setRemoveTarget] = useState<string | null>(null);
-  const [removeLoading, setRemoveLoading] = useState(false);
-
-  const loadData = useCallback(async (isRefresh = false) => {
-    await storageStore.initialize();
-    await storageStore.refreshNodeHealth(isRefresh);
-  }, []);
-
-  useEffect(() => {
-    void loadData();
-  }, [loadData]);
-
-  const handleRequestNode = async () => {
-    setAddLoading(true);
-    setAddError(null);
-    setAssignedUrl(null);
-    const r = await storageStore.addNode();
-    setAddLoading(false);
-    if (!r.success) {
-      setAddError(r.error || "Failed");
-      return;
-    }
-    setAssignedUrl(r.assignedUrl ?? null);
-  };
-
-  const handleRemove = async (url: string) => {
-    setRemoveLoading(true);
-    await storageStore.removeNode(url);
-    setRemoveLoading(false);
-    setRemoveTarget(null);
-  };
-
-  const online = storage.nodeHealth.filter((h) => h.status === "healthy").length;
-  const degraded = storage.nodeHealth.filter((h) => h.status === "degraded").length;
-  const offline = storage.nodeHealth.filter((h) => h.status === "down").length;
-  const regions = new Set(storage.nodeHealth.map((h) => h.region).filter(Boolean)).size;
-  const totalPut = storage.nodeHealth.reduce((s, h) => s + dton(h.objectsPutTotal), 0);
-  const totalGet = storage.nodeHealth.reduce((s, h) => s + dton(h.objectsGetTotal), 0);
-  const totalW = storage.nodeHealth.reduce((s, h) => s + dton(h.bytesWrittenTotal), 0);
-  const totalR = storage.nodeHealth.reduce((s, h) => s + dton(h.bytesReadTotal), 0);
-  const totalObj = totalPut + totalGet;
-
-  if (storage.nodeHealthLoading)
-    return <div className="storage-loading">Checking node health...</div>;
-
+export const StorageSetPanel: React.FC<{ status: StorageStatus }> = ({ status }) => {
+  const answeredCount = status.members.filter(answered).length;
   return (
     <div className="snd-stack">
-      {/* Stat grid */}
       <div className="snd-card">
         <div className="snd-stat-grid">
           <div className="snd-stat-cell">
-            <div className="snd-stat-val">{storage.nodeHealth.length}</div>
-            <div className="snd-stat-label">Nodes</div>
-          </div>
-          <div className="snd-stat-cell">
-            <div className="snd-stat-val">{online}</div>
-            <div className="snd-stat-label">Online</div>
-          </div>
-          <div className="snd-stat-cell">
             <div className="snd-stat-val">
-              {offline}
-              {degraded > 0 ? `/${degraded}` : ""}
+              {answeredCount}/{status.members.length}
             </div>
-            <div className="snd-stat-label">{degraded > 0 ? "Off/Warn" : "Offline"}</div>
+            <div className="snd-stat-label">Answered</div>
           </div>
           <div className="snd-stat-cell">
-            <div className="snd-stat-val">{regions}</div>
-            <div className="snd-stat-label">Regions</div>
+            <div className="snd-stat-val">{status.completedSyncs.toString()}</div>
+            <div className="snd-stat-label">Syncs</div>
           </div>
           <div className="snd-stat-cell">
-            <div className="snd-stat-val">{totalObj > 0 ? fmtCount(totalObj) : "\u2014"}</div>
-            <div className="snd-stat-label">Objects</div>
-          </div>
-          <div className="snd-stat-cell">
-            <div className="snd-stat-val">{totalW > 0 ? fmtBytes(totalW) : "\u2014"}</div>
-            <div className="snd-stat-label">Written</div>
+            <div className="snd-stat-val-sm">{formatBytes(status.databaseBytes)}</div>
+            <div className="snd-stat-label">Local DB</div>
           </div>
         </div>
-        {(totalPut > 0 || totalGet > 0) && (
-          <div className="snd-throughput">
-            <span>PUT {fmtCount(totalPut)}</span>
-            <span>GET {fmtCount(totalGet)}</span>
-            <span>W {fmtBytes(totalW)}</span>
-            <span>R {fmtBytes(totalR)}</span>
-          </div>
-        )}
       </div>
 
-      {/* Node table */}
-      <div className="snd-card snd-table">
-        <div className="snd-table-header">
-          <span />
-          <span>Node</span>
-          <span>Region</span>
-          <span>Ms</span>
+      <div className="snd-card">
+        <div className="snd-info-row">
+          <span className="snd-info-label">Network</span>
+          <span className="snd-info-val">{status.networkId}</span>
         </div>
-        {storage.nodeHealth.map((h) => {
-          const lat = dton(h.latencyMs);
-          const isExp = expanded === h.url;
-          const cls =
-            h.status === "down"
-              ? "snd-row snd-row-off"
-              : h.status === "degraded"
-                ? "snd-row snd-row-warn"
-                : "snd-row";
-          return (
-            <React.Fragment key={h.url}>
-              <div
-                className={`${cls}${isExp ? " snd-row-exp" : ""}`}
-                onClick={() => setExpanded(isExp ? null : h.url)}
-              >
-                <span
-                  className={`snd-dot${h.status === "healthy" ? " snd-dot-on" : h.status === "degraded" ? " snd-dot-warn" : ""}`}
-                />
-                <span className="snd-name">{h.name || extractHost(h.url)}</span>
-                <span className="snd-region">{h.region || "\u2014"}</span>
-                <span className="snd-ms">
-                  {h.status === "down" ? "\u2014" : lat > 0 ? String(lat) : ".."}
-                </span>
-              </div>
-              {isExp && (
-                <div className="snd-detail">
-                  <div className="snd-detail-url">{h.url}</div>
-                  {h.status !== "down" && h.objectsPutTotal !== undefined && (
-                    <div className="snd-detail-stats">
-                      <span>PUT {fmtCount(dton(h.objectsPutTotal))}</span>
-                      <span>GET {fmtCount(dton(h.objectsGetTotal))}</span>
-                      <span>W {fmtBytes(dton(h.bytesWrittenTotal))}</span>
-                      <span>R {fmtBytes(dton(h.bytesReadTotal))}</span>
-                    </div>
-                  )}
-                  {h.lastError && <div className="snd-detail-err">{h.lastError}</div>}
-                  {removeTarget === h.url ? (
-                    <div className="snd-detail-confirm">
-                      <span>REMOVE?</span>
-                      <button
-                        className="snd-btn-sm"
-                        disabled={removeLoading}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          void handleRemove(h.url);
-                        }}
-                      >
-                        {removeLoading ? ".." : "YES"}
-                      </button>
-                      <button
-                        className="snd-btn-sm"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setRemoveTarget(null);
-                        }}
-                      >
-                        NO
-                      </button>
-                    </div>
-                  ) : (
-                    <button
-                      className="snd-detail-remove"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setRemoveTarget(h.url);
-                      }}
-                    >
-                      REMOVE NODE
-                    </button>
-                  )}
-                </div>
-              )}
-            </React.Fragment>
-          );
-        })}
-        {storage.nodeHealth.length === 0 && (
-          <div className="snd-row storage-row-empty">No nodes configured</div>
-        )}
+        <div className="snd-info-row">
+          <span className="snd-info-label">Storage set</span>
+          <span className="snd-info-val snd-trunc" title={status.storageSetIdB32}>
+            {short(status.storageSetIdB32)}
+          </span>
+        </div>
+        <div className="snd-info-row">
+          <span className="snd-info-label">Members</span>
+          <span className="snd-info-val">{status.members.length}</span>
+        </div>
       </div>
 
-      {/* Actions — node is selected by keyed Fisher-Yates; the user cannot choose which node is added */}
-      <div className="snd-actions">
-        <button
-          className="snd-btn"
-          disabled={addLoading}
-          onClick={() => void handleRequestNode()}
-        >
-          {addLoading ? "Requesting..." : "+ Request Node"}
-        </button>
-        <button
-          className="snd-btn"
-          onClick={() => void loadData(true)}
-          disabled={storage.nodeHealthRefreshing}
-        >
-          {storage.nodeHealthRefreshing ? "Refreshing..." : "Refresh"}
-        </button>
+      <div className="snd-card storage-card-body">
+        <div className="storage-card-copy storage-card-copy-muted">
+          The set is pinned for this device&apos;s network. Syncs counts the inbox syncs
+          that ran to their end on this device.
+        </div>
       </div>
-      {assignedUrl && (
-        <div className="snd-detail-url storage-top-gap-sm">Assigned: {assignedUrl}</div>
-      )}
-      {addError && (
-        <div className="snd-detail-err storage-top-gap-sm">{addError}</div>
-      )}
     </div>
   );
 };
 
 // ═══════════════════════════════════════════════════════════════════════
-// DiagnosticsPanel — inverted dark panels
+// StorageMembersPanel — each member and its latest ByteCommit, as stated
 // ═══════════════════════════════════════════════════════════════════════
-export const DiagnosticsPanel: React.FC = () => {
-  const storage = useStorageStore();
-  const bundle: DiagnosticsBundle | null = storage.diagnostics;
-  const collecting = storage.diagnosticsCollecting;
-
-  async function collect() {
-    await storageStore.initialize();
-    await storageStore.collectDiagnostics();
-  }
-
-  function download() {
-    if (!bundle) return;
-    const data = storageStore.exportDiagnostics(bundle);
-    const blob = new Blob([new Uint8Array(data)], { type: "application/octet-stream" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `dsm-diag-${bundle.nodeHealth.length}.bin`;
-    a.click();
-    URL.revokeObjectURL(url);
-  }
-
-  const hc = bundle?.nodeHealth.filter((h) => h.status === "healthy").length ?? 0;
-  const dc = bundle?.nodeHealth.filter((h) => h.status === "degraded").length ?? 0;
-  const xc = bundle?.nodeHealth.filter((h) => h.status === "down").length ?? 0;
+export const StorageMembersPanel: React.FC<{ members: StorageMember[] }> = ({ members }) => {
+  const [expanded, setExpanded] = useState<string | null>(null);
 
   return (
     <div className="snd-stack">
-      <div className="storage-section-title">Diagnostics</div>
-      {!bundle ? (
-        <button className="snd-btn" onClick={collect} disabled={collecting}>
-          {collecting ? "Collecting\u2026" : "Run Diagnostics"}
-        </button>
-      ) : (
-        <>
-          {/* Summary card */}
-          <div className="snd-card">
-            <div className="snd-diag-row">
-              <span className="snd-diag-label">Nodes</span>
-              <span className="snd-diag-val">{bundle.nodeHealth.length}</span>
-            </div>
-            <div className="snd-diag-row">
-              <span className="snd-diag-label">Online / Warn / Offline</span>
-              <span className="snd-diag-val">
-                {hc} / {dc} / {xc}
-              </span>
-            </div>
-            <div className="snd-diag-row">
-              <span className="snd-diag-label">Platform</span>
-              <span className="snd-diag-val snd-trunc">{bundle.systemInfo.platform}</span>
-            </div>
-          </div>
-
-          {/* Node health table */}
-          {bundle.nodeHealth.length > 0 && (
-            <div className="snd-card snd-table">
-              <div className="snd-table-header" style={{ gridTemplateColumns: "14px 1fr 60px" }}>
-                <span />
-                <span>Node</span>
-                <span>Status</span>
+      <div className="snd-card snd-table">
+        <div className="snd-table-header">
+          <span />
+          <span>Member</span>
+          <span>Cycle</span>
+          <span>Used</span>
+        </div>
+        {members.map((m) => {
+          const isExp = expanded === m.memberId;
+          const mismatch = answeredAsAnother(m);
+          const rowClass = !answered(m)
+            ? "snd-row snd-row-off"
+            : mismatch
+              ? "snd-row snd-row-warn"
+              : "snd-row";
+          const dotClass = !answered(m)
+            ? "snd-dot"
+            : mismatch
+              ? "snd-dot snd-dot-warn"
+              : "snd-dot snd-dot-on";
+          return (
+            <React.Fragment key={m.memberId}>
+              <div
+                className={`${rowClass}${isExp ? " snd-row-exp" : ""}`}
+                onClick={() => setExpanded(isExp ? null : m.memberId)}
+              >
+                <span className={dotClass} />
+                <span className="snd-name">{m.memberId}</span>
+                <span className="snd-region">
+                  {m.answer.kind === "latest" ? m.answer.cycle.toString() : "—"}
+                </span>
+                <span className="snd-ms">
+                  {m.answer.kind === "latest" ? formatBytes(m.answer.bytesUsed) : "—"}
+                </span>
               </div>
-              {bundle.nodeHealth.map((h) => (
-                <div
-                  key={h.url}
-                  className={`snd-row${h.status === "down" ? " snd-row-off" : h.status === "degraded" ? " snd-row-warn" : ""}`}
-                  style={{ gridTemplateColumns: "14px 1fr 60px" }}
-                >
-                  <span
-                    className={`snd-dot${h.status === "healthy" ? " snd-dot-on" : h.status === "degraded" ? " snd-dot-warn" : ""}`}
-                  />
-                  <span className="snd-name">{h.name || extractHost(h.url)}</span>
-                  <span className="snd-region" style={{ fontWeight: 700 }}>
-                    {h.status === "healthy"
-                      ? "ONLINE"
-                      : h.status === "degraded"
-                        ? "WARN"
-                        : "OFFLINE"}
-                  </span>
-                </div>
-              ))}
-            </div>
-          )}
+              {isExp && <MemberDetail member={m} />}
+            </React.Fragment>
+          );
+        })}
+      </div>
 
-          {/* Recent errors */}
-          {bundle.recentErrors.length > 0 && (
-            <div className="snd-card snd-scroll-box">
-              <div className="snd-section-label">Errors ({bundle.recentErrors.length})</div>
-              {bundle.recentErrors.slice(-20).map((e, i) => (
-                <div key={i}>{e}</div>
-              ))}
-            </div>
-          )}
-
-          {/* Actions */}
-          <div className="snd-actions">
-            <button className="snd-btn" onClick={download}>
-              Export
-            </button>
-            <button className="snd-btn" onClick={collect} disabled={collecting}>
-              {collecting ? "Refreshing\u2026" : "Refresh"}
-            </button>
-            <button className="snd-btn" onClick={() => storageStore.clearDiagnostics()}>
-              Clear
-            </button>
-          </div>
-        </>
-      )}
+      <div className="snd-card storage-card-body">
+        <div className="storage-card-copy storage-card-copy-muted">
+          Each member&apos;s latest ByteCommit as that member states it. A member that did
+          not answer has not failed; nothing a member answers is a verdict.
+        </div>
+      </div>
     </div>
   );
 };
+
+const MemberDetail: React.FC<{ member: StorageMember }> = ({ member: m }) => (
+  <div className="snd-detail">
+    <div className="snd-detail-url">{m.endpoint}</div>
+    <div className="snd-detail-stats">
+      <span>Incarnation {short(m.registerIncarnationB32)}</span>
+    </div>
+    {m.answer.kind === "latest" && (
+      <div className="snd-detail-stats">
+        <span>Root {short(m.answer.rootB32)}</span>
+        <span>Digest {short(m.answer.digestB32)}</span>
+        <span>Parent {short(m.answer.parentB32)}</span>
+      </div>
+    )}
+    {m.answer.kind === "noCycle" && (
+      <div className="snd-detail-err">States it has closed no cycle yet.</div>
+    )}
+    {m.answer.kind === "unanswered" && <div className="snd-detail-err">{m.answer.why}</div>}
+    {m.answeredAs === undefined && answered(m) && (
+      <div className="snd-detail-err">The node that answered named no member.</div>
+    )}
+    {answeredAsAnother(m) && (
+      <div className="snd-detail-err">Answered as {m.answeredAs}.</div>
+    )}
+  </div>
+);

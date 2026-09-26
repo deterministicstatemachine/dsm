@@ -65,7 +65,7 @@ describe("protobuf-only bridge payloads", () => {
       },
     };
 
-    await createGenesisViaRouter(mnemonic, "en-US", "testnet");
+    await createGenesisViaRouter(mnemonic, "en-US");
 
     expect(seenRequests).toHaveLength(1);
     expect(seenRequests[0].method).toBe("createGenesisV2");
@@ -75,7 +75,8 @@ describe("protobuf-only bridge payloads", () => {
     const decoded = WalletCreateGenesisV2Request.fromBinary(payload.value.data);
     expect(decoded.mnemonic).toBe(mnemonic);
     expect(decoded.locale).toBe("en-US");
-    expect(decoded.networkId).toBe("testnet");
+    // The network is the SDK's to choose; the request names none.
+    expect(WalletCreateGenesisV2Request.fields.findJsonName("networkId")).toBeUndefined();
     // No silicon / no random entropy: the mnemonic is the sole genesis root.
   });
 

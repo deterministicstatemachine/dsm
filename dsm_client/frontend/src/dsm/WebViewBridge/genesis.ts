@@ -1,15 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
-// Canonical mnemonic-rooted Genesis v2 (whitepaper §2.5) + secondary device + persisted envelope.
+// Canonical mnemonic-rooted Genesis v2 (whitepaper §2.5) + persisted envelope.
 
 import { WalletCreateGenesisV2Request } from "../../proto/dsm_app_pb";
 import { bridgeGate } from "../BridgeGate";
 import { decodeFramedEnvelopeV3 } from "../decoding";
-import {
-  callBin,
-  invokeRouterEnvelope,
-  maybeThrowOnEmpty,
-  toBytes,
-} from "./transportCore";
+import { callBin, maybeThrowOnEmpty } from "./transportCore";
 
 /**
  * Generate a fresh BIP39 mnemonic for the new wallet (the sole Genesis v2 root). The caller MUST
@@ -31,7 +26,6 @@ export async function generateMnemonic(): Promise<string> {
 export async function createGenesisViaRouter(
   mnemonic: string,
   locale: string,
-  networkId: string
 ): Promise<Uint8Array> {
   if (!mnemonic || mnemonic.trim().length === 0) {
     throw new Error("createGenesisViaRouter: mnemonic is required (Genesis v2)");
@@ -39,7 +33,6 @@ export async function createGenesisViaRouter(
   const req = new WalletCreateGenesisV2Request({
     mnemonic: String(mnemonic),
     locale: String(locale ?? ""),
-    networkId: String(networkId ?? ""),
   });
   const res = await maybeThrowOnEmpty(
     await bridgeGate.enqueue(() => callBin("createGenesisV2", req.toBinary())),
@@ -52,33 +45,4 @@ export async function createGenesisViaRouter(
     throw new Error(`createGenesisV2 returned unexpected payload: ${env.payload.case}`);
   }
   return res;
-}
-
-/**
- * Add a secondary device to an existing genesis. Returns the inner
- * SecondaryDeviceResponse proto bytes (already decoded out of the framed
- * Envelope) so callers do not have to repeat the decode.
- */
-export async function addSecondaryDeviceBin(
-  genesisHash: Uint8Array,
-  deviceEntropy: Uint8Array
-): Promise<Uint8Array> {
-  const pb = await import("../../proto/dsm_app_pb");
-  const req = new pb.SecondaryDeviceRequest({
-    genesisHash: new Uint8Array(genesisHash),
-    deviceEntropy: new Uint8Array(deviceEntropy),
-  });
-  const arg = new pb.ArgPack({
-    codec: pb.Codec.PROTO,
-    body: toBytes(req.toBinary()),
-  });
-  const { envelope: env } = await invokeRouterEnvelope("system.secondary_device", arg.toBinary());
-  if (env.payload.case === "error") {
-    const errMsg = env.payload.value.message || `Error code ${env.payload.value.code}`;
-    throw new Error(`initializeSecondaryDevice failed: ${errMsg}`);
-  }
-  if (env.payload.case === "secondaryDeviceResponse") {
-    return env.payload.value.toBinary();
-  }
-  throw new Error(`initializeSecondaryDevice failed: unexpected payload case ${env.payload.case}`);
 }

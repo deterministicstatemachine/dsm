@@ -2689,12 +2689,7 @@ impl AppRouter for AppRouterImpl {
             // Bilateral routes
             "bilateral.pending_list" => self.handle_bilateral_query(q).await,
             // Storage routes
-            "storage.status"
-            | "storage.sync"
-            | "storage.nodeHealth"
-            | "storage.connectivity"
-            | "storage.addNode"
-            | "storage.removeNode" => self.handle_storage_query(q).await,
+            "storage.status" | "storage.sync" => self.handle_storage_query(q).await,
             // Diagnostics routes
             // Token query routes
             "tokens.getPolicy"

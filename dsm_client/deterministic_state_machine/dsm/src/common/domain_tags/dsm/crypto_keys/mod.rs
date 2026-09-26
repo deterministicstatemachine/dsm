@@ -39,7 +39,6 @@ pub(super) const TAGS: &[TaggedHashDomain<'static>] = &[
     TAG_DSM_ML_KEM_KEYGEN_D,
     TAG_DSM_ML_KEM_KEYGEN_Z,
     TAG_DSM_ML_KEM_SEED,
-    TAG_DSM_NETWORK_HASH,
     TAG_DSM_NEXT_ENTROPY,
     TAG_DSM_NONCE,
     TAG_DSM_PK_HASH,

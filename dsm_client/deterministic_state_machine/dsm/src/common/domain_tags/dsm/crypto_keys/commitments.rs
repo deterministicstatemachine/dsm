@@ -15,8 +15,6 @@ pub const TAG_DSM_EXTERNAL_COMMIT_ID: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/external-commit-id");
 pub const TAG_DSM_MERKLE_PATH: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/merkle-path");
-pub const TAG_DSM_NETWORK_HASH: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/network-hash");
 pub const TAG_DSM_PK_HASH: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/pk-hash");
 pub const TAG_DSM_PRECOMMIT: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/precommit");
 pub const TAG_DSM_PRECOMMIT_INVALIDATION_PROOF_V2: TaggedHashDomain<'static> =
