@@ -76,10 +76,8 @@ mod tests {
                 assert_eq!(e.message, "unit test failed");
                 // debug_b32 is present and decodes to some bytes
                 assert!(!e.debug_b32.is_empty());
-                let decoded = match base32::decode(base32::Alphabet::Crockford, &e.debug_b32) {
-                    Ok(d) => d,
-                    Err(e) => panic!("debug_b32 should decode: {:?}", e),
-                };
+                let decoded = base32::decode(base32::Alphabet::Crockford, &e.debug_b32)
+                    .expect("debug_b32 decodes");
                 assert!(decoded.len() > 0);
             }
             other => panic!("Unexpected payload: {:?}", other),
