@@ -21,17 +21,11 @@ export async function generateMnemonic(): Promise<string> {
  * native side derives `wallet_seed`, caches it in the unlocked session, and runs `create_genesis_v2`
  * (install + persist v2 record + identity + SDK context). Returns the framed genesis envelope.
  */
-export async function createGenesisViaRouter(
-  mnemonic: string,
-  locale: string,
-): Promise<Uint8Array> {
+export async function createGenesisViaRouter(mnemonic: string): Promise<Uint8Array> {
   if (!mnemonic || mnemonic.trim().length === 0) {
     throw new Error("createGenesisViaRouter: mnemonic is required (Genesis v2)");
   }
-  const req = new WalletCreateGenesisV2Request({
-    mnemonic: String(mnemonic),
-    locale: String(locale ?? ""),
-  });
+  const req = new WalletCreateGenesisV2Request({ mnemonic });
   const res = await bridgeGate.enqueue(() => callBin("createGenesisV2", req.toBinary()));
   const env = decodeFramedEnvelopeV3(res);
   if (env.payload.case === "error") {

@@ -1538,7 +1538,9 @@ message TokenMetadataProto {
 // session, and runs create_genesis_v2 (no storage nodes, no silicon, no random genesis entropy).
 message WalletCreateGenesisV2Request {
   string mnemonic   = 1;
-  string locale     = 2;
+  // 2 was a locale nothing consumed; Rust echoed it back.
+  reserved 2;
+  reserved "locale";
   // The network is the one this build's root register is pinned for, never
   // the caller's choice.
   reserved 3;
@@ -1553,7 +1555,8 @@ message GenesisCreated {
   reserved 6, 7, 8;
   reserved "session_id", "threshold", "storage_nodes";
   string network_id    = 9;
-  string locale        = 10;
+  reserved 10;
+  reserved "locale";
 }
 
 // Additional-device admission (§16.3). Gate-only, two-signature, co-present. An already-authorized

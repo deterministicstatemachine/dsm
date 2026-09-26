@@ -10503,11 +10503,6 @@ export class WalletCreateGenesisV2Request extends Message<WalletCreateGenesisV2R
    */
   mnemonic = "";
 
-  /**
-   * @generated from field: string locale = 2;
-   */
-  locale = "";
-
   constructor(data?: PartialMessage<WalletCreateGenesisV2Request>) {
     super();
     proto3.util.initPartial(data, this);
@@ -10517,7 +10512,6 @@ export class WalletCreateGenesisV2Request extends Message<WalletCreateGenesisV2R
   static readonly typeName = "dsm.WalletCreateGenesisV2Request";
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
     { no: 1, name: "mnemonic", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 2, name: "locale", kind: "scalar", T: 9 /* ScalarType.STRING */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): WalletCreateGenesisV2Request {
@@ -10573,11 +10567,6 @@ export class GenesisCreated extends Message<GenesisCreated> {
    */
   networkId = "";
 
-  /**
-   * @generated from field: string locale = 10;
-   */
-  locale = "";
-
   constructor(data?: PartialMessage<GenesisCreated>) {
     super();
     proto3.util.initPartial(data, this);
@@ -10592,7 +10581,6 @@ export class GenesisCreated extends Message<GenesisCreated> {
     { no: 4, name: "smt_root", kind: "message", T: Hash32 },
     { no: 5, name: "genesis_nonce", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 9, name: "network_id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 10, name: "locale", kind: "scalar", T: 9 /* ScalarType.STRING */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): GenesisCreated {

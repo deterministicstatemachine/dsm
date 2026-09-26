@@ -48,7 +48,6 @@ describe("protobuf-only bridge payloads", () => {
           genesisHash: new Hash32({ v: genesisHash }),
           genesisNonce: new Uint8Array(32).fill(0x33),
           networkId: "testnet",
-          locale: "en-US",
         }),
       },
     });
@@ -65,7 +64,7 @@ describe("protobuf-only bridge payloads", () => {
       },
     };
 
-    await createGenesisViaRouter(mnemonic, "en-US");
+    await createGenesisViaRouter(mnemonic);
 
     expect(seenRequests).toHaveLength(1);
     expect(seenRequests[0].method).toBe("createGenesisV2");
@@ -74,7 +73,6 @@ describe("protobuf-only bridge payloads", () => {
     if (payload.case !== "bytes") throw new Error("expected a bytes payload");
     const decoded = WalletCreateGenesisV2Request.fromBinary(payload.value.data);
     expect(decoded.mnemonic).toBe(mnemonic);
-    expect(decoded.locale).toBe("en-US");
     // The network is the SDK's to choose; the request names none.
     expect(WalletCreateGenesisV2Request.fields.findJsonName("networkId")).toBeUndefined();
     // No silicon / no random entropy: the mnemonic is the sole genesis root.

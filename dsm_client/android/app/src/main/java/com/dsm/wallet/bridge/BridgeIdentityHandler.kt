@@ -172,7 +172,6 @@ internal object BridgeIdentityHandler {
         keyGenesisHash: String,
         keyGenesisEnvelope: String,
         mnemonic: String,
-        locale: String,
     ): ByteArray {
         if (mnemonic.trim().isEmpty()) {
             Log.e(logTag, "createGenesisV2: mnemonic is required")
@@ -181,7 +180,6 @@ internal object BridgeIdentityHandler {
         return try {
             val req = WalletCreateGenesisV2Request.newBuilder()
                 .setMnemonic(mnemonic)
-                .setLocale(locale)
                 .build()
             val arg = ArgPack.newBuilder()
                 .setCodec(Codec.CODEC_PROTO)
