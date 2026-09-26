@@ -34,20 +34,12 @@ class HeaderService {
 
   isBridgeAvailable(): boolean {
     const b = (globalThis as any)?.DsmBridge;
-    return !!(
-      b &&
-      (b.__binary === true || typeof b.__callBin === 'function')
-    );
+    return b?.__binary === true;
   }
 
   ensureBridge(): void {
     const b: any = (globalThis as any)?.DsmBridge;
-    const ok = !!(
-      b && (
-        b.__binary === true || typeof b.__callBin === 'function'
-      )
-    );
-    if (!ok) throw new Error('DSM bridge not available');
+    if (b?.__binary !== true) throw new Error('DSM bridge not available');
   }
 
   invalidateCache(): void {

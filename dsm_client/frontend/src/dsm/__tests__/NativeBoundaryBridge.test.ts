@@ -25,8 +25,8 @@ describe('NativeBoundaryBridge', () => {
         }).toBinary();
       },
     };
+    // The setter registers the bridge with the DI registry.
     (globalThis as any).window.DsmBridge = bridge;
-    setBridgeInstance(bridge);
 
     const result = await routerQueryBin('wallet.balance', new Uint8Array([1, 2, 3]));
 

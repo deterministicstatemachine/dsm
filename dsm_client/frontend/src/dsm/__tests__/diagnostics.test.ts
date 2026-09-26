@@ -17,7 +17,7 @@ function failure(message: string): Uint8Array {
 /** The native bridge answering `answers[method]` (bytes) over the real transport. */
 function installBridge(answers: Record<string, () => Uint8Array>): void {
   (global as any).window.DsmBridge = {
-    __callBin: async (reqBytes: Uint8Array) => {
+    sendMessageBin: async (reqBytes: Uint8Array) => {
       const method = BridgeRpcRequest.fromBinary(reqBytes).method;
       const answer = answers[method];
       if (!answer) throw new Error(`unexpected bridge method ${method}`);

@@ -18,8 +18,15 @@
 # Handled names are the string arms of the `when (method)` inside
 # SinglePathWebViewBridge.handleBinaryRpcInternal.
 #
-# Exit 0 only when both sets are non-empty and equal. There is no allowlist: a
-# name one side must stop using is removed from that side.
+# The bridge object itself is held to the same rule: the members of the
+# frontend's `AndroidBridgeV3` must be exactly the keys `index.html` installs on
+# `window.DsmBridge` (every production call on the bridge object is typed
+# against that interface), and no production source may name `__callBin`, the
+# transport function only the jest stub installed and every transport path
+# once branched on.
+#
+# Exit 0 only when every set is non-empty and each pair is equal. There is no
+# allowlist: a name one side must stop using is removed from that side.
 
 import os
 import re
@@ -28,6 +35,7 @@ import sys
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 FRONTEND_SRC = os.path.join(ROOT, "dsm_client", "frontend", "src")
 INDEX_HTML = os.path.join(ROOT, "dsm_client", "frontend", "public", "index.html")
+BRIDGE_TYPES = os.path.join(ROOT, "dsm_client", "frontend", "src", "dsm", "bridgeTypes.ts")
 KOTLIN_BRIDGE = os.path.join(
     ROOT, "dsm_client", "android", "app", "src", "main", "java", "com", "dsm", "wallet",
     "bridge", "SinglePathWebViewBridge.kt",
@@ -39,6 +47,9 @@ CALL_RE = re.compile(
 CALL_IDENT_RE = re.compile(r"\bcallBin\(\s*([A-Z][A-Z0-9_]+)\b")
 HTML_RE = re.compile(r"\b(?:callBridgeMethod|encodeBridgeRequest)\(\s*[\"']([A-Za-z0-9_]+)[\"']")
 ARM_RE = re.compile(r"^\s*\"([A-Za-z0-9_]+)\"\s*->", re.M)
+# A member of the object literal: `key: value` or the shorthand `key,`.
+INSTALLED_KEY_RE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?::|,\s*$)", re.M)
+TYPE_MEMBER_RE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\??\s*:", re.M)
 
 
 def fail(msg):
@@ -117,9 +128,54 @@ def handled_names():
     return handled
 
 
+def installed_bridge_keys():
+    """The keys of the object literal `index.html` assigns to `window.DsmBridge`."""
+    html = open(INDEX_HTML, encoding="utf-8").read()
+    start = html.find("window.DsmBridge = {")
+    if start < 0:
+        fail("index.html does not install `window.DsmBridge = {`")
+        sys.exit(2)
+    i = html.index("{", start)
+    depth = 0
+    j = i
+    while j < len(html):
+        if html[j] == "{":
+            depth += 1
+        elif html[j] == "}":
+            depth -= 1
+            if depth == 0:
+                break
+        j += 1
+    return set(INSTALLED_KEY_RE.findall(html[i + 1:j]))
+
+
+def bridge_type_members():
+    text = open(BRIDGE_TYPES, encoding="utf-8").read()
+    start = text.find("export interface AndroidBridgeV3 {")
+    if start < 0:
+        fail("bridgeTypes.ts does not declare AndroidBridgeV3")
+        sys.exit(2)
+    body = text[text.index("{", start) + 1:text.index("\n}", start)]
+    body = re.sub(r"/\*.*?\*/", "", body, flags=re.S)
+    body = re.sub(r"//[^\n]*", "", body)
+    return set(TYPE_MEMBER_RE.findall(body))
+
+
+def production_names_callbin():
+    hits = []
+    for path in frontend_sources():
+        text = open(path, encoding="utf-8").read()
+        for m in re.finditer(r"__callBin", text):
+            hits.append(f"{os.path.relpath(path, ROOT)}:{text.count(chr(10), 0, m.start()) + 1}")
+    return hits
+
+
 def main():
     sent = sent_names()
     handled = handled_names()
+    installed = installed_bridge_keys()
+    typed = bridge_type_members()
+    callbin = production_names_callbin()
     if not sent or not handled:
         fail(f"a scan that finds nothing is not a scan (sent={len(sent)}, handled={len(handled)})")
         return 2
@@ -136,8 +192,26 @@ def main():
         for name in unsent:
             print(f"  {name}: " + ", ".join(handled[name]))
         status = 1
+    if not installed or not typed:
+        fail(f"a scan that finds nothing is not a scan (installed={len(installed)}, typed={len(typed)})")
+        return 2
+    if installed != typed:
+        fail("the frontend's AndroidBridgeV3 and the bridge object index.html installs differ:")
+        for name in sorted(typed - installed):
+            print(f"  typed but not installed: {name}")
+        for name in sorted(installed - typed):
+            print(f"  installed but not typed: {name}")
+        status = 1
+    if callbin:
+        fail("production sources name `__callBin`, a transport only the jest stub installs:")
+        for where in callbin:
+            print(f"  {where}")
+        status = 1
     if status == 0:
-        print(f"[bridge-rpc-names] OK: {len(sent)} names sent, {len(handled)} handled, the same set")
+        print(
+            f"[bridge-rpc-names] OK: {len(sent)} names sent, {len(handled)} handled, the same set; "
+            f"the bridge object's {len(installed)} members typed as installed"
+        )
     return status
 
 

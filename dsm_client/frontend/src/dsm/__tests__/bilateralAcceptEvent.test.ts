@@ -34,7 +34,7 @@ describe('bilateral accept event dispatch', () => {
     } as any);
     const framed = frameEnvelope(env);
     (window as any).DsmBridge = {
-      __callBin: async (reqBytes: Uint8Array) => {
+      sendMessageBin: async (reqBytes: Uint8Array) => {
         const req = pb.BridgeRpcRequest.fromBinary(reqBytes);
         const method = req.method || '';
         const payload = req.payload?.case === 'bytes' ? req.payload.value.data : new Uint8Array(0);
@@ -43,7 +43,7 @@ describe('bilateral accept event dispatch', () => {
           expect(payload.length).toBe(32);
           return wrapSuccessEnvelope(framed);
         }
-        throw new Error(`unhandled __callBin method: ${method}`);
+        throw new Error(`unhandled bridge method: ${method}`);
       },
     };
 
@@ -64,7 +64,7 @@ describe('bilateral accept event dispatch', () => {
 
   test('acceptBilateralByCommitmentBridge rejects invalid payload size', async () => {
     (window as any).DsmBridge = {
-      __callBin: async (_reqBytes: Uint8Array) => new Uint8Array([1]),
+      sendMessageBin: async (_reqBytes: Uint8Array) => new Uint8Array([1]),
     };
     await expect(acceptBilateralByCommitmentBridge(new Uint8Array([1, 2, 3]))).rejects.toThrow(/must be 32 bytes/i);
   });
