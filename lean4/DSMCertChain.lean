@@ -74,7 +74,7 @@ axiom domainHash : String → List UInt8 → Nat
 /-- BLAKE3 domain-hash collision resistance: distinct (tag, message) pairs
     produce distinct hashes. We do NOT prove BLAKE3 security; we state
     the protocol-level consequence. Consistent with the same axiom in
-    DSMOfflineFinality.lean / DSMCryptoBinding.lean. -/
+    DSMCryptoBinding.lean. -/
 axiom domain_hash_injective :
   ∀ (tag₁ : String) (msg₁ : List UInt8) (tag₂ : String) (msg₂ : List UInt8),
     domainHash tag₁ msg₁ = domainHash tag₂ msg₂ →
