@@ -359,6 +359,28 @@ fn a_genesis_release_rides_only_its_creating_operation() {
     }
 }
 
+/// A creation naming ERA's commitment is refused at once from ERA's own
+/// policy, which Core holds (Amendment S11): no resolver is asked, so it is
+/// Invalid, never an availability failure waiting on a fetch.
+#[test]
+fn a_creation_naming_eras_commitment_is_refused_from_eras_own_policy() {
+    let era = dsm::core::token::era_policy::era_policy_commit();
+    let op = create_token(era, 1_000);
+    match verify_release(
+        &Anchors(Vec::new()),
+        &release_witness(era, 1_000),
+        Some(&op),
+    ) {
+        Err(ProvenanceError::GenesisReleaseInvalid(why)) => {
+            assert!(
+                why.contains("release rule"),
+                "refused for another reason: {why}"
+            )
+        }
+        other => panic!("a creation of ERA was not refused from ERA's policy: {other:?}"),
+    }
+}
+
 /// A network-anchored policy (Amendment S11) is a well-formed policy that
 /// releases nothing at creation: the refusal is the release rule's, not a
 /// parse error.

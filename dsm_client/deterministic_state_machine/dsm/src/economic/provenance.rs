@@ -672,9 +672,15 @@ fn verify_genesis_release(
         ));
     };
     let policy_commit = *policy_commit;
-    let bytes = resolver
-        .anchored_policy_bytes(&policy_commit)
-        .map_err(ProvenanceError::GenesisReleasePolicy)?;
+    // ERA's policy is Core's own (Amendment S11): answered from its bytes,
+    // never asked of a resolver, so a creation naming it is refused at once.
+    let bytes = if policy_commit == crate::core::token::era_policy::era_policy_commit() {
+        crate::core::token::era_policy::era_policy_bytes().to_vec()
+    } else {
+        resolver
+            .anchored_policy_bytes(&policy_commit)
+            .map_err(ProvenanceError::GenesisReleasePolicy)?
+    };
     // Bytes that do not re-hash to the commit are not the policy; they supply
     // nothing and prove nothing about the token.
     if crate::crypto::blake3::domain_hash_bytes(crate::common::domain_tags::TAG_DSM_POLICY, &bytes)

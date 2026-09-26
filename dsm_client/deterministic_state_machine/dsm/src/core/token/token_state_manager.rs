@@ -2,9 +2,10 @@
 
 //! Token policy commits and canonical balance keys.
 //!
-//! A token is named in hashing by its 32-byte CPTA `policy_commit`: builtins
-//! (ERA, dBTC) carry fixed commits, every other token resolves through a
-//! registered policy. Balance keys are derived under that commit.
+//! A token is named in hashing by its 32-byte `policy_commit`: ERA's is
+//! derived from its committed policy ([`crate::core::token::era_policy`]),
+//! dBTC's is fixed, and every other token resolves through a registered
+//! policy. Balance keys are derived under that commit.
 
 use std::collections::HashMap;
 
@@ -91,23 +92,16 @@ pub fn derive_canonical_balance_key(
     format!("{prefix}|{token_id}")
 }
 
+/// ERA's policy commitment, derived from ERA's committed policy bytes (SoFi
+/// Amendment S11). Callers that mean ERA use this and carry no
+/// string-keyed lookup.
+pub use crate::core::token::era_policy::era_policy_commit;
+
 /// Deterministic policy_commit lookup for builtin token types.
 /// Used by state machine core to apply token operations deterministically.
-/// The builtin ERA policy commit, infallibly.
-///
-/// `builtin_policy_commit_for_token("ERA")` returns `Option` only because it
-/// is a string-keyed lookup; the "ERA" arm is a constant that cannot miss.
-/// Callers that mean ERA specifically should use this and carry no
-/// panic-or-error path for an impossibility.
-pub fn era_policy_commit() -> [u8; 32] {
-    ERA_POLICY_COMMIT
-}
-
 pub fn builtin_policy_commit_for_token(token_id: &str) -> Option<[u8; 32]> {
-    // These values must match the SDK's policy/builtins.rs for consistency.
-    // Era/dBTC are the canonical builtin tokens for DSM.
     match token_id {
-        "ERA" => Some(ERA_POLICY_COMMIT),
+        "ERA" => Some(era_policy_commit()),
         "dBTC" => Some(DBTC_POLICY_COMMIT),
         _ => None,
     }
@@ -123,7 +117,7 @@ pub fn builtin_policy_commit_for_token(token_id: &str) -> Option<[u8; 32]> {
 /// balance keys in the canonical `{prefix}|{token_id}` format produced by
 /// [`derive_canonical_balance_key`].
 pub fn builtin_token_id_for_policy_commit(policy_commit: &[u8; 32]) -> Option<&'static str> {
-    if *policy_commit == ERA_POLICY_COMMIT {
+    if *policy_commit == era_policy_commit() {
         Some("ERA")
     } else if *policy_commit == DBTC_POLICY_COMMIT {
         Some("dBTC")
@@ -132,11 +126,6 @@ pub fn builtin_token_id_for_policy_commit(policy_commit: &[u8; 32]) -> Option<&'
     }
 }
 
-const ERA_POLICY_COMMIT: [u8; 32] = [
-    0xaf, 0x13, 0x49, 0xb9, 0xf5, 0xf9, 0xa1, 0xa6, 0xa0, 0x40, 0x4d, 0xea, 0x36, 0xdc, 0xc9, 0x49,
-    0x9b, 0xcb, 0x25, 0xc9, 0xad, 0xc1, 0x12, 0xb7, 0xcc, 0x9a, 0x93, 0xca, 0xe4, 0x1f, 0x32, 0x62,
-];
-
 const DBTC_POLICY_COMMIT: [u8; 32] = [
     0x03, 0xa4, 0x2b, 0x67, 0x19, 0x17, 0xaf, 0x84, 0x2f, 0x07, 0x3d, 0x87, 0xcf, 0xa4, 0x59, 0xd8,
     0x45, 0xb9, 0x68, 0xfd, 0xb1, 0xab, 0xcb, 0x03, 0x31, 0x2d, 0x91, 0x4e, 0x35, 0x01, 0x62, 0x22,
@@ -144,11 +133,11 @@ const DBTC_POLICY_COMMIT: [u8; 32] = [
 
 /// Resolve policy_commit for a token by ticker.
 ///
-/// §9.1: all TokenOps MUST include `policy_commit`. Builtins (ERA, dBTC)
-/// resolve to their precomputed constants. For CPTA-anchored custom tokens
-/// the canonical policy_commit is `BLAKE3-256("DSM/cpta\0" || canonical_cpta_bytes)`
-/// and can only be produced by reading the registered `TokenPolicyV3` — not
-/// derived from the ticker string.
+/// §9.1: all TokenOps MUST include `policy_commit`. Builtins resolve to
+/// theirs: ERA's derived from its committed policy, dBTC's fixed. For every
+/// other token the canonical policy_commit is
+/// `BLAKE3(DSM/policy ‖ 0x00 ‖ TokenPolicyV3 bytes)` and can only be produced
+/// by reading the registered policy — not derived from the ticker string.
 ///
 /// This function therefore strict-fails for any non-builtin token.  Callers
 /// that handle custom tokens MUST carry `policy_commit` explicitly on the

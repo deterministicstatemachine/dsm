@@ -554,6 +554,13 @@ impl AppRouterImpl {
     /// The table read re-verifies that the bytes hash to the anchor; a
     /// corrupted row, or a table that cannot be read, is an error.
     async fn load_policy_bytes(&self, anchor: [u8; 32]) -> Result<Option<Vec<u8>>, String> {
+        // ERA's policy is Core's own (SoFi Amendment S11): answered from its
+        // bytes, never fetched and never stored.
+        if anchor == dsm::core::token::token_state_manager::era_policy_commit() {
+            return Ok(Some(
+                dsm::core::token::era_policy::era_policy_bytes().to_vec(),
+            ));
+        }
         if let Some(bytes) = self.policy_cache.lock().await.get(&anchor).cloned() {
             return Ok(Some(bytes));
         }
@@ -667,6 +674,13 @@ impl AppRouterImpl {
                     Err(e) => return err(format!("tokens.addByAnchor: {e}")),
                 };
                 let anchor = input.anchor;
+                if let Some(builtin) = dsm::core::token::builtin_token_id_for_policy_commit(&anchor)
+                {
+                    return err(format!(
+                        "tokens.addByAnchor: {builtin} is a protocol asset — every device already \
+                         has it"
+                    ));
+                }
 
                 let policy_bytes = match self.load_policy_bytes(anchor).await {
                     Ok(Some(b)) if !b.is_empty() => b,
@@ -1930,6 +1944,17 @@ mod tests {
             device_created.len() - network_anchored.len(),
             32 + 32 + 1 + 1 + 2 + 64,
             "exactly the creator and the one-key signer set are left out"
+        );
+    }
+
+    /// SoFi §47, Amendment S11: the one packer reproduces ERA's policy bytes
+    /// exactly from ERA's fields — Core's compiled bytes are the packer's.
+    #[test]
+    fn the_one_packer_reproduces_eras_policy_bytes() {
+        let era = dsm::core::token::era_policy::era_policy().expect("ERA's policy parses");
+        assert_eq!(
+            v3_policy(era),
+            dsm::core::token::era_policy::era_policy_bytes()
         );
     }
 
