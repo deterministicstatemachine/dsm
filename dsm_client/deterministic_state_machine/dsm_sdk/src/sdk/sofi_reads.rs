@@ -286,11 +286,14 @@ mod tests {
     /// whose bytes no member holds may be the genesis, so the scan is a
     /// network failure, never "not published"; a candidate whose bytes are
     /// held and are not a genesis is established, and nothing. On the storage
-    /// node's own code, on Postgres.
+    /// node's own code, on Postgres, as a booted device: the verifier's reads
+    /// are over the network this device's genesis committed, so the test
+    /// establishes that device itself rather than standing on one an earlier
+    /// test left behind.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[serial_test::serial]
     async fn an_unestablished_genesis_candidate_is_not_read_as_unpublished() {
-        let _fleet = crate::test_support::one_device::Fleet::start();
+        let _device = crate::test_support::one_device::Device::start(0xE3).await;
         let set = crate::sdk::storage_set::canonical_set(crate::economic_fixtures::NETWORK)
             .expect("the pinned set");
         let client = SetClient::new(&set).expect("a client of the set");
