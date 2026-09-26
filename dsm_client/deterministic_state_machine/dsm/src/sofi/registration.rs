@@ -84,6 +84,7 @@ pub fn names_fulfillment_key(
 pub struct PositionCells {
     fulfillment: RoutedCell,
     root: RootCell,
+    parent_root: D32,
 }
 
 impl PositionCells {
@@ -113,7 +114,11 @@ impl PositionCells {
             members,
             committed_set_id,
         )?;
-        Ok(Self { fulfillment, root })
+        Ok(Self {
+            fulfillment,
+            root,
+            parent_root: *parent_root,
+        })
     }
 
     /// `K_ful(q)`.
@@ -124,6 +129,70 @@ impl PositionCells {
     /// `K_root(q)`.
     pub fn root(&self) -> &RootCell {
         &self.root
+    }
+
+    /// `R_p`, the root the pair is routed by.
+    pub fn parent_root(&self) -> &D32 {
+        &self.parent_root
+    }
+}
+
+/// `FulfillmentRegistered` at one position as the reads established it,
+/// bound to the position it is about: the trader, the position, and the
+/// root `R_p` the pair was routed by. Built by [`fulfillment_registered`]
+/// over the seats' reads and by nothing else, so the registration a verdict
+/// stands on is always one Core derived at that very pair.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegistrationRead {
+    genesis: D32,
+    device_id: D32,
+    position: u64,
+    parent_root: D32,
+    registration: Registration,
+}
+
+impl RegistrationRead {
+    pub fn genesis(&self) -> &D32 {
+        &self.genesis
+    }
+
+    pub fn device_id(&self) -> &D32 {
+        &self.device_id
+    }
+
+    pub fn position(&self) -> u64 {
+        self.position
+    }
+
+    pub fn parent_root(&self) -> &D32 {
+        &self.parent_root
+    }
+
+    pub fn registration(&self) -> &Registration {
+        &self.registration
+    }
+
+    pub fn into_registration(self) -> Registration {
+        self.registration
+    }
+
+    /// Whether this read is of the position `fulfillment` claims for
+    /// `precommit`'s trader, routed by the root `precommit` was built on.
+    pub fn is_of(
+        &self,
+        precommit: &TraderPrecommitBody,
+        fulfillment: &TraderFulfillmentBody,
+    ) -> bool {
+        self.genesis == *precommit.genesis()
+            && self.device_id == *precommit.device_id()
+            && self.position == fulfillment.position()
+            && self.parent_root == *precommit.void_root()
+    }
+
+    /// `FulfillmentRegistered(q, F)` for exactly `fulfillment`: registered,
+    /// and the registered envelope's body is this one.
+    pub fn is_registered_as(&self, fulfillment: &TraderFulfillmentBody) -> bool {
+        matches!(&self.registration, Registration::Registered(signed) if signed.body == *fulfillment)
     }
 }
 
@@ -220,6 +289,22 @@ pub fn check_fulfillment_completion(
 /// claim). `Err` names what the evidence does not yet show at a cell whose
 /// answer is needed: a network status, never an answer about the position.
 pub fn fulfillment_registered(
+    cells: &PositionCells,
+    fulfillment_evidence: &CellEvidence,
+    root_evidence: &CellEvidence,
+    precommits: &impl PrecommitLookup,
+) -> Result<RegistrationRead, Missing> {
+    let registration = registration_of(cells, fulfillment_evidence, root_evidence, precommits)?;
+    Ok(RegistrationRead {
+        genesis: *cells.root.genesis(),
+        device_id: *cells.root.device_id(),
+        position: cells.root.economic_position(),
+        parent_root: cells.parent_root,
+        registration,
+    })
+}
+
+fn registration_of(
     cells: &PositionCells,
     fulfillment_evidence: &CellEvidence,
     root_evidence: &CellEvidence,
@@ -396,7 +481,8 @@ mod tests {
         let mut root = Cell::at(cells.root().routed());
         root.write(&claim, ROUTE_LEN - 1, &[]);
         assert!(matches!(
-            fulfillment_registered(&cells, &ful.evidence(), &root.evidence(), &known),
+            fulfillment_registered(&cells, &ful.evidence(), &root.evidence(), &known)
+                .map(|r| r.into_registration()),
             Ok(Registration::Registered(ref s)) if s.body == f
         ));
     }
@@ -476,7 +562,7 @@ mod tests {
         let ful_cell = |value: &[u8], last: usize| written(cells.fulfillment(), value, last);
         let root_cell = |value: &[u8], last: usize| written(cells.root().routed(), value, last);
         let reg = |ful: &CellEvidence, root: &CellEvidence| {
-            fulfillment_registered(&cells, ful, root, &known)
+            fulfillment_registered(&cells, ful, root, &known).map(|r| r.into_registration())
         };
         let registered = Signed {
             body: f.clone(),

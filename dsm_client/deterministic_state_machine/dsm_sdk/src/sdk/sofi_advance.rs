@@ -32,10 +32,11 @@ use dsm::economic::state::EconomicLeafState;
 use dsm::economic::tree::EconomicSmt;
 use dsm::route_chain::{CellReading, ChainState, Missing as CellMissing};
 use dsm::sofi::derive;
-use dsm::sofi::lineage::{advance_resolved, descendant_fence, RealizedReceipt, RegisteredClaims};
+use dsm::sofi::facts::{Established, NotEstablished};
+use dsm::sofi::lineage::{advance_resolved, descendant_fence, AdvanceError};
 use dsm::sofi::publication::Publication;
 use dsm::sofi::registration::Registration;
-use dsm::sofi::resolution::{ParentPosition, PositionEffect, Resolution};
+use dsm::sofi::resolution::{PositionEffect, Resolution};
 use dsm::sofi::storage::Resolved;
 use dsm::sofi::validation::{trader_post_states, vault_post_states};
 use dsm::sofi::wire::{
@@ -49,7 +50,7 @@ use dsm::types::operations::Operation;
 use crate::sdk::core_sdk::CoreSDK;
 use crate::sdk::economic_admission_flow::validated_root_or_activate;
 use crate::sdk::route_seats::{read_cell, value_of, NodeSeats};
-use crate::sdk::sofi_evidence::{acquire_evidence, Acquired, LocalLeaves};
+use crate::sdk::sofi_evidence::{Acquired, LocalLeaves};
 use crate::sdk::sofi_exercise::{build_exercise, read_attempt_cell, write_exercise, LegWrite};
 use crate::sdk::sofi_publish::{fetch_fulfillment, fetch_precommit, fetch_preimage};
 use crate::sdk::sofi_chain::ChainWalker;
@@ -57,7 +58,7 @@ use crate::sdk::sofi_register::{
     acquire_conformance_evidence, install_fulfillment, position_cells, read_registration,
     InstallRequest, Installed,
 };
-use crate::sdk::sofi_resolve::{NotEstablished, PositionOutcome, Resolver};
+use crate::sdk::sofi_resolve::Resolver;
 use crate::sdk::storage_set::StorageSet;
 use dsm::sofi::resolution::{Incomplete, VaultChain};
 use crate::storage::client_db::economic_lineage;
@@ -471,15 +472,11 @@ pub enum NotResolved {
     /// The first leg's cell does not hold the exercise yet, or its reads do
     /// not decide it.
     ExerciseNotRead,
-    /// The resolver's facts are complete and the ladder does not resolve the
-    /// position yet (Amendment S7).
+    /// The facts are complete and the ladder, run inside the advance, does
+    /// not resolve the position yet (Amendment S7).
     Ladder(Incomplete),
     /// A fact the ladder reads is not established.
     Facts(NotEstablished),
-    /// Resolved, but the claim at `K_root(q)` is not final in hand yet.
-    RootClaimNotFinal,
-    /// Realized, but the evidence the advance consumes is not in hand.
-    Evidence(String),
 }
 
 /// What stage 10 did.
@@ -608,7 +605,7 @@ pub async fn resolve_pending_position(
             Ok(registration) => registration,
             Err(missing) => return not_yet(NotResolved::Registration(missing)),
         };
-    let fulfillment = match &registration {
+    let fulfillment = match registration.registration() {
         Registration::Registered(signed)
             if derive::fulfillment_id(&signed.body) == fulfillment_id =>
         {
@@ -640,7 +637,7 @@ pub async fn resolve_pending_position(
         .ok_or_else(|| refuse("F names no attempt for P's first leg"))?;
     let exercise =
         match read_attempt_cell(set, &first.vault_id, &first.parent_root, attempt).await? {
-            Ok(read) => match read.exercise {
+            Ok(read) => match read.into_exercise() {
                 Some(exercise) => exercise,
                 None => return not_yet(NotResolved::ExerciseNotRead),
             },
@@ -655,23 +652,11 @@ pub async fn resolve_pending_position(
     // forward from the genesis or from the generations this device already
     // recorded, so a parent past genesis is decided rather than deferred.
     let local = LocalLeaves::of_validated(&genesis, &device_id, &validated)?;
-    let mut parents = BTreeMap::new();
-    if let AdmittedEconomicPosition::ResolvedSofi {
-        fulfillment_id: parent_fid,
-        selected_root,
-        ..
-    } = admitted
-    {
-        parents.insert(
-            parent_fid,
-            ParentPosition::ConditionalSelected { selected_root },
-        );
-    }
     let mut chains: BTreeMap<D32, VaultChain> = BTreeMap::new();
     let walker = ChainWalker {
         set,
         local: &local,
-        parents: &parents,
+        parent: Some(&admitted),
     };
     for leg in precommit.legs() {
         if chains.contains_key(&leg.vault_id) {
@@ -682,93 +667,64 @@ pub async fn resolve_pending_position(
     let resolver = Resolver {
         set,
         local: &local,
-        parents: &parents,
+        parent: Some(&admitted),
         chains: &chains,
     };
-    let (resolution, effect) = match resolver
-        .resolve_recognized(exercise.clone(), &registration)
-        .await?
-    {
-        PositionOutcome::Resolved { resolution, effect } => (resolution, effect),
-        PositionOutcome::NotYet(incomplete) => return not_yet(NotResolved::Ladder(incomplete)),
-        PositionOutcome::NotEstablished(why) => return not_yet(NotResolved::Facts(why)),
-    };
-    // Only a realized or void route installs a root.
-    let realized = match resolution {
-        Resolution::Realized => true,
-        Resolution::Void => false,
-        Resolution::Invalid => return Ok(Advanced::Invalid { position: q }),
+    let established = match resolver.establish_own(&exercise, &registration).await? {
+        Ok(established) => established,
+        Err(why) => return not_yet(NotResolved::Facts(why)),
     };
 
     // Stage 10. Every input to `advance_resolved` is this device's own: the
-    // validated predecessor, the claim it registered at p, and C_q read
-    // back final from K_root(q) — compared against the one (P, F) derive,
-    // never believed.
+    // validated predecessor, the claim it registered at p, the facts Core
+    // established over its own reads, and the head whose adoptions decide
+    // what a realized route may credit. The ladder runs inside the advance;
+    // no resolution is named here.
     let parent = own_parent_claim(&admitted)?;
-    let Some(conditional_bytes) =
-        final_root_cell(set, &genesis, &device_id, q, &validated.economic_root()).await?
-    else {
-        return not_yet(NotResolved::RootClaimNotFinal);
-    };
-    let claims = RegisteredClaims {
-        parent,
-        conditional: derive::claim_ref(&conditional_bytes),
-    };
-    // The evidence this verdict was reached on, acquired BEFORE the advance:
-    // the adoption gate inside `advance_resolved` derives this operation's
-    // credits from these same bytes, so it cannot be handed a different
-    // settlement's. A Void moves nothing and needs none.
-    let evidence = if realized {
-        match acquire_evidence(set, &precommit, &exercise.preimage, &local).await? {
-            Acquired::Complete(evidence) => Some(evidence),
-            Acquired::Exhausted(missing) | Acquired::NoSource(missing) => {
-                return not_yet(NotResolved::Evidence(format!("{missing:?}")))
-            }
-        }
-    } else {
-        None
-    };
-    let receipt = evidence.as_ref().map(|evidence| RealizedReceipt {
-        preimage: &exercise.preimage,
-        evidence,
-        // `S_pre`: the state this advance succeeds. Adoption must PRECEDE
-        // receipt, so it is this head's adoptions that decide, not the ones
-        // the operation would leave behind.
-        receiver: &head,
-    });
-    let advanced = advance_resolved(
+    let advanced = match advance_resolved(
         &validated,
         &precommit,
         &fulfillment.body,
-        &claims,
-        resolution,
-        receipt.as_ref(),
-    )
-    .map_err(|e| refuse(e.to_string()))?;
+        &parent,
+        &established,
+        &head,
+    ) {
+        Ok(advanced) => advanced,
+        Err(AdvanceError::FactsIncomplete(incomplete)) => {
+            return not_yet(NotResolved::Ladder(incomplete))
+        }
+        // The route resolved Invalid: the lineage is terminal at q, no root
+        // follows it, and the fence stands.
+        Err(AdvanceError::LineageIsTerminal) => return Ok(Advanced::Invalid { position: q }),
+        Err(e) => return Err(refuse(e.to_string())),
+    };
 
     // The leaves behind the installed root. Void moved nothing; Realized
     // wrote exactly what T° states, recomputed by Core from the evidence the
-    // verdict was reached on. Either way the cache must recompute the root
-    // before it is written.
+    // verdict was reached on — the evidence inside the established facts,
+    // the same bytes the advance derived the balances from. Either way the
+    // cache must recompute the root before it is written.
     let current = economic_lineage::load_leaf_cache().map_err(|e| storage("leaf cache", e))?;
     let mut vault_heads = Vec::new();
-    let leaves = match (realized, evidence.as_ref()) {
-        (true, Some(evidence)) => {
-            let post = trader_post_states(&precommit, &exercise.preimage, evidence)
+    let leaves = match (advanced.resolution, &established) {
+        (Resolution::Realized, Established::Facts(facts)) => {
+            let post = trader_post_states(&precommit, facts.preimage(), facts.evidence())
                 .map_err(|e| refuse(format!("post states: {e:?}")))?;
             // The vaults moved too, and this device is the one that resolved
             // it: the post state each leg selected is kept so the NEXT trade
             // against that vault has evidence to stand on (§44.4). Recomputed
             // from the same evidence the verdict used, and bound to what each
             // `V°` states — never read back from anything the producer said.
-            vault_heads = vault_post_states(&precommit, &exercise.preimage, evidence)
+            vault_heads = vault_post_states(&precommit, facts.preimage(), facts.evidence())
                 .map_err(|e| refuse(format!("vault post states: {e:?}")))?;
             post_leaf_cache(current, &post)?
         }
-        (false, None) => current,
-        (true, None) | (false, Some(..)) => {
+        (Resolution::Void, _) => current,
+        // The advance answers Realized over established facts only, and
+        // never Invalid; stated so that a change to it is refused here.
+        (Resolution::Realized, Established::RefutedInHand(..)) | (Resolution::Invalid, _) => {
             return Err(refuse(
-                "the evidence in hand is not the evidence this resolution consumes",
+                "the advance installed a root these facts cannot have produced",
             ))
         }
     };
@@ -790,8 +746,8 @@ pub async fn resolve_pending_position(
         &vault_heads,
     )?;
     Ok(Advanced::Installed {
-        resolution,
-        effect,
+        resolution: advanced.resolution,
+        effect: advanced.effect,
         validated: advanced.root,
     })
 }

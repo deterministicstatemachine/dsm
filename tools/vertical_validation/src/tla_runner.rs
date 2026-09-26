@@ -1012,6 +1012,22 @@ impl TlaRunner {
                 "DSM_SofiFulfillment_CompleteRejectedNotSkipped.cfg",
                 "ObjectiveRejectionImpliesSkipped",
             ),
+            // Stage 10 installs whichever root a caller names: the installed
+            // root stops being the ladder's answer.
+            expect_violation(
+                "SofiFulfillment/install-on-caller-value",
+                "DSM_SofiFulfillment.tla",
+                "DSM_SofiFulfillment_InstallOnCallerValue.cfg",
+                "InstalledRootIsTheLadders",
+            ),
+            // Non-vacuity: an install is reachable in the states the base
+            // config checks.
+            expect_violation(
+                "SofiFulfillment/install-reachable",
+                "DSM_SofiFulfillment.tla",
+                "DSM_SofiFulfillment_InstallReachable.cfg",
+                "NeverInstalled",
+            ),
             expect_violation(
                 "SofiFulfillment/complete-without-canonical-parents",
                 "DSM_SofiFulfillment.tla",

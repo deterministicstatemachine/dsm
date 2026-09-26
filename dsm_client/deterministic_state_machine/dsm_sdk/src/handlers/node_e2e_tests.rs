@@ -17,7 +17,7 @@ use dsm::sofi::conformance::{
 use dsm::sofi::derive;
 use dsm::sofi::exercise::{recognize_exercise, RecognizedExercise};
 use dsm::sofi::publication::Publication;
-use dsm::sofi::resolution::{ParentPosition, WalkOutcome};
+use dsm::sofi::resolution::WalkOutcome;
 use dsm::sofi::wire::{
     AttemptEntry, DlvPolicyFulfillmentBody, PrecommitLeg, SofiExercise, TraderFulfillmentBody,
     TraderPrecommitBody,
@@ -358,7 +358,7 @@ async fn realized_trade(p: &Pair, m: &Market, amount_in: u64) -> u64 {
 /// What a device stands on for a resolution, as `sofi_advance` assembles it:
 /// its own leaves at its validated predecessor, and the conditional position
 /// it resolved, if that is what it stands on.
-fn standing_of(d: &TestDevice) -> (LocalLeaves, BTreeMap<[u8; 32], ParentPosition>) {
+fn standing_of(d: &TestDevice) -> (LocalLeaves, Option<AdmittedEconomicPosition>) {
     d.enter();
     let admitted = economic_lineage::get_admitted()
         .expect("read admitted")
@@ -367,19 +367,11 @@ fn standing_of(d: &TestDevice) -> (LocalLeaves, BTreeMap<[u8; 32], ParentPositio
         .expect("a resolved predecessor");
     let local =
         LocalLeaves::of_validated(&d.genesis, &d.device_id, &validated).expect("own leaves");
-    let mut parents = BTreeMap::new();
-    if let AdmittedEconomicPosition::ResolvedSofi {
-        fulfillment_id,
-        selected_root,
-        ..
-    } = admitted
-    {
-        parents.insert(
-            fulfillment_id,
-            ParentPosition::ConditionalSelected { selected_root },
-        );
-    }
-    (local, parents)
+    // The position this device resolved itself, for Core to read what it
+    // selected when a P names it as its parent.
+    let parent =
+        matches!(admitted, AdmittedEconomicPosition::ResolvedSofi { .. }).then_some(admitted);
+    (local, parent)
 }
 
 fn pending_position(d: &TestDevice) -> Option<u64> {
@@ -588,20 +580,20 @@ async fn a_key_held_by_an_exercise_its_own_bytes_refute_is_skipped_on_those_byte
     let chain = ChainWalker {
         set: &set,
         local: &local,
-        parents: &parents,
+        parent: parents.as_ref(),
     }
     .chain(&m.vault_id)
     .await
     .expect("the vault's chain");
-    assert_eq!(chain.roots.len(), 2, "genesis and one consumption");
-    let (r0, r1) = (chain.roots[0], chain.roots[1]);
+    assert_eq!(chain.roots().len(), 2, "genesis and one consumption");
+    let (r0, r1) = (chain.roots()[0], chain.roots()[1]);
 
     // B's exercise, read back from the key it consumed, and re-aimed.
     let honest = read_attempt_cell(&set, &m.vault_id, &r0, 0)
         .await
         .expect("read")
         .expect("decided")
-        .exercise
+        .into_exercise()
         .expect("B's exercise holds the key it consumed");
     p.b.enter();
     let secret_key = crate::sdk::signing_authority::current_secret_key().expect("B's signing key");
@@ -633,7 +625,7 @@ async fn a_key_held_by_an_exercise_its_own_bytes_refute_is_skipped_on_those_byte
         .expect("read")
         .expect("decided");
     assert_eq!(
-        held.fact,
+        held.fact(),
         CellFact::Held {
             id: recognized.external_commitment,
             state: ChainState::Final,
@@ -649,7 +641,7 @@ async fn a_key_held_by_an_exercise_its_own_bytes_refute_is_skipped_on_those_byte
     let resolver = Resolver {
         set: &set,
         local: &local,
-        parents: &parents,
+        parent: parents.as_ref(),
         chains: &chains,
     };
     let walked = resolver
@@ -700,7 +692,7 @@ async fn a_key_held_by_an_exercise_its_own_bytes_refute_is_skipped_on_those_byte
         .await
         .expect("read")
         .expect("decided")
-        .exercise
+        .into_exercise()
         .expect("B's second exercise holds the next key");
     assert_eq!(next.fulfillment.body.position(), q2);
     assert_eq!(next.fulfillment.body.attempts()[0].attempt, 1);
@@ -728,18 +720,18 @@ async fn an_unsigned_exercise_at_a_successor_key_takes_nothing() {
     let chain = ChainWalker {
         set: &set,
         local: &local,
-        parents: &parents,
+        parent: parents.as_ref(),
     }
     .chain(&m.vault_id)
     .await
     .expect("the vault's chain");
-    assert_eq!(chain.roots.len(), 2, "genesis and one consumption");
-    let (r0, r1) = (chain.roots[0], chain.roots[1]);
+    assert_eq!(chain.roots().len(), 2, "genesis and one consumption");
+    let (r0, r1) = (chain.roots()[0], chain.roots()[1]);
     let honest = read_attempt_cell(&set, &m.vault_id, &r0, 0)
         .await
         .expect("read")
         .expect("decided")
-        .exercise
+        .into_exercise()
         .expect("B's exercise holds the key it consumed");
 
     let unsigned = reaimed(&honest, &m.vault_id, &r1, &|_| vec![0x77; 8]);
@@ -753,14 +745,14 @@ async fn an_unsigned_exercise_at_a_successor_key_takes_nothing() {
         .await
         .expect("read")
         .expect("decided");
-    assert_eq!(read.fact, CellFact::Open, "unsigned bytes hold nothing");
+    assert_eq!(read.fact(), CellFact::Open, "unsigned bytes hold nothing");
 
     let q2 = realized_trade(&p, &m, 10).await;
     let second = read_attempt_cell(&set, &m.vault_id, &r1, 0)
         .await
         .expect("read")
         .expect("decided")
-        .exercise
+        .into_exercise()
         .expect("B's second exercise holds the first key at R1");
     assert_eq!(second.fulfillment.body.position(), q2);
     assert_eq!(balance(&p.b, &m.era), 180);
@@ -802,14 +794,14 @@ async fn a_trade_cut_short_by_a_refused_write_is_the_network_status_until_it_lan
     let chain = ChainWalker {
         set: &set,
         local: &local,
-        parents: &parents,
+        parent: parents.as_ref(),
     }
     .chain(&m.vault_id)
     .await
     .expect("the vault's chain");
-    assert_eq!(chain.roots.len(), 1, "the vault is at its genesis");
+    assert_eq!(chain.roots().len(), 1, "the vault is at its genesis");
     let attempt =
-        attempt_cell(&set, &m.vault_id, &chain.roots[0], 0).expect("the first attempt key");
+        attempt_cell(&set, &m.vault_id, &chain.roots()[0], 0).expect("the first attempt key");
     let attempt_leader = member_name(attempt.routed().route().leader());
 
     // 1. The pair's leader refuses the pair: the trade fails on the network,
