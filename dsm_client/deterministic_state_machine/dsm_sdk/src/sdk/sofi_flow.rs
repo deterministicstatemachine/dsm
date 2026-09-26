@@ -37,12 +37,12 @@ use dsm::types::error::DsmError;
 use crate::sdk::core_sdk::CoreSDK;
 use crate::sdk::economic_admission_flow::{
     admitted_self_loop_operation, committed_network_id, producer_tree_and_pre_state,
-    validated_root_or_activate,
+    validated_root_or_activate, BuiltOn,
 };
 use crate::sdk::economic_registers::{resolve_peer_with_cache, LiveRegisterResolver};
 use crate::sdk::sofi_advance::{
     complete_pending_fulfillment, fulfill, own_closure_objects, own_parent_claim,
-    resolve_pending_position, Advanced, FulfillRequest,
+    resolve_pending_position, Advanced, Completion, FulfillRequest,
 };
 use crate::sdk::sofi_reads::{
     local_leaves_of_validated, verifier_error, LiveSofiReads, VerifierContext,
@@ -294,6 +294,9 @@ pub async fn create_vault(
             amount: intent.reserve_b,
         },
     ];
+    // The genesis names `create_position`, the successor of the predecessor
+    // it was built on: the admission is refused before the advance unless
+    // that is still the predecessor this device stands on.
     let (.., admitted) = admitted_self_loop_operation(
         core,
         operation,
@@ -301,18 +304,12 @@ pub async fn create_vault(
         CreditSourceFacts::None,
         Vec::new(),
         None,
+        Some(BuiltOn::of(&validated)),
     )
     .await?;
-    if admitted.economic_position != create_position {
-        return Err(refuse(format!(
-            "the creation was admitted at position {}, not the position {create_position} its \
-             genesis names",
-            admitted.economic_position
-        )));
-    }
     Ok(VaultCreated {
         vault_id: preimage.vault_id(),
-        position: create_position,
+        position: admitted.economic_position,
     })
 }
 
@@ -406,6 +403,9 @@ pub async fn setup(
         require_stored("setup", &published)?;
     }
     let operation = produced.operation.clone().with_signature(signature);
+    // The setup is built against `validated`: the admission is refused
+    // before the advance unless that is still the predecessor this device
+    // stands on.
     let (.., admitted) = admitted_self_loop_operation(
         core,
         operation,
@@ -413,6 +413,7 @@ pub async fn setup(
         CreditSourceFacts::None,
         Vec::new(),
         None,
+        Some(BuiltOn::of(&validated)),
     )
     .await?;
     Ok(SetUp {
@@ -639,7 +640,9 @@ fn price_hop(
 /// hops (the beta `ROUTE_MAX_LEGS`) from `token_in` to `token_out` through
 /// vaults this device is set up with — every leg names this device's setup
 /// with its vault — each hop quoted at its vault's walked head. A vault whose
-/// head cannot be established here is left out; no route is an empty list.
+/// head cannot be established is an error: a search that could not see every
+/// vault this device is set up with has not searched. Over established heads,
+/// no route is an empty list.
 pub async fn find_route(
     core: &CoreSDK,
     set: &StorageSet,
@@ -650,13 +653,19 @@ pub async fn find_route(
     let verifier = ctx.verifier();
     let mut heads = Vec::new();
     for leaf in standing.local.relationships() {
-        match vault_at_head(set, &verifier, &leaf.vault_id).await {
-            Ok((head, ..)) if head.state.status == VAULT_STATUS_ACTIVE => heads.push(head),
-            Ok(..) => {}
-            Err(e) => log::info!(
-                "[sofi findRoute] vault {} left out: {e}",
-                crate::util::text_id::encode_base32_crockford(&leaf.vault_id)
-            ),
+        let (head, ..) = vault_at_head(set, &verifier, &leaf.vault_id)
+            .await
+            .map_err(|e| {
+                storage(
+                    "findRoute",
+                    format!(
+                        "the head of vault {} is not established: {e}",
+                        crate::util::text_id::encode_base32_crockford(&leaf.vault_id)
+                    ),
+                )
+            })?;
+        if head.state.status == VAULT_STATUS_ACTIVE {
+            heads.push(head);
         }
     }
     let hop = |vault: &VaultAtHead, token_in: D32, amount_in: u64, index: usize| {
@@ -1028,11 +1037,11 @@ async fn exercise_draft(
         })
         .ok_or_else(|| refuse("the fulfillment was not produced"))?;
 
-    // Stages 6 and 7: the transition, then the install. The closure objects
-    // only this trader holds exactly — the parent claim P names — come from
-    // its own durable state.
+    // Stage 6: the transition. The closure objects only this trader holds
+    // exactly — the parent claim P names — come from its own durable state.
+    // The position is durable and fenced from here.
     let own_objects = own_closure_objects(set, checked.precommit(), checked.preimage()).await?;
-    let fulfilled = fulfill(
+    fulfill(
         core,
         set,
         &FulfillRequest {
@@ -1045,18 +1054,21 @@ async fn exercise_draft(
         },
     )
     .await?;
-    // Stage 8, then stages 9 and 10. The position is durable and fenced from
-    // here: a completion the network does not take is retried by
-    // `sofi.resolve`, and reported as the network status meanwhile.
-    if let Err(e) = complete_pending_fulfillment(core, set).await {
-        log::warn!(
-            "[sofi] position {} completion not written this pass: {e}",
-            fulfilled.position
-        );
-        return Ok(PositionOutcome {
-            position: fulfilled.position,
-            state: PositionState::RetriesExhausted,
-        });
+    complete_and_settle(core, set).await
+}
+
+/// Stages 7 to 10 for the pending position: the install and the exercise
+/// from what storage holds, then the resolution rounds. A stage the network
+/// did not take this pass is the network's status, logged; the rounds still
+/// read the position as storage holds it — another party may have carried
+/// the pair or the exercise (§33) — and report `RetriesExhausted` if it does
+/// not resolve. A refusal is an error, and reported as one.
+async fn complete_and_settle(
+    core: &CoreSDK,
+    set: &StorageSet,
+) -> Result<PositionOutcome, DsmError> {
+    if let Completion::NotTaken { position, why } = complete_pending_fulfillment(core, set).await? {
+        log::info!("[sofi] position {position}: stages 7 and 8 not taken by the network this pass: {why:?}");
     }
     settle(core, set).await
 }
@@ -1244,8 +1256,7 @@ pub async fn relay(set: &StorageSet, intent: &RelayIntent) -> Result<Relayed, Ds
 /// `sofi.resolve`: finish this device's pending fulfillment from what storage
 /// holds — install and exercise, idempotently — and resolve it.
 pub async fn resolve(core: &CoreSDK, set: &StorageSet) -> Result<PositionOutcome, DsmError> {
-    complete_pending_fulfillment(core, set).await?;
-    settle(core, set).await
+    complete_and_settle(core, set).await
 }
 
 #[cfg(test)]
