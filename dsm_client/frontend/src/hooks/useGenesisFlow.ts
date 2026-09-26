@@ -106,9 +106,8 @@ export function useGenesisFlow({
         throw new Error('Genesis: failed to generate a valid recovery mnemonic');
       }
       onMnemonicGenerated?.(mnemonic);
-      const locale = navigator.language || 'en-US';
 
-      const envelopeBytes = await createGenesisViaRouter(mnemonic, locale);
+      const envelopeBytes = await createGenesisViaRouter(mnemonic);
       logger.debug('FRONTEND: createGenesisViaRouter returned bytes', envelopeBytes?.length);
 
       if (!envelopeBytes || envelopeBytes.length < 10) {

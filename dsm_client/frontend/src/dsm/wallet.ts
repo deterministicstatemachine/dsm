@@ -7,7 +7,7 @@ import {
     getWalletHistoryStrictBridge,
     getInboxStrictBridge,
 } from './WebViewBridge';
-import { TokenBalanceView, WalletHistory } from './types';
+import { TokenBalanceView, WalletHistory, InboxItemView } from './types';
 import { decodeFramedEnvelopeV3 } from './decoding';
 import { mapTransactions } from '../domain/mappers';
 import logger from '../utils/logger';
@@ -105,52 +105,28 @@ export async function getTransactions(): Promise<any[]> {
   return history.transactions;
 }
 
-export async function getInbox(limit = 50): Promise<{ items: Array<{ id: string; preview: string; sender_id?: string; payload?: Uint8Array; isStaleRoute: boolean }> }> {
-  try {
-    const responseBytes = await getInboxStrictBridge({ limit });
-    
-    // CANONICAL PATH: All bridge responses are FramedEnvelopeV3
-    const env = decodeFramedEnvelopeV3(responseBytes);
-    logger.debug('[DSM:getInbox] Successfully decoded Envelope! payload.case=', env.payload.case);
-
-    // Check for error response
-    if (env.payload.case === 'error') {
-      const err = env.payload.value;
-      throw new Error(`Native error: ${err.message || 'Unknown'} (code ${err.code || 0})`);
-    }
-
-    // Extract inbox from envelope
-    if (env.payload.case !== 'inboxResponse') {
-      logger.error('[DSM:getInbox] Unexpected payload.case:', env.payload.case);
-      throw new Error(`Unexpected payload case for inbox: ${env.payload.case}`);
-    }
-
-    const inboxResponse = env.payload.value;
-    if (!inboxResponse) {
-      throw new Error('inboxResponse payload is null');
-    }
-
-    const items = inboxResponse.items.map((item: pb.InboxItem) => ({
-      id: item.id || '',
-      preview: item.preview || '',
-      sender_id: item.senderId,
-      isStaleRoute: item.isStaleRoute,
-    }));
-
-    return { items };
-  } catch (e) {
-    logger.warn('[DSM:getInbox] Bridge call failed:', e);
-    throw e;
+/**
+ * The items `inbox.pull` found queued for this device. Rust writes an id and a
+ * preview on every item; an item without them is refused, never filled in.
+ */
+export async function getInbox(limit = 50): Promise<{ items: InboxItemView[] }> {
+  const env = decodeFramedEnvelopeV3(await getInboxStrictBridge({ limit }));
+  if (env.payload.case === 'error') {
+    const err = env.payload.value;
+    throw new Error(`Native error: ${err.message || 'Unknown'} (code ${err.code || 0})`);
   }
-}
-
-export async function listB0xMessages(): Promise<any[]> {
-  const inbox = await getInbox();
-  return inbox.items.map(item => ({
-    id: item.id,
-    preview: item.preview,
-    senderId: item.sender_id,
-    isStaleRoute: item.isStaleRoute ?? false,
-  }));
+  if (env.payload.case !== 'inboxResponse') {
+    throw new Error(`Unexpected payload case for inbox: ${env.payload.case}`);
+  }
+  if (!env.payload.value) {
+    throw new Error('inboxResponse payload is null');
+  }
+  const items = env.payload.value.items.map((item: pb.InboxItem): InboxItemView => {
+    if (!item.id || !item.preview) {
+      throw new Error(`STRICT: inbox.pull answered an item without its id or preview (id "${item.id}")`);
+    }
+    return { id: item.id, preview: item.preview, senderId: item.senderId, isStaleRoute: item.isStaleRoute };
+  });
+  return { items };
 }
 

@@ -4,11 +4,11 @@
 import * as pb from '../proto/dsm_app_pb';
 import {
   getContactsStrictBridge,
-  normalizeToBytes,
   routerInvokeBin,
+  routerQueryBin,
   requestBlePermissions as bridgeRequestBlePermissions,
 } from './WebViewBridge';
-import { ContactsList, AddContactArgs, AddContactResult, BilateralRelationshipDTO } from './types';
+import { ContactsList, AddContactArgs, AddContactResult, BilateralRelationshipDTO, ContactCard } from './types';
 
 /** A contact as contacts.list states it; a contact missing what Rust always writes is refused. */
 function mapContactToDTO(c: pb.ContactAddResponse): BilateralRelationshipDTO {
@@ -81,54 +81,70 @@ export async function getContacts(): Promise<ContactsList> {
   }
 }
 
+/** Rust's refusal, worded as Rust worded it. */
+function refusal(route: string, e: pb.Error): Error {
+  return new Error(e.message || `${route} failed with code ${e.code}`);
+}
+
+/** This device's contact code: the text its QR encodes, as Rust renders it. */
+export async function getContactCode(): Promise<string> {
+  const env = decodeFramedEnvelopeV3(await routerQueryBin('identity.contact_code'));
+  if (env.payload.case === 'error') throw refusal('identity.contact_code', env.payload.value);
+  if (env.payload.case !== 'appStateResponse' || env.payload.value.key !== 'contact_code' || !env.payload.value.value) {
+    throw new Error(`STRICT: identity.contact_code answered ${env.payload.case} without the code`);
+  }
+  return env.payload.value.value;
+}
+
+/**
+ * The card a scanned or pasted contact code carries. Rust reads the code and
+ * refuses one that is not whole or names another network than this device's.
+ */
+export async function readContactCode(text: string): Promise<ContactCard> {
+  const scanned = new pb.QrScanResultPayload({ textUtf8: text });
+  const pack = new pb.ArgPack({ codec: pb.Codec.PROTO, body: scanned.toBinary() as any });
+  const env = decodeFramedEnvelopeV3(await routerQueryBin('contacts.readContactCode', pack.toBinary()));
+  if (env.payload.case === 'error') throw refusal('contacts.readContactCode', env.payload.value);
+  if (env.payload.case !== 'contactQrResponse') {
+    throw new Error(`STRICT: contacts.readContactCode answered ${env.payload.case}`);
+  }
+  const card = env.payload.value;
+  if (card.deviceId.length !== 32 || card.genesisHash.length !== 32 || card.signingPublicKey.length !== 64 || !card.network) {
+    throw new Error('STRICT: contacts.readContactCode answered a card without its identity');
+  }
+  return {
+    deviceId: card.deviceId,
+    genesisHash: card.genesisHash,
+    signingPublicKey: card.signingPublicKey,
+    network: card.network,
+    preferredAlias: card.preferredAlias || undefined,
+  };
+}
+
+/**
+ * Adds the contact a card names. Rust resolves the device's directory entry on
+ * the pinned set first and answers the contact it added, or its refusal.
+ */
 export async function addContact(args: AddContactArgs): Promise<AddContactResult> {
-  if (!args.alias) {
-    throw new Error('alias required');
-  }
-  const deviceId = normalizeToBytes(args.deviceId);
-  const genesisHash = normalizeToBytes(args.genesisHash);
-  const signingPublicKey = normalizeToBytes(args.signingPublicKey);
-  
-  if (deviceId.length !== 32) {
-    throw new Error('deviceId must be 32 bytes');
-  }
-  if (genesisHash.length !== 32) {
-    throw new Error('genesisHash must be 32 bytes');
-  }
-  if (signingPublicKey.length !== 64) {
-    throw new Error('signingPublicKey must be 64 bytes');
-  }
   try {
     const req = new pb.ContactManualAddRequest({
       alias: args.alias,
-      deviceId: deviceId as any,
-      genesisHash: genesisHash as any,
-      signingPublicKey: signingPublicKey as any,
+      deviceId: args.deviceId as any,
+      genesisHash: args.genesisHash as any,
+      signingPublicKey: args.signingPublicKey as any,
     });
-
     const argPack = new pb.ArgPack({
       codec: pb.Codec.PROTO,
       body: new Uint8Array(req.toBinary()) as any,
     });
-
-    const responseBytes = await routerInvokeBin(
-      'contacts.addManual',
-      argPack.toBinary()
-    );
-
-    // Canonical Envelope v3 decode
-    const env = decodeFramedEnvelopeV3(responseBytes);
-    if (env.payload.case === 'error') {
-      const errMsg = env.payload.value.message || `Error code ${env.payload.value.code}`;
-      throw new Error(`addContact failed: ${errMsg}`);
-    }
+    const env = decodeFramedEnvelopeV3(await routerInvokeBin('contacts.addManual', argPack.toBinary()));
+    if (env.payload.case === 'error') throw refusal('contacts.addManual', env.payload.value);
     if (env.payload.case !== 'contactAddResponse') {
-      throw new Error(`Expected contactAddResponse, got ${env.payload.case}`);
+      throw new Error(`STRICT: contacts.addManual answered ${env.payload.case}`);
     }
-    // Rust answers an added contact with the contact itself; a refusal is an error.
-    return { accepted: true, contactId: encodeBase32Crockford(env.payload.value.deviceId) };
+    const added = env.payload.value;
+    return { accepted: true, contactId: encodeBase32Crockford(added.deviceId), alias: added.alias };
   } catch (e) {
-    console.error('[addContact] Bridge call failed:', e);
     return {
       accepted: false,
       error: e instanceof Error ? e.message : String(e),

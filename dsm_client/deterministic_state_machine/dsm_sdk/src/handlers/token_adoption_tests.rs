@@ -81,7 +81,23 @@ async fn created_on_a_adopted_on_b(ticker: &str) -> (Pair, [u8; 32]) {
         "B adopts {ticker}: {:?}",
         adopted.error_message
     );
+    // The answer names the token it registered — id, ticker and the anchor
+    // re-derived from the fetched bytes — as fields, not as prose: the screen
+    // shows these, and it used to scrape the ticker out of the message.
+    let answer = adopted_token(&adopted);
+    assert_eq!(answer.ticker, ticker);
+    assert_eq!(answer.token_id, derive_token_id(&anchor, ticker));
+    assert_eq!(answer.policy_anchor, anchor.to_vec());
     (p, anchor)
+}
+
+/// The `TokenCreateResponse` a successful adoption answers with.
+fn adopted_token(result: &AppResult) -> crate::generated::TokenCreateResponse {
+    let env = crate::generated::Envelope::decode(&result.data[1..]).expect("a framed envelope");
+    match env.payload {
+        Some(crate::generated::envelope::Payload::TokenCreateResponse(resp)) => resp,
+        other => panic!("an adoption answers a TokenCreateResponse, not {other:?}"),
+    }
 }
 
 /// THE HARDWARE FAILURE (8XK → D3): the receiver of a created token held no

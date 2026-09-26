@@ -29,7 +29,6 @@ class SinglePathWebViewBridgeFuzzTest {
             "getPersistedDeviceId",
             "getPersistedGenesisHash",
             "getBluetoothStatus",
-            "hasIdentityDirect",
             "getPreference",
             "setPreference",
             "nativeBoundaryStartup",
@@ -290,7 +289,7 @@ class SinglePathWebViewBridgeFuzzTest {
     @Test
     fun testValidPayloadsStillWork() {
         // Test methods that should work with empty payloads
-        val emptyMethods = listOf("hasNativeQrScanner", "getDeviceIdBin", "hasIdentityDirect")
+        val emptyMethods = listOf("hasNativeQrScanner", "getDeviceIdBin")
 
         emptyMethods.forEach { method ->
             val result = SinglePathWebViewBridge.handleBinaryRpc(method, ByteArray(0))

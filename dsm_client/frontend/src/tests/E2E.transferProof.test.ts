@@ -166,7 +166,6 @@ function installBridge(opts?: { contactBleAddress?: string }) {
     __binary: true,
     getDeviceIdBin: () => encodeBase32Crockford(DEVICE_A),
     getGenesisHashBin: () => encodeBase32Crockford(GENESIS_A),
-    hasIdentityDirect: () => true,
 
     __callBin: async (reqBytes: Uint8Array): Promise<Uint8Array> => {
       const { method, payload } = decodeBridgeReq(reqBytes);

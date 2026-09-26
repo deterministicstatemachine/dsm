@@ -877,6 +877,7 @@ impl AppRouterImpl {
                         token_id,
                         policy_anchor: anchor.to_vec(),
                         message: format!("Added {}", parsed.ticker),
+                        ticker: parsed.ticker.clone(),
                     },
                 ))
             }
@@ -1197,6 +1198,7 @@ impl AppRouterImpl {
                                     token_id,
                                     policy_anchor: policy_anchor.to_vec(),
                                     message: "Token already created".to_string(),
+                                    ticker: ticker.clone(),
                                 },
                             ),
                         );
@@ -1451,6 +1453,7 @@ impl AppRouterImpl {
                     token_id,
                     policy_anchor: policy_anchor.to_vec(),
                     message: "Token created".to_string(),
+                    ticker: ticker.clone(),
                 };
                 pack_envelope_ok(generated::envelope::Payload::TokenCreateResponse(resp))
             }

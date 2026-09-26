@@ -5,10 +5,12 @@ import { renderHook, act } from '@testing-library/react';
 
 const mockGetPreference = jest.fn();
 const mockSetPreference = jest.fn();
+const mockGetIdentity = jest.fn();
 jest.mock('../../services/dsmClient', () => ({
   dsmClient: {
     getPreference: (...args: any[]) => mockGetPreference(...args),
     setPreference: (...args: any[]) => mockSetPreference(...args),
+    getIdentity: (...args: any[]) => mockGetIdentity(...args),
   },
 }));
 
@@ -40,21 +42,15 @@ jest.mock('../../runtime/nativeSessionStore', () => ({
   },
 }));
 
+const mockGetArchitectureInfo = jest.fn();
+const mockGetDiagnosticsLog = jest.fn();
 jest.mock('../../dsm/WebViewBridge', () => ({
-  runNativeBridgeSelfTest: jest.fn(() => 'PASS'),
-  getLastError: jest.fn(() => ''),
-  getArchitectureInfo: jest.fn(async () => ({
-    status: 'COMPATIBLE',
-    deviceArch: 'arm64',
-    supportedAbis: 'arm64-v8a',
-    message: 'OK',
-    recommendation: '',
-  })),
+  getArchitectureInfo: (...args: any[]) => mockGetArchitectureInfo(...args),
+  getDiagnosticsLog: (...args: any[]) => mockGetDiagnosticsLog(...args),
 }));
 
 jest.mock('../../services/telemetry', () => ({
   sendDiagnostics: jest.fn(async () => {}),
-  exportDiagnosticsReport: jest.fn(async () => new Uint8Array(0)),
 }));
 
 import { bridgeEvents } from '../../bridge/bridgeEvents';
@@ -73,10 +69,20 @@ beforeEach(() => {
   mockSetPreference.mockReset();
   mockGetPreference.mockResolvedValue(null);
   mockSetPreference.mockResolvedValue(undefined);
+  mockGetIdentity.mockReset();
+  mockGetIdentity.mockResolvedValue({ deviceId: 'DEV', genesisHash: 'GEN' });
+  mockGetArchitectureInfo.mockReset();
+  mockGetArchitectureInfo.mockResolvedValue({
+    status: 'COMPATIBLE',
+    deviceArch: 'arm64',
+    supportedAbis: 'arm64-v8a',
+    message: 'OK',
+    recommendation: '',
+  });
+  mockGetDiagnosticsLog.mockReset();
+  mockGetDiagnosticsLog.mockResolvedValue(new Uint8Array(0));
   jest.spyOn(console, 'warn').mockImplementation(() => {});
   jest.spyOn(console, 'error').mockImplementation(() => {});
-  delete (window as any).__envConfigErrorDetail;
-  delete (window as any).__lastBridgeError;
 });
 
 afterEach(() => {
@@ -140,11 +146,6 @@ describe('useDiagnostics', () => {
     });
 
     expect(result.current.envConfigError).toBe('Missing config');
-    expect((window as any).__envConfigErrorDetail).toEqual({
-      message: 'Missing config',
-      type: 'MISSING_FILE',
-      help: 'reinstall',
-    });
   });
 
   it('handles env.config.error with missing message', async () => {
@@ -171,11 +172,6 @@ describe('useDiagnostics', () => {
     });
 
     expect(result.current.lastBridgeError).toEqual({
-      code: 42,
-      message: 'decode fail',
-      debugB32: 'ABC123',
-    });
-    expect((window as any).__lastBridgeError).toEqual({
       code: 42,
       message: 'decode fail',
       debugB32: 'ABC123',
@@ -223,9 +219,58 @@ describe('useDiagnostics', () => {
 
     expect(result.current.diagLoading).toBe(false);
     expect(result.current.showDiagnostics).toBe(true);
-    expect(result.current.diagnostics).toContain('DSM diagnostics (clockless)');
-    expect(result.current.diagnostics).toContain('bridgeStatus=');
-    expect(result.current.diagnostics).toContain('archStatus=COMPATIBLE');
+    expect(result.current.diagnostics).toContain('DSM diagnostics');
+    expect(result.current.diagnostics).toContain('session=wallet_ready');
+    expect(result.current.diagnostics).toContain('identity=device DEV genesis GEN');
+    expect(result.current.diagnostics).toContain('arch=COMPATIBLE device=arm64 abis=arm64-v8a message=OK');
+  });
+
+  // The identity lines come from Rust's transport headers, never from the
+  // preference copies Kotlin keeps for its own startup.
+  it('reads the identity from Rust, not from preferences', async () => {
+    const { result } = renderHook(() => useDiagnostics(jest.fn()));
+    await act(async () => {});
+    await act(async () => { await result.current.gatherDiagnostics(); });
+
+    expect(mockGetIdentity).toHaveBeenCalled();
+    for (const call of mockGetPreference.mock.calls) {
+      expect(['device_id_bytes', 'genesis_hash_bytes', 'DSM_ENV_CONFIG_PATH']).not.toContain(call[0]);
+    }
+  });
+
+  // A failed check is reported as its failure; it used to read archStatus=UNKNOWN.
+  it('reports a failed architecture check as its failure, not as a status', async () => {
+    mockGetArchitectureInfo.mockRejectedValueOnce(new Error('getArchitectureInfo answered no bytes'));
+    const { result } = renderHook(() => useDiagnostics(jest.fn()));
+    await act(async () => {});
+    await act(async () => { await result.current.gatherDiagnostics(); });
+
+    expect(result.current.diagnostics).toContain('arch=not measured: getArchitectureInfo answered no bytes');
+    expect(result.current.diagnostics).not.toContain('UNKNOWN');
+  });
+
+  it('a missing identity is reported as missing, not as empty fields', async () => {
+    mockGetIdentity.mockResolvedValueOnce(null);
+    const { result } = renderHook(() => useDiagnostics(jest.fn()));
+    await act(async () => {});
+    await act(async () => { await result.current.gatherDiagnostics(); });
+
+    expect(result.current.diagnostics).toContain('identity=none (getIdentity answered null)');
+  });
+
+  // The bundle says why the native log was not read; it used to say "No
+  // native bridge log captured" for a failure and for an empty log alike.
+  it('the bundle names why the bridge log was not read', async () => {
+    mockGetDiagnosticsLog.mockRejectedValueOnce(new Error('Bridge not initialized'));
+    const writeText = jest.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true, writable: true });
+    const { result } = renderHook(() => useDiagnostics(jest.fn()));
+    await act(async () => {});
+    await act(async () => { await result.current.gatherDiagnostics(); });
+    await act(async () => { await result.current.copyDiagnostics(); });
+
+    expect(writeText).toHaveBeenCalledTimes(1);
+    expect(writeText.mock.calls[0][0]).toContain('--- Native Bridge Log ---\nnot read: Bridge not initialized');
   });
 
   it('sendDiagnosticsTelemetry calls telemetry service', async () => {

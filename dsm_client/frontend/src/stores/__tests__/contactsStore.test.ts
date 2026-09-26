@@ -260,44 +260,45 @@ describe('ContactsStore', () => {
   });
 
   describe('addContact()', () => {
-    it('adds contact and refreshes', async () => {
+    // The card as Rust read it from a contact code.
+    const CARD = {
+      deviceId: new Uint8Array(32).fill(1),
+      genesisHash: new Uint8Array(32).fill(2),
+      signingPublicKey: new Uint8Array(64).fill(3),
+      network: 'dsm-testnet',
+    };
+
+    it('adds the card Rust read, answers what Rust answered, and refreshes', async () => {
       const { contactsStore, client } = freshModule();
-      client.addContact.mockResolvedValue({ accepted: true });
+      client.addContact.mockResolvedValue({ accepted: true, contactId: 'DEVICE', alias: 'Alice' });
       client.getContacts.mockResolvedValue({ contacts: [makeContact()] });
 
-      const result = await contactsStore.addContact('Alice', new Uint8Array(32), new Uint8Array(32), new Uint8Array(64));
-      expect(result).toBe(true);
-      expect(client.addContact).toHaveBeenCalled();
+      const result = await contactsStore.addContact('Alice', CARD);
+      expect(result).toEqual({ accepted: true, contactId: 'DEVICE', alias: 'Alice' });
+      expect(client.addContact).toHaveBeenCalledWith({
+        alias: 'Alice',
+        deviceId: CARD.deviceId,
+        genesisHash: CARD.genesisHash,
+        signingPublicKey: CARD.signingPublicKey,
+      });
+      expect(client.getContacts).toHaveBeenCalled();
     });
 
-    it('returns false when add is not accepted', async () => {
+    it('answers Rust’s refusal and keeps it as the error', async () => {
       const { contactsStore, client } = freshModule();
       client.addContact.mockResolvedValue({ accepted: false, error: 'dup' });
 
-      const result = await contactsStore.addContact('A', new Uint8Array(32), new Uint8Array(32), new Uint8Array(64));
-      expect(result).toBe(false);
+      const result = await contactsStore.addContact('A', CARD);
+      expect(result).toEqual({ accepted: false, error: 'dup' });
       expect(contactsStore.getSnapshot().error).toBe('dup');
-    });
-
-    it('returns false when deviceId is empty', async () => {
-      const { contactsStore } = freshModule();
-      const result = await contactsStore.addContact('A', new Uint8Array(32), '', new Uint8Array(64));
-      expect(result).toBe(false);
-      expect(contactsStore.getSnapshot().error).toContain('device_id required');
-    });
-
-    it('returns false when signingPublicKey is empty', async () => {
-      const { contactsStore } = freshModule();
-      const result = await contactsStore.addContact('A', new Uint8Array(32), new Uint8Array(32), '');
-      expect(result).toBe(false);
-      expect(contactsStore.getSnapshot().error).toContain('signingPublicKey required');
+      expect(client.getContacts).not.toHaveBeenCalled();
     });
 
     it('sets isLoading false on completion', async () => {
       const { contactsStore, client } = freshModule();
       client.addContact.mockRejectedValue(new Error('net'));
 
-      await contactsStore.addContact('A', new Uint8Array(32), new Uint8Array(32), new Uint8Array(64));
+      await expect(contactsStore.addContact('A', CARD)).rejects.toThrow('net');
       expect(contactsStore.getSnapshot().isLoading).toBe(false);
     });
   });

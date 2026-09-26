@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! Contact route handlers extracted from AppRouterImpl.
 //!
-//! Handles `contacts.list`, `contacts.handle_contact_qr_v3`, and `contacts.addManual`.
+//! Handles `contacts.list`, `contacts.readContactCode`, and `contacts.addManual`.
 
 use prost::Message;
 
@@ -116,26 +116,31 @@ impl AppRouterImpl {
                 pack_envelope_ok(generated::envelope::Payload::ContactsListResponse(reply))
             }
 
-            "contacts.handle_contact_qr_v3" => {
+            // The card a scanned or pasted contact code carries, read by Rust:
+            // the screen renders it and adds the contact through
+            // `contacts.addManual`.
+            "contacts.readContactCode" => {
                 let pack = match generated::ArgPack::decode(&*q.params) {
                     Ok(p) => p,
                     Err(e) => return err(format!("decode ArgPack failed: {e}")),
                 };
                 if pack.codec != generated::Codec::Proto as i32 {
-                    return err("contacts.handle_contact_qr_v3: ArgPack.codec must be PROTO".into());
+                    return err("contacts.readContactCode: ArgPack.codec must be PROTO".into());
                 }
-                let qr = match generated::ContactQrV3::decode(&*pack.body) {
-                    Ok(qr) => qr,
-                    Err(e) => return err(format!("decode ContactQrV3 failed: {e}")),
+                let scanned = match generated::QrScanResultPayload::decode(&*pack.body) {
+                    Ok(scanned) => scanned,
+                    Err(e) => {
+                        return err(format!(
+                            "contacts.readContactCode: decode QrScanResultPayload failed: {e}"
+                        ))
+                    }
                 };
-
-                let resolved = match resolve_counterparty_via_transport(&qr).await {
-                    Ok(r) => r,
-                    Err(e) => return err(format!("counterparty resolve failed: {e}")),
-                };
-
-                self.add_resolved_contact(&qr.preferred_alias, resolved)
-                    .await
+                match super::identity_routes::read_contact_code(&scanned.text_utf8) {
+                    Ok(card) => {
+                        pack_envelope_ok(generated::envelope::Payload::ContactQrResponse(card))
+                    }
+                    Err(e) => err(format!("contacts.readContactCode: {e}")),
+                }
             }
 
             other => err(format!("contacts: unknown route '{other}'")),
@@ -197,8 +202,6 @@ mod tests {
         let qr = generated::ContactQrV3 {
             device_id: device_id.clone(),
             network: "test".into(),
-            storage_nodes: vec!["http://node1:8080".into(), "http://node2:8081".into()],
-            sdk_fingerprint: vec![0x11; 32],
             genesis_hash: genesis_hash.clone(),
             signing_public_key: vec![0x22; 64],
             preferred_alias: "Alice".into(),
@@ -211,7 +214,6 @@ mod tests {
         assert_eq!(decoded.genesis_hash, genesis_hash);
         assert_eq!(decoded.preferred_alias, "Alice");
         assert_eq!(decoded.network, "test");
-        assert_eq!(decoded.storage_nodes.len(), 2);
         assert_eq!(decoded.signing_public_key.len(), 64);
     }
 
@@ -241,7 +243,7 @@ mod tests {
             ..Default::default()
         };
         let arg_pack = generated::ArgPack {
-            schema_hash: Some(generated::Hash32 { v: vec![0u8; 32] }),
+            schema_hash: None,
             codec: generated::Codec::Proto as i32,
             body: qr.encode_to_vec(),
         };

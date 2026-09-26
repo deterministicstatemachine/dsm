@@ -340,10 +340,7 @@ class SinglePathWebViewBridge(private val context: Context) {
 
                 "createGenesisV2" -> {
                     val req = WalletCreateGenesisV2Request.parseFrom(payload)
-                    inst.createGenesisV2(
-                        mnemonic = req.mnemonic,
-                        locale = req.locale,
-                    )
+                    inst.createGenesisV2(mnemonic = req.mnemonic)
                 }
 
                 // strict balances (JNI). Returns FramedEnvelopeV3 bytes or empty on error.
@@ -586,19 +583,6 @@ class SinglePathWebViewBridge(private val context: Context) {
                     BridgeBleHandler.setBleIdentityForAdvertising(out, TAG)
                 }
 
-                "handleContactQrV3" -> {
-                    try {
-                        Log.d(TAG, "handleBinaryRpc: handleContactQrV3 invoked payloadLen=${payload.size}")
-                        val result = UnifiedContactBridge.handleContactQrV3(payload)
-                        Log.d(TAG, "handleBinaryRpc: handleContactQrV3 resultLen=${result.size}")
-                        result
-                    } catch (t: Throwable) {
-                        Log.w(TAG, "handleContactQrV3 failed", t)
-                        // Return empty bytes on error; frontend will handle via timeout/events
-                        ByteArray(0)
-                    }
-                }
-
                 // Generic Envelope v3 processing (online transfers, DBRW export, etc.)
                 "processEnvelopeV3" -> {
                     try {
@@ -696,7 +680,7 @@ class SinglePathWebViewBridge(private val context: Context) {
      * Canonical mnemonic-rooted Genesis v2 wallet creation. The (backed-up) mnemonic is the sole
      * root. Returns framed Envelope v3 bytes; failures may be returned as error envelopes.
      */
-    fun createGenesisV2(mnemonic: String, locale: String): ByteArray {
+    fun createGenesisV2(mnemonic: String): ByteArray {
         if (!ready) {
             Log.e(TAG, "createGenesisV2: bridge not ready")
             return ByteArray(0)
@@ -709,7 +693,6 @@ class SinglePathWebViewBridge(private val context: Context) {
             keyGenesisHash = KEY_GENESIS_HASH,
             keyGenesisEnvelope = KEY_GENESIS_ENVELOPE,
             mnemonic = mnemonic,
-            locale = locale,
         )
     }
 

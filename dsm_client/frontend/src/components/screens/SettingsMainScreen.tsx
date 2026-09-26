@@ -13,31 +13,13 @@ import { getNfcBackupUiModel } from '../../services/recovery/nfcBackupUi';
 import { tourStore } from '../tour/tourStore';
 import './SettingsScreen.css';
 
-type PrefValue = string | null;
-
-interface NfcReadResult {
-  ringId?: string;
-}
-
-interface ExtendedDsmClient {
-  getPreference(key: string): Promise<PrefValue>;
-  setPreference(key: string, value: string): Promise<void>;
-  nfcReadRingId?: () => Promise<NfcReadResult | null>;
-  nfcRegisterRingId?: (id: string) => Promise<boolean>;
-}
-
-const client = dsmClient as unknown as ExtendedDsmClient;
+const client = dsmClient;
 const DEV_MODE_PREF_KEY = 'dev_mode';
 const OPEN_DIAGNOSTICS_EVENT = 'dsm-open-diagnostics';
 let cachedDevMode: boolean | null = null;
-const emptyNfcStatus: NfcBackupStatus = {
-  enabled: false,
-  configured: false,
-  pendingCapsule: false,
-  capsuleCount: 0,
-  lastCapsuleIndex: 0,
-  autoWriteEnabled: false,
-};
+
+/** The backup status as Rust reported it, the failure of asking, or not asked yet. */
+type NfcStatusRead = { status: NfcBackupStatus } | { error: string } | undefined;
 
 interface SettingsMainScreenProps {
   onNavigate?: (screen: string) => void;
@@ -52,21 +34,25 @@ const SettingsMainScreen: React.FC<SettingsMainScreenProps> = ({ onNavigate }) =
   const [status, setStatus] = useState<string>('');
 
   // --- Compact NFC status (full management is on NfcRecoveryScreen) ---
-  const [nfcStatus, setNfcStatus] = useState<NfcBackupStatus>(emptyNfcStatus);
-
-
+  // A status that could not be read is shown as that failure; it used to be
+  // shown as "NOT SET", the status of a device with no backup at all.
+  const [nfcRead, setNfcRead] = useState<NfcStatusRead>(undefined);
 
   useEffect(() => {
+    let cancelled = false;
     void (async () => {
       try {
-        setNfcStatus(await getNfcBackupStatus());
-      } catch {
-        /* tolerate — tables may not exist yet */
+        const status = await getNfcBackupStatus();
+        if (!cancelled) setNfcRead({ status });
+      } catch (e) {
+        if (!cancelled) setNfcRead({ error: e instanceof Error ? e.message : String(e) });
       }
     })();
+    return () => { cancelled = true; };
   }, []);
 
-  const nfcUi = getNfcBackupUiModel(nfcStatus);
+  const nfcStatus = nfcRead && 'status' in nfcRead ? nfcRead.status : null;
+  const nfcUi = nfcStatus ? getNfcBackupUiModel(nfcStatus) : null;
 
   // Initial preferences load (deterministic, event-driven only)
   useEffect(() => {
@@ -79,8 +65,9 @@ const SettingsMainScreen: React.FC<SettingsMainScreenProps> = ({ onNavigate }) =
         if (!cancelled) {
           setDevMode(unlocked);
         }
-      } catch {
-        // Remain silent in UI; settings screen tolerates missing prefs
+      } catch (e) {
+        // Not unlocked until the preference says so; the failure is logged, not hidden.
+        console.warn('[Settings] the developer-mode preference was not read:', e);
       } finally {
         if (!cancelled) {
           setDevModeResolved(true);
@@ -121,34 +108,6 @@ const SettingsMainScreen: React.FC<SettingsMainScreenProps> = ({ onNavigate }) =
       return next;
     });
   }, [devMode, devModeResolved, enableDevMode]);
-
-  const _onSetupRing = useCallback(async () => {
-    try {
-      const nfc = client.nfcReadRingId ? await client.nfcReadRingId() : null;
-      let id: string | undefined = nfc?.ringId;
-
-      if (!id) {
-        const entered =
-          typeof window !== 'undefined'
-            ? window.prompt('Scan/enter Ring ID (read-only, provided by NFC):')
-            : null;
-        if (!entered || !entered.trim()) return;
-        id = entered.trim();
-      }
-
-      const registered = client.nfcRegisterRingId
-        ? await client.nfcRegisterRingId(id)
-        : false;
-
-      if (!registered) {
-        await client.setPreference('nfc_ring_id', id);
-      }
-
-      setStatus('Ring registered successfully');
-    } catch {
-      setStatus('Failed to register ring');
-    }
-  }, []);
 
   const openDiagnosticsWorkspace = useCallback(() => {
     if (typeof window === 'undefined') return;
@@ -288,8 +247,8 @@ const SettingsMainScreen: React.FC<SettingsMainScreenProps> = ({ onNavigate }) =
               marginBottom: 4,
             }}
           >
-            {nfcUi.backupLabel}
-            {nfcUi.writeStateLabel !== '--' ? ` / ${nfcUi.writeStateLabel}` : ''}
+            {nfcRead === undefined ? '…' : nfcUi ? nfcUi.backupLabel : 'NOT READ'}
+            {nfcUi && nfcUi.writeStateLabel !== '--' ? ` / ${nfcUi.writeStateLabel}` : ''}
           </div>
           <div
             style={{
@@ -299,7 +258,11 @@ const SettingsMainScreen: React.FC<SettingsMainScreenProps> = ({ onNavigate }) =
               opacity: 0.82,
             }}
           >
-            {nfcUi.compactSummary}
+            {nfcRead === undefined
+              ? 'Reading the backup status…'
+              : nfcUi
+                ? nfcUi.compactSummary
+                : `Status not read: ${(nfcRead as { error: string }).error}`}
           </div>
         </div>
         <div className="settings-shell__button-row">
@@ -318,13 +281,13 @@ const SettingsMainScreen: React.FC<SettingsMainScreenProps> = ({ onNavigate }) =
             INSPECT OR RECOVER
           </button>
         </div>
-        {nfcStatus.enabled && nfcStatus.configured && (
+        {nfcStatus && nfcStatus.enabled && nfcStatus.configured && (
           <button
             className="settings-shell__button"
             onClick={() => {
               const next = !nfcStatus.autoWriteEnabled;
               void setAutoWriteEnabled(next).then(() =>
-                setNfcStatus((prev) => ({ ...prev, autoWriteEnabled: next })),
+                setNfcRead({ status: { ...nfcStatus, autoWriteEnabled: next } }),
               );
             }}
             style={{ fontSize: '9px', width: '100%', marginTop: 6 }}

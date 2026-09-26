@@ -2,13 +2,8 @@
 
 jest.mock('../WebViewBridge', () => ({
   getContactsStrictBridge: jest.fn(),
-  normalizeToBytes: jest.fn((data: unknown) => {
-    if (data instanceof Uint8Array) return data;
-    if (data instanceof ArrayBuffer) return new Uint8Array(data);
-    if (Array.isArray(data)) return new Uint8Array(data);
-    throw new Error('normalizeToBytes: expected Uint8Array or number[]');
-  }),
   routerInvokeBin: jest.fn(),
+  routerQueryBin: jest.fn(),
   requestBlePermissions: jest.fn(),
 }));
 
@@ -183,33 +178,9 @@ describe('contacts.ts', () => {
   // ── addContact ─────────────────────────────────────────────────────
 
   describe('addContact', () => {
-    test('throws when alias is missing', async () => {
-      await expect(addContact({
-        alias: '',
-        deviceId: new Uint8Array(32),
-        genesisHash: new Uint8Array(32),
-        signingPublicKey: new Uint8Array(64),
-      })).rejects.toThrow(/alias required/);
-    });
-
-    test('throws when genesisHash is not 32 bytes', async () => {
-      await expect(addContact({
-        alias: 'Test',
-        deviceId: new Uint8Array(32),
-        genesisHash: new Uint8Array(16),
-        signingPublicKey: new Uint8Array(64),
-      })).rejects.toThrow(/genesisHash must be 32 bytes/);
-    });
-
-    test('throws when signingPublicKey is not 64 bytes', async () => {
-      await expect(addContact({
-        alias: 'Test',
-        deviceId: new Uint8Array(32),
-        genesisHash: new Uint8Array(32),
-        signingPublicKey: new Uint8Array(32),
-      })).rejects.toThrow(/signingPublicKey must be 64 bytes/);
-    });
-
+    // No alias or length rule is checked here: Rust names a contact added
+    // without an alias by its device, and refuses a card that does not
+    // resolve (contacts.manualAdd.test.ts).
     test('returns accepted on success', async () => {
       const deviceId = new Uint8Array(32).fill(1);
       const genesisHash = new Uint8Array(32).fill(2);
@@ -225,8 +196,7 @@ describe('contacts.ts', () => {
       (routerInvokeBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
 
       const result = await addContact({ alias: 'TestContact', deviceId, genesisHash, signingPublicKey });
-      expect(result.accepted).toBe(true);
-      expect(result.contactId).toBe(encodeBase32Crockford(deviceId));
+      expect(result).toEqual({ accepted: true, contactId: encodeBase32Crockford(deviceId), alias: 'TestContact' });
     });
 
     test('returns error on error envelope', async () => {
@@ -241,8 +211,7 @@ describe('contacts.ts', () => {
       (routerInvokeBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
 
       const result = await addContact({ alias: 'Test', deviceId, genesisHash, signingPublicKey });
-      expect(result.accepted).toBe(false);
-      expect(result.error).toMatch(/duplicate/);
+      expect(result).toEqual({ accepted: false, error: 'duplicate' });
     });
 
     test('returns error when bridge throws', async () => {
@@ -253,8 +222,7 @@ describe('contacts.ts', () => {
       (routerInvokeBin as jest.Mock).mockRejectedValue(new Error('bridge fail'));
 
       const result = await addContact({ alias: 'Test', deviceId, genesisHash, signingPublicKey });
-      expect(result.accepted).toBe(false);
-      expect(result.error).toBe('bridge fail');
+      expect(result).toEqual({ accepted: false, error: 'bridge fail' });
     });
   });
 

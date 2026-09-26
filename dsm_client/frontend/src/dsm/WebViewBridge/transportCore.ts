@@ -24,13 +24,6 @@ import {
   ingressBoundaryOk,
 } from "../NativeBoundaryBridge";
 
-let bridgeEventCounter = 0;
-
-function nextBridgeEventCounter(): number {
-  bridgeEventCounter = (bridgeEventCounter + 1) >>> 0;
-  return bridgeEventCounter;
-}
-
 export function mustBridge(): AndroidBridgeV3 {
   const b = getBridgeInstance();
   if (!b) throw new Error("DSM bridge not available");
@@ -110,11 +103,6 @@ const unwrapProtobufResponse = async (_method: string, buf: Uint8Array): Promise
 
       const be = new BridgeError(code, uiMessage);
       be.details = err;
-
-      const win = window as Window & {
-        __lastBridgeError?: { message: string; code: string; counter: number };
-      };
-      win.__lastBridgeError = { message: uiMessage, code: hex, counter: nextBridgeEventCounter() };
 
       try {
         bridgeEvents.emit("bridge.error", {
@@ -214,22 +202,6 @@ export async function callBin(method: string, payload?: Uint8Array): Promise<Uin
   return sendBridgeRequestBytes(method, reqBytes);
 }
 
-export async function maybeThrowOnEmpty(result: Uint8Array): Promise<Uint8Array> {
-  if (result.length > 0) return result;
-  const b = mustBridge();
-  try {
-    if (typeof b.lastError === "function") {
-      const msg = b.lastError();
-      if (msg && typeof msg === "string" && msg.length > 0) {
-        throw new Error(`DSM native error: ${msg}`);
-      }
-    }
-  } catch (e) {
-    if (e instanceof Error && /DSM native error/.test(e.message)) throw e;
-  }
-  return result;
-}
-
 export async function processEnvelopeV3Bin(envelopeBytes: Uint8Array): Promise<Uint8Array> {
   return bridgeGate.enqueue(() => ingressBoundaryOk(buildEnvelopeIngressRequest(envelopeBytes)));
 }
@@ -260,5 +232,5 @@ export async function queryRouterEnvelope(path: string, params?: Uint8Array) {
 
 export async function queryTransportHeadersV3(): Promise<Uint8Array> {
   const responseBytes = await callBin("getTransportHeadersV3Bin", new Uint8Array(0));
-  return maybeThrowOnEmpty(responseBytes);
+  return responseBytes;
 }

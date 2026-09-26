@@ -126,7 +126,7 @@ export const UXProvider: React.FC<{ defaultHideComplexity?: boolean; children?: 
   }, [notifyToast]);
 
   // Global notification when new inbox items arrive from storage sync.
-  useBridgeEvent('inbox.updated', (detail?: { unreadCount?: number; newItems?: number }) => {
+  useBridgeEvent('inbox.updated', (detail?: { newItems?: number }) => {
     const newItems = typeof detail?.newItems === 'number' ? detail.newItems : 0;
     if (newItems <= 0) return;
     const label = newItems === 1 ? 'New inbox item received' : `${newItems} new inbox items received`;

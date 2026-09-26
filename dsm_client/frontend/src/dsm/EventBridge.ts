@@ -60,25 +60,6 @@ export function emit(topic: string, payload: Uint8Array): void {
   }
 }
 
-// Typed result for parseBleEnvelope
-export interface OfflineTransferParseResult {
-  offlineTransferPayload: Uint8Array;
-}
-export interface BleDeviceFoundResult {
-  address: string;
-  name: string;
-  rssi: number;
-}
-export interface BleErrorResult {
-  error: { code: number; message: string };
-}
-export interface BleConnectionResult {
-  connected?: boolean;
-  disconnected?: boolean;
-}
-export type BleParseResult = BleDeviceFoundResult | BleErrorResult | BleConnectionResult;
-export type EnvelopeParseResult = OfflineTransferParseResult | BleParseResult | { rawEnvelope: Uint8Array } | null;
-
 // Re-dispatch a genesis lifecycle topic on the DOM `dsm-event-bin` channel so
 // that `addDsmEventListener` subscribers (e.g. `useGenesisFlow`) receive it.
 // The existing `dsm-event-bin` listener in this file will also call the
@@ -168,97 +149,6 @@ function decodeSessionState(bytes: Uint8Array): NativeSessionSnapshot {
     fatal_error: session.fatalError || null,
     wallet_refresh_hint: Number(session.walletRefreshHint ?? 0),
   };
-}
-
-// Parse Envelope from "ble.envelope.bin" and extract BLE/offline transfer metadata
-export function parseBleEnvelope(bytes: Uint8Array): EnvelopeParseResult {
-  try {
-    const env = decodeFramedEnvelopeV3(bytes);
-    const p: any = env?.payload ?? env;
-
-    // Direct DsmBtMessage (BLE error or other BT layer message) handling first
-    const btMsg = (p?.case === 'dsmBtMessage' ? p.value : p?.dsmBtMessage) as pb.DsmBtMessage | undefined;
-    if (btMsg && btMsg.messageType === pb.BtMessageType.BTMSG_TYPE_ERROR) {
-      try {
-        // Payload is a serialized BleTransactionError
-        const err = pb.BleTransactionError.fromBinary(btMsg.payload);
-        return {
-          error: {
-            code: typeof err.errorCode === 'number' ? err.errorCode : 0,
-            message: typeof err.message === 'string' ? err.message : '',
-          },
-        };
-      } catch {
-        // Fall through if payload malformed
-      }
-    }
-
-    // BLE UniversalRx parsing (type-safe)
-    const rx = (p?.case === 'universalRx' ? p.value : p?.universalRx) as pb.UniversalRx | undefined;
-    if (rx && Array.isArray(rx.results) && rx.results.length > 0) {
-      const first = rx.results[0];
-      const pack = first?.result;
-      if (pack?.body instanceof Uint8Array && pack.body.length > 0) {
-        try {
-          const resp = pb.BleCommandResponse.fromBinary(pack.body);
-          // BLE response discriminated union parsing
-          if (resp && typeof resp === 'object') {
-            if ('deviceFound' in resp && resp.deviceFound) {
-              const df = resp.deviceFound as { address?: string; name?: string; rssi?: number };
-              return {
-                address: typeof df.address === 'string' ? df.address : '',
-                name: typeof df.name === 'string' ? df.name : '',
-                rssi: typeof df.rssi === 'number' ? df.rssi : 0,
-              };
-            }
-            if ('error' in resp && resp.error) {
-              const err = resp.error as { code?: number; message?: string };
-              return {
-                error: {
-                  code: typeof err.code === 'number' ? err.code : 0,
-                  message: typeof err.message === 'string' ? err.message : '',
-                },
-              };
-            }
-            if ('connected' in resp && resp.connected) {
-              return { connected: true };
-            }
-            if ('disconnected' in resp && resp.disconnected) {
-              return { disconnected: true };
-            }
-          }
-          return { rawEnvelope: pack.body };
-        } catch {
-          // Not a BleCommandResponse, fall through
-        }
-      }
-    }
-
-    // Offline bilateral transfer detection (wallet.receive invoke in UniversalTx)
-    const uTx = (p?.case === 'universalTx' ? p.value : p?.universalTx) as pb.UniversalTx | undefined;
-    if (uTx && Array.isArray(uTx.ops) && uTx.ops.length > 0) {
-      const op = uTx.ops[0];
-      // Correct offline transfer detection logic
-      if (op?.kind?.case === 'invoke') {
-        const invoke = op.kind.value as pb.Invoke;
-        if (invoke?.method === 'wallet.receive') {
-          const argPack = invoke.args;
-          if (argPack?.body instanceof Uint8Array && argPack.body.length > 0) {
-            try {
-              pb.BilateralTransferRequest.fromBinary(argPack.body);
-              return { offlineTransferPayload: argPack.body };
-            } catch {
-              // not a bilateral request
-            }
-          }
-        }
-      }
-      return { rawEnvelope: bytes };
-    }
-    return { rawEnvelope: bytes };
-  } catch {
-    return null;
-  }
 }
 
 export function initializeEventBridge(): void {
@@ -447,25 +337,18 @@ export function initializeEventBridge(): void {
       // Inbox sync result pushed from Rust inbox_poller (Invariant #7 compliant).
       // Payload is StorageSyncResponse protobuf bytes.
       if (topic === 'inbox.updated') {
+        let resp: pb.StorageSyncResponse;
         try {
-          const resp = pb.StorageSyncResponse.fromBinary(bytes);
-          const unreadCount = Math.max((resp.pulled ?? 0) - (resp.processed ?? 0), 0);
-          bridgeEvents.emit('inbox.updated', {
-            unreadCount,
-            newItems: resp.processed,
-            source: 'rust_poller',
-          });
-          // Also trigger wallet refresh if items were processed.
-          if (resp.processed > 0) {
-            bridgeEvents.emit('wallet.refresh', { source: 'inbox.sync' });
-          }
-        } catch {
-          // Fallback: emit with zero counts if decode fails.
-          bridgeEvents.emit('inbox.updated', {
-            unreadCount: 0,
-            newItems: 0,
-            source: 'rust_poller',
-          });
+          resp = pb.StorageSyncResponse.fromBinary(bytes);
+        } catch (e) {
+          // No counts are known from bytes that do not decode: none are announced.
+          logger.error('[EventBridge] inbox.updated payload does not decode:', e);
+          return;
+        }
+        bridgeEvents.emit('inbox.updated', { newItems: resp.processed, source: 'rust_poller' });
+        // Also trigger wallet refresh if items were processed.
+        if (resp.processed > 0) {
+          bridgeEvents.emit('wallet.refresh', { source: 'inbox.sync' });
         }
         emit(topic, bytes);
         return;
@@ -474,19 +357,15 @@ export function initializeEventBridge(): void {
       // Pairing completion relay from native.
       // Payload is expected to be counterparty device_id bytes (32 bytes).
       if (topic === 'dsm-contact-ble-updated') {
-        try {
-          const deviceIdB32 = bytes.length === 32 ? encodeBase32Crockford(bytes) : undefined;
-          bridgeEvents.emit('contact.bleUpdated', {
-            bleAddress: undefined,
-            deviceId: deviceIdB32,
-          });
-        } catch {
-          try {
-            bridgeEvents.emit('contact.bleUpdated', {
-              bleAddress: undefined,
-            });
-          } catch {}
+        if (bytes.length !== 32) {
+          // An update names the device it is about; this one names none.
+          logger.error(`[EventBridge] dsm-contact-ble-updated carries ${bytes.length} bytes, not a 32-byte device id`);
+          return;
         }
+        bridgeEvents.emit('contact.bleUpdated', {
+          bleAddress: undefined,
+          deviceId: encodeBase32Crockford(bytes),
+        });
         emit(topic, bytes);
         return;
       }
@@ -496,10 +375,8 @@ export function initializeEventBridge(): void {
         try {
           const note = pb.BilateralEventNotification.fromBinary(bytes);
 
-          const status = String(note?.status ?? '');
-          const needsReconcile =
-            status === 'needs_online_reconcile' ||
-            status === 'needsOnlineReconcile';
+          // The SDK marks a rejection that must be reconciled online by this status.
+          const needsReconcile = note.status === 'needs_online_reconcile';
 
           if (needsReconcile) {
             try {
@@ -515,16 +392,9 @@ export function initializeEventBridge(): void {
               })
             );
           } catch {}
-          
-          // Also emit to bridgeEvents for testing
-          try {
-            bridgeEvents.emit('bilateral.event', bytes);
-          } catch {}
-          
-          // Accept explicit type or status string (robustness against enum drift)
-          const isComplete = 
-            note?.eventType === pb.BilateralEventType.BILATERAL_EVENT_TRANSFER_COMPLETE ||
-            note?.status === 'completed';
+
+          // The event type says a transfer completed; a status string is free text.
+          const isComplete = note.eventType === pb.BilateralEventType.BILATERAL_EVENT_TRANSFER_COMPLETE;
 
           if (isComplete) {
             try { logger.debug('[BilateralTransfer] TRANSFER_COMPLETE - refreshing wallet state'); } catch {}

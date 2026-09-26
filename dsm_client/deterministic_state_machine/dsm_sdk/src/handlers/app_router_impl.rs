@@ -2681,15 +2681,13 @@ impl AppRouter for AppRouterImpl {
                 self.handle_system_query(q).await
             }
             // Identity routes
-            "identity.transport_headers_v3"
-            | "identity.pairing_qr"
-            | "identity.pairing_compact" => self.handle_identity_query(q).await,
+            "identity.transport_headers_v3" | "identity.contact_code" => {
+                self.handle_identity_query(q).await
+            }
             // Balance/wallet query routes
             "balance.get" | "balance.list" | "wallet.history" => self.handle_wallet_query(q).await,
             // Contacts routes
-            "contacts.list" | "contacts.handle_contact_qr_v3" => {
-                self.handle_contacts_query(q).await
-            }
+            "contacts.list" | "contacts.readContactCode" => self.handle_contacts_query(q).await,
             // Prefs routes
             "prefs.get" | "prefs.set" => self.handle_prefs_query(q).await,
             // Inbox routes

@@ -58,15 +58,15 @@ jest.mock('../inputs/useInputIntents', () => ({
 
 // Mock WebViewBridge dynamic import used by gatherDiagnostics
 jest.mock('../dsm/WebViewBridge', () => ({
-  runNativeBridgeSelfTest: jest.fn().mockReturnValue({ ok: true }),
-  getLastError: jest.fn().mockReturnValue(''),
   getArchitectureInfo: jest.fn().mockResolvedValue({ status: 'OK', deviceArch: 'arm64-v8a', supportedAbis: ['arm64-v8a'], message: '', recommendation: '' }),
+  getDiagnosticsLog: jest.fn().mockResolvedValue(new Uint8Array(0)),
   addDsmEventListener: jest.fn().mockReturnValue(() => {}),
 }));
 
 // Mock dsmClient.getPreference
 jest.mock('../services/dsmClient', () => ({
   dsmClient: {
+    getIdentity: jest.fn().mockResolvedValue(null),
     getPreference: jest.fn().mockImplementation(async (k: string) => {
       if (k === 'DSM_ENV_CONFIG_PATH') return '/data/user/0/app/files/dsm_env_config.toml';
       if (k === 'genesis_hash_bytes') return 'deadbeef';

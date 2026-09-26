@@ -3,6 +3,9 @@
 # Frontend invoke/query mappings (post-16f0763 unified ingress boundary)
 dsm_client/frontend/src/dsm/transactions.ts|routerInvokeBin('wallet.sendSmart'|frontend smart online transfer maps to wallet.sendSmart
 dsm_client/frontend/src/dsm/transactions.ts|routerInvokeBin('wallet.sendOffline'|frontend bilateral prepare routes via wallet.sendOffline
+dsm_client/frontend/src/dsm/contacts.ts|routerQueryBin('identity.contact_code'|frontend takes its contact code from Rust
+dsm_client/frontend/src/dsm/contacts.ts|routerQueryBin('contacts.readContactCode'|frontend has Rust read a scanned contact code
+dsm_client/frontend/src/dsm/contacts.ts|routerInvokeBin('contacts.addManual'|frontend contact add routes via contacts.addManual
 dsm_client/frontend/src/dsm/WebViewBridge/transportCore.ts|buildRouterInvokeIngressRequest|bridge builds routerInvoke via ingress helper
 dsm_client/frontend/src/dsm/WebViewBridge/transportCore.ts|buildRouterQueryIngressRequest|bridge builds routerQuery via ingress helper
 dsm_client/frontend/src/dsm/NativeBoundaryBridge.ts|case: 'routerInvoke'|ingress routerInvoke payload case exists
@@ -17,7 +20,8 @@ dsm_client/deterministic_state_machine/dsm_sdk/src/jni/unified_protobuf_bridge.r
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/app_router_impl.rs|"wallet.send" | "wallet.sendSmart"|sdk router invoke handler for wallet.send exists
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/wallet_routes.rs|"wallet.sendOffline" =>|sdk router invoke handler for the offline send exists
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/app_router_impl.rs|"message.send" =>|sdk router invoke handler for message.send exists
-dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/app_router_impl.rs|"contacts.handle_contact_qr_v3"|sdk router query handler for contacts.handle_contact_qr_v3 exists
+dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/app_router_impl.rs|"identity.contact_code"|sdk router query handler for identity.contact_code exists
+dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/app_router_impl.rs|"contacts.readContactCode"|sdk router query handler for contacts.readContactCode exists
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/app_router_impl.rs|"inbox.pull"|sdk router query handler for inbox.pull exists
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/app_router_impl.rs|"bilateral.pending_list"|sdk router query handler for bilateral.pending_list exists
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/app_router_impl.rs|"storage.sync"|sdk router query handler for storage.sync exists

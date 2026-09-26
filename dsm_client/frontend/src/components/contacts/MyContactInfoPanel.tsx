@@ -1,17 +1,17 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 // SPDX-License-Identifier: Apache-2.0
 // path: src/components/contacts/MyContactInfoPanel.tsx
-// MyContactInfoPanel — deterministic QR of minimal contact payload (genesis+device), protobuf-only, no clocks.
+// MyContactInfoPanel — this device's contact code, as Rust renders it, and its QR.
 
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import QRCode from 'qrcode';
 
 import { AudioManager } from '../../utils/audio';
 import logger from '../../utils/logger';
-import { fetchPairingContactUri } from '../../services/qr/pairingQrService';
+import { getContactCode } from '../../dsm/contacts';
 
 export default function MyContactInfoPanel(): React.JSX.Element {
-  const [contactUri, setContactUri] = useState<string>('');
+  const [contactCode, setContactCode] = useState<string>('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
@@ -44,20 +44,20 @@ export default function MyContactInfoPanel(): React.JSX.Element {
     return () => { try { document.head.removeChild(style); } catch {} };
   }, []);
 
-  // Separate effect: Fetch URI only once (or on retry)
+  // Separate effect: fetch the code once (or on retry)
   useEffect(() => {
     let cancelled = false;
-    if (contactUri) return; // Already have it
+    if (contactCode) return; // Already have it
 
     (async () => {
       try {
         setLoading(true);
         setError(null);
-        logger.info('[MyContactInfoPanel] Requesting pairing QR from router...');
-        const uri = await fetchPairingContactUri();
-        logger.debug('[MyContactInfoPanel] contact uri len:', uri.length);
+        logger.info('[MyContactInfoPanel] Requesting the contact code from Rust...');
+        const code = await getContactCode();
+        logger.debug('[MyContactInfoPanel] contact code len:', code.length);
         if (!cancelled) {
-            setContactUri(uri);
+            setContactCode(code);
             setLoading(false);
         }
       } catch (err) {
@@ -69,16 +69,16 @@ export default function MyContactInfoPanel(): React.JSX.Element {
       }
     })();
     return () => { cancelled = true; };
-  }, [contactUri]); // Retry if contactUri is reset to empty
+  }, [contactCode]); // Retry if contactCode is reset to empty
 
-  // Separate effect: Render QR when URI or size changes
+  // Separate effect: render the QR when the code or size changes
   useEffect(() => {
-    if (!contactUri || !qrSize) return;
+    if (!contactCode || !qrSize) return;
     
     let cancelled = false;
     (async () => {
         try {
-          const url = await QRCode.toDataURL(contactUri, {
+          const url = await QRCode.toDataURL(contactCode, {
             errorCorrectionLevel: 'M',
             margin: 2,
             color: { dark: '#000000', light: '#FFFFFF' },
@@ -93,7 +93,7 @@ export default function MyContactInfoPanel(): React.JSX.Element {
         }
     })();
     return () => { cancelled = true; };
-  }, [contactUri, qrSize]);
+  }, [contactCode, qrSize]);
 
   useEffect(() => {
     const onResize = () => {
@@ -198,10 +198,10 @@ export default function MyContactInfoPanel(): React.JSX.Element {
       </div>
 
       <div style={{ marginTop: 8 }}>
-        <div style={{ fontSize: 14, fontWeight: 'bold', marginBottom: 6 }}>CONTACT URI</div>
+        <div style={{ fontSize: 14, fontWeight: 'bold', marginBottom: 6 }}>CONTACT CODE</div>
         <textarea
           readOnly
-          value={contactUri}
+          value={contactCode}
           onClick={(e) => e.currentTarget.select()}
           style={{
             width: '100%',
@@ -215,7 +215,7 @@ export default function MyContactInfoPanel(): React.JSX.Element {
           }}
         />
         <button
-          onClick={() => copyToClipboard(contactUri, 'Contact URI')}
+          onClick={() => copyToClipboard(contactCode, 'Contact code')}
           className="wallet-style-button"
           style={{
             width: '100%',
@@ -231,7 +231,7 @@ export default function MyContactInfoPanel(): React.JSX.Element {
             boxShadow: 'inset 0 -2px 0 rgba(var(--text-rgb),0.18), inset 0 2px 0 rgba(var(--bg-rgb),0.08)',
             fontSize: 10,
           }}
-          aria-label="Copy Contact URI"
+          aria-label="Copy contact code"
         >
           COPY
         </button>

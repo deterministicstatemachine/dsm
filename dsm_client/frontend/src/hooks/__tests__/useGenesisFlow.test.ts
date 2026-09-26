@@ -105,8 +105,8 @@ describe('useGenesisFlow', () => {
     });
 
     expect(mockGenerateMnemonic).toHaveBeenCalled();
-    // The network is the SDK's to choose; the frontend names none.
-    expect(mockCreateGenesisViaRouter).toHaveBeenCalledWith(TEST_MNEMONIC, expect.any(String));
+    // The network is the SDK's to choose; the frontend names none, and no locale.
+    expect(mockCreateGenesisViaRouter).toHaveBeenCalledWith(TEST_MNEMONIC);
     expect(mockedDecode).toHaveBeenCalledWith(fakeEnvelope);
     // No error set on success
     expect(args.setError).not.toHaveBeenCalled();

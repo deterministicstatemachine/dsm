@@ -222,10 +222,6 @@ function installCallBinMock() {
 
       // --- Direct bridge methods ---
 
-      if (method === 'hasIdentityDirect') {
-        return wrapSuccess(new Uint8Array([0x01])); // identity exists
-      }
-
       if (method === 'getTransportHeadersV3Bin') {
         const headers = new pb.Headers({
           deviceId: DEVICE_ID as any,
@@ -289,7 +285,6 @@ function installCallBinMock() {
       return bridge.__callBin(reqBytes);
     },
     getAppRouterStatus: () => 1,
-    hasIdentityDirect: () => true,
   };
 
   g.window.DsmBridge = bridge;
@@ -365,15 +360,6 @@ describe('BridgeEventBus — core event delivery', () => {
     expect(spy1).toHaveBeenCalled();
     expect(spy2).toHaveBeenCalled();
     u1(); u2();
-  });
-
-  test('bilateral.event delivers Uint8Array payload', () => {
-    const spy = jest.fn();
-    const unsub = bridgeEvents.on('bilateral.event', spy);
-    const payload = new Uint8Array([1, 2, 3, 4]);
-    bridgeEvents.emit('bilateral.event', payload);
-    expect(spy).toHaveBeenCalledWith(payload);
-    unsub();
   });
 
   test('wallet.bilateralCommitted carries typed payload', () => {
