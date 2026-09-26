@@ -8,6 +8,9 @@ import { readImageRgba } from '../utils/imageRgba';
 import { createToken } from '@/dsm/policies';
 import { getTokenCreationFeeEra } from '@/dsm/policies';
 
+/** The creation fee as Rust reported it, the failure of asking, or not asked yet. */
+type CreationFee = { era: bigint } | { error: string } | undefined;
+
 // ── Types ────────────────────────────────────────────────────────────────────
 // Fungible is the only token kind the protocol enforces. NFT/SBT would need
 // a per-item ownership primitive that does not exist, and the Rust policy
@@ -336,14 +339,14 @@ function Step2({
 
 // ── Sub-component: Step 3 — Access + Review ──────────────────────────────────
 function Step3({
-  state, set, effectiveDecimals, effectiveTransferable, creationFeeEra,
+  state, set, effectiveDecimals, effectiveTransferable, creationFee,
 }: {
   state: WizardState;
   set: (p: Partial<WizardState>) => void;
   effectiveDecimals: number;
   effectiveTransferable: boolean;
-  /** Authoritative fee from Rust; `undefined` until the query returns. */
-  creationFeeEra?: bigint;
+  /** The fee from Rust; `undefined` until the query returns. */
+  creationFee: CreationFee;
 }) {
   const supplyLine = state.genesisSupply ? BigInt(state.genesisSupply).toLocaleString() : '—';
 
@@ -433,7 +436,11 @@ function Step3({
         <div className="tcd-review-row">
           <span className="tcd-review-key">Creation fee</span>
           <span className="tcd-review-val">
-            {creationFeeEra === undefined ? '…' : `${creationFeeEra} ERA (burned)`}
+            {creationFee === undefined
+              ? '…'
+              : 'era' in creationFee
+                ? `${creationFee.era} ERA (burned)`
+                : `not available: ${creationFee.error}`}
           </span>
         </div>
         {state.description.trim() && (
@@ -518,14 +525,18 @@ export const TokenCreationDialog: React.FC<{ onClose: () => void; onSuccess?: ()
   // Authoritative creation fee, fetched from Rust. Never hardcoded here — the
   // conservation guard validates the charged fee against a core constant, and a
   // number invented in the UI could silently disagree with what is burned.
-  const [creationFeeEra, setCreationFeeEra] = useState<bigint | undefined>(undefined);
+  const [creationFee, setCreationFee] = useState<CreationFee>(undefined);
   const stateRef = useRef(state);
 
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      const fee = await getTokenCreationFeeEra();
-      if (!cancelled) setCreationFeeEra(fee);
+      try {
+        const era = await getTokenCreationFeeEra();
+        if (!cancelled) setCreationFee({ era });
+      } catch (e) {
+        if (!cancelled) setCreationFee({ error: e instanceof Error ? e.message : String(e) });
+      }
     })();
     return () => { cancelled = true; };
   }, []);
@@ -700,7 +711,7 @@ export const TokenCreationDialog: React.FC<{ onClose: () => void; onSuccess?: ()
               set={set}
               effectiveDecimals={effectiveDecimals}
               effectiveTransferable={effectiveTransferable}
-              creationFeeEra={creationFeeEra}
+              creationFee={creationFee}
             />
           )}
         </div>

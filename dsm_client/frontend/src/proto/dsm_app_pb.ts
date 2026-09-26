@@ -7450,6 +7450,13 @@ export class TokenCreateResponse extends Message<TokenCreateResponse> {
    */
   message = "";
 
+  /**
+   * the token's ticker as its policy names it
+   *
+   * @generated from field: string ticker = 5;
+   */
+  ticker = "";
+
   constructor(data?: PartialMessage<TokenCreateResponse>) {
     super();
     proto3.util.initPartial(data, this);
@@ -7462,6 +7469,7 @@ export class TokenCreateResponse extends Message<TokenCreateResponse> {
     { no: 2, name: "token_id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 3, name: "policy_anchor", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 4, name: "message", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 5, name: "ticker", kind: "scalar", T: 9 /* ScalarType.STRING */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): TokenCreateResponse {

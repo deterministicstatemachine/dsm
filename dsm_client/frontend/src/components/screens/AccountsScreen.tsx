@@ -266,22 +266,14 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
         // route's reply says what Rust did; the list must show what Rust
         // KEPT. Rendering an optimistic row would claim a token is holdable
         // on the strength of a response rather than of stored state.
-        const rows = await loadBalances();
-        // Show the anchor RUST holds, not the text the user pasted. A scanned
-        // payload is a `dsm:token/v1:` URI, and echoing it under the label
-        // "Policy Anchor (CPTA)" tells the reader that a URI is an anchor —
-        // then they hand that to the next person and it resolves to nothing.
-        const adopted = (rows || []).find(
-          (b) => b.canonicalTokenId === res.tokenId || b.tokenId === res.tokenId,
-        );
-        setAddedToken({
-          ticker: res.ticker || '',
-          tokenId: res.tokenId || '',
-          anchorBase32: adopted?.policyAnchorB32 || '',
-        });
+        await loadBalances();
+        // The anchor Rust answered is the one it re-derived from the policy
+        // bytes it fetched: the anchor it holds, never the text pasted (a
+        // scanned payload is a `dsm:token/v1:` URI, not an anchor).
+        setAddedToken({ ticker: res.ticker, tokenId: res.tokenId, anchorBase32: res.anchorBase32 });
         setAddingAnchor(null);
       } else {
-        setError(res?.error || 'Could not add that token');
+        setError(res.error);
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not add that token');
@@ -526,7 +518,7 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
                   }}
                 >
                   <div style={{ fontWeight: 700, fontSize: 9, marginBottom: 6 }}>
-                    {addedToken.ticker ? `${addedToken.ticker} added` : 'Token added'}
+                    {`${addedToken.ticker} added`}
                   </div>
                   <div style={{ opacity: 0.7, fontSize: 6, textTransform: 'uppercase' }}>Token ID</div>
                   <div style={{ wordBreak: 'break-all', marginBottom: 4 }}>{addedToken.tokenId}</div>

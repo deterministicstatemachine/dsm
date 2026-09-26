@@ -906,6 +906,7 @@ message TokenCreateResponse {
   string token_id = 2; // deterministic token id
   bytes policy_anchor = 3 [(dsm_fixed_len)=32];
   string message = 4;
+  string ticker = 5; // the token's ticker as its policy names it
 }
 
 // ------------------------- DLV Lifecycle Objects --------------------------
