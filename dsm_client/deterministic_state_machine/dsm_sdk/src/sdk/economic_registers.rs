@@ -485,6 +485,11 @@ pub(crate) fn anchored_policy_bytes(
     policy_commit: &[u8; 32],
     runtime: &tokio::runtime::Handle,
 ) -> Result<Vec<u8>, PeerLineageFailure> {
+    // ERA's policy is Core's own (SoFi Amendment S11): answered from its
+    // bytes, never fetched and never stored.
+    if *policy_commit == dsm::core::token::token_state_manager::era_policy_commit() {
+        return Ok(dsm::core::token::era_policy::era_policy_bytes().to_vec());
+    }
     match crate::storage::client_db::token_registry::load_policy_verified(policy_commit) {
         Ok(Some(bytes)) => return Ok(bytes),
         Ok(None) => {}

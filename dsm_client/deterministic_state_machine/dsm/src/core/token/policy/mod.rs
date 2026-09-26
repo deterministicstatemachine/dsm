@@ -9,9 +9,11 @@
 //! any other way: registration takes the bytes, recomputes the commitment
 //! from them and derives the enforcer's view from what the blob says
 //! (`policy_enforcement::enforced_policy`), and enforcement is keyed by the
-//! commitment an operation names. A token with no committed policy — ERA,
-//! whose `policy_commit` constant has no preimage yet — has no policy here,
-//! and an operation naming it is refused for that reason.
+//! commitment an operation names. ERA's policy is pre-rooted: every device
+//! holds its bytes by construction ([`crate::core::token::era_policy`], SoFi
+//! Amendment S11), so it is answered from them, never from the cache, which
+//! could evict it, nor from the durable store, which never holds it. A
+//! commitment no committed policy is in hand for permits nothing.
 //!
 //! Determinism rules: no wall-clock; enforcement reads only what the
 //! operation carries and what Core derived from canonical state.
@@ -98,6 +100,17 @@ impl TokenPolicySystem {
                 "token policy: the committed bytes do not parse: {e}"
             ))
         })?;
+        // Exactly one network-anchored policy exists, ERA's, and it is fixed
+        // in Core; no other is registered (SoFi Amendment S11).
+        if !matches!(
+            parsed.release,
+            crate::economic::token_policy::Release::AllAtCreation { .. }
+        ) {
+            return Err(DsmError::invalid_operation(
+                "token policy: a network-anchored policy is registered by nobody — the one \
+                 that exists, ERA's, is fixed in Core (Amendment S11)",
+            ));
+        }
         let anchor = PolicyAnchor::from_bytes(commit);
         self.policy_cache.store_policy(
             anchor.clone(),
@@ -113,6 +126,13 @@ impl TokenPolicySystem {
     /// commitment, but there is nothing to evaluate against either way.
     pub async fn policy_at(&self, commit: &[u8; 32]) -> Result<Option<TokenPolicy>, DsmError> {
         let anchor = PolicyAnchor::from_bytes(*commit);
+        if *commit == crate::core::token::era_policy::era_policy_commit() {
+            let era = crate::core::token::era_policy::era_policy()?;
+            return Ok(Some(TokenPolicy::new_with_anchor(
+                enforced_policy(era),
+                anchor,
+            )));
+        }
         if let Some(policy) = self.policy_cache.get_policy(&anchor).await? {
             return Ok(Some(policy));
         }
@@ -243,15 +263,15 @@ mod tests {
         );
     }
 
-    /// A commitment no committed policy is in hand for — ERA's today, whose
-    /// constant has no preimage — permits nothing: the operation is denied
-    /// for the absence, never allowed by a default.
+    /// A commitment no committed policy is in hand for permits nothing: the
+    /// operation is denied for the absence, never allowed by a default.
     #[tokio::test]
     async fn an_operation_naming_a_commitment_without_a_policy_is_denied() {
         let system = TokenPolicySystem::new();
-        let era = crate::core::token::token_state_manager::era_policy_commit();
+        let unregistered =
+            TokenPolicySystem::commitment_of(&token_policy_bytes_with(9, POLICY_FLAG_TRANSFERABLE));
         let result = system
-            .enforce_policy(&era, "transfer", &context(1))
+            .enforce_policy(&unregistered, "transfer", &context(1))
             .await
             .expect("enforced");
         assert!(!result.allowed);
@@ -259,6 +279,46 @@ mod tests {
             result.reason,
             "no policy is committed at the commitment the operation names"
         );
+    }
+
+    /// SoFi Amendment S11: ERA's policy is pre-rooted. A transfer and a burn of
+    /// ERA are permitted by ERA's own committed rules with nothing registered,
+    /// nothing cached, and a resolver that is never asked.
+    #[tokio::test]
+    async fn eras_policy_is_answered_from_cores_bytes_never_cached_or_resolved() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let system = TokenPolicySystem::new();
+        let asked = Arc::new(AtomicUsize::new(0));
+        let counter = asked.clone();
+        system.set_policy_resolver(Arc::new(move |_commit: &[u8; 32]| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            None
+        }));
+        let era = crate::core::token::era_policy::era_policy_commit();
+        for operation in ["transfer", "burn"] {
+            let result = system
+                .enforce_policy(&era, operation, &context(1))
+                .await
+                .expect("enforced");
+            assert!(result.allowed, "ERA {operation}: {}", result.reason);
+        }
+        assert_eq!(
+            asked.load(Ordering::SeqCst),
+            0,
+            "the resolver was asked for ERA"
+        );
+        assert!(system.policy_cache.is_empty(), "ERA took a cache slot");
+    }
+
+    /// ERA's own bytes are network-anchored, so they are registered by nobody:
+    /// its policy is Core's, fixed (Amendment S11).
+    #[tokio::test]
+    async fn eras_own_bytes_are_never_registered() {
+        let system = TokenPolicySystem::new();
+        assert!(system
+            .register_policy(crate::core::token::era_policy::era_policy_bytes())
+            .is_err());
+        assert!(system.policy_cache.is_empty());
     }
 
     /// The durable bytes at a commitment are taken on a cache miss when they

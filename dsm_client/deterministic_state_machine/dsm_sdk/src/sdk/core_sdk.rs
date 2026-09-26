@@ -746,9 +746,8 @@ impl CoreSDK {
         );
         // Policies are registered from their committed bytes as tokens are
         // created and adopted (`register_policy_bytes`) and rehydrated from
-        // the durable store on a miss. ERA has none: its `policy_commit`
-        // constant has no preimage, so no ERA transfer or burn passes
-        // enforcement until ERA's policy blob exists.
+        // the durable store on a miss. ERA's is pre-rooted in Core and
+        // answered from its own bytes (SoFi Amendment S11).
         let policy_system = TokenPolicySystem::new();
 
         let state_machine = Mutex::new(StateMachine::new());

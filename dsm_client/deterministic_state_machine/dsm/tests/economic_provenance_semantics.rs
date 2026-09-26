@@ -236,15 +236,18 @@ impl ProvenanceResolver for Anchors {
     }
 }
 
-/// `TokenPolicyV3` bytes of a native token created by `creator`, laid out as
-/// SoFi §47 packs it.
+/// `TokenPolicyV3` bytes of a native token under `release_rule`, laid out as
+/// SoFi §47 packs it: a device-created policy names `creator` and a signer
+/// set (Amendment S8); a network-anchored one names neither (S11).
 fn native_policy(creator: ([u8; 32], [u8; 32]), release_rule: u8, supply: u128) -> Vec<u8> {
     let mut blob = vec![3, 0, 0, 0x02, release_rule];
-    blob.extend_from_slice(&creator.0);
-    blob.extend_from_slice(&creator.1);
-    blob.extend_from_slice(&[1, 1]);
-    blob.extend_from_slice(&3u16.to_be_bytes());
-    blob.extend_from_slice(b"key");
+    if release_rule == RELEASE_AT_CREATION {
+        blob.extend_from_slice(&creator.0);
+        blob.extend_from_slice(&creator.1);
+        blob.extend_from_slice(&[1, 1]);
+        blob.extend_from_slice(&3u16.to_be_bytes());
+        blob.extend_from_slice(b"key");
+    }
     blob.push(3);
     blob.extend_from_slice(b"TKN");
     blob.extend_from_slice(&5u16.to_be_bytes());
@@ -356,15 +359,46 @@ fn a_genesis_release_rides_only_its_creating_operation() {
     }
 }
 
+/// A creation naming ERA's commitment is refused at once from ERA's own
+/// policy, which Core holds (Amendment S11): no resolver is asked, so it is
+/// Invalid, never an availability failure waiting on a fetch.
+#[test]
+fn a_creation_naming_eras_commitment_is_refused_from_eras_own_policy() {
+    let era = dsm::core::token::era_policy::era_policy_commit();
+    let op = create_token(era, 1_000);
+    match verify_release(
+        &Anchors(Vec::new()),
+        &release_witness(era, 1_000),
+        Some(&op),
+    ) {
+        Err(ProvenanceError::GenesisReleaseInvalid(why)) => {
+            assert!(
+                why.contains("release rule"),
+                "refused for another reason: {why}"
+            )
+        }
+        other => panic!("a creation of ERA was not refused from ERA's policy: {other:?}"),
+    }
+}
+
+/// A network-anchored policy (Amendment S11) is a well-formed policy that
+/// releases nothing at creation: the refusal is the release rule's, not a
+/// parse error.
 #[test]
 fn a_genesis_release_needs_the_all_at_creation_rule() {
     let policy = native_policy((G, DEV), FAUCET_RELEASE, 1_000);
+    assert!(dsm::economic::token_policy::parse_token_policy(&policy).is_ok());
     let pc = policy_commit_of(&policy);
     let op = create_token(pc, 1_000);
-    assert!(matches!(
-        verify_release(&Anchors(policy), &release_witness(pc, 1_000), Some(&op)),
-        Err(ProvenanceError::GenesisReleaseInvalid(_))
-    ));
+    match verify_release(&Anchors(policy), &release_witness(pc, 1_000), Some(&op)) {
+        Err(ProvenanceError::GenesisReleaseInvalid(why)) => {
+            assert!(
+                why.contains("release rule"),
+                "refused for another reason: {why}"
+            )
+        }
+        other => panic!("a network-anchored policy released at creation: {other:?}"),
+    }
 }
 
 #[test]

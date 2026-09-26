@@ -18,9 +18,9 @@ use super::response_helpers::{err, pack_envelope_ok};
 // (`dsm::economic::token_policy`), so no two readers can disagree about one
 // blob. This module keeps the one packer (SoFi §47).
 use dsm::economic::token_policy::{
-    ReleaseRule, ALLOWLIST_KIND_INLINE, ALLOWLIST_KIND_NONE, MAX_POLICY_SIGNERS,
-    POLICY_FLAG_ALLOWLIST, POLICY_FLAG_BURN, POLICY_FLAG_TRANSFERABLE, SUPPLY_CLASS_NATIVE,
-    TOKEN_KIND_FUNGIBLE, TOKEN_POLICY_VERSION,
+    Release, ALLOWLIST_KIND_INLINE, ALLOWLIST_KIND_NONE, MAX_POLICY_SIGNERS, POLICY_FLAG_ALLOWLIST,
+    POLICY_FLAG_BURN, POLICY_FLAG_TRANSFERABLE, SUPPLY_CLASS_NATIVE, TOKEN_KIND_FUNGIBLE,
+    TOKEN_POLICY_VERSION,
 };
 
 /// A committed token policy, as Core parses it.
@@ -43,11 +43,13 @@ pub(crate) type ParsedTokenPolicy = dsm::economic::token_policy::TokenPolicy;
 ///        backing rule has an encoding)
 ///   u8   flags: 0x01 burn | 0x02 transferable | 0x04 allowlist
 ///   u8   release_rule: 0 all-at-creation | 1 faucet
-///   32B  creator_genesis              (SoFi Amendment S8)
+///   ── release rule 0 only (device-created, SoFi Amendment S8) ──
+///   32B  creator_genesis
 ///   32B  creator_device_id
 ///   u8   threshold k                  (1..=n)
 ///   u8   signer_count n               (1..=16)
 ///   n x  { u16 pk_len, pk }
+///   ── every policy (a network-anchored one, Amendment S11, names neither) ──
 ///   u8   ticker_len,  ticker
 ///   u16  alias_len,   alias
 ///   u8   decimals
@@ -58,18 +60,23 @@ pub(crate) type ParsedTokenPolicy = dsm::economic::token_policy::TokenPolicy;
 ///   u16  allowlist_count, count x 32B device_id
 /// ```
 pub(crate) fn build_policy_v3_bytes(p: &ParsedTokenPolicy) -> Result<Vec<u8>, String> {
-    if p.signers.is_empty() || p.signers.len() > MAX_POLICY_SIGNERS {
-        return Err(format!(
-            "policy: signer count must be 1..={MAX_POLICY_SIGNERS}, got {}",
-            p.signers.len()
-        ));
-    }
-    if p.threshold == 0 || (p.threshold as usize) > p.signers.len() {
-        return Err(format!(
-            "policy: threshold {} must be 1..={} (the signer count)",
-            p.threshold,
-            p.signers.len()
-        ));
+    if let Release::AllAtCreation {
+        threshold, signers, ..
+    } = &p.release
+    {
+        if signers.is_empty() || signers.len() > MAX_POLICY_SIGNERS {
+            return Err(format!(
+                "policy: signer count must be 1..={MAX_POLICY_SIGNERS}, got {}",
+                signers.len()
+            ));
+        }
+        if *threshold == 0 || (*threshold as usize) > signers.len() {
+            return Err(format!(
+                "policy: threshold {} must be 1..={} (the signer count)",
+                threshold,
+                signers.len()
+            ));
+        }
     }
     if p.genesis_supply == 0 {
         return Err("policy: a token's genesis supply must be positive".into());
@@ -108,18 +115,29 @@ pub(crate) fn build_policy_v3_bytes(p: &ParsedTokenPolicy) -> Result<Vec<u8>, St
         TOKEN_KIND_FUNGIBLE,
         SUPPLY_CLASS_NATIVE,
         flags,
-        p.release_rule.code(),
+        p.release.rule().code(),
     ];
-    out.extend_from_slice(&p.creator_genesis);
-    out.extend_from_slice(&p.creator_device_id);
-    out.push(p.threshold);
-    out.push(p.signers.len() as u8);
-    for pk in &p.signers {
-        if pk.len() > u16::MAX as usize {
-            return Err("policy: signer public key too long".into());
+    match &p.release {
+        Release::AllAtCreation {
+            creator_genesis,
+            creator_device_id,
+            threshold,
+            signers,
+        } => {
+            out.extend_from_slice(creator_genesis);
+            out.extend_from_slice(creator_device_id);
+            out.push(*threshold);
+            out.push(signers.len() as u8);
+            for pk in signers {
+                if pk.len() > u16::MAX as usize {
+                    return Err("policy: signer public key too long".into());
+                }
+                out.extend_from_slice(&(pk.len() as u16).to_be_bytes());
+                out.extend_from_slice(pk);
+            }
         }
-        out.extend_from_slice(&(pk.len() as u16).to_be_bytes());
-        out.extend_from_slice(pk);
+        // Network-anchored (Amendment S11): no creator and no signer set.
+        Release::Faucet => {}
     }
     out.push(ticker.len() as u8);
     out.extend_from_slice(ticker);
@@ -151,6 +169,23 @@ pub(crate) fn build_policy_v3_bytes(p: &ParsedTokenPolicy) -> Result<Vec<u8>, St
 /// field: a policy that cannot be fully validated is not a policy.
 pub(crate) fn parse_token_policy(raw_proto: &[u8]) -> Option<ParsedTokenPolicy> {
     dsm::economic::token_policy::parse_token_policy(raw_proto).ok()
+}
+
+/// A policy a device may adopt or publish: one Core's parser accepts, and
+/// device-created. Exactly one network-anchored policy exists, ERA's, fixed
+/// in Core; any other is a lookalike with no reserve behind it (SoFi
+/// Amendment S11), and is neither adopted nor published.
+pub(crate) fn adoptable_policy(raw_proto: &[u8]) -> Result<ParsedTokenPolicy, String> {
+    let parsed = dsm::economic::token_policy::parse_token_policy(raw_proto)
+        .map_err(|e| format!("not a token policy: {e}"))?;
+    if !matches!(parsed.release, Release::AllAtCreation { .. }) {
+        return Err(
+            "a network-anchored policy: the one that exists, ERA's, is fixed in Core, and \
+             any other has no reserve behind it (Amendment S11)"
+                .into(),
+        );
+    }
+    Ok(parsed)
 }
 
 /// The network's pinned storage set, where token policies live as immutable
@@ -519,6 +554,13 @@ impl AppRouterImpl {
     /// The table read re-verifies that the bytes hash to the anchor; a
     /// corrupted row, or a table that cannot be read, is an error.
     async fn load_policy_bytes(&self, anchor: [u8; 32]) -> Result<Option<Vec<u8>>, String> {
+        // ERA's policy is Core's own (SoFi Amendment S11): answered from its
+        // bytes, never fetched and never stored.
+        if anchor == dsm::core::token::token_state_manager::era_policy_commit() {
+            return Ok(Some(
+                dsm::core::token::era_policy::era_policy_bytes().to_vec(),
+            ));
+        }
         if let Some(bytes) = self.policy_cache.lock().await.get(&anchor).cloned() {
             return Ok(Some(bytes));
         }
@@ -632,6 +674,13 @@ impl AppRouterImpl {
                     Err(e) => return err(format!("tokens.addByAnchor: {e}")),
                 };
                 let anchor = input.anchor;
+                if let Some(builtin) = dsm::core::token::builtin_token_id_for_policy_commit(&anchor)
+                {
+                    return err(format!(
+                        "tokens.addByAnchor: {builtin} is a protocol asset — every device already \
+                         has it"
+                    ));
+                }
 
                 let policy_bytes = match self.load_policy_bytes(anchor).await {
                     Ok(Some(b)) if !b.is_empty() => b,
@@ -655,11 +704,17 @@ impl AppRouterImpl {
                     );
                 }
 
-                let Some(parsed) = parse_token_policy(&policy_bytes) else {
-                    return err(
-                        "tokens.addByAnchor: policy is not a readable v3 token policy".into(),
-                    );
+                let parsed = match adoptable_policy(&policy_bytes) {
+                    Ok(parsed) => parsed,
+                    Err(e) => return err(format!("tokens.addByAnchor: {e}")),
                 };
+                let Release::AllAtCreation {
+                    creator_device_id, ..
+                } = &parsed.release
+                else {
+                    return err("tokens.addByAnchor: the policy names no creating device".into());
+                };
+                let creator_device_id = *creator_device_id;
 
                 let mut id_hasher = dsm::crypto::blake3::dsm_domain_hasher(
                     dsm::common::domain_tags::TAG_DSM_TOKEN_ID,
@@ -773,7 +828,7 @@ impl AppRouterImpl {
                     alias: parsed.alias.clone(),
                     decimals: parsed.decimals,
                     genesis_supply: parsed.genesis_supply,
-                    creator_device_id: parsed.creator_device_id,
+                    creator_device_id,
                 };
                 if let Err(e) = crate::storage::client_db::token_registry::insert_token(&row) {
                     // Already present is the idempotent case, not a failure.
@@ -992,19 +1047,20 @@ impl AppRouterImpl {
                 };
                 let (creator_genesis, creator_device_id) = (head.genesis_digest(), head.devid());
                 let parsed = ParsedTokenPolicy {
-                    creator_genesis,
-                    creator_device_id,
                     ticker: ticker.clone(),
                     alias: req.alias.trim().to_string(),
                     decimals: req.decimals,
                     genesis_supply,
-                    release_rule: ReleaseRule::AllAtCreation,
+                    release: Release::AllAtCreation {
+                        creator_genesis,
+                        creator_device_id,
+                        threshold,
+                        signers: vec![creator_pk],
+                    },
                     description: Some(req.description.trim().to_string()).filter(|s| !s.is_empty()),
                     icon_url: Some(req.icon_url.trim().to_string()).filter(|s| !s.is_empty()),
                     burn_enabled: req.burn_enabled,
                     transferable: req.transferable,
-                    threshold,
-                    signers: vec![creator_pk],
                     allowlist_device_ids,
                 };
 
@@ -1164,7 +1220,9 @@ impl AppRouterImpl {
                 fields.insert("kind".to_string(), "FUNGIBLE".to_string());
                 fields.insert("burn_enabled".to_string(), parsed.burn_enabled.to_string());
                 fields.insert("transferable".to_string(), parsed.transferable.to_string());
-                fields.insert("threshold".to_string(), parsed.threshold.to_string());
+                if let Release::AllAtCreation { threshold, .. } = &parsed.release {
+                    fields.insert("threshold".to_string(), threshold.to_string());
+                }
 
                 let metadata = TokenMetadata {
                     token_id: token_id.clone(),
@@ -1381,10 +1439,10 @@ impl AppRouterImpl {
                 if body.is_empty() {
                     return err("tokens.publishPolicy: empty body".into());
                 }
-                // Only a policy Core's one parser accepts is published: the
-                // network holds it under the anchor devices adopt a token by.
-                if let Err(e) = dsm::economic::token_policy::parse_token_policy(body) {
-                    return err(format!("tokens.publishPolicy: not a token policy: {e}"));
+                // Only a policy a device may adopt is published: the network
+                // holds it under the anchor devices adopt a token by.
+                if let Err(e) = adoptable_policy(body) {
+                    return err(format!("tokens.publishPolicy: {e}"));
                 }
 
                 // The anchor is the content hash, always. Publication is
@@ -1648,26 +1706,51 @@ mod tests {
         .encode_to_vec()
     }
 
-    fn fungible_fixture() -> ParsedTokenPolicy {
-        ParsedTokenPolicy {
+    /// The fixture's release: device-created by 0x31/0x32, `threshold` of
+    /// `signers`.
+    fn created(threshold: u8, signers: Vec<Vec<u8>>) -> Release {
+        Release::AllAtCreation {
             creator_genesis: [0x31; 32],
             creator_device_id: [0x32; 32],
+            threshold,
+            signers,
+        }
+    }
+
+    fn fungible_fixture() -> ParsedTokenPolicy {
+        ParsedTokenPolicy {
             ticker: "DSM".into(),
             alias: "DSM Token".into(),
             decimals: 8,
             genesis_supply: 1_000_000,
-            release_rule: ReleaseRule::AllAtCreation,
+            release: created(1, vec![vec![0xAB; 64]]),
             description: Some("A test token".into()),
             icon_url: Some("dsm:icon".into()),
             burn_enabled: true,
             transferable: true,
-            threshold: 1,
-            signers: vec![vec![0xAB; 64]],
             allowlist_device_ids: Vec::new(),
         }
     }
 
     // ── The one packer against Core's one parser ─────────────────────
+
+    /// A device-created policy's bytes are exactly the layout it has always
+    /// had: SoFi Amendment S11 changed only network-anchored policies, so no
+    /// created token's identity moved. The fixture's commitment is pinned —
+    /// the value was computed from the documented layout and held by the
+    /// packer before the grammar changed.
+    #[test]
+    fn a_device_created_policy_keeps_its_layout_and_commitment() {
+        let proto = v3_policy(&fungible_fixture());
+        let commit = dsm::crypto::blake3::domain_hash_bytes(
+            dsm::common::domain_tags::TAG_DSM_POLICY,
+            &proto,
+        );
+        assert_eq!(
+            crate::util::text_id::encode_base32_crockford(&commit),
+            "E1RX7V2A1G9XS9T3K1JDGGPXXXS173YH5HWM7DD388DH05XD493G"
+        );
+    }
 
     #[test]
     fn the_packed_policy_parses_to_every_field_it_was_packed_from() {
@@ -1689,13 +1772,11 @@ mod tests {
     #[test]
     fn a_multi_signer_threshold_round_trips() {
         let src = ParsedTokenPolicy {
-            threshold: 2,
-            signers: vec![vec![0x01; 64], vec![0x02; 64], vec![0x03; 64]],
+            release: created(2, vec![vec![0x01; 64], vec![0x02; 64], vec![0x03; 64]]),
             ..fungible_fixture()
         };
         let parsed = parse_token_policy(&v3_policy(&src)).expect("parses");
-        assert_eq!(parsed.threshold, 2);
-        assert_eq!(parsed.signers, src.signers);
+        assert_eq!(parsed.release, src.release);
     }
 
     #[test]
@@ -1717,8 +1798,7 @@ mod tests {
     #[test]
     fn duplicate_signers_are_refused() {
         let src = ParsedTokenPolicy {
-            threshold: 2,
-            signers: vec![vec![0x07; 64], vec![0x07; 64]],
+            release: created(2, vec![vec![0x07; 64], vec![0x07; 64]]),
             ..fungible_fixture()
         };
         assert!(build_policy_v3_bytes(&src).is_err());
@@ -1750,13 +1830,12 @@ mod tests {
     #[test]
     fn an_unsatisfiable_threshold_is_refused() {
         let bad = ParsedTokenPolicy {
-            threshold: 3,
-            signers: vec![vec![0x01; 64]],
+            release: created(3, vec![vec![0x01; 64]]),
             ..fungible_fixture()
         };
         assert!(build_policy_v3_bytes(&bad).is_err());
         let zero = ParsedTokenPolicy {
-            threshold: 0,
+            release: created(0, vec![vec![0xAB; 64]]),
             ..fungible_fixture()
         };
         assert!(build_policy_v3_bytes(&zero).is_err());
@@ -1765,16 +1844,18 @@ mod tests {
     #[test]
     fn an_empty_or_oversized_signer_set_is_refused() {
         let none = ParsedTokenPolicy {
-            signers: Vec::new(),
+            release: created(1, Vec::new()),
             ..fungible_fixture()
         };
         assert!(build_policy_v3_bytes(&none).is_err());
 
         let too_many = ParsedTokenPolicy {
-            threshold: 1,
-            signers: (0..(MAX_POLICY_SIGNERS + 1))
-                .map(|i| vec![i as u8; 64])
-                .collect(),
+            release: created(
+                1,
+                (0..(MAX_POLICY_SIGNERS + 1))
+                    .map(|i| vec![i as u8; 64])
+                    .collect(),
+            ),
             ..fungible_fixture()
         };
         assert!(build_policy_v3_bytes(&too_many).is_err());
@@ -1844,6 +1925,55 @@ mod tests {
                 .await
                 .get(&anchor_of(&policy)),
             Some(&policy)
+        );
+    }
+
+    /// SoFi Amendment S11: the one packer lays out a network-anchored policy
+    /// with no creator and no signer set, and Core's parser reads it back.
+    #[test]
+    fn a_network_anchored_policy_packs_without_a_creator_or_signers() {
+        let src = ParsedTokenPolicy {
+            release: Release::Faucet,
+            ..fungible_fixture()
+        };
+        let parsed = parse_token_policy(&v3_policy(&src)).expect("Core parses it");
+        assert_eq!(parsed, src);
+        let device_created = build_policy_v3_bytes(&fungible_fixture()).expect("packs");
+        let network_anchored = build_policy_v3_bytes(&src).expect("packs");
+        assert_eq!(
+            device_created.len() - network_anchored.len(),
+            32 + 32 + 1 + 1 + 2 + 64,
+            "exactly the creator and the one-key signer set are left out"
+        );
+    }
+
+    /// SoFi §47, Amendment S11: the one packer reproduces ERA's policy bytes
+    /// exactly from ERA's fields — Core's compiled bytes are the packer's.
+    #[test]
+    fn the_one_packer_reproduces_eras_policy_bytes() {
+        let era = dsm::core::token::era_policy::era_policy().expect("ERA's policy parses");
+        assert_eq!(
+            v3_policy(era),
+            dsm::core::token::era_policy::era_policy_bytes()
+        );
+    }
+
+    /// SoFi Amendment S11: exactly one network-anchored policy exists, ERA's,
+    /// fixed in Core. Any other is a lookalike with no reserve behind it and is
+    /// neither adopted nor published; a device-created policy is.
+    #[test]
+    fn a_network_anchored_lookalike_is_neither_adopted_nor_published() {
+        let lookalike = ParsedTokenPolicy {
+            ticker: "ERA".into(),
+            alias: "ERA".into(),
+            release: Release::Faucet,
+            ..fungible_fixture()
+        };
+        let refused = adoptable_policy(&v3_policy(&lookalike)).expect_err("refused");
+        assert!(refused.contains("network-anchored"), "{refused}");
+        assert_eq!(
+            adoptable_policy(&v3_policy(&fungible_fixture())).expect("adoptable"),
+            fungible_fixture()
         );
     }
 

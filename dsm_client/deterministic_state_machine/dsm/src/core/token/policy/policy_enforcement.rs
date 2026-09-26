@@ -260,24 +260,25 @@ impl PolicyEnforcer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::economic::token_policy::{ReleaseRule, TokenPolicy as ParsedTokenPolicy};
+    use crate::economic::token_policy::{Release, TokenPolicy as ParsedTokenPolicy};
     use crate::types::policy_types::{PolicyAnchor, PolicyCondition, PolicyFile, TokenPolicy};
 
     fn fungible_fixture() -> ParsedTokenPolicy {
         ParsedTokenPolicy {
-            creator_genesis: [0x31; 32],
-            creator_device_id: [0x32; 32],
             ticker: "DSM".into(),
             alias: "DSM Token".into(),
             decimals: 8,
             genesis_supply: 1_000_000,
-            release_rule: ReleaseRule::AllAtCreation,
+            release: Release::AllAtCreation {
+                creator_genesis: [0x31; 32],
+                creator_device_id: [0x32; 32],
+                threshold: 1,
+                signers: vec![vec![0xAB; 64]],
+            },
             description: Some("A test token".into()),
             icon_url: Some("dsm:icon".into()),
             burn_enabled: true,
             transferable: true,
-            threshold: 1,
-            signers: vec![vec![0xAB; 64]],
             allowlist_device_ids: Vec::new(),
         }
     }
