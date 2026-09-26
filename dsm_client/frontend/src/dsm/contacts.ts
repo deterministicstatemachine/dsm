@@ -8,45 +8,42 @@ import {
   routerInvokeBin,
   requestBlePermissions as bridgeRequestBlePermissions,
 } from './WebViewBridge';
-import { ContactsList, AddContactArgs, AddContactResult, BilateralRelationshipDTO, ChainTipDTO } from './types';
+import { ContactsList, AddContactArgs, AddContactResult, BilateralRelationshipDTO } from './types';
 
-function mapContactToDTO(c: any): BilateralRelationshipDTO {
-  // ═══════════════════════════════════════════════════════════════════════
-  // INVARIANT: Proto data uses camelCase field names from @bufbuild/protobuf.
-  // DO NOT add snake_case fallbacks (e.g. c.device_id ?? c.deviceId).
-  // If you see snake_case data, the bridge is returning raw objects — fix
-  // the bridge, not the mapper. ESLint enforces this via no-restricted-syntax.
-  // ═══════════════════════════════════════════════════════════════════════
-  const deviceId = c.deviceId instanceof Uint8Array ? c.deviceId : new Uint8Array();
-  const alias = c.alias || '';
-  const signingPublicKey = c.signingPublicKey instanceof Uint8Array ? c.signingPublicKey : new Uint8Array();
-
-  const genesisHash = (c.genesisHash instanceof Uint8Array)
-      ? c.genesisHash
-      : (c.genesisHash?.v instanceof Uint8Array ? c.genesisHash.v : undefined);
-
-  const tipHash = c.chainTip?.v instanceof Uint8Array ? c.chainTip.v : undefined;
-
-  let tip: ChainTipDTO | undefined = undefined;
-  if (tipHash) {
-      tip = { tipHash };
+/** A contact as contacts.list states it; a contact missing what Rust always writes is refused. */
+function mapContactToDTO(c: pb.ContactAddResponse): BilateralRelationshipDTO {
+  const genesisHash = c.genesisHash?.v;
+  const chainTip = c.chainTip?.v;
+  if (c.deviceId.length !== 32) {
+    throw new Error(`STRICT: contacts.list answered a contact with a ${c.deviceId.length}-byte device id`);
   }
-
-  const bleAddr = c.bleAddress || '';
-
+  if (!genesisHash || genesisHash.length !== 32) {
+    throw new Error('STRICT: contacts.list answered a contact without its 32-byte genesis');
+  }
+  if (c.signingPublicKey.length !== 64) {
+    throw new Error(`STRICT: contacts.list answered a contact with a ${c.signingPublicKey.length}-byte signing key`);
+  }
+  if (!c.alias) {
+    throw new Error('STRICT: contacts.list answered a contact without its alias');
+  }
+  if (chainTip !== undefined && chainTip.length !== 32) {
+    throw new Error(`STRICT: contacts.list answered a contact with a ${chainTip.length}-byte tip`);
+  }
   return {
-    deviceId,
-    publicKey: signingPublicKey,
-    alias,
+    deviceId: c.deviceId,
+    publicKey: c.signingPublicKey,
+    alias: c.alias,
     genesisHash,
-    chainTip: tip,
-    bleAddress: typeof bleAddr === 'string' && bleAddr.length > 0 ? bleAddr : undefined,
-    genesisVerifiedOnline: c.genesisVerifiedOnline === true,
-    sendStatus: c.sendStatus ?? undefined,
+    chainTip,
+    // The wire's empty string is "no address".
+    bleAddress: c.bleAddress || undefined,
+    genesisVerifiedOnline: c.genesisVerifiedOnline,
+    sendStatus: c.sendStatus,
   };
 }
 
 import { decodeFramedEnvelopeV3 } from './decoding';
+import { encodeBase32Crockford } from '../utils/textId';
 
 export async function getContacts(): Promise<ContactsList> {
   try {
@@ -92,6 +89,9 @@ export async function addContact(args: AddContactArgs): Promise<AddContactResult
   const genesisHash = normalizeToBytes(args.genesisHash);
   const signingPublicKey = normalizeToBytes(args.signingPublicKey);
   
+  if (deviceId.length !== 32) {
+    throw new Error('deviceId must be 32 bytes');
+  }
   if (genesisHash.length !== 32) {
     throw new Error('genesisHash must be 32 bytes');
   }
@@ -125,14 +125,8 @@ export async function addContact(args: AddContactArgs): Promise<AddContactResult
     if (env.payload.case !== 'contactAddResponse') {
       throw new Error(`Expected contactAddResponse, got ${env.payload.case}`);
     }
-    const resp = env.payload.value;
-    const success = !!resp.alias; // Check if we got back an alias
-    
-    return {
-      accepted: success,
-      contactId: undefined, // Could map resp.deviceId to B32 if utility available
-      error: success ? undefined : 'Empty response or failure'
-    };
+    // Rust answers an added contact with the contact itself; a refusal is an error.
+    return { accepted: true, contactId: encodeBase32Crockford(env.payload.value.deviceId) };
   } catch (e) {
     console.error('[addContact] Bridge call failed:', e);
     return {

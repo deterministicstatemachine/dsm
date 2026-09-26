@@ -2,8 +2,6 @@
 
 jest.mock('../WebViewBridge', () => ({
   routerInvokeBin: jest.fn(),
-  getTokenPolicyBytes: jest.fn(),
-  listCachedTokenPolicies: jest.fn(),
   publishTokenPolicyBytes: jest.fn(),
 }));
 
@@ -16,15 +14,11 @@ jest.mock('../events', () => ({
 import * as pb from '../../proto/dsm_app_pb';
 import {
   createToken,
-  listPolicies,
   publishTokenPolicyBytes,
-  getTokenPolicyBytes,
   publishTokenPolicy,
 } from '../policies';
 import {
   routerInvokeBin,
-  getTokenPolicyBytes as getTokenPolicyBytesBridge,
-  listCachedTokenPolicies,
   publishTokenPolicyBytes as publishTokenPolicyBytesBridge,
 } from '../WebViewBridge';
 import { encodeBase32Crockford } from '../../utils/textId';
@@ -174,75 +168,26 @@ describe('policies.ts', () => {
   });
 
 
-  describe('listPolicies', () => {
-    test('maps policies from envelope', async () => {
-      const commit = new Uint8Array(32).fill(0x01);
-      const pBytes = new Uint8Array(16).fill(0x02);
-      const env = new pb.Envelope({
-        version: 3,
-        payload: {
-          case: 'tokenPolicyListResponse',
-          value: new pb.TokenPolicyListResponse({
-            policies: [
-              new pb.TokenPolicyCacheEntry({
-                policyCommit: commit as any,
-                policyBytes: pBytes as any,
-                ticker: 'ERA',
-                alias: 'Era Coin',
-                decimals: 8,
-                maxSupply: '1000000',
-              }),
-            ],
-          }),
-        },
-      });
-      (listCachedTokenPolicies as jest.Mock).mockResolvedValue(frameEnvelope(env));
+  // ── publishTokenPolicyBytes ────────────────────────────────────────
 
-      const result = await listPolicies();
-      expect(result).toHaveLength(1);
-      expect(result[0].policy_commit).toEqual(commit);
-      expect(result[0].policy_bytes).toEqual(pBytes);
-      expect(result[0].metadata).toEqual({
-        ticker: 'ERA',
-        alias: 'Era Coin',
-        decimals: 8,
-        maxSupply: '1000000',
-      });
+  describe('amounts', () => {
+    // A blank or non-numeric amount used to be read as 0 and sent.
+    test('a blank genesis supply is refused before anything is sent', async () => {
+      const res = await createToken({
+        ticker: 'TKN', alias: 'Token', decimals: 0, genesisSupply: '  ',
+        burnEnabled: false, transferable: true, threshold: 1,
+      } as any);
+      expect(res).toEqual({ success: false, message: expect.stringContaining('whole number') });
+      expect(routerInvokeBin).not.toHaveBeenCalled();
     });
 
-    test('returns empty array on error envelope', async () => {
-      const env = new pb.Envelope({
-        version: 3,
-        payload: { case: 'error', value: new pb.Error({ message: 'nope' }) },
-      });
-      (listCachedTokenPolicies as jest.Mock).mockResolvedValue(frameEnvelope(env));
-
-      expect(await listPolicies()).toEqual([]);
-    });
-
-    test('returns empty array on bridge error', async () => {
-      (listCachedTokenPolicies as jest.Mock).mockRejectedValue(new Error('fail'));
-      expect(await listPolicies()).toEqual([]);
-    });
-
-    test('metadata is undefined when no metadata fields are present', async () => {
-      const env = new pb.Envelope({
-        version: 3,
-        payload: {
-          case: 'tokenPolicyListResponse',
-          value: new pb.TokenPolicyListResponse({
-            policies: [new pb.TokenPolicyCacheEntry({ policyCommit: new Uint8Array(32) as any, policyBytes: new Uint8Array(8) as any })],
-          }),
-        },
-      });
-      (listCachedTokenPolicies as jest.Mock).mockResolvedValue(frameEnvelope(env));
-
-      const result = await listPolicies();
-      expect(result[0].metadata).toBeUndefined();
+    test('a blank burn amount is refused before anything is sent', async () => {
+      const { burnToken } = await import('../policies');
+      const res = await burnToken({ tokenId: 'TKN', amount: '' });
+      expect(res).toEqual({ success: false, message: expect.stringContaining('whole number') });
+      expect(routerInvokeBin).not.toHaveBeenCalled();
     });
   });
-
-  // ── publishTokenPolicyBytes ────────────────────────────────────────
 
   describe('publishTokenPolicyBytes', () => {
     test('returns anchor bytes and base32 on success', async () => {
@@ -264,24 +209,6 @@ describe('policies.ts', () => {
   });
 
   // ── getTokenPolicyBytes ────────────────────────────────────────────
-
-  describe('getTokenPolicyBytes', () => {
-    test('returns bytes from bridge', async () => {
-      const policyBytes = new Uint8Array(64);
-      (getTokenPolicyBytesBridge as jest.Mock).mockResolvedValue(policyBytes);
-
-      const result = await getTokenPolicyBytes(new Uint8Array(32));
-      expect(result).toEqual(policyBytes);
-    });
-
-    test('throws when anchor is not 32 bytes', async () => {
-      await expect(getTokenPolicyBytes(new Uint8Array(16))).rejects.toThrow(/anchorBytes must be 32 bytes/);
-    });
-
-    test('throws when anchor is null', async () => {
-      await expect(getTokenPolicyBytes(null as any)).rejects.toThrow(/anchorBytes must be 32 bytes/);
-    });
-  });
 
   // ── publishTokenPolicy ─────────────────────────────────────────────
 

@@ -27,10 +27,8 @@ export type DomainContact = {
   genesisHash: string;
   chainTip?: string;
   bleAddress?: string;
-  status?: string;
-  genesisVerifiedOnline?: boolean;
-  verifyingStorageNodes?: number;
-  signingPublicKey?: string;  // base32 Crockford encoded
+  genesisVerifiedOnline: boolean;
+  signingPublicKey: string;  // base32 Crockford encoded
   sendReady?: boolean;
   sendCheckState?: DomainRelationshipSendCheckState;
   sendBlockReason?: DomainRelationshipSendBlockReason;

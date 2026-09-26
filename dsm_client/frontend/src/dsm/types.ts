@@ -39,33 +39,18 @@ export type ContactAddEvent = ContactAddProgress | ContactAddSuccess | ContactAd
 export type DsmEventListener = (e: ContactAddEvent | DsmRawEvent) => void;
 
 /**
- * Backend-verified ChainTip (pb-aligned).
- * Canonical fields only; any time-like info is audit-only and optional.
- */
-export interface ChainTipDTO {
-  tipHash: Uint8Array;            // Hash32 (32 bytes)
-  stateNumber?: bigint;           // u64 - may not be available initially
-  deviceId?: Uint8Array;          // 32 bytes - may not be available initially
-  counterpartyId?: Uint8Array;    // 32 bytes - may not be available initially
-  bilateralChainId?: string;      // string id (proto) - may not be available initially
-  anchored?: boolean;             // storage-node confirmation - defaults to false
-  anchorReceiptId?: string;       // optional external anchor ref
-  lastAnchorAttempt?: bigint;     // u64 audit-only counter/index (NOT wall-clock)
-  failedAnchorAttempts?: number;  // u32 - defaults to 0
-}
-
-/**
- * Bilateral relationship view (pb-aligned).
- * No hex/base64 at the boundary; binary everywhere.
+ * A contact as `contacts.list` states it (pb-aligned, binary). Rust writes the
+ * device id, genesis, signing key and alias on every contact.
  */
 export interface BilateralRelationshipDTO {
-  deviceId: Uint8Array;             // 32 bytes device id
-  publicKey: Uint8Array;          // raw PQ key bytes
-  alias: string;            // user label
-  genesisHash?: Uint8Array;       // 32 bytes genesis hash (if known)
-  chainTip?: ChainTipDTO;         // current bilateral tip
-  bleAddress?: string;           // BLE MAC address for offline bilateral transfers
-  genesisVerifiedOnline?: boolean; // genesis hash verified via storage node
+  deviceId: Uint8Array;             // 32 bytes
+  publicKey: Uint8Array;            // SPHINCS+ signing key, 64 bytes
+  alias: string;
+  genesisHash: Uint8Array;          // 32 bytes
+  /** The relationship's tip, once it has one. */
+  chainTip?: Uint8Array;            // 32 bytes
+  bleAddress?: string;              // BLE MAC address for offline bilateral transfers
+  genesisVerifiedOnline: boolean;   // genesis hash verified via storage node
   sendStatus?: pb.RelationshipSendStatus;
 }
 

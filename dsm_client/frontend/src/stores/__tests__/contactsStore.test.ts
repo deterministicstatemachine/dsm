@@ -7,8 +7,6 @@ jest.mock('../../services/dsmClient', () => ({
   dsmClient: {
     getContacts: jest.fn(),
     addContact: jest.fn(),
-    updateContactStrict: jest.fn(),
-    deleteContactStrict: jest.fn(),
   },
 }));
 
@@ -45,8 +43,6 @@ function freshModule() {
     dsmClient: {
       getContacts: jest.fn(),
       addContact: jest.fn(),
-      updateContactStrict: jest.fn(),
-      deleteContactStrict: jest.fn(),
     },
   }));
   jest.doMock('../../contexts/contacts/utils', () => ({
@@ -63,12 +59,13 @@ function freshModule() {
   return { ...mod, client };
 }
 
+/** A contact as getContacts returns it: the DTO contacts.list decodes to. */
 function makeContact(overrides: Record<string, any> = {}) {
   return {
     alias: 'Alice',
-    genesisHash: 'abcd1234',
-    deviceId: 'dev001',
-    signingPublicKey: 'key123',
+    deviceId: new Uint8Array(32).fill(0x01),
+    genesisHash: new Uint8Array(32).fill(0x02),
+    publicKey: new Uint8Array(64).fill(0x03),
     genesisVerifiedOnline: true,
     ...overrides,
   };
@@ -128,7 +125,17 @@ describe('ContactsStore', () => {
       await contactsStore.refreshContacts();
       const s = contactsStore.getSnapshot();
       expect(s.contacts).toHaveLength(1);
-      expect(s.contacts[0].alias).toBe('Alice');
+      expect(s.contacts[0]).toEqual({
+        // A contact is its device: the alias is a label.
+        id: '01'.repeat(32),
+        alias: 'Alice',
+        deviceId: '01'.repeat(32),
+        genesisHash: '02'.repeat(32),
+        publicKey: '03'.repeat(64),
+        isVerified: true,
+        bleAddress: undefined,
+        chainTip: undefined,
+      });
       expect(s.isLoading).toBe(false);
     });
 
@@ -140,15 +147,7 @@ describe('ContactsStore', () => {
       expect(contactsStore.getSnapshot().contacts).toEqual([]);
     });
 
-    it('handles missing contacts field', async () => {
-      const { contactsStore, client } = freshModule();
-      client.getContacts.mockResolvedValue({});
-
-      await contactsStore.refreshContacts();
-      expect(contactsStore.getSnapshot().contacts).toEqual([]);
-    });
-
-    it('preserves existing bleAddress if new data lacks it', async () => {
+    it('keeps no address Rust no longer holds', async () => {
       const { contactsStore, client } = freshModule();
       const contactWithBle = makeContact({ bleAddress: 'AA:BB:CC' });
       client.getContacts.mockResolvedValue({ contacts: [contactWithBle] });
@@ -159,7 +158,7 @@ describe('ContactsStore', () => {
       client.getContacts.mockResolvedValue({ contacts: [contactNoBle] });
       await contactsStore.refreshContacts();
 
-      expect(contactsStore.getSnapshot().contacts[0].bleAddress).toBe('AA:BB:CC');
+      expect(contactsStore.getSnapshot().contacts[0].bleAddress).toBeUndefined();
     });
 
     it('sets error on failure', async () => {
@@ -303,118 +302,7 @@ describe('ContactsStore', () => {
     });
   });
 
-  describe('updateContact()', () => {
-    it('returns true on success', async () => {
-      const { contactsStore, client } = freshModule();
-      client.updateContactStrict = jest.fn().mockResolvedValue({ success: true });
-      client.getContacts.mockResolvedValue({ contacts: [] });
-
-      const result = await contactsStore.updateContact('id1', { alias: 'Bob' });
-      expect(result).toBe(true);
-    });
-
-    it('returns false when not available', async () => {
-      const { contactsStore, client } = freshModule();
-      delete client.updateContactStrict;
-
-      const result = await contactsStore.updateContact('id1', { alias: 'Bob' });
-      expect(result).toBe(false);
-      expect(contactsStore.getSnapshot().error).toContain('not available');
-    });
-
-    it('returns false on failure result', async () => {
-      const { contactsStore, client } = freshModule();
-      client.updateContactStrict = jest.fn().mockResolvedValue({ success: false, message: 'denied' });
-
-      const result = await contactsStore.updateContact('id1', {});
-      expect(result).toBe(false);
-      expect(contactsStore.getSnapshot().error).toBe('denied');
-    });
-  });
-
-  describe('deleteContact()', () => {
-    it('returns true on success', async () => {
-      const { contactsStore, client } = freshModule();
-      client.deleteContactStrict = jest.fn().mockResolvedValue({ success: true });
-      client.getContacts.mockResolvedValue({ contacts: [] });
-
-      const result = await contactsStore.deleteContact('id1');
-      expect(result).toBe(true);
-    });
-
-    it('returns false when not available', async () => {
-      const { contactsStore, client } = freshModule();
-      delete client.deleteContactStrict;
-
-      const result = await contactsStore.deleteContact('id1');
-      expect(result).toBe(false);
-      expect(contactsStore.getSnapshot().error).toContain('not available');
-    });
-
-    it('returns false on failure result', async () => {
-      const { contactsStore, client } = freshModule();
-      client.deleteContactStrict = jest.fn().mockResolvedValue({ success: false, message: 'nope' });
-
-      const result = await contactsStore.deleteContact('id1');
-      expect(result).toBe(false);
-    });
-  });
-
-  describe('getContactByGenesisHash()', () => {
-    it('finds contact by genesis hash (case-insensitive)', async () => {
-      const { contactsStore, client } = freshModule();
-      client.getContacts.mockResolvedValue({ contacts: [makeContact({ genesisHash: 'ABCD' })] });
-      await contactsStore.refreshContacts();
-
-      const contact = contactsStore.getContactByGenesisHash('abcd');
-      expect(contact).not.toBeNull();
-      expect(contact?.alias).toBe('Alice');
-    });
-
-    it('returns null when not found', async () => {
-      const { contactsStore, client } = freshModule();
-      client.getContacts.mockResolvedValue({ contacts: [] });
-      await contactsStore.refreshContacts();
-
-      expect(contactsStore.getContactByGenesisHash('nonexistent')).toBeNull();
-    });
-  });
-
-  describe('getContactByAlias()', () => {
-    it('finds contact by alias (case-insensitive)', async () => {
-      const { contactsStore, client } = freshModule();
-      client.getContacts.mockResolvedValue({ contacts: [makeContact()] });
-      await contactsStore.refreshContacts();
-
-      const contact = contactsStore.getContactByAlias('alice');
-      expect(contact).not.toBeNull();
-    });
-
-    it('returns null when not found', () => {
-      const { contactsStore } = freshModule();
-      expect(contactsStore.getContactByAlias('nobody')).toBeNull();
-    });
-  });
-
-  describe('contact mapping edge cases', () => {
-    it('handles Uint8Array genesisHash', async () => {
-      const { contactsStore, client } = freshModule();
-      client.getContacts.mockResolvedValue({
-        contacts: [makeContact({ genesisHash: new Uint8Array([0, 1, 2]) })],
-      });
-      await contactsStore.refreshContacts();
-      expect(contactsStore.getSnapshot().contacts[0].genesisHash).toBeDefined();
-    });
-
-    it('handles missing alias', async () => {
-      const { contactsStore, client } = freshModule();
-      client.getContacts.mockResolvedValue({
-        contacts: [makeContact({ alias: undefined })],
-      });
-      await contactsStore.refreshContacts();
-      expect(contactsStore.getSnapshot().contacts[0].alias).toBe('Unknown');
-    });
-
+  describe('contact mapping', () => {
     it('sets isVerified from genesisVerifiedOnline', async () => {
       const { contactsStore, client } = freshModule();
       client.getContacts.mockResolvedValue({
@@ -422,6 +310,15 @@ describe('ContactsStore', () => {
       });
       await contactsStore.refreshContacts();
       expect(contactsStore.getSnapshot().contacts[0].isVerified).toBe(false);
+    });
+
+    it('carries the tip when the relationship has one', async () => {
+      const { contactsStore, client } = freshModule();
+      client.getContacts.mockResolvedValue({
+        contacts: [makeContact({ chainTip: new Uint8Array(32).fill(0x0c) })],
+      });
+      await contactsStore.refreshContacts();
+      expect(contactsStore.getSnapshot().contacts[0].chainTip).toBe('0c'.repeat(32));
     });
   });
 });
