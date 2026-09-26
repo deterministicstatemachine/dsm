@@ -11,8 +11,6 @@ jest.mock('../../services/dsmClient', () => ({
 }));
 
 jest.mock('../../contexts/contacts/utils', () => ({
-  parseBinary32: jest.fn((input: any) => (input instanceof Uint8Array ? input : new Uint8Array(32))),
-  parseBinary64: jest.fn((input: any) => (input instanceof Uint8Array ? input : new Uint8Array(64))),
   bytesToDisplay: jest.fn((u8: Uint8Array) => Array.from(u8).map(b => b.toString(16).padStart(2, '0')).join('')),
 }));
 
@@ -46,8 +44,6 @@ function freshModule() {
     },
   }));
   jest.doMock('../../contexts/contacts/utils', () => ({
-    parseBinary32: jest.fn((input: any) => (input instanceof Uint8Array ? input : new Uint8Array(32))),
-    parseBinary64: jest.fn((input: any) => (input instanceof Uint8Array ? input : new Uint8Array(64))),
     bytesToDisplay: jest.fn((u8: Uint8Array) => Array.from(u8).map(b => b.toString(16).padStart(2, '0')).join('')),
   }));
   jest.doMock('../../utils/logger', () => ({

@@ -11,7 +11,6 @@ import {
   encodeBase32Crockford,
   decodeBase32Crockford,
   encodeBase32Crockford32,
-  decodeBase32Crockford32,
   bytesToBase32CrockfordPrefix,
 } from '../textId';
 
@@ -139,17 +138,11 @@ describe('encodeBase32Crockford32', () => {
   });
 });
 
-describe('decodeBase32Crockford32', () => {
+describe('decodeBase32Crockford', () => {
   test('roundtrips with encodeBase32Crockford32', () => {
     const original = new Uint8Array(32).map((_, i) => (i * 7) & 0xff);
     const encoded = encodeBase32Crockford32(original);
-    const decoded = decodeBase32Crockford32(encoded);
-    expect(decoded).toEqual(original);
-  });
-
-  test('throws if decoded result is not 32 bytes', () => {
-    const short = encodeBase32Crockford(new Uint8Array([1, 2, 3]));
-    expect(() => decodeBase32Crockford32(short)).toThrow('exactly 32 bytes');
+    expect(decodeBase32Crockford(encoded)).toEqual(original);
   });
 });
 

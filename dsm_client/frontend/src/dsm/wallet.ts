@@ -111,11 +111,6 @@ export async function getWalletHistory(): Promise<WalletHistory> {
   }
 }
 
-export async function getTransactions(): Promise<any[]> {
-  const history = await getWalletHistory();
-  return history.transactions;
-}
-
 /**
  * The items `inbox.pull` found queued for this device. Rust writes an id and a
  * preview on every item; an item without them is refused, never filled in.

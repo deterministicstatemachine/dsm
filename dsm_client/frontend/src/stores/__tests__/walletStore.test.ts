@@ -317,15 +317,7 @@ describe('WalletStore', () => {
 });
 
 // Hook tests use static imports (same React instance as @testing-library/react)
-import {
-  useWalletStore,
-  useWalletBalances,
-  useWalletTransactions,
-  useWalletIdentity,
-  useWalletInitialized,
-  useWalletLoading,
-  useWalletError,
-} from '../walletStore';
+import { useWalletStore } from '../walletStore';
 
 describe('wallet store hooks', () => {
   it('useWalletStore returns full snapshot', () => {
@@ -334,35 +326,5 @@ describe('wallet store hooks', () => {
     expect(result.current).toHaveProperty('balances');
     expect(result.current).toHaveProperty('transactions');
     expect(result.current).toHaveProperty('isInitialized');
-  });
-
-  it('useWalletBalances returns balances array', () => {
-    const { result } = renderHook(() => useWalletBalances());
-    expect(Array.isArray(result.current)).toBe(true);
-  });
-
-  it('useWalletTransactions returns transactions array', () => {
-    const { result } = renderHook(() => useWalletTransactions());
-    expect(Array.isArray(result.current)).toBe(true);
-  });
-
-  it('useWalletIdentity returns cached identity object', () => {
-    const { result } = renderHook(() => useWalletIdentity());
-    expect(result.current).toEqual({ genesisHash: null, deviceId: null });
-  });
-
-  it('useWalletInitialized returns boolean', () => {
-    const { result } = renderHook(() => useWalletInitialized());
-    expect(result.current).toBe(false);
-  });
-
-  it('useWalletLoading returns boolean', () => {
-    const { result } = renderHook(() => useWalletLoading());
-    expect(result.current).toBe(false);
-  });
-
-  it('useWalletError returns null initially', () => {
-    const { result } = renderHook(() => useWalletError());
-    expect(result.current).toBeNull();
   });
 });

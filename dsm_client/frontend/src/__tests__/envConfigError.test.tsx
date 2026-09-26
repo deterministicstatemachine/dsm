@@ -78,7 +78,6 @@ jest.mock('../services/dsmClient', () => ({
       if (k === 'device_id_bytes') return 'cafebabe';
       return null;
     }),
-    getBluetoothStatus: jest.fn().mockResolvedValue({ enabled: false, advertising: false, scanning: false }),
     getContacts: jest.fn().mockResolvedValue({ contacts: [] }),
     setPreference: jest.fn().mockResolvedValue(undefined),
   },

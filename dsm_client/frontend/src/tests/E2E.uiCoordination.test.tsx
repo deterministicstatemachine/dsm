@@ -25,7 +25,7 @@
  * - useEventSignal (REAL useSyncExternalStore)
  * - useWalletSync (REAL event→dispatch routing)
  * - BridgeGate (REAL — auto-opens for sendMessageBin paths)
- * - decodeFramedEnvelopeV3, decodeBalancesListResponseStrict (REAL decoders)
+ * - decodeFramedEnvelopeV3 (the REAL decoder)
  *
  * COVERAGE:
  * 1. BridgeEventBus — typed delivery, multi-subscriber, error isolation
@@ -45,11 +45,8 @@ import { useEventSignal } from '../bridge/useEventSignal';
 import * as pb from '../proto/dsm_app_pb';
 import { emit as eventBridgeEmit, on as eventBridgeOn, initializeEventBridge } from '../dsm/EventBridge';
 import { initializeNativeBridgeAdapter } from '../bridge/nativeBridgeAdapter';
-import {
-  BilateralEventType,
-  encodeBilateralEventNotification,
-  decodeBilateralEvent,
-} from '../services/bilateral/bilateralEventService';
+import { BilateralEventType, decodeBilateralEvent } from '../services/bilateral/bilateralEventService';
+import { encodeBilateralEventNotification } from './helpers/bilateralEventFixture';
 import { setBridgeInstance } from '../bridge/BridgeRegistry';
 
 let consoleWarnSpy: jest.SpyInstance;
@@ -514,17 +511,6 @@ describe('Bilateral event service — encode/decode roundtrip', () => {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 describe('nativeBridgeAdapter — REAL DOM → bridgeEvents translation', () => {
-  test('REAL: dsm-bilateral-committed DOM event → wallet.bilateralCommitted', () => {
-    const spy = jest.fn();
-    const unsub = bridgeEvents.on('wallet.bilateralCommitted', spy);
-    window.dispatchEvent(new CustomEvent('dsm-bilateral-committed', {
-      detail: { commitmentHash: makeCommitmentHash(0x11), counterpartyDeviceId: makeDeviceId(0x22), accepted: true },
-    }));
-    expect(spy).toHaveBeenCalledTimes(1);
-    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ accepted: true }));
-    unsub();
-  });
-
   test('REAL: dsm-wallet-refresh DOM event → wallet.refresh', () => {
     const spy = jest.fn();
     const unsub = bridgeEvents.on('wallet.refresh', spy);
@@ -715,7 +701,7 @@ describe('INTEGRATED: Full chain with sendMessageBin-only mock', () => {
 
     // The balance came from sendMessageBin via: dsmClient.getAllBalances() → dsm.getAllBalances()
     // → getAllBalancesStrictBridge() → callBin('getAllBalancesStrict') → sendMessageBin → FramedEnvelopeV3
-    // → decodeBalancesListResponseStrict() → TokenBalanceView[]
+    // → decodeFramedEnvelopeV3() → TokenBalanceView[]
     // PROVES the entire decode chain works.
     const balText = screen.getByTestId('i-balance-era').textContent;
     expect(balText).toBe('10000');

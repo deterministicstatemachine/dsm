@@ -145,15 +145,6 @@ export async function getIdentity(): Promise<IdentityInfo> {
   );
 }
 
-export async function getBluetoothStatus(): Promise<{ enabled: boolean; advertising: boolean; scanning: boolean }> {
-  const session = nativeSessionStore.getSnapshot();
-  return {
-    enabled: session.hardware_status.ble.enabled,
-    advertising: session.hardware_status.ble.advertising,
-    scanning: session.hardware_status.ble.scanning,
-  };
-}
-
 // Preferences (strict bridge)
 export async function getPreference(key: string): Promise<string | null> {
   return getPreferenceBridge(String(key));

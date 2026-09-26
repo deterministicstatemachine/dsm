@@ -17,6 +17,7 @@ import {
     readPeerRelationshipStatusBridge,
 } from './WebViewBridge';
 import { on as eventBridgeOn } from './EventBridge';
+import { emitBilateralCommitted } from './events';
 import { bridgeEvents } from '../bridge/bridgeEvents';
 import { getHeaders } from './identity';
 
@@ -413,21 +414,10 @@ export async function acceptOfflineTransfer(args: { commitmentHash: Uint8Array, 
     if (!answer.success) {
       return answer;
     }
-    // Emit through the real DOM/native adapter path so all app listeners see
-    // the same bilateral acceptance signal as production.
-    if (typeof window !== 'undefined') {
-      window.dispatchEvent(new CustomEvent('dsm-bilateral-committed', {
-        detail: {
-          commitmentHash: new Uint8Array(args.commitmentHash),
-          counterpartyDeviceId: new Uint8Array(args.counterpartyDeviceId),
-          accepted: true,
-          committed: true,
-        },
-      }));
-    }
-    // Also emit the bridge event for consistency with the event system
+    // The committed signal, once, on the event bus. It used to be dispatched
+    // twice: as a window event the adapter re-emitted here, and here again.
     try {
-      bridgeEvents.emit('wallet.bilateralCommitted', {
+      emitBilateralCommitted({
         commitmentHash: new Uint8Array(args.commitmentHash),
         counterpartyDeviceId: new Uint8Array(args.counterpartyDeviceId),
         accepted: true,

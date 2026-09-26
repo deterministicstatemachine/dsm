@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { decodeBalancesListResponseStrict, decodeFramedEnvelopeV3 } from '../decoding';
+import { decodeFramedEnvelopeV3 } from '../decoding';
 import { routerQueryBin } from '../WebViewBridge';
 
 function makeInvalidResponse(): Uint8Array {
@@ -57,10 +57,5 @@ describe('bridge decoding boundary (integration)', () => {
 
   it('decodeFramedEnvelopeV3 rejects empty bytes', () => {
     expect(() => decodeFramedEnvelopeV3(new Uint8Array(0))).toThrow();
-  });
-
-  it('decodeBalancesListResponseStrict rejects garbage bytes', () => {
-    const raw = new Uint8Array([9, 9, 9, 9, 9, 9]);
-    expect(() => decodeBalancesListResponseStrict(raw, { label: 'test' })).toThrow(/invalid framing byte/i);
   });
 });

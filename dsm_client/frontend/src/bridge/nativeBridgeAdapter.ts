@@ -34,10 +34,6 @@ export function initializeNativeBridgeAdapter(): void {
   }
 
   if (typeof window !== 'undefined') {
-    window.addEventListener('dsm-bilateral-committed', (evt: any) => {
-      bridgeEvents.emit('wallet.bilateralCommitted', evt?.detail ?? {});
-    });
-
     window.addEventListener(DSM_WALLET_REFRESH_EVENT, (evt: any) => {
       const detail = evt?.detail ?? { source: 'unknown' };
       bridgeEvents.emit('wallet.refresh', detail);

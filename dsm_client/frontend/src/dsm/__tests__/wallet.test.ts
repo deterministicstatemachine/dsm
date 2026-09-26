@@ -14,7 +14,6 @@ import * as pb from '../../proto/dsm_app_pb';
 import {
   getAllBalances,
   getWalletHistory,
-  getTransactions,
   getInbox,
 } from '../wallet';
 import {
@@ -230,24 +229,6 @@ describe('wallet.ts', () => {
 
       const result = await getWalletHistory();
       expect(result.transactions).toEqual([]);
-    });
-  });
-
-  // ── getTransactions ────────────────────────────────────────────────
-
-  describe('getTransactions', () => {
-    test('returns transactions array from wallet history', async () => {
-      const env = new pb.Envelope({
-        version: 3,
-        payload: {
-          case: 'walletHistoryResponse',
-          value: new pb.WalletHistoryResponse({ transactions: [] }),
-        },
-      });
-      (getWalletHistoryStrictBridge as jest.Mock).mockResolvedValue(frameEnvelope(env));
-
-      const result = await getTransactions();
-      expect(Array.isArray(result)).toBe(true);
     });
   });
 

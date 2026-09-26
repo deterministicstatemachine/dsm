@@ -18,7 +18,6 @@ import * as pb from '../../proto/dsm_app_pb';
 import {
   getHeaders,
   getIdentity,
-  getBluetoothStatus,
   getPreference,
   setPreference,
   isIdentityUnavailable,
@@ -174,19 +173,6 @@ describe('identity.ts', () => {
       const identity = await getIdentity();
       expect(identity.deviceId).toBe(encodeBase32Crockford(deviceId));
     }, 30_000);
-  });
-
-  // ── getBluetoothStatus ─────────────────────────────────────────────
-
-  describe('getBluetoothStatus', () => {
-    test('reads from native session store', async () => {
-      (nativeSessionStore.getSnapshot as jest.Mock).mockReturnValue({
-        hardware_status: { ble: { enabled: true, advertising: true, scanning: false } },
-      });
-
-      const status = await getBluetoothStatus();
-      expect(status).toEqual({ enabled: true, advertising: true, scanning: false });
-    });
   });
 
   // ── Preferences ────────────────────────────────────────────────────

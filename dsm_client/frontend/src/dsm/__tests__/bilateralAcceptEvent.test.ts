@@ -3,6 +3,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { acceptOfflineTransfer } from '../index';
 import { acceptBilateralByCommitmentBridge } from '../WebViewBridge';
+import { bridgeEvents } from '../../bridge/bridgeEvents';
 import * as pb from '../../proto/dsm_app_pb';
 
 // Helper to wrap responses in DSM_BRIDGE format
@@ -25,7 +26,9 @@ describe('bilateral accept event dispatch', () => {
     jest.restoreAllMocks();
   });
 
-  test('acceptOfflineTransfer dispatches dsm-bilateral-committed', async () => {
+  // One accept, one committed signal. It used to be dispatched as a window
+  // event the adapter re-emitted on the bus, and emitted on the bus again.
+  test('acceptOfflineTransfer emits wallet.bilateralCommitted exactly once', async () => {
     const commitmentHash = new Uint8Array(32).fill(2);
     const counterpartyDeviceId = new Uint8Array(32).fill(3);
     const env = new pb.Envelope({
@@ -48,13 +51,13 @@ describe('bilateral accept event dispatch', () => {
     };
 
     const handler = jest.fn();
-    window.addEventListener('dsm-bilateral-committed', handler as EventListener, { once: true });
+    const off = bridgeEvents.on('wallet.bilateralCommitted', handler as any);
 
     await acceptOfflineTransfer({ commitmentHash, counterpartyDeviceId });
+    off();
 
     expect(handler).toHaveBeenCalledTimes(1);
-    const event = handler.mock.calls[0]?.[0] as CustomEvent | undefined;
-    expect(event?.detail).toEqual(expect.objectContaining({
+    expect(handler.mock.calls[0]?.[0]).toEqual(expect.objectContaining({
       accepted: true,
       committed: true,
       commitmentHash,

@@ -72,28 +72,12 @@ export function persistBleMapping(args: {
   } catch {}
 }
 
-export function clearBleIdentityCache(): void {
-  bleIdentityMap.byDeviceId.clear();
-  bleIdentityMap.byGenesis.clear();
-}
-
 export function getBleIdentitySnapshot(): { deviceIds: Record<string, string>; genesis: Record<string, string> } {
   const deviceIds: Record<string, string> = {};
   const genesis: Record<string, string> = {};
   for (const [k, v] of bleIdentityMap.byDeviceId.entries()) deviceIds[k] = v;
   for (const [k, v] of bleIdentityMap.byGenesis.entries()) genesis[k] = v;
   return { deviceIds, genesis };
-}
-
-export function pruneBleIdentityMappings(args: { deviceIds?: Uint8Array[]; genesisHashes?: Uint8Array[] }): void {
-  const devKeys = (args.deviceIds || []).filter((b) => b instanceof Uint8Array).map((b) => base32Key32(b));
-  const genKeys = (args.genesisHashes || []).filter((b) => b instanceof Uint8Array).map((b) => base32Key32(b));
-  for (const k of devKeys) {
-    bleIdentityMap.byDeviceId.delete(k);
-  }
-  for (const k of genKeys) {
-    bleIdentityMap.byGenesis.delete(k);
-  }
 }
 
 // Strict version: single deterministic resolution path
