@@ -56,6 +56,11 @@ def fail(msg):
     print(f"[bridge-rpc-names] FAIL: {msg}")
 
 
+def read_text(path):
+    with open(path, encoding="utf-8") as f:
+        return f.read()
+
+
 def frontend_sources():
     for dirpath, dirnames, filenames in os.walk(FRONTEND_SRC):
         if "__tests__" in dirpath or os.sep + "proto" in dirpath[len(FRONTEND_SRC):]:
@@ -73,7 +78,7 @@ def sent_names():
     sent = {}
     unresolved = []
     for path in frontend_sources():
-        text = open(path, encoding="utf-8").read()
+        text = read_text(path)
         rel = os.path.relpath(path, ROOT)
         for m in CALL_RE.finditer(text):
             sent.setdefault(m.group(1), []).append(f"{rel}:{text.count(chr(10), 0, m.start()) + 1}")
@@ -84,7 +89,7 @@ def sent_names():
                 sent.setdefault(const.group(1), []).append(where)
             else:
                 unresolved.append(f"{where} ({m.group(1)})")
-    html = open(INDEX_HTML, encoding="utf-8").read()
+    html = read_text(INDEX_HTML)
     for m in HTML_RE.finditer(html):
         sent.setdefault(m.group(1), []).append(
             f"{os.path.relpath(INDEX_HTML, ROOT)}:{html.count(chr(10), 0, m.start()) + 1}"
@@ -98,7 +103,7 @@ def sent_names():
 
 
 def handled_names():
-    text = open(KOTLIN_BRIDGE, encoding="utf-8").read()
+    text = read_text(KOTLIN_BRIDGE)
     fn = text.find("fun handleBinaryRpcInternal(")
     if fn < 0:
         fail(f"{os.path.relpath(KOTLIN_BRIDGE, ROOT)}: handleBinaryRpcInternal not found")
@@ -130,7 +135,7 @@ def handled_names():
 
 def installed_bridge_keys():
     """The keys of the object literal `index.html` assigns to `window.DsmBridge`."""
-    html = open(INDEX_HTML, encoding="utf-8").read()
+    html = read_text(INDEX_HTML)
     start = html.find("window.DsmBridge = {")
     if start < 0:
         fail("index.html does not install `window.DsmBridge = {`")
@@ -150,7 +155,7 @@ def installed_bridge_keys():
 
 
 def bridge_type_members():
-    text = open(BRIDGE_TYPES, encoding="utf-8").read()
+    text = read_text(BRIDGE_TYPES)
     start = text.find("export interface AndroidBridgeV3 {")
     if start < 0:
         fail("bridgeTypes.ts does not declare AndroidBridgeV3")
@@ -164,7 +169,7 @@ def bridge_type_members():
 def production_names_callbin():
     hits = []
     for path in frontend_sources():
-        text = open(path, encoding="utf-8").read()
+        text = read_text(path)
         for m in re.finditer(r"__callBin", text):
             hits.append(f"{os.path.relpath(path, ROOT)}:{text.count(chr(10), 0, m.start()) + 1}")
     return hits
