@@ -26,7 +26,9 @@ pub fn token_decimals(token_id: &str) -> Result<u32, String> {
     let canonical = canonicalize_token_id(token_id);
     match canonical.to_ascii_uppercase().as_str() {
         "" => Err("a token's decimals were asked for with no token named".to_string()),
-        "ERA" => Ok(0),
+        "ERA" => dsm::core::token::era_policy::era_policy()
+            .map(|era| era.decimals)
+            .map_err(|e| e.to_string()),
         "DBTC" | "BTC" => Ok(8),
         _ => crate::storage::client_db::token_registry::get_token_by_ticker(&canonical)
             .map_err(|e| format!("token registry unreadable for {canonical}: {e}"))?
@@ -74,23 +76,24 @@ pub(crate) fn enrich_balance_metadata(
     let token_id = reply.token_id.trim().to_uppercase();
     match token_id.as_str() {
         "ERA" => {
-            reply.symbol = "ERA".to_string();
-            reply.decimals = 0;
-            reply.token_name = "ERA".to_string();
-            reply.display_amount = format_base_units_for_display(reply.available, 0);
-            if let Some(c) = crate::policy::builtin_policy_commit("ERA") {
-                set_anchor(reply, &c);
-            }
-            // The protocol defines ERA, and its supply is the native reserve's,
-            // from which every unit in circulation was released. ERA's policy
-            // blob does not exist yet (§6.32), so nothing is stated about what
-            // it permits: absent, never a defaulted "not permitted".
-            reply.protocol_defined = true;
-            reply.genesis_supply_display = format_base_units_for_display(
-                dsm::economic::native_reserve::ERA_RESERVE_GENESIS_SUPPLY,
-                0,
+            // ERA's facts are its committed policy's (SoFi Amendment S11),
+            // which every device holds by construction.
+            let era = dsm::core::token::era_policy::era_policy().map_err(|e| e.to_string())?;
+            reply.symbol = era.ticker.clone();
+            reply.decimals = era.decimals;
+            reply.token_name = era.alias.clone();
+            reply.display_amount = format_base_units_for_display(reply.available, era.decimals);
+            set_anchor(
+                reply,
+                &dsm::core::token::token_state_manager::era_policy_commit(),
             );
-            reply.permissions = None;
+            reply.protocol_defined = true;
+            reply.genesis_supply_display =
+                format_supply_for_display(era.genesis_supply, era.decimals);
+            reply.permissions = Some(generated::TokenPolicyPermissions {
+                burn_enabled: era.burn_enabled,
+                transferable: era.transferable,
+            });
         }
         "DBTC" => {
             reply.token_id = "dBTC".to_string();
@@ -1387,19 +1390,20 @@ mod tests {
         let (signer_pk, _secret) =
             dsm::crypto::sphincs::generate_sphincs_keypair().expect("a signer key");
         let policy = super::super::token_routes::ParsedTokenPolicy {
-            creator_genesis: [0x11; 32],
-            creator_device_id: [0x22; 32],
             ticker: ticker.to_string(),
             alias: format!("{ticker} token"),
             decimals,
             genesis_supply,
-            release_rule: dsm::economic::token_policy::ReleaseRule::AllAtCreation,
+            release: dsm::economic::token_policy::Release::AllAtCreation {
+                creator_genesis: [0x11; 32],
+                creator_device_id: [0x22; 32],
+                threshold: 1,
+                signers: vec![signer_pk],
+            },
             description: None,
             icon_url: Some("dsm:coin:v1:ABC".to_string()),
             burn_enabled,
             transferable,
-            threshold: 1,
-            signers: vec![signer_pk],
             allowlist_device_ids: vec![],
         };
         let bytes = generated::TokenPolicyV3 {
@@ -1431,24 +1435,43 @@ mod tests {
                 alias: policy.alias.clone(),
                 decimals: policy.decimals,
                 genesis_supply,
-                creator_device_id: policy.creator_device_id,
+                creator_device_id: match &policy.release {
+                    dsm::economic::token_policy::Release::AllAtCreation {
+                        creator_device_id,
+                        ..
+                    } => *creator_device_id,
+                    dsm::economic::token_policy::Release::Faucet => {
+                        panic!("a registered token is device-created")
+                    }
+                },
             },
         )
         .expect("the token is registered");
     }
 
-    /// A protocol asset is one on Rust's word, not its ticker's. ERA's supply
-    /// is the reserve's; its policy blob does not exist yet (§6.32), so
-    /// nothing is stated about what it permits.
+    /// A protocol asset is one on Rust's word, not its ticker's. ERA's facts
+    /// are its committed policy's (SoFi Amendment S11): the supply, what
+    /// holders may do, and the anchor its bytes commit to.
     #[test]
     #[serial_test::serial]
-    fn era_is_protocol_defined_with_the_reserve_supply_and_no_stated_permissions() {
+    fn era_reports_its_committed_policy_supply_permissions_and_anchor() {
         fresh_db();
         let mut era = seed("ERA", 264, 0);
         super::enrich_balance_metadata(&mut era).expect("ERA is named");
         assert!(era.protocol_defined);
+        assert_eq!((era.symbol.as_str(), era.decimals), ("ERA", 0));
         assert_eq!(era.genesis_supply_display, "80000000000");
-        assert_eq!(era.permissions, None, "no policy blob: nothing stated");
+        assert_eq!(
+            era.permissions,
+            Some(generated::TokenPolicyPermissions {
+                burn_enabled: true,
+                transferable: true,
+            })
+        );
+        assert_eq!(
+            era.policy_anchor_b32,
+            "JXPMPGJH45HDTE0ARWE2CTB9E9BWTQZ3T78CE5RFF1RXMR9VKK80"
+        );
         let mut dbtc = seed("dBTC", 0, 0);
         super::enrich_balance_metadata(&mut dbtc).expect("dBTC is named");
         assert!(dbtc.protocol_defined);

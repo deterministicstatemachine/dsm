@@ -170,6 +170,26 @@ async fn builtins_resolve_and_an_unknown_token_fails_closed() {
     assert!(d.core().resolve_policy_commit_strict(b"NEVERSEEN").is_err());
 }
 
+/// A protocol asset is held by every device by construction and is never
+/// adopted by its anchor: ERA's commitment is refused as what it is, and no
+/// registry row is written for it (SoFi Amendment S11).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_protocol_asset_is_never_adopted_by_its_anchor() {
+    let d = Device::start(0xE7).await;
+    let era = dsm::core::token::token_state_manager::era_policy_commit();
+    let refused = adopt(&d.router, &anchor_text(&era)).await;
+    assert!(!refused.success, "ERA was adopted by its anchor");
+    let why = refused.error_message.unwrap_or_default();
+    assert!(
+        why.contains("protocol asset"),
+        "refused for another reason: {why}"
+    );
+    assert!(token_registry::get_token_by_ticker("ERA")
+        .expect("the registry is readable")
+        .is_none());
+}
+
 /// EVERY token query route is reachable through the production dispatcher:
 /// the failure where a handler arm exists but the dispatch table does not name
 /// it has happened twice.

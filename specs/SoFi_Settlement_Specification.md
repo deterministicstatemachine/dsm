@@ -2418,7 +2418,7 @@ of their own only if they created the token they provide liquidity for, which is
 <!-- spec-section: SOFI-047 -->
 ### 47 What a token policy is
 Rust packs one canonical blob, the only packer for the format (build_policy_v3_bytes, SDK/handlers/token_
-routes.rs:129). All integers are big endian.
+routes.rs). All integers are big endian.
 
 
 Field                                 Meaning
@@ -2443,6 +2443,12 @@ The token’s identity is policy_commit, the hash of the whole blob. Any field t
 The ticker is display only; two tokens may share one.
 
 > **Amendment S8 (owner, 2026-09-23) — the policy names its creator, and a token is created once.** The policy blob also commits the creator: the genesis `G` and device id `DevID` of the device that creates the token, placed after the release rule. A native token's genesis release is admissible only in a `CreateToken` of that device, so anyone else holding the same policy bytes releases nothing. The creating transition also inserts a creation record for the policy commit into the creator's economic tree, from zero (class `0x0060`, key `H(DSM/economic-token-creation-key/v1; G ∥ DevID ∥ policy_commit)`). Its presence under a validated root proves the creation, and a second creation of the same commit on that lineage cannot build its write set. The economic-root register keeps the lineage unforked, so the genesis supply is released exactly once.
+
+> **Amendment S11 (owner, 2026-09-26) — a network-anchored native token names no creator and no signer set; ERA's policy.** A native token whose releases are anchored to the network rather than to a creating device names no creator and no signer set: its blob omits the creator of Amendment S8 and the signer set and threshold of the table above, going from the release rule straight to the ticker, and its release rule alone governs every release. Exactly one such policy exists, ERA's, fixed in Core and checked by its commitment; any other network-anchored blob has no reserve and releases nothing, and it is never registered, adopted or published. The creator and the signer set belong to device-created tokens (release rule all-at-creation), whose layout is unchanged.
+>
+> ERA's policy: version 3, fungible, native; transferable and burnable; no recipient allowlist; release rule the beta faucet, under which units come out of the network's reserve by faucet claims; ticker and alias `ERA`; decimals 0; genesis supply 80,000,000,000 (owner, 2026-09-26); no description and no icon. Every device holds these bytes by construction. Their commitment, `BLAKE3(DSM/policy ‖ 0x00 ‖ TokenPolicyV3 bytes)`, is `JXPMPGJH45HDTE0ARWE2CTB9E9BWTQZ3T78CE5RFF1RXMR9VKK80` (Crockford base32). The faucet's per-claim payout is fixed by Core's beta claim policy and is not committed in the blob. The reserve's accounting is: the reserve starts at the genesis supply, every release is counted against it, the reserve is exhausted exactly when all of it has been released, and at exhaustion a claim is refused before anything is signed or written. ERA's previous commitment was the hash of empty input and committed to no policy; it is replaced.
+>
+> Open: join-triggered emission (DJTE) replaces the faucet after beta. That is a different release rule, so a different blob, and by the rule above that any differing field makes a different token, a different ERA identity.
 
 **Code**
 Balances are keyed by policy_commit (the economic balance leaf; CORE/sofi/validation.rs:553). Issuance
@@ -2530,7 +2536,7 @@ an externally backed token by what is proven locked.
 the standard policy the issuer locks itself out completely: it cannot change the policy and cannot take units
 outside its rules.
 3. Units not yet released come out only when the conditions committed in the policy are met, and anyone can
-verify them by recomputing. For ERA, the conditions are its emission schedule.
+verify them by recomputing. For ERA, the conditions are its emission schedule (after beta; in beta, the faucet — Amendment S11).
 4. A burn destroys the units it burns. They never return to the unreleased supply, so the total ever released
 only grows.
 
@@ -2550,7 +2556,7 @@ anyone accepting the token knows the most that can ever exist and how it can com
 the only number that matters is what remains unreleased.
 
 **Code**
-ERA is native: its emission schedule fixes its total (EmissionsSchedule.total_supply), and emission is release.
+ERA is native: its policy (Amendment S11) fixes its genesis supply, and every release, the beta faucet's and later emission's, comes out of the network's reserve.
 
 <!-- spec-section: SOFI-052 -->
 ### 52 Externally backed supply

@@ -2,6 +2,7 @@
 
 //! src/core/token/mod.rs
 
+pub mod era_policy;
 pub mod policy;
 pub mod token_state_manager;
 
