@@ -656,21 +656,34 @@ pub struct AdvanceOutcome {
     /// (a bearer advance). `parent` binds the old commit under `parent_r_a`/`smt_proofs.pre_root`;
     /// `child` binds the successor commit under `child_r_a`. `None` for ordinary transitions.
     pub anchor_proofs: Option<AnchorLeafProofs>,
+
+    /// The transition's one entropy, as `advance` derived it. Only `advance`
+    /// sets it.
+    transition_entropy: [u8; 32],
 }
 
 impl AdvanceOutcome {
     /// The one entropy of this transition, exactly as Core derived it inside
     /// `advance` (Part VII step 3). This is the value that sits in the
     /// relationship tip and that the SDK carries — unchanged — into both
-    /// receipt hashes, `C_pre` and the symmetric tip (§39.3). It is 32 bytes
-    /// by construction of `advance`.
+    /// receipt hashes, `C_pre` and the symmetric tip (§39.3).
     pub fn transition_entropy(&self) -> [u8; 32] {
-        let mut e = [0u8; 32];
-        let src = &self.new_chain_state.entropy;
-        if src.len() == 32 {
-            e.copy_from_slice(src);
+        self.transition_entropy
+    }
+
+    /// This outcome with its successor holding `admission` as its pending
+    /// economic admission: the one change a caller makes to an outcome before
+    /// committing it.
+    pub fn with_pending_economic_admission(
+        self,
+        admission: Option<crate::economic::admission::PendingEconomicAdmission>,
+    ) -> Self {
+        Self {
+            new_device_state: self
+                .new_device_state
+                .with_pending_economic_admission(admission),
+            ..self
         }
-        e
     }
 
     /// This device's canonical relationship pair for the advanced step: the
@@ -1110,9 +1123,8 @@ impl DeviceState {
     ) -> Result<AdvanceOutcome, DsmError> {
         // The one entropy of this transition, derived from the tip before
         // anything else reads the relationship (Part VII step 3).
-        let entropy: Vec<u8> = self
-            .derive_transition_entropy(&rel_key, &operation)
-            .to_vec();
+        let transition_entropy = self.derive_transition_entropy(&rel_key, &operation);
+        let entropy: Vec<u8> = transition_entropy.to_vec();
         // The step extends the relationship's committed leaf. A relationship
         // is established before its first step (`establish_relationship`), so
         // the parent path always authenticates a leaf the device holds under
@@ -1469,6 +1481,7 @@ impl DeviceState {
             parent_r_a,
             child_r_a,
             anchor_proofs,
+            transition_entropy,
         })
     }
 
