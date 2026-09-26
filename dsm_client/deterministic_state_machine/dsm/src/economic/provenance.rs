@@ -688,14 +688,22 @@ fn verify_genesis_release(
     }
     let policy = crate::economic::token_policy::parse_token_policy(&bytes)
         .map_err(|e| ProvenanceError::GenesisReleaseInvalid(format!("policy: {e}")))?;
-    if (policy.creator_genesis, policy.creator_device_id) != (*ctx.genesis, *ctx.device_id) {
-        return Err(ProvenanceError::GenesisReleaseInvalid(
-            "the token's policy names another creator".into(),
-        ));
-    }
-    if policy.release_rule != crate::economic::token_policy::ReleaseRule::AllAtCreation {
+    // Only a device-created policy releases its supply at creation, and only
+    // to the creator it names (Amendment S8). A network-anchored policy names
+    // no creator and releases only through the network's reserve (S11).
+    let crate::economic::token_policy::Release::AllAtCreation {
+        creator_genesis,
+        creator_device_id,
+        ..
+    } = &policy.release
+    else {
         return Err(ProvenanceError::GenesisReleaseInvalid(
             "the token's release rule does not release its supply at creation".into(),
+        ));
+    };
+    if (*creator_genesis, *creator_device_id) != (*ctx.genesis, *ctx.device_id) {
+        return Err(ProvenanceError::GenesisReleaseInvalid(
+            "the token's policy names another creator".into(),
         ));
     }
     let amount = u64::try_from(policy.genesis_supply).map_err(|_| {

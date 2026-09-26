@@ -1413,19 +1413,20 @@ mod tests {
         let (signer_pk, _secret) =
             dsm::crypto::sphincs::generate_sphincs_keypair().expect("a signer key");
         let policy = super::super::token_routes::ParsedTokenPolicy {
-            creator_genesis: [0x11; 32],
-            creator_device_id: [0x22; 32],
             ticker: ticker.to_string(),
             alias: format!("{ticker} token"),
             decimals,
             genesis_supply,
-            release_rule: dsm::economic::token_policy::ReleaseRule::AllAtCreation,
+            release: dsm::economic::token_policy::Release::AllAtCreation {
+                creator_genesis: [0x11; 32],
+                creator_device_id: [0x22; 32],
+                threshold: 1,
+                signers: vec![signer_pk],
+            },
             description: None,
             icon_url: Some("dsm:coin:v1:ABC".to_string()),
             burn_enabled,
             transferable,
-            threshold: 1,
-            signers: vec![signer_pk],
             allowlist_device_ids: vec![],
         };
         let bytes = generated::TokenPolicyV3 {
@@ -1457,7 +1458,15 @@ mod tests {
                 alias: policy.alias.clone(),
                 decimals: policy.decimals,
                 genesis_supply,
-                creator_device_id: policy.creator_device_id,
+                creator_device_id: match &policy.release {
+                    dsm::economic::token_policy::Release::AllAtCreation {
+                        creator_device_id,
+                        ..
+                    } => *creator_device_id,
+                    dsm::economic::token_policy::Release::Faucet => {
+                        panic!("a registered token is device-created")
+                    }
+                },
             },
         )
         .expect("the token is registered");

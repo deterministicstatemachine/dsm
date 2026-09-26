@@ -98,6 +98,17 @@ impl TokenPolicySystem {
                 "token policy: the committed bytes do not parse: {e}"
             ))
         })?;
+        // Exactly one network-anchored policy exists, ERA's, and it is fixed
+        // in Core; no other is registered (SoFi Amendment S11).
+        if !matches!(
+            parsed.release,
+            crate::economic::token_policy::Release::AllAtCreation { .. }
+        ) {
+            return Err(DsmError::invalid_operation(
+                "token policy: a network-anchored policy is registered by nobody — the one \
+                 that exists, ERA's, is fixed in Core (Amendment S11)",
+            ));
+        }
         let anchor = PolicyAnchor::from_bytes(commit);
         self.policy_cache.store_policy(
             anchor.clone(),
