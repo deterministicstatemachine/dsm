@@ -87,7 +87,5 @@ export const {
 export const { startNativeQrScannerViaRouter } = qr;
 export const {
   addTokenByAnchor,
-  getTokenPolicyBytes,
-  listCachedTokenPolicies,
   publishTokenPolicyBytes,
 } = tokenPolicy;

@@ -24,7 +24,6 @@ interface ExtendedDsmClient {
   setPreference(key: string, value: string): Promise<void>;
   nfcReadRingId?: () => Promise<NfcReadResult | null>;
   nfcRegisterRingId?: (id: string) => Promise<boolean>;
-  claimFaucet?: (tokenId?: string) => Promise<{ success: boolean; message?: string }>;
 }
 
 const client = dsmClient as unknown as ExtendedDsmClient;

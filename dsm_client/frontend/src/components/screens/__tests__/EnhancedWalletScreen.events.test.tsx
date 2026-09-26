@@ -6,11 +6,24 @@ import { render, screen, waitFor, act, fireEvent, within } from '@testing-librar
 import EnhancedWalletScreen from '../EnhancedWalletScreen';
 import { dsmClient } from '../../../services/dsmClient';
 import { bridgeEvents } from '../../../bridge/bridgeEvents';
+import { encodeBase32Crockford } from '../../../utils/textId';
 
 jest.mock('../../../services/bitcoinTap', () => ({
   formatBtc: (v: bigint | string | number) => String(v),
   getDbtcBalance: jest.fn().mockResolvedValue({ available: 0n, locked: 0n, source: 'CHAIN' }),
 }));
+
+/** A contact as getContacts returns it: the DTO contacts.list decodes to. */
+function contactDto(alias: string, fill: number, bleAddress?: string) {
+  return {
+    alias,
+    deviceId: new Uint8Array(32).fill(fill),
+    genesisHash: new Uint8Array(32).fill(fill + 1),
+    publicKey: new Uint8Array(64).fill(fill + 2),
+    genesisVerifiedOnline: true,
+    bleAddress,
+  };
+}
 
 function installStandardWalletMocks(contactList: any[] = []) {
   (dsmClient.isReady as any) = jest.fn().mockResolvedValue(true);
@@ -66,12 +79,7 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
   });
 
   test('offline send submits through sendOfflineTransfer', async () => {
-    const contact = {
-      alias: 'Receiver',
-      deviceId: 'ABCDEFGH12345678ABCDEFGH12345678',
-      genesisHash: 'HGFEDCBA12345678HGFEDCBA12345678',
-      bleAddress: 'AA:BB:CC:DD:EE:FF',
-    };
+    const contact = contactDto('Receiver', 0x0a, 'AA:BB:CC:DD:EE:FF');
 
     (dsmClient.isReady as any) = jest.fn().mockResolvedValue(true);
     (dsmClient.getIdentity as any) = jest
@@ -92,7 +100,7 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
     fireEvent.click(screen.getAllByRole('button', { name: 'Send' })[0]);
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Send Transaction' })).toBeInTheDocument());
     // The form no longer pre-selects a recipient: pick one, as a user must.
-    fireEvent.change(screen.getAllByRole('combobox')[0], { target: { value: contact.deviceId } });
+    fireEvent.change(screen.getAllByRole('combobox')[0], { target: { value: encodeBase32Crockford(contact.deviceId) } });
     fireEvent.click(screen.getByRole('button', { name: 'Offline' }));
     fireEvent.change(screen.getByLabelText(/Amount/i), { target: { value: '1' } });
     // The token picker is a listbox, not a native select: it shows each
@@ -110,7 +118,7 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
       expect(dsmClient.sendOfflineTransfer).toHaveBeenCalledWith(
         expect.objectContaining({
           tokenId: 'ROOT',
-          to: contact.deviceId,
+          to: encodeBase32Crockford(contact.deviceId),
           amount: '1',
           bleAddress: contact.bleAddress,
         })
@@ -119,11 +127,7 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
   });
 
   test('online sender updates visible balance in the UI after send completes', async () => {
-    const contact = {
-      alias: 'Receiver',
-      deviceId: 'ABCDEFGH12345678ABCDEFGH12345678',
-      genesisHash: 'HGFEDCBA12345678HGFEDCBA12345678',
-    };
+    const contact = contactDto('Receiver', 0x0a);
 
     installStandardWalletMocks([contact]);
 
@@ -145,7 +149,7 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
     fireEvent.click(screen.getAllByRole('button', { name: 'Send' })[0]);
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Send Transaction' })).toBeInTheDocument());
     // The form no longer pre-selects a recipient: pick one, as a user must.
-    fireEvent.change(screen.getAllByRole('combobox')[0], { target: { value: contact.deviceId } });
+    fireEvent.change(screen.getAllByRole('combobox')[0], { target: { value: encodeBase32Crockford(contact.deviceId) } });
     fireEvent.change(screen.getByLabelText(/Amount/i), { target: { value: '25' } });
     fireEvent.click(screen.getAllByRole('button', { name: 'Send' }).at(-1)!);
     await waitFor(() => expect(screen.getByRole('button', { name: 'Confirm' })).toBeInTheDocument());
@@ -160,12 +164,7 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
   });
 
   test('offline sender updates visible balance in the UI after send completes', async () => {
-    const contact = {
-      alias: 'Receiver',
-      deviceId: 'ABCDEFGH12345678ABCDEFGH12345678',
-      genesisHash: 'HGFEDCBA12345678HGFEDCBA12345678',
-      bleAddress: 'AA:BB:CC:DD:EE:FF',
-    };
+    const contact = contactDto('Receiver', 0x0a, 'AA:BB:CC:DD:EE:FF');
 
     installStandardWalletMocks([contact]);
 
@@ -188,7 +187,7 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
     fireEvent.click(screen.getAllByRole('button', { name: 'Send' })[0]);
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Send Transaction' })).toBeInTheDocument());
     // The form no longer pre-selects a recipient: pick one, as a user must.
-    fireEvent.change(screen.getAllByRole('combobox')[0], { target: { value: contact.deviceId } });
+    fireEvent.change(screen.getAllByRole('combobox')[0], { target: { value: encodeBase32Crockford(contact.deviceId) } });
     fireEvent.click(screen.getByRole('button', { name: 'Offline' }));
     fireEvent.change(screen.getByLabelText(/Amount/i), { target: { value: '25' } });
     // The token picker is a listbox, not a native select: it shows each
@@ -206,7 +205,7 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
       expect(dsmClient.sendOfflineTransfer).toHaveBeenCalledWith(
         expect.objectContaining({
           tokenId: 'ROOT',
-          to: contact.deviceId,
+          to: encodeBase32Crockford(contact.deviceId),
           amount: '25',
           bleAddress: contact.bleAddress,
         })

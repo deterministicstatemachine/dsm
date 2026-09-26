@@ -6,8 +6,6 @@ import {
   routerInvokeBin,
   routerQueryBin,
   addTokenByAnchor as addTokenByAnchorBridge,
-  getTokenPolicyBytes as getTokenPolicyBytesBridge,
-  listCachedTokenPolicies,
   publishTokenPolicyBytes as publishTokenPolicyBytesBridge,
 } from './WebViewBridge';
 import { encodeBase32Crockford, decodeBase32Crockford } from '../utils/textId';
@@ -49,10 +47,11 @@ export interface TokenCreateDetails {
 
 export async function createToken(details: TokenCreateDetails): Promise<{ success: boolean; tokenId?: string; anchorBase32?: string; message?: string }> {
   try {
-    const u128be = (v: string | number | undefined): Uint8Array => {
+    const u128be = (v: string | number): Uint8Array => {
+      const text = String(v).trim();
+      if (!/^\d+$/.test(text)) throw new Error('createToken: the genesis supply must be a whole number');
       const out = new Uint8Array(16);
-      let n = BigInt(String(v ?? '0').trim() || '0');
-      if (n < 0n) throw new Error('createToken: amounts must be non-negative');
+      let n = BigInt(text);
       for (let i = 15; i >= 0; i--) {
         out[i] = Number(n & 0xffn);
         n >>= 8n;
@@ -195,46 +194,10 @@ export async function tokenAdoptionQr(tokenIdOrTicker: string): Promise<{
   };
 }
 
-export async function listPolicies(): Promise<Array<{
-  policy_commit: Uint8Array;
-  policy_bytes: Uint8Array;
-  metadata?: { ticker: string; alias: string; decimals: number; maxSupply: string };
-}>> {
-  try {
-    const responseBytes = await listCachedTokenPolicies();
-    const env = decodeFramedEnvelopeV3(responseBytes);
-    if (env.payload.case === 'error') {
-      throw new Error(env.payload.value.message || `Error code ${env.payload.value.code}`);
-    }
-    if (env.payload.case !== 'tokenPolicyListResponse') {
-      throw new Error(`Expected tokenPolicyListResponse, got ${env.payload.case}`);
-    }
-    return (env.payload.value.policies ?? []).map((entry) => ({
-      policy_commit: entry.policyCommit instanceof Uint8Array ? entry.policyCommit : new Uint8Array(),
-      policy_bytes: entry.policyBytes instanceof Uint8Array ? entry.policyBytes : new Uint8Array(),
-      metadata: entry.ticker || entry.alias || entry.maxSupply || entry.decimals
-        ? {
-            ticker: entry.ticker || '',
-            alias: entry.alias || '',
-            decimals: Number(entry.decimals || 0),
-            maxSupply: entry.maxSupply || '0',
-          }
-        : undefined,
-    }));
-  } catch {
-    return [];
-  }
-}
-
 export async function publishTokenPolicyBytes(policyBytes: Uint8Array): Promise<{ anchorBytes: Uint8Array; anchorBase32: string }> {
   if (!policyBytes || policyBytes.length === 0) throw new Error('publishTokenPolicyBytes: policyBytes required');
   const anchorBytes = await publishTokenPolicyBytesBridge(policyBytes);
   return { anchorBytes, anchorBase32: encodeBase32Crockford(anchorBytes) };
-}
-
-export async function getTokenPolicyBytes(anchorBytes: Uint8Array): Promise<Uint8Array> {
-  if (!anchorBytes || anchorBytes.length !== 32) throw new Error('getTokenPolicyBytes: anchorBytes must be 32 bytes');
-  return getTokenPolicyBytesBridge(anchorBytes);
 }
 
 /**
@@ -295,12 +258,19 @@ export async function forgetToken(
   return { success: resp.success, message: resp.message };
 }
 
+/** A whole-number amount as typed; a blank or non-numeric one is refused, never read as 0. */
+function wholeAmount(action: string, value: string | number): bigint {
+  const text = String(value).trim();
+  if (!/^\d+$/.test(text)) throw new Error(`${action}: the amount must be a whole number`);
+  return BigInt(text);
+}
+
 /** Burn supply the caller holds. Burn <= balance is enforced by the core conservation guard. */
 export async function burnToken(args: { tokenId: string; amount: string | number; message?: string }): Promise<{ success: boolean; newBalance?: bigint; message?: string }> {
   try {
     const req = new pb.TokenBurnRequest({
       tokenId: String(args?.tokenId || '').trim(),
-      amount: BigInt(String(args?.amount ?? '0')),
+      amount: wholeAmount('burnToken', args.amount),
       message: String(args?.message || ''),
     } as any);
     const argPack = new pb.ArgPack({

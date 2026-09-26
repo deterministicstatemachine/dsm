@@ -12,6 +12,7 @@ jest.mock('../../services/qr/contactQrService', () => ({
   encodeContactQrV3Payload: jest.fn(),
 }));
 
+import { encodeBase32Crockford } from '../../utils/textId';
 import * as pb from '../../proto/dsm_app_pb';
 import { addContact } from '../contacts';
 import { routerInvokeBin } from '../WebViewBridge';
@@ -56,7 +57,8 @@ describe('contacts.addManual', () => {
     });
 
     const result = await addContact({ alias: 'Bob', deviceId, genesisHash, signingPublicKey });
-    expect(result).toEqual({ accepted: true, contactId: undefined, error: undefined });
+    // The contact Rust added is named by its device.
+    expect(result).toEqual({ accepted: true, contactId: encodeBase32Crockford(deviceId) });
     expect(encodeContactQrV3Payload).not.toHaveBeenCalled();
   });
 });

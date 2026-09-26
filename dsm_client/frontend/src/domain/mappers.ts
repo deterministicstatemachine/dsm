@@ -9,6 +9,7 @@ import {
   TransactionType,
   type TransactionInfo,
 } from '../proto/dsm_app_pb';
+import type { BilateralRelationshipDTO } from '../dsm/types';
 import type {
   DomainContact,
   DomainRelationshipSendBlockReason,
@@ -17,36 +18,6 @@ import type {
   DomainTransaction,
   DomainTxType,
 } from './types';
-
-function toBase32(bytes?: Uint8Array | null): string {
-  if (!(bytes instanceof Uint8Array)) return '';
-  if (bytes.length === 0) return '';
-  return toBase32Crockford(bytes);
-}
-
-function parseByteListString(input: string): Uint8Array | null {
-  const s = String(input || '').trim();
-  if (!s.includes(',')) return null;
-  const parts = s.split(',').map(p => p.trim()).filter(Boolean);
-  if (parts.length !== 32) return null;
-  const out = new Uint8Array(32);
-  for (let i = 0; i < parts.length; i += 1) {
-    const n = Number(parts[i]);
-    if (!Number.isInteger(n) || n < 0 || n > 255) return null;
-    out[i] = n;
-  }
-  return out;
-}
-
-function normalizeIdField(value: any): string {
-  if (value instanceof Uint8Array) return toBase32(value);
-  if (typeof value === 'string') {
-    const parsed = parseByteListString(value);
-    if (parsed) return toBase32(parsed);
-    return value;
-  }
-  return String(value ?? '');
-}
 
 export function normalizeBleAddress(input?: string): string | undefined {
   if (typeof input !== 'string') return undefined;
@@ -108,42 +79,24 @@ export function mapRelationshipSendStatus(status: any): DomainRelationshipSendSt
   };
 }
 
-export function mapContactList(list: any[], bleSnapshot?: { deviceIds: Record<string, string>; genesis: Record<string, string> }): DomainContact[] {
+export function mapContactList(list: BilateralRelationshipDTO[], bleSnapshot?: { deviceIds: Record<string, string>; genesis: Record<string, string> }): DomainContact[] {
   const snapshot = bleSnapshot || { deviceIds: {}, genesis: {} };
-  return list.map((c: any) => {
-    // Strict proto field names — camelCase from @bufbuild/protobuf codegen.
-    if ('genesis_hash' in c || 'device_id' in c || 'ble_address' in c) {
-      console.error('[mappers] snake_case fields in contact — bridge returned raw data instead of protobuf');
-    }
-
-    const alias = c.alias instanceof Uint8Array ? toBase32(c.alias) : String(c.alias ?? 'Unknown');
-    const deviceId = normalizeIdField(c.deviceId);
-    const genesisHash = normalizeIdField(c.genesisHash);
-    let chainTip = '';
-    if (c.chainTip instanceof Uint8Array) {
-      chainTip = toBase32(c.chainTip);
-    } else if (c.chainTip?.tipHash instanceof Uint8Array) {
-      chainTip = toBase32(c.chainTip.tipHash);
-    } else if (c.chainTip?.v instanceof Uint8Array) {
-      chainTip = toBase32(c.chainTip.v);
-    } else if (typeof c.chainTip === 'string') {
-      chainTip = c.chainTip;
-    }
+  return list.map((c) => {
+    const deviceId = toBase32Crockford(c.deviceId);
+    const genesisHash = toBase32Crockford(c.genesisHash);
     const sendStatus = mapRelationshipSendStatus(c.sendStatus);
-
-    const directBle = normalizeBleAddress(String(c.bleAddress || ''));
+    // The address Rust holds for the contact, else one the native side
+    // resolved for its device this session (dsm/resolution.ts).
+    const directBle = normalizeBleAddress(c.bleAddress ?? '');
     const mappedBle = directBle || snapshot.deviceIds[deviceId] || snapshot.genesis[genesisHash] || undefined;
     return {
-      alias,
+      alias: c.alias,
       deviceId,
       genesisHash,
-      chainTip: chainTip || undefined,
+      chainTip: c.chainTip ? toBase32Crockford(c.chainTip) : undefined,
       bleAddress: mappedBle,
-      status: c.status,
       genesisVerifiedOnline: c.genesisVerifiedOnline,
-      verifyingStorageNodes: c.verifyingStorageNodes,
-      signingPublicKey: c.publicKey instanceof Uint8Array && c.publicKey.length > 0
-        ? toBase32(c.publicKey) : undefined,
+      signingPublicKey: toBase32Crockford(c.publicKey),
       sendReady: sendStatus?.sendReady,
       sendCheckState: sendStatus?.sendCheckState,
       sendBlockReason: sendStatus?.sendBlockReason,
@@ -163,7 +116,7 @@ function txBytes32(t: TransactionInfo, field: string, bytes: Uint8Array): string
   if (!(bytes instanceof Uint8Array) || bytes.length !== 32) {
     throw new Error(`STRICT: transaction ${t.id} carries a ${field} that is not 32 bytes`);
   }
-  return toBase32(bytes);
+  return toBase32Crockford(bytes);
 }
 
 function txText(t: TransactionInfo, field: string, value: string): string {

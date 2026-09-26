@@ -11,16 +11,16 @@ import {
 } from '../dsm/WebViewBridge';
 import { getHeaders } from '../dsm/identity';
 
+/** A contact as Rust lists it, in Base32 Crockford. */
 export interface Contact {
+  /** The contact's device id: a contact is its device. */
   id: string;
   alias: string;
   genesisHash: string;
-  deviceId?: string;
-  publicKey?: string;
-  lastSeen?: number;
+  deviceId: string;
+  publicKey: string;
+  /** Its genesis was verified against the storage nodes. */
   isVerified: boolean;
-  isFavorite?: boolean;
-  notes?: string;
   bleAddress?: string;
   chainTip?: string;
 }
@@ -34,10 +34,6 @@ export interface ContactsState {
 export interface ContactsContextValue extends ContactsState {
   refreshContacts: () => Promise<void>;
   addContact: (alias: string, genesisHash: Uint8Array | string, deviceId: Uint8Array | string | undefined, signingPublicKey: Uint8Array | string | undefined) => Promise<boolean>;
-  updateContact: (id: string, updates: Partial<Contact>) => Promise<boolean>;
-  deleteContact: (id: string) => Promise<boolean>;
-  getContactByGenesisHash: (genesisHash: string) => Contact | null;
-  getContactByAlias: (alias: string) => Contact | null;
   setError: (error: string | null) => void;
 }
 
@@ -47,10 +43,6 @@ const defaultValue: ContactsContextValue = {
   error: null,
   refreshContacts: async () => {},
   addContact: async () => false,
-  updateContact: async () => false,
-  deleteContact: async () => false,
-  getContactByGenesisHash: () => null,
-  getContactByAlias: () => null,
   setError: () => {},
 };
 
@@ -133,10 +125,6 @@ export function ContactsProvider({ children }: { children: React.ReactNode }) {
     error: state.error,
     refreshContacts: contactsStore.refreshContacts,
     addContact: contactsStore.addContact,
-    updateContact: contactsStore.updateContact,
-    deleteContact: contactsStore.deleteContact,
-    getContactByGenesisHash: contactsStore.getContactByGenesisHash,
-    getContactByAlias: contactsStore.getContactByAlias,
     setError: contactsStore.setError,
   }), [state]);
 
