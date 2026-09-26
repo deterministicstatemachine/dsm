@@ -22564,58 +22564,11 @@ export class StorageMemberNoCycle extends Message<StorageMemberNoCycle> {
 
 /**
  * ============================ POLICY FILE (Canonical) ============================
+ * The enforcer's view of a committed token policy: the operations its flags
+ * permit and the supply it was created with (SoFi §47–§54), derived from the
+ * committed TokenPolicyV3 bytes. A policy's identity is the commitment of
+ * those bytes, never of this projection.
  *
- * @generated from message dsm.PolicyRoleProto
- */
-export class PolicyRoleProto extends Message<PolicyRoleProto> {
-  /**
-   * @generated from field: string id = 1;
-   */
-  id = "";
-
-  /**
-   * @generated from field: string name = 2;
-   */
-  name = "";
-
-  /**
-   * sorted
-   *
-   * @generated from field: repeated string permissions = 3;
-   */
-  permissions: string[] = [];
-
-  constructor(data?: PartialMessage<PolicyRoleProto>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.PolicyRoleProto";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 2, name: "name", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 3, name: "permissions", kind: "scalar", T: 9 /* ScalarType.STRING */, repeated: true },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): PolicyRoleProto {
-    return new PolicyRoleProto().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): PolicyRoleProto {
-    return new PolicyRoleProto().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): PolicyRoleProto {
-    return new PolicyRoleProto().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: PolicyRoleProto | PlainMessage<PolicyRoleProto> | undefined, b: PolicyRoleProto | PlainMessage<PolicyRoleProto> | undefined): boolean {
-    return proto3.util.equals(PolicyRoleProto, a, b);
-  }
-}
-
-/**
  * @generated from message dsm.PolicyConditionProto
  */
 export class PolicyConditionProto extends Message<PolicyConditionProto> {
@@ -22624,34 +22577,10 @@ export class PolicyConditionProto extends Message<PolicyConditionProto> {
    */
   kind: {
     /**
-     * @generated from field: dsm.IdentityConstraintProto identity_constraint = 1;
-     */
-    value: IdentityConstraintProto;
-    case: "identityConstraint";
-  } | {
-    /**
      * @generated from field: dsm.OperationRestrictionProto operation_restriction = 3;
      */
     value: OperationRestrictionProto;
     case: "operationRestriction";
-  } | {
-    /**
-     * @generated from field: dsm.EmissionsScheduleProto emissions_schedule = 5;
-     */
-    value: EmissionsScheduleProto;
-    case: "emissionsSchedule";
-  } | {
-    /**
-     * @generated from field: dsm.CreditBundlePolicyProto credit_bundle_policy = 6;
-     */
-    value: CreditBundlePolicyProto;
-    case: "creditBundlePolicy";
-  } | {
-    /**
-     * @generated from field: dsm.CustomConstraintProto custom = 7;
-     */
-    value: CustomConstraintProto;
-    case: "custom";
   } | {
     /**
      * @generated from field: dsm.BitcoinTapConstraintProto bitcoin_tap_constraint = 8;
@@ -22678,11 +22607,7 @@ export class PolicyConditionProto extends Message<PolicyConditionProto> {
   static readonly runtime: typeof proto3 = proto3;
   static readonly typeName = "dsm.PolicyConditionProto";
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "identity_constraint", kind: "message", T: IdentityConstraintProto, oneof: "kind" },
     { no: 3, name: "operation_restriction", kind: "message", T: OperationRestrictionProto, oneof: "kind" },
-    { no: 5, name: "emissions_schedule", kind: "message", T: EmissionsScheduleProto, oneof: "kind" },
-    { no: 6, name: "credit_bundle_policy", kind: "message", T: CreditBundlePolicyProto, oneof: "kind" },
-    { no: 7, name: "custom", kind: "message", T: CustomConstraintProto, oneof: "kind" },
     { no: 8, name: "bitcoin_tap_constraint", kind: "message", T: BitcoinTapConstraintProto, oneof: "kind" },
     { no: 10, name: "supply_cap", kind: "message", T: SupplyCapProto, oneof: "kind" },
   ]);
@@ -22745,49 +22670,6 @@ export class SupplyCapProto extends Message<SupplyCapProto> {
 }
 
 /**
- * @generated from message dsm.IdentityConstraintProto
- */
-export class IdentityConstraintProto extends Message<IdentityConstraintProto> {
-  /**
-   * @generated from field: repeated string allowed_identities = 1;
-   */
-  allowedIdentities: string[] = [];
-
-  /**
-   * @generated from field: bool allow_derived = 2;
-   */
-  allowDerived = false;
-
-  constructor(data?: PartialMessage<IdentityConstraintProto>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.IdentityConstraintProto";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "allowed_identities", kind: "scalar", T: 9 /* ScalarType.STRING */, repeated: true },
-    { no: 2, name: "allow_derived", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): IdentityConstraintProto {
-    return new IdentityConstraintProto().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): IdentityConstraintProto {
-    return new IdentityConstraintProto().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): IdentityConstraintProto {
-    return new IdentityConstraintProto().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: IdentityConstraintProto | PlainMessage<IdentityConstraintProto> | undefined, b: IdentityConstraintProto | PlainMessage<IdentityConstraintProto> | undefined): boolean {
-    return proto3.util.equals(IdentityConstraintProto, a, b);
-  }
-}
-
-/**
  * @generated from message dsm.OperationRestrictionProto
  */
 export class OperationRestrictionProto extends Message<OperationRestrictionProto> {
@@ -22821,116 +22703,6 @@ export class OperationRestrictionProto extends Message<OperationRestrictionProto
 
   static equals(a: OperationRestrictionProto | PlainMessage<OperationRestrictionProto> | undefined, b: OperationRestrictionProto | PlainMessage<OperationRestrictionProto> | undefined): boolean {
     return proto3.util.equals(OperationRestrictionProto, a, b);
-  }
-}
-
-/**
- * @generated from message dsm.EmissionsScheduleProto
- */
-export class EmissionsScheduleProto extends Message<EmissionsScheduleProto> {
-  /**
-   * @generated from field: uint64 total_supply = 1;
-   */
-  totalSupply = protoInt64.zero;
-
-  /**
-   * @generated from field: uint32 shard_depth = 2;
-   */
-  shardDepth = 0;
-
-  /**
-   * @generated from field: uint32 schedule_steps = 3;
-   */
-  scheduleSteps = 0;
-
-  /**
-   * @generated from field: uint64 initial_step_emissions = 4;
-   */
-  initialStepEmissions = protoInt64.zero;
-
-  /**
-   * @generated from field: uint64 initial_step_amount = 5;
-   */
-  initialStepAmount = protoInt64.zero;
-
-  constructor(data?: PartialMessage<EmissionsScheduleProto>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.EmissionsScheduleProto";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "total_supply", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
-    { no: 2, name: "shard_depth", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
-    { no: 3, name: "schedule_steps", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
-    { no: 4, name: "initial_step_emissions", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
-    { no: 5, name: "initial_step_amount", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): EmissionsScheduleProto {
-    return new EmissionsScheduleProto().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): EmissionsScheduleProto {
-    return new EmissionsScheduleProto().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): EmissionsScheduleProto {
-    return new EmissionsScheduleProto().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: EmissionsScheduleProto | PlainMessage<EmissionsScheduleProto> | undefined, b: EmissionsScheduleProto | PlainMessage<EmissionsScheduleProto> | undefined): boolean {
-    return proto3.util.equals(EmissionsScheduleProto, a, b);
-  }
-}
-
-/**
- * @generated from message dsm.CreditBundlePolicyProto
- */
-export class CreditBundlePolicyProto extends Message<CreditBundlePolicyProto> {
-  /**
-   * @generated from field: uint64 bundle_size = 1;
-   */
-  bundleSize = protoInt64.zero;
-
-  /**
-   * @generated from field: string debit_rule = 2;
-   */
-  debitRule = "";
-
-  /**
-   * @generated from field: string refill_rule = 3;
-   */
-  refillRule = "";
-
-  constructor(data?: PartialMessage<CreditBundlePolicyProto>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.CreditBundlePolicyProto";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "bundle_size", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
-    { no: 2, name: "debit_rule", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 3, name: "refill_rule", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): CreditBundlePolicyProto {
-    return new CreditBundlePolicyProto().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): CreditBundlePolicyProto {
-    return new CreditBundlePolicyProto().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): CreditBundlePolicyProto {
-    return new CreditBundlePolicyProto().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: CreditBundlePolicyProto | PlainMessage<CreditBundlePolicyProto> | undefined, b: CreditBundlePolicyProto | PlainMessage<CreditBundlePolicyProto> | undefined): boolean {
-    return proto3.util.equals(CreditBundlePolicyProto, a, b);
   }
 }
 
@@ -23000,62 +22772,6 @@ export class BitcoinTapConstraintProto extends Message<BitcoinTapConstraintProto
 }
 
 /**
- * IMPORTANT: `parameters_kv` is the canonical/deterministic representation.
- * `parameters` (map) is UI/interop only and MUST NOT be used in hashed preimages.
- *
- * @generated from message dsm.CustomConstraintProto
- */
-export class CustomConstraintProto extends Message<CustomConstraintProto> {
-  /**
-   * @generated from field: string constraint_type = 1;
-   */
-  constraintType = "";
-
-  /**
-   * UI/interop only (non-deterministic ordering). Do not hash.
-   *
-   * @generated from field: map<string, string> parameters = 2;
-   */
-  parameters: { [key: string]: string } = {};
-
-  /**
-   * Canonical: sorted by key before hashing/signing.
-   *
-   * @generated from field: repeated dsm.ParamKV parameters_kv = 3;
-   */
-  parametersKv: ParamKV[] = [];
-
-  constructor(data?: PartialMessage<CustomConstraintProto>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.CustomConstraintProto";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "constraint_type", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 2, name: "parameters", kind: "map", K: 9 /* ScalarType.STRING */, V: {kind: "scalar", T: 9 /* ScalarType.STRING */} },
-    { no: 3, name: "parameters_kv", kind: "message", T: ParamKV, repeated: true },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): CustomConstraintProto {
-    return new CustomConstraintProto().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): CustomConstraintProto {
-    return new CustomConstraintProto().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): CustomConstraintProto {
-    return new CustomConstraintProto().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: CustomConstraintProto | PlainMessage<CustomConstraintProto> | undefined, b: CustomConstraintProto | PlainMessage<CustomConstraintProto> | undefined): boolean {
-    return proto3.util.equals(CustomConstraintProto, a, b);
-  }
-}
-
-/**
  * @generated from message dsm.CanonicalPolicy
  */
 export class CanonicalPolicy extends Message<CanonicalPolicy> {
@@ -23069,11 +22785,6 @@ export class CanonicalPolicy extends Message<CanonicalPolicy> {
    */
   conditions: PolicyConditionProto[] = [];
 
-  /**
-   * @generated from field: repeated dsm.PolicyRoleProto roles = 3;
-   */
-  roles: PolicyRoleProto[] = [];
-
   constructor(data?: PartialMessage<CanonicalPolicy>) {
     super();
     proto3.util.initPartial(data, this);
@@ -23084,7 +22795,6 @@ export class CanonicalPolicy extends Message<CanonicalPolicy> {
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
     { no: 1, name: "author", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 2, name: "conditions", kind: "message", T: PolicyConditionProto, repeated: true },
-    { no: 3, name: "roles", kind: "message", T: PolicyRoleProto, repeated: true },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): CanonicalPolicy {
@@ -23101,79 +22811,6 @@ export class CanonicalPolicy extends Message<CanonicalPolicy> {
 
   static equals(a: CanonicalPolicy | PlainMessage<CanonicalPolicy> | undefined, b: CanonicalPolicy | PlainMessage<CanonicalPolicy> | undefined): boolean {
     return proto3.util.equals(CanonicalPolicy, a, b);
-  }
-}
-
-/**
- * @generated from message dsm.StoredPolicy
- */
-export class StoredPolicy extends Message<StoredPolicy> {
-  /**
-   * @generated from field: string name = 1;
-   */
-  name = "";
-
-  /**
-   * @generated from field: string revision = 2;
-   */
-  revision = "";
-
-  /**
-   * @generated from field: string author = 4;
-   */
-  author = "";
-
-  /**
-   * @generated from field: string description = 5;
-   */
-  description = "";
-
-  /**
-   * @generated from field: repeated dsm.PolicyConditionProto conditions = 6;
-   */
-  conditions: PolicyConditionProto[] = [];
-
-  /**
-   * @generated from field: repeated dsm.PolicyRoleProto roles = 7;
-   */
-  roles: PolicyRoleProto[] = [];
-
-  /**
-   * @generated from field: map<string, string> metadata = 8;
-   */
-  metadata: { [key: string]: string } = {};
-
-  constructor(data?: PartialMessage<StoredPolicy>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.StoredPolicy";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "name", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 2, name: "revision", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 4, name: "author", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 5, name: "description", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 6, name: "conditions", kind: "message", T: PolicyConditionProto, repeated: true },
-    { no: 7, name: "roles", kind: "message", T: PolicyRoleProto, repeated: true },
-    { no: 8, name: "metadata", kind: "map", K: 9 /* ScalarType.STRING */, V: {kind: "scalar", T: 9 /* ScalarType.STRING */} },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): StoredPolicy {
-    return new StoredPolicy().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): StoredPolicy {
-    return new StoredPolicy().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): StoredPolicy {
-    return new StoredPolicy().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: StoredPolicy | PlainMessage<StoredPolicy> | undefined, b: StoredPolicy | PlainMessage<StoredPolicy> | undefined): boolean {
-    return proto3.util.equals(StoredPolicy, a, b);
   }
 }
 

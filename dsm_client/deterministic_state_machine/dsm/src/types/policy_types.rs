@@ -2,33 +2,28 @@
 
 //! Token Policy Types (Protobuf-only transport; binary-only digests).
 //!
-//! Content-Addressed Token Policy Anchors (CTPA).
-//! - Canonical hashing: BLAKE3 over a deterministic byte layout (binary).
+//! The enforcer's view of a committed token policy ([`PolicyFile`]) and the
+//! 32-byte commitment it is keyed by ([`PolicyAnchor`]). A policy's identity
+//! is the commitment of its `TokenPolicyV3` bytes (SoFi §47), computed where
+//! the bytes are registered (`crate::core::token::policy`); nothing here
+//! hashes.
 //! - No time of any kind in a policy.
 //! - Absolutely no hex/json/base64/serde in any Rust path.
 
 use std::collections::HashMap;
 
-use crate::{crypto::blake3, types::error::DsmError};
+use crate::types::error::DsmError;
 use prost::Message;
 
 /// Fixed-length digest type for anchors and policy-bound hashes.
 pub type Digest32 = [u8; 32];
 
-/// PolicyAnchor is the 32-byte identifier (BLAKE3) of a canonical policy file.
+/// The 32-byte commitment a token policy is keyed by: its `policy_commit`,
+/// the hash of its committed `TokenPolicyV3` bytes.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PolicyAnchor(pub Digest32);
 
 impl PolicyAnchor {
-    /// Create a new policy anchor from a policy file (content-addressed).
-    ///
-    /// NOTE: `PolicyFile::canonical_bytes()` is stable across platforms/runs.
-    pub fn from_policy(policy: &PolicyFile) -> Result<Self, DsmError> {
-        let bytes = policy.canonical_bytes()?;
-        let h = blake3::domain_hash(crate::common::domain_tags::TAG_DSM_CPTA, &bytes);
-        Ok(PolicyAnchor(*h.as_bytes()))
-    }
-
     /// Borrow the raw 32-byte anchor.
     #[inline]
     pub fn as_bytes(&self) -> &Digest32 {
@@ -117,39 +112,14 @@ impl PolicyAnchor {
     }
 }
 
-/// Policy-level conditions that constrain token behavior.
+/// What a committed policy constrains, as the enforcer evaluates it: the
+/// operations its flags permit and the supply it was created with (SoFi
+/// §47–§54), derived from the parsed blob by
+/// `crate::core::token::policy::enforced_policy` and stated by nothing else.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PolicyCondition {
-    /// Only allow listed identities (optionally including their derivatives).
-    IdentityConstraint {
-        allowed_identities: Vec<String>,
-        allow_derived: bool,
-    },
-
     /// Restrict allowed operation types (interpreted as a set).
     OperationRestriction { allowed_operations: Vec<String> },
-
-    /// Emissions schedule parameters (DJTE).
-    EmissionsSchedule {
-        total_supply: u64,
-        shard_depth: u8,
-        schedule_steps: u8,
-        initial_step_emissions: u64,
-        initial_step_amount: u64,
-    },
-
-    /// Credit bundle policy (sender-pays economic rate limiting).
-    CreditBundlePolicy {
-        bundle_size: u64,
-        debit_rule: String,
-        refill_rule: String,
-    },
-
-    /// Custom constraints with string parameters.
-    Custom {
-        constraint_type: String,
-        parameters: HashMap<String, String>,
-    },
 
     /// Bitcoin tap safety constraints (dBTC §12).
     /// Protocol law — frozen into policy_commit via canonical bytes.
@@ -170,16 +140,7 @@ pub enum PolicyCondition {
     SupplyCap { max_supply: u128 },
 }
 
-/// Role-based access control for token policies.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PolicyRole {
-    pub id: String,
-    pub name: String,
-    /// Interpreted as a set; canonicalized by sorted textual form.
-    pub permissions: Vec<String>,
-}
-
-/// Immutable policy file content. Its canonical bytes are content-addressed.
+/// The enforcer's view of one committed policy.
 #[derive(Debug, Clone)]
 pub struct PolicyFile {
     /// Human-friendly name (UI/ops only; not on wire hashing).
@@ -192,8 +153,6 @@ pub struct PolicyFile {
     pub description: Option<String>,
     /// Constraining conditions.
     pub conditions: Vec<PolicyCondition>,
-    /// Roles and permissions.
-    pub roles: Vec<PolicyRole>,
     /// Extra key/value metadata (UI/ops only).
     pub metadata: HashMap<String, String>,
 }
@@ -207,18 +166,12 @@ impl PolicyFile {
             author: author.to_string(),
             description: None,
             conditions: Vec::new(),
-            roles: Vec::new(),
             metadata: HashMap::new(),
         }
     }
 
     pub fn add_condition(&mut self, condition: PolicyCondition) -> &mut Self {
         self.conditions.push(condition);
-        self
-    }
-
-    pub fn add_role(&mut self, role: PolicyRole) -> &mut Self {
-        self.roles.push(role);
         self
     }
 
@@ -232,18 +185,14 @@ impl PolicyFile {
         self
     }
 
-    /// Derive the CTPA anchor for this file.
-    pub fn generate_anchor(&self) -> Result<PolicyAnchor, DsmError> {
-        PolicyAnchor::from_policy(self)
-    }
-
-    /// Canonical deterministic serialization for hashing (binary).
+    /// Canonical deterministic serialization (binary): the `CanonicalPolicy`
+    /// proto, the shape [`Self::from_canonical_bytes`] reads.
     ///
     /// Design:
     /// - **Excluded**: `metadata`, `description`, `name`, `version`
     ///   (UI/ops only; avoid non-semantic drift).
-    /// - **Included**: `author`, `conditions`, `roles` (semantic).
-    /// - Set-like fields are **sorted** (regions, identities, operations, role perms).
+    /// - **Included**: `author`, `conditions` (semantic).
+    /// - Set-like fields are **sorted** (operations).
     /// - Output is a compact binary layout (no text encodings).
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, DsmError> {
         let proto: crate::types::proto::CanonicalPolicy = self.into();
@@ -254,22 +203,11 @@ impl PolicyFile {
         Ok(buf)
     }
 
-    pub fn to_bytes(&self) -> Result<Vec<u8>, DsmError> {
-        let proto: crate::types::proto::StoredPolicy = self.into();
-        let mut buf = Vec::new();
-        proto
-            .encode(&mut buf)
-            .map_err(|e| DsmError::SerializationError(format!("Protobuf encode failed: {}", e)))?;
-        Ok(buf)
-    }
-
     /// Deserialize from canonical binary format (CanonicalPolicy proto).
     ///
-    /// The canonical encoding contains only the semantic fields: `author`,
-    /// `conditions`, and `roles`. Non-semantic fields (`name`, `version`,
+    /// The canonical encoding contains only the semantic fields: `author`
+    /// and `conditions`. Non-semantic fields (`name`, `version`,
     /// `description`, `metadata`) are empty.
-    /// This is used when fetching policies from storage nodes, which store
-    /// canonical bytes for content-addressed integrity.
     pub fn from_canonical_bytes(bytes: &[u8]) -> Result<Self, DsmError> {
         let proto = crate::types::proto::CanonicalPolicy::decode(bytes).map_err(|e| {
             DsmError::SerializationError(format!("CanonicalPolicy decode failed: {}", e))
@@ -280,7 +218,6 @@ impl PolicyFile {
             .iter()
             .map(|c| c.try_into())
             .collect::<Result<Vec<_>, _>>()?;
-        let roles = proto.roles.iter().map(|r| r.into()).collect();
 
         Ok(Self {
             name: String::new(),
@@ -288,50 +225,8 @@ impl PolicyFile {
             author: proto.author,
             description: None,
             conditions,
-            roles,
             metadata: std::collections::HashMap::new(),
         })
-    }
-
-    /// Deserialize from full StoredPolicy binary format.
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, DsmError> {
-        let proto = crate::types::proto::StoredPolicy::decode(bytes)
-            .map_err(|e| DsmError::SerializationError(format!("Protobuf decode failed: {}", e)))?;
-
-        let conditions = proto
-            .conditions
-            .iter()
-            .map(|c| c.try_into())
-            .collect::<Result<Vec<_>, _>>()?;
-        let roles = proto.roles.iter().map(|r| r.into()).collect();
-
-        Ok(Self {
-            name: proto.name,
-            version: proto.revision,
-            author: proto.author,
-            description: if proto.description.is_empty() {
-                None
-            } else {
-                Some(proto.description)
-            },
-            conditions,
-            roles,
-            metadata: proto.metadata,
-        })
-    }
-}
-
-impl From<&PolicyFile> for crate::types::proto::StoredPolicy {
-    fn from(file: &PolicyFile) -> Self {
-        Self {
-            name: file.name.clone(),
-            revision: file.version.clone(),
-            author: file.author.clone(),
-            description: file.description.clone().unwrap_or_default(),
-            conditions: file.conditions.iter().map(|c| c.into()).collect(),
-            roles: file.roles.iter().map(|r| r.into()).collect(),
-            metadata: file.metadata.clone(),
-        }
     }
 }
 
@@ -340,7 +235,6 @@ impl From<&PolicyFile> for crate::types::proto::CanonicalPolicy {
         Self {
             author: file.author.clone(),
             conditions: file.conditions.iter().map(|c| c.into()).collect(),
-            roles: file.roles.iter().map(|r| r.into()).collect(),
         }
     }
 }
@@ -351,75 +245,11 @@ impl From<&PolicyCondition> for crate::types::proto::PolicyConditionProto {
         use crate::types::proto::*;
 
         let kind = match cond {
-            PolicyCondition::IdentityConstraint {
-                allowed_identities,
-                allow_derived,
-            } => {
-                let mut sorted = allowed_identities.clone();
-                sorted.sort();
-                Kind::IdentityConstraint(IdentityConstraintProto {
-                    allowed_identities: sorted,
-                    allow_derived: *allow_derived,
-                })
-            }
             PolicyCondition::OperationRestriction { allowed_operations } => {
                 let mut sorted = allowed_operations.clone();
                 sorted.sort();
                 Kind::OperationRestriction(OperationRestrictionProto {
                     allowed_operations: sorted,
-                })
-            }
-            PolicyCondition::EmissionsSchedule {
-                total_supply,
-                shard_depth,
-                schedule_steps,
-                initial_step_emissions,
-                initial_step_amount,
-            } => Kind::EmissionsSchedule(EmissionsScheduleProto {
-                total_supply: *total_supply,
-                shard_depth: *shard_depth as u32,
-                schedule_steps: *schedule_steps as u32,
-                initial_step_emissions: *initial_step_emissions,
-                initial_step_amount: *initial_step_amount,
-            }),
-            PolicyCondition::CreditBundlePolicy {
-                bundle_size,
-                debit_rule,
-                refill_rule,
-            } => Kind::CreditBundlePolicy(CreditBundlePolicyProto {
-                bundle_size: *bundle_size,
-                debit_rule: debit_rule.clone(),
-                refill_rule: refill_rule.clone(),
-            }),
-            PolicyCondition::Custom {
-                constraint_type,
-                parameters,
-            } => {
-                // Issue #183 Finding 1 fix: `CustomConstraintProto.parameters`
-                // is a `map<string,string>` with non-deterministic
-                // iteration order — the proto schema comment explicitly says
-                // "UI/interop only (non-deterministic ordering). Do not
-                // hash." Encoding it into `canonical_bytes()` made the
-                // policy anchor depend on `HashMap` iteration order, which
-                // varies across runs/platforms.
-                //
-                // The canonical projection emits ONLY `parameters_kv` (the
-                // sorted `Vec<ParamKv>`); `parameters` is left empty.
-                // Reverse conversion already prefers `parameters_kv` and
-                // falls back to `parameters` for legacy protos, so
-                // round-tripping is unaffected.
-                let mut kv: Vec<ParamKv> = parameters
-                    .iter()
-                    .map(|(k, v)| ParamKv {
-                        key: k.clone(),
-                        value: v.clone(),
-                    })
-                    .collect();
-                kv.sort_by(|a, b| a.key.cmp(&b.key));
-                Kind::Custom(CustomConstraintProto {
-                    constraint_type: constraint_type.clone(),
-                    parameters: std::collections::HashMap::new(),
-                    parameters_kv: kv,
                 })
             }
             PolicyCondition::BitcoinTapConstraint {
@@ -449,35 +279,8 @@ impl TryFrom<&crate::types::proto::PolicyConditionProto> for PolicyCondition {
         use crate::types::proto::*;
 
         match &proto.kind {
-            Some(Kind::IdentityConstraint(p)) => Ok(PolicyCondition::IdentityConstraint {
-                allowed_identities: p.allowed_identities.clone(),
-                allow_derived: p.allow_derived,
-            }),
             Some(Kind::OperationRestriction(p)) => Ok(PolicyCondition::OperationRestriction {
                 allowed_operations: p.allowed_operations.clone(),
-            }),
-            Some(Kind::EmissionsSchedule(p)) => Ok(PolicyCondition::EmissionsSchedule {
-                total_supply: p.total_supply,
-                shard_depth: p.shard_depth as u8,
-                schedule_steps: p.schedule_steps as u8,
-                initial_step_emissions: p.initial_step_emissions,
-                initial_step_amount: p.initial_step_amount,
-            }),
-            Some(Kind::CreditBundlePolicy(p)) => Ok(PolicyCondition::CreditBundlePolicy {
-                bundle_size: p.bundle_size,
-                debit_rule: p.debit_rule.clone(),
-                refill_rule: p.refill_rule.clone(),
-            }),
-            Some(Kind::Custom(p)) => Ok(PolicyCondition::Custom {
-                constraint_type: p.constraint_type.clone(),
-                parameters: if !p.parameters_kv.is_empty() {
-                    p.parameters_kv
-                        .iter()
-                        .map(|kv| (kv.key.clone(), kv.value.clone()))
-                        .collect()
-                } else {
-                    p.parameters.clone()
-                },
             }),
             Some(Kind::BitcoinTapConstraint(p)) => Ok(PolicyCondition::BitcoinTapConstraint {
                 max_successor_depth: p.max_successor_depth,
@@ -504,29 +307,8 @@ impl TryFrom<&crate::types::proto::PolicyConditionProto> for PolicyCondition {
     }
 }
 
-impl From<&PolicyRole> for crate::types::proto::PolicyRoleProto {
-    fn from(role: &PolicyRole) -> Self {
-        let mut sorted_permissions = role.permissions.clone();
-        sorted_permissions.sort();
-        Self {
-            id: role.id.clone(),
-            name: role.name.clone(),
-            permissions: sorted_permissions,
-        }
-    }
-}
-
-impl From<&crate::types::proto::PolicyRoleProto> for PolicyRole {
-    fn from(proto: &crate::types::proto::PolicyRoleProto) -> Self {
-        Self {
-            id: proto.id.clone(),
-            name: proto.name.clone(),
-            permissions: proto.permissions.clone(),
-        }
-    }
-}
-
-/// In-memory, runtime policy bundle + verification state.
+/// A policy as the enforcer holds it: its view and the commitment it is
+/// keyed by.
 #[derive(Debug, Clone)]
 pub struct TokenPolicy {
     pub file: PolicyFile,
@@ -534,61 +316,18 @@ pub struct TokenPolicy {
 }
 
 impl TokenPolicy {
-    pub fn new(file: PolicyFile) -> Result<Self, DsmError> {
-        let anchor = file.generate_anchor()?;
-        Ok(Self::new_with_anchor(file, anchor))
-    }
-
-    /// Construct a runtime policy using an already-authoritative anchor.
-    ///
-    /// This is used when the canonical policy commitment is obtained from a
-    /// storage-layer anchor (for example, `DSM/policy` anchored bytes) and
-    /// must be preserved exactly in runtime mapping.
+    /// The enforcer's view `file` of the policy committed at `anchor`. The
+    /// commitment is computed where the bytes are registered
+    /// (`crate::core::token::policy::TokenPolicySystem::register_policy`)
+    /// and never from `file`.
     pub fn new_with_anchor(file: PolicyFile, anchor: PolicyAnchor) -> Self {
         Self { file, anchor }
     }
-
-    // Issue #183 Finding 2 fix: `is_condition_satisfied` and
-    // `are_time_conditions_satisfied` previously returned `true`
-    // unconditionally — a silent total bypass of policy enforcement. They
-    // had no production callers and have been removed. Use
-    // `crate::core::token::policy::policy_enforcement::PolicyEnforcer::enforce_policy(...)`
-    // for the real condition-evaluation path (whitepaper §9.5).
-}
-
-/// Lightweight policy handle used by some SDK surfaces.
-pub struct Policy {
-    pub name: String,
-    pub conditions: Vec<PolicyCondition>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn anchor_is_stable_and_ignores_display_fields() {
-        let mut p1 = PolicyFile::new("Name", "v2", "authorX");
-        p1.add_condition(PolicyCondition::OperationRestriction {
-            allowed_operations: vec!["transfer".into(), "lock".into()],
-        });
-        p1.roles.push(PolicyRole {
-            id: "admin".into(),
-            name: "Admin".into(),
-            permissions: vec![],
-        });
-
-        // Clone and perturb UI/ops fields that must not affect canonical hash
-        let mut p2 = p1.clone();
-        p2.metadata.insert("note".into(), "hello".into());
-        p2.description = Some("desc".into());
-        p2.name = "Other".into();
-        p2.version = "v2".into();
-
-        let a1 = p1.generate_anchor().unwrap();
-        let a2 = p2.generate_anchor().unwrap();
-        assert_eq!(a1.0, a2.0, "UI/ops fields must not affect anchor");
-    }
 
     #[test]
     fn sets_are_sorted_in_canonical_bytes() {
@@ -679,72 +418,47 @@ mod tests {
         pf.add_condition(PolicyCondition::OperationRestriction {
             allowed_operations: vec!["transfer".into()],
         });
-        pf.add_role(PolicyRole {
-            id: "r1".into(),
-            name: "Role1".into(),
-            permissions: vec!["read".into()],
-        });
 
         assert_eq!(pf.description.as_deref(), Some("A test policy"));
         assert_eq!(pf.metadata.get("key1").unwrap(), "val1");
         assert_eq!(pf.conditions.len(), 1);
-        assert_eq!(pf.roles.len(), 1);
-    }
-
-    #[test]
-    fn policy_file_to_bytes_from_bytes_roundtrip() {
-        let mut pf = PolicyFile::new("roundtrip", "v2", "bob");
-        pf.with_description("desc");
-        pf.add_metadata("k", "v");
-        pf.add_condition(PolicyCondition::IdentityConstraint {
-            allowed_identities: vec!["id1".into()],
-            allow_derived: true,
-        });
-        pf.add_role(PolicyRole {
-            id: "admin".into(),
-            name: "Admin".into(),
-            permissions: vec!["write".into(), "read".into()],
-        });
-
-        let bytes = pf.to_bytes().unwrap();
-        let restored = PolicyFile::from_bytes(&bytes).unwrap();
-        assert_eq!(restored.name, "roundtrip");
-        assert_eq!(restored.version, "v2");
-        assert_eq!(restored.author, "bob");
-        assert_eq!(restored.description.as_deref(), Some("desc"));
-        assert_eq!(restored.conditions.len(), 1);
-        assert_eq!(restored.roles.len(), 1);
-        assert_eq!(restored.roles[0].id, "admin");
     }
 
     #[test]
     fn policy_file_canonical_bytes_from_canonical_bytes_roundtrip() {
         let mut pf = PolicyFile::new("name", "v1", "carol");
-        pf.add_condition(PolicyCondition::EmissionsSchedule {
-            total_supply: 1_000_000,
-            shard_depth: 4,
-            schedule_steps: 10,
-            initial_step_emissions: 500,
-            initial_step_amount: 100,
+        pf.add_condition(PolicyCondition::SupplyCap {
+            max_supply: 1_000_000,
+        });
+        pf.add_condition(PolicyCondition::OperationRestriction {
+            allowed_operations: vec!["transfer".into()],
         });
         let canonical = pf.canonical_bytes().unwrap();
         let restored = PolicyFile::from_canonical_bytes(&canonical).unwrap();
         assert_eq!(restored.author, "carol");
-        assert_eq!(restored.conditions.len(), 1);
+        assert_eq!(restored.conditions, pf.conditions);
         assert!(restored.name.is_empty(), "name excluded from canonical");
     }
 
     /// A committed policy carrying a vault condition (the reserved
     /// `vault_enforcement`, field 2) names a fact no verifier derives: it does
-    /// not decode, so no token under it can be adopted or evaluated. A policy
-    /// of evaluable conditions still decodes.
+    /// not decode, so no token under it can be adopted or evaluated. The same
+    /// for the condition kinds the policy grammar (SoFi §47–§54) does not
+    /// name — an identity allowlist over caller-stated strings (field 1), an
+    /// emission schedule (5), a credit bundle (6), a custom constraint (7) —
+    /// which are reserved. A policy of evaluable conditions still decodes.
     #[test]
-    fn a_policy_carrying_a_vault_condition_does_not_decode() {
-        // CanonicalPolicy { author: "a", conditions: [ { 2: { minimum_balance: 100 } } ] }
-        let vault_condition = [0x12, 0x02, 0x10, 0x64];
-        let mut bytes = vec![0x0A, 0x01, b'a', 0x12, vault_condition.len() as u8];
-        bytes.extend_from_slice(&vault_condition);
-        assert!(PolicyFile::from_canonical_bytes(&bytes).is_err());
+    fn a_policy_carrying_a_condition_the_grammar_does_not_name_does_not_decode() {
+        // CanonicalPolicy { author: "a", conditions: [ { <field>: { 1: 100 } } ] }
+        for field in [1u8, 2, 5, 6, 7] {
+            let condition = [(field << 3) | 2, 0x02, 0x08, 0x64];
+            let mut bytes = vec![0x0A, 0x01, b'a', 0x12, condition.len() as u8];
+            bytes.extend_from_slice(&condition);
+            assert!(
+                PolicyFile::from_canonical_bytes(&bytes).is_err(),
+                "condition kind {field} decoded"
+            );
+        }
 
         let mut evaluable = PolicyFile::new("n", "v", "a");
         evaluable.add_condition(PolicyCondition::OperationRestriction {
@@ -752,68 +466,5 @@ mod tests {
         });
         let canonical = evaluable.canonical_bytes().expect("canonical");
         assert!(PolicyFile::from_canonical_bytes(&canonical).is_ok());
-    }
-
-    #[test]
-    fn different_authors_produce_different_anchors() {
-        let p1 = PolicyFile::new("n", "v", "alice");
-        let p2 = PolicyFile::new("n", "v", "bob");
-        let a1 = p1.generate_anchor().unwrap();
-        let a2 = p2.generate_anchor().unwrap();
-        assert_ne!(a1.0, a2.0);
-    }
-
-    // ────────────────────────────────────────────────────────────────────────
-    // Issue #183 Finding 1 regression — Custom policy anchor determinism.
-    //
-    // Repeatedly building the same logical Custom policy must produce
-    // byte-identical `canonical_bytes()` output. The previous code carried
-    // `parameters: HashMap<String,String>` into the canonical proto, and
-    // HashMap iteration order is non-deterministic, so anchors drifted across
-    // runs. The fix zeroes `parameters` in the canonical projection and keeps
-    // only the sorted `parameters_kv` Vec.
-    // ────────────────────────────────────────────────────────────────────────
-
-    fn make_custom_policy(author: &str) -> PolicyFile {
-        let mut params = std::collections::HashMap::new();
-        // Insert many keys in varied order so HashMap's pseudo-random
-        // iteration would naturally permute them. If `canonical_bytes`
-        // depended on iteration order, the digest would differ between
-        // constructions of the same logical policy.
-        for k in &["zeta", "alpha", "mu", "beta", "iota", "kappa", "delta"] {
-            params.insert(k.to_string(), format!("v_{k}"));
-        }
-        let mut pf = PolicyFile::new("cust-policy", "v1", author);
-        pf.add_condition(PolicyCondition::Custom {
-            constraint_type: "test-constraint".into(),
-            parameters: params,
-        });
-        pf
-    }
-
-    #[test]
-    fn custom_policy_canonical_bytes_are_deterministic_across_constructions() {
-        let p1 = make_custom_policy("alice");
-        let p2 = make_custom_policy("alice");
-        let b1 = p1.canonical_bytes().expect("canonical bytes p1");
-        let b2 = p2.canonical_bytes().expect("canonical bytes p2");
-        assert_eq!(
-            b1, b2,
-            "Custom policy canonical_bytes must be byte-identical across constructions"
-        );
-    }
-
-    #[test]
-    fn custom_policy_anchor_is_deterministic_across_constructions() {
-        // Repeat a few times — non-deterministic HashMap ordering would
-        // typically reveal itself within a handful of attempts.
-        let baseline = make_custom_policy("alice").generate_anchor().unwrap();
-        for _ in 0..16 {
-            let again = make_custom_policy("alice").generate_anchor().unwrap();
-            assert_eq!(
-                baseline.0, again.0,
-                "Custom policy anchor drifted across construction"
-            );
-        }
     }
 }

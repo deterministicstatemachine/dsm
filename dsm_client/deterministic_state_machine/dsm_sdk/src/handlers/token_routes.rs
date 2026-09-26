@@ -212,63 +212,6 @@ pub(crate) async fn try_fetch_policy_from_network(
         .map_err(|e| e.to_string())
 }
 
-/// Build the enforcer's `PolicyFile` from a parsed policy.
-///
-/// SOLE constructor. It is a pure function of the parsed (and therefore of the
-/// anchored) policy, so every device that fetches the same policy bytes
-/// reconstructs a byte-identical `PolicyFile`. Creation and restart
-/// rehydration both call this — there is no second place that decides what a
-/// token's policy means.
-pub(crate) fn derive_policy_file(
-    ticker: &str,
-    parsed: &ParsedTokenPolicy,
-) -> dsm::types::policy_types::PolicyFile {
-    use dsm::types::policy_types::PolicyCondition;
-
-    // Semantic version — the validator rejects a bare "1".
-    let mut pf = dsm::types::policy_types::PolicyFile::new(ticker, "1.0.0", "dsm_token_route");
-    if let Some(desc) = parsed.description.as_ref() {
-        pf.description = Some(desc.clone());
-    }
-
-    // CONDITIONS, not metadata. `PolicyFile::metadata` is documented as
-    // "UI/ops only" and is EXCLUDED from `canonical_bytes` — anything put
-    // there is neither committed in the anchor nor read by the enforcer, which
-    // is why the previous transferable/allowed_operations metadata was inert.
-    // Conditions are both committed and evaluated.
-    // The whole supply exists from creation (SoFi §51): no unit is issued
-    // after it.
-    pf.add_condition(PolicyCondition::SupplyCap {
-        max_supply: parsed.genesis_supply,
-    });
-    // What each flag governs (SoFi §49, §54): `transferable` every transfer
-    // (vault creation and SoFi legs are refused in Core, at genesis
-    // acceptance and route validation), `burn_enabled` burns only. Creation
-    // is always the creator's own (Amendment S8, checked at the genesis
-    // release). The signer set the blob carries authorizes only what the
-    // policy's own rules name, and the standard release rule names none
-    // (§47), so no condition is built from it.
-    pf.add_condition(PolicyCondition::OperationRestriction {
-        allowed_operations: permitted_operations(parsed.transferable, parsed.burn_enabled),
-    });
-
-    pf.add_metadata("created_by", "dsm_token_route")
-        .add_metadata("token_name", ticker);
-    pf
-}
-
-/// The operations a token's policy permits, from its two flags.
-pub(crate) fn permitted_operations(transferable: bool, burn_enabled: bool) -> Vec<String> {
-    let mut ops = vec!["create_token".to_string()];
-    if transferable {
-        ops.extend(["transfer", "lock", "unlock"].map(String::from));
-    }
-    if burn_enabled {
-        ops.push("burn".to_string());
-    }
-    ops
-}
-
 /// Tell the WebView its token set changed.
 ///
 /// Emitted from Rust beside the registry write, because the write is what made
@@ -393,42 +336,18 @@ impl AppRouterImpl {
     /// that — any row added later, or any warm-up that skipped a row,
     /// reproduces it exactly. So the miss itself consults durable storage.
     ///
-    /// Resolution uses the SAME pieces as creation and adoption:
-    /// `load_policy_verified` (which re-derives BLAKE3(TAG_DSM_POLICY, bytes)
-    /// and treats a mismatch as absent), the one strict `parse_token_policy`,
-    /// and the one `derive_policy_file` constructor. There is no second parser
-    /// and no second notion of what a policy is.
+    /// The resolver answers the durable `TokenPolicyV3` bytes recorded at a
+    /// commitment (`load_policy_verified`, which re-derives
+    /// BLAKE3(TAG_DSM_POLICY, bytes) and treats a mismatch as absent); Core
+    /// re-derives the commitment again and reads the bytes with its one
+    /// parser. There is no second parser and no second notion of what a
+    /// policy is.
     pub fn install_policy_resolver(&self) {
         self.core_sdk.set_policy_resolver(std::sync::Arc::new(
-            |identifier: &str| -> Option<(
-                dsm::types::policy_types::PolicyFile,
-                dsm::types::policy_types::PolicyAnchor,
-            )> {
-                // Accept the canonical id or a registered ticker, same as the
-                // resolver the send path uses.
-                let row = crate::storage::client_db::token_registry::get_token(identifier)
+            |commit: &[u8; 32]| -> Option<Vec<u8>> {
+                crate::storage::client_db::token_registry::load_policy_verified(commit)
                     .ok()
                     .flatten()
-                    .or_else(|| {
-                        crate::storage::client_db::token_registry::get_token_by_ticker(identifier)
-                            .ok()
-                            .flatten()
-                    })?;
-
-                // Anchor equality is enforced inside load_policy_verified: a
-                // row whose bytes do not hash to their recorded commitment is
-                // reported ABSENT rather than returned.
-                let raw = crate::storage::client_db::token_registry::load_policy_verified(
-                    &row.policy_commit,
-                )
-                .ok()
-                .flatten()?;
-
-                let parsed = parse_token_policy(&raw)?;
-                Some((
-                    derive_policy_file(&row.ticker, &parsed),
-                    dsm::types::policy_types::PolicyAnchor::from_bytes(row.policy_commit),
-                ))
             },
         ));
     }
@@ -522,22 +441,28 @@ impl AppRouterImpl {
                 continue;
             };
 
+            match self.core_sdk.register_policy_bytes(&raw_proto) {
+                Ok(commit) if commit == row.policy_commit => {}
+                Ok(..) => {
+                    log::warn!(
+                        "[token] registry rehydrate: the recorded bytes for {} are a policy at \
+                         another commitment; it stays unusable",
+                        row.token_id
+                    );
+                    continue;
+                }
+                Err(e) => {
+                    log::warn!(
+                        "[token] registry rehydrate: register failed for {}: {e}",
+                        row.token_id
+                    );
+                    continue;
+                }
+            }
+
             {
                 let mut cache = self.policy_cache.lock().await;
                 cache.insert(row.policy_commit, raw_proto);
-            }
-
-            let policy_file = derive_policy_file(&row.ticker, &parsed);
-            if let Err(e) = self
-                .core_sdk
-                .register_token_policy_with_anchor(&row.token_id, policy_file, row.policy_commit)
-                .await
-            {
-                log::warn!(
-                    "[token] registry rehydrate: register failed for {}: {e}",
-                    row.token_id
-                );
-                continue;
             }
 
             // Re-seed the metadata cache so strict policy-commit resolution
@@ -1106,11 +1031,16 @@ impl AppRouterImpl {
                     );
                 };
 
-                // The anchor is the content hash of those exact bytes.
-                let policy_anchor: [u8; 32] = dsm::crypto::blake3::domain_hash_bytes(
-                    dsm::common::domain_tags::TAG_DSM_POLICY,
-                    &raw_proto,
-                );
+                // The anchor is the content hash of those exact bytes, as
+                // Core computes it when it registers the policy with the
+                // enforcer from them.
+                let policy_anchor: [u8; 32] = match self.core_sdk.register_policy_bytes(&raw_proto)
+                {
+                    Ok(commit) => commit,
+                    Err(e) => {
+                        return err(format!("token.create: register_token_policy failed: {e}"))
+                    }
+                };
 
                 // A new token may NEVER be issued under an existing asset's
                 // policy commit. The anchor becomes the `policy_commit` on the
@@ -1250,19 +1180,6 @@ impl AppRouterImpl {
                     fields,
                 };
 
-                // Single source of truth for what the policy means — the
-                // same function restart rehydration uses.
-                let policy_file = derive_policy_file(&ticker, &parsed);
-
-                // Register policy mapping under the derived anchor so
-                // token_id -> policy_commit stays stable.
-                if let Err(e) = self
-                    .core_sdk
-                    .register_token_policy_with_anchor(&token_id, policy_file, policy_anchor)
-                    .await
-                {
-                    return err(format!("token.create: register_token_policy failed: {e}"));
-                }
                 let policy_commit: [u8; 32] = policy_anchor;
 
                 // Cache authoritative TokenMetadata (no Generic shim op).
@@ -1747,53 +1664,6 @@ mod tests {
             threshold: 1,
             signers: vec![vec![0xAB; 64]],
             allowlist_device_ids: Vec::new(),
-        }
-    }
-
-    /// SoFi §49, §54: a token's operation restriction is exactly its two
-    /// flags — transfers (and the lock operation types) when transferable,
-    /// burns when burn-enabled, creation always — and the signer set builds
-    /// no condition, because the standard release rule names it for nothing
-    /// (§47).
-    #[test]
-    fn the_policy_permits_exactly_what_its_flags_name() {
-        use dsm::types::policy_types::PolicyCondition;
-        for (transferable, burn_enabled) in
-            [(true, true), (true, false), (false, true), (false, false)]
-        {
-            let parsed = ParsedTokenPolicy {
-                transferable,
-                burn_enabled,
-                ..fungible_fixture()
-            };
-            let pf = derive_policy_file("T", &parsed);
-            let restrictions: Vec<&Vec<String>> = pf
-                .conditions
-                .iter()
-                .filter_map(|c| match c {
-                    PolicyCondition::OperationRestriction { allowed_operations } => {
-                        Some(allowed_operations)
-                    }
-                    _ => None,
-                })
-                .collect();
-            assert_eq!(
-                restrictions.len(),
-                1,
-                "one restriction ({transferable}, {burn_enabled})"
-            );
-            let ops = restrictions[0];
-            let has = |op: &str| ops.iter().any(|o| o == op);
-            assert!(has("create_token"));
-            assert_eq!(has("transfer"), transferable);
-            assert_eq!(has("lock"), transferable);
-            assert_eq!(has("unlock"), transferable);
-            assert_eq!(has("burn"), burn_enabled);
-            assert_eq!(
-                pf.conditions.len(),
-                2,
-                "the supply cap and the restriction, and nothing built from the signer set"
-            );
         }
     }
 
