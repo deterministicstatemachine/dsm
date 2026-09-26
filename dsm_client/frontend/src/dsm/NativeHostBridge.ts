@@ -6,7 +6,7 @@ import { bridgeEvents } from '../bridge/bridgeEvents';
 import logger from '../utils/logger';
 import type { AndroidBridgeV3 } from './bridgeTypes';
 import { bridgeGate } from './BridgeGate';
-import { BiometricAuthorizeResult, NativeHostAck, NativeHostEvent, NativeHostEventKind, NativeHostRequest, NativeHostRequestKind, NativeHostResponse, NfcTagWritePayload, NfcTagWriteResult, QrScanResultPayload } from '../proto/dsm_app_pb';
+import { BiometricAuthorizeResult, NativeHostEvent, NativeHostEventKind, NativeHostRequest, NativeHostRequestKind, NativeHostResponse, NfcTagWritePayload, NfcTagWriteResult, QrScanResultPayload } from '../proto/dsm_app_pb';
 
 function mustBridge(): AndroidBridgeV3 {
   const bridge = getBridgeInstance();
@@ -76,24 +76,6 @@ export async function startNativeQrScan(): Promise<void> {
   await hostRequestOk(buildHostRequest(NativeHostRequestKind.HOST_CONTROL_QR_START_SCAN));
 }
 
-export async function startBleScanHost(): Promise<void> {
-  await hostRequestOk(buildHostRequest(NativeHostRequestKind.HOST_CONTROL_BLE_SCAN_START));
-}
-
-export async function stopBleScanHost(): Promise<void> {
-  await hostRequestOk(buildHostRequest(NativeHostRequestKind.HOST_CONTROL_BLE_SCAN_STOP));
-}
-
-export async function startBleAdvertisingHost(): Promise<NativeHostAck> {
-  const bytes = await hostRequestOk(buildHostRequest(NativeHostRequestKind.HOST_CONTROL_BLE_ADVERTISE_START));
-  return NativeHostAck.fromBinary(bytes);
-}
-
-export async function stopBleAdvertisingHost(): Promise<NativeHostAck> {
-  const bytes = await hostRequestOk(buildHostRequest(NativeHostRequestKind.HOST_CONTROL_BLE_ADVERTISE_STOP));
-  return NativeHostAck.fromBinary(bytes);
-}
-
 export async function startNfcReaderHost(): Promise<void> {
   await hostRequestOk(buildHostRequest(NativeHostRequestKind.HOST_CONTROL_NFC_READER_START));
 }
@@ -128,8 +110,6 @@ export function decodeNativeHostEventToLegacyTopic(eventBytes: Uint8Array): { to
         return null;
       }
     }
-    case NativeHostEventKind.BLUETOOTH_PERMISSIONS:
-      return { topic: 'bluetooth-permissions', payload: event.payload };
     case NativeHostEventKind.BIOMETRIC_RESULT: {
       try {
         const payload = BiometricAuthorizeResult.fromBinary(event.payload);

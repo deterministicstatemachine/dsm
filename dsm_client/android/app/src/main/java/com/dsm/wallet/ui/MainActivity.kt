@@ -149,6 +149,8 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
             bleBackgroundService = binder?.getService()
             bleServiceBound = bleBackgroundService != null
             Log.i(tag, "BLE service bound: $bleServiceBound")
+            // A resume or init that ran before the bind had no service to ask.
+            bleBackgroundService?.refreshAdvertising()
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
@@ -797,8 +799,28 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         }
     }
 
-    fun setBleAdvertisingDesired(desired: Boolean) {
-        bleBackgroundService?.setAdvertisingDesired(desired)
+    /**
+     * The device has an identity: the BLE foreground service runs (it survives
+     * activity lifecycle transitions) and brings the GATT server and advertising
+     * up on its own thread; a service already running is asked again, since the
+     * identity may only now exist. Called on the UI thread (context
+     * requirement) at init when the identity is read and when genesis creates it.
+     */
+    fun startBleForIdentity() {
+        // Rust starts pairing on the next session facts, and pairing drives the
+        // radio through the coordinator: it exists before those facts go out.
+        try {
+            BleCoordinator.getInstance(applicationContext)
+        } catch (t: Throwable) {
+            Log.w(tag, "startBleForIdentity: BLE coordinator init failed", t)
+        }
+        try {
+            BleBackgroundService.start(this)
+            Log.i(tag, "startBleForIdentity: BLE foreground service started")
+        } catch (t: Throwable) {
+            Log.w(tag, "startBleForIdentity: BLE foreground service start failed", t)
+        }
+        bleBackgroundService?.refreshAdvertising()
     }
 
     private fun setSessionFatalError(message: String?) {
@@ -821,7 +843,6 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         }
     }
 
-    private fun bleCoordinator(): BleCoordinator = BleCoordinator.getInstance(applicationContext)
 
 
     // The WebView external-host allowlist lives at file scope below so that
@@ -1341,24 +1362,16 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         if (hasIdentityViaRust()) {
             invokeNativeRouterInvoke("inbox.resume")
         }
-        // Only restart BLE after genesis — during genesis the device is busy and
-        // BLE scanning/advertising wastes resources and causes errors.
+        // Stale GATT sessions from before the pause are closed (a peer's RPA
+        // may have rotated); advertising follows the identity. Pre-genesis
+        // there is no identity and nothing to restart. An unbound service
+        // refreshes when it binds.
         if (hasIdentityViaRust()) {
-            try {
-                val svc = bleBackgroundService
-                if (svc != null) {
-                    svc.closeStaleGattSessions()
-                    val gattOk = svc.ensureGattServerStarted()
-                    svc.setAdvertisingDesired(true)
-                    Log.i(tag, "onResume: BLE restart — stale sessions closed, GATT=$gattOk advertising=desired")
-                } else {
-                    Log.w(tag, "onResume: BLE service not bound yet, GATT restart deferred")
-                }
-            } catch (t: Throwable) {
-                Log.w(tag, "onResume: BLE restart failed: ${t.message}")
+            val svc = bleBackgroundService
+            if (svc != null) {
+                svc.closeStaleGattSessions()
+                svc.refreshAdvertising()
             }
-        } else {
-            Log.d(tag, "onResume: skipping BLE restart (no identity yet, pre-genesis)")
         }
 
         // Suppress Android's system NFC popup while the app is in foreground.
@@ -1536,19 +1549,8 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         
         if (blePermsGranted) {
             Log.i(tag, "BLE permissions granted")
-            // Start the background service so it's bound and ready, but only
-            // initialize GATT/advertising after genesis (hasIdentityViaRust).
-            try {
-                val svc = bleBackgroundService
-                if (hasIdentityViaRust()) {
-                    val gattResult = svc?.ensureGattServerStarted() ?: false
-                    Log.i(tag, "Bluetooth permissions granted: GATT server ensure-start result=$gattResult")
-                } else {
-                    Log.d(tag, "Bluetooth permissions granted: deferring GATT start until after genesis")
-                }
-            } catch (t: Throwable) {
-                Log.e(tag, "Failed to reinitialize BLE after permissions granted", t)
-            }
+            // The radio can now do what the identity asks of it.
+            bleBackgroundService?.refreshAdvertising()
         } else {
             Log.w(tag, "BLE permissions not granted: $grants")
         }
@@ -1813,32 +1815,9 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
                         }
 
                         if (capturedDeviceId.size == 32 && capturedGenesis.size == 32) {
-                            // Start BLE as a foreground service so it survives activity
-                            // lifecycle transitions. Must happen on the UI thread (context
-                            // requirement) BEFORE the background GATT init thread.
-                            try {
-                                BleBackgroundService.start(this@MainActivity)
-                                Log.i(tag, "initDsmAndSignalReady: BLE foreground service started")
-                            } catch (t: Throwable) {
-                                Log.w(tag, "initDsmAndSignalReady: BLE foreground service start failed", t)
-                            }
-
-                            // GATT server init + identity write are synchronous Bluetooth
-                            // framework calls (100-500ms). Run on a background thread to
-                            // avoid blocking the UI thread on slower chipsets (MediaTek).
-                            Thread {
-                                try {
-                                    val coordinator = bleCoordinator()
-                                    val gattReady = coordinator.ensureGattServerStarted()
-                                    Log.i(tag, "initDsmAndSignalReady: GATT server ensure-started: $gattReady")
-                                    coordinator.setIdentityValue(capturedGenesis, capturedDeviceId)
-                                    Log.i(tag, "initDsmAndSignalReady: BLE identity set (genesis + deviceId)")
-                                } catch (t: Throwable) {
-                                    Log.w(tag, "initDsmAndSignalReady: GATT/identity setup failed", t)
-                                }
-                            }.start()
+                            startBleForIdentity()
                         } else {
-                            Log.i(tag, "initDsmAndSignalReady: BLE identity not yet present in persisted bytes; skipping setIdentityValue")
+                            Log.i(tag, "initDsmAndSignalReady: no identity yet; BLE stays down until genesis")
                         }
                         publishSessionState("initComplete")
                     } catch (t: Throwable) {
@@ -1872,19 +1851,13 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
             val allGranted = grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }
             if (!allGranted) {
                 Log.w(tag, "Bluetooth permissions not granted")
-                dispatchNativeHostEventOnUi(
-                    NativeHostEventKind.NATIVE_HOST_EVENT_KIND_BLUETOOTH_PERMISSIONS,
-                    byteArrayOf(0x00),
-                )
             } else {
-                Log.i(tag, "Bluetooth permissions granted, notifying WebView")
-                // BLE ops are NOT auto-started here. The UI must explicitly request
-                // scanning/advertising via the native host boundary.
-                dispatchNativeHostEventOnUi(
-                    NativeHostEventKind.NATIVE_HOST_EVENT_KIND_BLUETOOTH_PERMISSIONS,
-                    byteArrayOf(0x01),
-                )
+                // The radio can now do what the identity asks of it. The UI is
+                // not asked to start anything: advertising is native policy.
+                Log.i(tag, "Bluetooth permissions granted")
+                bleBackgroundService?.refreshAdvertising()
             }
+            // The permission facts reach the UI in the session snapshot.
             publishSessionState("runtimePermissions")
         }
     }

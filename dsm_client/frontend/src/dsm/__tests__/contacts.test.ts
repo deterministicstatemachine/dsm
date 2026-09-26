@@ -47,6 +47,7 @@ describe('contacts.ts', () => {
                 signingPublicKey: signingPk as any,
                 genesisHash: { v: gh } as any,
                 bleAddress: 'AA:BB:CC:DD:EE:FF',
+                pairing: pb.ContactPairingPhase.PAIRED,
                 genesisVerifiedOnline: true,
               }),
             ],
@@ -62,6 +63,7 @@ describe('contacts.ts', () => {
       expect(result.contacts[0].deviceId).toEqual(deviceId);
       expect(result.contacts[0].publicKey).toEqual(signingPk);
       expect(result.contacts[0].bleAddress).toBe('AA:BB:CC:DD:EE:FF');
+      expect(result.contacts[0].pairing).toBe('paired');
       expect(result.contacts[0].genesisVerifiedOnline).toBe(true);
     });
 
@@ -91,6 +93,7 @@ describe('contacts.ts', () => {
         alias: 'Alice',
         signingPublicKey: new Uint8Array(64).fill(0x02),
         genesisHash: { v: new Uint8Array(32).fill(0x03) },
+        pairing: pb.ContactPairingPhase.IDLE,
       };
 
       (getContactsStrictBridge as jest.Mock).mockResolvedValue(answer(new pb.ContactAddResponse({})));
@@ -110,6 +113,40 @@ describe('contacts.ts', () => {
         answer(new pb.ContactAddResponse({ ...complete, alias: '' } as any)),
       );
       await expect(getContacts()).rejects.toThrow(/STRICT.*without its alias/);
+
+      // Where pairing stands is Rust's to state; a phase the wire does not
+      // name is not read as any other.
+      (getContactsStrictBridge as jest.Mock).mockResolvedValue(
+        answer(new pb.ContactAddResponse({ ...complete, pairing: pb.ContactPairingPhase.UNSPECIFIED } as any)),
+      );
+      await expect(getContacts()).rejects.toThrow(/STRICT.*pairing phase the wire does not name/);
+    });
+
+    test('each contact carries the pairing phase Rust states', async () => {
+      const phases: Array<[pb.ContactPairingPhase, string]> = [
+        [pb.ContactPairingPhase.PAIRED, 'paired'],
+        [pb.ContactPairingPhase.IDLE, 'idle'],
+        [pb.ContactPairingPhase.SEARCHING, 'searching'],
+        [pb.ContactPairingPhase.CONNECTED, 'connected'],
+        [pb.ContactPairingPhase.RETRYING, 'retrying'],
+      ];
+      (getContactsStrictBridge as jest.Mock).mockResolvedValue(frameEnvelope(new pb.Envelope({
+        version: 3,
+        payload: {
+          case: 'contactsListResponse',
+          value: new pb.ContactsListResponse({
+            contacts: phases.map(([pairing], i) => new pb.ContactAddResponse({
+              deviceId: new Uint8Array(32).fill(i + 1) as any,
+              alias: `c${i}`,
+              signingPublicKey: new Uint8Array(64).fill(2) as any,
+              genesisHash: { v: new Uint8Array(32).fill(3) } as any,
+              pairing,
+            })),
+          }),
+        },
+      })));
+      const result = await getContacts();
+      expect(result.contacts.map((c) => c.pairing)).toEqual(phases.map(([, name]) => name));
     });
 
     test('throws on empty response bytes', async () => {
@@ -163,6 +200,7 @@ describe('contacts.ts', () => {
                 signingPublicKey: new Uint8Array(64).fill(0x05) as any,
                 genesisHash: { v: new Uint8Array(32).fill(0x06) } as any,
                 chainTip: { v: tipHash } as any,
+                pairing: pb.ContactPairingPhase.IDLE,
               }),
             ],
           }),

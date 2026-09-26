@@ -445,7 +445,6 @@ internal object BridgeEnvelopeCodec {
             6 -> parseAppRouterPayload(bytes)
             8 -> parseSingleBytesPayload(bytes)
             9 -> parseSingleBytesPayload(bytes)
-            10 -> parseBleIdentityPayload(bytes)
             11 -> parseBilateralPayload(bytes)
             else -> ByteArray(0)
         }
@@ -503,11 +502,6 @@ internal object BridgeEnvelopeCodec {
 
     private fun parseSingleBytesPayload(bytes: ByteArray): ByteArray {
         return parseBytesPayload(bytes)
-    }
-
-    private fun parseBleIdentityPayload(bytes: ByteArray): ByteArray {
-        // Keep canonical protobuf bytes for downstream typed decoders.
-        return bytes
     }
 
     private fun parseBilateralPayload(bytes: ByteArray): ByteArray {

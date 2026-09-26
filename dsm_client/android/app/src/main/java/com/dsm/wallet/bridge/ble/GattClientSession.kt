@@ -67,7 +67,6 @@ class GattClientSession(
     private var requestCharacteristic: BluetoothGattCharacteristic? = null
     private var responseCharacteristic: BluetoothGattCharacteristic? = null
     private var identityCharacteristic: BluetoothGattCharacteristic? = null
-    private var relationshipStatusCharacteristic: BluetoothGattCharacteristic? = null
     private var pairingCharacteristic: BluetoothGattCharacteristic? = null
     private var pairingAckCharacteristic: BluetoothGattCharacteristic? = null
 
@@ -317,7 +316,6 @@ class GattClientSession(
                     requestCharacteristic = service.getCharacteristic(BleConstants.TX_REQUEST_UUID)
                     responseCharacteristic = service.getCharacteristic(BleConstants.TX_RESPONSE_UUID)
                     identityCharacteristic = service.getCharacteristic(BleConstants.IDENTITY_UUID)
-                    relationshipStatusCharacteristic = service.getCharacteristic(BleConstants.RELATIONSHIP_STATUS_UUID)
                     pairingCharacteristic = service.getCharacteristic(BleConstants.PAIRING_UUID)
                     pairingAckCharacteristic = service.getCharacteristic(BleConstants.PAIRING_ACK_UUID)
 
@@ -439,14 +437,6 @@ class GattClientSession(
                     } else {
                         emitEvent(BleSessionEvent.IdentityReadCompleted(deviceAddress, null))
                         emitEvent(BleSessionEvent.ErrorOccurred(deviceAddress, BleErrorCategory.CHARACTERISTIC_READ_FAILED, "identity_read", status))
-                    }
-                }
-                BleConstants.RELATIONSHIP_STATUS_UUID -> {
-                    if (status == BluetoothGatt.GATT_SUCCESS) {
-                        emitEvent(BleSessionEvent.RelationshipStatusReadCompleted(deviceAddress, characteristic.value))
-                    } else {
-                        emitEvent(BleSessionEvent.RelationshipStatusReadCompleted(deviceAddress, null))
-                        emitEvent(BleSessionEvent.ErrorOccurred(deviceAddress, BleErrorCategory.CHARACTERISTIC_READ_FAILED, "relationship_status_read", status))
                     }
                 }
             }
@@ -650,7 +640,6 @@ class GattClientSession(
         requestCharacteristic = null
         responseCharacteristic = null
         identityCharacteristic = null
-        relationshipStatusCharacteristic = null
         pairingCharacteristic = null
         pairingAckCharacteristic = null
         txResponseSubscribed = false
@@ -837,34 +826,6 @@ class GattClientSession(
                 }
                 diagnostics.recordError(BleErrorCategory.PERMISSION_DENIED, "characteristic_read")
                 emitEvent(BleSessionEvent.ErrorOccurred(deviceAddress, BleErrorCategory.PERMISSION_DENIED, "characteristic_read"))
-                false
-            }
-        }
-    }
-
-    /**
-     * Initiate relationship-status read operation.
-     * Result is communicated via RelationshipStatusReadCompleted event.
-     */
-    fun readRelationshipStatus(): Boolean {
-        val char = relationshipStatusCharacteristic
-        if (char == null) {
-            diagnostics.recordError(BleErrorCategory.CHARACTERISTIC_READ_FAILED, "relationship_status_no_char")
-            emitEvent(BleSessionEvent.ErrorOccurred(deviceAddress, BleErrorCategory.CHARACTERISTIC_READ_FAILED, "relationship_status_no_char"))
-            return false
-        }
-
-        return enqueueGattOp {
-            try {
-                bluetoothGatt?.readCharacteristic(char) == true
-            } catch (e: SecurityException) {
-                Log.e("GattClientSession", "Security exception reading relationship-status characteristic for $deviceAddress", e)
-                BleCoordinator.getInstance(context).let { coordinator ->
-                    coordinator.permissionsGate.recordPermissionFailure()
-                    coordinator.callback?.onBlePermissionError("Bluetooth connection permission required")
-                }
-                diagnostics.recordError(BleErrorCategory.PERMISSION_DENIED, "relationship_status_read")
-                emitEvent(BleSessionEvent.ErrorOccurred(deviceAddress, BleErrorCategory.PERMISSION_DENIED, "relationship_status_read"))
                 false
             }
         }

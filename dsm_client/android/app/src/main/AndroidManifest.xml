@@ -157,13 +157,6 @@
             </intent-filter>
         </receiver>
 
-        <!-- Debug pairing test activity (manual isolated pairing control) -->
-        <activity
-            android:name="com.dsm.wallet.debug.PairingTestActivity"
-            android:exported="false"
-            android:label="Pairing Test"
-            android:launchMode="singleTop" />
-
         <!-- H2 bench self-test: launched when the Pico anchor attaches over USB-OTG (that launch
              also grants USB permission for the device). Replays one OP_SPI_PASSTHROUGH round-trip
              and logs whether the phone reached the real TROPIC01. Debug bring-up only. -->

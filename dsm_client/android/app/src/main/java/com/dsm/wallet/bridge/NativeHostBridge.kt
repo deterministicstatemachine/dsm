@@ -10,7 +10,6 @@ import android.util.Log
 import androidx.core.content.ContextCompat
 import com.google.protobuf.ByteString
 import com.google.protobuf.InvalidProtocolBufferException
-import com.dsm.wallet.bridge.ble.BleCoordinator
 import com.dsm.wallet.ui.MainActivity
 import dsm.types.proto.BiometricAuthorizePayload
 import dsm.types.proto.HostPermissionsRequestPayload
@@ -82,10 +81,6 @@ internal object NativeHostBridge {
                             .addSupportedRequests(NativeHostRequestKind.NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_CAPABILITIES_GET)
                             .addSupportedRequests(NativeHostRequestKind.NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_QR_START_SCAN)
                             .addSupportedRequests(NativeHostRequestKind.NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_QR_STOP_SCAN)
-                            .addSupportedRequests(NativeHostRequestKind.NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_BLE_SCAN_START)
-                            .addSupportedRequests(NativeHostRequestKind.NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_BLE_SCAN_STOP)
-                            .addSupportedRequests(NativeHostRequestKind.NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_BLE_ADVERTISE_START)
-                            .addSupportedRequests(NativeHostRequestKind.NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_BLE_ADVERTISE_STOP)
                             .addSupportedRequests(NativeHostRequestKind.NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_NFC_READER_START)
                             .addSupportedRequests(NativeHostRequestKind.NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_NFC_READER_STOP)
                             .addSupportedRequests(NativeHostRequestKind.NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_PERMISSIONS_REQUEST)
@@ -113,47 +108,6 @@ internal object NativeHostBridge {
                 MainActivity.getActiveInstance()?.runOnUiThread {
                     MainActivity.getActiveInstance()?.publishCurrentSessionState("host_control.qr.stop_scan")
                 }
-                okAck()
-            }
-
-            NativeHostRequestKind.NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_BLE_SCAN_START -> {
-                val act = MainActivity.getActiveInstance()
-                    ?: return errorResponse(503, "BLE unavailable: no active activity")
-                val ctx = act.baseContext
-                val ok = BleCoordinator.getInstance(ctx).startScanning()
-                Log.i(logTag, "host_control.ble.scan.start: result=$ok")
-                act.runOnUiThread { act.publishCurrentSessionState("host_control.ble.scan.start") }
-                okAck(ok)
-            }
-
-            NativeHostRequestKind.NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_BLE_SCAN_STOP -> {
-                val act = MainActivity.getActiveInstance()
-                    ?: return errorResponse(503, "BLE unavailable: no active activity")
-                BleCoordinator.getInstance(act.baseContext).stopScanning()
-                Log.i(logTag, "host_control.ble.scan.stop")
-                act.runOnUiThread { act.publishCurrentSessionState("host_control.ble.scan.stop") }
-                okAck()
-            }
-
-            NativeHostRequestKind.NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_BLE_ADVERTISE_START -> {
-                val act = MainActivity.getActiveInstance()
-                    ?: return errorResponse(503, "BLE unavailable: no active activity")
-                val ok = BleCoordinator.getInstance(act.baseContext).startAdvertising()
-                if (ok) {
-                    act.setBleAdvertisingDesired(true)
-                }
-                Log.i(logTag, "host_control.ble.advertise.start: result=$ok")
-                act.runOnUiThread { act.publishCurrentSessionState("host_control.ble.advertise.start") }
-                okAck(ok)
-            }
-
-            NativeHostRequestKind.NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_BLE_ADVERTISE_STOP -> {
-                val act = MainActivity.getActiveInstance()
-                    ?: return errorResponse(503, "BLE unavailable: no active activity")
-                BleCoordinator.getInstance(act.baseContext).stopAdvertising()
-                act.setBleAdvertisingDesired(false)
-                Log.i(logTag, "host_control.ble.advertise.stop")
-                act.runOnUiThread { act.publishCurrentSessionState("host_control.ble.advertise.stop") }
                 okAck()
             }
 

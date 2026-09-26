@@ -28,7 +28,6 @@ class BleScanner(private val context: Context) {
 
     private val scanning = AtomicBoolean(false)
     private var bluetoothLeScanner: BluetoothLeScanner? = null
-    private var currentSessionMode: BleSessionMode = BleSessionMode.IDLE
     private var callback: Callback? = null
 
     fun setCallback(callback: Callback) {
@@ -72,10 +71,6 @@ class BleScanner(private val context: Context) {
             scanning.set(false)
             callback?.onScanFailed(errorCode)
         }
-    }
-
-    fun setSessionMode(mode: BleSessionMode) {
-        currentSessionMode = mode
     }
 
     /**
@@ -127,7 +122,7 @@ class BleScanner(private val context: Context) {
             bluetoothLeScanner?.startScan(filters, settings, scanCallback)
             scanning.set(true)
             val modeLabel = if (lowLatency) "LOW_LATENCY" else "BALANCED"
-            Log.i("BleScanner", "BLE scan started ($modeLabel), mode: $currentSessionMode")
+            Log.i("BleScanner", "BLE scan started ($modeLabel)")
             true
         } catch (t: Throwable) {
             Log.e("BleScanner", "Failed to start scan", t)

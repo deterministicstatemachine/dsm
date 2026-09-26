@@ -104,17 +104,13 @@ function SendTabInner({
       const tokenId = selectedSendBalance.tokenId;
 
       if (txMode === 'offline') {
-        const bleAddr = await dsmClient.resolveBleAddressForContact(contact);
-        if (!bleAddr || typeof bleAddr !== 'string' || bleAddr.length === 0) {
-          throw new Error('Offline transfer requires a BLE address for the recipient');
-        }
-
+        // Where the recipient's phone is over BLE is Rust's to know; a phone
+        // it has not met is its refusal, in its words.
         const res = await dsmClient.sendOfflineTransfer({
           tokenId,
           to: sendForm.selectedContactKey,
           amount: sendForm.amount.trim(),
           memo: sendForm.note || undefined,
-          bleAddress: bleAddr,
         });
         if (res.open) {
           // Not finished and not failed: the step is open on both phones and

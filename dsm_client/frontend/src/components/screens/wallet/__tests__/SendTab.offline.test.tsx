@@ -16,7 +16,6 @@ jest.mock('../../../fx/FxProvider', () => ({
 
 jest.mock('../../../../services/dsmClient', () => ({
   dsmClient: {
-    resolveBleAddressForContact: jest.fn().mockResolvedValue('AA:BB:CC:DD:EE:FF'),
     sendOfflineTransfer: jest.fn(),
     sendOnlineTransferSmart: jest.fn(),
   },
@@ -68,6 +67,21 @@ describe('SendTab offline outcome', () => {
     expect(dsmClient.sendOfflineTransfer).toHaveBeenCalledWith(
       expect.objectContaining({ tokenId: 'RIGB', to: D3.deviceId, amount: '5' }),
     );
+  });
+
+  // Where the recipient's phone is over BLE is Rust's to know. The form used
+  // to resolve an address itself and refuse a contact it found none for,
+  // before Rust was asked.
+  it('asks Rust to send and names no address itself; a phone Rust has not met is its refusal', async () => {
+    const refusal = 'wallet.sendOffline: no BLE address is known for the counterparty: the phones have not met over BLE';
+    (dsmClient.sendOfflineTransfer as jest.Mock).mockResolvedValue({ accepted: false, result: refusal });
+    const setError = jest.fn();
+
+    sendOffline({ setError, onSendComplete: jest.fn() });
+
+    await waitFor(() => expect(setError).toHaveBeenCalledWith(refusal));
+    const [params] = (dsmClient.sendOfflineTransfer as jest.Mock).mock.calls.at(-1);
+    expect(params).toEqual({ tokenId: 'RIGB', to: D3.deviceId, amount: '5', memo: undefined });
   });
 
   it("reports a refused send as failed, in the SDK's words", async () => {

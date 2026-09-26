@@ -279,32 +279,6 @@ class SinglePathWebViewBridge(private val context: Context) {
                     }
                 }
 
-                // strict wallet history (JNI). Returns FramedEnvelopeV3 bytes or empty on error.
-                 // genesis_envelope bytes (prefs-only). Used for cold-start rehydration.
-                // Returns empty if not present.
-                 // Resolve BLE address from native mapping (bytes-only).
-                // Payload: 32-byte device_id. Response: UTF-8 address bytes or empty.
-                "resolveBleAddressForDeviceId" -> {
-                    if (payload.size != 32) return ByteArray(0)
-                    UnifiedContactBridge.resolveBleAddressForDeviceIdBin(payload)
-                }
-
-                "readPeerRelationshipStatus" -> {
-                    val bleAddress = payload.toString(Charsets.UTF_8).trim()
-                    if (bleAddress.isEmpty()) {
-                        ByteArray(0)
-                    } else {
-                        try {
-                            BleCoordinator.getInstance(inst.context)
-                                .readPeerRelationshipStatus(bleAddress)
-                                ?: ByteArray(0)
-                        } catch (t: Throwable) {
-                            Log.w(TAG, "readPeerRelationshipStatus failed for $bleAddress", t)
-                            ByteArray(0)
-                        }
-                    }
-                }
-
                 // Diagnostics: append raw payload to persisted bridge log
                 "diagnosticsLog" -> {
                     BridgeLogger.logDiagnosticsPayload(payload)
@@ -370,48 +344,6 @@ class SinglePathWebViewBridge(private val context: Context) {
                     }
                 }
 
-                // Rust-driven pairing orchestration: scan all unpaired contacts automatically
-                "startPairingAll" -> {
-                    // Invariant #7: identity check via JNI → Rust, not prefs side channel.
-                    // BLE identity publication requires BOTH device_id and genesis_hash.
-                    val hasIdentity = try {
-                        Unified.getDeviceIdBin().size == 32 && Unified.getGenesisHashBin().size == 32
-                    } catch (_: Throwable) { false }
-                    if (!hasIdentity) {
-                        Log.w(TAG, "startPairingAll: identity not ready, aborting")
-                        return ByteArray(0)
-                    }
-                    // Ensure BLE permissions are granted before starting the loop
-                    BridgeBleHandler.requestBlePermissions()
-                    // Ensure BleCoordinator is initialized before Rust calls startBlePairing*
-                    try {
-                        val ctx = com.dsm.wallet.ui.MainActivity.getActiveInstance()?.applicationContext
-                        if (ctx != null) {
-                            BleCoordinator.getInstance(ctx)
-                            Log.i(TAG, "startPairingAll: BleCoordinator ensured")
-                        } else {
-                            Log.w(TAG, "startPairingAll: no context for BleCoordinator init")
-                        }
-                    } catch (t: Throwable) {
-                        Log.w(TAG, "startPairingAll: BleCoordinator init failed", t)
-                    }
-                    try {
-                        Unified.startPairingAll()
-                    } catch (t: Throwable) {
-                        Log.w(TAG, "startPairingAll failed", t)
-                    }
-                    ByteArray(0)
-                }
-
-                "stopPairingAll" -> {
-                    try {
-                        Unified.stopPairingAll()
-                    } catch (t: Throwable) {
-                        Log.w(TAG, "stopPairingAll failed", t)
-                    }
-                    ByteArray(0)
-                }
-
                 "requestBlePermissions" -> {
                     BridgeBleHandler.requestBlePermissions()
                     ByteArray(0)
@@ -467,28 +399,6 @@ class SinglePathWebViewBridge(private val context: Context) {
                         Log.w(TAG, "cancelBilateralByCommitment failed", t)
                         ByteArray(0)
                     }
-                }
-
-                "setBleIdentityForAdvertising" -> {
-                    val parsed = try {
-                        dsm.types.proto.BleIdentityPayload.parseFrom(payload)
-                    } catch (e: com.google.protobuf.InvalidProtocolBufferException) {
-                        Log.w(TAG, "setBleIdentityForAdvertising: invalid payload: ${e.message}")
-                        return ByteArray(0)
-                    }
-                    val genesisHash = parsed.genesisHash.toByteArray()
-                    val deviceId = parsed.deviceId.toByteArray()
-                    if (genesisHash.size != 32 || deviceId.size != 32) {
-                        Log.w(TAG, "setBleIdentityForAdvertising: invalid field lengths genesis=${genesisHash.size} device=${deviceId.size}")
-                        return ByteArray(0)
-                    }
-                    // Kotlin MUST NOT concatenate raw bytes — encodeIdentityCharValue is the canonical encoder.
-                    val out = Unified.encodeIdentityCharValue(genesisHash, deviceId)
-                    if (out.isEmpty()) {
-                        Log.w(TAG, "setBleIdentityForAdvertising: encodeIdentityCharValue returned empty")
-                        return ByteArray(0)
-                    }
-                    BridgeBleHandler.setBleIdentityForAdvertising(out, TAG)
                 }
 
                 // Generic Envelope v3 processing (online transfers, DBRW export, etc.)

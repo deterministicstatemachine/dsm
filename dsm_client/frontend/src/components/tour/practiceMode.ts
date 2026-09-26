@@ -61,6 +61,8 @@ function freshState(): PracticeState {
         deviceId: practiceId('PRACT1CEA11CE'),
         genesisHash: practiceId('PRACT1CEA11CEGENES1S'),
         signingPublicKey: practiceId('PRACT1CEA11CEKEY'),
+        // Practice contacts are never paired over BLE.
+        pairing: 'idle',
         genesisVerifiedOnline: true,
         sendReady: true,
         sendCheckState: 'ready',
@@ -154,7 +156,6 @@ function simulations(state: PracticeState, emit: (event: PracticeEvent) => void)
     getAllBalances: async () => state.balances.map((b) => ({ ...b })),
     getContacts: async () => ({ contacts: state.contacts.map((c) => ({ ...c })) }),
     getWalletHistory: async () => ({ transactions: [...state.history] }),
-    resolveBleAddressForContact: async () => undefined,
     sendOnlineTransferSmart: async (recipientAlias: string, scaledAmountStr: string | number | bigint, memo?: string, tokenId?: string) => {
       await pause(700);
       // As Rust answers: a send that names no token is refused, never sent as ERA.
@@ -195,6 +196,7 @@ function simulations(state: PracticeState, emit: (event: PracticeEvent) => void)
         genesisHash: typeof input.genesisHash === 'string' ? input.genesisHash : practiceId('PRACT1CEGENES1S'),
         deviceId: typeof input.deviceId === 'string' ? input.deviceId : practiceId('PRACT1CEDEV1CE'),
         signingPublicKey: practiceId('PRACT1CEKEY'),
+        pairing: 'idle',
         genesisVerifiedOnline: true,
         sendReady: true,
         sendCheckState: 'ready',

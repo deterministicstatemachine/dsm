@@ -19,21 +19,6 @@ import type {
   DomainTxType,
 } from './types';
 
-export function normalizeBleAddress(input?: string): string | undefined {
-  if (typeof input !== 'string') return undefined;
-  const s = input.trim();
-  if (!s) return undefined;
-  // eslint-disable-next-line security/detect-unsafe-regex
-  if (/^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$/.test(s)) return s.toUpperCase();
-  // eslint-disable-next-line security/detect-unsafe-regex
-  if (/^[0-9a-fA-F]{12}$/.test(s)) {
-    const parts: string[] = [];
-    for (let i = 0; i < 12; i += 2) parts.push(s.slice(i, i + 2));
-    return parts.join(':').toUpperCase();
-  }
-  return undefined;
-}
-
 function mapSendCheckState(value: unknown): DomainRelationshipSendCheckState | undefined {
   switch (value) {
     case RelationshipSendCheckState.CHECKING:
@@ -79,22 +64,17 @@ export function mapRelationshipSendStatus(status: any): DomainRelationshipSendSt
   };
 }
 
-export function mapContactList(list: BilateralRelationshipDTO[], bleSnapshot?: { deviceIds: Record<string, string>; genesis: Record<string, string> }): DomainContact[] {
-  const snapshot = bleSnapshot || { deviceIds: {}, genesis: {} };
+export function mapContactList(list: BilateralRelationshipDTO[]): DomainContact[] {
   return list.map((c) => {
-    const deviceId = toBase32Crockford(c.deviceId);
-    const genesisHash = toBase32Crockford(c.genesisHash);
     const sendStatus = mapRelationshipSendStatus(c.sendStatus);
-    // The address Rust holds for the contact, else one the native side
-    // resolved for its device this session (dsm/resolution.ts).
-    const directBle = normalizeBleAddress(c.bleAddress ?? '');
-    const mappedBle = directBle || snapshot.deviceIds[deviceId] || snapshot.genesis[genesisHash] || undefined;
     return {
       alias: c.alias,
-      deviceId,
-      genesisHash,
+      deviceId: toBase32Crockford(c.deviceId),
+      genesisHash: toBase32Crockford(c.genesisHash),
       chainTip: c.chainTip ? toBase32Crockford(c.chainTip) : undefined,
-      bleAddress: mappedBle,
+      // The address Rust holds for the contact: pairing confirmed it.
+      bleAddress: c.bleAddress,
+      pairing: c.pairing,
       genesisVerifiedOnline: c.genesisVerifiedOnline,
       signingPublicKey: toBase32Crockford(c.publicKey),
       sendReady: sendStatus?.sendReady,

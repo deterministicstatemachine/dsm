@@ -27,14 +27,13 @@ import androidx.annotation.Keep
 //   - All crypto (SPHINCS+, ML-KEM-768, DBRW) handled in Rust beneath.
 //
 // DOMAIN GROUPS:
-//   Identity:  recordPeerIdentity
 //   Protocol:  processEnvelopeV3, processEnvelopeV3WithAddress
 //   Shared boundary: dispatchStartup, dispatchIngress
 //   Bilateral: acceptBilateralByCommitment, ...
 //   BLE:       initBleCoordinator, processBleChunk, chunkEnvelopeForBle, ...
 //   Contacts:  removeContact, hasContactForDeviceId
 //
-// Full method list: See UnifiedNativeApi.kt for all 87+ external declarations.
+// Full method list: UnifiedNativeApi.kt holds every external declaration.
 // ============================================================================
 
 /**
@@ -44,23 +43,6 @@ import androidx.annotation.Keep
  * - No reflection-based dispatch; strict surface.
  */
 object Unified {
-
-    /**
-     * Called when a peer's identity (genesis hash + device ID) is read from BLE GATT.
-     * This should be bridged to Rust/JS as needed.
-     */
-    @Keep
-    @JvmStatic
-    fun recordPeerIdentity(address: String, identity: ByteArray) {
-        UnifiedNativeApi.recordPeerIdentity(address, identity)
-    }
-
-    @Keep
-    @JvmStatic
-    fun onPeerIdentityReceived(address: String, identity: ByteArray) {
-        // Forward to native layer to maintain device_id -> BLE address mapping (no hex at app layer)
-        recordPeerIdentity(address, identity)
-    }
 
     init {
         // Load the native library with JNI exports.
@@ -209,13 +191,6 @@ object Unified {
         return UnifiedBleBridge.stopBlePairingScan()
     }
 
-    /**
-     * Stop BLE advertising. Called by Rust pairing loop on exit to prevent lingering advertise.
-     */
-    @Keep @JvmStatic fun stopBlePairingAdvertise(): Boolean {
-        return UnifiedBleBridge.stopBlePairingAdvertise()
-    }
-
     // ---------- Event notifications ----------
     @Keep @JvmStatic fun bleNotifyConnectionState(address: String, connected: Boolean) {
         UnifiedNativeApi.bleNotifyConnectionState(address, connected)
@@ -252,15 +227,7 @@ object Unified {
     @Keep @JvmStatic fun notifyBleIdentityObserved(address: String, genesisHash: ByteArray, deviceId: ByteArray) {
         UnifiedNativeApi.notifyBleIdentityObserved(address, genesisHash, deviceId)
     }
-    
-    /**
-     * Check if there are any contacts that are not yet BLE-capable (need pairing).
-     * Used to determine if persistent BLE scanning should be active.
-     * Returns true if there are unpaired contacts, false if all contacts are BleCapable.
-     */
-    @Keep @JvmStatic fun hasUnpairedContacts(): Boolean = UnifiedNativeApi.hasUnpairedContacts()
 
-    
     @Keep @JvmStatic fun onDeviceConnected(address: String) {
         UnifiedBleEvents.onDeviceConnected(address)
     }
@@ -320,13 +287,6 @@ object Unified {
      */
     @Keep @JvmStatic fun encodeIdentityCharValue(genesisHash: ByteArray, deviceId: ByteArray): ByteArray =
         UnifiedNativeApi.encodeIdentityCharValue(genesisHash, deviceId)
-
-    /**
-     * Encode the local relationship send-status protobuf for the connected BLE peer.
-     * Rust owns the relationship-readiness logic; Kotlin relays the raw bytes.
-     */
-    @Keep @JvmStatic fun getRelationshipStatusCharValue(bleAddress: String): ByteArray =
-        UnifiedNativeApi.getRelationshipStatusCharValue(bleAddress)
 
     /**
      * Process raw protobuf bytes read from the GATT identity characteristic.
@@ -485,13 +445,6 @@ object Unified {
         try { UnifiedNativeApi.onAppBackgrounded() } catch (_: Throwable) { false }
     @Keep @JvmStatic fun getGenesisHashBin(): ByteArray = UnifiedNativeApi.getGenesisHashBin()
     /**
-     * Get the current BLE MAC address for a device_id by searching identity cache.
-     * @param deviceId Raw 32-byte device ID
-     * @return UTF-8 BLE MAC address bytes or empty array if not found/connected
-     */
-    @Keep @JvmStatic fun resolveBleAddressForDeviceIdBin(deviceId: ByteArray): ByteArray =
-        UnifiedNativeApi.resolveBleAddressForDeviceIdBin(deviceId)
-    /**
      * Resolve the persisted peer identity for a BLE address.
      * Returns 64 bytes ordered as [device_id(32)][genesis_hash(32)], or empty if unknown.
      */
@@ -568,24 +521,6 @@ object Unified {
     // Kotlin no longer computes trust/entropy/Wasserstein on its own — the
     // `cdbrw.measure_trust` router query publishes a live CdbrwTrustSnapshot
     // with the same data, and frontend/UI consume that directly.
-
-    // ---------- BLE pairing orchestration (Rust-driven loop) ----------
-
-    /**
-     * Start the Rust pairing orchestrator loop that scans all unpaired contacts
-     * and drives BLE pairing automatically. Fire-and-forget — status updates are
-     * delivered via PairingStatusUpdate BleEvent envelopes through the event bus.
-     */
-    @Keep @JvmStatic fun startPairingAll() {
-        UnifiedNativeApi.startPairingAll()
-    }
-
-    /**
-     * Signal the Rust pairing orchestrator to stop its loop at the next cycle boundary.
-     */
-    @Keep @JvmStatic fun stopPairingAll() {
-        UnifiedNativeApi.stopPairingAll()
-    }
 
     @Keep @JvmStatic fun onConnectionFailed(address: String, reason: String) {
         UnifiedBleEvents.onConnectionFailed(address, reason)

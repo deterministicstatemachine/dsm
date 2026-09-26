@@ -17,17 +17,6 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use once_cell::sync::Lazy;
 
-fn pb_send_status_from_router_status(
-    status: dsm::types::proto::RelationshipSendStatus,
-) -> pb::RelationshipSendStatus {
-    pb::RelationshipSendStatus {
-        send_ready: status.send_ready,
-        send_check_state: status.send_check_state,
-        send_block_reason: status.send_block_reason,
-        send_block_message: status.send_block_message,
-    }
-}
-
 /// Convert raw JNIEnv pointer to safe wrapper.
 /// Returns None on failure instead of aborting the process.
 #[inline]
@@ -858,12 +847,13 @@ fn process_deferred_identity(
         return;
     }
 
-    // 2. Register in-memory BLE address mapping (for routing), but do NOT persist
-    // ble_address to SQLite yet. The ble_address column is the sentinel that controls
-    // the pairing loop's exit condition — writing it before the scanner confirms
-    // receipt of our ACK breaks atomicity (advertiser exits loop, scanner never paired).
-    // Persistence happens in handle_pairing_confirm after the scanner's round-trip.
-    super::state::register_ble_address_mapping(&device_id, &sender_address);
+    // 2. Record where the contact's identity was seen this session, but do NOT
+    // persist ble_address to SQLite yet. The ble_address column is the sentinel that
+    // controls the pairing loop's exit condition — writing it before the scanner
+    // confirms receipt of our ACK breaks atomicity (advertiser exits loop, scanner
+    // never paired). Persistence happens in handle_pairing_confirm after the
+    // scanner's round-trip.
+    crate::bluetooth::peer_address::record_sighting(&device_id, &sender_address);
 
     // 3. Dispatch identity event to WebView via JNI callback (background thread)
     dispatch_identity_to_webview(&sender_address, &genesis_hash, &device_id);
@@ -1049,82 +1039,6 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_encodeIdentit
                 Ok(arr) => arr.into_raw(),
                 Err(e) => {
                     log::error!("encodeIdentityCharValue: JNI byte_array_from_slice failed: {e}");
-                    empty(&mut env)
-                }
-            }
-        }),
-    )
-}
-
-/// Encode the local relationship send-status as a protobuf GATT characteristic value.
-#[no_mangle]
-pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_getRelationshipStatusCharValue(
-    env: jni::sys::JNIEnv,
-    _clazz: jni::sys::jclass,
-    ble_address_jstr: jni::sys::jstring,
-) -> jni::sys::jbyteArray {
-    crate::jni::bridge_utils::jni_catch_unwind_jbytearray(
-        "getRelationshipStatusCharValue",
-        std::panic::AssertUnwindSafe(|| {
-            let mut env = match unsafe { env_from(env) } {
-                Some(e) => e,
-                None => return std::ptr::null_mut(),
-            };
-            let address_jstring = unsafe { jstr_from(ble_address_jstr) };
-            let ble_address: String = match env.get_string(&address_jstring) {
-                Ok(s) => s.into(),
-                Err(e) => {
-                    log::error!(
-                        "getRelationshipStatusCharValue: JNI address extraction failed: {e}"
-                    );
-                    return empty(&mut env);
-                }
-            };
-
-            let contact = match crate::storage::client_db::get_contact_by_ble_address(&ble_address)
-            {
-                Ok(Some(contact)) => contact,
-                Ok(None) => {
-                    log::warn!(
-                        "getRelationshipStatusCharValue: no contact mapped to BLE address {}",
-                        ble_address
-                    );
-                    return empty(&mut env);
-                }
-                Err(e) => {
-                    log::error!(
-                        "getRelationshipStatusCharValue: failed to load contact for {}: {}",
-                        ble_address,
-                        e
-                    );
-                    return empty(&mut env);
-                }
-            };
-
-            if contact.device_id.len() != 32 {
-                log::error!(
-                    "getRelationshipStatusCharValue: contact device_id has invalid length {}",
-                    contact.device_id.len()
-                );
-                return empty(&mut env);
-            }
-
-            let send_status =
-                crate::handlers::relationship_status::derive_local_send_status_for_contact(
-                    &contact,
-                );
-            let char_value = pb::BleRelationshipStatusCharValue {
-                counterparty_device_id: contact.device_id.clone(),
-                send_status: Some(pb_send_status_from_router_status(send_status)),
-            };
-
-            let encoded = char_value.encode_to_vec();
-            match env.byte_array_from_slice(&encoded) {
-                Ok(arr) => arr.into_raw(),
-                Err(e) => {
-                    log::error!(
-                        "getRelationshipStatusCharValue: JNI byte_array_from_slice failed: {e}"
-                    );
                     empty(&mut env)
                 }
             }

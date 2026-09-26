@@ -49,7 +49,6 @@ use prost::Message;
 use std::sync::atomic::Ordering;
 use crate::storage::client_db::get_contact_by_device_id;
 use crate::sdk::session_manager::SDK_READY;
-use crate::jni::state::register_ble_address_mapping;
 #[cfg(all(target_os = "android", feature = "bluetooth"))]
 use crate::jni::state::BILATERAL_INIT_POLL_STARTED;
 
@@ -66,7 +65,6 @@ use crate::bluetooth::frame_classify::{
     ble_frame_needs_chunking, detect_ble_frame_type_from_bytes, strip_envelope_v3_framing,
 };
 #[cfg(all(target_os = "android", feature = "bluetooth"))]
-use crate::jni::state::DEVICE_ID_TO_ADDR;
 #[cfg(all(target_os = "android", feature = "bluetooth"))]
 #[cfg(all(target_os = "android", feature = "bluetooth"))]
 use jni::objects::{JObject, JValue};
@@ -1186,8 +1184,8 @@ pub(crate) fn handle_ble_identity_observed_from_envelope(
             ) {
                 log::warn!("identity_observed: BLE address not persisted: {e}");
             }
-            // Register in in-memory resolution map
-            register_ble_address_mapping(&device_id, &address);
+            // Where the contact's identity was seen this session.
+            crate::bluetooth::peer_address::record_sighting(&device_id, &address);
             // Verify persistence
             match get_contact_by_device_id(&device_id) {
                 Ok(Some(re_read)) if re_read.ble_address.as_ref() == Some(&address) => {
@@ -3045,114 +3043,6 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_cancelBilater
 /* =============================================================================
 Unified init/status + header fetch (stable surface for Activity gating)
 ============================================================================= */
-
-/// Record peer identity mapping: address -> device_id (last 32 bytes of identity payload)
-/// identity can be 64 bytes (genesis_hash||device_id) or 32 bytes (device_id only)
-#[no_mangle]
-#[cfg(all(target_os = "android", feature = "bluetooth"))]
-pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_recordPeerIdentity(
-    env: jni::sys::JNIEnv,
-    _clazz: jni::sys::jclass,
-    address: jni::sys::jstring,
-    identity: jni::sys::jbyteArray,
-) {
-    crate::jni::bridge_utils::jni_catch_unwind_void(
-        "recordPeerIdentity",
-        std::panic::AssertUnwindSafe(|| {
-            let mut env = match unsafe { env_from(env) } {
-                Some(e) => e,
-                None => return,
-            };
-            let jaddr = unsafe { jstr_from(address) };
-            let addr: String = match env.get_string(&jaddr) {
-                Ok(s) => s.into(),
-                Err(_) => return,
-            };
-            let jba = unsafe { jba_from(identity) };
-            let id_bytes = match env.convert_byte_array(&jba) {
-                Ok(v) => v,
-                Err(_) => return,
-            };
-            let dev_key: [u8; 32] = if id_bytes.len() >= 32 {
-                let mut key = [0u8; 32];
-                key.copy_from_slice(&id_bytes[id_bytes.len() - 32..]);
-                key
-            } else {
-                return;
-            };
-            if !addr.is_empty() {
-                if let Ok(mut map) = DEVICE_ID_TO_ADDR.try_lock() {
-                    map.insert(dev_key, addr);
-                } else {
-                    log::warn!("DEVICE_ID_TO_ADDR lock contention, skipping");
-                }
-            }
-        }),
-    )
-}
-
-/// Resolve current BLE address for a given raw 32-byte device ID.
-/// Returns UTF-8 BLE MAC address bytes or empty array.
-#[no_mangle]
-#[cfg(all(target_os = "android", feature = "bluetooth"))]
-pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_resolveBleAddressForDeviceIdBin(
-    env: jni::sys::JNIEnv,
-    _clazz: jni::sys::jclass,
-    device_id: jni::sys::jbyteArray,
-) -> jni::sys::jbyteArray {
-    crate::jni::bridge_utils::jni_catch_unwind_jbytearray(
-        "resolveBleAddressForDeviceIdBin",
-        std::panic::AssertUnwindSafe(|| {
-            let mut env = match unsafe { env_from(env) } {
-                Some(e) => e,
-                None => return std::ptr::null_mut(),
-            };
-            let jba = unsafe { jba_from(device_id) };
-            let id_bytes = match env.convert_byte_array(&jba) {
-                Ok(v) => v,
-                Err(_) => return empty_byte_array_or_empty(&mut env).into_raw(),
-            };
-            if id_bytes.len() != 32 {
-                return empty_byte_array_or_empty(&mut env).into_raw();
-            }
-            let mut dev_key = [0u8; 32];
-            dev_key.copy_from_slice(&id_bytes);
-
-            let addr = DEVICE_ID_TO_ADDR
-                .try_lock()
-                .ok()
-                .and_then(|map| map.get(&dev_key).cloned())
-                .unwrap_or_default();
-
-            // Cache miss: resolve from the persisted contact record and repopulate the map.
-            let final_addr = if addr.is_empty() {
-                match crate::storage::client_db::get_contact_by_device_id(&dev_key) {
-                    Ok(Some(contact)) if contact.ble_address.is_some() => {
-                        let resolved = contact.ble_address.expect("guarded by is_some()");
-                        if let Ok(mut map) = DEVICE_ID_TO_ADDR.try_lock() {
-                            map.insert(dev_key, resolved.clone());
-                        } else {
-                            log::warn!("DEVICE_ID_TO_ADDR lock contention, skipping cache insert");
-                        }
-                        log::info!(
-                            "resolveBleAddressForDeviceIdBin: hydrated persisted BLE address {:02x}{:02x}... -> {}",
-                            dev_key[0], dev_key[1], resolved
-                        );
-                        resolved
-                    }
-                    _ => String::new(),
-                }
-            } else {
-                addr
-            };
-
-            let addr_bytes = final_addr.as_bytes();
-            env.byte_array_from_slice(addr_bytes)
-                .map(|a| a.into_raw())
-                .unwrap_or_else(|_| empty_byte_array_or_empty(&mut env).into_raw())
-        }),
-    )
-}
 
 /// Create a transaction error envelope for BLE operations
 /// Returns protobuf-encoded envelope with Error payload

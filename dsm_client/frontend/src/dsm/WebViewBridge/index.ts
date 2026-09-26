@@ -36,16 +36,7 @@ export const {
 
 export const {
   openBluetoothSettings,
-  readPeerRelationshipStatusBridge,
   requestBlePermissions,
-  resolveBleAddressForDeviceIdBridge,
-  setBleIdentityForAdvertising,
-  startBleAdvertisingViaRouter,
-  startBleScanViaRouter,
-  startPairingAll,
-  stopBleAdvertisingViaRouter,
-  stopBleScanViaRouter,
-  stopPairingAll,
 } = ble;
 
 export const {

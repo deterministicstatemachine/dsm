@@ -9,7 +9,6 @@ import QRCodeScannerPanel from '../qr/QRCodeScannerPanel';
 import MyContactInfoPanel from '../contacts/MyContactInfoPanel';
 import { useContacts } from '../../contexts/ContactsContext';
 import { useTransactions } from '../../hooks/useTransactions';
-import { startPairingAll, stopPairingAll } from '../../dsm/WebViewBridge';
 import { bridgeEvents } from '../../bridge/bridgeEvents';
 import StitchedReceiptDetails from '../receipts/StitchedReceiptDetails';
 import { useDpadNav } from '../../hooks/useDpadNav';
@@ -65,10 +64,6 @@ const ContactsTabScreen: React.FC<Props> = ({ eraTokenSrc = 'images/logos/era_to
   const [error] = useState<string | null>(null);
   const [loadingMessage] = useState('Loading contacts...');
   
-  // BLE discovery status: tracks real connection progress
-  type BleStatus = 'idle' | 'scanning' | 'found' | 'connected' | 'paired';
-  const [bleStatus, setBleStatus] = useState<BleStatus>('idle');
-
 
   // Debounce ref to prevent rapid refresh calls
   const refreshPendingRef = useRef(false);
@@ -146,106 +141,34 @@ const ContactsTabScreen: React.FC<Props> = ({ eraTokenSrc = 'images/logos/era_to
       });
     });
 
+    // A pairing moved on: the list states where it stands now.
+    const offPairingStatus = bridgeEvents.on('ble.pairingStatus', () => {
+      if (refreshPendingRef.current) return;
+      refreshPendingRef.current = true;
+      queueMicrotask(() => {
+        refreshPendingRef.current = false;
+        void load('pairing-status');
+      });
+    });
+
     return () => {
       offBleMapped();
       offBleUpdated();
+      offPairingStatus();
     };
   }, [load]);
 
-  // Reactive BLE status: driven by actual BLE events, not timers.
-  // scanning → found → connected → paired → idle
-  useEffect(() => {
-    const hasUnpairedContacts = contacts.some(c => !c.bleAddress);
-    if (!hasUnpairedContacts) {
-      // All contacts paired or none have deviceId — go idle (skip if already paired/idle)
-      if (bleStatus !== 'idle') {
-        setBleStatus('idle');
-      }
-      return;
-    }
-    // We have unpaired contacts — start at "scanning" if idle
-    if (bleStatus === 'idle') {
-      setBleStatus('scanning');
-    }
-  }, [contacts, bleStatus]);
-
-  // Listen for BLE lifecycle events to advance status
-  useEffect(() => {
-    const offFound = bridgeEvents.on('ble.deviceFound', () => {
-      setBleStatus(prev => (prev === 'scanning' || prev === 'idle') ? 'found' : prev);
-    });
-    const offConnected = bridgeEvents.on('ble.deviceConnected', () => {
-      setBleStatus(prev => (prev !== 'paired' && prev !== 'idle') ? 'connected' : prev);
-    });
-    const offMapped = bridgeEvents.on('contact.bleMapped', () => {
-      setBleStatus('paired');
-    });
-    const offScanStarted = bridgeEvents.on('ble.scanStarted', () => {
-      setBleStatus(prev => prev === 'idle' ? 'scanning' : prev);
-    });
-    const offDisconnected = bridgeEvents.on('ble.deviceDisconnected', () => {
-      // Regress to scanning if we lost connection before pairing
-      setBleStatus(prev => (prev === 'connected' || prev === 'found') ? 'scanning' : prev);
-    });
-    const offFailed = bridgeEvents.on('ble.connectionFailed', () => {
-      setBleStatus(prev => (prev === 'connected' || prev === 'found') ? 'scanning' : prev);
-    });
-
-    return () => {
-      offFound(); offConnected(); offMapped();
-      offScanStarted(); offDisconnected(); offFailed();
-    };
-  }, []);
-
-
-  // Rust-driven BLE pairing: trigger when unpaired contacts appear.
-  // Track the count of unpaired contacts so we only call startPairingAll when
-  // new unpaired contacts are detected (avoids stop/start thrashing on every refresh).
-  const prevUnpairedCountRef = useRef(0);
-  useEffect(() => {
-    const unpairedCount = contacts.filter(c => !c.bleAddress).length;
-    if (unpairedCount > 0 && unpairedCount > prevUnpairedCountRef.current) {
-      if (CONTACTS_DEBUG) console.log(`[ContactsTab] ${unpairedCount} unpaired contacts detected, starting pairing orchestrator`);
-      void startPairingAll().catch(e =>
-        console.warn('[ContactsTab] startPairingAll failed:', e)
-      );
-    }
-    prevUnpairedCountRef.current = unpairedCount;
-  }, [contacts]);
-
-  // Stop pairing on unmount
-  useEffect(() => {
-    return () => {
-      void stopPairingAll().catch(() => {});
-    };
-  }, []);
-
-  // Listen for Rust pairing status events to advance BLE status indicator
-  useEffect(() => {
-    const offPairingStatus = bridgeEvents.on('ble.pairingStatus', (evt) => {
-      if (CONTACTS_DEBUG) console.log('[ContactsTab] ble.pairingStatus:', evt.status, evt.message);
-      switch (evt.status) {
-        case 'scanning':
-          setBleStatus(prev => prev === 'idle' ? 'scanning' : prev);
-          break;
-        case 'found':
-          setBleStatus(prev => (prev === 'scanning' || prev === 'idle') ? 'found' : prev);
-          break;
-        case 'connected':
-          setBleStatus(prev => (prev !== 'paired') ? 'connected' : prev);
-          break;
-        case 'paired':
-          setBleStatus('paired');
-          break;
-        case 'failed':
-        case 'timeout':
-          // Regress to scanning to show we're retrying
-          setBleStatus(prev => (prev !== 'paired') ? 'scanning' : prev);
-          break;
-      }
-    });
-    return () => { offPairingStatus(); };
-  }, []);
+  // When pairing runs is Rust's: while the app is in the foreground with
+  // Bluetooth on and permitted, until no contact is left unpaired. Where it
+  // stands is Rust's too: each contact carries its phase from the pairing
+  // loop, and the line shows the furthest a pairing has got. This screen used
+  // to start and stop pairing itself, and to infer its progress from raw radio
+  // events, showing "Paired!" when a phone's identity was read.
+  const pairingLine: 'connected' | 'searching' | null = contacts.some((c) => c.pairing === 'connected')
+    ? 'connected'
+    : contacts.some((c) => c.pairing === 'searching' || c.pairing === 'retrying')
+      ? 'searching'
+      : null;
 
   // Only show loading overlay on cold start when there are truly no contacts yet.
   // Contact-add refreshes are too fast for an overlay — it just flickers.
@@ -375,20 +298,18 @@ const ContactsTabScreen: React.FC<Props> = ({ eraTokenSrc = 'images/logos/era_to
             </div>
           )}
           
-          {/* BLE status indicator - reactive to actual BLE events */}
-          {bleStatus !== 'idle' && contacts.length > 0 && (
+          {/* Where pairing stands, as Rust states it on each contact */}
+          {pairingLine && (
             <div style={{
               display: 'flex',
               alignItems: 'center',
               gap: 12,
               padding: 12,
               marginBottom: 12,
-              background: bleStatus === 'paired'
-                ? 'rgba(var(--text-dark-rgb), 0.7)'
-                : bleStatus === 'connected'
-                  ? 'rgba(var(--text-dark-rgb), 0.65)'
-                  : 'rgba(var(--text-dark-rgb), 0.6)',
-              border: `2px solid ${bleStatus === 'paired' ? 'var(--accent)' : 'var(--border)'}`,
+              background: pairingLine === 'connected'
+                ? 'rgba(var(--text-dark-rgb), 0.65)'
+                : 'rgba(var(--text-dark-rgb), 0.6)',
+              border: '2px solid var(--border)',
               borderRadius: 8,
               fontFamily: "'Martian Mono', monospace",
               transition: 'background 0.3s, border-color 0.3s',
@@ -403,19 +324,15 @@ const ContactsTabScreen: React.FC<Props> = ({ eraTokenSrc = 'images/logos/era_to
                   fontSize: 9,
                   fontFamily: "'Press Start 2P', monospace",
                   letterSpacing: '1px',
-                  color: bleStatus === 'paired' ? 'var(--accent)' : 'var(--text)',
+                  color: 'var(--text)',
                   marginBottom: 4,
                 }}>
-                  {bleStatus === 'scanning' && 'Scanning for Peers'}
-                  {bleStatus === 'found' && 'Peer Found'}
-                  {bleStatus === 'connected' && 'Connected'}
-                  {bleStatus === 'paired' && 'Paired!'}
+                  {pairingLine === 'searching' && 'Scanning for Peers'}
+                  {pairingLine === 'connected' && 'Connected'}
                 </div>
                 <div style={{ fontSize: 9, opacity: 0.8, color: 'var(--text-dark)' }}>
-                  {bleStatus === 'scanning' && 'Keep both devices on this screen'}
-                  {bleStatus === 'found' && 'Establishing connection...'}
-                  {bleStatus === 'connected' && 'Exchanging identity...'}
-                  {bleStatus === 'paired' && 'Contact linked successfully'}
+                  {pairingLine === 'searching' && 'Keep both phones open in the app, near each other'}
+                  {pairingLine === 'connected' && 'Exchanging identity...'}
                 </div>
               </div>
             </div>
@@ -518,7 +435,7 @@ const ContactsTabScreen: React.FC<Props> = ({ eraTokenSrc = 'images/logos/era_to
                       boxSizing: 'border-box',
                     }}>
                       <div style={{ marginBottom: 6, fontSize: 8, fontWeight: 'bold' }}>
-                        {c.bleAddress ? 'BLE PAIRED' : c.genesisVerifiedOnline ? 'VERIFIED' : 'NOT VERIFIED'}
+                        {c.pairing === 'paired' ? 'BLE PAIRED' : c.genesisVerifiedOnline ? 'VERIFIED' : 'NOT VERIFIED'}
                       </div>
                       <div style={{ display: 'grid', gap: 4 }}>
                         <div style={detailRowStyle}>

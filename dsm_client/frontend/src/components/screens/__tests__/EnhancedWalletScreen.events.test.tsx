@@ -11,6 +11,7 @@ import { UXProvider } from '../../../contexts/UXContext';
 import { WalletProvider } from '../../../contexts/WalletContext';
 import { walletStore } from '../../../stores/walletStore';
 import { contactsStore } from '../../../stores/contactsStore';
+import * as pb from '../../../proto/dsm_app_pb';
 
 /**
  * The screen as the app mounts it: inside the wallet provider, whose store is
@@ -126,7 +127,6 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
       .fn()
       .mockResolvedValue([{ tokenId: 'ROOT', symbol: 'ERA', baseUnits: 100n, displayAmount: '100', decimals: 0 }]);
     (dsmClient.getWalletHistory as any) = jest.fn().mockResolvedValue({ transactions: [] });
-    (dsmClient.resolveBleAddressForContact as any) = jest.fn().mockResolvedValue(contact.bleAddress);
     (dsmClient.sendOfflineTransfer as any) = jest.fn().mockResolvedValue({ success: true });
 
     await renderWallet();
@@ -156,10 +156,11 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
           tokenId: 'ROOT',
           to: encodeBase32Crockford(contact.deviceId),
           amount: '1',
-          bleAddress: contact.bleAddress,
         })
       );
     });
+    // Where the recipient's phone is over BLE is Rust's to know: the screen names no address.
+    expect((dsmClient.sendOfflineTransfer as jest.Mock).mock.calls[0][0]).not.toHaveProperty('bleAddress');
   });
 
   test('online sender updates visible balance in the UI after send completes', async () => {
@@ -209,7 +210,6 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
 
     (dsmClient.getAllBalances as any) = jest.fn().mockImplementation(async () => balancesState);
     (dsmClient.getWalletHistory as any) = jest.fn().mockImplementation(async () => ({ transactions: historyState }));
-    (dsmClient.resolveBleAddressForContact as any) = jest.fn().mockResolvedValue(contact.bleAddress);
     (dsmClient.sendOfflineTransfer as any) = jest.fn().mockImplementation(async () => {
       balancesState = [{ tokenId: 'ROOT', symbol: 'ERA', baseUnits: 55n, displayAmount: '55', decimals: 0 }];
       historyState = [{ txId: 'tx-offline-sender', txHash: 'TXOFFLINESENDERHASH', txType: 'bilateral_offline', type: 'offline', amount: -25n, displayAmount: '-25', tokenId: 'ERA', recipient: 'Receiver', status: 'confirmed', fromDeviceId: 'FROM', toDeviceId: 'TO', receiptVerified: false }];
@@ -243,7 +243,6 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
           tokenId: 'ROOT',
           to: encodeBase32Crockford(contact.deviceId),
           amount: '25',
-          bleAddress: contact.bleAddress,
         })
       );
       expect(screen.queryByRole('heading', { name: 'Send Transaction' })).not.toBeInTheDocument();
@@ -435,5 +434,36 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Close inbox' }));
     expect(opened).toHaveBeenLastCalledWith({ open: false });
     off();
+  });
+
+  // The radio is native's: the device advertises while it has an identity,
+  // and an offline send connects to its peer itself. The screen used to start
+  // advertising when it mounted or became visible, and stop it when hidden and
+  // when it unmounted, so a device on any other screen could not be reached.
+  test('the wallet screen makes no radio request as it mounts, hides, shows and unmounts', async () => {
+    installStandardWalletMocks([contactDto('Peer', 0x0a, 'AA:BB:CC:DD:EE:FF')]);
+    (dsmClient.getAllBalances as any) = jest.fn().mockResolvedValue([]);
+    (dsmClient.getWalletHistory as any) = jest.fn().mockResolvedValue({ transactions: [] });
+    const bridge = (window as any).DsmBridge;
+    const answer = bridge.sendMessageBin;
+    const methods: string[] = [];
+    bridge.sendMessageBin = (bytes: Uint8Array) => {
+      methods.push(pb.BridgeRpcRequest.fromBinary(bytes).method);
+      return answer(bytes);
+    };
+    try {
+      const { unmount } = await renderWallet();
+      await waitFor(() => expect(screen.getByText('DSM Wallet')).toBeInTheDocument());
+      await act(async () => {
+        bridgeEvents.emit('visibility.change', { state: 'hidden' });
+        bridgeEvents.emit('visibility.change', { state: 'visible' });
+      });
+      unmount();
+      // Whatever the lifecycle started has reached the port by now.
+      await act(async () => { await new Promise((r) => setTimeout(r, 20)); });
+    } finally {
+      bridge.sendMessageBin = answer;
+    }
+    expect(methods).not.toContain('nativeHostRequest');
   });
 });

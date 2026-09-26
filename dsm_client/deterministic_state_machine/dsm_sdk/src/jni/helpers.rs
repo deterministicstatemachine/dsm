@@ -232,7 +232,7 @@ pub extern "C" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_resolvePeerIdentit
 
             let mut device_id = [0u8; 32];
             device_id.copy_from_slice(&contact.device_id);
-            crate::jni::state::register_ble_address_mapping(&device_id, &address);
+            crate::bluetooth::peer_address::record_sighting(&device_id, &address);
 
             let mut out = Vec::with_capacity(64);
             out.extend_from_slice(&contact.device_id);
@@ -570,62 +570,4 @@ pub extern "C" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_notifyBleIdentityO
             }
         }),
     );
-}
-
-#[cfg(target_os = "android")]
-#[no_mangle]
-pub extern "C" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_hasUnpairedContacts(
-    _env: jni::JNIEnv,
-    _class: jni::objects::JClass,
-) -> jni::sys::jboolean {
-    crate::jni::bridge_utils::jni_catch_unwind_jboolean(
-        "hasUnpairedContacts",
-        std::panic::AssertUnwindSafe(|| {
-            use jni::sys::{JNI_FALSE, JNI_TRUE};
-
-            let has_unpaired = crate::storage::client_db::has_unpaired_contacts();
-
-            if has_unpaired {
-                log::debug!(
-                    "[JNI] hasUnpairedContacts: true - persistent scanning should be active"
-                );
-                JNI_TRUE
-            } else {
-                log::debug!("[JNI] hasUnpairedContacts: false - can stop persistent scanning");
-                JNI_FALSE
-            }
-        }),
-    )
-}
-
-/// Start the pairing loop for all unpaired contacts.
-/// Spawns on the tokio runtime (fire-and-forget). The loop runs until all contacts are
-/// paired or stopPairingAll() is called.
-#[cfg(target_os = "android")]
-#[no_mangle]
-pub extern "C" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_startPairingAll(
-    _env: jni::JNIEnv,
-    _class: jni::objects::JClass,
-) {
-    log::info!("[JNI] startPairingAll invoked");
-    let orchestrator = crate::bluetooth::get_pairing_orchestrator();
-    if orchestrator.is_loop_running() {
-        log::info!("[JNI] startPairingAll: loop already running, ignoring");
-        return;
-    }
-    crate::runtime::get_runtime().spawn(async move {
-        orchestrator.start_pairing_all_unpaired().await;
-    });
-}
-
-/// Stop the pairing loop. Safe to call even if no loop is running.
-#[cfg(target_os = "android")]
-#[no_mangle]
-pub extern "C" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_stopPairingAll(
-    _env: jni::JNIEnv,
-    _class: jni::objects::JClass,
-) {
-    log::info!("[JNI] stopPairingAll invoked");
-    let orchestrator = crate::bluetooth::get_pairing_orchestrator();
-    orchestrator.stop_pairing_loop();
 }

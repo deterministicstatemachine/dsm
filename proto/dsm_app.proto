@@ -1622,19 +1622,21 @@ message BilateralPrepareRequest {
   reserved "validity_iterations";
   Hash32 expected_genesis_hash  = 4;
   Hash32 expected_counterparty_state_hash = 5;
-  string ble_address            = 6; // BLE MAC address of recipient device
+  // The recipient's BLE address, which no receiver read: the sender's SDK
+  // resolves where a prepare goes.
+  reserved 6;
+  reserved "ble_address";
   bytes  sender_signing_public_key = 7 [(dsm_fixed_len)=64]; // Sender's SPHINCS+ SPX256s public key for offline verification
   bytes  sender_device_id       = 8 [(dsm_fixed_len)=32]; // Sender's device ID for relationship binding
   Hash32 sender_genesis_hash    = 9; // Sender's genesis hash for relationship anchor
   // The relationship tip travels once, as expected_counterparty_state_hash.
   reserved 10;
   reserved "sender_chain_tip";
-  // Transfer intent fields. Rust builds canonical operation_data from these
-  // when operation_data is empty.
-  uint64 transfer_amount         = 11; // amount in token base units
-  string token_id_hint           = 12; // token ID (e.g. "ERA")
-  string memo_hint               = 13; // optional transfer memo
-  string transfer_amount_display = 14; // decimal display amount; backend scales via token decimals
+  // The send's intent, which reached the SDK on this message: it travels as
+  // OfflineTransferRequest, and the prepare carries the operation the SDK
+  // authored from it.
+  reserved 11 to 14;
+  reserved "transfer_amount", "token_id_hint", "memo_hint", "transfer_amount_display";
   reserved 15; // removed: legacy Safe-7 sender_anchor_identity (fused anchor is pinned out-of-band)
   // Sender's ML-KEM-768 encapsulation key (1184 bytes). The device Kyber keypair is
   // derived from the wallet master secret ("DSM/kyber\0"). The receiver refuses the
@@ -2053,13 +2055,6 @@ message BleGattIdentityReadResult {
   string error_message       = 3;
   bytes  peer_device_id      = 4 [(dsm_fixed_len)=32]; // Peer's deviceId (for Kotlin identity anchoring)
   bytes  peer_genesis_hash   = 5 [(dsm_fixed_len)=32]; // Peer's genesisHash
-}
-
-// Protobuf value carried on the BLE relationship-status GATT characteristic.
-// The advertiser computes the status in Rust for the connected peer relationship.
-message BleRelationshipStatusCharValue {
-  bytes counterparty_device_id = 1 [(dsm_fixed_len)=32];
-  RelationshipSendStatus send_status = 2;
 }
 
 // Response from processIncomingBleData JNI call.
@@ -3104,6 +3099,23 @@ message ContactAddResponse {
   string ble_address = 11; // BLE MAC address for offline bilateral transfers
   bytes  signing_public_key = 12 [(dsm_fixed_len)=64]; // SPHINCS+ SPX256s public key for bilateral verification
   RelationshipSendStatus send_status = 13;
+  // Where BLE pairing with the contact stands; set on contacts.list.
+  ContactPairingPhase pairing = 14;
+}
+
+// Where BLE pairing with a contact stands, as the SDK's pairing loop has it.
+enum ContactPairingPhase {
+  CONTACT_PAIRING_PHASE_UNSPECIFIED = 0;
+  // The contact holds the BLE address pairing confirmed.
+  CONTACT_PAIRING_PHASE_PAIRED = 1;
+  // Not paired, and no pairing session is under way.
+  CONTACT_PAIRING_PHASE_IDLE = 2;
+  // A pairing session waits for the phone to be seen over BLE.
+  CONTACT_PAIRING_PHASE_SEARCHING = 3;
+  // The phone was seen; the pairing exchange is under way.
+  CONTACT_PAIRING_PHASE_CONNECTED = 4;
+  // The last attempt did not complete; the pairing loop tries again.
+  CONTACT_PAIRING_PHASE_RETRYING = 5;
 }
 
 // ======================== Faucet Operations =========================
@@ -3258,6 +3270,16 @@ message OnlineTransferSmartRequest {
   string amount = 2; // Decimal string
   string token_id = 3;
   string memo = 4;
+}
+
+// wallet.sendOffline: what the user asked for, and nothing the SDK works out
+// itself. The SDK resolves where the counterparty's phone is over BLE, the
+// token's decimals and policy, and authors the operation.
+message OfflineTransferRequest {
+  bytes  counterparty_device_id = 1 [(dsm_fixed_len)=32];
+  string token_id               = 2; // as the user chose it; the SDK canonicalizes it and refuses none
+  string amount                 = 3; // decimal, as the user typed it; the SDK scales it by the token's decimals
+  string memo                   = 4;
 }
 
 message OnlineTransferResponse {
@@ -3689,9 +3711,13 @@ message BridgeRpcRequest {
     AppRouterPayload app_router = 6;
     BleContactPayload ble_contact = 8;
     BleAddressPayload ble_address = 9;
-    BleIdentityPayload ble_identity = 10;
     BilateralPayload bilateral = 11;
   }
+  // The frontend handed the device's own identity to the BLE layer to
+  // advertise. The identity is Rust's: the GATT server reads it from Rust
+  // when a peer asks for it.
+  reserved 10;
+  reserved "ble_identity";
 }
 
 message BridgeRpcResponse {
@@ -3727,11 +3753,6 @@ message BleContactPayload {
 
 message BleAddressPayload {
   bytes device_id = 1 [(dsm_fixed_len)=32];
-}
-
-message BleIdentityPayload {
-  bytes genesis_hash = 1 [(dsm_fixed_len)=32];
-  bytes device_id = 2 [(dsm_fixed_len)=32];
 }
 
 message BilateralPayload {
@@ -3901,10 +3922,14 @@ enum NativeHostRequestKind {
   NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_CAPABILITIES_GET = 1;
   NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_QR_START_SCAN = 2;
   NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_QR_STOP_SCAN = 3;
-  NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_BLE_SCAN_START = 4;
-  NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_BLE_SCAN_STOP = 5;
-  NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_BLE_ADVERTISE_START = 6;
-  NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_BLE_ADVERTISE_STOP = 7;
+  // When the radio scans and advertises is native policy, not a frontend
+  // request: advertising follows the identity, scanning follows a send or a
+  // pairing that needs it.
+  reserved 4 to 7;
+  reserved "NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_BLE_SCAN_START",
+           "NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_BLE_SCAN_STOP",
+           "NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_BLE_ADVERTISE_START",
+           "NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_BLE_ADVERTISE_STOP";
   NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_NFC_READER_START = 8;
   NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_NFC_READER_STOP = 9;
   NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_PERMISSIONS_REQUEST = 10;
@@ -3942,7 +3967,10 @@ message NativeHostResponse {
 enum NativeHostEventKind {
   NATIVE_HOST_EVENT_KIND_UNSPECIFIED = 0;
   NATIVE_HOST_EVENT_KIND_QR_SCAN_RESULT = 1;
-  NATIVE_HOST_EVENT_KIND_BLUETOOTH_PERMISSIONS = 2;
+  // A Bluetooth permission result is native's to act on (it starts the radio
+  // the policy wants); the frontend had nothing listening for it.
+  reserved 2;
+  reserved "NATIVE_HOST_EVENT_KIND_BLUETOOTH_PERMISSIONS";
   NATIVE_HOST_EVENT_KIND_BIOMETRIC_RESULT = 3;
   NATIVE_HOST_EVENT_KIND_NFC_TAG_READ = 4;
   NATIVE_HOST_EVENT_KIND_NFC_TAG_WRITE = 5;

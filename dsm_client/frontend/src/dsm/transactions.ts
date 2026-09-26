@@ -11,17 +11,11 @@ import {
     cancelBilateralByCommitmentBridge,
     rejectBilateralByCommitmentBridge,
     getPendingBilateralListStrictBridge,
-    setBleIdentityForAdvertising,
-    startBleAdvertisingViaRouter,
-    startBleScanViaRouter,
-    readPeerRelationshipStatusBridge,
 } from './WebViewBridge';
 import { on as eventBridgeOn } from './EventBridge';
 import { emitBilateralCommitted } from './events';
 import { bridgeEvents } from '../bridge/bridgeEvents';
-import { getHeaders } from './identity';
 
-import { normalizeBleAddress } from './resolution';
 import logger from '../utils/logger';
 
 import { GenericTransaction, GenericTxResponse } from './types';
@@ -55,18 +49,6 @@ function schedulePostAcceptRefreshes(): void {
     }
   };
   requestAnimationFrame(tick);
-}
-
-export async function readPeerRelationshipStatus(
-  bleAddress: string,
-): Promise<pb.BleRelationshipStatusCharValue | null> {
-  const normalized = normalizeBleAddress(bleAddress);
-  if (!normalized) return null;
-  const bytes = await readPeerRelationshipStatusBridge(normalized);
-  if (!(bytes instanceof Uint8Array) || bytes.length === 0) {
-    return null;
-  }
-  return pb.BleRelationshipStatusCharValue.fromBinary(bytes);
 }
 
 export async function sendOnlineTransferSmart(
@@ -136,24 +118,19 @@ export async function offlineSend(transfer: GenericTransaction): Promise<Generic
       return true;
     };
 
-    const transferAmountDisplay = String(transfer.amount ?? '').trim();
-    if (!transferAmountDisplay) {
-      throw new Error('offlineSend: amount is required');
-    }
-
-    const prepReq = new pb.BilateralPrepareRequest({
+    // What the user asked for, and nothing else: where the counterparty's
+    // phone is over BLE, the token's decimals and the operation are Rust's,
+    // and so is refusing a token or an amount the request does not name.
+    const request = new pb.OfflineTransferRequest({
       counterpartyDeviceId: toBytes as any,
-      bleAddress: normalizeBleAddress(String(transfer.bleAddress || '')) || '',
-      transferAmountDisplay,
-      // Named exactly as the user chose it; Rust canonicalizes it and refuses
-      // a request that names none.
-      tokenIdHint: transfer.tokenId,
-      memoHint: transfer.memo || '',
-    } as any);
+      tokenId: transfer.tokenId,
+      amount: String(transfer.amount ?? '').trim(),
+      memo: transfer.memo || '',
+    });
 
     const argPack = new pb.ArgPack({
       codec: pb.Codec.PROTO as any,
-      body: new Uint8Array(prepReq.toBinary()),
+      body: new Uint8Array(request.toBinary()),
     });
 
     // --- Set up event listeners BEFORE sending BLE chunks to avoid race condition ---
@@ -182,9 +159,6 @@ export async function offlineSend(transfer: GenericTransaction): Promise<Generic
         statusPollTimer = null;
       }
       offEvent();
-      offBle();
-      // Re-start advertising so device stays discoverable for next transfer
-      void startBleAdvertisingViaRouter().catch(() => {});
       if (resolvePromise) resolvePromise(res);
     };
 
@@ -261,36 +235,15 @@ export async function offlineSend(transfer: GenericTransaction): Promise<Generic
       } catch { /* ignore */ }
     });
 
-    const offBle = eventBridgeOn('ble.envelope.bin', (payload) => {
-      try {
-        const bleEnv = decodeFramedEnvelopeV3(payload as Uint8Array);
-        const p2: any = bleEnv?.payload ?? bleEnv;
-        const btMsg = (p2?.case === 'dsmBtMessage' ? p2.value : p2?.dsmBtMessage) as pb.DsmBtMessage | undefined;
-        if (!btMsg || btMsg.messageType !== pb.BtMessageType.BTMSG_TYPE_ERROR) return;
-        const err = pb.BleTransactionError.fromBinary(btMsg.payload);
-        const msg = err?.message || 'BLE transaction error';
-        finish({ accepted: false, result: msg });
-      } catch { /* ignore */ }
-    });
+    // A BLE transport error is not this send's failure: Kotlin raises one for
+    // any failed connection, to any peer, and a lost link fails no step. The
+    // send ends on Rust's word — its events, or its pending list.
 
-    // --- Ensure BLE advertising + scanning so the receiver can connect back ---
-    // §2.3-2.4: advertise real genesis hash, not zeros.
-    try {
-      const headers = await getHeaders();
-      const devId = headers.deviceId;
-      const genesisHash = headers.genesisHash;
-      if (devId && devId.length === 32 && genesisHash && genesisHash.length === 32) {
-        await setBleIdentityForAdvertising(new Uint8Array(genesisHash), new Uint8Array(devId));
-        await startBleAdvertisingViaRouter();
-      }
-      await startBleScanViaRouter();
-      // Brief pause for BLE stack to settle and peer to discover us
-      await new Promise(r => setTimeout(r, 1500));
-    } catch {
-      // Best-effort — proceed with send even if BLE priming fails
-    }
-
-    // --- Delegate native authoring + BLE dispatch to wallet.sendOffline ---
+    // --- Native authoring + BLE dispatch: wallet.sendOffline ---
+    // The radio is native's: it advertises while the device has an identity,
+    // and the dispatch connects (scanning for the peer as it needs) itself.
+    // This used to set the advertised identity, start advertising and
+    // scanning, and sleep 1.5 s first, swallowing every failure.
     const respBytes = await routerInvokeBin('wallet.sendOffline', new Uint8Array(argPack.toBinary()));
     if (!respBytes || respBytes.length === 0) {
       finish({ accepted: false, result: 'offlineSend: empty response from bridge' });
@@ -367,14 +320,12 @@ export async function sendOfflineTransfer(params: {
   to: string | Uint8Array;
   amount: string | number | bigint;
   memo?: string;
-  bleAddress?: string;
 }): Promise<GenericTxResponse> {
   return offlineSend({
     tokenId: params.tokenId,
     to: params.to,
     amount: params.amount,
     memo: params.memo,
-    bleAddress: params.bleAddress,
   });
 }
 
