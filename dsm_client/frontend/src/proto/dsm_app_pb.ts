@@ -84,6 +84,16 @@ export enum TransactionType {
   TX_TYPE_UNSPECIFIED = 0,
 
   /**
+   * A faucet claim: ERA released to this device from the native reserve. The
+   * row names no sender device (its source is the reserve) and carries the
+   * release's operation digest as its hash. Value 1 is deliberately taken
+   * back from reserved: it was reserved while no claim wrote a history row.
+   *
+   * @generated from enum value: TX_TYPE_FAUCET = 1;
+   */
+  TX_TYPE_FAUCET = 1,
+
+  /**
    * Offline bilateral transfer
    *
    * @generated from enum value: TX_TYPE_BILATERAL_OFFLINE = 2;
@@ -114,6 +124,7 @@ export enum TransactionType {
 // Retrieve enum metadata with: proto3.getEnumType(TransactionType)
 proto3.util.setEnumType(TransactionType, "dsm.TransactionType", [
   { no: 0, name: "TX_TYPE_UNSPECIFIED" },
+  { no: 1, name: "TX_TYPE_FAUCET" },
   { no: 2, name: "TX_TYPE_BILATERAL_OFFLINE" },
   { no: 4, name: "TX_TYPE_ONLINE" },
   { no: 5, name: "TX_TYPE_DBTC_MINT" },

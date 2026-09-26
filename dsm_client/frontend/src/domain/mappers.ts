@@ -106,6 +106,7 @@ export function mapContactList(list: BilateralRelationshipDTO[], bleSnapshot?: {
 }
 
 const TX_TYPES: Record<number, DomainTxType> = {
+  [TransactionType.TX_TYPE_FAUCET]: 'faucet',
   [TransactionType.TX_TYPE_BILATERAL_OFFLINE]: 'bilateral_offline',
   [TransactionType.TX_TYPE_ONLINE]: 'online',
   [TransactionType.TX_TYPE_DBTC_MINT]: 'dbtc_mint',
@@ -117,6 +118,13 @@ function txBytes32(t: TransactionInfo, field: string, bytes: Uint8Array): string
     throw new Error(`STRICT: transaction ${t.id} carries a ${field} that is not 32 bytes`);
   }
   return toBase32Crockford(bytes);
+}
+
+function noSender(t: TransactionInfo): undefined {
+  if (t.fromDeviceId.length !== 0) {
+    throw new Error(`STRICT: faucet claim ${t.id} names a sender device`);
+  }
+  return undefined;
 }
 
 function txText(t: TransactionInfo, field: string, value: string): string {
@@ -147,7 +155,9 @@ export function mapTransactions(list: TransactionInfo[]): DomainTransaction[] {
       tokenId: txText(t, 'token id', t.tokenId),
       recipient: txText(t, 'counterparty label', t.recipient),
       status: txText(t, 'status', t.status),
-      fromDeviceId: txBytes32(t, 'sender device id', t.fromDeviceId),
+      // A faucet row's source is the ERA reserve: Rust names no sender device,
+      // and a faucet row that names one is refused as corrupt.
+      fromDeviceId: txType === 'faucet' ? noSender(t) : txBytes32(t, 'sender device id', t.fromDeviceId),
       toDeviceId: txBytes32(t, 'recipient device id', t.toDeviceId),
       memo: t.memo.length > 0 ? t.memo : undefined,
       stitchedReceipt: t.stitchedReceipt.length > 0 ? t.stitchedReceipt : undefined,

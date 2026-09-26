@@ -64,10 +64,14 @@ enum AttestorType {
 // ============================== TRANSACTION TYPES =============================
 enum TransactionType {
   TX_TYPE_UNSPECIFIED      = 0;
-  // 1 was a faucet claim and 3 a recovered offline transfer: no history row
-  // of either kind is written.
-  reserved 1, 3;
-  reserved "TX_TYPE_FAUCET", "TX_TYPE_BILATERAL_OFFLINE_RECOVERED";
+  // A faucet claim: ERA released to this device from the native reserve. The
+  // row names no sender device (its source is the reserve) and carries the
+  // release's operation digest as its hash. Value 1 is deliberately taken
+  // back from reserved: it was reserved while no claim wrote a history row.
+  TX_TYPE_FAUCET           = 1;
+  // 3 was a recovered offline transfer: no history row of that kind is written.
+  reserved 3;
+  reserved "TX_TYPE_BILATERAL_OFFLINE_RECOVERED";
   TX_TYPE_BILATERAL_OFFLINE = 2; // Offline bilateral transfer
   TX_TYPE_ONLINE           = 4; // Online transfer
   TX_TYPE_DBTC_MINT        = 5; // BTC→dBTC deposit (mint)

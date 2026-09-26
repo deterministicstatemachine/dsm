@@ -340,8 +340,68 @@ pub async fn claim_era_faucet(core: &CoreSDK, network_id: &[u8]) -> Result<Claim
         Vec::new(),
     )
     .await?;
+    record_claim_history_row(
+        &genesis,
+        &devid,
+        &reserve_id,
+        generation,
+        &op_digest,
+        admitted.economic_position,
+    );
+
     Ok(ClaimOutcome {
         tokens_received: ERA_FAUCET_PAYOUT,
         economic_position: admitted.economic_position,
     })
+}
+
+/// The wallet's history row for an admitted claim: ERA released to this
+/// device from the native reserve. It names no sender device — its source is
+/// the reserve — and carries the release's operation digest as its hash, so
+/// a claim resumed on the same release upserts the same row. The credit is
+/// final before this runs; a row that fails to persist is logged and queued
+/// for projection repair, never reported as a failed claim.
+fn record_claim_history_row(
+    genesis: &[u8; 32],
+    devid: &[u8; 32],
+    reserve_id: &[u8; 32],
+    generation: u64,
+    op_digest: &[u8; 32],
+    economic_position: u64,
+) {
+    use crate::util::text_id::encode_base32_crockford as b32;
+    let mut metadata = std::collections::HashMap::new();
+    metadata.insert("token_id".to_string(), b"ERA".to_vec());
+    metadata.insert("reserve_id".to_string(), b32(reserve_id).into_bytes());
+    metadata.insert(
+        "generation".to_string(),
+        generation.to_string().into_bytes(),
+    );
+    metadata.insert(
+        "economic_position".to_string(),
+        economic_position.to_string().into_bytes(),
+    );
+    metadata.insert("recipient_genesis".to_string(), b32(genesis).into_bytes());
+    let row = crate::storage::client_db::TransactionRecord {
+        tx_id: format!("faucet_{}", b32(op_digest)),
+        tx_hash: b32(op_digest),
+        from_device: String::new(),
+        to_device: b32(devid),
+        amount: ERA_FAUCET_PAYOUT,
+        tx_type: "faucet".to_string(),
+        status: "confirmed".to_string(),
+        commitment_hash: None,
+        proof_data: None,
+        metadata,
+    };
+    if let Err(e) = crate::storage::client_db::store_transaction(&row) {
+        log::error!("[faucet] the claim stands; its history row failed to persist: {e}");
+        if let Err(q) = crate::storage::client_db::enqueue_projection_repair(
+            &b32(devid),
+            "ERA",
+            &format!("faucet history row failed: {e}"),
+        ) {
+            log::error!("[faucet] could not queue the history repair: {q}");
+        }
+    }
 }
