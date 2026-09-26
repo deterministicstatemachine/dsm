@@ -51,7 +51,6 @@ data class PeerSession(
     var currentTransaction: BleOutboxItem? = null,
     var identityExchangeInProgress: Boolean = false,
     var pairingInProgress: Boolean = false,
-    @Transient var relationshipStatusReadResult: CompletableDeferred<ByteArray?>? = null,
 
     // ── Connection lifecycle (was pendingConnectionAddresses + polling loop) ─
     // When non-null, a connect is in flight. Completed by handleSessionEvent
@@ -108,8 +107,6 @@ data class PeerSession(
         currentTransaction = null
         identityExchangeInProgress = false
         pairingInProgress = false
-        relationshipStatusReadResult?.cancel()
-        relationshipStatusReadResult = null
         connectResult?.complete(false)
         connectResult = null
         pendingPairingConfirm = null

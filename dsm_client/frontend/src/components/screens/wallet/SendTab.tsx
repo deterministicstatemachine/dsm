@@ -104,20 +104,16 @@ function SendTabInner({
       const tokenId = selectedSendBalance.tokenId;
 
       if (txMode === 'offline') {
-        const bleAddr = await dsmClient.resolveBleAddressForContact(contact);
-        if (!bleAddr || typeof bleAddr !== 'string' || bleAddr.length === 0) {
-          throw new Error('Offline transfer requires a BLE address for the recipient');
-        }
-
+        // Where the recipient's appliance is over BLE is Rust's to know; an appliance
+        // it has not met is its refusal, in its words.
         const res = await dsmClient.sendOfflineTransfer({
           tokenId,
           to: sendForm.selectedContactKey,
           amount: sendForm.amount.trim(),
           memo: sendForm.note || undefined,
-          bleAddress: bleAddr,
         });
         if (res.open) {
-          // Not finished and not failed: the step is open on both phones and
+          // Not finished and not failed: the step is open on both appliances and
           // completes when they are together again. The form is done with it.
           fx.play({
             anim: 'trace',
@@ -201,7 +197,7 @@ function SendTabInner({
           How to send
           <InfoTip title="How to send" label="About sending modes">
             <p><b>Online</b> goes through the storage nodes. The recipient does not need to be nearby or awake; it lands in their inbox.</p>
-            <p><b>Offline</b> goes phone to phone over Bluetooth. Both phones must be next to each other with Bluetooth on, and both must be on the wallet screen.</p>
+            <p><b>Offline</b> goes appliance to appliance over Bluetooth. Both appliances must be next to each other with Bluetooth on, and the recipient accepts it in the app.</p>
           </InfoTip>
         </span>
         <div className="sb-seg sb-seg--block" role="group" aria-label="Transaction mode">
@@ -210,7 +206,7 @@ function SendTabInner({
         </div>
         {txMode === 'offline' && (
           <Notice>
-            <strong>Offline needs Bluetooth.</strong> Both phones next to each other, Bluetooth on.
+            <strong>Offline needs Bluetooth.</strong> Both appliances next to each other, Bluetooth on.
           </Notice>
         )}
       </div>

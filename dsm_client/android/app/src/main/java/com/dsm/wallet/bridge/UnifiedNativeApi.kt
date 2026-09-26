@@ -47,7 +47,6 @@ internal object UnifiedNativeApi {
         }
     }
 
-    @Keep @JvmStatic external fun recordPeerIdentity(address: String, identity: ByteArray)
     @Keep @JvmStatic external fun initSdk(baseDir: String): Boolean
     @Keep @JvmStatic external fun initSdkV3(baseDir: String): ByteArray
     @Keep @JvmStatic external fun initStorageBaseDir(path: ByteArray)
@@ -72,7 +71,6 @@ internal object UnifiedNativeApi {
     @Keep @JvmStatic external fun isBleAddressPaired(address: String): Boolean
     @Keep @JvmStatic external fun isCommitEnvelope(envelope: ByteArray): Boolean
     @Keep @JvmStatic external fun notifyBleIdentityObserved(address: String, genesisHash: ByteArray, deviceId: ByteArray)
-    @Keep @JvmStatic external fun hasUnpairedContacts(): Boolean
     @Keep @JvmStatic external fun createTransactionErrorEnvelope(address: String, code: Int, message: String): ByteArray?
     @Keep @JvmStatic external fun removeContact(contactId: String): Byte
     @Keep @JvmStatic external fun isBleCoordinatorReady(): Boolean
@@ -110,7 +108,6 @@ internal object UnifiedNativeApi {
      */
     @Keep @JvmStatic external fun onAppBackgrounded(): Boolean
     @Keep @JvmStatic external fun getGenesisHashBin(): ByteArray
-    @Keep @JvmStatic external fun resolveBleAddressForDeviceIdBin(deviceId: ByteArray): ByteArray
     @Keep @JvmStatic external fun resolvePeerIdentityForBleAddressBin(address: String): ByteArray
     @Keep @JvmStatic external fun isRejectEnvelope(envelopeBytes: ByteArray): ByteArray
     @Keep @JvmStatic external fun isErrorEnvelope(envelopeBytes: ByteArray): Int
@@ -126,9 +123,6 @@ internal object UnifiedNativeApi {
     // Encode genesis_hash + device_id as protobuf BleIdentityCharValue for GATT characteristic.
     // Kotlin MUST NOT concatenate raw bytes — this is the canonical encoder.
     @Keep @JvmStatic external fun encodeIdentityCharValue(genesisHash: ByteArray, deviceId: ByteArray): ByteArray
-
-    // Encode the local relationship send-status protobuf for a connected BLE peer.
-    @Keep @JvmStatic external fun getRelationshipStatusCharValue(bleAddress: String): ByteArray
 
     // Process raw protobuf bytes read from GATT identity characteristic.
     // Decodes BleIdentityCharValue, dispatches identity events, returns BleGattIdentityReadResult.
@@ -148,8 +142,6 @@ internal object UnifiedNativeApi {
     @Keep @JvmStatic external fun createNfcBackupWrittenEnvelope(): ByteArray
 
     // BLE pairing orchestration (Rust-driven loop)
-    @Keep @JvmStatic external fun startPairingAll()
-    @Keep @JvmStatic external fun stopPairingAll()
 
     // Session state — Rust owns session computation, Kotlin relays bytes to WebView
     @Keep @JvmStatic external fun getSessionSnapshot(): ByteArray

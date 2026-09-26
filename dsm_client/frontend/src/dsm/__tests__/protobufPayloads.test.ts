@@ -3,11 +3,9 @@
 import {
   createGenesisViaRouter,
   rejectBilateralByCommitmentBridge,
-  setBleIdentityForAdvertising,
 } from "../WebViewBridge";
 import {
   BilateralPayload,
-  BleIdentityPayload,
   BridgeRpcRequest,
   BridgeRpcResponse,
   Envelope,
@@ -76,27 +74,6 @@ describe("protobuf-only bridge payloads", () => {
     // The network is the SDK's to choose; the request names none.
     expect(WalletCreateGenesisV2Request.fields.findJsonName("networkId")).toBeUndefined();
     // No silicon / no random entropy: the mnemonic is the sole genesis root.
-  });
-
-  test("setBleIdentityForAdvertising sends BleIdentityPayload", async () => {
-    let seenMethod = "";
-    let seenPayload: Uint8Array | undefined;
-
-    setupBridge((req) => {
-      seenMethod = req.method;
-      seenPayload = req.payload.case === "bytes" ? req.payload.value.data : new Uint8Array(0);
-    });
-
-    const genesis = new Uint8Array(32).fill(0xaa);
-    const deviceId = new Uint8Array(32).fill(0xbb);
-    await setBleIdentityForAdvertising(genesis, deviceId);
-
-    expect(seenMethod).toBe("setBleIdentityForAdvertising");
-    expect(seenPayload).toBeInstanceOf(Uint8Array);
-
-    const decoded = BleIdentityPayload.fromBinary(seenPayload as Uint8Array);
-    expect(decoded.genesisHash).toEqual(genesis);
-    expect(decoded.deviceId).toEqual(deviceId);
   });
 
   test("rejectBilateralByCommitmentBridge sends BilateralPayload", async () => {

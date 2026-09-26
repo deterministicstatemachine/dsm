@@ -792,38 +792,6 @@ pub fn get_local_bilateral_chain_tip(device_id: &[u8]) -> Result<Option<[u8; 32]
     read_contact_tip(device_id, "local_bilateral_chain_tip")
 }
 
-/// Check if there are any contacts that are not yet BLE-capable (i.e., need BLE pairing)
-pub fn has_unpaired_contacts() -> bool {
-    let binding = match get_connection() {
-        Ok(b) => b,
-        Err(e) => {
-            log::error!(
-                "[client_db] has_unpaired_contacts: failed to get connection: {}",
-                e
-            );
-            return false;
-        }
-    };
-    let conn = binding.lock().unwrap_or_else(|poisoned| {
-        log::warn!("DB lock poisoned, recovering");
-        poisoned.into_inner()
-    });
-
-    let result: Result<i64, _> = conn.query_row(
-        "SELECT COUNT(*) FROM contacts WHERE status != 'BleCapable' OR status IS NULL",
-        [],
-        |row| row.get(0),
-    );
-
-    match result {
-        Ok(count) => count > 0,
-        Err(e) => {
-            log::warn!("[client_db] has_unpaired_contacts: query failed: {}", e);
-            false
-        }
-    }
-}
-
 /// Remove a contact by its contact_id. Returns Ok(true) if a row was deleted, Ok(false) if not found.
 pub fn remove_contact(contact_id: &str) -> Result<bool> {
     let binding = get_connection()?;
