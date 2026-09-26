@@ -33,7 +33,7 @@ describe('pruneBleIdentityMappings', () => {
     ]);
     (globalThis as any).window.DsmBridge = {
       __binary: true,
-      __callBin: async (reqBytes: Uint8Array) => {
+      sendMessageBin: async (reqBytes: Uint8Array) => {
         const pb = require('../../proto/dsm_app_pb');
         const req = pb.BridgeRpcRequest.fromBinary(reqBytes);
         const method = req.method || '';

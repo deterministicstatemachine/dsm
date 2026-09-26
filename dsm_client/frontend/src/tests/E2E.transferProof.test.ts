@@ -167,7 +167,7 @@ function installBridge(opts?: { contactBleAddress?: string }) {
     getDeviceIdBin: () => encodeBase32Crockford(DEVICE_A),
     getGenesisHashBin: () => encodeBase32Crockford(GENESIS_A),
 
-    __callBin: async (reqBytes: Uint8Array): Promise<Uint8Array> => {
+    sendMessageBin: async (reqBytes: Uint8Array): Promise<Uint8Array> => {
       const { method, payload } = decodeBridgeReq(reqBytes);
       capturedMethods.push(method);
 
@@ -237,11 +237,6 @@ function installBridge(opts?: { contactBleAddress?: string }) {
       }
 
       return wrapError(`unhandled method: ${method}`);
-    },
-
-    sendMessageBin: async (reqBytes: Uint8Array): Promise<Uint8Array> => {
-      // MessagePort path — delegates to __callBin for simplicity in tests
-      return g.window.DsmBridge.__callBin(reqBytes);
     },
   };
 
@@ -481,8 +476,8 @@ describe('Offline Transfer — Full Cycle', () => {
     let capturedPrepReq: pb.BilateralPrepareRequest | null = null;
 
     // Intercept nativeBoundaryIngress to capture the ArgPack → BilateralPrepareRequest
-    const origCallBin = (global as any).window.DsmBridge.__callBin;
-    (global as any).window.DsmBridge.__callBin = async (reqBytes: Uint8Array) => {
+    const origCallBin = (global as any).window.DsmBridge.sendMessageBin;
+    (global as any).window.DsmBridge.sendMessageBin = async (reqBytes: Uint8Array) => {
       const { method, payload } = decodeBridgeReq(reqBytes);
       if (method === 'nativeBoundaryIngress') {
         const ingress = decodeIngressReq(payload);
@@ -588,8 +583,8 @@ describe('Offline Transfer — Full Cycle', () => {
   test('missing BLE address with no resolution → error', async () => {
     // Override bridge: when wallet.sendOffline is called with an empty bleAddress,
     // the Rust layer rejects with a bilateralPrepareReject error.
-    const origCallBin = (global as any).window.DsmBridge.__callBin;
-    (global as any).window.DsmBridge.__callBin = async (reqBytes: Uint8Array) => {
+    const origCallBin = (global as any).window.DsmBridge.sendMessageBin;
+    (global as any).window.DsmBridge.sendMessageBin = async (reqBytes: Uint8Array) => {
       const { method, payload } = decodeBridgeReq(reqBytes);
       if (method === 'nativeBoundaryIngress') {
         const ingress = decodeIngressReq(payload);
@@ -766,8 +761,8 @@ describe('Offline Transfer — Timeout & Event Matching', () => {
       version: 3,
       payload: { case: 'error', value: new pb.Error({ code: 1, message: 'wallet.sendOffline: the request names no token' }) },
     } as any));
-    const origCallBin = (global as any).window.DsmBridge.__callBin;
-    (global as any).window.DsmBridge.__callBin = async (reqBytes: Uint8Array) => {
+    const origCallBin = (global as any).window.DsmBridge.sendMessageBin;
+    (global as any).window.DsmBridge.sendMessageBin = async (reqBytes: Uint8Array) => {
       const { method, payload } = decodeBridgeReq(reqBytes);
       if (method === 'nativeBoundaryIngress') {
         const ingress = decodeIngressReq(payload);

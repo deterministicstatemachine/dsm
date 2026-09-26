@@ -69,35 +69,6 @@ describe('E2E: Offline BLE exchange -> wallet refresh', () => {
       sendMessageBin: async (reqBytes: Uint8Array) => {
         const req = pb.BridgeRpcRequest.fromBinary(reqBytes);
         const method = req.method || '';
-        const data = req.payload?.case === 'bytes' ? req.payload.value.data : new Uint8Array(0);
-        if (method === 'nativeBoundaryIngress') {
-          const ingress = pb.IngressRequest.fromBinary(data);
-          if (ingress.operation.case === 'routerQuery' && ingress.operation.value.method === 'contacts.list') {
-            const contactsListResponse = new pb.ContactsListResponse({
-              contacts: [
-                {
-                  alias: 'Bob',
-                  deviceId: BOB_DEVICE_ID,
-                  genesisHash: new pb.Hash32({ v: BOB_GENESIS } as any),
-                  chainTip: new pb.Hash32({ v: BOB_TIP } as any),
-                  bleAddress: 'AA:BB:CC:DD:EE:FF',
-                },
-              ],
-            } as any);
-            // Return Envelope-wrapped response with framing byte and router prefix
-            const env = new pb.Envelope({
-              version: 3,
-              payload: { case: 'contactsListResponse', value: contactsListResponse },
-            } as any);
-            return wrapIngressOk(frameEnvelope(env));
-          }
-          return wrapIngressOk(new Uint8Array(0));
-        }
-        throw new Error(`unhandled sendMessageBin: ${reqBytes.length} bytes`);
-      },
-      __callBin: async (reqBytes: Uint8Array) => {
-        const req = pb.BridgeRpcRequest.fromBinary(reqBytes);
-        const method = req.method || '';
         const payload = req.payload?.case === 'bytes' ? req.payload.value.data : new Uint8Array(0);
         if (method === 'getTransportHeadersV3Bin') {
           const headersBytes = new pb.Headers({
@@ -160,7 +131,7 @@ describe('E2E: Offline BLE exchange -> wallet refresh', () => {
           const hostRequest = pb.NativeHostRequest.fromBinary(payload);
           throw new Error(`unhandled nativeHostRequest kind: ${hostRequest.kind}`);
         }
-        throw new Error(`unhandled __callBin method: ${method} (payloadLen=${payload.length})`);
+        throw new Error(`unhandled bridge method: ${method} (payloadLen=${payload.length})`);
       },
       // Some call sites read base32 Crockford strings from these getters.
       getDeviceIdBin: () => base32CrockfordEncode(ALICE_DEVICE_ID),

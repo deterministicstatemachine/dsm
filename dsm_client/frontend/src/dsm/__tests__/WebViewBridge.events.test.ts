@@ -54,7 +54,7 @@ describe("WebViewBridge preference gating", () => {
     const enqueueSpy = jest.spyOn(bridgeGate, "enqueue");
     const bridge = {
       __binary: true,
-      __callBin: async (reqBytes: Uint8Array) => {
+      sendMessageBin: async (reqBytes: Uint8Array) => {
         const pb = require("../../proto/dsm_app_pb");
         const req = pb.BridgeRpcRequest.fromBinary(reqBytes);
         expect(req.method).toBe("getPreference");
@@ -76,7 +76,7 @@ describe("WebViewBridge preference gating", () => {
     const enqueueSpy = jest.spyOn(bridgeGate, "enqueue");
     const bridge = {
       __binary: true,
-      __callBin: async (reqBytes: Uint8Array) => {
+      sendMessageBin: async (reqBytes: Uint8Array) => {
         const pb = require("../../proto/dsm_app_pb");
         const req = pb.BridgeRpcRequest.fromBinary(reqBytes);
         expect(req.method).toBe("setPreference");

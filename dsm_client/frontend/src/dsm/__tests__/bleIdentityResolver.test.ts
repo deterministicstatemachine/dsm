@@ -23,7 +23,7 @@ describe('resolveBleAddressForContact', () => {
   it('returns undefined when no mapping or stored address', async () => {
     (globalThis as any).window.DsmBridge = {
       __binary: true,
-      __callBin: async () => createDsmBridgeSuccessResponse(new Uint8Array(0)),
+      sendMessageBin: async () => createDsmBridgeSuccessResponse(new Uint8Array(0)),
     };
     const contact = { alias: 'A', deviceId: mkBytes(1), genesisHash: mkBytes(2) };
     await expect(dsmClient.resolveBleAddressForContact?.(contact as any)).resolves.toBeUndefined();
@@ -32,7 +32,7 @@ describe('resolveBleAddressForContact', () => {
   it('uses stored ble_address directly', async () => {
     (globalThis as any).window.DsmBridge = {
       __binary: true,
-      __callBin: async () => new Uint8Array(0),
+      sendMessageBin: async () => new Uint8Array(0),
     };
     const contact = { alias: 'B', deviceId: mkBytes(3), genesisHash: mkBytes(4), bleAddress: '11:22:33:44:55:66' };
     await expect(dsmClient.resolveBleAddressForContact?.(contact as any)).resolves.toBe('11:22:33:44:55:66');
@@ -44,7 +44,7 @@ describe('resolveBleAddressForContact', () => {
     const address = 'AA:BB:CC:DD:EE:FF';
     (globalThis as any).window.DsmBridge = {
       __binary: true,
-      __callBin: async (_reqBytes: Uint8Array) => {
+      sendMessageBin: async (_reqBytes: Uint8Array) => {
         return createDsmBridgeSuccessResponse(new Uint8Array(Array.from(enc.encode(address))));
       },
     };
@@ -70,7 +70,7 @@ describe('resolveBleAddressForContact', () => {
 
     (globalThis as any).window.DsmBridge = {
       __binary: true,
-      __callBin: async (reqBytes: Uint8Array) => {
+      sendMessageBin: async (reqBytes: Uint8Array) => {
         const pb = require('../../proto/dsm_app_pb');
         const req = pb.BridgeRpcRequest.fromBinary(reqBytes);
         const method = req.method || '';
@@ -100,7 +100,7 @@ describe('resolveBleAddressForContact', () => {
     const address = 'AA:11:22:33:44:55';
     (globalThis as any).window.DsmBridge = {
       __binary: true,
-      __callBin: async (reqBytes: Uint8Array) => {
+      sendMessageBin: async (reqBytes: Uint8Array) => {
         const pb = require('../../proto/dsm_app_pb');
         const req = pb.BridgeRpcRequest.fromBinary(reqBytes);
         const method = req.method || '';

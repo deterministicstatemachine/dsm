@@ -2,30 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { getBridgeInstance } from '../bridge/BridgeRegistry';
+import { bridgeEvents } from '../bridge/bridgeEvents';
 import logger from '../utils/logger';
 import type { AndroidBridgeV3 } from './bridgeTypes';
 import { bridgeGate } from './BridgeGate';
-import {
-  BiometricAuthorizePayload,
-  BiometricAuthorizeResult,
-  BridgeRpcRequest,
-  BridgeRpcResponse,
-  BytesPayload,
-  EmptyPayload,
-  HostPermissionsRequestPayload,
-  NativeHostAck,
-  NativeHostCapabilities,
-  NativeHostEvent,
-  NativeHostEventKind,
-  NativeHostRequest,
-  NativeHostRequestKind,
-  NativeHostResponse,
-  NfcTagReadPayload,
-  NfcTagReadResult,
-  NfcTagWritePayload,
-  NfcTagWriteResult,
-  QrScanResultPayload,
-} from '../proto/dsm_app_pb';
+import { BiometricAuthorizePayload, BiometricAuthorizeResult, HostPermissionsRequestPayload, NativeHostAck, NativeHostCapabilities, NativeHostEvent, NativeHostEventKind, NativeHostRequest, NativeHostRequestKind, NativeHostResponse, NfcTagReadPayload, NfcTagReadResult, NfcTagWritePayload, NfcTagWriteResult, QrScanResultPayload } from '../proto/dsm_app_pb';
 
 function mustBridge(): AndroidBridgeV3 {
   const bridge = getBridgeInstance();
@@ -42,46 +23,20 @@ function normalizeToBytes(data: unknown): Uint8Array {
   throw new Error('expected Uint8Array response from native host boundary');
 }
 
-function buildBridgeRequest(method: string, payload: Uint8Array): Uint8Array {
-  const req = new BridgeRpcRequest({
-    method,
-    payload:
-      payload.length > 0
-        ? { case: 'bytes', value: new BytesPayload({ data: new Uint8Array(payload) }) }
-        : { case: 'empty', value: new EmptyPayload({}) },
-  });
-  return req.toBinary();
-}
-
-function unwrapBridgeRpcResponse(method: string, responseBytes: Uint8Array): Uint8Array {
-  const response = BridgeRpcResponse.fromBinary(responseBytes);
-  if (response.result.case === 'success') {
-    const data = response.result.value?.data;
-    return data instanceof Uint8Array ? data : new Uint8Array(0);
-  }
-  if (response.result.case === 'error') {
-    const message = response.result.value?.message || `bridge error while calling ${method}`;
-    throw new Error(message);
-  }
-  throw new Error(`empty bridge response for ${method}`);
-}
-
 async function callHostMethod(payload: Uint8Array): Promise<Uint8Array> {
+  // `hostRequest` is the bridge object's own wrapper over the MessagePort
+  // (`index.html`); it answers the host's bytes or throws.
   const bridge = mustBridge();
-  if (typeof bridge.hostRequest === 'function') {
+  if (typeof bridge.hostRequest !== 'function') {
+    throw new Error('DSM bridge does not expose nativeHostRequest');
+  }
+  try {
     return normalizeToBytes(await bridge.hostRequest(payload));
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    bridgeEvents.emit('bridge.error', { code: 0, message, debugB32: '' });
+    throw e;
   }
-
-  const requestBytes = buildBridgeRequest('nativeHostRequest', payload);
-  if (typeof bridge.__callBin === 'function') {
-    const responseBytes = await bridge.__callBin(requestBytes);
-    return unwrapBridgeRpcResponse('nativeHostRequest', normalizeToBytes(responseBytes));
-  }
-  if (bridge.__binary === true && typeof bridge.sendMessageBin === 'function') {
-    const responseBytes = await bridge.sendMessageBin(requestBytes);
-    return unwrapBridgeRpcResponse('nativeHostRequest', normalizeToBytes(responseBytes));
-  }
-  throw new Error('DSM bridge does not expose the native host boundary transport');
 }
 
 function encodeRequest(request: NativeHostRequest | Uint8Array): Uint8Array {
@@ -104,11 +59,7 @@ function unwrapHostResponse(responseBytes: Uint8Array): Uint8Array {
 
 export function isNativeHostUnavailableError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
-  return (
-    error.message.includes('Unknown binary RPC method: nativeHostRequest') ||
-    error.message.includes('unhandled __callBin method') ||
-    error.message.includes('does not expose the native host boundary transport')
-  );
+  return error.message.includes('Unknown binary RPC method: nativeHostRequest');
 }
 
 export async function hostRequest(request: NativeHostRequest | Uint8Array): Promise<Uint8Array> {

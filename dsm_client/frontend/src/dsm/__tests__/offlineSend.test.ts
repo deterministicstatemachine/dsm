@@ -68,7 +68,7 @@ describe('offlineSend', () => {
     const to = new Uint8Array(32).fill(0x22);
     const commitmentHash = new Uint8Array(32).fill(0x99);
 
-    (global as any).window.DsmBridge.__callBin = async (reqBytes: Uint8Array) => {
+    (global as any).window.DsmBridge.sendMessageBin = async (reqBytes: Uint8Array) => {
       const { route, args } = decodeRouterInvoke(reqBytes);
       expect(route).toBe('wallet.sendOffline');
       const argPack = pb.ArgPack.fromBinary(args);
@@ -98,7 +98,7 @@ describe('offlineSend', () => {
     const bleAddress = 'AA:BB:CC:DD:EE:FF';
     const commitmentHash = new Uint8Array(32).fill(0x55);
 
-    (global as any).window.DsmBridge.__callBin = async (reqBytes: Uint8Array) => {
+    (global as any).window.DsmBridge.sendMessageBin = async (reqBytes: Uint8Array) => {
       const { route, args } = decodeRouterInvoke(reqBytes);
       expect(route).toBe('wallet.sendOffline');
       const request = pb.BilateralPrepareRequest.fromBinary(pb.ArgPack.fromBinary(args).body);
@@ -122,7 +122,7 @@ describe('offlineSend', () => {
   test('surfaces bilateral prepare rejects from wallet.sendOffline', async () => {
     const to = new Uint8Array(32).fill(0x44);
 
-    (global as any).window.DsmBridge.__callBin = async (reqBytes: Uint8Array) => {
+    (global as any).window.DsmBridge.sendMessageBin = async (reqBytes: Uint8Array) => {
       const { route } = decodeRouterInvoke(reqBytes);
       expect(route).toBe('wallet.sendOffline');
       const env = new pb.Envelope({

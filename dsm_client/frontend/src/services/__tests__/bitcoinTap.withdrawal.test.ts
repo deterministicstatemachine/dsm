@@ -39,7 +39,7 @@ describe('bitcoinTap withdrawal planner service', () => {
     framedEnv.set(envBytes, 1);
 
     (global as any).window.DsmBridge = {
-      __callBin: async (reqBytes: Uint8Array): Promise<Uint8Array> => {
+      sendMessageBin: async (reqBytes: Uint8Array): Promise<Uint8Array> => {
         capturedReqBytes = new Uint8Array(reqBytes);
         return (global as any).createDsmBridgeSuccessResponse(
           new IngressResponse({
@@ -97,7 +97,7 @@ describe('bitcoinTap withdrawal planner service', () => {
     framedEnv.set(envBytes, 1);
 
     (global as any).window.DsmBridge = {
-      __callBin: async (reqBytes: Uint8Array): Promise<Uint8Array> => {
+      sendMessageBin: async (reqBytes: Uint8Array): Promise<Uint8Array> => {
         capturedReqBytes = new Uint8Array(reqBytes);
         return (global as any).createDsmBridgeSuccessResponse(
           new IngressResponse({

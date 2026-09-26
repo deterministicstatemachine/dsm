@@ -38,8 +38,8 @@ describe('getAllBalancesStrictBridge', () => {
     // Mock the native bridge to return the framed data wrapped in BridgeRpcResponse
     (globalThis as any).window = (globalThis as any).window || {};
     (globalThis as any).window.DsmBridge = {
-      // presence of __callBin signals BridgeGate to not block in tests
-      __callBin: async (reqBytes: Uint8Array) => {
+      // The test bridge speaks the production interface; setupTests completes it.
+      sendMessageBin: async (reqBytes: Uint8Array) => {
         const pb = require('../../proto/dsm_app_pb');
         const req = pb.BridgeRpcRequest.fromBinary(reqBytes);
         // Expect the dedicated strict balance RPC, not the shared ingress router path
