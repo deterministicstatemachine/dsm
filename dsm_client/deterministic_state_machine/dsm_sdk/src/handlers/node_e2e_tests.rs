@@ -30,6 +30,7 @@ use serial_test::serial;
 
 use crate::bridge::{AppInvoke, AppQuery, AppResult, AppRouter as _};
 use crate::economic_fixtures::NETWORK;
+use crate::sdk::sofi_advance::{complete_pending_fulfillment, Completion, NotTaken};
 use crate::sdk::sofi_exercise::{attempt_cell, write_exercise};
 use crate::sdk::sofi_reads::{local_leaves_of_validated, VerifierContext};
 use crate::sdk::sofi_register::position_cells;
@@ -741,15 +742,28 @@ async fn an_unsigned_exercise_at_a_successor_key_takes_nothing() {
     head_agrees_with_admitted_root(&p.b, &[m.era, m.tkn]);
 }
 
+/// B's own completion of its pending position, stages 7 and 8 from what
+/// storage holds: what the network took, or what it did not.
+async fn complete(p: &Pair) -> Completion {
+    let set = canonical_set(NETWORK).expect("the pinned set");
+    p.b.enter();
+    complete_pending_fulfillment(&p.b.router().core_sdk, &set)
+        .await
+        .expect("a stage the network did not take is its status, not an error")
+}
+
 /// SoFi Amendment S7 and storage §3, §6: a trade cut short by a member's
 /// failed write is the network status until the write can land, and nothing
 /// negative is recorded meanwhile. The position pair's leader refuses the
 /// pair when B trades: the head advances and the install cannot reach the
-/// leader, so the trade fails on the network with the position fenced. When
-/// that store takes writes again and the first leg's key is refused at its
-/// own leader, completion carries what it can and the reads find no
-/// exercise: `RetriesExhausted`, with the position still pending and no
-/// balance moved. When every write lands, the position realizes.
+/// leader, so the trade is `RetriesExhausted` at its position — fenced,
+/// nothing admitted, no balance moved — and completion names the pair's
+/// leader as what the network did not take. When that store takes writes
+/// again and the first leg's key is refused at its own leader, completion
+/// names that leg and the reads find no exercise: `RetriesExhausted`, still
+/// pending, nothing moved. When every write lands, completion is written and
+/// the position realizes. A resolve with nothing pending is refused: an
+/// error, never the network status.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn a_trade_cut_short_by_a_refused_write_is_the_network_status_until_it_lands() {
@@ -781,8 +795,8 @@ async fn a_trade_cut_short_by_a_refused_write_is_the_network_status_until_it_lan
         attempt_cell(&set, &m.vault_id, &chain.roots()[0], 0).expect("the first attempt key");
     let attempt_leader = member_name(attempt.routed().route().leader());
 
-    // 1. The pair's leader refuses the pair: the trade fails on the network,
-    // fenced.
+    // 1. The pair's leader refuses the pair: the trade is the network status
+    // at q, fenced, and completion names the pair's leader.
     p.nodes
         .refuse_cell_writes(
             &pair_leader,
@@ -790,28 +804,41 @@ async fn a_trade_cut_short_by_a_refused_write_is_the_network_status_until_it_lan
         )
         .await;
     let r = invoke(&p.b, "sofi.trade", args(&trade_request(&m, 10))).await;
-    assert!(
-        !r.success,
-        "the trade went through without the pair's leader"
-    );
-    assert_eq!(pending_position(&p.b), Some(q), "{:?}", r.error_message);
+    assert_eq!(position_of(&r, "sofi.trade"), (q, exhausted));
+    assert_eq!(pending_position(&p.b), Some(q));
     assert_eq!(admitted_position(&p.b), position);
     assert_eq!(balance(&p.b, &m.era), 200);
+    assert_eq!(
+        complete(&p).await,
+        Completion::NotTaken {
+            position: q,
+            why: NotTaken::PairLeaderUnreached
+        }
+    );
 
     // 2. The pair lands and the first leg's key is refused at its leader:
-    // the network status, recording nothing.
+    // completion names the leg, and the reads find no exercise — the
+    // network status, recording nothing.
     p.nodes.accept_cell_writes(&pair_leader).await;
     p.nodes
         .refuse_cell_writes(&attempt_leader, &[*attempt.routed().key()])
         .await;
+    assert_eq!(
+        complete(&p).await,
+        Completion::NotTaken {
+            position: q,
+            why: NotTaken::LegLeaderUnreached(vec![m.vault_id])
+        }
+    );
     assert_eq!(resolve(&p).await, (q, exhausted));
     assert_eq!(pending_position(&p.b), Some(q));
     assert_eq!(admitted_position(&p.b), position);
     assert_eq!(balance(&p.b, &m.era), 200);
     assert_eq!(balance(&p.b, &m.tkn), 0);
 
-    // 3. Every write lands: the position realizes.
+    // 3. Every write lands: completion is written and the position realizes.
     p.nodes.accept_cell_writes(&attempt_leader).await;
+    assert!(matches!(complete(&p).await, Completion::Written(..)));
     assert_eq!(resolve(&p).await, (q, realized));
     assert_eq!(pending_position(&p.b), None);
     assert_eq!(admitted_position(&p.b), q);
@@ -820,4 +847,60 @@ async fn a_trade_cut_short_by_a_refused_write_is_the_network_status_until_it_lan
     assert_eq!(balance(&p.b, &m.era), 190);
     assert_eq!(balance(&p.b, &m.tkn), out);
     head_agrees_with_admitted_root(&p.b, &[m.era, m.tkn]);
+
+    // 4. Nothing pending: a resolve is refused, not reported as the network
+    // status of a position.
+    let r = invoke(
+        &p.b,
+        "sofi.resolve",
+        args(&generated::SofiResolveRequest {}),
+    )
+    .await;
+    assert!(
+        !r.success,
+        "a resolve with nothing pending answered {:?}",
+        r.data
+    );
+}
+
+/// SoFi §30 and storage §4: a route search that cannot establish the head of
+/// a vault this device is set up with is an error, not a search that found no
+/// route. B, set up with A's vault, is quoted one hop ERA→TKN at the vault's
+/// head; with the fleet below quorum the head cannot be established and the
+/// search is refused rather than answered empty; with the fleet back, the one
+/// hop again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_route_search_that_cannot_see_a_vault_is_an_error_not_an_empty_route() {
+    let mut p = Pair::boot(500, 200).await;
+    let m = open_market(&p).await;
+    let request = generated::SofiFindRouteRequest {
+        token_in_policy_commit: m.era.to_vec(),
+        token_out_policy_commit: m.tkn.to_vec(),
+        amount_in: 10,
+    };
+    let hops = |r: &AppResult| match payload(r) {
+        Payload::SofiFindRouteResponse(r) => r.hops,
+        other => panic!("sofi.findRoute answered {other:?}"),
+    };
+    let out = dsm::dlv::route_commit::constant_product_output(10, 100, 1_000, 30)
+        .expect("the vault prices the hop");
+    let route = hops(&invoke(&p.b, "sofi.findRoute", args(&request)).await);
+    assert_eq!(route.len(), 1, "one hop through A's vault");
+    assert_eq!(route[0].vault_id, m.vault_id.to_vec());
+    assert_eq!((route[0].amount_in, route[0].amount_out), (10, out));
+
+    let down = crate::economic_fixtures::members_to_break_quorum();
+    p.nodes.take_down(&down).await;
+    let refused = invoke(&p.b, "sofi.findRoute", args(&request)).await;
+    assert!(
+        !refused.success,
+        "a search that could not see the vault answered {:?}",
+        refused.data
+    );
+
+    p.nodes.bring_up(&down).await;
+    let route = hops(&invoke(&p.b, "sofi.findRoute", args(&request)).await);
+    assert_eq!(route.len(), 1, "the hop is found again");
+    assert_eq!(route[0].amount_out, out);
 }

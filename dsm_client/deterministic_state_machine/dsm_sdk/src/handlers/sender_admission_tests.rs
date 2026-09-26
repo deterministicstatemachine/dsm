@@ -168,6 +168,7 @@ async fn a_stale_admission_snapshot_is_refused_not_committed() {
         &op,
         dsm::economic::write_set::CreditSourceFacts::None,
         Vec::new(),
+        None,
     )
     .await
     .expect("stage at position 2");
@@ -828,4 +829,89 @@ async fn a_failed_finish_holds_the_outbox_and_resume_completes_the_same_admissio
     let applied = p.b.sync().await;
     assert!(applied.success, "{:?}", applied.errors);
     assert_eq!(p.b.era_balance(), 10, "B received the held transfer once");
+}
+
+/// A vault genesis names the position of the creation that carries it: the
+/// successor of the predecessor the creation was built on. A creation built
+/// on a predecessor the device no longer stands on — here a held token
+/// creation that staging resumes on its way in, moving the predecessor — is
+/// refused BEFORE its advance: nothing is admitted at a position the genesis
+/// does not name, the head carries nothing pending, and the same creation
+/// built again on the current predecessor is admitted at the position its new
+/// genesis names.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_creation_built_on_a_predecessor_the_device_no_longer_stands_on_is_refused_before_its_advance(
+) {
+    let mut d = Device::funded(0xCA).await;
+    let down = economic_fixtures::members_to_break_quorum();
+
+    // A token creation held behind its pending admission at position 2.
+    d.nodes.take_down(&down).await;
+    let held = invoke(&d.router, "token.create", &create_request("HELD", 0, 300)).await;
+    assert!(
+        !held.success,
+        "a creation that cannot be admitted must not report success"
+    );
+    assert!(
+        economic_fixtures::pending_state(&d.router).is_some(),
+        "the creation is held behind its pending admission"
+    );
+    assert_eq!(admitted_position(), 1);
+    d.nodes.bring_up(&down).await;
+
+    let held_token = client_db::token_registry::get_token_by_ticker("HELD")
+        .expect("registry read")
+        .expect("the held creation registered HELD")
+        .policy_commit;
+    let (token_a, token_b, reserve_a, reserve_b) = if era() < held_token {
+        (era(), held_token, 10, 100)
+    } else {
+        (held_token, era(), 100, 10)
+    };
+    let request = crate::generated::SofiCreateVaultRequest {
+        token_a_policy_commit: token_a.to_vec(),
+        token_b_policy_commit: token_b.to_vec(),
+        reserve_a,
+        reserve_b,
+        fee_bps: 30,
+    };
+
+    // Built on position 1, the admitted predecessor when the genesis was
+    // made; staging resumes the held creation first, so the device stands
+    // on position 2 by the time the vault creation would advance.
+    let refused = invoke(&d.router, "sofi.createVault", &request).await;
+    assert!(
+        !refused.success,
+        "a creation whose genesis names a position the device is past went through: {:?}",
+        refused.data
+    );
+    let message = refused.error_message.unwrap_or_default();
+    assert!(
+        message.contains("built on position 1") && message.contains("stands on is position 2"),
+        "refused for another reason: {message}"
+    );
+    assert_eq!(
+        admitted_position(),
+        2,
+        "the held creation resumed and nothing else was admitted"
+    );
+    assert!(
+        d.core()
+            .device_head()
+            .expect("head")
+            .pending_economic_admission()
+            .is_none(),
+        "the refused creation left nothing pending"
+    );
+
+    // Built again on position 2: admitted at 3, the position its genesis names.
+    let created = invoke(&d.router, "sofi.createVault", &request).await;
+    match payload(&created) {
+        crate::generated::envelope::Payload::SofiVaultCreatedResponse(v) => {
+            assert_eq!(v.position, 3)
+        }
+        other => panic!("sofi.createVault answered {other:?}"),
+    }
+    assert_eq!(admitted_position(), 3);
 }

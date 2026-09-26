@@ -457,16 +457,57 @@ pub(crate) struct StagedAdmission {
     pub prepared: PendingEconomicAdmission,
 }
 
+/// The predecessor an operation's published object was built on and names —
+/// a vault genesis its `create_position`, a setup the validated root it is
+/// built against. The admission is refused before anything is written unless
+/// the staged predecessor is exactly it: a pending admission resumed on the
+/// way in, or any other advance since the object was built, moves the
+/// predecessor, and an object admitted at a position other than the one it
+/// names would stand in the lineage naming a position it does not hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BuiltOn {
+    pub position: u64,
+    pub root: [u8; 32],
+}
+
+impl BuiltOn {
+    pub(crate) fn of(validated: &ValidatedEconomicRoot) -> Self {
+        Self {
+            position: validated.economic_position(),
+            root: validated.economic_root(),
+        }
+    }
+
+    /// Refuse unless `validated` is the predecessor the object was built on.
+    fn admits(&self, validated: &ValidatedEconomicRoot) -> Result<(), DsmError> {
+        let staged = Self::of(validated);
+        if staged == *self {
+            return Ok(());
+        }
+        Err(DsmError::invalid_operation(format!(
+            "the operation was built on position {} at root {}; the predecessor this device \
+             stands on is position {} at root {} — build it again on that",
+            self.position,
+            crate::util::text_id::encode_base32_crockford(&self.root),
+            staged.position,
+            crate::util::text_id::encode_base32_crockford(&staged.root),
+        )))
+    }
+}
+
 /// Resolve the admitted predecessor, derive the producer tree and balances from
 /// it, and prepare the successor coordinate this admission will CAS against.
 ///
 /// Any pending admission is resumed first, so the caller always stages against
-/// a settled predecessor.
+/// a settled predecessor. An operation whose published object names the
+/// predecessor it was built on (`built_on`) is refused here, before anything
+/// is written, when that is not the predecessor staged.
 pub(crate) async fn stage_admission(
     core: &CoreSDK,
     operation: &Operation,
     facts: CreditSourceFacts,
     extra_artifacts: Vec<(String, Vec<u8>, &'static str)>,
+    built_on: Option<BuiltOn>,
 ) -> Result<StagedAdmission, DsmError> {
     let network_id = committed_network_id()?;
     if let Some(pending) = core
@@ -482,6 +523,9 @@ pub(crate) async fn stage_admission(
     let devid = head.devid();
     let set = canonical_set(&network_id)?;
     let validated = validated_root_or_activate(core)?;
+    if let Some(built_on) = built_on {
+        built_on.admits(&validated)?;
+    }
     let (tree, pre_state) = producer_tree_and_pre_state(&validated)?;
     let authority = authority_material(&network_id, &genesis)?;
     let target_position = validated.economic_position() + 1;
@@ -520,7 +564,9 @@ pub(crate) async fn stage_admission(
 /// transaction as the advance and the pending admission, so the crash
 /// invariant holds: either the operation never became locally accepted, or
 /// the operation, its pending admission and its exact evidence bytes all
-/// exist durably.
+/// exist durably. `built_on` is the predecessor the operation's published
+/// object names, when it names one: [`stage_admission`] refuses before the
+/// advance unless the staged predecessor is exactly it.
 pub(crate) async fn admitted_self_loop_operation(
     core: &CoreSDK,
     operation: Operation,
@@ -534,6 +580,7 @@ pub(crate) async fn admitted_self_loop_operation(
         ) -> Result<(), DsmError>
               + Sync),
     >,
+    built_on: Option<BuiltOn>,
 ) -> Result<(dsm::types::device_state::AdvanceOutcome, AdmittedOutcome), DsmError> {
     let StagedAdmission {
         network_id,
@@ -548,7 +595,7 @@ pub(crate) async fn admitted_self_loop_operation(
         extra_artifacts,
         prepared,
         ..
-    } = stage_admission(core, &operation, facts, extra_artifacts).await?;
+    } = stage_admission(core, &operation, facts, extra_artifacts, built_on).await?;
     let mut built: Option<DsmAdmissionParts> = None;
     let (outcome, pending) = core.admitted_advance(
         operation.clone(),
