@@ -44,7 +44,7 @@ describe('wallet.ts', () => {
           case: 'balancesListResponse',
           value: new pb.BalancesListResponse({
             balances: [
-              new pb.BalanceGetResponse({ tokenId: 'ERA', available: 1000n, symbol: 'ERA', decimals: 0, tokenName: 'ERA', displayAmount: '1000' }),
+              new pb.BalanceGetResponse({ tokenId: 'ERA', available: 1000n, symbol: 'ERA', decimals: 0, tokenName: 'ERA', displayAmount: '1000', protocolDefined: true }),
               new pb.BalanceGetResponse({
                 tokenId: 'RIGB',
                 available: 100000n,
@@ -56,6 +56,9 @@ describe('wallet.ts', () => {
                 policyAnchorB32: 'ANCH0R',
                 anchorFingerprint: 'ANCH',
                 iconUrl: 'dsm:coin:v1:ABC',
+                protocolDefined: false,
+                genesisSupplyDisplay: '1000.00',
+                permissions: { burnEnabled: true, transferable: false },
               }),
             ],
           }),
@@ -77,6 +80,11 @@ describe('wallet.ts', () => {
           policyAnchorB32: undefined,
           anchorFingerprint: undefined,
           iconUrl: undefined,
+          // A protocol asset on Rust's word; it states no supply here and no
+          // permissions, and neither is filled in.
+          protocolDefined: true,
+          genesisSupplyDisplay: undefined,
+          permissions: undefined,
         },
         {
           tokenId: 'RIGB',
@@ -89,6 +97,9 @@ describe('wallet.ts', () => {
           policyAnchorB32: 'ANCH0R',
           anchorFingerprint: 'ANCH',
           iconUrl: 'dsm:coin:v1:ABC',
+          protocolDefined: false,
+          genesisSupplyDisplay: '1000.00',
+          permissions: { burnEnabled: true, transferable: false },
         },
       ]);
     });
@@ -121,6 +132,13 @@ describe('wallet.ts', () => {
         answer(new pb.BalanceGetResponse({ tokenId: 'RIGB', available: 5n, symbol: 'RIGB', tokenName: 'RIGB' })),
       );
       await expect(getAllBalances()).rejects.toThrow(/STRICT.*RIGB without its display_amount/);
+
+      // A created token without its policy's facts: Rust reads them from the
+      // committed bytes or refuses the row, so their absence is not a row.
+      (getAllBalancesStrictBridge as jest.Mock).mockResolvedValue(
+        answer(new pb.BalanceGetResponse({ tokenId: 'RIGB', available: 5n, symbol: 'RIGB', tokenName: 'RIGB', displayAmount: '5' })),
+      );
+      await expect(getAllBalances()).rejects.toThrow(/STRICT.*created token RIGB without its policy facts/);
     });
 
     test('throws on error envelope', async () => {

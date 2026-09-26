@@ -31,33 +31,13 @@ export interface TokenBalance {
   anchorFingerprint?: string;
   /** The token policy's icon field, carried from Rust; the row draws the token's coin from it. */
   iconUrl?: string;
+  /** Whether Rust reports the token as one the protocol defines. Never decided here from the ticker. */
+  protocolDefined: boolean;
+  /** The whole supply that will ever exist, rendered by Rust; absent when Rust holds none. */
+  genesisSupplyDisplay?: string;
+  /** What the committed policy permits, as Rust read it; absent when Rust holds no policy for the token. */
+  permissions?: { burnEnabled: boolean; transferable: boolean };
 }
-
-
-interface CptaInfo {
-  cptaType: string;
-  anchorId: string;
-  anchor: string;
-  maxSupply: string;
-  supplyLabel: string;
-}
-
-const CPTA_INFO: Record<string, CptaInfo> = {
-  ERA: {
-    cptaType: 'DJTE EMISSION TOKEN',
-    anchorId: 'PROTOCOL-DEFINED',
-    anchor: 'BLAKE3("DSM/cpta\\0" || djte_emission_genesis)\nDeterministic Join-Triggered Emission. ERA has an 80 billion total supply.',
-    maxSupply: '80,000,000,000',
-    supplyLabel: 'Total Supply',
-  },
-  DBTC: {
-    cptaType: 'BITCOIN TAP TOKEN',
-    anchorId: 'PROTOCOL-DEFINED',
-    anchor: 'BLAKE3("DSM/cpta\\0" || bitcoin_tap_genesis)\nMint/burn BTC tap asset. dBTC tracks the net BTC tapped into DSM; there is no fixed protocol cap. Fractional exits and possession transfers stay supported.',
-    maxSupply: 'Variable \u2014 net BTC tapped into DSM',
-    supplyLabel: 'Supply Model',
-  },
-};
 
 const SUPPLY_BTN: React.CSSProperties = {
   flex: 1,
@@ -85,9 +65,10 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
   const [expandedToken, setExpandedToken] = useState<string | null>(null);
   const faucetEnabled = !!isInitialized || !!(window as any).DsmBridge;
 
-  // Token creation and supply control. ERA and dBTC are protocol-defined, so
-  // they are described by CPTA_INFO and offer no supply controls; anything else
-  // in this list was created or adopted by this device and carries its own policy.
+  // Token creation and supply control. Rust reports which tokens the protocol
+  // defines; those offer no supply controls. Anything else in this list was
+  // created or adopted by this device and carries its own committed policy,
+  // whose facts Rust reports on the row.
   const [creating, setCreating] = useState(false);
   /// Adding a token created elsewhere, by its CPTA anchor. A device cannot
   /// hold a token whose policy it does not have, so this is the step between
@@ -103,13 +84,8 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
   const [amount, setAmount] = useState('');
   const [busy, setBusy] = useState(false);
 
-  const isProtocolToken = useCallback(
-    (b: TokenBalance) =>
-      Boolean(
-        CPTA_INFO[b.tokenId.toUpperCase()] || CPTA_INFO[b.symbol.toUpperCase()],
-      ),
-    [],
-  );
+  // Rust's word, never the ticker's: a created token may read "ERA".
+  const isProtocolToken = useCallback((b: TokenBalance) => b.protocolDefined, []);
 
   const hasBalances = useMemo(() => balances.length > 0, [balances]);
 
@@ -137,6 +113,10 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
         policyAnchorB32: b.policyAnchorB32,
         anchorFingerprint: b.anchorFingerprint,
         iconUrl: b.iconUrl,
+        // What the token is and what its policy fixes and permits, as Rust reports them.
+        protocolDefined: b.protocolDefined,
+        genesisSupplyDisplay: b.genesisSupplyDisplay,
+        permissions: b.permissions,
       }));
       setBalances(list);
       return list;
@@ -563,13 +543,16 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
               ) : (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 0, width: '100%' }}>
                   {balances.map((balance, bIdx) => {
+                    // The protocol's own artwork is for the protocol's own
+                    // assets: which one is Rust's word plus the ticker, so a
+                    // created token whose ticker contains "btc" draws its coin.
                     const sym = balance.symbol.toLowerCase();
-                    const isBtc = sym.includes('btc') || sym.includes('dbtc');
+                    const isBtc = balance.protocolDefined && sym === 'dbtc';
+                    const isEra = balance.protocolDefined && sym === 'era';
                     const logoSrc = isBtc ? btcLogoSrc : eraTokenSrc;
                     const logoAlt = isBtc ? 'BTC' : 'ERA';
                     const isFocused = focusedIndex === 2 + createOffset + bIdx;
                     const isExpanded = expandedToken === balance.tokenId;
-                    const cpta = CPTA_INFO[balance.tokenId.toUpperCase()] || CPTA_INFO[balance.symbol.toUpperCase()];
                     const isZero = balance.baseUnits === 0n;
                     return (
                     <div
@@ -609,7 +592,7 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
                           textTransform: 'uppercase',
                           letterSpacing: 0.2,
                         }}>
-                          {isBtc || sym === 'era' ? (
+                          {isBtc || isEra ? (
                             <img
                               src={logoSrc}
                               alt={logoAlt}
@@ -642,8 +625,10 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
                           </span>
                         </span>
                       </div>
-                      {/* Expanded CPTA panel — dark bg */}
-                      {isExpanded && cpta && (
+                      {/* Expanded policy panel — dark bg. Every line is a fact
+                          Rust reports on the row; a line Rust does not report
+                          is not drawn. */}
+                      {isExpanded && (
                         <div style={{ borderTop: '1px solid rgba(var(--bg-rgb),0.14)' }}>
                           <div style={{
                             padding: '6px 10px 4px',
@@ -657,11 +642,17 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
                           </div>
                           {([
                             ['Your Balance', `${balance.balance} ${balance.symbol}`],
-                            ['CPTA Type', cpta.cptaType],
-                            // As Rust reports them for this token.
+                            ['Defined By', balance.protocolDefined ? 'the protocol' : 'its creator’s committed policy'],
                             ['Decimals', String(balance.decimals)],
-                            [cpta.supplyLabel, cpta.maxSupply],
-                            ['Anchor ID', cpta.anchorId],
+                            ...(balance.genesisSupplyDisplay
+                              ? [['Total Supply', `${balance.genesisSupplyDisplay} ${balance.symbol}`]]
+                              : []),
+                            ...(balance.permissions
+                              ? [
+                                  ['Burn', balance.permissions.burnEnabled ? 'permitted' : 'not permitted'],
+                                  ['Transfer', balance.permissions.transferable ? 'permitted' : 'not permitted'],
+                                ]
+                              : []),
                           ] as [string, string][]).map(([label, value]) => (
                             <div key={label} style={{
                               display: 'flex',
@@ -695,16 +686,6 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
                               </span>
                             </div>
                           ))}
-                          <div style={{
-                            padding: '6px 10px 8px',
-                            fontSize: 7,
-                            lineHeight: 1.5,
-                            opacity: 0.72,
-                            whiteSpace: 'pre-wrap',
-                            wordBreak: 'break-word',
-                          }}>
-                            {cpta.anchor}
-                          </div>
                         </div>
                       )}
 
@@ -778,13 +759,18 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
                             </>
                           ) : (
                             <div style={{ display: 'flex', gap: 8 }}>
-                              <button
-                                type="button"
-                                onClick={() => { setSupplyAction({ tokenId: balance.tokenId, kind: 'burn' }); setAmount(''); }}
-                                style={SUPPLY_BTN}
-                              >
-                                BURN
-                              </button>
+                              {/* Offered only where the committed policy
+                                  permits burning, as Rust read it; Rust
+                                  enforces the policy either way. */}
+                              {balance.permissions?.burnEnabled && (
+                                <button
+                                  type="button"
+                                  onClick={() => { setSupplyAction({ tokenId: balance.tokenId, kind: 'burn' }); setAmount(''); }}
+                                  style={SUPPLY_BTN}
+                                >
+                                  BURN
+                                </button>
+                              )}
                               {/* Dropping the identity, not the asset. A ticker
                                   names one token, so a superseded token blocks
                                   its own ticker until it is forgotten. Rust
