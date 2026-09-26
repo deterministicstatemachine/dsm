@@ -480,6 +480,17 @@ jobs:
         working-directory: .
         run: bash ci/bridge_contracts_gate.sh
 
+      # The flow gates and the scan read frontend files too. They also run in
+      # `rust-gates`, which a frontend-only change never selects: #1003 deleted
+      # two uncalled frontend functions the flow gates named, its frontend
+      # changes were never checked against them, and main went red.
+      - name: Flow and scan gates
+        working-directory: .
+        run: |
+          bash scripts/flow_assertions.sh
+          bash scripts/flow_mapping_assertions.sh
+          bash scripts/ci_scan.sh
+
       - name: Lint
         run: npm run lint
 
