@@ -286,16 +286,6 @@ export function initializeEventBridge(): void {
         return;
       }
 
-      if (topic === 'bluetooth-permissions') {
-        // Payload: [0x01] = granted, [0x00] = denied
-        try {
-          const granted = bytes.length > 0 && bytes[0] === 0x01;
-          window.dispatchEvent(new CustomEvent('bluetooth-permissions', { detail: { granted } }));
-        } catch {}
-        emit(topic, bytes);
-        return;
-      }
-
       if (topic === 'ble-dev-automation') {
         // Payload: UTF-8 "ok:advertising=true,scanning=true" or "error:reason"
         try {

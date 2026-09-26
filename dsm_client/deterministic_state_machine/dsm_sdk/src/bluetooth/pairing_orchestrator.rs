@@ -1115,9 +1115,12 @@ impl PairingOrchestrator {
         Ok(())
     }
 
-    /// Stop BLE scan and advertise via JNI.
+    /// Stop the scan pairing started, via JNI.
     /// Called when the pairing loop exits to prevent lingering radio activity
-    /// that causes "stuck scanning" after pairing completes.
+    /// that causes "stuck scanning" after pairing completes. Advertising is not
+    /// pairing's to stop: it follows the device's identity (the Android BLE
+    /// service owns it), and a device that stopped advertising here could not
+    /// be found for an offline transfer by the contact it had just paired with.
     #[cfg(all(target_os = "android", feature = "jni"))]
     async fn stop_ble_discovery(&self) -> Result<(), String> {
         use crate::jni::jni_common::{find_class_with_app_loader, get_java_vm_borrowed};
@@ -1131,11 +1134,9 @@ impl PairingOrchestrator {
         let class = find_class_with_app_loader(&mut env, "com/dsm/wallet/bridge/Unified")
             .map_err(|e| format!("Failed to find Unified class: {e:?}"))?;
 
-        // Stop both scan and advertise — we don't know which role we were playing
         let _ = env.call_static_method(&class, "stopBlePairingScan", "()Z", &[]);
-        let _ = env.call_static_method(&class, "stopBlePairingAdvertise", "()Z", &[]);
 
-        log::info!("[PairingOrchestrator] stop_ble_discovery: stopped scan and advertise");
+        log::info!("[PairingOrchestrator] stop_ble_discovery: stopped scan");
         Ok(())
     }
 

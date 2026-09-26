@@ -209,13 +209,6 @@ object Unified {
         return UnifiedBleBridge.stopBlePairingScan()
     }
 
-    /**
-     * Stop BLE advertising. Called by Rust pairing loop on exit to prevent lingering advertise.
-     */
-    @Keep @JvmStatic fun stopBlePairingAdvertise(): Boolean {
-        return UnifiedBleBridge.stopBlePairingAdvertise()
-    }
-
     // ---------- Event notifications ----------
     @Keep @JvmStatic fun bleNotifyConnectionState(address: String, connected: Boolean) {
         UnifiedNativeApi.bleNotifyConnectionState(address, connected)

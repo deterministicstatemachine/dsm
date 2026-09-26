@@ -1,15 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
-// BLE-related transport: pairing orchestrator, advertising, scanning, identity
-// injection, and bilateral offline send.
+// BLE-related bridge calls the screens make: permissions, Bluetooth settings,
+// the pairing loop, and the peer relationship read. When the radio advertises
+// and scans is native policy; nothing here starts or stops it.
 
 import { bridgeGate } from "../BridgeGate";
-import { BleIdentityPayload } from "../../proto/dsm_app_pb";
-import {
-  startBleAdvertisingHost,
-  startBleScanHost,
-  stopBleAdvertisingHost,
-  stopBleScanHost,
-} from "../NativeHostBridge";
 import { callBin } from "./transportCore";
 import { log } from "./log";
 
@@ -58,65 +52,4 @@ export async function readPeerRelationshipStatusBridge(bleAddress: string): Prom
   return bridgeGate.enqueue(() =>
     callBin("readPeerRelationshipStatus", new TextEncoder().encode(normalized))
   );
-}
-
-export async function startBleScanViaRouter(): Promise<void> {
-  await startBleScanHost();
-}
-
-export async function stopBleScanViaRouter(): Promise<void> {
-  await stopBleScanHost();
-}
-
-export async function startBleAdvertisingViaRouter(): Promise<{
-  success: boolean;
-  error?: { message?: string };
-}> {
-  try {
-    const ack = await startBleAdvertisingHost();
-    return { success: Boolean(ack.success) };
-  } catch (e) {
-    return {
-      success: false,
-      error: { message: e instanceof Error ? e.message : "device.ble.advertise.start failed" },
-    };
-  }
-}
-
-export async function stopBleAdvertisingViaRouter(): Promise<{
-  success: boolean;
-  error?: { message?: string };
-}> {
-  try {
-    const ack = await stopBleAdvertisingHost();
-    return { success: Boolean(ack.success) };
-  } catch (e) {
-    return {
-      success: false,
-      error: { message: e instanceof Error ? e.message : "device.ble.advertise.stop failed" },
-    };
-  }
-}
-
-/**
- * Inject genesis + device_id into native BLE layer to enable advertising after
- * genesis creation.
- */
-export async function setBleIdentityForAdvertising(
-  genesisHash: Uint8Array,
-  deviceId: Uint8Array
-): Promise<void> {
-  if (genesisHash.length !== 32) {
-    throw new Error("setBleIdentityForAdvertising: genesis_hash must be 32 bytes");
-  }
-  if (deviceId.length !== 32) {
-    throw new Error("setBleIdentityForAdvertising: device_id must be 32 bytes");
-  }
-
-  const req = new BleIdentityPayload({
-    genesisHash: new Uint8Array(genesisHash),
-    deviceId: new Uint8Array(deviceId),
-  });
-
-  await bridgeGate.enqueue(() => callBin("setBleIdentityForAdvertising", req.toBinary()));
 }

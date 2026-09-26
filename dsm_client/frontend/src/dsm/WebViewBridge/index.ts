@@ -39,12 +39,7 @@ export const {
   readPeerRelationshipStatusBridge,
   requestBlePermissions,
   resolveBleAddressForDeviceIdBridge,
-  setBleIdentityForAdvertising,
-  startBleAdvertisingViaRouter,
-  startBleScanViaRouter,
   startPairingAll,
-  stopBleAdvertisingViaRouter,
-  stopBleScanViaRouter,
   stopPairingAll,
 } = ble;
 

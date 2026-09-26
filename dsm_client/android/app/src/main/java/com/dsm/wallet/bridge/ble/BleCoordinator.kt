@@ -365,37 +365,6 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
     }
 
     /**
-     * Set local identity value for GATT server.
-     */
-    fun setIdentityValue(genesisHash: ByteArray, deviceId: ByteArray) {
-        runOperation(BleOpLane.LIFECYCLE) {
-            gattServer.setIdentityValue(genesisHash, deviceId)
-        }
-    }
-
-    /**
-     * Ensure BLE is ready to receive bilateral transfers: GATT server running
-     * and advertising active. Called by the frontend wallet screen lifecycle
-     * via the native host boundary, and also called internally by
-     * connectToDevice as a safety net.
-     */
-    fun ensureBleReady(): Boolean {
-        val gattReady = runOperationBool(BleOpLane.LIFECYCLE) {
-            if (!gattServer.isReady()) {
-                gattServer.ensureStarted()
-            }
-            gattServer.isReady()
-        }
-        // Delegate to the public advertising entry point so that
-        // permissions and error handling are consistent.
-        val advertisingReady = startAdvertising()
-        if (!advertisingReady) {
-            Log.w("BleCoordinator", "ensureBleReady: startAdvertising returned false")
-        }
-        return gattReady && advertisingReady
-    }
-
-    /**
      * Ensure GATT server is started.
      */
     fun ensureGattServerStarted(): Boolean {

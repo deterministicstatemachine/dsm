@@ -78,7 +78,6 @@ class GattServerHost(private val context: Context) {
     private val servicesReady = AtomicBoolean(false)
     private val serviceRegistrationInProgress = AtomicBoolean(false)
     @Volatile private var serviceReadyDeferred: CompletableDeferred<Boolean>? = null
-    @Volatile private var identityValue: ByteArray? = null
 
     // Write buffers for handling chunked writes
     private val pendingTxWriteBuffers = ConcurrentHashMap<String, ByteArray>()
@@ -128,7 +127,6 @@ class GattServerHost(private val context: Context) {
             val success = status == BluetoothGatt.GATT_SUCCESS
             if (success) {
                 servicesReady.set(true)
-                updateIdentityCharacteristic()
                 Log.i("GattServerHost", "GATT service registered via onServiceAdded callback")
             } else {
                 servicesReady.set(false)
@@ -343,16 +341,6 @@ class GattServerHost(private val context: Context) {
 
     fun isReady(): Boolean = gattServer.get() != null && servicesReady.get()
 
-    /** Non-suspend version: triggers service setup if needed but does not await the callback. */
-    fun ensureStartedNonBlocking() {
-        if (!BleCoordinator.getInstance(context).permissionsGate.hasConnectPermission()) return
-        if (gattServer.get() == null) openGattServer()
-        val server = gattServer.get() ?: return
-        if (!servicesReady.get() && !serviceRegistrationInProgress.get()) {
-            setupGattService(server)
-        }
-    }
-
     fun stop() {
         try {
             gattServer.get()?.close()
@@ -364,29 +352,6 @@ class GattServerHost(private val context: Context) {
         pendingTxWriteBuffers.clear()
         pendingPairingWriteBuffers.clear()
         Log.i("GattServerHost", "GATT server stopped")
-    }
-
-    fun getIdentityValue(): ByteArray? = identityValue?.clone()
-
-    fun setIdentityValue(genesisHash: ByteArray, deviceId: ByteArray) {
-        if (genesisHash.size != 32 || deviceId.size != 32) {
-            Log.w("GattServerHost", "Invalid identity value lengths")
-            return
-        }
-
-        // Encode identity as protobuf BleIdentityCharValue via Rust.
-        // Kotlin MUST NOT concatenate raw bytes — Rust is the canonical encoder.
-        val encoded = com.dsm.wallet.bridge.Unified.encodeIdentityCharValue(genesisHash, deviceId)
-        if (encoded.isEmpty()) {
-            Log.e("GattServerHost", "encodeIdentityCharValue returned empty — identity not set")
-            return
-        }
-        identityValue = encoded
-        Log.i("GattServerHost", "Identity value set (proto-encoded, ${identityValue?.size} bytes)")
-
-        // Trigger GATT server setup if needed (non-blocking — doesn't await callback)
-        ensureStartedNonBlocking()
-        updateIdentityCharacteristic()
     }
 
     /**
@@ -750,24 +715,12 @@ class GattServerHost(private val context: Context) {
         }
     }
 
-    private fun updateIdentityCharacteristic() {
-        val server = gattServer.get() ?: return
-        val service = server.getService(BleConstants.DSM_SERVICE_UUID_V2) ?: return
-        val identityChar = service.getCharacteristic(BleConstants.IDENTITY_UUID) ?: return
-
-        identityValue?.let { value ->
-            @Suppress("DEPRECATION")
-            identityChar.setValue(value)
-            Log.d("GattServerHost", "Identity characteristic updated")
-        }
-    }
-
     private fun handleIdentityRead(device: BluetoothDevice, requestId: Int, offset: Int) {
-        val value = identityValue
-        // Null identity (identity not yet published) and out-of-range offset are distinct
-        // error conditions requiring different GATT status codes so the client can distinguish them.
+        val value = localIdentityCharValue()
+        // No identity (pre-genesis) and an out-of-range offset are distinct error
+        // conditions with different GATT status codes, so the client can tell them apart.
         if (value == null) {
-            Log.w("GattServerHost", "Identity read for ${device.address}: identity not yet set")
+            Log.w("GattServerHost", "Identity read for ${device.address}: no local identity")
             try {
                 gattServer.get()?.sendResponse(device, requestId, BluetoothGatt.GATT_FAILURE, 0, null)
             } catch (e: SecurityException) {
@@ -811,6 +764,28 @@ class GattServerHost(private val context: Context) {
                 coordinator.callback?.onBlePermissionError("Bluetooth connection permission required")
             }
         }
+    }
+
+    /**
+     * The identity a peer reads, from Rust at the moment it asks: the device's
+     * own genesis and device id, encoded by Rust's canonical encoder. Nothing
+     * pushes it here — the frontend used to hand these bytes to the BLE layer,
+     * and a value set by a caller can be stale, or not the device's at all.
+     * Encoding is deterministic, so a long read's chunks agree.
+     */
+    private fun localIdentityCharValue(): ByteArray? = try {
+        val genesisHash = com.dsm.wallet.bridge.Unified.getGenesisHashBin()
+        val deviceId = com.dsm.wallet.bridge.Unified.getDeviceIdBin()
+        if (genesisHash.size == 32 && deviceId.size == 32) {
+            // Kotlin MUST NOT concatenate raw bytes — Rust is the canonical encoder.
+            com.dsm.wallet.bridge.Unified.encodeIdentityCharValue(genesisHash, deviceId)
+                .takeIf { it.isNotEmpty() }
+        } else {
+            null
+        }
+    } catch (t: Throwable) {
+        Log.w("GattServerHost", "Local identity read failed", t)
+        null
     }
 
     private fun handleRelationshipStatusRead(device: BluetoothDevice, requestId: Int, offset: Int) {

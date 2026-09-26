@@ -11,15 +11,11 @@ import {
     cancelBilateralByCommitmentBridge,
     rejectBilateralByCommitmentBridge,
     getPendingBilateralListStrictBridge,
-    setBleIdentityForAdvertising,
-    startBleAdvertisingViaRouter,
-    startBleScanViaRouter,
     readPeerRelationshipStatusBridge,
 } from './WebViewBridge';
 import { on as eventBridgeOn } from './EventBridge';
 import { emitBilateralCommitted } from './events';
 import { bridgeEvents } from '../bridge/bridgeEvents';
-import { getHeaders } from './identity';
 
 import { normalizeBleAddress } from './resolution';
 import logger from '../utils/logger';
@@ -183,8 +179,6 @@ export async function offlineSend(transfer: GenericTransaction): Promise<Generic
       }
       offEvent();
       offBle();
-      // Re-start advertising so device stays discoverable for next transfer
-      void startBleAdvertisingViaRouter().catch(() => {});
       if (resolvePromise) resolvePromise(res);
     };
 
@@ -273,24 +267,11 @@ export async function offlineSend(transfer: GenericTransaction): Promise<Generic
       } catch { /* ignore */ }
     });
 
-    // --- Ensure BLE advertising + scanning so the receiver can connect back ---
-    // §2.3-2.4: advertise real genesis hash, not zeros.
-    try {
-      const headers = await getHeaders();
-      const devId = headers.deviceId;
-      const genesisHash = headers.genesisHash;
-      if (devId && devId.length === 32 && genesisHash && genesisHash.length === 32) {
-        await setBleIdentityForAdvertising(new Uint8Array(genesisHash), new Uint8Array(devId));
-        await startBleAdvertisingViaRouter();
-      }
-      await startBleScanViaRouter();
-      // Brief pause for BLE stack to settle and peer to discover us
-      await new Promise(r => setTimeout(r, 1500));
-    } catch {
-      // Best-effort — proceed with send even if BLE priming fails
-    }
-
-    // --- Delegate native authoring + BLE dispatch to wallet.sendOffline ---
+    // --- Native authoring + BLE dispatch: wallet.sendOffline ---
+    // The radio is native's: it advertises while the device has an identity,
+    // and the dispatch connects (scanning for the peer as it needs) itself.
+    // This used to set the advertised identity, start advertising and
+    // scanning, and sleep 1.5 s first, swallowing every failure.
     const respBytes = await routerInvokeBin('wallet.sendOffline', new Uint8Array(argPack.toBinary()));
     if (!respBytes || respBytes.length === 0) {
       finish({ accepted: false, result: 'offlineSend: empty response from bridge' });

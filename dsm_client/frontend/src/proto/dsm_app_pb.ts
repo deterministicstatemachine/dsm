@@ -977,26 +977,6 @@ export enum NativeHostRequestKind {
   HOST_CONTROL_QR_STOP_SCAN = 3,
 
   /**
-   * @generated from enum value: NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_BLE_SCAN_START = 4;
-   */
-  HOST_CONTROL_BLE_SCAN_START = 4,
-
-  /**
-   * @generated from enum value: NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_BLE_SCAN_STOP = 5;
-   */
-  HOST_CONTROL_BLE_SCAN_STOP = 5,
-
-  /**
-   * @generated from enum value: NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_BLE_ADVERTISE_START = 6;
-   */
-  HOST_CONTROL_BLE_ADVERTISE_START = 6,
-
-  /**
-   * @generated from enum value: NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_BLE_ADVERTISE_STOP = 7;
-   */
-  HOST_CONTROL_BLE_ADVERTISE_STOP = 7,
-
-  /**
    * @generated from enum value: NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_NFC_READER_START = 8;
    */
   HOST_CONTROL_NFC_READER_START = 8,
@@ -1034,10 +1014,6 @@ proto3.util.setEnumType(NativeHostRequestKind, "dsm.NativeHostRequestKind", [
   { no: 1, name: "NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_CAPABILITIES_GET" },
   { no: 2, name: "NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_QR_START_SCAN" },
   { no: 3, name: "NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_QR_STOP_SCAN" },
-  { no: 4, name: "NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_BLE_SCAN_START" },
-  { no: 5, name: "NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_BLE_SCAN_STOP" },
-  { no: 6, name: "NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_BLE_ADVERTISE_START" },
-  { no: 7, name: "NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_BLE_ADVERTISE_STOP" },
   { no: 8, name: "NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_NFC_READER_START" },
   { no: 9, name: "NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_NFC_READER_STOP" },
   { no: 10, name: "NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_PERMISSIONS_REQUEST" },
@@ -1059,11 +1035,6 @@ export enum NativeHostEventKind {
    * @generated from enum value: NATIVE_HOST_EVENT_KIND_QR_SCAN_RESULT = 1;
    */
   QR_SCAN_RESULT = 1,
-
-  /**
-   * @generated from enum value: NATIVE_HOST_EVENT_KIND_BLUETOOTH_PERMISSIONS = 2;
-   */
-  BLUETOOTH_PERMISSIONS = 2,
 
   /**
    * @generated from enum value: NATIVE_HOST_EVENT_KIND_BIOMETRIC_RESULT = 3;
@@ -1089,7 +1060,6 @@ export enum NativeHostEventKind {
 proto3.util.setEnumType(NativeHostEventKind, "dsm.NativeHostEventKind", [
   { no: 0, name: "NATIVE_HOST_EVENT_KIND_UNSPECIFIED" },
   { no: 1, name: "NATIVE_HOST_EVENT_KIND_QR_SCAN_RESULT" },
-  { no: 2, name: "NATIVE_HOST_EVENT_KIND_BLUETOOTH_PERMISSIONS" },
   { no: 3, name: "NATIVE_HOST_EVENT_KIND_BIOMETRIC_RESULT" },
   { no: 4, name: "NATIVE_HOST_EVENT_KIND_NFC_TAG_READ" },
   { no: 5, name: "NATIVE_HOST_EVENT_KIND_NFC_TAG_WRITE" },
@@ -22966,12 +22936,6 @@ export class BridgeRpcRequest extends Message<BridgeRpcRequest> {
     case: "bleAddress";
   } | {
     /**
-     * @generated from field: dsm.BleIdentityPayload ble_identity = 10;
-     */
-    value: BleIdentityPayload;
-    case: "bleIdentity";
-  } | {
-    /**
      * @generated from field: dsm.BilateralPayload bilateral = 11;
      */
     value: BilateralPayload;
@@ -22994,7 +22958,6 @@ export class BridgeRpcRequest extends Message<BridgeRpcRequest> {
     { no: 6, name: "app_router", kind: "message", T: AppRouterPayload, oneof: "payload" },
     { no: 8, name: "ble_contact", kind: "message", T: BleContactPayload, oneof: "payload" },
     { no: 9, name: "ble_address", kind: "message", T: BleAddressPayload, oneof: "payload" },
-    { no: 10, name: "ble_identity", kind: "message", T: BleIdentityPayload, oneof: "payload" },
     { no: 11, name: "bilateral", kind: "message", T: BilateralPayload, oneof: "payload" },
   ]);
 
@@ -23329,49 +23292,6 @@ export class BleAddressPayload extends Message<BleAddressPayload> {
 
   static equals(a: BleAddressPayload | PlainMessage<BleAddressPayload> | undefined, b: BleAddressPayload | PlainMessage<BleAddressPayload> | undefined): boolean {
     return proto3.util.equals(BleAddressPayload, a, b);
-  }
-}
-
-/**
- * @generated from message dsm.BleIdentityPayload
- */
-export class BleIdentityPayload extends Message<BleIdentityPayload> {
-  /**
-   * @generated from field: bytes genesis_hash = 1;
-   */
-  genesisHash = new Uint8Array(0);
-
-  /**
-   * @generated from field: bytes device_id = 2;
-   */
-  deviceId = new Uint8Array(0);
-
-  constructor(data?: PartialMessage<BleIdentityPayload>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.BleIdentityPayload";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "genesis_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 2, name: "device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BleIdentityPayload {
-    return new BleIdentityPayload().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): BleIdentityPayload {
-    return new BleIdentityPayload().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): BleIdentityPayload {
-    return new BleIdentityPayload().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: BleIdentityPayload | PlainMessage<BleIdentityPayload> | undefined, b: BleIdentityPayload | PlainMessage<BleIdentityPayload> | undefined): boolean {
-    return proto3.util.equals(BleIdentityPayload, a, b);
   }
 }
 

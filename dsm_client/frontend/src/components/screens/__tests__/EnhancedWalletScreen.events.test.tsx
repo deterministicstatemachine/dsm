@@ -11,6 +11,7 @@ import { UXProvider } from '../../../contexts/UXContext';
 import { WalletProvider } from '../../../contexts/WalletContext';
 import { walletStore } from '../../../stores/walletStore';
 import { contactsStore } from '../../../stores/contactsStore';
+import * as pb from '../../../proto/dsm_app_pb';
 
 /**
  * The screen as the app mounts it: inside the wallet provider, whose store is
@@ -435,5 +436,36 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Close inbox' }));
     expect(opened).toHaveBeenLastCalledWith({ open: false });
     off();
+  });
+
+  // The radio is native's: the device advertises while it has an identity,
+  // and an offline send connects to its peer itself. The screen used to start
+  // advertising when it mounted or became visible, and stop it when hidden and
+  // when it unmounted, so a device on any other screen could not be reached.
+  test('the wallet screen makes no radio request as it mounts, hides, shows and unmounts', async () => {
+    installStandardWalletMocks([contactDto('Peer', 0x0a, 'AA:BB:CC:DD:EE:FF')]);
+    (dsmClient.getAllBalances as any) = jest.fn().mockResolvedValue([]);
+    (dsmClient.getWalletHistory as any) = jest.fn().mockResolvedValue({ transactions: [] });
+    const bridge = (window as any).DsmBridge;
+    const answer = bridge.sendMessageBin;
+    const methods: string[] = [];
+    bridge.sendMessageBin = (bytes: Uint8Array) => {
+      methods.push(pb.BridgeRpcRequest.fromBinary(bytes).method);
+      return answer(bytes);
+    };
+    try {
+      const { unmount } = await renderWallet();
+      await waitFor(() => expect(screen.getByText('DSM Wallet')).toBeInTheDocument());
+      await act(async () => {
+        bridgeEvents.emit('visibility.change', { state: 'hidden' });
+        bridgeEvents.emit('visibility.change', { state: 'visible' });
+      });
+      unmount();
+      // Whatever the lifecycle started has reached the port by now.
+      await act(async () => { await new Promise((r) => setTimeout(r, 20)); });
+    } finally {
+      bridge.sendMessageBin = answer;
+    }
+    expect(methods).not.toContain('nativeHostRequest');
   });
 });

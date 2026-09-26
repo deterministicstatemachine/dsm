@@ -469,28 +469,6 @@ class SinglePathWebViewBridge(private val context: Context) {
                     }
                 }
 
-                "setBleIdentityForAdvertising" -> {
-                    val parsed = try {
-                        dsm.types.proto.BleIdentityPayload.parseFrom(payload)
-                    } catch (e: com.google.protobuf.InvalidProtocolBufferException) {
-                        Log.w(TAG, "setBleIdentityForAdvertising: invalid payload: ${e.message}")
-                        return ByteArray(0)
-                    }
-                    val genesisHash = parsed.genesisHash.toByteArray()
-                    val deviceId = parsed.deviceId.toByteArray()
-                    if (genesisHash.size != 32 || deviceId.size != 32) {
-                        Log.w(TAG, "setBleIdentityForAdvertising: invalid field lengths genesis=${genesisHash.size} device=${deviceId.size}")
-                        return ByteArray(0)
-                    }
-                    // Kotlin MUST NOT concatenate raw bytes — encodeIdentityCharValue is the canonical encoder.
-                    val out = Unified.encodeIdentityCharValue(genesisHash, deviceId)
-                    if (out.isEmpty()) {
-                        Log.w(TAG, "setBleIdentityForAdvertising: encodeIdentityCharValue returned empty")
-                        return ByteArray(0)
-                    }
-                    BridgeBleHandler.setBleIdentityForAdvertising(out, TAG)
-                }
-
                 // Generic Envelope v3 processing (online transfers, DBRW export, etc.)
                  else -> throw IllegalArgumentException("Unknown binary RPC method: $method")
             }
