@@ -611,6 +611,17 @@ jobs:
         # x86_64 would fail before any test ran. This is the repo's own target.
         run: make android-libs
 
+      - name: Compile the SDK's Android-target unit tests
+        # The SDK's tests under #[cfg(target_os = "android")] compile only for
+        # an Android target, and nothing else builds them: they had rotted to
+        # 21 errors before anyone noticed. Built here with the library's
+        # profile and features, so its dependencies are shared. Nothing runs
+        # them on a device yet.
+        working-directory: dsm_client/deterministic_state_machine
+        run: |
+          DSM_PROTO_ROOT="$GITHUB_WORKSPACE/proto" cargo ndk -t arm64-v8a --platform 23 \
+            test --no-run --release --locked --package dsm_sdk --features=jni,bluetooth --lib
+
       - name: Cache Gradle caches
         uses: actions/cache@v6
         with:

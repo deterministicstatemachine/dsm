@@ -2516,7 +2516,7 @@ mod unified_protobuf_bridge_tests {
     use once_cell::sync::Lazy;
     use prost::Message;
     use super::{
-        detect_ble_frame_type_from_bytes, dispatch_envelope_via_ingress,
+        detect_ble_frame_type_from_bytes, dispatch_envelope_via_ingress, is_error_envelope_bytes,
         route_hardware_facts_via_ingress, strip_envelope_v3_framing,
     };
 
