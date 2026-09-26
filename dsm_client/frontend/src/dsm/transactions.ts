@@ -7,7 +7,6 @@ import { decodeFramedEnvelopeV3 } from './decoding';
 import {
     routerInvokeBin,
     getDeviceIdBinBridgeAsync,
-    getSigningPublicKeyBinBridgeAsync,
     acceptBilateralByCommitmentBridge,
     cancelBilateralByCommitmentBridge,
     rejectBilateralByCommitmentBridge,
@@ -54,48 +53,6 @@ function schedulePostAcceptRefreshes(): void {
     }
   };
   requestAnimationFrame(tick);
-}
-
-// Helpers
-
-/** Diagnostics: get local device id via native bridge (may be empty until identity initialized). */
-export function getLocalDeviceId(): Uint8Array {
-  // Try cache first (works for binary bridge if getHeaders() was called previously)
-  const g: any = globalThis as any;
-  const cached = g.__dsmLastGoodHeaders?.deviceId;
-  if (cached instanceof Uint8Array && cached.length === 32) {
-    return cached;
-  }
-
-  // Not available in async bridge contract
-  return new Uint8Array();
-}
-
-/** Get local signing public key (64 bytes for SPHINCS+ SPX256s) via native bridge (sync). */
-export function getLocalSigningPublicKey(): Uint8Array {
-  // Not available in async bridge contract
-  return new Uint8Array();
-}
-
-
-/** Get local signing public key (64 bytes for SPHINCS+ SPX256s) via native bridge (async). */
-export async function getLocalSigningPublicKeyAsync(): Promise<Uint8Array> {
-  try {
-    const key = await getSigningPublicKeyBinBridgeAsync();
-    return key || new Uint8Array();
-  } catch {
-    return new Uint8Array();
-  }
-}
-
-/** Get local device ID (32 bytes) via native bridge (async). */
-export async function getLocalDeviceIdAsync(): Promise<Uint8Array> {
-  try {
-    const id = await getDeviceIdBinBridgeAsync();
-    return id || new Uint8Array();
-  } catch {
-    return new Uint8Array();
-  }
 }
 
 export async function readPeerRelationshipStatus(
@@ -513,109 +470,38 @@ export async function cancelOfflineTransfer(args: { commitmentHash: Uint8Array, 
   }
 }
 
-export async function claimFaucet(policyId: string): Promise<{ success: boolean; message: string; tokensReceived: number; humanScaled?: boolean; _debug?: any }> {
-  void policyId;
+/** What `faucet.claim` answered: what Rust released, in its words, or why not. */
+export type FaucetClaimResult =
+  | { success: true; tokensReceived: bigint; message: string }
+  | { success: false; message: string };
+
+/**
+ * faucet.claim: this device claims ERA from the faucet for itself (Rust
+ * refuses a request naming another device) and reports Rust's answer.
+ */
+export async function claimFaucet(): Promise<FaucetClaimResult> {
   try {
     const deviceId = await getDeviceIdBinBridgeAsync();
     if (!deviceId || deviceId.length !== 32) {
-      return { success: false, message: 'Faucet claim failed: device_id unavailable', tokensReceived: 0 };
+      return { success: false, message: 'Faucet claim failed: the device id is unavailable' };
     }
-    const deviceIdU8 = new Uint8Array(deviceId);
-    const body = new Uint8Array(new pb.FaucetClaimRequest({ deviceId: deviceIdU8 }).toBinary());
     const argPack = new pb.ArgPack({
-      schemaHash: undefined,
       codec: pb.Codec.PROTO,
-      body,
+      body: new Uint8Array(new pb.FaucetClaimRequest({ deviceId: new Uint8Array(deviceId) }).toBinary()),
     });
-
-    const bytes: Uint8Array = await routerInvokeBin('faucet.claim', argPack.toBinary());
-    const _debug: any = {
-      resultBytesLen: bytes?.length ?? 0,
-    };
-
-    // CANONICAL PATH: All bridge responses are FramedEnvelopeV3
-    let env: pb.Envelope;
-    try {
-      env = decodeFramedEnvelopeV3(bytes);
-      _debug.envelopeVersion = env.version;
-      _debug.payloadCase = env.payload.case;
-    } catch (e) {
-      logger.error('[claimFaucet] Failed to decode FramedEnvelopeV3:', e);
-      _debug.decodeException = String(e);
-      return { success: false, message: `Faucet claim decode failed: ${e instanceof Error ? e.message : String(e)}`, tokensReceived: 0, _debug };
-    }
-
-    // Check for error envelope
+    const env = decodeFramedEnvelopeV3(await routerInvokeBin('faucet.claim', argPack.toBinary()));
     if (env.payload.case === 'error') {
-      const err = env.payload.value;
-      _debug.errorNote = `envelope error: ${err.message || 'unknown'} (code ${err.code || 0})`;
-      return { success: false, message: `Faucet claim failed: ${err.message || 'Unknown error'}`, tokensReceived: 0, _debug };
+      return { success: false, message: env.payload.value.message };
     }
-
-    // Extract faucet response from envelope
     if (env.payload.case !== 'faucetClaimResponse') {
-      logger.error('[claimFaucet] Unexpected payload.case:', env.payload.case);
-      _debug.unexpectedCase = env.payload.case;
-      return { success: false, message: `Unexpected response type: ${env.payload.case}`, tokensReceived: 0, _debug };
+      return { success: false, message: `faucet.claim answered ${String(env.payload.case)}, not a claim` };
     }
-
     const resp = env.payload.value;
-    if (!resp) {
-      _debug.nullResponse = true;
-      return { success: false, message: 'Faucet claim response is null', tokensReceived: 0, _debug };
-    }
-
-    return {
-      success: Boolean(resp.success),
-      message: resp.success ? 'Faucet claim ok' : 'Faucet claim failed',
-      tokensReceived: Number(resp.tokensReceived ?? 0),
-      humanScaled: true,
-      _debug,
-    };
+    return resp.success
+      ? { success: true, tokensReceived: resp.tokensReceived, message: resp.message }
+      : { success: false, message: resp.message };
   } catch (e) {
-    return { success: false, message: e instanceof Error ? e.message : String(e), tokensReceived: 0, _debug: { resultBytesLen: 0, decodeNote: 'outer exception' } };
+    return { success: false, message: e instanceof Error ? e.message : String(e) };
   }
 }
 
-/**
- * Claim tokens from the testnet faucet.
- * Wraps FaucetClaimRequest via routerInvokeBin('faucet.claim', ...).
- *
- * Note: The native backend handles the actual logic in `transition.rs` and `client_db.rs`,
- * including CPTA verification and balance updates. The frontend just invokes the operation.
- */
-export async function claimTestnetFaucet(): Promise<pb.FaucetClaimResponse> {
-  logger.info('[transactions.claimTestnetFaucet] INVOKED');
-  const deviceId = await getLocalDeviceIdAsync();
-  logger.info('[transactions.claimTestnetFaucet] deviceId obtained, length=', deviceId?.length);
-  if (!deviceId || deviceId.length !== 32) {
-    throw new Error('claimTestnetFaucet: Device ID not available (wallet not initialized?)');
-  }
-
-  const req = new pb.FaucetClaimRequest({
-    deviceId: deviceId as any,
-  });
-  logger.debug('[transactions.claimTestnetFaucet] FaucetClaimRequest created');
-
-  const argPack = new pb.ArgPack({
-    schemaHash: undefined,
-    codec: pb.Codec.PROTO,
-    body: new Uint8Array(req.toBinary()),
-  });
-  logger.debug('[transactions.claimTestnetFaucet] ArgPack created, calling routerInvokeBin(faucet.claim, ...)');
-
-  // 'faucet.claim' maps to the FaucetClaimRequest handler in the native AppRouter
-  const resBytes = await routerInvokeBin('faucet.claim', argPack.toBinary());
-  logger.debug('[transactions.claimTestnetFaucet] routerInvokeBin returned, resBytes.length=', resBytes.length);
-
-  // Canonical Envelope v3 decode
-  const env5 = decodeFramedEnvelopeV3(resBytes);
-  if (env5.payload.case === 'error') {
-    const errMsg = env5.payload.value.message || `Error code ${env5.payload.value.code}`;
-    throw new Error(`claimTestnetFaucet failed: ${errMsg}`);
-  }
-  if (env5.payload.case !== 'faucetClaimResponse') {
-    throw new Error(`Expected faucetClaimResponse, got ${env5.payload.case}`);
-  }
-  return env5.payload.value;
-}

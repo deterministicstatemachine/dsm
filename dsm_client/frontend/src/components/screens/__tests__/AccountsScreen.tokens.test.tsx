@@ -232,6 +232,28 @@ describe('AccountsScreen — the screen TOKENS actually opens', () => {
     expect(screen.queryByRole('button', { name: /^FORGET$/ })).toBeNull();
   });
 
+  /// The faucet tab shows what Rust released, in its words, and its refusal
+  /// in its words — never a count or a token the screen composed itself.
+  it("shows what the faucet released in Rust's words, and Rust's refusal", async () => {
+    (dsmClient.claimFaucet as jest.Mock).mockResolvedValueOnce({
+      success: true,
+      tokensReceived: 100n,
+      message: 'claimed 100 ERA (economic position 3)',
+    });
+    render(<AccountsScreen />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Faucet' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'CLAIM FAUCET' }));
+    expect(await screen.findByText('claimed 100 ERA (economic position 3)')).toBeInTheDocument();
+    expect(dsmClient.claimFaucet).toHaveBeenCalledWith();
+
+    (dsmClient.claimFaucet as jest.Mock).mockResolvedValueOnce({
+      success: false,
+      message: 'faucet.claim: the reserve is spent',
+    });
+    fireEvent.click(await screen.findByRole('button', { name: 'CLAIM FAUCET' }));
+    expect(await screen.findByText('faucet.claim: the reserve is spent')).toBeInTheDocument();
+  });
+
   /// The panel's decimals are the ones Rust reports for the token. A table in
   /// this screen said ERA took 2 decimals while Rust renders ERA whole.
   it("shows a protocol token's decimals as Rust reports them", async () => {

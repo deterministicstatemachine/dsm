@@ -177,11 +177,16 @@ function simulations(state: PracticeState, emit: (event: PracticeEvent) => void)
       emit('sent');
       return { accepted: true, result: 'Practice transfer complete' };
     },
-    claimFaucet: async (tokenId?: string) => {
+    // Answers in the shape the real claimFaucet does; the faucet releases ERA.
+    claimFaucet: async () => {
       await pause(600);
-      credit(state, tokenId || 'ERA', PRACTICE_FAUCET_AMOUNT);
+      credit(state, 'ERA', PRACTICE_FAUCET_AMOUNT);
       emit('claimed');
-      return { success: true, message: `Practice: ${PRACTICE_FAUCET_AMOUNT} ERA added`, tokensReceived: PRACTICE_FAUCET_AMOUNT };
+      return {
+        success: true,
+        tokensReceived: BigInt(PRACTICE_FAUCET_AMOUNT),
+        message: `Practice: claimed ${PRACTICE_FAUCET_AMOUNT} ERA`,
+      };
     },
     addContact: async (input: { alias: string; genesisHash: string | Uint8Array; deviceId: string | Uint8Array }) => {
       await pause(400);

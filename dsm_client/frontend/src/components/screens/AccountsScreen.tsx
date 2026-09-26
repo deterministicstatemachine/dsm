@@ -80,7 +80,7 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
   const [balances, setBalances] = useState<TokenBalance[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
-  const [claimingId, setClaimingId] = useState<string | null>(null);
+  const [claiming, setClaiming] = useState(false);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const [expandedToken, setExpandedToken] = useState<string | null>(null);
   const faucetEnabled = !!isInitialized || !!(window as any).DsmBridge;
@@ -187,61 +187,38 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
   }, [loadBalances]);
 
 
-  const claimFromFaucet = useCallback(
-    async (tokenId: string, symbol: string) => {
-      console.log('[UI:faucet] claimFromFaucet click', { tokenId, symbol });
-      setError(null);
-      setSuccessMsg(null);
-      setClaimingId(tokenId);
-
-      try {
-        if (!faucetEnabled) {
-          throw new Error('Faucet is unavailable until your wallet is initialized. Please finish genesis setup and try again.');
-        }
-
-        // Faucet claim via dsmClient.claimFaucet()
-        const result: any = await dsmClient.claimFaucet(tokenId);
-
-        console.log('[UI:faucet] claimFaucet result', result);
-
-        if (!result?.success) {
-          const msg = result?.message ?? 'Faucet claim failed';
-          throw new Error(msg);
-        }
-
-        // Some bridge paths may not include tokensReceived/humanScaled; keep UI deterministic.
-        const rawTokens = (result as any)?.tokensReceived;
-        const tokensHuman =
-          // ERA is a whole-unit token, so the claimed amount IS its display
-          // form. This used to divide by 10^8 in floating point, which is both
-          // the wrong scale and the wrong arithmetic for an amount.
-          rawTokens == null ? '—' : String(rawTokens);
-
-        await loadBalances();
-        try {
-          await refreshAll();
-        } catch (refreshErr) {
-          // non-fatal UI refresh miss
-          console.warn('AccountsScreen: refreshAll failed after faucet claim:', refreshErr);
-        }
-        // refreshAll() already updated WalletContext (balance + history).
-        // Do NOT emit wallet.refresh here — that would trigger 3 more RPCs for
-        // data we just fetched (useWalletSync balance+history, useWalletRefreshListener
-        // history again).
-
-        setSuccessMsg(
-          `Claimed ${tokensHuman} ${symbol || 'ERA'}.`
-        );
-      } catch (e) {
-        console.warn('[UI:faucet] claim failed', e);
-        const msg = e instanceof Error ? e.message : 'Faucet claim failed';
-        setError(msg);
-      } finally {
-        setClaimingId(null);
+  const claimFromFaucet = useCallback(async () => {
+    setError(null);
+    setSuccessMsg(null);
+    setClaiming(true);
+    try {
+      if (!faucetEnabled) {
+        throw new Error('Faucet is unavailable until your wallet is initialized. Please finish genesis setup and try again.');
       }
-    },
-    [loadBalances, refreshAll]
-  );
+      const result = await dsmClient.claimFaucet();
+      if (!result.success) {
+        throw new Error(result.message);
+      }
+      await loadBalances();
+      try {
+        await refreshAll();
+      } catch (refreshErr) {
+        // non-fatal UI refresh miss
+        console.warn('AccountsScreen: refreshAll failed after faucet claim:', refreshErr);
+      }
+      // refreshAll() already updated WalletContext (balance + history).
+      // Do NOT emit wallet.refresh here — that would trigger 3 more RPCs for
+      // data we just fetched (useWalletSync balance+history, useWalletRefreshListener
+      // history again).
+
+      // What Rust released, in its words.
+      setSuccessMsg(result.message);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Faucet claim failed');
+    } finally {
+      setClaiming(false);
+    }
+  }, [loadBalances, refreshAll]);
 
   /// Run a burn and show whatever the policy decided, verbatim.
   ///
@@ -327,7 +304,7 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
       if (activeTab === 'tokens' && idx === 2) { setCreating(true); return; }
       // Content items
       if (activeTab === 'faucet') {
-        void claimFromFaucet(balances[0]?.tokenId || 'era', 'ERA');
+        void claimFromFaucet();
       }
       // Token items: toggle expand on select
       const tokenIdx = idx - 2 - createOffset;
@@ -894,25 +871,25 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
                 <button
                   className={`wallet-style-button${fc(2)}`}
                   data-tour="faucet-claim"
-                  onClick={() => void claimFromFaucet(balances[0]?.tokenId || 'era', 'ERA')}
-                  disabled={claimingId !== null}
+                  onClick={() => void claimFromFaucet()}
+                  disabled={claiming}
                   style={{
                     width: '100%',
                     padding: 12,
                     fontSize: 10,
                     fontFamily: '\'Martian Mono\', monospace',
                     textTransform: 'uppercase',
-                    background: (claimingId !== null)
+                    background: (claiming)
                       ? 'linear-gradient(0deg, rgba(var(--text-rgb),0.12), rgba(var(--bg-rgb),0.06)), repeating-linear-gradient(45deg, rgba(var(--text-rgb),0.14) 0px, rgba(var(--text-rgb),0.14) 2px, transparent 2px, transparent 4px)'
                       : 'linear-gradient(0deg, rgba(var(--bg-rgb),0.08), rgba(var(--text-rgb),0.12)), repeating-linear-gradient(45deg, rgba(var(--bg-rgb),0.12) 0px, rgba(var(--bg-rgb),0.12) 2px, transparent 2px, transparent 4px)',
-                    color: (claimingId !== null) ? 'var(--text-dark)' : 'var(--text)',
+                    color: (claiming) ? 'var(--text-dark)' : 'var(--text)',
                     border: '2px solid var(--border)',
                     borderRadius: 8,
-                    cursor: (claimingId !== null) ? 'not-allowed' : 'pointer',
+                    cursor: (claiming) ? 'not-allowed' : 'pointer',
                     boxShadow: 'inset 0 -2px 0 rgba(var(--text-rgb),0.18), inset 0 2px 0 rgba(var(--bg-rgb),0.08)',
                   }}
                 >
-                  {claimingId !== null ? 'CLAIMING...' : 'CLAIM FAUCET'}
+                  {claiming ? 'CLAIMING...' : 'CLAIM FAUCET'}
                 </button>
               </div>
             </div>
