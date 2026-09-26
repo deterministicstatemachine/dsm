@@ -9,7 +9,6 @@
 //
 // MODULE MAP (kept in sync with the `export * from './<name>'` lines below):
 //   types         — TypeScript types for State, Token, Policy, etc.
-//   resolution    — Name/address resolution
 //   identity      — Device identity, genesis, pairing
 //   contacts      — Contact management (device IDs, metadata)
 //   wallet        — Balance queries, transaction history
@@ -26,7 +25,7 @@
 // CURATED FLAT NAMESPACE EXPORT (`dsmClient`):
 //   `dsmClient` exposes a curated, object-style API combining the modules
 //   that need name-collision-free access: identity, contacts, wallet,
-//   policies, dlv, storage, transactions, diagnostics, resolution.
+//   policies, dlv, storage, transactions, diagnostics.
 //   It intentionally OMITS `types` (too generic to flatten safely) and the
 //   bridge-helper re-exports above (imported by name).
 //
@@ -36,9 +35,6 @@
 
 // Export core types
 export * from './types';
-
-// Export resolution logic
-export * from './resolution';
 
 // Export domain-specific logic
 export * from './identity';
@@ -67,7 +63,6 @@ import * as Policies from './policies';
 import * as Storage from './storage';
 import * as Transactions from './transactions';
 import * as Diagnostics from './diagnostics';
-import * as Resolution from './resolution';
 
 // Flat namespace export for consumers that prefer object-style access.
 export const dsmClient = {
@@ -78,5 +73,4 @@ export const dsmClient = {
   ...Storage,
   ...Transactions,
   ...Diagnostics,
-  ...Resolution,
 };

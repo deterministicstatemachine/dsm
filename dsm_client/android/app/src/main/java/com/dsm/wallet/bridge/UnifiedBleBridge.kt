@@ -93,25 +93,12 @@ internal object UnifiedBleBridge {
         }
     }
 
-    private fun publishLocalIdentityIfAvailable(svc: BleCoordinator): Boolean {
-        try {
-            val deviceIdBytes = try { Unified.getDeviceIdBin() } catch (_: Throwable) { byteArrayOf() }
-            val genesisHashBytes = try { Unified.getGenesisHashBin() } catch (_: Throwable) { byteArrayOf() }
-            if (deviceIdBytes.size == 32 && genesisHashBytes.size == 32) {
-                svc.setIdentityValue(genesisHashBytes, deviceIdBytes)
-                Log.i("UnifiedBleBridge", "publishLocalIdentityIfAvailable: local BLE identity published to GATT")
-                return true
-            } else {
-                Log.w(
-                    "UnifiedBleBridge",
-                    "publishLocalIdentityIfAvailable: identity bytes unavailable (genesis=${genesisHashBytes.size}, device=${deviceIdBytes.size})"
-                )
-                return false
-            }
-        } catch (t: Throwable) {
-            Log.w("UnifiedBleBridge", "publishLocalIdentityIfAvailable failed", t)
-            return false
-        }
+    // The GATT server reads the identity from Rust when a peer asks for it;
+    // advertising without one would answer every identity read with a failure.
+    private fun localIdentityAvailable(): Boolean = try {
+        Unified.getDeviceIdBin().size == 32 && Unified.getGenesisHashBin().size == 32
+    } catch (_: Throwable) {
+        false
     }
 
     fun initBleCoordinator(
@@ -136,7 +123,7 @@ internal object UnifiedBleBridge {
     fun startBlePairingAdvertise(): Boolean {
         val svc = bleCoordinator ?: return false
         return try {
-            if (!publishLocalIdentityIfAvailable(svc)) {
+            if (!localIdentityAvailable()) {
                 Log.w("UnifiedBleBridge", "startBlePairingAdvertise: refusing to advertise without local identity")
                 return false
             }
@@ -154,10 +141,6 @@ internal object UnifiedBleBridge {
         return try { svc.stopScanning() } catch (_: Throwable) { false }
     }
 
-    fun stopBlePairingAdvertise(): Boolean {
-        val svc = bleCoordinator ?: return false
-        return try { svc.stopAdvertising() } catch (_: Throwable) { false }
-    }
 
     fun requestGattWriteChunks(deviceAddress: String, chunks: Array<ByteArray>): Boolean {
         val svc = bleCoordinator ?: return false
@@ -241,7 +224,6 @@ internal object UnifiedBleBridge {
                 Log.i("BleTransferTrace", "requestGattWriteChunks routing: no route -> $effectiveAddr (on-demand connect)")
                 Log.i("UnifiedBleBridge", "requestGattWriteChunks: no route for $effectiveAddr — on-demand connect")
                 svc.ensureGattServerStarted()
-                publishLocalIdentityIfAvailable(svc)
                 svc.startAdvertising()
                 runBlocking {
                     try {

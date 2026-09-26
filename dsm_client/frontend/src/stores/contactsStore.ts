@@ -88,10 +88,8 @@ class ContactsStore {
 
       const data = await awaitWithFrameBudget(dsmClient.getContacts());
       // Rust's list as it stands, in the one contact shape every screen reads
-      // — each contact with its send-readiness, and the BLE address Rust holds
-      // or the native side resolved for its device this session. An address
-      // Rust no longer holds is not kept.
-      const contacts = mapContactList(data.contacts, dsmClient.getBleIdentitySnapshot());
+      // — each contact with its send-readiness and the BLE address Rust holds.
+      const contacts = mapContactList(data.contacts);
 
       if (seq === this.refreshSeq) {
         this.setState({ contacts });
