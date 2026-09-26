@@ -31,9 +31,14 @@
 # sends must be one Kotlin handles. #1012 deleted five arms the frontend no
 # longer sent; the instrumented proof still called them and the managed-device
 # job stayed red on main from that merge on, because no gate read androidTest.
-# The one exception is the unknown-method probe: it sends the name bound to
-# UNHANDLED_METHOD, and that name must be one Kotlin does NOT handle, or the
-# probe tests nothing.
+# A name is read where the suite names it: the first argument of
+# callBridgeMethod, encodeBridgeRpcRequest or handleBinaryRpc*, or a method
+# field encoded by hand (`encodeLengthDelimitedField(1, "…".toByteArray`).
+# The one exception is the unknown-method probe: the suite binds its name to
+# UNHANDLED_METHOD and sends it through one of those calls, and that name
+# must be one Kotlin does NOT handle, or the probe tests nothing. A probe the
+# gate cannot find, a binding it cannot read and a probe the suite never sends
+# all fail.
 #
 # Exit 0 only when every set is non-empty and each pair is equal. There is no
 # allowlist: a name one side must stop using is removed from that side.
@@ -191,7 +196,13 @@ INSTRUMENTED_CALL_RE = re.compile(
     r"\b(?:callBridgeMethod|encodeBridgeRpcRequest|handleBinaryRpcRawStrict|handleBinaryRpcRaw|handleBinaryRpc)"
     r"\(\s*\"([A-Za-z0-9_]+)\""
 )
-UNHANDLED_PROBE_RE = re.compile(r"\bUNHANDLED_METHOD\s*=\s*\"([A-Za-z0-9_]+)\"")
+HAND_METHOD_FIELD_RE = re.compile(r"\bencodeLengthDelimitedField\(\s*1\s*,\s*\"([A-Za-z0-9_]+)\"\.toByteArray")
+UNHANDLED_PROBE_RE = re.compile(r"\bUNHANDLED_METHOD\s*(?::\s*String\s*)?=\s*\"([A-Za-z0-9_]+)\"")
+UNHANDLED_DECL_RE = re.compile(r"\b(?:val|var)\s+UNHANDLED_METHOD\b")
+UNHANDLED_USE_RE = re.compile(
+    r"\b(?:callBridgeMethod|encodeBridgeRpcRequest|handleBinaryRpcRawStrict|handleBinaryRpcRaw|handleBinaryRpc)"
+    r"\(\s*UNHANDLED_METHOD\b"
+)
 
 
 def test_sources():
@@ -219,9 +230,15 @@ def stub_names():
 
 
 def instrumented_names():
-    """({name: [where, ...]} sent by the instrumented suite, {name: [where, ...]} bound to UNHANDLED_METHOD)."""
+    """(sent, probes, probe declarations, probe sends): what the instrumented suite names.
+
+    sent and probes are {name: [where, ...]}; the declaration and send counts
+    let main() refuse a probe binding it cannot read or a probe nothing sends.
+    """
     called = {}
     probes = {}
+    decls = 0
+    uses = 0
     for dirpath, _dirnames, filenames in os.walk(ANDROID_TEST):
         for name in filenames:
             if not name.endswith(".kt"):
@@ -229,11 +246,14 @@ def instrumented_names():
             path = os.path.join(dirpath, name)
             text = read_text(path)
             rel = os.path.relpath(path, ROOT)
-            for m in INSTRUMENTED_CALL_RE.finditer(text):
-                called.setdefault(m.group(1), []).append(f"{rel}:{text.count(chr(10), 0, m.start()) + 1}")
+            for rx in (INSTRUMENTED_CALL_RE, HAND_METHOD_FIELD_RE):
+                for m in rx.finditer(text):
+                    called.setdefault(m.group(1), []).append(f"{rel}:{text.count(chr(10), 0, m.start()) + 1}")
             for m in UNHANDLED_PROBE_RE.finditer(text):
                 probes.setdefault(m.group(1), []).append(f"{rel}:{text.count(chr(10), 0, m.start()) + 1}")
-    return called, probes
+            decls += len(UNHANDLED_DECL_RE.findall(text))
+            uses += len(UNHANDLED_USE_RE.findall(text))
+    return called, probes, decls, uses
 
 
 def main():
@@ -280,10 +300,19 @@ def main():
         for name in phantom:
             print(f"  {name}: " + ", ".join(stubbed[name]))
         status = 1
-    called, probes = instrumented_names()
+    called, probes, probe_decls, probe_uses = instrumented_names()
     if not called:
         fail("a scan that finds nothing is not a scan (the instrumented suite sends no bridge RPC name)")
         return 2
+    if not probes or probe_decls != sum(len(w) for w in probes.values()):
+        fail(
+            f"the unknown-method probe is not readable: {probe_decls} UNHANDLED_METHOD declaration(s), "
+            f"{sum(len(w) for w in probes.values())} bound to a string the gate can read"
+        )
+        return 2
+    if probe_uses == 0:
+        fail("the instrumented suite never sends UNHANDLED_METHOD: the unknown-method probe tests nothing")
+        status = 1
     missing = sorted(set(called) - set(handled))
     if missing:
         fail("the instrumented suite sends bridge RPC names Kotlin does not handle:")

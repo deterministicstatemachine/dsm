@@ -10,6 +10,7 @@ import com.dsm.wallet.ui.MainActivity
 import com.google.protobuf.ByteString
 import java.io.File
 import java.io.FileOutputStream
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -304,6 +305,26 @@ class AndroidLayerProofTest {
     // =========================================================================
 
     @Test
+    fun t22_identity_jniExportsMatchTheHeaders() {
+        ensureGenesis()
+
+        // BLE reads this appliance's identity through these exports (GattServerHost's identity
+        // characteristic, the advertising gate in BleBackgroundService); the frontend reads it
+        // from the transport headers. Both must name the same device and the same genesis.
+        val headers = transportHeaders()
+        val deviceId = Unified.getDeviceIdBin()
+        val genesisHash = Unified.getGenesisHashBin()
+        assertEquals("Device ID must be 32 bytes", 32, deviceId.size)
+        assertArrayEquals("BLE and the frontend must read the same device id", headers.deviceId.toByteArray(), deviceId)
+        assertEquals("Genesis hash must be 32 bytes", 32, genesisHash.size)
+        assertArrayEquals(
+            "BLE and the frontend must read the same genesis hash",
+            headers.genesisHash.toByteArray(),
+            genesisHash
+        )
+    }
+
+    @Test
     fun t24_method_getTransportHeadersV3Bin() {
         ensureGenesis()
 
@@ -347,13 +368,11 @@ class AndroidLayerProofTest {
 
         val (isSuccess, data) = BridgeEnvelopeCodec.parseEnvelopeResponse(framedResp.copyOfRange(8, framedResp.size))
         assertTrue("nativeBoundaryIngress(routerQuery wallet.history) must succeed", isSuccess)
-        val ingressResponse = IngressResponse.parseFrom(data)
-        assertEquals(IngressResponse.ResultCase.OK_BYTES, ingressResponse.resultCase)
         // A fresh wallet has no rows; the answer is still a history, not an error.
         assertEquals(
             "wallet.history answers a WalletHistoryResponse",
             Envelope.PayloadCase.WALLET_HISTORY_RESPONSE,
-            decodeFramedEnvelope(ingressResponse.okBytes.toByteArray()).payloadCase
+            decodeFramedEnvelope(okBytes(IngressResponse.parseFrom(data), "wallet.history")).payloadCase
         )
     }
 
@@ -373,13 +392,10 @@ class AndroidLayerProofTest {
         val respBody = framedResp.copyOfRange(8, framedResp.size)
         val (isSuccess, data) = BridgeEnvelopeCodec.parseEnvelopeResponse(respBody)
         assertTrue("nativeBoundaryIngress(routerQuery balance.list) must succeed", isSuccess)
-        val ingressResponse = IngressResponse.parseFrom(data)
-        assertEquals(
-            "Ingress response should carry ok bytes",
-            IngressResponse.ResultCase.OK_BYTES,
-            ingressResponse.resultCase
+        assertTrue(
+            "Router query response payload must be non-empty",
+            okBytes(IngressResponse.parseFrom(data), "balance.list").isNotEmpty()
         )
-        assertTrue("Router query response payload must be non-empty", !ingressResponse.okBytes.isEmpty)
     }
 
     @Test
@@ -395,8 +411,7 @@ class AndroidLayerProofTest {
         assertEquals("Message ID must match", 200L, readMessageId(setResp))
         val (isSuccess, data) = BridgeEnvelopeCodec.parseEnvelopeResponse(setResp.copyOfRange(8, setResp.size))
         assertTrue("session.lock invoke must succeed", isSuccess)
-        val ingressResponse = IngressResponse.parseFrom(data)
-        assertEquals(IngressResponse.ResultCase.OK_BYTES, ingressResponse.resultCase)
+        okBytes(IngressResponse.parseFrom(data), "session.lock")
     }
 
     @Test
@@ -446,11 +461,8 @@ class AndroidLayerProofTest {
         baos.write(encodeVarint32(reasonBytes.size))
         baos.write(reasonBytes)
 
-        // Wrap in BridgeRpcRequest field 11 (bilateralPayload)
-        val bilateralPayload = baos.toByteArray()
-        val methodField = encodeLengthDelimitedField(1, "rejectBilateralByCommitment".toByteArray(Charsets.UTF_8))
-        val payloadField = encodeLengthDelimitedField(11, bilateralPayload)
-        val requestBytes = methodField + payloadField
+        // BridgeRpcRequest field 11 (bilateral)
+        val requestBytes = encodeBridgeRpcRequest("rejectBilateralByCommitment", 11, baos.toByteArray())
 
         val framedResp = MainActivity.processBridgeRequestForTest(ctx, prependMessageId(300L, requestBytes))
         assertTrue("Must get response", framedResp.size > 8)
@@ -468,13 +480,15 @@ class AndroidLayerProofTest {
     //         MessagePort protocol works end-to-end through the Kotlin layer.
     // =========================================================================
 
-    // Claims the faucet from the live storage fleet, so it runs only on real hardware.
+    // Claims ERA through faucet.claim, which needs the storage set the network pins. It is
+    // excluded from the emulator run; ensureGenesis installs the loopback test config, under
+    // which the claim is refused (CONFORMANCE_GAPS §6.29, Open).
     @RealHardware
     @Test
     fun t40_fullFrame_identityCheckAndBalanceFetch() {
         ensureGenesis()
         val claim = claimFaucet()
-        assertTrue("the faucet must release ERA: ${claim.message}", claim.success)
+        assertTrue("the faucet must release ERA", claim.tokensReceived > 0L)
 
         // Step 1: Identity check (same bytes JS would send)
         val identityReq = encodeBridgeRpcRequest("getTransportHeadersV3Bin", ByteArray(0))
@@ -834,6 +848,15 @@ class AndroidLayerProofTest {
             .build()
             .toByteArray()
 
+    /** The bytes a routed call answered; a refusal fails the test with Rust's reason. */
+    private fun okBytes(response: IngressResponse, route: String): ByteArray {
+        if (response.resultCase == IngressResponse.ResultCase.ERROR) {
+            fail("$route refused: ${response.error.message}")
+        }
+        assertEquals("$route answers bytes", IngressResponse.ResultCase.OK_BYTES, response.resultCase)
+        return response.okBytes.toByteArray()
+    }
+
     /** A router answer: `0x03` then an Envelope v3. */
     private fun decodeFramedEnvelope(bytes: ByteArray): Envelope {
         assertTrue("A framed Envelope v3 starts with 0x03", bytes.isNotEmpty() && bytes[0] == 0x03.toByte())
@@ -842,8 +865,9 @@ class AndroidLayerProofTest {
 
     /**
      * `faucet.claim` exactly as the frontend sends it (transactions.ts `claimFaucet`): this
-     * device's id from the transport headers, in an ArgPack with no schema hash. Returns Rust's
-     * answer; the caller decides what it requires.
+     * device's id from the transport headers, in an ArgPack with no schema hash. Rust answers a
+     * refusal as an ingress error, and the test fails with Rust's reason; otherwise returns the
+     * release Rust reports.
      */
     private fun claimFaucet(): FaucetClaimResponse {
         val request = FaucetClaimRequest.newBuilder().setDeviceId(transportHeaders().deviceId).build()
@@ -859,9 +883,7 @@ class AndroidLayerProofTest {
         assertTrue("faucet.claim must answer", framedResp.size > 8)
         val (isSuccess, data) = BridgeEnvelopeCodec.parseEnvelopeResponse(framedResp.copyOfRange(8, framedResp.size))
         assertTrue("faucet.claim must reach the router", isSuccess)
-        val ingressResponse = IngressResponse.parseFrom(data)
-        assertEquals(IngressResponse.ResultCase.OK_BYTES, ingressResponse.resultCase)
-        val envelope = decodeFramedEnvelope(ingressResponse.okBytes.toByteArray())
+        val envelope = decodeFramedEnvelope(okBytes(IngressResponse.parseFrom(data), "faucet.claim"))
         assertEquals(
             "faucet.claim answers a FaucetClaimResponse",
             Envelope.PayloadCase.FAUCET_CLAIM_RESPONSE,
@@ -886,6 +908,11 @@ class AndroidLayerProofTest {
      * Encode a BridgeRpcRequest with just method and empty/simple payload.
      * field 1 = method (string), field 2 = empty_payload (for empty payload methods)
      */
+    /** A BridgeRpcRequest whose payload is the message [payload] at oneof field [payloadField]. */
+    private fun encodeBridgeRpcRequest(method: String, payloadField: Int, payload: ByteArray): ByteArray =
+        encodeLengthDelimitedField(1, method.toByteArray(Charsets.UTF_8)) +
+            encodeLengthDelimitedField(payloadField, payload)
+
     private fun encodeBridgeRpcRequest(method: String, payload: ByteArray): ByteArray {
         val methodField = encodeLengthDelimitedField(1, method.toByteArray(Charsets.UTF_8))
         if (payload.isEmpty()) {
