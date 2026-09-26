@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // BLE React context wired to deterministic DSM BLE bridge (protobuf-only events)
 
-import React, { createContext, useCallback, useContext, useMemo, useRef, useState } from 'react';
+import React, { createContext, useCallback, useMemo, useRef, useState } from 'react';
 import { useUX } from './UXContext';
 import { useBridgeEvent } from '../hooks/useBridgeEvents';
 import { startBleScanViaRouter, stopBleScanViaRouter } from '../dsm/WebViewBridge';
@@ -110,10 +110,4 @@ export function BleProvider({ children }: { children: React.ReactNode }) {
   );
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
-}
-
-export function useBle(): BleApi {
-  const v = useContext(Ctx);
-  if (!v) throw new Error('BleContext missing provider');
-  return v;
 }

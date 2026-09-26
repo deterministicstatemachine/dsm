@@ -163,10 +163,3 @@ export const UXProvider: React.FC<{ defaultHideComplexity?: boolean; children?: 
 export function useUX(): UXContextValue {
   return useContext(Ctx);
 }
-
-export function useUXTerms() {
-  return {
-    getScreenTitle: (key: string) => key,
-    getActionLabel: (key: string) => key,
-  };
-}
