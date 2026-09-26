@@ -1,9 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
-// Data loading hook for the wallet screen — identity, balances, contacts, transactions.
-import { useState, useCallback, useEffect, useRef } from 'react';
+// The wallet screen's data. Balances and history are the wallet store's — the
+// provider's one copy, reloaded once per `wallet.refresh` — and this hook reads
+// them; it used to hold a second copy and reload it beside the store's, so one
+// wallet change was two reads of `balance.list` and `wallet.history`. What the
+// screen owns is the identity (read once, or the reason it was not) and the
+// send tab's contacts with their send-readiness, re-read when the contacts
+// store reports a change and on a manual refresh.
+import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { dsmClient } from '../../../../services/dsmClient';
-import { useWalletRefreshListener } from '../../../../hooks/useWalletRefreshListener';
-import type { Balance } from '../helpers';
+import { useWallet } from '../../../../contexts/WalletContext';
+import { useContactsStore } from '../../../../stores/contactsStore';
+import type { TokenBalanceView } from '../../../../dsm/types';
 import type { DomainContact, DomainIdentity, DomainTransaction } from '../../../../domain/types';
 import { mapContactList } from '../../../../domain/mappers';
 
@@ -11,7 +18,9 @@ export type WalletScreenData = {
   identity: DomainIdentity | null;
   genesisB32: string;
   deviceB32: string;
-  balances: Balance[];
+  balances: TokenBalanceView[];
+  /** The store has not answered balances yet; nothing is known either way. */
+  balancesLoading: boolean;
   contacts: DomainContact[];
   transactions: DomainTransaction[];
   loading: boolean;
@@ -27,133 +36,54 @@ export type WalletScreenData = {
 };
 
 export function useWalletScreenData(activeTab: string): WalletScreenData {
+  const wallet = useWallet();
+  const contactsState = useContactsStore();
   const [identity, setIdentity] = useState<DomainIdentity | null>(null);
-  const [genesisB32, setGenesisB32] = useState('');
-  const [deviceB32, setDeviceB32] = useState('');
-  const [balances, setBalances] = useState<Balance[]>([]);
   const [contacts, setContacts] = useState<DomainContact[]>([]);
-  const [transactions, setTransactions] = useState<DomainTransaction[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [warning, setWarning] = useState<string | null>(null);
+  const [contactsWarning, setContactsWarning] = useState<string | null>(null);
+  const [warningDismissed, setWarningDismissed] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [touchFeedback, setTouchFeedback] = useState<'refreshed' | 'copied' | 'transaction_sent' | 'b0x_checked' | null>(null);
-  const inFlightLoadRef = useRef<Promise<void> | null>(null);
-  const reloadQueuedRef = useRef(false);
-  const hasLoadedOnceRef = useRef(false);
 
-
-  const performWalletDataLoad = useCallback(async () => {
-    // Only show the full-screen "Loading wallet…" spinner on the very first
-    // load.  Subsequent refreshes keep the current UI visible so the screen
-    // never flashes back to the spinner during BLE bilateral transfers —
-    // which emit wallet.refresh rapidly.
-    if (!hasLoadedOnceRef.current) setLoading(true);
-    const keepLoading = false;
+  // The identity, answered or refused with its reason: missing, runtime not
+  // ready, or not read. The screen shows the reason.
+  const loadIdentity = useCallback(async () => {
     try {
       setError(null);
-      setWarning(null);
-      const warnings: string[] = [];
-      // Answered or thrown with its reason: missing, runtime not ready, or not read.
-      const id = await dsmClient.getIdentity();
-      setIdentity(id);
-      setGenesisB32(id.genesisHash);
-      setDeviceB32(id.deviceId);
-
-      // Inbox sync is handled by the background poller (inbox_poller.rs).
-      // Do NOT call syncWithStorage here — it blocks the Kotlin bridge thread
-      // for 2-3 minutes while polling 6 storage nodes, which prevents ALL
-      // other bridge calls (balance.list, wallet.history) from completing.
-      // When the poller finds new transfers, it emits inbox.updated which
-      // triggers a wallet.refresh via useWalletRefreshListener.
-
-      try {
-        const list = await dsmClient.getContacts();
-        const snapshot = typeof (dsmClient as unknown as { getBleIdentitySnapshot?: () => { deviceIds: Record<string, string>; genesis: Record<string, string> } }).getBleIdentitySnapshot === 'function'
-          ? (dsmClient as unknown as { getBleIdentitySnapshot: () => { deviceIds: Record<string, string>; genesis: Record<string, string> } }).getBleIdentitySnapshot()
-          : undefined;
-        const normalized: DomainContact[] = mapContactList(list.contacts, snapshot);
-        setContacts(normalized);
-      } catch (e) {
-        warnings.push(e instanceof Error ? e.message : 'Failed to load contacts');
-      }
-
-      try {
-        const bal = await dsmClient.getAllBalances();
-        const eraTokens: Balance[] = bal
-          .filter((b) => b.tokenId.toUpperCase() !== 'BTC_CHAIN')
-          .map((b) => ({
-            tokenId: b.tokenId,
-            symbol: b.symbol,
-            // Rust renders every token from its own decimals, so there is no
-            // special case here any more. dBTC used to be the ONLY token this
-            // scaled, which is exactly why a created token showed its base
-            // units: 100000 where the protocol held 1,000.00.
-            balance: b.displayAmount,
-            decimals: b.decimals,
-            // Both are carried, never derived. The icon is the artwork the
-            // token was created with, which is how a screen draws its coin;
-            // the anchor is the token's identity, which is what Swap trades
-            // against. Dropping them here left Swap with an empty token list
-            // and every custom token wearing a generic coin.
-            iconUrl: b.iconUrl,
-            policyAnchorB32: b.policyAnchorB32,
-          }));
-        setBalances(eraTokens);
-      } catch (e) {
-        warnings.push(e instanceof Error ? e.message : 'Failed to load balances');
-      }
-
-      try {
-        const history = await dsmClient.getWalletHistory();
-        if (history && Array.isArray(history.transactions)) {
-          setTransactions(history.transactions);
-        }
-      } catch (e) {
-        warnings.push(e instanceof Error ? e.message : 'Failed to load transactions');
-      }
-
-      if (warnings.length > 0) {
-        setWarning(warnings.join(' \u2022 '));
-      }
+      setIdentity(await dsmClient.getIdentity());
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load');
     } finally {
-      if (!keepLoading) {
-        hasLoadedOnceRef.current = true;
-        setLoading(false);
-      }
+      setLoading(false);
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const loadWalletData = useCallback(async () => {
-    if (inFlightLoadRef.current) {
-      reloadQueuedRef.current = true;
-      await inFlightLoadRef.current;
-      return;
+  // The send tab's contacts: Rust's list with each contact's send-readiness,
+  // and the BLE addresses the native side resolved this session.
+  const loadContacts = useCallback(async () => {
+    try {
+      const list = await dsmClient.getContacts();
+      setContacts(mapContactList(list.contacts, dsmClient.getBleIdentitySnapshot()));
+      setContactsWarning(null);
+    } catch (e) {
+      setContactsWarning(e instanceof Error ? e.message : 'Failed to load contacts');
     }
+  }, []);
 
-    do {
-      reloadQueuedRef.current = false;
-      const run = performWalletDataLoad();
-      inFlightLoadRef.current = run;
-      try {
-        await run;
-      } finally {
-        inFlightLoadRef.current = null;
-      }
-    } while (reloadQueuedRef.current);
-  }, [performWalletDataLoad]);
+  useEffect(() => { void loadIdentity(); }, [loadIdentity]);
 
-  useEffect(() => { void loadWalletData(); }, [loadWalletData]);
+  // On mount, and again whenever the contacts store reports a change.
+  useEffect(() => { void loadContacts(); }, [loadContacts, contactsState.contacts]);
 
-  // The one path from a wallet change to this reload: `wallet.refresh`,
-  // coalesced. A completed bilateral transfer and the inbox poller's new items
-  // both reach it through the event bridge; the direct subscriptions to those
-  // raw events that used to sit beside it were second and third reloads of
-  // the same change, grown around a listener that dropped events.
-  useWalletRefreshListener(() => void loadWalletData(), [loadWalletData]);
+  // A manual refresh reloads the store's balances and history and this
+  // screen's contacts. Balances and history otherwise reload on
+  // `wallet.refresh`, in the provider, once per change.
+  const { refreshAll } = wallet;
+  const loadWalletData = useCallback(async () => {
+    await Promise.all([refreshAll(), loadContacts()]);
+  }, [refreshAll, loadContacts]);
 
   // Reload when leaving bitcoin tab
   const activeTabRef = useRef(activeTab);
@@ -179,13 +109,26 @@ export function useWalletScreenData(activeTab: string): WalletScreenData {
     return () => clearTimeout(id);
   }, [touchFeedback]);
 
+  // What the stores report failed, as they word it; dismissable until it changes.
+  const warning = useMemo(() => {
+    const parts = [wallet.error, contactsWarning].filter((w): w is string => Boolean(w));
+    const joined = parts.length > 0 ? parts.join(' • ') : null;
+    return joined && joined !== warningDismissed ? joined : null;
+  }, [wallet.error, contactsWarning, warningDismissed]);
+  const setWarning = useCallback((next: string | null) => {
+    if (next === null) {
+      setWarningDismissed([wallet.error, contactsWarning].filter(Boolean).join(' • ') || null);
+    }
+  }, [wallet.error, contactsWarning]);
+
   return {
     identity,
-    genesisB32,
-    deviceB32,
-    balances,
+    genesisB32: identity?.genesisHash ?? '',
+    deviceB32: identity?.deviceId ?? '',
+    balances: wallet.balances,
+    balancesLoading: wallet.isLoading && wallet.balances.length === 0,
     contacts,
-    transactions,
+    transactions: wallet.transactions,
     loading,
     error,
     warning,

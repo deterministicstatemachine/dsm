@@ -10,12 +10,12 @@ import { Notice } from '../../common/ScreenFrame';
 import { InfoTip } from '../../common/InfoTip';
 import { useFx } from '../../fx/FxProvider';
 import { fxAmountLabel } from '../../fx/fxEngine';
-import type { Balance } from './helpers';
+import type { TokenBalanceView } from '../../../dsm/types';
 import type { DomainContact } from '../../../domain/types';
 
 type Props = {
   contacts: DomainContact[];
-  balances: Balance[];
+  balances: TokenBalanceView[];
   onCancel: () => void;
   onSendComplete: () => void;
   loadWalletData: () => Promise<void>;
@@ -47,7 +47,7 @@ function SendTabInner({
 
   // Only what Rust listed. With no balances there is nothing to send, and the
   // form says so rather than offering a token the wallet does not hold.
-  const tokenOptions: Balance[] = balances;
+  const tokenOptions: TokenBalanceView[] = balances;
 
   const selectedSendBalance = useMemo(
     () => tokenOptions.find((b) => b.tokenId === sendForm.token) ?? null,
@@ -188,7 +188,7 @@ function SendTabInner({
               {selectedSendBalance.symbol}
             </span>
             <span className="sb-kv__v" style={{ fontSize: 15, fontWeight: 700 }}>
-              {selectedSendBalance.balance}
+              {selectedSendBalance.displayAmount}
             </span>
           </div>
         </div>

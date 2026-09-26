@@ -31,7 +31,7 @@ function sendOffline(props: { setError: jest.Mock; onSendComplete: jest.Mock }) 
   render(
     <SendTab
       contacts={[D3]}
-      balances={[{ tokenId: 'RIGB', symbol: 'RIGB', balance: '1000', decimals: 0 }]}
+      balances={[{ tokenId: 'RIGB', symbol: 'RIGB', tokenName: 'RIGB', baseUnits: 1000n, displayAmount: '1000', decimals: 0, protocolDefined: false }]}
       onCancel={jest.fn()}
       loadWalletData={jest.fn().mockResolvedValue(undefined)}
       {...props}
