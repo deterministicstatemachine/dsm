@@ -123,7 +123,13 @@ class GattServerHost(private val context: Context) {
         }
 
         override fun onServiceAdded(status: Int, service: BluetoothGattService?) {
-            serviceRegistrationInProgress.set(false)
+            // Only the registration in flight is answered here. After stop() (or
+            // Bluetooth off) forgot it, a late answer belongs to a closed server and
+            // must not mark the next server's service as registered.
+            if (!serviceRegistrationInProgress.compareAndSet(true, false)) {
+                Log.w("GattServerHost", "onServiceAdded for no registration in flight (status=$status) ignored")
+                return
+            }
             val success = status == BluetoothGatt.GATT_SUCCESS
             if (success) {
                 servicesReady.set(true)
@@ -338,14 +344,22 @@ class GattServerHost(private val context: Context) {
 
     fun isReady(): Boolean = gattServer.get() != null && servicesReady.get()
 
+    /**
+     * Close the server and forget its registration, so the next [ensureStarted]
+     * opens a new server and registers the service again. Also what Bluetooth going
+     * off requires: the stack drops the server registration with the radio.
+     */
     fun stop() {
         try {
             gattServer.get()?.close()
-        } catch (e: SecurityException) {
-            Log.e("GattServerHost", "Security exception closing GATT server", e)
+        } catch (t: Throwable) {
+            Log.e("GattServerHost", "Exception closing GATT server", t)
         }
         gattServer.set(null)
         servicesReady.set(false)
+        serviceRegistrationInProgress.set(false)
+        serviceReadyDeferred?.complete(false)
+        serviceReadyDeferred = null
         pendingTxWriteBuffers.clear()
         pendingPairingWriteBuffers.clear()
         Log.i("GattServerHost", "GATT server stopped")

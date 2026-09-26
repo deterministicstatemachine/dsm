@@ -142,6 +142,16 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
             }
         }
     }
+    // Bluetooth turning on or off changes a fact Rust decides pairing from.
+    private val bluetoothStateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action != android.bluetooth.BluetoothAdapter.ACTION_STATE_CHANGED) return
+            when (intent.getIntExtra(android.bluetooth.BluetoothAdapter.EXTRA_STATE, android.bluetooth.BluetoothAdapter.ERROR)) {
+                android.bluetooth.BluetoothAdapter.STATE_ON,
+                android.bluetooth.BluetoothAdapter.STATE_OFF -> publishSessionState("bluetoothState")
+            }
+        }
+    }
     private var bleServiceBound = false
     private val bleServiceConnection = object : android.content.ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
@@ -790,6 +800,28 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         updateBatterySnapshotFromIntent(stickyIntent)
     }
 
+    private fun registerBluetoothStateReceiver() {
+        val filter = IntentFilter(android.bluetooth.BluetoothAdapter.ACTION_STATE_CHANGED)
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                registerReceiver(bluetoothStateReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            } else {
+                registerReceiver(bluetoothStateReceiver, filter)
+            }
+        } catch (t: Throwable) {
+            Log.w(tag, "registerBluetoothStateReceiver: failed", t)
+        }
+    }
+
+    private fun unregisterBluetoothStateReceiver() {
+        try {
+            unregisterReceiver(bluetoothStateReceiver)
+        } catch (_: IllegalArgumentException) {
+        } catch (t: Throwable) {
+            Log.w(tag, "unregisterBluetoothStateReceiver: failed", t)
+        }
+    }
+
     private fun unregisterBatteryReceiver() {
         try {
             unregisterReceiver(batteryChangedReceiver)
@@ -1342,6 +1374,7 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         setContentView(rootContainer)
         setupWebView(webView)
         registerBatteryReceiver()
+        registerBluetoothStateReceiver()
 
 
         initDsmAndSignalReady()
@@ -1507,6 +1540,7 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
             activeInstance = null
         }
         unregisterBatteryReceiver()
+        unregisterBluetoothStateReceiver()
         super.onDestroy()
         com.dsm.wallet.EventPoller.stop()
     }
