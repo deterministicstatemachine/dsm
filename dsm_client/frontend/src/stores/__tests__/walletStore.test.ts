@@ -146,7 +146,7 @@ describe('WalletStore', () => {
   describe('refreshBalances()', () => {
     it('fetches and stores balances', async () => {
       const { walletStore, client } = freshModule();
-      const balances = [{ tokenId: 'DSM', balance: 100n, tokenName: 'DSM', decimals: 0, symbol: 'DSM' }];
+      const balances = [{ tokenId: 'DSM', baseUnits: 100n, tokenName: 'DSM', decimals: 0, symbol: 'DSM' }];
       client.getAllBalances.mockResolvedValue(balances);
 
       await walletStore.refreshBalances();
@@ -159,8 +159,8 @@ describe('WalletStore', () => {
     it('filters out BTC_CHAIN entries', async () => {
       const { walletStore, client } = freshModule();
       client.getAllBalances.mockResolvedValue([
-        { tokenId: 'BTC_CHAIN', balance: 10n },
-        { tokenId: 'DSM', balance: 50n },
+        { tokenId: 'BTC_CHAIN', baseUnits: 10n },
+        { tokenId: 'DSM', baseUnits: 50n },
       ]);
 
       await walletStore.refreshBalances();
@@ -168,23 +168,23 @@ describe('WalletStore', () => {
       expect(ids).toEqual(['DSM']);
     });
 
-    it('reports partial failure when ERA fetch rejects', async () => {
+    it('reports a failed balance refresh', async () => {
       const { walletStore, client } = freshModule();
       jest.spyOn(console, 'error').mockImplementation(() => {});
-      client.getAllBalances.mockRejectedValue(new Error('ERA down'));
+      client.getAllBalances.mockRejectedValue(new Error('balances down'));
 
       await walletStore.refreshBalances();
       const s = walletStore.getSnapshot();
-      expect(s.error).toBe('Failed to refresh ERA balances');
+      expect(s.error).toBe('Failed to refresh balances');
       expect(s.isLoading).toBe(false);
     });
 
     it('emits wallet.creditReceived when balance increases after first observation', async () => {
       const { walletStore, client, events } = freshModule();
-      client.getAllBalances.mockResolvedValue([{ tokenId: 'DSM', balance: 100n }]);
+      client.getAllBalances.mockResolvedValue([{ tokenId: 'DSM', baseUnits: 100n }]);
       await walletStore.refreshBalances(); // first call → sets hasObservedBalances
 
-      client.getAllBalances.mockResolvedValue([{ tokenId: 'DSM', balance: 200n }]);
+      client.getAllBalances.mockResolvedValue([{ tokenId: 'DSM', baseUnits: 200n }]);
       await walletStore.refreshBalances();
 
       expect(events.emit).toHaveBeenCalledWith('wallet.creditReceived', expect.objectContaining({
@@ -196,17 +196,17 @@ describe('WalletStore', () => {
 
     it('does not emit creditReceived on first observation', async () => {
       const { walletStore, client, events } = freshModule();
-      client.getAllBalances.mockResolvedValue([{ tokenId: 'DSM', balance: 100n }]);
+      client.getAllBalances.mockResolvedValue([{ tokenId: 'DSM', baseUnits: 100n }]);
       await walletStore.refreshBalances();
       expect(events.emit).not.toHaveBeenCalled();
     });
 
     it('does not emit creditReceived when balance decreases', async () => {
       const { walletStore, client, events } = freshModule();
-      client.getAllBalances.mockResolvedValue([{ tokenId: 'DSM', balance: 200n }]);
+      client.getAllBalances.mockResolvedValue([{ tokenId: 'DSM', baseUnits: 200n }]);
       await walletStore.refreshBalances();
 
-      client.getAllBalances.mockResolvedValue([{ tokenId: 'DSM', balance: 100n }]);
+      client.getAllBalances.mockResolvedValue([{ tokenId: 'DSM', baseUnits: 100n }]);
       await walletStore.refreshBalances();
       expect(events.emit).not.toHaveBeenCalled();
     });

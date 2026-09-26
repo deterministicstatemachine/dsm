@@ -37,35 +37,23 @@ function SendTabInner({
     // reorders on its own. The user picks, explicitly, every time.
     selectedContactKey: '',
     amount: '',
-    token: 'ERA',
+    // Chosen from the balances Rust listed; until they arrive there is none.
+    token: '',
     note: '',
   });
   const [txMode, setTxMode] = useState<'online' | 'offline'>('online');
   const [sendingTx, setSendingTx] = useState(false);
   const [showSendConfirm, setShowSendConfirm] = useState(false);
 
-  const tokenOptions = useMemo(() => {
-    if (!Array.isArray(balances) || balances.length === 0) {
-      return [{ tokenId: 'ERA', symbol: 'ERA', balance: '0' } as Balance];
-    }
-    return balances;
-  }, [balances]);
+  // Only what Rust listed. With no balances there is nothing to send, and the
+  // form says so rather than offering a token the wallet does not hold.
+  const tokenOptions: Balance[] = balances;
 
-  const selectedSendBalance = useMemo(() => {
-    if (tokenOptions.length === 0) return null;
-    return tokenOptions.find((b) => b.tokenId === sendForm.token) ?? tokenOptions[0];
-  }, [tokenOptions, sendForm.token]);
+  const selectedSendBalance = useMemo(
+    () => tokenOptions.find((b) => b.tokenId === sendForm.token) ?? null,
+    [tokenOptions, sendForm.token],
+  );
 
-  // The selected token's decimals, as the wire reported them. They come from
-  // the registry in Rust, so a token created with 2 decimals accepts cents
-  // here. A hardcoded table used to answer this and knew only dBTC, which made
-  // every custom token look like it took whole units only.
-  const selectedDecimals = selectedSendBalance?.decimals ?? 0;
-
-  // The coin, the balance and the unit all read from the selected token, so
-  // picking another one in the Amount row changes all three together.
-  const selectedTicker = selectedSendBalance?.symbol || selectedSendBalance?.tokenId || sendForm.token || 'ERA';
-  const coin = <TokenMark ticker={selectedTicker} iconUrl={selectedSendBalance?.iconUrl} className="sb-coin sb-coin--lg" />;
 
   const selectedContact = useMemo(
     () => contacts.find((c) => c.deviceId === sendForm.selectedContactKey) ?? null,
@@ -110,7 +98,10 @@ function SendTabInner({
         throw new Error('Selected contact not found');
       }
 
-      const tokenId = sendForm.token || 'ERA';
+      if (!selectedSendBalance) {
+        throw new Error('Choose a token to send');
+      }
+      const tokenId = selectedSendBalance.tokenId;
 
       if (txMode === 'offline') {
         const bleAddr = await dsmClient.resolveBleAddressForContact(contact);
@@ -125,31 +116,24 @@ function SendTabInner({
           memo: sendForm.note || undefined,
           bleAddress: bleAddr,
         });
-        const success = res && typeof res === 'object'
-          ? ('success' in res
-              ? Boolean((res as { success?: boolean }).success)
-              : ('accepted' in res ? Boolean((res as { accepted?: boolean }).accepted) : false))
-          : false;
-        if (!success) {
-          // GenericTxResponse carries the SDK's reason in `result` (sometimes `message`
-          // for legacy callers). Read both so we surface the real failure cause to the
-          // user instead of the generic fallback.
-          const resultText = res && typeof res === 'object' && 'result' in res
-            ? String((res as { result?: string }).result || '')
-            : '';
-          const messageText = res && typeof res === 'object' && 'message' in res
-            ? String((res as { message?: string }).message || '')
-            : '';
-          let msg = resultText || messageText || 'Offline transfer failed';
-          const failureReason = res && typeof res === 'object' && 'failureReason' in res ? (res as { failureReason?: unknown }).failureReason : undefined;
-          const failureReasonNum = typeof failureReason === 'number'
-            ? failureReason
-            : typeof failureReason === 'string'
-              ? Number(failureReason)
-              : undefined;
-          const fm = failureReasonMessage(Number.isFinite(failureReasonNum) ? failureReasonNum : undefined);
-          if (fm) msg = fm;
-          throw new Error(msg);
+        if (res.open) {
+          // Not finished and not failed: the step is open on both phones and
+          // completes when they are together again. The form is done with it.
+          fx.play({
+            anim: 'trace',
+            title: 'Not finished yet',
+            caption: res.result ?? '',
+            tone: 'neutral',
+            okLabel: 'OK',
+            coin: { ticker: selectedSendBalance.symbol, iconUrl: selectedSendBalance.iconUrl },
+          });
+          onSendComplete();
+          await loadWalletData();
+          return;
+        }
+        if (!res.accepted) {
+          // The failure reason's message when the SDK named one, else its own words.
+          throw new Error(failureReasonMessage(res.failureReason) ?? res.result ?? 'Offline transfer failed');
         }
       } else {
         const res = await dsmClient.sendOnlineTransferSmart(
@@ -169,7 +153,7 @@ function SendTabInner({
         title: txMode === 'offline' ? 'Signed and sealed' : 'Sent',
         caption: `${sent} to ${contact.alias}`,
         amount: fxAmountLabel(sent, '-'),
-        coin: { ticker: selectedTicker, iconUrl: selectedSendBalance?.iconUrl },
+        coin: { ticker: selectedSendBalance.symbol, iconUrl: selectedSendBalance.iconUrl },
       });
       onSendComplete();
       await loadWalletData();
@@ -180,7 +164,7 @@ function SendTabInner({
     } finally {
       setSendingTx(false);
     }
-  }, [sendForm, selectedContact, txMode, selectedTicker, selectedSendBalance, loadWalletData, setError, onSendComplete, fx]);
+  }, [sendForm, selectedContact, txMode, selectedSendBalance, loadWalletData, setError, onSendComplete, fx]);
 
   const handleSubmit = useCallback((event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -192,19 +176,25 @@ function SendTabInner({
     <div className="send-tab">
       <h3 className="sb-section-title">Send Transaction</h3>
 
-      {/* The coin and its ticker are pinned to the left edge so they hold still
+      {/* The coin, the balance and the unit all read from the selected token, so
+          picking another one in the Amount row changes all three together.
+          The coin and its ticker are pinned to the left edge so they hold still
           while the number beside them changes length. */}
-      <div className="sb-card" style={{ padding: '6px 10px' }}>
-        <div className="sb-kv" style={{ alignItems: 'center' }}>
-          <span className="sb-kv__k" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, textTransform: 'none', letterSpacing: 0 }}>
-            {coin}
-            {selectedTicker}
-          </span>
-          <span className="sb-kv__v" style={{ fontSize: 15, fontWeight: 700 }}>
-            {selectedSendBalance ? String(selectedSendBalance.balance ?? '0') : '0'}
-          </span>
+      {selectedSendBalance ? (
+        <div className="sb-card" style={{ padding: '6px 10px' }}>
+          <div className="sb-kv" style={{ alignItems: 'center' }}>
+            <span className="sb-kv__k" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, textTransform: 'none', letterSpacing: 0 }}>
+              <TokenMark ticker={selectedSendBalance.symbol} iconUrl={selectedSendBalance.iconUrl} className="sb-coin sb-coin--lg" />
+              {selectedSendBalance.symbol}
+            </span>
+            <span className="sb-kv__v" style={{ fontSize: 15, fontWeight: 700 }}>
+              {selectedSendBalance.balance}
+            </span>
+          </div>
         </div>
-      </div>
+      ) : (
+        <div className="sb-empty">No balances to send yet.</div>
+      )}
 
       <div className="sb-field">
         <span className="sb-label">
@@ -244,17 +234,23 @@ function SendTabInner({
           )}
         </div>
 
+        {selectedSendBalance && (
         <div className="sb-field">
           <label htmlFor="amount">Amount</label>
           <div className="sb-input-row">
+            {/* The selected token's decimals, as the wire reported them. They
+                come from the registry in Rust, so a token created with 2
+                decimals accepts cents here. A hardcoded table used to answer
+                this and knew only dBTC, which made every custom token look
+                like it took whole units only. */}
             <input
               id="amount"
               type="number"
-              step={selectedDecimals > 0 ? `0.${'0'.repeat(selectedDecimals - 1)}1` : '1'}
+              step={selectedSendBalance.decimals > 0 ? `0.${'0'.repeat(selectedSendBalance.decimals - 1)}1` : '1'}
               min="0"
               value={sendForm.amount}
               onChange={(e) => setSendForm((p) => ({ ...p, amount: e.target.value }))}
-              placeholder={selectedDecimals > 0 ? `0.${'0'.repeat(selectedDecimals)}` : '0'}
+              placeholder={selectedSendBalance.decimals > 0 ? `0.${'0'.repeat(selectedSendBalance.decimals)}` : '0'}
               className="sb-input sb-input--mono"
               required
             />
@@ -262,11 +258,12 @@ function SendTabInner({
               label="Token"
               className="sb-tokensel--inline"
               value={sendForm.token}
-              options={tokenOptions.map((b) => ({ value: b.tokenId, ticker: b.symbol || b.tokenId, iconUrl: b.iconUrl }))}
+              options={tokenOptions.map((b) => ({ value: b.tokenId, ticker: b.symbol, iconUrl: b.iconUrl }))}
               onChange={(next) => setSendForm((p) => ({ ...p, token: next }))}
             />
           </div>
         </div>
+        )}
 
         <div className="sb-field">
           <label htmlFor="note">Note (optional)</label>
@@ -288,7 +285,7 @@ function SendTabInner({
           <button
             type="submit"
             className="sb-btn sb-btn--primary"
-            disabled={!sendForm.selectedContactKey || contacts.length === 0 || sendingTx}
+            disabled={!sendForm.selectedContactKey || contacts.length === 0 || !selectedSendBalance || sendingTx}
           >
             {sendingTx ? 'Sending…' : 'Send'}
           </button>
@@ -297,7 +294,9 @@ function SendTabInner({
       <ConfirmModal
         visible={showSendConfirm}
         title="Send"
-        message={`Send ${sendForm.amount} ${sendForm.token || 'ERA'} to ${selectedContact?.alias || 'recipient'}?${txMode === 'offline' ? ' (Bluetooth)' : ''}`}
+        message={selectedContact && selectedSendBalance
+          ? `Send ${sendForm.amount} ${selectedSendBalance.symbol} to ${selectedContact.alias}?${txMode === 'offline' ? ' (Bluetooth)' : ''}`
+          : ''}
         onConfirm={() => { setShowSendConfirm(false); void handleSendTransaction(); }}
         onCancel={() => setShowSendConfirm(false)}
       />

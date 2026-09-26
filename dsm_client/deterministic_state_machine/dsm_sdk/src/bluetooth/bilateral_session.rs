@@ -305,6 +305,15 @@ pub fn is_inflight_phase(phase: &BilateralPhase) -> bool {
     )
 }
 
+/// Whether the proposer may still cancel a step in `phase`: until its
+/// confirm, nothing can have committed on either side. Past the confirm its
+/// receiver may have committed, so the step completes or is reconciled
+/// online.
+#[inline]
+pub fn is_cancellable_proposal_phase(phase: &BilateralPhase) -> bool {
+    matches!(phase, BilateralPhase::Preparing | BilateralPhase::Prepared)
+}
+
 /// Map phase to a persistence-safe string tag.
 pub fn phase_to_str(phase: &BilateralPhase) -> &'static str {
     match phase {

@@ -9,7 +9,6 @@ import { contactsStore } from '../stores/contactsStore';
 import '../styles/BilateralTransfer.css';
 import { emitWalletRefresh } from '../dsm/events';
 import { bridgeEvents } from '../bridge/bridgeEvents';
-import { presentDisplayAmount } from '../utils/tokenMeta';
 import { useFx } from './fx/FxProvider';
 
 interface BilateralTransferDialogProps {
@@ -139,7 +138,7 @@ export const BilateralTransferDialog: React.FC<BilateralTransferDialogProps> = (
       if (result.success) {
         setIncomingTransfer(null);
       } else {
-        alert('Failed to accept transfer');
+        alert(`Failed to accept transfer: ${result.error}`);
       }
     } catch (err) {
       console.error('[BilateralTransfer] Accept error:', err);
@@ -154,8 +153,12 @@ export const BilateralTransferDialog: React.FC<BilateralTransferDialogProps> = (
     setProcessing(true);
     try {
       const result = await rejectIncomingTransfer(incomingTransfer, 'User rejected transfer');
-      if (!result.success) alert('Failed to reject transfer');
-      setIncomingTransfer(null);
+      if (result.success) {
+        setIncomingTransfer(null);
+      } else {
+        // The proposal still awaits a decision; the dialog stays.
+        alert(`Failed to reject transfer: ${result.error}`);
+      }
     } catch (err) {
       console.error('[BilateralTransfer] Reject error:', err);
       alert(`Error rejecting transfer: ${err}`);
@@ -184,19 +187,20 @@ export const BilateralTransferDialog: React.FC<BilateralTransferDialogProps> = (
               </div>
             </div>
             
-            {incomingTransfer.amount !== undefined && incomingTransfer.amount !== null && (
+            {incomingTransfer.amount !== undefined && (
               <div className="bilateral-transfer-info">
                 <div className="bilateral-transfer-label">Amount:</div>
                 <div className="bilateral-transfer-value">
                   {(() => {
-                    const raw = incomingTransfer.amount;
-                    const tid = (incomingTransfer.tokenId || 'ERA').toUpperCase();
-                    const abs = typeof raw === 'bigint' ? raw : BigInt(String(raw));
-                    // What the sender's device says this amount is, rendered
-                    // from the token's own decimals. Accepting a transfer is a
-                    // decision about a quantity, so the quantity shown must be
-                    // the one the protocol moved.
-                    return `${presentDisplayAmount(incomingTransfer.displayAmount, abs)} ${tid}`;
+                    // What the sender's device says this amount is, rendered by
+                    // Rust from the token's own decimals. Accepting a transfer
+                    // is a decision about a quantity, so the quantity shown must
+                    // be the one the protocol moved: when this device does not
+                    // know the token's decimals, the base units, named as such.
+                    const token = incomingTransfer.tokenId ?? '(token not named)';
+                    return incomingTransfer.displayAmount
+                      ? `${incomingTransfer.displayAmount} ${token}`
+                      : `${incomingTransfer.amount.toString()} ${token} base units`;
                   })()}
                 </div>
               </div>

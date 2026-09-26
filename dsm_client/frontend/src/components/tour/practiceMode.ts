@@ -11,11 +11,11 @@
 
 import { dsmClient } from '../../services/dsmClient';
 import type {
-  DomainBalance,
   DomainContact,
   DomainIdentity,
   DomainTransaction,
 } from '../../domain/types';
+import type { TokenBalanceView } from '../../dsm/types';
 
 export type PracticeEvent = 'sent' | 'claimed' | 'contactAdded';
 
@@ -39,7 +39,7 @@ export const PRACTICE_FAUCET_AMOUNT = 100;
 
 type PracticeState = {
   identity: DomainIdentity;
-  balances: DomainBalance[];
+  balances: TokenBalanceView[];
   contacts: DomainContact[];
   history: DomainTransaction[];
   sequence: number;
@@ -52,8 +52,8 @@ function freshState(): PracticeState {
       deviceId: practiceId('PRACT1CEY0VDEV1CE'),
     },
     balances: [
-      { tokenId: 'ERA', tokenName: 'ERA', symbol: 'ERA', decimals: 0, balance: BigInt(1000), displayAmount: '1000' },
-      { tokenId: 'PLAY', tokenName: 'Practice Coin', symbol: 'PLAY', decimals: 0, balance: BigInt(50), displayAmount: '50' },
+      { tokenId: 'ERA', tokenName: 'ERA', symbol: 'ERA', decimals: 0, baseUnits: BigInt(1000), displayAmount: '1000' },
+      { tokenId: 'PLAY', tokenName: 'Practice Coin', symbol: 'PLAY', decimals: 0, baseUnits: BigInt(50), displayAmount: '50' },
     ],
     contacts: [
       {
@@ -69,13 +69,18 @@ function freshState(): PracticeState {
     history: [
       {
         txId: 'practice-welcome',
+        txHash: practiceId('PRACT1CEWE1C0ME'),
+        txType: 'online',
         type: 'online',
         amount: BigInt(1000),
-        amountSigned: BigInt(1000),
-        recipient: 'you',
-        memo: 'Practice tokens for the tour',
+        displayAmount: '1000',
+        tokenId: 'ERA',
+        recipient: 'practice',
         status: 'confirmed',
-        txType: 'faucet',
+        fromDeviceId: practiceId('PRACT1CESENDER'),
+        toDeviceId: practiceId('PRACT1CEY0VDEV1CE'),
+        memo: 'Practice tokens for the tour',
+        receiptVerified: false,
       },
     ],
     sequence: 0,
@@ -101,34 +106,40 @@ function debit(state: PracticeState, tokenId: string, amount: string | number | 
   if (units === null || units <= BigInt(0)) return { ok: false, message: 'Enter a whole amount above zero.' };
   const holding = state.balances.find((b) => b.tokenId === tokenId);
   if (!holding) return { ok: false, message: `You hold no ${tokenId} in practice.` };
-  if (units > holding.balance) {
-    return { ok: false, message: `Not enough ${holding.symbol}: you have ${holding.balance.toString()}.` };
+  if (units > holding.baseUnits) {
+    return { ok: false, message: `Not enough ${holding.symbol}: you have ${holding.displayAmount}.` };
   }
-  holding.balance -= units;
-  holding.displayAmount = holding.balance.toString();
-  return { ok: true, balance: holding.balance };
+  holding.baseUnits -= units;
+  holding.displayAmount = holding.baseUnits.toString();
+  return { ok: true, balance: holding.baseUnits };
 }
 
 function credit(state: PracticeState, tokenId: string, units: number): void {
   const holding = state.balances.find((b) => b.tokenId === tokenId) ?? state.balances[0];
-  holding.balance += BigInt(units);
-  holding.displayAmount = holding.balance.toString();
+  holding.baseUnits += BigInt(units);
+  holding.displayAmount = holding.baseUnits.toString();
 }
 
-function recordSend(state: PracticeState, to: string, amount: string | number | bigint, memo: string | undefined, mode: 'online' | 'offline'): string {
+function recordSend(state: PracticeState, to: string, tokenId: string, amount: string | number | bigint, memo: string | undefined, mode: 'online' | 'offline'): string {
   state.sequence += 1;
   const txId = `practice-${state.sequence}`;
   const units = wholeAmount(amount) ?? BigInt(0);
+  const contact = state.contacts.find((c) => c.alias === to || c.deviceId === to);
   state.history = [
     {
       txId,
+      txHash: practiceId(`PRACT1CETX${state.sequence}`),
+      txType: mode === 'offline' ? 'bilateral_offline' : 'online',
       type: mode,
-      amount: units,
-      amountSigned: -units,
-      recipient: to,
-      memo,
+      amount: -units,
+      displayAmount: `-${units.toString()}`,
+      tokenId,
+      recipient: contact?.alias ?? to,
       status: 'confirmed',
-      txType: 'transfer',
+      fromDeviceId: state.identity.deviceId,
+      toDeviceId: contact?.deviceId ?? practiceId('PRACT1CEPEER'),
+      memo,
+      receiptVerified: false,
     },
     ...state.history,
   ];
@@ -146,19 +157,25 @@ function simulations(state: PracticeState, emit: (event: PracticeEvent) => void)
     resolveBleAddressForContact: async () => undefined,
     sendOnlineTransferSmart: async (recipientAlias: string, scaledAmountStr: string | number | bigint, memo?: string, tokenId?: string) => {
       await pause(700);
-      const result = debit(state, tokenId || 'ERA', scaledAmountStr);
+      // As Rust answers: a send that names no token is refused, never sent as ERA.
+      if (!tokenId) return { success: false, message: 'wallet.sendSmart: the request names no token' };
+      const token = tokenId;
+      const result = debit(state, token, scaledAmountStr);
       if (!result.ok) return { success: false, error: { message: result.message } };
-      recordSend(state, recipientAlias, scaledAmountStr, memo, 'online');
+      recordSend(state, recipientAlias, token, scaledAmountStr, memo, 'online');
       emit('sent');
       return { success: true, newBalance: result.balance };
     },
+    // Answers in the shape the real sendOfflineTransfer does (GenericTxResponse).
     sendOfflineTransfer: async (params: { tokenId: string; to: string; amount: number | bigint | string; memo?: string }) => {
       await pause(700);
-      const result = debit(state, params.tokenId || 'ERA', params.amount);
-      if (!result.ok) return { success: false, message: result.message };
-      const transactionId = recordSend(state, params.to, params.amount, params.memo, 'offline');
+      if (!params.tokenId) return { accepted: false, result: 'wallet.sendOffline: the request names no token' };
+      const token = params.tokenId;
+      const result = debit(state, token, params.amount);
+      if (!result.ok) return { accepted: false, result: result.message };
+      recordSend(state, params.to, token, params.amount, params.memo, 'offline');
       emit('sent');
-      return { success: true, transactionId };
+      return { accepted: true, result: 'Practice transfer complete' };
     },
     claimFaucet: async (tokenId?: string) => {
       await pause(600);

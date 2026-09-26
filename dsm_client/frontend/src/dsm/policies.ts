@@ -238,15 +238,17 @@ export async function getTokenPolicyBytes(anchorBytes: Uint8Array): Promise<Uint
 }
 
 /**
- * Publish a CPTA token policy from a Base32 Crockford-encoded CanonicalPolicy proto.
- * Validates the payload as TokenPolicyV3, publishes to the storage node (or falls back
- * to a local content-addressed anchor), and returns the policy anchor ID.
+ * Publish a token policy: the Base32 Crockford of serialized TokenPolicyV3
+ * bytes, sent to Rust exactly as pasted. Rust refuses bytes Core's policy
+ * parser does not accept; its anchor is the BLAKE3 content hash of those
+ * bytes; it keeps the policy on this device and answers whether the network
+ * stored it.
  *
  * This is the entry point for the DevPolicyScreen "Publish Policy" action.
  */
 export async function publishTokenPolicy(input: {
   policyBase32: string;
-}): Promise<{ success: boolean; id?: string; error?: string }> {
+}): Promise<{ success: true; id: string } | { success: false; error: string }> {
   try {
     const b32 = typeof input?.policyBase32 === 'string' ? input.policyBase32.trim() : '';
     if (!b32) return { success: false, error: 'policy bytes required (base32)' };
@@ -254,24 +256,15 @@ export async function publishTokenPolicy(input: {
     const bytes = decodeBase32Crockford(b32);
     if (!bytes || bytes.length === 0) return { success: false, error: 'decoded policy bytes empty' };
 
-    // Validate payload is a TokenPolicyV3 proto; re-encode to canonical bytes.
-    const policy = pb.TokenPolicyV3.fromBinary(bytes);
-    const canonicalBytes = new Uint8Array(policy.toBinary());
-
-    const published = await publishTokenPolicyBytes(canonicalBytes);
+    // Exactly the bytes pasted: the anchor is their hash, so a re-encoding here
+    // would publish another policy's bytes under another anchor.
+    const published = await publishTokenPolicyBytes(new Uint8Array(bytes));
     return { success: true, id: published.anchorBase32 };
   } catch (e: any) {
     return { success: false, error: e?.message || 'Policy publish failed' };
   }
 }
 
-/**
- * Mint additional supply of an existing token.
- *
- * PURE TRANSPORT. Authority, the k-of-N threshold and the supply cap are
- * enforced by the token's committed policy conditions in Rust; this layer
- * cannot approve or bypass any of them, and must never try to pre-judge them.
- */
 /// Drop a token's identity from this device.
 ///
 /// A ticker names one token, so a device that has adopted one cannot adopt a

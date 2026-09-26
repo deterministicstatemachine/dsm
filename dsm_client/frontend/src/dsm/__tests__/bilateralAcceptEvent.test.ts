@@ -30,7 +30,7 @@ describe('bilateral accept event dispatch', () => {
     const counterpartyDeviceId = new Uint8Array(32).fill(3);
     const env = new pb.Envelope({
       version: 3,
-      payload: { case: 'appStateResponse', value: new pb.AppStateResponse({ key: 'ok' }) },
+      payload: { case: 'bilateralPrepareResponse', value: new pb.BilateralPrepareResponse({}) },
     } as any);
     const framed = frameEnvelope(env);
     (window as any).DsmBridge = {

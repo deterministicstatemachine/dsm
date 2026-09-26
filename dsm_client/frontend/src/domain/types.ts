@@ -7,18 +7,6 @@ export type DomainIdentity = {
   deviceId: string;
 };
 
-export type DomainBalance = {
-  /** Display form rendered by Rust. Never computed in this layer. */
-  displayAmount?: string;
-  tokenId: string;
-  tokenName: string;
-  balance: bigint;
-  decimals: number;
-  symbol: string;
-  /** The token policy's icon field, carried from Rust; the wallet draws the token's coin from it. */
-  iconUrl?: string;
-};
-
 export type DomainRelationshipSendCheckState = 'checking' | 'ready' | 'blocked';
 
 export type DomainRelationshipSendBlockReason =
@@ -49,22 +37,34 @@ export type DomainContact = {
   sendBlockMessage?: string;
 };
 
+/** The history types Rust writes (`TransactionInfo.tx_type`). */
+export type DomainTxType = 'bilateral_offline' | 'online' | 'dbtc_mint' | 'dbtc_burn';
+
+/**
+ * One wallet history row, exactly as `wallet.history` reports it. Every
+ * field is Rust's; nothing here is inferred, defaulted or re-derived.
+ */
 export type DomainTransaction = {
   txId: string;
-  type: 'online' | 'offline';
+  /** Base32 Crockford. */
+  txHash: string;
+  txType: DomainTxType;
+  /** A transfer's transport; a dBTC deposit or withdrawal has none. */
+  type?: 'online' | 'offline';
+  /** Signed base units, as Rust signed it: negative is outgoing. */
   amount: bigint;
-  recipient: string;
-  memo?: string;
-  status: 'pending' | 'confirmed' | 'failed';
-  syncStatus?: 'synced' | 'syncing' | 'unsynced' | undefined;
-  txType?: string;
-  txHash?: string;
-  fromDeviceId?: string;
-  toDeviceId?: string;
-  amountSigned?: bigint;
   /** Signed display form rendered by Rust. Never computed in this layer. */
-  displayAmount?: string;
+  displayAmount: string;
+  tokenId: string;
+  /** The counterparty as Rust labels it (alias or device id). */
+  recipient: string;
+  /** Rust's word for the row's state. */
+  status: string;
+  /** Base32 Crockford. */
+  fromDeviceId: string;
+  /** Base32 Crockford. */
+  toDeviceId: string;
+  memo?: string;
   stitchedReceipt?: Uint8Array;
-  receiptVerified?: boolean;
-  tokenId?: string;
+  receiptVerified: boolean;
 };

@@ -5,7 +5,7 @@
 
 import * as pb from '../../proto/dsm_app_pb';
 import { encodeBase32Crockford, decodeBase32Crockford } from '../../utils/textId';
-import { acceptOfflineTransfer, rejectOfflineTransfer } from '../../dsm/index';
+import { acceptOfflineTransfer, rejectOfflineTransfer, type BilateralActionResult } from '../../dsm/index';
 
 export const BilateralEventType = {
   PREPARE_RECEIVED: pb.BilateralEventType.BILATERAL_EVENT_PREPARE_RECEIVED,
@@ -93,13 +93,13 @@ function decodeB32To32Bytes(value: string, label: string): Uint8Array {
   return bytes;
 }
 
-export async function acceptIncomingTransfer(event: BilateralTransferEvent): Promise<{ success: boolean }> {
+export async function acceptIncomingTransfer(event: BilateralTransferEvent): Promise<BilateralActionResult> {
   const commitmentHash = decodeB32To32Bytes(event.commitmentHash, 'commitmentHash');
   const counterpartyDeviceId = decodeB32To32Bytes(event.counterpartyDeviceId, 'counterpartyDeviceId');
   return acceptOfflineTransfer({ commitmentHash, counterpartyDeviceId });
 }
 
-export async function rejectIncomingTransfer(event: BilateralTransferEvent, reason?: string): Promise<{ success: boolean }> {
+export async function rejectIncomingTransfer(event: BilateralTransferEvent, reason?: string): Promise<BilateralActionResult> {
   const commitmentHash = decodeB32To32Bytes(event.commitmentHash, 'commitmentHash');
   const counterpartyDeviceId = decodeB32To32Bytes(event.counterpartyDeviceId, 'counterpartyDeviceId');
   return rejectOfflineTransfer({ commitmentHash, counterpartyDeviceId, reason });

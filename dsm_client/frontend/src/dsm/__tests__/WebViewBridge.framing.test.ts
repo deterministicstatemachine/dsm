@@ -8,7 +8,7 @@ function wrapSuccessEnvelope(data: Uint8Array): Uint8Array {
   return br.toBinary();
 }
 
-describe.skip('WebViewBridge framing invariants', () => {
+describe('WebViewBridge framing invariants', () => {
   beforeEach(() => {
     (global as any).window = (global as any).window ?? {};
   });
@@ -37,13 +37,13 @@ describe.skip('WebViewBridge framing invariants', () => {
     expect((ingressRequest.operation.value as EnvelopeOp).envelopeBytes).toEqual(envelope);
   });
 
-  test('normalizeToBytes rejects non-Uint8Array / non-number[] payloads', async () => {
+  test('a native answer that is not bytes is refused', async () => {
     (global as any).window.DsmBridge = {
       __callBin: async () => ({ nope: true } as any),
     };
 
     await expect(processEnvelopeV3Bin(new Uint8Array([1]))).rejects.toThrow(
-      /normalizeToBytes: expected Uint8Array or number\[]/,
+      /expected Uint8Array response from native boundary/,
     );
   });
 });

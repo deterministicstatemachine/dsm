@@ -123,10 +123,17 @@ function frameEnvelope(env: pb.Envelope): Uint8Array {
 
 /** Build FramedEnvelopeV3 containing a BalancesListResponse */
 function makeBalancesFramedEnvelope(balances: Array<{ tokenId: string; available: bigint }>): Uint8Array {
+  // Complete rows, as balance.list enriches them: the boundary decoder refuses
+  // a row missing its symbol, name or display amount. The fixture's tokens are
+  // whole-unit, so the display form is the base units.
   const balList = balances.map(b => new pb.BalanceGetResponse({
     tokenId: b.tokenId,
     available: b.available as any,
     locked: 0n as any,
+    symbol: b.tokenId,
+    tokenName: b.tokenId,
+    decimals: 0,
+    displayAmount: b.available.toString(),
   } as any));
   const resp = new pb.BalancesListResponse({ balances: balList } as any);
   const env = new pb.Envelope({
@@ -138,11 +145,21 @@ function makeBalancesFramedEnvelope(balances: Array<{ tokenId: string; available
 
 /** Build FramedEnvelopeV3 containing a WalletHistoryResponse */
 function makeHistoryFramedEnvelope(transactions: Array<{ amount: bigint; amountSigned: bigint }>): Uint8Array {
-  const txList = transactions.map(t => new pb.TransactionInfo({
-    id: `tx-${Math.random().toString(36).slice(2, 8)}`,
-    amount: t.amount as any,
-    amountSigned: t.amountSigned as any,
-  } as any));
+  // Complete rows, as wallet.history writes them: the boundary mapper refuses
+  // a row missing any field Rust always sets.
+  const txList = transactions.map((t, i) => new pb.TransactionInfo({
+    id: `tx-${i}`,
+    fromDeviceId: new Uint8Array(32).fill(0x11),
+    toDeviceId: new Uint8Array(32).fill(0x22),
+    tokenId: 'ERA',
+    amount: t.amount,
+    txHash: new Uint8Array(32).fill(0x30 + i),
+    amountSigned: t.amountSigned,
+    txType: pb.TransactionType.TX_TYPE_BILATERAL_OFFLINE,
+    status: 'completed',
+    recipient: 'peer',
+    displayAmount: t.amountSigned.toString(),
+  }));
   const resp = new pb.WalletHistoryResponse({ transactions: txList } as any);
   const env = new pb.Envelope({
     version: 3,
@@ -159,6 +176,24 @@ function makeSuccessFramedEnvelope(): Uint8Array {
   const env = new pb.Envelope({
     version: 3,
     payload: { case: 'universalRx', value: rx },
+  } as any);
+  return frameEnvelope(env);
+}
+
+/** The SDK's answer to an accept: the accept envelope it sends the proposer. */
+function makeAcceptFramedEnvelope(): Uint8Array {
+  const env = new pb.Envelope({
+    version: 3,
+    payload: { case: 'bilateralPrepareResponse', value: new pb.BilateralPrepareResponse({}) },
+  } as any);
+  return frameEnvelope(env);
+}
+
+/** The SDK's answer to a reject: the rejection it sends the proposer. */
+function makeRejectFramedEnvelope(): Uint8Array {
+  const env = new pb.Envelope({
+    version: 3,
+    payload: { case: 'bilateralPrepareReject', value: new pb.BilateralPrepareReject({ reason: 'User rejected transfer' }) },
   } as any);
   return frameEnvelope(env);
 }
@@ -207,13 +242,11 @@ function installCallBinMock() {
       }
 
       if (method === 'acceptBilateralByCommitment') {
-        // Returns FramedEnvelopeV3 with success
-        return wrapSuccess(makeSuccessFramedEnvelope());
+        return wrapSuccess(makeAcceptFramedEnvelope());
       }
 
       if (method === 'rejectBilateralByCommitment') {
-        // Returns FramedEnvelopeV3 with success
-        return wrapSuccess(makeSuccessFramedEnvelope());
+        return wrapSuccess(makeRejectFramedEnvelope());
       }
 
       if (method === 'getPreference' || method === 'setPreference') {
@@ -651,7 +684,7 @@ describe('INTEGRATED: Full chain with __callBin-only mock', () => {
         <span data-testid="i-tx-count">{wallet.transactions?.length ?? 0}</span>
         <span data-testid="i-initialized">{String(wallet.isInitialized)}</span>
         <span data-testid="i-balance-era">
-          {wallet.balances?.find((b: any) => b.tokenId === 'ERA')?.balance?.toString() ?? 'none'}
+          {wallet.balances?.find((b: any) => b.tokenId === 'ERA')?.displayAmount ?? 'none'}
         </span>
       </div>
     );
@@ -821,7 +854,7 @@ describe('INTEGRATED: Full chain with __callBin-only mock', () => {
     // BilateralTransferDialog.handleComplete → refreshAll() → WalletProvider's REAL refreshAll()
     // → dsmClient.getAllBalances() → dsm.getAllBalances() → getAllBalancesStrictBridge()
     // → callBin('getAllBalancesStrict') → __callBin → FramedEnvelopeV3(10300)
-    // → decodeBalancesListResponseStrict() → mapBalanceList() → dispatch SET_BALANCES → DOM updates
+    // → getAllBalances() → TokenBalanceView[] → walletStore → DOM updates
     act(() => {
       eventBridgeEmit('bilateral.event', encodeBilateralEventNotification({
         eventType: BilateralEventType.TRANSFER_COMPLETE,
@@ -844,7 +877,7 @@ describe('INTEGRATED: Full chain with __callBin-only mock', () => {
     // TRANSFER_COMPLETE event → Dialog.handleComplete → refreshAll() → dsmClient.getAllBalances()
     // → dsm/wallet.ts::getAllBalances() → getAllBalancesStrictBridge() → callBin('getAllBalancesStrict')
     // → __callBin → BridgeRpcResponse → unwrapProtobufResponse → FramedEnvelopeV3
-    // → decodeBalancesListResponseStrict → TokenBalanceView[] → mapBalanceList → dispatch SET_BALANCES → DOM
+    // → getAllBalances → TokenBalanceView[] → walletStore → DOM
     await waitFor(() => {
       expect(screen.getByTestId('i-balance-era').textContent).toBe('10300');
     });
@@ -1046,7 +1079,7 @@ describe('INTEGRATED: Full bilateral transfer back-and-forth', () => {
     const w = useWallet();
     return (
       <div>
-        <span data-testid="seq-bal">{w.balances?.find((b: any) => b.tokenId === 'ERA')?.balance?.toString() ?? 'none'}</span>
+        <span data-testid="seq-bal">{w.balances?.find((b: any) => b.tokenId === 'ERA')?.displayAmount ?? 'none'}</span>
         <span data-testid="seq-txs">{w.transactions?.length ?? 0}</span>
       </div>
     );

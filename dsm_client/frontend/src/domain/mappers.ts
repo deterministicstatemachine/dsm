@@ -6,15 +6,16 @@ import { toBase32Crockford } from '../dsm/decoding';
 import {
   RelationshipSendBlockReason,
   RelationshipSendCheckState,
+  TransactionType,
+  type TransactionInfo,
 } from '../proto/dsm_app_pb';
 import type {
-  DomainBalance,
   DomainContact,
-  DomainIdentity,
   DomainRelationshipSendBlockReason,
   DomainRelationshipSendCheckState,
   DomainRelationshipSendStatus,
   DomainTransaction,
+  DomainTxType,
 } from './types';
 
 function toBase32(bytes?: Uint8Array | null): string {
@@ -45,13 +46,6 @@ function normalizeIdField(value: any): string {
     return value;
   }
   return String(value ?? '');
-}
-
-export function toBigint(x: unknown): bigint {
-  if (typeof x === 'bigint') return x;
-  if (typeof x === 'number') return BigInt(Math.trunc(x));
-  if (typeof x === 'string' && x.trim().length > 0) return BigInt(x);
-  return 0n;
 }
 
 export function normalizeBleAddress(input?: string): string | undefined {
@@ -114,37 +108,6 @@ export function mapRelationshipSendStatus(status: any): DomainRelationshipSendSt
   };
 }
 
-export function mapIdentity(id: any): DomainIdentity | null {
-  // Strict proto field names — camelCase from @bufbuild/protobuf codegen.
-  if (id && ('genesis_hash' in id || 'device_id' in id)) {
-    console.error('[mappers] snake_case fields in identity — bridge returned raw data instead of protobuf');
-  }
-  const genesisHash = id?.genesisHash instanceof Uint8Array ? toBase32(id.genesisHash) : String(id?.genesisHash ?? '');
-  const deviceId = id?.deviceId instanceof Uint8Array ? toBase32(id.deviceId) : String(id?.deviceId ?? '');
-  if (!genesisHash || !deviceId) return null;
-  return { genesisHash, deviceId };
-}
-
-export function mapBalanceList(list: any[]): DomainBalance[] {
-  return list.map((b: any) => {
-    // Strict proto field names — camelCase only. snake_case = raw data bug.
-    if ('token_id' in b) {
-      console.error('[mappers] snake_case fields in balance — bridge returned raw data instead of protobuf');
-    }
-    let tokenId = String(b.tokenId ?? '');
-    const symbol = String(b.symbol ?? '');
-    if (tokenId.includes(' ') || tokenId.includes('-')) tokenId = 'ERA';
-    const tokenName = String(b.tokenName ?? symbol ?? tokenId ?? 'UNKNOWN');
-    const balance = toBigint(b.balance);
-    const decimals = typeof b.decimals === 'number' ? b.decimals : 0;
-    // Rendered by Rust; carried, never recomputed.
-    const displayAmount = String(b.displayAmount ?? '');
-    // The token policy's icon field, carried from Rust.
-    const iconUrl = String(b.iconUrl ?? '');
-    return { tokenId, tokenName, balance, decimals, symbol, displayAmount, iconUrl };
-  });
-}
-
 export function mapContactList(list: any[], bleSnapshot?: { deviceIds: Record<string, string>; genesis: Record<string, string> }): DomainContact[] {
   const snapshot = bleSnapshot || { deviceIds: {}, genesis: {} };
   return list.map((c: any) => {
@@ -189,91 +152,53 @@ export function mapContactList(list: any[], bleSnapshot?: { deviceIds: Record<st
   });
 }
 
-export function mapTransactions(list: any[]): DomainTransaction[] {
-  const txTypeToString = (raw: unknown): string => {
-    if (typeof raw === 'string' && raw.length > 0) return raw;
-    if (typeof raw === 'number') {
-      switch (raw) {
-        case 1:
-          return 'faucet';
-        case 2:
-          return 'bilateral_offline';
-        case 3:
-          return 'bilateral_offline_recovered';
-        case 4:
-          return 'online';
-        case 5:
-          return 'dbtc_mint';
-        case 6:
-          return 'dbtc_burn';
-        default:
-          return '';
-      }
-    }
-    return '';
-  };
+const TX_TYPES: Record<number, DomainTxType> = {
+  [TransactionType.TX_TYPE_BILATERAL_OFFLINE]: 'bilateral_offline',
+  [TransactionType.TX_TYPE_ONLINE]: 'online',
+  [TransactionType.TX_TYPE_DBTC_MINT]: 'dbtc_mint',
+  [TransactionType.TX_TYPE_DBTC_BURN]: 'dbtc_burn',
+};
 
-  return list.map((t: any) => {
-    // Strict proto field names — camelCase from @bufbuild/protobuf codegen.
-    if ('tx_id' in t || 'from_device_id' in t || 'to_device_id' in t) {
-      console.error('[mappers] snake_case fields in transaction — bridge returned raw data instead of protobuf');
+function txBytes32(t: TransactionInfo, field: string, bytes: Uint8Array): string {
+  if (!(bytes instanceof Uint8Array) || bytes.length !== 32) {
+    throw new Error(`STRICT: transaction ${t.id} carries a ${field} that is not 32 bytes`);
+  }
+  return toBase32(bytes);
+}
+
+function txText(t: TransactionInfo, field: string, value: string): string {
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new Error(`STRICT: transaction ${t.id || '(no id)'} carries no ${field}`);
+  }
+  return value;
+}
+
+/**
+ * `wallet.history` rows as Rust reports them. A row missing a field Rust
+ * always writes, or of a type the wire does not name, is refused: nothing is
+ * filled in or guessed.
+ */
+export function mapTransactions(list: TransactionInfo[]): DomainTransaction[] {
+  return list.map((t) => {
+    const txType = TX_TYPES[t.txType];
+    if (!txType) {
+      throw new Error(`STRICT: transaction ${t.id || '(no id)'} has type ${t.txType}, which the wire does not name`);
     }
-    const txId = t.txHash instanceof Uint8Array ? toBase32(t.txHash) : String(t.txId ?? t.id ?? '');
-    const recipient = t.toDeviceId instanceof Uint8Array ? toBase32(t.toDeviceId) : String(t.recipient ?? '');
-    const amountSignedRaw = t.amountSigned ?? t.amount ?? 0;
-    const amount = toBigint(amountSignedRaw);
-    const txType = txTypeToString(t.txType);
-    const status = (typeof t.status === 'string' && t.status.length > 0) ? t.status : 'confirmed';
-    const fromDevice = t.fromDeviceId instanceof Uint8Array
-      ? toBase32(t.fromDeviceId)
-      : typeof t.fromDeviceId === 'string'
-        ? t.fromDeviceId
-        : undefined;
-    const toDevice = t.toDeviceId instanceof Uint8Array
-      ? toBase32(t.toDeviceId)
-      : typeof t.toDeviceId === 'string'
-        ? t.toDeviceId
-        : undefined;
-    const txHash = t.txHash instanceof Uint8Array
-      ? toBase32(t.txHash)
-      : typeof t.txHash === 'string'
-        ? t.txHash
-        : undefined;
-    const stitchedReceipt = t.stitchedReceipt instanceof Uint8Array
-      ? t.stitchedReceipt
-      : undefined;
-    // Resolve tokenId: use explicit field first, then infer from txType for dBTC ops.
-    const rawTokenId = typeof t.tokenId === 'string' && t.tokenId.length > 0
-      ? t.tokenId
-      : undefined;
-    const tokenId = rawTokenId
-      || (txType === 'dbtc_mint' || txType === 'dbtc_burn' ? 'dBTC' : undefined);
-    const memo = typeof t.memo === 'string' && t.memo.length > 0 ? t.memo : undefined;
-    const type: 'online' | 'offline' = (txType === 'bilateral_offline' || txType === 'bilateral_offline_recovered')
-      ? 'offline'
-      : (txType === 'faucet' || txType === 'online')
-        ? 'online'
-        : (t.type === 'offline' || t.type === 'online')
-          ? t.type
-          : 'online';
     return {
-      txId,
-      type,
-      amount,
-      recipient,
-      status: status as any,
-      syncStatus: t.syncStatus,
-      txType: txType || undefined,
-      txHash,
-      fromDeviceId: fromDevice,
-      toDeviceId: toDevice,
-      amountSigned: amount,
-      // Rendered by Rust from the token's registry decimals; carried as-is.
-      displayAmount: String((t as any).displayAmount ?? ''),
-      stitchedReceipt,
-      receiptVerified: !!t.receiptVerified,
-      tokenId,
-      memo,
+      txId: txText(t, 'id', t.id),
+      txHash: txBytes32(t, 'tx hash', t.txHash),
+      txType,
+      type: txType === 'bilateral_offline' ? 'offline' : txType === 'online' ? 'online' : undefined,
+      amount: t.amountSigned,
+      displayAmount: txText(t, 'display amount', t.displayAmount),
+      tokenId: txText(t, 'token id', t.tokenId),
+      recipient: txText(t, 'counterparty label', t.recipient),
+      status: txText(t, 'status', t.status),
+      fromDeviceId: txBytes32(t, 'sender device id', t.fromDeviceId),
+      toDeviceId: txBytes32(t, 'recipient device id', t.toDeviceId),
+      memo: t.memo.length > 0 ? t.memo : undefined,
+      stitchedReceipt: t.stitchedReceipt.length > 0 ? t.stitchedReceipt : undefined,
+      receiptVerified: t.receiptVerified,
     };
   });
 }

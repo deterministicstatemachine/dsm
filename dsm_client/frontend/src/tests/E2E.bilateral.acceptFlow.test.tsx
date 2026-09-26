@@ -52,7 +52,12 @@ describe('E2E bilateral accept: BLE accept flow triggers refresh and toast', () 
         const req = pb.BridgeRpcRequest.fromBinary(reqBytes);
         const method = req.method || '';
         if (method === 'acceptBilateralByCommitment') {
-          return (global as any).createDsmBridgeSuccessResponse(frame(env.toBinary()));
+          // The SDK answers an accept with the accept envelope it sends the proposer.
+          const accept = new pb.Envelope({
+            version: 3,
+            payload: { case: 'bilateralPrepareResponse', value: new pb.BilateralPrepareResponse({}) },
+          } as any);
+          return (global as any).createDsmBridgeSuccessResponse(frame(accept.toBinary()));
         }
         if (method === 'nativeBoundaryIngress') {
           const ingressRequest = pb.IngressRequest.fromBinary(
