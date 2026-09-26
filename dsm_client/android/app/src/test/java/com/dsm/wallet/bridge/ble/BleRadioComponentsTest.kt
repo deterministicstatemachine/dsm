@@ -98,19 +98,24 @@ class BleRadioComponentsTest {
         val framework = mock<BluetoothLeAdvertiser>()
         shadowOf(adapter).setBluetoothLeAdvertiser(framework)
         val advertiser = BleAdvertiser(app)
+        assertFalse("nothing was on the air", advertiser.radioOff())
+
         assertTrue(advertiser.startAdvertising())
-        val firstCallback = startedSetCallback(framework, 1)
-        firstCallback.onAdvertisingSetStarted(mock<AdvertisingSet>(), 0, AdvertisingSetCallback.ADVERTISE_SUCCESS)
+        assertFalse("a set the stack never confirmed was not on the air", advertiser.radioOff())
+
+        assertTrue(advertiser.startAdvertising())
+        val confirmed = startedSetCallback(framework, 2)
+        confirmed.onAdvertisingSetStarted(mock<AdvertisingSet>(), 0, AdvertisingSetCallback.ADVERTISE_SUCCESS)
         assertTrue(advertiser.isAdvertising())
 
         assertTrue("a confirmed set was on the air", advertiser.radioOff())
         assertFalse(advertiser.isAdvertising())
         // A late answer about the ended set changes nothing.
-        firstCallback.onAdvertisingSetStarted(mock<AdvertisingSet>(), 0, AdvertisingSetCallback.ADVERTISE_SUCCESS)
+        confirmed.onAdvertisingSetStarted(mock<AdvertisingSet>(), 0, AdvertisingSetCallback.ADVERTISE_SUCCESS)
         assertFalse(advertiser.isAdvertising())
 
         assertTrue(advertiser.startAdvertising())
-        startedSetCallback(framework, 2)
+        startedSetCallback(framework, 3)
     }
 
     @Test

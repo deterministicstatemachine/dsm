@@ -1,6 +1,7 @@
 package com.dsm.wallet.bridge.ble
 
 import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothDevice
 import android.content.Context
 import android.content.Intent
 import android.os.Looper
@@ -143,6 +144,18 @@ class BleCoordinatorRadioTest {
         whenever(advertiser.startAdvertising()).thenReturn(true)
         whenever(scanner.isScanning()).thenAnswer { scanning }
         whenever(scanner.radioOff()).thenAnswer { val was = scanning; scanning = false; was }
+        // A peer connected to our server and subscribed, and a peer we are connected to.
+        val serverClient = PeerSession("11:22:33:44:55:66").apply {
+            serverDevice = mock<BluetoothDevice>()
+            subscribedCccds[BleConstants.TX_RESPONSE_UUID] = true
+        }
+        val clientSession = mock<GattClientSession>()
+        val connected = PeerSession("77:88:99:AA:BB:CC").apply {
+            gattClientSession = clientSession
+            isConnected = true
+        }
+        coordinator.peers[serverClient.address] = serverClient
+        coordinator.peers[connected.address] = connected
 
         context.sendBroadcast(
             Intent(BluetoothAdapter.ACTION_STATE_CHANGED)
@@ -158,6 +171,12 @@ class BleCoordinatorRadioTest {
         verifyBlocking(gattServer) { ensureStarted() }
         verify(advertiser).startAdvertising()
         assertEquals(listOf("scanStopped", "advertisingStopped"), recorded.events)
+        // No link outlives the radio: neither peer is left looking reachable.
+        assertFalse(serverClient.isServerClient)
+        assertFalse(serverClient.isSubscribedTo(BleConstants.TX_RESPONSE_UUID))
+        assertFalse(connected.hasActiveClientSession)
+        verify(clientSession).closeQuietly()
+        assertTrue("peers with nothing left are dropped", coordinator.peers.isEmpty())
     }
 
     @Test

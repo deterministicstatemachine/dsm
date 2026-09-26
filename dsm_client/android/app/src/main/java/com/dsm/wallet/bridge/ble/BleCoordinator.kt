@@ -360,7 +360,17 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
             val wasScanning = scanner.radioOff()
             val wasAdvertising = advertiser.radioOff()
             gattServer.stop()
-            Log.i("BleCoordinator", "Bluetooth off: radio state cleared (scanning=$wasScanning advertising=$wasAdvertising)")
+            // Every link ended with the radio. The server that would have reported
+            // its clients' disconnects is closed, so no disconnect will clear them:
+            // clear each peer's links here, keeping what outlives a link.
+            var links = 0
+            for ((address, peer) in peers) {
+                if (peer.gattClientSession != null || peer.isServerClient || peer.connectionPending) links++
+                peer.clearClientState()
+                peer.clearServerState()
+                if (peer.isEmpty) peers.remove(address)
+            }
+            Log.i("BleCoordinator", "Bluetooth off: radio state cleared (scanning=$wasScanning advertising=$wasAdvertising links=$links)")
             if (wasScanning) radioEvents.scanStopped()
             if (wasAdvertising) radioEvents.advertisingStopped()
         }
