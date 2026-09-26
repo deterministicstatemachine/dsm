@@ -48,10 +48,10 @@ function OverviewTabInner({ balances, transactions, genesisB32, deviceB32, onSwi
             {visibleBalances.map((b) => (
               <div key={b.tokenId} className="sb-kv" style={{ padding: '6px 0' }}>
                 <span className="sb-kv__k" style={{ fontSize: 11, textTransform: 'none', letterSpacing: 0, display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                  <TokenMark ticker={b.symbol || b.tokenId} iconUrl={b.iconUrl} />
-                  {b.symbol || b.tokenId}
+                  <TokenMark ticker={b.symbol} iconUrl={b.iconUrl} />
+                  {b.symbol}
                 </span>
-                <span className="sb-kv__v" style={{ fontSize: 15, fontWeight: 700 }}>{String(b.balance ?? '0')}</span>
+                <span className="sb-kv__v" style={{ fontSize: 15, fontWeight: 700 }}>{b.balance}</span>
               </div>
             ))}
             {balances.length > MAX_OVERVIEW_BALANCES && (

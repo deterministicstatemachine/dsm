@@ -123,10 +123,17 @@ function frameEnvelope(env: pb.Envelope): Uint8Array {
 
 /** Build FramedEnvelopeV3 containing a BalancesListResponse */
 function makeBalancesFramedEnvelope(balances: Array<{ tokenId: string; available: bigint }>): Uint8Array {
+  // Complete rows, as balance.list enriches them: the boundary decoder refuses
+  // a row missing its symbol, name or display amount. The fixture's tokens are
+  // whole-unit, so the display form is the base units.
   const balList = balances.map(b => new pb.BalanceGetResponse({
     tokenId: b.tokenId,
     available: b.available as any,
     locked: 0n as any,
+    symbol: b.tokenId,
+    tokenName: b.tokenId,
+    decimals: 0,
+    displayAmount: b.available.toString(),
   } as any));
   const resp = new pb.BalancesListResponse({ balances: balList } as any);
   const env = new pb.Envelope({
@@ -677,7 +684,7 @@ describe('INTEGRATED: Full chain with __callBin-only mock', () => {
         <span data-testid="i-tx-count">{wallet.transactions?.length ?? 0}</span>
         <span data-testid="i-initialized">{String(wallet.isInitialized)}</span>
         <span data-testid="i-balance-era">
-          {wallet.balances?.find((b: any) => b.tokenId === 'ERA')?.balance?.toString() ?? 'none'}
+          {wallet.balances?.find((b: any) => b.tokenId === 'ERA')?.displayAmount ?? 'none'}
         </span>
       </div>
     );
@@ -847,7 +854,7 @@ describe('INTEGRATED: Full chain with __callBin-only mock', () => {
     // BilateralTransferDialog.handleComplete → refreshAll() → WalletProvider's REAL refreshAll()
     // → dsmClient.getAllBalances() → dsm.getAllBalances() → getAllBalancesStrictBridge()
     // → callBin('getAllBalancesStrict') → __callBin → FramedEnvelopeV3(10300)
-    // → decodeBalancesListResponseStrict() → mapBalanceList() → dispatch SET_BALANCES → DOM updates
+    // → getAllBalances() → TokenBalanceView[] → walletStore → DOM updates
     act(() => {
       eventBridgeEmit('bilateral.event', encodeBilateralEventNotification({
         eventType: BilateralEventType.TRANSFER_COMPLETE,
@@ -870,7 +877,7 @@ describe('INTEGRATED: Full chain with __callBin-only mock', () => {
     // TRANSFER_COMPLETE event → Dialog.handleComplete → refreshAll() → dsmClient.getAllBalances()
     // → dsm/wallet.ts::getAllBalances() → getAllBalancesStrictBridge() → callBin('getAllBalancesStrict')
     // → __callBin → BridgeRpcResponse → unwrapProtobufResponse → FramedEnvelopeV3
-    // → decodeBalancesListResponseStrict → TokenBalanceView[] → mapBalanceList → dispatch SET_BALANCES → DOM
+    // → getAllBalances → TokenBalanceView[] → walletStore → DOM
     await waitFor(() => {
       expect(screen.getByTestId('i-balance-era').textContent).toBe('10300');
     });
@@ -1072,7 +1079,7 @@ describe('INTEGRATED: Full bilateral transfer back-and-forth', () => {
     const w = useWallet();
     return (
       <div>
-        <span data-testid="seq-bal">{w.balances?.find((b: any) => b.tokenId === 'ERA')?.balance?.toString() ?? 'none'}</span>
+        <span data-testid="seq-bal">{w.balances?.find((b: any) => b.tokenId === 'ERA')?.displayAmount ?? 'none'}</span>
         <span data-testid="seq-txs">{w.transactions?.length ?? 0}</span>
       </div>
     );

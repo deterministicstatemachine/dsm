@@ -307,19 +307,21 @@ export interface AddContactResult {
 }
 
 /**
- * Token Balance View (UI Friendly)
+ * One row of `balance.list`, as Rust reported it. Rust enriches every row at
+ * its encoding boundary, so a row without its token, symbol, name or display
+ * amount is refused, never filled in.
  */
 export interface TokenBalanceView {
-  tokenId: string; // string id
-  ticker: string;
-  balance: string; // formatted decimal string
+  /** The ticker the balance is projected under. Not an identity: see `canonicalTokenId`. */
+  tokenId: string;
+  symbol: string;
+  tokenName: string;
+  /** The available balance in base units. */
   baseUnits: bigint;
   decimals: number;
-  symbol: string;
-  tokenName?: string;
   /** Display form of `baseUnits`, rendered by Rust. Never computed here. */
-  displayAmount?: string;
-  /** The token's canonical id. `tokenId` on the wire is the TICKER, which is not an identity. */
+  displayAmount: string;
+  /** The token's canonical id, when Rust names one (registered tokens). */
   canonicalTokenId?: string;
   /** CPTA policy anchor, Base32 Crockford, rendered by Rust. Carried, never derived. */
   policyAnchorB32?: string;

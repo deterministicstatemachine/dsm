@@ -38,13 +38,13 @@ describe('wallet credit sound routing', () => {
     jest.spyOn(dsmClient, 'getWalletHistory' as any).mockResolvedValue({ transactions: [] });
     jest.spyOn(dsmClient, 'getAllBalances' as any)
       .mockResolvedValueOnce([
-        { tokenId: 'dBTC', tokenName: 'dBTC', balance: 5n, decimals: 8, symbol: 'dBTC' },
+        { tokenId: 'dBTC', tokenName: 'dBTC', baseUnits: 5n, decimals: 8, symbol: 'dBTC' },
       ])
       .mockResolvedValueOnce([
-        { tokenId: 'dBTC', tokenName: 'dBTC', balance: 6n, decimals: 8, symbol: 'dBTC' },
+        { tokenId: 'dBTC', tokenName: 'dBTC', baseUnits: 6n, decimals: 8, symbol: 'dBTC' },
       ])
       .mockResolvedValueOnce([
-        { tokenId: 'dBTC', tokenName: 'dBTC', balance: 6n, decimals: 8, symbol: 'dBTC' },
+        { tokenId: 'dBTC', tokenName: 'dBTC', baseUnits: 6n, decimals: 8, symbol: 'dBTC' },
       ]);
 
     await act(async () => {

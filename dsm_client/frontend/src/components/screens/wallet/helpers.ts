@@ -6,9 +6,9 @@ import type { DomainTransaction, DomainTxType } from '../../../domain/types';
 export type Balance = {
   tokenId: string;
   symbol: string;
-  balance: string | number;
-  decimals?: number;
-  usdValue?: string;
+  /** Display form, rendered by Rust from the token's decimals. */
+  balance: string;
+  decimals: number;
   /** The token policy's icon field, carried from Rust. */
   iconUrl?: string;
   /** CPTA policy anchor, Base32 Crockford, rendered by Rust. Carried, never derived. */

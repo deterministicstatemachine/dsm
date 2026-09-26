@@ -10,9 +10,7 @@ import {
   type TransactionInfo,
 } from '../proto/dsm_app_pb';
 import type {
-  DomainBalance,
   DomainContact,
-  DomainIdentity,
   DomainRelationshipSendBlockReason,
   DomainRelationshipSendCheckState,
   DomainRelationshipSendStatus,
@@ -48,13 +46,6 @@ function normalizeIdField(value: any): string {
     return value;
   }
   return String(value ?? '');
-}
-
-export function toBigint(x: unknown): bigint {
-  if (typeof x === 'bigint') return x;
-  if (typeof x === 'number') return BigInt(Math.trunc(x));
-  if (typeof x === 'string' && x.trim().length > 0) return BigInt(x);
-  return 0n;
 }
 
 export function normalizeBleAddress(input?: string): string | undefined {
@@ -115,37 +106,6 @@ export function mapRelationshipSendStatus(status: any): DomainRelationshipSendSt
     sendBlockReason,
     sendBlockMessage,
   };
-}
-
-export function mapIdentity(id: any): DomainIdentity | null {
-  // Strict proto field names — camelCase from @bufbuild/protobuf codegen.
-  if (id && ('genesis_hash' in id || 'device_id' in id)) {
-    console.error('[mappers] snake_case fields in identity — bridge returned raw data instead of protobuf');
-  }
-  const genesisHash = id?.genesisHash instanceof Uint8Array ? toBase32(id.genesisHash) : String(id?.genesisHash ?? '');
-  const deviceId = id?.deviceId instanceof Uint8Array ? toBase32(id.deviceId) : String(id?.deviceId ?? '');
-  if (!genesisHash || !deviceId) return null;
-  return { genesisHash, deviceId };
-}
-
-export function mapBalanceList(list: any[]): DomainBalance[] {
-  return list.map((b: any) => {
-    // Strict proto field names — camelCase only. snake_case = raw data bug.
-    if ('token_id' in b) {
-      console.error('[mappers] snake_case fields in balance — bridge returned raw data instead of protobuf');
-    }
-    let tokenId = String(b.tokenId ?? '');
-    const symbol = String(b.symbol ?? '');
-    if (tokenId.includes(' ') || tokenId.includes('-')) tokenId = 'ERA';
-    const tokenName = String(b.tokenName ?? symbol ?? tokenId ?? 'UNKNOWN');
-    const balance = toBigint(b.balance);
-    const decimals = typeof b.decimals === 'number' ? b.decimals : 0;
-    // Rendered by Rust; carried, never recomputed.
-    const displayAmount = String(b.displayAmount ?? '');
-    // The token policy's icon field, carried from Rust.
-    const iconUrl = String(b.iconUrl ?? '');
-    return { tokenId, tokenName, balance, decimals, symbol, displayAmount, iconUrl };
-  });
 }
 
 export function mapContactList(list: any[], bleSnapshot?: { deviceIds: Record<string, string>; genesis: Record<string, string> }): DomainContact[] {

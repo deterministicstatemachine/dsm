@@ -7,18 +7,6 @@ export type DomainIdentity = {
   deviceId: string;
 };
 
-export type DomainBalance = {
-  /** Display form rendered by Rust. Never computed in this layer. */
-  displayAmount?: string;
-  tokenId: string;
-  tokenName: string;
-  balance: bigint;
-  decimals: number;
-  symbol: string;
-  /** The token policy's icon field, carried from Rust; the wallet draws the token's coin from it. */
-  iconUrl?: string;
-};
-
 export type DomainRelationshipSendCheckState = 'checking' | 'ready' | 'blocked';
 
 export type DomainRelationshipSendBlockReason =

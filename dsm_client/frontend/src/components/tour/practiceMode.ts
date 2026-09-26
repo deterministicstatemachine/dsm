@@ -11,11 +11,11 @@
 
 import { dsmClient } from '../../services/dsmClient';
 import type {
-  DomainBalance,
   DomainContact,
   DomainIdentity,
   DomainTransaction,
 } from '../../domain/types';
+import type { TokenBalanceView } from '../../dsm/types';
 
 export type PracticeEvent = 'sent' | 'claimed' | 'contactAdded';
 
@@ -39,7 +39,7 @@ export const PRACTICE_FAUCET_AMOUNT = 100;
 
 type PracticeState = {
   identity: DomainIdentity;
-  balances: DomainBalance[];
+  balances: TokenBalanceView[];
   contacts: DomainContact[];
   history: DomainTransaction[];
   sequence: number;
@@ -52,8 +52,8 @@ function freshState(): PracticeState {
       deviceId: practiceId('PRACT1CEY0VDEV1CE'),
     },
     balances: [
-      { tokenId: 'ERA', tokenName: 'ERA', symbol: 'ERA', decimals: 0, balance: BigInt(1000), displayAmount: '1000' },
-      { tokenId: 'PLAY', tokenName: 'Practice Coin', symbol: 'PLAY', decimals: 0, balance: BigInt(50), displayAmount: '50' },
+      { tokenId: 'ERA', tokenName: 'ERA', symbol: 'ERA', decimals: 0, baseUnits: BigInt(1000), displayAmount: '1000' },
+      { tokenId: 'PLAY', tokenName: 'Practice Coin', symbol: 'PLAY', decimals: 0, baseUnits: BigInt(50), displayAmount: '50' },
     ],
     contacts: [
       {
@@ -106,18 +106,18 @@ function debit(state: PracticeState, tokenId: string, amount: string | number | 
   if (units === null || units <= BigInt(0)) return { ok: false, message: 'Enter a whole amount above zero.' };
   const holding = state.balances.find((b) => b.tokenId === tokenId);
   if (!holding) return { ok: false, message: `You hold no ${tokenId} in practice.` };
-  if (units > holding.balance) {
-    return { ok: false, message: `Not enough ${holding.symbol}: you have ${holding.balance.toString()}.` };
+  if (units > holding.baseUnits) {
+    return { ok: false, message: `Not enough ${holding.symbol}: you have ${holding.displayAmount}.` };
   }
-  holding.balance -= units;
-  holding.displayAmount = holding.balance.toString();
-  return { ok: true, balance: holding.balance };
+  holding.baseUnits -= units;
+  holding.displayAmount = holding.baseUnits.toString();
+  return { ok: true, balance: holding.baseUnits };
 }
 
 function credit(state: PracticeState, tokenId: string, units: number): void {
   const holding = state.balances.find((b) => b.tokenId === tokenId) ?? state.balances[0];
-  holding.balance += BigInt(units);
-  holding.displayAmount = holding.balance.toString();
+  holding.baseUnits += BigInt(units);
+  holding.displayAmount = holding.baseUnits.toString();
 }
 
 function recordSend(state: PracticeState, to: string, tokenId: string, amount: string | number | bigint, memo: string | undefined, mode: 'online' | 'offline'): string {

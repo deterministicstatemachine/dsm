@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 // Data loading hook for the wallet screen — identity, balances, contacts, transactions.
-import { presentDisplayAmount } from '../../../../utils/tokenMeta';
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { dsmClient } from '../../../../services/dsmClient';
 import { useWalletRefreshListener } from '../../../../hooks/useWalletRefreshListener';
@@ -85,17 +84,16 @@ export function useWalletScreenData(activeTab: string): WalletScreenData {
 
       try {
         const bal = await dsmClient.getAllBalances();
-        const raw = Array.isArray(bal) ? bal : [];
-        const eraTokens: Balance[] = raw
+        const eraTokens: Balance[] = bal
           .filter((b) => b.tokenId.toUpperCase() !== 'BTC_CHAIN')
           .map((b) => ({
             tokenId: b.tokenId,
-            symbol: b.symbol || b.ticker || b.tokenId,
+            symbol: b.symbol,
             // Rust renders every token from its own decimals, so there is no
             // special case here any more. dBTC used to be the ONLY token this
             // scaled, which is exactly why a created token showed its base
             // units: 100000 where the protocol held 1,000.00.
-            balance: presentDisplayAmount(b.displayAmount, BigInt(b.baseUnits ?? b.balance ?? 0)),
+            balance: b.displayAmount,
             decimals: b.decimals,
             // Both are carried, never derived. The icon is the artwork the
             // token was created with, which is how a screen draws its coin;
