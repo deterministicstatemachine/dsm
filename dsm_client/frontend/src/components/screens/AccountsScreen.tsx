@@ -86,8 +86,8 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
   const faucetEnabled = !!isInitialized || !!(window as any).DsmBridge;
 
   // Token creation and supply control. ERA and dBTC are protocol-defined, so
-  // they are described by CPTA_INFO and are not user-mintable; anything else in
-  // this list was created by this device and carries its own policy.
+  // they are described by CPTA_INFO and offer no supply controls; anything else
+  // in this list was created or adopted by this device and carries its own policy.
   const [creating, setCreating] = useState(false);
   /// Adding a token created elsewhere, by its CPTA anchor. A device cannot
   /// hold a token whose policy it does not have, so this is the step between

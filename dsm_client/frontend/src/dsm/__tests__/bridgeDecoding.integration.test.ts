@@ -11,27 +11,10 @@ function makeInvalidResponse(): Uint8Array {
 
 
 
+/** A BridgeRpcResponse error, built by the harness helper setupTests installs. */
 function makeErrorResponse(msg: string): Uint8Array {
-  // Use test harness helper if available (preferred)
-  const g: any = global as any;
-  if (typeof g.createDsmBridgeErrorResponse === 'function') {
-    return g.createDsmBridgeErrorResponse(msg);
-  }
-
-  // Alternate path: try to construct a proper protobuf BridgeRpcResponse with debugB32
-  try {
-    const pb = require('../proto/dsm_app_pb');
-    const { encodeBase32Crockford } = require('../../utils/textId');
-    const errProto = new pb.ErrorResponse({ errorCode: 1, message: msg });
-    const debug = encodeBase32Crockford(errProto.toBinary());
-    const br = new pb.BridgeRpcResponse({ result: { case: 'error', value: { errorCode: 1, message: msg, debugB32: debug } } });
-    return br.toBinary();
-  } catch (_e) {
-    // Last-resort plain-text error
-    const data = new TextEncoder().encode(msg);
-    return data;
-  }
-} 
+  return (global as any).createDsmBridgeErrorResponse(msg);
+}
 
 describe('bridge decoding boundary (integration)', () => {
   beforeEach(() => {
@@ -49,10 +32,6 @@ describe('bridge decoding boundary (integration)', () => {
     await expect(processEnvelopeV3Bin(new Uint8Array([1]))).rejects.toThrow(/native exploded/i);
   });
 
-  it.skip('sanity: test harness helper attaches debugB32', () => {
-    // Skip this test as it requires importing the proto which Jest can't handle
-  });
-
   it('emits bridge.error event with debug_b32 that decodes to original ErrorResponse', async () => {
     (global as any).window.DsmBridge.__callBin = async () => makeErrorResponse('native exploded');
 
@@ -65,7 +44,6 @@ describe('bridge decoding boundary (integration)', () => {
           expect(detail).toHaveProperty('code');
           expect(detail).toHaveProperty('message');
           expect(typeof detail.debugB32).toBe('string');
-          const { decodeBase32Crockford } = require('../../utils/textId');
           const dbgStr = detail.debugB32;
           console.log('DEBUG_B32:', dbgStr?.slice(0, 120));
           const decoded = decodeBase32Crockford(detail.debugB32);
