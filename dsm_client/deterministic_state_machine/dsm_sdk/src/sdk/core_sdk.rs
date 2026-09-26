@@ -744,9 +744,12 @@ impl CoreSDK {
             "Initializing CoreSDK (strict/proto-only/clockless) for device {}",
             crate::util::text_id::encode_base32_crockford(&device_info.device_id)
         );
+        // Policies are registered from their committed bytes as tokens are
+        // created and adopted (`register_policy_bytes`) and rehydrated from
+        // the durable store on a miss. ERA has none: its `policy_commit`
+        // constant has no preimage, so no ERA transfer or burn passes
+        // enforcement until ERA's policy blob exists.
         let policy_system = TokenPolicySystem::new();
-        // Preload standard token policies (ERA) synchronously
-        policy_system.preload_standard_policies_blocking()?;
 
         let state_machine = Mutex::new(StateMachine::new());
 
@@ -945,25 +948,6 @@ impl CoreSDK {
         Ok(state)
     }
 
-    /// Register a CPTA policy for a custom token with the underlying
-    /// `TokenPolicySystem`.  This is the authoritative step that makes the
-    /// policy visible to `PolicyEnforcer` and binds `policy_commit =
-    /// PolicyAnchor::from_policy(&policy_file)` for all subsequent balance
-    /// ops on `token_id`.
-    ///
-    /// Must run before any balance-changing op references `token_id`.
-    pub async fn register_token_policy(
-        &self,
-        token_id: &str,
-        policy_file: dsm::types::policy_types::PolicyFile,
-    ) -> Result<dsm::types::policy_types::PolicyAnchor, DsmError> {
-        self.policy_system
-            .register_token_policy(token_id, policy_file)
-            .await
-    }
-
-    /// Register policy bytes while preserving an externally-authoritative
-    /// policy anchor (for example, a storage-layer `DSM/policy` commitment).
     /// Read access to the policy system, for tests that need to ask the
     /// enforcer directly whether it can see a token's policy.
     pub fn policy_system_ref(&self) -> &dsm::core::token::policy::TokenPolicySystem {
@@ -978,200 +962,68 @@ impl CoreSDK {
         self.policy_system.set_policy_resolver(resolver);
     }
 
-    pub async fn register_token_policy_with_anchor(
-        &self,
-        token_id: &str,
-        policy_file: dsm::types::policy_types::PolicyFile,
-        anchor: [u8; 32],
-    ) -> Result<(), DsmError> {
-        self.policy_system
-            .register_token_policy_with_anchor(
-                token_id,
-                policy_file,
-                dsm::types::policy_types::PolicyAnchor::from_bytes(anchor),
-            )
-            .await
+    /// Register the policy these exact `TokenPolicyV3` bytes are with the
+    /// enforcer, and answer its commitment: Core recomputes the commitment
+    /// from the bytes and derives the enforcer's view from what the blob
+    /// says. Must run before any balance-changing operation names the
+    /// commitment.
+    pub fn register_policy_bytes(&self, bytes: &[u8]) -> Result<[u8; 32], DsmError> {
+        self.policy_system.register_policy(bytes)
     }
 
-    fn canonical_token_id_str(token_id: &[u8]) -> Option<&str> {
-        std::str::from_utf8(token_id)
-            .ok()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-    }
-
-    /// What the supply cap is evaluated against: the asset and the amount
-    /// the operation names. The circulating supply is derived where the chain
-    /// is reachable (`enforce_policy_for_operation`), never here.
-    fn insert_supply_witness(
-        context: &mut HashMap<String, Vec<u8>>,
-        policy_commit: &[u8; 32],
-        amount: u64,
-    ) {
+    /// What the supply cap is evaluated against: the amount the operation
+    /// names. The circulating supply is derived where the chain is reachable
+    /// (`enforce_policy_for_operation`), never here.
+    fn insert_supply_witness(context: &mut HashMap<String, Vec<u8>>, amount: u64) {
         use dsm::core::token::policy::policy_enforcement::witness_keys;
-        context.insert(
-            witness_keys::POLICY_COMMIT.to_string(),
-            policy_commit.to_vec(),
-        );
         context.insert(
             witness_keys::AMOUNT.to_string(),
             amount.to_le_bytes().to_vec(),
         );
     }
 
+    /// What the enforcer evaluates for `operation`: the commitment of the
+    /// policy the operation names, the operation type, and what the supply
+    /// cap is evaluated against. `None` for an operation no token policy
+    /// gates. A token operation that names no commitment cannot be evaluated
+    /// against a committed policy and is refused (§9.1: every token
+    /// operation carries its `policy_commit`).
     fn build_token_policy_context(
         operation: &dsm::types::operations::Operation,
-        state_hash: [u8; 32],
-    ) -> Result<Option<(String, String, HashMap<String, Vec<u8>>)>, DsmError> {
+    ) -> Result<Option<([u8; 32], String, HashMap<String, Vec<u8>>)>, DsmError> {
         let mut context = HashMap::new();
-        context.insert("state_hash".to_string(), state_hash.to_vec());
-
         match operation {
-            DsmOperation::Transfer {
-                token_id,
-                amount,
-                recipient,
-                ..
-            } => {
-                let token_id = Self::canonical_token_id_str(token_id).ok_or_else(|| {
-                    DsmError::invalid_operation(
-                        "Policy enforcement rejected: malformed or empty token_id",
-                    )
-                })?;
-                let amount_u64 = amount.value();
-                context.insert("amount_u64".to_string(), amount_u64.to_le_bytes().to_vec());
-                context.insert("amount".to_string(), amount_u64.to_string().into_bytes());
-                context.insert("recipient".to_string(), recipient.clone());
-                Ok(Some((
-                    token_id.to_string(),
-                    "transfer".to_string(),
-                    context,
-                )))
+            DsmOperation::Transfer { policy_commit, .. } => {
+                Ok(Some((*policy_commit, "transfer".to_string(), context)))
             }
             DsmOperation::Burn {
-                token_id,
                 amount,
                 policy_commit,
                 ..
             } => {
-                let token_id = Self::canonical_token_id_str(token_id).ok_or_else(|| {
-                    DsmError::invalid_operation(
-                        "Policy enforcement rejected: malformed or empty token_id",
-                    )
-                })?;
-                let amount_u64 = amount.value();
-                context.insert("amount_u64".to_string(), amount_u64.to_le_bytes().to_vec());
-                context.insert("amount".to_string(), amount_u64.to_string().into_bytes());
                 // Whether the holder may burn is the policy's burn flag,
                 // expressed as its operation restriction (SoFi §54).
-                Self::insert_supply_witness(&mut context, policy_commit, amount_u64);
-                Ok(Some((token_id.to_string(), "burn".to_string(), context)))
+                Self::insert_supply_witness(&mut context, amount.value());
+                Ok(Some((*policy_commit, "burn".to_string(), context)))
             }
-
             // Creation is gated by the token's own policy: the supply cap and
             // the operation restriction; who may create is the creator the
             // policy names (SoFi Amendment S8), checked at the genesis release.
             DsmOperation::CreateToken {
-                token_id,
                 initial_supply,
                 policy_commit,
                 ..
             } => {
-                let token_id = Self::canonical_token_id_str(token_id).ok_or_else(|| {
-                    DsmError::invalid_operation(
-                        "Policy enforcement rejected: malformed or empty token_id",
-                    )
-                })?;
-                let amount_u64 = initial_supply.value();
-                context.insert("amount_u64".to_string(), amount_u64.to_le_bytes().to_vec());
-                context.insert("amount".to_string(), amount_u64.to_string().into_bytes());
-                Self::insert_supply_witness(&mut context, policy_commit, amount_u64);
-                Ok(Some((
-                    token_id.to_string(),
-                    "create_token".to_string(),
-                    context,
-                )))
+                Self::insert_supply_witness(&mut context, initial_supply.value());
+                Ok(Some((*policy_commit, "create_token".to_string(), context)))
             }
-            DsmOperation::Lock {
-                token_id,
-                amount,
-                purpose,
-                owner,
-                ..
-            } => {
-                let token_id = Self::canonical_token_id_str(token_id).ok_or_else(|| {
-                    DsmError::invalid_operation(
-                        "Policy enforcement rejected: malformed or empty token_id",
-                    )
-                })?;
-                let amount_u64 = amount.value();
-                context.insert("amount_u64".to_string(), amount_u64.to_le_bytes().to_vec());
-                context.insert("amount".to_string(), amount_u64.to_string().into_bytes());
-                context.insert("purpose".to_string(), purpose.clone());
-                context.insert("owner".to_string(), owner.clone());
-                Ok(Some((token_id.to_string(), "lock".to_string(), context)))
-            }
-            DsmOperation::Unlock {
-                token_id,
-                amount,
-                purpose,
-                owner,
-                ..
-            } => {
-                let token_id = Self::canonical_token_id_str(token_id).ok_or_else(|| {
-                    DsmError::invalid_operation(
-                        "Policy enforcement rejected: malformed or empty token_id",
-                    )
-                })?;
-                let amount_u64 = amount.value();
-                context.insert("amount_u64".to_string(), amount_u64.to_le_bytes().to_vec());
-                context.insert("amount".to_string(), amount_u64.to_string().into_bytes());
-                context.insert("purpose".to_string(), purpose.clone());
-                context.insert("owner".to_string(), owner.clone());
-                Ok(Some((token_id.to_string(), "unlock".to_string(), context)))
-            }
-            DsmOperation::LockToken {
-                token_id,
-                amount,
-                purpose,
-                ..
-            } => {
-                let token_id = Self::canonical_token_id_str(token_id).ok_or_else(|| {
-                    DsmError::invalid_operation(
-                        "Policy enforcement rejected: malformed or empty token_id",
-                    )
-                })?;
-                let amount_u64 = u64::try_from(*amount).map_err(|_| {
-                    DsmError::invalid_operation(
-                        "Policy enforcement rejected: LockToken amount must be non-negative",
-                    )
-                })?;
-                context.insert("amount_u64".to_string(), amount_u64.to_le_bytes().to_vec());
-                context.insert("amount".to_string(), amount_u64.to_string().into_bytes());
-                context.insert("purpose".to_string(), purpose.clone());
-                Ok(Some((token_id.to_string(), "lock".to_string(), context)))
-            }
-            DsmOperation::UnlockToken {
-                token_id,
-                amount,
-                purpose,
-                ..
-            } => {
-                let token_id = Self::canonical_token_id_str(token_id).ok_or_else(|| {
-                    DsmError::invalid_operation(
-                        "Policy enforcement rejected: malformed or empty token_id",
-                    )
-                })?;
-                let amount_u64 = u64::try_from(*amount).map_err(|_| {
-                    DsmError::invalid_operation(
-                        "Policy enforcement rejected: UnlockToken amount must be non-negative",
-                    )
-                })?;
-                context.insert("amount_u64".to_string(), amount_u64.to_le_bytes().to_vec());
-                context.insert("amount".to_string(), amount_u64.to_string().into_bytes());
-                context.insert("purpose".to_string(), purpose.clone());
-                Ok(Some((token_id.to_string(), "unlock".to_string(), context)))
-            }
+            DsmOperation::Lock { .. }
+            | DsmOperation::Unlock { .. }
+            | DsmOperation::LockToken { .. }
+            | DsmOperation::UnlockToken { .. } => Err(DsmError::invalid_operation(
+                "Policy enforcement rejected: a lock operation names no policy commitment, so \
+                 no committed policy can be evaluated for it (§9.1)",
+            )),
             _ => Ok(None),
         }
     }
@@ -1220,39 +1072,33 @@ impl CoreSDK {
         Some(u64::try_from(circulating).unwrap_or(u64::MAX))
     }
 
+    /// Whether the policy committed at the commitment `operation` names
+    /// permits it. A creation's supply cap is evaluated against the
+    /// circulating supply derived HERE, where the chain is reachable, never
+    /// in the pure context builder.
     fn enforce_policy_for_operation(
         &self,
         operation: &dsm::types::operations::Operation,
-        state_hash: [u8; 32],
     ) -> Result<(), DsmError> {
-        let Some((token_id, op_type, mut context)) =
-            Self::build_token_policy_context(operation, state_hash)?
+        use dsm::core::token::policy::policy_enforcement::witness_keys;
+        let Some((policy_commit, op_type, mut context)) =
+            Self::build_token_policy_context(operation)?
         else {
             return Ok(());
         };
-
-        // The supply cap is evaluated against canonical history, so the
-        // derivation happens HERE (where the chain is reachable) rather than
-        // in the pure context builder.
-        {
-            use dsm::core::token::policy::policy_enforcement::witness_keys;
-            if let Some(pc) = context.get(witness_keys::POLICY_COMMIT).cloned() {
-                if let Ok(commit) = <[u8; 32]>::try_from(pc.as_slice()) {
-                    // Absent, not zero, when the history is incomplete — the
-                    // enforcer refuses a capped creation it cannot evaluate.
-                    if let Some(circulating) = self.derive_circulating_supply(&commit) {
-                        context.insert(
-                            witness_keys::CIRCULATING.to_string(),
-                            circulating.to_le_bytes().to_vec(),
-                        );
-                    }
-                }
+        if context.contains_key(witness_keys::AMOUNT) {
+            // Absent, not zero, when the history is incomplete — the
+            // enforcer refuses a capped creation it cannot evaluate.
+            if let Some(circulating) = self.derive_circulating_supply(&policy_commit) {
+                context.insert(
+                    witness_keys::CIRCULATING.to_string(),
+                    circulating.to_le_bytes().to_vec(),
+                );
             }
         }
 
         let result = if tokio::runtime::Handle::try_current().is_ok() {
             let policy_system = self.policy_system.clone();
-            let token_id_for_thread = token_id.clone();
             let op_type_for_thread = op_type.clone();
             let context_for_thread = context.clone();
             let join_res = std::thread::spawn(move || {
@@ -1267,11 +1113,7 @@ impl CoreSDK {
                     })?;
                 rt.block_on(async {
                     policy_system
-                        .enforce_policy(
-                            &token_id_for_thread,
-                            &op_type_for_thread,
-                            &context_for_thread,
-                        )
+                        .enforce_policy(&policy_commit, &op_type_for_thread, &context_for_thread)
                         .await
                 })
             })
@@ -1299,14 +1141,14 @@ impl CoreSDK {
 
             rt.block_on(async {
                 self.policy_system
-                    .enforce_policy(&token_id, &op_type, &context)
+                    .enforce_policy(&policy_commit, &op_type, &context)
                     .await
             })?
         };
 
         if !result.allowed {
             return Err(DsmError::policy_violation(
-                token_id,
+                crate::util::text_id::encode_base32_crockford(&policy_commit),
                 result.reason,
                 None::<std::convert::Infallible>,
             ));
@@ -1601,14 +1443,14 @@ impl CoreSDK {
             }
         }
 
-        // Enforce token policy constraints on the operation that will advance
-        // state. This closes the previous gap where registration existed but
-        // execution path skipped policy checks.
-        let current_state_hash = sm
-            .device_head()
-            .map(|ds| ds.root())
-            .ok_or_else(|| DsmError::state_machine("no device head to execute an operation on"))?;
-        self.enforce_policy_for_operation(&operation, current_state_hash)?;
+        // Enforce the token's committed policy on the operation that will
+        // advance state, under the lock: registration alone gates nothing.
+        if sm.device_head().is_none() {
+            return Err(DsmError::state_machine(
+                "no device head to execute an operation on",
+            ));
+        }
+        self.enforce_policy_for_operation(&operation)?;
         // ── Admission serialization, UNDER the state-machine lock ──────────
         // A new admission atomically refuses an existing pending one and
         // CAS-checks the admitted predecessor it extends. A route-level

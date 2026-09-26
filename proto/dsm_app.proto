@@ -3586,19 +3586,13 @@ message StorageMemberByteCommit {
 message StorageMemberNoCycle {}
 
 // ============================ POLICY FILE (Canonical) ============================
-message PolicyRoleProto {
-  string id = 1;
-  string name = 2;
-  repeated string permissions = 3; // sorted
-}
-
+// The enforcer's view of a committed token policy: the operations its flags
+// permit and the supply it was created with (SoFi §47–§54), derived from the
+// committed TokenPolicyV3 bytes. A policy's identity is the commitment of
+// those bytes, never of this projection.
 message PolicyConditionProto {
   oneof kind {
-    IdentityConstraintProto identity_constraint = 1;
     OperationRestrictionProto operation_restriction = 3;
-    EmissionsScheduleProto emissions_schedule = 5;
-    CreditBundlePolicyProto credit_bundle_policy = 6;
-    CustomConstraintProto custom = 7;
     BitcoinTapConstraintProto bitcoin_tap_constraint = 8;
     // 9 was a signer-set authority over burn and creation: the signer set
     // authorizes only what the policy's own rules name, and none names it
@@ -3614,6 +3608,13 @@ message PolicyConditionProto {
   // verifier derives the vault facts it names, so it cannot be checked.
   reserved 2;
   reserved "vault_enforcement";
+  // Condition kinds the policy grammar (SoFi §47–§54) does not name: an
+  // identity allowlist over caller-stated strings, an emission schedule and
+  // a credit bundle that were configuration the enforcer never evaluated,
+  // and a custom constraint keyed by a string. A committed policy states
+  // its recipient allowlist and its release rule in the TokenPolicyV3 blob.
+  reserved 1, 5, 6, 7;
+  reserved "identity_constraint", "emissions_schedule", "credit_bundle_policy", "custom";
 }
 
 // The whole supply a token is created with. Nothing is minted after genesis
@@ -3624,10 +3625,7 @@ message SupplyCapProto {
   reserved "unlimited";
 }
 
-message IdentityConstraintProto { repeated string allowed_identities = 1; bool allow_derived = 2; }
 message OperationRestrictionProto { repeated string allowed_operations = 1; }
-message EmissionsScheduleProto { uint64 total_supply = 1; uint32 shard_depth = 2; uint32 schedule_steps = 3; uint64 initial_step_emissions = 4; uint64 initial_step_amount = 5; }
-message CreditBundlePolicyProto { uint64 bundle_size = 1; string debit_rule = 2; string refill_rule = 3; }
 
 // Bitcoin tap safety constraints (dBTC §12). Protocol law — frozen into policy_commit.
 message BitcoinTapConstraintProto {
@@ -3637,34 +3635,13 @@ message BitcoinTapConstraintProto {
   uint64 min_confirmations = 4; // Required block depth for entry/exit anchors (§12.1.3)
 }
 
-// IMPORTANT: `parameters_kv` is the canonical/deterministic representation.
-// `parameters` (map) is UI/interop only and MUST NOT be used in hashed preimages.
-message CustomConstraintProto {
-  string constraint_type = 1;
-
-  // UI/interop only (non-deterministic ordering). Do not hash.
-  map<string, string> parameters = 2;
-
-  // Canonical: sorted by key before hashing/signing.
-  repeated ParamKV parameters_kv = 3;
-}
-
 message CanonicalPolicy {
   string author = 1;
   repeated PolicyConditionProto conditions = 2;
-  repeated PolicyRoleProto roles = 3;
-}
-
-message StoredPolicy {
-  string name = 1;
-  string revision = 2;
+  // 3 was role-based access control over caller-stated identities: no
+  // verifier derives an identity's roles, so it could not be evaluated.
   reserved 3;
-  reserved "created_tick";
-  string author = 4;
-  string description = 5;
-  repeated PolicyConditionProto conditions = 6;
-  repeated PolicyRoleProto roles = 7;
-  map<string, string> metadata = 8;
+  reserved "roles";
 }
 
 // ====================== WebView Bridge Messages ======================

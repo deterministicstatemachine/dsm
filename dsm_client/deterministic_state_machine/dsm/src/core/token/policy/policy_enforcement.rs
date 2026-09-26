@@ -3,7 +3,11 @@
 //! src/core/token/policy/policy_enforcement.rs
 //! Policy Enforcement Engine (protobuf-only; binary comparisons; no hex/base64/JSON).
 //!
-//! Enforces token policy constraints (CTPA).
+//! Enforces what a token's committed policy says (SoFi §47–§54): the supply
+//! it was created with and the operations its flags permit. The enforcer's
+//! view of a policy is derived here from the parsed blob
+//! ([`enforced_policy`]) and nowhere else.
+//!
 //! Determinism rules:
 //! - No time of any kind.
 //! - No alternate paths.
@@ -12,7 +16,7 @@ use std::collections::HashMap;
 
 use crate::types::{
     error::DsmError,
-    policy_types::{PolicyCondition, PolicyRole, TokenPolicy},
+    policy_types::{PolicyCondition, PolicyFile, TokenPolicy},
 };
 
 /// Minimal error type for policy enforcement failures that are not simply allow/deny decisions
@@ -71,20 +75,11 @@ impl EnforcementResult {
     }
 }
 
-/// Identity context (local-only; deterministic)
-#[derive(Debug, Clone)]
-pub struct IdentityContext {
-    pub id: String,
-    pub assigned_roles: Option<Vec<String>>,
-    pub derivation_path: Option<Vec<String>>,
-}
-
-/// Policy enforcement context (constructed from operation + caller-provided binary data)
+/// Policy enforcement context: the operation type and the binary data the
+/// SDK derived from the operation itself.
 #[derive(Debug, Clone)]
 pub struct EnforcementContext {
     pub operation_type: String,
-    pub identity: Option<IdentityContext>,
-    pub region: Option<String>,
     pub data: HashMap<String, Vec<u8>>,
 }
 
@@ -92,24 +87,8 @@ impl EnforcementContext {
     pub fn new(operation_type: &str) -> Self {
         Self {
             operation_type: operation_type.to_string(),
-            identity: None,
-            region: None,
             data: HashMap::new(),
         }
-    }
-
-    pub fn with_identity(mut self, identity: &str) -> Self {
-        self.identity = Some(IdentityContext {
-            id: identity.to_string(),
-            assigned_roles: None,
-            derivation_path: None,
-        });
-        self
-    }
-
-    pub fn with_region(mut self, region: &str) -> Self {
-        self.region = Some(region.to_string());
-        self
     }
 
     pub fn with_data(mut self, key: &str, value: Vec<u8>) -> Self {
@@ -127,13 +106,57 @@ impl EnforcementContext {
     }
 }
 
+/// The enforcer's view of a parsed policy blob.
+///
+/// SOLE constructor. It is a pure function of the parsed (and therefore of
+/// the committed) policy, so every device that reads the same policy bytes
+/// derives the same view: there is no second place that decides what a
+/// token's policy means.
+pub fn enforced_policy(parsed: &crate::economic::token_policy::TokenPolicy) -> PolicyFile {
+    // Name, version and author are display fields: the policy's identity is
+    // its commitment, never anything stated here.
+    let mut file = PolicyFile::new(&parsed.ticker, "1.0.0", "committed policy");
+    if let Some(description) = parsed.description.as_ref() {
+        file.description = Some(description.clone());
+    }
+    // CONDITIONS, not metadata: conditions are what the enforcer evaluates.
+    // The whole supply exists from creation (SoFi §51): no unit is issued
+    // after it.
+    file.add_condition(PolicyCondition::SupplyCap {
+        max_supply: parsed.genesis_supply,
+    });
+    // What each flag governs (SoFi §49, §54): `transferable` every transfer
+    // (vault creation and SoFi legs are refused in Core, at genesis
+    // acceptance and route validation), `burn_enabled` burns only. Creation
+    // is always the creator's own (Amendment S8, checked at the genesis
+    // release). The signer set the blob carries authorizes only what the
+    // policy's own rules name, and the standard release rule names none
+    // (§47), so no condition is built from it.
+    file.add_condition(PolicyCondition::OperationRestriction {
+        allowed_operations: permitted_operations(parsed.transferable, parsed.burn_enabled),
+    });
+    file.add_metadata("token_name", &parsed.ticker);
+    file
+}
+
+/// The operations a token's policy permits, from its two flags.
+pub fn permitted_operations(transferable: bool, burn_enabled: bool) -> Vec<String> {
+    let mut ops = vec!["create_token".to_string()];
+    if transferable {
+        ops.extend(["transfer", "lock", "unlock"].map(String::from));
+    }
+    if burn_enabled {
+        ops.push("burn".to_string());
+    }
+    ops
+}
+
 /// Policy enforcement engine
 #[derive(Debug, Default)]
 pub struct PolicyEnforcer;
 
 /// Context keys carrying what the supply cap is evaluated against.
 pub mod witness_keys {
-    pub const POLICY_COMMIT: &str = "policy_commit";
     pub const AMOUNT: &str = "amount_le";
     /// Circulating supply DERIVED from canonical state (never a cached count).
     pub const CIRCULATING: &str = "circulating_le";
@@ -151,40 +174,15 @@ impl PolicyEnforcer {
         context_data: &HashMap<String, Vec<u8>>,
     ) -> Result<EnforcementResult, DsmError> {
         let mut ctx = EnforcementContext::new(operation_type);
-
         for (k, v) in context_data {
             ctx = ctx.with_data(k, v.clone());
         }
-
-        if let Some(id_bytes) = context_data.get("identity") {
-            if let Ok(id) = String::from_utf8(id_bytes.clone()) {
-                ctx = ctx.with_identity(&id);
-            }
-        }
-        if let Some(region_bytes) = context_data.get("region") {
-            if let Ok(region) = String::from_utf8(region_bytes.clone()) {
-                ctx = ctx.with_region(&region);
-            }
-        }
-
         for condition in &policy.file.conditions {
             let res = self.check_condition(condition, &ctx).await?;
             if !res.allowed {
                 return Ok(res);
             }
         }
-
-        if !policy.file.roles.is_empty() {
-            let ok = self
-                .check_role_permissions(&policy.file.roles, &ctx)
-                .await?;
-            if !ok {
-                return Ok(EnforcementResult::denied(
-                    "Operation not permitted by role-based access control",
-                ));
-            }
-        }
-
         Ok(EnforcementResult::allowed(
             "All policy conditions satisfied",
         ))
@@ -199,31 +197,9 @@ impl PolicyEnforcer {
         ctx: &EnforcementContext,
     ) -> Result<EnforcementResult, DsmError> {
         match condition {
-            PolicyCondition::IdentityConstraint {
-                allowed_identities,
-                allow_derived,
-            } => {
-                if let Some(ref id) = ctx.identity {
-                    if allowed_identities.iter().any(|s| s == &id.id) {
-                        return Ok(EnforcementResult::allowed("Identity authorized"));
-                    }
-                    if *allow_derived && self.is_derived_identity(id, allowed_identities).await {
-                        return Ok(EnforcementResult::allowed("Derived identity authorized"));
-                    }
-                    Ok(EnforcementResult::denied("Identity not authorized"))
-                } else {
-                    Ok(EnforcementResult::denied("No identity provided"))
-                }
-            }
-
             PolicyCondition::OperationRestriction { allowed_operations } => {
-                // Issue #183 Finding 3 fix: match the case-sensitive canonical
-                // encoding. `CanonicalPolicy` sorts `allowed_operations` with
-                // a case-sensitive `Vec::sort()`, so `["transfer"]` and
-                // `["Transfer"]` are distinct policy_commits. Enforcement
-                // previously used `eq_ignore_ascii_case`, which let
-                // `"Transfer"` (uppercase) pass under a policy committed to
-                // `"transfer"` only — semantic gap. Match exactly.
+                // Match the case-sensitive canonical encoding: `["transfer"]`
+                // and `["Transfer"]` are distinct policies.
                 let allowed = allowed_operations
                     .iter()
                     .any(|op| op == &ctx.operation_type);
@@ -270,24 +246,6 @@ impl PolicyEnforcer {
                 }
             }
 
-            PolicyCondition::Custom {
-                constraint_type,
-                parameters,
-            } => {
-                self.check_custom_constraint(constraint_type, parameters, ctx)
-                    .await
-            }
-
-            PolicyCondition::EmissionsSchedule { .. } => {
-                // Configuration-only; does not deny operations directly.
-                Ok(EnforcementResult::allowed("Emissions schedule parameter"))
-            }
-
-            PolicyCondition::CreditBundlePolicy { .. } => {
-                // Configuration-only; does not deny operations directly.
-                Ok(EnforcementResult::allowed("Credit bundle policy parameter"))
-            }
-
             PolicyCondition::BitcoinTapConstraint { .. } => {
                 // Configuration-only; tap safety is enforced at vault creation
                 // and fractional exit time, not during generic policy enforcement.
@@ -297,116 +255,84 @@ impl PolicyEnforcer {
             }
         }
     }
-
-    async fn check_custom_constraint(
-        &self,
-        constraint_type: &str,
-        parameters: &HashMap<String, String>,
-        ctx: &EnforcementContext,
-    ) -> Result<EnforcementResult, DsmError> {
-        match constraint_type {
-            "amount_limit" => {
-                let max_amount = parameters
-                    .get("max_amount")
-                    .and_then(|s| s.parse::<u64>().ok());
-
-                let Some(max_amount) = max_amount else {
-                    return Ok(EnforcementResult::denied("Missing/invalid max_amount"));
-                };
-
-                match ctx.amount_witness() {
-                    Some(v) if v <= max_amount => {
-                        Ok(EnforcementResult::allowed("Amount limit satisfied"))
-                    }
-                    Some(_) => Ok(EnforcementResult::denied("Amount exceeds limit")),
-                    None => Ok(EnforcementResult::denied("No amount witness provided")),
-                }
-            }
-
-            _ => {
-                // Production-safe default: unknown custom constraint DENIES unless explicitly waived.
-                Ok(EnforcementResult::denied("Unknown custom constraint"))
-            }
-        }
-    }
-
-    async fn check_role_permissions(
-        &self,
-        roles: &[PolicyRole],
-        ctx: &EnforcementContext,
-    ) -> Result<bool, DsmError> {
-        let Some(identity) = ctx.identity.as_ref() else {
-            return Ok(false);
-        };
-
-        for role in roles {
-            if self.user_has_role(identity, &role.id).await {
-                // Issue #183 Finding 3 fix: role-permission match must use
-                // case-sensitive comparison to align with the case-sensitive
-                // canonical sort of role permissions in `CanonicalPolicy`.
-                let permitted = role.permissions.iter().any(|op| op == &ctx.operation_type);
-                if permitted {
-                    return Ok(true);
-                }
-            }
-        }
-        Ok(false)
-    }
-
-    async fn user_has_role(&self, id: &IdentityContext, role_id: &str) -> bool {
-        id.assigned_roles
-            .as_ref()
-            .map(|rs| rs.iter().any(|r| r == role_id))
-            .unwrap_or(false)
-    }
-
-    async fn is_derived_identity(&self, id: &IdentityContext, allowed: &[String]) -> bool {
-        if allowed.is_empty() {
-            return false;
-        }
-        match &id.derivation_path {
-            Some(path) if !path.is_empty() => {
-                if let Some(tail) = path.last() {
-                    allowed.iter().any(|a| a == tail)
-                } else {
-                    false
-                }
-            }
-            _ => false,
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::policy_types::{PolicyCondition, PolicyFile, TokenPolicy};
+    use crate::economic::token_policy::{ReleaseRule, TokenPolicy as ParsedTokenPolicy};
+    use crate::types::policy_types::{PolicyAnchor, PolicyCondition, PolicyFile, TokenPolicy};
 
-    #[tokio::test]
-    async fn identity_constraint_denies() -> Result<(), Box<dyn std::error::Error>> {
-        let enforcer = PolicyEnforcer::new();
-
-        let mut pf = PolicyFile::new("ID", "1.0.0", "a");
-        pf.add_condition(PolicyCondition::IdentityConstraint {
-            allowed_identities: vec!["allowed_user".into()],
-            allow_derived: false,
-        });
-        let pol = TokenPolicy::new(pf)?;
-
-        let mut ctx = HashMap::new();
-        ctx.insert("identity".into(), b"unauthorized_user".to_vec());
-
-        let res = enforcer.enforce_policy(&pol, "transfer", &ctx).await?;
-        assert!(!res.allowed);
-        Ok(())
+    fn fungible_fixture() -> ParsedTokenPolicy {
+        ParsedTokenPolicy {
+            creator_genesis: [0x31; 32],
+            creator_device_id: [0x32; 32],
+            ticker: "DSM".into(),
+            alias: "DSM Token".into(),
+            decimals: 8,
+            genesis_supply: 1_000_000,
+            release_rule: ReleaseRule::AllAtCreation,
+            description: Some("A test token".into()),
+            icon_url: Some("dsm:icon".into()),
+            burn_enabled: true,
+            transferable: true,
+            threshold: 1,
+            signers: vec![vec![0xAB; 64]],
+            allowlist_device_ids: Vec::new(),
+        }
     }
 
-    // ────────────────────────────────────────────────────────────────────────
-    // Issue #183 Finding 3 regression — OperationRestriction must be
-    // case-sensitive so enforcement aligns with the case-sensitive canonical
-    // sort that goes into the policy_commit anchor.
-    // ────────────────────────────────────────────────────────────────────────
+    /// SoFi §49, §54: a token's operation restriction is exactly its two
+    /// flags — transfers (and the lock operation types) when transferable,
+    /// burns when burn-enabled, creation always — and the signer set builds
+    /// no condition, because the standard release rule names it for nothing
+    /// (§47).
+    #[test]
+    fn the_policy_permits_exactly_what_its_flags_name() {
+        for (transferable, burn_enabled) in
+            [(true, true), (true, false), (false, true), (false, false)]
+        {
+            let parsed = ParsedTokenPolicy {
+                transferable,
+                burn_enabled,
+                ..fungible_fixture()
+            };
+            let file = enforced_policy(&parsed);
+            let restrictions: Vec<&Vec<String>> = file
+                .conditions
+                .iter()
+                .filter_map(|c| match c {
+                    PolicyCondition::OperationRestriction { allowed_operations } => {
+                        Some(allowed_operations)
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                restrictions.len(),
+                1,
+                "one restriction ({transferable}, {burn_enabled})"
+            );
+            let ops = restrictions[0];
+            let has = |op: &str| ops.iter().any(|o| o == op);
+            assert!(has("create_token"));
+            assert_eq!(has("transfer"), transferable);
+            assert_eq!(has("lock"), transferable);
+            assert_eq!(has("unlock"), transferable);
+            assert_eq!(has("burn"), burn_enabled);
+            assert_eq!(
+                file.conditions.len(),
+                2,
+                "the supply cap and the restriction, and nothing built from the signer set"
+            );
+            assert!(file.conditions.contains(&PolicyCondition::SupplyCap {
+                max_supply: 1_000_000
+            }));
+        }
+    }
 
+    // OperationRestriction is case-sensitive, so enforcement aligns with the
+    // case-sensitive canonical sort that goes into a policy's bytes.
     #[tokio::test]
     async fn operation_restriction_is_case_sensitive() -> Result<(), Box<dyn std::error::Error>> {
         let enforcer = PolicyEnforcer::new();
@@ -415,7 +341,7 @@ mod tests {
         pf.add_condition(PolicyCondition::OperationRestriction {
             allowed_operations: vec!["transfer".into()],
         });
-        let pol = TokenPolicy::new(pf)?;
+        let pol = TokenPolicy::new_with_anchor(pf, PolicyAnchor::from_bytes([0x0F; 32]));
 
         let ctx = HashMap::new();
 
@@ -423,9 +349,9 @@ mod tests {
         let res = enforcer.enforce_policy(&pol, "transfer", &ctx).await?;
         assert!(res.allowed, "exact-case operation must be allowed");
 
-        // Uppercase variant — must reject (canonical anchor sees only
+        // Uppercase variant — must reject (the committed bytes see only
         // "transfer"; allowing "Transfer" would diverge enforcement from
-        // the anchored permission set).
+        // the committed permission set).
         let res = enforcer.enforce_policy(&pol, "Transfer", &ctx).await?;
         assert!(
             !res.allowed,

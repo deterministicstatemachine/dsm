@@ -12,14 +12,6 @@ use parking_lot::RwLock;
 
 use crate::types::error::DsmError;
 
-/// Resolves a `token_id` string to its 32-byte CPTA `policy_commit`.
-///
-/// This trait enables hierarchical domain-separated hashing where
-/// `policy_commit` serves as the cryptographic sub-domain for each token type.
-pub trait PolicyCommitResolver: Send + Sync {
-    fn resolve(&self, token_id: &str) -> Result<[u8; 32], DsmError>;
-}
-
 /// ERA destroyed to create a token.
 ///
 /// This lives in CORE, not in the SDK's mutable `fee_schedule` map, because the
