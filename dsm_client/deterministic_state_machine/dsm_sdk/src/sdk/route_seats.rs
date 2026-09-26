@@ -311,27 +311,6 @@ fn recorded(
     }
 }
 
-/// The value a Core reading of `evidence` names by `id`: the exact bytes a
-/// seat's copy carries, whose entry digest is `id`. A seat's log holds the
-/// cell's route entries; the value is the one an entry carries, never the
-/// entry's own bytes.
-pub(crate) fn value_of(evidence: &CellEvidence, id: &[u8; 32]) -> Option<Vec<u8>> {
-    carried_values(evidence).find(|value| dsm::storage_cell::entry_digest(value) == *id)
-}
-
-/// Every value the cell's copies carry, seat by seat in route order and in
-/// each seat's arrival order: the bytes a recognizer is shown. What does not
-/// decode as a route entry carries nothing.
-pub(crate) fn carried_values(evidence: &CellEvidence) -> impl Iterator<Item = Vec<u8>> + '_ {
-    evidence
-        .seats
-        .iter()
-        .filter_map(|seat| seat.values.as_ref())
-        .flatten()
-        .filter_map(|bytes| dsm::route_chain::RouteEntry::decode(bytes))
-        .map(|entry| entry.value)
-}
-
 /// Keep the completion proof of the value final at `cell` (storage spec §9
 /// rule 11), keyed by the cell and the value it proves.
 pub(crate) fn keep_completion(

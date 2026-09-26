@@ -420,7 +420,7 @@ fn get_database_path() -> Result<PathBuf> {
 /// sent root, a bearer step's anchor leaf and allocation spend) and the frame
 /// it owes its counterparty, so a restart continues a session instead of
 /// failing it and a returning link delivers what is owed.
-pub const CLIENT_DB_SCHEMA_VERSION: i64 = 23;
+pub const CLIENT_DB_SCHEMA_VERSION: i64 = 24;
 
 /// A 32-byte column, exactly. Any other length is a corrupt row and an error —
 /// never padded, never truncated.
@@ -573,9 +573,15 @@ fn create_schema(conn: &Connection) -> Result<()> {
         -- leaf PREIMAGES after this device has walked past g, and a mixture
         -- of two generations is not a tree.
         CREATE TABLE IF NOT EXISTS sofi_vault_root(
-            vault_id   BLOB NOT NULL CHECK (length(vault_id) = 32),
-            generation INTEGER NOT NULL CHECK (generation >= 0),
-            root       BLOB NOT NULL CHECK (length(root) = 32),
+            vault_id    BLOB NOT NULL CHECK (length(vault_id) = 32),
+            generation  INTEGER NOT NULL CHECK (generation >= 0),
+            root        BLOB NOT NULL CHECK (length(root) = 32),
+            -- v24: past genesis, the root this generation was built on and
+            -- the E of the operation that consumed it, so the recorded
+            -- chain links row to row and Core can check the links before it
+            -- stands on this device's memo (`VaultChain::from_recorded`).
+            pre_root    BLOB CHECK (pre_root IS NULL OR length(pre_root) = 32),
+            consumed_by BLOB CHECK (consumed_by IS NULL OR length(consumed_by) = 32),
             PRIMARY KEY (vault_id, generation)
         ) WITHOUT ROWID;
         CREATE TABLE IF NOT EXISTS sofi_vault_leaf(

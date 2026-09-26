@@ -27,7 +27,6 @@ pub mod kv;
 pub mod native_reserve;
 pub mod runtime_config;
 pub mod sdk_context;
-pub mod sofi_evidence;
 
 // Re-export SdkContext for convenient access
 pub use sdk_context::SdkContext;
@@ -47,13 +46,12 @@ pub mod kyber_identity; // ML-KEM identity binding for online contact establishm
 pub mod session_manager; // Native-first session state projection
 pub mod signing_authority;
 pub mod sofi_advance;
-pub mod sofi_chain;
 /// SoFi v8 producers: setup, vault creation, trade, route and close.
 pub mod sofi_exercise;
 pub mod sofi_publish;
+pub mod sofi_reads;
 pub mod sofi_register;
 pub mod sofi_relay;
-pub mod sofi_resolve;
 pub mod sofi_sdk;
 pub mod tls_transport_sdk;
 pub mod token_sdk;

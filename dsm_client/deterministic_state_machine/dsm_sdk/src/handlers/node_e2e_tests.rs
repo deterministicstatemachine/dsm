@@ -18,6 +18,7 @@ use dsm::sofi::derive;
 use dsm::sofi::exercise::{recognize_exercise, RecognizedExercise};
 use dsm::sofi::publication::Publication;
 use dsm::sofi::resolution::WalkOutcome;
+use dsm::sofi::resolve::{LocalLeaves, WALK_BUDGET};
 use dsm::sofi::wire::{
     AttemptEntry, DlvPolicyFulfillmentBody, PrecommitLeg, SofiExercise, TraderFulfillmentBody,
     TraderPrecommitBody,
@@ -29,11 +30,9 @@ use serial_test::serial;
 
 use crate::bridge::{AppInvoke, AppQuery, AppResult, AppRouter as _};
 use crate::economic_fixtures::NETWORK;
-use crate::sdk::sofi_chain::ChainWalker;
-use crate::sdk::sofi_evidence::LocalLeaves;
-use crate::sdk::sofi_exercise::{attempt_cell, read_attempt_cell, write_exercise};
+use crate::sdk::sofi_exercise::{attempt_cell, write_exercise};
+use crate::sdk::sofi_reads::{local_leaves_of_validated, VerifierContext};
 use crate::sdk::sofi_register::position_cells;
-use crate::sdk::sofi_resolve::{Resolver, WALK_BUDGET};
 use crate::sdk::storage_set::canonical_set;
 use crate::storage::client_db::economic_lineage;
 use crate::test_support::two_device::{Pair, TestDevice};
@@ -366,7 +365,7 @@ fn standing_of(d: &TestDevice) -> (LocalLeaves, Option<AdmittedEconomicPosition>
     let validated = ValidatedEconomicRoot::rehydrate_from_admitted_store(admitted)
         .expect("a resolved predecessor");
     let local =
-        LocalLeaves::of_validated(&d.genesis, &d.device_id, &validated).expect("own leaves");
+        local_leaves_of_validated(&d.genesis, &d.device_id, &validated).expect("own leaves");
     // The position this device resolved itself, for Core to read what it
     // selected when a P names it as its parent.
     let parent =
@@ -577,20 +576,15 @@ async fn a_key_held_by_an_exercise_its_own_bytes_refute_is_skipped_on_those_byte
     // The vault's chain as B established it: the genesis root and the
     // generation B's trade produced.
     let (local, parents) = standing_of(&p.b);
-    let chain = ChainWalker {
-        set: &set,
-        local: &local,
-        parent: parents.as_ref(),
-    }
-    .chain(&m.vault_id)
-    .await
-    .expect("the vault's chain");
+    let ctx = VerifierContext::new(&set, Some(&local), parents.as_ref()).expect("a verifier");
+    let verifier = ctx.verifier();
+    let chain = verifier.chain(&m.vault_id).expect("the vault's chain");
     assert_eq!(chain.roots().len(), 2, "genesis and one consumption");
     let (r0, r1) = (chain.roots()[0], chain.roots()[1]);
 
     // B's exercise, read back from the key it consumed, and re-aimed.
-    let honest = read_attempt_cell(&set, &m.vault_id, &r0, 0)
-        .await
+    let honest = verifier
+        .read_attempt_cell(&m.vault_id, &r0, 0)
         .expect("read")
         .expect("decided")
         .into_exercise()
@@ -620,8 +614,8 @@ async fn a_key_held_by_an_exercise_its_own_bytes_refute_is_skipped_on_those_byte
         .await
         .expect("any party may write an exercise");
     assert!(writes.iter().all(|w| w.reached_leader), "{writes:?}");
-    let held = read_attempt_cell(&set, &m.vault_id, &r1, 0)
-        .await
+    let held = verifier
+        .read_attempt_cell(&m.vault_id, &r1, 0)
         .expect("read")
         .expect("decided");
     assert_eq!(
@@ -638,15 +632,8 @@ async fn a_key_held_by_an_exercise_its_own_bytes_refute_is_skipped_on_those_byte
         node.forget_requests();
     }
     let chains = BTreeMap::from([(m.vault_id, chain)]);
-    let resolver = Resolver {
-        set: &set,
-        local: &local,
-        parent: parents.as_ref(),
-        chains: &chains,
-    };
-    let walked = resolver
-        .walk_parent(&m.vault_id, &r1, 0, WALK_BUDGET)
-        .await
+    let walked = verifier
+        .walk_parent(&chains, &m.vault_id, &r1, 0, WALK_BUDGET)
         .expect("the walk");
     assert_eq!(walked.outcome, WalkOutcome::Unresolved { attempt: 1 });
     assert_eq!(walked.not_established, None);
@@ -688,8 +675,8 @@ async fn a_key_held_by_an_exercise_its_own_bytes_refute_is_skipped_on_those_byte
     // The next trade takes the next key, and the vault prices it at the
     // reserves B's first trade left.
     let q2 = realized_trade(&p, &m, 10).await;
-    let next = read_attempt_cell(&set, &m.vault_id, &r1, 1)
-        .await
+    let next = verifier
+        .read_attempt_cell(&m.vault_id, &r1, 1)
         .expect("read")
         .expect("decided")
         .into_exercise()
@@ -717,18 +704,13 @@ async fn an_unsigned_exercise_at_a_successor_key_takes_nothing() {
     realized_trade(&p, &m, 10).await;
     let set = canonical_set(NETWORK).expect("the pinned set");
     let (local, parents) = standing_of(&p.b);
-    let chain = ChainWalker {
-        set: &set,
-        local: &local,
-        parent: parents.as_ref(),
-    }
-    .chain(&m.vault_id)
-    .await
-    .expect("the vault's chain");
+    let ctx = VerifierContext::new(&set, Some(&local), parents.as_ref()).expect("a verifier");
+    let verifier = ctx.verifier();
+    let chain = verifier.chain(&m.vault_id).expect("the vault's chain");
     assert_eq!(chain.roots().len(), 2, "genesis and one consumption");
     let (r0, r1) = (chain.roots()[0], chain.roots()[1]);
-    let honest = read_attempt_cell(&set, &m.vault_id, &r0, 0)
-        .await
+    let honest = verifier
+        .read_attempt_cell(&m.vault_id, &r0, 0)
         .expect("read")
         .expect("decided")
         .into_exercise()
@@ -741,15 +723,15 @@ async fn an_unsigned_exercise_at_a_successor_key_takes_nothing() {
         .await
         .expect("the nodes keep whatever they are given");
     assert!(write.reached_leader());
-    let read = read_attempt_cell(&set, &m.vault_id, &r1, 0)
-        .await
+    let read = verifier
+        .read_attempt_cell(&m.vault_id, &r1, 0)
         .expect("read")
         .expect("decided");
     assert_eq!(read.fact(), CellFact::Open, "unsigned bytes hold nothing");
 
     let q2 = realized_trade(&p, &m, 10).await;
-    let second = read_attempt_cell(&set, &m.vault_id, &r1, 0)
-        .await
+    let second = verifier
+        .read_attempt_cell(&m.vault_id, &r1, 0)
         .expect("read")
         .expect("decided")
         .into_exercise()
@@ -791,14 +773,9 @@ async fn a_trade_cut_short_by_a_refused_write_is_the_network_status_until_it_lan
         .expect("B's next position pair");
     let pair_leader = member_name(pair.fulfillment().route().leader());
     let (local, parents) = standing_of(&p.b);
-    let chain = ChainWalker {
-        set: &set,
-        local: &local,
-        parent: parents.as_ref(),
-    }
-    .chain(&m.vault_id)
-    .await
-    .expect("the vault's chain");
+    let ctx = VerifierContext::new(&set, Some(&local), parents.as_ref()).expect("a verifier");
+    let verifier = ctx.verifier();
+    let chain = verifier.chain(&m.vault_id).expect("the vault's chain");
     assert_eq!(chain.roots().len(), 1, "the vault is at its genesis");
     let attempt =
         attempt_cell(&set, &m.vault_id, &chain.roots()[0], 0).expect("the first attempt key");

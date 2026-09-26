@@ -13,17 +13,14 @@
 //! key is Core's (`sofi::exercise::exercise_names_key`): the first exercise
 //! at the leader whose `F` names `(v, a)` and whose `P` names `(v, R_n)`.
 
-use dsm::route_chain::CellFact;
 use dsm::sofi::conformance::{derive_policy_fulfillments, ConformanceEvidence};
 use dsm::sofi::derive;
-use dsm::sofi::exercise::{
-    attempt_completion, attempt_resolution, AttemptCell, AttemptCellRead, RecognizedExercise,
-};
+use dsm::sofi::exercise::{AttemptCell, RecognizedExercise};
 use dsm::sofi::publication::Publication;
 use dsm::sofi::wire::{DlvPolicyFulfillmentBody, SofiExercise};
 use dsm::types::error::DsmError;
 
-use crate::sdk::route_seats::{read_cell, write_recorded, NodeSeats};
+use crate::sdk::route_seats::write_recorded;
 use crate::sdk::sofi_register::InstallRequest;
 use crate::sdk::storage_set::StorageSet;
 
@@ -145,50 +142,4 @@ pub async fn write_exercise(
         });
     }
     Ok(writes)
-}
-
-/// `SuccessorResolution(K^(attempt))` of `vault_id` at `parent_root`, as the
-/// ladder reads it (Section 23.1): Core evaluates the cell's route chains
-/// from every seat's reads into a read bound to the key. An exercise final
-/// at the cell has its completion proof kept (storage spec §9 rule 11).
-/// Reads that do not decide the cell yet — its leader unread, or its leader
-/// link not yet committed — are the inner `Err`, what Core names as missing:
-/// a network status for the caller to retry, never an open cell.
-pub async fn read_attempt_cell(
-    set: &StorageSet,
-    vault_id: &D32,
-    parent_root: &D32,
-    attempt: u64,
-) -> Result<Result<AttemptCellRead, dsm::route_chain::Missing>, DsmError> {
-    let cell = attempt_cell(set, vault_id, parent_root, attempt)?;
-    let seats = NodeSeats::new(set)?;
-    let evidence = read_cell(&seats, cell.routed()).await;
-    let read = match attempt_resolution(&cell, &evidence) {
-        Ok(read) => read,
-        Err(missing) => return Ok(Err(missing)),
-    };
-    if let CellFact::Held {
-        state: dsm::route_chain::ChainState::Final,
-        ..
-    } = read.fact()
-    {
-        keep_attempt_completion(&cell, &evidence)?;
-    }
-    Ok(Ok(read))
-}
-
-/// Keep the completion proof of the exercise final at `cell`.
-fn keep_attempt_completion(
-    cell: &AttemptCell,
-    evidence: &dsm::route_chain::CellEvidence,
-) -> Result<(), DsmError> {
-    let (.., proof) = attempt_completion(cell, evidence)
-        .map_err(|missing| err("attempt completion", format!("{missing:?}")))?
-        .ok_or_else(|| {
-            err(
-                "attempt completion",
-                "a final exercise has no completion proof",
-            )
-        })?;
-    crate::sdk::route_seats::keep_completion(cell.routed(), &proof)
 }
