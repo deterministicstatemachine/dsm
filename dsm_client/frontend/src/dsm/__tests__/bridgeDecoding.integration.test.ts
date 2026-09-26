@@ -2,7 +2,7 @@
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { decodeBalancesListResponseStrict, decodeFramedEnvelopeV3 } from '../decoding';
-import { processEnvelopeV3Bin } from '../WebViewBridge';
+import { routerQueryBin } from '../WebViewBridge';
 
 function makeInvalidResponse(): Uint8Array {
   return new Uint8Array([0x01, 0x02, 0x03, 0x04]);
@@ -25,12 +25,12 @@ describe('bridge decoding boundary (integration)', () => {
   // wrapper answers `invalid bridge response for <method>`.
   it('rejects invalid BridgeRpcResponse bytes', async () => {
     (global as any).window.DsmBridge.sendMessageBin = async () => makeInvalidResponse();
-    await expect(processEnvelopeV3Bin(new Uint8Array([1, 2, 3]))).rejects.toThrow(/invalid bridge response for nativeBoundaryIngress/);
+    await expect(routerQueryBin('balance.list', new Uint8Array([1, 2, 3]))).rejects.toThrow(/invalid bridge response for nativeBoundaryIngress/);
   });
 
   it('propagates bridge error payloads', async () => {
     (global as any).window.DsmBridge.sendMessageBin = async () => makeErrorResponse('native exploded');
-    await expect(processEnvelopeV3Bin(new Uint8Array([1]))).rejects.toThrow(/native exploded/i);
+    await expect(routerQueryBin('balance.list')).rejects.toThrow(/native exploded/i);
   });
 
   // A boundary failure reaches the diagnostics bus as its message. The port
@@ -42,7 +42,7 @@ describe('bridge decoding boundary (integration)', () => {
     const seen: any[] = [];
     const off = bridgeEvents.on('bridge.error', (detail: any) => { seen.push(detail); });
     try {
-      await expect(processEnvelopeV3Bin(new Uint8Array([1]))).rejects.toThrow(/native exploded/);
+      await expect(routerQueryBin('balance.list')).rejects.toThrow(/native exploded/);
     } finally {
       off();
     }

@@ -77,9 +77,6 @@ describe('E2E: Offline BLE exchange -> wallet refresh', () => {
           }).toBinary();
           return wrapSuccessEnvelope(headersBytes);
         }
-        if (method === 'getSigningPublicKeyBin') {
-          return wrapSuccessEnvelope(new Uint8Array(64).fill(0x5a));
-        }
         if (method === 'nativeBoundaryIngress') {
           const ingress = pb.IngressRequest.fromBinary(payload);
           if (ingress.operation.case === 'routerQuery') {
@@ -133,11 +130,6 @@ describe('E2E: Offline BLE exchange -> wallet refresh', () => {
         }
         throw new Error(`unhandled bridge method: ${method} (payloadLen=${payload.length})`);
       },
-      // Some call sites read base32 Crockford strings from these getters.
-      getDeviceIdBin: () => base32CrockfordEncode(ALICE_DEVICE_ID),
-      getGenesisHashBin: () => base32CrockfordEncode(ALICE_GENESIS),
-      getTransportHeadersV3Bin: () =>
-        new pb.Headers({ deviceId: ALICE_DEVICE_ID, genesisHash: ALICE_GENESIS as any,}).toBinary(),
     };
 
     // Start offline send

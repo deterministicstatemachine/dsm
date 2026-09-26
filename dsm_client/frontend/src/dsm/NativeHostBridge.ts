@@ -57,11 +57,6 @@ function unwrapHostResponse(responseBytes: Uint8Array): Uint8Array {
   throw new Error('native host boundary returned no result');
 }
 
-export function isNativeHostUnavailableError(error: unknown): boolean {
-  if (!(error instanceof Error)) return false;
-  return error.message.includes('Unknown binary RPC method: nativeHostRequest');
-}
-
 export async function hostRequest(request: NativeHostRequest | Uint8Array): Promise<Uint8Array> {
   return bridgeGate.enqueue(() => callHostMethod(encodeRequest(request)));
 }

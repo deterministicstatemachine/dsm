@@ -18,7 +18,6 @@ import type { AndroidBridgeV3 } from "../bridgeTypes";
 import { emitDeterministicSafetyIfPresent } from "../../utils/deterministicSafety";
 import { decodeFramedEnvelopeV3 } from "../decoding";
 import {
-  buildEnvelopeIngressRequest,
   buildRouterInvokeIngressRequest,
   buildRouterQueryIngressRequest,
   ingressBoundaryOk,
@@ -161,10 +160,6 @@ export const sendBridgeRequestBytes = async (
 export async function callBin(method: string, payload?: Uint8Array): Promise<Uint8Array> {
   const reqBytes = buildBridgeRequest(method, payload);
   return sendBridgeRequestBytes(method, reqBytes);
-}
-
-export async function processEnvelopeV3Bin(envelopeBytes: Uint8Array): Promise<Uint8Array> {
-  return bridgeGate.enqueue(() => ingressBoundaryOk(buildEnvelopeIngressRequest(envelopeBytes)));
 }
 
 export async function routerInvokeBin(method: string, args?: Uint8Array): Promise<Uint8Array> {

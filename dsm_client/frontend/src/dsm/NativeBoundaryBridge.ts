@@ -4,7 +4,7 @@
 import { getBridgeInstance } from '../bridge/BridgeRegistry';
 import { bridgeEvents } from '../bridge/bridgeEvents';
 import type { AndroidBridgeV3 } from './bridgeTypes';
-import { EnvelopeOp, IngressRequest, IngressResponse, RouterInvokeOp, RouterQueryOp, StartupRequest, StartupResponse } from '../proto/dsm_app_pb';
+import { IngressRequest, IngressResponse, RouterInvokeOp, RouterQueryOp, StartupRequest, StartupResponse } from '../proto/dsm_app_pb';
 
 function mustBridge(): AndroidBridgeV3 {
   const bridge = getBridgeInstance();
@@ -106,15 +106,6 @@ export function buildRouterInvokeIngressRequest(method: string, args?: Uint8Arra
         method,
         args: args instanceof Uint8Array ? new Uint8Array(args) : new Uint8Array(0),
       }),
-    },
-  });
-}
-
-export function buildEnvelopeIngressRequest(envelopeBytes: Uint8Array): IngressRequest {
-  return new IngressRequest({
-    operation: {
-      case: 'envelope',
-      value: new EnvelopeOp({ envelopeBytes: new Uint8Array(envelopeBytes) }),
     },
   });
 }

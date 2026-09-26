@@ -85,8 +85,6 @@ describe('E2E bilateral accept: BLE accept flow triggers refresh and toast', () 
         }
         throw new Error(`unhandled bridge method:${method}`);
       },
-      getDeviceIdBin: () => new Uint8Array(32).fill(1),
-      getGenesisHashBin: () => new Uint8Array(32).fill(1),
     };
 
     // Call accept — RAF mock fires synchronously so all 4 staggered
