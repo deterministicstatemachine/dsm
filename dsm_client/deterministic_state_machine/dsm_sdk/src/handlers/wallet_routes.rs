@@ -521,7 +521,9 @@ impl AppRouterImpl {
                         };
 
                         // Determine recipient/sender for UI display - resolve aliases
-                        let recipient = if t.tx_type == "dbtc_mint" || t.tx_type == "dbtc_burn" {
+                        let recipient = if t.tx_type == "faucet" {
+                            "ERA reserve (faucet)".to_string()
+                        } else if t.tx_type == "dbtc_mint" || t.tx_type == "dbtc_burn" {
                             "Bitcoin Network".to_string()
                         } else if t.to_device == my_device_id_str {
                             // Incoming: show who sent it - try to resolve alias
@@ -541,6 +543,7 @@ impl AppRouterImpl {
                         // does not name is a row this history cannot report,
                         // never an unspecified one.
                         let tx_type_enum = match t.tx_type.as_str() {
+                            "faucet" => generated::TransactionType::TxTypeFaucet,
                             "bilateral_offline" => {
                                 generated::TransactionType::TxTypeBilateralOffline
                             }
@@ -569,7 +572,19 @@ impl AppRouterImpl {
                             id: safe_id,
                             // Protocol/UI contract: device ids are binary 32-byte values.
                             // We store canonical base32 in SQLite for indexing, but must return bytes here.
-                            from_device_id: bytes32("sender device id", &t.from_device)?,
+                            // A faucet row names no sender device: its source is the
+                            // reserve, and a stored faucet row that names one is corrupt.
+                            from_device_id: if t.tx_type == "faucet" {
+                                if !t.from_device.is_empty() {
+                                    return Err(format!(
+                                        "wallet.history: faucet claim {} names a sender device",
+                                        t.tx_id
+                                    ));
+                                }
+                                Vec::new()
+                            } else {
+                                bytes32("sender device id", &t.from_device)?
+                            },
                             to_device_id: bytes32("recipient device id", &t.to_device)?,
                             token_id: canonicalize_token_id(&token_id),
                             amount: t.amount,
@@ -1368,6 +1383,59 @@ mod history_tests {
             Some(generated::envelope::Payload::WalletHistoryResponse(history)) => Ok(history),
             other => Err(format!("wallet.history answered {other:?}")),
         }
+    }
+
+    /// A faucet claim's row names no sender device — its source is the ERA
+    /// reserve — and is reported as such: type FAUCET, an empty sender, the
+    /// reserve as the counterparty label, the payout incoming. A stored
+    /// faucet row that names a sender is corrupt and refused.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn history_reports_a_faucet_claim_from_the_reserve_with_no_sender_device() {
+        let device = crate::test_support::one_device::Device::start(0x73).await;
+        let me = crate::util::text_id::encode_base32_crockford(&device.router.device_id_bytes);
+        let faucet_row = |id: &str, from: &str| TransactionRecord {
+            tx_id: id.to_string(),
+            tx_hash: crate::util::text_id::encode_base32_crockford(&[0x64; 32]),
+            from_device: from.to_string(),
+            to_device: me.clone(),
+            amount: 100,
+            tx_type: "faucet".to_string(),
+            status: "confirmed".to_string(),
+            commitment_hash: None,
+            proof_data: None,
+            metadata: [("token_id".to_string(), b"ERA".to_vec())]
+                .into_iter()
+                .collect(),
+        };
+
+        store_transaction(&faucet_row("claim", "")).expect("store the faucet row");
+        let reported = history_of(&device.router).await.expect("the history");
+        assert_eq!(reported.transactions.len(), 1);
+        let claim = &reported.transactions[0];
+        assert_eq!(
+            claim.tx_type,
+            generated::TransactionType::TxTypeFaucet as i32
+        );
+        assert!(
+            claim.from_device_id.is_empty(),
+            "a claim names no sender device"
+        );
+        assert_eq!(claim.to_device_id, device.router.device_id_bytes.to_vec());
+        assert_eq!(claim.recipient, "ERA reserve (faucet)");
+        assert_eq!(claim.amount_signed, 100, "incoming");
+        assert_eq!(claim.display_amount, "100");
+        assert_eq!(claim.token_id, "ERA");
+
+        let peer = crate::util::text_id::encode_base32_crockford(&[0x74u8; 32]);
+        store_transaction(&faucet_row("corrupt", &peer)).expect("store the corrupt row");
+        let refused = history_of(&device.router)
+            .await
+            .expect_err("a faucet row naming a sender is refused");
+        assert!(
+            refused.contains("corrupt") && refused.contains("names a sender device"),
+            "{refused}"
+        );
     }
 
     /// A history row is reported only as one of the types the wire names. A

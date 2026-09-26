@@ -17,7 +17,9 @@ use dsm::economic::native_reserve::{
     NativeReserveState, SuccessorCell, WalkStop, ERA_RESERVE_GENESIS_SUPPLY,
 };
 
+use crate::bridge::{AppQuery, AppRouter};
 use crate::economic_fixtures::NETWORK;
+use crate::generated;
 use crate::sdk::faucet_claim_flow::claim_era_faucet;
 use crate::sdk::storage_set::{as_ccb_members, canonical_set};
 use crate::storage::client_db;
@@ -107,6 +109,59 @@ async fn a_full_claim_credits_100_era_and_admits_position_1() {
         d.identity.device_id,
         "generation 1 names the claimant"
     );
+
+    // The wallet's history lists the claim: 100 ERA in, from the reserve —
+    // no sender device — under the release's operation digest. No claim
+    // wrote a history row before.
+    let history = wallet_history(&d.router).await;
+    assert_eq!(history.transactions.len(), 1, "one row: the claim");
+    let claim = &history.transactions[0];
+    assert_eq!(
+        claim.tx_type,
+        generated::TransactionType::TxTypeFaucet as i32
+    );
+    assert_eq!(claim.amount_signed, 100);
+    assert_eq!(claim.display_amount, "100");
+    assert_eq!(claim.token_id, "ERA");
+    assert!(claim.from_device_id.is_empty(), "the source is the reserve");
+    assert_eq!(claim.to_device_id, d.identity.device_id.to_vec());
+    assert_eq!(claim.recipient, "ERA reserve (faucet)");
+    assert_eq!(claim.status, "confirmed");
+    assert_eq!(claim.tx_hash.len(), 32, "the release's operation digest");
+    assert_eq!(
+        claim.id,
+        format!(
+            "tx_{}",
+            crate::util::text_id::encode_base32_crockford(&claim.tx_hash)
+        )
+    );
+}
+
+/// The wallet's history as `wallet.history` answers it.
+async fn wallet_history(
+    router: &crate::handlers::app_router_impl::AppRouterImpl,
+) -> generated::WalletHistoryResponse {
+    use prost::Message;
+    let mut body = Vec::with_capacity(16);
+    body.extend_from_slice(&16u64.to_le_bytes());
+    body.extend_from_slice(&0u64.to_le_bytes());
+    let answer = router
+        .query(AppQuery {
+            path: "wallet.history".to_string(),
+            params: generated::ArgPack {
+                codec: generated::Codec::Proto as i32,
+                body,
+                ..Default::default()
+            }
+            .encode_to_vec(),
+        })
+        .await;
+    assert!(answer.success, "wallet.history: {:?}", answer.error_message);
+    let env = generated::Envelope::decode(&answer.data[1..]).expect("a framed envelope");
+    match env.payload {
+        Some(generated::envelope::Payload::WalletHistoryResponse(h)) => h,
+        other => panic!("wallet.history answers a WalletHistoryResponse, not {other:?}"),
+    }
 }
 
 /// SoFi §51 and the shortcut audit of 2026-09-25: a release of the whole

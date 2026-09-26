@@ -18,6 +18,7 @@ export type Balance = {
 /** The badge a history row's type shows. */
 export function txTypeLabel(txType: DomainTxType): string {
   switch (txType) {
+    case 'faucet': return 'FAUCET';
     case 'bilateral_offline': return 'OFFLINE';
     case 'online': return 'ONLINE';
     case 'dbtc_mint': return 'dBTC MINT';
@@ -28,6 +29,7 @@ export function txTypeLabel(txType: DomainTxType): string {
 /** The long name a history row's type shows when expanded. */
 export function txTypeDetail(txType: DomainTxType): string {
   switch (txType) {
+    case 'faucet': return 'ERA faucet claim';
     case 'bilateral_offline': return 'Bilateral Offline (BLE)';
     case 'online': return 'Online';
     case 'dbtc_mint': return 'BTC \u2192 dBTC Deposit';

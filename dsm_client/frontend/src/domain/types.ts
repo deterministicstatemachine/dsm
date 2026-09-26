@@ -36,7 +36,7 @@ export type DomainContact = {
 };
 
 /** The history types Rust writes (`TransactionInfo.tx_type`). */
-export type DomainTxType = 'bilateral_offline' | 'online' | 'dbtc_mint' | 'dbtc_burn';
+export type DomainTxType = 'faucet' | 'bilateral_offline' | 'online' | 'dbtc_mint' | 'dbtc_burn';
 
 /**
  * One wallet history row, exactly as `wallet.history` reports it. Every
@@ -58,8 +58,11 @@ export type DomainTransaction = {
   recipient: string;
   /** Rust's word for the row's state. */
   status: string;
-  /** Base32 Crockford. */
-  fromDeviceId: string;
+  /**
+   * Base32 Crockford. Absent for a faucet row: its source is the ERA reserve,
+   * not a device, and Rust names none.
+   */
+  fromDeviceId?: string;
   /** Base32 Crockford. */
   toDeviceId: string;
   memo?: string;
