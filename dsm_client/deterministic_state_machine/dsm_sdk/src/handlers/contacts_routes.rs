@@ -335,7 +335,7 @@ mod pairing_phase_tests {
 
     /// The contact list states where BLE pairing with each contact stands, as
     /// the SDK's pairing loop has it. The contacts screen used to infer it from
-    /// raw radio events, and showed "Paired!" when a phone's identity was read.
+    /// raw radio events, and showed "Paired!" when a device's identity was read.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[serial_test::serial]
     async fn the_contact_list_states_where_pairing_stands() {

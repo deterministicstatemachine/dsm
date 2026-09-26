@@ -159,7 +159,7 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
         })
       );
     });
-    // Where the recipient's phone is over BLE is Rust's to know: the screen names no address.
+    // Where the recipient's device is over BLE is Rust's to know: the screen names no address.
     expect((dsmClient.sendOfflineTransfer as jest.Mock).mock.calls[0][0]).not.toHaveProperty('bleAddress');
   });
 

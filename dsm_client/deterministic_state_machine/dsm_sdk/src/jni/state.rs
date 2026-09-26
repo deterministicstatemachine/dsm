@@ -3,7 +3,7 @@
 //! # JNI Global State
 //!
 //! Process-global flags shared across JNI entry points: whether the bilateral
-//! poll has started. Where a contact's phone is over BLE is
+//! poll has started. Where a contact's device is over BLE is
 //! `crate::bluetooth::peer_address`; `SDK_READY` is `sdk::session_manager`.
 
 #[cfg(all(target_os = "android", feature = "bluetooth"))]

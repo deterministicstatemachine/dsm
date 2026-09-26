@@ -119,7 +119,7 @@ export async function offlineSend(transfer: GenericTransaction): Promise<Generic
     };
 
     // What the user asked for, and nothing else: where the counterparty's
-    // phone is over BLE, the token's decimals and the operation are Rust's,
+    // device is over BLE, the token's decimals and the operation are Rust's,
     // and so is refusing a token or an amount the request does not name.
     const request = new pb.OfflineTransferRequest({
       counterpartyDeviceId: toBytes as any,
@@ -195,7 +195,7 @@ export async function offlineSend(transfer: GenericTransaction): Promise<Generic
         finish({
           accepted: false,
           open: true,
-          result: 'The transfer is still open. It completes when the two phones are together again; Pending transfers shows it.',
+          result: 'The transfer is still open. It completes when the two devices are together again; Pending transfers shows it.',
         });
         return;
       }

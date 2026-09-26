@@ -3110,9 +3110,9 @@ enum ContactPairingPhase {
   CONTACT_PAIRING_PHASE_PAIRED = 1;
   // Not paired, and no pairing session is under way.
   CONTACT_PAIRING_PHASE_IDLE = 2;
-  // A pairing session waits for the phone to be seen over BLE.
+  // A pairing session waits for the device to be seen over BLE.
   CONTACT_PAIRING_PHASE_SEARCHING = 3;
-  // The phone was seen; the pairing exchange is under way.
+  // The device was seen; the pairing exchange is under way.
   CONTACT_PAIRING_PHASE_CONNECTED = 4;
   // The last attempt did not complete; the pairing loop tries again.
   CONTACT_PAIRING_PHASE_RETRYING = 5;
@@ -3273,7 +3273,7 @@ message OnlineTransferSmartRequest {
 }
 
 // wallet.sendOffline: what the user asked for, and nothing the SDK works out
-// itself. The SDK resolves where the counterparty's phone is over BLE, the
+// itself. The SDK resolves where the counterparty's device is over BLE, the
 // token's decimals and policy, and authors the operation.
 message OfflineTransferRequest {
   bytes  counterparty_device_id = 1 [(dsm_fixed_len)=32];

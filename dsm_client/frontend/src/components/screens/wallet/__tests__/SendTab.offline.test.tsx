@@ -2,7 +2,7 @@
 //! An offline send ends one of three ways, and the screen says which.
 //!
 //! When the screen stopped waiting, it used to report "did not complete in
-//! time" as a failed send, while the step stayed open on both phones and
+//! time" as a failed send, while the step stayed open on both devices and
 //! completed when they met again: a lost link fails no step.
 
 import React from 'react';
@@ -69,11 +69,11 @@ describe('SendTab offline outcome', () => {
     );
   });
 
-  // Where the recipient's phone is over BLE is Rust's to know. The form used
+  // Where the recipient's device is over BLE is Rust's to know. The form used
   // to resolve an address itself and refuse a contact it found none for,
   // before Rust was asked.
-  it('asks Rust to send and names no address itself; a phone Rust has not met is its refusal', async () => {
-    const refusal = 'wallet.sendOffline: no BLE address is known for the counterparty: the phones have not met over BLE';
+  it('asks Rust to send and names no address itself; a device Rust has not met is its refusal', async () => {
+    const refusal = 'wallet.sendOffline: no BLE address is known for the counterparty: the devices have not met over BLE';
     (dsmClient.sendOfflineTransfer as jest.Mock).mockResolvedValue({ accepted: false, result: refusal });
     const setError = jest.fn();
 

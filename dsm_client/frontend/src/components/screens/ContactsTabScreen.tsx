@@ -163,7 +163,7 @@ const ContactsTabScreen: React.FC<Props> = ({ eraTokenSrc = 'images/logos/era_to
   // stands is Rust's too: each contact carries its phase from the pairing
   // loop, and the line shows the furthest a pairing has got. This screen used
   // to start and stop pairing itself, and to infer its progress from raw radio
-  // events, showing "Paired!" when a phone's identity was read.
+  // events, showing "Paired!" when a device's identity was read.
   const pairingLine: 'connected' | 'searching' | null = contacts.some((c) => c.pairing === 'connected')
     ? 'connected'
     : contacts.some((c) => c.pairing === 'searching' || c.pairing === 'retrying')
@@ -331,7 +331,7 @@ const ContactsTabScreen: React.FC<Props> = ({ eraTokenSrc = 'images/logos/era_to
                   {pairingLine === 'connected' && 'Connected'}
                 </div>
                 <div style={{ fontSize: 9, opacity: 0.8, color: 'var(--text-dark)' }}>
-                  {pairingLine === 'searching' && 'Keep both phones open in the app, near each other'}
+                  {pairingLine === 'searching' && 'Keep both devices open in the app, near each other'}
                   {pairingLine === 'connected' && 'Exchanging identity...'}
                 </div>
               </div>

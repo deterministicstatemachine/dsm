@@ -864,14 +864,14 @@ export enum ContactPairingPhase {
   IDLE = 2,
 
   /**
-   * A pairing session waits for the phone to be seen over BLE.
+   * A pairing session waits for the device to be seen over BLE.
    *
    * @generated from enum value: CONTACT_PAIRING_PHASE_SEARCHING = 3;
    */
   SEARCHING = 3,
 
   /**
-   * The phone was seen; the pairing exchange is under way.
+   * The device was seen; the pairing exchange is under way.
    *
    * @generated from enum value: CONTACT_PAIRING_PHASE_CONNECTED = 4;
    */
@@ -20688,7 +20688,7 @@ export class OnlineTransferSmartRequest extends Message<OnlineTransferSmartReque
 
 /**
  * wallet.sendOffline: what the user asked for, and nothing the SDK works out
- * itself. The SDK resolves where the counterparty's phone is over BLE, the
+ * itself. The SDK resolves where the counterparty's device is over BLE, the
  * token's decimals and policy, and authors the operation.
  *
  * @generated from message dsm.OfflineTransferRequest
