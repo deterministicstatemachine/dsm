@@ -1196,11 +1196,11 @@ Not in the manifest: `dsm_sdk::sdk::sofi_reads::tests::an_unestablished_genesis_
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |
 |---|---|---|---|---|---|---|---|
 | DSM high-level (MR-DSM) | 272 | 66 | 116 | 34 | 9 | 29 | 18 |
-| SoFi (MR-SOFI) | 333 | 206 | 84 | 18 | 8 | 17 | 0 |
+| SoFi (MR-SOFI) | 337 | 206 | 84 | 22 | 8 | 17 | 0 |
 | dBTC (MR-DBTC) | 135 | 0 | 0 | 0 | 0 | 0 | 135 |
 | Storage node (MR-STOR) | 158 | 32 | 41 | 50 | 16 | 18 | 1 |
 | Storage §14 lines added after the pin (STOR-014) | 11 | 9 | 1 | 1 | 0 | 0 | 0 |
-| **All** | **909** | **313** | **242** | **103** | **33** | **64** | **154** |
+| **All** | **913** | **313** | **242** | **107** | **33** | **64** | **154** |
 
 ## 8 Per-requirement results
 
@@ -1818,6 +1818,10 @@ Not in the manifest: `dsm_sdk::sdk::sofi_reads::tests::an_unestablished_genesis_
 | MR-SOFI-0331 | Met | `dsm::sofi::validation::setup_valid`; `dsm::sofi::validation::Evidence` | `dsm::sofi::validation::tests::a_setup_naming_another_claim_than_the_accepted_one_is_invalid`; `dsm::sofi::validation::tests::a_setup_whose_accepted_claim_is_not_in_hand_is_missing` | Evidence carries the accepted claims lineage validation produced; a setup naming another claim is Invalid, and one whose accepted claim is not in hand is Missing. |
 | MR-SOFI-0332 | Met | `dsm::economic::token_policy::TokenPolicy`; `dsm::economic::provenance::verify_genesis_release` | `dsm::economic_provenance_semantics::a_genesis_release_funds_its_creators_whole_supply`; `dsm::economic_provenance_semantics::a_genesis_release_of_another_creators_policy_is_refused` | The policy blob carries creator_genesis and creator_device_id; a genesis release of another creator's policy is refused. |
 | MR-SOFI-0333 | Met | `dsm::economic::keys::token_creation_key`; `dsm::economic::write_set::build_write_set` | `dsm::economic_write_set::a_token_is_created_once_on_its_creators_lineage`; `dsm::sofi::lineage::tests::the_creation_record_is_an_economic_leaf_with_its_own_key` | Creation inserts the 0x0060 record under its own key from zero; a second creation of the same commit cannot build its write set. |
+| MR-SOFI-0334 | Missing | — | — | Amendment S11 (2026-09-26): the network-anchored grammar, built in this PR. |
+| MR-SOFI-0335 | Missing | — | — | Amendment S11 (2026-09-26): ERA's canonical policy in Core, built in this PR. |
+| MR-SOFI-0336 | Missing | — | — | Amendment S11 (2026-09-26): confinement of the network-anchored shape to ERA, built in this PR. |
+| MR-SOFI-0337 | Missing | — | — | Amendment S11 (2026-09-26): the reserve's supply from ERA's policy and exhaustion refused before signing, built in this PR. |
 
 ### 8.3 dBTC native specification
 
