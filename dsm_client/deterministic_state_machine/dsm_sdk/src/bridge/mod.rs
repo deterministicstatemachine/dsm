@@ -272,6 +272,42 @@ pub fn app_router() -> Option<Arc<dyn AppRouter>> {
     APP_ROUTER.read().ok()?.clone()
 }
 
+/// Test-only: the SDK app router slot held empty — as a process in which no
+/// router has been installed has it — for as long as the hold lives, with the
+/// full-router identity marker cleared to match. What the slot held is put
+/// back when the hold drops, a failing test included, so a test states this
+/// premise instead of inheriting whatever router an earlier test left, and
+/// leaves nothing of its own behind.
+#[cfg(test)]
+#[must_use = "dropping the hold at once puts the previous router back"]
+pub(crate) struct NoAppRouterHold {
+    router: Option<Arc<dyn AppRouter>>,
+    full_router_identity: Option<Vec<u8>>,
+}
+
+#[cfg(test)]
+impl NoAppRouterHold {
+    pub(crate) fn take() -> Self {
+        Self {
+            router: APP_ROUTER.write().unwrap_or_else(|e| e.into_inner()).take(),
+            full_router_identity: FULL_APP_ROUTER_IDENTITY
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .take(),
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for NoAppRouterHold {
+    fn drop(&mut self) {
+        *APP_ROUTER.write().unwrap_or_else(|e| e.into_inner()) = self.router.take();
+        *FULL_APP_ROUTER_IDENTITY
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = self.full_router_identity.take();
+    }
+}
+
 /// A cache of the local device's ML-KEM-768 (Kyber) encapsulation key, the key derived from
 /// `Smaster` under `DSM/kyber\0`. Installed by `AppRouterImpl::new` once `WalletSDK` has
 /// derived the device keys; `kyber_identity::local_kyber_public_key` re-derives it when the
@@ -517,4 +553,55 @@ pub async fn get_ble_transport_adapter() -> Result<
         .get_ble_transport_adapter()
         .await
         .ok_or_else(|| "Ble transport adapter not injected yet".to_string())
+}
+
+#[cfg(test)]
+mod no_app_router_hold_tests {
+    use super::*;
+    use serial_test::serial;
+
+    /// The hold empties the router slot for its lifetime and puts back
+    /// exactly what it found: a router installed before it — as an earlier
+    /// test leaves one — is out of reach while it lives, and back, with its
+    /// full-router marker, when it drops.
+    /// MUTATION CONTROL: a hold that leaves the slot as it is turns this red.
+    #[test]
+    #[serial]
+    fn the_hold_empties_the_router_slot_and_puts_back_what_it_found() {
+        // This test's own premise: it starts from an empty slot, and leaves
+        // the slot as it found it.
+        let _as_found = NoAppRouterHold::take();
+        let identity = crate::economic_fixtures::local_device(0x4D).0;
+        let router: Arc<dyn AppRouter> = Arc::new(
+            crate::handlers::app_router_impl::AppRouterImpl::new(crate::init::SdkConfig {
+                node_id: "no-app-router-hold-test".to_string(),
+                storage_endpoints: Vec::new(),
+                enable_offline: false,
+            })
+            .expect("a router for the fixture device"),
+        );
+        install_app_router(router.clone()).expect("install the router");
+        mark_full_app_router_installed(identity.device_id.to_vec());
+
+        {
+            let _no_router = NoAppRouterHold::take();
+            assert!(app_router().is_none(), "the hold left a router in the slot");
+            assert_eq!(
+                *FULL_APP_ROUTER_IDENTITY.read().expect("the marker"),
+                None,
+                "the hold left the full-router marker set"
+            );
+        }
+
+        let back = app_router().expect("the router is back when the hold drops");
+        assert!(
+            Arc::ptr_eq(&back, &router),
+            "the hold put back another router"
+        );
+        assert_eq!(
+            *FULL_APP_ROUTER_IDENTITY.read().expect("the marker"),
+            Some(identity.device_id.to_vec()),
+            "the hold lost the full-router marker"
+        );
+    }
 }
