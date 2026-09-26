@@ -40,7 +40,7 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
     // getWalletHistory: first empty, then returns 1 transaction on second invocation
     (dsmClient.getWalletHistory as any) = jest.fn()
       .mockResolvedValueOnce({ transactions: [] })
-      .mockResolvedValueOnce({ transactions: [{ txId: 'tx123', type: 'online', amount: '100', recipient: 'FAUCET', status: 'confirmed' }] });
+      .mockResolvedValueOnce({ transactions: [{ txId: 'tx123', txHash: 'TX123HASH', txType: 'online', type: 'online', amount: 100n, displayAmount: '100', tokenId: 'ERA', recipient: 'peer', status: 'confirmed', fromDeviceId: 'FROM', toDeviceId: 'TO', receiptVerified: false }] });
 
     // Minimal contacts and BLE functions used by loadWalletData
     (dsmClient.getContacts as any) = jest.fn().mockResolvedValue({ contacts: [] });
@@ -134,7 +134,7 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
     (dsmClient.getWalletHistory as any) = jest.fn().mockImplementation(async () => ({ transactions: historyState }));
     (dsmClient.sendOnlineTransferSmart as any) = jest.fn().mockImplementation(async () => {
       balancesState = [{ tokenId: 'ERA', symbol: 'ERA', balance: '75', baseUnits: 75n, displayAmount: '75', decimals: 0 }];
-      historyState = [{ txId: 'tx-online-sender', type: 'online', amount: '25', recipient: 'Receiver', status: 'confirmed' }];
+      historyState = [{ txId: 'tx-online-sender', txHash: 'TXONLINESENDERHASH', txType: 'online', type: 'online', amount: -25n, displayAmount: '-25', tokenId: 'ERA', recipient: 'Receiver', status: 'confirmed', fromDeviceId: 'FROM', toDeviceId: 'TO', receiptVerified: false }];
       return { success: true, message: 'ok', newBalance: 75n };
     });
 
@@ -177,7 +177,7 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
     (dsmClient.resolveBleAddressForContact as any) = jest.fn().mockResolvedValue(contact.bleAddress);
     (dsmClient.sendOfflineTransfer as any) = jest.fn().mockImplementation(async () => {
       balancesState = [{ tokenId: 'ROOT', symbol: 'ERA', balance: '55', baseUnits: 55n, displayAmount: '55', decimals: 0 }];
-      historyState = [{ txId: 'tx-offline-sender', type: 'offline', amount: '25', recipient: 'Receiver', status: 'confirmed' }];
+      historyState = [{ txId: 'tx-offline-sender', txHash: 'TXOFFLINESENDERHASH', txType: 'bilateral_offline', type: 'offline', amount: -25n, displayAmount: '-25', tokenId: 'ERA', recipient: 'Receiver', status: 'confirmed', fromDeviceId: 'FROM', toDeviceId: 'TO', receiptVerified: false }];
       return { success: true };
     });
 
@@ -231,7 +231,7 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
     await waitFor(() => expect(screen.getByText('40')).toBeInTheDocument());
 
     balancesState = [{ tokenId: 'ERA', symbol: 'ERA', balance: '65', baseUnits: 65n, displayAmount: '65', decimals: 0 }];
-    historyState = [{ txId: 'tx-online-receiver', type: 'online', amount: '25', recipient: 'Self', status: 'confirmed' }];
+    historyState = [{ txId: 'tx-online-receiver', txHash: 'TXONLINERECEIVERHASH', txType: 'online', type: 'online', amount: 25n, displayAmount: '25', tokenId: 'ERA', recipient: 'Sender', status: 'confirmed', fromDeviceId: 'FROM', toDeviceId: 'TO', receiptVerified: false }];
 
     await act(async () => {
       bridgeEvents.emit('wallet.refresh', { source: 'wallet.send' });

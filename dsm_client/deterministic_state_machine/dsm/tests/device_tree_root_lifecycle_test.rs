@@ -90,34 +90,6 @@ fn test_secondary_device_gets_unique_root() {
     );
 }
 
-#[test]
-fn test_recovery_path_settlement_exception() {
-    // ARRANGE: Create transfer context for recovery path
-    // This test verifies the Fix 4 exception: recovery settlements
-    // are allowed to lack proof_data
-
-    let tx_type = "bilateral_offline_recovered";
-    let is_recovery = tx_type == "bilateral_offline_recovered";
-
-    // ASSERT: Recovery path is correctly identified
-    assert!(
-        is_recovery,
-        "Recovery path must be identified by tx_type={}",
-        tx_type
-    );
-
-    // ARRANGE: Create normal path
-    let tx_type_normal = "bilateral_offline";
-    let is_recovery_normal = tx_type_normal == "bilateral_offline_recovered";
-
-    // ASSERT: Normal path is not identified as recovery
-    assert!(
-        !is_recovery_normal,
-        "Normal path tx_type={} must not be identified as recovery",
-        tx_type_normal
-    );
-}
-
 /// Verifies that the device tree root computation is stable and
 /// suitable for use in cryptographic commitments.
 #[test]

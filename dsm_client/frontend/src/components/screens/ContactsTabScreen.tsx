@@ -12,7 +12,6 @@ import { useTransactions } from '../../hooks/useTransactions';
 import { startPairingAll, stopPairingAll } from '../../dsm/WebViewBridge';
 import { bridgeEvents } from '../../bridge/bridgeEvents';
 import StitchedReceiptDetails from '../receipts/StitchedReceiptDetails';
-import { presentSignedDisplayAmount } from '../../utils/tokenMeta';
 import { useDpadNav } from '../../hooks/useDpadNav';
 
 interface Props { onNavigate?: (screen: string) => void; eraTokenSrc?: string }
@@ -568,13 +567,9 @@ const ContactsTabScreen: React.FC<Props> = ({ eraTokenSrc = 'images/logos/era_to
                       <div style={{ marginTop: 10 }}>
                         <div style={{ fontSize: 8, textTransform: 'uppercase', marginBottom: 6, fontWeight: 'bold' }}>Stitched receipts</div>
                         {(() => {
-                          const contactTxs = transactions.filter((tx) => {
-                            const counterparty = tx.counterpartyDeviceId || tx.fromDeviceId || tx.toDeviceId || '';
-                            if (counterparty && counterparty === c.deviceId) return true;
-                            if (tx.fromDeviceId === c.deviceId || tx.toDeviceId === c.deviceId) return true;
-                            if (typeof tx.recipient === 'string' && tx.recipient === c.alias) return true;
-                            return false;
-                          });
+                          const contactTxs = transactions.filter(
+                            (tx) => tx.fromDeviceId === c.deviceId || tx.toDeviceId === c.deviceId,
+                          );
 
                           if (contactTxs.length === 0) {
                             return <div style={{ opacity: 0.8 }}>No receipts yet</div>;
@@ -584,9 +579,7 @@ const ContactsTabScreen: React.FC<Props> = ({ eraTokenSrc = 'images/logos/era_to
                             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                               {contactTxs.map((tx, idx) => {
                                 const direction = tx.amount < 0n ? 'Sent' : 'Received';
-                                const rawTokenId = (tx as { tokenId?: string }).tokenId || 'ERA';
-                                const tokenId = rawTokenId.toUpperCase();
-                                const amountLabel = `${presentSignedDisplayAmount(tx.displayAmount, tx.amount)} ${tokenId}`;
+                                const amountLabel = `${tx.displayAmount} ${tx.tokenId}`;
                                 const summary = `#${idx + 1} · ${direction} ${amountLabel}`;
                                 return (
                                   <details key={`${tx.txId}-${idx}`}>
@@ -598,7 +591,7 @@ const ContactsTabScreen: React.FC<Props> = ({ eraTokenSrc = 'images/logos/era_to
                                       </div>
                                       <div style={detailRowStyle}>
                                         <span style={detailLabelStyle}>Type</span>
-                                        <span>{tx.txType || tx.type}</span>
+                                        <span>{tx.txType}</span>
                                       </div>
                                       <StitchedReceiptDetails bytes={tx.stitchedReceipt} />
                                     </div>

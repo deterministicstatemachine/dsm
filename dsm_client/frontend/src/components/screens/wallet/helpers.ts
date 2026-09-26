@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Shared helpers and types for the wallet screen components.
-import { encodeBase32Crockford } from '../../../utils/textId';
-import { presentSignedDisplayAmount } from '../../../utils/tokenMeta';
-import type { DomainContact, DomainTransaction } from '../../../domain/types';
+import type { DomainTransaction, DomainTxType } from '../../../domain/types';
 
 // Local UI types
 export type Balance = {
@@ -17,45 +15,23 @@ export type Balance = {
   policyAnchorB32?: string;
 };
 
-// Transaction type enum helpers (matches proto TransactionType)
-export function txTypeLabel(v: number): string {
-  switch (v) {
-    case 1: return 'FAUCET';
-    case 2: case 3: return 'OFFLINE';
-    case 4: return 'ONLINE';
-    case 5: return 'dBTC MINT';
-    case 6: return 'dBTC BURN';
-    default: return 'UNKNOWN';
+/** The badge a history row's type shows. */
+export function txTypeLabel(txType: DomainTxType): string {
+  switch (txType) {
+    case 'bilateral_offline': return 'OFFLINE';
+    case 'online': return 'ONLINE';
+    case 'dbtc_mint': return 'dBTC MINT';
+    case 'dbtc_burn': return 'dBTC BURN';
   }
 }
 
-export function txTypeDetail(v: number): string {
-  switch (v) {
-    case 1: return 'Faucet Claim';
-    case 2: return 'Bilateral Offline (BLE)';
-    case 3: return 'Bilateral Offline (Recovered)';
-    case 4: return 'Online';
-    case 5: return 'BTC \u2192 dBTC Deposit';
-    case 6: return 'dBTC \u2192 BTC Withdrawal';
-    default: return 'Unknown';
-  }
-}
-
-export function b32(bytes: unknown): string {
-  if (typeof bytes === 'string' && bytes.length > 0) return bytes;
-  if (bytes instanceof Uint8Array && bytes.length > 0) return encodeBase32Crockford(bytes);
-  return '';
-}
-
-export function txTypeNumber(tx: DomainTransaction): number {
-  switch (tx.txType) {
-    case 'faucet': return 1;
-    case 'bilateral_offline': return 2;
-    case 'bilateral_offline_recovered': return 3;
-    case 'online': return 4;
-    case 'dbtc_mint': return 5;
-    case 'dbtc_burn': return 6;
-    default: return tx.type === 'offline' ? 2 : tx.type === 'online' ? 4 : 0;
+/** The long name a history row's type shows when expanded. */
+export function txTypeDetail(txType: DomainTxType): string {
+  switch (txType) {
+    case 'bilateral_offline': return 'Bilateral Offline (BLE)';
+    case 'online': return 'Online';
+    case 'dbtc_mint': return 'BTC \u2192 dBTC Deposit';
+    case 'dbtc_burn': return 'dBTC \u2192 BTC Withdrawal';
   }
 }
 
@@ -64,24 +40,6 @@ export function txTypeNumber(tx: DomainTransaction): number {
 /// Rust renders the signed form; a transaction row shows the sign separately
 /// as an arrow and a colour, so drop the leading '-'. That is a presentational
 /// split of a finished string, not a second conversion.
-export function formatTxAmount(tx: DomainTransaction, abs: bigint): string {
-  const signed = presentSignedDisplayAmount(tx.displayAmount, abs);
-  return signed.startsWith('-') ? signed.slice(1) : signed;
-}
-
-export function shortStr(s: string, head = 8, tail = 8): string {
-  return s.length <= head + tail + 3 ? s : `${s.slice(0, head)}...${s.slice(-tail)}`;
-}
-
-export function resolveAlias(deviceIdB32: string, aliasMap: Map<string, string>): string {
-  if (!deviceIdB32) return '';
-  return aliasMap.get(deviceIdB32) || shortStr(deviceIdB32, 8, 6);
-}
-
-export function buildAliasLookup(contacts: DomainContact[]): Map<string, string> {
-  const map = new Map<string, string>();
-  for (const c of contacts) {
-    if (c.deviceId && c.alias) map.set(c.deviceId, c.alias);
-  }
-  return map;
+export function formatTxAmount(tx: DomainTransaction): string {
+  return tx.displayAmount.startsWith('-') ? tx.displayAmount.slice(1) : tx.displayAmount;
 }

@@ -64,9 +64,11 @@ enum AttestorType {
 // ============================== TRANSACTION TYPES =============================
 enum TransactionType {
   TX_TYPE_UNSPECIFIED      = 0;
-  TX_TYPE_FAUCET           = 1; // Faucet claim
+  // 1 was a faucet claim and 3 a recovered offline transfer: no history row
+  // of either kind is written.
+  reserved 1, 3;
+  reserved "TX_TYPE_FAUCET", "TX_TYPE_BILATERAL_OFFLINE_RECOVERED";
   TX_TYPE_BILATERAL_OFFLINE = 2; // Offline bilateral transfer
-  TX_TYPE_BILATERAL_OFFLINE_RECOVERED = 3; // Recovered offline bilateral
   TX_TYPE_ONLINE           = 4; // Online transfer
   TX_TYPE_DBTC_MINT        = 5; // BTC→dBTC deposit (mint)
   TX_TYPE_DBTC_BURN        = 6; // dBTC→BTC withdrawal (burn)
