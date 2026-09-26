@@ -34,13 +34,3 @@ export async function stopPairingAll(): Promise<void> {
   }
 }
 
-export async function resolveBleAddressForDeviceIdBridge(
-  deviceId: Uint8Array
-): Promise<string | undefined> {
-  const bytes = deviceId instanceof Uint8Array ? deviceId : new Uint8Array(0);
-  if (bytes.length !== 32) return undefined;
-  const resp = await callBin("resolveBleAddressForDeviceId", bytes);
-  if (!resp || resp.length === 0) return undefined;
-  const s = new TextDecoder().decode(resp).trim();
-  return s || undefined;
-}

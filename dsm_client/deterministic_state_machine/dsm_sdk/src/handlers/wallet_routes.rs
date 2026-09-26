@@ -770,20 +770,14 @@ impl AppRouterImpl {
                 if arg_pack.codec != generated::Codec::Proto as i32 {
                     return err("wallet.sendOffline: ArgPack.codec must be PROTO".into());
                 }
-                let req = match generated::BilateralPrepareRequest::decode(&*arg_pack.body) {
+                let req = match generated::OfflineTransferRequest::decode(&*arg_pack.body) {
                     Ok(r) => r,
                     Err(e) => {
                         return err(format!(
-                            "wallet.sendOffline: decode BilateralPrepareRequest failed: {e}"
+                            "wallet.sendOffline: decode OfflineTransferRequest failed: {e}"
                         ))
                     }
                 };
-                if req.counterparty_device_id.len() != 32 {
-                    return err(
-                        "wallet.sendOffline: counterparty_device_id must be 32 bytes".into(),
-                    );
-                }
-
                 let counterparty_device_id: [u8; 32] = match req.counterparty_device_id[..]
                     .try_into()
                 {
@@ -794,26 +788,20 @@ impl AppRouterImpl {
                         )
                     }
                 };
-                let ble_address = if !req.ble_address.trim().is_empty() {
-                    req.ble_address.trim().to_string()
-                } else {
-                    match crate::storage::client_db::get_contact_by_device_id(
-                        &req.counterparty_device_id,
-                    ) {
-                        Ok(Some(contact)) => contact.ble_address.unwrap_or_default(),
-                        Ok(None) => String::new(),
-                        Err(e) => {
-                            return err(format!(
-                                "wallet.sendOffline: failed to resolve counterparty contact: {e}"
-                            ))
-                        }
+                // Where the counterparty's phone is over BLE is the SDK's to know:
+                // the address its contact holds, else the one its identity was
+                // seen at this session.
+                let ble_address = match crate::bluetooth::peer_address::counterparty_address(
+                    &counterparty_device_id,
+                ) {
+                    Ok(Some(address)) => address,
+                    Ok(None) => {
+                        return err("wallet.sendOffline: no BLE address is known for the \
+                             counterparty: the phones have not met over BLE"
+                            .into())
                     }
+                    Err(e) => return err(format!("wallet.sendOffline: {e}")),
                 };
-                if ble_address.is_empty() {
-                    return err(
-                        "wallet.sendOffline: ble_address unavailable for counterparty".into(),
-                    );
-                }
 
                 let send_status = self
                     .calibrate_local_relationship_send_status(&counterparty_device_id)
@@ -830,52 +818,38 @@ impl AppRouterImpl {
                     return err(format!("wallet.sendOffline: {message}"));
                 }
 
-                let operation_bytes = if req.operation_data.is_empty() {
-                    // The token is named exactly: an omitted token is not ERA.
-                    let token_id = canonicalize_token_id(&req.token_id_hint);
-                    if token_id.is_empty() {
-                        return err("wallet.sendOffline: the request names no token".into());
-                    }
-                    let transfer_amount = if req.transfer_amount_display.trim().is_empty() {
-                        req.transfer_amount
-                    } else {
-                        let decimals = match token_decimals(&token_id) {
-                            Ok(d) => d,
-                            Err(e) => return err(format!("wallet.sendOffline: {e}")),
-                        };
-                        match parse_display_amount_to_base_units(
-                            &req.transfer_amount_display,
-                            decimals,
-                        ) {
-                            Ok(amount) => amount,
-                            Err(e) => {
-                                return err(format!(
-                                    "wallet.sendOffline: invalid display amount: {e}"
-                                ))
-                            }
-                        }
-                    };
-                    let policy_commit = match self
-                        .core_sdk
-                        .resolve_policy_commit_strict(token_id.as_bytes())
-                    {
-                        Ok(pc) => pc,
-                        Err(e) => {
-                            return err(format!(
-                                "wallet.sendOffline: policy_commit resolve failed: {e}"
-                            ))
-                        }
-                    };
-                    encode_offline_transfer_operation_canonical(
-                        &counterparty_device_id,
-                        transfer_amount,
-                        &token_id,
-                        req.memo_hint.trim(),
-                        &policy_commit,
-                    )
-                } else {
-                    req.operation_data.clone()
+                // The token is named exactly: an omitted token is not ERA.
+                let token_id = canonicalize_token_id(&req.token_id);
+                if token_id.is_empty() {
+                    return err("wallet.sendOffline: the request names no token".into());
+                }
+                let decimals = match token_decimals(&token_id) {
+                    Ok(d) => d,
+                    Err(e) => return err(format!("wallet.sendOffline: {e}")),
                 };
+                let transfer_amount =
+                    match parse_display_amount_to_base_units(&req.amount, decimals) {
+                        Ok(amount) => amount,
+                        Err(e) => return err(format!("wallet.sendOffline: invalid amount: {e}")),
+                    };
+                let policy_commit = match self
+                    .core_sdk
+                    .resolve_policy_commit_strict(token_id.as_bytes())
+                {
+                    Ok(pc) => pc,
+                    Err(e) => {
+                        return err(format!(
+                            "wallet.sendOffline: policy_commit resolve failed: {e}"
+                        ))
+                    }
+                };
+                let operation_bytes = encode_offline_transfer_operation_canonical(
+                    &counterparty_device_id,
+                    transfer_amount,
+                    &token_id,
+                    req.memo.trim(),
+                    &policy_commit,
+                );
                 let operation =
                     match dsm::types::operations::Operation::from_bytes(&operation_bytes) {
                         Ok(op) => op,
@@ -1660,6 +1634,87 @@ mod history_tests {
         assert!(
             refused.contains("unnamed") && refused.contains("unilateral_send"),
             "{refused}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod send_offline_tests {
+    use crate::bridge::{AppInvoke, AppRouter};
+    use crate::handlers::app_router_impl::AppRouterImpl;
+    use crate::storage::client_db::{store_contact, update_contact_ble_status, ContactRecord};
+    use dsm::types::proto as generated;
+    use prost::Message;
+
+    /// `wallet.sendOffline` as the frontend asks for it: the user's intent.
+    async fn send_offline(router: &AppRouterImpl, counterparty: [u8; 32]) -> Result<(), String> {
+        let answer = router
+            .invoke(AppInvoke {
+                method: "wallet.sendOffline".to_string(),
+                args: generated::ArgPack {
+                    codec: generated::Codec::Proto as i32,
+                    body: generated::OfflineTransferRequest {
+                        counterparty_device_id: counterparty.to_vec(),
+                        token_id: "ERA".to_string(),
+                        amount: "1".to_string(),
+                        memo: String::new(),
+                    }
+                    .encode_to_vec(),
+                    ..Default::default()
+                }
+                .encode_to_vec(),
+            })
+            .await;
+        if answer.success {
+            Ok(())
+        } else {
+            Err(answer.error_message.unwrap_or_default())
+        }
+    }
+
+    /// Where the counterparty's phone is over BLE is the SDK's to know; the
+    /// request names no address. A send to a contact whose phone the SDK has
+    /// not met is refused, saying so; once the contact holds an address, the
+    /// send goes past that refusal.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn an_offline_send_goes_where_the_sdk_has_seen_the_phone() {
+        let device = crate::test_support::one_device::Device::start(0x75).await;
+        let peer = [0x76u8; 32];
+        store_contact(&ContactRecord {
+            contact_id: crate::util::text_id::encode_base32_crockford(&peer),
+            device_id: peer.to_vec(),
+            alias: "peer".to_string(),
+            genesis_hash: vec![0x77; 32],
+            public_key: vec![0x78; 64],
+            kyber_public_key: vec![0x4B; 1184],
+            current_chain_tip: Some(vec![0x79; 32]),
+            verified: true,
+            verification_proof: None,
+            metadata: std::collections::HashMap::new(),
+            ble_address: None,
+            status: "OnlineCapable".to_string(),
+            needs_online_reconcile: false,
+            previous_chain_tip: None,
+        })
+        .expect("store the contact");
+
+        let refused = send_offline(&device.router, peer)
+            .await
+            .expect_err("the phones have not met");
+        assert!(
+            refused.contains("no BLE address is known for the counterparty"),
+            "{refused}"
+        );
+
+        update_contact_ble_status(&peer, None, Some("AA:BB:CC:DD:EE:FF"))
+            .expect("pairing persists the address");
+        // A host build has no BLE: the send stops only at the dispatch, past
+        // the address, the relationship's send status, the token, the amount
+        // and its policy.
+        assert_eq!(
+            send_offline(&device.router, peer).await,
+            Err("wallet.sendOffline is only available on Android BLE builds".to_string())
         );
     }
 }

@@ -179,10 +179,6 @@ function installBridge(opts?: { contactBleAddress?: string }) {
         return wrapSuccess(new Uint8Array(0));
       }
 
-      if (method === 'resolveBleAddressForDeviceId') {
-        return wrapSuccess(new TextEncoder().encode('AA:BB:CC:DD:EE:FF'));
-      }
-
       if (method === 'nativeBoundaryIngress') {
         const ingress = pb.IngressRequest.fromBinary(payload);
         if (ingress.operation.case === 'routerQuery') {
@@ -443,7 +439,6 @@ describe('Offline Transfer — Full Cycle', () => {
       to: DEVICE_B,
       amount: BigInt(10000 + testIndex),
       tokenId: 'ERA',
-      bleAddress: 'AA:BB:CC:DD:EE:FF',
     } as any);
 
     // Let offlineSend register event listeners (async bridge calls)
@@ -462,14 +457,13 @@ describe('Offline Transfer — Full Cycle', () => {
     expect(res.accepted).toBe(true);
   });
 
-  test('CRITICAL: BilateralPrepareRequest fields sent to bridge are correct', async () => {
-    // Verifies the TS-side fields in the BilateralPrepareRequest that offlineSend
-    // constructs and sends via routerInvokeBin('wallet.sendOffline', ArgPack).
-    // The Rust layer adds senderSigningPublicKey/senderDeviceId/senderGenesisHash
-    // before BLE transmission — those are NOT set by the TS side.
-    let capturedPrepReq: pb.BilateralPrepareRequest | null = null;
+  test('CRITICAL: the offline send request carries what the user asked for', async () => {
+    // offlineSend sends the user's intent via routerInvokeBin('wallet.sendOffline',
+    // ArgPack): the counterparty, token, amount and memo. Rust resolves where the
+    // counterparty's phone is and authors the prepare it sends over BLE.
+    let capturedPrepReq: pb.OfflineTransferRequest | null = null;
 
-    // Intercept nativeBoundaryIngress to capture the ArgPack → BilateralPrepareRequest
+    // Intercept nativeBoundaryIngress to capture the ArgPack → OfflineTransferRequest
     const origCallBin = (global as any).window.DsmBridge.sendMessageBin;
     (global as any).window.DsmBridge.sendMessageBin = async (reqBytes: Uint8Array) => {
       const { method, payload } = decodeBridgeReq(reqBytes);
@@ -478,7 +472,7 @@ describe('Offline Transfer — Full Cycle', () => {
         if (ingress.operationCase === 'routerInvoke' && ingress.method === 'wallet.sendOffline') {
           try {
             const argPack = pb.ArgPack.fromBinary(ingress.args);
-            capturedPrepReq = pb.BilateralPrepareRequest.fromBinary(argPack.body);
+            capturedPrepReq = pb.OfflineTransferRequest.fromBinary(argPack.body);
           } catch {
             // fall through
           }
@@ -491,7 +485,6 @@ describe('Offline Transfer — Full Cycle', () => {
       to: DEVICE_B,
       amount: BigInt(11000 + testIndex),
       tokenId: 'ERA',
-      bleAddress: 'AA:BB:CC:DD:EE:FF',
     } as any);
 
     await new Promise(r => setTimeout(r, 100));
@@ -504,12 +497,12 @@ describe('Offline Transfer — Full Cycle', () => {
     const res = await promise;
     expect(res.accepted).toBe(true);
 
-    // Verify the BilateralPrepareRequest that TS sends to the Rust layer
+    // Verify the OfflineTransferRequest that TS sends to the Rust layer
     expect(capturedPrepReq).not.toBeNull();
     expect(capturedPrepReq!.counterpartyDeviceId).toHaveLength(32);
     expect(capturedPrepReq!.counterpartyDeviceId[0]).toBe(0xBB); // matches DEVICE_B
-    expect(capturedPrepReq!.bleAddress).toBe('AA:BB:CC:DD:EE:FF');
-    expect(capturedPrepReq!.transferAmountDisplay).toBe(String(11000 + testIndex));
+    expect(capturedPrepReq!.tokenId).toBe('ERA');
+    expect(capturedPrepReq!.amount).toBe(String(11000 + testIndex));
   });
 
   test('BILATERAL_EVENT_REJECTED event → accepted=false', async () => {
@@ -517,7 +510,6 @@ describe('Offline Transfer — Full Cycle', () => {
       to: DEVICE_B,
       amount: BigInt(12000 + testIndex),
       tokenId: 'ERA',
-      bleAddress: 'AA:BB:CC:DD:EE:FF',
     } as any);
 
     await new Promise(r => setTimeout(r, 100));
@@ -556,7 +548,6 @@ describe('Offline Transfer — Full Cycle', () => {
       to: DEVICE_B,
       amount: BigInt(13000 + testIndex),
       tokenId: 'ERA',
-      bleAddress: 'AA:BB:CC:DD:EE:FF',
     } as any);
 
     await new Promise(r => setTimeout(r, 100));
@@ -574,44 +565,24 @@ describe('Offline Transfer — Full Cycle', () => {
     expect(String(res.result)).toMatch(/failed/i);
   });
 
-  test('missing BLE address with no resolution → error', async () => {
-    // Override bridge: when wallet.sendOffline is called with an empty bleAddress,
-    // the Rust layer rejects with a bilateralPrepareReject error.
-    const origCallBin = (global as any).window.DsmBridge.sendMessageBin;
-    (global as any).window.DsmBridge.sendMessageBin = async (reqBytes: Uint8Array) => {
-      const { method, payload } = decodeBridgeReq(reqBytes);
-      if (method === 'nativeBoundaryIngress') {
-        const ingress = decodeIngressReq(payload);
-        if (ingress.operationCase === 'routerInvoke' && ingress.method === 'wallet.sendOffline') {
-          // Check if bleAddress is empty in the request
-          try {
-            const argPack = pb.ArgPack.fromBinary(ingress.args);
-            const prep = pb.BilateralPrepareRequest.fromBinary(argPack.body);
-            if (!prep.bleAddress) {
-              const reject = new pb.BilateralPrepareReject({ reason: 'bleAddress unavailable' } as any);
-              const env = new pb.Envelope({
-                version: 3,
-                payload: { case: 'bilateralPrepareReject', value: reject },
-              } as any);
-              return wrapIngressOk(frameEnvelope(env));
-            }
-          } catch {
-            // ignore, let original handler run
-          }
-        }
-      }
-      return origCallBin(reqBytes);
-    };
+  // Where the counterparty's phone is over BLE is Rust's to know. A phone it
+  // has not met is its refusal, shown in its words; the frontend neither
+  // resolves an address nor refuses first.
+  test('a send to a phone Rust has not met over BLE is Rust\'s refusal, in its words', async () => {
+    const refusal = 'wallet.sendOffline: no BLE address is known for the counterparty: the phones have not met over BLE';
+    bilateralResponseOverride = () => frameEnvelope(new pb.Envelope({
+      version: 3,
+      payload: { case: 'error', value: new pb.Error({ code: 1, message: refusal }) },
+    } as any));
 
     const res = await dsm.offlineSend({
       to: DEVICE_B,
       amount: BigInt(14000 + testIndex),
       tokenId: 'ERA',
-      // no bleAddress provided
-    } as any);
+    });
 
     expect(res.accepted).toBe(false);
-    expect(String(res.result)).toMatch(/ble|unavailable|rejected/i);
+    expect(res.result).toBe(`offlineSend: ${refusal}`);
   }, 15000);
 });
 
@@ -626,7 +597,6 @@ describe('Offline Transfer — Proto Constraints', () => {
       operationData: new Uint8Array(100) as any,
       expectedGenesisHash: new pb.Hash32({ v: COUNTERPARTY_GENESIS } as any),
       expectedCounterpartyStateHash: new pb.Hash32({ v: COUNTERPARTY_TIP } as any),
-      bleAddress: 'AA:BB:CC:DD:EE:FF',
       senderSigningPublicKey: SIGNING_KEY as any,
       senderDeviceId: DEVICE_A as any,
       senderGenesisHash: new pb.Hash32({ v: GENESIS_A } as any),
@@ -646,8 +616,6 @@ describe('Offline Transfer — Proto Constraints', () => {
     expect(decoded.expectedGenesisHash?.v).toHaveLength(32);
     expect(decoded.expectedCounterpartyStateHash?.v).toHaveLength(32);
     expect(decoded.senderGenesisHash?.v).toHaveLength(32);
-    // BLE address
-    expect(decoded.bleAddress).toBe('AA:BB:CC:DD:EE:FF');
   });
 
   test('canonical encoding is deterministic (same input = same bytes)', () => {
@@ -702,7 +670,6 @@ describe('Offline Transfer — Timeout & Event Matching', () => {
       to: DEVICE_B,
       amount: BigInt(15000 + testIndex),
       tokenId: 'ERA',
-      bleAddress: 'AA:BB:CC:DD:EE:FF',
     } as any);
     void promise.then(() => { settled = true; });
 
@@ -736,7 +703,6 @@ describe('Offline Transfer — Timeout & Event Matching', () => {
         to: DEVICE_B,
         amount: BigInt(18000 + testIndex),
         tokenId: 'ERA',
-        bleAddress: 'AA:BB:CC:DD:EE:FF',
       } as any);
       // The pending list never names the step as ended, past every poll.
       await jest.advanceTimersByTimeAsync(1_500 + 3_000 * 41);
@@ -750,7 +716,7 @@ describe('Offline Transfer — Timeout & Event Matching', () => {
   });
 
   test('a send that names no token reaches Rust naming none, and Rust refuses it', async () => {
-    let captured: pb.BilateralPrepareRequest | null = null;
+    let captured: pb.OfflineTransferRequest | null = null;
     bilateralResponseOverride = () => frameEnvelope(new pb.Envelope({
       version: 3,
       payload: { case: 'error', value: new pb.Error({ code: 1, message: 'wallet.sendOffline: the request names no token' }) },
@@ -761,7 +727,7 @@ describe('Offline Transfer — Timeout & Event Matching', () => {
       if (method === 'nativeBoundaryIngress') {
         const ingress = decodeIngressReq(payload);
         if (ingress.operationCase === 'routerInvoke' && ingress.method === 'wallet.sendOffline') {
-          captured = pb.BilateralPrepareRequest.fromBinary(pb.ArgPack.fromBinary(ingress.args).body);
+          captured = pb.OfflineTransferRequest.fromBinary(pb.ArgPack.fromBinary(ingress.args).body);
         }
       }
       return origCallBin(reqBytes);
@@ -771,11 +737,10 @@ describe('Offline Transfer — Timeout & Event Matching', () => {
       to: DEVICE_B,
       amount: BigInt(19000 + testIndex),
       tokenId: '',
-      bleAddress: 'AA:BB:CC:DD:EE:FF',
     } as any);
 
     expect(captured).not.toBeNull();
-    expect(captured!.tokenIdHint).toBe('');
+    expect(captured!.tokenId).toBe('');
     expect(res.accepted).toBe(false);
     expect(String(res.result)).toContain('names no token');
   });
@@ -785,7 +750,6 @@ describe('Offline Transfer — Timeout & Event Matching', () => {
       to: DEVICE_B,
       amount: BigInt(16000 + testIndex),
       tokenId: 'ERA',
-      bleAddress: 'AA:BB:CC:DD:EE:FF',
     } as any);
 
     // Let async bridge calls complete

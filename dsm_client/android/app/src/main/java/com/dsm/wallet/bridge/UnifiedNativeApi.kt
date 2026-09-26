@@ -47,7 +47,6 @@ internal object UnifiedNativeApi {
         }
     }
 
-    @Keep @JvmStatic external fun recordPeerIdentity(address: String, identity: ByteArray)
     @Keep @JvmStatic external fun initSdk(baseDir: String): Boolean
     @Keep @JvmStatic external fun initSdkV3(baseDir: String): ByteArray
     @Keep @JvmStatic external fun initStorageBaseDir(path: ByteArray)
@@ -110,7 +109,6 @@ internal object UnifiedNativeApi {
      */
     @Keep @JvmStatic external fun onAppBackgrounded(): Boolean
     @Keep @JvmStatic external fun getGenesisHashBin(): ByteArray
-    @Keep @JvmStatic external fun resolveBleAddressForDeviceIdBin(deviceId: ByteArray): ByteArray
     @Keep @JvmStatic external fun resolvePeerIdentityForBleAddressBin(address: String): ByteArray
     @Keep @JvmStatic external fun isRejectEnvelope(envelopeBytes: ByteArray): ByteArray
     @Keep @JvmStatic external fun isErrorEnvelope(envelopeBytes: ByteArray): Int

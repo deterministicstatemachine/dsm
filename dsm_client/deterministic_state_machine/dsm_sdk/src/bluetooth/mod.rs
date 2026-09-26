@@ -17,6 +17,7 @@ pub mod frame_classify;
 #[cfg(test)]
 mod offline_step_tests;
 pub mod pairing_orchestrator;
+pub mod peer_address;
 
 // Re-export bilateral transaction components
 pub use bilateral_ble_handler::{

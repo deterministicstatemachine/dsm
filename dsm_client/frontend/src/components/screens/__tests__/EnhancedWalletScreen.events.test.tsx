@@ -127,7 +127,6 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
       .fn()
       .mockResolvedValue([{ tokenId: 'ROOT', symbol: 'ERA', baseUnits: 100n, displayAmount: '100', decimals: 0 }]);
     (dsmClient.getWalletHistory as any) = jest.fn().mockResolvedValue({ transactions: [] });
-    (dsmClient.resolveBleAddressForContact as any) = jest.fn().mockResolvedValue(contact.bleAddress);
     (dsmClient.sendOfflineTransfer as any) = jest.fn().mockResolvedValue({ success: true });
 
     await renderWallet();
@@ -157,10 +156,11 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
           tokenId: 'ROOT',
           to: encodeBase32Crockford(contact.deviceId),
           amount: '1',
-          bleAddress: contact.bleAddress,
         })
       );
     });
+    // Where the recipient's phone is over BLE is Rust's to know: the screen names no address.
+    expect((dsmClient.sendOfflineTransfer as jest.Mock).mock.calls[0][0]).not.toHaveProperty('bleAddress');
   });
 
   test('online sender updates visible balance in the UI after send completes', async () => {
@@ -210,7 +210,6 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
 
     (dsmClient.getAllBalances as any) = jest.fn().mockImplementation(async () => balancesState);
     (dsmClient.getWalletHistory as any) = jest.fn().mockImplementation(async () => ({ transactions: historyState }));
-    (dsmClient.resolveBleAddressForContact as any) = jest.fn().mockResolvedValue(contact.bleAddress);
     (dsmClient.sendOfflineTransfer as any) = jest.fn().mockImplementation(async () => {
       balancesState = [{ tokenId: 'ROOT', symbol: 'ERA', baseUnits: 55n, displayAmount: '55', decimals: 0 }];
       historyState = [{ txId: 'tx-offline-sender', txHash: 'TXOFFLINESENDERHASH', txType: 'bilateral_offline', type: 'offline', amount: -25n, displayAmount: '-25', tokenId: 'ERA', recipient: 'Receiver', status: 'confirmed', fromDeviceId: 'FROM', toDeviceId: 'TO', receiptVerified: false }];
@@ -244,7 +243,6 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
           tokenId: 'ROOT',
           to: encodeBase32Crockford(contact.deviceId),
           amount: '25',
-          bleAddress: contact.bleAddress,
         })
       );
       expect(screen.queryByRole('heading', { name: 'Send Transaction' })).not.toBeInTheDocument();

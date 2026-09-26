@@ -33,7 +33,6 @@ class SinglePathWebViewBridgeFuzzTest {
             "setPreference",
             "nativeBoundaryIngress",
             "nativeHostRequest",
-            "resolveBleAddressForDeviceId",
             "initiateBleContactPairing",
             "getTransportHeadersV3Bin",
             "acceptBilateralByCommitment",
@@ -152,7 +151,7 @@ class SinglePathWebViewBridgeFuzzTest {
         payloads.add(byteArrayOf(0x00, 0x00, 0x00, 0x05, 0x41, 0x42, 0x43)) // methodLen=5 but truncated
         payloads.add(byteArrayOf(0xFF.toByte(), 0xFF.toByte(), 0xFF.toByte(), 0xFF.toByte())) // huge method length
 
-        // For resolveBleAddressForDeviceId: wrong sizes
+        // Ids of the wrong size
         payloads.add(ByteArray(31)) // 31 bytes instead of 32
         payloads.add(ByteArray(33)) // 33 bytes instead of 32
         payloads.add(ByteArray(32) { 0x00 }) // 32 zero bytes

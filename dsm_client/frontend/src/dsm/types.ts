@@ -27,7 +27,6 @@ export type GenericTransaction = {
   to: Uint8Array | string;
   amount: string | number | bigint;
   memo?: string;
-  bleAddress?: string;
 };
 
 /** UI-level response shape returned by offlineSend. */

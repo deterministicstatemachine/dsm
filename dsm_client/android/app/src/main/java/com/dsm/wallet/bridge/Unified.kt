@@ -27,14 +27,13 @@ import androidx.annotation.Keep
 //   - All crypto (SPHINCS+, ML-KEM-768, DBRW) handled in Rust beneath.
 //
 // DOMAIN GROUPS:
-//   Identity:  recordPeerIdentity
 //   Protocol:  processEnvelopeV3, processEnvelopeV3WithAddress
 //   Shared boundary: dispatchStartup, dispatchIngress
 //   Bilateral: acceptBilateralByCommitment, ...
 //   BLE:       initBleCoordinator, processBleChunk, chunkEnvelopeForBle, ...
 //   Contacts:  removeContact, hasContactForDeviceId
 //
-// Full method list: See UnifiedNativeApi.kt for all 87+ external declarations.
+// Full method list: UnifiedNativeApi.kt holds every external declaration.
 // ============================================================================
 
 /**
@@ -44,23 +43,6 @@ import androidx.annotation.Keep
  * - No reflection-based dispatch; strict surface.
  */
 object Unified {
-
-    /**
-     * Called when a peer's identity (genesis hash + device ID) is read from BLE GATT.
-     * This should be bridged to Rust/JS as needed.
-     */
-    @Keep
-    @JvmStatic
-    fun recordPeerIdentity(address: String, identity: ByteArray) {
-        UnifiedNativeApi.recordPeerIdentity(address, identity)
-    }
-
-    @Keep
-    @JvmStatic
-    fun onPeerIdentityReceived(address: String, identity: ByteArray) {
-        // Forward to native layer to maintain device_id -> BLE address mapping (no hex at app layer)
-        recordPeerIdentity(address, identity)
-    }
 
     init {
         // Load the native library with JNI exports.
@@ -470,13 +452,6 @@ object Unified {
     @Keep @JvmStatic fun onAppBackgrounded(): Boolean =
         try { UnifiedNativeApi.onAppBackgrounded() } catch (_: Throwable) { false }
     @Keep @JvmStatic fun getGenesisHashBin(): ByteArray = UnifiedNativeApi.getGenesisHashBin()
-    /**
-     * Get the current BLE MAC address for a device_id by searching identity cache.
-     * @param deviceId Raw 32-byte device ID
-     * @return UTF-8 BLE MAC address bytes or empty array if not found/connected
-     */
-    @Keep @JvmStatic fun resolveBleAddressForDeviceIdBin(deviceId: ByteArray): ByteArray =
-        UnifiedNativeApi.resolveBleAddressForDeviceIdBin(deviceId)
     /**
      * Resolve the persisted peer identity for a BLE address.
      * Returns 64 bytes ordered as [device_id(32)][genesis_hash(32)], or empty if unknown.

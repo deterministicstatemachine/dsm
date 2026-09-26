@@ -1,25 +1,28 @@
 // SPDX-License-Identifier: Apache-2.0
 import {
+  mapContactList,
   mapTransactions,
-  normalizeBleAddress,
 } from '../mappers';
 import { TransactionInfo, TransactionType } from '../../proto/dsm_app_pb';
 import { toBase32Crockford } from '../../dsm/decoding';
 
 describe('domain mappers', () => {
-  describe('normalizeBleAddress', () => {
-    it('uppercases colon-separated MAC', () => {
-      expect(normalizeBleAddress('aa:bb:cc:dd:ee:ff')).toBe('AA:BB:CC:DD:EE:FF');
+  describe('mapContactList', () => {
+    const contact = (bleAddress?: string) => ({
+      alias: 'peer',
+      deviceId: new Uint8Array(32).fill(1),
+      genesisHash: new Uint8Array(32).fill(2),
+      publicKey: new Uint8Array(64).fill(3),
+      genesisVerifiedOnline: true,
+      bleAddress,
     });
 
-    it('formats 12 hex chars without colons', () => {
-      expect(normalizeBleAddress('aabbccddeeff')).toBe('AA:BB:CC:DD:EE:FF');
-    });
-
-    it('returns undefined for invalid input', () => {
-      expect(normalizeBleAddress('')).toBeUndefined();
-      expect(normalizeBleAddress('not-mac')).toBeUndefined();
-      expect(normalizeBleAddress(undefined)).toBeUndefined();
+    // The address is Rust's: the contact carries it as Rust holds it, and none
+    // where Rust holds none. The mapper used to reformat it, drop one that was
+    // not MAC-shaped, and fill a missing one from addresses resolved this session.
+    it('carries the BLE address Rust holds, as it holds it, and none where it holds none', () => {
+      expect(mapContactList([contact('aa:bb:cc:dd:ee:ff')])[0].bleAddress).toBe('aa:bb:cc:dd:ee:ff');
+      expect(mapContactList([contact(undefined)])[0].bleAddress).toBeUndefined();
     });
   });
 

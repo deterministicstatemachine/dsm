@@ -10840,13 +10840,6 @@ export class BilateralPrepareRequest extends Message<BilateralPrepareRequest> {
   expectedCounterpartyStateHash?: Hash32;
 
   /**
-   * BLE MAC address of recipient device
-   *
-   * @generated from field: string ble_address = 6;
-   */
-  bleAddress = "";
-
-  /**
    * Sender's SPHINCS+ SPX256s public key for offline verification
    *
    * @generated from field: bytes sender_signing_public_key = 7;
@@ -10866,37 +10859,6 @@ export class BilateralPrepareRequest extends Message<BilateralPrepareRequest> {
    * @generated from field: dsm.Hash32 sender_genesis_hash = 9;
    */
   senderGenesisHash?: Hash32;
-
-  /**
-   * Transfer intent fields. Rust builds canonical operation_data from these
-   * when operation_data is empty.
-   *
-   * amount in token base units
-   *
-   * @generated from field: uint64 transfer_amount = 11;
-   */
-  transferAmount = protoInt64.zero;
-
-  /**
-   * token ID (e.g. "ERA")
-   *
-   * @generated from field: string token_id_hint = 12;
-   */
-  tokenIdHint = "";
-
-  /**
-   * optional transfer memo
-   *
-   * @generated from field: string memo_hint = 13;
-   */
-  memoHint = "";
-
-  /**
-   * decimal display amount; backend scales via token decimals
-   *
-   * @generated from field: string transfer_amount_display = 14;
-   */
-  transferAmountDisplay = "";
 
   /**
    * Sender's ML-KEM-768 encapsulation key (1184 bytes). The device Kyber keypair is
@@ -10938,14 +10900,9 @@ export class BilateralPrepareRequest extends Message<BilateralPrepareRequest> {
     { no: 2, name: "operation_data", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 4, name: "expected_genesis_hash", kind: "message", T: Hash32 },
     { no: 5, name: "expected_counterparty_state_hash", kind: "message", T: Hash32 },
-    { no: 6, name: "ble_address", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 7, name: "sender_signing_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 8, name: "sender_device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 9, name: "sender_genesis_hash", kind: "message", T: Hash32 },
-    { no: 11, name: "transfer_amount", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
-    { no: 12, name: "token_id_hint", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 13, name: "memo_hint", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 14, name: "transfer_amount_display", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 16, name: "sender_kyber_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 17, name: "sender_kyber_binding_sig", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 18, name: "sender_signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
@@ -20662,6 +20619,69 @@ export class OnlineTransferSmartRequest extends Message<OnlineTransferSmartReque
 
   static equals(a: OnlineTransferSmartRequest | PlainMessage<OnlineTransferSmartRequest> | undefined, b: OnlineTransferSmartRequest | PlainMessage<OnlineTransferSmartRequest> | undefined): boolean {
     return proto3.util.equals(OnlineTransferSmartRequest, a, b);
+  }
+}
+
+/**
+ * wallet.sendOffline: what the user asked for, and nothing the SDK works out
+ * itself. The SDK resolves where the counterparty's phone is over BLE, the
+ * token's decimals and policy, and authors the operation.
+ *
+ * @generated from message dsm.OfflineTransferRequest
+ */
+export class OfflineTransferRequest extends Message<OfflineTransferRequest> {
+  /**
+   * @generated from field: bytes counterparty_device_id = 1;
+   */
+  counterpartyDeviceId = new Uint8Array(0);
+
+  /**
+   * as the user chose it; the SDK canonicalizes it and refuses none
+   *
+   * @generated from field: string token_id = 2;
+   */
+  tokenId = "";
+
+  /**
+   * decimal, as the user typed it; the SDK scales it by the token's decimals
+   *
+   * @generated from field: string amount = 3;
+   */
+  amount = "";
+
+  /**
+   * @generated from field: string memo = 4;
+   */
+  memo = "";
+
+  constructor(data?: PartialMessage<OfflineTransferRequest>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.OfflineTransferRequest";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "counterparty_device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "token_id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 3, name: "amount", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 4, name: "memo", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): OfflineTransferRequest {
+    return new OfflineTransferRequest().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): OfflineTransferRequest {
+    return new OfflineTransferRequest().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): OfflineTransferRequest {
+    return new OfflineTransferRequest().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: OfflineTransferRequest | PlainMessage<OfflineTransferRequest> | undefined, b: OfflineTransferRequest | PlainMessage<OfflineTransferRequest> | undefined): boolean {
+    return proto3.util.equals(OfflineTransferRequest, a, b);
   }
 }
 

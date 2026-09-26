@@ -232,7 +232,7 @@ pub extern "C" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_resolvePeerIdentit
 
             let mut device_id = [0u8; 32];
             device_id.copy_from_slice(&contact.device_id);
-            crate::jni::state::register_ble_address_mapping(&device_id, &address);
+            crate::bluetooth::peer_address::record_sighting(&device_id, &address);
 
             let mut out = Vec::with_capacity(64);
             out.extend_from_slice(&contact.device_id);

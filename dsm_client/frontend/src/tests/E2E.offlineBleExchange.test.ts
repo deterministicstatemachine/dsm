@@ -133,7 +133,7 @@ describe('E2E: Offline BLE exchange -> wallet refresh', () => {
     };
 
     // Start offline send
-    const offlineSendPromise = offlineSend({ to: base32CrockfordEncode(recipient), amount: '1', tokenId: 'ERA', bleAddress: 'AA:BB:CC:DD:EE:FF' });
+    const offlineSendPromise = offlineSend({ to: base32CrockfordEncode(recipient), amount: '1', tokenId: 'ERA' });
 
     // Emit TRANSFER_COMPLETE event to resolve offlineSend
     await new Promise((r) => setTimeout(r, 0));

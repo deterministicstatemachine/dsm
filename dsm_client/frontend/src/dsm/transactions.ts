@@ -16,7 +16,6 @@ import { on as eventBridgeOn } from './EventBridge';
 import { emitBilateralCommitted } from './events';
 import { bridgeEvents } from '../bridge/bridgeEvents';
 
-import { normalizeBleAddress } from './resolution';
 import logger from '../utils/logger';
 
 import { GenericTransaction, GenericTxResponse } from './types';
@@ -119,24 +118,19 @@ export async function offlineSend(transfer: GenericTransaction): Promise<Generic
       return true;
     };
 
-    const transferAmountDisplay = String(transfer.amount ?? '').trim();
-    if (!transferAmountDisplay) {
-      throw new Error('offlineSend: amount is required');
-    }
-
-    const prepReq = new pb.BilateralPrepareRequest({
+    // What the user asked for, and nothing else: where the counterparty's
+    // phone is over BLE, the token's decimals and the operation are Rust's,
+    // and so is refusing a token or an amount the request does not name.
+    const request = new pb.OfflineTransferRequest({
       counterpartyDeviceId: toBytes as any,
-      bleAddress: normalizeBleAddress(String(transfer.bleAddress || '')) || '',
-      transferAmountDisplay,
-      // Named exactly as the user chose it; Rust canonicalizes it and refuses
-      // a request that names none.
-      tokenIdHint: transfer.tokenId,
-      memoHint: transfer.memo || '',
-    } as any);
+      tokenId: transfer.tokenId,
+      amount: String(transfer.amount ?? '').trim(),
+      memo: transfer.memo || '',
+    });
 
     const argPack = new pb.ArgPack({
       codec: pb.Codec.PROTO as any,
-      body: new Uint8Array(prepReq.toBinary()),
+      body: new Uint8Array(request.toBinary()),
     });
 
     // --- Set up event listeners BEFORE sending BLE chunks to avoid race condition ---
@@ -335,14 +329,12 @@ export async function sendOfflineTransfer(params: {
   to: string | Uint8Array;
   amount: string | number | bigint;
   memo?: string;
-  bleAddress?: string;
 }): Promise<GenericTxResponse> {
   return offlineSend({
     tokenId: params.tokenId,
     to: params.to,
     amount: params.amount,
     memo: params.memo,
-    bleAddress: params.bleAddress,
   });
 }
 

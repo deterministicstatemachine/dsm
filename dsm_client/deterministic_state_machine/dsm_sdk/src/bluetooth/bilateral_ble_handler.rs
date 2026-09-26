@@ -16,9 +16,6 @@ use log::{debug, info, warn, error};
 use prost::Message;
 use tokio::sync::RwLock;
 
-#[cfg(all(target_os = "android", feature = "jni"))]
-use crate::jni::state::DEVICE_ID_TO_ADDR;
-
 // Re-export types from bilateral_session so existing import paths still work.
 pub use super::bilateral_session::{
     BilateralBleSession, BilateralEventCallback, BilateralPhase, BilateralSettlementDelegate,
@@ -842,7 +839,6 @@ impl BilateralBleHandler {
         }
         drop(door);
 
-        // Build prepare request with BLE address lookup
         let expected_counterparty_state_hash = {
             let m = self.bilateral_tx_manager.read().await;
             m.get_chain_tip_for(&counterparty_device_id)
@@ -851,52 +847,6 @@ impl BilateralBleHandler {
                         "No remote chain tip found for counterparty. Relationship required.",
                     )
                 })?
-        };
-
-        // Look up BLE address from contact or in-memory map
-        let ble_address = {
-            let m = self.bilateral_tx_manager.read().await;
-            if let Some(contact) = m.get_contact(&counterparty_device_id) {
-                if let Some(addr) = &contact.ble_address {
-                    addr.clone()
-                } else {
-                    // Contact exists but no BLE address persisted
-                    // Check in-memory map and persist if found
-                    #[cfg(all(target_os = "android", feature = "jni"))]
-                    {
-                        if let Ok(map) = DEVICE_ID_TO_ADDR.try_lock() {
-                            if let Some(addr) = map.get(&counterparty_device_id) {
-                                // Persist it to the contact (transport state only).
-                                if let Err(e) = crate::storage::client_db::update_contact_ble_status(
-                                    &counterparty_device_id,
-                                    None,
-                                    Some(addr),
-                                ) {
-                                    warn!(
-                                        "[BLE_HANDLER] BLE address {} not persisted for the contact: {}",
-                                        addr, e
-                                    );
-                                }
-                                addr.clone()
-                            } else {
-                                warn!("[BLE_HANDLER] No BLE address found for counterparty device (contact exists but no address persisted or in map)");
-                                String::new()
-                            }
-                        } else {
-                            warn!("[BLE_HANDLER] DEVICE_ID_TO_ADDR lock contended, no BLE address found for counterparty device");
-                            String::new()
-                        }
-                    }
-                    #[cfg(not(all(target_os = "android", feature = "jni")))]
-                    {
-                        warn!("[BLE_HANDLER] No BLE address found for counterparty device (contact exists but no address persisted)");
-                        String::new()
-                    }
-                }
-            } else {
-                warn!("[BLE_HANDLER] No contact found for counterparty device");
-                String::new()
-            }
         };
 
         // Get sender's signing public key for inclusion in prepare request
@@ -914,20 +864,12 @@ impl BilateralBleHandler {
             expected_counterparty_state_hash: Some(generated::Hash32 {
                 v: expected_counterparty_state_hash.to_vec(),
             }),
-            ble_address,
             // Include sender identity for relationship establishment
             sender_signing_public_key,
             sender_device_id: self.device_id.to_vec(),
             sender_genesis_hash: Some(generated::Hash32 {
                 v: local_genesis_hash.to_vec(),
             }),
-            // transfer_amount and token_id_hint are UI-only hints; protocol
-            // correctness is carried entirely by operation_data.  The transport
-            // layer does not extract token-specific fields from the Operation.
-            transfer_amount: 0,
-            token_id_hint: String::new(),
-            memo_hint: String::new(),
-            transfer_amount_display: String::new(),
             sender_kyber_public_key,
             sender_kyber_binding_sig,
             // σ_A over the commitment: the receiver puts to its user only a
@@ -4496,14 +4438,9 @@ mod tests {
             operation_data: online_tier_transfer(device_id).to_bytes(),
             expected_genesis_hash: None,
             expected_counterparty_state_hash: None,
-            ble_address: String::new(),
             sender_signing_public_key: vec![0; 64],
             sender_device_id: sender.to_vec(),
             sender_genesis_hash: None,
-            transfer_amount: 0,
-            token_id_hint: String::new(),
-            memo_hint: String::new(),
-            transfer_amount_display: String::new(),
             sender_kyber_public_key: vec![],
             sender_kyber_binding_sig: vec![],
             sender_signature: vec![],
@@ -4608,16 +4545,11 @@ mod tests {
             expected_counterparty_state_hash: Some(generated::Hash32 {
                 v: cached_tip.to_vec(),
             }),
-            ble_address: String::new(),
             sender_signing_public_key: sender_keys.public_key().to_vec(),
             sender_device_id: sender.to_vec(),
             sender_genesis_hash: Some(generated::Hash32 {
                 v: sender_genesis.to_vec(),
             }),
-            transfer_amount: 0,
-            token_id_hint: String::new(),
-            memo_hint: String::new(),
-            transfer_amount_display: String::new(),
             sender_kyber_public_key: kyber_pk,
             sender_kyber_binding_sig: binding_sig,
             sender_signature: sender_keys

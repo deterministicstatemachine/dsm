@@ -847,12 +847,13 @@ fn process_deferred_identity(
         return;
     }
 
-    // 2. Register in-memory BLE address mapping (for routing), but do NOT persist
-    // ble_address to SQLite yet. The ble_address column is the sentinel that controls
-    // the pairing loop's exit condition — writing it before the scanner confirms
-    // receipt of our ACK breaks atomicity (advertiser exits loop, scanner never paired).
-    // Persistence happens in handle_pairing_confirm after the scanner's round-trip.
-    super::state::register_ble_address_mapping(&device_id, &sender_address);
+    // 2. Record where the contact's identity was seen this session, but do NOT
+    // persist ble_address to SQLite yet. The ble_address column is the sentinel that
+    // controls the pairing loop's exit condition — writing it before the scanner
+    // confirms receipt of our ACK breaks atomicity (advertiser exits loop, scanner
+    // never paired). Persistence happens in handle_pairing_confirm after the
+    // scanner's round-trip.
+    crate::bluetooth::peer_address::record_sighting(&device_id, &sender_address);
 
     // 3. Dispatch identity event to WebView via JNI callback (background thread)
     dispatch_identity_to_webview(&sender_address, &genesis_hash, &device_id);

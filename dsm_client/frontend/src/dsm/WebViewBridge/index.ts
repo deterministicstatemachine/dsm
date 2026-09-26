@@ -37,7 +37,6 @@ export const {
 export const {
   openBluetoothSettings,
   requestBlePermissions,
-  resolveBleAddressForDeviceIdBridge,
   startPairingAll,
   stopPairingAll,
 } = ble;

@@ -279,16 +279,6 @@ class SinglePathWebViewBridge(private val context: Context) {
                     }
                 }
 
-                // strict wallet history (JNI). Returns FramedEnvelopeV3 bytes or empty on error.
-                 // genesis_envelope bytes (prefs-only). Used for cold-start rehydration.
-                // Returns empty if not present.
-                 // Resolve BLE address from native mapping (bytes-only).
-                // Payload: 32-byte device_id. Response: UTF-8 address bytes or empty.
-                "resolveBleAddressForDeviceId" -> {
-                    if (payload.size != 32) return ByteArray(0)
-                    UnifiedContactBridge.resolveBleAddressForDeviceIdBin(payload)
-                }
-
                 // Diagnostics: append raw payload to persisted bridge log
                 "diagnosticsLog" -> {
                     BridgeLogger.logDiagnosticsPayload(payload)

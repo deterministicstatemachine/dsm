@@ -1622,19 +1622,21 @@ message BilateralPrepareRequest {
   reserved "validity_iterations";
   Hash32 expected_genesis_hash  = 4;
   Hash32 expected_counterparty_state_hash = 5;
-  string ble_address            = 6; // BLE MAC address of recipient device
+  // The recipient's BLE address, which no receiver read: the sender's SDK
+  // resolves where a prepare goes.
+  reserved 6;
+  reserved "ble_address";
   bytes  sender_signing_public_key = 7 [(dsm_fixed_len)=64]; // Sender's SPHINCS+ SPX256s public key for offline verification
   bytes  sender_device_id       = 8 [(dsm_fixed_len)=32]; // Sender's device ID for relationship binding
   Hash32 sender_genesis_hash    = 9; // Sender's genesis hash for relationship anchor
   // The relationship tip travels once, as expected_counterparty_state_hash.
   reserved 10;
   reserved "sender_chain_tip";
-  // Transfer intent fields. Rust builds canonical operation_data from these
-  // when operation_data is empty.
-  uint64 transfer_amount         = 11; // amount in token base units
-  string token_id_hint           = 12; // token ID (e.g. "ERA")
-  string memo_hint               = 13; // optional transfer memo
-  string transfer_amount_display = 14; // decimal display amount; backend scales via token decimals
+  // The send's intent, which reached the SDK on this message: it travels as
+  // OfflineTransferRequest, and the prepare carries the operation the SDK
+  // authored from it.
+  reserved 11 to 14;
+  reserved "transfer_amount", "token_id_hint", "memo_hint", "transfer_amount_display";
   reserved 15; // removed: legacy Safe-7 sender_anchor_identity (fused anchor is pinned out-of-band)
   // Sender's ML-KEM-768 encapsulation key (1184 bytes). The device Kyber keypair is
   // derived from the wallet master secret ("DSM/kyber\0"). The receiver refuses the
@@ -3251,6 +3253,16 @@ message OnlineTransferSmartRequest {
   string amount = 2; // Decimal string
   string token_id = 3;
   string memo = 4;
+}
+
+// wallet.sendOffline: what the user asked for, and nothing the SDK works out
+// itself. The SDK resolves where the counterparty's phone is over BLE, the
+// token's decimals and policy, and authors the operation.
+message OfflineTransferRequest {
+  bytes  counterparty_device_id = 1 [(dsm_fixed_len)=32];
+  string token_id               = 2; // as the user chose it; the SDK canonicalizes it and refuses none
+  string amount                 = 3; // decimal, as the user typed it; the SDK scales it by the token's decimals
+  string memo                   = 4;
 }
 
 message OnlineTransferResponse {
