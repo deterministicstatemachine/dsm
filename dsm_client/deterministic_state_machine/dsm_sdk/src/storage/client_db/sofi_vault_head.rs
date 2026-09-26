@@ -66,22 +66,21 @@ pub fn record_resolved_with_conn(tx: &Transaction<'_>, post: &VaultPostState) ->
     // The previous set is read through the CALLER'S transaction, not a second
     // connection: the admit path already holds the connection mutex, and a
     // nested acquisition would deadlock rather than fail.
-    let previous = rows_with_conn(tx, &post.vault_id, post.pre_generation)?;
+    let vault_id = post.vault_id();
+    let state = post.state();
+    let previous = rows_with_conn(tx, vault_id, post.pre_generation())?;
     let mut leaves: Vec<(D32, D32, i64, Vec<u8>)> = previous
         .iter()
-        .filter(|(key, ..)| *key != derive::vault_state_key(&post.vault_id))
+        .filter(|(key, ..)| *key != derive::vault_state_key(vault_id))
         .cloned()
         .collect();
     leaves.push((
-        derive::vault_state_key(&post.vault_id),
-        derive::vault_state_leaf_value(&post.state)
-            .map_err(|e| anyhow!("state leaf value: {e}"))?,
+        derive::vault_state_key(vault_id),
+        derive::vault_state_leaf_value(state).map_err(|e| anyhow!("state leaf value: {e}"))?,
         KIND_STATE,
-        post.state
-            .encode()
-            .map_err(|e| anyhow!("state leaf: {e}"))?,
+        state.encode().map_err(|e| anyhow!("state leaf: {e}"))?,
     ));
-    if let Some((key, leaf)) = &post.relationship {
+    if let Some((key, leaf)) = post.relationship() {
         leaves.retain(|(k, ..)| k != key);
         leaves.push((
             *key,
@@ -94,14 +93,8 @@ pub fn record_resolved_with_conn(tx: &Transaction<'_>, post: &VaultPostState) ->
     // set and not a chain, and `root_at(v, g)` is what a parent's status is
     // asked about. Idempotent: re-resolving the same position writes the same
     // two rows.
-    write_root(tx, &post.vault_id, post.pre_generation, &post.pre_root)?;
-    write(
-        tx,
-        &post.vault_id,
-        post.state.generation,
-        &post.root,
-        &leaves,
-    )
+    write_root(tx, vault_id, post.pre_generation(), post.pre_root())?;
+    write(tx, vault_id, post.generation(), post.root(), &leaves)
 }
 
 fn write_root(tx: &Transaction<'_>, vault_id: &D32, generation: u64, root: &D32) -> Result<()> {
@@ -215,10 +208,10 @@ pub fn record_walked(post: &VaultPostState) -> Result<()> {
     let binding = get_connection()?;
     let mut conn = binding.lock().unwrap_or_else(|p| p.into_inner());
     for (generation, root) in [
-        (post.pre_generation, post.pre_root),
-        (post.state.generation, post.root),
+        (post.pre_generation(), *post.pre_root()),
+        (post.generation(), *post.root()),
     ] {
-        if let Some(existing) = root_at_with_conn(&conn, &post.vault_id, generation)? {
+        if let Some(existing) = root_at_with_conn(&conn, post.vault_id(), generation)? {
             if existing != root {
                 return Err(anyhow!(
                     "generation {generation} of this vault already established another root"

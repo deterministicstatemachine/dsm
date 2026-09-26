@@ -30,7 +30,7 @@ use dsm::sofi::conformance::{
 use dsm::sofi::derive;
 use dsm::sofi::publication::{recognize_fulfillment, Publication, Signed};
 use dsm::sofi::registration::{
-    fulfillment_completion, fulfillment_registered, PositionCells, Registration,
+    fulfillment_completion, fulfillment_registered, PositionCells, Registration, RegistrationRead,
 };
 use dsm::sofi::storage::Resolved;
 use dsm::sofi::wire::{
@@ -187,7 +187,7 @@ pub async fn acquire_prior_attempts(
         for earlier in 0..entry.attempt.min(reach) {
             match read_attempt_cell(set, &leg.vault_id, &leg.parent_root, earlier).await? {
                 Ok(read) => {
-                    cells.insert((entry.vault_id, earlier), read.fact);
+                    cells.insert((entry.vault_id, earlier), read.fact());
                 }
                 Err(undecided) => {
                     log::info!("[sofi register] K^({earlier}) is not decided yet: {undecided:?}")
@@ -343,7 +343,7 @@ pub async fn read_registration(
     device_id: &D32,
     position: u64,
     parent_root: &D32,
-) -> Result<Result<Registration, CellMissing>, DsmError> {
+) -> Result<Result<RegistrationRead, CellMissing>, DsmError> {
     let cells = position_cells(set, genesis, device_id, position, parent_root)?;
     let seats = NodeSeats::new(set)?;
     let ful_evidence = read_cell(&seats, cells.fulfillment()).await;
@@ -388,7 +388,7 @@ pub async fn read_registration(
             Ok(registration) => registration,
             Err(missing) => return Ok(Err(missing)),
         };
-    if let Registration::Registered(..) = &registration {
+    if let Registration::Registered(..) = registration.registration() {
         let (.., ful_proof) = fulfillment_completion(&cells, &ful_evidence, &precommits)
             .map_err(|missing| storage_err("fulfillment completion", format!("{missing:?}")))?
             .ok_or_else(|| storage_err("fulfillment completion", "a final value has no proof"))?;

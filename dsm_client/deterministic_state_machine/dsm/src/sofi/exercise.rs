@@ -19,8 +19,8 @@
 //! question (rebuild step R12), answered from the same bytes.
 
 use crate::route_chain::{
-    check_completion_proof, completion_proof, evaluate, CellError, CellEvidence, CellReading,
-    CompletionProof, Missing, ProofRefusal, RoutedCell,
+    check_completion_proof, completion_proof, evaluate, CellError, CellEvidence, CellFact,
+    CellReading, CompletionProof, Missing, ProofRefusal, RoutedCell,
 };
 use super::derive;
 use super::publication::{
@@ -184,6 +184,48 @@ impl AttemptCell {
     }
 }
 
+/// What the ladder reads at one attempt key (Section 23.1), bound to the key
+/// it was read at: the storage fact — open, or which exercise (by its `E`)
+/// holds the cell and how far its chain has gone — and the exercise holding
+/// it. Built by [`attempt_resolution`] over the seats' reads and by nothing
+/// else, so a leg's cell fact is always one Core evaluated at that very key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttemptCellRead {
+    vault_id: D32,
+    parent_root: D32,
+    attempt: u64,
+    fact: CellFact,
+    exercise: Option<RecognizedExercise>,
+}
+
+impl AttemptCellRead {
+    pub fn vault_id(&self) -> &D32 {
+        &self.vault_id
+    }
+
+    pub fn parent_root(&self) -> &D32 {
+        &self.parent_root
+    }
+
+    pub fn attempt(&self) -> u64 {
+        self.attempt
+    }
+
+    /// The storage fact at the key.
+    pub fn fact(&self) -> CellFact {
+        self.fact
+    }
+
+    /// The exercise holding the key, if any.
+    pub fn exercise(&self) -> Option<&RecognizedExercise> {
+        self.exercise.as_ref()
+    }
+
+    pub fn into_exercise(self) -> Option<RecognizedExercise> {
+        self.exercise
+    }
+}
+
 /// `SuccessorResolution(K)` (Section 23.1) as the ladder reads it: the
 /// route-chain reading of an attempt cell over exercises naming its key.
 /// What holds the cell is the recognized exercise, identified by its `E`. A
@@ -193,8 +235,20 @@ impl AttemptCell {
 pub fn attempt_resolution(
     cell: &AttemptCell,
     evidence: &CellEvidence,
-) -> Result<CellReading<RecognizedExercise>, Missing> {
-    evaluate(&cell.cell, evidence, exercise_at(cell))
+) -> Result<AttemptCellRead, Missing> {
+    let reading = evaluate(&cell.cell, evidence, exercise_at(cell))?;
+    let fact = reading.fact();
+    let exercise = match reading {
+        CellReading::Held { object, .. } => Some(object),
+        CellReading::Open => None,
+    };
+    Ok(AttemptCellRead {
+        vault_id: cell.vault_id,
+        parent_root: cell.parent_root,
+        attempt: cell.attempt,
+        fact,
+        exercise,
+    })
 }
 
 /// The recognizer of an attempt cell: exercises naming its key, identified
@@ -226,40 +280,40 @@ pub fn check_attempt_completion(
     check_completion_proof(&cell.cell, evidence, proof, exercise_at(cell))
 }
 
+/// Test fixtures shared with the facts tests: one operation as an exercise,
+/// signed by the fixture trader.
 #[cfg(test)]
-#[allow(clippy::disallowed_methods)] // test asserts; a failure here is the signal
-mod tests {
+#[allow(clippy::disallowed_methods)] // fixtures unwrap; a failure here is the signal
+pub(crate) mod fixtures {
     use super::*;
     use crate::ccb::sigalg::SPHINCS_PLUS_SPX256F as ALG;
     use crate::sofi::conformance::derive_policy_fulfillments;
     use crate::sofi::derive::precommit_id;
     use crate::sofi::publication::Publication;
-    use crate::sofi::validation::fixtures::{swap_fixture_n, trader_keys, Fixture};
-    use crate::route_chain::fixtures::{committed_set, committed_set_id, Cell};
-    use crate::route_chain::{CellFact, ChainState, ROUTE_LEN};
+    use crate::sofi::validation::fixtures::{trader_keys, Fixture};
     use crate::sofi::wire::AttemptEntry;
 
     /// The trader's key, as every fixture `P` commits it.
-    fn key() -> &'static [u8] {
+    pub(crate) fn key() -> &'static [u8] {
         &trader_keys().0
     }
 
     /// The trader's signature over `digest`.
-    fn signed(digest: D32) -> Vec<u8> {
+    pub(crate) fn signed(digest: D32) -> Vec<u8> {
         crate::crypto::sphincs::sphincs_sign(&trader_keys().1, &digest).unwrap()
     }
 
     /// An exercise with the precommit and fulfillment body it carries.
-    struct Built {
-        exercise: SofiExercise,
-        precommit: TraderPrecommitBody,
-        fulfillment: TraderFulfillmentBody,
+    pub(crate) struct Built {
+        pub(crate) exercise: SofiExercise,
+        pub(crate) precommit: TraderPrecommitBody,
+        pub(crate) fulfillment: TraderFulfillmentBody,
     }
 
     /// One operation as an exercise: F over `attempts`, the canonical
     /// witnesses over the shadows P(E) commits, and the parent claim its
     /// closure references.
-    fn exercise(f: &Fixture, attempts: &[u64]) -> Built {
+    pub(crate) fn exercise(f: &Fixture, attempts: &[u64]) -> Built {
         let p = &f.precommit;
         let canonical = derive::canonical_legs(&f.preimage).unwrap();
         let shadows: Vec<D32> = p
@@ -323,6 +377,18 @@ mod tests {
             fulfillment: fb,
         }
     }
+}
+
+#[cfg(test)]
+#[allow(clippy::disallowed_methods)] // test asserts; a failure here is the signal
+mod tests {
+    use super::fixtures::*;
+    use super::*;
+    use crate::ccb::sigalg::SPHINCS_PLUS_SPX256F as ALG;
+    use crate::sofi::publication::Publication;
+    use crate::sofi::validation::fixtures::swap_fixture_n;
+    use crate::route_chain::fixtures::{committed_set, committed_set_id, Cell};
+    use crate::route_chain::{CellFact, ChainState, ROUTE_LEN};
 
     #[test]
     fn an_exercise_round_trips_and_rebuilds_into_bound_objects() {
@@ -574,7 +640,7 @@ mod tests {
             .expect("the committed set")
         };
         let read = |seats: &Cell, attempt: u64| attempt_resolution(&at(attempt), &seats.evidence());
-        let fact = |reading: &Result<CellReading<RecognizedExercise>, Missing>| match reading {
+        let fact = |reading: &Result<AttemptCellRead, Missing>| match reading {
             Ok(held) => Ok(held.fact()),
             Err(missing) => Err(*missing),
         };
@@ -586,9 +652,15 @@ mod tests {
             cell.write(&bytes, last, &[]);
             let reading = read(&cell, 0);
             assert_eq!(fact(&reading), Ok(CellFact::Held { id: e, state }));
-            let Ok(CellReading::Held { object, .. }) = reading else {
+            let Ok(held) = reading else {
                 panic!("the exercise holds the key")
             };
+            // The read is bound to the key it was evaluated at.
+            assert_eq!(
+                (held.vault_id(), held.parent_root(), held.attempt()),
+                (&leg.vault_id, &leg.parent_root, 0)
+            );
+            let object = held.exercise().expect("the exercise holds the key");
             assert_eq!(object.fulfillment.body, built.fulfillment);
         }
         let mut garbage = Cell::at(at(0).routed());
