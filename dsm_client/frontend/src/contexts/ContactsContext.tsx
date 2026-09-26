@@ -72,9 +72,6 @@ export function ContactsProvider({ children }: { children: React.ReactNode }) {
     void ensureBleAdvertisingIfContacts();
   }, []);
   useBridgeEvent('contact.bleUpdated', contactsStore.handleBleUpdated, []);
-  useBridgeEvent('contact.added', () => {
-    void contactsStore.refreshContacts();
-  }, []);
   useBridgeEvent('identity.ready', () => {
     // After identity is ready, refresh contacts then start advertising
     // so peers can discover us for bilateral transfers.

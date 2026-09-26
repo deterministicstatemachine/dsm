@@ -22,17 +22,11 @@ jest.mock('../../bridge/bridgeEvents', () => {
   };
 });
 
-import { emitWalletRefresh, emitBilateralCommitted, DSM_WALLET_REFRESH_EVENT } from '../events';
+import { emitWalletRefresh, emitBilateralCommitted } from '../events';
 import { bridgeEvents } from '../../bridge/bridgeEvents';
 
 describe('events.ts', () => {
   beforeEach(() => jest.clearAllMocks());
-
-  describe('DSM_WALLET_REFRESH_EVENT', () => {
-    test('has the canonical event name', () => {
-      expect(DSM_WALLET_REFRESH_EVENT).toBe('dsm-wallet-refresh');
-    });
-  });
 
   describe('emitWalletRefresh', () => {
     test('emits wallet.refresh event with detail', () => {

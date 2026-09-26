@@ -15,13 +15,11 @@ export interface BilateralCommittedEventDetail {
 }
 
 /**
- * Canonical wallet refresh event.
+ * Canonical wallet refresh event: `wallet.refresh` on the bus.
  *
- * Determinism rule: there should be exactly ONE pathway to trigger a UI refresh.
- * All wallet mutation boundaries must emit ONLY this (coalesced) event.
+ * Determinism rule: there is exactly ONE pathway to trigger a UI refresh.
+ * All wallet mutation boundaries emit ONLY this (coalesced) event.
  */
-export const DSM_WALLET_REFRESH_EVENT = 'dsm-wallet-refresh' as const;
-
 export type WalletRefreshDetail = {
   /** Where the mutation originated (e.g. 'wallet.send', 'storage.sync', 'bilateral.commit'). */
   source: string;

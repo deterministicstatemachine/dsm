@@ -10,7 +10,6 @@ jest.mock('../WebViewBridge', () => ({
 jest.mock('../events', () => ({
   emitWalletRefresh: jest.fn(),
   emitBilateralCommitted: jest.fn(),
-  DSM_WALLET_REFRESH_EVENT: 'dsm-wallet-refresh',
 }));
 
 import * as pb from '../../proto/dsm_app_pb';

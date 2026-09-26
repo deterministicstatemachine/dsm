@@ -121,26 +121,11 @@ const ContactsTabScreen: React.FC<Props> = ({ eraTokenSrc = 'images/logos/era_to
     flexShrink: 0,
   };
 
-  // Listen for contact-added events - refresh and auto-switch to list.
-  // No loading overlay — the refresh is near-instant and the overlay
-  // just causes a visible flicker.
+  // Listen for BLE mapping events - refresh the list. No loading overlay —
+  // the refresh is near-instant and the overlay just causes a visible
+  // flicker. An added contact reaches this screen through the contacts
+  // store, which the add itself refreshes.
   useEffect(() => {
-    const handleContactAdded = (_e: Event) => {
-      if (CONTACTS_DEBUG) console.log('[ContactsTab] dsm-contact-added event received');
-
-      // Deterministic coalescing: no wall-clock debounce.
-      if (refreshPendingRef.current) return;
-      refreshPendingRef.current = true;
-      queueMicrotask(() => {
-        refreshPendingRef.current = false;
-        void (async () => {
-          await load('contact-added');
-          // Auto-switch to list tab to show the new contact
-          setActiveTab('list');
-        })();
-      });
-    };
-
     const offBleMapped = bridgeEvents.on('contact.bleMapped', () => {
       if (CONTACTS_DEBUG) console.log('[ContactsTab] contact.bleMapped event received');
       if (refreshPendingRef.current) return;
@@ -161,14 +146,9 @@ const ContactsTabScreen: React.FC<Props> = ({ eraTokenSrc = 'images/logos/era_to
       });
     });
 
-    const offContactAdded = bridgeEvents.on('contact.added', () => {
-      handleContactAdded(new Event('contact.added'));
-    });
-
     return () => {
       offBleMapped();
       offBleUpdated();
-      offContactAdded();
     };
   }, [load]);
 

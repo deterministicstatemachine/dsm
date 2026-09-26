@@ -28,6 +28,7 @@ import {
   setPreference as setPreferenceBridge,
 } from '../WebViewBridge';
 import { nativeSessionStore } from '../../runtime/nativeSessionStore';
+import { bridgeEvents } from '../../bridge/bridgeEvents';
 import { encodeBase32Crockford } from '../../utils/textId';
 
 function makeValidDeviceId(): Uint8Array {
@@ -148,6 +149,34 @@ describe('identity.ts', () => {
       expect(failure.state).toBe('missing');
       expect(Date.now() - started).toBeLessThan(1000);
       expect(queryTransportHeadersV3).not.toHaveBeenCalled();
+    });
+
+    // The wait between attempts ends early on Rust's `identity.ready`, on the
+    // bus. It used to listen on `window` for an event dispatched on
+    // `document`, and never woke.
+    test('the wait wakes early on identity.ready from the bus', async () => {
+      jest.useFakeTimers();
+      try {
+        session({ received: true, identity_status: 'ready' });
+        const deviceId = makeValidDeviceId();
+        const genesisHash = makeValidGenesisHash();
+        (queryTransportHeadersV3 as jest.Mock)
+          .mockResolvedValueOnce(new Uint8Array(0))
+          .mockResolvedValueOnce(makeHeadersBinary(deviceId, genesisHash));
+
+        const pending = getIdentity();
+        // The first attempt fails and the wait begins; the announcement ends it.
+        // No timer is advanced: only the wake can end the wait.
+        for (let i = 0; i < 20; i++) {
+          bridgeEvents.emit('identity.ready', undefined as never);
+          await Promise.resolve();
+        }
+        const identity = await pending;
+        expect(identity.deviceId).toBe(encodeBase32Crockford(deviceId));
+        expect(queryTransportHeadersV3).toHaveBeenCalledTimes(2);
+      } finally {
+        jest.useRealTimers();
+      }
     });
 
     test('a ready session whose headers never read is answered as not read, with the reason', async () => {

@@ -187,9 +187,8 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
         console.warn('AccountsScreen: refreshAll failed after faucet claim:', refreshErr);
       }
       // refreshAll() already updated WalletContext (balance + history).
-      // Do NOT emit wallet.refresh here — that would trigger 3 more RPCs for
-      // data we just fetched (useWalletSync balance+history, useWalletRefreshListener
-      // history again).
+      // Do NOT emit wallet.refresh here — that would reload, through the
+      // provider's listener, the data we just fetched.
 
       // What Rust released, in its words.
       setSuccessMsg(result.message);

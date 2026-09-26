@@ -220,7 +220,6 @@ export function initializeEventBridge(): void {
         try {
           const snapshot = decodeSessionState(bytes);
           bridgeEvents.emit('session.state', snapshot);
-          window.dispatchEvent(new CustomEvent('dsm-session-state', { detail: snapshot }));
         } catch (e) {
           logger.warn('[EventBridge] session.state decode failed:', e);
         }
@@ -235,13 +234,15 @@ export function initializeEventBridge(): void {
       }
 
       if (topic === 'dsm-identity-ready') {
-        try { document.dispatchEvent(new Event('dsm-identity-ready')); } catch (e) { logger.warn('[EventBridge] dsm-identity-ready dispatch failed:', e); }
+        // Straight to the bus. This used to be a `document` event that the
+        // adapter re-emitted, and that `getIdentity`'s wake-up listened for on
+        // `window`, where it never arrived.
+        bridgeEvents.emit('identity.ready', undefined as never);
         emit(topic, bytes);
         return;
       }
 
       if (topic === 'dsm-app-pause') {
-        try { window.dispatchEvent(new CustomEvent('dsm-app-pause')); } catch (e) { logger.warn('[EventBridge] dsm-app-pause dispatch failed:', e); }
         emit(topic, bytes);
         return;
       }
@@ -266,12 +267,7 @@ export function initializeEventBridge(): void {
         try {
           const text = new TextDecoder().decode(bytes);
           const parts = text.split('|');
-          const detail = {
-            type: parts[0] || 'UNKNOWN_ERROR',
-            message: parts[1] || 'Environment configuration error',
-            help: parts[2] || undefined,
-          };
-          document.dispatchEvent(new CustomEvent('dsm-env-config-error', { detail }));
+          bridgeEvents.emit('env.config.error', { message: parts[1] || 'Environment configuration error' });
         } catch {}
         emit(topic, bytes);
         return;
@@ -327,7 +323,7 @@ export function initializeEventBridge(): void {
       }
 
       if (topic === 'dsm-wallet-refresh') {
-        try { window.dispatchEvent(new CustomEvent('dsm-wallet-refresh', { detail: { source: 'native' } })); } catch {}
+        bridgeEvents.emit('wallet.refresh', { source: 'native' });
         emit(topic, bytes);
         return;
       }
@@ -381,15 +377,6 @@ export function initializeEventBridge(): void {
               bridgeEvents.emit('wallet.refresh', { source: 'bilateral.reconcile_status' });
             } catch {}
           }
-
-          // Always fan out a typed DOM event so UI can react even if it doesn't subscribe via EventBridge.
-          try {
-            window.dispatchEvent(
-              new CustomEvent('dsm-bilateral-notification', {
-                detail: { notification: note, bytes },
-              })
-            );
-          } catch {}
 
           // The event type says a transfer completed; a status string is free text.
           const isComplete = note.eventType === pb.BilateralEventType.BILATERAL_EVENT_TRANSFER_COMPLETE;

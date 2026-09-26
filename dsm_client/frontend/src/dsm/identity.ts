@@ -7,6 +7,7 @@ import { encodeBase32Crockford } from '../utils/textId';
 import { IdentityInfo } from './types';
 import logger from '../utils/logger';
 import { nativeSessionStore } from '../runtime/nativeSessionStore';
+import { bridgeEvents } from '../bridge/bridgeEvents';
 import { IdentityUnavailableError } from './identityUnavailable';
 
 // Cache the last known-good identity to avoid flip-flops.
@@ -97,22 +98,21 @@ export async function getIdentity(): Promise<IdentityInfo> {
   let lastFailure: unknown = null;
   for (let attempt = 0; attempt < retryDelays.length; attempt++) {
     if (attempt > 0) {
-      // Yield to event loop to allow bridge port delivery / gate drain.
-      // Also listen for the identity-ready event so we wake up early if it fires.
+      // Yield to event loop to allow bridge port delivery / gate drain, and
+      // wake early on Rust's `identity.ready` — on the bus, where the event
+      // bridge puts it; it used to be listened for on `window` after being
+      // dispatched on `document`, and never woke anything.
       const delay = retryDelays[attempt];
       await new Promise<void>(resolve => {
         let settled = false;
-        const settle = () => { if (!settled) { settled = true; resolve(); } };
-        const onReady = () => { settle(); };
-        if (typeof window !== 'undefined') {
-          window.addEventListener('dsm-identity-ready', onReady, { once: true });
-        }
-        setTimeout(() => {
-          if (typeof window !== 'undefined') {
-            window.removeEventListener('dsm-identity-ready', onReady);
-          }
-          settle();
-        }, delay);
+        const offReady = bridgeEvents.on('identity.ready', () => settle());
+        const settle = () => {
+          if (settled) return;
+          settled = true;
+          offReady();
+          resolve();
+        };
+        setTimeout(settle, delay);
       });
     }
     const session = nativeSessionStore.getSnapshot();
