@@ -31,6 +31,7 @@ use dsm::economic::register::read_root_cell;
 use dsm::economic::state::EconomicLeafState;
 use dsm::economic::tree::EconomicSmt;
 use dsm::route_chain::{CellReading, ChainState, Missing as CellMissing};
+use dsm::sofi::conformance::ConformanceMissing;
 use dsm::sofi::derive;
 use dsm::sofi::facts::{Established, NotEstablished};
 use dsm::sofi::lineage::{advance_resolved, descendant_fence, AdvanceError};
@@ -54,7 +55,9 @@ use crate::sdk::route_seats::{read_cell, NodeSeats};
 use crate::sdk::sofi_exercise::{build_exercise, write_exercise, LegWrite};
 use crate::sdk::sofi_publish::{fetch_fulfillment, fetch_precommit, fetch_preimage};
 use crate::sdk::sofi_reads::{local_leaves_of_validated, verifier_error, VerifierContext};
-use crate::sdk::sofi_register::{install_fulfillment, position_cells, InstallRequest, Installed};
+use crate::sdk::sofi_register::{
+    install_fulfillment, position_cells, InstallError, InstallRequest, Installed,
+};
 use crate::sdk::storage_set::StorageSet;
 use dsm::sofi::resolution::{Incomplete, VaultChain};
 use crate::storage::client_db::economic_lineage;
@@ -82,24 +85,53 @@ pub struct FulfillRequest<'a> {
     pub own_objects: &'a BTreeMap<ValidationRef, Vec<u8>>,
 }
 
-/// The fulfillment's transition and install.
-#[derive(Debug, Clone)]
+/// The fulfillment's transition.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Fulfilled {
     /// `q`, the position the fulfillment holds under its conditional claim.
     pub position: u64,
     pub fulfillment_id: D32,
-    /// Stage 7: the pair at the leader of `s(q)` (R9).
-    pub installed: Installed,
 }
 
-/// Stages 7 and 8, run again from what storage holds.
-#[derive(Debug, Clone)]
+/// Stages 7 and 8, written from what storage holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Completed {
     pub position: u64,
     pub fulfillment_id: D32,
+    /// Stage 7: the pair at the leader of `s(q)` (R9).
     pub installed: Installed,
     /// Stage 8: the exercise at every leg's key (R11).
     pub exercise: Vec<LegWrite>,
+}
+
+/// What [`complete_pending_fulfillment`] did for the pending position.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Completion {
+    /// The pair reached the leader of `s(q)` and the exercise the leader of
+    /// every leg's key.
+    Written(Box<Completed>),
+    /// The network did not take a write, or did not establish an object a
+    /// stage reads, this pass. The position stays pending and fenced and
+    /// nothing negative is recorded (Amendment S3, storage §3): the next
+    /// `sofi.resolve` runs the stages again from what storage holds.
+    NotTaken { position: u64, why: NotTaken },
+}
+
+/// The network's status when stages 7 and 8 could not be written: never a
+/// refusal, which is an error, and never a verdict.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NotTaken {
+    /// The pending `F`, its `P` or its `P(E)` — the named one — could not be
+    /// read back: the scan did not establish the object's bytes.
+    Unavailable(&'static str),
+    /// Evidence conformance needs is not in hand after the acquisition
+    /// rounds (rule T5).
+    Evidence(Vec<ConformanceMissing>),
+    /// The leader of `s(q)` did not answer with the pair's links.
+    PairLeaderUnreached,
+    /// The leader of a leg's key did not answer with the exercise's link, at
+    /// these vaults.
+    LegLeaderUnreached(Vec<D32>),
 }
 
 /// The acceptance coordinates of a fulfillment's admission: what the durable
@@ -128,16 +160,15 @@ fn fulfillment_acceptance_coords(
 }
 
 /// Stage 6 of §31: the trader's transition carrying `SofiFulfill` through the
-/// one Core transition, then stage 7, the install. The head advances with a
-/// `SofiFulfillment` admission at `q` that fences the lineage until the route
-/// resolves; stage 8, the exercise, is any party's
-/// ([`complete_pending_fulfillment`] does it for this device).
+/// one Core transition. The head advances with a `SofiFulfillment` admission
+/// at `q` that fences the lineage until the route resolves. Stages 7 and 8 —
+/// the install and the exercise — are written from what storage holds by
+/// [`complete_pending_fulfillment`], for a device that just advanced and for
+/// one that comes back after a crash alike.
 ///
 /// Refused before anything is written unless `P` is built on exactly this
 /// device's validated predecessor — its position and root — and names this
-/// device. A failure AFTER the advance (a member unreachable at install)
-/// leaves the position fenced and durable; [`complete_pending_fulfillment`]
-/// finishes stages 7 and 8 from what storage holds.
+/// device.
 pub async fn fulfill(
     core: &CoreSDK,
     set: &StorageSet,
@@ -222,16 +253,9 @@ pub async fn fulfill(
         &set.id(),
         None,
     )?;
-    let admitted = economic_lineage::get_admitted()
-        .map_err(|e| storage("load admitted", e))?
-        .ok_or_else(|| refuse("no admitted predecessor for the fulfillment"))?;
-    let standing = OwnStanding::of(core, admitted, &validated)?;
-    let ctx = standing.context(set)?;
-    let installed = install_pair(&ctx, set, request).await?;
     Ok(Fulfilled {
         position: q,
         fulfillment_id,
-        installed,
     })
 }
 
@@ -271,25 +295,41 @@ impl OwnStanding {
     }
 }
 
+/// What an install that wrote nothing means: the network's status when the
+/// leader did not answer or the evidence is not in hand, an error otherwise
+/// — a non-conforming `F`, an object without canonical bytes, a member or
+/// this device's own store that could not be read or written.
+fn install_failure(e: InstallError) -> Result<NotTaken, DsmError> {
+    match e {
+        InstallError::LeaderUnreached => Ok(NotTaken::PairLeaderUnreached),
+        InstallError::Unavailable(missing) => Ok(NotTaken::Evidence(missing)),
+        InstallError::NotConforming(why) => Err(refuse(format!("install: {why:?}"))),
+        InstallError::Wire(e) => Err(refuse(format!("install: {e:?}"))),
+        InstallError::Storage(e) => Err(storage("install", e)),
+    }
+}
+
 /// Stage 7: the pair at `s(q)`, conformance first (R9). Idempotent at the
 /// members, which keep what they are given.
 async fn install_pair(
     ctx: &VerifierContext<'_>,
     set: &StorageSet,
     request: &FulfillRequest<'_>,
-) -> Result<Installed, DsmError> {
-    install_fulfillment(&ctx.verifier(), set, &install_request(request))
-        .await
-        .map_err(|e| refuse(format!("install: {e:?}")))
+) -> Result<Result<Installed, NotTaken>, DsmError> {
+    match install_fulfillment(&ctx.verifier(), set, &install_request(request)).await {
+        Ok(installed) => Ok(Ok(installed)),
+        Err(e) => install_failure(e).map(Err),
+    }
 }
 
 /// Stage 8: the exercise, built over the evidence its conformance was
-/// decided on, at every leg's key (R11).
+/// decided on, at every leg's key (R11). Written when the leader of every
+/// leg's key answered with its link.
 async fn exercise_legs(
     ctx: &VerifierContext<'_>,
     set: &StorageSet,
     request: &FulfillRequest<'_>,
-) -> Result<Vec<LegWrite>, DsmError> {
+) -> Result<Result<Vec<LegWrite>, NotTaken>, DsmError> {
     let install = install_request(request);
     let evidence = match ctx
         .verifier()
@@ -297,17 +337,26 @@ async fn exercise_legs(
         .map_err(verifier_error)?
     {
         Acquired::Complete(evidence) => evidence,
-        Acquired::Exhausted(missing) | Acquired::NoSource(missing) => {
-            return Err(storage(
-                "exercise",
-                format!("conformance evidence not in hand: {missing:?}"),
-            ))
+        Acquired::Exhausted(missing) => return Ok(Err(NotTaken::Evidence(missing))),
+        Acquired::NoSource(missing) => {
+            return Err(refuse(format!(
+                "exercise: conformance evidence has no source: {missing:?}"
+            )))
         }
     };
     let exercise = build_exercise(&install, &evidence)?;
     let recognized = dsm::sofi::exercise::recognize_exercise(&exercise.encode())
         .ok_or_else(|| refuse("the exercise built here does not recognize"))?;
-    write_exercise(set, &exercise, &recognized).await
+    let writes = write_exercise(set, &exercise, &recognized).await?;
+    let unreached: Vec<D32> = writes
+        .iter()
+        .filter(|write| !write.reached_leader)
+        .map(|write| write.vault_id)
+        .collect();
+    if !unreached.is_empty() {
+        return Ok(Err(NotTaken::LegLeaderUnreached(unreached)));
+    }
+    Ok(Ok(writes))
 }
 
 /// The pending fulfillment admission on the head, or why there is none.
@@ -426,40 +475,54 @@ async fn final_root_cell(
 
 /// The registered `F`, its `P` and `P(E)` for the pending position, from
 /// storage: what a restarted device needs to finish or resolve without
-/// having kept anything but the admission.
+/// having kept anything but the admission. `Err(name)` names the object the
+/// scan could not establish this pass. An object the scan established absent
+/// is a refusal: each was read back `Stored` before the transition, so a
+/// network that has none of it contradicts this device's record.
 async fn pending_objects(
     set: &StorageSet,
-    core: &CoreSDK,
+    fulfillment_id: &D32,
 ) -> Result<
-    (
-        PendingEconomicAdmission,
-        dsm::sofi::publication::Signed<TraderFulfillmentBody>,
-        dsm::sofi::publication::Signed<TraderPrecommitBody>,
-        SettlementPreimage,
-    ),
+    Result<
+        (
+            dsm::sofi::publication::Signed<TraderFulfillmentBody>,
+            dsm::sofi::publication::Signed<TraderPrecommitBody>,
+            SettlementPreimage,
+        ),
+        &'static str,
+    >,
     DsmError,
 > {
-    let (pending, fulfillment_id) = pending_fulfillment(core)?;
-    let Resolved::Kept(fulfillment) = fetch_fulfillment(set, &fulfillment_id).await? else {
-        return Err(refuse(
-            "the pending fulfillment is not Stored; nothing to finish from",
-        ));
+    let fulfillment = match fetch_fulfillment(set, fulfillment_id).await? {
+        Resolved::Kept(fulfillment) => fulfillment,
+        Resolved::Unavailable => return Ok(Err("fulfillment")),
+        Resolved::None => {
+            return Err(refuse(
+                "the pending fulfillment is not Stored; nothing to finish from",
+            ))
+        }
     };
-    let Resolved::Kept(precommit) = fetch_precommit(set, fulfillment.body.precommit_id()).await?
-    else {
-        return Err(refuse("the pending fulfillment's P is not Stored"));
+    let precommit = match fetch_precommit(set, fulfillment.body.precommit_id()).await? {
+        Resolved::Kept(precommit) => precommit,
+        Resolved::Unavailable => return Ok(Err("precommit")),
+        Resolved::None => return Err(refuse("the pending fulfillment's P is not Stored")),
     };
-    let Resolved::Kept(preimage) =
-        fetch_preimage(set, precommit.body.external_commitment()).await?
-    else {
-        return Err(refuse("the pending fulfillment's P(E) is not Stored"));
+    let preimage = match fetch_preimage(set, precommit.body.external_commitment()).await? {
+        Resolved::Kept(preimage) => preimage,
+        Resolved::Unavailable => return Ok(Err("preimage")),
+        Resolved::None => return Err(refuse("the pending fulfillment's P(E) is not Stored")),
     };
-    Ok((pending, fulfillment, precommit, preimage))
+    Ok(Ok((fulfillment, precommit, preimage)))
 }
 
-/// Stages 7 and 8 for the pending position, from what storage holds: a
-/// device that crashed after its transition finishes its own install and
-/// exercise here.
+/// Stages 7 and 8 for the pending position, from what storage holds: the
+/// device that just advanced and one that crashed after its transition write
+/// their install and exercise here alike.
+///
+/// A stage the network did not take is [`Completion::NotTaken`], never an
+/// error and never a verdict; an error is a refusal — the fence, a
+/// non-conforming `F`, an object the network established absent — or a read
+/// or write that failed, and it is reported as what it is.
 ///
 /// OWNER LOCAL, and the signature says so: it reads this device's head and
 /// the admission on it, and it builds the exercise from the trader's OWN
@@ -471,8 +534,14 @@ async fn pending_objects(
 pub async fn complete_pending_fulfillment(
     core: &CoreSDK,
     set: &StorageSet,
-) -> Result<Completed, DsmError> {
-    let (pending, fulfillment, precommit, preimage) = pending_objects(set, core).await?;
+) -> Result<Completion, DsmError> {
+    let (pending, fulfillment_id) = pending_fulfillment(core)?;
+    let position = pending.economic_position;
+    let not_taken = |why: NotTaken| Ok(Completion::NotTaken { position, why });
+    let (fulfillment, precommit, preimage) = match pending_objects(set, &fulfillment_id).await? {
+        Ok(objects) => objects,
+        Err(what) => return not_taken(NotTaken::Unavailable(what)),
+    };
     let own = own_closure_objects(set, &precommit.body, &preimage).await?;
     let request = FulfillRequest {
         precommit: &precommit.body,
@@ -494,14 +563,20 @@ pub async fn complete_pending_fulfillment(
         .map_err(|e| refuse(e.to_string()))?;
     let standing = OwnStanding::of(core, admitted, &validated)?;
     let ctx = standing.context(set)?;
-    let installed = install_pair(&ctx, set, &request).await?;
-    let exercise = exercise_legs(&ctx, set, &request).await?;
-    Ok(Completed {
-        position: pending.economic_position,
-        fulfillment_id: derive::fulfillment_id(&fulfillment.body),
+    let installed = match install_pair(&ctx, set, &request).await? {
+        Ok(installed) => installed,
+        Err(why) => return not_taken(why),
+    };
+    let exercise = match exercise_legs(&ctx, set, &request).await? {
+        Ok(exercise) => exercise,
+        Err(why) => return not_taken(why),
+    };
+    Ok(Completion::Written(Box::new(Completed {
+        position,
+        fulfillment_id,
         installed,
         exercise,
-    })
+    })))
 }
 
 /// Why the pending position is not resolved yet.
@@ -795,4 +870,43 @@ pub async fn resolve_pending_position(
         effect: advanced.effect,
         validated: advanced.root,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dsm::sofi::conformance::FulfillmentConformanceError;
+    use dsm::sofi::wire::SofiWireError;
+
+    /// An install the network did not take — the leader of `s(q)` silent,
+    /// the evidence not in hand after the rounds — is the network's status.
+    /// An install refused, or one whose read or write failed, is an error:
+    /// never the status, never `RetriesExhausted`.
+    #[test]
+    fn only_an_install_the_network_did_not_take_is_the_network_status() {
+        assert!(matches!(
+            install_failure(InstallError::LeaderUnreached),
+            Ok(NotTaken::PairLeaderUnreached)
+        ));
+        assert!(matches!(
+            install_failure(InstallError::Unavailable(vec![ConformanceMissing::Preimage])),
+            Ok(NotTaken::Evidence(missing)) if missing == vec![ConformanceMissing::Preimage]
+        ));
+        assert!(matches!(
+            install_failure(InstallError::NotConforming(
+                FulfillmentConformanceError::PrecommitMismatch
+            )),
+            Err(DsmError::InvalidOperation(..))
+        ));
+        assert!(matches!(
+            install_failure(InstallError::Wire(SofiWireError::UnknownSignatureAlg {
+                alg: 7
+            })),
+            Err(DsmError::InvalidOperation(..))
+        ));
+        assert!(matches!(
+            install_failure(InstallError::Storage("the route record".to_string())),
+            Err(DsmError::Storage { .. })
+        ));
+    }
 }
