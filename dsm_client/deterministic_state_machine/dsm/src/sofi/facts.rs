@@ -672,7 +672,7 @@ mod tests {
         };
         let mut roots: Vec<D32> = (0..generation).map(|g| [0xF0 ^ (g as u8); 32]).collect();
         roots.push(root);
-        VaultChain::from_recorded_generations(roots)
+        VaultChain::of_roots_for_test(roots)
     }
 
     /// The validated predecessor the fixture's `P` was built on.

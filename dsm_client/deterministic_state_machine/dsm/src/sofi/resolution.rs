@@ -160,13 +160,40 @@ pub fn parent_status(established: Option<[u8; 32]>, claimed: &[u8; 32]) -> Paren
 /// A chain is established, never assembled: it starts at an accepted genesis
 /// ([`VaultChain::from_genesis`]) and grows by one Core-recomputed
 /// consumption at a time ([`VaultChain::extend`]). The one other way in is
-/// this verifier's own memo of generations it established before
-/// ([`VaultChain::from_recorded_generations`]), which the CI gate
+/// this verifier's own memo of generations it established before, anchored
+/// at the genesis it accepts now and linked row to row before it is stood on
+/// ([`VaultChain::from_recorded`]), which the CI gate
 /// `ci/sofi_validated_root_constructors.sh` pins to its one caller. Nothing
 /// read off the network becomes a root here.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct VaultChain {
     roots: Vec<[u8; 32]>,
+}
+
+/// One generation as this device recorded it (`VaultChain::from_recorded`):
+/// the root, and — past genesis — the root it was built on and the operation
+/// that consumed that root.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecordedGeneration {
+    pub generation: u64,
+    pub root: [u8; 32],
+    pub pre_root: Option<[u8; 32]>,
+    pub consumed_by: Option<[u8; 32]>,
+}
+
+/// This device's own record of a chain contradicts itself, or the genesis it
+/// is anchored at. Not a network status: the local store is incoherent, and
+/// nothing is stood on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemoBroken {
+    pub generation: u64,
+    pub why: &'static str,
+}
+
+impl core::fmt::Display for MemoBroken {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "recorded generation {}: {}", self.generation, self.why)
+    }
 }
 
 /// Why a post state does not extend a chain: it was not built on the chain's
@@ -218,19 +245,78 @@ impl VaultChain {
         Ok(())
     }
 
-    /// THE MEMO PUNCTURE: the generations this verifier itself established
-    /// earlier, as it recorded them — contiguous from generation zero, a
-    /// root per generation. A memo proves nothing by existing: what it holds
-    /// is this device's own earlier conclusion, read back, and a caller that
-    /// hands it anything else has fabricated a chain. That is why the CI gate
-    /// pins this constructor to its one caller, the chain walker's start.
-    pub fn from_recorded_generations(roots: Vec<[u8; 32]>) -> Self {
-        Self { roots }
+    /// THE MEMO: the generations this verifier itself established earlier,
+    /// as it recorded them, anchored at the genesis it accepts NOW and
+    /// linked one to the next before any of it is stood on. Row zero is the
+    /// accepted genesis root; every later row was built on the root before
+    /// it and names the operation that consumed it. A memo proves nothing by
+    /// existing — what it holds is this device's own earlier conclusion, read
+    /// back — so what can be checked is checked here, and a record that does
+    /// not anchor or does not link is a contradiction, never a chain. The CI
+    /// gate pins this constructor to its one caller, the chain walk's start.
+    pub fn from_recorded(
+        genesis: &super::lineage::AcceptedVaultGenesis,
+        rows: &[RecordedGeneration],
+    ) -> Result<Self, MemoBroken> {
+        let mut chain = Self::from_genesis(genesis);
+        for (index, row) in rows.iter().enumerate() {
+            let generation = u64::try_from(index).map_err(|_| MemoBroken {
+                generation: row.generation,
+                why: "generation overflow",
+            })?;
+            if row.generation != generation {
+                return Err(MemoBroken {
+                    generation: row.generation,
+                    why: "the rows are not contiguous from generation zero",
+                });
+            }
+            if generation == 0 {
+                if row.root != *genesis.genesis_root() {
+                    return Err(MemoBroken {
+                        generation: 0,
+                        why: "the recorded genesis is not the accepted genesis",
+                    });
+                }
+                if row.pre_root.is_some() || row.consumed_by.is_some() {
+                    return Err(MemoBroken {
+                        generation: 0,
+                        why: "the genesis generation records a consumption",
+                    });
+                }
+                continue;
+            }
+            let Some((.., head)) = chain.head() else {
+                return Err(MemoBroken {
+                    generation,
+                    why: "no head to link to",
+                });
+            };
+            if row.pre_root != Some(head) {
+                return Err(MemoBroken {
+                    generation,
+                    why: "the generation was not built on the one before it",
+                });
+            }
+            if row.consumed_by.is_none() {
+                return Err(MemoBroken {
+                    generation,
+                    why: "no operation is recorded as consuming the generation before it",
+                });
+            }
+            chain.roots.push(row.root);
+        }
+        Ok(chain)
     }
 
     /// `R*_g` for every generation established, in generation order.
     pub fn roots(&self) -> &[[u8; 32]] {
         &self.roots
+    }
+
+    /// A chain stated for a test of what reads it; in-crate only.
+    #[cfg(test)]
+    pub(crate) fn of_roots_for_test(roots: Vec<[u8; 32]>) -> Self {
+        Self { roots }
     }
 
     /// The status of a parent asked about at `generation` — [`parent_status`]
@@ -990,6 +1076,106 @@ mod tests {
             ..good_leg()
         }];
         assert_eq!(resolve_position(&realized(&refuted)), Ok(Resolution::Void));
+    }
+
+    /// The genesis the memo tests anchor at, accepted as the fixture owner's
+    /// creation.
+    fn accepted_genesis() -> crate::sofi::lineage::AcceptedVaultGenesis {
+        use crate::sofi::lineage::genesis_acceptance::{accept, valid};
+        accept(&valid()).expect("the fixture's genesis is accepted")
+    }
+
+    /// Rows as this device records them: the genesis at zero, then each
+    /// root built on the one before it and consumed by a distinct operation.
+    fn recorded(genesis: &[u8; 32], roots: &[[u8; 32]]) -> Vec<RecordedGeneration> {
+        let mut rows = vec![RecordedGeneration {
+            generation: 0,
+            root: *genesis,
+            pre_root: None,
+            consumed_by: None,
+        }];
+        let mut previous = *genesis;
+        for (i, root) in roots.iter().enumerate() {
+            rows.push(RecordedGeneration {
+                generation: i as u64 + 1,
+                root: *root,
+                pre_root: Some(previous),
+                consumed_by: Some([0xC0 | i as u8; 32]),
+            });
+            previous = *root;
+        }
+        rows
+    }
+
+    /// THE MEMO IS ANCHORED AND LINKED, OR IT IS NOTHING. The rows this
+    /// device recorded become a chain only from the genesis it accepts now,
+    /// each generation built on the one before it and consumed by a named
+    /// operation; a record that does not anchor, does not link, names no
+    /// consumption or skips a generation is a contradiction and no chain.
+    /// MUTATION CONTROL: a constructor that takes the rows as they are turns
+    /// this red.
+    #[test]
+    fn the_memo_becomes_a_chain_only_anchored_at_the_genesis_and_linked_row_to_row() {
+        let genesis = accepted_genesis();
+        let g = *genesis.genesis_root();
+        let (r1, r2) = ([0xA1; 32], [0xA2; 32]);
+
+        assert_eq!(
+            VaultChain::from_recorded(&genesis, &[]).unwrap().roots(),
+            &[g][..],
+            "no rows: the chain is the genesis alone"
+        );
+        let rows = recorded(&g, &[r1, r2]);
+        assert_eq!(
+            VaultChain::from_recorded(&genesis, &rows).unwrap().roots(),
+            &[g, r1, r2][..]
+        );
+
+        // Not anchored: row zero is not the genesis accepted now.
+        let mut unanchored = rows.clone();
+        unanchored[0].root = OTHER_ROOT;
+        assert_eq!(
+            VaultChain::from_recorded(&genesis, &unanchored)
+                .unwrap_err()
+                .generation,
+            0
+        );
+        // The genesis row records a consumption.
+        let mut consumed_genesis = rows.clone();
+        consumed_genesis[0].pre_root = Some(OTHER_ROOT);
+        assert_eq!(
+            VaultChain::from_recorded(&genesis, &consumed_genesis)
+                .unwrap_err()
+                .generation,
+            0
+        );
+        // Not linked: generation 2 was not built on generation 1.
+        let mut unlinked = rows.clone();
+        unlinked[2].pre_root = Some(OTHER_ROOT);
+        assert_eq!(
+            VaultChain::from_recorded(&genesis, &unlinked)
+                .unwrap_err()
+                .generation,
+            2
+        );
+        // No consumption named.
+        let mut unnamed = rows.clone();
+        unnamed[1].consumed_by = None;
+        assert_eq!(
+            VaultChain::from_recorded(&genesis, &unnamed)
+                .unwrap_err()
+                .generation,
+            1
+        );
+        // A generation skipped.
+        let mut gapped = rows.clone();
+        gapped.remove(1);
+        assert_eq!(
+            VaultChain::from_recorded(&genesis, &gapped)
+                .unwrap_err()
+                .generation,
+            2
+        );
     }
 
     /// A leg that consumed its canonical parent on this operation's E.

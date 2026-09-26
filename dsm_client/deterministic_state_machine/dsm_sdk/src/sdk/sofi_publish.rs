@@ -33,7 +33,8 @@ use dsm::sofi::wire::{
 };
 use dsm::types::error::DsmError;
 
-use crate::sdk::sofi_evidence::LOCATOR_BUDGET;
+/// Candidates one locator scan may examine before it is `Unavailable`.
+pub const LOCATOR_BUDGET: usize = 64;
 use crate::sdk::sofi_sdk::{Produced, ToPublish};
 use crate::sdk::storage_io::{
     append_to_index, put_immutable, read_stored_bytes, resolve_locator, resolve_locator_all,

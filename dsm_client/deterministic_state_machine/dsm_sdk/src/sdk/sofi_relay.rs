@@ -21,13 +21,14 @@
 //! every carrier.
 use dsm::route_chain::CellFact;
 use dsm::sofi::exercise::attempt_resolution;
+use dsm::sofi::resolve::value_of;
 use dsm::sofi::publication::{Publication, Signed};
 use dsm::sofi::storage::Resolved;
 use dsm::sofi::wire::{TraderFulfillmentBody, TraderPrecommitBody};
 use dsm::types::error::DsmError;
 
 use crate::sdk::route_seats::{
-    read_cell, value_of, write_recorded, write_recorded_position, NodeSeats, WriteReport,
+    read_cell, write_recorded, write_recorded_position, NodeSeats, WriteReport,
 };
 use crate::sdk::sofi_exercise::{attempt_cell, LegWrite};
 use crate::sdk::sofi_publish::{fetch_fulfillment, fetch_precommit};

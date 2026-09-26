@@ -59,7 +59,7 @@ use dsm::sofi::wire::{
 };
 use dsm::types::operations::Operation;
 
-use crate::sdk::sofi_evidence::LocalLeaves;
+use dsm::sofi::resolve::LocalLeaves;
 
 type D32 = [u8; 32];
 

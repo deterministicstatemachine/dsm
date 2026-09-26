@@ -37,6 +37,7 @@ use dsm::sofi::lineage::{advance_resolved, descendant_fence, AdvanceError};
 use dsm::sofi::publication::Publication;
 use dsm::sofi::registration::Registration;
 use dsm::sofi::resolution::{PositionEffect, Resolution};
+use dsm::sofi::resolve::{value_of, Acquired, LocalLeaves};
 use dsm::sofi::storage::Resolved;
 use dsm::sofi::validation::{trader_post_states, vault_post_states};
 use dsm::sofi::wire::{
@@ -49,16 +50,11 @@ use dsm::types::operations::Operation;
 
 use crate::sdk::core_sdk::CoreSDK;
 use crate::sdk::economic_admission_flow::validated_root_or_activate;
-use crate::sdk::route_seats::{read_cell, value_of, NodeSeats};
-use crate::sdk::sofi_evidence::{Acquired, LocalLeaves};
-use crate::sdk::sofi_exercise::{build_exercise, read_attempt_cell, write_exercise, LegWrite};
+use crate::sdk::route_seats::{read_cell, NodeSeats};
+use crate::sdk::sofi_exercise::{build_exercise, write_exercise, LegWrite};
 use crate::sdk::sofi_publish::{fetch_fulfillment, fetch_precommit, fetch_preimage};
-use crate::sdk::sofi_chain::ChainWalker;
-use crate::sdk::sofi_register::{
-    acquire_conformance_evidence, install_fulfillment, position_cells, read_registration,
-    InstallRequest, Installed,
-};
-use crate::sdk::sofi_resolve::Resolver;
+use crate::sdk::sofi_reads::{local_leaves_of_validated, verifier_error, VerifierContext};
+use crate::sdk::sofi_register::{install_fulfillment, position_cells, InstallRequest, Installed};
 use crate::sdk::storage_set::StorageSet;
 use dsm::sofi::resolution::{Incomplete, VaultChain};
 use crate::storage::client_db::economic_lineage;
@@ -226,7 +222,12 @@ pub async fn fulfill(
         &set.id(),
         None,
     )?;
-    let installed = install_pair(set, request).await?;
+    let admitted = economic_lineage::get_admitted()
+        .map_err(|e| storage("load admitted", e))?
+        .ok_or_else(|| refuse("no admitted predecessor for the fulfillment"))?;
+    let standing = OwnStanding::of(core, admitted, &validated)?;
+    let ctx = standing.context(set)?;
+    let installed = install_pair(&ctx, set, request).await?;
     Ok(Fulfilled {
         position: q,
         fulfillment_id,
@@ -245,13 +246,39 @@ fn install_request<'a>(request: &FulfillRequest<'a>) -> InstallRequest<'a> {
     }
 }
 
+/// This device as the verifier of its own position: its leaves at its
+/// validated root, and the position it resolved itself.
+struct OwnStanding {
+    local: LocalLeaves,
+    admitted: AdmittedEconomicPosition,
+}
+
+impl OwnStanding {
+    fn of(
+        core: &CoreSDK,
+        admitted: AdmittedEconomicPosition,
+        validated: &ValidatedEconomicRoot,
+    ) -> Result<Self, DsmError> {
+        let head = core
+            .device_head()
+            .ok_or_else(|| storage("device head", "none"))?;
+        let local = local_leaves_of_validated(&head.genesis_digest(), &head.devid(), validated)?;
+        Ok(Self { local, admitted })
+    }
+
+    fn context<'a>(&'a self, set: &'a StorageSet) -> Result<VerifierContext<'a>, DsmError> {
+        VerifierContext::new(set, Some(&self.local), Some(&self.admitted))
+    }
+}
+
 /// Stage 7: the pair at `s(q)`, conformance first (R9). Idempotent at the
 /// members, which keep what they are given.
 async fn install_pair(
+    ctx: &VerifierContext<'_>,
     set: &StorageSet,
     request: &FulfillRequest<'_>,
 ) -> Result<Installed, DsmError> {
-    install_fulfillment(set, &install_request(request))
+    install_fulfillment(&ctx.verifier(), set, &install_request(request))
         .await
         .map_err(|e| refuse(format!("install: {e:?}")))
 }
@@ -259,11 +286,16 @@ async fn install_pair(
 /// Stage 8: the exercise, built over the evidence its conformance was
 /// decided on, at every leg's key (R11).
 async fn exercise_legs(
+    ctx: &VerifierContext<'_>,
     set: &StorageSet,
     request: &FulfillRequest<'_>,
 ) -> Result<Vec<LegWrite>, DsmError> {
     let install = install_request(request);
-    let evidence = match acquire_conformance_evidence(set, &install).await? {
+    let evidence = match ctx
+        .verifier()
+        .acquire_conformance_evidence(&install.objects())
+        .map_err(verifier_error)?
+    {
         Acquired::Complete(evidence) => evidence,
         Acquired::Exhausted(missing) | Acquired::NoSource(missing) => {
             return Err(storage(
@@ -450,8 +482,20 @@ pub async fn complete_pending_fulfillment(
         fulfillment_signature: &fulfillment.signature,
         own_objects: &own,
     };
-    let installed = install_pair(set, &request).await?;
-    let exercise = exercise_legs(set, &request).await?;
+    let admitted = economic_lineage::get_admitted()
+        .map_err(|e| storage("load admitted", e))?
+        .ok_or_else(|| refuse("no admitted predecessor for the pending position"))?;
+    // THE FENCE, again on the path that finishes the descendant at q: the
+    // pending position stands on the root its resolved predecessor selected,
+    // or it is not finished.
+    descendant_fence(admitted.predecessor_claim(), &pending.pre_economic_root)
+        .map_err(|e| refuse(e.to_string()))?;
+    let validated = ValidatedEconomicRoot::rehydrate_from_admitted_store(admitted)
+        .map_err(|e| refuse(e.to_string()))?;
+    let standing = OwnStanding::of(core, admitted, &validated)?;
+    let ctx = standing.context(set)?;
+    let installed = install_pair(&ctx, set, &request).await?;
+    let exercise = exercise_legs(&ctx, set, &request).await?;
     Ok(Completed {
         position: pending.economic_position,
         fulfillment_id: derive::fulfillment_id(&fulfillment.body),
@@ -600,11 +644,16 @@ pub async fn resolve_pending_position(
     // Registration, from the pair (R10). The F at q must be THIS one: the
     // device only ever writes its own claims at its own positions, so any
     // other outcome is a local incoherence, not a race to wait out.
-    let registration =
-        match read_registration(set, &genesis, &device_id, q, &validated.economic_root()).await? {
-            Ok(registration) => registration,
-            Err(missing) => return not_yet(NotResolved::Registration(missing)),
-        };
+    let standing = OwnStanding::of(core, admitted, &validated)?;
+    let ctx = standing.context(set)?;
+    let verifier = ctx.verifier();
+    let registration = match verifier
+        .read_registration(&genesis, &device_id, q, &validated.economic_root())
+        .map_err(verifier_error)?
+    {
+        Ok(registration) => registration,
+        Err(missing) => return not_yet(NotResolved::Registration(missing)),
+    };
     let fulfillment = match registration.registration() {
         Registration::Registered(signed)
             if derive::fulfillment_id(&signed.body) == fulfillment_id =>
@@ -635,42 +684,38 @@ pub async fn resolve_pending_position(
         .find(|a| a.vault_id == first.vault_id)
         .map(|a| a.attempt)
         .ok_or_else(|| refuse("F names no attempt for P's first leg"))?;
-    let exercise =
-        match read_attempt_cell(set, &first.vault_id, &first.parent_root, attempt).await? {
-            Ok(read) => match read.into_exercise() {
-                Some(exercise) => exercise,
-                None => return not_yet(NotResolved::ExerciseNotRead),
-            },
-            Err(missing) => {
-                log::info!("[sofi advance] the first leg's cell is not decided yet: {missing:?}");
-                return not_yet(NotResolved::ExerciseNotRead);
-            }
-        };
+    let exercise = match verifier
+        .read_attempt_cell(&first.vault_id, &first.parent_root, attempt)
+        .map_err(verifier_error)?
+    {
+        Ok(read) => match read.into_exercise() {
+            Some(exercise) => exercise,
+            None => return not_yet(NotResolved::ExerciseNotRead),
+        },
+        Err(missing) => {
+            log::info!("[sofi advance] the first leg's cell is not decided yet: {missing:?}");
+            return not_yet(NotResolved::ExerciseNotRead);
+        }
+    };
 
     // What this verifier brings: its leaves, the position it resolved
     // itself, and the canonical chain of each vault a leg names — walked
     // forward from the genesis or from the generations this device already
     // recorded, so a parent past genesis is decided rather than deferred.
-    let local = LocalLeaves::of_validated(&genesis, &device_id, &validated)?;
     let mut chains: BTreeMap<D32, VaultChain> = BTreeMap::new();
-    let walker = ChainWalker {
-        set,
-        local: &local,
-        parent: Some(&admitted),
-    };
     for leg in precommit.legs() {
         if chains.contains_key(&leg.vault_id) {
             continue;
         }
-        chains.insert(leg.vault_id, walker.chain(&leg.vault_id).await?);
+        chains.insert(
+            leg.vault_id,
+            verifier.chain(&leg.vault_id).map_err(verifier_error)?,
+        );
     }
-    let resolver = Resolver {
-        set,
-        local: &local,
-        parent: Some(&admitted),
-        chains: &chains,
-    };
-    let established = match resolver.establish_own(&exercise, &registration).await? {
+    let established = match verifier
+        .establish_own(&chains, &exercise, &registration)
+        .map_err(verifier_error)?
+    {
         Ok(established) => established,
         Err(why) => return not_yet(NotResolved::Facts(why)),
     };

@@ -24,6 +24,7 @@ use dsm::sofi::derive;
 use dsm::sofi::publication::{Publication, VaultPolicyClass};
 use dsm::sofi::registration::Registration;
 use dsm::sofi::resolution::{VaultChain, WalkOutcome};
+use dsm::sofi::resolve::{Acquired, LocalLeaves, VaultGenesis, Verifier, WALK_BUDGET};
 use dsm::sofi::storage::Discovered;
 use dsm::sofi::validation::{close_vault_post, swap_vault_post, Evidence, EvidenceNeeds, Policies};
 use dsm::sofi::wire::{
@@ -43,15 +44,11 @@ use crate::sdk::sofi_advance::{
     complete_pending_fulfillment, fulfill, own_closure_objects, own_parent_claim,
     resolve_pending_position, Advanced, FulfillRequest,
 };
-use crate::sdk::sofi_chain::ChainWalker;
-use crate::sdk::sofi_evidence::{
-    acquire_evidence, fetch_vault_genesis, Acquired, LocalLeaves, VaultGenesis,
+use crate::sdk::sofi_reads::{
+    local_leaves_of_validated, verifier_error, LiveSofiReads, VerifierContext,
 };
-use crate::sdk::sofi_exercise::read_attempt_cell;
 use crate::sdk::sofi_publish::{fetch_setup_for, publish, publish_produced, Published};
-use crate::sdk::sofi_register::read_registration;
 use crate::sdk::sofi_relay::relay_fulfillment;
-use crate::sdk::sofi_resolve::{Resolver, WALK_BUDGET};
 use crate::sdk::sofi_sdk::{
     build_fulfillment, build_setup, build_vault_create, check_draft, draft_close, draft_route,
     ToPublish, TraderContext, UncheckedDraft,
@@ -355,7 +352,19 @@ pub async fn setup(
     intent: &SetupIntent,
 ) -> Result<SetUp, DsmError> {
     let (genesis, device_id) = identity(core)?;
-    match fetch_vault_genesis(set, &intent.vault_id).await? {
+    let admitted = economic_lineage::get_admitted()
+        .map_err(|e| storage("load admitted", e))?
+        .ok_or_else(|| {
+            refuse("no admitted position: a setup names the claim registered at its position")
+        })?;
+    let validated = validated_root_or_activate(core)?;
+    let local = local_leaves_of_validated(&genesis, &device_id, &validated)?;
+    let ctx = VerifierContext::new(set, Some(&local), Some(&admitted))?;
+    match ctx
+        .verifier()
+        .vault_genesis(&intent.vault_id)
+        .map_err(verifier_error)?
+    {
         VaultGenesis::Accepted(..) => {}
         VaultGenesis::NotPublished => {
             return Err(refuse(
@@ -369,12 +378,6 @@ pub async fn setup(
         }
         VaultGenesis::Refused(why) => return Err(refuse(format!("vault genesis refused: {why}"))),
     }
-    let admitted = economic_lineage::get_admitted()
-        .map_err(|e| storage("load admitted", e))?
-        .ok_or_else(|| {
-            refuse("no admitted position: a setup names the claim registered at its position")
-        })?;
-    let validated = validated_root_or_activate(core)?;
     let (pre_tree, ..) = producer_tree_and_pre_state(&validated)?;
     let claim_ref = own_claim_ref(&admitted)?;
     let public_key = crate::sdk::signing_authority::current_public_key()?;
@@ -459,7 +462,7 @@ fn standing(core: &CoreSDK) -> Result<Standing, DsmError> {
         .map_err(|e| storage("load admitted", e))?
         .ok_or_else(|| refuse("no admitted position to build on"))?;
     let (tree, pre_state) = producer_tree_and_pre_state(&validated)?;
-    let local = LocalLeaves::of_validated(&genesis, &device_id, &validated)?;
+    let local = local_leaves_of_validated(&genesis, &device_id, &validated)?;
     Ok(Standing {
         genesis,
         device_id,
@@ -502,15 +505,15 @@ async fn vault_policies(set: &StorageSet, state: &VaultStateLeaf) -> Result<Poli
 /// walk wrote must reproduce the head's root.
 async fn vault_at_head(
     set: &StorageSet,
-    walker: &ChainWalker<'_>,
+    verifier: &Verifier<'_, LiveSofiReads<'_>>,
     vault_id: &D32,
 ) -> Result<(VaultAtHead, VaultChain), DsmError> {
-    let chain = walker.chain(vault_id).await?;
+    let chain = verifier.chain(vault_id).map_err(verifier_error)?;
     let (generation, root) = chain
         .head()
         .ok_or_else(|| refuse("no head of this vault is established"))?;
     let (state, tree) = if generation == 0 {
-        let accepted = match fetch_vault_genesis(set, vault_id).await? {
+        let accepted = match verifier.vault_genesis(vault_id).map_err(verifier_error)? {
             VaultGenesis::Accepted(accepted) => accepted,
             VaultGenesis::NotPublished => {
                 return Err(refuse(
@@ -564,12 +567,10 @@ async fn vault_at_head(
 }
 
 impl Standing {
-    fn walker<'a>(&'a self, set: &'a StorageSet) -> ChainWalker<'a> {
-        ChainWalker {
-            set,
-            local: &self.local,
-            parent: Some(&self.admitted),
-        }
+    /// This device as the verifier: its own leaves and the position it
+    /// resolved itself, over the pinned set.
+    fn context<'a>(&'a self, set: &'a StorageSet) -> Result<VerifierContext<'a>, DsmError> {
+        VerifierContext::new(set, Some(&self.local), Some(&self.admitted))
     }
 }
 
@@ -645,10 +646,11 @@ pub async fn find_route(
     intent: &FindRouteIntent,
 ) -> Result<Vec<Hop>, DsmError> {
     let standing = standing(core)?;
-    let walker = standing.walker(set);
+    let ctx = standing.context(set)?;
+    let verifier = ctx.verifier();
     let mut heads = Vec::new();
     for leaf in standing.local.relationships() {
-        match vault_at_head(set, &walker, &leaf.vault_id).await {
+        match vault_at_head(set, &verifier, &leaf.vault_id).await {
             Ok((head, ..)) if head.state.status == VAULT_STATUS_ACTIVE => heads.push(head),
             Ok(..) => {}
             Err(e) => log::info!(
@@ -741,20 +743,23 @@ async fn own_setup_ref(
 
 /// The live attempt of a leg at `parent_root`: the walk's first unresolved
 /// key, advanced past keys an exercise still in flight holds (§31 stage 6).
-async fn live_attempt(
-    set: &StorageSet,
-    resolver: &Resolver<'_>,
+fn live_attempt(
+    verifier: &Verifier<'_, LiveSofiReads<'_>>,
+    chains: &BTreeMap<D32, VaultChain>,
     vault_id: &D32,
     parent_root: &D32,
 ) -> Result<u64, DsmError> {
-    let mut cursor = 0;
+    let mut walked = verifier
+        .walk_parent(chains, vault_id, parent_root, 0, WALK_BUDGET)
+        .map_err(verifier_error)?;
     let first = loop {
-        let walked = resolver
-            .walk_parent(vault_id, parent_root, cursor, WALK_BUDGET)
-            .await?;
         match walked.outcome {
             WalkOutcome::Unresolved { attempt } => break attempt,
-            WalkOutcome::Continue { cursor: next } => cursor = next,
+            WalkOutcome::Continue { .. } => {
+                walked = verifier
+                    .continue_walk(chains, walked, WALK_BUDGET)
+                    .map_err(verifier_error)?
+            }
             WalkOutcome::Consumed { attempt } => {
                 return Err(refuse(format!(
                     "the vault's parent was consumed at attempt {attempt}: its head moved"
@@ -770,7 +775,10 @@ async fn live_attempt(
     let mut attempt = first;
     let mut advanced = 0;
     while advanced <= ATTEMPT_ADVANCE {
-        match read_attempt_cell(set, vault_id, parent_root, attempt).await? {
+        match verifier
+            .read_attempt_cell(vault_id, parent_root, attempt)
+            .map_err(verifier_error)?
+        {
             Ok(read) if read.exercise().is_none() => return Ok(attempt),
             Ok(..) => {
                 attempt = next_attempt(attempt).map_err(refuse)?;
@@ -968,8 +976,11 @@ async fn exercise_draft(
     draft: UncheckedDraft,
 ) -> Result<PositionOutcome, DsmError> {
     // Stage 3.
-    let evidence = match acquire_evidence(set, draft.precommit(), draft.preimage(), &standing.local)
-        .await?
+    let ctx = standing.context(set)?;
+    let verifier = ctx.verifier();
+    let evidence = match verifier
+        .acquire_evidence(draft.precommit(), draft.preimage())
+        .map_err(verifier_error)?
     {
         Acquired::Complete(evidence) => evidence,
         Acquired::Exhausted(missing) | Acquired::NoSource(missing) => {
@@ -984,21 +995,17 @@ async fn exercise_draft(
 
     // Stage 6: each leg's live attempt, from the walk at its parent.
     let mut chains = BTreeMap::new();
-    let walker = standing.walker(set);
     for leg in checked.precommit().legs() {
-        chains.insert(leg.vault_id, walker.chain(&leg.vault_id).await?);
+        chains.insert(
+            leg.vault_id,
+            verifier.chain(&leg.vault_id).map_err(verifier_error)?,
+        );
     }
-    let resolver = Resolver {
-        set,
-        local: &standing.local,
-        parent: Some(&standing.admitted),
-        chains: &chains,
-    };
     let mut attempts = Vec::new();
     for leg in checked.precommit().legs() {
         attempts.push((
             leg.vault_id,
-            live_attempt(set, &resolver, &leg.vault_id, &leg.parent_root).await?,
+            live_attempt(&verifier, &chains, &leg.vault_id, &leg.parent_root)?,
         ));
     }
     let produced =
@@ -1062,14 +1069,15 @@ pub async fn trade(
     intent: &TradeIntent,
 ) -> Result<PositionOutcome, DsmError> {
     let standing = standing(core)?;
-    let walker = standing.walker(set);
+    let ctx = standing.context(set)?;
+    let verifier = ctx.verifier();
     let mut token = intent.token_in_policy_commit;
     let mut amount = intent.amount_in;
     let mut hops = Vec::new();
     let mut cores = Vec::new();
     let mut vaults = Vec::new();
     for (index, vault_id) in intent.vault_ids.iter().enumerate() {
-        let (vault, ..) = vault_at_head(set, &walker, vault_id).await?;
+        let (vault, ..) = vault_at_head(set, &verifier, vault_id).await?;
         let setup_ref =
             own_setup_ref(set, &standing.genesis, &standing.device_id, vault_id).await?;
         let base = relationship_base(&standing, vault_id)?;
@@ -1115,8 +1123,9 @@ pub async fn close(
     intent: &CloseIntent,
 ) -> Result<PositionOutcome, DsmError> {
     let standing = standing(core)?;
-    let walker = standing.walker(set);
-    let (vault, ..) = vault_at_head(set, &walker, &intent.vault_id).await?;
+    let ctx = standing.context(set)?;
+    let verifier = ctx.verifier();
+    let (vault, ..) = vault_at_head(set, &verifier, &intent.vault_id).await?;
     if vault.state.owner_genesis != standing.genesis
         || vault.state.owner_device_id != standing.device_id
     {
@@ -1195,15 +1204,17 @@ pub async fn relay(set: &StorageSet, intent: &RelayIntent) -> Result<Relayed, Ds
         ))
     })?;
     let parent_root = parent.validated_root().economic_root();
-    let registration = read_registration(
-        set,
-        &intent.trader_genesis,
-        &intent.trader_device_id,
-        intent.position,
-        &parent_root,
-    )
-    .await?
-    .map_err(|missing| storage("position pair", format!("not decided yet: {missing:?}")))?;
+    let ctx = VerifierContext::new(set, None, None)?;
+    let registration = ctx
+        .verifier()
+        .read_registration(
+            &intent.trader_genesis,
+            &intent.trader_device_id,
+            intent.position,
+            &parent_root,
+        )
+        .map_err(verifier_error)?
+        .map_err(|missing| storage("position pair", format!("not decided yet: {missing:?}")))?;
     let fulfillment = match registration.into_registration() {
         Registration::Registered(signed) => signed,
         Registration::NeverRegistered { .. } => {
