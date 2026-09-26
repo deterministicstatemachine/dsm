@@ -26,7 +26,6 @@ function contactDto(alias: string, fill: number, bleAddress?: string) {
 }
 
 function installStandardWalletMocks(contactList: any[] = []) {
-  (dsmClient.isReady as any) = jest.fn().mockResolvedValue(true);
   (dsmClient.getIdentity as any) = jest.fn().mockResolvedValue({
     genesisHash: 'G'.repeat(32),
     deviceId: 'D'.repeat(32),
@@ -42,7 +41,6 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
 
   test('reloads transactions when dsm-wallet-refresh is dispatched', async () => {
     // Prepare identity to satisfy loadWalletData
-    (dsmClient.isReady as any) = jest.fn().mockResolvedValue(true);
     (dsmClient.getIdentity as any) = jest.fn().mockResolvedValue({ genesisHash: 'G'.repeat(32), deviceId: 'D'.repeat(32) });
 
     // getAllBalances: first empty, then updated
@@ -81,7 +79,6 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
   test('offline send submits through sendOfflineTransfer', async () => {
     const contact = contactDto('Receiver', 0x0a, 'AA:BB:CC:DD:EE:FF');
 
-    (dsmClient.isReady as any) = jest.fn().mockResolvedValue(true);
     (dsmClient.getIdentity as any) = jest
       .fn()
       .mockResolvedValue({ genesisHash: 'G'.repeat(32), deviceId: 'D'.repeat(32) });
@@ -244,7 +241,6 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
   });
 
   test('inbox check loads preview items without full storage sync', async () => {
-    (dsmClient.isReady as any) = jest.fn().mockResolvedValue(true);
     (dsmClient.getIdentity as any) = jest
       .fn()
       .mockResolvedValue({ genesisHash: 'G'.repeat(32), deviceId: 'D'.repeat(32) });
@@ -272,7 +268,6 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
   });
 
   test('inbox badge updates before the user opens the inbox', async () => {
-    (dsmClient.isReady as any) = jest.fn().mockResolvedValue(true);
     (dsmClient.getIdentity as any) = jest
       .fn()
       .mockResolvedValue({ genesisHash: 'G'.repeat(32), deviceId: 'D'.repeat(32) });
@@ -330,7 +325,6 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
   // on the previous-tip route; it used to drop those and keep a label nothing
   // could reach.
   test('an item Rust marked stale-route is listed with that marking', async () => {
-    (dsmClient.isReady as any) = jest.fn().mockResolvedValue(true);
     (dsmClient.getIdentity as any) = jest
       .fn()
       .mockResolvedValue({ genesisHash: 'G'.repeat(32), deviceId: 'D'.repeat(32) });
@@ -358,7 +352,6 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
   // The bilateral transfer dialog stands aside while the inbox is open; it
   // learns of it from `inbox.open`, which nothing emitted before.
   test('opening and closing the inbox announces inbox.open', async () => {
-    (dsmClient.isReady as any) = jest.fn().mockResolvedValue(true);
     (dsmClient.getIdentity as any) = jest
       .fn()
       .mockResolvedValue({ genesisHash: 'G'.repeat(32), deviceId: 'D'.repeat(32) });

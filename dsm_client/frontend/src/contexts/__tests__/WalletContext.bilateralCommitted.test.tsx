@@ -52,7 +52,6 @@ describe('WalletContext bilateral committed event', () => {
         genesisHash: 'G'.repeat(32),
         deviceId: 'D'.repeat(32),
       });
-    jest.spyOn(dsmClient, 'isReady' as any).mockResolvedValue(true);
     // The listener reloads on an animation frame; fake timers do not drive
     // jsdom's, so run the frame callback at once.
     jest.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => {
@@ -103,7 +102,6 @@ describe('WalletContext bilateral committed event', () => {
       genesisHash: 'G'.repeat(32),
       deviceId: 'D'.repeat(32),
     });
-    jest.spyOn(dsmClient, 'isReady' as any).mockResolvedValue(true);
 
     await renderWalletProvider();
 

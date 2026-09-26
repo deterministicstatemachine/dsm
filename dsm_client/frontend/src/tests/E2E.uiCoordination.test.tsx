@@ -16,7 +16,7 @@
  * - dsmClient.getAllBalances() → dsm/wallet.ts::getAllBalances() → WebViewBridge::getAllBalancesStrictBridge() → callBin() → sendMessageBin (mock)
  * - dsmClient.getWalletHistory() → dsm/wallet.ts::getWalletHistory() → WebViewBridge::getWalletHistoryStrictBridge() → routerQueryBin() → sendMessageBin (mock)
  * - dsmClient.getIdentity() → dsm/identity.ts::getIdentity() → getHeaders() → getTransportHeadersV3Bin() → sendMessageBin (mock)
- * - dsmClient.isReady() → hasIdentity() → checkIdentityState() → sendMessageBin (mock)
+ * - useTransactions → checkIdentityState() (the native session store)
  * - acceptIncomingTransfer() → acceptOfflineTransfer() → acceptBilateralByCommitmentBridge() → callBin() → sendMessageBin (mock)
  * - rejectIncomingTransfer() → rejectOfflineTransfer() → rejectBilateralByCommitmentBridge() → sendBridgeRequestBytes() → sendMessageBin (mock)
  * - EventBridge (REAL — initializeEventBridge)
@@ -708,7 +708,7 @@ describe('INTEGRATED: Full chain with sendMessageBin-only mock', () => {
     render(<ProductionLayout />);
     await settleWalletInit();
 
-    // Wait for the REAL init chain: isReady → getIdentity → getAllBalances → getWalletHistory
+    // Wait for the REAL init chain: getIdentity → getAllBalances → getWalletHistory
     await waitFor(() => {
       expect(screen.getByTestId('i-balance-era').textContent).not.toBe('none');
     });

@@ -2,7 +2,6 @@
 
 jest.mock('../WebViewBridge', () => ({
   queryTransportHeadersV3: jest.fn(),
-  getDeviceIdBinBridgeAsync: jest.fn(),
   getPreference: jest.fn(),
   setPreference: jest.fn(),
 }));
@@ -19,15 +18,13 @@ import * as pb from '../../proto/dsm_app_pb';
 import {
   getHeaders,
   getIdentity,
-  getDeviceIdentity,
   getBluetoothStatus,
-  isReady,
   getPreference,
   setPreference,
+  isIdentityUnavailable,
 } from '../identity';
 import {
   queryTransportHeadersV3,
-  getDeviceIdBinBridgeAsync,
   getPreference as getPreferenceBridge,
   setPreference as setPreferenceBridge,
 } from '../WebViewBridge';
@@ -122,11 +119,46 @@ describe('identity.ts', () => {
       });
     });
 
-    test('returns null after all retries fail', async () => {
+    /** The native session as Rust reported it, beside the store's hardware fields. */
+    function session(state: { received: boolean; identity_status: string }) {
+      (nativeSessionStore.getSnapshot as jest.Mock).mockReturnValue({
+        ...state,
+        hardware_status: { ble: { enabled: false, advertising: false, scanning: false } },
+      });
+    }
+
+    // The three answers that used to be one null.
+    test('with no session state and no readable headers, the answer is runtime-not-ready after the window', async () => {
+      session({ received: false, identity_status: 'runtime_not_ready' });
       (queryTransportHeadersV3 as jest.Mock).mockResolvedValue(new Uint8Array(0));
 
-      const identity = await getIdentity();
-      expect(identity).toBeNull();
+      const failure = await getIdentity().catch((e) => e);
+      expect(isIdentityUnavailable(failure)).toBe(true);
+      expect(failure.state).toBe('runtime_not_ready');
+      expect(failure.message).toMatch(/no session state received/);
+      expect(failure.message).toMatch(/DSM bridge identity not ready/);
+    }, 30_000);
+
+    test('a missing identity is answered as missing at once, without the retry window', async () => {
+      session({ received: true, identity_status: 'missing' });
+      (queryTransportHeadersV3 as jest.Mock).mockResolvedValue(new Uint8Array(0));
+
+      const started = Date.now();
+      const failure = await getIdentity().catch((e) => e);
+      expect(isIdentityUnavailable(failure)).toBe(true);
+      expect(failure.state).toBe('missing');
+      expect(Date.now() - started).toBeLessThan(1000);
+      expect(queryTransportHeadersV3).not.toHaveBeenCalled();
+    });
+
+    test('a ready session whose headers never read is answered as not read, with the reason', async () => {
+      session({ received: true, identity_status: 'ready' });
+      (queryTransportHeadersV3 as jest.Mock).mockRejectedValue(new Error('port closed'));
+
+      const failure = await getIdentity().catch((e) => e);
+      expect(isIdentityUnavailable(failure)).toBe(true);
+      expect(failure.state).toBe('read_failed');
+      expect(failure.message).toMatch(/reports it ready/);
     }, 30_000);
 
     test('succeeds on later retry attempt', async () => {
@@ -140,31 +172,8 @@ describe('identity.ts', () => {
       });
 
       const identity = await getIdentity();
-      expect(identity).not.toBeNull();
-      expect(identity!.deviceId).toBe(encodeBase32Crockford(deviceId));
+      expect(identity.deviceId).toBe(encodeBase32Crockford(deviceId));
     }, 30_000);
-  });
-
-  // ── getDeviceIdentity ──────────────────────────────────────────────
-
-  describe('getDeviceIdentity', () => {
-    test('returns base32-encoded device id', async () => {
-      const deviceId = makeValidDeviceId();
-      (getDeviceIdBinBridgeAsync as jest.Mock).mockResolvedValue(deviceId);
-
-      const result = await getDeviceIdentity();
-      expect(result).toBe(encodeBase32Crockford(deviceId));
-    });
-
-    test('returns null for empty bytes', async () => {
-      (getDeviceIdBinBridgeAsync as jest.Mock).mockResolvedValue(new Uint8Array(0));
-      expect(await getDeviceIdentity()).toBeNull();
-    });
-
-    test('returns null on bridge error', async () => {
-      (getDeviceIdBinBridgeAsync as jest.Mock).mockRejectedValue(new Error('fail'));
-      expect(await getDeviceIdentity()).toBeNull();
-    });
   });
 
   // ── getBluetoothStatus ─────────────────────────────────────────────
@@ -177,25 +186,6 @@ describe('identity.ts', () => {
 
       const status = await getBluetoothStatus();
       expect(status).toEqual({ enabled: true, advertising: true, scanning: false });
-    });
-  });
-
-  // ── isReady ────────────────────────────────────────────────────────
-
-  describe('isReady', () => {
-    test('returns true when device identity exists', async () => {
-      (getDeviceIdBinBridgeAsync as jest.Mock).mockResolvedValue(makeValidDeviceId());
-      expect(await isReady()).toBe(true);
-    });
-
-    test('returns false when device identity is empty', async () => {
-      (getDeviceIdBinBridgeAsync as jest.Mock).mockResolvedValue(new Uint8Array(0));
-      expect(await isReady()).toBe(false);
-    });
-
-    test('returns false on error', async () => {
-      (getDeviceIdBinBridgeAsync as jest.Mock).mockRejectedValue(new Error('nope'));
-      expect(await isReady()).toBe(false);
     });
   });
 

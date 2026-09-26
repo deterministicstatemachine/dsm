@@ -54,10 +54,8 @@ export function useWalletScreenData(activeTab: string): WalletScreenData {
       setError(null);
       setWarning(null);
       const warnings: string[] = [];
+      // Answered or thrown with its reason: missing, runtime not ready, or not read.
       const id = await dsmClient.getIdentity();
-      if (!id || !id.genesisHash || !id.deviceId) {
-        throw new Error('Identity not initialized');
-      }
       setIdentity(id);
       setGenesisB32(id.genesisHash);
       setDeviceB32(id.deviceId);
