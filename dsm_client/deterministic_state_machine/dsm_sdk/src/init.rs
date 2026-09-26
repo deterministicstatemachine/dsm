@@ -506,9 +506,11 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
         ) {
             (Some(d), Some(g)) => (d, g),
             (None, ..) | (.., None) => {
-                // Identity not ready: Skip BT init but SDK is still functional for queries.
-                // BLE can be late-initialized via initializeBilateralSdk once genesis is created.
-                log::warn!("[SDK Init] BluetoothManager identity not ready (device_id/genesis missing). Skipping BT init; will allow late init.");
+                // Identity not ready: no BLE stack yet; the SDK still answers
+                // bootstrap queries. The init after genesis builds the stack.
+                log::warn!(
+                    "[SDK Init] identity not ready (device_id/genesis missing): no BLE stack yet"
+                );
                 return Ok(());
             }
         };
@@ -579,21 +581,24 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
             );
         }
 
-        let chain_tip_store =
-            std::sync::Arc::new(crate::sdk::chain_tip_store::SqliteChainTipStore::new());
-        let manager = BilateralTransactionManager::new(
-            contact_manager,
-            keypair,
-            dev_fixed,
-            gen_fixed,
-            chain_tip_store,
-        );
-        let btx = std::sync::Arc::new(TokioRwLock::new(manager));
-        let manager_arc =
-            std::sync::Arc::new(crate::bluetooth::BluetoothManager::new(dev_fixed, btx));
-
-        crate::bluetooth::register_global_bluetooth_manager(manager_arc.clone());
-        log::info!("[SDK Init] BluetoothManager registered globally");
+        // The process's one BLE stack: reused when init runs again for this
+        // identity, built only when none is live for it.
+        let manager_arc = crate::bluetooth::bluetooth_manager_for(dev_fixed, || {
+            let chain_tip_store =
+                std::sync::Arc::new(crate::sdk::chain_tip_store::SqliteChainTipStore::new());
+            let manager = BilateralTransactionManager::new(
+                contact_manager,
+                keypair,
+                dev_fixed,
+                gen_fixed,
+                chain_tip_store,
+            );
+            Ok(crate::bluetooth::BluetoothManager::new(
+                dev_fixed,
+                std::sync::Arc::new(TokioRwLock::new(manager)),
+            ))
+        })?;
+        log::info!("[SDK Init] the BLE stack is live");
 
         // Inject BLE frame coordinator into BiImpl so offline sends dispatch over BLE.
         // Use a separate thread with its own runtime to avoid "Cannot start a runtime

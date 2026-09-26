@@ -835,11 +835,8 @@ impl AppRouterImpl {
 
                 #[cfg(all(target_os = "android", feature = "bluetooth", feature = "jni"))]
                 {
-                    // Try to get the adapter; if not yet injected, trigger on-demand
-                    // injection via ensure_bluetooth_manager_and_sync_contact. This
-                    // handles the race where the frontend fires sendOffline immediately
-                    // after pairing finalized but before the Kotlin-side 15s pairing
-                    // timeout fires the bilateral preconditions check.
+                    // The live BLE stack carries the step; `init_dsm_sdk` builds it
+                    // once the identity exists, and nothing builds a second one.
                     let contact = match crate::storage::client_db::get_contact_by_device_id(
                         &counterparty_device_id,
                     ) {
@@ -856,43 +853,18 @@ impl AppRouterImpl {
                     };
                     let transport_adapter = match crate::bridge::get_ble_transport_adapter().await {
                         Ok(adapter) => adapter,
-                        Err(missing) => {
-                            log::warn!(
-                                "[wallet.sendOffline] BLE transport adapter not yet injected ({missing}); attempting on-demand injection"
-                            );
-                            if let Err(e) =
-                                crate::bluetooth::ensure_bluetooth_manager_and_sync_contact(
-                                    contact.clone(),
-                                )
-                                .await
-                            {
-                                return err(format!(
-                                    "wallet.sendOffline: on-demand BLE init failed: {e}"
-                                ));
-                            }
-                            match crate::bridge::get_ble_transport_adapter().await {
-                                Ok(adapter) => adapter,
-                                Err(e) => {
-                                    return err(format!(
-                                        "wallet.sendOffline: BLE transport adapter not ready after on-demand injection attempt: {e}"
-                                    ))
-                                }
-                            }
+                        Err(e) => {
+                            return err(format!(
+                                "wallet.sendOffline: the BLE stack is not live yet: {e}"
+                            ))
                         }
                     };
                     let coordinator = match crate::bridge::get_ble_coordinator().await {
                         Ok(c) => c,
-                        Err(missing) => {
-                            log::warn!("[wallet.sendOffline] BLE coordinator not yet injected ({missing}); retrying after brief yield");
-                            tokio::task::yield_now().await;
-                            match crate::bridge::get_ble_coordinator().await {
-                                Ok(c) => c,
-                                Err(e) => {
-                                    return err(format!(
-                                        "wallet.sendOffline: BLE coordinator not ready: {e}"
-                                    ))
-                                }
-                            }
+                        Err(e) => {
+                            return err(format!(
+                                "wallet.sendOffline: the BLE stack is not live yet: {e}"
+                            ))
                         }
                     };
                     // Just-in-time contact sync: the BLE handler may have missed

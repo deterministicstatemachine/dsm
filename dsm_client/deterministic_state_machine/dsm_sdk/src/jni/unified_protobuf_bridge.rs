@@ -1540,8 +1540,10 @@ pub extern "system" fn Java_com_dsm_native_DsmNative_initializeBilateralSdk(
                 return jni::sys::JNI_TRUE;
             }
 
-            // Defer if context or handler not available yet
-            if !crate::is_sdk_context_initialized() || crate::bridge::ble_runtime().is_none() {
+            // Defer if the context or the BLE stack is not there yet
+            if !crate::is_sdk_context_initialized()
+                || crate::bluetooth::get_global_bluetooth_manager().is_none()
+            {
                 if !BILATERAL_INIT_POLL_STARTED.swap(true, Ordering::SeqCst) {
                     log::info!("initializeBilateralSdk: preconditions missing – spawning poller");
                     // Spawn runtime task with adaptive backoff & telemetry.
@@ -1551,7 +1553,7 @@ pub extern "system" fn Java_com_dsm_native_DsmNative_initializeBilateralSdk(
                             || {
                                 (
                                     crate::is_sdk_context_initialized(),
-                                    crate::bridge::ble_runtime().is_some(),
+                                    crate::bluetooth::get_global_bluetooth_manager().is_some(),
                                 )
                             },
                             || {
@@ -1741,40 +1743,6 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_isBleCoordina
                 None => return jni::sys::JNI_FALSE,
             };
             // Query bridge.get_ble_coordinator() synchronously via runtime
-            let ok = if Handle::try_current().is_ok() {
-                Handle::current()
-                    .block_on(crate::bridge::get_ble_coordinator())
-                    .is_ok()
-            } else {
-                crate::runtime::get_runtime()
-                    .block_on(crate::bridge::get_ble_coordinator())
-                    .is_ok()
-            };
-            if ok {
-                jni::sys::JNI_TRUE
-            } else {
-                jni::sys::JNI_FALSE
-            }
-        }),
-    )
-}
-
-#[no_mangle]
-#[cfg(all(target_os = "android", feature = "bluetooth"))]
-pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_forceBleCoordinatorInit(
-    env: jni::sys::JNIEnv,
-    _clazz: jni::sys::jclass,
-) -> jni::sys::jboolean {
-    crate::jni::bridge_utils::jni_catch_unwind_jboolean(
-        "forceBleCoordinatorInit",
-        std::panic::AssertUnwindSafe(|| {
-            let _env = match unsafe { env_from(env) } {
-                Some(e) => e,
-                None => return jni::sys::JNI_FALSE,
-            };
-            // Attempt to get the coordinator; if present, return true. We do not attempt
-            // to construct or inject a coordinator here — SDK initialization
-            // (`init_dsm_sdk`) injects it. This keeps the function safe and idempotent.
             let ok = if Handle::try_current().is_ok() {
                 Handle::current()
                     .block_on(crate::bridge::get_ble_coordinator())

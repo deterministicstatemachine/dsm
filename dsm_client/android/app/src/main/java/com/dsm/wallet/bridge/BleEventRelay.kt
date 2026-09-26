@@ -77,11 +77,10 @@ object BleEventRelay {
 
         try {
             if (!com.dsm.wallet.bridge.UnifiedNativeApi.isBleCoordinatorReady()) {
-                Log.i(TAG, "Rust BLE coordinator not ready — forcing init")
-                com.dsm.wallet.bridge.UnifiedNativeApi.forceBleCoordinatorInit()
+                Log.i(TAG, "Rust BLE stack not live yet: SDK init builds it once the identity exists")
             }
         } catch (t: Throwable) {
-            Log.w(TAG, "BLE coordinator readiness check failed (non-fatal): ${t.message}")
+            Log.w(TAG, "BLE stack readiness check failed (non-fatal): ${t.message}")
         }
 
         if (ctx != null) {
