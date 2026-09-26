@@ -577,16 +577,6 @@ object Unified {
         return ready
     }
 
-    // ---------- Runtime JNI surface self-test (non-fatal) ----------
-    /**
-     * Performs lightweight invocation tests of core JNI externals.
-     * Returns binary report: [u32BE count] then per entry [u16BE nameLen][name][ok_byte][u16BE detailLen][detail].
-     * Never throws; failure details captured per entry.
-     */
-    @Keep @JvmStatic fun runNativeBridgeSelfTest(): ByteArray {
-        return UnifiedNativeDiagnostics.runNativeBridgeSelfTest()
-    }
-
     // getCdbrwRuntimeSnapshot() was removed with the Protocol 6.2 collapse.
     // Kotlin no longer computes trust/entropy/Wasserstein on its own — the
     // `cdbrw.measure_trust` router query publishes a live CdbrwTrustSnapshot

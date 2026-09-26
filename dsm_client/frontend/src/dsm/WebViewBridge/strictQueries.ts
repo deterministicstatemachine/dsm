@@ -3,11 +3,11 @@
 // list, storage sync. All return raw framed Envelope v3 bytes; callers decode.
 
 import { ArgPack, Codec, InboxRequest, StorageSyncRequest } from "../../proto/dsm_app_pb";
-import { callBin, maybeThrowOnEmpty, routerQueryBin, toBytes } from "./transportCore";
+import { callBin, routerQueryBin, toBytes } from "./transportCore";
 
 export async function getContactsStrictBridge(): Promise<Uint8Array> {
   const res = await routerQueryBin("contacts.list");
-  return maybeThrowOnEmpty(res);
+  return res;
 }
 
 /**
@@ -17,7 +17,7 @@ export async function getContactsStrictBridge(): Promise<Uint8Array> {
  */
 export async function getAllBalancesStrictBridge(): Promise<Uint8Array> {
   const res = await callBin("getAllBalancesStrict");
-  return maybeThrowOnEmpty(res);
+  return res;
 }
 
 export async function getWalletHistoryStrictBridge(): Promise<Uint8Array> {
@@ -28,7 +28,7 @@ export async function getWalletHistoryStrictBridge(): Promise<Uint8Array> {
     body: toBytes(limitOffset),
   });
   const res = await routerQueryBin("wallet.history", arg.toBinary());
-  return maybeThrowOnEmpty(res);
+  return res;
 }
 
 export async function getInboxStrictBridge(args?: { limit?: number }): Promise<Uint8Array> {
@@ -39,7 +39,7 @@ export async function getInboxStrictBridge(args?: { limit?: number }): Promise<U
     body: toBytes(req.toBinary()),
   });
   const res = await routerQueryBin("inbox.pull", arg.toBinary());
-  return maybeThrowOnEmpty(res);
+  return res;
 }
 
 export async function getPendingBilateralListStrictBridge(): Promise<Uint8Array> {
@@ -48,7 +48,7 @@ export async function getPendingBilateralListStrictBridge(): Promise<Uint8Array>
     body: new Uint8Array(0),
   });
   const res = await routerQueryBin("bilateral.pending_list", arg.toBinary());
-  return maybeThrowOnEmpty(res);
+  return res;
 }
 
 export async function syncWithStorageStrictBridge(args?: {
@@ -66,5 +66,5 @@ export async function syncWithStorageStrictBridge(args?: {
     body: toBytes(req.toBinary()),
   });
   const res = await routerQueryBin("storage.sync", arg.toBinary());
-  return maybeThrowOnEmpty(res);
+  return res;
 }
