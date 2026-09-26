@@ -48,7 +48,7 @@ describe('E2E bilateral accept: BLE accept flow triggers refresh and toast', () 
     };
 
     (window as any).DsmBridge = {
-      __callBin: async (reqBytes: Uint8Array) => {
+      sendMessageBin: async (reqBytes: Uint8Array) => {
         const req = pb.BridgeRpcRequest.fromBinary(reqBytes);
         const method = req.method || '';
         if (method === 'acceptBilateralByCommitment') {
@@ -83,7 +83,7 @@ describe('E2E bilateral accept: BLE accept flow triggers refresh and toast', () 
           const headers = new pb.Headers({ deviceId: new Uint8Array(32).fill(1), genesisHash: new Uint8Array(32).fill(1) as any, chainTip: new Uint8Array(32), seq: 1n as any } as any);
           return (global as any).createDsmBridgeSuccessResponse(frame(headers.toBinary()));
         }
-        throw new Error(`unhandled __callBin method:${method}`);
+        throw new Error(`unhandled bridge method:${method}`);
       },
       getDeviceIdBin: () => new Uint8Array(32).fill(1),
       getGenesisHashBin: () => new Uint8Array(32).fill(1),

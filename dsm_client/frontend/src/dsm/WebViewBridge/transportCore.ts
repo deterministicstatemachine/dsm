@@ -50,14 +50,6 @@ export const toBytes = (bytes: Uint8Array): Uint8Array<ArrayBuffer> => {
   return out;
 };
 
-function maybeUnframe(buf: Uint8Array): Uint8Array {
-  if (buf.length < 4) return buf;
-  const nBE = ((buf[0] << 24) | (buf[1] << 16) | (buf[2] << 8) | buf[3]) >>> 0;
-  if (4 + nBE === buf.length) return buf.slice(4, 4 + nBE);
-  const nLE = (buf[0] | (buf[1] << 8) | (buf[2] << 16) | (buf[3] << 24)) >>> 0;
-  if (4 + nLE === buf.length) return buf.slice(4, 4 + nLE);
-  return buf;
-}
 
 export class BridgeError extends Error {
   errorCode?: number;
@@ -149,52 +141,21 @@ const buildBridgeRequest = (method: string, payload?: Uint8Array): Uint8Array =>
   return req.toBinary();
 };
 
+/**
+ * One request over the bytes-only MessagePort bridge `index.html` installs:
+ * `sendMessageBin` waits for the port itself and answers the BridgeRpcResponse
+ * Kotlin posted, which is unwrapped here. There is no other transport.
+ */
 export const sendBridgeRequestBytes = async (
   method: string,
   requestBytes: Uint8Array
 ): Promise<Uint8Array> => {
   const b = mustBridge();
-
-  const waitForBinaryBridgeReady = async (): Promise<void> => {
-    const maybeBridge = b as unknown as { isAvailable?: () => boolean };
-    if (typeof maybeBridge.isAvailable !== "function" || maybeBridge.isAvailable()) {
-      return;
-    }
-
-    await new Promise<void>((resolve) => {
-      let done = false;
-      const finish = () => {
-        if (!done) {
-          done = true;
-          resolve();
-        }
-      };
-      const onReady = () => finish();
-      if (typeof window !== "undefined") {
-        window.addEventListener("dsm-bridge-ready", onReady, { once: true });
-      }
-      setTimeout(() => {
-        if (typeof window !== "undefined") {
-          window.removeEventListener("dsm-bridge-ready", onReady);
-        }
-        finish();
-      }, 2500);
-    });
-  };
-
-  if (typeof b.__callBin === "function") {
-    const respBytes = await b.__callBin(requestBytes);
-    return await unwrapProtobufResponse(method, normalizeToBytes(respBytes));
+  if (b.__binary !== true || typeof b.sendMessageBin !== "function") {
+    throw new Error("DSM bridge not available (bytes-only MessagePort required)");
   }
-
-  if (b.__binary === true && typeof b.sendMessageBin === "function") {
-    await waitForBinaryBridgeReady();
-    const respBytes = await b.sendMessageBin(requestBytes);
-    const respFramed = normalizeToBytes(respBytes);
-    return await unwrapProtobufResponse(method, maybeUnframe(respFramed));
-  }
-
-  throw new Error("DSM bridge not available (bytes-only MessagePort required)");
+  const respBytes = normalizeToBytes(await b.sendMessageBin(requestBytes));
+  return await unwrapProtobufResponse(method, respBytes);
 };
 
 export async function callBin(method: string, payload?: Uint8Array): Promise<Uint8Array> {

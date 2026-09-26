@@ -98,7 +98,7 @@ describe('E2E: sendOnlineTransfer (unit-level, mocked storage)', () => {
     (global as any).window.DsmBridge.sendMessageBin = (global as any).window.DsmBridge.sendMessageBin || (async () => new Uint8Array(0));
 
     // Mock the bytes-only router calls
-    (global as any).window.DsmBridge.__callBin = async (reqBytes: Uint8Array) => {
+    (global as any).window.DsmBridge.sendMessageBin = async (reqBytes: Uint8Array) => {
       const req = pb.BridgeRpcRequest.fromBinary(reqBytes);
       const method = req.method || '';
 

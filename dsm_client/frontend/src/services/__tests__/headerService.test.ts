@@ -40,9 +40,12 @@ describe('HeaderService', () => {
       expect(headerService.isBridgeAvailable()).toBe(true);
     });
 
-    it('returns true when DsmBridge.__callBin is a function', () => {
-      (globalThis as Record<string, unknown>).DsmBridge = { __callBin: jest.fn() };
+    it('is available only through the bytes-only bridge index.html installs', () => {
+      (globalThis as Record<string, unknown>).DsmBridge = { __binary: true, sendMessageBin: jest.fn() };
       expect(headerService.isBridgeAvailable()).toBe(true);
+      // A transport function alone is not the bridge: production installs `__binary`.
+      (globalThis as Record<string, unknown>).DsmBridge = { sendMessageBin: jest.fn() };
+      expect(headerService.isBridgeAvailable()).toBe(false);
     });
 
     it('returns false when DsmBridge is an empty object', () => {

@@ -20,7 +20,7 @@ describe('WebViewBridge framing invariants', () => {
     }).toBinary();
 
     (global as any).window.DsmBridge = {
-      __callBin: async (reqBytes: Uint8Array) => {
+      sendMessageBin: async (reqBytes: Uint8Array) => {
         const req = BridgeRpcRequest.fromBinary(reqBytes);
         seen.method = req.method;
         seen.payload = req.payload?.case === 'bytes' ? req.payload.value.data : new Uint8Array(0);
@@ -37,9 +37,12 @@ describe('WebViewBridge framing invariants', () => {
     expect((ingressRequest.operation.value as EnvelopeOp).envelopeBytes).toEqual(envelope);
   });
 
+  // The guard is on the bridge's own `ingress` wrapper's answer: index.html
+  // answers bytes or throws, and anything else is refused here.
   test('a native answer that is not bytes is refused', async () => {
     (global as any).window.DsmBridge = {
-      __callBin: async () => ({ nope: true } as any),
+      sendMessageBin: async () => new Uint8Array(0),
+      ingress: async () => ({ nope: true } as any),
     };
 
     await expect(processEnvelopeV3Bin(new Uint8Array([1]))).rejects.toThrow(

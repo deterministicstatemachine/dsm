@@ -24,7 +24,7 @@ function wrapSuccessEnvelope(data: Uint8Array): Uint8Array {
 function setupBridge(onRequest: (req: BridgeRpcRequest) => void): void {
   (global as any).window = (global as any).window ?? {};
   (global as any).window.DsmBridge = {
-    __callBin: async (reqBytes: Uint8Array) => {
+    sendMessageBin: async (reqBytes: Uint8Array) => {
       const req = BridgeRpcRequest.fromBinary(reqBytes);
       onRequest(req);
       return wrapSuccessEnvelope(new Uint8Array([1]));
@@ -54,7 +54,7 @@ describe("protobuf-only bridge payloads", () => {
     const framedGenesisEnvelope = new Uint8Array([0x03, ...genesisEnvelope.toBinary()]);
     (global as any).window = (global as any).window ?? {};
     (global as any).window.DsmBridge = {
-      __callBin: async (reqBytes: Uint8Array) => {
+      sendMessageBin: async (reqBytes: Uint8Array) => {
         const req = BridgeRpcRequest.fromBinary(reqBytes);
         seenRequests.push(req);
         if (req.method === "createGenesisV2") {

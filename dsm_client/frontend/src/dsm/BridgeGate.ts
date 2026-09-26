@@ -31,9 +31,8 @@ export class BridgeGate {
    * (`window.DsmBridge`, bytes-only). Safe to call repeatedly.
    */
   refreshPrereqsOnce(): BridgePrereqState {
-    const b = (globalThis as { window?: { DsmBridge?: { __binary?: boolean; __callBin?: unknown } } })
-      .window?.DsmBridge;
-    const installed = !!(b && (b.__binary === true || typeof b.__callBin === 'function'));
+    const b = (globalThis as { window?: { DsmBridge?: { __binary?: boolean } } }).window?.DsmBridge;
+    const installed = b?.__binary === true;
     if (installed && !this.prereq.bridgeReady) {
       this.onEvent({ type: 'bridge.ready' });
     }

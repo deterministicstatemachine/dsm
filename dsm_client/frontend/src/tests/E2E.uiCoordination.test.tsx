@@ -2,29 +2,29 @@
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 /**
- * E2E UI Coordination Tests — REAL EVERYTHING, __callBin-only mock
+ * E2E UI Coordination Tests — REAL EVERYTHING, sendMessageBin-only mock
  *
  * WHAT THIS PROVES:
  * The ENTIRE TypeScript stack works end-to-end — from React components down to
- * the JNI bridge boundary. The ONLY mock is window.DsmBridge.__callBin, which
+ * the JNI bridge boundary. The ONLY mock is window.DsmBridge.sendMessageBin, which
  * is the actual Android/Kotlin JNI entry point.
  *
  * WHAT'S REAL (NOT MOCKED):
  * - BilateralTransferDialog (REAL React component)
  * - WalletProvider / useWallet (REAL React context with real refreshAll)
  * - UXProvider (REAL)
- * - dsmClient.getAllBalances() → dsm/wallet.ts::getAllBalances() → WebViewBridge::getAllBalancesStrictBridge() → callBin() → __callBin (mock)
- * - dsmClient.getWalletHistory() → dsm/wallet.ts::getWalletHistory() → WebViewBridge::getWalletHistoryStrictBridge() → routerQueryBin() → __callBin (mock)
- * - dsmClient.getIdentity() → dsm/identity.ts::getIdentity() → getHeaders() → getTransportHeadersV3Bin() → __callBin (mock)
- * - dsmClient.isReady() → hasIdentity() → checkIdentityState() → __callBin (mock)
- * - acceptIncomingTransfer() → acceptOfflineTransfer() → acceptBilateralByCommitmentBridge() → callBin() → __callBin (mock)
- * - rejectIncomingTransfer() → rejectOfflineTransfer() → rejectBilateralByCommitmentBridge() → sendBridgeRequestBytes() → __callBin (mock)
+ * - dsmClient.getAllBalances() → dsm/wallet.ts::getAllBalances() → WebViewBridge::getAllBalancesStrictBridge() → callBin() → sendMessageBin (mock)
+ * - dsmClient.getWalletHistory() → dsm/wallet.ts::getWalletHistory() → WebViewBridge::getWalletHistoryStrictBridge() → routerQueryBin() → sendMessageBin (mock)
+ * - dsmClient.getIdentity() → dsm/identity.ts::getIdentity() → getHeaders() → getTransportHeadersV3Bin() → sendMessageBin (mock)
+ * - dsmClient.isReady() → hasIdentity() → checkIdentityState() → sendMessageBin (mock)
+ * - acceptIncomingTransfer() → acceptOfflineTransfer() → acceptBilateralByCommitmentBridge() → callBin() → sendMessageBin (mock)
+ * - rejectIncomingTransfer() → rejectOfflineTransfer() → rejectBilateralByCommitmentBridge() → sendBridgeRequestBytes() → sendMessageBin (mock)
  * - EventBridge (REAL — initializeEventBridge)
  * - nativeBridgeAdapter (REAL — initializeNativeBridgeAdapter)
  * - bridgeEvents (REAL pub/sub)
  * - useEventSignal (REAL useSyncExternalStore)
  * - useWalletSync (REAL event→dispatch routing)
- * - BridgeGate (REAL — auto-opens for __callBin paths)
+ * - BridgeGate (REAL — auto-opens for sendMessageBin paths)
  * - decodeFramedEnvelopeV3, decodeBalancesListResponseStrict (REAL decoders)
  *
  * COVERAGE:
@@ -33,7 +33,7 @@
  * 3. Bilateral event encode/decode roundtrip (protobuf)
  * 4. DOM event → nativeBridgeAdapter → bridgeEvents (REAL adapter)
  * 5. DOM event → EventBridge → bilateral.event (REAL EventBridge)
- * 6. INTEGRATED: Dialog + WalletContext — PREPARE → Accept → COMPLETE → refreshAll → REAL getAllBalances → __callBin → proto decode → balance in DOM
+ * 6. INTEGRATED: Dialog + WalletContext — PREPARE → Accept → COMPLETE → refreshAll → REAL getAllBalances → sendMessageBin → proto decode → balance in DOM
  * 7. INTEGRATED: wallet.sendCommitted → WalletContext refresh trigger only
  * 8. INTEGRATED: Full bilateral sequence through REAL components — EXACT device sequence
  */
@@ -198,9 +198,9 @@ function makeRejectFramedEnvelope(): Uint8Array {
   return frameEnvelope(env);
 }
 
-// ─── __callBin Mock State ────────────────────────────────────────────────────
+// ─── sendMessageBin Mock State ────────────────────────────────────────────────────
 
-/** Mutable state that tests can modify to change what __callBin returns */
+/** Mutable state that tests can modify to change what sendMessageBin returns */
 let balancesState: Array<{ tokenId: string; available: bigint }> = [
   { tokenId: 'ERA', available: 10000n },
 ];
@@ -209,14 +209,14 @@ let historyState: Array<{ amount: bigint; amountSigned: bigint }> = [
 ];
 let capturedMethods: string[] = [];
 
-/** Install a __callBin mock that handles the full protocol */
+/** Install a sendMessageBin mock that handles the full protocol */
 function installCallBinMock() {
   const g = global as any;
   g.window = g.window || {};
 
   const bridge = {
     __binary: true,
-    __callBin: async (reqBytes: Uint8Array): Promise<Uint8Array> => {
+    sendMessageBin: async (reqBytes: Uint8Array): Promise<Uint8Array> => {
       const { method, payload } = decodeBridgeReq(reqBytes);
       capturedMethods.push(method);
 
@@ -281,14 +281,10 @@ function installCallBinMock() {
       // Default: error for unknown methods
       return wrapError(`Method '${method}' not handled in UI coordination test mock`);
     },
-    sendMessageBin: async (reqBytes: Uint8Array): Promise<Uint8Array> => {
-      return bridge.__callBin(reqBytes);
-    },
-    getAppRouterStatus: () => 1,
   };
 
+  // The setter registers the bridge with the DI registry and completes it.
   g.window.DsmBridge = bridge;
-  setBridgeInstance(bridge);
 }
 
 // ─── Initialization ──────────────────────────────────────────────────────────
@@ -632,14 +628,14 @@ describe('EventBridge — REAL DOM event-bin propagation', () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// 6. INTEGRATED: BilateralTransferDialog + WalletProvider — __callBin-only Mock
-//    The ENTIRE TypeScript chain is REAL. Only __callBin is mocked.
+// 6. INTEGRATED: BilateralTransferDialog + WalletProvider — sendMessageBin-only Mock
+//    The ENTIRE TypeScript chain is REAL. Only sendMessageBin is mocked.
 // ═══════════════════════════════════════════════════════════════════════════════
 
-describe('INTEGRATED: Full chain with __callBin-only mock', () => {
+describe('INTEGRATED: Full chain with sendMessageBin-only mock', () => {
   // NO jest.mock() for bilateralEventService — it's REAL!
-  // acceptIncomingTransfer → acceptOfflineTransfer → acceptBilateralByCommitmentBridge → callBin → __callBin (mocked)
-  // rejectIncomingTransfer → rejectOfflineTransfer → rejectBilateralByCommitmentBridge → sendBridgeRequestBytes → __callBin (mocked)
+  // acceptIncomingTransfer → acceptOfflineTransfer → acceptBilateralByCommitmentBridge → callBin → sendMessageBin (mocked)
+  // rejectIncomingTransfer → rejectOfflineTransfer → rejectBilateralByCommitmentBridge → sendBridgeRequestBytes → sendMessageBin (mocked)
 
   // Dynamic imports to avoid module initialization order issues
   let BilateralTransferDialog: any;
@@ -706,7 +702,7 @@ describe('INTEGRATED: Full chain with __callBin-only mock', () => {
     jest.useRealTimers();
   });
 
-  test('WalletProvider initializes by calling REAL getAllBalances → __callBin', async () => {
+  test('WalletProvider initializes by calling REAL getAllBalances → sendMessageBin', async () => {
     render(<ProductionLayout />);
     await settleWalletInit();
 
@@ -715,19 +711,19 @@ describe('INTEGRATED: Full chain with __callBin-only mock', () => {
       expect(screen.getByTestId('i-balance-era').textContent).not.toBe('none');
     });
 
-    // The balance came from __callBin via: dsmClient.getAllBalances() → dsm.getAllBalances()
-    // → getAllBalancesStrictBridge() → callBin('getAllBalancesStrict') → __callBin → FramedEnvelopeV3
+    // The balance came from sendMessageBin via: dsmClient.getAllBalances() → dsm.getAllBalances()
+    // → getAllBalancesStrictBridge() → callBin('getAllBalancesStrict') → sendMessageBin → FramedEnvelopeV3
     // → decodeBalancesListResponseStrict() → TokenBalanceView[]
     // PROVES the entire decode chain works.
     const balText = screen.getByTestId('i-balance-era').textContent;
     expect(balText).toBe('10000');
 
-    // Verify __callBin was actually called with the expected methods
+    // Verify sendMessageBin was actually called with the expected methods
     expect(capturedMethods).toContain('getAllBalancesStrict');
     expect(capturedMethods).toContain('getTransportHeadersV3Bin');
   });
 
-  test('PREPARE_RECEIVED → Dialog shows → Accept → REAL acceptIncomingTransfer → __callBin', async () => {
+  test('PREPARE_RECEIVED → Dialog shows → Accept → REAL acceptIncomingTransfer → sendMessageBin', async () => {
     const { container } = render(<ProductionLayout />);
     await settleWalletInit();
     await waitFor(() => expect(screen.getByTestId('i-balance-era').textContent).not.toBe('none'));
@@ -762,12 +758,12 @@ describe('INTEGRATED: Full chain with __callBin-only mock', () => {
     capturedMethods = [];
 
     // Click Accept — calls REAL handleAccept → REAL acceptIncomingTransfer
-    // → REAL acceptOfflineTransfer → REAL acceptBilateralByCommitmentBridge → callBin → __callBin
+    // → REAL acceptOfflineTransfer → REAL acceptBilateralByCommitmentBridge → callBin → sendMessageBin
     await act(async () => {
       fireEvent.click(screen.getByText('Accept'));
     });
 
-    // Verify __callBin received acceptBilateralByCommitment
+    // Verify sendMessageBin received acceptBilateralByCommitment
     expect(capturedMethods).toContain('acceptBilateralByCommitment');
 
     // Dialog clears after successful accept
@@ -776,7 +772,7 @@ describe('INTEGRATED: Full chain with __callBin-only mock', () => {
     });
   });
 
-  test('PREPARE → Reject → REAL rejectIncomingTransfer → __callBin', async () => {
+  test('PREPARE → Reject → REAL rejectIncomingTransfer → sendMessageBin', async () => {
     const { container } = render(<ProductionLayout />);
     await settleWalletInit();
     await waitFor(() => expect(screen.getByTestId('i-balance-era').textContent).not.toBe('none'));
@@ -800,7 +796,7 @@ describe('INTEGRATED: Full chain with __callBin-only mock', () => {
       fireEvent.click(screen.getByText('Reject'));
     });
 
-    // Verify __callBin received rejectBilateralByCommitment
+    // Verify sendMessageBin received rejectBilateralByCommitment
     expect(capturedMethods).toContain('rejectBilateralByCommitment');
 
     await waitFor(() => {
@@ -808,7 +804,7 @@ describe('INTEGRATED: Full chain with __callBin-only mock', () => {
     });
   });
 
-  test('TRANSFER_COMPLETE → Dialog clears + REAL refreshAll → __callBin returns new balance → DOM updates', async () => {
+  test('TRANSFER_COMPLETE → Dialog clears + REAL refreshAll → sendMessageBin returns new balance → DOM updates', async () => {
     const { container } = render(<ProductionLayout />);
     await settleWalletInit();
     await waitFor(() => expect(screen.getByTestId('i-balance-era').textContent).toBe('10000'));
@@ -826,7 +822,7 @@ describe('INTEGRATED: Full chain with __callBin-only mock', () => {
     });
     await waitFor(() => expect(container.querySelector('.bilateral-transfer-dialog')).not.toBeNull());
 
-    // CHANGE what __callBin returns for the NEXT getAllBalancesStrict call
+    // CHANGE what sendMessageBin returns for the NEXT getAllBalancesStrict call
     // This simulates the balance updating in the native layer after transfer
     balancesState = [{ tokenId: 'ERA', available: 10300n }];
     historyState = [
@@ -839,7 +835,7 @@ describe('INTEGRATED: Full chain with __callBin-only mock', () => {
     // Emit TRANSFER_COMPLETE — this is the critical moment:
     // BilateralTransferDialog.handleComplete → refreshAll() → WalletProvider's REAL refreshAll()
     // → dsmClient.getAllBalances() → dsm.getAllBalances() → getAllBalancesStrictBridge()
-    // → callBin('getAllBalancesStrict') → __callBin → FramedEnvelopeV3(10300)
+    // → callBin('getAllBalancesStrict') → sendMessageBin → FramedEnvelopeV3(10300)
     // → getAllBalances() → TokenBalanceView[] → walletStore → DOM updates
     act(() => {
       eventBridgeEmit('bilateral.event', encodeBilateralEventNotification({
@@ -853,16 +849,16 @@ describe('INTEGRATED: Full chain with __callBin-only mock', () => {
     // Dialog should be cleared
     await waitFor(() => expect(container.querySelector('.bilateral-transfer-dialog')).toBeNull());
 
-    // KEY ASSERTION: __callBin was called for the refresh
+    // KEY ASSERTION: sendMessageBin was called for the refresh
     await waitFor(() => {
       expect(capturedMethods).toContain('getAllBalancesStrict');
     });
 
-    // KEY ASSERTION: The new balance (10300) from __callBin should appear in the DOM
+    // KEY ASSERTION: The new balance (10300) from sendMessageBin should appear in the DOM
     // This proves the ENTIRE chain works:
     // TRANSFER_COMPLETE event → Dialog.handleComplete → refreshAll() → dsmClient.getAllBalances()
     // → dsm/wallet.ts::getAllBalances() → getAllBalancesStrictBridge() → callBin('getAllBalancesStrict')
-    // → __callBin → BridgeRpcResponse → unwrapProtobufResponse → FramedEnvelopeV3
+    // → sendMessageBin → BridgeRpcResponse → unwrapProtobufResponse → FramedEnvelopeV3
     // → getAllBalances → TokenBalanceView[] → walletStore → DOM
     await waitFor(() => {
       expect(screen.getByTestId('i-balance-era').textContent).toBe('10300');
@@ -982,12 +978,12 @@ describe('INTEGRATED: Full chain with __callBin-only mock', () => {
     await waitFor(() => expect(container.querySelector('.bilateral-transfer-overlay')).not.toBeNull());
   });
 
-  test('wallet.bilateralCommitted → WalletProvider refreshes (REAL __callBin round trip)', async () => {
+  test('wallet.bilateralCommitted → WalletProvider refreshes (REAL sendMessageBin round trip)', async () => {
     render(<ProductionLayout />);
     await settleWalletInit();
     await waitFor(() => expect(screen.getByTestId('i-balance-era').textContent).toBe('10000'));
 
-    // Change what __callBin will return on next balance fetch
+    // Change what sendMessageBin will return on next balance fetch
     balancesState = [{ tokenId: 'ERA', available: 10500n }];
     capturedMethods = [];
 
@@ -996,12 +992,12 @@ describe('INTEGRATED: Full chain with __callBin-only mock', () => {
       bridgeEvents.emit('wallet.bilateralCommitted', { accepted: true, committed: true } as any);
     });
 
-    // Wait for REAL getAllBalances → __callBin round trip
+    // Wait for REAL getAllBalances → sendMessageBin round trip
     await waitFor(() => {
       expect(capturedMethods).toContain('getAllBalancesStrict');
     });
 
-    // Balance should update in UI from __callBin's response
+    // Balance should update in UI from sendMessageBin's response
     await waitFor(() => {
       expect(screen.getByTestId('i-balance-era').textContent).toBe('10500');
     });
@@ -1094,10 +1090,10 @@ describe('INTEGRATED: Full bilateral transfer back-and-forth', () => {
     jest.useRealTimers();
   });
 
-  test('EXACT device sequence: PREPARE → show → Accept → __callBin(acceptBilateral) → ACCEPT_SENT → COMMIT → COMPLETE → __callBin(getAllBalancesStrict) → new balance in DOM', async () => {
+  test('EXACT device sequence: PREPARE → show → Accept → sendMessageBin(acceptBilateral) → ACCEPT_SENT → COMMIT → COMPLETE → sendMessageBin(getAllBalancesStrict) → new balance in DOM', async () => {
     /**
      * This test reproduces the EXACT sequence of events from a real BLE transfer.
-     * The ONLY mock is __callBin. Everything else — React components, event bridges,
+     * The ONLY mock is sendMessageBin. Everything else — React components, event bridges,
      * proto encoding/decoding, identity resolution, BridgeGate, WebViewBridge,
      * bilateralEventService, transactions — is ALL REAL.
      */
@@ -1126,12 +1122,12 @@ describe('INTEGRATED: Full bilateral transfer back-and-forth', () => {
       expect(container.textContent).toContain('1000');
     });
 
-    // ──── Step 3: User clicks Accept → REAL acceptIncomingTransfer chain → __callBin ────
+    // ──── Step 3: User clicks Accept → REAL acceptIncomingTransfer chain → sendMessageBin ────
     capturedMethods = [];
     await act(async () => {
       fireEvent.click(screen.getByText('Accept'));
     });
-    // Proves the REAL chain: acceptIncomingTransfer → acceptOfflineTransfer → acceptBilateralByCommitmentBridge → __callBin
+    // Proves the REAL chain: acceptIncomingTransfer → acceptOfflineTransfer → acceptBilateralByCommitmentBridge → sendMessageBin
     expect(capturedMethods).toContain('acceptBilateralByCommitment');
 
     // ──── Step 4: ACCEPT_SENT ────
@@ -1156,7 +1152,7 @@ describe('INTEGRATED: Full bilateral transfer back-and-forth', () => {
       }));
     });
 
-    // ──── Step 6: TRANSFER_COMPLETE → refreshAll → __callBin(getAllBalancesStrict with new balance) → DOM ────
+    // ──── Step 6: TRANSFER_COMPLETE → refreshAll → sendMessageBin(getAllBalancesStrict with new balance) → DOM ────
     balancesState = [{ tokenId: 'ERA', available: 6000n }];
     historyState = [{ amount: 1000n, amountSigned: 1000n }];
     capturedMethods = [];
@@ -1173,7 +1169,7 @@ describe('INTEGRATED: Full bilateral transfer back-and-forth', () => {
       }));
     });
 
-    // Balance should reflect the 1000 ERA received (5000 → 6000) via __callBin
+    // Balance should reflect the 1000 ERA received (5000 → 6000) via sendMessageBin
     await waitFor(() => {
       expect(screen.getByTestId('seq-bal').textContent).toBe('6000');
     });
@@ -1183,10 +1179,10 @@ describe('INTEGRATED: Full bilateral transfer back-and-forth', () => {
       expect(parseInt(screen.getByTestId('seq-txs').textContent || '0')).toBe(1);
     });
 
-    // Verify __callBin was called for the balance refresh
+    // Verify sendMessageBin was called for the balance refresh
     expect(capturedMethods).toContain('getAllBalancesStrict');
 
-    // ──── Step 7: wallet.bilateralCommitted → refresh again via __callBin ────
+    // ──── Step 7: wallet.bilateralCommitted → refresh again via sendMessageBin ────
     capturedMethods = [];
     act(() => {
       bridgeEvents.emit('wallet.bilateralCommitted', {

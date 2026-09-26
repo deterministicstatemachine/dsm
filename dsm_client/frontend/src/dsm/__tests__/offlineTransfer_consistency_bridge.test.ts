@@ -52,7 +52,7 @@ describe('offline transfer sender/recipient consistency through WebView bridge',
     const bleAddress = 'AA:BB:CC:DD:EE:FF';
     const commitmentHash = new Uint8Array(32).fill(0x77);
 
-    (global as any).window.DsmBridge.__callBin = async (reqBytes: Uint8Array) => {
+    (global as any).window.DsmBridge.sendMessageBin = async (reqBytes: Uint8Array) => {
       const { route, args } = decodeRouterInvoke(reqBytes);
       expect(route).toBe('wallet.sendOffline');
 
@@ -93,7 +93,7 @@ describe('offline transfer sender/recipient consistency through WebView bridge',
     const bleAddress = 'AA:BB:CC:DD:EE:11';
     const commitmentHash = new Uint8Array(32).fill(0x33);
 
-    (global as any).window.DsmBridge.__callBin = async (reqBytes: Uint8Array) => {
+    (global as any).window.DsmBridge.sendMessageBin = async (reqBytes: Uint8Array) => {
       const { args } = decodeRouterInvoke(reqBytes);
       const argPack = pb.ArgPack.fromBinary(args);
       const prepare = pb.BilateralPrepareRequest.fromBinary(argPack.body);

@@ -3,7 +3,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { decodeBalancesListResponseStrict, decodeFramedEnvelopeV3 } from '../decoding';
 import { processEnvelopeV3Bin } from '../WebViewBridge';
-import { decodeBase32Crockford } from '../../utils/textId';
 
 function makeInvalidResponse(): Uint8Array {
   return new Uint8Array([0x01, 0x02, 0x03, 0x04]);
@@ -22,47 +21,33 @@ describe('bridge decoding boundary (integration)', () => {
     (global as any).window.DsmBridge = (global as any).window.DsmBridge || {};
   });
 
+  // Bytes the port answered that are not a BridgeRpcResponse: index.html's
+  // wrapper answers `invalid bridge response for <method>`.
   it('rejects invalid BridgeRpcResponse bytes', async () => {
-    (global as any).window.DsmBridge.__callBin = async () => makeInvalidResponse();
-    await expect(processEnvelopeV3Bin(new Uint8Array([1, 2, 3]))).rejects.toThrow(/Bridge error/i);
+    (global as any).window.DsmBridge.sendMessageBin = async () => makeInvalidResponse();
+    await expect(processEnvelopeV3Bin(new Uint8Array([1, 2, 3]))).rejects.toThrow(/invalid bridge response for nativeBoundaryIngress/);
   });
 
   it('propagates bridge error payloads', async () => {
-    (global as any).window.DsmBridge.__callBin = async () => makeErrorResponse('native exploded');
+    (global as any).window.DsmBridge.sendMessageBin = async () => makeErrorResponse('native exploded');
     await expect(processEnvelopeV3Bin(new Uint8Array([1]))).rejects.toThrow(/native exploded/i);
   });
 
-  it('emits bridge.error event with debug_b32 that decodes to original ErrorResponse', async () => {
-    (global as any).window.DsmBridge.__callBin = async () => makeErrorResponse('native exploded');
-
-    // Listen for bridge.error event
+  // A boundary failure reaches the diagnostics bus as its message. The port
+  // wrappers in index.html reduce Kotlin's ErrorResponse to that message, so
+  // no code or debug bytes travel with it (recorded as Open in §6.29).
+  it('a boundary failure reaches bridge.error as its message', async () => {
+    (global as any).window.DsmBridge.sendMessageBin = async () => makeErrorResponse('native exploded');
     const { bridgeEvents } = require('../../bridge/bridgeEvents');
-
-    const evPromise = new Promise<void>((resolve, reject) => {
-      const off = bridgeEvents.on('bridge.error', (detail: any) => {
-        try {
-          expect(detail).toHaveProperty('code');
-          expect(detail).toHaveProperty('message');
-          expect(typeof detail.debugB32).toBe('string');
-          const dbgStr = detail.debugB32;
-          console.log('DEBUG_B32:', dbgStr?.slice(0, 120));
-          const decoded = decodeBase32Crockford(detail.debugB32);
-          // Basic check: decoded bytes exist and are non-empty (debug payload present)
-          console.log('DEBUG_DECODED_LEN:', decoded.length);
-          expect((decoded as Uint8Array).length).toBeGreaterThan(0);
-          off();
-          resolve();
-        } catch (e) {
-          off();
-          reject(e);
-        }
-      });
-      // Timeout fail-safe
-      setTimeout(() => { off(); reject(new Error('bridge.error not emitted')); }, 3000);
-    });
-
-    await expect(processEnvelopeV3Bin(new Uint8Array([1]))).rejects.toThrow(/native exploded/i);
-    await evPromise;
+    const seen: any[] = [];
+    const off = bridgeEvents.on('bridge.error', (detail: any) => { seen.push(detail); });
+    try {
+      await expect(processEnvelopeV3Bin(new Uint8Array([1]))).rejects.toThrow(/native exploded/);
+    } finally {
+      off();
+    }
+    expect(seen).toHaveLength(1);
+    expect(seen[0].message).toMatch(/native exploded/);
   });
 
   it('decodeFramedEnvelopeV3 rejects non-framed garbage bytes', () => {

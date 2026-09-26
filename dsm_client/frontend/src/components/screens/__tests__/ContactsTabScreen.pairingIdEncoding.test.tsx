@@ -61,7 +61,7 @@ describe('ContactsTabScreen BLE pairing', () => {
 
     (globalThis as any).window = (globalThis as any).window || {};
     (globalThis as any).window.DsmBridge = {
-      __callBin: async () => new Uint8Array(0),
+      sendMessageBin: async () => new Uint8Array(0),
     };
     (globalThis as any).requestAnimationFrame = () => 0;
 

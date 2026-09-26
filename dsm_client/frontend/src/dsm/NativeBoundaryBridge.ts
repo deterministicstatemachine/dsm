@@ -4,20 +4,7 @@
 import { getBridgeInstance } from '../bridge/BridgeRegistry';
 import { bridgeEvents } from '../bridge/bridgeEvents';
 import type { AndroidBridgeV3 } from './bridgeTypes';
-import { encodeBase32Crockford } from '../utils/textId';
-import {
-  BridgeRpcRequest,
-  BridgeRpcResponse,
-  BytesPayload,
-  EmptyPayload,
-  EnvelopeOp,
-  IngressRequest,
-  IngressResponse,
-  RouterInvokeOp,
-  RouterQueryOp,
-  StartupRequest,
-  StartupResponse,
-} from '../proto/dsm_app_pb';
+import { EnvelopeOp, IngressRequest, IngressResponse, RouterInvokeOp, RouterQueryOp, StartupRequest, StartupResponse } from '../proto/dsm_app_pb';
 
 function mustBridge(): AndroidBridgeV3 {
   const bridge = getBridgeInstance();
@@ -34,62 +21,23 @@ function normalizeToBytes(data: unknown): Uint8Array {
   throw new Error('expected Uint8Array response from native boundary');
 }
 
-function buildBridgeRequest(method: string, payload: Uint8Array): Uint8Array {
-  const req = new BridgeRpcRequest({
-    method,
-    payload:
-      payload.length > 0
-        ? { case: 'bytes', value: new BytesPayload({ data: new Uint8Array(payload) }) }
-        : { case: 'empty', value: new EmptyPayload({}) },
-  });
-  return req.toBinary();
-}
-
-function unwrapBridgeRpcResponse(method: string, responseBytes: Uint8Array): Uint8Array {
-  let response: BridgeRpcResponse;
-  try {
-    response = BridgeRpcResponse.fromBinary(responseBytes);
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    throw new Error(`Bridge error: failed to decode response for ${method}: ${msg}`);
-  }
-  if (response.result.case === 'success') {
-    const data = response.result.value?.data;
-    return data instanceof Uint8Array ? data : new Uint8Array(0);
-  }
-  if (response.result.case === 'error') {
-    const errVal = response.result.value;
-    const message = errVal?.message || `bridge error while calling ${method}`;
-    const debugBytes = errVal ? errVal.toBinary() : new Uint8Array(0);
-    bridgeEvents.emit('bridge.error', {
-      code: errVal?.errorCode,
-      message,
-      debugB32: encodeBase32Crockford(debugBytes),
-    });
-    throw new Error(message);
-  }
-  throw new Error(`empty bridge response for ${method}`);
-}
-
 async function callBoundaryMethod(method: 'nativeBoundaryStartup' | 'nativeBoundaryIngress', payload: Uint8Array): Promise<Uint8Array> {
+  // `startup` and `ingress` are the bridge object's own wrappers over the
+  // MessagePort (`index.html`); they answer the boundary's bytes or throw.
   const bridge = mustBridge();
-  if (method === 'nativeBoundaryStartup' && typeof bridge.startup === 'function') {
-    return normalizeToBytes(await bridge.startup(payload));
+  const call = method === 'nativeBoundaryStartup' ? bridge.startup : bridge.ingress;
+  if (typeof call !== 'function') {
+    throw new Error(`DSM bridge does not expose ${method}`);
   }
-  if (method === 'nativeBoundaryIngress' && typeof bridge.ingress === 'function') {
-    return normalizeToBytes(await bridge.ingress(payload));
+  try {
+    return normalizeToBytes(await call(payload));
+  } catch (e) {
+    // The wrapper reduces Kotlin's ErrorResponse to its message; that message
+    // reaches the diagnostics bus as the RPC path's failures do.
+    const message = e instanceof Error ? e.message : String(e);
+    bridgeEvents.emit('bridge.error', { code: 0, message, debugB32: '' });
+    throw e;
   }
-
-  const requestBytes = buildBridgeRequest(method, payload);
-  if (typeof bridge.__callBin === 'function') {
-    const responseBytes = await bridge.__callBin(requestBytes);
-    return unwrapBridgeRpcResponse(method, normalizeToBytes(responseBytes));
-  }
-  if (bridge.__binary === true && typeof bridge.sendMessageBin === 'function') {
-    const responseBytes = await bridge.sendMessageBin(requestBytes);
-    return unwrapBridgeRpcResponse(method, normalizeToBytes(responseBytes));
-  }
-  throw new Error('DSM bridge does not expose the native boundary transport');
 }
 
 function encodeStartupRequest(request: StartupRequest | Uint8Array): Uint8Array {

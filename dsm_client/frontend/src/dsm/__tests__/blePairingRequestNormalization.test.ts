@@ -22,7 +22,7 @@ describe('BlePairingRequest normalization & mapping', () => {
     const genesis = mkBytes(61);
     const rawAddress = 'aa:bb:cc:dd:ee:ff'; // lower-case; should normalize to upper-case
     (globalThis as any).window = (globalThis as any).window || {};
-    (globalThis as any).window.DsmBridge = { __binary: true, __callBin: async () => new Uint8Array(0) };
+    (globalThis as any).window.DsmBridge = { __binary: true, sendMessageBin: async () => new Uint8Array(0) };
 
     const contact = { alias: 'PeerLC', deviceId: devId, genesisHash: genesis, bleAddress: rawAddress };
     const resolved = await dsmClient.resolveBleAddressForContact?.(contact as any);
@@ -33,7 +33,7 @@ describe('BlePairingRequest normalization & mapping', () => {
     const devId = mkBytes(70);
     const genesis = mkBytes(71);
     const rawAddress = '112233445566'; // contiguous hex
-    (globalThis as any).window.DsmBridge = { __binary: true, __callBin: async () => new Uint8Array(0) };
+    (globalThis as any).window.DsmBridge = { __binary: true, sendMessageBin: async () => new Uint8Array(0) };
 
     const contact = { alias: 'PeerHex', deviceId: devId, genesisHash: genesis, bleAddress: rawAddress };
     const resolved = await dsmClient.resolveBleAddressForContact?.(contact as any);
