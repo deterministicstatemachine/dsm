@@ -3082,6 +3082,107 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_rejectBilater
     )
 }
 
+/// The proposer cancels a proposal it has not confirmed
+/// (`BilateralBleHandler::cancel_proposal`) and sends the signed cancellation
+/// to the counterparty. The cancellation holds whether or not this send
+/// completes: it is also the answer to the counterparty's next frame for the
+/// step.
+#[no_mangle]
+#[cfg(all(target_os = "android", feature = "bluetooth"))]
+pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_cancelBilateralByCommitment(
+    env: jni::sys::JNIEnv,
+    _clazz: jni::sys::jclass,
+    commitment_hash: jni::sys::jbyteArray,
+    reason: jni::sys::jstring,
+) -> jni::sys::jbyteArray {
+    crate::jni::bridge_utils::jni_catch_unwind_jbytearray(
+        "cancelBilateralByCommitment",
+        std::panic::AssertUnwindSafe(|| {
+            let mut env = match unsafe { env_from(env) } {
+                Some(e) => e,
+                None => return std::ptr::null_mut(),
+            };
+            let jba = unsafe { jba_from(commitment_hash) };
+            let ch: [u8; 32] = match env
+                .convert_byte_array(&jba)
+                .ok()
+                .and_then(|bytes| <[u8; 32]>::try_from(bytes.as_slice()).ok())
+            {
+                Some(ch) => ch,
+                None => {
+                    return error_byte_array(
+                        &mut env,
+                        helpers::JniErrorCode::InvalidInput as u32,
+                        "commitment_hash must be 32 bytes",
+                    )
+                    .into_raw();
+                }
+            };
+            let jreason = unsafe { jstr_from(reason) };
+            let reason: String = match env.get_string(&jreason) {
+                Ok(s) => s.into(),
+                Err(e) => {
+                    return error_byte_array(
+                        &mut env,
+                        helpers::JniErrorCode::InvalidInput as u32,
+                        &format!("invalid reason: {e}"),
+                    )
+                    .into_raw();
+                }
+            };
+            let rt = crate::runtime::get_runtime();
+            let (coord, adapter) = match (
+                rt.block_on(crate::bridge::get_ble_coordinator()),
+                rt.block_on(crate::bridge::get_ble_transport_adapter()),
+            ) {
+                (Ok(coord), Ok(adapter)) => (coord, adapter),
+                _ => {
+                    return error_byte_array(
+                        &mut env,
+                        helpers::JniErrorCode::NotReady as u32,
+                        "BLE transport not ready",
+                    )
+                    .into_raw();
+                }
+            };
+            let counterparty = rt.block_on(adapter.counterparty_for_commitment(ch));
+            let cancellation =
+                match rt.block_on(adapter.bilateral_handler().cancel_proposal(ch, reason)) {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        return error_byte_array(
+                            &mut env,
+                            helpers::JniErrorCode::ProcessingFailed as u32,
+                            &format!("cancelBilateralByCommitment failed: {e}"),
+                        )
+                        .into_raw();
+                    }
+                };
+            let address = counterparty
+                .and_then(|device| get_contact_by_device_id(&device).ok().flatten())
+                .and_then(|contact| contact.ble_address)
+                .filter(|address| !address.is_empty());
+            if let Some(address) = address {
+                let sent = coord
+                    .chunk_message(pb::BleFrameType::BilateralPrepareReject, &cancellation)
+                    .map_err(|e| e.to_string())
+                    .and_then(|chunks| send_ble_chunks_via_unified(&mut env, &address, &chunks));
+                if !matches!(sent, Ok(true)) {
+                    log::warn!(
+                        "[BLE] cancellation not delivered now; it answers the counterparty's next frame"
+                    );
+                }
+            }
+            let mut framed_bytes = Vec::with_capacity(1 + cancellation.len());
+            framed_bytes.push(0x03);
+            framed_bytes.extend_from_slice(&cancellation);
+            env.byte_array_from_slice(&framed_bytes)
+                .map(|a| a.into_raw())
+                .unwrap_or_else(|_| empty_byte_array_or_empty(&mut env).into_raw())
+        }),
+    )
+}
+
 /* =============================================================================
 Unified init/status + header fetch (stable surface for Activity gating)
 ============================================================================= */

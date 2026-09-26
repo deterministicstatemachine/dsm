@@ -926,15 +926,34 @@ impl BilateralBleHandler {
             m.sign_commitment(&pre_commitment.bilateral_commitment_hash)?
         };
 
-        let sessions = self.sessions.sessions.lock().await;
-        if sessions.contains_key(&pre_commitment.bilateral_commitment_hash) {
-            log::warn!(
-                "[BLE_HANDLER] ⚠️ Duplicate prepare request for {}. Dropping silently.",
-                bytes_to_base32(&pre_commitment.bilateral_commitment_hash)
-            );
-            return Err(DsmError::invalid_operation("silent_drop_duplicate_packet"));
+        // A step keeps its identity (its commitment) whatever became of it: the
+        // same operation on the same tip is that step again, and is refused. The
+        // in-flight gate above admits no live step with this counterparty, so a
+        // step found here has ended, and the precommitment just made for it
+        // goes.
+        let known = self
+            .sessions
+            .sessions
+            .lock()
+            .await
+            .contains_key(&pre_commitment.bilateral_commitment_hash)
+            || crate::storage::client_db::get_bilateral_session(
+                &pre_commitment.bilateral_commitment_hash,
+            )
+            .map_err(|e| {
+                DsmError::storage(format!("the step's session: {e}"), None::<std::io::Error>)
+            })?
+            .is_some();
+        if known {
+            self.bilateral_tx_manager
+                .write()
+                .await
+                .consume_pre_commitment(&pre_commitment.bilateral_commitment_hash);
+            return Err(DsmError::invalid_operation(format!(
+                "this step was already proposed ({}); a new step needs a new operation",
+                bytes_to_base32(&pre_commitment.bilateral_commitment_hash[..8])
+            )));
         }
-        drop(sessions);
 
         let session = BilateralBleSession {
             commitment_hash: pre_commitment.bilateral_commitment_hash,
@@ -1611,6 +1630,36 @@ impl BilateralBleHandler {
             }
         }
 
+        // The proposal delivered again. An acceptance answers it with the
+        // response it owes (the first may not have arrived); a proposal this
+        // device rejected, with its signed rejection. A proposal still awaiting
+        // its user, or a step that ended any other way, answers nothing.
+        let existing = match self
+            .sessions
+            .sessions
+            .lock()
+            .await
+            .get(&origin_commitment_hash)
+            .cloned()
+        {
+            Some(session) => Some(session),
+            None => crate::storage::client_db::get_bilateral_session(&origin_commitment_hash)
+                .map_err(|e| {
+                    DsmError::storage(format!("the step's session: {e}"), None::<std::io::Error>)
+                })?
+                .map(|row| BilateralBleSession::from_record(&row))
+                .transpose()?,
+        };
+        if let Some(existing) = existing {
+            let answer = existing
+                .owed()
+                .filter(|frame| frame.kind == OfflineFrameKind::PrepareResponse)
+                .map(|frame| frame.bytes)
+                .or_else(|| existing.rejection())
+                .unwrap_or_default();
+            return Ok((answer, crate::sdk::transfer_hooks::TransferMeta::default()));
+        }
+
         // The proposal is the sender's, and it extends the held tip: this
         // device's own precommitment to the same step.
         let our_pre_commitment = {
@@ -1628,24 +1677,6 @@ impl BilateralBleHandler {
             let m = self.bilateral_tx_manager.read().await;
             m.sign_commitment(&origin_commitment_hash)?
         };
-
-        // The proposal delivered again: an acceptance answers it with the
-        // response it owes (the first one may not have arrived); a proposal
-        // still awaiting its user has nothing to send yet.
-        if let Some(existing) = self
-            .sessions
-            .sessions
-            .lock()
-            .await
-            .get(&origin_commitment_hash)
-        {
-            let owed = existing
-                .owed()
-                .filter(|frame| frame.kind == OfflineFrameKind::PrepareResponse)
-                .map(|frame| frame.bytes)
-                .unwrap_or_default();
-            return Ok((owed, crate::sdk::transfer_hooks::TransferMeta::default()));
-        }
 
         let session = BilateralBleSession {
             commitment_hash: origin_commitment_hash,
@@ -1949,12 +1980,113 @@ impl BilateralBleHandler {
         envelope.encode(&mut buffer).map_err(|e| {
             DsmError::serialization_error("encode_reject", "protobuf", Some(e.to_string()), Some(e))
         })?;
+        // The rejection is kept as the answer to the proposal delivered again.
+        self.keep_rejection(origin_commitment_hash, &buffer).await?;
 
         info!(
             "Bilateral prepare reject envelope created for {}",
             bytes_to_base32(&origin_commitment_hash[..8])
         );
         Ok(buffer)
+    }
+
+    /// Keep the signed rejection or cancellation that ended the step
+    /// `commitment_hash` as the answer to its counterparty's next frame for it.
+    async fn keep_rejection(
+        &self,
+        commitment_hash: [u8; 32],
+        rejection: &[u8],
+    ) -> Result<(), DsmError> {
+        let mut sessions = self.sessions.sessions.lock().await;
+        let session = sessions
+            .get_mut(&commitment_hash)
+            .ok_or_else(|| DsmError::invalid_operation("the rejected step's session is gone"))?;
+        session.owed_frame = Some(rejection.to_vec());
+        let kept = session.clone();
+        drop(sessions);
+        self.persist_session(&kept).await
+    }
+
+    /// The proposer ends a proposal before it has confirmed it: until the
+    /// confirm, nothing can have committed on either side. The cancellation is
+    /// a rejection the proposer signs; it is kept as the answer to the
+    /// receiver's next frame for the step, which ends the receiver's side, and
+    /// the relationship is free for the next step. A step past its confirm
+    /// cannot be cancelled: its receiver may have committed.
+    pub async fn cancel_proposal(
+        &self,
+        commitment_hash: [u8; 32],
+        reason: String,
+    ) -> Result<Vec<u8>, DsmError> {
+        let session = self
+            .sessions
+            .sessions
+            .lock()
+            .await
+            .get(&commitment_hash)
+            .cloned()
+            .ok_or_else(|| DsmError::invalid_operation("no proposal with that commitment"))?;
+        match session.phase {
+            BilateralPhase::Preparing | BilateralPhase::Prepared => {}
+            BilateralPhase::ConfirmPending => {
+                return Err(DsmError::invalid_operation(
+                    "a confirmed step cannot be cancelled: its receiver may have committed; it \
+                     completes, or is reconciled online",
+                ))
+            }
+            other => {
+                return Err(DsmError::invalid_operation(format!(
+                    "a step in {other:?} is not a proposal this device can cancel"
+                )))
+            }
+        }
+        let rejector_signature = self
+            .bilateral_tx_manager
+            .read()
+            .await
+            .sign_rejection(&commitment_hash, &reason)?;
+        let envelope = self
+            .create_envelope(generated::envelope::Payload::BilateralPrepareReject(
+                generated::BilateralPrepareReject {
+                    commitment_hash: Some(generated::Hash32 {
+                        v: commitment_hash.to_vec(),
+                    }),
+                    reason: reason.clone(),
+                    rejector_device_id: self.device_id.to_vec(),
+                    send_status: None,
+                    rejector_signature,
+                },
+            ))
+            .await;
+        let cancellation = envelope.encode_to_vec();
+        let mut cancelled = session;
+        cancelled.phase = BilateralPhase::Rejected;
+        cancelled.owed_frame = Some(cancellation.clone());
+        self.persist_session(&cancelled).await?;
+        let counterparty_device_id = cancelled.counterparty_device_id;
+        self.sessions
+            .sessions
+            .lock()
+            .await
+            .insert(commitment_hash, cancelled);
+        self.bilateral_tx_manager
+            .write()
+            .await
+            .consume_pre_commitment(&commitment_hash);
+        self.emit_event(&generated::BilateralEventNotification {
+            display_amount: None,
+            event_type: generated::BilateralEventType::BilateralEventRejected.into(),
+            counterparty_device_id: counterparty_device_id.to_vec(),
+            commitment_hash: commitment_hash.to_vec(),
+            transaction_hash: None,
+            amount: None,
+            token_id: None,
+            status: "cancelled".to_string(),
+            message: reason,
+            sender_ble_address: None,
+            failure_reason: None,
+        });
+        Ok(cancellation)
     }
 
     /// Handle prepare rejection (original sender processes rejection)
@@ -1993,9 +2125,10 @@ impl BilateralBleHandler {
             .try_into()
             .map_err(|_| DsmError::invalid_operation("rejector device_id must be 32 bytes"))?;
 
-        // A rejection ends only a proposal this device sent to the rejector, and
-        // only when the rejector signed it under the key its contact pins.
-        // Anything else changes nothing.
+        // A rejection ends only a step with the rejector that has not been
+        // confirmed — this device's proposal the rejector refused, or the
+        // rejector's proposal it cancelled — and only when the rejector signed
+        // it under the key its contact pins. Anything else changes nothing.
         let rejected_session = {
             let sessions = self.sessions.sessions.lock().await;
             let session = sessions.get(&commitment_hash).ok_or_else(|| {
@@ -2006,14 +2139,19 @@ impl BilateralBleHandler {
                     "the rejection is not from the device the proposal went to",
                 ));
             }
-            // Past its prepare the proposal was accepted: a rejection then is the
-            // counterparty contradicting its own signature, not an answer.
+            // A proposal still awaiting its answer, or — on the receiver — a
+            // proposal not yet confirmed. Past the confirm the step may have
+            // committed: a rejection then contradicts the rejector's own
+            // signatures and ends nothing.
             if !matches!(
                 session.phase,
-                BilateralPhase::Preparing | BilateralPhase::Prepared
+                BilateralPhase::Preparing
+                    | BilateralPhase::Prepared
+                    | BilateralPhase::PendingUserAction
+                    | BilateralPhase::Accepted
             ) {
                 return Err(DsmError::invalid_operation(
-                    "a rejection answers only a proposal still awaiting its answer",
+                    "a rejection ends only a step that has not been confirmed",
                 ));
             }
             let mut rejected = session.clone();
@@ -2037,11 +2175,14 @@ impl BilateralBleHandler {
         {
             session.phase = BilateralPhase::Rejected;
         }
-        // The proposal is abandoned: the sender's relationship tip stays where it was.
+        // The step is abandoned: the relationship tip stays where it was.
+        let pending_key = rejected_session
+            .local_commitment_hash
+            .unwrap_or(commitment_hash);
         self.bilateral_tx_manager
             .write()
             .await
-            .consume_pre_commitment(&commitment_hash);
+            .consume_pre_commitment(&pending_key);
 
         self.prune_terminal_sessions_for_counterparty(&rejector_device_id)
             .await;
@@ -2238,6 +2379,14 @@ impl BilateralBleHandler {
                     })?;
                 return Ok((
                     owed.bytes,
+                    crate::sdk::transfer_hooks::TransferMeta::default(),
+                ));
+            }
+            // A response for a proposal this device cancelled is answered
+            // with the signed cancellation: it ends the receiver's side.
+            if let Some(cancellation) = session.rejection() {
+                return Ok((
+                    cancellation,
                     crate::sdk::transfer_hooks::TransferMeta::default(),
                 ));
             }
@@ -4715,7 +4864,7 @@ mod tests {
     /// A proposal is abandoned only for a rejection its counterparty signed
     /// under the key its contact pins: an unsigned one, one signed by another
     /// key, one from another device, or one for a proposal already answered
-    /// changes nothing. MUTATION CONTROL: skipping the signature check lets the
+    /// and confirmed changes nothing. MUTATION CONTROL: skipping the signature check lets the
     /// unsigned rejection end the proposal and turns this red.
     #[tokio::test]
     #[serial]
@@ -4765,8 +4914,9 @@ mod tests {
         handler
             .test_insert_session(session(pending, BilateralPhase::Prepared))
             .await;
+        // Answered: the proposer confirmed it (its receiver may have committed).
         handler
-            .test_insert_session(session(answered, BilateralPhase::Accepted))
+            .test_insert_session(session(answered, BilateralPhase::ConfirmPending))
             .await;
 
         let rejection = |commitment_hash: [u8; 32], rejector: [u8; 32], signature: Vec<u8>| {
@@ -4837,7 +4987,7 @@ mod tests {
         );
         assert_eq!(
             handler.get_session_phase(&answered).await,
-            Some(BilateralPhase::Accepted)
+            Some(BilateralPhase::ConfirmPending)
         );
 
         handler

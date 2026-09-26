@@ -478,6 +478,8 @@ object Unified {
      */
     @Keep @JvmStatic fun rejectBilateralByCommitment(commitmentHashBytes: ByteArray, reason: String): ByteArray =
         UnifiedNativeApi.rejectBilateralByCommitment(commitmentHashBytes, reason)
+    @Keep @JvmStatic fun cancelBilateralByCommitment(commitmentHashBytes: ByteArray, reason: String): ByteArray =
+        UnifiedNativeApi.cancelBilateralByCommitment(commitmentHashBytes, reason)
 
     // Device + envelope inspection helpers
     @Keep @JvmStatic fun getDeviceIdBin(): ByteArray = UnifiedNativeApi.getDeviceIdBin()
