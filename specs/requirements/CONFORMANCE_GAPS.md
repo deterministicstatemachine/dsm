@@ -1109,7 +1109,55 @@ Owner decision (plan of 2026-09-25): delete the fake ERA policy and leave the ho
 | `dsm/src/sofi/validation.rs` · `market_legs_permitted` | The same absence at SoFi validation: ERA and dBTC are exempted as "pre-rooted" and read no policy bytes, so a SoFi leg in ERA is checked against nothing where every other token is checked against its committed policy. Recorded; not changed in this cut. |
 | `dsm/src/core/token/policy/policy_enforcement.rs` · `BitcoinTapConstraint` | A configuration-only arm that allows unconditionally, kept because Bitcoin is not touched in this round. |
 
-**Expected-red manifest.** Recorded from the board of this commit; see the pull request body.
+**Expected-red manifest** (the `Rust tests (dsm_sdk)` job of this commit's board, run 36226702605: 1020 tests, 46 failed). The 45 below fail on the ERA refusal — "Token policy violation for `NW9MKEFNZ6GTD8209QN3DQ6996DWP9E9NQ0H5DYCKA9WNS0Z69H0`: no policy is committed at the commitment the operation names" — at an ERA transfer or burn. Every other job of the board is green (`Rust tests (dsm)`, `workspace-rest`, `Storage Node (Postgres)`, the gates, Lean). A red outside this list is a regression; a listed test that goes green without ERA's policy is a finding.
+
+- `dsm_sdk::bluetooth::offline_step_tests::an_online_send_waits_for_the_offline_step_in_flight`
+- `dsm_sdk::handlers::bilateral_finality_tests::a_send_before_the_previous_step_finalizes_is_gated_never_marked_for_resync`
+- `dsm_sdk::handlers::bilateral_finality_tests::harness_carries_one_generation_a_to_b_through_production_code`
+- `dsm_sdk::handlers::bilateral_finality_tests::r11_only_the_checkpoint_sweep_clears_the_gate`
+- `dsm_sdk::handlers::bilateral_finality_tests::r1_role_reversal_applies_once_on_a_and_finalizes_on_b`
+- `dsm_sdk::handlers::bilateral_finality_tests::r2a_recipient_cannot_originate_before_the_peer_finalized`
+- `dsm_sdk::handlers::bilateral_finality_tests::r2b_the_certificate_releases_the_recipient`
+- `dsm_sdk::handlers::bilateral_finality_tests::r3_sender_stays_gated_until_the_checkpoint_reaches_quorum`
+- `dsm_sdk::handlers::bilateral_finality_tests::r4_calibration_cannot_release_the_sender_gate`
+- `dsm_sdk::handlers::bilateral_finality_tests::r7_a_frozen_checkpoint_is_replayed_byte_identically_after_the_fleet_returns`
+- `dsm_sdk::handlers::bilateral_finality_tests::r8_a_next_generation_transfer_is_held_until_the_certificate_lands`
+- `dsm_sdk::handlers::bilateral_finality_tests::r9_the_barrier_is_relationship_local`
+- `dsm_sdk::handlers::bilateral_finality_tests::the_harness_defers_the_background_poller_while_a_pair_lives`
+- `dsm_sdk::handlers::node_e2e_tests::a_transfer_reaches_the_nodes_only_sealed_and_arrives`
+- `dsm_sdk::handlers::node_e2e_tests::an_inbox_read_that_did_not_cover_every_delivery_is_not_a_complete_sync`
+- `dsm_sdk::handlers::recipient_accept::tests::a_bad_receipt_sig_is_refused_and_never_accepts`
+- `dsm_sdk::handlers::recipient_accept::tests::a_bad_sig_a_is_refused_and_never_accepts`
+- `dsm_sdk::handlers::recipient_accept::tests::verification_is_unreachable_from_a_single_half`
+- `dsm_sdk::handlers::recipient_admission_tests::a_transfer_admits_on_both_sides_with_a_register_backed_release`
+- `dsm_sdk::handlers::recipient_admission_tests::an_outage_holds_the_transfer_cleanly_and_it_recovers`
+- `dsm_sdk::handlers::recipient_admission_tests::fabricated_sender_coordinates_are_refused_before_any_durable_state`
+- `dsm_sdk::handlers::recipient_admission_tests::the_same_sender_debit_cannot_fund_a_second_credit`
+- `dsm_sdk::handlers::recipient_dispatch::tests::a_single_half_or_an_unbound_half_never_completes`
+- `dsm_sdk::handlers::recipient_dispatch::tests::a_tampered_evidence_arriving_first_cannot_lock_out_the_honest_copy`
+- `dsm_sdk::handlers::recipient_dispatch::tests::a_tampered_transfer_arriving_first_cannot_lock_out_the_honest_copy`
+- `dsm_sdk::handlers::recipient_dispatch::tests::every_arrival_order_converges`
+- `dsm_sdk::handlers::recipient_dispatch::tests::staging_freezes_the_exact_bytes_and_the_frozen_pair_is_what_applies`
+- `dsm_sdk::handlers::relationship_finalized::tests::a_certificate_for_a_transition_never_journaled_is_not_ours`
+- `dsm_sdk::handlers::relationship_finalized::tests::a_verified_certificate_releases_the_recipient_once_and_forgeries_do_not`
+- `dsm_sdk::handlers::sender_admission_tests::a_failed_finish_holds_the_outbox_and_resume_completes_the_same_admission`
+- `dsm_sdk::handlers::sender_admission_tests::a_stale_admission_snapshot_is_refused_not_committed`
+- `dsm_sdk::handlers::sender_admission_tests::a_stale_resume_returns_the_admitted_outcome_and_leaves_a_newer_admission_alone`
+- `dsm_sdk::handlers::sender_admission_tests::a_transfer_registers_the_senders_root_at_the_next_position`
+- `dsm_sdk::handlers::sender_admission_tests::an_admitted_burn_advances_the_lineage_and_is_foreign_walkable`
+- `dsm_sdk::handlers::sender_admission_tests::sequential_admissions_stay_monotonic_across_operation_kinds`
+- `dsm_sdk::handlers::sender_admission_tests::token_routes_admit_create_and_burn_end_to_end`
+- `dsm_sdk::handlers::storage_routes::tests::a_delta_for_a_step_with_no_retained_evidence_is_a_terminal_invariant_violation`
+- `dsm_sdk::handlers::storage_routes::tests::a_full_receipt_on_the_countersign_method_is_refused_at_the_wire`
+- `dsm_sdk::handlers::storage_routes::tests::a_poisoned_delta_parks_the_step_and_the_honest_delta_still_finalizes`
+- `dsm_sdk::handlers::storage_routes::tests::a_release_of_another_step_cannot_finalize_this_one`
+- `dsm_sdk::handlers::storage_routes::tests::settled_outbox_rows_are_never_resubmitted`
+- `dsm_sdk::sdk::b0x_sdk::tests::a_send_lands_on_exactly_the_register_quorum_of_members`
+- `dsm_sdk::sdk::b0x_sdk::tests::delivery_below_the_quorum_is_refused_however_many_members_are_marked_failed`
+- `dsm_sdk::sdk::core_sdk::tests::a_redelivered_transfer_applies_once_and_is_never_rebuilt`
+- `dsm_sdk::sdk::core_sdk::tests::an_apply_consults_the_signed_pair_never_the_projection`
+
+Not in the manifest: `dsm_sdk::sdk::sofi_reads::tests::an_unestablished_genesis_candidate_is_not_read_as_unpublished`, red on `main` since #1013 for a reason of its own (it booted no device) and fixed by #1017.
 
 ## 7 Totals
 
