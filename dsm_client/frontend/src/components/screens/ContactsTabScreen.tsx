@@ -9,7 +9,6 @@ import QRCodeScannerPanel from '../qr/QRCodeScannerPanel';
 import MyContactInfoPanel from '../contacts/MyContactInfoPanel';
 import { useContacts } from '../../contexts/ContactsContext';
 import { useTransactions } from '../../hooks/useTransactions';
-import { startPairingAll, stopPairingAll } from '../../dsm/WebViewBridge';
 import { bridgeEvents } from '../../bridge/bridgeEvents';
 import StitchedReceiptDetails from '../receipts/StitchedReceiptDetails';
 import { useDpadNav } from '../../hooks/useDpadNav';
@@ -197,28 +196,9 @@ const ContactsTabScreen: React.FC<Props> = ({ eraTokenSrc = 'images/logos/era_to
     };
   }, []);
 
-
-  // Rust-driven BLE pairing: trigger when unpaired contacts appear.
-  // Track the count of unpaired contacts so we only call startPairingAll when
-  // new unpaired contacts are detected (avoids stop/start thrashing on every refresh).
-  const prevUnpairedCountRef = useRef(0);
-  useEffect(() => {
-    const unpairedCount = contacts.filter(c => !c.bleAddress).length;
-    if (unpairedCount > 0 && unpairedCount > prevUnpairedCountRef.current) {
-      if (CONTACTS_DEBUG) console.log(`[ContactsTab] ${unpairedCount} unpaired contacts detected, starting pairing orchestrator`);
-      void startPairingAll().catch(e =>
-        console.warn('[ContactsTab] startPairingAll failed:', e)
-      );
-    }
-    prevUnpairedCountRef.current = unpairedCount;
-  }, [contacts]);
-
-  // Stop pairing on unmount
-  useEffect(() => {
-    return () => {
-      void stopPairingAll().catch(() => {});
-    };
-  }, []);
+  // When pairing runs is Rust's: while the app is in the foreground with
+  // Bluetooth on and permitted, until no contact is left unpaired. This screen
+  // used to start it when it saw an unpaired contact and stop it on unmount.
 
   // Listen for Rust pairing status events to advance BLE status indicator
   useEffect(() => {
@@ -412,7 +392,7 @@ const ContactsTabScreen: React.FC<Props> = ({ eraTokenSrc = 'images/logos/era_to
                   {bleStatus === 'paired' && 'Paired!'}
                 </div>
                 <div style={{ fontSize: 9, opacity: 0.8, color: 'var(--text-dark)' }}>
-                  {bleStatus === 'scanning' && 'Keep both devices on this screen'}
+                  {bleStatus === 'scanning' && 'Keep both phones open in the app, near each other'}
                   {bleStatus === 'found' && 'Establishing connection...'}
                   {bleStatus === 'connected' && 'Exchanging identity...'}
                   {bleStatus === 'paired' && 'Contact linked successfully'}

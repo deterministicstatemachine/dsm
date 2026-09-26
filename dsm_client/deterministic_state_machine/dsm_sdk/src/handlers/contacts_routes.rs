@@ -85,6 +85,8 @@ impl AppRouterImpl {
                 }
             }
         }
+        // Pairing takes the new contact up now, if the session lets it run.
+        crate::bluetooth::contact_added();
         pack_envelope_ok(generated::envelope::Payload::ContactAddResponse(added))
     }
 

@@ -227,15 +227,7 @@ object Unified {
     @Keep @JvmStatic fun notifyBleIdentityObserved(address: String, genesisHash: ByteArray, deviceId: ByteArray) {
         UnifiedNativeApi.notifyBleIdentityObserved(address, genesisHash, deviceId)
     }
-    
-    /**
-     * Check if there are any contacts that are not yet BLE-capable (need pairing).
-     * Used to determine if persistent BLE scanning should be active.
-     * Returns true if there are unpaired contacts, false if all contacts are BleCapable.
-     */
-    @Keep @JvmStatic fun hasUnpairedContacts(): Boolean = UnifiedNativeApi.hasUnpairedContacts()
 
-    
     @Keep @JvmStatic fun onDeviceConnected(address: String) {
         UnifiedBleEvents.onDeviceConnected(address)
     }
@@ -529,24 +521,6 @@ object Unified {
     // Kotlin no longer computes trust/entropy/Wasserstein on its own — the
     // `cdbrw.measure_trust` router query publishes a live CdbrwTrustSnapshot
     // with the same data, and frontend/UI consume that directly.
-
-    // ---------- BLE pairing orchestration (Rust-driven loop) ----------
-
-    /**
-     * Start the Rust pairing orchestrator loop that scans all unpaired contacts
-     * and drives BLE pairing automatically. Fire-and-forget — status updates are
-     * delivered via PairingStatusUpdate BleEvent envelopes through the event bus.
-     */
-    @Keep @JvmStatic fun startPairingAll() {
-        UnifiedNativeApi.startPairingAll()
-    }
-
-    /**
-     * Signal the Rust pairing orchestrator to stop its loop at the next cycle boundary.
-     */
-    @Keep @JvmStatic fun stopPairingAll() {
-        UnifiedNativeApi.stopPairingAll()
-    }
 
     @Keep @JvmStatic fun onConnectionFailed(address: String, reason: String) {
         UnifiedBleEvents.onConnectionFailed(address, reason)

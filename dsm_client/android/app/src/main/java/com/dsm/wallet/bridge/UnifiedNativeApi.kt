@@ -71,7 +71,6 @@ internal object UnifiedNativeApi {
     @Keep @JvmStatic external fun isBleAddressPaired(address: String): Boolean
     @Keep @JvmStatic external fun isCommitEnvelope(envelope: ByteArray): Boolean
     @Keep @JvmStatic external fun notifyBleIdentityObserved(address: String, genesisHash: ByteArray, deviceId: ByteArray)
-    @Keep @JvmStatic external fun hasUnpairedContacts(): Boolean
     @Keep @JvmStatic external fun createTransactionErrorEnvelope(address: String, code: Int, message: String): ByteArray?
     @Keep @JvmStatic external fun removeContact(contactId: String): Byte
     @Keep @JvmStatic external fun isBleCoordinatorReady(): Boolean
@@ -143,8 +142,6 @@ internal object UnifiedNativeApi {
     @Keep @JvmStatic external fun createNfcBackupWrittenEnvelope(): ByteArray
 
     // BLE pairing orchestration (Rust-driven loop)
-    @Keep @JvmStatic external fun startPairingAll()
-    @Keep @JvmStatic external fun stopPairingAll()
 
     // Session state — Rust owns session computation, Kotlin relays bytes to WebView
     @Keep @JvmStatic external fun getSessionSnapshot(): ByteArray

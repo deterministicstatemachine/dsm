@@ -37,8 +37,6 @@ export const {
 export const {
   openBluetoothSettings,
   requestBlePermissions,
-  startPairingAll,
-  stopPairingAll,
 } = ble;
 
 export const {

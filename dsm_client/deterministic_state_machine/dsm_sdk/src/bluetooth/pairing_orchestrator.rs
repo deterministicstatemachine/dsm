@@ -751,7 +751,8 @@ impl PairingOrchestrator {
     /// 5. Waits for actual pairing state changes or a transport retry timeout
     /// 6. Loops until all contacts are paired or stop_pairing_loop() is called
     ///
-    /// Designed to be spawned on the tokio runtime (fire-and-forget from JNI).
+    /// Spawned on the tokio runtime when the session lets pairing run
+    /// (`bluetooth::pairing_follows`, `bluetooth::contact_added`).
     pub async fn start_pairing_all_unpaired(self: Arc<Self>) {
         // Reset stop flag first, then atomically claim the loop
         self.loop_stop.store(false, Ordering::SeqCst);
@@ -883,8 +884,8 @@ impl PairingOrchestrator {
 
                 // Clear any Failed or stale session so initiate_pairing() inserts a
                 // fresh one.  A Failed session for a contact that is still unpaired
-                // (ble_address absent in SQLite) must be retried on the next
-                // startPairingAll call.  A stale in-progress session means the GATT
+                // (ble_address absent in SQLite) is retried on this pass. A
+                // stale in-progress session means the GATT
                 // connection dropped mid-handshake without transitioning to Failed.
                 {
                     let mut sessions = self.sessions.write().await;
@@ -934,8 +935,9 @@ impl PairingOrchestrator {
             let _ = tokio::time::timeout(PAIRING_LOOP_WAKE_TIMEOUT, state_changed).await;
         }
 
-        // Stop BLE radios on loop exit to prevent lingering scan/advertise that
-        // causes "stuck scanning" when the peer has already completed pairing.
+        // Stop the pairing scan on loop exit so it does not linger ("stuck
+        // scanning") once the peer has completed pairing. Advertising follows
+        // the identity and is not the loop's.
         let _ = self.stop_ble_discovery().await;
 
         self.loop_running.store(false, Ordering::SeqCst);

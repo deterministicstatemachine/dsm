@@ -20,11 +20,6 @@ jest.mock('../../../contexts/ContactsContext', () => ({
   useContacts: () => ({ contacts: mockContacts, refreshContacts: async () => {}, isLoading: false }),
 }));
 
-jest.mock('../../../dsm/WebViewBridge', () => ({
-  startPairingAll: jest.fn().mockResolvedValue(undefined),
-  stopPairingAll: jest.fn().mockResolvedValue(undefined),
-}));
-
 describe('ContactsTabScreen contact row', () => {
   beforeEach(() => {
     (globalThis as any).requestAnimationFrame = () => 0;

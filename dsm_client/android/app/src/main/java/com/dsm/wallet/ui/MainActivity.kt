@@ -60,6 +60,7 @@ import com.dsm.wallet.BuildConfig
 import com.dsm.wallet.bridge.BleEventRelay
 import com.dsm.wallet.bridge.SinglePathWebViewBridge
 import com.dsm.wallet.bridge.Unified
+import com.dsm.wallet.bridge.ble.BleCoordinator
 import com.dsm.wallet.mcp.McpService
 import com.dsm.wallet.permissions.BluetoothPermissionHelper
 import com.dsm.wallet.service.BleBackgroundService
@@ -806,6 +807,13 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
      * requirement) at init when the identity is read and when genesis creates it.
      */
     fun startBleForIdentity() {
+        // Rust starts pairing on the next session facts, and pairing drives the
+        // radio through the coordinator: it exists before those facts go out.
+        try {
+            BleCoordinator.getInstance(applicationContext)
+        } catch (t: Throwable) {
+            Log.w(tag, "startBleForIdentity: BLE coordinator init failed", t)
+        }
         try {
             BleBackgroundService.start(this)
             Log.i(tag, "startBleForIdentity: BLE foreground service started")

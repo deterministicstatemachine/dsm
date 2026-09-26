@@ -40,6 +40,44 @@ use dsm::types::error::DsmError;
 use std::sync::Arc;
 use std::sync::RwLock;
 
+/// Pairing follows the session (`SessionManager::pairing_may_run`): the loop
+/// runs while the app is in the foreground with Bluetooth on and permitted and
+/// an identity to pair as, and ends by itself once no contact is unpaired; it
+/// stops when the session says it may not run. Host builds have no BLE to pair
+/// over.
+pub fn pairing_follows(may_run: bool) {
+    #[cfg(all(target_os = "android", feature = "jni"))]
+    {
+        let orchestrator = get_pairing_orchestrator();
+        if may_run {
+            if !orchestrator.is_loop_running() {
+                crate::runtime::get_runtime().spawn(async move {
+                    orchestrator.start_pairing_all_unpaired().await;
+                });
+            }
+        } else if orchestrator.is_loop_running() {
+            orchestrator.stop_pairing_loop();
+        }
+    }
+    #[cfg(not(all(target_os = "android", feature = "jni")))]
+    let _ = may_run;
+}
+
+/// A contact was added: it is paired now if the session lets pairing run. A
+/// running loop is woken to take it up; otherwise one is started.
+pub fn contact_added() {
+    #[cfg(all(target_os = "android", feature = "jni"))]
+    {
+        if !crate::sdk::session_manager::pairing_may_run_now() {
+            return;
+        }
+        let orchestrator = get_pairing_orchestrator();
+        crate::runtime::get_runtime().spawn(async move {
+            orchestrator.start_pairing_all_unpaired().await;
+        });
+    }
+}
+
 /// Global pairing orchestrator
 static PAIRING_ORCHESTRATOR: RwLock<Option<Arc<pairing_orchestrator::PairingOrchestrator>>> =
     RwLock::new(None);

@@ -343,6 +343,16 @@ impl SessionManager {
         Ok(())
     }
 
+    /// Whether the BLE pairing loop may run: the app is in the foreground,
+    /// Bluetooth is on and permitted, and there is an identity to pair as.
+    /// The loop itself ends once no contact is left unpaired.
+    pub fn pairing_may_run(&self, has_identity: bool) -> bool {
+        self.hardware.app_foreground
+            && self.hardware.ble_enabled
+            && self.hardware.ble_permissions
+            && has_identity
+    }
+
     /// Build the full `AppSessionStateProto` snapshot.
     /// Reads from existing Rust truth on every call — no caching of projection inputs.
     pub fn compute_snapshot(&self) -> generated::AppSessionStateProto {
@@ -407,7 +417,20 @@ pub fn update_hardware_and_snapshot(facts_bytes: &[u8]) -> Result<Vec<u8>, Strin
         .map_err(|e| format!("session lock settings: {e}"))?;
     mgr.apply_hardware_facts(&facts)
         .map_err(|e| format!("session lock: {e}"))?;
-    Ok(envelope_wrap_snapshot(mgr.compute_snapshot()))
+    let snapshot = envelope_wrap_snapshot(mgr.compute_snapshot());
+    let pairing_may_run = mgr.pairing_may_run(AppState::get_has_identity());
+    drop(mgr);
+    // Pairing follows the session, as the lock does.
+    crate::bluetooth::pairing_follows(pairing_may_run);
+    Ok(snapshot)
+}
+
+/// Whether the BLE pairing loop may run, on the session's last facts.
+pub fn pairing_may_run_now() -> bool {
+    SESSION_MANAGER
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .pairing_may_run(AppState::get_has_identity())
 }
 
 /// Set a fatal error on the session manager and return envelope-wrapped snapshot bytes.
@@ -622,6 +645,38 @@ mod tests {
         assert!(ble.enabled);
         assert!(ble.advertising);
         assert!(!ble.scanning);
+    }
+
+    /// Pairing runs only while the app is in the foreground with Bluetooth
+    /// on and permitted and an identity to pair as: the contacts screen used
+    /// to start it when it saw an unpaired contact and stop it when it
+    /// unmounted.
+    #[test]
+    fn pairing_runs_only_in_the_foreground_with_bluetooth_on_permitted_and_an_identity() {
+        let facts =
+            |app_foreground, ble_enabled, ble_permissions| generated::SessionHardwareFactsProto {
+                app_foreground,
+                ble_enabled,
+                ble_permissions,
+                ..Default::default()
+            };
+        let mut mgr = SessionManager::default();
+        mgr.apply_hardware_facts(&facts(true, true, true))
+            .expect("facts");
+        assert!(mgr.pairing_may_run(true));
+        assert!(!mgr.pairing_may_run(false), "no identity to pair as");
+        for (foreground, on, permitted) in [
+            (false, true, true),
+            (true, false, true),
+            (true, true, false),
+        ] {
+            mgr.apply_hardware_facts(&facts(foreground, on, permitted))
+                .expect("facts");
+            assert!(
+                !mgr.pairing_may_run(true),
+                "foreground={foreground} on={on} permitted={permitted}"
+            );
+        }
     }
 
     #[test]

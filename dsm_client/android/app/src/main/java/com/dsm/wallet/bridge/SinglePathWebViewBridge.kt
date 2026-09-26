@@ -344,48 +344,6 @@ class SinglePathWebViewBridge(private val context: Context) {
                     }
                 }
 
-                // Rust-driven pairing orchestration: scan all unpaired contacts automatically
-                "startPairingAll" -> {
-                    // Invariant #7: identity check via JNI → Rust, not prefs side channel.
-                    // BLE identity publication requires BOTH device_id and genesis_hash.
-                    val hasIdentity = try {
-                        Unified.getDeviceIdBin().size == 32 && Unified.getGenesisHashBin().size == 32
-                    } catch (_: Throwable) { false }
-                    if (!hasIdentity) {
-                        Log.w(TAG, "startPairingAll: identity not ready, aborting")
-                        return ByteArray(0)
-                    }
-                    // Ensure BLE permissions are granted before starting the loop
-                    BridgeBleHandler.requestBlePermissions()
-                    // Ensure BleCoordinator is initialized before Rust calls startBlePairing*
-                    try {
-                        val ctx = com.dsm.wallet.ui.MainActivity.getActiveInstance()?.applicationContext
-                        if (ctx != null) {
-                            BleCoordinator.getInstance(ctx)
-                            Log.i(TAG, "startPairingAll: BleCoordinator ensured")
-                        } else {
-                            Log.w(TAG, "startPairingAll: no context for BleCoordinator init")
-                        }
-                    } catch (t: Throwable) {
-                        Log.w(TAG, "startPairingAll: BleCoordinator init failed", t)
-                    }
-                    try {
-                        Unified.startPairingAll()
-                    } catch (t: Throwable) {
-                        Log.w(TAG, "startPairingAll failed", t)
-                    }
-                    ByteArray(0)
-                }
-
-                "stopPairingAll" -> {
-                    try {
-                        Unified.stopPairingAll()
-                    } catch (t: Throwable) {
-                        Log.w(TAG, "stopPairingAll failed", t)
-                    }
-                    ByteArray(0)
-                }
-
                 "requestBlePermissions" -> {
                     BridgeBleHandler.requestBlePermissions()
                     ByteArray(0)
