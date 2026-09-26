@@ -145,12 +145,6 @@ object Unified {
     @Keep @JvmStatic fun getAllBalancesStrict(): ByteArray =
         UnifiedNativeApi.getAllBalancesStrict()
 
-    /**
-     * Fetch wallet history (strict, protobuf-encoded).
-     * Returns: ByteArray (protobuf-encoded WalletHistoryResponse)
-     */
-    @Keep @JvmStatic fun getWalletHistoryStrict(): ByteArray =
-        UnifiedNativeApi.getWalletHistoryStrict()
 
     // BLE bilateral operations
 
@@ -490,13 +484,6 @@ object Unified {
     @Keep @JvmStatic fun onAppBackgrounded(): Boolean =
         try { UnifiedNativeApi.onAppBackgrounded() } catch (_: Throwable) { false }
     @Keep @JvmStatic fun getGenesisHashBin(): ByteArray = UnifiedNativeApi.getGenesisHashBin()
-    /**
-     * Get the local signing public key (64 bytes for SPHINCS+ SPX256s).
-     * Used for bilateral transaction verification and QR code generation.
-     * @return 64-byte signing public key or empty array if not initialized
-     */
-    @Keep @JvmStatic fun getSigningPublicKeyBin(): ByteArray =
-        UnifiedNativeApi.getSigningPublicKeyBin()
     /**
      * Get the current BLE MAC address for a device_id by searching identity cache.
      * @param deviceId Raw 32-byte device ID

@@ -150,6 +150,7 @@ jobs:
           bash scripts/flow_mapping_assertions.sh
           bash scripts/check_forbidden_symbols.sh
           bash scripts/ci_scan.sh
+          python3 ci/bridge_rpc_names.py
 
       - name: Production safety lints
         run: bash ci/production_safety_checks.sh
@@ -490,6 +491,7 @@ jobs:
           bash scripts/flow_assertions.sh
           bash scripts/flow_mapping_assertions.sh
           bash scripts/ci_scan.sh
+          python3 ci/bridge_rpc_names.py
 
       - name: Lint
         run: npm run lint
@@ -522,6 +524,12 @@ jobs:
         working-directory: dsm_client/android
     steps:
       - uses: actions/checkout@v7
+
+      # The bridge RPC names Kotlin handles must be the names the frontend sends;
+      # this job is what a Kotlin-only change selects.
+      - name: Bridge RPC name gate
+        working-directory: .
+        run: python3 ci/bridge_rpc_names.py
 
       - name: Set up JDK 17
         uses: actions/setup-java@v5
