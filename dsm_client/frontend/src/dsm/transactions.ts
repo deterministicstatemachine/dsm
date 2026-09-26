@@ -159,7 +159,6 @@ export async function offlineSend(transfer: GenericTransaction): Promise<Generic
         statusPollTimer = null;
       }
       offEvent();
-      offBle();
       if (resolvePromise) resolvePromise(res);
     };
 
@@ -236,17 +235,9 @@ export async function offlineSend(transfer: GenericTransaction): Promise<Generic
       } catch { /* ignore */ }
     });
 
-    const offBle = eventBridgeOn('ble.envelope.bin', (payload) => {
-      try {
-        const bleEnv = decodeFramedEnvelopeV3(payload as Uint8Array);
-        const p2: any = bleEnv?.payload ?? bleEnv;
-        const btMsg = (p2?.case === 'dsmBtMessage' ? p2.value : p2?.dsmBtMessage) as pb.DsmBtMessage | undefined;
-        if (!btMsg || btMsg.messageType !== pb.BtMessageType.BTMSG_TYPE_ERROR) return;
-        const err = pb.BleTransactionError.fromBinary(btMsg.payload);
-        const msg = err?.message || 'BLE transaction error';
-        finish({ accepted: false, result: msg });
-      } catch { /* ignore */ }
-    });
+    // A BLE transport error is not this send's failure: Kotlin raises one for
+    // any failed connection, to any peer, and a lost link fails no step. The
+    // send ends on Rust's word — its events, or its pending list.
 
     // --- Native authoring + BLE dispatch: wallet.sendOffline ---
     // The radio is native's: it advertises while the device has an identity,
