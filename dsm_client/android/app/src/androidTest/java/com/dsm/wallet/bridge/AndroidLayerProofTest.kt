@@ -28,10 +28,17 @@ import java.security.SecureRandom
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.CyclicBarrier
 import java.util.concurrent.atomic.AtomicInteger
+import dsm.types.proto.ArgPack
+import dsm.types.proto.Codec
+import dsm.types.proto.Envelope
+import dsm.types.proto.FaucetClaimRequest
+import dsm.types.proto.FaucetClaimResponse
+import dsm.types.proto.Headers
 import dsm.types.proto.IngressRequest
 import dsm.types.proto.IngressResponse
 import dsm.types.proto.RouterInvokeOp
 import dsm.types.proto.RouterQueryOp
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * ON-DEVICE PROOF: Android Layer Correctness
@@ -69,6 +76,11 @@ class AndroidLayerProofTest {
         @Volatile
         @JvmStatic
         private var genesisCreated = false
+
+        // The method t60 sends to reach the unknown-method arm. ci/bridge_rpc_names.py
+        // checks Kotlin handles no method by this name; every other bridge name this
+        // suite sends must be one Kotlin handles.
+        private const val UNHANDLED_METHOD = "nonExistentMethod"
     }
 
     private lateinit var ctx: Context
@@ -249,7 +261,7 @@ class AndroidLayerProofTest {
         ensureGenesis()
 
         val messageId = 0x0102030405060708L
-        val requestBytes = encodeBridgeRpcRequest("getDeviceIdBin", ByteArray(0))
+        val requestBytes = encodeBridgeRpcRequest("getTransportHeadersV3Bin", ByteArray(0))
         val framedReq = prependMessageId(messageId, requestBytes)
 
         val framedResp = MainActivity.processBridgeRequestForTest(ctx, framedReq)
@@ -264,7 +276,7 @@ class AndroidLayerProofTest {
 
         val id1 = 1L
         val id2 = 2L
-        val requestBytes = encodeBridgeRpcRequest("getDeviceIdBin", ByteArray(0))
+        val requestBytes = encodeBridgeRpcRequest("getTransportHeadersV3Bin", ByteArray(0))
 
         val resp1 = MainActivity.processBridgeRequestForTest(ctx, prependMessageId(id1, requestBytes))
         val resp2 = MainActivity.processBridgeRequestForTest(ctx, prependMessageId(id2, requestBytes))
@@ -278,7 +290,7 @@ class AndroidLayerProofTest {
         ensureGenesis()
 
         val messageId = Long.MAX_VALUE
-        val requestBytes = encodeBridgeRpcRequest("getDeviceIdBin", ByteArray(0))
+        val requestBytes = encodeBridgeRpcRequest("getTransportHeadersV3Bin", ByteArray(0))
         val framedResp = MainActivity.processBridgeRequestForTest(ctx, prependMessageId(messageId, requestBytes))
 
         assertEquals("Max message ID must survive", messageId, readMessageId(framedResp))
@@ -292,41 +304,21 @@ class AndroidLayerProofTest {
     // =========================================================================
 
     @Test
-    fun t22_method_getDeviceIdBin() {
-        ensureGenesis()
-
-        val resp = callBridgeMethod("getDeviceIdBin", ByteArray(0))
-        assertTrue("Must be success", resp.first)
-        assertEquals("Device ID must be 32 bytes", 32, resp.second.size)
-        assertFalse("Device ID must not be all zeros", resp.second.all { it == 0.toByte() })
-    }
-
-    @Test
-    fun t23_method_getGenesisHashBin() {
-        ensureGenesis()
-
-        val resp = callBridgeMethod("getGenesisHashBin", ByteArray(0))
-        assertTrue("Must be success", resp.first)
-        assertEquals("Genesis hash must be 32 bytes", 32, resp.second.size)
-        assertFalse("Genesis hash must not be all zeros", resp.second.all { it == 0.toByte() })
-    }
-
-    @Test
     fun t24_method_getTransportHeadersV3Bin() {
         ensureGenesis()
 
-        val resp = callBridgeMethod("getTransportHeadersV3Bin", ByteArray(0))
-        assertTrue("Must be success", resp.first)
-        assertTrue("Headers must be non-empty", resp.second.isNotEmpty())
-        // Headers are protobuf: should start with a valid field tag
-        val firstByte = resp.second[0].toInt() and 0xFF
-        assertTrue("First byte must be a valid protobuf tag", firstByte > 0)
+        // The frontend's identity read (diagnostics.ts getDeviceIdBinBridgeAsync):
+        // the device id and the genesis hash come from the transport headers.
+        val headers = transportHeaders()
+        assertEquals("Device ID must be 32 bytes", 32, headers.deviceId.size())
+        assertFalse("Device ID must not be all zeros", headers.deviceId.toByteArray().all { it == 0.toByte() })
+        assertEquals("Genesis hash must be 32 bytes", 32, headers.genesisHash.size())
+        assertFalse("Genesis hash must not be all zeros", headers.genesisHash.toByteArray().all { it == 0.toByte() })
     }
 
     @Test
     fun t25_method_getAllBalancesStrict() {
         ensureGenesis()
-        claimFaucet()
 
         val resp = callBridgeMethod("getAllBalancesStrict", ByteArray(0))
         assertTrue("Must be success", resp.first)
@@ -342,18 +334,32 @@ class AndroidLayerProofTest {
     }
 
     @Test
-    fun t26_method_getWalletHistoryStrict() {
+    fun t26_method_nativeBoundaryIngress_routerQuery_walletHistory() {
         ensureGenesis()
 
-        val resp = callBridgeMethod("getWalletHistoryStrict", ByteArray(0))
-        assertTrue("Must be success", resp.first)
-        // History may be empty if no transactions, but must not crash
+        val requestBytes = encodeBridgeRpcRequest(
+            "nativeBoundaryIngress",
+            buildRouterQueryIngressRequest("wallet.history", walletHistoryArgs())
+        )
+        val framedResp = MainActivity.processBridgeRequestForTest(ctx, prependMessageId(300L, requestBytes))
+        assertTrue("Must get response", framedResp.size > 8)
+        assertEquals("Message ID must match", 300L, readMessageId(framedResp))
+
+        val (isSuccess, data) = BridgeEnvelopeCodec.parseEnvelopeResponse(framedResp.copyOfRange(8, framedResp.size))
+        assertTrue("nativeBoundaryIngress(routerQuery wallet.history) must succeed", isSuccess)
+        val ingressResponse = IngressResponse.parseFrom(data)
+        assertEquals(IngressResponse.ResultCase.OK_BYTES, ingressResponse.resultCase)
+        // A fresh wallet has no rows; the answer is still a history, not an error.
+        assertEquals(
+            "wallet.history answers a WalletHistoryResponse",
+            Envelope.PayloadCase.WALLET_HISTORY_RESPONSE,
+            decodeFramedEnvelope(ingressResponse.okBytes.toByteArray()).payloadCase
+        )
     }
 
     @Test
     fun t27_method_nativeBoundaryIngress_routerQuery_balanceList() {
         ensureGenesis()
-        claimFaucet()
 
         val requestBytes = encodeBridgeRpcRequest(
             "nativeBoundaryIngress",
@@ -455,24 +461,6 @@ class AndroidLayerProofTest {
         assertTrue("rejectBilateralByCommitment must not crash (success response)", isSuccess)
     }
 
-    @Test
-    fun t32_method_getSigningPublicKeyBin() {
-        ensureGenesis()
-
-        val resp = callBridgeMethod("getSigningPublicKeyBin", ByteArray(0))
-        assertTrue("Must be success", resp.first)
-        // Key may be 32 or 33 bytes depending on key type, or empty if not available
-    }
-
-    @Test
-    fun t34_method_getPersistedGenesisEnvelope() {
-        ensureGenesis()
-
-        val resp = callBridgeMethod("getPersistedGenesisEnvelope", ByteArray(0))
-        assertTrue("Must be success", resp.first)
-        assertTrue("Genesis envelope must be non-empty", resp.second.isNotEmpty())
-    }
-
     // =========================================================================
     // SECTION 4: Full Frame Round-trip (JS-identical bytes)
     //
@@ -485,10 +473,11 @@ class AndroidLayerProofTest {
     @Test
     fun t40_fullFrame_identityCheckAndBalanceFetch() {
         ensureGenesis()
-        claimFaucet()
+        val claim = claimFaucet()
+        assertTrue("the faucet must release ERA: ${claim.message}", claim.success)
 
         // Step 1: Identity check (same bytes JS would send)
-        val identityReq = encodeBridgeRpcRequest("getDeviceIdBin", ByteArray(0))
+        val identityReq = encodeBridgeRpcRequest("getTransportHeadersV3Bin", ByteArray(0))
         val identityFramed = prependMessageId(1001L, identityReq)
         val identityResp = MainActivity.processBridgeRequestForTest(ctx, identityFramed)
 
@@ -497,7 +486,7 @@ class AndroidLayerProofTest {
             identityResp.copyOfRange(8, identityResp.size)
         )
         assertTrue("Identity must succeed", idOk)
-        assertEquals("An identity has a 32-byte device id", 32, idData.size)
+        assertEquals("An identity has a 32-byte device id", 32, Headers.parseFrom(idData).deviceId.size())
 
         // Step 2: Fetch balances (same bytes JS would send)
         val balReq = encodeBridgeRpcRequest("getAllBalancesStrict", ByteArray(0))
@@ -534,22 +523,6 @@ class AndroidLayerProofTest {
         assertTrue("ERA balance must be positive after faucet", eraBalance > 0L)
     }
 
-    @Test
-    fun t42_fullFrame_headersContainDeviceId() {
-        ensureGenesis()
-
-        val deviceIdResp = callBridgeMethod("getDeviceIdBin", ByteArray(0))
-        val deviceId = deviceIdResp.second
-
-        val headersResp = callBridgeMethod("getTransportHeadersV3Bin", ByteArray(0))
-        val headers = headersResp.second
-
-        assertTrue("Headers must be non-empty", headers.isNotEmpty())
-        // The device ID should appear somewhere in the headers protobuf
-        // (as a bytes field). Check that the headers size suggests real data.
-        assertTrue("Headers must be larger than 32 bytes (contains deviceId + other fields)", headers.size > 32)
-    }
-
     // =========================================================================
     // SECTION 5: Thread Safety
     //
@@ -566,13 +539,16 @@ class AndroidLayerProofTest {
         val latch = CountDownLatch(threadCount)
         val errors = AtomicInteger(0)
         val successes = AtomicInteger(0)
+        val deviceIds = ConcurrentHashMap.newKeySet<ByteString>()
 
         for (i in 0 until threadCount) {
             Thread {
                 try {
                     barrier.await() // All threads start simultaneously
-                    val resp = callBridgeMethod("getDeviceIdBin", ByteArray(0))
-                    if (resp.first && resp.second.size == 32 && resp.second.any { it != 0.toByte() }) {
+                    val resp = callBridgeMethod("getTransportHeadersV3Bin", ByteArray(0))
+                    val deviceId = if (resp.first) Headers.parseFrom(resp.second).deviceId else ByteString.EMPTY
+                    if (deviceId.size() == 32 && deviceId.toByteArray().any { it != 0.toByte() }) {
+                        deviceIds.add(deviceId)
                         successes.incrementAndGet()
                     } else {
                         errors.incrementAndGet()
@@ -588,12 +564,12 @@ class AndroidLayerProofTest {
         latch.await()
         assertEquals("No errors in concurrent calls", 0, errors.get())
         assertEquals("All threads must succeed", threadCount, successes.get())
+        assertEquals("Every thread must read the same device id", 1, deviceIds.size)
     }
 
     @Test
     fun t51_threadSafety_concurrentBalanceFetches() {
         ensureGenesis()
-        claimFaucet()
 
         val threadCount = 8
         val barrier = CyclicBarrier(threadCount)
@@ -628,25 +604,34 @@ class AndroidLayerProofTest {
     fun t52_threadSafety_mixedMethodsConcurrent() {
         ensureGenesis()
 
-        val methods = listOf(
-            "getDeviceIdBin" to ByteArray(0),
-            "getGenesisHashBin" to ByteArray(0),
-            "getSigningPublicKeyBin" to ByteArray(0),
-            "getTransportHeadersV3Bin" to ByteArray(0),
-            "getAllBalancesStrict" to ByteArray(0),
+        val calls: List<() -> Pair<Boolean, ByteArray>> = listOf(
+            { callBridgeMethod("getTransportHeadersV3Bin", ByteArray(0)) },
+            { callBridgeMethod("getAllBalancesStrict", ByteArray(0)) },
+            {
+                callBridgeMethod(
+                    "nativeBoundaryIngress",
+                    buildRouterQueryIngressRequest("balance.list", ByteArray(0))
+                )
+            },
+            {
+                callBridgeMethod(
+                    "nativeBoundaryIngress",
+                    buildRouterQueryIngressRequest("wallet.history", walletHistoryArgs())
+                )
+            },
         )
 
-        val threadCount = methods.size * 2
+        val threadCount = calls.size * 2
         val barrier = CyclicBarrier(threadCount)
         val latch = CountDownLatch(threadCount)
         val errors = AtomicInteger(0)
 
         for (i in 0 until threadCount) {
-            val (method, payload) = methods[i % methods.size]
+            val call = calls[i % calls.size]
             Thread {
                 try {
                     barrier.await()
-                    val resp = callBridgeMethod(method, payload)
+                    val resp = call()
                     if (!resp.first) errors.incrementAndGet()
                 } catch (t: Throwable) {
                     errors.incrementAndGet()
@@ -674,7 +659,7 @@ class AndroidLayerProofTest {
                 try {
                     barrier.await()
                     val msgId = (1000L + i)
-                    val reqBytes = encodeBridgeRpcRequest("getDeviceIdBin", ByteArray(0))
+                    val reqBytes = encodeBridgeRpcRequest("getTransportHeadersV3Bin", ByteArray(0))
                     val framedReq = prependMessageId(msgId, reqBytes)
                     val framedResp = MainActivity.processBridgeRequestForTest(ctx, framedReq)
 
@@ -707,7 +692,7 @@ class AndroidLayerProofTest {
 
     @Test
     fun t60_error_unknownMethod() {
-        val requestBytes = encodeBridgeRpcRequest("nonExistentMethod", ByteArray(0))
+        val requestBytes = encodeBridgeRpcRequest(UNHANDLED_METHOD, ByteArray(0))
         val framedResp = MainActivity.processBridgeRequestForTest(ctx, prependMessageId(1L, requestBytes))
 
         assertTrue("Must get response for unknown method", framedResp.size > 8)
@@ -776,9 +761,9 @@ class AndroidLayerProofTest {
         MainActivity.processBridgeRequestForTest(ctx, prependMessageId(1L, garbage))
 
         // Then: send valid request — bridge must still work
-        val resp = callBridgeMethod("getDeviceIdBin", ByteArray(0))
+        val resp = callBridgeMethod("getTransportHeadersV3Bin", ByteArray(0))
         assertTrue("Bridge must work after error", resp.first)
-        assertEquals("Identity must still exist", 32, resp.second.size)
+        assertEquals("Identity must still exist", 32, Headers.parseFrom(resp.second).deviceId.size())
     }
 
     @Test
@@ -789,8 +774,8 @@ class AndroidLayerProofTest {
         var successCount = 0
         for (i in 0 until 100) {
             try {
-                val resp = callBridgeMethod("getDeviceIdBin", ByteArray(0))
-                if (resp.first && resp.second.size == 32) successCount++
+                val resp = callBridgeMethod("getTransportHeadersV3Bin", ByteArray(0))
+                if (resp.first && Headers.parseFrom(resp.second).deviceId.size() == 32) successCount++
             } catch (_: Throwable) {
                 // count as failure
             }
@@ -834,30 +819,55 @@ class AndroidLayerProofTest {
         genesisCreated = true
     }
 
-    private fun claimFaucet() {
-        val deviceId = SinglePathWebViewBridge.handleBinaryRpcRaw("getDeviceIdBin", ByteArray(0))
-        if (deviceId.size != 32) return
+    /** The transport headers `getTransportHeadersV3Bin` answers: the frontend's identity read. */
+    private fun transportHeaders(): Headers {
+        val resp = callBridgeMethod("getTransportHeadersV3Bin", ByteArray(0))
+        assertTrue("getTransportHeadersV3Bin must succeed", resp.first)
+        return Headers.parseFrom(resp.second)
+    }
 
-        try {
-            // Hand-encode protobuf wire format (no generated proto classes needed):
-            // FaucetClaimRequest { bytes device_id = 1 }
-            val faucetClaimReqBytes = encodeLengthDelimitedField(1, deviceId)
+    /** `wallet.history`'s argument as the frontend sends it (strictQueries.ts): limit and offset, u64 LE. */
+    private fun walletHistoryArgs(): ByteArray =
+        ArgPack.newBuilder()
+            .setCodec(Codec.CODEC_PROTO)
+            .setBody(ByteString.copyFrom(ByteArray(16)))
+            .build()
+            .toByteArray()
 
-            // ArgPack { Hash32 schema_hash = 1; Codec codec = 2; bytes body = 3 }
-            // Hash32 { bytes v = 1 } → 32 zero bytes
-            val hash32Bytes = encodeLengthDelimitedField(1, ByteArray(32))
-            val argPackBytes = encodeLengthDelimitedField(1, hash32Bytes) + // schema_hash
-                byteArrayOf(0x10, 0x01) +                                  // codec = CODEC_PROTO (1)
-                encodeLengthDelimitedField(3, faucetClaimReqBytes)          // body
+    /** A router answer: `0x03` then an Envelope v3. */
+    private fun decodeFramedEnvelope(bytes: ByteArray): Envelope {
+        assertTrue("A framed Envelope v3 starts with 0x03", bytes.isNotEmpty() && bytes[0] == 0x03.toByte())
+        return Envelope.parseFrom(bytes.copyOfRange(1, bytes.size))
+    }
 
-            val requestBytes = encodeBridgeRpcRequest(
-                "nativeBoundaryIngress",
-                buildRouterInvokeIngressRequest("faucet.claim", argPackBytes)
-            )
-            MainActivity.processBridgeRequestForTest(ctx, prependMessageId(9999L, requestBytes))
-        } catch (_: Throwable) {
-            // Faucet may fail (already claimed, etc.) — don't block tests
-        }
+    /**
+     * `faucet.claim` exactly as the frontend sends it (transactions.ts `claimFaucet`): this
+     * device's id from the transport headers, in an ArgPack with no schema hash. Returns Rust's
+     * answer; the caller decides what it requires.
+     */
+    private fun claimFaucet(): FaucetClaimResponse {
+        val request = FaucetClaimRequest.newBuilder().setDeviceId(transportHeaders().deviceId).build()
+        val argPack = ArgPack.newBuilder()
+            .setCodec(Codec.CODEC_PROTO)
+            .setBody(request.toByteString())
+            .build()
+        val requestBytes = encodeBridgeRpcRequest(
+            "nativeBoundaryIngress",
+            buildRouterInvokeIngressRequest("faucet.claim", argPack.toByteArray())
+        )
+        val framedResp = MainActivity.processBridgeRequestForTest(ctx, prependMessageId(9999L, requestBytes))
+        assertTrue("faucet.claim must answer", framedResp.size > 8)
+        val (isSuccess, data) = BridgeEnvelopeCodec.parseEnvelopeResponse(framedResp.copyOfRange(8, framedResp.size))
+        assertTrue("faucet.claim must reach the router", isSuccess)
+        val ingressResponse = IngressResponse.parseFrom(data)
+        assertEquals(IngressResponse.ResultCase.OK_BYTES, ingressResponse.resultCase)
+        val envelope = decodeFramedEnvelope(ingressResponse.okBytes.toByteArray())
+        assertEquals(
+            "faucet.claim answers a FaucetClaimResponse",
+            Envelope.PayloadCase.FAUCET_CLAIM_RESPONSE,
+            envelope.payloadCase
+        )
+        return envelope.faucetClaimResponse
     }
 
     /**

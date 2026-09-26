@@ -27,6 +27,14 @@
 # only names Kotlin handles: an arm for a method that does not exist is a
 # stub of nothing, and two outlived the methods they stubbed.
 #
+# The instrumented suite drives the real bridge on a device, so every name it
+# sends must be one Kotlin handles. #1012 deleted five arms the frontend no
+# longer sent; the instrumented proof still called them and the managed-device
+# job stayed red on main from that merge on, because no gate read androidTest.
+# The one exception is the unknown-method probe: it sends the name bound to
+# UNHANDLED_METHOD, and that name must be one Kotlin does NOT handle, or the
+# probe tests nothing.
+#
 # Exit 0 only when every set is non-empty and each pair is equal. There is no
 # allowlist: a name one side must stop using is removed from that side.
 
@@ -42,6 +50,7 @@ KOTLIN_BRIDGE = os.path.join(
     ROOT, "dsm_client", "android", "app", "src", "main", "java", "com", "dsm", "wallet",
     "bridge", "SinglePathWebViewBridge.kt",
 )
+ANDROID_TEST = os.path.join(ROOT, "dsm_client", "android", "app", "src", "androidTest")
 
 CALL_RE = re.compile(
     r"\b(?:callBin|sendBridgeRequestBytes|buildBridgeRequest|callBoundaryMethod)\(\s*[\"']([A-Za-z0-9_]+)[\"']"
@@ -178,6 +187,11 @@ def production_names_callbin():
 
 
 STUB_ARM_RE = re.compile(r"(?<![A-Za-z0-9_])method === [\"']([A-Za-z0-9_]+)[\"']")
+INSTRUMENTED_CALL_RE = re.compile(
+    r"\b(?:callBridgeMethod|encodeBridgeRpcRequest|handleBinaryRpcRawStrict|handleBinaryRpcRaw|handleBinaryRpc)"
+    r"\(\s*\"([A-Za-z0-9_]+)\""
+)
+UNHANDLED_PROBE_RE = re.compile(r"\bUNHANDLED_METHOD\s*=\s*\"([A-Za-z0-9_]+)\"")
 
 
 def test_sources():
@@ -202,6 +216,24 @@ def stub_names():
         for m in STUB_ARM_RE.finditer(text):
             stubbed.setdefault(m.group(1), []).append(f"{rel}:{text.count(chr(10), 0, m.start()) + 1}")
     return stubbed
+
+
+def instrumented_names():
+    """({name: [where, ...]} sent by the instrumented suite, {name: [where, ...]} bound to UNHANDLED_METHOD)."""
+    called = {}
+    probes = {}
+    for dirpath, _dirnames, filenames in os.walk(ANDROID_TEST):
+        for name in filenames:
+            if not name.endswith(".kt"):
+                continue
+            path = os.path.join(dirpath, name)
+            text = read_text(path)
+            rel = os.path.relpath(path, ROOT)
+            for m in INSTRUMENTED_CALL_RE.finditer(text):
+                called.setdefault(m.group(1), []).append(f"{rel}:{text.count(chr(10), 0, m.start()) + 1}")
+            for m in UNHANDLED_PROBE_RE.finditer(text):
+                probes.setdefault(m.group(1), []).append(f"{rel}:{text.count(chr(10), 0, m.start()) + 1}")
+    return called, probes
 
 
 def main():
@@ -248,11 +280,29 @@ def main():
         for name in phantom:
             print(f"  {name}: " + ", ".join(stubbed[name]))
         status = 1
+    called, probes = instrumented_names()
+    if not called:
+        fail("a scan that finds nothing is not a scan (the instrumented suite sends no bridge RPC name)")
+        return 2
+    missing = sorted(set(called) - set(handled))
+    if missing:
+        fail("the instrumented suite sends bridge RPC names Kotlin does not handle:")
+        for name in missing:
+            print(f"  {name}: " + ", ".join(called[name]))
+        status = 1
+    live_probes = sorted(set(probes) & set(handled))
+    if live_probes:
+        fail("the unknown-method probe names a method Kotlin handles (it probes nothing):")
+        for name in live_probes:
+            print(f"  {name}: " + ", ".join(probes[name]))
+        status = 1
     if status == 0:
         print(
             f"[bridge-rpc-names] OK: {len(sent)} names sent, {len(handled)} handled, the same set; "
             f"the bridge object's {len(installed)} members typed as installed; "
-            f"{len(stubbed)} names stubbed in tests, all handled"
+            f"{len(stubbed)} names stubbed in tests, all handled; "
+            f"{len(called)} names sent by the instrumented suite, all handled; "
+            f"{len(probes)} unknown-method probe name(s), none handled"
         )
     return status
 
