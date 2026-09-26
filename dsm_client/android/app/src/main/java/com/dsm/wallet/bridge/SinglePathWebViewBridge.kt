@@ -69,18 +69,6 @@ class SinglePathWebViewBridge(private val context: Context) {
 
 
 
-        private fun readPersistedBytesOrEmpty(p: SharedPreferences, key: String): ByteArray {
-            val s = p.getString(key, null)
-            if (s.isNullOrBlank()) return ByteArray(0)
-            return try {
-                BridgeEncoding.base32CrockfordDecode(s)
-            } catch (_: Throwable) {
-                ByteArray(0)
-            }
-        }
-
-
-
         // Enhanced error handling with specific error codes
         private const val ERROR_BRIDGE_NOT_INITIALIZED = 1
         private const val ERROR_INVALID_PAYLOAD = 2
@@ -266,73 +254,10 @@ class SinglePathWebViewBridge(private val context: Context) {
                 // --- Native QR scanner (Android ML Kit / camera activity) ---
                 // JS expects a 1-byte boolean response for availability.
                 // Launch result is delivered via CustomEvent("dsm-event") topic "qr_scan_result".
-                "hasNativeQrScanner" -> {
-                    try {
-                        // If the activity exists, we treat native scanning as available.
-                        // (Camera permission flow is handled by the activity itself.)
-                        val pm = inst.context.packageManager
-                        val intent = android.content.Intent(inst.context, com.dsm.wallet.ui.QrScannerActivity::class.java)
-                        val resolved = intent.resolveActivity(pm) != null
-                        byteArrayOf(if (resolved) 1 else 0)
-                    } catch (e: Throwable) {
-                        Log.w(TAG, "hasNativeQrScanner: failed to resolve activity", e)
-                        byteArrayOf(0)
-                    }
-                }
-
-                "startNativeQrScanner" -> {
-                    try {
-                        // Prefer launching through the active MainActivity so the result callback can
-                        // dispatch back into the WebView as a dsm-event.
-                        val act = com.dsm.wallet.ui.MainActivity.getActiveInstance()
-                        if (act != null) {
-                            act.runOnUiThread {
-                                try {
-                                    act.launchNativeQrScanner { qrText: String? ->
-                                        // Dispatch via JS evaluation (topic: qr_scan_result)
-                                        act.dispatchQrScanResult(qrText)
-                                    }
-                                } catch (e: Throwable) {
-                                    Log.w(TAG, "startNativeQrScanner: inner exception", e)
-                                    act.dispatchQrScanResult(null)
-                                }
-                            }
-                        }
-                    } catch (e: Throwable) {
-                        Log.w(TAG, "startNativeQrScanner: failed to launch scanner", e)
-                    }
-                    // Empty response is fine; result comes via event.
-                    ByteArray(0)
-                }
-
-                // device_id bytes via JNI → Rust (Invariant #7: spine path, not prefs).
-                "getDeviceIdBin" -> {
-                    try {
-                        Unified.getDeviceIdBin()
-                    } catch (_: Throwable) {
-                        ByteArray(0)
-                    }
-                }
-
-                // genesis_hash bytes via JNI → Rust (Invariant #7: spine path, not prefs).
-                "getGenesisHashBin" -> {
-                    try {
-                        Unified.getGenesisHashBin()
-                    } catch (_: Throwable) {
-                        ByteArray(0)
-                    }
-                }
-
-                // signing public key bytes (JNI). Returns empty if not available.
-                "getSigningPublicKeyBin" -> {
-                    try {
-                        Unified.getSigningPublicKeyBin()
-                    } catch (_: Throwable) {
-                        ByteArray(0)
-                    }
-                }
-
-                // Canonical mnemonic-rooted Genesis v2 (whitepaper §2.5): generate a mnemonic for
+                 // device_id bytes via JNI → Rust (Invariant #7: spine path, not prefs).
+                 // genesis_hash bytes via JNI → Rust (Invariant #7: spine path, not prefs).
+                 // signing public key bytes (JNI). Returns empty if not available.
+                 // Canonical mnemonic-rooted Genesis v2 (whitepaper §2.5): generate a mnemonic for
                 // backup, then create the wallet from it. No silicon enrollment, no random entropy.
                 "generateMnemonic" -> {
                     inst.generateMnemonic()
@@ -354,23 +279,9 @@ class SinglePathWebViewBridge(private val context: Context) {
                 }
 
                 // strict wallet history (JNI). Returns FramedEnvelopeV3 bytes or empty on error.
-                "getWalletHistoryStrict" -> {
-                    try {
-                        Unified.getWalletHistoryStrict()
-                    } catch (t: Throwable) {
-                        Log.w(TAG, "getWalletHistoryStrict failed", t)
-                        ByteArray(0)
-                    }
-                }
-
-                // genesis_envelope bytes (prefs-only). Used for cold-start rehydration.
+                 // genesis_envelope bytes (prefs-only). Used for cold-start rehydration.
                 // Returns empty if not present.
-                "getPersistedGenesisEnvelope" -> {
-                    val p = inst.prefs()
-                    readPersistedBytesOrEmpty(p, KEY_GENESIS_ENVELOPE)
-                }
-
-                // Resolve BLE address from native mapping (bytes-only).
+                 // Resolve BLE address from native mapping (bytes-only).
                 // Payload: 32-byte device_id. Response: UTF-8 address bytes or empty.
                 "resolveBleAddressForDeviceId" -> {
                     if (payload.size != 32) return ByteArray(0)
@@ -584,20 +495,7 @@ class SinglePathWebViewBridge(private val context: Context) {
                 }
 
                 // Generic Envelope v3 processing (online transfers, DBRW export, etc.)
-                "processEnvelopeV3" -> {
-                    try {
-                        val result = Unified.processEnvelopeV3(payload)
-                        // State may have mutated — refresh NFC capsule if backup enabled.
-                        // Rust decides whether to actually create one (no-op if disabled).
-                        try { UnifiedNativeApi.maybeRefreshNfcCapsule() } catch (_: Throwable) {}
-                        result
-                    } catch (t: Throwable) {
-                        Log.w(TAG, "processEnvelopeV3 failed", t)
-                        ByteArray(0)
-                    }
-                }
-
-                else -> throw IllegalArgumentException("Unknown binary RPC method: $method")
+                 else -> throw IllegalArgumentException("Unknown binary RPC method: $method")
             }
         }
 
