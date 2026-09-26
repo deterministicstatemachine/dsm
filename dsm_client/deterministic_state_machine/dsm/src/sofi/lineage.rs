@@ -1807,7 +1807,7 @@ mod tests {
 
 #[cfg(test)]
 #[allow(clippy::disallowed_methods)] // test asserts; a failure here is the signal
-mod genesis_acceptance {
+pub(crate) mod genesis_acceptance {
     //! SoFi §19.8 `GenesisAccepted` over a creation signed with the owner's
     //! key and policy bytes that re-hash to their commits. Each test changes
     //! one thing the owner's validated creation or `V_0` holds and names the
@@ -1836,7 +1836,7 @@ mod genesis_acceptance {
     }
 
     /// A creation as the owner signed it, with what a verifier fetched.
-    struct Creation {
+    pub(crate) struct Creation {
         preimage_bytes: Vec<u8>,
         operation: Operation,
         token_policies: BTreeMap<D32, Vec<u8>>,
@@ -1900,7 +1900,7 @@ mod genesis_acceptance {
         }
     }
 
-    fn valid() -> Creation {
+    pub(crate) fn valid() -> Creation {
         let pair = (tokens()[0].0, tokens()[1].0);
         let (state, market_bytes) = genesis_state(pair);
         creation_of(state, market_bytes, pair)
@@ -1920,7 +1920,7 @@ mod genesis_acceptance {
         )
     }
 
-    fn accept(c: &Creation) -> Result<AcceptedVaultGenesis, GenesisRefusal> {
+    pub(crate) fn accept(c: &Creation) -> Result<AcceptedVaultGenesis, GenesisRefusal> {
         accept_at(c, P_CREATE)
     }
 

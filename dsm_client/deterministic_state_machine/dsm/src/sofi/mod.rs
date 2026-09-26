@@ -44,6 +44,7 @@ pub mod lineage;
 pub mod publication;
 pub mod registration;
 pub mod resolution;
+pub mod resolve;
 pub mod signature;
 pub mod smt;
 pub mod storage;

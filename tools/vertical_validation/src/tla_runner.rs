@@ -31,7 +31,10 @@ use crate::tla_trace_replay::{
 /// `expected=12` module count in CI, and it exists for the same reason: an
 /// anti-skip tripwire is cheap, and a silently shrinking formal suite is the
 /// failure mode that looks most like success.
-pub const EXPECTED_STANDARD_SPECS: usize = 85;
+///
+/// 87 since `SofiFulfillment/install-on-caller-value` and
+/// `SofiFulfillment/install-reachable` (the installed root is the ladder's).
+pub const EXPECTED_STANDARD_SPECS: usize = 87;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TlaSpec {

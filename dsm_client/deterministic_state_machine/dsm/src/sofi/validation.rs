@@ -632,11 +632,20 @@ pub struct VaultPostState {
     /// trader's leaf in THIS vault's tree, which is not the trader's own
     /// relationship leaf in its own tree.
     relationship: Option<(D32, VaultRelationshipLeaf)>,
+    /// `E` of the operation that consumed `pre_root`: what a recorded
+    /// generation names as the consumption that produced it.
+    consumed_by: D32,
 }
 
 impl VaultPostState {
     pub fn vault_id(&self) -> &D32 {
         &self.vault_id
+    }
+
+    /// `E` of the operation whose consumption of `pre_root` produced this
+    /// state.
+    pub fn consumed_by(&self) -> &D32 {
+        &self.consumed_by
     }
 
     /// `R_g`, the root the operation was built on.
@@ -754,6 +763,7 @@ pub fn vault_post_states(
             root,
             state: post_state,
             relationship,
+            consumed_by: e,
         });
     }
     Ok(out)

@@ -93,7 +93,7 @@ known_rehydrate_callers=(
   "$core/dsm_sdk/src/sdk/core_sdk.rs"                   # the head's validated root from the admitted store
   "$core/dsm_sdk/src/sdk/economic_admission_flow.rs"    # the validated predecessor of a pending admission
   "$core/dsm_sdk/src/sdk/sofi_advance.rs"               # the pending SoFi position's validated predecessor
-  "$core/dsm_sdk/src/sdk/sofi_evidence.rs"              # accepted_claim_at: the accepted claim at a setup's position
+  "$core/dsm_sdk/src/sdk/sofi_reads.rs"                 # accepted_claim_at: the accepted claim at a setup's position, answered to the verifier
 )
 rehydrate_callers=$(grep -rl 'rehydrate_from_admitted_store' "$core/dsm/src" "$core/dsm_sdk/src" dsm_storage_node/src 2>/dev/null \
   | grep -v '_tests\.rs$' | grep -v '/test_support/' | sort)
@@ -278,25 +278,31 @@ if ! grep -q 'pub(crate) fn resolve_position' "$resolution"; then
 fi
 echo "  ✓ advance_resolved runs the ladder over the established facts and takes no verdict"
 
-# Production callers only: the facts tests state a chain through the memo
-# constructor for a fixture vault, which is test text (ci/production_text.py).
+# The memo constructor has exactly one production caller: the verifier's
+# chain walk (`dsm/src/sofi/resolve.rs`), which anchors the recorded rows at
+# the genesis it accepted and checks their links before it stands on them.
+# Test text (ci/production_text.py) may state a chain for a fixture.
 memo_callers=""
 while IFS= read -r f; do
   [[ -z "$f" ]] && continue
   prod=$(python3 ci/production_text.py "$f")
-  grep -q 'from_recorded_generations' <<<"$prod" && memo_callers="$memo_callers$f"$'\n'
-done < <(grep -rln 'from_recorded_generations' "$core/dsm/src" "$core/dsm_sdk/src" dsm_storage_node/src 2>/dev/null \
+  grep -q 'from_recorded(' <<<"$prod" && memo_callers="$memo_callers$f"$'\n'
+done < <(grep -rln 'from_recorded(' "$core/dsm/src" "$core/dsm_sdk/src" dsm_storage_node/src 2>/dev/null \
   | grep -v "sofi/resolution.rs" | sort)
 memo_callers=${memo_callers%$'\n'}
-expected_memo="$core/dsm_sdk/src/sdk/sofi_chain.rs"
+expected_memo="$core/dsm/src/sofi/resolve.rs"
 if [[ "$memo_callers" != "$expected_memo" ]]; then
-  echo "[FAIL] VaultChain::from_recorded_generations must be called only from $expected_memo"
+  echo "[FAIL] VaultChain::from_recorded must be called only from $expected_memo"
   echo "       production callers found: ${memo_callers:-none}"
   exit 1
 fi
-count=$(python3 ci/production_text.py "$expected_memo" | grep -c 'from_recorded_generations')
+count=$(python3 ci/production_text.py "$expected_memo" | grep -c 'from_recorded(')
 if [[ "$count" -ne 1 ]]; then
-  echo "[FAIL] $expected_memo references from_recorded_generations $count times; the chain's start is one call"
+  echo "[FAIL] $expected_memo references from_recorded $count times; the chain's start is one call"
+  exit 1
+fi
+if grep -rn 'from_recorded_generations' "$core/dsm/src" "$core/dsm_sdk/src" >/dev/null 2>&1; then
+  echo "[FAIL] the unchecked memo constructor from_recorded_generations is back"
   exit 1
 fi
 literals=$(grep -rn 'EstablishedFacts {' "$core/dsm/src" "$core/dsm_sdk/src" dsm_storage_node/src 2>/dev/null \
@@ -311,6 +317,6 @@ while IFS= read -r hit; do
     exit 1
   fi
 done <<<"$literals"
-echo "  ✓ one caller of the chain memo, at the walk's start; facts are built by establish only"
+echo "  ✓ one caller of the anchored, linked chain memo, at the walk's start; facts are built by establish only"
 
 echo "✓ raw envelope -> verified claim -> registered root: every arrow is opaque"
