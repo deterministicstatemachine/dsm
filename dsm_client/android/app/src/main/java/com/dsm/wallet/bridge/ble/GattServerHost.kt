@@ -757,10 +757,10 @@ class GattServerHost(private val context: Context) {
     }
 
     /**
-     * The identity a peer reads, from Rust at the moment it asks: the device's
+     * The identity a peer reads, from Rust at the moment it asks: the appliance's
      * own genesis and device id, encoded by Rust's canonical encoder. Nothing
      * pushes it here — the frontend used to hand these bytes to the BLE layer,
-     * and a value set by a caller can be stale, or not the device's at all.
+     * and a value set by a caller can be stale, or not the appliance's at all.
      * Encoding is deterministic, so a long read's chunks agree.
      */
     private fun localIdentityCharValue(): ByteArray? = try {

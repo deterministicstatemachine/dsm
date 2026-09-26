@@ -119,7 +119,7 @@ export async function offlineSend(transfer: GenericTransaction): Promise<Generic
     };
 
     // What the user asked for, and nothing else: where the counterparty's
-    // device is over BLE, the token's decimals and the operation are Rust's,
+    // appliance is over BLE, the token's decimals and the operation are Rust's,
     // and so is refusing a token or an amount the request does not name.
     const request = new pb.OfflineTransferRequest({
       counterpartyDeviceId: toBytes as any,
@@ -195,7 +195,7 @@ export async function offlineSend(transfer: GenericTransaction): Promise<Generic
         finish({
           accepted: false,
           open: true,
-          result: 'The transfer is still open. It completes when the two devices are together again; Pending transfers shows it.',
+          result: 'The transfer is still open. It completes when the two appliances are together again; Pending transfers shows it.',
         });
         return;
       }
@@ -240,7 +240,7 @@ export async function offlineSend(transfer: GenericTransaction): Promise<Generic
     // send ends on Rust's word — its events, or its pending list.
 
     // --- Native authoring + BLE dispatch: wallet.sendOffline ---
-    // The radio is native's: it advertises while the device has an identity,
+    // The radio is native's: it advertises while the appliance has an identity,
     // and the dispatch connects (scanning for the peer as it needs) itself.
     // This used to set the advertised identity, start advertising and
     // scanning, and sleep 1.5 s first, swallowing every failure.

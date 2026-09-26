@@ -159,7 +159,7 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
         })
       );
     });
-    // Where the recipient's device is over BLE is Rust's to know: the screen names no address.
+    // Where the recipient's appliance is over BLE is Rust's to know: the screen names no address.
     expect((dsmClient.sendOfflineTransfer as jest.Mock).mock.calls[0][0]).not.toHaveProperty('bleAddress');
   });
 
@@ -436,10 +436,10 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
     off();
   });
 
-  // The radio is native's: the device advertises while it has an identity,
+  // The radio is native's: the appliance advertises while it has an identity,
   // and an offline send connects to its peer itself. The screen used to start
   // advertising when it mounted or became visible, and stop it when hidden and
-  // when it unmounted, so a device on any other screen could not be reached.
+  // when it unmounted, so an appliance on any other screen could not be reached.
   test('the wallet screen makes no radio request as it mounts, hides, shows and unmounts', async () => {
     installStandardWalletMocks([contactDto('Peer', 0x0a, 'AA:BB:CC:DD:EE:FF')]);
     (dsmClient.getAllBalances as any) = jest.fn().mockResolvedValue([]);

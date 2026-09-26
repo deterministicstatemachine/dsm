@@ -104,7 +104,7 @@ function SendTabInner({
       const tokenId = selectedSendBalance.tokenId;
 
       if (txMode === 'offline') {
-        // Where the recipient's device is over BLE is Rust's to know; a device
+        // Where the recipient's appliance is over BLE is Rust's to know; an appliance
         // it has not met is its refusal, in its words.
         const res = await dsmClient.sendOfflineTransfer({
           tokenId,
@@ -113,7 +113,7 @@ function SendTabInner({
           memo: sendForm.note || undefined,
         });
         if (res.open) {
-          // Not finished and not failed: the step is open on both devices and
+          // Not finished and not failed: the step is open on both appliances and
           // completes when they are together again. The form is done with it.
           fx.play({
             anim: 'trace',
@@ -197,7 +197,7 @@ function SendTabInner({
           How to send
           <InfoTip title="How to send" label="About sending modes">
             <p><b>Online</b> goes through the storage nodes. The recipient does not need to be nearby or awake; it lands in their inbox.</p>
-            <p><b>Offline</b> goes device to device over Bluetooth. Both devices must be next to each other with Bluetooth on, and the recipient accepts it in the app.</p>
+            <p><b>Offline</b> goes appliance to appliance over Bluetooth. Both appliances must be next to each other with Bluetooth on, and the recipient accepts it in the app.</p>
           </InfoTip>
         </span>
         <div className="sb-seg sb-seg--block" role="group" aria-label="Transaction mode">
@@ -206,7 +206,7 @@ function SendTabInner({
         </div>
         {txMode === 'offline' && (
           <Notice>
-            <strong>Offline needs Bluetooth.</strong> Both devices next to each other, Bluetooth on.
+            <strong>Offline needs Bluetooth.</strong> Both appliances next to each other, Bluetooth on.
           </Notice>
         )}
       </div>

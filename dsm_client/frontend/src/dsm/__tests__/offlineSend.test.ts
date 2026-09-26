@@ -65,7 +65,7 @@ describe('offlineSend', () => {
   });
 
   // The send is what the user asked for, byte for byte, and nothing else:
-  // where the counterparty's device is over BLE is Rust's to know.
+  // where the counterparty's appliance is over BLE is Rust's to know.
   test('an offline send reaches wallet.sendOffline as what the user asked for, and nothing else', async () => {
     const to = new Uint8Array(32).fill(0x22);
     const commitmentHash = new Uint8Array(32).fill(0x99);

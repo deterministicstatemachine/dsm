@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-// Whether the radio advertises is native policy: it follows the device's
+// Whether the radio advertises is native policy: it follows the appliance's
 // identity. The contacts provider used to set the advertised identity and
 // start advertising when the identity became ready and when a contact's BLE
 // address was learned.

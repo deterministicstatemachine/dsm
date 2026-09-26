@@ -1150,8 +1150,8 @@ impl PairingOrchestrator {
     /// Stop the scan pairing started, via JNI.
     /// Called when the pairing loop exits to prevent lingering radio activity
     /// that causes "stuck scanning" after pairing completes. Advertising is not
-    /// pairing's to stop: it follows the device's identity (the Android BLE
-    /// service owns it), and a device that stopped advertising here could not
+    /// pairing's to stop: it follows the appliance's identity (the Android BLE
+    /// service owns it), and an appliance that stopped advertising here could not
     /// be found for an offline transfer by the contact it had just paired with.
     #[cfg(all(target_os = "android", feature = "jni"))]
     async fn stop_ble_discovery(&self) -> Result<(), String> {

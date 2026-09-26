@@ -461,7 +461,7 @@ describe('Offline Transfer — Full Cycle', () => {
   test('CRITICAL: the offline send request carries what the user asked for', async () => {
     // offlineSend sends the user's intent via routerInvokeBin('wallet.sendOffline',
     // ArgPack): the counterparty, token, amount and memo. Rust resolves where the
-    // counterparty's device is and authors the prepare it sends over BLE.
+    // counterparty's appliance is and authors the prepare it sends over BLE.
     let capturedPrepReq: pb.OfflineTransferRequest | null = null;
 
     // Intercept nativeBoundaryIngress to capture the ArgPack → OfflineTransferRequest
@@ -566,11 +566,11 @@ describe('Offline Transfer — Full Cycle', () => {
     expect(String(res.result)).toMatch(/failed/i);
   });
 
-  // Where the counterparty's device is over BLE is Rust's to know. A device it
+  // Where the counterparty's appliance is over BLE is Rust's to know. An appliance it
   // has not met is its refusal, shown in its words; the frontend neither
   // resolves an address nor refuses first.
-  test('a send to a device Rust has not met over BLE is Rust\'s refusal, in its words', async () => {
-    const refusal = 'wallet.sendOffline: no BLE address is known for the counterparty: the devices have not met over BLE';
+  test('a send to an appliance Rust has not met over BLE is Rust\'s refusal, in its words', async () => {
+    const refusal = 'wallet.sendOffline: no BLE address is known for the counterparty: the appliances have not met over BLE';
     bilateralResponseOverride = () => frameEnvelope(new pb.Envelope({
       version: 3,
       payload: { case: 'error', value: new pb.Error({ code: 1, message: refusal }) },

@@ -788,7 +788,7 @@ impl AppRouterImpl {
                         )
                     }
                 };
-                // Where the counterparty's device is over BLE is the SDK's to know:
+                // Where the counterparty's appliance is over BLE is the SDK's to know:
                 // the address its contact holds, else the one its identity was
                 // seen at this session.
                 let ble_address = match crate::bluetooth::peer_address::counterparty_address(
@@ -797,7 +797,7 @@ impl AppRouterImpl {
                     Ok(Some(address)) => address,
                     Ok(None) => {
                         return err("wallet.sendOffline: no BLE address is known for the \
-                             counterparty: the devices have not met over BLE"
+                             counterparty: the appliances have not met over BLE"
                             .into())
                     }
                     Err(e) => return err(format!("wallet.sendOffline: {e}")),
@@ -1672,13 +1672,13 @@ mod send_offline_tests {
         }
     }
 
-    /// Where the counterparty's device is over BLE is the SDK's to know; the
-    /// request names no address. A send to a contact whose device the SDK has
+    /// Where the counterparty's appliance is over BLE is the SDK's to know; the
+    /// request names no address. A send to a contact whose appliance the SDK has
     /// not met is refused, saying so; once the contact holds an address, the
     /// send goes past that refusal.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[serial_test::serial]
-    async fn an_offline_send_goes_where_the_sdk_has_seen_the_device() {
+    async fn an_offline_send_goes_where_the_sdk_has_seen_the_appliance() {
         let device = crate::test_support::one_device::Device::start(0x75).await;
         let peer = [0x76u8; 32];
         store_contact(&ContactRecord {
@@ -1701,7 +1701,7 @@ mod send_offline_tests {
 
         let refused = send_offline(&device.router, peer)
             .await
-            .expect_err("the devices have not met");
+            .expect_err("the appliances have not met");
         assert!(
             refused.contains("no BLE address is known for the counterparty"),
             "{refused}"

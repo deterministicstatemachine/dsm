@@ -203,7 +203,7 @@ internal object BridgeIdentityHandler {
             // The Rust route already initialized the SDK context (wallet unlocked this session).
             sdkContextInitialized.set(true)
             Log.i(logTag, "createGenesisV2: identity persisted + SDK context initialized")
-            // The device has an identity now; advertising follows it.
+            // The appliance has an identity now; advertising follows it.
             com.dsm.wallet.ui.MainActivity.getActiveInstance()?.let { act ->
                 act.runOnUiThread { act.startBleForIdentity() }
             }

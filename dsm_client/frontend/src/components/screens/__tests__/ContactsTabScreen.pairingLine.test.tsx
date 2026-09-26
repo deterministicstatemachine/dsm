@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! The pairing line states where pairing stands as Rust states it on each
 //! contact. The screen used to infer it from raw radio events, and showed
-//! "Paired!" when a device's identity was read, before pairing had completed.
+//! "Paired!" when an appliance's identity was read, before pairing had completed.
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import React from 'react';

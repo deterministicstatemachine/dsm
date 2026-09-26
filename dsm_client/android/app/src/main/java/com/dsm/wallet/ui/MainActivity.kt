@@ -800,7 +800,7 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
     }
 
     /**
-     * The device has an identity: the BLE foreground service runs (it survives
+     * The appliance has an identity: the BLE foreground service runs (it survives
      * activity lifecycle transitions) and brings the GATT server and advertising
      * up on its own thread; a service already running is asked again, since the
      * identity may only now exist. Called on the UI thread (context

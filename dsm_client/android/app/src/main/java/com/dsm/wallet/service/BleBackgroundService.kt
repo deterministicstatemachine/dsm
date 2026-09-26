@@ -38,8 +38,8 @@ import java.util.concurrent.Executors
  * because Android kills BLE advertising/GATT when apps lose foreground status.
  *
  * It is the one owner of advertising. Advertising follows the identity: a
- * device Rust knows advertises, so a peer can find it for a transfer or a
- * pairing; a device without one does not. The screen the user is on has no
+ * appliance Rust knows advertises, so a peer can find it for a transfer or a
+ * pairing; an appliance without one does not. The screen the user is on has no
  * say — the frontend used to start advertising on the wallet screen and stop
  * it on leaving, and on a cold start nothing else ever started it.
  */
