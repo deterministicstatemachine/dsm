@@ -9,7 +9,6 @@ import GlobalToast from './components/GlobalToast';
 import BilateralTransferDialog from './components/BilateralTransferDialog';
 import GuidedTour from './components/tour/GuidedTour';
 import TourOffer from './components/tour/TourOffer';
-import { BleProvider } from './contexts/BleContext';
 import ScreenContainer from './components/ScreenContainer';
 import { useLockState } from './hooks/useLockState';
 import { getLockPrefs } from './services/lock/lockService';
@@ -129,7 +128,6 @@ export default function App() {
     <UXProvider defaultHideComplexity={true}>
       <WalletProvider>
         <ContactsProvider>
-          <BleProvider>
             <BridgeProvider bridge={(globalThis as any)?.window?.DsmBridge as AndroidBridgeV3 | undefined}>
               <ErrorBoundary>
                 <StateBoyInputProvider intents={intents}>
@@ -168,7 +166,6 @@ export default function App() {
                 </StateBoyInputProvider>
               </ErrorBoundary>
             </BridgeProvider>
-          </BleProvider>
         </ContactsProvider>
       </WalletProvider>
     </UXProvider>

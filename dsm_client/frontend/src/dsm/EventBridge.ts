@@ -444,10 +444,6 @@ export function initializeEventBridge(): void {
               try { bridgeEvents.emit('ble.deviceDisconnected', { address: info?.address ?? '' }); } catch {}
             } else if (evCase === 'connectionFailed') {
               try { bridgeEvents.emit('ble.connectionFailed', { reason: String(bleEvent.ev.value ?? '') }); } catch {}
-            } else if (evCase === 'advertisingStarted') {
-              try { bridgeEvents.emit('ble.advertisingStarted', undefined as any); } catch {}
-            } else if (evCase === 'advertisingStopped') {
-              try { bridgeEvents.emit('ble.advertisingStopped', undefined as any); } catch {}
             } else if (evCase === 'pairingStatus') {
               const ps = bleEvent.ev.value as pb.PairingStatusUpdate;
               const devId = ps?.deviceId instanceof Uint8Array && ps.deviceId.length === 32

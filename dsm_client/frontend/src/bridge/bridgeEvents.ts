@@ -20,22 +20,17 @@ export type BridgeEventMap = {
   'inbox.updated': { newItems: number; source: string };
   'visibility.change': { state: DocumentVisibilityState };
   'ble.permission.error': { message: string };
-  'ble.permission.recovery.needed': void;
-  'ble.features.disabled': void;
   'ble.deviceFound': { address: string; name: string; rssi: number };
   'ble.scanStarted': void;
   'ble.scanStopped': void;
   'ble.deviceConnected': { address: string };
   'ble.deviceDisconnected': { address: string };
   'ble.connectionFailed': { reason: string };
-  'ble.advertisingStarted': void;
-  'ble.advertisingStopped': void;
   'ble.pairingStatus': { deviceId: string; status: string; message: string; bleAddress?: string };
   'deposit.completed': { depositId: string; amount: string };
   'wallet.exitCompleted': { source: string };
   // NFC ring backup domain
   'nfc.backupWritten': void;
-  'nfc.writeStarted': void;
 };
 
 type Handler<T> = (payload: T) => void;
