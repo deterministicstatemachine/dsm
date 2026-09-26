@@ -37,7 +37,6 @@ pub use pairing_orchestrator::{PairingOrchestrator, PairingSession, PairingState
 use dsm::types::error::DsmError;
 
 use std::sync::Arc;
-use std::sync::OnceLock;
 use std::sync::RwLock;
 
 /// Global pairing orchestrator
@@ -167,8 +166,6 @@ impl BluetoothManager {
             device_id_bytes,
         ));
 
-        android_ble_bridge::register_global_android_bridge(android_bridge.clone());
-
         log::info!(
             "BluetoothManager initialized for device(b32): {}",
             crate::util::text_id::encode_base32_crockford(&device_id_bytes)
@@ -231,180 +228,61 @@ impl BluetoothManager {
     }
 }
 
-/// Global Bluetooth Manager registry
-static GLOBAL_BT_MANAGER: OnceLock<Arc<BluetoothManager>> = OnceLock::new();
+/// The process's one BLE stack, and the identity it was built for: the
+/// manager whose handler takes every offline frame, every link event and
+/// every user decision.
+static BLUETOOTH_STACK: RwLock<Option<([u8; 32], Arc<BluetoothManager>)>> = RwLock::new(None);
 
-pub fn register_global_bluetooth_manager(manager: Arc<BluetoothManager>) {
-    if GLOBAL_BT_MANAGER.set(manager).is_err() {
-        log::warn!("BluetoothManager already registered globally");
+/// The BLE stack for `device_id`: the live one, when it was built for this
+/// identity; otherwise the one `build` makes, which becomes the live one.
+/// `init_dsm_sdk` can run more than once in a process, and it reuses the
+/// stack, so the handler that holds a step's session and precommitment is the
+/// one every later frame and every user decision on that step reaches.
+pub fn bluetooth_manager_for(
+    device_id: [u8; 32],
+    build: impl FnOnce() -> Result<BluetoothManager, String>,
+) -> Result<Arc<BluetoothManager>, String> {
+    let mut stack = BLUETOOTH_STACK.write().unwrap_or_else(|e| e.into_inner());
+    if let Some((built_for, manager)) = stack.as_ref() {
+        if *built_for == device_id {
+            return Ok(manager.clone());
+        }
     }
+    let manager = Arc::new(build()?);
+    *stack = Some((device_id, manager.clone()));
+    Ok(manager)
 }
 
+/// The live BLE stack, if `init_dsm_sdk` has built one.
 pub fn get_global_bluetooth_manager() -> Option<Arc<BluetoothManager>> {
-    GLOBAL_BT_MANAGER.get().cloned()
+    BLUETOOTH_STACK
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .map(|(_, manager)| manager.clone())
 }
 
-/// Ensure BluetoothManager is initialized and sync a verified contact to it.
-/// This handles the late-init case where QR contact is added before BLE init.
-/// Returns Ok(true) if contact was synced, Ok(false) if BLE not available, Err on failure.
+/// Test-only: no live BLE stack.
+#[cfg(test)]
+pub(crate) fn reset_bluetooth_stack_for_tests() {
+    *BLUETOOTH_STACK.write().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+/// Hand a contact to the live BLE stack's handler. With no stack yet there is
+/// nothing to hand it to, and nothing is lost: `init_dsm_sdk` loads every
+/// stored contact into the stack it builds. Returns whether a stack took it.
 #[cfg(all(target_os = "android", feature = "bluetooth"))]
-pub async fn ensure_bluetooth_manager_and_sync_contact(
+pub async fn sync_contact_to_bluetooth_manager(
     contact: dsm::types::contact_types::DsmVerifiedContact,
 ) -> Result<bool, String> {
-    // First check if manager already exists
-    if let Some(bt_mgr) = get_global_bluetooth_manager() {
-        log::info!("[BLE] ensure_bluetooth_manager_and_sync_contact: manager exists, syncing contact device_id={:02x?}", 
-            &contact.device_id[..8]);
-        bt_mgr
-            .add_verified_contact(contact)
-            .await
-            .map_err(|e| format!("add_verified_contact failed: {e}"))?;
-        return Ok(true);
-    }
-
-    // Manager doesn't exist - try to late-init it
-    log::warn!("[BLE] ensure_bluetooth_manager_and_sync_contact: manager not available, attempting late init");
-
-    // Get identity from AppState
-    let dev = crate::sdk::app_state::AppState::get_device_id();
-    let gen = crate::sdk::app_state::AppState::get_genesis_hash();
-
-    let (dev_fixed, gen_fixed) = match (dev, gen) {
-        (Some(d), Some(g)) if d.len() == 32 && g.len() == 32 => {
-            let mut df = [0u8; 32];
-            let mut gf = [0u8; 32];
-            df.copy_from_slice(&d);
-            gf.copy_from_slice(&g);
-            (df, gf)
-        }
-        _ => {
-            log::error!(
-                "[BLE] ensure_bluetooth_manager_and_sync_contact: no valid identity in AppState"
-            );
-            return Ok(false);
-        }
-    };
-
-    // Skip if device_id is all zeros
-    if dev_fixed == [0u8; 32] {
-        log::warn!("[BLE] ensure_bluetooth_manager_and_sync_contact: device_id is zero, skipping");
+    let Some(bt_mgr) = get_global_bluetooth_manager() else {
         return Ok(false);
-    }
-
-    // Create the BluetoothManager
-    use dsm::core::contact_manager::DsmContactManager;
-    use dsm::core::bilateral_transaction_manager::BilateralTransactionManager;
-    use tokio::sync::RwLock as TokioRwLock;
-
-    let contact_manager = DsmContactManager::new(dev_fixed);
-    // The bilateral σ signer MUST be the device identity AK — the same key the QR pins and σ is
-    // verified against (`derive_device_ak_keypair(seed, genesis, 0, policy)`), NEVER a random
-    // keypair. This late-init manager can win the global-signer `OnceLock` race (first-writer-wins)
-    // against the canonical AK-keyed manager from `init_dsm_sdk`; if it holds a random key, σ_A/σ_B
-    // are signed with a key the peer never pinned and every transfer fails σ verification. Derive
-    // the AK from the cached wallet seed exactly as the canonical path; if the seed is locked,
-    // REFUSE to register rather than mint a non-AK key that would hijack the signer slot.
-    let keypair = match crate::sdk::recovery_sdk::RecoverySDK::get_cached_wallet_seed() {
-        Some(seed) => crate::init::derive_device_signing_keypair(&seed, &gen_fixed)
-            .map_err(|e| format!("device signing keypair derivation failed: {e}"))?,
-        None => {
-            log::warn!(
-                "[BLE] ensure_bluetooth_manager_and_sync_contact: wallet seed not unlocked; \
-                 refusing to late-init the BLE signer with a non-AK key"
-            );
-            return Ok(false);
-        }
     };
-    let chain_tip_store = Arc::new(crate::sdk::chain_tip_store::SqliteChainTipStore::new());
-    let manager = BilateralTransactionManager::new(
-        contact_manager,
-        keypair,
-        dev_fixed,
-        gen_fixed,
-        chain_tip_store,
-    );
-    let btx = Arc::new(TokioRwLock::new(manager));
-    let mgr = BluetoothManager::new(dev_fixed, btx);
-    let mgr_arc = Arc::new(mgr);
-
-    // Register globally (if another thread beat us, that's fine)
-    register_global_bluetooth_manager(mgr_arc.clone());
-    log::info!("[BLE] ensure_bluetooth_manager_and_sync_contact: late BluetoothManager registered");
-
-    // CRITICAL: Also inject the coordinator into BiImpl so that processBleChunk,
-    // acceptBilateralByCommitment and wallet.sendOffline all use the SAME
-    // BilateralBleHandler instance. Without this, sessions created by one path
-    // are invisible to the other, causing "NO SESSION FOUND" failures.
-    let coordinator = mgr_arc.frame_coordinator().clone();
-    let transport_adapter = mgr_arc.transport_adapter().clone();
-    match crate::bridge::inject_ble_coordinator(coordinator).await {
-        Ok(_) => log::info!(
-            "[BLE] ensure_bluetooth_manager_and_sync_contact: coordinator injected into BiImpl"
-        ),
-        Err(e) => log::warn!(
-            "[BLE] ensure_bluetooth_manager_and_sync_contact: coordinator injection failed: {e}"
-        ),
-    }
-    match crate::bridge::inject_ble_transport_adapter(transport_adapter).await {
-        Ok(_) => log::info!(
-            "[BLE] ensure_bluetooth_manager_and_sync_contact: transport adapter injected into BiImpl"
-        ),
-        Err(e) => log::warn!(
-            "[BLE] ensure_bluetooth_manager_and_sync_contact: transport adapter injection failed: {e}"
-        ),
-    }
-
-    // Now sync the contact
-    mgr_arc
+    bt_mgr
         .add_verified_contact(contact)
         .await
-        .map_err(|e| format!("add_verified_contact (late init) failed: {e}"))?;
-
-    log::info!("[BLE] ensure_bluetooth_manager_and_sync_contact: contact synced successfully");
+        .map_err(|e| format!("add_verified_contact failed: {e}"))?;
     Ok(true)
-}
-
-/// Resync ALL contacts from SQLite to BluetoothManager.
-/// This is called when forceBleCoordinatorInit detects an existing BluetoothManager
-/// to ensure contacts are loaded even if the initial sync was missed.
-/// Returns Ok(count) with number of contacts synced, or Err on failure.
-#[cfg(all(target_os = "android", feature = "bluetooth"))]
-pub async fn resync_all_contacts_to_bluetooth_manager() -> Result<usize, String> {
-    let bt_mgr = get_global_bluetooth_manager()
-        .ok_or_else(|| "BluetoothManager not registered".to_string())?;
-
-    let contacts = crate::storage::client_db::get_all_contacts()
-        .map_err(|e| format!("Failed to load contacts from SQLite: {e}"))?;
-
-    log::warn!(
-        "[BLE] resync_all_contacts_to_bluetooth_manager: 🔄 Syncing {} contacts to BluetoothManager",
-        contacts.len()
-    );
-
-    let mut synced_count = 0;
-    for c in contacts {
-        let verified_contact = c
-            .to_verified_contact()
-            .map_err(|e| format!("resync_all_contacts: {e}"))?;
-        bt_mgr
-            .add_verified_contact(verified_contact)
-            .await
-            .map_err(|e| format!("resync_all_contacts: contact {}: {e}", c.alias))?;
-        synced_count += 1;
-    }
-
-    log::warn!(
-        "[BLE] resync_all_contacts_to_bluetooth_manager: 🔄 Complete. Synced {} contacts",
-        synced_count
-    );
-    Ok(synced_count)
-}
-
-/// Non-Android stub for resync_all_contacts_to_bluetooth_manager
-#[cfg(not(all(target_os = "android", feature = "bluetooth")))]
-pub async fn resync_all_contacts_to_bluetooth_manager() -> Result<usize, String> {
-    log::debug!("[BLE] resync_all_contacts_to_bluetooth_manager: not on Android, skipping");
-    Ok(0)
 }
 
 // Android WebView event dispatch: delegates to the generic event_dispatch module.
@@ -430,4 +308,77 @@ pub fn post_bilateral_event_to_webview_jni(
     _event_bytes: Vec<u8>,
 ) -> Result<(), dsm::types::error::DsmError> {
     Ok(())
+}
+
+#[cfg(test)]
+mod stack_tests {
+    use super::*;
+    use dsm::core::bilateral_transaction_manager::BilateralTransactionManager;
+    use dsm::core::contact_manager::DsmContactManager;
+    use serial_test::serial;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn stack(identity: &crate::economic_fixtures::TestIdentity) -> BluetoothManager {
+        let manager = BilateralTransactionManager::new(
+            DsmContactManager::new(identity.device_id),
+            identity.signing_keypair(),
+            identity.device_id,
+            identity.genesis,
+            Arc::new(crate::sdk::chain_tip_store::SqliteChainTipStore::new()),
+        );
+        BluetoothManager::new(
+            identity.device_id,
+            Arc::new(tokio::sync::RwLock::new(manager)),
+        )
+    }
+
+    /// The process holds one BLE stack per identity. Init run again for the
+    /// same identity reuses the live stack — its handler, sessions and
+    /// precommitments — and builds nothing; the bridge JNI hands BLE events to
+    /// is the live stack's. A new identity's stack replaces it.
+    /// MUTATION CONTROL: building a stack on every call leaves two handlers
+    /// live and turns this red.
+    #[test]
+    #[serial]
+    fn the_process_holds_one_ble_stack_per_identity() {
+        reset_bluetooth_stack_for_tests();
+        let (identity, _core) = crate::economic_fixtures::local_device(0x31);
+        let built = AtomicUsize::new(0);
+        let first = bluetooth_manager_for(identity.device_id, || {
+            built.fetch_add(1, Ordering::SeqCst);
+            Ok(stack(&identity))
+        })
+        .expect("the first init builds the stack");
+        let again = bluetooth_manager_for(identity.device_id, || {
+            built.fetch_add(1, Ordering::SeqCst);
+            Ok(stack(&identity))
+        })
+        .expect("init again reuses it");
+        assert!(
+            Arc::ptr_eq(&first, &again),
+            "init built a second BLE stack for the same identity"
+        );
+        assert_eq!(built.load(Ordering::SeqCst), 1);
+        assert!(Arc::ptr_eq(
+            &get_global_bluetooth_manager().expect("a live stack"),
+            &first
+        ));
+        assert!(
+            Arc::ptr_eq(
+                &android_ble_bridge::get_global_android_bridge().expect("its bridge"),
+                first.android_bridge()
+            ),
+            "BLE events would reach another stack's bridge"
+        );
+
+        let (other, _core) = crate::economic_fixtures::local_device(0x32);
+        let replaced = bluetooth_manager_for(other.device_id, || Ok(stack(&other)))
+            .expect("a new identity's stack");
+        assert!(!Arc::ptr_eq(&first, &replaced));
+        assert!(Arc::ptr_eq(
+            &get_global_bluetooth_manager().expect("a live stack"),
+            &replaced
+        ));
+        reset_bluetooth_stack_for_tests();
+    }
 }

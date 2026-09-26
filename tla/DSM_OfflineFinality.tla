@@ -2,512 +2,491 @@
 EXTENDS Integers, Sequences, FiniteSets, TLC
 
 (***************************************************************************
-  DSM Offline Finality Specification
-  ===================================
+  DSM Offline Finality — the offline bilateral step between two devices
+  =======================================================================
 
-  Formally proves bilateral settlement irreversibility and BLE partition
-  tolerance for DSM's 3-phase offline commit protocol.
+  One relationship between two devices. Either device may propose a step
+  to the other, and each step runs prepare -> accept -> confirm -> ack:
 
-  PAPER ANCHORING (Ramsay, "Statelessness Reframed", Oct 2025):
-    - Theorem 4.1 (Pending-Online Lock): modal locking preserves
-      single-successor semantics; disjoint relationships commute.
-    - Theorem 4.2 (Atomic Interlock Tripwire): assuming EUF-CMA for
-      SPHINCS+ and collision resistance for H, the probability of two
-      distinct accepted successors to the same parent tip is negligible.
+      proposer                          receiver
+      Prepared        -- prepare -->    PendingUser  (its user decides)
+                      <-- response --   Accepted     (or a signed rejection)
+      ConfirmPending  -- confirm -->    Committed    (commits, then answers)
+      Committed       <--- ack -----
 
-  This spec extends the paper's sketch proofs into machine-checked
-  TLC invariants + TLAPS structured proofs, covering:
+  The receiver commits on the confirm and the proposer on the ack: two
+  commits, on two devices, at two moments. Atomicity is therefore not "both
+  move in one step" but BOTH-OR-NEITHER: a step committed on one device is
+  committed on the other, or is still owed there by a proposer that can no
+  longer end it and can still commit it.
 
-    1. BilateralIrreversibility: once Committed, no valid action sequence
-       can produce a state where the transfer didn't happen.
-    2. FullSettlement: receiver's balance is spendable; sender's is reduced.
-    3. NoHalfCommit (partition tolerance): if BLE drops mid-protocol,
-       either both peers finalize or neither does.
-    4. TripwireGuaranteesUniqueness: no two committed sessions from the
-       same sender share a parent tip (fork exclusion).
-    5. TokenConservation: sum of all balances is constant.
+  What the model holds the code to (dsm_sdk bluetooth/bilateral_ble_handler.rs):
 
-  MODEL SCOPE:
-  Focused 2-device model with 2 sessions (to verify double-commit
-  prevention). Strips DLV vaults, b0x spool, and recovery from
-  DSM_BilateralLiveness to isolate the finality claim.
+    * Every transition is durable before the frame it owes leaves: Core
+      decides, one SQLite transaction writes the phase and everything the
+      step commits, and only then does the frame go to the carrier. So the
+      durable phase IS a device's state, and a restart changes nothing it
+      holds — it takes every step up again (restore_sessions_from_storage).
+      A crash loses only frames in the air, which a lost link loses too.
+    * A lost link fails nothing. The link is up or down; losing it drops the
+      frames in the air. While it is up each device delivers what its phase
+      owes (frames_owed_to): the prepare while Prepared, the response while
+      Accepted, the confirm while ConfirmPending.
+    * A frame delivered again is answered from durable state: an acceptance
+      answers a repeated prepare with its response and a rejection with its
+      signed rejection; a confirmed step answers a repeated response with its
+      confirm and a cancelled one with its cancellation; a committed step
+      answers a repeated confirm with its ack (the lost ack,
+      answer_committed_confirm).
+    * A step ends without committing only on a signed rejection (the
+      receiver's), a signed cancellation (the proposer's, and only before
+      its confirm), or invalid evidence. Never on time.
+    * One step at a time per relationship, at BOTH doors: a device with a
+      step in flight neither proposes (ensure_counterparty_ready_for_prepare)
+      nor takes the peer's proposal — it answers that with a signed
+      rejection, and keeps it, so the proposal delivered again gets the same
+      answer.
+    * Each commit is guarded by the tripwire: the device's relationship tip
+      is the step's parent — for the receiver, the tip its precommitment was
+      made on; for the proposer, the head its confirm was signed from (the
+      root its receipt names).
 
-  Code traceability:
-    - 3-phase commit: bilateral_ble_handler.rs:665 (prepare),
-      bilateral_ble_handler.rs:1557 (accept),
-      bilateral_transaction_manager.rs:952 (finalize)
-    - Tripwire enforcement: bilateral_transaction_manager.rs:983-1006
-    - Session recovery: bilateral_ble_handler.rs:475-513
-    - BilateralPhase enum: bilateral_ble_handler.rs:75-84
+  Implementation switches. DSM_OfflineFinality.cfg sets each to the code's
+  behaviour. Each falsification config flips exactly one and names the
+  invariant that then fails, so every rule above is shown load-bearing:
+
+    FramesAfterDurable            FALSE: the confirm leaves before
+                                  ConfirmPending is durable and the proposer
+                                  restarts before writing it -> NoHalfCommit
+    CancelOnlyBeforeConfirm       FALSE: a proposer may cancel after its
+                                  confirm -> NoHalfCommit
+    LinkLossFailsNothing          FALSE: losing the link fails every step in
+                                  flight (the removed disconnect handler)
+                                  -> NoHalfCommit
+    ReceiverRefusesWhileInFlight  FALSE: a device with a step in flight still
+                                  takes the peer's proposal. Two proposals
+                                  that cross each commit on its receiver: two
+                                  successors of one tip -> NoFork
+
+  Out of scope, recorded open in specs/requirements/CONFORMANCE_GAPS.md
+  §6.28: a device whose head moves through ANOTHER relationship between its
+  confirm and its commit cannot commit (the receipt it signed names its whole
+  device root). This model has one relationship.
 ***************************************************************************)
 
-\* ========================================================================
-\* CONSTANTS
-\* ========================================================================
-
 CONSTANTS
-    Device,          \* Set of device identifiers, e.g., {d1, d2}
-    SessionId,       \* Set of session identifiers, e.g., {s1, s2}
-    MaxChain,        \* Maximum chain tip value (bounds state space)
-    INITIAL_BALANCE, \* Starting balance per device
-    NULL             \* Sentinel value
+    Device,                        \* the relationship's two devices
+    StepsPerDevice,                \* steps each device may propose
+    INITIAL_BALANCE,               \* each device's balance; a step moves 1
+    FramesAfterDurable,
+    CancelOnlyBeforeConfirm,
+    LinkLossFailsNothing,
+    ReceiverRefusesWhileInFlight
 
-\* Derived constants
-Phase == {"Prepared", "PendingUserAction", "Accepted",
-          "Committed", "Failed"}
+ASSUME Cardinality(Device) = 2
+ASSUME StepsPerDevice \in Nat \ {0}
+ASSUME INITIAL_BALANCE \in Nat
+ASSUME {FramesAfterDurable, CancelOnlyBeforeConfirm, LinkLossFailsNothing,
+        ReceiverRefusesWhileInFlight} \subseteq BOOLEAN
 
-TerminalPhase == {"Committed", "Failed"}
+\* A step is named by its proposer and a number.
+Step == Device \X (1..StepsPerDevice)
+Proposer(s) == s[1]
+Peer(d) == CHOOSE e \in Device : e # d
+Receiver(s) == Peer(Proposer(s))
 
-InFlightPhase == {"Prepared", "PendingUserAction", "Accepted"}
+NoParent == -1
 
-Hash == 0..MaxChain
+\* A device's phase for a step:
+\*   None            it holds nothing for the step
+\*   Prepared        proposer: proposed, awaiting the response
+\*   ConfirmPending  proposer: confirmed, awaiting the ack
+\*   PendingUser     receiver: holding the proposal for its user
+\*   Accepted        receiver: accepted, awaiting the confirm
+\*   Rejected        it signed the step's end (a rejection or a
+\*                   cancellation), which it keeps as its answer
+\*   Ended           the peer's signed rejection or cancellation ended it
+\*   Committed       the step is in its chain
+\*   Failed          ended with no signed end (only the removed disconnect
+\*                   handler did this: LinkLossFailsNothing = FALSE)
+Phase == {"None", "Prepared", "ConfirmPending", "PendingUser", "Accepted",
+          "Rejected", "Ended", "Committed", "Failed"}
+InFlightPhase == {"Prepared", "ConfirmPending", "PendingUser", "Accepted"}
 
-\* ========================================================================
-\* VARIABLES
-\* ========================================================================
+Kind == {"prepare", "response", "reject", "cancel", "confirm", "ack"}
+Msg(k, s) == [kind |-> k, step |-> s]
 
 VARIABLES
-    \* === Per-Device State ===
-    chainTip,        \* chainTip[d] \in Hash — per-device chain tip
-    balance,         \* balance[d] \in Nat   — per-device spendable balance
+    chain,    \* chain[d]: the steps d has committed on the relationship, in order
+    phase,    \* phase[d][s]: d's durable phase for step s
+    parent,   \* parent[s]: the relationship tip s was proposed on
+    net,      \* the frames in the air
+    link      \* whether the two devices are linked
 
-    \* === Relationship State (single bilateral pair) ===
-    relationshipTip, \* Hash: shared chain tip for the bilateral pair
+vars == <<chain, phase, parent, net, link>>
 
-    \* === Bilateral Sessions ===
-    sessions,        \* sessions[sid] = record or NULL
+Tip(d) == Len(chain[d])
+InChain(d, s) == \E i \in 1..Len(chain[d]) : chain[d][i] = s
+Balance(d) ==
+    INITIAL_BALANCE
+      - Cardinality({i \in 1..Len(chain[d]) : Proposer(chain[d][i]) = d})
+      + Cardinality({i \in 1..Len(chain[d]) : Proposer(chain[d][i]) # d})
+InFlight(d) == \E s \in Step : phase[d][s] \in InFlightPhase
 
-    \* === BLE Transport ===
-    bleConnected     \* BOOLEAN: BLE proximity link up
-
-vars == <<chainTip, balance, relationshipTip, sessions, bleConnected>>
-
-\* ========================================================================
-\* INITIAL STATE
-\* ========================================================================
+\* A frame leaves only while the devices are linked; one that cannot leave
+\* is still owed by the phase that produced it.
+Emit(k, s) == net' = IF link THEN net \cup {Msg(k, s)} ELSE net
+\* A frame taken off the air, answered with `k` (the answer leaves with it).
+Answer(m, k) == net' = (net \ {m}) \cup {Msg(k, m.step)}
+Consume(m) == net' = net \ {m}
 
 Init ==
-    /\ chainTip = [d \in Device |-> 0]
-    /\ balance = [d \in Device |-> INITIAL_BALANCE]
-    /\ relationshipTip = 0
-    /\ sessions = [sid \in SessionId |-> NULL]
-    /\ bleConnected = TRUE
+    /\ chain = [d \in Device |-> <<>>]
+    /\ phase = [d \in Device |-> [s \in Step |-> "None"]]
+    /\ parent = [s \in Step |-> NoParent]
+    /\ net = {}
+    /\ link = TRUE
 
-\* ========================================================================
-\* BILATERAL SESSION ACTIONS (3-phase offline commit)
-\* ========================================================================
+\* ------------------------------------------------------------------------
+\* The proposer's door: one step at a time. prepare_bilateral_transaction
+\* after ensure_counterparty_ready_for_prepare; the proposal is durable, with
+\* its prepare owed, before the prepare leaves.
+\* ------------------------------------------------------------------------
+Propose(s) ==
+    LET d == Proposer(s) IN
+    /\ phase[d][s] = "None"
+    /\ parent[s] = NoParent
+    /\ ~InFlight(d)
+    /\ Balance(d) >= 1
+    /\ phase' = [phase EXCEPT ![d][s] = "Prepared"]
+    /\ parent' = [parent EXCEPT ![s] = Tip(d)]
+    /\ Emit("prepare", s)
+    /\ UNCHANGED <<chain, link>>
 
-\* ---------- Phase 1: SenderPrepare ----------
-\* Maps to prepare_bilateral_transaction() in bilateral_ble_handler.rs:665
-\* Creates precommitment with chain tip anchor for Tripwire.
-\* Guards: sufficient balance, chain not full, no concurrent in-flight
-\* session for this sender (Paper Theorem 4.1: modal lock semantics).
-SenderPrepare(sender, receiver, sid, amount) ==
-    /\ sender /= receiver
-    /\ sessions[sid] = NULL
-    /\ balance[sender] >= amount
-    /\ amount > 0
-    /\ chainTip[sender] < MaxChain
-    \* Paper Theorem 4.1: no concurrent in-flight session for this sender
-    \* (single-successor semantics via modal lock)
-    /\ ~\E sid2 \in SessionId :
-        /\ sessions[sid2] /= NULL
-        /\ sessions[sid2].phase \in InFlightPhase
-        /\ sessions[sid2].sender = sender
-    /\ sessions' = [sessions EXCEPT ![sid] =
-        [phase |-> "Prepared",
-         sender |-> sender,
-         receiver |-> receiver,
-         tipAtCreation |-> chainTip[sender],
-         amount |-> amount,
-         hasBothSigs |-> FALSE]]
-    /\ UNCHANGED <<chainTip, balance, relationshipTip, bleConnected>>
+\* ------------------------------------------------------------------------
+\* The receiver's door (handle_prepare_request). A step it already holds is
+\* answered from its phase. A new one is refused, with a signed rejection it
+\* keeps, while the receiver has a step of its own in flight; refused, with a
+\* signed rejection, when it does not extend the receiver's tip (the tip
+\* never comes back, so that answer need not be kept); otherwise held for the
+\* user.
+\* ------------------------------------------------------------------------
+RecvPrepare(s) ==
+    LET r == Receiver(s)
+        m == Msg("prepare", s)
+    IN
+    /\ link
+    /\ m \in net
+    /\ CASE phase[r][s] = "Accepted" ->
+              /\ Answer(m, "response")
+              /\ UNCHANGED phase
+         [] phase[r][s] = "Rejected" ->
+              /\ Answer(m, "reject")
+              /\ UNCHANGED phase
+         [] phase[r][s] = "None" /\ ReceiverRefusesWhileInFlight /\ InFlight(r) ->
+              /\ phase' = [phase EXCEPT ![r][s] = "Rejected"]
+              /\ Answer(m, "reject")
+         [] phase[r][s] = "None" /\ Tip(r) # parent[s] ->
+              /\ Answer(m, "reject")
+              /\ UNCHANGED phase
+         [] phase[r][s] = "None" ->
+              /\ phase' = [phase EXCEPT ![r][s] = "PendingUser"]
+              /\ Consume(m)
+         [] OTHER ->
+              \* PendingUser, Ended, Committed, Failed: nothing to answer
+              /\ Consume(m)
+              /\ UNCHANGED phase
+    /\ UNCHANGED <<chain, parent, link>>
 
-\* ---------- Phase 1→2: ReceiverReceivePrepare ----------
-\* Maps to handle_prepare_request() in bilateral_ble_handler.rs:1055
-\* Receiver gets the prepare via BLE (co-present required for offline).
-ReceiverReceivePrepare(sid) ==
-    /\ sessions[sid] /= NULL
-    /\ sessions[sid].phase = "Prepared"
-    /\ bleConnected
-    /\ sessions' = [sessions EXCEPT ![sid].phase = "PendingUserAction"]
-    /\ UNCHANGED <<chainTip, balance, relationshipTip, bleConnected>>
+\* The receiver's user accepts: Accepted is durable, with the response owed,
+\* before the response leaves.
+UserAccept(s) ==
+    LET r == Receiver(s) IN
+    /\ phase[r][s] = "PendingUser"
+    /\ phase' = [phase EXCEPT ![r][s] = "Accepted"]
+    /\ Emit("response", s)
+    /\ UNCHANGED <<chain, parent, link>>
 
-\* ---------- Phase 2: UserAccept ----------
-\* Maps to create_prepare_accept_envelope() in bilateral_ble_handler.rs:1557
-\* Receiver signs acceptance. Both signatures now available.
-\*
-\* REFINEMENT NOTE — `hasBothSigs = TRUE` refines to a §11.1 per-step EK
-\* signing chain on BOTH sides of the bilateral receipt:
-\*
-\*   - Sender stamps {ek_pk_a, ek_cert_a, kyber_ct_a, sig_a} during
-\*     send_bilateral_confirm (sign_receipt_with_per_step_ek_for_bilateral
-\*     with BilateralSide::A).
-\*   - Receiver verifies sender's A-side in handle_confirm_request via
-\*     verify_per_step_ek_signing_strict_aware, then counter-stamps
-\*     {ek_pk_b, ek_cert_b, kyber_ct_b, sig_b} (BilateralSide::B).
-\*   - Counter-signed bytes ride back to sender on
-\*     BilateralCommitResponse.counter_signed_receipt; sender verifies
-\*     B-side in handle_commit_response and replaces the in-memory
-\*     A-only cached receipt with the fully co-signed bytes for archive.
-\*
-\* The strict-aware verifier verify_per_step_ek_signing_strict_aware
-\* (receipts.rs:487) UNCONDITIONALLY returns a structured error when
-\* per-step EK artifacts are missing on either side — there is no mode
-\* toggle and no fail-open path. So `hasBothSigs = TRUE` cannot be reached
-\* without genuine §11.1 per-step EK signing on both sides.
-\*
-\* The full refinement is detailed in DSM_Tripwire.tla and verified
-\* end-to-end by per_step_signing_end_to_end_two_steps,
-\* per_step_signing_chain_property_invariants, and
-\* verify_per_step_ek_signing_accepts_symmetric_a_and_b_on_same_receipt.
-UserAccept(sid) ==
-    /\ sessions[sid] /= NULL
-    /\ sessions[sid].phase = "PendingUserAction"
-    /\ sessions' = [sessions EXCEPT ![sid].phase = "Accepted",
-                                     ![sid].hasBothSigs = TRUE]
-    /\ UNCHANGED <<chainTip, balance, relationshipTip, bleConnected>>
+\* The receiver's user rejects: a signed rejection, kept.
+UserReject(s) ==
+    LET r == Receiver(s) IN
+    /\ phase[r][s] = "PendingUser"
+    /\ phase' = [phase EXCEPT ![r][s] = "Rejected"]
+    /\ Emit("reject", s)
+    /\ UNCHANGED <<chain, parent, link>>
 
-\* ---------- Phase 3: Commit ----------
-\* Maps to prepare_bilateral_advance() in bilateral_transaction_manager.rs
-\* (the §6.1 tripwire) followed by the canonical Core advance
-\* (DeviceState::advance), which derives the transition's one entropy.
-\*
-\* PAPER THEOREM 4.2 (Atomic Interlock Tripwire):
-\*   chainTip[sender] MUST equal tipAtCreation. If the tip has advanced
-\*   (another transaction consumed the parent), this guard fails and the
-\*   session must abort via TripwireAbort.
-\*
-\* ATOMICITY: Both balance updates and both chain tip advances happen
-\* in a single TLA+ step. This is the core of NoHalfCommit — there is
-\* no intermediate state where one peer has moved and the other hasn't.
-Commit(sid) ==
-    /\ sessions[sid] /= NULL
-    /\ sessions[sid].phase = "Accepted"
-    /\ sessions[sid].hasBothSigs = TRUE
-    \* TRIPWIRE (Paper Theorem 4.2, Whitepaper Section 6.1)
-    /\ chainTip[sessions[sid].sender] = sessions[sid].tipAtCreation
-    /\ chainTip[sessions[sid].sender] < MaxChain
-    /\ chainTip[sessions[sid].receiver] < MaxChain
-    /\ LET s == sessions[sid].sender
-           r == sessions[sid].receiver
-           amt == sessions[sid].amount
-       IN /\ sessions' = [sessions EXCEPT ![sid].phase = "Committed"]
-          /\ balance' = [balance EXCEPT ![s] = balance[s] - amt,
-                                        ![r] = balance[r] + amt]
-          /\ chainTip' = [chainTip EXCEPT ![s] = chainTip[s] + 1,
-                                          ![r] = chainTip[r] + 1]
-          /\ relationshipTip' = relationshipTip + 1
-    /\ UNCHANGED <<bleConnected>>
+\* ------------------------------------------------------------------------
+\* The proposer takes the response (handle_prepare_response). From Prepared
+\* it confirms: ConfirmPending is durable, with the confirm owed, before the
+\* confirm leaves (send_bilateral_confirm).
+\* ------------------------------------------------------------------------
+RecvResponse(s) ==
+    LET p == Proposer(s)
+        m == Msg("response", s)
+    IN
+    /\ link
+    /\ m \in net
+    /\ CASE phase[p][s] = "Prepared" ->
+              /\ phase' = [phase EXCEPT ![p][s] = "ConfirmPending"]
+              /\ Answer(m, "confirm")
+         [] phase[p][s] = "ConfirmPending" ->
+              /\ Answer(m, "confirm")
+              /\ UNCHANGED phase
+         [] phase[p][s] = "Rejected" ->
+              /\ Answer(m, "cancel")
+              /\ UNCHANGED phase
+         [] OTHER ->
+              /\ Consume(m)
+              /\ UNCHANGED phase
+    /\ UNCHANGED <<chain, parent, link>>
 
-\* ---------- SessionFail ----------
-\* Any in-flight session can fail: BLE disconnect, timeout, crash.
-\* CRITICAL: no balance change. This is the atomicity guarantee —
-\* failure always returns to pre-session state.
-SessionFail(sid) ==
-    /\ sessions[sid] /= NULL
-    /\ sessions[sid].phase \in InFlightPhase
-    /\ sessions' = [sessions EXCEPT ![sid].phase = "Failed"]
-    /\ UNCHANGED <<chainTip, balance, relationshipTip, bleConnected>>
+\* FramesAfterDurable = FALSE: the confirm leaves first and the proposer
+\* restarts before ConfirmPending is written. The confirm is out; the
+\* proposer holds Prepared.
+RecvResponseFrameFirst(s) ==
+    LET p == Proposer(s)
+        m == Msg("response", s)
+    IN
+    /\ ~FramesAfterDurable
+    /\ link
+    /\ m \in net
+    /\ phase[p][s] = "Prepared"
+    /\ Answer(m, "confirm")
+    /\ UNCHANGED <<chain, phase, parent, link>>
 
-\* ---------- SessionRecover ----------
-\* Maps to recover_sender_commit_from_storage() in bilateral_ble_handler.rs:638
-\* Auto-commit accepted sessions with both sigs on BLE reconnect.
-\* Same Tripwire guard as Commit — if tip moved, recovery fails via
-\* TripwireAbort instead.
-SessionRecover(sid) ==
-    /\ sessions[sid] /= NULL
-    /\ sessions[sid].phase = "Accepted"
-    /\ sessions[sid].hasBothSigs = TRUE
-    /\ chainTip[sessions[sid].sender] = sessions[sid].tipAtCreation
-    /\ chainTip[sessions[sid].sender] < MaxChain
-    /\ chainTip[sessions[sid].receiver] < MaxChain
-    /\ bleConnected  \* Recovery requires reconnect
-    /\ LET s == sessions[sid].sender
-           r == sessions[sid].receiver
-           amt == sessions[sid].amount
-       IN /\ sessions' = [sessions EXCEPT ![sid].phase = "Committed"]
-          /\ balance' = [balance EXCEPT ![s] = balance[s] - amt,
-                                        ![r] = balance[r] + amt]
-          /\ chainTip' = [chainTip EXCEPT ![s] = chainTip[s] + 1,
-                                          ![r] = chainTip[r] + 1]
-          /\ relationshipTip' = relationshipTip + 1
-    /\ UNCHANGED <<bleConnected>>
+\* The proposer takes the receiver's signed rejection (handle_prepare_reject):
+\* it ends only a proposal not yet confirmed.
+RecvReject(s) ==
+    LET p == Proposer(s)
+        m == Msg("reject", s)
+    IN
+    /\ link
+    /\ m \in net
+    /\ Consume(m)
+    /\ phase' = IF phase[p][s] = "Prepared"
+                THEN [phase EXCEPT ![p][s] = "Ended"]
+                ELSE phase
+    /\ UNCHANGED <<chain, parent, link>>
 
-\* ---------- TripwireAbort ----------
-\* Paper Theorem 4.2: when the chain tip has moved since precommitment
-\* (another transaction consumed the parent), the session MUST abort.
-\* Maps to DeterministicSafetyClass::ParentConsumed at
-\* bilateral_transaction_manager.rs:990.
-TripwireAbort(sid) ==
-    /\ sessions[sid] /= NULL
-    /\ sessions[sid].phase = "Accepted"
-    /\ chainTip[sessions[sid].sender] /= sessions[sid].tipAtCreation
-    /\ sessions' = [sessions EXCEPT ![sid].phase = "Failed"]
-    /\ UNCHANGED <<chainTip, balance, relationshipTip, bleConnected>>
+\* The proposer cancels a proposal it has not confirmed (cancel_proposal): a
+\* signed cancellation, kept as its answer to the receiver's next frame.
+Cancel(s) ==
+    LET p == Proposer(s) IN
+    /\ \/ phase[p][s] = "Prepared"
+       \/ ~CancelOnlyBeforeConfirm /\ phase[p][s] = "ConfirmPending"
+    /\ phase' = [phase EXCEPT ![p][s] = "Rejected"]
+    /\ Emit("cancel", s)
+    /\ UNCHANGED <<chain, parent, link>>
 
-\* ========================================================================
-\* BLE TRANSPORT ACTIONS (nondeterministic)
-\* ========================================================================
+\* The receiver takes the proposer's signed cancellation: it ends a step the
+\* receiver holds and has not committed.
+RecvCancel(s) ==
+    LET r == Receiver(s)
+        m == Msg("cancel", s)
+    IN
+    /\ link
+    /\ m \in net
+    /\ Consume(m)
+    /\ phase' = IF phase[r][s] \in {"PendingUser", "Accepted"}
+                THEN [phase EXCEPT ![r][s] = "Ended"]
+                ELSE phase
+    /\ UNCHANGED <<chain, parent, link>>
 
-\* BLE drops mid-protocol — models unreliable transport.
-\* This is the partition we need to tolerate.
-BleDisconnect ==
-    /\ bleConnected
-    /\ bleConnected' = FALSE
-    /\ UNCHANGED <<chainTip, balance, relationshipTip, sessions>>
+\* ------------------------------------------------------------------------
+\* The receiver takes the confirm (handle_confirm_request): it commits in one
+\* transaction and only then answers with its ack. A committed step answers
+\* the confirm again with its ack (answer_committed_confirm).
+\* ------------------------------------------------------------------------
+RecvConfirm(s) ==
+    LET r == Receiver(s)
+        m == Msg("confirm", s)
+    IN
+    /\ link
+    /\ m \in net
+    /\ CASE phase[r][s] = "Accepted" /\ Tip(r) = parent[s] ->
+              /\ chain' = [chain EXCEPT ![r] = Append(@, s)]
+              /\ phase' = [phase EXCEPT ![r][s] = "Committed"]
+              /\ Answer(m, "ack")
+         [] phase[r][s] = "Committed" ->
+              /\ Answer(m, "ack")
+              /\ UNCHANGED <<chain, phase>>
+         [] OTHER ->
+              /\ Consume(m)
+              /\ UNCHANGED <<chain, phase>>
+    /\ UNCHANGED <<parent, link>>
 
-\* BLE reconnects — enables session recovery.
-BleReconnect ==
-    /\ ~bleConnected
-    /\ bleConnected' = TRUE
-    /\ UNCHANGED <<chainTip, balance, relationshipTip, sessions>>
+\* The proposer takes the ack (handle_commit_response): it commits the step
+\* its confirm was signed from. An ack that does not hold against its heads
+\* commits nothing and leaves the step awaiting its ack.
+RecvAck(s) ==
+    LET p == Proposer(s)
+        m == Msg("ack", s)
+    IN
+    /\ link
+    /\ m \in net
+    /\ Consume(m)
+    /\ IF phase[p][s] = "ConfirmPending" /\ Tip(p) = parent[s]
+       THEN /\ chain' = [chain EXCEPT ![p] = Append(@, s)]
+            /\ phase' = [phase EXCEPT ![p][s] = "Committed"]
+       ELSE UNCHANGED <<chain, phase>>
+    /\ UNCHANGED <<parent, link>>
 
-\* ========================================================================
-\* NEXT-STATE RELATION
-\* ========================================================================
+\* ------------------------------------------------------------------------
+\* The link. While it is up each device delivers what its phase owes
+\* (deliver_owed_frames on connect). Losing it drops the frames in the air
+\* and, in the code, fails nothing.
+\* ------------------------------------------------------------------------
+Owed(d, s) ==
+    CASE phase[d][s] = "Prepared" -> "prepare"
+      [] phase[d][s] = "Accepted" -> "response"
+      [] phase[d][s] = "ConfirmPending" -> "confirm"
+      [] OTHER -> "none"
+
+Resend(d, s) ==
+    /\ link
+    /\ Owed(d, s) # "none"
+    /\ Msg(Owed(d, s), s) \notin net
+    /\ net' = net \cup {Msg(Owed(d, s), s)}
+    /\ UNCHANGED <<chain, phase, parent, link>>
+
+LinkDown ==
+    /\ link
+    /\ link' = FALSE
+    /\ net' = {}
+    /\ phase' = IF LinkLossFailsNothing
+                THEN phase
+                ELSE [d \in Device |-> [s \in Step |->
+                        IF phase[d][s] \in InFlightPhase THEN "Failed"
+                                                         ELSE phase[d][s]]]
+    /\ UNCHANGED <<chain, parent>>
+
+LinkUp ==
+    /\ ~link
+    /\ link' = TRUE
+    /\ UNCHANGED <<chain, phase, parent, net>>
 
 Next ==
-    \* Bilateral session actions (3-phase commit)
-    \/ \E s, r \in Device, sid \in SessionId, amt \in 1..INITIAL_BALANCE :
-        SenderPrepare(s, r, sid, amt)
-    \/ \E sid \in SessionId : ReceiverReceivePrepare(sid)
-    \/ \E sid \in SessionId : UserAccept(sid)
-    \/ \E sid \in SessionId : Commit(sid)
-    \/ \E sid \in SessionId : SessionFail(sid)
-    \/ \E sid \in SessionId : SessionRecover(sid)
-    \/ \E sid \in SessionId : TripwireAbort(sid)
-    \* BLE transport
-    \/ BleDisconnect
-    \/ BleReconnect
+    \/ \E s \in Step :
+          \/ Propose(s)
+          \/ RecvPrepare(s)
+          \/ UserAccept(s)
+          \/ UserReject(s)
+          \/ RecvResponse(s)
+          \/ RecvResponseFrameFirst(s)
+          \/ RecvReject(s)
+          \/ Cancel(s)
+          \/ RecvCancel(s)
+          \/ RecvConfirm(s)
+          \/ RecvAck(s)
+    \/ \E d \in Device, s \in Step : Resend(d, s)
+    \/ LinkDown
+    \/ LinkUp
 
-\* ========================================================================
-\* FAIRNESS ASSUMPTIONS
-\* ========================================================================
-
-\* Weak fairness: if an action is continuously enabled, it is eventually
-\* taken. Required for liveness proofs.
-\*
-\* Fairness on:
-\*   - UserAccept: receiver eventually responds
-\*   - Commit/SessionRecover: accepted sessions eventually finalize
-\*   - TripwireAbort: detected conflicts eventually abort
-\*   - SessionFail: stuck sessions eventually time out
-\*   - BleReconnect: partitions eventually heal
+\* Fairness: a user eventually decides on a proposal it holds, and while the
+\* link is up an owed frame is eventually sent and a frame in the air is
+\* eventually taken. Proposing, cancelling and the link itself are free.
 Fairness ==
-    /\ \A sid \in SessionId :
-        /\ WF_vars(UserAccept(sid))
-        /\ WF_vars(Commit(sid))
-        /\ WF_vars(SessionRecover(sid))
-        /\ WF_vars(TripwireAbort(sid))
-        /\ WF_vars(SessionFail(sid))
-    /\ WF_vars(BleReconnect)
+    /\ \A s \in Step :
+          /\ WF_vars(UserAccept(s) \/ UserReject(s))
+          /\ WF_vars(RecvPrepare(s))
+          /\ WF_vars(RecvResponse(s))
+          /\ WF_vars(RecvReject(s))
+          /\ WF_vars(RecvCancel(s))
+          /\ WF_vars(RecvConfirm(s))
+          /\ WF_vars(RecvAck(s))
+    /\ \A d \in Device, s \in Step : WF_vars(Resend(d, s))
 
 Spec == Init /\ [][Next]_vars /\ Fairness
 
 \* ========================================================================
-\* SAFETY INVARIANTS
+\* SAFETY
 \* ========================================================================
 
-\* TypeOK: all variables have valid types
 TypeOK ==
-    /\ chainTip \in [Device -> Hash]
-    /\ balance \in [Device -> Nat]
-    /\ relationshipTip \in Nat
-    /\ \A sid \in SessionId :
-        sessions[sid] = NULL \/
-        (/\ sessions[sid].phase \in Phase
-         /\ sessions[sid].sender \in Device
-         /\ sessions[sid].receiver \in Device
-         /\ sessions[sid].tipAtCreation \in Hash
-         /\ sessions[sid].amount \in 1..INITIAL_BALANCE
-         /\ sessions[sid].hasBothSigs \in BOOLEAN)
-    /\ bleConnected \in BOOLEAN
+    /\ chain \in [Device -> Seq(Step)]
+    /\ phase \in [Device -> [Step -> Phase]]
+    /\ parent \in [Step -> {NoParent} \cup Nat]
+    /\ net \subseteq [kind : Kind, step : Step]
+    /\ link \in BOOLEAN
 
-\* ------------------------------------------------------------------
-\* INVARIANT 1: BilateralIrreversibility
-\*
-\* Paper Theorem 4.2 consequence: once a session reaches Committed,
-\* the receiver's balance includes the transferred amount AND the
-\* sender's chain tip has advanced past the precommitment point.
-\* No future valid action can undo this because:
-\*   (a) No action decrements balance except Commit on a different session
-\*   (b) A new Commit requires tipAtCreation == current tip, but the tip
-\*       already advanced, so no session with the old tip can commit
-\* ------------------------------------------------------------------
-BilateralIrreversibility ==
-    \A sid \in SessionId :
-        (sessions[sid] /= NULL /\ sessions[sid].phase = "Committed")
-        => /\ balance[sessions[sid].receiver] >= sessions[sid].amount
-           /\ chainTip[sessions[sid].sender] > sessions[sid].tipAtCreation
+\* The two devices hold one relationship chain: one is a prefix of the other.
+NoFork ==
+    \A d \in Device :
+        Len(chain[d]) <= Len(chain[Peer(d)])
+            => SubSeq(chain[Peer(d)], 1, Len(chain[d])) = chain[d]
 
-\* ------------------------------------------------------------------
-\* INVARIANT 2: FullSettlement
-\*
-\* Committed => receiver's balance includes the amount (spendable in
-\* subsequent transactions). Sender's balance is reduced.
-\* ------------------------------------------------------------------
-FullSettlement ==
-    \A sid \in SessionId :
-        (sessions[sid] /= NULL /\ sessions[sid].phase = "Committed")
-        => balance[sessions[sid].receiver] >= sessions[sid].amount
-
-\* ------------------------------------------------------------------
-\* INVARIANT 3: NoHalfCommit (Partition Tolerance)
-\*
-\* The core atomicity property. For each session:
-\*   - In-flight (Prepared/PendingUserAction/Accepted): balances match
-\*     their values BEFORE the session modified them (no partial apply)
-\*   - Committed: both balances updated (sender decreased, receiver increased)
-\*   - Failed: balances unchanged from pre-session state
-\*
-\* This holds because Commit is the ONLY action that modifies balance,
-\* and it updates BOTH sender and receiver in a single TLA+ step.
-\* BLE disconnect during any in-flight phase → SessionFail → no change.
-\*
-\* Implementation note: in the Rust code the canonical Core advance
-\* (DeviceState::advance, reached through prepare_bilateral_advance and
-\* AppRouter::execute_on_relationship_for_bilateral) installs the successor
-\* and its balance deltas in a single state transition.
-\* ------------------------------------------------------------------
+\* Both-or-neither: a step committed on one device is committed on the other,
+\* or is owed there by a proposer that can no longer end it (it is past its
+\* confirm) and can still commit it (its tip is the step's parent).
 NoHalfCommit ==
-    \A sid \in SessionId :
-        sessions[sid] /= NULL =>
-            \* In-flight sessions: sender's tip has NOT advanced due to THIS session.
-            \* The tip might have advanced due to a DIFFERENT session's commit,
-            \* in which case TripwireAbort will eventually fire for this one.
-            \/ sessions[sid].phase \in InFlightPhase
-            \* Committed: sender tip advanced past precommitment point
-            \* (balance transfer happened atomically)
-            \/ (sessions[sid].phase = "Committed"
-                /\ chainTip[sessions[sid].sender] > sessions[sid].tipAtCreation)
-            \* Failed: no balance change from this session
-            \/ sessions[sid].phase = "Failed"
+    \A d \in Device, s \in Step :
+        InChain(d, s) =>
+            \/ InChain(Peer(d), s)
+            \/ /\ d = Receiver(s)
+               /\ phase[Proposer(s)][s] = "ConfirmPending"
+               /\ Tip(Proposer(s)) = parent[s]
 
-\* ------------------------------------------------------------------
-\* INVARIANT 4: TripwireGuaranteesUniqueness (Fork Exclusion)
-\*
-\* Paper Theorem 4.2: no two committed sessions from the same sender
-\* consumed the same parent tip. This is the discrete model of
-\* "probability of two accepted successors is negligible" — in the
-\* bounded model, it's exactly zero.
-\* ------------------------------------------------------------------
+\* Tripwire (spec §53): no two committed steps share a parent — on either
+\* device.
 TripwireGuaranteesUniqueness ==
-    \A s1, s2 \in SessionId :
-        (s1 /= s2
-         /\ sessions[s1] /= NULL /\ sessions[s2] /= NULL
-         /\ sessions[s1].phase = "Committed" /\ sessions[s2].phase = "Committed"
-         /\ sessions[s1].sender = sessions[s2].sender)
-        => sessions[s1].tipAtCreation /= sessions[s2].tipAtCreation
+    \A s, t \in Step :
+        (/\ s # t
+         /\ \E d \in Device : InChain(d, s)
+         /\ \E d \in Device : InChain(d, t))
+        => parent[s] # parent[t]
 
-\* ------------------------------------------------------------------
-\* INVARIANT 5: TokenConservation
-\*
-\* Sum of all balances is constant. No value is created or destroyed.
-\* ------------------------------------------------------------------
-\* Sum balances without RECURSIVE (TLAPS cannot handle recursive operators).
-\* For the 2-device model, unfold directly. For larger models, use
-\* MapThenFoldSet from the CommunityModules library.
-LOCAL SumBal_Impl(S) ==
-    LET devs == { d \in S : TRUE }
-    IN  IF Cardinality(devs) = 0 THEN 0
-        ELSE IF Cardinality(devs) = 1
-             THEN LET d1 == CHOOSE x \in devs : TRUE IN balance[d1]
-             ELSE IF Cardinality(devs) = 2
-                  THEN LET d1 == CHOOSE x \in devs : TRUE
-                           d2 == CHOOSE x \in devs : x # d1
-                       IN  balance[d1] + balance[d2]
-                  ELSE \* Fallback for >2: still correct but not TLAPS-provable
-                       LET d1 == CHOOSE x \in devs : TRUE
-                       IN  balance[d1]  \* placeholder — model uses 2 devices
+\* Every committed step sits directly on its parent.
+CommitsExtendTheirParent ==
+    \A d \in Device : \A i \in 1..Len(chain[d]) : parent[chain[d][i]] = i - 1
 
+\* One step at a time: a device holds at most one step in flight.
+OneStepInFlight ==
+    \A d \in Device :
+        Cardinality({s \in Step : phase[d][s] \in InFlightPhase}) <= 1
+
+\* With no step in flight anywhere, no value was made or lost.
 TokenConservation ==
-    SumBal_Impl(Device) = Cardinality(Device) * INITIAL_BALANCE
+    (\A d \in Device : ~InFlight(d))
+        => LET d == CHOOSE x \in Device : TRUE
+           IN Balance(d) + Balance(Peer(d)) = 2 * INITIAL_BALANCE
 
-\* ------------------------------------------------------------------
-\* INVARIANT 6: BalancesNonNegative
-\* ------------------------------------------------------------------
-BalancesNonNegative ==
-    \A d \in Device : balance[d] >= 0
+BalancesNonNegative == \A d \in Device : Balance(d) >= 0
+
+\* The durable boundary, frame by frame: a confirm in the air was sent by a
+\* proposer whose ConfirmPending is durable; an ack by a receiver whose
+\* commit is.
+ConfirmFollowsDurableConfirm ==
+    \A s \in Step :
+        Msg("confirm", s) \in net
+            => phase[Proposer(s)][s] \in {"ConfirmPending", "Committed"}
+
+AckFollowsDurableCommit ==
+    \A s \in Step : Msg("ack", s) \in net => InChain(Receiver(s), s)
+
+\* A committed step stays committed: each chain only grows.
+ChainsOnlyGrow ==
+    [][\A d \in Device :
+          /\ Len(chain[d]) <= Len(chain'[d])
+          /\ SubSeq(chain'[d], 1, Len(chain[d])) = chain[d]]_vars
+
+\* Non-vacuity witnesses. Each is false in some reachable state, and its
+\* *Reachable config expects TLC to find one: both steps commit on both
+\* devices, and the two devices' proposals are in flight at once (they
+\* cross), so the invariants above are checked over those states.
+NeverCommittedOnBoth == ~(\A s \in Step : \A d \in Device : InChain(d, s))
+NeverCrossed == ~(\A s \in Step : phase[Proposer(s)][s] = "Prepared")
 
 \* ========================================================================
-\* LIVENESS PROPERTIES
+\* LIVENESS
 \* ========================================================================
 
-\* ------------------------------------------------------------------
-\* Property 1: SessionTermination
-\*
-\* Every in-flight session eventually reaches a terminal state.
-\* Proof sketch:
-\*   Prepared: SessionFail always enabled (WF fires)
-\*   PendingUserAction: UserAccept (WF fires)
-\*   Accepted + bothSigs + tipMatch: Commit enabled (WF fires)
-\*   Accepted + tipMoved: TripwireAbort enabled (WF fires)
-\*   Accepted + !bothSigs: SessionFail enabled (WF fires)
-\* ------------------------------------------------------------------
+Proposed(s) == parent[s] # NoParent
+Settled(s) == \A d \in Device : phase[d][s] \notin InFlightPhase
+
+\* If the link eventually stays up, every proposed step settles on both
+\* devices — committed on both (NoHalfCommit) or ended on both. Nothing here
+\* ends a step on time or on a lost link.
 SessionTermination ==
-    \A sid \in SessionId :
-        [](sessions[sid] /= NULL /\ sessions[sid].phase \in InFlightPhase
-           => <>(sessions[sid] /= NULL /\ sessions[sid].phase \in TerminalPhase))
-
-\* ------------------------------------------------------------------
-\* Property 2: BlePartitionRecovery
-\*
-\* If BLE drops while a session is in-flight, the session eventually
-\* terminates — it either recovers (Committed) or fails (Failed).
-\* No session hangs forever due to a BLE partition.
-\*
-\* Proof sketch:
-\*   BLE drops → session stuck in Accepted/Prepared/PendingUserAction.
-\*   SessionFail is always enabled for in-flight sessions (WF fires).
-\*   OR: BleReconnect fires (WF), then Commit/SessionRecover fires.
-\*   Either way, session reaches terminal state.
-\* ------------------------------------------------------------------
-BlePartitionRecovery ==
-    \A sid \in SessionId :
-        []((~bleConnected
-            /\ sessions[sid] /= NULL
-            /\ sessions[sid].phase \in InFlightPhase)
-           => <>(sessions[sid] /= NULL /\ sessions[sid].phase \in TerminalPhase))
-
-\* ========================================================================
-\* TLAPS PROOF STRUCTURE (structured proofs for TLAPS verification)
-\* ========================================================================
-
-\* THEOREM OfflineFinalityInit == Init => TypeOK /\ TokenConservation
-\* PROOF BY ExpandDefs, SMT
-
-\* THEOREM OfflineFinalityStep ==
-\*     TypeOK /\ [Next]_vars => TypeOK'
-\* PROOF BY case split on each action, Zenon/SMT
-
-\* THEOREM IrreversibilityInductive ==
-\*     BilateralIrreversibility /\ TypeOK /\ [Next]_vars
-\*       => BilateralIrreversibility'
-\* PROOF
-\*   Case Commit(sid): chainTip'[sender] = chainTip[sender] + 1 > tipAtCreation.
-\*     For previously committed sessions: their tipAtCreation < chainTip[sender]
-\*     which is <= chainTip'[sender], so invariant preserved.
-\*     Key arithmetic lemma: chainTip + 1 > tipAtCreation when
-\*     chainTip = tipAtCreation. Discharged by DSMOfflineFinality.lean:
-\*     tripwire_tip_strictly_advances.
-\*   Case SessionFail(sid): no balance change, UNCHANGED chainTip. Trivial.
-\*   Case TripwireAbort(sid): no balance change. Trivial.
-\*   Case SenderPrepare/ReceiverReceivePrepare/UserAccept: no balance/tip change.
-\*   Case BleDisconnect/BleReconnect: UNCHANGED everything relevant.
-\*   Case SessionRecover(sid): identical to Commit case.
-\* QED
-
-\* THEOREM NoHalfCommitInductive ==
-\*     NoHalfCommit /\ TypeOK /\ [Next]_vars => NoHalfCommit'
-\* PROOF
-\*   Commit is the ONLY action that modifies balance. It updates both
-\*   sender and receiver atomically in a single step. All other actions
-\*   have UNCHANGED <<balance>>. The NoHalfCommit invariant holds because:
-\*   - Before Commit: in-flight, tipAtCreation = chainTip[sender]
-\*   - After Commit: phase = Committed, chainTip' > tipAtCreation
-\*   - On Fail: phase = Failed (third disjunct)
-\*   No intermediate state exists.
-\* QED
+    (<>[]link) => \A s \in Step : Proposed(s) ~> Settled(s)
 
 ====

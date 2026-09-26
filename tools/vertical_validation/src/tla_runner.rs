@@ -31,7 +31,7 @@ use crate::tla_trace_replay::{
 /// `expected=12` module count in CI, and it exists for the same reason: an
 /// anti-skip tripwire is cheap, and a silently shrinking formal suite is the
 /// failure mode that looks most like success.
-pub const EXPECTED_STANDARD_SPECS: usize = 79;
+pub const EXPECTED_STANDARD_SPECS: usize = 85;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TlaSpec {
@@ -57,10 +57,11 @@ pub struct TlaSpec {
     /// no violation at all (the invariant is decoration), the wrong invariant
     /// (the config is not modelling what it says), or a TLC error.
     pub expect_violation: Option<String>,
-    /// `true` for a model whose every action is monotone, so its state graph
-    /// is finite by construction: TLC explores it breadth-first with parallel
-    /// workers and exhausts it. `false` keeps the bounded DFID search that
-    /// unbounded models need. Iterative deepening regenerated 71M states to
+    /// `true` for a model whose state graph is finite by construction — every
+    /// action monotone, or every variable over a fixed finite set: TLC
+    /// explores it breadth-first with parallel workers and exhausts it, and
+    /// only then checks liveness (DFID cannot). `false` keeps the bounded DFID
+    /// search that unbounded models need. Iterative deepening regenerated 71M states to
     /// find the 1.08M of `DSM_SofiFulfillment` (five minutes); breadth-first
     /// finds them once (seventeen seconds).
     #[serde(default)]
@@ -407,27 +408,72 @@ impl TlaRunner {
                 expect_violation: None,
                 exhaustive: false,
             },
-            // --- Offline Finality (Paper Theorems 4.1, 4.2) ---
-            // Bilateral settlement irreversibility + BLE partition tolerance.
+            // --- Offline finality: the offline step between two devices ---
+            // Both-or-neither across a lost link, frames delivered again, a
+            // restart, rejection and cancellation; one step at a time at both
+            // doors; every proposed step settles once the link stays up.
             TlaSpec {
                 label: "OfflineFinality".into(),
                 spec_file: "DSM_OfflineFinality.tla".into(),
                 config_file: "DSM_OfflineFinality.cfg".into(),
                 invariants: vec![
                     "TypeOK".into(),
-                    "BilateralIrreversibility".into(),
-                    "FullSettlement".into(),
+                    "NoFork".into(),
                     "NoHalfCommit".into(),
                     "TripwireGuaranteesUniqueness".into(),
+                    "CommitsExtendTheirParent".into(),
+                    "OneStepInFlight".into(),
                     "TokenConservation".into(),
                     "BalancesNonNegative".into(),
+                    "ConfirmFollowsDurableConfirm".into(),
+                    "AckFollowsDurableCommit".into(),
                 ],
-                properties: vec![],
+                properties: vec!["ChainsOnlyGrow".into(), "SessionTermination".into()],
                 linked_implementation_traces: vec!["bilateral_full_offline_finality".into()],
                 supports_trace_replay: true,
                 expect_violation: None,
-                exhaustive: false,
+                exhaustive: true,
             },
+            // Each rule of the offline step removed, one at a time: the
+            // invariant it holds up fails.
+            expect_violation(
+                "OfflineFinality/frame-before-durable",
+                "DSM_OfflineFinality.tla",
+                "DSM_OfflineFinality_FrameBeforeDurable.cfg",
+                "NoHalfCommit",
+            ),
+            expect_violation(
+                "OfflineFinality/cancel-after-confirm",
+                "DSM_OfflineFinality.tla",
+                "DSM_OfflineFinality_CancelAfterConfirm.cfg",
+                "NoHalfCommit",
+            ),
+            expect_violation(
+                "OfflineFinality/link-loss-fails-steps",
+                "DSM_OfflineFinality.tla",
+                "DSM_OfflineFinality_LinkLossFailsSteps.cfg",
+                "NoHalfCommit",
+            ),
+            expect_violation(
+                "OfflineFinality/crossing-proposals",
+                "DSM_OfflineFinality.tla",
+                "DSM_OfflineFinality_CrossingProposals.cfg",
+                "NoFork",
+            ),
+            // Non-vacuity: both steps commit on both devices, and proposals
+            // cross, in states the model config checks.
+            expect_violation(
+                "OfflineFinality/steps-commit-reachable",
+                "DSM_OfflineFinality.tla",
+                "DSM_OfflineFinality_StepsCommitReachable.cfg",
+                "NeverCommittedOnBoth",
+            ),
+            expect_violation(
+                "OfflineFinality/crossing-reachable",
+                "DSM_OfflineFinality.tla",
+                "DSM_OfflineFinality_CrossingReachable.cfg",
+                "NeverCrossed",
+            ),
             // --- Non-Interference (Paper Lemma 3.1, 3.2, Theorem 3.1) ---
             // Additive scaling: operations on one bilateral pair cannot affect
             // any other pair. Mathematical core of Θ(N) throughput.
@@ -1313,9 +1359,10 @@ fn crashed_without_a_finding(result: &TlcResult) -> bool {
 /// A registry entry whose config must violate exactly `invariant`: a deliberate
 /// falsification (one gate removed) or a negated non-vacuity claim. The config
 /// lists that invariant alone, so no other invariant can report first.
-/// The SoFi modules are finite by construction (see `TlaSpec::exhaustive`).
+/// The SoFi modules and the offline step model are finite by construction
+/// (see `TlaSpec::exhaustive`).
 fn exhaustive_by_construction(spec_file: &str) -> bool {
-    spec_file.starts_with("DSM_Sofi")
+    spec_file.starts_with("DSM_Sofi") || spec_file == "DSM_OfflineFinality.tla"
 }
 
 /// A falsification config whose named finding is a `[][P]_vars` action

@@ -457,6 +457,28 @@ mod tests {
         assert!(!is_inflight_phase(&BilateralPhase::Failed));
     }
 
+    /// The durable rows count a step in flight by its phase tag: exactly the
+    /// tags of the phases a session in memory counts.
+    #[test]
+    fn the_durable_in_flight_tags_are_the_in_flight_phases() {
+        for phase in [
+            BilateralPhase::Preparing,
+            BilateralPhase::Prepared,
+            BilateralPhase::PendingUserAction,
+            BilateralPhase::Accepted,
+            BilateralPhase::Rejected,
+            BilateralPhase::ConfirmPending,
+            BilateralPhase::Committed,
+            BilateralPhase::Failed,
+        ] {
+            assert_eq!(
+                crate::storage::client_db::IN_FLIGHT_PHASE_TAGS.contains(&phase_to_str(&phase)),
+                is_inflight_phase(&phase),
+                "{phase:?}"
+            );
+        }
+    }
+
     /// A session and its durable row carry the same state, commit inputs
     /// included: a restart continues the session it wrote.
     #[test]

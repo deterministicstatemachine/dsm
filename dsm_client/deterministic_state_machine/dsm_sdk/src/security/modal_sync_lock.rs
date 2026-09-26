@@ -16,6 +16,15 @@ use std::sync::Arc;
 /// §5.4 Modal lock: set of relationship SMT keys with pending online projections.
 static PENDING_ONLINE: OnceCell<Arc<RwLock<HashSet<[u8; 32]>>>> = OnceCell::new();
 
+/// The doors a step comes into flight through — this device's own offline
+/// proposal and the peer's — are one critical section across every handler in
+/// the process. Under it the relationship's step in flight is read from the
+/// durable rows, the door decides, and the new step's row is written: two
+/// steps cannot both come into flight on one relationship, whichever handler
+/// or door each came through.
+pub(crate) static STEP_DOOR: once_cell::sync::Lazy<tokio::sync::Mutex<()>> =
+    once_cell::sync::Lazy::new(|| tokio::sync::Mutex::new(()));
+
 fn pending_online_set() -> Arc<RwLock<HashSet<[u8; 32]>>> {
     PENDING_ONLINE
         .get_or_init(|| Arc::new(RwLock::new(HashSet::new())))
