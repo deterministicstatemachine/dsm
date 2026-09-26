@@ -127,9 +127,6 @@ internal object UnifiedNativeApi {
     // Kotlin MUST NOT concatenate raw bytes — this is the canonical encoder.
     @Keep @JvmStatic external fun encodeIdentityCharValue(genesisHash: ByteArray, deviceId: ByteArray): ByteArray
 
-    // Encode the local relationship send-status protobuf for a connected BLE peer.
-    @Keep @JvmStatic external fun getRelationshipStatusCharValue(bleAddress: String): ByteArray
-
     // Process raw protobuf bytes read from GATT identity characteristic.
     // Decodes BleIdentityCharValue, dispatches identity events, returns BleGattIdentityReadResult.
     // Kotlin MUST NOT split or interpret the raw bytes.

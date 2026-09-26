@@ -11,7 +11,6 @@ import {
     cancelBilateralByCommitmentBridge,
     rejectBilateralByCommitmentBridge,
     getPendingBilateralListStrictBridge,
-    readPeerRelationshipStatusBridge,
 } from './WebViewBridge';
 import { on as eventBridgeOn } from './EventBridge';
 import { emitBilateralCommitted } from './events';
@@ -51,18 +50,6 @@ function schedulePostAcceptRefreshes(): void {
     }
   };
   requestAnimationFrame(tick);
-}
-
-export async function readPeerRelationshipStatus(
-  bleAddress: string,
-): Promise<pb.BleRelationshipStatusCharValue | null> {
-  const normalized = normalizeBleAddress(bleAddress);
-  if (!normalized) return null;
-  const bytes = await readPeerRelationshipStatusBridge(normalized);
-  if (!(bytes instanceof Uint8Array) || bytes.length === 0) {
-    return null;
-  }
-  return pb.BleRelationshipStatusCharValue.fromBinary(bytes);
 }
 
 export async function sendOnlineTransferSmart(

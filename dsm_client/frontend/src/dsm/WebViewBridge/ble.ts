@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
-// BLE-related bridge calls the screens make: permissions, Bluetooth settings,
-// the pairing loop, and the peer relationship read. When the radio advertises
-// and scans is native policy; nothing here starts or stops it.
+// BLE-related bridge calls the screens make: permissions, Bluetooth settings
+// and the pairing loop. When the radio advertises and scans is native policy;
+// nothing here starts or stops it.
 
-import { bridgeGate } from "../BridgeGate";
 import { callBin } from "./transportCore";
 import { log } from "./log";
 
@@ -44,12 +43,4 @@ export async function resolveBleAddressForDeviceIdBridge(
   if (!resp || resp.length === 0) return undefined;
   const s = new TextDecoder().decode(resp).trim();
   return s || undefined;
-}
-
-export async function readPeerRelationshipStatusBridge(bleAddress: string): Promise<Uint8Array> {
-  const normalized = String(bleAddress ?? "").trim();
-  if (!normalized) return new Uint8Array(0);
-  return bridgeGate.enqueue(() =>
-    callBin("readPeerRelationshipStatus", new TextEncoder().encode(normalized))
-  );
 }

@@ -13197,52 +13197,6 @@ export class BleGattIdentityReadResult extends Message<BleGattIdentityReadResult
 }
 
 /**
- * Protobuf value carried on the BLE relationship-status GATT characteristic.
- * The advertiser computes the status in Rust for the connected peer relationship.
- *
- * @generated from message dsm.BleRelationshipStatusCharValue
- */
-export class BleRelationshipStatusCharValue extends Message<BleRelationshipStatusCharValue> {
-  /**
-   * @generated from field: bytes counterparty_device_id = 1;
-   */
-  counterpartyDeviceId = new Uint8Array(0);
-
-  /**
-   * @generated from field: dsm.RelationshipSendStatus send_status = 2;
-   */
-  sendStatus?: RelationshipSendStatus;
-
-  constructor(data?: PartialMessage<BleRelationshipStatusCharValue>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.BleRelationshipStatusCharValue";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "counterparty_device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 2, name: "send_status", kind: "message", T: RelationshipSendStatus },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BleRelationshipStatusCharValue {
-    return new BleRelationshipStatusCharValue().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): BleRelationshipStatusCharValue {
-    return new BleRelationshipStatusCharValue().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): BleRelationshipStatusCharValue {
-    return new BleRelationshipStatusCharValue().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: BleRelationshipStatusCharValue | PlainMessage<BleRelationshipStatusCharValue> | undefined, b: BleRelationshipStatusCharValue | PlainMessage<BleRelationshipStatusCharValue> | undefined): boolean {
-    return proto3.util.equals(BleRelationshipStatusCharValue, a, b);
-  }
-}
-
-/**
  * Response from processIncomingBleData JNI call.
  * Rust decides internally whether to route as chunk or Envelope v3, runs any
  * frame-type detection, and returns pre-chunked follow-up bytes for Kotlin to

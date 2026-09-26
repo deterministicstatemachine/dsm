@@ -2055,13 +2055,6 @@ message BleGattIdentityReadResult {
   bytes  peer_genesis_hash   = 5 [(dsm_fixed_len)=32]; // Peer's genesisHash
 }
 
-// Protobuf value carried on the BLE relationship-status GATT characteristic.
-// The advertiser computes the status in Rust for the connected peer relationship.
-message BleRelationshipStatusCharValue {
-  bytes counterparty_device_id = 1 [(dsm_fixed_len)=32];
-  RelationshipSendStatus send_status = 2;
-}
-
 // Response from processIncomingBleData JNI call.
 // Rust decides internally whether to route as chunk or Envelope v3, runs any
 // frame-type detection, and returns pre-chunked follow-up bytes for Kotlin to

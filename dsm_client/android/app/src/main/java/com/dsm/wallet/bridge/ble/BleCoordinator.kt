@@ -12,7 +12,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Public BLE Coordinator facade.
@@ -129,7 +128,6 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
     companion object {
         /** Max time to wait for GATT connection readiness (connect + discover + MTU). */
         private const val CONNECT_READY_TIMEOUT_MS = 12_000L
-        private const val RELATIONSHIP_STATUS_READ_TIMEOUT_MS = 4_000L
         private const val MAX_PENDING_PAIRING_CONFIRMS = 8
 
         private var instance: BleCoordinator? = null
@@ -306,63 +304,6 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
     fun isScanning(): Boolean = scanner.isScanning()
 
     fun isAdvertising(): Boolean = advertiser.isAdvertising()
-
-    /**
-     * Set the current session mode.
-     */
-    fun setSessionMode(mode: BleSessionMode) {
-        runOperation(BleOpLane.LIFECYCLE) {
-            scanner.setSessionMode(mode)
-            // Update session mode logic here if needed for other components
-        }
-    }
-
-    /**
-     * Read peer identity information.
-     */
-    fun readPeerIdentity(deviceAddress: String): Boolean {
-        return runOperationBool(BleOpLane.PAIRING) {
-            val session = getOrCreateSession(deviceAddress)
-            session.readIdentity()
-            // For now, just start the operation - result will be handled asynchronously
-            true
-        }
-    }
-
-    fun readPeerRelationshipStatus(deviceAddress: String): ByteArray? = runBlocking {
-        val connected = withTimeoutOrNull(CONNECT_READY_TIMEOUT_MS + 2_000L) {
-            connectToDevice(deviceAddress).await()
-        } ?: false
-        if (!connected) {
-            return@runBlocking null
-        }
-
-        val deferred = CompletableDeferred<ByteArray?>()
-        val started = runOperationBool(BleOpLane.PAIRING) {
-            val resolved = resolveSession(deviceAddress)
-            val peer = resolved?.first ?: peers[deviceAddress]
-            val session = peer?.gattClientSession
-            if (peer == null || session == null || !peer.isConnected) {
-                deferred.complete(null)
-                return@runOperationBool false
-            }
-            peer.relationshipStatusReadResult?.cancel()
-            peer.relationshipStatusReadResult = deferred
-            if (!session.readRelationshipStatus()) {
-                peer.relationshipStatusReadResult = null
-                deferred.complete(null)
-                return@runOperationBool false
-            }
-            true
-        }
-        if (!started) {
-            return@runBlocking null
-        }
-
-        withTimeoutOrNull(RELATIONSHIP_STATUS_READ_TIMEOUT_MS) {
-            deferred.await()
-        }
-    }
 
     /**
      * Ensure GATT server is started.
@@ -631,7 +572,6 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
             is BleSessionEvent.TransactionWriteCompleted,
             is BleSessionEvent.ResponseReceived -> BleOpLane.TRANSFER
             is BleSessionEvent.IdentityReadCompleted,
-            is BleSessionEvent.RelationshipStatusReadCompleted,
             is BleSessionEvent.MtuNegotiated,
             is BleSessionEvent.PairingAckReceived,
             is BleSessionEvent.PairingConfirmWritten -> BleOpLane.PAIRING
@@ -877,10 +817,6 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                             )
                             resumePairingScan(event.deviceAddress, "identity_read_failed")
                         }
-                    }
-                    is BleSessionEvent.RelationshipStatusReadCompleted -> {
-                        peer.relationshipStatusReadResult?.complete(event.data)
-                        peer.relationshipStatusReadResult = null
                     }
                     is BleSessionEvent.TransactionWriteCompleted -> {
                         val currentTx = peer.currentTransaction
