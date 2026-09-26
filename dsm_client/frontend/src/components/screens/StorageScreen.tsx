@@ -1,12 +1,11 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
 // src/components/screens/StorageScreen.tsx
-// Per spec: storage nodes are index-only mirrors. No failover semantics.
+// The storage set this device's traffic uses and what each member answered
+// (SDK storage.status). Rendering only.
 import React, { useEffect, useState, useMemo } from "react";
-import { NodeHealthPanel, DiagnosticsPanel } from "../storage/StorageNodePanels";
-import { ObjectBrowserPanel } from "../storage/ObjectBrowser";
-import { DisplayOnlyNumber, displayOnlyNumberToNumber } from "../../types/storage";
+import { StorageMembersPanel, StorageSetPanel } from "../storage/StorageNodePanels";
+import type { StorageStatus } from "../../dsm/types";
 import { useDpadNav } from "../../hooks/useDpadNav";
 import {
   storageStore,
@@ -15,59 +14,30 @@ import {
 import { formatBtc, type VaultSummary } from "../../services/bitcoinTap";
 import "./StorageScreen.css";
 
-type StorageStatus = {
-  totalNodes: number;
-  connectedNodes: number;
-  lastSync: DisplayOnlyNumber; // UI-only deterministic sync marker
-  dataSize: string; // e.g. "12.3 MB"
-  backupStatus: string;
+const TABS = ["set", "members", "dlvs"] as const;
+type StorageTab = (typeof TABS)[number];
+
+const TAB_LABELS: Record<StorageTab, string> = {
+  set: "Set",
+  members: "Members",
+  dlvs: "DLVs",
 };
 
 const StorageScreen: React.FC = () => {
   const storage = useStorageStore();
-  const [backupPassword, setBackupPassword] = useState("");
   const [expandedDlv, setExpandedDlv] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<
-    "overview" | "dlvs" | "nodes" | "diagnostics" | "objects"
-  >("overview");
+  const [activeTab, setActiveTab] = useState<StorageTab>("set");
 
   useEffect(() => {
-    void storageStore.initialize();
-    void storageStore.refreshOverview();
+    void storageStore.refreshStatus();
     void storageStore.refreshDlvsAndPresence();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  async function createBackup() {
-    const result = await storageStore.createBackup(backupPassword || undefined);
-    if (!result?.success) {
-      return;
-    }
-    alert("Backup created successfully.");
-    void storageStore.refreshOverview();
-  }
-
-  function formatLastSync(ts: DisplayOnlyNumber): string {
-    if (!displayOnlyNumberToNumber(ts)) return "\u2014";
-    return `Sync #${displayOnlyNumberToNumber(ts)}`;
-  }
-
   // --- D-pad navigation ---
-  const tabList = storage.showObjectsTab
-    ? (["overview", "dlvs", "nodes", "diagnostics", "objects"] as const)
-    : (["overview", "dlvs", "nodes", "diagnostics"] as const);
-
-  const navActions = useMemo(() => {
-    const actions: Array<() => void> = [];
-    for (const tab of tabList) {
-      actions.push(() => setActiveTab(tab));
-    }
-    return actions;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [storage.showObjectsTab]);
+  const navActions = useMemo(() => TABS.map((tab) => () => setActiveTab(tab)), []);
 
   const { focusedIndex } = useDpadNav({
-    itemCount: tabList.length,
+    itemCount: TABS.length,
     onSelect: (idx) => navActions[idx]?.(),
   });
 
@@ -81,34 +51,26 @@ const StorageScreen: React.FC = () => {
 
         {/* Tab Navigation — inverted: inactive = dark, active = light */}
         <div className="storage-tab-nav">
-          {tabList.map((tab, tIdx) => (
+          {TABS.map((tab, tIdx) => (
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
               className={`storage-tab-button ${activeTab === tab ? "active" : ""}${tIdx === focusedIndex ? " focused" : ""}`}
             >
-              {tab === "dlvs"
-                ? "DLVs"
-                : tab === "diagnostics"
-                  ? "Diag"
-                  : tab.charAt(0).toUpperCase() + tab.slice(1)}
+              {TAB_LABELS[tab]}
             </button>
           ))}
         </div>
       </div>
 
       <div className="storage-screen-stage">
-        {/* Tab Content */}
-        {activeTab === "overview" && (
-          <OverviewTab
-            loading={storage.overviewLoading}
-            error={storage.overviewError}
-            storageInfo={storage.storageInfo}
-            backupPassword={backupPassword}
-            setBackupPassword={setBackupPassword}
-            onRetry={() => void storageStore.refreshOverview()}
-            onCreateBackup={createBackup}
-            formatLastSync={formatLastSync}
+        {(activeTab === "set" || activeTab === "members") && (
+          <StatusTab
+            tab={activeTab}
+            loading={storage.statusLoading}
+            error={storage.statusError}
+            status={storage.status}
+            onRefresh={() => void storageStore.refreshStatus()}
           />
         )}
 
@@ -120,21 +82,6 @@ const StorageScreen: React.FC = () => {
             setExpandedDlv={setExpandedDlv}
           />
         )}
-
-        {activeTab === "nodes" &&
-          (storage.nodesConfig.nodes.length === 0 ? (
-            <div className="snd-card storage-card-body">
-              <div className="snd-stat-label storage-card-title">NO NODES CONFIGURED</div>
-              <div className="storage-card-copy storage-card-copy-muted">
-                Add your storage node endpoints to <code>dsm_network_config.json</code> under
-                <code>production_nodes[]</code>.
-              </div>
-            </div>
-          ) : (
-            <NodeHealthPanel />
-          ))}
-        {activeTab === "diagnostics" && <DiagnosticsPanel />}
-        {activeTab === "objects" && storage.showObjectsTab && <ObjectBrowserPanel />}
       </div>
 
       <div className="storage-navigation-hint">Press B to go back</div>
@@ -145,37 +92,25 @@ const StorageScreen: React.FC = () => {
 export default StorageScreen;
 
 // ═══════════════════════════════════════════════════════════════════════
-// Overview Tab — inverted panels
+// Set / Members tabs — what storage.status reports
 // ═══════════════════════════════════════════════════════════════════════
-const OverviewTab: React.FC<{
+const StatusTab: React.FC<{
+  tab: "set" | "members";
   loading: boolean;
   error: string | null;
-  storageInfo: StorageStatus | null;
-  backupPassword: string;
-  setBackupPassword: (v: string) => void;
-  onRetry: () => void;
-  onCreateBackup: () => void;
-  formatLastSync: (ts: DisplayOnlyNumber) => string;
-}> = ({
-  loading,
-  error,
-  storageInfo,
-  backupPassword,
-  setBackupPassword,
-  onRetry,
-  onCreateBackup,
-  formatLastSync,
-}) => {
-  if (loading) return <div className="storage-loading">Loading storage info...</div>;
+  status: StorageStatus | null;
+  onRefresh: () => void;
+}> = ({ tab, loading, error, status, onRefresh }) => {
+  if (loading) return <div className="storage-loading">Asking the storage set...</div>;
 
-  if (error) {
+  if (error || !status) {
     return (
       <div className="snd-stack">
         <div className="snd-card storage-card-body">
           <div className="snd-stat-label storage-card-title">ERROR</div>
-          <div className="storage-card-copy">{error}</div>
+          <div className="storage-card-copy">{error ?? "No storage status."}</div>
           <div className="storage-top-gap-sm">
-            <button className="snd-btn" onClick={onRetry}>
+            <button className="snd-btn" onClick={onRefresh}>
               Try Again
             </button>
           </div>
@@ -184,75 +119,17 @@ const OverviewTab: React.FC<{
     );
   }
 
-  if (!storageInfo) {
-    return <div className="storage-empty">Storage info unavailable.</div>;
-  }
-
   return (
     <div className="snd-stack">
-      {/* Stat summary */}
-      <div className="snd-card">
-        <div className="snd-stat-grid-2">
-          <div className="snd-stat-cell">
-            <div className="snd-stat-val">
-              {storageInfo.connectedNodes}/{storageInfo.totalNodes}
-            </div>
-            <div className="snd-stat-label">Connected</div>
-          </div>
-          <div className="snd-stat-cell">
-            <div className="snd-stat-val-sm">{storageInfo.dataSize}</div>
-            <div className="snd-stat-label">Data Size</div>
-          </div>
-          <div className="snd-stat-cell">
-            <div className="snd-stat-val-sm">{formatLastSync(storageInfo.lastSync)}</div>
-            <div className="snd-stat-label">Last Sync</div>
-          </div>
-          <div className="snd-stat-cell">
-            <div className="snd-stat-val-sm">
-              {storageInfo.backupStatus === "current" ? "OK" : storageInfo.backupStatus}
-            </div>
-            <div className="snd-stat-label">Backup</div>
-          </div>
-        </div>
-      </div>
-
-      {/* Detail rows */}
-      <div className="snd-card">
-        <div className="snd-info-row">
-          <span className="snd-info-label">Storage Nodes</span>
-          <span className="snd-info-val">
-            {storageInfo.connectedNodes}/{storageInfo.totalNodes} connected
-          </span>
-        </div>
-        <div className="snd-info-row">
-          <span className="snd-info-label">Data Size</span>
-          <span className="snd-info-val">{storageInfo.dataSize}</span>
-        </div>
-        <div className="snd-info-row">
-          <span className="snd-info-label">Last Sync</span>
-          <span className="snd-info-val">{formatLastSync(storageInfo.lastSync)}</span>
-        </div>
-        <div className="snd-info-row">
-          <span className="snd-info-label">Backup Status</span>
-          <span className="snd-info-val">{storageInfo.backupStatus}</span>
-        </div>
-      </div>
-
-      {/* Create backup */}
-      <div className="snd-card storage-card-body">
-        <div className="snd-stat-label storage-card-title">CREATE BACKUP</div>
-        <input
-          type="password"
-          placeholder="Backup password (optional)"
-          value={backupPassword}
-          onChange={(e) => setBackupPassword(e.target.value)}
-          className="snd-input"
-        />
-        <div className="storage-top-gap-sm">
-          <button className="snd-btn" onClick={onCreateBackup}>
-            Create Backup
-          </button>
-        </div>
+      {tab === "set" ? (
+        <StorageSetPanel status={status} />
+      ) : (
+        <StorageMembersPanel members={status.members} />
+      )}
+      <div className="snd-actions">
+        <button className="snd-btn" onClick={onRefresh}>
+          Refresh
+        </button>
       </div>
     </div>
   );

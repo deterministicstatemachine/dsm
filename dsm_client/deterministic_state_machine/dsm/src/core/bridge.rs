@@ -586,7 +586,6 @@ pub fn handle_envelope_universal(env_bytes: &[u8]) -> Vec<u8> {
             | gp::envelope::Payload::BalanceGetResponse(_)
             | gp::envelope::Payload::BleCommandResponse(_)
             | gp::envelope::Payload::StateInfoResponse(_)
-            | gp::envelope::Payload::SecondaryDeviceResponse(_)
             | gp::envelope::Payload::ContactQrResponse(_)
             | gp::envelope::Payload::StorageStatusResponse(_)
             | gp::envelope::Payload::TokenCreateRequest(_)
@@ -804,10 +803,8 @@ pub fn handle_envelope_universal(env_bytes: &[u8]) -> Vec<u8> {
             })
         }
 
-        // Storage node stats/management responses — handled at the SDK layer
-        Some(gp::envelope::Payload::StorageNodeStatsResponse(_))
-        | Some(gp::envelope::Payload::StorageNodeManageResponse(_))
-        | Some(gp::envelope::Payload::SessionStateResponse(_))
+        // SDK-owned `session.status` query response.
+        Some(gp::envelope::Payload::SessionStateResponse(_))
         // Offline-bearer anchor status (signal (c)) — SDK-owned `anchor.status` query response.
         | Some(gp::envelope::Payload::AnchorStatusResponse(_))
         // Offline-cash load/unload — SDK-owned `wallet.loadOffline`/`unloadOffline` response.
@@ -823,10 +820,6 @@ pub fn handle_envelope_universal(env_bytes: &[u8]) -> Vec<u8> {
         | Some(gp::envelope::Payload::GenesisLifecycle(_))
         | Some(gp::envelope::Payload::BootstrapMeasurementReport(_))
         | Some(gp::envelope::Payload::BootstrapFinalizeResponse(_))
-        // The device tree snapshot: the core bridge never constructs or
-        // consumes it, and no route answers it until the device tree store
-        // is built.
-        | Some(gp::envelope::Payload::DeviceTreeSnapshotResponse(_))
         // Secondary-device admission envelopes: the core bridge never routes them, and no
         // SDK flow handles them until the device tree store they extend is built.
         | Some(gp::envelope::Payload::DeviceAdmissionRequest(_))

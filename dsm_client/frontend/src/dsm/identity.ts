@@ -110,10 +110,7 @@ export async function getIdentity(): Promise<IdentityInfo | null> {
       const h = await getHeaders();
       return {
         deviceId: encodeBase32Crockford(h.deviceId),
-        deviceEntropy: '',
-        isRegistered: h.deviceId.length === 32,
         genesisHash: encodeBase32Crockford(h.genesisHash),
-        networkId: 'dsm-main',
       };
     } catch (e) {
       logger.warn(`[getIdentity] attempt ${attempt + 1}/${retryDelays.length} failed:`, e);

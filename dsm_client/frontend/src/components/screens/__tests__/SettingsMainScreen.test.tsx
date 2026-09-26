@@ -21,11 +21,6 @@ jest.mock('../../../dsm/EventBridge', () => ({
   on: jest.fn(() => jest.fn()),
 }));
 
-jest.mock('../../../services/settings/backupService', () => ({
-  exportStateBackupFile: jest.fn(),
-  importStateBackupFile: jest.fn(),
-}));
-
 jest.mock('../../../services/recovery/nfcRecoveryService', () => ({
   getNfcBackupStatus: (...args: unknown[]) => mockGetNfcBackupStatus(...args),
   setAutoWriteEnabled: jest.fn().mockResolvedValue(undefined),

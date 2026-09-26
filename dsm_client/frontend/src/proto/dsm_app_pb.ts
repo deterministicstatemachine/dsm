@@ -799,44 +799,6 @@ proto3.util.setEnumType(ValueCapabilityV1, "dsm.ValueCapabilityV1", [
 ]);
 
 /**
- * ========================= Storage Replica Set Config =========================
- * UI/local configuration persisted via protobuf (no JSON/localStorage).
- * Storage nodes are independent, free-market participants — any N nodes can
- * serve as a device's replica set. Keyed Fisher-Yates reshuffles on churn.
- * There is no fixed cluster; each device independently selects its replica set.
- *
- * @generated from enum dsm.StorageNodeAuthType
- */
-export enum StorageNodeAuthType {
-  /**
-   * @generated from enum value: STORAGE_NODE_AUTH_UNSPECIFIED = 0;
-   */
-  STORAGE_NODE_AUTH_UNSPECIFIED = 0,
-
-  /**
-   * @generated from enum value: STORAGE_NODE_AUTH_NONE = 1;
-   */
-  STORAGE_NODE_AUTH_NONE = 1,
-
-  /**
-   * @generated from enum value: STORAGE_NODE_AUTH_BEARER = 2;
-   */
-  STORAGE_NODE_AUTH_BEARER = 2,
-
-  /**
-   * @generated from enum value: STORAGE_NODE_AUTH_BASIC = 3;
-   */
-  STORAGE_NODE_AUTH_BASIC = 3,
-}
-// Retrieve enum metadata with: proto3.getEnumType(StorageNodeAuthType)
-proto3.util.setEnumType(StorageNodeAuthType, "dsm.StorageNodeAuthType", [
-  { no: 0, name: "STORAGE_NODE_AUTH_UNSPECIFIED" },
-  { no: 1, name: "STORAGE_NODE_AUTH_NONE" },
-  { no: 2, name: "STORAGE_NODE_AUTH_BEARER" },
-  { no: 3, name: "STORAGE_NODE_AUTH_BASIC" },
-]);
-
-/**
  * @generated from enum dsm.SdkEventKind
  */
 export enum SdkEventKind {
@@ -10509,11 +10471,6 @@ export class WalletCreateGenesisV2Request extends Message<WalletCreateGenesisV2R
    */
   locale = "";
 
-  /**
-   * @generated from field: string network_id = 3;
-   */
-  networkId = "";
-
   constructor(data?: PartialMessage<WalletCreateGenesisV2Request>) {
     super();
     proto3.util.initPartial(data, this);
@@ -10524,7 +10481,6 @@ export class WalletCreateGenesisV2Request extends Message<WalletCreateGenesisV2R
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
     { no: 1, name: "mnemonic", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 2, name: "locale", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 3, name: "network_id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): WalletCreateGenesisV2Request {
@@ -10616,121 +10572,6 @@ export class GenesisCreated extends Message<GenesisCreated> {
 
   static equals(a: GenesisCreated | PlainMessage<GenesisCreated> | undefined, b: GenesisCreated | PlainMessage<GenesisCreated> | undefined): boolean {
     return proto3.util.equals(GenesisCreated, a, b);
-  }
-}
-
-/**
- * Secondary device initialization (binds to existing genesis via QR scan)
- *
- * @generated from message dsm.SecondaryDeviceRequest
- */
-export class SecondaryDeviceRequest extends Message<SecondaryDeviceRequest> {
-  /**
-   * Scanned from root device QR
-   *
-   * @generated from field: bytes genesis_hash = 1;
-   */
-  genesisHash = new Uint8Array(0);
-
-  /**
-   * New device's entropy
-   *
-   * @generated from field: bytes device_entropy = 2;
-   */
-  deviceEntropy = new Uint8Array(0);
-
-  constructor(data?: PartialMessage<SecondaryDeviceRequest>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.SecondaryDeviceRequest";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "genesis_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 2, name: "device_entropy", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SecondaryDeviceRequest {
-    return new SecondaryDeviceRequest().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): SecondaryDeviceRequest {
-    return new SecondaryDeviceRequest().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): SecondaryDeviceRequest {
-    return new SecondaryDeviceRequest().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: SecondaryDeviceRequest | PlainMessage<SecondaryDeviceRequest> | undefined, b: SecondaryDeviceRequest | PlainMessage<SecondaryDeviceRequest> | undefined): boolean {
-    return proto3.util.equals(SecondaryDeviceRequest, a, b);
-  }
-}
-
-/**
- * @generated from message dsm.SecondaryDeviceResponse
- */
-export class SecondaryDeviceResponse extends Message<SecondaryDeviceResponse> {
-  /**
-   * New device ID bound to genesis
-   *
-   * @generated from field: bytes device_id = 1;
-   */
-  deviceId = new Uint8Array(0);
-
-  /**
-   * Same genesis as root device
-   *
-   * @generated from field: dsm.Hash32 genesis_hash = 2;
-   */
-  genesisHash?: Hash32;
-
-  /**
-   * @generated from field: bool success = 3;
-   */
-  success = false;
-
-  /**
-   * Post-update Device Tree snapshot (root_hash, device_count,
-   * version_number). Populated by add_secondary_device and
-   * remove_secondary_device so the WebView / Kotlin layer can persist
-   * the new R_G locally without rederiving the tree. Optional —
-   * omitted only if a producer is unable to compute the new state
-   * (older clients, error paths).
-   *
-   * @generated from field: dsm.DeviceTreeV1 device_tree = 4;
-   */
-  deviceTree?: DeviceTreeV1;
-
-  constructor(data?: PartialMessage<SecondaryDeviceResponse>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.SecondaryDeviceResponse";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 2, name: "genesis_hash", kind: "message", T: Hash32 },
-    { no: 3, name: "success", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
-    { no: 4, name: "device_tree", kind: "message", T: DeviceTreeV1 },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SecondaryDeviceResponse {
-    return new SecondaryDeviceResponse().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): SecondaryDeviceResponse {
-    return new SecondaryDeviceResponse().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): SecondaryDeviceResponse {
-    return new SecondaryDeviceResponse().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: SecondaryDeviceResponse | PlainMessage<SecondaryDeviceResponse> | undefined, b: SecondaryDeviceResponse | PlainMessage<SecondaryDeviceResponse> | undefined): boolean {
-    return proto3.util.equals(SecondaryDeviceResponse, a, b);
   }
 }
 
@@ -10890,121 +10731,6 @@ export class AddDeviceAdmissionRequestV1 extends Message<AddDeviceAdmissionReque
 
   static equals(a: AddDeviceAdmissionRequestV1 | PlainMessage<AddDeviceAdmissionRequestV1> | undefined, b: AddDeviceAdmissionRequestV1 | PlainMessage<AddDeviceAdmissionRequestV1> | undefined): boolean {
     return proto3.util.equals(AddDeviceAdmissionRequestV1, a, b);
-  }
-}
-
-/**
- * NEW-device adopt input (device.adoptAdmission): the gate-signed admission received back from the
- * existing device, the existing device's signing pubkey (from the QR the new device scanned), and
- * the same 32-byte entropy used to build the request (for identity setup).
- *
- * @generated from message dsm.AddDeviceAdoptRequestV1
- */
-export class AddDeviceAdoptRequestV1 extends Message<AddDeviceAdoptRequestV1> {
-  /**
-   * AddDeviceAdmissionV1 bytes
-   *
-   * @generated from field: bytes admission = 1;
-   */
-  admission = new Uint8Array(0);
-
-  /**
-   * @generated from field: bytes signer_signing_pubkey = 2;
-   */
-  signerSigningPubkey = new Uint8Array(0);
-
-  /**
-   * @generated from field: bytes entropy = 3;
-   */
-  entropy = new Uint8Array(0);
-
-  constructor(data?: PartialMessage<AddDeviceAdoptRequestV1>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.AddDeviceAdoptRequestV1";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "admission", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 2, name: "signer_signing_pubkey", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 3, name: "entropy", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AddDeviceAdoptRequestV1 {
-    return new AddDeviceAdoptRequestV1().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): AddDeviceAdoptRequestV1 {
-    return new AddDeviceAdoptRequestV1().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): AddDeviceAdoptRequestV1 {
-    return new AddDeviceAdoptRequestV1().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: AddDeviceAdoptRequestV1 | PlainMessage<AddDeviceAdoptRequestV1> | undefined, b: AddDeviceAdoptRequestV1 | PlainMessage<AddDeviceAdoptRequestV1> | undefined): boolean {
-    return proto3.util.equals(AddDeviceAdoptRequestV1, a, b);
-  }
-}
-
-/**
- * NEW-device initiate input (device.requestAdmission): everything the new device needs to start the
- * admission handshake with the existing device over BLE. genesis_hash + signer_signing_pubkey come
- * from the existing device's scanned QR; entropy is platform-generated; ble_address is the existing
- * device's BLE address (from discovery).
- *
- * @generated from message dsm.AddDeviceAdmissionInitiateV1
- */
-export class AddDeviceAdmissionInitiateV1 extends Message<AddDeviceAdmissionInitiateV1> {
-  /**
-   * @generated from field: bytes genesis_hash = 1;
-   */
-  genesisHash = new Uint8Array(0);
-
-  /**
-   * @generated from field: bytes entropy = 2;
-   */
-  entropy = new Uint8Array(0);
-
-  /**
-   * @generated from field: bytes signer_signing_pubkey = 3;
-   */
-  signerSigningPubkey = new Uint8Array(0);
-
-  /**
-   * @generated from field: string ble_address = 4;
-   */
-  bleAddress = "";
-
-  constructor(data?: PartialMessage<AddDeviceAdmissionInitiateV1>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.AddDeviceAdmissionInitiateV1";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "genesis_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 2, name: "entropy", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 3, name: "signer_signing_pubkey", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 4, name: "ble_address", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AddDeviceAdmissionInitiateV1 {
-    return new AddDeviceAdmissionInitiateV1().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): AddDeviceAdmissionInitiateV1 {
-    return new AddDeviceAdmissionInitiateV1().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): AddDeviceAdmissionInitiateV1 {
-    return new AddDeviceAdmissionInitiateV1().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: AddDeviceAdmissionInitiateV1 | PlainMessage<AddDeviceAdmissionInitiateV1> | undefined, b: AddDeviceAdmissionInitiateV1 | PlainMessage<AddDeviceAdmissionInitiateV1> | undefined): boolean {
-    return proto3.util.equals(AddDeviceAdmissionInitiateV1, a, b);
   }
 }
 
@@ -16798,12 +16524,6 @@ export class Envelope extends Message<Envelope> {
     case: "stateInfoResponse";
   } | {
     /**
-     * @generated from field: dsm.SecondaryDeviceResponse secondary_device_response = 43;
-     */
-    value: SecondaryDeviceResponse;
-    case: "secondaryDeviceResponse";
-  } | {
-    /**
      * @generated from field: dsm.ContactQrV3 contact_qr_response = 44;
      */
     value: ContactQrV3;
@@ -17090,20 +16810,6 @@ export class Envelope extends Message<Envelope> {
     case: "bitcoinWalletCreateResponse";
   } | {
     /**
-     * Storage node health & management
-     *
-     * @generated from field: dsm.StorageNodeStatsResponse storage_node_stats_response = 88;
-     */
-    value: StorageNodeStatsResponse;
-    case: "storageNodeStatsResponse";
-  } | {
-    /**
-     * @generated from field: dsm.StorageNodeManageResponse storage_node_manage_response = 89;
-     */
-    value: StorageNodeManageResponse;
-    case: "storageNodeManageResponse";
-  } | {
-    /**
      * @generated from field: dsm.BitcoinWithdrawalPlanRequest bitcoin_withdrawal_plan_request = 91;
      */
     value: BitcoinWithdrawalPlanRequest;
@@ -17170,14 +16876,6 @@ export class Envelope extends Message<Envelope> {
      */
     value: BootstrapFinalizeResponse;
     case: "bootstrapFinalizeResponse";
-  } | {
-    /**
-     * Phase B.7 (issue #278) — pure-rendering DeviceTreeViewer payload.
-     *
-     * @generated from field: dsm.DeviceTreeSnapshotResponse device_tree_snapshot_response = 107;
-     */
-    value: DeviceTreeSnapshotResponse;
-    case: "deviceTreeSnapshotResponse";
   } | {
     /**
      * Secondary-device admission (§16.3) — co-present BLE handshake (request → gate-signed
@@ -17322,7 +17020,6 @@ export class Envelope extends Message<Envelope> {
     { no: 40, name: "online_transfer_response", kind: "message", T: OnlineTransferResponse, oneof: "payload" },
     { no: 41, name: "online_message_response", kind: "message", T: OnlineMessageResponse, oneof: "payload" },
     { no: 42, name: "state_info_response", kind: "message", T: StateInfoResponse, oneof: "payload" },
-    { no: 43, name: "secondary_device_response", kind: "message", T: SecondaryDeviceResponse, oneof: "payload" },
     { no: 44, name: "contact_qr_response", kind: "message", T: ContactQrV3, oneof: "payload" },
     { no: 45, name: "balance_get_response", kind: "message", T: BalanceGetResponse, oneof: "payload" },
     { no: 46, name: "contact_add_response", kind: "message", T: ContactAddResponse, oneof: "payload" },
@@ -17367,8 +17064,6 @@ export class Envelope extends Message<Envelope> {
     { no: 85, name: "bitcoin_address_select_response", kind: "message", T: BitcoinAddressSelectResponse, oneof: "payload" },
     { no: 86, name: "bitcoin_wallet_create_request", kind: "message", T: BitcoinWalletCreateRequest, oneof: "payload" },
     { no: 87, name: "bitcoin_wallet_create_response", kind: "message", T: BitcoinWalletCreateResponse, oneof: "payload" },
-    { no: 88, name: "storage_node_stats_response", kind: "message", T: StorageNodeStatsResponse, oneof: "payload" },
-    { no: 89, name: "storage_node_manage_response", kind: "message", T: StorageNodeManageResponse, oneof: "payload" },
     { no: 91, name: "bitcoin_withdrawal_plan_request", kind: "message", T: BitcoinWithdrawalPlanRequest, oneof: "payload" },
     { no: 92, name: "bitcoin_withdrawal_plan_response", kind: "message", T: BitcoinWithdrawalPlanResponse, oneof: "payload" },
     { no: 93, name: "bitcoin_withdrawal_execute_request", kind: "message", T: BitcoinWithdrawalExecuteRequest, oneof: "payload" },
@@ -17380,7 +17075,6 @@ export class Envelope extends Message<Envelope> {
     { no: 100, name: "genesis_lifecycle", kind: "message", T: GenesisLifecycleEvent, oneof: "payload" },
     { no: 101, name: "bootstrap_measurement_report", kind: "message", T: BootstrapMeasurementReport, oneof: "payload" },
     { no: 102, name: "bootstrap_finalize_response", kind: "message", T: BootstrapFinalizeResponse, oneof: "payload" },
-    { no: 107, name: "device_tree_snapshot_response", kind: "message", T: DeviceTreeSnapshotResponse, oneof: "payload" },
     { no: 108, name: "device_admission_request", kind: "message", T: AddDeviceAdmissionRequestV1, oneof: "payload" },
     { no: 109, name: "device_admission", kind: "message", T: AddDeviceAdmissionV1, oneof: "payload" },
     { no: 112, name: "anchor_status_response", kind: "message", T: AnchorStatusResponse, oneof: "payload" },
@@ -22414,175 +22108,6 @@ export class DeviceInclusionProofV1 extends Message<DeviceInclusionProofV1> {
 }
 
 /**
- * Phase B.7 (issue #278) — frontend DeviceTreeViewer payload.
- *
- * Returned by the `identity.devtree.snapshot` query route. The SDK
- * fetches the persisted `DeviceTreeStateV1` from a storage node,
- * re-canonicalises the leaf list through
- * `dsm::common::device_tree::DeviceTree::new`, derives a fresh
- * inclusion proof for every leaf via `DeviceTree::proof`, and
- * verifies each proof locally with `DevTreeProof::verify`. All
- * verification booleans are produced Rust-side; the React renderer
- * does no hashing.
- *
- * `claimed_root_matches_recomputed` is the trust-but-verify gate
- * against the storage node: if the storage-node-served `root_hash`
- * does not equal the SDK's recomputation from `device_ids`, the
- * frontend renders a "Tampered" badge instead of "Verified".
- *
- * @generated from message dsm.DeviceTreeSnapshotResponse
- */
-export class DeviceTreeSnapshotResponse extends Message<DeviceTreeSnapshotResponse> {
-  /**
-   * @generated from field: dsm.DeviceTreeV1 tree = 1;
-   */
-  tree?: DeviceTreeV1;
-
-  /**
-   * @generated from field: bytes recomputed_root = 2;
-   */
-  recomputedRoot = new Uint8Array(0);
-
-  /**
-   * @generated from field: bool claimed_root_matches_recomputed = 3;
-   */
-  claimedRootMatchesRecomputed = false;
-
-  /**
-   * @generated from field: repeated dsm.DeviceTreeLeafView leaves = 4;
-   */
-  leaves: DeviceTreeLeafView[] = [];
-
-  constructor(data?: PartialMessage<DeviceTreeSnapshotResponse>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.DeviceTreeSnapshotResponse";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "tree", kind: "message", T: DeviceTreeV1 },
-    { no: 2, name: "recomputed_root", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 3, name: "claimed_root_matches_recomputed", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
-    { no: 4, name: "leaves", kind: "message", T: DeviceTreeLeafView, repeated: true },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): DeviceTreeSnapshotResponse {
-    return new DeviceTreeSnapshotResponse().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): DeviceTreeSnapshotResponse {
-    return new DeviceTreeSnapshotResponse().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): DeviceTreeSnapshotResponse {
-    return new DeviceTreeSnapshotResponse().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: DeviceTreeSnapshotResponse | PlainMessage<DeviceTreeSnapshotResponse> | undefined, b: DeviceTreeSnapshotResponse | PlainMessage<DeviceTreeSnapshotResponse> | undefined): boolean {
-    return proto3.util.equals(DeviceTreeSnapshotResponse, a, b);
-  }
-}
-
-/**
- * One row in the DeviceTreeViewer table.
- *
- * `proof_bytes` is a fully encoded [`DeviceInclusionProofV1`] so the
- * frontend can persist it verbatim (e.g. into a contact card export)
- * without rebuilding from siblings + path_bits. `inclusion_verified`
- * is the Rust-side result of `DevTreeProof::verify(device_id,
- * recomputed_root)`.
- *
- * @generated from message dsm.DeviceTreeLeafView
- */
-export class DeviceTreeLeafView extends Message<DeviceTreeLeafView> {
-  /**
-   * @generated from field: bytes device_id = 1;
-   */
-  deviceId = new Uint8Array(0);
-
-  /**
-   * @generated from field: bytes proof_bytes = 2;
-   */
-  proofBytes = new Uint8Array(0);
-
-  /**
-   * @generated from field: bool inclusion_verified = 3;
-   */
-  inclusionVerified = false;
-
-  constructor(data?: PartialMessage<DeviceTreeLeafView>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.DeviceTreeLeafView";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 2, name: "proof_bytes", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 3, name: "inclusion_verified", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): DeviceTreeLeafView {
-    return new DeviceTreeLeafView().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): DeviceTreeLeafView {
-    return new DeviceTreeLeafView().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): DeviceTreeLeafView {
-    return new DeviceTreeLeafView().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: DeviceTreeLeafView | PlainMessage<DeviceTreeLeafView> | undefined, b: DeviceTreeLeafView | PlainMessage<DeviceTreeLeafView> | undefined): boolean {
-    return proto3.util.equals(DeviceTreeLeafView, a, b);
-  }
-}
-
-/**
- * Request envelope for `identity.devtree.snapshot`. The frontend
- * passes the genesis_hash it wants a viewer for (typically its own
- * from `AppState::get_genesis_hash`).
- *
- * @generated from message dsm.DeviceTreeSnapshotRequest
- */
-export class DeviceTreeSnapshotRequest extends Message<DeviceTreeSnapshotRequest> {
-  /**
-   * @generated from field: bytes genesis_hash = 1;
-   */
-  genesisHash = new Uint8Array(0);
-
-  constructor(data?: PartialMessage<DeviceTreeSnapshotRequest>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.DeviceTreeSnapshotRequest";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "genesis_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): DeviceTreeSnapshotRequest {
-    return new DeviceTreeSnapshotRequest().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): DeviceTreeSnapshotRequest {
-    return new DeviceTreeSnapshotRequest().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): DeviceTreeSnapshotRequest {
-    return new DeviceTreeSnapshotRequest().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: DeviceTreeSnapshotRequest | PlainMessage<DeviceTreeSnapshotRequest> | undefined, b: DeviceTreeSnapshotRequest | PlainMessage<DeviceTreeSnapshotRequest> | undefined): boolean {
-    return proto3.util.equals(DeviceTreeSnapshotRequest, a, b);
-  }
-}
-
-/**
  * Persistent state of a Device Tree for one genesis: the `DeviceTreeV1`
  * summary (root, count, version) together with the canonical sorted +
  * deduplicated `device_ids` list that produced it. The list is the
@@ -22703,306 +22228,12 @@ export class DeviceTreeEntry extends Message<DeviceTreeEntry> {
 }
 
 /**
- * ========================= Storage Object Messages =========================
- * Protobuf-based storage object submission (no hex, no headers)
- *
- * @generated from message dsm.StorageObjectPut
- */
-export class StorageObjectPut extends Message<StorageObjectPut> {
-  /**
-   * 32-byte DLV identifier (raw bytes)
-   *
-   * @generated from field: bytes dlv_id = 1;
-   */
-  dlvId = new Uint8Array(0);
-
-  /**
-   * object path within DLV
-   *
-   * @generated from field: string path = 2;
-   */
-  path = "";
-
-  /**
-   * object data (raw bytes)
-   *
-   * @generated from field: bytes payload = 3;
-   */
-  payload = new Uint8Array(0);
-
-  constructor(data?: PartialMessage<StorageObjectPut>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.StorageObjectPut";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "dlv_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 2, name: "path", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 3, name: "payload", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): StorageObjectPut {
-    return new StorageObjectPut().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): StorageObjectPut {
-    return new StorageObjectPut().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): StorageObjectPut {
-    return new StorageObjectPut().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: StorageObjectPut | PlainMessage<StorageObjectPut> | undefined, b: StorageObjectPut | PlainMessage<StorageObjectPut> | undefined): boolean {
-    return proto3.util.equals(StorageObjectPut, a, b);
-  }
-}
-
-/**
- * @generated from message dsm.StorageObjectPutResponse
- */
-export class StorageObjectPutResponse extends Message<StorageObjectPutResponse> {
-  /**
-   * @generated from field: bool success = 1;
-   */
-  success = false;
-
-  /**
-   * @generated from field: string message = 2;
-   */
-  message = "";
-
-  /**
-   * computed storage key
-   *
-   * @generated from field: bytes object_key = 3;
-   */
-  objectKey = new Uint8Array(0);
-
-  constructor(data?: PartialMessage<StorageObjectPutResponse>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.StorageObjectPutResponse";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "success", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
-    { no: 2, name: "message", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 3, name: "object_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): StorageObjectPutResponse {
-    return new StorageObjectPutResponse().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): StorageObjectPutResponse {
-    return new StorageObjectPutResponse().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): StorageObjectPutResponse {
-    return new StorageObjectPutResponse().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: StorageObjectPutResponse | PlainMessage<StorageObjectPutResponse> | undefined, b: StorageObjectPutResponse | PlainMessage<StorageObjectPutResponse> | undefined): boolean {
-    return proto3.util.equals(StorageObjectPutResponse, a, b);
-  }
-}
-
-/**
- * @generated from message dsm.StorageObjectGet
- */
-export class StorageObjectGet extends Message<StorageObjectGet> {
-  /**
-   * 32-byte DLV identifier (raw bytes)
-   *
-   * @generated from field: bytes dlv_id = 1;
-   */
-  dlvId = new Uint8Array(0);
-
-  /**
-   * object path within DLV
-   *
-   * @generated from field: string path = 2;
-   */
-  path = "";
-
-  constructor(data?: PartialMessage<StorageObjectGet>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.StorageObjectGet";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "dlv_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 2, name: "path", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): StorageObjectGet {
-    return new StorageObjectGet().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): StorageObjectGet {
-    return new StorageObjectGet().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): StorageObjectGet {
-    return new StorageObjectGet().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: StorageObjectGet | PlainMessage<StorageObjectGet> | undefined, b: StorageObjectGet | PlainMessage<StorageObjectGet> | undefined): boolean {
-    return proto3.util.equals(StorageObjectGet, a, b);
-  }
-}
-
-/**
- * @generated from message dsm.StorageObjectGetResponse
- */
-export class StorageObjectGetResponse extends Message<StorageObjectGetResponse> {
-  /**
-   * @generated from field: bool success = 1;
-   */
-  success = false;
-
-  /**
-   * object data (raw bytes)
-   *
-   * @generated from field: bytes payload = 2;
-   */
-  payload = new Uint8Array(0);
-
-  /**
-   * @generated from field: string message = 3;
-   */
-  message = "";
-
-  constructor(data?: PartialMessage<StorageObjectGetResponse>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.StorageObjectGetResponse";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "success", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
-    { no: 2, name: "payload", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 3, name: "message", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): StorageObjectGetResponse {
-    return new StorageObjectGetResponse().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): StorageObjectGetResponse {
-    return new StorageObjectGetResponse().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): StorageObjectGetResponse {
-    return new StorageObjectGetResponse().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: StorageObjectGetResponse | PlainMessage<StorageObjectGetResponse> | undefined, b: StorageObjectGetResponse | PlainMessage<StorageObjectGetResponse> | undefined): boolean {
-    return proto3.util.equals(StorageObjectGetResponse, a, b);
-  }
-}
-
-/**
- * @generated from message dsm.StorageObjectDelete
- */
-export class StorageObjectDelete extends Message<StorageObjectDelete> {
-  /**
-   * 32-byte DLV identifier (raw bytes)
-   *
-   * @generated from field: bytes dlv_id = 1;
-   */
-  dlvId = new Uint8Array(0);
-
-  /**
-   * object path within DLV
-   *
-   * @generated from field: string path = 2;
-   */
-  path = "";
-
-  constructor(data?: PartialMessage<StorageObjectDelete>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.StorageObjectDelete";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "dlv_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 2, name: "path", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): StorageObjectDelete {
-    return new StorageObjectDelete().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): StorageObjectDelete {
-    return new StorageObjectDelete().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): StorageObjectDelete {
-    return new StorageObjectDelete().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: StorageObjectDelete | PlainMessage<StorageObjectDelete> | undefined, b: StorageObjectDelete | PlainMessage<StorageObjectDelete> | undefined): boolean {
-    return proto3.util.equals(StorageObjectDelete, a, b);
-  }
-}
-
-/**
- * @generated from message dsm.StorageObjectDeleteResponse
- */
-export class StorageObjectDeleteResponse extends Message<StorageObjectDeleteResponse> {
-  /**
-   * @generated from field: bool success = 1;
-   */
-  success = false;
-
-  /**
-   * @generated from field: string message = 2;
-   */
-  message = "";
-
-  constructor(data?: PartialMessage<StorageObjectDeleteResponse>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.StorageObjectDeleteResponse";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "success", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
-    { no: 2, name: "message", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): StorageObjectDeleteResponse {
-    return new StorageObjectDeleteResponse().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): StorageObjectDeleteResponse {
-    return new StorageObjectDeleteResponse().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): StorageObjectDeleteResponse {
-    return new StorageObjectDeleteResponse().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: StorageObjectDeleteResponse | PlainMessage<StorageObjectDeleteResponse> | undefined, b: StorageObjectDeleteResponse | PlainMessage<StorageObjectDeleteResponse> | undefined): boolean {
-    return proto3.util.equals(StorageObjectDeleteResponse, a, b);
-  }
-}
-
-/**
  * ========================= Storage Status =========================
- *
- * No params needed for now
+ * `storage.status`: the storage set this device's traffic uses — its
+ * network's pinned set (storage spec §10) — and what each member answered
+ * when asked for its latest ByteCommit (§14). Every answer is an observation,
+ * never a verdict (§4): a member that did not answer has not failed, and a
+ * ByteCommit is as the member stated it, not as a verifier accepted it.
  *
  * @generated from message dsm.StorageStatusRequest
  */
@@ -23039,31 +22270,39 @@ export class StorageStatusRequest extends Message<StorageStatusRequest> {
  */
 export class StorageStatusResponse extends Message<StorageStatusResponse> {
   /**
-   * @generated from field: uint32 total_nodes = 1;
-   */
-  totalNodes = 0;
-
-  /**
-   * @generated from field: uint32 connected_nodes = 2;
-   */
-  connectedNodes = 0;
-
-  /**
-   * deterministic sync counter
+   * the committed network the set is pinned for
    *
-   * @generated from field: uint64 last_sync_iter = 3;
+   * @generated from field: string network_id = 6;
    */
-  lastSyncIter = protoInt64.zero;
+  networkId = "";
 
   /**
-   * @generated from field: string data_size = 4;
+   * re-derived from the members' (id, incarnation) pairs
+   *
+   * @generated from field: bytes storage_set_id = 7;
    */
-  dataSize = "";
+  storageSetId = new Uint8Array(0);
 
   /**
-   * @generated from field: string backup_status = 5;
+   * in the set's member order
+   *
+   * @generated from field: repeated dsm.StorageMemberStatus members = 8;
    */
-  backupStatus = "";
+  members: StorageMemberStatus[] = [];
+
+  /**
+   * storage.sync runs that ran to their end on this device
+   *
+   * @generated from field: uint64 completed_syncs = 9;
+   */
+  completedSyncs = protoInt64.zero;
+
+  /**
+   * the size of this device's database file
+   *
+   * @generated from field: uint64 database_bytes = 10;
+   */
+  databaseBytes = protoInt64.zero;
 
   constructor(data?: PartialMessage<StorageStatusResponse>) {
     super();
@@ -23073,11 +22312,11 @@ export class StorageStatusResponse extends Message<StorageStatusResponse> {
   static readonly runtime: typeof proto3 = proto3;
   static readonly typeName = "dsm.StorageStatusResponse";
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "total_nodes", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
-    { no: 2, name: "connected_nodes", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
-    { no: 3, name: "last_sync_iter", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
-    { no: 4, name: "data_size", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 5, name: "backup_status", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 6, name: "network_id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 7, name: "storage_set_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 8, name: "members", kind: "message", T: StorageMemberStatus, repeated: true },
+    { no: 9, name: "completed_syncs", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 10, name: "database_bytes", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): StorageStatusResponse {
@@ -23098,702 +22337,173 @@ export class StorageStatusResponse extends Message<StorageStatusResponse> {
 }
 
 /**
- * ========================= Storage Node Stats =========================
- * Per-node health and Prometheus metrics (display-only operational data)
+ * One member of the pinned set, and its answer to `bytecommit/latest`.
  *
- * @generated from message dsm.StorageNodeStatsRequest
+ * @generated from message dsm.StorageMemberStatus
  */
-export class StorageNodeStatsRequest extends Message<StorageNodeStatsRequest> {
+export class StorageMemberStatus extends Message<StorageMemberStatus> {
   /**
-   * if empty, use all configured endpoints
+   * exactly as the set commits it
    *
-   * @generated from field: repeated string endpoints = 1;
+   * @generated from field: bytes member_id = 1;
    */
-  endpoints: string[] = [];
+  memberId = new Uint8Array(0);
 
-  constructor(data?: PartialMessage<StorageNodeStatsRequest>) {
+  /**
+   * @generated from field: bytes register_incarnation_id = 2;
+   */
+  registerIncarnationId = new Uint8Array(0);
+
+  /**
+   * transport, resolved outside committed state (§11)
+   *
+   * @generated from field: string endpoint = 3;
+   */
+  endpoint = "";
+
+  /**
+   * @generated from oneof dsm.StorageMemberStatus.answer
+   */
+  answer: {
+    /**
+     * the member's latest ByteCommit, as it stated it
+     *
+     * @generated from field: dsm.StorageMemberByteCommit latest = 4;
+     */
+    value: StorageMemberByteCommit;
+    case: "latest";
+  } | {
+    /**
+     * the member states it has closed no cycle yet
+     *
+     * @generated from field: dsm.StorageMemberNoCycle no_cycle = 5;
+     */
+    value: StorageMemberNoCycle;
+    case: "noCycle";
+  } | {
+    /**
+     * why there is no ByteCommit of this member's to show
+     *
+     * @generated from field: string unanswered = 6;
+     */
+    value: string;
+    case: "unanswered";
+  } | { case: undefined; value?: undefined } = { case: undefined };
+
+  /**
+   * the member id the answering node echoed, when it echoed one
+   *
+   * @generated from field: optional bytes answered_as = 7;
+   */
+  answeredAs?: Uint8Array;
+
+  constructor(data?: PartialMessage<StorageMemberStatus>) {
     super();
     proto3.util.initPartial(data, this);
   }
 
   static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.StorageNodeStatsRequest";
+  static readonly typeName = "dsm.StorageMemberStatus";
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "endpoints", kind: "scalar", T: 9 /* ScalarType.STRING */, repeated: true },
+    { no: 1, name: "member_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "register_incarnation_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "endpoint", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 4, name: "latest", kind: "message", T: StorageMemberByteCommit, oneof: "answer" },
+    { no: 5, name: "no_cycle", kind: "message", T: StorageMemberNoCycle, oneof: "answer" },
+    { no: 6, name: "unanswered", kind: "scalar", T: 9 /* ScalarType.STRING */, oneof: "answer" },
+    { no: 7, name: "answered_as", kind: "scalar", T: 12 /* ScalarType.BYTES */, opt: true },
   ]);
 
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): StorageNodeStatsRequest {
-    return new StorageNodeStatsRequest().fromBinary(bytes, options);
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): StorageMemberStatus {
+    return new StorageMemberStatus().fromBinary(bytes, options);
   }
 
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): StorageNodeStatsRequest {
-    return new StorageNodeStatsRequest().fromJson(jsonValue, options);
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): StorageMemberStatus {
+    return new StorageMemberStatus().fromJson(jsonValue, options);
   }
 
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): StorageNodeStatsRequest {
-    return new StorageNodeStatsRequest().fromJsonString(jsonString, options);
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): StorageMemberStatus {
+    return new StorageMemberStatus().fromJsonString(jsonString, options);
   }
 
-  static equals(a: StorageNodeStatsRequest | PlainMessage<StorageNodeStatsRequest> | undefined, b: StorageNodeStatsRequest | PlainMessage<StorageNodeStatsRequest> | undefined): boolean {
-    return proto3.util.equals(StorageNodeStatsRequest, a, b);
+  static equals(a: StorageMemberStatus | PlainMessage<StorageMemberStatus> | undefined, b: StorageMemberStatus | PlainMessage<StorageMemberStatus> | undefined): boolean {
+    return proto3.util.equals(StorageMemberStatus, a, b);
   }
 }
 
 /**
- * @generated from message dsm.StorageNodeStats
+ * @generated from message dsm.StorageMemberByteCommit
  */
-export class StorageNodeStats extends Message<StorageNodeStats> {
+export class StorageMemberByteCommit extends Message<StorageMemberByteCommit> {
   /**
-   * @generated from field: string url = 1;
+   * @generated from field: dsm.ByteCommitV4 commit = 1;
    */
-  url = "";
+  commit?: ByteCommitV4;
 
   /**
-   * human-readable label (e.g. "dsm-node-1")
+   * d_t, computed by Core from the commit's fields
    *
-   * @generated from field: string name = 2;
+   * @generated from field: bytes digest = 2;
    */
-  name = "";
+  digest = new Uint8Array(0);
 
-  /**
-   * geographic region (e.g. "us-east-1")
-   *
-   * @generated from field: string region = 3;
-   */
-  region = "";
-
-  /**
-   * "healthy" | "degraded" | "down"
-   *
-   * @generated from field: string status = 4;
-   */
-  status = "";
-
-  /**
-   * display-only round-trip time
-   *
-   * @generated from field: uint32 latency_ms = 5;
-   */
-  latencyMs = 0;
-
-  /**
-   * @generated from field: string last_error = 6;
-   */
-  lastError = "";
-
-  /**
-   * @generated from field: uint64 objects_put_total = 7;
-   */
-  objectsPutTotal = protoInt64.zero;
-
-  /**
-   * @generated from field: uint64 objects_get_total = 8;
-   */
-  objectsGetTotal = protoInt64.zero;
-
-  /**
-   * @generated from field: uint64 bytes_written_total = 9;
-   */
-  bytesWrittenTotal = protoInt64.zero;
-
-  /**
-   * @generated from field: uint64 bytes_read_total = 10;
-   */
-  bytesReadTotal = protoInt64.zero;
-
-  /**
-   * @generated from field: uint64 cleanup_runs_total = 11;
-   */
-  cleanupRunsTotal = protoInt64.zero;
-
-  /**
-   * @generated from field: uint64 replication_failures = 12;
-   */
-  replicationFailures = protoInt64.zero;
-
-  constructor(data?: PartialMessage<StorageNodeStats>) {
+  constructor(data?: PartialMessage<StorageMemberByteCommit>) {
     super();
     proto3.util.initPartial(data, this);
   }
 
   static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.StorageNodeStats";
+  static readonly typeName = "dsm.StorageMemberByteCommit";
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "url", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 2, name: "name", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 3, name: "region", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 4, name: "status", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 5, name: "latency_ms", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
-    { no: 6, name: "last_error", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 7, name: "objects_put_total", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
-    { no: 8, name: "objects_get_total", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
-    { no: 9, name: "bytes_written_total", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
-    { no: 10, name: "bytes_read_total", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
-    { no: 11, name: "cleanup_runs_total", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
-    { no: 12, name: "replication_failures", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 1, name: "commit", kind: "message", T: ByteCommitV4 },
+    { no: 2, name: "digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): StorageNodeStats {
-    return new StorageNodeStats().fromBinary(bytes, options);
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): StorageMemberByteCommit {
+    return new StorageMemberByteCommit().fromBinary(bytes, options);
   }
 
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): StorageNodeStats {
-    return new StorageNodeStats().fromJson(jsonValue, options);
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): StorageMemberByteCommit {
+    return new StorageMemberByteCommit().fromJson(jsonValue, options);
   }
 
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): StorageNodeStats {
-    return new StorageNodeStats().fromJsonString(jsonString, options);
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): StorageMemberByteCommit {
+    return new StorageMemberByteCommit().fromJsonString(jsonString, options);
   }
 
-  static equals(a: StorageNodeStats | PlainMessage<StorageNodeStats> | undefined, b: StorageNodeStats | PlainMessage<StorageNodeStats> | undefined): boolean {
-    return proto3.util.equals(StorageNodeStats, a, b);
+  static equals(a: StorageMemberByteCommit | PlainMessage<StorageMemberByteCommit> | undefined, b: StorageMemberByteCommit | PlainMessage<StorageMemberByteCommit> | undefined): boolean {
+    return proto3.util.equals(StorageMemberByteCommit, a, b);
   }
 }
 
 /**
- * @generated from message dsm.StorageNodeStatsResponse
+ * @generated from message dsm.StorageMemberNoCycle
  */
-export class StorageNodeStatsResponse extends Message<StorageNodeStatsResponse> {
-  /**
-   * @generated from field: repeated dsm.StorageNodeStats nodes = 1;
-   */
-  nodes: StorageNodeStats[] = [];
-
-  /**
-   * @generated from field: uint32 total_nodes = 2;
-   */
-  totalNodes = 0;
-
-  /**
-   * @generated from field: uint32 healthy_nodes = 3;
-   */
-  healthyNodes = 0;
-
-  constructor(data?: PartialMessage<StorageNodeStatsResponse>) {
+export class StorageMemberNoCycle extends Message<StorageMemberNoCycle> {
+  constructor(data?: PartialMessage<StorageMemberNoCycle>) {
     super();
     proto3.util.initPartial(data, this);
   }
 
   static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.StorageNodeStatsResponse";
+  static readonly typeName = "dsm.StorageMemberNoCycle";
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "nodes", kind: "message", T: StorageNodeStats, repeated: true },
-    { no: 2, name: "total_nodes", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
-    { no: 3, name: "healthy_nodes", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
   ]);
 
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): StorageNodeStatsResponse {
-    return new StorageNodeStatsResponse().fromBinary(bytes, options);
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): StorageMemberNoCycle {
+    return new StorageMemberNoCycle().fromBinary(bytes, options);
   }
 
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): StorageNodeStatsResponse {
-    return new StorageNodeStatsResponse().fromJson(jsonValue, options);
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): StorageMemberNoCycle {
+    return new StorageMemberNoCycle().fromJson(jsonValue, options);
   }
 
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): StorageNodeStatsResponse {
-    return new StorageNodeStatsResponse().fromJsonString(jsonString, options);
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): StorageMemberNoCycle {
+    return new StorageMemberNoCycle().fromJsonString(jsonString, options);
   }
 
-  static equals(a: StorageNodeStatsResponse | PlainMessage<StorageNodeStatsResponse> | undefined, b: StorageNodeStatsResponse | PlainMessage<StorageNodeStatsResponse> | undefined): boolean {
-    return proto3.util.equals(StorageNodeStatsResponse, a, b);
-  }
-}
-
-/**
- * Storage node management (add/remove)
- *
- * @generated from message dsm.StorageNodeManageRequest
- */
-export class StorageNodeManageRequest extends Message<StorageNodeManageRequest> {
-  /**
-   * "add" | "remove"
-   *
-   * @generated from field: string action = 1;
-   */
-  action = "";
-
-  /**
-   * used only for "remove"; ignored when auto_assign = true
-   *
-   * @generated from field: string url = 2;
-   */
-  url = "";
-
-  /**
-   * unused (reserved for remove display purposes)
-   *
-   * @generated from field: string name = 3;
-   */
-  name = "";
-
-  /**
-   * unused (reserved for remove display purposes)
-   *
-   * @generated from field: string region = 4;
-   */
-  region = "";
-
-  /**
-   * When true, the SDK selects the next node via keyed Fisher-Yates over
-   * the known pool (dsm_env_config.toml nodes minus currently active nodes).
-   * The user does NOT choose which node is added — required for security
-   * and even distribution across the network.
-   *
-   * @generated from field: bool auto_assign = 5;
-   */
-  autoAssign = false;
-
-  constructor(data?: PartialMessage<StorageNodeManageRequest>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.StorageNodeManageRequest";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "action", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 2, name: "url", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 3, name: "name", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 4, name: "region", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 5, name: "auto_assign", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): StorageNodeManageRequest {
-    return new StorageNodeManageRequest().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): StorageNodeManageRequest {
-    return new StorageNodeManageRequest().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): StorageNodeManageRequest {
-    return new StorageNodeManageRequest().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: StorageNodeManageRequest | PlainMessage<StorageNodeManageRequest> | undefined, b: StorageNodeManageRequest | PlainMessage<StorageNodeManageRequest> | undefined): boolean {
-    return proto3.util.equals(StorageNodeManageRequest, a, b);
-  }
-}
-
-/**
- * @generated from message dsm.StorageNodeManageResponse
- */
-export class StorageNodeManageResponse extends Message<StorageNodeManageResponse> {
-  /**
-   * @generated from field: bool success = 1;
-   */
-  success = false;
-
-  /**
-   * @generated from field: string error = 2;
-   */
-  error = "";
-
-  /**
-   * updated list after operation
-   *
-   * @generated from field: repeated string current_endpoints = 3;
-   */
-  currentEndpoints: string[] = [];
-
-  /**
-   * Populated when auto_assign = true: the URL of the node the SDK assigned.
-   *
-   * @generated from field: string assigned_url = 4;
-   */
-  assignedUrl = "";
-
-  constructor(data?: PartialMessage<StorageNodeManageResponse>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.StorageNodeManageResponse";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "success", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
-    { no: 2, name: "error", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 3, name: "current_endpoints", kind: "scalar", T: 9 /* ScalarType.STRING */, repeated: true },
-    { no: 4, name: "assigned_url", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): StorageNodeManageResponse {
-    return new StorageNodeManageResponse().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): StorageNodeManageResponse {
-    return new StorageNodeManageResponse().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): StorageNodeManageResponse {
-    return new StorageNodeManageResponse().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: StorageNodeManageResponse | PlainMessage<StorageNodeManageResponse> | undefined, b: StorageNodeManageResponse | PlainMessage<StorageNodeManageResponse> | undefined): boolean {
-    return proto3.util.equals(StorageNodeManageResponse, a, b);
-  }
-}
-
-/**
- * @generated from message dsm.StorageNodeAuthProto
- */
-export class StorageNodeAuthProto extends Message<StorageNodeAuthProto> {
-  /**
-   * @generated from field: dsm.StorageNodeAuthType type = 1;
-   */
-  type = StorageNodeAuthType.STORAGE_NODE_AUTH_UNSPECIFIED;
-
-  /**
-   * @generated from field: string token = 2;
-   */
-  token = "";
-
-  /**
-   * @generated from field: string username = 3;
-   */
-  username = "";
-
-  /**
-   * @generated from field: string password = 4;
-   */
-  password = "";
-
-  constructor(data?: PartialMessage<StorageNodeAuthProto>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.StorageNodeAuthProto";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "type", kind: "enum", T: proto3.getEnumType(StorageNodeAuthType) },
-    { no: 2, name: "token", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 3, name: "username", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 4, name: "password", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): StorageNodeAuthProto {
-    return new StorageNodeAuthProto().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): StorageNodeAuthProto {
-    return new StorageNodeAuthProto().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): StorageNodeAuthProto {
-    return new StorageNodeAuthProto().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: StorageNodeAuthProto | PlainMessage<StorageNodeAuthProto> | undefined, b: StorageNodeAuthProto | PlainMessage<StorageNodeAuthProto> | undefined): boolean {
-    return proto3.util.equals(StorageNodeAuthProto, a, b);
-  }
-}
-
-/**
- * @generated from message dsm.StorageNodeEndpointProto
- */
-export class StorageNodeEndpointProto extends Message<StorageNodeEndpointProto> {
-  /**
-   * @generated from field: string url = 1;
-   */
-  url = "";
-
-  /**
-   * @generated from field: bool is_primary = 2;
-   */
-  isPrimary = false;
-
-  /**
-   * @generated from field: dsm.StorageNodeAuthProto auth = 3;
-   */
-  auth?: StorageNodeAuthProto;
-
-  /**
-   * @generated from field: string tls_cert = 4;
-   */
-  tlsCert = "";
-
-  /**
-   * human-readable label
-   *
-   * @generated from field: string name = 6;
-   */
-  name = "";
-
-  /**
-   * AWS region or geographic label
-   *
-   * @generated from field: string region = 7;
-   */
-  region = "";
-
-  constructor(data?: PartialMessage<StorageNodeEndpointProto>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.StorageNodeEndpointProto";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "url", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 2, name: "is_primary", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
-    { no: 3, name: "auth", kind: "message", T: StorageNodeAuthProto },
-    { no: 4, name: "tls_cert", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 6, name: "name", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 7, name: "region", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): StorageNodeEndpointProto {
-    return new StorageNodeEndpointProto().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): StorageNodeEndpointProto {
-    return new StorageNodeEndpointProto().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): StorageNodeEndpointProto {
-    return new StorageNodeEndpointProto().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: StorageNodeEndpointProto | PlainMessage<StorageNodeEndpointProto> | undefined, b: StorageNodeEndpointProto | PlainMessage<StorageNodeEndpointProto> | undefined): boolean {
-    return proto3.util.equals(StorageNodeEndpointProto, a, b);
-  }
-}
-
-/**
- * @generated from message dsm.StorageReplicaSetConfig
- */
-export class StorageReplicaSetConfig extends Message<StorageReplicaSetConfig> {
-  /**
-   * @generated from field: repeated dsm.StorageNodeEndpointProto nodes = 1;
-   */
-  nodes: StorageNodeEndpointProto[] = [];
-
-  /**
-   * @generated from field: string primary_node = 2;
-   */
-  primaryNode = "";
-
-  /**
-   * @generated from field: bool read_failover_enabled = 3;
-   */
-  readFailoverEnabled = false;
-
-  /**
-   * @generated from field: string write_strategy = 4;
-   */
-  writeStrategy = "";
-
-  /**
-   * @generated from field: uint32 retry_max = 5;
-   */
-  retryMax = 0;
-
-  /**
-   * @generated from field: uint32 retry_backoff_ms = 6;
-   */
-  retryBackoffMs = 0;
-
-  /**
-   * @generated from field: uint32 verification_quorum = 7;
-   */
-  verificationQuorum = 0;
-
-  constructor(data?: PartialMessage<StorageReplicaSetConfig>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.StorageReplicaSetConfig";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "nodes", kind: "message", T: StorageNodeEndpointProto, repeated: true },
-    { no: 2, name: "primary_node", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 3, name: "read_failover_enabled", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
-    { no: 4, name: "write_strategy", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 5, name: "retry_max", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
-    { no: 6, name: "retry_backoff_ms", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
-    { no: 7, name: "verification_quorum", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): StorageReplicaSetConfig {
-    return new StorageReplicaSetConfig().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): StorageReplicaSetConfig {
-    return new StorageReplicaSetConfig().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): StorageReplicaSetConfig {
-    return new StorageReplicaSetConfig().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: StorageReplicaSetConfig | PlainMessage<StorageReplicaSetConfig> | undefined, b: StorageReplicaSetConfig | PlainMessage<StorageReplicaSetConfig> | undefined): boolean {
-    return proto3.util.equals(StorageReplicaSetConfig, a, b);
-  }
-}
-
-/**
- * ============================ DIAGNOSTICS EXPORT ============================
- *
- * @generated from message dsm.NodeHealthEntry
- */
-export class NodeHealthEntry extends Message<NodeHealthEntry> {
-  /**
-   * @generated from field: string url = 1;
-   */
-  url = "";
-
-  /**
-   * "healthy" | "degraded" | "down" | "unknown"
-   *
-   * @generated from field: string status = 2;
-   */
-  status = "";
-
-  /**
-   * @generated from field: string last_error = 3;
-   */
-  lastError = "";
-
-  /**
-   * @generated from field: string name = 4;
-   */
-  name = "";
-
-  /**
-   * @generated from field: string region = 5;
-   */
-  region = "";
-
-  /**
-   * @generated from field: uint32 latency_ms = 6;
-   */
-  latencyMs = 0;
-
-  /**
-   * @generated from field: uint64 objects_put_total = 7;
-   */
-  objectsPutTotal = protoInt64.zero;
-
-  /**
-   * @generated from field: uint64 objects_get_total = 8;
-   */
-  objectsGetTotal = protoInt64.zero;
-
-  /**
-   * @generated from field: uint64 bytes_written_total = 9;
-   */
-  bytesWrittenTotal = protoInt64.zero;
-
-  /**
-   * @generated from field: uint64 bytes_read_total = 10;
-   */
-  bytesReadTotal = protoInt64.zero;
-
-  constructor(data?: PartialMessage<NodeHealthEntry>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.NodeHealthEntry";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "url", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 2, name: "status", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 3, name: "last_error", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 4, name: "name", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 5, name: "region", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 6, name: "latency_ms", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
-    { no: 7, name: "objects_put_total", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
-    { no: 8, name: "objects_get_total", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
-    { no: 9, name: "bytes_written_total", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
-    { no: 10, name: "bytes_read_total", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): NodeHealthEntry {
-    return new NodeHealthEntry().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): NodeHealthEntry {
-    return new NodeHealthEntry().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): NodeHealthEntry {
-    return new NodeHealthEntry().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: NodeHealthEntry | PlainMessage<NodeHealthEntry> | undefined, b: NodeHealthEntry | PlainMessage<NodeHealthEntry> | undefined): boolean {
-    return proto3.util.equals(NodeHealthEntry, a, b);
-  }
-}
-
-/**
- * @generated from message dsm.DiagnosticsExport
- */
-export class DiagnosticsExport extends Message<DiagnosticsExport> {
-  /**
-   * @generated from field: dsm.StorageReplicaSetConfig replica_set_config = 1;
-   */
-  replicaSetConfig?: StorageReplicaSetConfig;
-
-  /**
-   * @generated from field: repeated dsm.NodeHealthEntry node_health = 2;
-   */
-  nodeHealth: NodeHealthEntry[] = [];
-
-  /**
-   * @generated from field: repeated string recent_errors = 3;
-   */
-  recentErrors: string[] = [];
-
-  /**
-   * "local" | "production"
-   *
-   * @generated from field: string mode = 4;
-   */
-  mode = "";
-
-  /**
-   * @generated from field: string platform = 5;
-   */
-  platform = "";
-
-  /**
-   * @generated from field: string version = 6;
-   */
-  version = "";
-
-  constructor(data?: PartialMessage<DiagnosticsExport>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.DiagnosticsExport";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "replica_set_config", kind: "message", T: StorageReplicaSetConfig },
-    { no: 2, name: "node_health", kind: "message", T: NodeHealthEntry, repeated: true },
-    { no: 3, name: "recent_errors", kind: "scalar", T: 9 /* ScalarType.STRING */, repeated: true },
-    { no: 4, name: "mode", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 5, name: "platform", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 6, name: "version", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): DiagnosticsExport {
-    return new DiagnosticsExport().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): DiagnosticsExport {
-    return new DiagnosticsExport().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): DiagnosticsExport {
-    return new DiagnosticsExport().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: DiagnosticsExport | PlainMessage<DiagnosticsExport> | undefined, b: DiagnosticsExport | PlainMessage<DiagnosticsExport> | undefined): boolean {
-    return proto3.util.equals(DiagnosticsExport, a, b);
+  static equals(a: StorageMemberNoCycle | PlainMessage<StorageMemberNoCycle> | undefined, b: StorageMemberNoCycle | PlainMessage<StorageMemberNoCycle> | undefined): boolean {
+    return proto3.util.equals(StorageMemberNoCycle, a, b);
   }
 }
 

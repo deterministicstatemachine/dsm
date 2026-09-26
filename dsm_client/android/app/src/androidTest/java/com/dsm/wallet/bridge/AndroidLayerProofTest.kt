@@ -830,7 +830,7 @@ class AndroidLayerProofTest {
         // it. No storage nodes, no silicon — the BIP39 mnemonic is the sole root.
         val mnemonic = String(bridge.generateMnemonic(), Charsets.UTF_8)
         assertTrue("generateMnemonic must return a mnemonic", mnemonic.isNotBlank())
-        val envelope = bridge.createGenesisV2(mnemonic, Locale.getDefault().toLanguageTag(), "dev")
+        val envelope = bridge.createGenesisV2(mnemonic, Locale.getDefault().toLanguageTag())
         assertTrue("Genesis must produce non-empty envelope", envelope.isNotEmpty())
         genesisCreated = true
     }
