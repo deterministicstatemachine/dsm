@@ -94,15 +94,13 @@ async fn bilateral_reject_session_emits_event_and_updates_phase() {
             .unwrap()
     };
 
-    // Reject the session (simulating user cancellation)
-    handler
-        .reject_incoming_prepare(
-            commitment_hash,
-            remote_device,
-            Some("user rejected".to_string()),
-        )
+    // The proposer's user ends its proposal before any confirm: a signed
+    // cancellation, kept as the step's answer.
+    let cancellation = handler
+        .cancel_proposal(commitment_hash, "user rejected".to_string())
         .await
         .unwrap();
+    assert!(!cancellation.is_empty(), "the cancellation is its envelope");
 
     // Assert session phase updated
     {
@@ -129,7 +127,7 @@ async fn bilateral_reject_session_emits_event_and_updates_phase() {
                 note.event_type,
                 sdk::generated::BilateralEventType::BilateralEventRejected as i32
             );
-            assert_eq!(note.status, "rejected");
+            assert_eq!(note.status, "cancelled");
             assert_eq!(note.message, "user rejected");
         } else {
             panic!("Failed to decode BilateralEventNotification");

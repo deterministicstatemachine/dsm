@@ -542,12 +542,6 @@ object Unified {
         frameType,
         counterpartyDeviceId
     )
-    
-    /**
-     * Force initialization of the BLE frame coordinator if genesis-time injection was skipped.
-     * Returns true if coordinator is present or injected successfully.
-     */
-    @Keep @JvmStatic fun forceBleCoordinatorInit(): Boolean = UnifiedNativeApi.forceBleCoordinatorInit()
 
     // ---------- BLE diagnostics + retry helpers (non-external; pure-Kotlin wrappers) ----------
     @Keep @JvmStatic fun getBleStats(deviceAddress: String): ByteArray {

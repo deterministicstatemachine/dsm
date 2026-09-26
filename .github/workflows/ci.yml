@@ -729,7 +729,7 @@ jobs:
   # count is asserted instead, so a newly added module cannot be skipped by the
   # glob without the job noticing.
   #
-  # SCOPE, so a green result is not overread: the tree declares 17 `axiom`s and
+  # SCOPE, so a green result is not overread: the tree declares 14 `axiom`s and
   # 3 `opaque` defs (e.g. the SPHINCS+ round-trip). Theorems resting on those
   # are checked against the axioms, not against the Rust. This job proves the
   # proofs are well-formed and sorry-free; it does not prove the axioms.

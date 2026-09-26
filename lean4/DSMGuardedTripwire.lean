@@ -36,7 +36,7 @@
     * `step_inhabited` proves the step relation is satisfiable (not vacuous).
     * The only `axiom`s are the paper's cryptographic Assumptions (1 hash
       soundness, 3 canonical-encoding injectivity), matching the existing
-      lean4/DSMCryptoBinding.lean / DSMOfflineFinality.lean practice. The
+      lean4/DSMCryptoBinding.lean / DSMCertChain.lean practice. The
       uniqueness/tripwire core does NOT depend on them.
 
   Run: `lean DSMGuardedTripwire.lean` to verify all proofs.
@@ -328,7 +328,7 @@ theorem candidate_multiplicity_without_realized_fork :
 -- Cryptographic assumptions (paper Assumptions 1, 3) — labeled axioms
 -- ============================================================
 -- These are the paper's stated assumptions, matching the existing
--- DSMCryptoBinding.lean / DSMOfflineFinality.lean practice. The uniqueness and
+-- DSMCryptoBinding.lean / DSMCertChain.lean practice. The uniqueness and
 -- tripwire theorems above do NOT depend on them; they are used only for the
 -- CandidateOK digest-binding consequence (paper Def 36 clause 2).
 

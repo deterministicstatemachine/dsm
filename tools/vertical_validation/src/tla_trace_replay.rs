@@ -87,16 +87,9 @@ pub fn replay_trace_file(
 
     let failures = match spec.spec_file.as_str() {
         "DSM_Tripwire.tla" => replay_tripwire_trace(&states),
-        "DSM_OfflineFinality.tla" => replay_structural_trace(
-            &states,
-            &[
-                "chainTip",
-                "balance",
-                "relationshipTip",
-                "sessions",
-                "bleConnected",
-            ],
-        ),
+        "DSM_OfflineFinality.tla" => {
+            replay_structural_trace(&states, &["chain", "phase", "parent", "net", "link"])
+        }
         "DSM_NonInterference.tla" => {
             replay_structural_trace(&states, &["chainTip", "balance", "relTip", "sessions"])
         }
@@ -129,16 +122,9 @@ pub fn replay_trace_into_implementation(
 
     let failures = match spec.spec_file.as_str() {
         "DSM_Tripwire.tla" => replay_tripwire_trace_into_implementation(&states),
-        "DSM_OfflineFinality.tla" => replay_structural_trace(
-            &states,
-            &[
-                "chainTip",
-                "balance",
-                "relationshipTip",
-                "sessions",
-                "bleConnected",
-            ],
-        ),
+        "DSM_OfflineFinality.tla" => {
+            replay_structural_trace(&states, &["chain", "phase", "parent", "net", "link"])
+        }
         "DSM_NonInterference.tla" => {
             replay_structural_trace(&states, &["chainTip", "balance", "relTip", "sessions"])
         }

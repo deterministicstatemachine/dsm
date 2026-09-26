@@ -70,12 +70,14 @@ impl AppRouterImpl {
             let Some(stored) = cm.get_verified_contact(device_id).await else {
                 return err("contact added, but it is not held in memory".into());
             };
-            match crate::bluetooth::ensure_bluetooth_manager_and_sync_contact(stored).await {
+            match crate::bluetooth::sync_contact_to_bluetooth_manager(stored).await {
                 Ok(true) => log::info!(
                     "[contacts.add] synced contact device_id={} to the BluetoothManager",
                     dsm::core::utility::labeling::hash_to_short_id(&device_id)
                 ),
-                Ok(false) => log::info!("[contacts.add] BLE has no identity yet"),
+                Ok(false) => log::info!(
+                    "[contacts.add] no BLE stack yet: init loads the contact when it builds one"
+                ),
                 Err(e) => {
                     return err(format!(
                         "contact added, but syncing it to the BluetoothManager failed: {e}"

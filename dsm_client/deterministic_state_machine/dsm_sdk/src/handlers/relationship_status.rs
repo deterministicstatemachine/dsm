@@ -132,6 +132,26 @@ pub(crate) fn derive_local_send_status_for_contact(
         }
     }
 
+    // One step at a time on the relationship, whichever process: an offline
+    // step in flight with the contact — this device's proposal, or the
+    // contact's that it holds — holds every other origination until it
+    // commits or ends.
+    match client_db::bilateral_step_in_flight_with(&contact.device_id, None) {
+        Ok(Some(_)) => {
+            return blocked_status(
+                generated::RelationshipSendBlockReason::PendingCatchup,
+                "An offline step with this contact is in flight",
+            );
+        }
+        Ok(None) => {}
+        Err(e) => {
+            return blocked_status(
+                generated::RelationshipSendBlockReason::InternalError,
+                format!("The relationship's offline step is unreadable: {e}"),
+            );
+        }
+    }
+
     let tips = client_db::get_contact_chain_tip(&contact.device_id).and_then(|canonical| {
         Ok((
             canonical,

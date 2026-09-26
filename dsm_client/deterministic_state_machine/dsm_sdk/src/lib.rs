@@ -386,10 +386,8 @@ pub fn get_transport_headers_v3_bytes() -> Result<Vec<u8>, dsm::types::error::Ds
     Ok(buf)
 }
 
-/// Initialize bilateral SDK preconditions.
-///
-/// Enforces that SDK context and bilateral handler are installed,
-/// then performs device calibration for tick-rate normalization.
+/// Mark the bilateral SDK ready once its preconditions hold: the SDK context
+/// is initialized and the BLE stack is live.
 #[cfg(all(target_os = "android", feature = "bluetooth"))]
 pub async fn initialize_bilateral_sdk() -> Result<(), dsm::types::error::DsmError> {
     use dsm::types::error::DsmError;
@@ -400,12 +398,17 @@ pub async fn initialize_bilateral_sdk() -> Result<(), dsm::types::error::DsmErro
         ));
     }
 
-    if crate::bridge::ble_runtime().is_none() {
-        return Err(DsmError::invalid_operation("BLE runtime not installed"));
+    // Ready means the BLE stack is live — the handler steps run on — not only
+    // that the slot it is injected into exists: init installs that slot before
+    // any identity does.
+    if crate::bluetooth::get_global_bluetooth_manager().is_none() {
+        return Err(DsmError::invalid_operation(
+            "the BLE stack is not built yet: init builds it once the identity exists",
+        ));
     }
 
     log::info!(
-        "Bilateral SDK preconditions satisfied (context + handler). Marking bilateral ready."
+        "Bilateral SDK preconditions satisfied (context + BLE stack). Marking bilateral ready."
     );
     BILATERAL_READY.store(true, Ordering::SeqCst);
     Ok(())

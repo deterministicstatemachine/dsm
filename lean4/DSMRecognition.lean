@@ -80,8 +80,7 @@
   fields of `Crypto` so the theorems are parametric in them:
     * `H_inj`: BLAKE3 domain-hash collision resistance, as the protocol-level
       consequence (distinct inputs, distinct digests). The same axiom as
-      `domain_hash_injective` in DSMCertChain / DSMOfflineFinality /
-      DSMCryptoBinding.
+      `domain_hash_injective` in DSMCertChain / DSMCryptoBinding.
     * `keyGen`, `sign`, `verify`: a SPHINCS+ keypair from a seed, DETERMINISTIC
       signing (whitepaper §11: the Cat-5 'f' deterministic variant), and a
       verification predicate. Nothing is assumed about `sign` as a function

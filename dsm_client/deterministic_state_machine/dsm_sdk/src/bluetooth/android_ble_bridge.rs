@@ -70,16 +70,11 @@ pub struct AndroidBleBridge {
     connected_devices: Arc<RwLock<HashMap<String, DeviceConnection>>>,
 }
 
-// Global registry for a single AndroidBleBridge instance so JNI shims can access it.
-use once_cell::sync::OnceCell;
-static GLOBAL_ANDROID_BRIDGE: OnceCell<Arc<AndroidBleBridge>> = OnceCell::new();
-
-pub fn register_global_android_bridge(b: Arc<AndroidBleBridge>) -> bool {
-    GLOBAL_ANDROID_BRIDGE.set(b).is_ok()
-}
-
+/// The live BLE stack's bridge: the one JNI hands BLE events to. It is part
+/// of the stack, never registered beside it, so events reach the handler that
+/// holds the steps.
 pub fn get_global_android_bridge() -> Option<Arc<AndroidBleBridge>> {
-    GLOBAL_ANDROID_BRIDGE.get().cloned()
+    crate::bluetooth::get_global_bluetooth_manager().map(|manager| manager.android_bridge().clone())
 }
 
 #[derive(Debug, Clone)]

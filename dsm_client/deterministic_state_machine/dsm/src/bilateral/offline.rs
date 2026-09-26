@@ -130,6 +130,14 @@ pub enum PrepareDecision {
     /// The proposal extends the relationship tip this device holds: it is
     /// put to the user.
     Consider { commitment_hash: [u8; 32] },
+    /// The relationship holds another step in flight on this device. It
+    /// takes one step at a time, at the receiver's door as at the
+    /// proposer's: the proposal is answered with a signed rejection, which is
+    /// kept as the answer to the proposal delivered again. Two proposals that
+    /// cross are each refused this way; were either taken, each could commit
+    /// on its receiver, and the relationship would hold two successors of one
+    /// tip.
+    StepInFlight { in_flight: [u8; 32] },
     /// The proposal does not extend the tip this device holds: it is answered
     /// with a signed rejection, and the relationship is reconciled online.
     StaleTip {
@@ -149,21 +157,29 @@ pub struct PrepareClaims<'a> {
 
 /// The receiver's decision on a prepare. `operation` is what
 /// [`offline_operation`] admitted from the request, `commitment_hash` the
-/// commitment the proposal names, and `held_tip` the relationship tip this
-/// device holds durably. The proposal must come from the pinned sender (its
-/// keys, and its signature over the commitment), and the commitment must be
-/// its operation's commitment on the held tip — the receiver never signs a
-/// commitment it did not recompute.
+/// commitment the proposal names, `held_tip` the relationship tip this device
+/// holds durably, and `in_flight` the step this device holds in flight on the
+/// relationship, if any. The proposal must come from the pinned sender (its
+/// keys, and its signature over the commitment); it is refused while another
+/// step is in flight; and its commitment must be its operation's commitment
+/// on the held tip — the receiver never signs a commitment it did not
+/// recompute.
 pub fn decide_prepare(
     commitment_hash: [u8; 32],
     operation: &Operation,
     claims: PrepareClaims<'_>,
     sender: &PinnedPeer<'_>,
     held_tip: [u8; 32],
+    in_flight: Option<[u8; 32]>,
 ) -> Result<PrepareDecision, DsmError> {
     verify_pinned_peer_keys(sender, claims.credentials)?;
     verify_step_signature(sender, &commitment_hash, claims.signature, "proposal")?;
 
+    // Before the tip: a device behind its peer is behind because a step of
+    // its own is in flight, and that refusal is the one it keeps.
+    if let Some(in_flight) = in_flight.filter(|held| *held != commitment_hash) {
+        return Ok(PrepareDecision::StepInFlight { in_flight });
+    }
     if claims.expected_tip != Some(held_tip) {
         return Ok(PrepareDecision::StaleTip {
             expected: claims.expected_tip,
@@ -586,6 +602,7 @@ mod tests {
                 },
                 &sender.pinned(),
                 held,
+                None,
             )
         };
 
@@ -626,6 +643,59 @@ mod tests {
                 other => panic!("expected StaleTip, got {other:?}"),
             }
         }
+    }
+
+    /// The relationship takes one step at a time at the receiver's door: an
+    /// authenticated proposal is refused while this device holds another step
+    /// in flight — even one that would be stale, since the device is behind
+    /// because of that step — and the step in flight is not refused as its own
+    /// neighbour. An unauthenticated proposal is refused before any of it.
+    /// MUTATION CONTROL: dropping the in-flight arm lets the proposal be
+    /// considered and turns this red.
+    #[test]
+    fn a_proposal_is_refused_while_another_step_is_in_flight() {
+        let sender = Peer::new(0x46);
+        let held = [0x72u8; 32];
+        let operation = bearer_transfer([0x47; 32]);
+        let commitment =
+            BilateralPreCommitment::new(held, operation.clone()).bilateral_commitment_hash;
+        let own_step = [0x73u8; 32];
+        let decide = |expected_tip: Option<[u8; 32]>, signature: &[u8], in_flight| {
+            decide_prepare(
+                commitment,
+                &operation,
+                PrepareClaims {
+                    expected_tip,
+                    credentials: credentials(&sender),
+                    signature,
+                },
+                &sender.pinned(),
+                held,
+                in_flight,
+            )
+        };
+        let signature = sender.sign_step(&commitment);
+
+        for expected_tip in [Some(held), Some([0x74u8; 32])] {
+            match decide(expected_tip, &signature, Some(own_step))
+                .expect("an authenticated proposal is answered")
+            {
+                PrepareDecision::StepInFlight { in_flight } => assert_eq!(in_flight, own_step),
+                other => panic!("expected StepInFlight, got {other:?}"),
+            }
+        }
+        match decide(Some(held), &signature, Some(commitment))
+            .expect("the step in flight is this proposal")
+        {
+            PrepareDecision::Consider { commitment_hash } => {
+                assert_eq!(commitment_hash, commitment)
+            }
+            other => panic!("expected Consider, got {other:?}"),
+        }
+        refused(
+            decide(Some(held), &[], Some(own_step)),
+            "carries no signature",
+        );
     }
 
     /// Offline, only the bearer tier moves value: an online-tier transfer is
