@@ -2,14 +2,21 @@
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { renderHook, act, waitFor } from '@testing-library/react';
+
+jest.mock('../../utils/identity', () => ({
+  checkIdentityState: jest.fn(),
+}));
+
 import { useTransactions } from '../useTransactions';
 import { dsmClient } from '../../services/dsmClient';
+import { checkIdentityState } from '../../utils/identity';
 import type { DomainTransaction } from '../../domain/types';
+
+const identityState = checkIdentityState as jest.Mock;
 
 describe('useTransactions', () => {
   const original = {
     getWalletHistory: dsmClient.getWalletHistory,
-    isReady: (dsmClient as any).isReady,
   };
 
   const row: DomainTransaction = {
@@ -28,12 +35,11 @@ describe('useTransactions', () => {
   };
 
   beforeEach(() => {
-    (dsmClient as any).isReady = async () => true;
+    identityState.mockResolvedValue('READY');
   });
 
   afterEach(() => {
     (dsmClient as any).getWalletHistory = original.getWalletHistory;
-    (dsmClient as any).isReady = original.isReady;
   });
 
   async function renderTransactionsHook() {
@@ -66,15 +72,20 @@ describe('useTransactions', () => {
     });
   });
 
-  test('does not ask for history before the device has an identity', async () => {
-    (dsmClient as any).isReady = async () => false;
-    const history = jest.fn();
-    (dsmClient as any).getWalletHistory = history;
+  // The native session is Rust's word on whether there is an identity: no
+  // history is asked for while it reports none, or is not yet ready.
+  test.each(['NO_IDENTITY', 'RUNTIME_NOT_READY'])(
+    'does not ask for history while the native session reports %s',
+    async (state) => {
+      identityState.mockResolvedValue(state);
+      const history = jest.fn();
+      (dsmClient as any).getWalletHistory = history;
 
-    const { result } = await renderTransactionsHook();
+      const { result } = await renderTransactionsHook();
 
-    expect(history).not.toHaveBeenCalled();
-    expect(result.current.transactions).toEqual([]);
-    expect(result.current.error).toBeNull();
-  });
+      expect(history).not.toHaveBeenCalled();
+      expect(result.current.transactions).toEqual([]);
+      expect(result.current.error).toBeNull();
+    },
+  );
 });

@@ -3,9 +3,9 @@
 
 import { useSyncExternalStore } from 'react';
 import { dsmClient } from '../services/dsmClient';
-import { bytesToDisplay } from '../contexts/contacts/utils';
-import type { Contact, ContactsState } from '../contexts/ContactsContext';
-import type { AddContactResult, BilateralRelationshipDTO, ContactCard } from '../dsm/types';
+import type { ContactsState } from '../contexts/ContactsContext';
+import type { AddContactResult, ContactCard } from '../dsm/types';
+import { mapContactList } from '../domain/mappers';
 import logger from '../utils/logger';
 
 
@@ -78,23 +78,6 @@ class ContactsStore {
     this.emit();
   }
 
-  private mapContacts(list: BilateralRelationshipDTO[]): Contact[] {
-    return list.map((c) => {
-      const deviceId = bytesToDisplay(c.deviceId);
-      return {
-        // A contact is its device: the alias is a label and can change.
-        id: deviceId,
-        alias: c.alias,
-        genesisHash: bytesToDisplay(c.genesisHash),
-        deviceId,
-        publicKey: bytesToDisplay(c.publicKey),
-        isVerified: c.genesisVerifiedOnline,
-        bleAddress: c.bleAddress,
-        chainTip: c.chainTip ? bytesToDisplay(c.chainTip) : undefined,
-      };
-    });
-  }
-
   refreshContacts = async (): Promise<void> => {
     const seq = ++this.refreshSeq;
     try {
@@ -104,8 +87,11 @@ class ContactsStore {
       this.setState({ error: null });
 
       const data = await awaitWithFrameBudget(dsmClient.getContacts());
-      // Rust's list as it stands: an address Rust no longer holds is not kept.
-      const contacts = this.mapContacts(data.contacts);
+      // Rust's list as it stands, in the one contact shape every screen reads
+      // — each contact with its send-readiness, and the BLE address Rust holds
+      // or the native side resolved for its device this session. An address
+      // Rust no longer holds is not kept.
+      const contacts = mapContactList(data.contacts, dsmClient.getBleIdentitySnapshot());
 
       if (seq === this.refreshSeq) {
         this.setState({ contacts });

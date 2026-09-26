@@ -17,6 +17,7 @@ import {
     readPeerRelationshipStatusBridge,
 } from './WebViewBridge';
 import { on as eventBridgeOn } from './EventBridge';
+import { emitBilateralCommitted } from './events';
 import { bridgeEvents } from '../bridge/bridgeEvents';
 import { getHeaders } from './identity';
 
@@ -27,13 +28,14 @@ import { GenericTransaction, GenericTxResponse } from './types';
 
 
 /**
- * After the receiver sends Accept, the Confirm arrives within ~1-2 seconds.
- * Schedule staggered priority wallet refreshes using RAF batches to ensure
- * the UI picks up the balance change from SQLite regardless of whether the
- * TRANSFER_COMPLETE event chain delivers successfully.  Each refresh uses
- * the priority source so useWalletRefreshListener bypasses its cooldown.
+ * After the receiver sends Accept, the Confirm arrives within ~1-2 seconds
+ * and Rust announces the completed transfer (`bilateral.event`), which the
+ * event bridge turns into `wallet.refresh`. These staggered re-reads exist
+ * beside that announcement, not instead of it: whether the announcement alone
+ * suffices on a device is undecided (CONFORMANCE_GAPS §6.29, Open), so the
+ * cadence stays until a device run says. Each re-read names itself.
  *
- * RAF spacing: ~30 frames ≈ 0.5s at 60fps, repeated 4 times ≈ 0/0.5/1.5/3s.
+ * RAF spacing: ~30 frames ≈ 0.5s at 60fps, repeated 4 times ≈ 0/0.5/1/2s.
  */
 function schedulePostAcceptRefreshes(): void {
   const INTERVALS = [1, 30, 60, 120]; // RAF frame counts
@@ -45,7 +47,7 @@ function schedulePostAcceptRefreshes(): void {
     if (frame >= INTERVALS[idx]) {
       idx++;
       try {
-        bridgeEvents.emit('wallet.refresh', { source: 'bilateral.transfer_complete' });
+        bridgeEvents.emit('wallet.refresh', { source: 'bilateral.accept_followup' });
       } catch {}
     }
     if (idx < INTERVALS.length) {
@@ -412,21 +414,10 @@ export async function acceptOfflineTransfer(args: { commitmentHash: Uint8Array, 
     if (!answer.success) {
       return answer;
     }
-    // Emit through the real DOM/native adapter path so all app listeners see
-    // the same bilateral acceptance signal as production.
-    if (typeof window !== 'undefined') {
-      window.dispatchEvent(new CustomEvent('dsm-bilateral-committed', {
-        detail: {
-          commitmentHash: new Uint8Array(args.commitmentHash),
-          counterpartyDeviceId: new Uint8Array(args.counterpartyDeviceId),
-          accepted: true,
-          committed: true,
-        },
-      }));
-    }
-    // Also emit the bridge event for consistency with the event system
+    // The committed signal, once, on the event bus. It used to be dispatched
+    // twice: as a window event the adapter re-emitted here, and here again.
     try {
-      bridgeEvents.emit('wallet.bilateralCommitted', {
+      emitBilateralCommitted({
         commitmentHash: new Uint8Array(args.commitmentHash),
         counterpartyDeviceId: new Uint8Array(args.counterpartyDeviceId),
         accepted: true,

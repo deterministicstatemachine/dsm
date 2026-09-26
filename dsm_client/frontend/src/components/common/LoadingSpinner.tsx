@@ -2,7 +2,6 @@
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { bridgeEvents } from '../../bridge/bridgeEvents';
 
 interface LoadingSpinnerProps {
   message?: string;
@@ -41,20 +40,6 @@ const LoadingSpinner: React.FC<LoadingSpinnerProps> = ({
   useEffect(() => {
     if (typeof tick === 'number') bump();
   }, [tick, bump]);
-
-  // Advance on DSM activity events (transport, BLE, or explicit UI tick)
-    // Advance on DSM activity events (transport or explicit UI tick)
-  useEffect(() => {
-    const offTx = bridgeEvents.on('port.tx', () => bump());
-    const offRx = bridgeEvents.on('port.rx', () => bump());
-    const offUi = bridgeEvents.on('ui.tick', () => bump());
-
-    return () => {
-      offTx();
-      offRx();
-      offUi();
-    };
-  }, [bump]);
 
   const sizeMap = useMemo(
     () =>

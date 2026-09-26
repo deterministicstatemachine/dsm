@@ -66,14 +66,18 @@ jest.mock('../dsm/WebViewBridge', () => ({
 // Mock dsmClient.getPreference
 jest.mock('../services/dsmClient', () => ({
   dsmClient: {
-    getIdentity: jest.fn().mockResolvedValue(null),
+    getIdentity: jest.fn().mockRejectedValue(
+      Object.assign(new Error('no identity on this device (native session: missing)'), {
+        name: 'IdentityUnavailableError',
+        state: 'missing',
+      }),
+    ),
     getPreference: jest.fn().mockImplementation(async (k: string) => {
       if (k === 'DSM_ENV_CONFIG_PATH') return '/data/user/0/app/files/dsm_env_config.toml';
       if (k === 'genesis_hash_bytes') return 'deadbeef';
       if (k === 'device_id_bytes') return 'cafebabe';
       return null;
     }),
-    getBluetoothStatus: jest.fn().mockResolvedValue({ enabled: false, advertising: false, scanning: false }),
     getContacts: jest.fn().mockResolvedValue({ contacts: [] }),
     setPreference: jest.fn().mockResolvedValue(undefined),
   },

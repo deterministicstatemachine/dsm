@@ -3,14 +3,16 @@
 import React, { useState, useMemo, useCallback } from 'react';
 import TransactionItem from './TransactionItem';
 import { Disclosure } from '../../common/ScreenFrame';
-import type { Balance } from './helpers';
+import type { TokenBalanceView } from '../../../dsm/types';
 import { TokenMark } from '../../TokenMark';
 import type { DomainTransaction } from '../../../domain/types';
 
 const MAX_OVERVIEW_BALANCES = 5;
 
 type Props = {
-  balances: Balance[];
+  balances: TokenBalanceView[];
+  /** The store has not answered balances yet: neither a holding nor an empty wallet is known. */
+  balancesLoading: boolean;
   transactions: DomainTransaction[];
   genesisB32: string;
   deviceB32: string;
@@ -18,7 +20,7 @@ type Props = {
   onSwitchToHistory: () => void;
 };
 
-function OverviewTabInner({ balances, transactions, genesisB32, deviceB32, onSwitchToSend, onSwitchToHistory }: Props): React.JSX.Element {
+function OverviewTabInner({ balances, balancesLoading, transactions, genesisB32, deviceB32, onSwitchToSend, onSwitchToHistory }: Props): React.JSX.Element {
   const [showAllBalances, setShowAllBalances] = useState(false);
   const [expandedTxId, setExpandedTxId] = useState<string | null>(null);
 
@@ -39,7 +41,9 @@ function OverviewTabInner({ balances, transactions, genesisB32, deviceB32, onSwi
         <div className="sb-card__title">
           <span className="sb-hero__label">Your Balances</span>
         </div>
-        {balances.length === 0 ? (
+        {balancesLoading ? (
+          <div className="sb-hero__sub" style={{ textAlign: 'center' }}>Loading balances{'…'}</div>
+        ) : balances.length === 0 ? (
           <>
             <div className="sb-hero__sub" style={{ textAlign: 'center' }}>No balances yet. Claim tokens from the faucet to get started.</div>
           </>
@@ -51,7 +55,7 @@ function OverviewTabInner({ balances, transactions, genesisB32, deviceB32, onSwi
                   <TokenMark ticker={b.symbol} iconUrl={b.iconUrl} />
                   {b.symbol}
                 </span>
-                <span className="sb-kv__v" style={{ fontSize: 15, fontWeight: 700 }}>{b.balance}</span>
+                <span className="sb-kv__v" style={{ fontSize: 15, fontWeight: 700 }}>{b.displayAmount}</span>
               </div>
             ))}
             {balances.length > MAX_OVERVIEW_BALANCES && (

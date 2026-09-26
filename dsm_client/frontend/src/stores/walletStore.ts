@@ -3,6 +3,7 @@
 
 import { useSyncExternalStore } from 'react';
 import { dsmClient } from '../services/dsmClient';
+import { isIdentityUnavailable } from '../dsm/identityUnavailable';
 import { bridgeEvents } from '../bridge/bridgeEvents';
 import type { Transaction } from '@/hooks/useTransactions';
 import type { WalletBalance, WalletState } from '../contexts/WalletContext';
@@ -78,21 +79,25 @@ class WalletStore {
       this.setState({ isLoading: true, error: null });
 
       const identity = await dsmClient.getIdentity();
-      const genesisHash = identity?.genesisHash ?? null;
-      const deviceId = identity?.deviceId ?? null;
 
       this.setState({
-        genesisHash,
-        deviceId,
-        isInitialized: Boolean(genesisHash && deviceId),
+        genesisHash: identity.genesisHash,
+        deviceId: identity.deviceId,
+        isInitialized: true,
         isLoading: false,
         error: null,
       });
 
-      if (genesisHash && deviceId) {
-        await this.refreshAll();
-      }
+      await this.refreshAll();
     } catch (error) {
+      // No identity on this device is a state, not a failure: the store stays
+      // uninitialized with no error, and the genesis flow is where the app
+      // goes. Anything else — the runtime not ready within the window, a read
+      // that failed — is reported as what it is.
+      if (isIdentityUnavailable(error) && error.state === 'missing') {
+        this.setState({ genesisHash: null, deviceId: null, isInitialized: false, isLoading: false, error: null });
+        return;
+      }
       const message = error instanceof Error ? error.message : 'Failed to initialize wallet';
       this.setState({ isLoading: false, error: message });
     }
@@ -182,69 +187,5 @@ export function useWalletStore(): WalletState {
     walletStore.subscribe,
     walletStore.getSnapshot,
     walletStore.getServerSnapshot,
-  );
-}
-
-export function useWalletBalances(): WalletBalance[] {
-  return useSyncExternalStore(
-    walletStore.subscribe,
-    () => walletStore.getSnapshot().balances,
-    () => walletStore.getServerSnapshot().balances,
-  );
-}
-
-export function useWalletTransactions(): Transaction[] {
-  return useSyncExternalStore(
-    walletStore.subscribe,
-    () => walletStore.getSnapshot().transactions,
-    () => walletStore.getServerSnapshot().transactions,
-  );
-}
-
-// Memoized identity selector — avoids creating a new object reference on every
-// unrelated store change (e.g. transaction updates) which would cause needless
-// re-renders in all useWalletIdentity() consumers.
-let _cachedIdentity: { genesisHash: string | null; deviceId: string | null } = {
-  genesisHash: null,
-  deviceId: null,
-};
-
-function getIdentitySnapshot(): { genesisHash: string | null; deviceId: string | null } {
-  const s = walletStore.getSnapshot();
-  if (s.genesisHash !== _cachedIdentity.genesisHash || s.deviceId !== _cachedIdentity.deviceId) {
-    _cachedIdentity = { genesisHash: s.genesisHash, deviceId: s.deviceId };
-  }
-  return _cachedIdentity;
-}
-
-export function useWalletIdentity(): { genesisHash: string | null; deviceId: string | null } {
-  return useSyncExternalStore(
-    walletStore.subscribe,
-    getIdentitySnapshot,
-    getIdentitySnapshot,
-  );
-}
-
-export function useWalletInitialized(): boolean {
-  return useSyncExternalStore(
-    walletStore.subscribe,
-    () => walletStore.getSnapshot().isInitialized,
-    () => walletStore.getServerSnapshot().isInitialized,
-  );
-}
-
-export function useWalletLoading(): boolean {
-  return useSyncExternalStore(
-    walletStore.subscribe,
-    () => walletStore.getSnapshot().isLoading,
-    () => walletStore.getServerSnapshot().isLoading,
-  );
-}
-
-export function useWalletError(): string | null {
-  return useSyncExternalStore(
-    walletStore.subscribe,
-    () => walletStore.getSnapshot().error,
-    () => walletStore.getServerSnapshot().error,
   );
 }

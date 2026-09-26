@@ -89,13 +89,6 @@ export function encodeBase32Crockford32(bytes32: Uint8Array): string {
   return encodeBase32Crockford(bytes32);
 }
 
-export function decodeBase32Crockford32(s: string): Uint8Array {
-  const bytes = decodeBase32Crockford(s);
-  if (bytes.length !== 32) {
-    throw new Error('Base32 Crockford string must decode to exactly 32 bytes');
-  }
-  return bytes;
-}
 
 /**
  * Encode the first N bytes as Base32 Crockford for debug/log prefixes.

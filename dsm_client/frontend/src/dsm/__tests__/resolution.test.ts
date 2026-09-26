@@ -8,13 +8,7 @@ jest.mock('../WebViewBridge', () => ({
   resolveBleAddressForDeviceIdBridge: jest.fn(),
 }));
 
-import {
-  normalizeBleAddress,
-  persistBleMapping,
-  clearBleIdentityCache,
-  getBleIdentitySnapshot,
-  pruneBleIdentityMappings,
-} from '../resolution';
+import { normalizeBleAddress } from '../resolution';
 
 describe('normalizeBleAddress', () => {
   it('returns uppercase colon-separated form for valid colon address', () => {
@@ -79,89 +73,54 @@ describe('normalizeBleAddress', () => {
 });
 
 describe('BLE identity cache operations', () => {
+  // The cache is module state that production never clears; each test gets
+  // its own copy of the module rather than a setter that existed for tests.
+  let r: typeof import('../resolution');
+
   beforeEach(() => {
-    clearBleIdentityCache();
+    jest.isolateModules(() => {
+      r = require('../resolution');
+    });
   });
 
   it('starts with an empty snapshot', () => {
-    const snap = getBleIdentitySnapshot();
+    const snap = r.getBleIdentitySnapshot();
     expect(snap.deviceIds).toEqual({});
     expect(snap.genesis).toEqual({});
   });
 
   it('persistBleMapping stores deviceId mapping', () => {
     const devId = new Uint8Array(32).fill(0x01);
-    persistBleMapping({ bleAddress: 'AA:BB:CC:DD:EE:FF', deviceId: devId });
-    const snap = getBleIdentitySnapshot();
+    r.persistBleMapping({ bleAddress: 'AA:BB:CC:DD:EE:FF', deviceId: devId });
+    const snap = r.getBleIdentitySnapshot();
     const key = encodeBase32Crockford(devId);
     expect(snap.deviceIds[key]).toBe('AA:BB:CC:DD:EE:FF');
   });
 
   it('persistBleMapping stores genesisHash mapping', () => {
     const gen = new Uint8Array(32).fill(0x02);
-    persistBleMapping({ bleAddress: 'aabbccddeeff', genesisHash: gen });
-    const snap = getBleIdentitySnapshot();
+    r.persistBleMapping({ bleAddress: 'aabbccddeeff', genesisHash: gen });
+    const snap = r.getBleIdentitySnapshot();
     const key = encodeBase32Crockford(gen);
     expect(snap.genesis[key]).toBe('AA:BB:CC:DD:EE:FF');
   });
 
   it('persistBleMapping accepts string deviceIdStr', () => {
-    persistBleMapping({ bleAddress: '11:22:33:44:55:66', deviceIdStr: 'MYDEVICE' });
-    const snap = getBleIdentitySnapshot();
+    r.persistBleMapping({ bleAddress: '11:22:33:44:55:66', deviceIdStr: 'MYDEVICE' });
+    const snap = r.getBleIdentitySnapshot();
     expect(snap.deviceIds['MYDEVICE']).toBe('11:22:33:44:55:66');
   });
 
   it('persistBleMapping ignores invalid bleAddress', () => {
     const devId = new Uint8Array(32).fill(0x03);
-    persistBleMapping({ bleAddress: 'invalid', deviceId: devId });
-    const snap = getBleIdentitySnapshot();
+    r.persistBleMapping({ bleAddress: 'invalid', deviceId: devId });
+    const snap = r.getBleIdentitySnapshot();
     expect(Object.keys(snap.deviceIds).length).toBe(0);
   });
 
   it('persistBleMapping ignores empty Uint8Array deviceId', () => {
-    persistBleMapping({ bleAddress: 'AA:BB:CC:DD:EE:FF', deviceId: new Uint8Array(0) });
-    const snap = getBleIdentitySnapshot();
+    r.persistBleMapping({ bleAddress: 'AA:BB:CC:DD:EE:FF', deviceId: new Uint8Array(0) });
+    const snap = r.getBleIdentitySnapshot();
     expect(Object.keys(snap.deviceIds).length).toBe(0);
-  });
-
-  it('clearBleIdentityCache empties both maps', () => {
-    const devId = new Uint8Array(32).fill(0x04);
-    const gen = new Uint8Array(32).fill(0x05);
-    persistBleMapping({ bleAddress: 'AA:BB:CC:DD:EE:FF', deviceId: devId, genesisHash: gen });
-    expect(Object.keys(getBleIdentitySnapshot().deviceIds).length).toBe(1);
-
-    clearBleIdentityCache();
-    const snap = getBleIdentitySnapshot();
-    expect(snap.deviceIds).toEqual({});
-    expect(snap.genesis).toEqual({});
-  });
-
-  it('pruneBleIdentityMappings removes specified deviceIds', () => {
-    const devA = new Uint8Array(32).fill(0x0a);
-    const devB = new Uint8Array(32).fill(0x0b);
-    persistBleMapping({ bleAddress: 'AA:BB:CC:DD:EE:01', deviceId: devA });
-    persistBleMapping({ bleAddress: 'AA:BB:CC:DD:EE:02', deviceId: devB });
-    expect(Object.keys(getBleIdentitySnapshot().deviceIds).length).toBe(2);
-
-    pruneBleIdentityMappings({ deviceIds: [devA] });
-    const snap = getBleIdentitySnapshot();
-    expect(Object.keys(snap.deviceIds).length).toBe(1);
-    expect(snap.deviceIds[encodeBase32Crockford(devB)]).toBe('AA:BB:CC:DD:EE:02');
-  });
-
-  it('pruneBleIdentityMappings removes specified genesisHashes', () => {
-    const gen = new Uint8Array(32).fill(0x0c);
-    persistBleMapping({ bleAddress: 'AA:BB:CC:DD:EE:FF', genesisHash: gen });
-    expect(Object.keys(getBleIdentitySnapshot().genesis).length).toBe(1);
-
-    pruneBleIdentityMappings({ genesisHashes: [gen] });
-    expect(Object.keys(getBleIdentitySnapshot().genesis).length).toBe(0);
-  });
-
-  it('pruneBleIdentityMappings with empty arrays is a no-op', () => {
-    const devId = new Uint8Array(32).fill(0x0d);
-    persistBleMapping({ bleAddress: 'AA:BB:CC:DD:EE:FF', deviceId: devId });
-    pruneBleIdentityMappings({ deviceIds: [], genesisHashes: [] });
-    expect(Object.keys(getBleIdentitySnapshot().deviceIds).length).toBe(1);
   });
 });

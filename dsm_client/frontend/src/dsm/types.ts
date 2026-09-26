@@ -172,6 +172,21 @@ export interface TokenBalanceView {
   anchorFingerprint?: string;
   /** The token policy's icon field, carried from Rust; the wallet draws the token's coin from it. */
   iconUrl?: string;
+  /**
+   * Whether Rust reports the token as one the protocol defines (ERA, dBTC).
+   * Never decided here: a ticker is text, and a created token may read "ERA".
+   */
+  protocolDefined: boolean;
+  /** The whole supply that will ever exist, rendered by Rust; absent when Rust holds none. */
+  genesisSupplyDisplay?: string;
+  /** What the committed policy permits, as Rust read it; absent when Rust holds no policy for the token. */
+  permissions?: TokenPolicyPermissionsView;
+}
+
+/** The permission flags of a committed token policy, as Rust read them. */
+export interface TokenPolicyPermissionsView {
+  burnEnabled: boolean;
+  transferable: boolean;
 }
 
 /**

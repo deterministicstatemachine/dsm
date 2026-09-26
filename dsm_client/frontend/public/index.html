@@ -1812,7 +1812,6 @@ html[data-shell-theme] .stateboy::before {
         __binary: true,
         isAvailable: () => !!port,
         sendMessageBin,
-        startup: (payload) => callBridgeMethod('nativeBoundaryStartup', payload),
         ingress: (payload) => callBridgeMethod('nativeBoundaryIngress', payload),
         hostRequest: (payload) => callBridgeMethod('nativeHostRequest', payload),
         getBridgeStatus: () => (port ? 3 : 0),

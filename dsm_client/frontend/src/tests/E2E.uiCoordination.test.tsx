@@ -16,7 +16,7 @@
  * - dsmClient.getAllBalances() → dsm/wallet.ts::getAllBalances() → WebViewBridge::getAllBalancesStrictBridge() → callBin() → sendMessageBin (mock)
  * - dsmClient.getWalletHistory() → dsm/wallet.ts::getWalletHistory() → WebViewBridge::getWalletHistoryStrictBridge() → routerQueryBin() → sendMessageBin (mock)
  * - dsmClient.getIdentity() → dsm/identity.ts::getIdentity() → getHeaders() → getTransportHeadersV3Bin() → sendMessageBin (mock)
- * - dsmClient.isReady() → hasIdentity() → checkIdentityState() → sendMessageBin (mock)
+ * - useTransactions → checkIdentityState() (the native session store)
  * - acceptIncomingTransfer() → acceptOfflineTransfer() → acceptBilateralByCommitmentBridge() → callBin() → sendMessageBin (mock)
  * - rejectIncomingTransfer() → rejectOfflineTransfer() → rejectBilateralByCommitmentBridge() → sendBridgeRequestBytes() → sendMessageBin (mock)
  * - EventBridge (REAL — initializeEventBridge)
@@ -25,17 +25,15 @@
  * - useEventSignal (REAL useSyncExternalStore)
  * - useWalletSync (REAL event→dispatch routing)
  * - BridgeGate (REAL — auto-opens for sendMessageBin paths)
- * - decodeFramedEnvelopeV3, decodeBalancesListResponseStrict (REAL decoders)
+ * - decodeFramedEnvelopeV3 (the REAL decoder)
  *
  * COVERAGE:
  * 1. BridgeEventBus — typed delivery, multi-subscriber, error isolation
  * 2. useEventSignal — useSyncExternalStore, no tearing
  * 3. Bilateral event encode/decode roundtrip (protobuf)
- * 4. DOM event → nativeBridgeAdapter → bridgeEvents (REAL adapter)
- * 5. DOM event → EventBridge → bilateral.event (REAL EventBridge)
- * 6. INTEGRATED: Dialog + WalletContext — PREPARE → Accept → COMPLETE → refreshAll → REAL getAllBalances → sendMessageBin → proto decode → balance in DOM
- * 7. INTEGRATED: wallet.sendCommitted → WalletContext refresh trigger only
- * 8. INTEGRATED: Full bilateral sequence through REAL components — EXACT device sequence
+ * 4. DOM event → EventBridge → bilateral.event, and the native lifecycle topics → the bus (REAL EventBridge)
+ * 5. INTEGRATED: Dialog + WalletContext — PREPARE → Accept → COMPLETE → refreshAll → REAL getAllBalances → sendMessageBin → proto decode → balance in DOM
+ * 6. INTEGRATED: Full bilateral sequence through REAL components — EXACT device sequence
  */
 
 import React from 'react';
@@ -45,11 +43,8 @@ import { useEventSignal } from '../bridge/useEventSignal';
 import * as pb from '../proto/dsm_app_pb';
 import { emit as eventBridgeEmit, on as eventBridgeOn, initializeEventBridge } from '../dsm/EventBridge';
 import { initializeNativeBridgeAdapter } from '../bridge/nativeBridgeAdapter';
-import {
-  BilateralEventType,
-  encodeBilateralEventNotification,
-  decodeBilateralEvent,
-} from '../services/bilateral/bilateralEventService';
+import { BilateralEventType, decodeBilateralEvent } from '../services/bilateral/bilateralEventService';
+import { encodeBilateralEventNotification } from './helpers/bilateralEventFixture';
 import { setBridgeInstance } from '../bridge/BridgeRegistry';
 
 let consoleWarnSpy: jest.SpyInstance;
@@ -124,8 +119,9 @@ function frameEnvelope(env: pb.Envelope): Uint8Array {
 /** Build FramedEnvelopeV3 containing a BalancesListResponse */
 function makeBalancesFramedEnvelope(balances: Array<{ tokenId: string; available: bigint }>): Uint8Array {
   // Complete rows, as balance.list enriches them: the boundary decoder refuses
-  // a row missing its symbol, name or display amount. The fixture's tokens are
-  // whole-unit, so the display form is the base units.
+  // a row missing its symbol, name or display amount, and a created token's
+  // row without its policy facts. The fixture's tokens are ERA, a protocol
+  // asset on Rust's word, and whole-unit, so the display form is the base units.
   const balList = balances.map(b => new pb.BalanceGetResponse({
     tokenId: b.tokenId,
     available: b.available as any,
@@ -134,6 +130,7 @@ function makeBalancesFramedEnvelope(balances: Array<{ tokenId: string; available
     tokenName: b.tokenId,
     decimals: 0,
     displayAmount: b.available.toString(),
+    protocolDefined: true,
   } as any));
   const resp = new pb.BalancesListResponse({ balances: balList } as any);
   const env = new pb.Envelope({
@@ -374,25 +371,6 @@ describe('BridgeEventBus — core event delivery', () => {
     unsub();
   });
 
-  test('wallet.sendCommitted carries balance and tx info', () => {
-    const spy = jest.fn();
-    const unsub = bridgeEvents.on('wallet.sendCommitted', spy);
-    bridgeEvents.emit('wallet.sendCommitted', {
-      success: true,
-      tokenId: 'ERA',
-      newBalance: 9500n,
-      transactionHash: makeTxHash(),
-      toDeviceId: makeDeviceId(),
-      amount: 500n,
-    });
-    expect(spy).toHaveBeenCalledWith(expect.objectContaining({
-      success: true,
-      tokenId: 'ERA',
-      newBalance: 9500n,
-      amount: 500n,
-    }));
-    unsub();
-  });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -508,71 +486,40 @@ describe('Bilateral event service — encode/decode roundtrip', () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// 4. nativeBridgeAdapter — REAL DOM → bridgeEvents Translation
-// ═══════════════════════════════════════════════════════════════════════════════
-
-describe('nativeBridgeAdapter — REAL DOM → bridgeEvents translation', () => {
-  test('REAL: dsm-bilateral-committed DOM event → wallet.bilateralCommitted', () => {
-    const spy = jest.fn();
-    const unsub = bridgeEvents.on('wallet.bilateralCommitted', spy);
-    window.dispatchEvent(new CustomEvent('dsm-bilateral-committed', {
-      detail: { commitmentHash: makeCommitmentHash(0x11), counterpartyDeviceId: makeDeviceId(0x22), accepted: true },
-    }));
-    expect(spy).toHaveBeenCalledTimes(1);
-    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ accepted: true }));
-    unsub();
-  });
-
-  test('REAL: dsm-wallet-refresh DOM event → wallet.refresh', () => {
-    const spy = jest.fn();
-    const unsub = bridgeEvents.on('wallet.refresh', spy);
-    window.dispatchEvent(new CustomEvent('dsm-wallet-refresh', { detail: { source: 'dom-test' } }));
-    expect(spy).toHaveBeenCalledTimes(1);
-    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ source: 'dom-test' }));
-    unsub();
-  });
-
-  test('REAL: dsm-wallet-send-committed DOM event → wallet.sendCommitted', () => {
-    const spy = jest.fn();
-    const unsub = bridgeEvents.on('wallet.sendCommitted', spy);
-    window.dispatchEvent(new CustomEvent('dsm-wallet-send-committed', {
-      detail: { success: true, tokenId: 'ERA', newBalance: 5000n, amount: 1000n },
-    }));
-    expect(spy).toHaveBeenCalledTimes(1);
-    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ success: true, tokenId: 'ERA' }));
-    unsub();
-  });
-
-  test('REAL: dsm-identity-ready DOM event → identity.ready', () => {
-    const spy = jest.fn();
-    const unsub = bridgeEvents.on('identity.ready', spy);
-    document.dispatchEvent(new CustomEvent('dsm-identity-ready'));
-    expect(spy).toHaveBeenCalledTimes(1);
-    unsub();
-  });
-
-  test('REAL: dsm-history-updated DOM event → wallet.historyUpdated', () => {
-    const spy = jest.fn();
-    const unsub = bridgeEvents.on('wallet.historyUpdated', spy);
-    window.dispatchEvent(new CustomEvent('dsm-history-updated'));
-    expect(spy).toHaveBeenCalledTimes(1);
-    unsub();
-  });
-
-  test('REAL: dsm-balances-updated DOM event → wallet.balancesUpdated', () => {
-    const spy = jest.fn();
-    const unsub = bridgeEvents.on('wallet.balancesUpdated', spy);
-    window.dispatchEvent(new CustomEvent('dsm-balances-updated'));
-    expect(spy).toHaveBeenCalledTimes(1);
-    unsub();
-  });
-});
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// 5. EventBridge — REAL DOM → EventBridge → subscribers
+// 4. EventBridge — REAL DOM → EventBridge → subscribers
 // ═══════════════════════════════════════════════════════════════════════════════
 
 describe('EventBridge — REAL DOM event-bin propagation', () => {
+  // Native lifecycle topics reach the bus from the event bridge directly. They
+  // used to go through DOM events the adapter re-emitted, beside four DOM
+  // events nothing ever dispatched.
+  test('REAL: the native dsm-identity-ready topic → identity.ready on the bus', () => {
+    const spy = jest.fn();
+    const unsub = bridgeEvents.on('identity.ready', spy);
+    window.dispatchEvent(new CustomEvent('dsm-event-bin', { detail: { topic: 'dsm-identity-ready', payload: new Uint8Array(0) } }));
+    expect(spy).toHaveBeenCalledTimes(1);
+    unsub();
+  });
+
+  test('REAL: the native dsm-wallet-refresh topic → wallet.refresh from native on the bus', () => {
+    const spy = jest.fn();
+    const unsub = bridgeEvents.on('wallet.refresh', spy);
+    window.dispatchEvent(new CustomEvent('dsm-event-bin', { detail: { topic: 'dsm-wallet-refresh', payload: new Uint8Array(0) } }));
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy).toHaveBeenCalledWith({ source: 'native' });
+    unsub();
+  });
+
+  test('REAL: the native dsm-env-config-error topic → env.config.error with its message on the bus', () => {
+    const spy = jest.fn();
+    const unsub = bridgeEvents.on('env.config.error', spy);
+    // Built in the window's realm: the event-bin handler takes a Uint8Array of its own.
+    const payload = new Uint8Array(Array.from(new TextEncoder().encode('MISSING_FILE|no dsm_env_config.toml|put one in files/')));
+    window.dispatchEvent(new CustomEvent('dsm-event-bin', { detail: { topic: 'dsm-env-config-error', payload } }));
+    expect(spy).toHaveBeenCalledWith({ message: 'no dsm_env_config.toml' });
+    unsub();
+  });
+
   test('REAL: dsm-event-bin with topic=bilateral.event → EventBridge subscribers', () => {
     const spy = jest.fn();
     const unsub = eventBridgeOn('bilateral.event', spy);
@@ -628,7 +575,7 @@ describe('EventBridge — REAL DOM event-bin propagation', () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// 6. INTEGRATED: BilateralTransferDialog + WalletProvider — sendMessageBin-only Mock
+// 5. INTEGRATED: BilateralTransferDialog + WalletProvider — sendMessageBin-only Mock
 //    The ENTIRE TypeScript chain is REAL. Only sendMessageBin is mocked.
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -706,14 +653,14 @@ describe('INTEGRATED: Full chain with sendMessageBin-only mock', () => {
     render(<ProductionLayout />);
     await settleWalletInit();
 
-    // Wait for the REAL init chain: isReady → getIdentity → getAllBalances → getWalletHistory
+    // Wait for the REAL init chain: getIdentity → getAllBalances → getWalletHistory
     await waitFor(() => {
       expect(screen.getByTestId('i-balance-era').textContent).not.toBe('none');
     });
 
     // The balance came from sendMessageBin via: dsmClient.getAllBalances() → dsm.getAllBalances()
     // → getAllBalancesStrictBridge() → callBin('getAllBalancesStrict') → sendMessageBin → FramedEnvelopeV3
-    // → decodeBalancesListResponseStrict() → TokenBalanceView[]
+    // → decodeFramedEnvelopeV3() → TokenBalanceView[]
     // PROVES the entire decode chain works.
     const balText = screen.getByTestId('i-balance-era').textContent;
     expect(balText).toBe('10000');
@@ -978,7 +925,7 @@ describe('INTEGRATED: Full chain with sendMessageBin-only mock', () => {
     await waitFor(() => expect(container.querySelector('.bilateral-transfer-overlay')).not.toBeNull());
   });
 
-  test('wallet.bilateralCommitted → WalletProvider refreshes (REAL sendMessageBin round trip)', async () => {
+  test('an accepted transfer → WalletProvider refreshes on the accept path’s wallet.refresh (REAL sendMessageBin round trip)', async () => {
     render(<ProductionLayout />);
     await settleWalletInit();
     await waitFor(() => expect(screen.getByTestId('i-balance-era').textContent).toBe('10000'));
@@ -987,9 +934,12 @@ describe('INTEGRATED: Full chain with sendMessageBin-only mock', () => {
     balancesState = [{ tokenId: 'ERA', available: 10500n }];
     capturedMethods = [];
 
-    // Emit wallet.bilateralCommitted — useEventSignal triggers refreshAll
+    // What the accept path emits: the committed signal (the toast's trigger)
+    // and its own wallet.refresh (the reload's). The provider reloads on the
+    // second alone.
     act(() => {
       bridgeEvents.emit('wallet.bilateralCommitted', { accepted: true, committed: true } as any);
+      bridgeEvents.emit('wallet.refresh', { source: 'bilateral.accept_followup' });
     });
 
     // Wait for REAL getAllBalances → sendMessageBin round trip
@@ -1005,40 +955,10 @@ describe('INTEGRATED: Full chain with sendMessageBin-only mock', () => {
     await settleWalletEffects();
   });
 
-  test('wallet.sendCommitted triggers refresh without frontend-owned balance mutation', async () => {
-    render(<ProductionLayout />);
-    await settleWalletInit();
-    await waitFor(() => expect(screen.getByTestId('i-balance-era').textContent).toBe('10000'));
-
-    const initialTxCount = parseInt(screen.getByTestId('i-tx-count').textContent || '0');
-    capturedMethods = [];
-
-    // Emit sendCommitted — simulates what happens after online send completes
-    act(() => {
-      bridgeEvents.emit('wallet.sendCommitted', {
-        success: true,
-        tokenId: 'ERA',
-        newBalance: 9500n,
-        transactionHash: makeTxHash(0x01),
-        toDeviceId: makeDeviceId(0x02),
-        amount: 500n,
-      });
-    });
-
-    await waitFor(() => {
-      expect(capturedMethods).toContain('getAllBalancesStrict');
-      expect(capturedMethods).toContain('nativeBoundaryIngress');
-    });
-
-    expect(screen.getByTestId('i-balance-era').textContent).toBe('10000');
-    expect(parseInt(screen.getByTestId('i-tx-count').textContent || '0')).toBe(initialTxCount);
-
-    await settleWalletEffects();
-  });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// 7. INTEGRATED: Full Bilateral Sequence — EXACT Device Event Flow
+// 6. INTEGRATED: Full Bilateral Sequence — EXACT Device Event Flow
 // ═══════════════════════════════════════════════════════════════════════════════
 
 describe('INTEGRATED: Full bilateral transfer back-and-forth', () => {
@@ -1201,7 +1121,7 @@ describe('INTEGRATED: Full bilateral transfer back-and-forth', () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// 8. Event Ordering & Determinism
+// 7. Event Ordering & Determinism
 // ═══════════════════════════════════════════════════════════════════════════════
 
 describe('Event ordering & determinism', () => {
@@ -1257,7 +1177,7 @@ describe('Event ordering & determinism', () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// 9. Error Resilience
+// 8. Error Resilience
 // ═══════════════════════════════════════════════════════════════════════════════
 
 describe('Error resilience', () => {

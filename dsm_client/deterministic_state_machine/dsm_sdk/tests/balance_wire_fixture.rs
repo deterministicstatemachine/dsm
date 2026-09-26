@@ -45,6 +45,15 @@ fn emit_balances_list_fixture() {
         // The policy's icon field, carried as the policy states it; the wallet draws
         // the token's coin from it.
         icon_url: "dsm:coin:v1:FIXTURE".to_string(),
+        // What the token is and what its committed policy fixes and permits, as
+        // Rust reports them for a created token: 100_000_000 base units at 2
+        // decimals is 1000000.00.
+        protocol_defined: false,
+        genesis_supply_display: crate_format(100_000_000, 2),
+        permissions: Some(dsm_sdk::generated::TokenPolicyPermissions {
+            burn_enabled: true,
+            transferable: false,
+        }),
     };
     let list = dsm_sdk::generated::BalancesListResponse {
         balances: vec![row],
@@ -71,6 +80,16 @@ fn emit_balances_list_fixture() {
             assert_eq!(b.symbol, "RIGB", "symbol must survive encoding");
             assert_eq!(b.decimals, 2, "decimals must survive encoding");
             assert_eq!(b.token_name, "RigBravo");
+            assert!(!b.protocol_defined);
+            assert_eq!(b.genesis_supply_display, "1000000.00");
+            assert_eq!(
+                b.permissions,
+                Some(dsm_sdk::generated::TokenPolicyPermissions {
+                    burn_enabled: true,
+                    transferable: false,
+                }),
+                "the policy's permissions must survive encoding, present"
+            );
         }
         other => panic!("unexpected payload {other:?}"),
     }

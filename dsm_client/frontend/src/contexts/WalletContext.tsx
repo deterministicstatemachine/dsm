@@ -7,7 +7,7 @@ import { dsmClient } from '../services/dsmClient';
 import { useEventSignal } from '../bridge/useEventSignal';
 import { useBridgeEvent } from '@/hooks/useBridgeEvents';
 import type { Transaction } from '@/hooks/useTransactions';
-import { useWalletSync } from '@/hooks/useWalletSync';
+import { useWalletRefreshListener } from '@/hooks/useWalletRefreshListener';
 import { walletStore, useWalletStore } from '../stores/walletStore';
 import type { TokenBalanceView } from '../dsm/types';
 
@@ -77,40 +77,17 @@ export const WalletProvider: React.FC<{ children: ReactNode }> = ({ children }) 
     void walletStore.initialize();
   }, []);
 
-  useWalletSync({
-    onRefreshAll: async () => {
-      try {
-        await walletStore.refreshAll();
-      } catch (error) {
-        console.warn('[WalletProvider] refreshAll failed:', error);
-      }
-    },
-    onRefreshBalances: async () => {
-      try {
-        await walletStore.refreshBalances();
-      } catch (error) {
-        console.warn('[WalletProvider] refreshBalances failed:', error);
-      }
-    },
-    onRefreshTransactions: async () => {
-      try {
-        await walletStore.refreshTransactions();
-      } catch (error) {
-        console.warn('[WalletProvider] refreshTransactions failed:', error);
-      }
-    },
-    onIdentityReady: async () => {
-      try {
-        await walletStore.initialize();
-      } catch (error) {
-        console.warn('[WalletProvider] identity refresh failed:', error);
-      }
-    },
-  });
+  // Rust announcing the identity ready (re)initializes the store: the
+  // identity is read and the projection loaded.
+  useBridgeEvent('identity.ready', () => {
+    void walletStore.initialize();
+  }, []);
 
-  useBridgeEvent('bilateral.transferComplete', () => {
-    void refreshWalletProjection();
-  }, [refreshWalletProjection]);
+  // The one path from a wallet change to this projection's reload:
+  // `wallet.refresh`, coalesced. A completed bilateral transfer and Rust's
+  // inbox poller both reach it through the event bridge, so neither is
+  // subscribed to here again — each was a second reload of the same change.
+  useWalletRefreshListener(refreshWalletProjection, [refreshWalletProjection]);
 
   useBridgeEvent('deposit.completed', () => {
     void refreshWalletProjection();
@@ -120,15 +97,9 @@ export const WalletProvider: React.FC<{ children: ReactNode }> = ({ children }) 
     void refreshWalletProjection();
   }, [refreshWalletProjection]);
 
-  useBridgeEvent('inbox.updated', (detail?: { newItems?: number }) => {
-    const newItems = typeof detail?.newItems === 'number' ? detail.newItems : 0;
-    if (newItems <= 0) return;
-    void refreshWalletProjection();
-  }, [refreshWalletProjection]);
-
+  // The accept path emits `wallet.refresh` itself; this is the toast only.
   useEffect(() => {
     if (bilateralSignal > 0) {
-      void walletStore.refreshAll();
       try {
         notifyToast('transfer_accepted', 'Transfer accepted');
       } catch (error) {

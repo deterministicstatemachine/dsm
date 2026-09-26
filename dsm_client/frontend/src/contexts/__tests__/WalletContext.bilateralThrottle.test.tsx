@@ -13,7 +13,10 @@ describe('WalletContext bilateral event throttle & toast', () => {
     jest.clearAllMocks();
   });
 
-  test('refreshAll is throttled and toast not spammed on rapid events', async () => {
+  // The committed signal is the toast's trigger and nothing else: the accept
+  // path emits its own `wallet.refresh`, and the provider used to reload on
+  // the signal as well, a second reload of the same accept.
+  test('a burst of committed signals shows one toast and reloads nothing', async () => {
     const getBalancesSpy = jest.spyOn(dsmClient, 'getAllBalances').mockResolvedValue([] as any);
     const getHistorySpy = jest.spyOn(dsmClient, 'getWalletHistory').mockResolvedValue({ transactions: [] } as any);
     const getContactsSpy = jest.spyOn(dsmClient, 'getContacts').mockResolvedValue({ contacts: [] } as any);
@@ -59,21 +62,21 @@ describe('WalletContext bilateral event throttle & toast', () => {
       await Promise.resolve();
       await Promise.resolve();
     });
-    expect(getBalancesSpy).toHaveBeenCalledTimes(1);
+    expect(getBalancesSpy).not.toHaveBeenCalled();
+    expect(getHistorySpy).not.toHaveBeenCalled();
     expect(notifySpy).toHaveBeenCalledTimes(1);
 
-    // Dispatch a couple more events inside throttle window (should not cause extra immediate refreshes)
+    // A second burst: one more toast, still no reload from the signal.
     act(() => {
       emitBilateralCommitted();
       emitBilateralCommitted();
     });
 
-    // Flushing microtasks again should schedule exactly one more refresh.
     await act(async () => {
       await Promise.resolve();
       await Promise.resolve();
     });
-    expect(getBalancesSpy).toHaveBeenCalledTimes(2);
+    expect(getBalancesSpy).not.toHaveBeenCalled();
     expect(notifySpy).toHaveBeenCalledTimes(2);
   });
 });

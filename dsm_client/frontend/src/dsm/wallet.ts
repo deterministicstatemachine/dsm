@@ -38,6 +38,11 @@ export async function getAllBalances(): Promise<TokenBalanceView[]> {
         throw new Error(`STRICT: balance.list answered a row for ${b.tokenId || 'no token'} without its ${field}`);
       }
     }
+    // A created token's row always carries its policy's supply and what it
+    // permits: Rust reads them from the committed bytes or refuses the row.
+    if (!b.protocolDefined && (b.genesisSupplyDisplay.length === 0 || !b.permissions)) {
+      throw new Error(`STRICT: balance.list answered a created token ${b.tokenId} without its policy facts`);
+    }
     return {
       tokenId: b.tokenId,
       symbol: b.symbol,
@@ -54,6 +59,12 @@ export async function getAllBalances(): Promise<TokenBalanceView[]> {
       anchorFingerprint: named(b.anchorFingerprint),
       // The token policy's icon field, carried from Rust. The wallet draws the coin from it.
       iconUrl: named(b.iconUrl),
+      // Rust's word on what the token is and what its policy fixes and permits.
+      protocolDefined: b.protocolDefined,
+      genesisSupplyDisplay: named(b.genesisSupplyDisplay),
+      permissions: b.permissions
+        ? { burnEnabled: b.permissions.burnEnabled, transferable: b.permissions.transferable }
+        : undefined,
     };
   });
 }
@@ -98,11 +109,6 @@ export async function getWalletHistory(): Promise<WalletHistory> {
     logger.warn('[DSM] getWalletHistory failed:', e);
     throw e;
   }
-}
-
-export async function getTransactions(): Promise<any[]> {
-  const history = await getWalletHistory();
-  return history.transactions;
 }
 
 /**

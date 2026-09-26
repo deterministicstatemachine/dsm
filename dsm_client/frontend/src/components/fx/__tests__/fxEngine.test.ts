@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { FX_ANIMS, FX_ENGINE_SRC, fxAmountLabel, isFxEngineReady, loadFxEngine, setFxMuted } from '../fxEngine';
+import { FX_ENGINE_SRC, fxAmountLabel, isFxEngineReady, loadFxEngine, setFxMuted } from '../fxEngine';
 
 describe('fxEngine', () => {
   afterEach(() => {
@@ -34,11 +34,5 @@ describe('fxEngine', () => {
     expect(fxAmountLabel('  ')).toBeUndefined();
     expect(fxAmountLabel(undefined)).toBeUndefined();
     expect(fxAmountLabel('123456789012345678901 TOKEN', '+')).toHaveLength(17);
-  });
-
-  it('names every scene the engine ships', () => {
-    expect([...FX_ANIMS].sort()).toEqual(
-      ['confirm', 'fail', 'intro', 'lock', 'pair', 'seal', 'tamper', 'trace', 'vault'],
-    );
   });
 });

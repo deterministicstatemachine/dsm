@@ -21128,6 +21128,38 @@ export class BalanceGetResponse extends Message<BalanceGetResponse> {
    */
   iconUrl = "";
 
+  /**
+   * Whether this is an asset the protocol defines (ERA, dBTC) rather than a
+   * token a device created and this device registered. Decided by Rust from
+   * the builtin policy commit the ticker resolves to. A screen that keyed it
+   * on the ticker text it displayed would call a created token "ERA" a
+   * protocol asset, and carried its own copy of what a protocol asset is.
+   *
+   * @generated from field: bool protocol_defined = 12;
+   */
+  protocolDefined = false;
+
+  /**
+   * The whole supply that will ever exist, in display units rendered by Rust
+   * with the token's decimals. A created token's policy fixes it at creation
+   * (SoFi §51); ERA's is the native reserve's genesis supply, from which every
+   * unit in circulation was released. Empty when Rust holds no supply for the
+   * token.
+   *
+   * @generated from field: string genesis_supply_display = 13;
+   */
+  genesisSupplyDisplay = "";
+
+  /**
+   * What the token's committed policy permits, read from bytes verified
+   * against the anchor. Absent when Rust holds no committed policy for the
+   * token: "not stated" and "not permitted" are different facts, and a
+   * defaulted bool cannot tell them apart.
+   *
+   * @generated from field: dsm.TokenPolicyPermissions permissions = 14;
+   */
+  permissions?: TokenPolicyPermissions;
+
   constructor(data?: PartialMessage<BalanceGetResponse>) {
     super();
     proto3.util.initPartial(data, this);
@@ -21147,6 +21179,9 @@ export class BalanceGetResponse extends Message<BalanceGetResponse> {
     { no: 9, name: "anchor_fingerprint", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 10, name: "canonical_token_id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 11, name: "icon_url", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 12, name: "protocol_defined", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+    { no: 13, name: "genesis_supply_display", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 14, name: "permissions", kind: "message", T: TokenPolicyPermissions },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BalanceGetResponse {
@@ -21163,6 +21198,56 @@ export class BalanceGetResponse extends Message<BalanceGetResponse> {
 
   static equals(a: BalanceGetResponse | PlainMessage<BalanceGetResponse> | undefined, b: BalanceGetResponse | PlainMessage<BalanceGetResponse> | undefined): boolean {
     return proto3.util.equals(BalanceGetResponse, a, b);
+  }
+}
+
+/**
+ * The permission flags of a committed token policy, as Core's one parser read
+ * them (SoFi §47).
+ *
+ * @generated from message dsm.TokenPolicyPermissions
+ */
+export class TokenPolicyPermissions extends Message<TokenPolicyPermissions> {
+  /**
+   * Holders may burn (§54).
+   *
+   * @generated from field: bool burn_enabled = 1;
+   */
+  burnEnabled = false;
+
+  /**
+   * The token may move between holders (§49).
+   *
+   * @generated from field: bool transferable = 2;
+   */
+  transferable = false;
+
+  constructor(data?: PartialMessage<TokenPolicyPermissions>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.TokenPolicyPermissions";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "burn_enabled", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+    { no: 2, name: "transferable", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): TokenPolicyPermissions {
+    return new TokenPolicyPermissions().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): TokenPolicyPermissions {
+    return new TokenPolicyPermissions().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): TokenPolicyPermissions {
+    return new TokenPolicyPermissions().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: TokenPolicyPermissions | PlainMessage<TokenPolicyPermissions> | undefined, b: TokenPolicyPermissions | PlainMessage<TokenPolicyPermissions> | undefined): boolean {
+    return proto3.util.equals(TokenPolicyPermissions, a, b);
   }
 }
 

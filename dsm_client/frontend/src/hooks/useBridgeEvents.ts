@@ -6,18 +6,22 @@
 // This centralizes event binding logic and avoids zombie listeners.
 
 import { useEffect, useRef } from 'react';
-import { bridgeEvents } from '../bridge/bridgeEvents';
+import { bridgeEvents, type BridgeEventMap } from '../bridge/bridgeEvents';
 
 /**
  * Hook to subscribe to bridge events securely with automatic cleanup.
  * Prevents "zombie listeners" and memory leaks.
- * 
- * @param eventName The name of the event to listen for (e.g. 'ble.deviceFound', 'wallet.refresh')
- * @param handler The callback to run. 
+ *
+ * The name is one of the bus's events: a subscription to a name nothing can
+ * emit does not compile. Five such subscriptions had accumulated behind an
+ * untyped `string` — toasts and a BLE gate waiting on events with no producer.
+ *
+ * @param eventName The event to listen for (e.g. 'ble.deviceFound', 'wallet.refresh')
+ * @param handler The callback to run.
  * @param deps Dependencies for the effect. If these change, the subscription is recreated.
  */
-export function useBridgeEvent<T = any>(
-  eventName: string,
+export function useBridgeEvent<K extends keyof BridgeEventMap, T = BridgeEventMap[K]>(
+  eventName: K,
   handler: (detail?: T) => void,
   deps: React.DependencyList = []
 ) {
@@ -34,7 +38,7 @@ export function useBridgeEvent<T = any>(
       savedHandler.current(payload);
     };
 
-    const unsubscribe = bridgeEvents.on(eventName as any, listener as any);
+    const unsubscribe = bridgeEvents.on(eventName, listener as any);
     return () => unsubscribe();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [eventName, ...deps]);

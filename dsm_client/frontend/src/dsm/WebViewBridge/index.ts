@@ -27,7 +27,6 @@ export const {
   callBin,
   mustBridge,
   normalizeToBytes,
-  processEnvelopeV3Bin,
   queryTransportHeadersV3,
   routerInvokeBin,
   routerQueryBin,

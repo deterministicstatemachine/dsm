@@ -8,10 +8,17 @@ import { bridgeEvents } from '../../bridge/bridgeEvents';
 import { dsmClient } from '../../services/dsmClient';
 import { walletStore } from '../../stores/walletStore';
 import { playCoinSound } from '../../utils/coinSound';
+import { initializeEventBridge } from '../../dsm/EventBridge';
+import * as pb from '../../proto/dsm_app_pb';
 
 jest.mock('../../utils/coinSound', () => ({
   playCoinSound: jest.fn(),
 }));
+
+/** A native event as Kotlin posts it: the topic and the raw payload bytes. */
+function announce(topic: string, payload: Uint8Array) {
+  window.dispatchEvent(new CustomEvent('dsm-event-bin', { detail: { topic, payload } }));
+}
 
 describe('wallet credit sound routing', () => {
   beforeEach(() => {
@@ -30,7 +37,13 @@ describe('wallet credit sound routing', () => {
     (walletStore as any).hasObservedBalances = false;
   });
 
-  it('plays the coin sound only after a positive balance delta on receiver-side refreshes', async () => {
+  // What the event bridge announces for one change reloads the projection
+  // once: a completed bilateral transfer (`bilateral.event`) and an inbox sync
+  // with new items (`inbox.updated`) each become one `wallet.refresh`, and the
+  // provider reloads on that alone. The provider used to reload on the raw
+  // events as well. The coin sound follows a credit, not a reload.
+  it('reloads once per announced change and plays the coin sound only on a credit', async () => {
+    initializeEventBridge();
     jest.spyOn(dsmClient, 'getIdentity' as any).mockResolvedValue({
       genesisHash: 'G'.repeat(32),
       deviceId: 'D'.repeat(32),
@@ -65,21 +78,35 @@ describe('wallet credit sound routing', () => {
     expect(playCoinSound).not.toHaveBeenCalled();
 
     act(() => {
-      bridgeEvents.emit('bilateral.transferComplete', undefined as any);
+      announce(
+        'bilateral.event',
+        new pb.BilateralEventNotification({
+          eventType: pb.BilateralEventType.BILATERAL_EVENT_TRANSFER_COMPLETE,
+          message: 'test',
+        } as any).toBinary(),
+      );
     });
 
     await waitFor(() => {
       expect(playCoinSound).toHaveBeenCalledTimes(1);
     });
+    await waitFor(() => {
+      expect((dsmClient.getAllBalances as any)).toHaveBeenCalledTimes(2);
+    });
 
     act(() => {
-      bridgeEvents.emit('inbox.updated', { newItems: 1, source: 'poll' });
+      announce('inbox.updated', new pb.StorageSyncResponse({ processed: 1 } as any).toBinary());
     });
 
     await waitFor(() => {
       expect((dsmClient.getAllBalances as any)).toHaveBeenCalledTimes(3);
     });
-
+    // A second reload of either change would follow within a frame or two;
+    // none does.
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 80));
+    });
+    expect((dsmClient.getAllBalances as any)).toHaveBeenCalledTimes(3);
     expect(playCoinSound).toHaveBeenCalledTimes(1);
   });
 

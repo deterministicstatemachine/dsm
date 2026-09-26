@@ -81,6 +81,16 @@ pub(crate) fn enrich_balance_metadata(
             if let Some(c) = crate::policy::builtin_policy_commit("ERA") {
                 set_anchor(reply, &c);
             }
+            // The protocol defines ERA, and its supply is the native reserve's,
+            // from which every unit in circulation was released. ERA's policy
+            // blob does not exist yet (§6.32), so nothing is stated about what
+            // it permits: absent, never a defaulted "not permitted".
+            reply.protocol_defined = true;
+            reply.genesis_supply_display = format_base_units_for_display(
+                dsm::economic::native_reserve::ERA_RESERVE_GENESIS_SUPPLY,
+                0,
+            );
+            reply.permissions = None;
         }
         "DBTC" => {
             reply.token_id = "dBTC".to_string();
@@ -91,6 +101,7 @@ pub(crate) fn enrich_balance_metadata(
             if let Some(c) = crate::policy::builtin_policy_commit("dBTC") {
                 set_anchor(reply, &c);
             }
+            reply.protocol_defined = true;
         }
         // Created and adopted tokens carry their own decimals, and the wire
         // amount is BASE UNITS. Leaving decimals at the default meant a
@@ -108,6 +119,7 @@ pub(crate) fn enrich_balance_metadata(
                             reply.token_id
                         )
                     })?;
+            let policy = registered_policy(&row)?;
             reply.symbol = row.ticker.clone();
             reply.token_name = if row.alias.is_empty() {
                 row.ticker
@@ -117,26 +129,51 @@ pub(crate) fn enrich_balance_metadata(
             reply.decimals = row.decimals;
             reply.canonical_token_id = row.token_id.clone();
             set_anchor(reply, &row.policy_commit);
-            reply.icon_url = policy_icon(&row.policy_commit)?;
+            reply.icon_url = policy.icon_url.unwrap_or_default();
             reply.display_amount = format_base_units_for_display(reply.available, reply.decimals);
+            // A device created this token; its committed policy fixes the
+            // supply and says what holders may do with it.
+            reply.protocol_defined = false;
+            reply.genesis_supply_display =
+                format_supply_for_display(policy.genesis_supply, reply.decimals);
+            reply.permissions = Some(generated::TokenPolicyPermissions {
+                burn_enabled: policy.burn_enabled,
+                transferable: policy.transferable,
+            });
         }
     }
     Ok(())
 }
 
-/// The icon field of a token's anchored policy, from bytes verified against the commit.
+/// A registered token's committed policy: the bytes stored under its anchor,
+/// verified against it, read by Core's one parser, and in agreement with the
+/// row that names them.
 ///
-/// Carried as the policy states it: the wallet draws coin artwork from it; a policy
-/// without an icon field has none. A registered token's policy is stored with it, so
-/// a policy that is missing or does not parse is an error.
-fn policy_icon(policy_commit: &[u8; 32]) -> Result<String, String> {
-    let anchor = crate::util::text_id::encode_base32_crockford(policy_commit);
-    let bytes = crate::storage::client_db::token_registry::load_policy_verified(policy_commit)
+/// A registered token's policy is stored with it, so a policy that is missing
+/// or does not parse is an error. The row's ticker, alias, decimals and genesis
+/// supply were copied from this policy at registration; a row that disagrees
+/// with the bytes its own commit names is corrupt, and the wallet reports
+/// nothing from either side rather than pick one.
+fn registered_policy(
+    row: &crate::storage::client_db::token_registry::TokenRegistryRow,
+) -> Result<super::token_routes::ParsedTokenPolicy, String> {
+    let anchor = crate::util::text_id::encode_base32_crockford(&row.policy_commit);
+    let bytes = crate::storage::client_db::token_registry::load_policy_verified(&row.policy_commit)
         .map_err(|e| format!("policy {anchor} unreadable: {e}"))?
         .ok_or_else(|| format!("policy {anchor} of a registered token is not stored"))?;
     let policy = super::token_routes::parse_token_policy(&bytes)
         .ok_or_else(|| format!("stored policy {anchor} does not parse"))?;
-    Ok(policy.icon_url.unwrap_or_default())
+    if policy.ticker != row.ticker
+        || policy.alias != row.alias
+        || policy.decimals != row.decimals
+        || policy.genesis_supply != row.genesis_supply
+    {
+        return Err(format!(
+            "registry row for {} disagrees with its policy {anchor}",
+            row.ticker
+        ));
+    }
+    Ok(policy)
 }
 
 /// How much of an anchor is enough to compare by eye.
@@ -271,10 +308,19 @@ pub(crate) fn canonicalize_token_id(token_id: &str) -> String {
 /// Integer/string arithmetic — the digits are split, never divided — so a large
 /// balance stays exact where floating point would round it.
 pub fn format_base_units_for_display(base_units: u64, decimals: u32) -> String {
+    format_digits_for_display(base_units.to_string(), decimals)
+}
+
+/// The same rule over a policy's genesis supply, which is `u128` in the
+/// policy blob and the registry (SoFi §47).
+pub(crate) fn format_supply_for_display(base_units: u128, decimals: u32) -> String {
+    format_digits_for_display(base_units.to_string(), decimals)
+}
+
+fn format_digits_for_display(digits: String, decimals: u32) -> String {
     if decimals == 0 {
-        return base_units.to_string();
+        return digits;
     }
-    let digits = base_units.to_string();
     let d = decimals as usize;
     if digits.len() <= d {
         format!("0.{}", "0".repeat(d - digits.len()) + &digits)
@@ -1346,6 +1392,139 @@ mod tests {
 
         assert!(items.iter().any(|item| item.token_id == "ERA"));
         assert!(items.iter().any(|item| item.token_id == "dBTC"));
+    }
+
+    fn fresh_db() {
+        crate::economic_fixtures::use_test_storage_dir();
+        crate::storage::client_db::reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("init db");
+    }
+
+    /// A created token's committed policy, packed by the one packer and stored
+    /// under its anchor, as creation and adoption store it.
+    fn store_created_policy(
+        ticker: &str,
+        decimals: u32,
+        genesis_supply: u128,
+        burn_enabled: bool,
+        transferable: bool,
+    ) -> (super::super::token_routes::ParsedTokenPolicy, [u8; 32]) {
+        use prost::Message;
+        let (signer_pk, _secret) =
+            dsm::crypto::sphincs::generate_sphincs_keypair().expect("a signer key");
+        let policy = super::super::token_routes::ParsedTokenPolicy {
+            creator_genesis: [0x11; 32],
+            creator_device_id: [0x22; 32],
+            ticker: ticker.to_string(),
+            alias: format!("{ticker} token"),
+            decimals,
+            genesis_supply,
+            release_rule: dsm::economic::token_policy::ReleaseRule::AllAtCreation,
+            description: None,
+            icon_url: Some("dsm:coin:v1:ABC".to_string()),
+            burn_enabled,
+            transferable,
+            threshold: 1,
+            signers: vec![signer_pk],
+            allowlist_device_ids: vec![],
+        };
+        let bytes = generated::TokenPolicyV3 {
+            policy_bytes: super::super::token_routes::build_policy_v3_bytes(&policy)
+                .expect("the policy packs"),
+        }
+        .encode_to_vec();
+        let commit = dsm::crypto::blake3::domain_hash_bytes(
+            dsm::common::domain_tags::TAG_DSM_POLICY,
+            &bytes,
+        );
+        crate::storage::client_db::token_registry::upsert_policy(&commit, &bytes)
+            .expect("the policy is stored under its anchor");
+        (policy, commit)
+    }
+
+    /// The registry row adoption writes for a stored policy, with the supply
+    /// it records.
+    fn register(
+        policy: &super::super::token_routes::ParsedTokenPolicy,
+        commit: [u8; 32],
+        genesis_supply: u128,
+    ) {
+        crate::storage::client_db::token_registry::insert_token(
+            &crate::storage::client_db::token_registry::TokenRegistryRow {
+                token_id: format!("token-{}", policy.ticker),
+                policy_commit: commit,
+                ticker: policy.ticker.clone(),
+                alias: policy.alias.clone(),
+                decimals: policy.decimals,
+                genesis_supply,
+                creator_device_id: policy.creator_device_id,
+            },
+        )
+        .expect("the token is registered");
+    }
+
+    /// A protocol asset is one on Rust's word, not its ticker's. ERA's supply
+    /// is the reserve's; its policy blob does not exist yet (§6.32), so
+    /// nothing is stated about what it permits.
+    #[test]
+    #[serial_test::serial]
+    fn era_is_protocol_defined_with_the_reserve_supply_and_no_stated_permissions() {
+        fresh_db();
+        let mut era = seed("ERA", 264, 0);
+        super::enrich_balance_metadata(&mut era).expect("ERA is named");
+        assert!(era.protocol_defined);
+        assert_eq!(era.genesis_supply_display, "80000000000");
+        assert_eq!(era.permissions, None, "no policy blob: nothing stated");
+        let mut dbtc = seed("dBTC", 0, 0);
+        super::enrich_balance_metadata(&mut dbtc).expect("dBTC is named");
+        assert!(dbtc.protocol_defined);
+    }
+
+    /// A created token's facts are its committed policy's, read from bytes
+    /// verified against the anchor: the supply in display units, what holders
+    /// may do, the icon.
+    #[test]
+    #[serial_test::serial]
+    fn a_registered_token_reports_its_policy_supply_and_permissions() {
+        fresh_db();
+        let (policy, commit) = store_created_policy("RIGB", 2, 100_000, true, false);
+        register(&policy, commit, 100_000);
+        let mut row = seed("RIGB", 5, 0);
+        super::enrich_balance_metadata(&mut row).expect("a registered token is named");
+        assert!(!row.protocol_defined);
+        assert_eq!(row.genesis_supply_display, "1000.00");
+        assert_eq!(
+            row.permissions,
+            Some(generated::TokenPolicyPermissions {
+                burn_enabled: true,
+                transferable: false,
+            })
+        );
+        assert_eq!(row.icon_url, "dsm:coin:v1:ABC");
+        assert_eq!(row.symbol, "RIGB");
+        assert_eq!(row.display_amount, "0.05");
+    }
+
+    /// A row that disagrees with the bytes its own commit names is corrupt:
+    /// refused, with nothing from either side reported.
+    #[test]
+    #[serial_test::serial]
+    fn a_registry_row_that_disagrees_with_its_policy_is_refused() {
+        fresh_db();
+        let (policy, commit) = store_created_policy("DISA", 0, 10, true, true);
+        register(&policy, commit, 11);
+        let mut row = seed("DISA", 0, 0);
+        let refused = super::enrich_balance_metadata(&mut row)
+            .expect_err("a row disagreeing with its policy is refused");
+        assert!(refused.contains("disagrees with its policy"), "{refused}");
+        assert!(
+            row.permissions.is_none(),
+            "nothing reported from the policy"
+        );
+        assert!(
+            row.genesis_supply_display.is_empty(),
+            "nothing reported from the row"
+        );
     }
 }
 

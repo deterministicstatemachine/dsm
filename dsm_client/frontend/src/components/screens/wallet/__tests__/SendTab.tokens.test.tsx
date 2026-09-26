@@ -36,7 +36,7 @@ describe('SendTab tokens', () => {
   it('shows the selected token and its balance as Rust rendered them', () => {
     render(
       <SendTab
-        {...props([{ tokenId: 'RIGB', symbol: 'RIGB', balance: '1000.00', decimals: 2 }])}
+        {...props([{ tokenId: 'RIGB', symbol: 'RIGB', displayAmount: '1000.00', decimals: 2 }])}
       />,
     );
 

@@ -22,18 +22,6 @@ export type FxAnim =
   | 'tamper'
   | 'seal';
 
-export const FX_ANIMS: readonly FxAnim[] = [
-  'confirm',
-  'fail',
-  'intro',
-  'trace',
-  'lock',
-  'vault',
-  'pair',
-  'tamper',
-  'seal',
-];
-
 declare global {
   interface Window {
     /** Engine-wide mute flag read by every fx-canvas instance. */

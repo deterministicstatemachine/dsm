@@ -26,7 +26,8 @@ import dsm.types.proto.WalletCreateGenesisV2Request
 //   and receives [0x03][Envelope v3 proto] responses.
 //
 // METHOD ROUTING (grouped by boundary):
-//   Shared boundary: "nativeBoundaryStartup", "nativeBoundaryIngress"
+//   Shared boundary: "nativeBoundaryIngress" (the startup boundary is crossed
+//   natively, by BridgeIdentityHandler; the WebView never sends it)
 //   Private host boundary: "nativeHostRequest"
 //   Platform-bound helpers stay behind the same binary MessagePort dispatcher.
 //
@@ -333,10 +334,6 @@ class SinglePathWebViewBridge(private val context: Context) {
 
                 "setPreference" -> {
                     BridgePreferencesHandler.setPreference(inst.prefs(), payload)
-                }
-
-                "nativeBoundaryStartup" -> {
-                    NativeBoundaryBridge.startup(payload)
                 }
 
                 "nativeBoundaryIngress" -> {

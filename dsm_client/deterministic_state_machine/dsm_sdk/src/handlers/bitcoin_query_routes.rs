@@ -630,6 +630,12 @@ impl AppRouterImpl {
                         anchor_fingerprint: String::new(),
                         // Native BTC has no CPTA identity either.
                         canonical_token_id: String::new(),
+                        // Nor a committed DSM policy: this row is neither a
+                        // protocol asset nor a created token, and states no
+                        // supply and no permissions.
+                        protocol_defined: false,
+                        genesis_supply_display: String::new(),
+                        permissions: None,
                     },
                 ))
             }

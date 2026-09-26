@@ -31,7 +31,6 @@ class SinglePathWebViewBridgeFuzzTest {
             "getBluetoothStatus",
             "getPreference",
             "setPreference",
-            "nativeBoundaryStartup",
             "nativeBoundaryIngress",
             "nativeHostRequest",
             "resolveBleAddressForDeviceId",
@@ -94,7 +93,7 @@ class SinglePathWebViewBridgeFuzzTest {
         malformedProtos.forEach { proto ->
             try {
                 // Try various methods that parse protobuf
-                val methods = listOf("nativeBoundaryStartup", "nativeBoundaryIngress", "nativeHostRequest")
+                val methods = listOf("nativeBoundaryIngress", "nativeHostRequest")
                 methods.forEach { method ->
                     val result = SinglePathWebViewBridge.handleBinaryRpc(method, proto)
                     // Bridge is not initialized in unit tests, so all responses
@@ -307,7 +306,7 @@ class SinglePathWebViewBridgeFuzzTest {
         // Test with extremely large payloads
         val hugePayload = ByteArray(10 * 1024 * 1024) { it.toByte() } // 10MB
 
-        val methods = listOf("nativeBoundaryStartup", "nativeBoundaryIngress", "nativeHostRequest")
+        val methods = listOf("nativeBoundaryIngress", "nativeHostRequest")
 
         methods.forEach { method ->
             try {

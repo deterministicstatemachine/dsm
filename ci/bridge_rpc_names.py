@@ -23,7 +23,9 @@
 # `window.DsmBridge` (every production call on the bridge object is typed
 # against that interface), and no production source may name `__callBin`, the
 # transport function only the jest stub installed and every transport path
-# once branched on.
+# once branched on. A test bridge's stub arms (`method === '…'`) may answer
+# only names Kotlin handles: an arm for a method that does not exist is a
+# stub of nothing, and two outlived the methods they stubbed.
 #
 # Exit 0 only when every set is non-empty and each pair is equal. There is no
 # allowlist: a name one side must stop using is removed from that side.
@@ -175,6 +177,33 @@ def production_names_callbin():
     return hits
 
 
+STUB_ARM_RE = re.compile(r"(?<![A-Za-z0-9_])method === [\"']([A-Za-z0-9_]+)[\"']")
+
+
+def test_sources():
+    for dirpath, _dirnames, filenames in os.walk(FRONTEND_SRC):
+        for name in filenames:
+            if not name.endswith((".ts", ".tsx")):
+                continue
+            if "__tests__" in dirpath or ".test." in name or name == "setupTests.ts":
+                yield os.path.join(dirpath, name)
+
+
+def stub_names():
+    """{name: [where, ...]}: the bridge RPC names test bridges answer by `method === '…'`.
+
+    A stub arm for a name Kotlin does not handle answers a method that does
+    not exist — two such arms outlived the methods they stubbed (2026-09-26).
+    """
+    stubbed = {}
+    for path in test_sources():
+        text = read_text(path)
+        rel = os.path.relpath(path, ROOT)
+        for m in STUB_ARM_RE.finditer(text):
+            stubbed.setdefault(m.group(1), []).append(f"{rel}:{text.count(chr(10), 0, m.start()) + 1}")
+    return stubbed
+
+
 def main():
     sent = sent_names()
     handled = handled_names()
@@ -212,10 +241,18 @@ def main():
         for where in callbin:
             print(f"  {where}")
         status = 1
+    stubbed = stub_names()
+    phantom = sorted(set(stubbed) - set(handled))
+    if phantom:
+        fail("test bridges answer bridge RPC names Kotlin does not handle (stubs of methods that do not exist):")
+        for name in phantom:
+            print(f"  {name}: " + ", ".join(stubbed[name]))
+        status = 1
     if status == 0:
         print(
             f"[bridge-rpc-names] OK: {len(sent)} names sent, {len(handled)} handled, the same set; "
-            f"the bridge object's {len(installed)} members typed as installed"
+            f"the bridge object's {len(installed)} members typed as installed; "
+            f"{len(stubbed)} names stubbed in tests, all handled"
         )
     return status
 

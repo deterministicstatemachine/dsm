@@ -72,8 +72,8 @@ describe('useBridgeEvent', () => {
     const handler = jest.fn();
 
     const { rerender } = renderHook(
-      ({ eventName }) => useBridgeEvent(eventName, handler),
-      { initialProps: { eventName: 'wallet.refresh' } },
+      ({ eventName }: { eventName: 'wallet.refresh' | 'identity.ready' }) => useBridgeEvent(eventName, handler),
+      { initialProps: { eventName: 'wallet.refresh' as 'wallet.refresh' | 'identity.ready' } },
     );
 
     rerender({ eventName: 'identity.ready' });
@@ -99,7 +99,7 @@ describe('useBridgeEvent', () => {
 
   it('supports typed payloads', () => {
     const handler = jest.fn();
-    renderHook(() => useBridgeEvent<{ address: string }>('ble.deviceConnected', handler));
+    renderHook(() => useBridgeEvent('ble.deviceConnected', handler));
 
     act(() => { emitBridge('ble.deviceConnected', { address: 'AA:BB:CC' }); });
 

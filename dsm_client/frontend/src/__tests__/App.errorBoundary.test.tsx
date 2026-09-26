@@ -29,10 +29,6 @@ jest.mock('../contexts/ContactsContext', () => ({
   ContactsProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
 }));
 
-jest.mock('../contexts/BleContext', () => ({
-  BleProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
-}));
-
 jest.mock('../inputs/providers/StateBoyInputProvider', () => ({
   StateBoyInputProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
 }));

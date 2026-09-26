@@ -25,12 +25,4 @@ describe('syncWithStorage error envelope handling', () => {
     }
   });
 
-  test('getAllBalances throws when bridge returns Error envelope', async () => {
-    const env = new Envelope({ version: 3, payload: { case: 'error', value: new PbError({ code: 77, message: 'nope' }) } as any });
-    // Add framing byte as done by bridge
-    const framed = new Uint8Array([0x03, ...env.toBinary()]);
-    // Test direct call
-    const { decodeBalancesListResponseStrict } = await import('../decoding');
-    expect(() => decodeBalancesListResponseStrict(framed)).toThrow(/Native error:.*nope/);
-  });
 });

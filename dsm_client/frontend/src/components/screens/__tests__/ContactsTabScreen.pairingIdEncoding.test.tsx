@@ -33,12 +33,11 @@ jest.mock('../../../contexts/ContactsContext', () => {
       return {
         contacts: [
           {
-            id: deviceIdB32,
             alias: 'peer',
             deviceId: deviceIdB32,
             genesisHash: encodeBase32Crockford32(new Uint8Array(32)),
-            publicKey: encodeBase32Crockford32(new Uint8Array(32).fill(7)),
-            isVerified: true,
+            signingPublicKey: encodeBase32Crockford32(new Uint8Array(32).fill(7)),
+            genesisVerifiedOnline: true,
             bleAddress: 'AA:BB:CC:DD:EE:FF',
           },
         ],

@@ -52,8 +52,8 @@ function freshState(): PracticeState {
       deviceId: practiceId('PRACT1CEY0VDEV1CE'),
     },
     balances: [
-      { tokenId: 'ERA', tokenName: 'ERA', symbol: 'ERA', decimals: 0, baseUnits: BigInt(1000), displayAmount: '1000' },
-      { tokenId: 'PLAY', tokenName: 'Practice Coin', symbol: 'PLAY', decimals: 0, baseUnits: BigInt(50), displayAmount: '50' },
+      { tokenId: 'ERA', tokenName: 'ERA', symbol: 'ERA', decimals: 0, baseUnits: BigInt(1000), displayAmount: '1000', protocolDefined: true },
+      { tokenId: 'PLAY', tokenName: 'Practice Coin', symbol: 'PLAY', decimals: 0, baseUnits: BigInt(50), displayAmount: '50', protocolDefined: false },
     ],
     contacts: [
       {

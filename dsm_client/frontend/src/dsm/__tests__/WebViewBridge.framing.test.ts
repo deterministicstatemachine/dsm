@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-import { processEnvelopeV3Bin } from '../WebViewBridge';
-import { BridgeRpcRequest, BridgeRpcResponse, EnvelopeOp, IngressRequest, IngressResponse } from '../../proto/dsm_app_pb';
+import { routerQueryBin } from '../WebViewBridge';
+import { BridgeRpcRequest, BridgeRpcResponse, IngressRequest, IngressResponse } from '../../proto/dsm_app_pb';
 
 function wrapSuccessEnvelope(data: Uint8Array): Uint8Array {
   const br = new BridgeRpcResponse({ result: { case: 'success', value: { data: new Uint8Array(data) } } });
@@ -13,7 +13,7 @@ describe('WebViewBridge framing invariants', () => {
     (global as any).window = (global as any).window ?? {};
   });
 
-  test('processEnvelopeV3Bin uses nativeBoundaryIngress with an envelope op', async () => {
+  test('a router query goes to nativeBoundaryIngress as a routerQuery op', async () => {
     const seen: { method?: string; payload?: Uint8Array } = {};
     const response = new IngressResponse({
       result: { case: 'okBytes', value: new Uint8Array([1, 2, 3]) },
@@ -28,13 +28,14 @@ describe('WebViewBridge framing invariants', () => {
       },
     };
 
-    const envelope = new Uint8Array([9, 9, 9, 9]);
-    await processEnvelopeV3Bin(envelope);
+    const params = new Uint8Array([9, 9, 9, 9]);
+    await expect(routerQueryBin('balance.list', params)).resolves.toEqual(new Uint8Array([1, 2, 3]));
 
     expect(seen.method).toBe('nativeBoundaryIngress');
     const ingressRequest = IngressRequest.fromBinary(seen.payload ?? new Uint8Array(0));
-    expect(ingressRequest.operation.case).toBe('envelope');
-    expect((ingressRequest.operation.value as EnvelopeOp).envelopeBytes).toEqual(envelope);
+    expect(ingressRequest.operation.case).toBe('routerQuery');
+    expect(ingressRequest.operation.case === 'routerQuery' && ingressRequest.operation.value.method).toBe('balance.list');
+    expect(ingressRequest.operation.case === 'routerQuery' && ingressRequest.operation.value.args).toEqual(params);
   });
 
   // The guard is on the bridge's own `ingress` wrapper's answer: index.html
@@ -45,7 +46,7 @@ describe('WebViewBridge framing invariants', () => {
       ingress: async () => ({ nope: true } as any),
     };
 
-    await expect(processEnvelopeV3Bin(new Uint8Array([1]))).rejects.toThrow(
+    await expect(routerQueryBin('balance.list')).rejects.toThrow(
       /expected Uint8Array response from native boundary/,
     );
   });
