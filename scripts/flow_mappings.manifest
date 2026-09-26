@@ -1,9 +1,7 @@
 # format: file|exact_fixed_string|description
 
 # Frontend invoke/query mappings (post-16f0763 unified ingress boundary)
-dsm_client/frontend/src/dsm/transactions.ts|routerInvokeBin('wallet.send'|frontend online transfer maps to wallet.send
 dsm_client/frontend/src/dsm/transactions.ts|routerInvokeBin('wallet.sendSmart'|frontend smart online transfer maps to wallet.sendSmart
-dsm_client/frontend/src/dsm/transactions.ts|routerInvokeBin('message.send'|frontend online message maps to message.send
 dsm_client/frontend/src/dsm/transactions.ts|routerInvokeBin('wallet.sendOffline'|frontend bilateral prepare routes via wallet.sendOffline
 dsm_client/frontend/src/dsm/WebViewBridge/transportCore.ts|buildRouterInvokeIngressRequest|bridge builds routerInvoke via ingress helper
 dsm_client/frontend/src/dsm/WebViewBridge/transportCore.ts|buildRouterQueryIngressRequest|bridge builds routerQuery via ingress helper
