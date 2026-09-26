@@ -43,10 +43,9 @@ assert_file "$FRONT_PORT"
 assert_file "$JNI_BRIDGE"
 assert_file "$SDK_ROUTER"
 
-# Online transfer path — routes via unified ingress (routerInvokeBin → IngressRequest)
-assert_pattern "$FRONT_TX" "sendOnlineTransfer(" "frontend online transfer entrypoint missing"
-assert_pattern "$FRONT_TX" "routerInvokeBin('wallet.send'" "frontend online transfer must route via wallet.send"
-assert_pattern "$FRONT_TX" "routerInvokeBin('wallet.sendSmart'" "frontend smart online transfer must route via wallet.sendSmart"
+# Online transfer path — the send screen's, via unified ingress (routerInvokeBin → IngressRequest)
+assert_pattern "$FRONT_TX" "sendOnlineTransferSmart(" "frontend online transfer entrypoint missing"
+assert_pattern "$FRONT_TX" "routerInvokeBin('wallet.sendSmart'" "frontend online transfer must route via wallet.sendSmart"
 assert_pattern "$SDK_ROUTER" "process_online_transfer_logic" "sdk online transfer processing logic missing"
 
 # Offline bilateral prepare path
