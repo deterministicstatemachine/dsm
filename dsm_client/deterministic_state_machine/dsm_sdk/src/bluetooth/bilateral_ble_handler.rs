@@ -703,6 +703,18 @@ impl BilateralBleHandler {
         // step's row written under the one door (the peer's door is the other).
         let door = crate::security::modal_sync_lock::STEP_DOOR.lock().await;
         Self::ensure_counterparty_ready_for_prepare(&counterparty_device_id)?;
+        // An online send on the relationship holds it from its reservation,
+        // taken under the same door.
+        if crate::security::modal_sync_lock::is_pending_online(
+            &dsm::core::bilateral_transaction_manager::compute_smt_key(
+                &self.device_id,
+                &counterparty_device_id,
+            ),
+        ) {
+            return Err(DsmError::invalid_operation(
+                "§5.4: an online send on this relationship is in progress",
+            ));
+        }
 
         // FINALITY BARRIER — same authority as `wallet.send`, BEFORE any value
         // mutation: a BLE origination is an origination. Refused while our
@@ -1169,6 +1181,12 @@ impl BilateralBleHandler {
             bytes_to_base32(&origin_commitment_hash)
         );
 
+        // Through the peer's door: the online reservation, the tip this device
+        // holds and the step it holds in flight with the sender are read, Core
+        // decides with them, and the proposal's row is written — all under the
+        // one door this device's own proposals and online sends also take.
+        let door = crate::security::modal_sync_lock::STEP_DOOR.lock().await;
+
         // Ensure contact and relationship (receiver side)
         // We verify the SENDER (counterparty_device_id) is a known contact
         {
@@ -1296,11 +1314,6 @@ impl BilateralBleHandler {
                 .map_err(|_| {
                     DsmError::invalid_operation("the sender's pinned genesis is not 32 bytes")
                 })?;
-        // Through the peer's door: the step this device holds in flight with
-        // the sender is read, Core decides with it, and the proposal's row is
-        // written, under the one door (this device's own proposals are the
-        // other).
-        let door = crate::security::modal_sync_lock::STEP_DOOR.lock().await;
         let in_flight =
             step_in_flight_with(&counterparty_device_id, Some(&origin_commitment_hash))?
                 .map(|(hash, _phase)| hash);

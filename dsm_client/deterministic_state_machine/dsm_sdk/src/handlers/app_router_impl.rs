@@ -912,6 +912,13 @@ impl AppRouterImpl {
             ));
         }
 
+        // One step at a time on the relationship, whichever process: the online
+        // reservation and the send-ready check — which counts an offline step in
+        // flight — are taken under the doors' one critical section, so no
+        // offline step comes into flight between them, and none after: the
+        // offline doors check the reservation under the same door.
+        let door = crate::security::modal_sync_lock::STEP_DOOR.lock().await;
+
         // §5.4 Modal lock: reserve this (A,B) relationship before any local mutation.
         // If another online transition is already pending, fail closed.
         // Held for the rest of this function. Releasing it is the guard's job, on
@@ -949,6 +956,7 @@ impl AppRouterImpl {
                 crate::handlers::relationship_status::status_message(&send_status)
             ));
         }
+        drop(door);
 
         // Tripwire preflight: the parent tip may be consumed only once.
         match crate::storage::client_db::contact_chain_tip_matches_expected(

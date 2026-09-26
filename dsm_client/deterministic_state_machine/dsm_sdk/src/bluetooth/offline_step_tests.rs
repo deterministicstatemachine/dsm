@@ -1301,3 +1301,101 @@ async fn a_committed_steps_prepare_delivered_again_is_not_refused() {
         answer.len()
     );
 }
+
+/// One step at a time holds across the online and offline processes. While an
+/// offline step with a contact is in flight — this device's proposal, or the
+/// contact's proposal it holds — the relationship is not send-ready, and an
+/// online send to that contact is refused before any mutation. Once the step
+/// ends, the online send goes.
+/// MUTATION CONTROL: dropping the offline-step clause from the send-ready
+/// authority lets the online sends through and turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn an_online_send_waits_for_the_offline_step_in_flight() {
+    let pair = Pair::boot(1_000, 1_000).await;
+    let a = OfflineDevice::new(&pair.a);
+    let b = OfflineDevice::new(&pair.b);
+
+    a.device.enter();
+    let (prepare, step) = a
+        .handler
+        .prepare_bilateral_transaction(b.device.device_id, marked(1))
+        .await
+        .expect("A proposes offline");
+    let status = crate::handlers::relationship_status::derive_local_send_status_for_device_id(
+        &b.device.device_id,
+    );
+    assert!(
+        !status.send_ready && status.send_block_message.contains("offline step"),
+        "A's relationship is send-ready with its offline step in flight: {status:?}"
+    );
+    let refused = pair.a.send(&pair.b, 10).await;
+    assert!(
+        !refused.success,
+        "A sent online with its offline step in flight"
+    );
+    assert_eq!(pair.a.era_balance(), 1_000, "a refused send debited");
+
+    b.device.enter();
+    b.handler
+        .handle_prepare_request(&prepare, None)
+        .await
+        .expect("B holds A's proposal for its user");
+    let refused = pair.b.send(&pair.a, 10).await;
+    assert!(
+        !refused.success,
+        "B sent online while it held A's offline proposal"
+    );
+    assert_eq!(pair.b.era_balance(), 1_000, "a refused send debited");
+
+    a.device.enter();
+    let cancellation = a
+        .handler
+        .cancel_proposal(step, "changed my mind".to_string())
+        .await
+        .expect("A cancels its proposal");
+    b.device.enter();
+    b.handler
+        .handle_prepare_reject(&cancellation)
+        .await
+        .expect("B takes the cancellation");
+
+    let sent = pair.a.send(&pair.b, 10).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+}
+
+/// And the other way: while an online send on the relationship holds its
+/// reservation, an offline proposal to that contact is refused; once the
+/// reservation is released, it is proposed.
+/// MUTATION CONTROL: dropping the reservation check from the offline
+/// proposer's door lets the proposal through and turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn an_offline_proposal_waits_for_an_online_send_in_progress() {
+    let pair = Pair::boot(0, 0).await;
+    let a = OfflineDevice::new(&pair.a);
+    let b = OfflineDevice::new(&pair.b);
+
+    a.device.enter();
+    let reservation = crate::security::modal_sync_lock::PendingOnlineGuard::acquire(
+        &dsm::core::bilateral_transaction_manager::compute_smt_key(
+            &a.device.device_id,
+            &b.device.device_id,
+        ),
+    )
+    .expect("the online send's reservation");
+    let refused = a
+        .handler
+        .prepare_bilateral_transaction(b.device.device_id, marked(1))
+        .await
+        .expect_err("an online send is in progress");
+    assert!(
+        refused.to_string().contains("online send"),
+        "unexpected refusal: {refused}"
+    );
+    drop(reservation);
+    a.handler
+        .prepare_bilateral_transaction(b.device.device_id, marked(1))
+        .await
+        .expect("A proposes once the online send is done");
+}
