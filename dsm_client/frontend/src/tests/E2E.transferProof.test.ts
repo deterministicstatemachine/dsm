@@ -98,6 +98,7 @@ function makeContactsFramedEnvelope(bleAddress?: string): Uint8Array {
     genesisHash: new pb.Hash32({ v: COUNTERPARTY_GENESIS }),
     chainTip: new pb.Hash32({ v: COUNTERPARTY_TIP }),
     bleAddress: bleAddress || 'AA:BB:CC:DD:EE:FF',
+    pairing: pb.ContactPairingPhase.PAIRED,
   } as any);
   const resp = new pb.ContactsListResponse({ contacts: [contact] });
   const env = new pb.Envelope({

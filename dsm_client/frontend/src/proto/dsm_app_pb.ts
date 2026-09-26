@@ -839,6 +839,62 @@ proto3.util.setEnumType(ValueCapabilityV1, "dsm.ValueCapabilityV1", [
 ]);
 
 /**
+ * Where BLE pairing with a contact stands, as the SDK's pairing loop has it.
+ *
+ * @generated from enum dsm.ContactPairingPhase
+ */
+export enum ContactPairingPhase {
+  /**
+   * @generated from enum value: CONTACT_PAIRING_PHASE_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * The contact holds the BLE address pairing confirmed.
+   *
+   * @generated from enum value: CONTACT_PAIRING_PHASE_PAIRED = 1;
+   */
+  PAIRED = 1,
+
+  /**
+   * Not paired, and no pairing session is under way.
+   *
+   * @generated from enum value: CONTACT_PAIRING_PHASE_IDLE = 2;
+   */
+  IDLE = 2,
+
+  /**
+   * A pairing session waits for the phone to be seen over BLE.
+   *
+   * @generated from enum value: CONTACT_PAIRING_PHASE_SEARCHING = 3;
+   */
+  SEARCHING = 3,
+
+  /**
+   * The phone was seen; the pairing exchange is under way.
+   *
+   * @generated from enum value: CONTACT_PAIRING_PHASE_CONNECTED = 4;
+   */
+  CONNECTED = 4,
+
+  /**
+   * The last attempt did not complete; the pairing loop tries again.
+   *
+   * @generated from enum value: CONTACT_PAIRING_PHASE_RETRYING = 5;
+   */
+  RETRYING = 5,
+}
+// Retrieve enum metadata with: proto3.getEnumType(ContactPairingPhase)
+proto3.util.setEnumType(ContactPairingPhase, "dsm.ContactPairingPhase", [
+  { no: 0, name: "CONTACT_PAIRING_PHASE_UNSPECIFIED" },
+  { no: 1, name: "CONTACT_PAIRING_PHASE_PAIRED" },
+  { no: 2, name: "CONTACT_PAIRING_PHASE_IDLE" },
+  { no: 3, name: "CONTACT_PAIRING_PHASE_SEARCHING" },
+  { no: 4, name: "CONTACT_PAIRING_PHASE_CONNECTED" },
+  { no: 5, name: "CONTACT_PAIRING_PHASE_RETRYING" },
+]);
+
+/**
  * @generated from enum dsm.SdkEventKind
  */
 export enum SdkEventKind {
@@ -20015,6 +20071,13 @@ export class ContactAddResponse extends Message<ContactAddResponse> {
    */
   sendStatus?: RelationshipSendStatus;
 
+  /**
+   * Where BLE pairing with the contact stands; set on contacts.list.
+   *
+   * @generated from field: dsm.ContactPairingPhase pairing = 14;
+   */
+  pairing = ContactPairingPhase.UNSPECIFIED;
+
   constructor(data?: PartialMessage<ContactAddResponse>) {
     super();
     proto3.util.initPartial(data, this);
@@ -20033,6 +20096,7 @@ export class ContactAddResponse extends Message<ContactAddResponse> {
     { no: 11, name: "ble_address", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 12, name: "signing_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 13, name: "send_status", kind: "message", T: RelationshipSendStatus },
+    { no: 14, name: "pairing", kind: "enum", T: proto3.getEnumType(ContactPairingPhase) },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ContactAddResponse {

@@ -112,6 +112,13 @@ impl AppRouterImpl {
                     };
                     let mut item = contact_add_response(contact);
                     item.send_status = Some(derive_local_send_status_for_contact(&record));
+                    let session = crate::bluetooth::get_pairing_orchestrator()
+                        .get_session_status(&contact.device_id)
+                        .await;
+                    item.pairing = crate::bluetooth::pairing_orchestrator::contact_pairing_phase(
+                        record.ble_address.as_deref().is_some_and(|a| !a.is_empty()),
+                        session.as_ref(),
+                    ) as i32;
                     items.push(item);
                 }
                 let reply = generated::ContactsListResponse { contacts: items };
@@ -281,6 +288,7 @@ mod tests {
             ble_address: "AA:BB:CC:DD:EE:FF".into(),
             signing_public_key: vec![0x88; 64],
             send_status: None,
+            pairing: generated::ContactPairingPhase::Paired as i32,
         };
 
         let bytes = resp.encode_to_vec();
@@ -290,5 +298,69 @@ mod tests {
         assert!(decoded.genesis_verified_online);
         assert_eq!(decoded.verifying_storage_nodes.len(), 2);
         assert_eq!(decoded.ble_address, "AA:BB:CC:DD:EE:FF");
+    }
+}
+
+#[cfg(test)]
+mod pairing_phase_tests {
+    use crate::bridge::{AppQuery, AppRouter};
+    use dsm::types::proto as generated;
+    use dsm::types::proto::ContactPairingPhase as Phase;
+
+    async fn pairing_with(
+        device: &crate::test_support::two_device::TestDevice,
+        peer: [u8; 32],
+    ) -> Phase {
+        device.enter();
+        let answer = device
+            .router()
+            .query(AppQuery {
+                path: "contacts.list".to_string(),
+                params: Vec::new(),
+            })
+            .await;
+        assert!(answer.success, "contacts.list: {:?}", answer.error_message);
+        let env = crate::handlers::response_helpers::decode_local_envelope(&answer.data)
+            .expect("a local answer");
+        let Some(generated::envelope::Payload::ContactsListResponse(list)) = env.payload else {
+            panic!("contacts.list answered {:?}", env.payload);
+        };
+        let contact = list
+            .contacts
+            .iter()
+            .find(|c| c.device_id == peer.to_vec())
+            .expect("the peer is listed");
+        Phase::try_from(contact.pairing).expect("a named phase")
+    }
+
+    /// The contact list states where BLE pairing with each contact stands, as
+    /// the SDK's pairing loop has it. The contacts screen used to infer it from
+    /// raw radio events, and showed "Paired!" when a phone's identity was read.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn the_contact_list_states_where_pairing_stands() {
+        let pair = crate::test_support::two_device::Pair::boot(0, 0).await;
+        let (a, b) = (&pair.a, &pair.b);
+        let orchestrator = crate::bluetooth::get_pairing_orchestrator();
+
+        assert_eq!(pairing_with(a, b.device_id).await, Phase::Idle);
+
+        a.enter();
+        orchestrator
+            .initiate_pairing(b.device_id)
+            .await
+            .expect("a session for B");
+        assert_eq!(pairing_with(a, b.device_id).await, Phase::Searching);
+
+        a.enter();
+        crate::storage::client_db::update_contact_ble_status(
+            &b.device_id,
+            None,
+            Some("AA:BB:CC:DD:EE:0B"),
+        )
+        .expect("pairing stores the address");
+        assert_eq!(pairing_with(a, b.device_id).await, Phase::Paired);
+
+        orchestrator.cancel_pairing(&b.device_id).await;
     }
 }

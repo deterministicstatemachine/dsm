@@ -3099,6 +3099,23 @@ message ContactAddResponse {
   string ble_address = 11; // BLE MAC address for offline bilateral transfers
   bytes  signing_public_key = 12 [(dsm_fixed_len)=64]; // SPHINCS+ SPX256s public key for bilateral verification
   RelationshipSendStatus send_status = 13;
+  // Where BLE pairing with the contact stands; set on contacts.list.
+  ContactPairingPhase pairing = 14;
+}
+
+// Where BLE pairing with a contact stands, as the SDK's pairing loop has it.
+enum ContactPairingPhase {
+  CONTACT_PAIRING_PHASE_UNSPECIFIED = 0;
+  // The contact holds the BLE address pairing confirmed.
+  CONTACT_PAIRING_PHASE_PAIRED = 1;
+  // Not paired, and no pairing session is under way.
+  CONTACT_PAIRING_PHASE_IDLE = 2;
+  // A pairing session waits for the phone to be seen over BLE.
+  CONTACT_PAIRING_PHASE_SEARCHING = 3;
+  // The phone was seen; the pairing exchange is under way.
+  CONTACT_PAIRING_PHASE_CONNECTED = 4;
+  // The last attempt did not complete; the pairing loop tries again.
+  CONTACT_PAIRING_PHASE_RETRYING = 5;
 }
 
 // ======================== Faucet Operations =========================

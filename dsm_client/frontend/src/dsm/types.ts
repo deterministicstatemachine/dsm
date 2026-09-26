@@ -2,6 +2,7 @@
 
 // Lightweight shared types for DSM UI flows and events
 import * as pb from '../proto/dsm_app_pb';
+import type { ContactPairing } from '../domain/types';
 
 /**
  * A contact as `contacts.list` states it (pb-aligned, binary). Rust writes the
@@ -15,6 +16,7 @@ export interface BilateralRelationshipDTO {
   /** The relationship's tip, once it has one. */
   chainTip?: Uint8Array;            // 32 bytes
   bleAddress?: string;              // BLE MAC address for offline bilateral transfers
+  pairing: ContactPairing;          // where BLE pairing stands, as Rust's pairing loop has it
   genesisVerifiedOnline: boolean;   // genesis hash verified via storage node
   sendStatus?: pb.RelationshipSendStatus;
 }

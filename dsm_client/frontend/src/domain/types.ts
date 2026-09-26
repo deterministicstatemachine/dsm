@@ -21,12 +21,16 @@ export type DomainRelationshipSendStatus = {
   sendBlockMessage?: string;
 };
 
+/** Where BLE pairing with a contact stands, as Rust's pairing loop has it. */
+export type ContactPairing = 'paired' | 'idle' | 'searching' | 'connected' | 'retrying';
+
 export type DomainContact = {
   alias: string;
   deviceId: string;
   genesisHash: string;
   chainTip?: string;
   bleAddress?: string;
+  pairing: ContactPairing;
   genesisVerifiedOnline: boolean;
   signingPublicKey: string;  // base32 Crockford encoded
   sendReady?: boolean;

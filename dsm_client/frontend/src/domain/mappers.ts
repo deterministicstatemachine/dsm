@@ -74,6 +74,7 @@ export function mapContactList(list: BilateralRelationshipDTO[]): DomainContact[
       chainTip: c.chainTip ? toBase32Crockford(c.chainTip) : undefined,
       // The address Rust holds for the contact: pairing confirmed it.
       bleAddress: c.bleAddress,
+      pairing: c.pairing,
       genesisVerifiedOnline: c.genesisVerifiedOnline,
       signingPublicKey: toBase32Crockford(c.publicKey),
       sendReady: sendStatus?.sendReady,

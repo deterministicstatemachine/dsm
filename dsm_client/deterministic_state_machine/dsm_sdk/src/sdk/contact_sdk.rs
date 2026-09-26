@@ -222,6 +222,9 @@ pub fn contact_add_response(
                 &contact.device_id,
             ),
         ),
+        // Where pairing stands is the contact list's to state (`contacts.list`),
+        // from the pairing loop's sessions; an add reply states none.
+        pairing: pb::ContactPairingPhase::Unspecified as i32,
     }
 }
 

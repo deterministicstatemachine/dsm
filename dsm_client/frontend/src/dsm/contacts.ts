@@ -9,6 +9,15 @@ import {
   requestBlePermissions as bridgeRequestBlePermissions,
 } from './WebViewBridge';
 import { ContactsList, AddContactArgs, AddContactResult, BilateralRelationshipDTO, ContactCard } from './types';
+import type { ContactPairing } from '../domain/types';
+
+const PAIRING: Partial<Record<pb.ContactPairingPhase, ContactPairing>> = {
+  [pb.ContactPairingPhase.PAIRED]: 'paired',
+  [pb.ContactPairingPhase.IDLE]: 'idle',
+  [pb.ContactPairingPhase.SEARCHING]: 'searching',
+  [pb.ContactPairingPhase.CONNECTED]: 'connected',
+  [pb.ContactPairingPhase.RETRYING]: 'retrying',
+};
 
 /** A contact as contacts.list states it; a contact missing what Rust always writes is refused. */
 function mapContactToDTO(c: pb.ContactAddResponse): BilateralRelationshipDTO {
@@ -29,6 +38,10 @@ function mapContactToDTO(c: pb.ContactAddResponse): BilateralRelationshipDTO {
   if (chainTip !== undefined && chainTip.length !== 32) {
     throw new Error(`STRICT: contacts.list answered a contact with a ${chainTip.length}-byte tip`);
   }
+  const pairing = PAIRING[c.pairing];
+  if (!pairing) {
+    throw new Error(`STRICT: contacts.list answered a contact in a pairing phase the wire does not name (${c.pairing})`);
+  }
   return {
     deviceId: c.deviceId,
     publicKey: c.signingPublicKey,
@@ -37,6 +50,7 @@ function mapContactToDTO(c: pb.ContactAddResponse): BilateralRelationshipDTO {
     chainTip,
     // The wire's empty string is "no address".
     bleAddress: c.bleAddress || undefined,
+    pairing,
     genesisVerifiedOnline: c.genesisVerifiedOnline,
     sendStatus: c.sendStatus,
   };

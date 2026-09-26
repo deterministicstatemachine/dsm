@@ -90,6 +90,7 @@ describe('E2E: Offline BLE exchange -> wallet refresh', () => {
                     genesisHash: new pb.Hash32({ v: BOB_GENESIS } as any),
                     chainTip: new pb.Hash32({ v: BOB_TIP } as any),
                     bleAddress: 'AA:BB:CC:DD:EE:FF',
+                    pairing: pb.ContactPairingPhase.PAIRED,
                   },
                 ],
               } as any);
