@@ -19937,6 +19937,10 @@ export class RecoverySuccessionProofV1 extends Message<RecoverySuccessionProofV1
 
 /**
  * ==================== Minimal deterministic identity =================
+ * A device's contact card. Its text form, the contact code, is written by
+ * `identity.contact_code` and read by `contacts.readContactCode`. The card
+ * names no nodes: the reader resolves the device's directory entry on the
+ * pinned set of the network the card names.
  *
  * @generated from message dsm.ContactQrV3
  */
@@ -19949,27 +19953,11 @@ export class ContactQrV3 extends Message<ContactQrV3> {
   deviceId = new Uint8Array(0);
 
   /**
-   * e.g. "main" | "test"
+   * the network the device's genesis committed; a reader on another network refuses the card
    *
    * @generated from field: string network = 2;
    */
   network = "";
-
-  /**
-   * Replace single CSV storage_hint with an explicit
-   * repeated list of storage node endpoints. A minimum of 3 MUST be supplied
-   * to allow multi-node online genesis hash verification.
-   *
-   * e.g. ["http://host:8080", "http://host:8081", ...]
-   *
-   * @generated from field: repeated string storage_nodes = 3;
-   */
-  storageNodes: string[] = [];
-
-  /**
-   * @generated from field: bytes sdk_fingerprint = 4;
-   */
-  sdkFingerprint = new Uint8Array(0);
 
   /**
    * raw 32-byte genesis hash
@@ -19986,7 +19974,7 @@ export class ContactQrV3 extends Message<ContactQrV3> {
   signingPublicKey = new Uint8Array(0);
 
   /**
-   * Optional user-chosen alias; backend uses this if non-empty, otherwise generates from device_id
+   * Optional alias the card's owner suggests
    *
    * @generated from field: string preferred_alias = 7;
    */
@@ -20002,8 +19990,6 @@ export class ContactQrV3 extends Message<ContactQrV3> {
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
     { no: 1, name: "device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 2, name: "network", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 3, name: "storage_nodes", kind: "scalar", T: 9 /* ScalarType.STRING */, repeated: true },
-    { no: 4, name: "sdk_fingerprint", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 5, name: "genesis_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 6, name: "signing_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 7, name: "preferred_alias", kind: "scalar", T: 9 /* ScalarType.STRING */ },

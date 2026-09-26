@@ -222,10 +222,6 @@ function installCallBinMock() {
 
       // --- Direct bridge methods ---
 
-      if (method === 'hasIdentityDirect') {
-        return wrapSuccess(new Uint8Array([0x01])); // identity exists
-      }
-
       if (method === 'getTransportHeadersV3Bin') {
         const headers = new pb.Headers({
           deviceId: DEVICE_ID as any,
@@ -289,7 +285,6 @@ function installCallBinMock() {
       return bridge.__callBin(reqBytes);
     },
     getAppRouterStatus: () => 1,
-    hasIdentityDirect: () => true,
   };
 
   g.window.DsmBridge = bridge;

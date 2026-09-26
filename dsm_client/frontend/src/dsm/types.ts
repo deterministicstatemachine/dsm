@@ -3,41 +3,6 @@
 // Lightweight shared types for DSM UI flows and events
 import * as pb from '../proto/dsm_app_pb';
 
-export type DsmRawEvent = {
-  type?: string;
-  payload?: unknown;
-  [k: string]: unknown;
-};
-
-export type ContactAddProgress = {
-  kind: "contact:add:progress";
-  step:
-    | "qr:parsed"
-    | "qr:validated"
-    | "bridge:request_sent"
-    | "storage:verifying"
-    | "storage:verified_quorum"
-    | "done";
-  info?: Record<string, unknown>;
-};
-
-export type ContactAddSuccess = {
-  kind: "contact:add:success";
-  deviceId?: string; // base32 (Crockford)
-  verifyingNodes?: string[];
-  genesisHashBase32?: string;
-};
-
-export type ContactAddFailure = {
-  kind: "contact:add:failure";
-  error: string;
-  info?: Record<string, unknown>;
-};
-
-export type ContactAddEvent = ContactAddProgress | ContactAddSuccess | ContactAddFailure;
-
-export type DsmEventListener = (e: ContactAddEvent | DsmRawEvent) => void;
-
 /**
  * A contact as `contacts.list` states it (pb-aligned, binary). Rust writes the
  * device id, genesis, signing key and alias on every contact.
@@ -142,20 +107,35 @@ export interface ContactsList {
  * Add Contact Arguments
  */
 export interface AddContactArgs {
+  /** Empty: Rust names the contact by its device. */
   alias: string;
-  deviceId: Uint8Array | string;
-  genesisHash: Uint8Array | string;
-  signingPublicKey: Uint8Array | string;
+  deviceId: Uint8Array;
+  genesisHash: Uint8Array;
+  signingPublicKey: Uint8Array;
+}
+
+/**
+ * The card a contact code carries, as Rust read it (`contacts.readContactCode`).
+ * Rust refuses a code that is not whole or names another network than this
+ * device's.
+ */
+export interface ContactCard {
+  deviceId: Uint8Array;
+  genesisHash: Uint8Array;
+  signingPublicKey: Uint8Array;
+  network: string;
+  /** The alias the card's owner suggests, when it names one. */
+  preferredAlias?: string;
 }
 
 /**
  * Add Contact Result
  */
-export interface AddContactResult {
-  accepted: boolean;
-  contactId?: string; // Base32 DeviceID
-  error?: string;
-}
+export type AddContactResult =
+  /** The contact Rust added: its device (Base32) and the alias Rust stored. */
+  | { accepted: true; contactId: string; alias: string }
+  /** Rust's refusal, as Rust worded it. */
+  | { accepted: false; error: string };
 
 /**
  * One row of `balance.list`, as Rust reported it. Rust enriches every row at

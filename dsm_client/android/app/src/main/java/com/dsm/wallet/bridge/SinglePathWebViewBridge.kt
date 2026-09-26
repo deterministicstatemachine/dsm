@@ -586,19 +586,6 @@ class SinglePathWebViewBridge(private val context: Context) {
                     BridgeBleHandler.setBleIdentityForAdvertising(out, TAG)
                 }
 
-                "handleContactQrV3" -> {
-                    try {
-                        Log.d(TAG, "handleBinaryRpc: handleContactQrV3 invoked payloadLen=${payload.size}")
-                        val result = UnifiedContactBridge.handleContactQrV3(payload)
-                        Log.d(TAG, "handleBinaryRpc: handleContactQrV3 resultLen=${result.size}")
-                        result
-                    } catch (t: Throwable) {
-                        Log.w(TAG, "handleContactQrV3 failed", t)
-                        // Return empty bytes on error; frontend will handle via timeout/events
-                        ByteArray(0)
-                    }
-                }
-
                 // Generic Envelope v3 processing (online transfers, DBRW export, etc.)
                 "processEnvelopeV3" -> {
                     try {

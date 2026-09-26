@@ -32,7 +32,7 @@ import androidx.annotation.Keep
 //   Shared boundary: dispatchStartup, dispatchIngress
 //   Bilateral: acceptBilateralByCommitment, ...
 //   BLE:       initBleCoordinator, processBleChunk, chunkEnvelopeForBle, ...
-//   Contacts:  removeContact, handleContactQrV3, hasContactForDeviceId
+//   Contacts:  removeContact, hasContactForDeviceId
 //
 // Full method list: See UnifiedNativeApi.kt for all 87+ external declarations.
 // ============================================================================
@@ -355,8 +355,6 @@ object Unified {
     // ---------- Contact management ----------
     @Keep @JvmStatic fun removeContact(contactId: String): Byte =
         UnifiedNativeApi.removeContact(contactId)
-    @Keep @JvmStatic fun handleContactQrV3(contactQrV3Bytes: ByteArray): ByteArray =
-        UnifiedNativeApi.handleContactQrV3(contactQrV3Bytes)
 
     // ---------- Bilateral BLE operations ----------
     

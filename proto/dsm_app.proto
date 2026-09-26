@@ -3057,17 +3057,18 @@ message RecoverySuccessionProofV1 {
 }
 
 // ==================== Minimal deterministic identity =================
+// A device's contact card. Its text form, the contact code, is written by
+// `identity.contact_code` and read by `contacts.readContactCode`. The card
+// names no nodes: the reader resolves the device's directory entry on the
+// pinned set of the network the card names.
 message ContactQrV3 {
+  reserved 3, 4;
+  reserved "storage_nodes", "sdk_fingerprint";
   bytes  device_id       = 1 [(dsm_fixed_len)=32]; // raw 32-byte device identifier
-  string network         = 2; // e.g. "main" | "test"
-  // Replace single CSV storage_hint with an explicit
-  // repeated list of storage node endpoints. A minimum of 3 MUST be supplied
-  // to allow multi-node online genesis hash verification.
-  repeated string storage_nodes = 3; // e.g. ["http://host:8080", "http://host:8081", ...]
-  bytes  sdk_fingerprint = 4 [(dsm_fixed_len)=32];
+  string network         = 2; // the network the device's genesis committed; a reader on another network refuses the card
   bytes  genesis_hash    = 5 [(dsm_fixed_len)=32]; // raw 32-byte genesis hash
   bytes  signing_public_key = 6 [(dsm_fixed_len)=64]; // SPHINCS+ SPX256s public key for bilateral verification
-  string preferred_alias = 7; // Optional user-chosen alias; backend uses this if non-empty, otherwise generates from device_id
+  string preferred_alias = 7; // Optional alias the card's owner suggests
 }
 
 message ContactManualAddRequest {
