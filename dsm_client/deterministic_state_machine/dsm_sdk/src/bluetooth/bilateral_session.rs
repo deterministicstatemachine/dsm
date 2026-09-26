@@ -93,8 +93,10 @@ pub struct BilateralBleSession {
     pub parent_tip: Option<[u8; 32]>,
     /// The frame this session owes its counterparty until the counterparty
     /// answers it: the sender's prepare (Prepared) or confirm
-    /// (ConfirmPending), the receiver's response (Accepted). Written with the
-    /// phase that owes it, and delivered again whenever the link returns.
+    /// (ConfirmPending), the receiver's response (Accepted) — written with
+    /// the phase that owes it and delivered again whenever the link returns.
+    /// A rejected step keeps the signed rejection (or cancellation) that
+    /// ended it, the answer to the counterparty's next frame for the step.
     pub owed_frame: Option<Vec<u8>>,
 }
 
@@ -119,6 +121,14 @@ impl BilateralBleSession {
     /// its answer owes the prepare, an acceptance awaiting its confirm owes the
     /// response, a confirm awaiting its ack owes the confirm. A session in any
     /// other phase owes nothing.
+    /// The signed rejection or cancellation that ended this step, the answer
+    /// to any frame the counterparty sends for it again.
+    pub fn rejection(&self) -> Option<Vec<u8>> {
+        (self.phase == BilateralPhase::Rejected)
+            .then(|| self.owed_frame.clone())
+            .flatten()
+    }
+
     pub fn owed(&self) -> Option<OwedFrame> {
         let kind = match self.phase {
             BilateralPhase::Prepared => OfflineFrameKind::Prepare,

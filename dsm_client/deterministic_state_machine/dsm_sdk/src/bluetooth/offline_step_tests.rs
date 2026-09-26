@@ -781,3 +781,206 @@ async fn a_prepare_delivered_again_to_an_acceptance_is_answered_with_its_respons
         .expect("the proposal delivered again after the restart");
     assert_eq!(answered, response, "answered with the response it owes");
 }
+
+/// The rejection frame `rejection` with its rejector signature replaced.
+fn with_rejector_signature(rejection: &[u8], signature: Vec<u8>) -> Vec<u8> {
+    use prost::Message;
+    let mut envelope =
+        crate::envelope::from_canonical_bytes(rejection).expect("the rejection decodes");
+    let Some(crate::generated::envelope::Payload::BilateralPrepareReject(reject)) =
+        envelope.payload.as_mut()
+    else {
+        panic!("a rejection is a BilateralPrepareReject");
+    };
+    reject.rejector_signature = signature;
+    envelope.encode_to_vec()
+}
+
+/// A proposal accepted by a receiver whose response is lost, up to that
+/// response: the sender holds the proposal Prepared, the receiver Accepted.
+async fn to_a_lost_response(a: &OfflineDevice, b: &OfflineDevice) -> ([u8; 32], Vec<u8>, Vec<u8>) {
+    a.device.enter();
+    let (prepare, commitment) = a
+        .handler
+        .prepare_bilateral_transaction(b.device.device_id, Operation::Noop)
+        .await
+        .expect("the sender prepares");
+    b.device.enter();
+    b.handler
+        .handle_prepare_request(&prepare, None)
+        .await
+        .expect("the receiver takes the proposal");
+    let response = b
+        .handler
+        .create_prepare_accept_envelope(commitment)
+        .await
+        .expect("the receiver's user accepts");
+    (commitment, prepare, response)
+}
+
+/// A proposer whose proposal went unanswered cancels it: the relationship is
+/// free for the next step at once. The receiver, still holding its
+/// acceptance, delivers its response again when the link returns; the
+/// proposer answers with the signed cancellation, which ends the receiver's
+/// side. Nothing moved on either side.
+/// MUTATION CONTROL: refusing a rejection outside the proposer's phases (the
+/// behaviour replaced) leaves the receiver's acceptance standing and turns
+/// this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_proposer_cancels_an_unanswered_proposal_and_the_receiver_ends_it_on_its_next_frame() {
+    let pair = Pair::boot(0, 0).await;
+    let a = OfflineDevice::new(&pair.a);
+    let b = OfflineDevice::new(&pair.b);
+    let h_0 = a.tip_with(&b);
+
+    let (commitment, _prepare, _lost_response) = to_a_lost_response(&a, &b).await;
+    a.device.enter();
+    a.handler
+        .cancel_proposal(commitment, "no answer".to_string())
+        .await
+        .expect("the proposer cancels its unanswered proposal");
+    assert!(
+        a.handler
+            .frames_owed_to(&b.device.device_id)
+            .await
+            .is_empty(),
+        "a cancelled proposal owes nothing"
+    );
+
+    b.device.enter();
+    let owed = b.handler.frames_owed_to(&a.device.device_id).await;
+    assert_eq!(owed.len(), 1, "the receiver still owes its response");
+    a.device.enter();
+    let (answer, _) = a
+        .handler
+        .handle_prepare_response(&owed[0].bytes)
+        .await
+        .expect("the response is answered");
+    b.device.enter();
+    b.handler
+        .handle_prepare_reject(&answer)
+        .await
+        .expect("the proposer's signed cancellation ends the receiver's side");
+    assert!(
+        b.handler
+            .frames_owed_to(&a.device.device_id)
+            .await
+            .is_empty(),
+        "the receiver owes nothing after the cancellation"
+    );
+    assert_eq!(a.tip_with(&b), h_0, "nothing moved on the proposer");
+    assert_eq!(b.tip_with(&a), h_0, "nothing moved on the receiver");
+
+    // The relationship is free for the next step: no step is in flight. The
+    // same operation on the same tip is the cancelled step again, and is
+    // refused as that — not as a step in progress.
+    a.device.enter();
+    let again = a
+        .handler
+        .prepare_bilateral_transaction(b.device.device_id, Operation::Noop)
+        .await
+        .expect_err("the cancelled step is not proposed again");
+    assert!(again.to_string().contains("already proposed"), "{again}");
+}
+
+/// A cancellation its proposer did not sign ends nothing: the receiver keeps
+/// its acceptance and still owes its response.
+/// MUTATION CONTROL: ending the step without the rejector's signature
+/// verified turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_cancellation_its_proposer_did_not_sign_ends_nothing() {
+    let pair = Pair::boot(0, 0).await;
+    let a = OfflineDevice::new(&pair.a);
+    let b = OfflineDevice::new(&pair.b);
+
+    let (commitment, _prepare, _lost_response) = to_a_lost_response(&a, &b).await;
+    a.device.enter();
+    let cancellation = a
+        .handler
+        .cancel_proposal(commitment, "no answer".to_string())
+        .await
+        .expect("the proposer cancels");
+    let forged = with_rejector_signature(&cancellation, vec![0x5A; 64]);
+    b.device.enter();
+    b.handler
+        .handle_prepare_reject(&forged)
+        .await
+        .expect_err("a cancellation its proposer did not sign");
+    assert_eq!(
+        b.handler.frames_owed_to(&a.device.device_id).await.len(),
+        1,
+        "the receiver's acceptance stands"
+    );
+}
+
+/// A step past its confirm is not cancelled: its receiver may have committed.
+/// MUTATION CONTROL: allowing a cancellation in ConfirmPending turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_confirmed_step_cannot_be_cancelled() {
+    let pair = Pair::boot(0, 0).await;
+    let a = OfflineDevice::new(&pair.a);
+    let b = OfflineDevice::new(&pair.b);
+
+    let (commitment, _ack) = to_the_ack(&a, &b, Operation::Noop).await;
+    a.device.enter();
+    let refused = a
+        .handler
+        .cancel_proposal(commitment, "too late".to_string())
+        .await
+        .expect_err("a confirmed step is not cancelled");
+    assert!(
+        refused.to_string().contains("receiver may have committed"),
+        "{refused}"
+    );
+    assert_eq!(
+        a.handler.frames_owed_to(&b.device.device_id).await.len(),
+        1,
+        "the confirm is still owed"
+    );
+}
+
+/// A receiver that rejected a proposal answers the proposal delivered again
+/// with its signed rejection, which ends the proposer's side.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_receiver_that_rejected_answers_the_prepare_again_with_its_rejection() {
+    let pair = Pair::boot(0, 0).await;
+    let a = OfflineDevice::new(&pair.a);
+    let b = OfflineDevice::new(&pair.b);
+
+    a.device.enter();
+    let (prepare, commitment) = a
+        .handler
+        .prepare_bilateral_transaction(b.device.device_id, Operation::Noop)
+        .await
+        .expect("the sender prepares");
+    b.device.enter();
+    b.handler
+        .handle_prepare_request(&prepare, None)
+        .await
+        .expect("the receiver takes the proposal");
+    let rejection = b
+        .handler
+        .create_prepare_reject_envelope_with_cleanup(commitment, "no thanks".to_string())
+        .await
+        .expect("the receiver's user rejects");
+    let (answer, _) = b
+        .handler
+        .handle_prepare_request(&prepare, None)
+        .await
+        .expect("the proposal delivered again");
+    assert_eq!(answer, rejection, "answered with the rejection");
+    a.device.enter();
+    a.handler
+        .handle_prepare_reject(&answer)
+        .await
+        .expect("the rejection ends the proposer's side");
+    assert!(a
+        .handler
+        .frames_owed_to(&b.device.device_id)
+        .await
+        .is_empty());
+}

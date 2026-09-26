@@ -193,12 +193,16 @@ fn classify_prepare_reply(envelope_bytes: &[u8]) -> Option<BleFrameType> {
     }
 }
 
-/// Route a `handle_prepare_response` reply to its BLE frame by the returned envelope's payload.
-/// The only routable reply is the confirm (a UniversalTx invoking "bilateral.confirm") — anything
-/// else is `None` → fail-closed at the call site (never a best-effort frame guess).
+/// Route a `handle_prepare_response` reply to its BLE frame by the returned envelope's payload:
+/// the confirm (a UniversalTx invoking "bilateral.confirm"), or the signed cancellation of a
+/// proposal this device cancelled. Anything else is `None` → fail-closed at the call site
+/// (never a best-effort frame guess).
 fn classify_prepare_response_reply(envelope_bytes: &[u8]) -> Option<BleFrameType> {
     let env = crate::envelope::from_canonical_bytes(envelope_bytes).ok()?;
     match env.payload {
+        Some(crate::generated::envelope::Payload::BilateralPrepareReject(_)) => {
+            Some(BleFrameType::BilateralPrepareReject)
+        }
         Some(crate::generated::envelope::Payload::UniversalTx(ref tx)) => tx
             .ops
             .first()

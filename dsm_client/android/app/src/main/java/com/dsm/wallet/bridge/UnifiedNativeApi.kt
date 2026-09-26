@@ -101,6 +101,7 @@ internal object UnifiedNativeApi {
     @Keep @JvmStatic external fun sendBleChunks(deviceAddress: String, chunks: Array<ByteArray>): Boolean
     @Keep @JvmStatic external fun acceptBilateralByCommitment(commitmentHashBytes: ByteArray): ByteArray
     @Keep @JvmStatic external fun rejectBilateralByCommitment(commitmentHashBytes: ByteArray, reason: String): ByteArray
+    @Keep @JvmStatic external fun cancelBilateralByCommitment(commitmentHashBytes: ByteArray, reason: String): ByteArray
     @Keep @JvmStatic external fun chunkEnvelopeForBle(envelopeBytes: ByteArray, frameType: Int): Array<ByteArray>
     @Keep @JvmStatic external fun chunkEnvelopeForBleWithCounterparty(envelopeBytes: ByteArray, frameType: Int, counterpartyDeviceId: ByteArray): Array<ByteArray>
     @Keep @JvmStatic external fun forceBleCoordinatorInit(): Boolean
