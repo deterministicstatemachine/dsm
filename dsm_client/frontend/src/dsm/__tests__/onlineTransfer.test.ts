@@ -1,341 +1,58 @@
 // SPDX-License-Identifier: Apache-2.0
-// Production-hardening tests for online transfer flows
+// The online send the send screen makes: wallet.sendSmart. The file used to
+// test a wallet.send wrapper no screen called, and two of its tests compared an
+// object the test built with itself.
 
 import * as pb from '../../proto/dsm_app_pb';
 import * as dsm from '../index';
-import { encodeBase32Crockford } from '../../utils/textId';
+import * as bridge from '../WebViewBridge';
 
-let transportHeaderBytes: Uint8Array;
-
-function zeroHash32(): pb.Hash32 {
-  return new pb.Hash32({ v: new Uint8Array(32) as any });
+function framed(payload: pb.Envelope['payload']): Uint8Array {
+  const env = new pb.Envelope({ version: 3, payload }).toBinary();
+  const out = new Uint8Array(1 + env.length);
+  out[0] = 0x03;
+  out.set(env, 1);
+  return out;
 }
 
-const zeroHash = () => new pb.Hash32({ v: new Uint8Array(32) });
+describe('sendOnlineTransferSmart', () => {
+  afterEach(() => jest.restoreAllMocks());
 
-const toBin = (u8: Uint8Array) => u8;
+  it('invokes wallet.sendSmart with the request the user made and returns what Rust answered', async () => {
+    const invoke = jest.spyOn(bridge, 'routerInvokeBin').mockResolvedValue(
+      framed({
+        case: 'onlineTransferResponse',
+        value: new pb.OnlineTransferResponse({ success: true, message: 'sent', newBalance: 90n }),
+      }),
+    );
 
-function makeContactsResponse(): Uint8Array {
-  const contact = new pb.ContactAddResponse({
-    alias: 'alice',
-    deviceId: new Uint8Array(32).fill(0xdd),
-    genesisHash: new pb.Hash32({ v: new Uint8Array(32).fill(0xee) }),
-    chainTip: new pb.Hash32({ v: new Uint8Array(32).fill(0xff) }),
-    genesisVerifiedOnline: true,
-    verifyingStorageNodes: ['http://127.0.0.1:8080'],
-    bleAddress: '',
-  } as any);
+    const res = await dsm.sendOnlineTransferSmart('alice', '10', 'lunch', 'RIGB');
 
-  const resp = new pb.ContactsListResponse({ contacts: [contact] });
-  
-  // Wrap in ResultPack as the router does (Rust `pack_ok(...)`).
-  const pack = new pb.ResultPack({
-    schemaHash: zeroHash32(),
-    codec: pb.Codec.PROTO,
-    body: resp.toBinary() as any,
-  });
-  
-  return pack.toBinary();
-}
-
-function makeOkEnvelope(): pb.Envelope {
-  const resp = new pb.OnlineTransferResponse({
-    success: true,
-    transactionHash: zeroHash(),
-    message: 'ok',
-    newBalance: 123n as any,
-  } as any);
-
-  return new pb.Envelope({
-    version: 3,
-    headers: new pb.Headers({
-      deviceId: new Uint8Array(32) as any,
-      genesisHash: new Uint8Array(32) as any,
-    } as any),
-    payload: { case: 'onlineTransferResponse', value: resp },
-  } as any);
-}
-
-// Helper to create framed envelope bytes (for router methods)
-function makeFramedEnvelope(envelope: pb.Envelope): Uint8Array {
-  const envelopeBytes = envelope.toBinary();
-  const framingByte = new Uint8Array([0x03]);
-  const framed = new Uint8Array(framingByte.length + envelopeBytes.length);
-  framed.set(framingByte, 0);
-  framed.set(envelopeBytes, framingByte.length);
-  return framed;
-}
-
-function wrapSuccessRaw(data: Uint8Array): Uint8Array {
-  // Return BridgeRpcResponse with raw data (for direct bridge methods)
-  const br = new pb.BridgeRpcResponse({ 
-    result: { case: 'success', value: { data: new Uint8Array(data) } } 
-  });
-  return br.toBinary();
-}
-
-function wrapSuccessEnvelope(data: Uint8Array): Uint8Array {
-  // Return BridgeRpcResponse with 0x03-framed data (for router methods returning envelopes)
-  const framed = new Uint8Array(1 + data.length);
-  framed[0] = 0x03;
-  framed.set(data, 1);
-  const br = new pb.BridgeRpcResponse({ 
-    result: { case: 'success', value: { data: framed } } 
-  });
-  return br.toBinary();
-}
-
-function wrapIngressOk(data: Uint8Array): Uint8Array {
-  return wrapSuccessRaw(
-    new pb.IngressResponse({
-      result: { case: 'okBytes', value: data },
-    }).toBinary(),
-  );
-}
-
-function wrapErrorEnvelope(errorCode: number, message: string): Uint8Array {
-  const msg = `${message}`;
-  const data = new TextEncoder().encode(errorCode ? `${msg} (code=${errorCode})` : msg);
-  const br = new pb.BridgeRpcResponse({ result: { case: 'error', value: { errorCode, message: msg } } });
-  return br.toBinary();
-}
-
-function makeOkResultPack(): pb.ResultPack {
-  const resp = new pb.OnlineTransferResponse({
-    success: true,
-    transactionHash: zeroHash(),
-    message: 'ok',
-    newBalance: 123n as any,
-  } as any);
-
-  return new pb.ResultPack({
-    schemaHash: zeroHash(),
-    codec: pb.Codec.PROTO,
-    body: resp.toBinary() as any,
-  });
-}
-
-describe('online transfer', () => {
-  let capturedEnvelopes: pb.Envelope[];
-
-  const mkContact = (alias: string, deviceId: Uint8Array) => {
-    return {
-      alias,
-      deviceId,
-      genesisHash: new Uint8Array(32).fill(0xee),
-      chainTip: new Uint8Array(32).fill(0xff),
-      genesisVerifiedOnline: true,
-      verifyingStorageNodes: ['http://127.0.0.1:8080'],
-      bleAddress: '',
-      publicKey: new Uint8Array(0),
-    } as any;
-  };
-
-  beforeEach(() => {
-    capturedEnvelopes = [];
-
-    const deviceId = new Uint8Array(32).fill(0xaa);
-    const genesisHash = new Uint8Array(32).fill(0xbb);
-    const chainTip = new Uint8Array(32).fill(0xcc);
-    const transportHeaders = new pb.Headers({
-      deviceId: deviceId as any,
-      genesisHash: genesisHash as any,
+    expect(res).toEqual({ success: true, message: 'sent', newBalance: 90n });
+    expect(invoke).toHaveBeenCalledTimes(1);
+    const [method, args] = invoke.mock.calls[0];
+    expect(method).toBe('wallet.sendSmart');
+    const req = pb.OnlineTransferSmartRequest.fromBinary(pb.ArgPack.fromBinary(args as Uint8Array).body);
+    expect({ recipient: req.recipient, amount: req.amount, tokenId: req.tokenId, memo: req.memo }).toEqual({
+      recipient: 'alice',
+      amount: '10',
+      tokenId: 'RIGB',
+      memo: 'lunch',
     });
-    transportHeaderBytes = transportHeaders.toBinary();
-
-    const g: any = globalThis as any;
-    g.window = g.window || ({} as any);
-    const win: any = g.window;
-    // Provide a window object for code paths that reference the Jest global `global.window`.
-    (global as any).window = win;
-
-    // Minimal bridge surface consumed by getHeaders/transport
-    win.DsmBridge = {
-      __binary: true,
-      __callBin: async (reqBytes: Uint8Array) => {
-        const req = pb.BridgeRpcRequest.fromBinary(reqBytes);
-        const method = req.method || '';
-        const p = req.payload?.case === 'bytes' ? req.payload.value.data : new Uint8Array(0);
-
-        if (method === 'getTransportHeadersV3Bin') {
-          return wrapSuccessRaw(transportHeaders.toBinary());
-        }
-
-        if (method === 'nativeBoundaryIngress') {
-          const ingressRequest = pb.IngressRequest.fromBinary(p);
-          if (ingressRequest.operation.case === 'routerQuery') {
-            const path = ingressRequest.operation.value.method;
-            if (path === 'contacts.list') {
-              return wrapIngressOk(makeContactsResponse());
-            }
-            return wrapIngressOk(new Uint8Array(0));
-          }
-          if (ingressRequest.operation.case !== 'routerInvoke') {
-            return wrapIngressOk(new Uint8Array(0));
-          }
-          const innerMethod = ingressRequest.operation.value.method;
-          if (innerMethod === 'wallet.send' || innerMethod === 'onlineTransfer' || innerMethod === 'wallet.sendSmart') {
-            return wrapIngressOk(new pb.ResultPack({
-              schemaHash: zeroHash(),
-              codec: pb.Codec.PROTO,
-              body: new pb.OnlineTransferResponse({
-                success: true,
-                transactionHash: zeroHash(),
-                message: 'ok',
-                newBalance: 123n as any,
-              } as any).toBinary() as any,
-            }).toBinary());
-          }
-          return wrapIngressOk(new Uint8Array(0));
-        }
-
-        return wrapSuccessEnvelope(new Uint8Array(0));
-      },
-      sendMessageBin: async (reqBytes: Uint8Array) => {
-        const req = pb.BridgeRpcRequest.fromBinary(reqBytes);
-        const method = req.method || '';
-        const p = req.payload?.case === 'bytes' ? req.payload.value.data : new Uint8Array(0);
-
-        if (method === 'getTransportHeadersV3Bin') {
-          return wrapSuccessRaw(transportHeaders.toBinary());
-        }
-
-        if (method === 'nativeBoundaryIngress') {
-          const ingressRequest = pb.IngressRequest.fromBinary(p);
-          if (ingressRequest.operation.case === 'routerQuery') {
-            const path = ingressRequest.operation.value.method;
-            if (path === '/transport/headersV3') return wrapIngressOk(transportHeaders.toBinary());
-            if (path === 'contacts.list') return wrapIngressOk(makeContactsResponse());
-            return wrapIngressOk(new Uint8Array(0));
-          }
-          if (ingressRequest.operation.case === 'routerInvoke') {
-            const innerMethod = ingressRequest.operation.value.method;
-            if (innerMethod === 'wallet.send' || innerMethod === 'onlineTransfer') {
-              const argPack = pb.ArgPack.fromBinary(ingressRequest.operation.value.args);
-              const req = pb.OnlineTransferRequest.fromBinary(argPack.body);
-              capturedEnvelopes.push(req as any);
-              return wrapIngressOk(makeOkResultPack().toBinary());
-            }
-            if (innerMethod === 'getContactsStrict' || innerMethod === 'getContactsStrictBridge') {
-              return wrapIngressOk(makeContactsResponse());
-            }
-            return wrapIngressOk(new Uint8Array(0));
-          }
-        }
-        return new Uint8Array(0);
-      },
-      hasIdentityDirect: () => true,
-      getDeviceIdBin: () => deviceId,
-      getGenesisHashBin: () => genesisHash,
-    };
-    win.dispatchEvent = win.dispatchEvent || jest.fn();
-    win.addEventListener = win.addEventListener || jest.fn();
-    win.removeEventListener = win.removeEventListener || jest.fn();
-    win.CustomEvent = win.CustomEvent || CustomEvent;
-    jest.clearAllMocks();
   });
 
-  it('accepts amount=0 at the JS layer (validation is native-side)', async () => {
-    // Test that amount=0 passes JS validation and reaches the bridge call
-    // The actual acceptance is decided by native code
-    // sendOnlineTransfer now calls routerInvokeBin('wallet.send', ...)
-    const minEnv = new pb.Envelope({
-      version: 3,
-      payload: { case: 'onlineTransferResponse', value: new pb.OnlineTransferResponse({ success: true, message: 'ok' } as any) },
-    } as any);
-    const minEnvBytes = minEnv.toBinary();
-    const minFramed = new Uint8Array(1 + minEnvBytes.length);
-    minFramed[0] = 0x03;
-    minFramed.set(minEnvBytes, 1);
-    const mockAppRouterInvoke = jest.fn().mockResolvedValue(minFramed);
-    jest.spyOn(require('../WebViewBridge'), 'routerInvokeBin').mockImplementation(mockAppRouterInvoke);
+  it("carries Rust's refusal of a send that names no token", async () => {
+    const invoke = jest.spyOn(bridge, 'routerInvokeBin').mockResolvedValue(
+      framed({ case: 'error', value: new pb.Error({ code: 1, message: 'wallet.sendSmart: the request names no token' }) }),
+    );
 
-    const res = await dsm.sendOnlineTransfer({ to: new Uint8Array(32), amount: 0n } as any);
-    // The function should not throw at JS layer for amount=0
-    expect(mockAppRouterInvoke).toHaveBeenCalledWith('wallet.send', expect.any(Uint8Array));
-  });
+    const res = await dsm.sendOnlineTransferSmart('alice', '10', undefined, '');
 
-  it('succeeds with mocked bridge (router invoke path)', async () => {
-    // Test the core response parsing logic directly to ensure correct implementation
-    const rawResp = new pb.OnlineTransferResponse({
-      success: true,
-      transactionHash: zeroHash(),
-      message: 'ok',
-      newBalance: 123n as any,
-    } as any);
-
-    const inner = pb.OnlineTransferResponse.fromBinary(rawResp.toBinary());
-
-    expect(inner.success).toBe(true);
-    expect(inner.message).toBe('ok');
-    expect(inner.newBalance).toBe(123n);
-
-    // Verify the response formatting matches what sendOnlineTransfer expects
-    const expectedResponse = {
-      accepted: inner.success,
-      result: inner.message,
-      txHash: inner.transactionHash ? encodeBase32Crockford(inner.transactionHash.v) : undefined,
-      newBalance: inner.newBalance,
-    };
-
-    expect(expectedResponse.accepted).toBe(true);
-    expect(expectedResponse.result).toBe('ok');
-    expect(expectedResponse.newBalance).toBe(123n);
-  });
-
-  it('sendOnlineTransferSmart routes through wallet.sendSmart', async () => {
-    // Test the core parsing logic for sendOnlineTransferSmart
-    const resultPack = new pb.ResultPack({
-      schemaHash: zeroHash(),
-      codec: pb.Codec.PROTO,
-      body: new pb.OnlineTransferResponse({
-        success: true,
-        transactionHash: zeroHash(),
-        message: 'smart transfer ok',
-        newBalance: 100n as any,
-      } as any).toBinary() as any,
-    });
-    
-    // Verify the parsing logic works
-    const resBytes = resultPack.toBinary();
-    const resPack = pb.ResultPack.fromBinary(resBytes);
-    const inner = pb.OnlineTransferResponse.fromBinary(resPack.body);
-    
-    expect(inner.success).toBe(true);
-    expect(inner.message).toBe('smart transfer ok');
-    
-    // Verify the response formatting
-    const expectedResponse = { success: inner.success, message: inner.message };
-    expect(expectedResponse.success).toBe(true);
-    expect(expectedResponse.message).toBe('smart transfer ok');
-  });
-
-  it('computes b0x address and posts envelope to storage node (best-effort)', async () => {
-    // Test that modern sendOnlineTransfer does not perform storage-node POST fan-out
-    // Mock fetch to ensure it's not called
-    const fetchMock = jest.fn().mockResolvedValue({ ok: true, status: 200 });
-    (global as any).fetch = fetchMock;
-
-    // Mock routerInvokeBin to return framed Envelope with onlineTransferResponse
-    const transferResp = new pb.OnlineTransferResponse({
-      success: true,
-      transactionHash: zeroHash(),
-      message: 'ok',
-      newBalance: 100n as any,
-    } as any);
-    const okEnv = new pb.Envelope({
-      version: 3,
-      payload: { case: 'onlineTransferResponse', value: transferResp },
-    } as any);
-    const mockAppRouterInvoke = jest.fn().mockResolvedValue(makeFramedEnvelope(okEnv));
-    jest.spyOn(require('../WebViewBridge'), 'routerInvokeBin').mockImplementation(mockAppRouterInvoke);
-
-    const res = await dsm.sendOnlineTransfer({ to: new Uint8Array(32).fill(0xdd), amount: 5n, tokenId: 'ERA', memo: 'hi' });
-    expect(res.accepted).toBe(true);
-
-    // Modern contract does not require WebView-side storage-node POST fan-out.
-    expect(fetchMock).not.toHaveBeenCalled();
-
-    (global as any).fetch = undefined;
+    const req = pb.OnlineTransferSmartRequest.fromBinary(
+      pb.ArgPack.fromBinary(invoke.mock.calls[0][1] as Uint8Array).body,
+    );
+    expect(req.tokenId).toBe('');
+    expect(res.success).toBe(false);
+    expect(res.message).toContain('names no token');
   });
 });

@@ -172,6 +172,12 @@ export type GenericTransaction = {
 /** UI-level response shape returned by sendOnlineTransfer/offlineSend. */
 export type GenericTxResponse = {
   accepted: boolean;
+  /**
+   * The screen stopped waiting while the step is still open: it completes when
+   * the devices meet again, and until its confirm its proposer may cancel it.
+   * Not a failure.
+   */
+  open?: boolean;
   result?: string;
   txHash?: string;
   newBalance?: bigint;

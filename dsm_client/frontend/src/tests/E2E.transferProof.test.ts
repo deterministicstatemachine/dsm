@@ -110,9 +110,9 @@ function makeContactsFramedEnvelope(bleAddress?: string): Uint8Array {
 
 /** Build a BilateralPrepareResponse inside a framed Envelope. */
 function makeBilateralPrepareResponseEnvelope(commitHash: Uint8Array): Uint8Array {
+  // The commitment is what the frontend reads; the rest is Rust's to fill.
   const resp = new pb.BilateralPrepareResponse({
     commitmentHash: new pb.Hash32({ v: commitHash } as any),
-    localSignature: new Uint8Array(64),
   } as any);
   const env = new pb.Envelope({
     version: 3,
@@ -277,30 +277,23 @@ beforeEach(() => {
 // 1. Online Transfer — Full Cycle
 // ─────────────────────────────────────────────────────────────────
 
-describe('Online Transfer — Full Cycle', () => {
+describe('Online Transfer — Full Cycle (wallet.sendSmart, the path the send screen takes)', () => {
   beforeEach(() => installBridge());
 
-  test('happy path: accepted=true with txHash', async () => {
+  test('happy path: success=true', async () => {
     onlineTransferOverride = () => makeOnlineResponseEnvelope(true, 'transfer ok', 500n);
 
-    const res = await dsm.sendOnlineTransfer({
-      to: encodeBase32Crockford(DEVICE_B),
-      amount: BigInt(1000 + testIndex), // unique amount to avoid dedup
-      tokenId: 'ERA',
-    });
-    expect(res.accepted).toBe(true);
+    // A unique amount per test avoids dedup.
+    const res = await dsm.sendOnlineTransferSmart('bob', BigInt(1000 + testIndex), undefined, 'ERA');
+    expect(res.success).toBe(true);
   });
 
-  test('failure response returns accepted=false when inner OnlineTransferResponse.success=false', async () => {
+  test('failure response returns success=false when inner OnlineTransferResponse.success=false', async () => {
     onlineTransferOverride = () => makeOnlineResponseEnvelope(false, 'insufficient funds', 0n);
 
-    const res = await dsm.sendOnlineTransfer({
-      to: encodeBase32Crockford(DEVICE_B),
-      amount: BigInt(2000 + testIndex),
-      tokenId: 'ERA',
-    });
-    expect(res.accepted).toBe(false);
-    expect(res.result).toContain('insufficient funds');
+    const res = await dsm.sendOnlineTransferSmart('bob', BigInt(2000 + testIndex), undefined, 'ERA');
+    expect(res.success).toBe(false);
+    expect(res.message).toContain('insufficient funds');
   });
 
   test('error envelope: bridge returns error payload', async () => {
@@ -315,13 +308,9 @@ describe('Online Transfer — Full Cycle', () => {
       } as any));
     };
 
-    const res = await dsm.sendOnlineTransfer({
-      to: encodeBase32Crockford(DEVICE_B),
-      amount: BigInt(3000 + testIndex),
-      tokenId: 'ERA',
-    });
-    expect(res.accepted).toBe(false);
-    expect(String(res.result)).toMatch(/internal error|DSM error/);
+    const res = await dsm.sendOnlineTransferSmart('bob', BigInt(3000 + testIndex), undefined, 'ERA');
+    expect(res.success).toBe(false);
+    expect(String(res.message)).toMatch(/internal error|DSM error/);
   });
 
   test('unexpected payload case → error', async () => {
@@ -336,14 +325,9 @@ describe('Online Transfer — Full Cycle', () => {
       } as any));
     };
 
-    const res = await dsm.sendOnlineTransfer({
-      to: encodeBase32Crockford(DEVICE_B),
-      amount: BigInt(4000 + testIndex),
-      tokenId: 'ERA',
-    });
-    expect(res.accepted).toBe(false);
-    // sendOnlineTransfer now expects onlineTransferResponse, not universalRx
-    expect(String(res.result)).toMatch(/Expected onlineTransferResponse|unexpected/i);
+    const res = await dsm.sendOnlineTransferSmart('bob', BigInt(4000 + testIndex), undefined, 'ERA');
+    expect(res.success).toBe(false);
+    expect(String(res.message)).toMatch(/Expected onlineTransferResponse|unexpected/i);
   });
 
   test('OnlineTransferResponse with success=false carries message', async () => {
@@ -360,56 +344,9 @@ describe('Online Transfer — Full Cycle', () => {
       } as any));
     };
 
-    const res = await dsm.sendOnlineTransfer({
-      to: encodeBase32Crockford(DEVICE_B),
-      amount: BigInt(5000 + testIndex),
-      tokenId: 'ERA',
-    });
-    expect(res.accepted).toBe(false);
-    expect(String(res.result)).toContain('quota exceeded');
-  });
-});
-
-// ─────────────────────────────────────────────────────────────────
-// 2. Online Transfer — Input Validation
-// ─────────────────────────────────────────────────────────────────
-
-describe('Online Transfer — Input Validation', () => {
-  beforeEach(() => installBridge());
-
-  test('invalid device ID length (16 bytes) → error', async () => {
-    const shortId = new Uint8Array(16).fill(0x22);
-    const res = await dsm.sendOnlineTransfer({ to: shortId as unknown as string, amount: BigInt(6000 + testIndex), tokenId: 'ERA' });
-    expect(res.accepted).toBe(false);
-    expect(String(res.result)).toMatch(/32 bytes/);
-  });
-
-  test('string device ID (base32) is accepted', async () => {
-    const b32 = encodeBase32Crockford(DEVICE_B);
-    onlineTransferOverride = () => makeOnlineResponseEnvelope(true, 'ok', 100n);
-
-    const res = await dsm.sendOnlineTransfer({ to: b32, amount: BigInt(7000 + testIndex), tokenId: 'ERA' });
-    expect(res.accepted).toBe(true);
-  });
-
-  test('missing from_device_id (bridge returns short headers) → error', async () => {
-    // Override getTransportHeadersV3Bin to return empty device_id
-    const origCallBin = (global as any).window.DsmBridge.__callBin;
-    (global as any).window.DsmBridge.__callBin = async (reqBytes: Uint8Array) => {
-      const { method } = decodeBridgeReq(reqBytes);
-      if (method === 'getTransportHeadersV3Bin') {
-        const headers = new pb.Headers({
-          deviceId: new Uint8Array(0) as any,
-          genesisHash: GENESIS_A as any,
-        } as any);
-        return wrapSuccess(headers.toBinary());
-      }
-      return origCallBin(reqBytes);
-    };
-
-    const res = await dsm.sendOnlineTransfer({ to: encodeBase32Crockford(DEVICE_B), amount: BigInt(9000 + testIndex), tokenId: 'ERA' });
-    expect(res.accepted).toBe(false);
-    expect(String(res.result)).toMatch(/device.id|32 bytes|bridge headers|identity not ready/i);
+    const res = await dsm.sendOnlineTransferSmart('bob', BigInt(5000 + testIndex), undefined, 'ERA');
+    expect(res.success).toBe(false);
+    expect(String(res.message)).toContain('quota exceeded');
   });
 });
 
@@ -803,6 +740,57 @@ describe('Offline Transfer — Timeout & Event Matching', () => {
     const res = await promise;
     expect(res.accepted).toBe(true);
   }, 15000);
+
+  test('when the screen stops waiting, the step is reported open, not failed', async () => {
+    jest.useFakeTimers();
+    try {
+      const promise = dsm.offlineSend({
+        to: DEVICE_B,
+        amount: BigInt(18000 + testIndex),
+        tokenId: 'ERA',
+        bleAddress: 'AA:BB:CC:DD:EE:FF',
+      } as any);
+      // The pending list never names the step as ended, past every poll.
+      await jest.advanceTimersByTimeAsync(1_500 + 3_000 * 41);
+      const res = await promise;
+      expect(res.accepted).toBe(false);
+      expect(res.open).toBe(true);
+      expect(String(res.result)).toMatch(/still open/);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('a send that names no token reaches Rust naming none, and Rust refuses it', async () => {
+    let captured: pb.BilateralPrepareRequest | null = null;
+    bilateralResponseOverride = () => frameEnvelope(new pb.Envelope({
+      version: 3,
+      payload: { case: 'error', value: new pb.Error({ code: 1, message: 'wallet.sendOffline: the request names no token' }) },
+    } as any));
+    const origCallBin = (global as any).window.DsmBridge.__callBin;
+    (global as any).window.DsmBridge.__callBin = async (reqBytes: Uint8Array) => {
+      const { method, payload } = decodeBridgeReq(reqBytes);
+      if (method === 'nativeBoundaryIngress') {
+        const ingress = decodeIngressReq(payload);
+        if (ingress.operationCase === 'routerInvoke' && ingress.method === 'wallet.sendOffline') {
+          captured = pb.BilateralPrepareRequest.fromBinary(pb.ArgPack.fromBinary(ingress.args).body);
+        }
+      }
+      return origCallBin(reqBytes);
+    };
+
+    const res = await dsm.offlineSend({
+      to: DEVICE_B,
+      amount: BigInt(19000 + testIndex),
+      tokenId: '',
+      bleAddress: 'AA:BB:CC:DD:EE:FF',
+    } as any);
+
+    expect(captured).not.toBeNull();
+    expect(captured!.tokenIdHint).toBe('');
+    expect(res.accepted).toBe(false);
+    expect(String(res.result)).toContain('names no token');
+  });
 
   test('event with wrong commitment hash does NOT resolve; correct hash does', async () => {
     const promise = dsm.offlineSend({

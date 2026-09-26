@@ -116,31 +116,24 @@ function SendTabInner({
           memo: sendForm.note || undefined,
           bleAddress: bleAddr,
         });
-        const success = res && typeof res === 'object'
-          ? ('success' in res
-              ? Boolean((res as { success?: boolean }).success)
-              : ('accepted' in res ? Boolean((res as { accepted?: boolean }).accepted) : false))
-          : false;
-        if (!success) {
-          // GenericTxResponse carries the SDK's reason in `result` (sometimes `message`
-          // for legacy callers). Read both so we surface the real failure cause to the
-          // user instead of the generic fallback.
-          const resultText = res && typeof res === 'object' && 'result' in res
-            ? String((res as { result?: string }).result || '')
-            : '';
-          const messageText = res && typeof res === 'object' && 'message' in res
-            ? String((res as { message?: string }).message || '')
-            : '';
-          let msg = resultText || messageText || 'Offline transfer failed';
-          const failureReason = res && typeof res === 'object' && 'failureReason' in res ? (res as { failureReason?: unknown }).failureReason : undefined;
-          const failureReasonNum = typeof failureReason === 'number'
-            ? failureReason
-            : typeof failureReason === 'string'
-              ? Number(failureReason)
-              : undefined;
-          const fm = failureReasonMessage(Number.isFinite(failureReasonNum) ? failureReasonNum : undefined);
-          if (fm) msg = fm;
-          throw new Error(msg);
+        if (res.open) {
+          // Not finished and not failed: the step is open on both phones and
+          // completes when they are together again. The form is done with it.
+          fx.play({
+            anim: 'trace',
+            title: 'Not finished yet',
+            caption: res.result ?? '',
+            tone: 'neutral',
+            okLabel: 'OK',
+            coin: { ticker: selectedSendBalance.symbol, iconUrl: selectedSendBalance.iconUrl },
+          });
+          onSendComplete();
+          await loadWalletData();
+          return;
+        }
+        if (!res.accepted) {
+          // The failure reason's message when the SDK named one, else its own words.
+          throw new Error(failureReasonMessage(res.failureReason) ?? res.result ?? 'Offline transfer failed');
         }
       } else {
         const res = await dsmClient.sendOnlineTransferSmart(

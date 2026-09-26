@@ -2,7 +2,7 @@
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import * as pb from '../proto/dsm_app_pb';
-import { decodeBase32Crockford, encodeBase32Crockford } from '../utils/textId';
+import { decodeBase32Crockford } from '../utils/textId';
 import { decodeFramedEnvelopeV3 } from './decoding';
 import {
     routerInvokeBin,
@@ -26,14 +26,6 @@ import logger from '../utils/logger';
 
 import { GenericTransaction, GenericTxResponse } from './types';
 
-function canonicalizeTransferTokenId(tokenId: string | undefined | null): string {
-  const trimmed = String(tokenId || 'ERA').trim();
-  if (!trimmed) return 'ERA';
-  const upper = trimmed.toUpperCase();
-  if (upper === 'ERA') return 'ERA';
-  if (upper === 'DBTC') return 'dBTC';
-  return trimmed;
-}
 
 /**
  * After the receiver sends Accept, the Confirm arrives within ~1-2 seconds.
@@ -118,82 +110,6 @@ export async function readPeerRelationshipStatus(
   return pb.BleRelationshipStatusCharValue.fromBinary(bytes);
 }
 
-export async function sendOnlineTransfer(transfer: GenericTransaction): Promise<GenericTxResponse> {
-  try {
-    let toBytes: Uint8Array;
-    if (typeof transfer.to === 'string') {
-      toBytes = new Uint8Array(decodeBase32Crockford(transfer.to));
-    } else if ((transfer.to as any) instanceof Uint8Array) {
-      toBytes = new Uint8Array(transfer.to as any);
-    } else {
-      throw new Error(`Invalid toDeviceId: must be string or Uint8Array`);
-    }
-
-    if (toBytes.length !== 32) {
-      throw new Error("to_device_id must be 32 bytes");
-    }
-
-    // Required signing context from transport headers (bytes-only bridge)
-    const headers = await getHeaders();
-    const fromDeviceId = headers.deviceId instanceof Uint8Array ? headers.deviceId : new Uint8Array();
-    if (fromDeviceId.length !== 32) {
-      throw new Error('from_device_id must be 32 bytes (bridge headers missing)');
-    }
-    // chain_tip is protocol state owned by the SDK (per-relationship bilateral tip, §4).
-    // The SDK derives it from SQLite; the frontend never supplies it.
-    const req = new pb.OnlineTransferRequest({
-      tokenId: canonicalizeTransferTokenId(transfer.tokenId),
-      toDeviceId: toBytes as any,
-      amount: BigInt(transfer.amount),
-      memo: transfer.memo,
-      nonce: new Uint8Array(0),
-      signature: new Uint8Array(0),
-      fromDeviceId: fromDeviceId as any,
-    } as any);
-
-    // Route through AppRouter via routerInvokeBin('wallet.send').
-    // The Rust handler at AppRouterImpl.handle_wallet_invoke decodes the ArgPack,
-    // runs process_online_transfer_logic, and returns Envelope.onlineTransferResponse.
-    const argPack = new pb.ArgPack({
-      codec: pb.Codec.PROTO as any,
-      body: new Uint8Array(req.toBinary()),
-    });
-
-    const resBytes = await routerInvokeBin('wallet.send', new Uint8Array(argPack.toBinary()));
-
-    if (!resBytes || resBytes.length === 0) {
-      throw new Error('Empty response from wallet.send');
-    }
-
-    // Canonical Envelope v3 decode — AppRouter returns Envelope.onlineTransferResponse
-    const env = decodeFramedEnvelopeV3(resBytes);
-
-    if (env.payload.case === 'error') {
-      const errMsg = env.payload.value.message || `Error code ${env.payload.value.code}`;
-      throw new Error(`DSM error: ${errMsg}`);
-    }
-
-    if (env.payload.case !== 'onlineTransferResponse') {
-      throw new Error(`Expected onlineTransferResponse, got ${env.payload.case}`);
-    }
-
-    const inner = env.payload.value;
-
-    return {
-      accepted: inner.success,
-      result: inner.message,
-      txHash: inner.transactionHash ? encodeBase32Crockford(inner.transactionHash.v) : undefined,
-      newBalance: inner.newBalance,
-    };
-  } catch (e: any) {
-    return {
-      accepted: false,
-      result: e?.message || 'Failed',
-    };
-  }
-}
-
-
 export async function sendOnlineTransferSmart(
     alias: string,
     amount: string | number | bigint,
@@ -270,7 +186,9 @@ export async function offlineSend(transfer: GenericTransaction): Promise<Generic
       counterpartyDeviceId: toBytes as any,
       bleAddress: normalizeBleAddress(String(transfer.bleAddress || '')) || '',
       transferAmountDisplay,
-      tokenIdHint: canonicalizeTransferTokenId(transfer.tokenId),
+      // Named exactly as the user chose it; Rust canonicalizes it and refuses
+      // a request that names none.
+      tokenIdHint: transfer.tokenId,
       memoHint: transfer.memo || '',
     } as any);
 
@@ -338,7 +256,14 @@ export async function offlineSend(transfer: GenericTransaction): Promise<Generic
         // Query failed — keep polling, don't declare failure
       }
       if (pollAttempts >= STATUS_POLL_MAX_ATTEMPTS && !settled) {
-        finish({ accepted: false, result: 'Bilateral transfer did not complete in time' });
+        // The screen stops waiting; the step does not end. A lost link fails
+        // no step: it stays open on both devices and completes when they meet
+        // again, and until its confirm its proposer may cancel it.
+        finish({
+          accepted: false,
+          open: true,
+          result: 'The transfer is still open. It completes when the two phones are together again; Pending transfers shows it.',
+        });
         return;
       }
       // Self-schedule the next poll only after this one completes to prevent
@@ -477,7 +402,7 @@ export async function offlineSend(transfer: GenericTransaction): Promise<Generic
   }
 }
 
-// Compatibility wrapper used by UI/service layers that call dsmClient.sendOfflineTransfer(...)
+// The send screen's entry: dsmClient.sendOfflineTransfer(...)
 export async function sendOfflineTransfer(params: {
   tokenId: string;
   to: string | Uint8Array;
@@ -486,12 +411,12 @@ export async function sendOfflineTransfer(params: {
   bleAddress?: string;
 }): Promise<GenericTxResponse> {
   return offlineSend({
-    tokenId: canonicalizeTransferTokenId(params.tokenId),
-    to: params.to as any,
-    amount: params.amount as any,
+    tokenId: params.tokenId,
+    to: params.to,
+    amount: params.amount,
     memo: params.memo,
     bleAddress: params.bleAddress,
-  } as any);
+  });
 }
 
 /** What the SDK answered a bilateral accept, reject or cancel: done, or its reason why not. */

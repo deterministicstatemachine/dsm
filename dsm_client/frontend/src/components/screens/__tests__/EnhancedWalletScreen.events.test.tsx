@@ -178,7 +178,7 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
     (dsmClient.sendOfflineTransfer as any) = jest.fn().mockImplementation(async () => {
       balancesState = [{ tokenId: 'ROOT', symbol: 'ERA', baseUnits: 55n, displayAmount: '55', decimals: 0 }];
       historyState = [{ txId: 'tx-offline-sender', txHash: 'TXOFFLINESENDERHASH', txType: 'bilateral_offline', type: 'offline', amount: -25n, displayAmount: '-25', tokenId: 'ERA', recipient: 'Receiver', status: 'confirmed', fromDeviceId: 'FROM', toDeviceId: 'TO', receiptVerified: false }];
-      return { success: true };
+      return { accepted: true, result: 'Bilateral transfer complete' };
     });
 
     render(<EnhancedWalletScreen />);

@@ -157,21 +157,25 @@ function simulations(state: PracticeState, emit: (event: PracticeEvent) => void)
     resolveBleAddressForContact: async () => undefined,
     sendOnlineTransferSmart: async (recipientAlias: string, scaledAmountStr: string | number | bigint, memo?: string, tokenId?: string) => {
       await pause(700);
-      const token = tokenId || 'ERA';
+      // As Rust answers: a send that names no token is refused, never sent as ERA.
+      if (!tokenId) return { success: false, message: 'wallet.sendSmart: the request names no token' };
+      const token = tokenId;
       const result = debit(state, token, scaledAmountStr);
       if (!result.ok) return { success: false, error: { message: result.message } };
       recordSend(state, recipientAlias, token, scaledAmountStr, memo, 'online');
       emit('sent');
       return { success: true, newBalance: result.balance };
     },
+    // Answers in the shape the real sendOfflineTransfer does (GenericTxResponse).
     sendOfflineTransfer: async (params: { tokenId: string; to: string; amount: number | bigint | string; memo?: string }) => {
       await pause(700);
-      const token = params.tokenId || 'ERA';
+      if (!params.tokenId) return { accepted: false, result: 'wallet.sendOffline: the request names no token' };
+      const token = params.tokenId;
       const result = debit(state, token, params.amount);
-      if (!result.ok) return { success: false, message: result.message };
-      const transactionId = recordSend(state, params.to, token, params.amount, params.memo, 'offline');
+      if (!result.ok) return { accepted: false, result: result.message };
+      recordSend(state, params.to, token, params.amount, params.memo, 'offline');
       emit('sent');
-      return { success: true, transactionId };
+      return { accepted: true, result: 'Practice transfer complete' };
     },
     claimFaucet: async (tokenId?: string) => {
       await pause(600);

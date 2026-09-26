@@ -45,7 +45,9 @@ describe('offline transfer sender/recipient consistency through WebView bridge',
     warnSpy.mockRestore();
   });
 
-  test('dBTC offline send is encoded as wallet.sendOffline with token and memo hints', async () => {
+  // The token is forwarded exactly as chosen: Rust canonicalizes it
+  // (`canonicalize_token_id`) and refuses one that names nothing.
+  test('an offline send reaches wallet.sendOffline with the token and memo hints as given', async () => {
     const to = new Uint8Array(32).fill(0xcc);
     const bleAddress = 'AA:BB:CC:DD:EE:FF';
     const commitmentHash = new Uint8Array(32).fill(0x77);
@@ -59,7 +61,7 @@ describe('offline transfer sender/recipient consistency through WebView bridge',
       expect(prepare.counterpartyDeviceId).toEqual(to);
       expect(prepare.transferAmountDisplay).toBe('5');
       expect(prepare.bleAddress).toBe(bleAddress);
-      expect(prepare.tokenIdHint).toBe('dBTC');
+      expect(prepare.tokenIdHint).toBe('DBTC');
       expect(prepare.memoHint).toBe('hi');
 
       const env = new pb.Envelope({
