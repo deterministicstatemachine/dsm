@@ -10,16 +10,25 @@ import { encodeBase32Crockford } from '../../../utils/textId';
 import { UXProvider } from '../../../contexts/UXContext';
 import { WalletProvider } from '../../../contexts/WalletContext';
 import { walletStore } from '../../../stores/walletStore';
+import { contactsStore } from '../../../stores/contactsStore';
 
-/** The screen as the app mounts it: inside the wallet provider, whose store is its balances and history. */
-function renderWallet() {
-  return render(
+/**
+ * The screen as the app mounts it: inside the wallet provider, whose store is
+ * its balances and history; the contacts store, its contacts, loaded here as
+ * the contacts provider loads it once the identity is ready.
+ */
+async function renderWallet() {
+  const rendered = render(
     <UXProvider>
       <WalletProvider>
         <EnhancedWalletScreen />
       </WalletProvider>
     </UXProvider>,
   );
+  await act(async () => {
+    await contactsStore.refreshContacts();
+  });
+  return rendered;
 }
 
 /** The store is a module singleton; each test starts it empty. */
@@ -86,7 +95,7 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
     // Minimal contacts and BLE functions used by loadWalletData
     (dsmClient.getContacts as any) = jest.fn().mockResolvedValue({ contacts: [] });
 
-    renderWallet();
+    await renderWallet();
 
     // wait for initial load(s) to complete (bridge-ready retry may cause 2 calls)
     await waitFor(() => expect((dsmClient.getWalletHistory as any).mock.calls.length).toBeGreaterThanOrEqual(1));
@@ -120,7 +129,7 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
     (dsmClient.resolveBleAddressForContact as any) = jest.fn().mockResolvedValue(contact.bleAddress);
     (dsmClient.sendOfflineTransfer as any) = jest.fn().mockResolvedValue({ success: true });
 
-    renderWallet();
+    await renderWallet();
 
     await waitFor(() => expect(screen.getByText('DSM Wallet')).toBeInTheDocument());
 
@@ -169,7 +178,7 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
       return { success: true, message: 'ok', newBalance: 75n };
     });
 
-    renderWallet();
+    await renderWallet();
 
     await waitFor(() => expect(screen.getByText('100')).toBeInTheDocument());
 
@@ -207,7 +216,7 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
       return { accepted: true, result: 'Bilateral transfer complete' };
     });
 
-    renderWallet();
+    await renderWallet();
 
     await waitFor(() => expect(screen.getByText('80')).toBeInTheDocument());
 
@@ -252,7 +261,7 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
     (dsmClient.getAllBalances as any) = jest.fn().mockImplementation(async () => balancesState);
     (dsmClient.getWalletHistory as any) = jest.fn().mockImplementation(async () => ({ transactions: historyState }));
 
-    renderWallet();
+    await renderWallet();
 
     await waitFor(() => expect(screen.getByText('40')).toBeInTheDocument());
 
@@ -284,7 +293,7 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
       items: [{ id: 'inbox-1', preview: 'Incoming online transfer 25 ERA', isStaleRoute: false }],
     });
 
-    renderWallet();
+    await renderWallet();
 
     await waitFor(() => expect(screen.getByText('DSM Wallet')).toBeInTheDocument());
 
@@ -308,7 +317,7 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
     (dsmClient.getWalletHistory as any) = jest.fn().mockResolvedValue({ transactions: [] });
     (dsmClient.getInbox as any) = jest.fn().mockResolvedValue({ items: [] });
 
-    renderWallet();
+    await renderWallet();
 
     await waitFor(() => expect(screen.getByText('DSM Wallet')).toBeInTheDocument());
 
@@ -318,6 +327,30 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
 
     const button = screen.getByRole('button', { name: 'Inbox (2 new)' });
     expect(button.className).toContain('has-items');
+  });
+
+  // The refresh button re-reads both stores: balances and history, and the
+  // contacts the send tab offers.
+  test('the refresh button re-reads balances, history and contacts', async () => {
+    installStandardWalletMocks();
+    (dsmClient.getAllBalances as any) = jest
+      .fn()
+      .mockResolvedValue([{ tokenId: 'ERA', symbol: 'ERA', baseUnits: 100n, displayAmount: '100', decimals: 0, protocolDefined: true }]);
+    (dsmClient.getWalletHistory as any) = jest.fn().mockResolvedValue({ transactions: [] });
+
+    await renderWallet();
+    await waitFor(() => expect(screen.getByText('DSM Wallet')).toBeInTheDocument());
+    const balancesBefore = (dsmClient.getAllBalances as jest.Mock).mock.calls.length;
+    const historyBefore = (dsmClient.getWalletHistory as jest.Mock).mock.calls.length;
+    const contactsBefore = (dsmClient.getContacts as jest.Mock).mock.calls.length;
+
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+
+    await waitFor(() => {
+      expect((dsmClient.getAllBalances as jest.Mock).mock.calls.length).toBe(balancesBefore + 1);
+      expect((dsmClient.getWalletHistory as jest.Mock).mock.calls.length).toBe(historyBefore + 1);
+      expect((dsmClient.getContacts as jest.Mock).mock.calls.length).toBe(contactsBefore + 1);
+    });
   });
 
   // One inbox sync with new items is one reload. The event bridge announces
@@ -330,7 +363,7 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
       .mockResolvedValue([{ tokenId: 'ERA', symbol: 'ERA', baseUnits: 100n, displayAmount: '100', decimals: 0, protocolDefined: true }]);
     (dsmClient.getWalletHistory as any) = jest.fn().mockResolvedValue({ transactions: [] });
 
-    renderWallet();
+    await renderWallet();
     await waitFor(() => expect(dsmClient.getAllBalances).toHaveBeenCalledTimes(1));
 
     await act(async () => {
@@ -370,7 +403,7 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
       ],
     });
 
-    renderWallet();
+    await renderWallet();
     await waitFor(() => expect(screen.getByText('DSM Wallet')).toBeInTheDocument());
     fireEvent.click(screen.getByRole('button', { name: /Inbox/ }));
 
@@ -394,7 +427,7 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
     const opened = jest.fn();
     const off = bridgeEvents.on('inbox.open', opened as any);
 
-    renderWallet();
+    await renderWallet();
     await waitFor(() => expect(screen.getByText('DSM Wallet')).toBeInTheDocument());
     fireEvent.click(screen.getByRole('button', { name: /Inbox/ }));
     expect(opened).toHaveBeenLastCalledWith({ open: true });

@@ -2,16 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { renderHook } from '@testing-library/react';
+import { toBase32Crockford } from '../../dsm/decoding';
 
 jest.mock('../../services/dsmClient', () => ({
   dsmClient: {
     getContacts: jest.fn(),
     addContact: jest.fn(),
+    getBleIdentitySnapshot: () => ({ deviceIds: {}, genesis: {} }),
   },
-}));
-
-jest.mock('../../contexts/contacts/utils', () => ({
-  bytesToDisplay: jest.fn((u8: Uint8Array) => Array.from(u8).map(b => b.toString(16).padStart(2, '0')).join('')),
 }));
 
 jest.mock('../../utils/logger', () => ({
@@ -41,10 +39,8 @@ function freshModule() {
     dsmClient: {
       getContacts: jest.fn(),
       addContact: jest.fn(),
+      getBleIdentitySnapshot: () => ({ deviceIds: {}, genesis: {} }),
     },
-  }));
-  jest.doMock('../../contexts/contacts/utils', () => ({
-    bytesToDisplay: jest.fn((u8: Uint8Array) => Array.from(u8).map(b => b.toString(16).padStart(2, '0')).join('')),
   }));
   jest.doMock('../../utils/logger', () => ({
     default: { error: jest.fn(), debug: jest.fn(), warn: jest.fn(), info: jest.fn() },
@@ -121,16 +117,20 @@ describe('ContactsStore', () => {
       await contactsStore.refreshContacts();
       const s = contactsStore.getSnapshot();
       expect(s.contacts).toHaveLength(1);
+      // The one contact shape every screen reads, from the one mapper: a
+      // contact is its device, in Base32 Crockford, with its send-readiness.
       expect(s.contacts[0]).toEqual({
-        // A contact is its device: the alias is a label.
-        id: '01'.repeat(32),
         alias: 'Alice',
-        deviceId: '01'.repeat(32),
-        genesisHash: '02'.repeat(32),
-        publicKey: '03'.repeat(64),
-        isVerified: true,
+        deviceId: toBase32Crockford(new Uint8Array(32).fill(0x01)),
+        genesisHash: toBase32Crockford(new Uint8Array(32).fill(0x02)),
+        signingPublicKey: toBase32Crockford(new Uint8Array(64).fill(0x03)),
+        genesisVerifiedOnline: true,
         bleAddress: undefined,
         chainTip: undefined,
+        sendReady: undefined,
+        sendCheckState: undefined,
+        sendBlockReason: undefined,
+        sendBlockMessage: undefined,
       });
       expect(s.isLoading).toBe(false);
     });
@@ -300,13 +300,13 @@ describe('ContactsStore', () => {
   });
 
   describe('contact mapping', () => {
-    it('sets isVerified from genesisVerifiedOnline', async () => {
+    it('carries genesisVerifiedOnline as Rust reports it', async () => {
       const { contactsStore, client } = freshModule();
       client.getContacts.mockResolvedValue({
         contacts: [makeContact({ genesisVerifiedOnline: false })],
       });
       await contactsStore.refreshContacts();
-      expect(contactsStore.getSnapshot().contacts[0].isVerified).toBe(false);
+      expect(contactsStore.getSnapshot().contacts[0].genesisVerifiedOnline).toBe(false);
     });
 
     it('carries the tip when the relationship has one', async () => {
@@ -315,7 +315,7 @@ describe('ContactsStore', () => {
         contacts: [makeContact({ chainTip: new Uint8Array(32).fill(0x0c) })],
       });
       await contactsStore.refreshContacts();
-      expect(contactsStore.getSnapshot().contacts[0].chainTip).toBe('0c'.repeat(32));
+      expect(contactsStore.getSnapshot().contacts[0].chainTip).toBe(toBase32Crockford(new Uint8Array(32).fill(0x0c)));
     });
   });
 });

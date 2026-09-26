@@ -484,7 +484,7 @@ const ContactsTabScreen: React.FC<Props> = ({ eraTokenSrc = 'images/logos/era_to
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 12, width: '100%' }}>
               {contacts.map((c, i) => (
-                <div key={c.id} style={{ width: '100%' }}>
+                <div key={c.deviceId} style={{ width: '100%' }}>
                   <div
                     className={focusedIndex === i + 3 ? 'dpad-focus-ring' : undefined}
                     onClick={() => setSelected(selected === i ? null : i)}
@@ -538,7 +538,7 @@ const ContactsTabScreen: React.FC<Props> = ({ eraTokenSrc = 'images/logos/era_to
                       boxSizing: 'border-box',
                     }}>
                       <div style={{ marginBottom: 6, fontSize: 8, fontWeight: 'bold' }}>
-                        {c.bleAddress ? 'BLE PAIRED' : c.isVerified ? 'VERIFIED' : 'NOT VERIFIED'}
+                        {c.bleAddress ? 'BLE PAIRED' : c.genesisVerifiedOnline ? 'VERIFIED' : 'NOT VERIFIED'}
                       </div>
                       <div style={{ display: 'grid', gap: 4 }}>
                         <div style={detailRowStyle}>
@@ -555,11 +555,11 @@ const ContactsTabScreen: React.FC<Props> = ({ eraTokenSrc = 'images/logos/era_to
                         </div>
                         <div style={detailRowStyle}>
                           <span style={detailLabelStyle}>Pub Key</span>
-                          <span>{c.publicKey.length > 24 ? `${c.publicKey.slice(0, 12)}...${c.publicKey.slice(-10)}` : c.publicKey}</span>
+                          <span>{c.signingPublicKey.length > 24 ? `${c.signingPublicKey.slice(0, 12)}...${c.signingPublicKey.slice(-10)}` : c.signingPublicKey}</span>
                         </div>
                         <div style={detailRowStyle}>
                           <span style={detailLabelStyle}>Verified</span>
-                          <span>{c.isVerified ? 'YES' : 'NO'}</span>
+                          <span>{c.genesisVerifiedOnline ? 'YES' : 'NO'}</span>
                         </div>
                       </div>
                       <div style={{ marginTop: 10 }}>

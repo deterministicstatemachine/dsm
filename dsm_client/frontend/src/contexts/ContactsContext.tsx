@@ -11,23 +11,11 @@ import {
 } from '../dsm/WebViewBridge';
 import { getHeaders } from '../dsm/identity';
 import type { AddContactResult, ContactCard } from '../dsm/types';
-
-/** A contact as Rust lists it, in Base32 Crockford. */
-export interface Contact {
-  /** The contact's device id: a contact is its device. */
-  id: string;
-  alias: string;
-  genesisHash: string;
-  deviceId: string;
-  publicKey: string;
-  /** Its genesis was verified against the storage nodes. */
-  isVerified: boolean;
-  bleAddress?: string;
-  chainTip?: string;
-}
+import type { DomainContact } from '../domain/types';
 
 export interface ContactsState {
-  contacts: Contact[];
+  /** Rust's list in the one contact shape: a contact is its device, with its send-readiness. */
+  contacts: DomainContact[];
   isLoading: boolean;
   error: string | null;
 }

@@ -1,18 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
-// The wallet screen's data. Balances and history are the wallet store's — the
-// provider's one copy, reloaded once per `wallet.refresh` — and this hook reads
-// them; it used to hold a second copy and reload it beside the store's, so one
-// wallet change was two reads of `balance.list` and `wallet.history`. What the
-// screen owns is the identity (read once, or the reason it was not) and the
-// send tab's contacts with their send-readiness, re-read when the contacts
-// store reports a change and on a manual refresh.
+// The wallet screen's data. Balances and history are the wallet store's and
+// contacts are the contacts store's — the one copy of each, reloaded in the
+// providers — and this hook reads them; it used to hold second copies and
+// reload them beside the stores', so one wallet change was two reads of
+// `balance.list` and `wallet.history`. What the screen owns is the identity,
+// read once, or the reason it was not.
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { dsmClient } from '../../../../services/dsmClient';
 import { useWallet } from '../../../../contexts/WalletContext';
-import { useContactsStore } from '../../../../stores/contactsStore';
+import { contactsStore, useContactsStore } from '../../../../stores/contactsStore';
 import type { TokenBalanceView } from '../../../../dsm/types';
 import type { DomainContact, DomainIdentity, DomainTransaction } from '../../../../domain/types';
-import { mapContactList } from '../../../../domain/mappers';
 
 export type WalletScreenData = {
   identity: DomainIdentity | null;
@@ -39,10 +37,8 @@ export function useWalletScreenData(activeTab: string): WalletScreenData {
   const wallet = useWallet();
   const contactsState = useContactsStore();
   const [identity, setIdentity] = useState<DomainIdentity | null>(null);
-  const [contacts, setContacts] = useState<DomainContact[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [contactsWarning, setContactsWarning] = useState<string | null>(null);
   const [warningDismissed, setWarningDismissed] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [touchFeedback, setTouchFeedback] = useState<'refreshed' | 'copied' | 'transaction_sent' | 'b0x_checked' | null>(null);
@@ -60,30 +56,15 @@ export function useWalletScreenData(activeTab: string): WalletScreenData {
     }
   }, []);
 
-  // The send tab's contacts: Rust's list with each contact's send-readiness,
-  // and the BLE addresses the native side resolved this session.
-  const loadContacts = useCallback(async () => {
-    try {
-      const list = await dsmClient.getContacts();
-      setContacts(mapContactList(list.contacts, dsmClient.getBleIdentitySnapshot()));
-      setContactsWarning(null);
-    } catch (e) {
-      setContactsWarning(e instanceof Error ? e.message : 'Failed to load contacts');
-    }
-  }, []);
-
   useEffect(() => { void loadIdentity(); }, [loadIdentity]);
 
-  // On mount, and again whenever the contacts store reports a change.
-  useEffect(() => { void loadContacts(); }, [loadContacts, contactsState.contacts]);
-
-  // A manual refresh reloads the store's balances and history and this
-  // screen's contacts. Balances and history otherwise reload on
-  // `wallet.refresh`, in the provider, once per change.
+  // A manual refresh reloads both stores. Balances and history otherwise
+  // reload on `wallet.refresh`, in the wallet provider, once per change;
+  // contacts on the contact events, in the contacts provider.
   const { refreshAll } = wallet;
   const loadWalletData = useCallback(async () => {
-    await Promise.all([refreshAll(), loadContacts()]);
-  }, [refreshAll, loadContacts]);
+    await Promise.all([refreshAll(), contactsStore.refreshContacts()]);
+  }, [refreshAll]);
 
   // Reload when leaving bitcoin tab
   const activeTabRef = useRef(activeTab);
@@ -110,16 +91,19 @@ export function useWalletScreenData(activeTab: string): WalletScreenData {
   }, [touchFeedback]);
 
   // What the stores report failed, as they word it; dismissable until it changes.
+  const contactsError = contactsState.error;
   const warning = useMemo(() => {
-    const parts = [wallet.error, contactsWarning].filter((w): w is string => Boolean(w));
+    const parts = [wallet.error, contactsError].filter((w): w is string => Boolean(w));
     const joined = parts.length > 0 ? parts.join(' • ') : null;
     return joined && joined !== warningDismissed ? joined : null;
-  }, [wallet.error, contactsWarning, warningDismissed]);
+  }, [wallet.error, contactsError, warningDismissed]);
   const setWarning = useCallback((next: string | null) => {
     if (next === null) {
-      setWarningDismissed([wallet.error, contactsWarning].filter(Boolean).join(' • ') || null);
+      setWarningDismissed([wallet.error, contactsError].filter(Boolean).join(' • ') || null);
     }
-  }, [wallet.error, contactsWarning]);
+  }, [wallet.error, contactsError]);
+
+  const contacts: DomainContact[] = contactsState.contacts;
 
   return {
     identity,
