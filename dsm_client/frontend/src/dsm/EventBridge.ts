@@ -162,8 +162,6 @@ export function initializeEventBridge(): void {
   // Deterministic throttle for wallet.refresh from BLE envelopes.
   // Without this, every BLE envelope matching bilateral patterns
   // triggers a full balance+history refresh (~50 calls/sec).
-  let bleWalletRefreshCounter = 0;
-  const BLE_WALLET_REFRESH_EVERY = 8; // emit 1 in 8 BLE-triggered refreshes
 
   window.addEventListener('dsm-native-host-event-bin', (ev: Event) => {
     try {
@@ -399,7 +397,7 @@ export function initializeEventBridge(): void {
           if (isComplete) {
             try { logger.debug('[BilateralTransfer] TRANSFER_COMPLETE - refreshing wallet state'); } catch {}
             try { bridgeEvents.emit('wallet.refresh', { source: 'bilateral.transfer_complete' }); } catch {}
-            // Direct signal so listeners can bypass the wallet.refresh throttle chain.
+            // For the reactions that are not reloads: the toast and the credit sound.
             try { bridgeEvents.emit('bilateral.transferComplete', undefined as any); } catch {}
           }
         } catch (e) {
@@ -493,17 +491,11 @@ export function initializeEventBridge(): void {
             return; // handled; do not fall through
           }
 
-          // Check for bilateral response (type 8 = BilateralPrepareResponse)
-          // Throttled: emit wallet.refresh only every Nth BLE envelope to avoid
-          // flooding the bridge with balance+history queries (~50/sec without this).
-          const uTx: any = (p?.case === 'universalTx' ? p.value : p?.universalTx);
-          const bpResp: any = (p?.case === 'bilateralPrepareResponse' ? p.value : p?.bilateralPrepareResponse);
-          if (uTx?.type === 8 || bpResp) {
-            bleWalletRefreshCounter = (bleWalletRefreshCounter + 1) | 0;
-            if ((bleWalletRefreshCounter % BLE_WALLET_REFRESH_EVERY) === 1) {
-              bridgeEvents.emit('wallet.refresh', { source: 'bilateral.transfer_complete' });
-            }
-          }
+          // A bilateral prepare response over BLE is not a wallet change and
+          // announces none: the wallet changes at TRANSFER_COMPLETE, which
+          // `bilateral.event` announces. This used to emit a `wallet.refresh`
+          // claiming `bilateral.transfer_complete` on one prepare response in
+          // eight.
           
           // Check for identity-like payload without depending on a specific generated type name
           const identity: any = (p?.case === 'bilateralIdentityExchange' ? p.value : p?.bilateralIdentityExchange);

@@ -52,7 +52,7 @@ describe('E2E: Offline BLE exchange -> wallet refresh', () => {
     initializeEventBridge();
   });
 
-  test('offline send then receive BilateralPrepareResponse triggers wallet refresh', async () => {
+  test('offline send: a BLE prepare response announces no wallet change; the completed transfer does', async () => {
     // Mock bridge methods
     (global as any).window = (global as any).window || {};
     const ALICE_DEVICE_ID = new Uint8Array(32).fill(1);
@@ -169,14 +169,21 @@ describe('E2E: Offline BLE exchange -> wallet refresh', () => {
     bytes[0] = 0x03;
     bytes.set(rawBytes, 1);
 
-    // Emit through the real DOM ingress path that EventBridge listens to.
+    // Emit through the real DOM ingress path that EventBridge listens to. A
+    // prepare response is not a wallet change and announces none; this used
+    // to emit a `wallet.refresh` claiming a completed transfer on one prepare
+    // response in eight.
     window.dispatchEvent(new CustomEvent('dsm-event-bin', {
       detail: { topic: 'ble.envelope.bin', payload: bytes },
     }));
+    expect(handler).not.toHaveBeenCalled();
 
-    expect(handler).toHaveBeenCalled();
-    const calledWith = handler.mock.calls.find((c: any) => c && c[0] && typeof c[0].source === 'string' && c[0].source.indexOf('bilateral') >= 0);
-    expect(Boolean(calledWith)).toBe(true);
+    // The completed transfer is Rust's to announce, and that is the refresh.
+    window.dispatchEvent(new CustomEvent('dsm-event-bin', {
+      detail: { topic: 'bilateral.event', payload: new Uint8Array(completeNote.toBinary()) },
+    }));
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(handler.mock.calls[0][0]).toEqual(expect.objectContaining({ source: 'bilateral.transfer_complete' }));
     unsubscribe();
   });
 });

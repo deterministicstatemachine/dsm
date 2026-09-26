@@ -3,11 +3,9 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { dsmClient } from '../../../../services/dsmClient';
 import { useWalletRefreshListener } from '../../../../hooks/useWalletRefreshListener';
-import { bridgeEvents } from '../../../../bridge/bridgeEvents';
 import type { Balance } from '../helpers';
 import type { DomainContact, DomainIdentity, DomainTransaction } from '../../../../domain/types';
 import { mapContactList } from '../../../../domain/mappers';
-import logger from '../../../../utils/logger';
 
 export type WalletScreenData = {
   identity: DomainIdentity | null;
@@ -152,35 +150,12 @@ export function useWalletScreenData(activeTab: string): WalletScreenData {
 
   useEffect(() => { void loadWalletData(); }, [loadWalletData]);
 
-  // Listen for wallet refresh events with RAF coalescing to avoid bridge spam.
+  // The one path from a wallet change to this reload: `wallet.refresh`,
+  // coalesced. A completed bilateral transfer and the inbox poller's new items
+  // both reach it through the event bridge; the direct subscriptions to those
+  // raw events that used to sit beside it were second and third reloads of
+  // the same change, grown around a listener that dropped events.
   useWalletRefreshListener(() => void loadWalletData(), [loadWalletData]);
-
-  // Direct bilateral transfer-complete listener — bypasses the wallet.refresh
-  // throttle chain.  When a BLE bilateral transfer completes on the receiver,
-  // the event chain (Rust → JNI → Kotlin → MessagePort → EventBridge) emits
-  // bilateral.transferComplete.  This direct subscription ensures the wallet
-  // data reloads even if the wallet.refresh → useWalletRefreshListener path
-  // drops the event (e.g. during cooldown or RAF scheduling edge cases).
-  useEffect(() => {
-    const unsub = bridgeEvents.on('bilateral.transferComplete', () => {
-      logger.debug('[useWalletScreenData] bilateral.transferComplete -> reloading wallet data');
-      void loadWalletData();
-    });
-    return unsub;
-  }, [loadWalletData]);
-
-  // Reload when inbox sync applies new transfers (online receive path).
-  // storage.sync → apply_operation → inbox.updated event → reload balances.
-  useEffect(() => {
-    const unsub = bridgeEvents.on('inbox.updated', (detail) => {
-      const newItems = typeof detail?.newItems === 'number' ? detail.newItems : 0;
-      if (newItems > 0) {
-        logger.debug(`[useWalletScreenData] inbox.updated (${newItems} new) -> reloading wallet data`);
-        void loadWalletData();
-      }
-    });
-    return unsub;
-  }, [loadWalletData]);
 
   // Reload when leaving bitcoin tab
   const activeTabRef = useRef(activeTab);

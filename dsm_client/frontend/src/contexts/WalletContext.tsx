@@ -8,6 +8,7 @@ import { useEventSignal } from '../bridge/useEventSignal';
 import { useBridgeEvent } from '@/hooks/useBridgeEvents';
 import type { Transaction } from '@/hooks/useTransactions';
 import { useWalletSync } from '@/hooks/useWalletSync';
+import { useWalletRefreshListener } from '@/hooks/useWalletRefreshListener';
 import { walletStore, useWalletStore } from '../stores/walletStore';
 import type { TokenBalanceView } from '../dsm/types';
 
@@ -108,9 +109,11 @@ export const WalletProvider: React.FC<{ children: ReactNode }> = ({ children }) 
     },
   });
 
-  useBridgeEvent('bilateral.transferComplete', () => {
-    void refreshWalletProjection();
-  }, [refreshWalletProjection]);
+  // The one path from a wallet change to this projection's reload:
+  // `wallet.refresh`, coalesced. A completed bilateral transfer and Rust's
+  // inbox poller both reach it through the event bridge, so neither is
+  // subscribed to here again — each was a second reload of the same change.
+  useWalletRefreshListener(refreshWalletProjection, [refreshWalletProjection]);
 
   useBridgeEvent('deposit.completed', () => {
     void refreshWalletProjection();
@@ -120,15 +123,9 @@ export const WalletProvider: React.FC<{ children: ReactNode }> = ({ children }) 
     void refreshWalletProjection();
   }, [refreshWalletProjection]);
 
-  useBridgeEvent('inbox.updated', (detail?: { newItems?: number }) => {
-    const newItems = typeof detail?.newItems === 'number' ? detail.newItems : 0;
-    if (newItems <= 0) return;
-    void refreshWalletProjection();
-  }, [refreshWalletProjection]);
-
+  // The accept path emits `wallet.refresh` itself; this is the toast only.
   useEffect(() => {
     if (bilateralSignal > 0) {
-      void walletStore.refreshAll();
       try {
         notifyToast('transfer_accepted', 'Transfer accepted');
       } catch (error) {

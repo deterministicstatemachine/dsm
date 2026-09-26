@@ -295,6 +295,37 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
     expect(button.className).toContain('has-items');
   });
 
+  // One inbox sync with new items is one reload. The event bridge announces
+  // it as `inbox.updated` and one `wallet.refresh`; the screen used to reload
+  // on both, and on `bilateral.transferComplete` beside `wallet.refresh` too.
+  test('one inbox sync with new items reloads the wallet data once', async () => {
+    installStandardWalletMocks();
+    (dsmClient.getAllBalances as any) = jest
+      .fn()
+      .mockResolvedValue([{ tokenId: 'ERA', symbol: 'ERA', baseUnits: 100n, displayAmount: '100', decimals: 0, protocolDefined: true }]);
+    (dsmClient.getWalletHistory as any) = jest.fn().mockResolvedValue({ transactions: [] });
+
+    render(<EnhancedWalletScreen />);
+    await waitFor(() => expect(dsmClient.getAllBalances).toHaveBeenCalledTimes(1));
+
+    await act(async () => {
+      bridgeEvents.emit('inbox.updated', { newItems: 1, source: 'rust_poller' });
+      bridgeEvents.emit('wallet.refresh', { source: 'inbox.sync' });
+    });
+    await waitFor(() => expect(dsmClient.getAllBalances).toHaveBeenCalledTimes(2));
+    // A second reload would follow within a frame or two; none does.
+    await act(async () => { await new Promise((r) => setTimeout(r, 80)); });
+    expect(dsmClient.getAllBalances).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      bridgeEvents.emit('wallet.refresh', { source: 'bilateral.transfer_complete' });
+      bridgeEvents.emit('bilateral.transferComplete', undefined as any);
+    });
+    await waitFor(() => expect(dsmClient.getAllBalances).toHaveBeenCalledTimes(3));
+    await act(async () => { await new Promise((r) => setTimeout(r, 80)); });
+    expect(dsmClient.getAllBalances).toHaveBeenCalledTimes(3);
+  });
+
   // The overlay lists what Rust found, including an item Rust marked as found
   // on the previous-tip route; it used to drop those and keep a label nothing
   // could reach.

@@ -124,8 +124,9 @@ function frameEnvelope(env: pb.Envelope): Uint8Array {
 /** Build FramedEnvelopeV3 containing a BalancesListResponse */
 function makeBalancesFramedEnvelope(balances: Array<{ tokenId: string; available: bigint }>): Uint8Array {
   // Complete rows, as balance.list enriches them: the boundary decoder refuses
-  // a row missing its symbol, name or display amount. The fixture's tokens are
-  // whole-unit, so the display form is the base units.
+  // a row missing its symbol, name or display amount, and a created token's
+  // row without its policy facts. The fixture's tokens are ERA, a protocol
+  // asset on Rust's word, and whole-unit, so the display form is the base units.
   const balList = balances.map(b => new pb.BalanceGetResponse({
     tokenId: b.tokenId,
     available: b.available as any,
@@ -134,6 +135,7 @@ function makeBalancesFramedEnvelope(balances: Array<{ tokenId: string; available
     tokenName: b.tokenId,
     decimals: 0,
     displayAmount: b.available.toString(),
+    protocolDefined: true,
   } as any));
   const resp = new pb.BalancesListResponse({ balances: balList } as any);
   const env = new pb.Envelope({
@@ -978,7 +980,7 @@ describe('INTEGRATED: Full chain with sendMessageBin-only mock', () => {
     await waitFor(() => expect(container.querySelector('.bilateral-transfer-overlay')).not.toBeNull());
   });
 
-  test('wallet.bilateralCommitted → WalletProvider refreshes (REAL sendMessageBin round trip)', async () => {
+  test('an accepted transfer → WalletProvider refreshes on the accept path’s wallet.refresh (REAL sendMessageBin round trip)', async () => {
     render(<ProductionLayout />);
     await settleWalletInit();
     await waitFor(() => expect(screen.getByTestId('i-balance-era').textContent).toBe('10000'));
@@ -987,9 +989,12 @@ describe('INTEGRATED: Full chain with sendMessageBin-only mock', () => {
     balancesState = [{ tokenId: 'ERA', available: 10500n }];
     capturedMethods = [];
 
-    // Emit wallet.bilateralCommitted — useEventSignal triggers refreshAll
+    // What the accept path emits: the committed signal (the toast's trigger)
+    // and its own wallet.refresh (the reload's). The provider reloads on the
+    // second alone.
     act(() => {
       bridgeEvents.emit('wallet.bilateralCommitted', { accepted: true, committed: true } as any);
+      bridgeEvents.emit('wallet.refresh', { source: 'bilateral.accept_followup' });
     });
 
     // Wait for REAL getAllBalances → sendMessageBin round trip

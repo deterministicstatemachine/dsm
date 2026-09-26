@@ -27,13 +27,14 @@ import { GenericTransaction, GenericTxResponse } from './types';
 
 
 /**
- * After the receiver sends Accept, the Confirm arrives within ~1-2 seconds.
- * Schedule staggered priority wallet refreshes using RAF batches to ensure
- * the UI picks up the balance change from SQLite regardless of whether the
- * TRANSFER_COMPLETE event chain delivers successfully.  Each refresh uses
- * the priority source so useWalletRefreshListener bypasses its cooldown.
+ * After the receiver sends Accept, the Confirm arrives within ~1-2 seconds
+ * and Rust announces the completed transfer (`bilateral.event`), which the
+ * event bridge turns into `wallet.refresh`. These staggered re-reads exist
+ * beside that announcement, not instead of it: whether the announcement alone
+ * suffices on a device is undecided (CONFORMANCE_GAPS §6.29, Open), so the
+ * cadence stays until a device run says. Each re-read names itself.
  *
- * RAF spacing: ~30 frames ≈ 0.5s at 60fps, repeated 4 times ≈ 0/0.5/1.5/3s.
+ * RAF spacing: ~30 frames ≈ 0.5s at 60fps, repeated 4 times ≈ 0/0.5/1/2s.
  */
 function schedulePostAcceptRefreshes(): void {
   const INTERVALS = [1, 30, 60, 120]; // RAF frame counts
@@ -45,7 +46,7 @@ function schedulePostAcceptRefreshes(): void {
     if (frame >= INTERVALS[idx]) {
       idx++;
       try {
-        bridgeEvents.emit('wallet.refresh', { source: 'bilateral.transfer_complete' });
+        bridgeEvents.emit('wallet.refresh', { source: 'bilateral.accept_followup' });
       } catch {}
     }
     if (idx < INTERVALS.length) {

@@ -18,10 +18,8 @@ export type WalletSyncHandlers = {
 export function useWalletSync(handlers: WalletSyncHandlers) {
   const { onRefreshAll, onRefreshBalances, onRefreshTransactions, onIdentityReady } = handlers;
 
-  // NOTE: wallet.refresh is handled by useWalletRefreshListener (RAF-coalesced
-  // + 120-frame cooldown) inside useWalletScreenData.  We intentionally do NOT
-  // subscribe to it here — doing so would create an unthrottled duplicate that
-  // floods the bridge with balance/history queries during BLE transfers.
+  // `wallet.refresh` is the provider's own listener (useWalletRefreshListener,
+  // coalesced); it is not subscribed to here as well.
 
   // Specific sub-stream updates
   useBridgeEvent('wallet.historyUpdated', useCallback(() => {
