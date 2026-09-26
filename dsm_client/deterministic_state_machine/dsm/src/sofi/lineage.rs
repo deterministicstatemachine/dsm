@@ -27,7 +27,10 @@ use crate::sofi::wire::SettlementPreimage;
 use crate::types::device_state::DeviceState;
 
 use super::derive;
-use super::resolution::Resolution;
+use super::facts::Established;
+use super::resolution::{
+    effect_of, resolve_position, resolve_refuted_in_hand, Incomplete, PositionEffect, Resolution,
+};
 use super::wire::{
     next_position, ParentClaimRef, SofiWireError, TraderFulfillmentBody, TraderPrecommitBody,
     VaultGenesisPreimage, VaultStateLeaf,
@@ -48,14 +51,19 @@ pub enum AdvanceError {
     PreRootIsNotThePredecessor { previous: D32, void_root: D32 },
     /// The claim registered at `K_root(p)` is not the one `P` names.
     ParentClaimMismatch,
-    /// The fulfillment installed a different `C_q` than `(P, F)` derive.
-    ResolutionClaimMismatch { registered: D32, derived: D32 },
+    /// The facts handed over were established for another exercise: they
+    /// name another fulfillment, or another `E`, than `(P, F)`.
+    FactsAreNotThisOperation { expected: D32, facts: D32 },
+    /// The facts are complete and the ladder does not resolve the position
+    /// yet (Amendment S7): nothing is installed, and the caller reads again.
+    FactsIncomplete(Incomplete),
     /// The position resolved Invalid: the lineage is terminal here, and no
     /// root follows it.
     LineageIsTerminal,
-    /// A realized position was handed no receipt, so the tokens it credits
-    /// could not be checked against the receiver's adoptions.
-    RealizedWithoutReceipt,
+    /// The ladder over an in-hand refutation answered something other than
+    /// Invalid. It never does (`resolve_refuted_in_hand`); stated so that a
+    /// change to it is refused here rather than installed.
+    RefutedYetNotTerminal,
     /// The credits of a realized position could not be derived from the
     /// evidence the verdict was reached on.
     CreditsNotDerivable,
@@ -64,9 +72,10 @@ pub enum AdvanceError {
     /// The balances a realized position moves could not be derived from the
     /// evidence the verdict was reached on.
     BalancesNotDerivable,
-    /// The receipt describes a different operation from the one being
-    /// installed: its settlement does not recompute this `P`'s `E`.
-    ReceiptIsNotThisOperation { expected: D32, derived: D32 },
+    /// The preimage the facts were established over describes a different
+    /// operation from the one being installed: its settlement does not
+    /// recompute this `P`'s `E`.
+    PreimageIsNotThisOperation { expected: D32, derived: D32 },
     /// A counter has no successor.
     Counter(SofiWireError),
 }
@@ -89,17 +98,24 @@ impl core::fmt::Display for AdvanceError {
             Self::ParentClaimMismatch => {
                 write!(f, "the claim at K_root(p) is not the one P names")
             }
-            Self::ResolutionClaimMismatch { .. } => write!(
+            Self::FactsAreNotThisOperation { expected, facts } => write!(
                 f,
-                "the registered C_q is not the one (P, F) derive — a claim is \
-                 recomputed, never believed"
+                "the facts were established for another exercise: E {} was expected, \
+                 they are bound to {}",
+                crate::utils::text_id::encode_base32_crockford(expected),
+                crate::utils::text_id::encode_base32_crockford(facts)
+            ),
+            Self::FactsIncomplete(incomplete) => write!(
+                f,
+                "the position is not resolved yet over these facts: {incomplete:?}"
             ),
             Self::LineageIsTerminal => {
                 write!(f, "the position resolved Invalid: no root follows it")
             }
-            Self::RealizedWithoutReceipt => write!(
+            Self::RefutedYetNotTerminal => write!(
                 f,
-                "a realized position was handed no receipt: its credits cannot be checked"
+                "an exercise refuted in hand resolved to something other than Invalid: \
+                 the ladder and the advance disagree, and nothing is installed"
             ),
             Self::CreditsNotDerivable => write!(
                 f,
@@ -116,10 +132,10 @@ impl core::fmt::Display for AdvanceError {
                  roots the token on the receiver's behalf does not satisfy it",
                 crate::utils::text_id::encode_base32_crockford(policy_commit)
             ),
-            Self::ReceiptIsNotThisOperation { expected, derived } => write!(
+            Self::PreimageIsNotThisOperation { expected, derived } => write!(
                 f,
-                "the receipt is for another operation: E {} was expected, its settlement \
-                 recomputes {}",
+                "the facts' preimage is another operation's: E {} was expected, its \
+                 settlement recomputes {}",
                 crate::utils::text_id::encode_base32_crockford(expected),
                 crate::utils::text_id::encode_base32_crockford(derived)
             ),
@@ -129,36 +145,6 @@ impl core::fmt::Display for AdvanceError {
 }
 
 impl std::error::Error for AdvanceError {}
-
-/// What a verifier has established about the claim registered at `p` and `q`.
-///
-/// Both are EXACT registered values it read for itself. They are inputs to be
-/// checked, never authorities to be trusted.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RegisteredClaims {
-    /// The exact claim reference registered at `K_root(p)`, in the form `P`
-    /// names it.
-    pub parent: ParentClaimRef,
-    /// The `C_q` digest the fulfillment installed at `K_root(q)`.
-    pub conditional: D32,
-}
-
-/// What a REALIZED resolution must present beyond its claim: the settlement
-/// whose credits are about to land, the evidence its verdict was reached on,
-/// and the receiving device's own pre-state.
-///
-/// A `Void` needs none of it, because a void moves nothing. A `Realized`
-/// cannot be advanced without one — which is the point. The credits are
-/// DERIVED here from the preimage and the evidence, never supplied by the
-/// caller, so no producer can present a short list and no producer can skip
-/// the check by omitting the argument.
-pub struct RealizedReceipt<'a> {
-    pub preimage: &'a SettlementPreimage,
-    pub evidence: &'a Evidence,
-    /// `S_pre`: the state this advance is about to succeed. Its adoptions are
-    /// the ones that count, because adoption must PRECEDE receipt.
-    pub receiver: &'a DeviceState,
-}
 
 /// THE ADOPTION INVARIANT, on the resolved SoFi seam:
 ///
@@ -184,25 +170,29 @@ pub struct RealizedReceipt<'a> {
 /// holds, and the multi-hop intermediate is never credited to the trader at
 /// all (see [`trader_credits`]), so a route passing through an asset does not
 /// oblige the trader to adopt it — that asset is the DLVs' across the hop.
+///
+/// `receiver` is `S_pre`: the state this advance is about to succeed. Its
+/// adoptions are the ones that count, because adoption must PRECEDE receipt.
 fn adoption_admits(
     precommit: &TraderPrecommitBody,
-    receipt: &RealizedReceipt<'_>,
+    preimage: &SettlementPreimage,
+    evidence: &Evidence,
+    receiver: &DeviceState,
 ) -> Result<(), AdvanceError> {
-    // The receipt must describe THIS operation. Without this, a producer
-    // could present the evidence of some other, fully adopted settlement and
-    // install this one's root behind it — the gate would be checking an
-    // operation nobody was installing. `E` is what `P` commits its settlement
-    // by, so recomputing it from the receipt's own bytes is the binding.
-    let derived =
-        derive::recompute_e(receipt.preimage).map_err(|_| AdvanceError::CreditsNotDerivable)?;
+    // The preimage must describe THIS operation. Without this, facts
+    // established over some other, fully adopted settlement could install
+    // this one's root behind it — the gate would be checking an operation
+    // nobody was installing. `E` is what `P` commits its settlement by, so
+    // recomputing it from the preimage's own bytes is the binding.
+    let derived = derive::recompute_e(preimage).map_err(|_| AdvanceError::CreditsNotDerivable)?;
     let expected = *precommit.external_commitment();
     if derived != expected {
-        return Err(AdvanceError::ReceiptIsNotThisOperation { expected, derived });
+        return Err(AdvanceError::PreimageIsNotThisOperation { expected, derived });
     }
-    let credits = trader_credits(receipt.preimage, receipt.evidence)
-        .map_err(|_| AdvanceError::CreditsNotDerivable)?;
+    let credits =
+        trader_credits(preimage, evidence).map_err(|_| AdvanceError::CreditsNotDerivable)?;
     for policy_commit in credits {
-        if !receipt.receiver.has_adopted(&policy_commit) {
+        if !receiver.has_adopted(&policy_commit) {
             return Err(AdvanceError::TokenNotAdopted { policy_commit });
         }
     }
@@ -223,10 +213,13 @@ impl ResolvedBalances {
     }
 }
 
-/// What [`advance_resolved`] establishes at `q`: the validated root, the
-/// claim `C_q` accepted there, and the trader balances the root moved.
+/// What [`advance_resolved`] establishes at `q`: the resolution the ladder
+/// reached and its effect, the validated root, the claim `C_q` accepted
+/// there, and the trader balances the root moved.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedAdvance {
+    pub resolution: Resolution,
+    pub effect: PositionEffect,
     pub root: ValidatedEconomicRoot,
     pub claim: crate::economic::lineage::AcceptedClaim,
     pub balances: ResolvedBalances,
@@ -234,18 +227,30 @@ pub struct ResolvedAdvance {
 
 /// Advance the validated lineage through a resolved SoFi position (P15-10).
 ///
-/// Every conjunct is independent and each one is a separate reason to refuse:
-/// the positions chain, the predecessor's root is the one `P` was built on,
-/// the parent claim is the one `P` names, and the installed `C_q` is the one
-/// `(P, F)` derive — recomputed here, because a register holds what a member
-/// was told.
+/// THE VERDICT IS DERIVED HERE. `established` is what this verifier
+/// established about the exercise — facts Core built from reads Core
+/// evaluated (`facts::establish`), or its own bytes' refutation — and the
+/// ladder (`resolve_position`, §24) runs over them inside this function. No
+/// caller names a resolution: a root is installed on the ladder's answer and
+/// on nothing else. `Void` installs the predecessor's root and moves
+/// nothing; `Realized` installs `P.realize_root` and moves exactly the
+/// balances Core derives from the evidence the verdict was reached on;
+/// `Invalid` installs nothing, ever.
+///
+/// Every other conjunct is independent and each is a separate reason to
+/// refuse: the positions chain, the predecessor's root is the one `P` was
+/// built on, the parent claim is the one `P` names, the facts are this
+/// operation's, and — for a realized route — every token it credits is one
+/// `receiver` adopted before. `C_q` is derived from `(P, F)` for the claim
+/// accepted at `q`; the register holds what a member was told, and the
+/// registration the facts stand on was itself read by Core from the pair.
 pub fn advance_resolved(
     previous: &ValidatedEconomicRoot,
     precommit: &TraderPrecommitBody,
     fulfillment: &TraderFulfillmentBody,
-    claims: &RegisteredClaims,
-    resolution: Resolution,
-    receipt: Option<&RealizedReceipt<'_>>,
+    parent_claim: &ParentClaimRef,
+    established: &Established,
+    receiver: &DeviceState,
 ) -> Result<ResolvedAdvance, AdvanceError> {
     let q = next_position(precommit.position()).map_err(AdvanceError::Counter)?;
     if fulfillment.position() != q || previous.economic_position() != precommit.position() {
@@ -262,36 +267,72 @@ pub fn advance_resolved(
             void_root: *precommit.void_root(),
         });
     }
-    if claims.parent != *precommit.parent_claim_ref() {
+    if *parent_claim != *precommit.parent_claim_ref() {
         return Err(AdvanceError::ParentClaimMismatch);
     }
-    // C_q is DERIVED from (P, F). Reading it out of the register and comparing
-    // it to itself would check nothing.
-    let derived = derive::resolution_claim(precommit, fulfillment);
-    let derived_digest = derive::claim_ref(&derived.encode());
-    if claims.conditional != derived_digest {
-        return Err(AdvanceError::ResolutionClaimMismatch {
-            registered: claims.conditional,
-            derived: derived_digest,
+    // The facts must be THIS operation's: established for this F, bound to
+    // this P's E. Facts of another exercise, however resolved, install
+    // nothing here.
+    let expected = *precommit.external_commitment();
+    if *established.fulfillment_id() != derive::fulfillment_id(fulfillment)
+        || *established.external_commitment() != expected
+    {
+        return Err(AdvanceError::FactsAreNotThisOperation {
+            expected,
+            facts: *established.external_commitment(),
         });
     }
-    let (root, balances) = match resolution {
-        Resolution::Realized => {
-            let receipt = receipt.ok_or(AdvanceError::RealizedWithoutReceipt)?;
-            // The adoption invariant, inside the function that installs the
-            // root, so that no caller can reach a realized advance without it.
-            adoption_admits(precommit, receipt)?;
-            // The balances the realize root holds for the tokens T° moves,
-            // from the same bytes `adoption_admits` just bound to this `E`.
-            let changes = trader_balance_changes(precommit, receipt.preimage, receipt.evidence)
-                .map_err(|_| AdvanceError::BalancesNotDerivable)?;
-            (*precommit.realize_root(), ResolvedBalances(changes))
+    let (resolution, root, balances) = match established {
+        Established::Facts(facts) => {
+            let resolution =
+                resolve_position(&facts.route_facts()).map_err(AdvanceError::FactsIncomplete)?;
+            match resolution {
+                Resolution::Realized => {
+                    // The adoption invariant, inside the function that
+                    // installs the root, so that no caller can reach a
+                    // realized advance without it.
+                    adoption_admits(precommit, &facts.preimage, &facts.evidence, receiver)?;
+                    // The balances the realize root holds for the tokens T°
+                    // moves, from the same bytes `adoption_admits` just
+                    // bound to this `E`.
+                    let changes =
+                        trader_balance_changes(precommit, &facts.preimage, &facts.evidence)
+                            .map_err(|_| AdvanceError::BalancesNotDerivable)?;
+                    (
+                        resolution,
+                        *precommit.realize_root(),
+                        ResolvedBalances(changes),
+                    )
+                }
+                // Zero mutations: the lineage continues exactly where it was.
+                Resolution::Void => (
+                    resolution,
+                    previous.economic_root(),
+                    ResolvedBalances(Vec::new()),
+                ),
+                Resolution::Invalid => return Err(AdvanceError::LineageIsTerminal),
+            }
         }
-        // Zero mutations: the lineage continues exactly where it was.
-        Resolution::Void => (previous.economic_root(), ResolvedBalances(Vec::new())),
-        Resolution::Invalid => return Err(AdvanceError::LineageIsTerminal),
+        Established::RefutedInHand(refuted) => {
+            // Registration is the one fact the ladder asks of a refuted
+            // exercise; registered, it is Invalid whatever the cells say.
+            match resolve_refuted_in_hand(refuted.registered)
+                .map_err(AdvanceError::FactsIncomplete)?
+            {
+                Resolution::Invalid => return Err(AdvanceError::LineageIsTerminal),
+                Resolution::Realized | Resolution::Void => {
+                    return Err(AdvanceError::RefutedYetNotTerminal)
+                }
+            }
+        }
     };
+    // C_q is DERIVED from (P, F): the claim accepted at q is the one they
+    // derive, never one read out of a register.
+    let derived_digest =
+        derive::claim_ref(&derive::resolution_claim(precommit, fulfillment).encode());
     Ok(ResolvedAdvance {
+        resolution,
+        effect: effect_of(resolution),
         balances,
         root: ValidatedEconomicRoot::from_resolved_sofi_position(q, root),
         claim: crate::economic::lineage::AcceptedClaim::from_resolved_sofi_position(
@@ -708,9 +749,14 @@ pub fn genesis_root(vault_id: &D32, state: &VaultStateLeaf) -> Result<D32, SofiW
 #[allow(clippy::disallowed_methods)] // test asserts; a failure here is the signal
 mod tests {
     use super::*;
-    use crate::sofi::wire::{VaultCreation, VaultGenesisPreimage, VAULT_STATUS_ACTIVE};
     use crate::economic::state::EconomicLeafState;
+    use crate::route_chain::{CellFact, ChainState};
+    use crate::sofi::conformance::Validation;
+    use crate::sofi::facts::{EstablishedFacts, RefutedPosition};
+    use crate::sofi::resolution::{LegFacts, ParentPosition, ParentStatus, RefutedInHand};
+    use crate::sofi::validation::fixtures::{swap_fixture_n, Fixture};
     use crate::sofi::wire::{PrecommitLeg, TraderRelationshipLeaf};
+    use crate::sofi::wire::{VaultCreation, VaultGenesisPreimage, VAULT_STATUS_ACTIVE};
 
     const G: D32 = [0x11; 32];
     const DEV: D32 = [0x22; 32];
@@ -757,13 +803,6 @@ mod tests {
         .unwrap()
     }
 
-    fn claims(p: &TraderPrecommitBody, f: &TraderFulfillmentBody) -> RegisteredClaims {
-        RegisteredClaims {
-            parent: *p.parent_claim_ref(),
-            conditional: derive::claim_ref(&derive::resolution_claim(p, f).encode()),
-        }
-    }
-
     fn previous(root: D32) -> ValidatedEconomicRoot {
         ValidatedEconomicRoot::rehydrate_from_admitted_store(
             crate::economic::lineage::AdmittedEconomicPosition::SingleRoot {
@@ -775,29 +814,104 @@ mod tests {
         .expect("an ordinary admitted position")
     }
 
+    /// How the ladder resolves the facts stated for a position: what each
+    /// leg's cell holds, and whether the route is statically valid.
+    #[derive(Clone, Copy)]
+    enum Shape {
+        /// Every leg final on this operation's `E`, canonical and live.
+        Realized,
+        /// Every leg final on ANOTHER operation's `E`: a reserved key lost.
+        Void,
+        /// `RouteValidation = Invalid`.
+        Invalid,
+    }
+
+    /// The facts of `p`'s exercise as Core would establish them for a
+    /// position of `shape`, stated directly: this module tests the advance's
+    /// own conjuncts and what it does with the ladder's answer over the
+    /// facts. That the facts' producer states nothing a read did not
+    /// establish is `facts`' own test.
+    fn established(
+        p: &TraderPrecommitBody,
+        f: &TraderFulfillmentBody,
+        preimage: &SettlementPreimage,
+        evidence: &Evidence,
+        shape: Shape,
+    ) -> Established {
+        let e = *p.external_commitment();
+        let held_by = match shape {
+            Shape::Realized | Shape::Invalid => e,
+            Shape::Void => d(0x0E),
+        };
+        let legs = p
+            .legs()
+            .iter()
+            .map(|_| LegFacts {
+                cell: CellFact::Held {
+                    id: held_by,
+                    state: ChainState::Final,
+                },
+                parent: ParentStatus::Canonical,
+                attempt_live: true,
+                parent_consumed_elsewhere: false,
+            })
+            .collect();
+        let keys = p
+            .legs()
+            .iter()
+            .map(|leg| {
+                let attempt = f
+                    .attempts()
+                    .iter()
+                    .find(|a| a.vault_id == leg.vault_id)
+                    .map_or(0, |a| a.attempt);
+                (leg.vault_id, leg.parent_root, attempt)
+            })
+            .collect();
+        Established::Facts(Box::new(EstablishedFacts {
+            fulfillment_id: derive::fulfillment_id(f),
+            external_commitment: e,
+            registered: true,
+            conformance: Validation::Valid,
+            position_lost: false,
+            parent: ParentPosition::SingleRoot,
+            parent_pre_root: *p.void_root(),
+            validation: match shape {
+                Shape::Invalid => Validation::Invalid,
+                Shape::Realized | Shape::Void => Validation::Valid,
+            },
+            storage_resolved: true,
+            legs,
+            keys,
+            preimage: preimage.clone(),
+            evidence: evidence.clone(),
+        }))
+    }
+
+    /// Any settlement preimage, for facts whose preimage the advance never
+    /// reads: a void moves nothing and an invalid installs nothing.
+    fn any_preimage() -> SettlementPreimage {
+        swap_fixture_n(1).preimage
+    }
+
+    /// A receiver whose adoptions the advance never consults, for the same
+    /// two cases.
+    fn bare_receiver() -> DeviceState {
+        DeviceState::new(G, DEV, vec![0x01; 32])
+    }
+
     /// The fixture's own one-hop swap, and a receiver that HAS adopted what
-    /// it credits. The receipt must describe this very operation — its
-    /// settlement has to recompute `P`'s `E` — so these tests stand on the
+    /// it credits. The facts must describe this very operation — their
+    /// preimage has to recompute `P`'s `E` — so these tests stand on the
     /// real rig rather than the synthetic precommit above, whose `E` is a
     /// literal no settlement could produce.
-    fn realized_rig() -> (crate::sofi::validation::fixtures::Fixture, DeviceState) {
-        let fx = crate::sofi::validation::fixtures::swap_fixture_n(1);
+    fn realized_rig() -> (Fixture, DeviceState) {
+        let fx = swap_fixture_n(1);
         let mut receiver = DeviceState::new(G, DEV, vec![0x01; 32]);
         for policy_commit in trader_credits(&fx.preimage, &fx.evidence).unwrap() {
             receiver = receiver.adopt_token(policy_commit).unwrap();
         }
         (fx, receiver)
-    }
-
-    fn receipt<'a>(
-        fx: &'a crate::sofi::validation::fixtures::Fixture,
-        receiver: &'a DeviceState,
-    ) -> RealizedReceipt<'a> {
-        RealizedReceipt {
-            preimage: &fx.preimage,
-            evidence: &fx.evidence,
-            receiver,
-        }
     }
 
     #[test]
@@ -809,11 +923,13 @@ mod tests {
             &previous(*p.void_root()),
             &p,
             &f,
-            &claims(&p, &f),
-            Resolution::Realized,
-            Some(&receipt(&fx, &receiver)),
+            p.parent_claim_ref(),
+            &established(&p, &f, &fx.preimage, &fx.evidence, Shape::Realized),
+            &receiver,
         )
         .unwrap();
+        assert_eq!(advanced.resolution, Resolution::Realized);
+        assert_eq!(advanced.effect, PositionEffect::InstallRealizeRoot);
         assert_eq!(advanced.root.economic_position(), P_POS + 1);
         assert_eq!(advanced.root.economic_root(), *p.realize_root());
         // The claim accepted at q is C_q, derived from (P, F).
@@ -833,9 +949,151 @@ mod tests {
         );
     }
 
+    /// THE VERDICT IS THE LADDER'S. Over the same `P`, `F`, evidence and
+    /// receiver, the root the advance installs follows what the facts say:
+    /// legs final on this operation's `E` install the realize root; a leg
+    /// final on another operation's `E` — a reserved key lost — installs the
+    /// predecessor's root and moves nothing. Nothing a caller passes names
+    /// the resolution; there is no argument to name it with.
+    /// MUTATION CONTROL: an advance that installs on anything but the
+    /// ladder's answer over these facts turns this red.
+    #[test]
+    fn the_installed_root_follows_the_ladder_over_the_facts() {
+        let (fx, receiver) = realized_rig();
+        let p = fx.precommit.clone();
+        let f = fulfillment(&p);
+        let realized = advance_resolved(
+            &previous(*p.void_root()),
+            &p,
+            &f,
+            p.parent_claim_ref(),
+            &established(&p, &f, &fx.preimage, &fx.evidence, Shape::Realized),
+            &receiver,
+        )
+        .unwrap();
+        assert_eq!(realized.resolution, Resolution::Realized);
+        assert_eq!(realized.root.economic_root(), *p.realize_root());
+        assert!(!realized.balances.changes().is_empty());
+
+        let void = advance_resolved(
+            &previous(*p.void_root()),
+            &p,
+            &f,
+            p.parent_claim_ref(),
+            &established(&p, &f, &fx.preimage, &fx.evidence, Shape::Void),
+            &receiver,
+        )
+        .unwrap();
+        assert_eq!(void.resolution, Resolution::Void);
+        assert_eq!(void.effect, PositionEffect::InstallPreviousRoot);
+        assert_eq!(void.root.economic_root(), *p.void_root());
+        assert!(void.balances.changes().is_empty());
+
+        assert_eq!(
+            advance_resolved(
+                &previous(*p.void_root()),
+                &p,
+                &f,
+                p.parent_claim_ref(),
+                &established(&p, &f, &fx.preimage, &fx.evidence, Shape::Invalid),
+                &receiver,
+            ),
+            Err(AdvanceError::LineageIsTerminal)
+        );
+    }
+
+    /// Facts the ladder does not resolve install nothing, and say why: an
+    /// unregistered fulfillment (rung 0), a leg whose key is still open
+    /// (rung 6). Not a result, and never a root.
+    #[test]
+    fn facts_the_ladder_does_not_resolve_install_nothing() {
+        let (fx, receiver) = realized_rig();
+        let p = fx.precommit.clone();
+        let f = fulfillment(&p);
+        let Established::Facts(complete) =
+            established(&p, &f, &fx.preimage, &fx.evidence, Shape::Realized)
+        else {
+            unreachable!("stated facts")
+        };
+        let unregistered = EstablishedFacts {
+            registered: false,
+            ..(*complete).clone()
+        };
+        assert_eq!(
+            advance_resolved(
+                &previous(*p.void_root()),
+                &p,
+                &f,
+                p.parent_claim_ref(),
+                &Established::Facts(Box::new(unregistered)),
+                &receiver,
+            ),
+            Err(AdvanceError::FactsIncomplete(Incomplete::NotRegistered))
+        );
+        let open = EstablishedFacts {
+            legs: vec![LegFacts {
+                cell: CellFact::Open,
+                ..complete.legs[0]
+            }],
+            storage_resolved: false,
+            ..*complete
+        };
+        assert_eq!(
+            advance_resolved(
+                &previous(*p.void_root()),
+                &p,
+                &f,
+                p.parent_claim_ref(),
+                &Established::Facts(Box::new(open)),
+                &receiver,
+            ),
+            Err(AdvanceError::FactsIncomplete(Incomplete::StorageNotFinal))
+        );
+    }
+
+    /// An exercise refuted by its own bytes installs nothing: registered, it
+    /// is Invalid and the lineage is terminal; unregistered, it is not
+    /// resolved at all (§24 step 0).
+    #[test]
+    fn a_refuted_exercise_installs_nothing() {
+        let pre = d(0xA0);
+        let p = precommit(pre, d(0xA1));
+        let f = fulfillment(&p);
+        let refuted = |registered| {
+            Established::RefutedInHand(RefutedPosition {
+                fulfillment_id: derive::fulfillment_id(&f),
+                external_commitment: *p.external_commitment(),
+                refuted: RefutedInHand::Conformance,
+                registered,
+            })
+        };
+        assert_eq!(
+            advance_resolved(
+                &previous(pre),
+                &p,
+                &f,
+                p.parent_claim_ref(),
+                &refuted(true),
+                &bare_receiver(),
+            ),
+            Err(AdvanceError::LineageIsTerminal)
+        );
+        assert_eq!(
+            advance_resolved(
+                &previous(pre),
+                &p,
+                &f,
+                p.parent_claim_ref(),
+                &refuted(false),
+                &bare_receiver(),
+            ),
+            Err(AdvanceError::FactsIncomplete(Incomplete::NotRegistered))
+        );
+    }
+
     /// The swap the realized rig resolves: `AMOUNT_IN` of its first token
     /// out of the trader's 50 000, and its exact output of the last one in.
-    fn swap_terms(fx: &crate::sofi::validation::fixtures::Fixture) -> (D32, D32, u64) {
+    fn swap_terms(fx: &Fixture) -> (D32, D32, u64) {
         match fx.preimage.settlement() {
             crate::sofi::wire::SettlementBody::Swap {
                 token_in,
@@ -863,9 +1121,9 @@ mod tests {
             &previous(*p.void_root()),
             &p,
             &f,
-            &claims(&p, &f),
-            Resolution::Realized,
-            Some(&receipt(&fx, &receiver)),
+            p.parent_claim_ref(),
+            &established(&p, &f, &fx.preimage, &fx.evidence, Shape::Realized),
+            &receiver,
         )
         .unwrap();
         let mut changes = advanced.balances.changes().to_vec();
@@ -906,9 +1164,9 @@ mod tests {
             &previous(*p.void_root()),
             &p,
             &f,
-            &claims(&p, &f),
-            Resolution::Realized,
-            Some(&receipt(&fx, &receiver)),
+            p.parent_claim_ref(),
+            &established(&p, &f, &fx.preimage, &fx.evidence, Shape::Realized),
+            &receiver,
         )
         .unwrap();
         assert!(receiver.with_resolved_position(&advanced.balances).is_err());
@@ -926,9 +1184,9 @@ mod tests {
             &previous(pre),
             &p,
             &f,
-            &claims(&p, &f),
-            Resolution::Void,
-            None,
+            p.parent_claim_ref(),
+            &established(&p, &f, &any_preimage(), &Evidence::default(), Shape::Void),
+            &bare_receiver(),
         )
         .unwrap();
         assert!(advanced.balances.changes().is_empty());
@@ -945,11 +1203,12 @@ mod tests {
             &previous(pre),
             &p,
             &f,
-            &claims(&p, &f),
-            Resolution::Void,
-            None,
+            p.parent_claim_ref(),
+            &established(&p, &f, &any_preimage(), &Evidence::default(), Shape::Void),
+            &bare_receiver(),
         )
         .unwrap();
+        assert_eq!(advanced.resolution, Resolution::Void);
         assert_eq!(advanced.root.economic_position(), P_POS + 1);
         assert_eq!(advanced.root.economic_root(), pre);
     }
@@ -964,9 +1223,15 @@ mod tests {
                 &previous(pre),
                 &p,
                 &f,
-                &claims(&p, &f),
-                Resolution::Invalid,
-                None
+                p.parent_claim_ref(),
+                &established(
+                    &p,
+                    &f,
+                    &any_preimage(),
+                    &Evidence::default(),
+                    Shape::Invalid
+                ),
+                &bare_receiver(),
             ),
             Err(AdvanceError::LineageIsTerminal)
         );
@@ -980,7 +1245,7 @@ mod tests {
         let realize = d(0xA1);
         let p = precommit(pre, realize);
         let f = fulfillment(&p);
-        let good = claims(&p, &f);
+        let facts = established(&p, &f, &any_preimage(), &Evidence::default(), Shape::Void);
 
         // The predecessor is at another position.
         assert!(matches!(
@@ -995,9 +1260,9 @@ mod tests {
                 .expect("an ordinary admitted position"),
                 &p,
                 &f,
-                &good,
-                Resolution::Realized,
-                None,
+                p.parent_claim_ref(),
+                &facts,
+                &bare_receiver(),
             ),
             Err(AdvanceError::PositionIsNotSuccessor { .. })
         ));
@@ -1020,9 +1285,9 @@ mod tests {
                 &previous(pre),
                 &p,
                 &wrong_q,
-                &good,
-                Resolution::Realized,
-                None
+                p.parent_claim_ref(),
+                &facts,
+                &bare_receiver()
             ),
             Err(AdvanceError::PositionIsNotSuccessor { .. })
         ));
@@ -1033,52 +1298,53 @@ mod tests {
                 &previous(d(0xBB)),
                 &p,
                 &f,
-                &good,
-                Resolution::Realized,
-                None
+                p.parent_claim_ref(),
+                &facts,
+                &bare_receiver()
             ),
             Err(AdvanceError::PreRootIsNotThePredecessor { .. })
         ));
 
         // The claim at K_root(p) is not the one P names.
-        let other_parent = RegisteredClaims {
-            parent: ParentClaimRef::Conditional {
-                fulfillment_id: d(0x77),
-            },
-            ..good
-        };
         assert_eq!(
             advance_resolved(
                 &previous(pre),
                 &p,
                 &f,
-                &other_parent,
-                Resolution::Realized,
-                None
+                &ParentClaimRef::Conditional {
+                    fulfillment_id: d(0x77),
+                },
+                &facts,
+                &bare_receiver()
             ),
             Err(AdvanceError::ParentClaimMismatch)
         );
 
-        // C_q is DERIVED, so a register holding anything else is refused.
-        let other_cq = RegisteredClaims {
-            conditional: d(0x5A),
-            ..good
-        };
+        // The facts were established for another exercise.
+        let other = precommit(pre, d(0xA2));
+        let other_facts = established(
+            &other,
+            &fulfillment(&other),
+            &any_preimage(),
+            &Evidence::default(),
+            Shape::Void,
+        );
         assert!(matches!(
             advance_resolved(
                 &previous(pre),
                 &p,
                 &f,
-                &other_cq,
-                Resolution::Realized,
-                None
+                p.parent_claim_ref(),
+                &other_facts,
+                &bare_receiver()
             ),
-            Err(AdvanceError::ResolutionClaimMismatch { .. })
+            Err(AdvanceError::FactsAreNotThisOperation { .. })
         ));
     }
 
-    /// A fulfillment of ANOTHER precommit derives another `C_q`, so it cannot
-    /// advance this position even at the right place in the lineage.
+    /// A fulfillment of ANOTHER precommit is another exercise, so facts
+    /// established for this one cannot advance the position under it even
+    /// at the right place in the lineage.
     #[test]
     fn a_fulfillment_of_another_precommit_cannot_advance_this_position() {
         let pre = d(0xA0);
@@ -1092,11 +1358,11 @@ mod tests {
                 &previous(pre),
                 &p,
                 &other_f,
-                &claims(&p, &f),
-                Resolution::Realized,
-                None,
+                p.parent_claim_ref(),
+                &established(&p, &f, &any_preimage(), &Evidence::default(), Shape::Void),
+                &bare_receiver(),
             ),
-            Err(AdvanceError::ResolutionClaimMismatch { .. })
+            Err(AdvanceError::FactsAreNotThisOperation { .. })
         ));
     }
 
@@ -1271,9 +1537,15 @@ mod tests {
                 &previous(pre),
                 &p,
                 &f,
-                &claims(&p, &f),
-                Resolution::Invalid,
-                None
+                p.parent_claim_ref(),
+                &established(
+                    &p,
+                    &f,
+                    &any_preimage(),
+                    &Evidence::default(),
+                    Shape::Invalid
+                ),
+                &bare_receiver()
             ),
             Err(AdvanceError::LineageIsTerminal)
         );
@@ -1330,6 +1602,7 @@ mod tests {
         let f = fulfillment(&p);
         let credits = trader_credits(&fx.preimage, &fx.evidence).unwrap();
         assert_eq!(credits.len(), 1, "a one-hop swap credits its output only");
+        let facts = established(&p, &f, &fx.preimage, &fx.evidence, Shape::Realized);
 
         // A receiver that has adopted NOTHING.
         let bare = DeviceState::new(G, DEV, vec![0x01; 32]);
@@ -1339,9 +1612,9 @@ mod tests {
                 &previous(*p.void_root()),
                 &p,
                 &f,
-                &claims(&p, &f),
-                Resolution::Realized,
-                Some(&receipt(&fx, &bare)),
+                p.parent_claim_ref(),
+                &facts,
+                &bare,
             ),
             Err(AdvanceError::TokenNotAdopted {
                 policy_commit: credits[0]
@@ -1354,42 +1627,21 @@ mod tests {
             &previous(*p.void_root()),
             &p,
             &f,
-            &claims(&p, &f),
-            Resolution::Realized,
-            Some(&receipt(&fx, &adopter)),
+            p.parent_claim_ref(),
+            &facts,
+            &adopter,
         )
         .is_ok());
     }
 
-    /// The gate cannot be skipped by declining to present a receipt: a
-    /// realized advance without one is refused, so there is no argument a
-    /// caller can omit to avoid being checked.
+    /// The gate cannot be skipped by withholding what it reads: a realized
+    /// advance derives its credits and balances from the evidence inside the
+    /// facts, and facts whose evidence holds nothing are refused rather than
+    /// crediting nothing. There is no argument a caller can omit to avoid
+    /// being checked.
     #[test]
-    fn a_realized_position_cannot_advance_without_a_receipt() {
-        let (fx, _) = realized_rig();
-        let p = fx.precommit.clone();
-        let f = fulfillment(&p);
-        assert_eq!(
-            advance_resolved(
-                &previous(*p.void_root()),
-                &p,
-                &f,
-                &claims(&p, &f),
-                Resolution::Realized,
-                None,
-            ),
-            Err(AdvanceError::RealizedWithoutReceipt)
-        );
-    }
-
-    /// Nor by presenting SOMEBODY ELSE'S receipt. A producer holding the
-    /// evidence of a fully adopted settlement could otherwise install this
-    /// operation's root behind it, and the gate would be checking an
-    /// operation nobody was installing. `E` is the binding.
-    #[test]
-    fn a_receipt_for_another_operation_is_refused() {
+    fn a_realized_advance_without_the_evidence_it_was_reached_on_is_refused() {
         let (fx, receiver) = realized_rig();
-        let other = crate::sofi::validation::fixtures::swap_fixture_n(2);
         let p = fx.precommit.clone();
         let f = fulfillment(&p);
         assert!(matches!(
@@ -1397,20 +1649,61 @@ mod tests {
                 &previous(*p.void_root()),
                 &p,
                 &f,
-                &claims(&p, &f),
-                Resolution::Realized,
-                Some(&RealizedReceipt {
-                    preimage: &other.preimage,
-                    evidence: &other.evidence,
-                    receiver: &receiver,
-                }),
+                p.parent_claim_ref(),
+                &established(&p, &f, &fx.preimage, &Evidence::default(), Shape::Realized),
+                &receiver,
             ),
-            Err(AdvanceError::ReceiptIsNotThisOperation { .. })
+            Err(AdvanceError::CreditsNotDerivable | AdvanceError::BalancesNotDerivable)
         ));
     }
 
-    /// A VOID moves nothing, so it needs no receipt and no adoption: refusing
-    /// it would strand a lineage over a token that never arrived.
+    /// Nor by presenting SOMEBODY ELSE'S facts. Facts established for another
+    /// operation — another `P`, `F` and `E` — are refused at the binding;
+    /// facts bound to this operation whose preimage is another settlement's
+    /// are refused where `E` is recomputed. A producer holding the evidence
+    /// of a fully adopted settlement cannot install this operation's root
+    /// behind it: the gate would be checking an operation nobody was
+    /// installing.
+    #[test]
+    fn facts_established_for_another_operation_are_refused() {
+        let (fx, receiver) = realized_rig();
+        let other = swap_fixture_n(2);
+        let p = fx.precommit.clone();
+        let f = fulfillment(&p);
+        let other_f = fulfillment(&other.precommit);
+        assert!(matches!(
+            advance_resolved(
+                &previous(*p.void_root()),
+                &p,
+                &f,
+                p.parent_claim_ref(),
+                &established(
+                    &other.precommit,
+                    &other_f,
+                    &other.preimage,
+                    &other.evidence,
+                    Shape::Realized
+                ),
+                &receiver,
+            ),
+            Err(AdvanceError::FactsAreNotThisOperation { .. })
+        ));
+        // Bound to this operation, over another operation's preimage.
+        assert!(matches!(
+            advance_resolved(
+                &previous(*p.void_root()),
+                &p,
+                &f,
+                p.parent_claim_ref(),
+                &established(&p, &f, &other.preimage, &other.evidence, Shape::Realized),
+                &receiver,
+            ),
+            Err(AdvanceError::PreimageIsNotThisOperation { .. })
+        ));
+    }
+
+    /// A VOID moves nothing, so it needs no adoption: refusing it would
+    /// strand a lineage over a token that never arrived.
     #[test]
     fn a_void_needs_no_adoption() {
         let (fx, _) = realized_rig();
@@ -1420,9 +1713,9 @@ mod tests {
             &previous(*p.void_root()),
             &p,
             &f,
-            &claims(&p, &f),
-            Resolution::Void,
-            None,
+            p.parent_claim_ref(),
+            &established(&p, &f, &fx.preimage, &fx.evidence, Shape::Void),
+            &bare_receiver(),
         )
         .unwrap();
         assert_eq!(advanced.root.economic_root(), *p.void_root());
@@ -1434,7 +1727,7 @@ mod tests {
     /// would refuse a route over an asset the trader never receives.
     #[test]
     fn a_route_does_not_oblige_the_trader_to_adopt_what_it_passes_through() {
-        let fx = crate::sofi::validation::fixtures::swap_fixture_n(2);
+        let fx = swap_fixture_n(2);
         let p = fx.precommit.clone();
         let f = fulfillment(&p);
         let hops = match fx.preimage.settlement() {
@@ -1464,9 +1757,9 @@ mod tests {
             &previous(*p.void_root()),
             &p,
             &f,
-            &claims(&p, &f),
-            Resolution::Realized,
-            Some(&receipt(&fx, &receiver)),
+            p.parent_claim_ref(),
+            &established(&p, &f, &fx.preimage, &fx.evidence, Shape::Realized),
+            &receiver,
         )
         .is_ok());
     }
@@ -1480,13 +1773,16 @@ mod tests {
         let p = fx.precommit.clone();
         let (pre, realize) = (*p.void_root(), *p.realize_root());
         let f = fulfillment(&p);
-        let r = receipt(&fx, &receiver);
-        for (resolution, expected) in [(Resolution::Realized, realize), (Resolution::Void, pre)] {
-            // A void needs no receipt; a realized one cannot advance without.
-            let carried = matches!(resolution, Resolution::Realized).then_some(&r);
-            let advanced =
-                advance_resolved(&previous(pre), &p, &f, &claims(&p, &f), resolution, carried)
-                    .unwrap();
+        for (shape, expected) in [(Shape::Realized, realize), (Shape::Void, pre)] {
+            let advanced = advance_resolved(
+                &previous(pre),
+                &p,
+                &f,
+                p.parent_claim_ref(),
+                &established(&p, &f, &fx.preimage, &fx.evidence, shape),
+                &receiver,
+            )
+            .unwrap();
             assert_eq!(
                 descendant_fence(
                     PredecessorClaim::ConditionalResolved {

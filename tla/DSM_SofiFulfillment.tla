@@ -73,7 +73,8 @@ CONSTANTS
     OrdinaryClaimBypassesFence,        \* [FALSE] fence applied to conditional claims only
     DescendantOnStorageResolution,     \* [FALSE] q + 1 built once q is storage-resolved, not Core-resolved
     RegisteredGenesisAccepted,         \* [FALSE] the walk starts from a stored genesis
-    TraderOnlyCompletion               \* [FALSE] a write authorization: only the trader completes
+    TraderOnlyCompletion,              \* [FALSE] a write authorization: only the trader completes
+    InstallFromCaller                  \* [FALSE] stage 10 installs whichever root a caller names
 
 ASSUME MaxStep \in Nat
 
@@ -126,10 +127,11 @@ VARIABLES
     online,    \* traders able to act (matters only under TraderOnlyCompletion)
     claim2,    \* T's claim at q + 1
     parent,    \* the claim at p that P1 names: ParentStates
-    resHist    \* [Traders -> first non-Pending resolution observed]
+    resHist,   \* [Traders -> first non-Pending resolution observed]
+    installed  \* the root T's lineage took at q (stage 10): none, realize, void
 
 vars == <<pStored, gStored, slot, covers, key, evid, canon, online, claim2,
-          parent, resHist>>
+          parent, resHist, installed>>
 
 \* =============================================================================
 \* THE VERIFIER: the two predicates, the walk, consumption, resolution
@@ -324,7 +326,7 @@ StoreP(p) ==
                  THEN [slot EXCEPT ![Trader(p)] = SlotPrecommit]
                  ELSE slot
     /\ Hist
-    /\ UNCHANGED <<gStored, covers, key, evid, canon, online, claim2, parent>>
+    /\ UNCHANGED <<gStored, covers, key, evid, canon, online, claim2, parent, installed>>
 
 \* Anyone computes and publishes a witness for a leg of a stored P.
 StoreG(p, r) ==
@@ -333,7 +335,7 @@ StoreG(p, r) ==
     /\ <<p, r>> \notin gStored
     /\ gStored' = gStored \cup {<<p, r>>}
     /\ Hist
-    /\ UNCHANGED <<pStored, slot, covers, key, evid, canon, online, claim2, parent>>
+    /\ UNCHANGED <<pStored, slot, covers, key, evid, canon, online, claim2, parent, installed>>
 
 \* F reaches the leader of its position pair first and registers with the
 \* legs it names -- all of P's, or a subset (a malformed F: the store keeps it,
@@ -358,14 +360,14 @@ Register(f, legs) ==
     /\ slot' = [slot EXCEPT ![Trader(p)] = f]
     /\ covers' = [covers EXCEPT ![Trader(p)] = legs]
     /\ Hist
-    /\ UNCHANGED <<pStored, gStored, key, evid, canon, online, claim2, parent>>
+    /\ UNCHANGED <<pStored, gStored, key, evid, canon, online, claim2, parent, installed>>
 
 \* An ordinary trader transition at q.
 Transition ==
     /\ slot[T] = SlotNone
     /\ slot' = [slot EXCEPT ![T] = SlotS]
     /\ Hist
-    /\ UNCHANGED <<pStored, gStored, covers, key, evid, canon, online, claim2, parent>>
+    /\ UNCHANGED <<pStored, gStored, covers, key, evid, canon, online, claim2, parent, installed>>
 
 \* A relayer carries tr's exercise to a key it names; it wins the race at the
 \* leader and the copies follow. Registration is not required to write --
@@ -376,34 +378,34 @@ WriteKey(k, tr) ==
     /\ CompleterOK(tr)
     /\ key' = [key EXCEPT ![k] = IF tr = T THEN E1 ELSE E2]
     /\ Hist
-    /\ UNCHANGED <<pStored, gStored, slot, covers, evid, canon, online, claim2, parent>>
+    /\ UNCHANGED <<pStored, gStored, slot, covers, evid, canon, online, claim2, parent, installed>>
 
 PublishEvidence(p) ==
     /\ p \in pStored
     /\ p \notin evid
     /\ evid' = evid \cup {p}
     /\ Hist
-    /\ UNCHANGED <<pStored, gStored, slot, covers, key, canon, online, claim2, parent>>
+    /\ UNCHANGED <<pStored, gStored, slot, covers, key, canon, online, claim2, parent, installed>>
 
 \* The parent's own lineage settles whether it is canonical. Exogenous, once.
 SettleParent(r, c) ==
     /\ canon[r] = "unknown"
     /\ canon' = [canon EXCEPT ![r] = c]
     /\ Hist
-    /\ UNCHANGED <<pStored, gStored, slot, covers, key, evid, online, claim2, parent>>
+    /\ UNCHANGED <<pStored, gStored, slot, covers, key, evid, online, claim2, parent, installed>>
 
 SelectParentBranch(b) ==
     /\ parent = "open"
     /\ parent' = b
     /\ Hist
-    /\ UNCHANGED <<pStored, gStored, slot, covers, key, evid, canon, online, claim2>>
+    /\ UNCHANGED <<pStored, gStored, slot, covers, key, evid, canon, online, claim2, installed>>
 
 GoOffline(tr) ==
     /\ TraderOnlyCompletion
     /\ tr \in online
     /\ online' = online \ {tr}
     /\ Hist
-    /\ UNCHANGED <<pStored, gStored, slot, covers, key, evid, canon, claim2, parent>>
+    /\ UNCHANGED <<pStored, gStored, slot, covers, key, evid, canon, claim2, parent, installed>>
 
 \* A producer builds a claim at q + 1 only on a Core-resolved q, whatever the
 \* claim's kind. The mutations build on storage resolution, or exempt
@@ -415,7 +417,23 @@ ClaimNext(kind) ==
        \/ (OrdinaryClaimBypassesFence /\ kind = "S2")
     /\ claim2' = kind
     /\ Hist
-    /\ UNCHANGED <<pStored, gStored, slot, covers, key, evid, canon, online, parent>>
+    /\ UNCHANGED <<pStored, gStored, slot, covers, key, evid, canon, online, parent, installed>>
+
+\* Stage 10 (`advance_resolved`): T's lineage takes a root on the ladder's
+\* answer over the facts, and on nothing else -- the realize root when the
+\* route realized, the predecessor's (void) root when it voided, no root
+\* otherwise. The mutation lets the install take whichever root a caller
+\* names, which is what an advance that accepts a resolution argument does.
+SelectedRoot(res) ==
+    IF res = "Realized" THEN "realize" ELSE IF res = "Void" THEN "void" ELSE "none"
+
+Install(root) ==
+    /\ installed = "none"
+    /\ Registered(T)
+    /\ IF InstallFromCaller THEN TRUE ELSE root = SelectedRoot(Resolve(T))
+    /\ installed' = root
+    /\ Hist
+    /\ UNCHANGED <<pStored, gStored, slot, covers, key, evid, canon, online, claim2, parent>>
 
 Idle == UNCHANGED vars
 
@@ -430,6 +448,7 @@ Next ==
     \/ \E b \in {"taken", "other", "none"} : SelectParentBranch(b)
     \/ \E tr \in Traders : GoOffline(tr)
     \/ \E kind \in {"C2", "S2"} : ClaimNext(kind)
+    \/ \E root \in {"realize", "void"} : Install(root)
     \/ Idle
 
 Init ==
@@ -444,6 +463,7 @@ Init ==
     /\ claim2 = NONE
     /\ parent \in {"single", "open"}
     /\ resHist = [tr \in Traders |-> "Pending"]
+    /\ installed = "none"
 
 Spec == Init /\ [][Next]_vars
 
@@ -484,6 +504,7 @@ TypeOK ==
     /\ claim2 \in {NONE, "C2", "S2"}
     /\ parent \in ParentStates
     /\ resHist \in [Traders -> {"Pending", "Realized", "Invalid", "Void"}]
+    /\ installed \in {"none", "realize", "void"}
 
 \* P and G are non-economic: a position holds only a registered F or a
 \* transition.
@@ -511,6 +532,14 @@ ObjectiveRejectionImpliesSkipped ==
 \* Once a position resolves, its resolution never changes.
 ResolutionPermanent ==
     \A tr \in Traders : resHist[tr] # "Pending" => Resolve(tr) = resHist[tr]
+
+\* The root installed at q is the ladder's answer over the facts, and stays
+\* so: no caller names it, and the ladder is permanent (advance_resolved).
+InstalledRootIsTheLadders ==
+    installed # "none" => installed = SelectedRoot(Resolve(T))
+
+\* Non-vacuity: an install is reachable (checked as an expected violation).
+NeverInstalled == installed = "none"
 
 MismatchedParentNeverRealizes ==
     parent \in {"other", "none"} => Resolve(T) # "Realized"

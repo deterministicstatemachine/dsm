@@ -38,6 +38,7 @@ pub mod admission;
 pub mod conformance;
 pub mod derive;
 pub mod exercise;
+pub mod facts;
 pub mod fisher_yates;
 pub mod lineage;
 pub mod publication;

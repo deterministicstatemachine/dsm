@@ -54,8 +54,9 @@ use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
 
+use dsm::economic::lineage::AdmittedEconomicPosition;
 use dsm::sofi::exercise::RecognizedExercise;
-use dsm::sofi::resolution::{ParentPosition, VaultChain, WalkOutcome};
+use dsm::sofi::resolution::{VaultChain, WalkOutcome};
 use dsm::sofi::validation::{vault_post_states, VaultPostState};
 use dsm::types::error::DsmError;
 
@@ -84,12 +85,12 @@ pub const SIBLING_DEPTH: usize = 2;
 type Fut<'s, T> = Pin<Box<dyn Future<Output = Result<T, DsmError>> + Send + 's>>;
 
 /// What the walk brings: the committed set, this verifier's own leaves, and
-/// the conditional positions it resolved itself — the same three the resolver
+/// the conditional position it resolved itself — the same three the resolver
 /// stands on, because the walk classifies keys with the resolver.
 pub struct ChainWalker<'a> {
     pub set: &'a StorageSet,
     pub local: &'a LocalLeaves,
-    pub parents: &'a BTreeMap<D32, ParentPosition>,
+    pub parent: Option<&'a AdmittedEconomicPosition>,
 }
 
 impl ChainWalker<'_> {
@@ -101,16 +102,16 @@ impl ChainWalker<'_> {
 
     fn chain_to_depth(&self, vault_id: D32, depth: usize) -> Fut<'_, VaultChain> {
         Box::pin(async move {
-            let mut roots = stored_prefix(&vault_id)?;
-            if roots.is_empty() {
+            let recorded = stored_prefix(&vault_id)?;
+            let mut chain = if recorded.is_empty() {
                 // Nothing recorded: the chain starts where every chain starts,
                 // at the accepted genesis (Section 30, step 1).
                 match fetch_vault_genesis(self.set, &vault_id).await? {
-                    VaultGenesis::Accepted(genesis) => roots.push(*genesis.genesis_root()),
+                    VaultGenesis::Accepted(genesis) => VaultChain::from_genesis(&genesis),
                     // Not established yet. The chain is empty, and an empty
                     // chain refutes nothing.
                     VaultGenesis::NotPublished | VaultGenesis::OwnerUnresolved(..) => {
-                        return Ok(VaultChain { roots: Vec::new() })
+                        return Ok(VaultChain::default())
                     }
                     VaultGenesis::Refused(why) => {
                         return Err(DsmError::invalid_operation(format!(
@@ -119,26 +120,26 @@ impl ChainWalker<'_> {
                         )))
                     }
                 }
-            }
+            } else {
+                // This device's own memo of the generations it established
+                // before: the one memo puncture of a chain, pinned to this
+                // call by `ci/sofi_validated_root_constructors.sh`.
+                VaultChain::from_recorded_generations(recorded)
+            };
             // What the resolver is told while this chain is being extended:
             // this vault's chain SO FAR, plus any sibling chain a multi-leg
             // consumption forced us to establish. The chain so far is not an
             // assumption — it is the induction, from a genesis nobody
             // resolved through one realized consumption per step.
             let mut chains: BTreeMap<D32, VaultChain> = BTreeMap::new();
-            chains.insert(
-                vault_id,
-                VaultChain {
-                    roots: roots.clone(),
-                },
-            );
+            chains.insert(vault_id, chain.clone());
             let mut extended = 0;
             while extended < GENERATION_BUDGET {
                 extended += 1;
                 // The chain is non-empty here, but say so in the type rather
                 // than in a panic: an empty chain means nothing was
                 // established, which is a stop, never a crash.
-                let Some(&current) = roots.last() else {
+                let Some((.., current)) = chain.head() else {
                     break;
                 };
                 let Some(post) = self
@@ -153,15 +154,16 @@ impl ChainWalker<'_> {
                         None::<std::io::Error>,
                     )
                 })?;
-                roots.push(post.root);
-                chains.insert(
-                    vault_id,
-                    VaultChain {
-                        roots: roots.clone(),
-                    },
-                );
+                // Core grows the chain by the consumption it recomputed, from
+                // the head it was walked at.
+                chain.extend(&post).map_err(|e| {
+                    DsmError::invalid_operation(format!(
+                        "chain: the consumption does not extend the chain: {e}"
+                    ))
+                })?;
+                chains.insert(vault_id, chain.clone());
             }
-            Ok(VaultChain { roots })
+            Ok(chain)
         })
     }
 
@@ -185,7 +187,7 @@ impl ChainWalker<'_> {
                     let resolver = Resolver {
                         set: self.set,
                         local: self.local,
-                        parents: self.parents,
+                        parent: self.parent,
                         chains: &*chains,
                     };
                     resolver
@@ -244,7 +246,7 @@ impl ChainWalker<'_> {
         match vault_post_states(precommit, &exercise.preimage, &evidence) {
             Ok(posts) => Ok(posts
                 .into_iter()
-                .find(|p| p.vault_id == *vault_id && p.pre_root == *current)),
+                .find(|p| p.vault_id() == vault_id && p.pre_root() == current)),
             Err(refusal) => {
                 log::info!("[sofi chain] the consumption is not recomputable: {refusal:?}");
                 Ok(None)
@@ -265,7 +267,7 @@ impl ChainWalker<'_> {
         depth: usize,
     ) -> Result<bool, DsmError> {
         let exercise = match read_attempt_cell(self.set, vault_id, current, attempt).await? {
-            Ok(read) => read.exercise,
+            Ok(read) => read.into_exercise(),
             Err(missing) => {
                 log::info!("[sofi chain] attempt {attempt} is not decided yet: {missing:?}");
                 None

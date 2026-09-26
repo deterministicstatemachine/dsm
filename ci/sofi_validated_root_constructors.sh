@@ -210,4 +210,107 @@ if ! awk '/fn decode_and_verify_economic_root_claim/{f=1} f&&/Ok\(VerifiedEconom
 fi
 echo "  ✓ one construction path, inside decode-and-verify"
 
+# 5. The facts a SoFi resolution stands on are Core's, on the same terms.
+#
+#    `advance_resolved` installs a root on the ladder's answer over
+#    `EstablishedFacts`, which `facts::establish` builds from reads Core
+#    evaluated: a registration read bound to its position, an attempt-cell
+#    read bound to its key, a walk bound to its chain, a vault chain grown
+#    from an accepted genesis by Core-recomputed post states. None of these
+#    has a field visible outside the crate (`pub(crate)` is allowed: the
+#    ladder's own tests state facts), and the advance takes no `Resolution`
+#    argument — a caller cannot name the verdict. The chain's one memo
+#    puncture, `VaultChain::from_recorded_generations`, is this device's own
+#    earlier conclusion read back, and has exactly one caller: the chain
+#    walker's start.
+echo "[5] SoFi facts: Core-built, and the advance derives the verdict..."
+resolution="$core/dsm/src/sofi/resolution.rs"
+facts="$core/dsm/src/sofi/facts.rs"
+exercise="$core/dsm/src/sofi/exercise.rs"
+registration="$core/dsm/src/sofi/registration.rs"
+validation="$core/dsm/src/sofi/validation.rs"
+for f in "$resolution" "$facts" "$exercise" "$registration" "$validation"; do
+  [[ -f "$f" ]] || { echo "[FAIL] $f is not where this gate expects it"; exit 1; }
+done
+check_no_pub_field() {
+  local ty="$1" file="$2"
+  local body
+  body=$(awk -v ty="$ty" '$0 ~ "^pub struct " ty "[ <]" {f=1} f{print} f&&/^\}/{exit}' "$file")
+  [[ -n "$body" ]] || { echo "[FAIL] $ty is not defined in $file"; exit 1; }
+  if grep -qE '^\s+pub [a-z_]+:' <<<"$body"; then
+    echo "[FAIL] $ty has a public field — a caller outside the crate could state a fact:"
+    grep -nE '^\s+pub [a-z_]+:' <<<"$body"
+    exit 1
+  fi
+}
+check_no_pub_field RouteFacts "$resolution"
+check_no_pub_field LegFacts "$resolution"
+check_no_pub_field VaultChain "$resolution"
+check_no_pub_field KeyFacts "$resolution"
+check_no_pub_field AttemptWalk "$resolution"
+check_no_pub_field EstablishedFacts "$facts"
+check_no_pub_field RefutedPosition "$facts"
+check_no_pub_field InHandRefutation "$facts"
+check_no_pub_field AttemptCellRead "$exercise"
+check_no_pub_field RegistrationRead "$registration"
+check_no_pub_field VaultPostState "$validation"
+echo "  ✓ no fact type has a field visible outside the crate"
+
+sig=$(awk '/^pub fn advance_resolved\(/{f=1} f{print} f&&/\) -> /{exit}' "$sofi_lineage")
+if grep -qE 'Resolution' <<<"$sig"; then
+  echo "[FAIL] advance_resolved takes a Resolution: the verdict must be derived inside it, never named by a caller"
+  echo "$sig"
+  exit 1
+fi
+if ! grep -qE 'established: &Established' <<<"$sig"; then
+  echo "[FAIL] advance_resolved does not take the established facts"
+  echo "$sig"
+  exit 1
+fi
+if ! grep -qE '^\s*resolve_position\(' <(awk '/^pub fn advance_resolved\(/{f=1} f{print} f&&/^\}/{exit}' "$sofi_lineage") \
+   && ! grep -qE 'resolve_position\(' <(awk '/^pub fn advance_resolved\(/{f=1} f{print} f&&/^\}/{exit}' "$sofi_lineage"); then
+  echo "[FAIL] advance_resolved does not run the ladder (resolve_position) itself"
+  exit 1
+fi
+if ! grep -q 'pub(crate) fn resolve_position' "$resolution"; then
+  echo "[FAIL] resolve_position is not pub(crate): the ladder is the advance's to run"
+  exit 1
+fi
+echo "  ✓ advance_resolved runs the ladder over the established facts and takes no verdict"
+
+# Production callers only: the facts tests state a chain through the memo
+# constructor for a fixture vault, which is test text (ci/production_text.py).
+memo_callers=""
+while IFS= read -r f; do
+  [[ -z "$f" ]] && continue
+  prod=$(python3 ci/production_text.py "$f")
+  grep -q 'from_recorded_generations' <<<"$prod" && memo_callers="$memo_callers$f"$'\n'
+done < <(grep -rln 'from_recorded_generations' "$core/dsm/src" "$core/dsm_sdk/src" dsm_storage_node/src 2>/dev/null \
+  | grep -v "sofi/resolution.rs" | sort)
+memo_callers=${memo_callers%$'\n'}
+expected_memo="$core/dsm_sdk/src/sdk/sofi_chain.rs"
+if [[ "$memo_callers" != "$expected_memo" ]]; then
+  echo "[FAIL] VaultChain::from_recorded_generations must be called only from $expected_memo"
+  echo "       production callers found: ${memo_callers:-none}"
+  exit 1
+fi
+count=$(python3 ci/production_text.py "$expected_memo" | grep -c 'from_recorded_generations')
+if [[ "$count" -ne 1 ]]; then
+  echo "[FAIL] $expected_memo references from_recorded_generations $count times; the chain's start is one call"
+  exit 1
+fi
+literals=$(grep -rn 'EstablishedFacts {' "$core/dsm/src" "$core/dsm_sdk/src" dsm_storage_node/src 2>/dev/null \
+  | grep -v '^\S*facts\.rs:' | grep -vE '(_tests\.rs|/tests/)' || true)
+while IFS= read -r hit; do
+  [[ -z "$hit" ]] && continue
+  file=${hit%%:*}
+  prod=$(python3 ci/production_text.py "$file")
+  if grep -q 'EstablishedFacts {' <<<"$prod"; then
+    echo "[FAIL] EstablishedFacts is stated as a literal outside its builder, in production code:"
+    echo "       $hit"
+    exit 1
+  fi
+done <<<"$literals"
+echo "  ✓ one caller of the chain memo, at the walk's start; facts are built by establish only"
+
 echo "✓ raw envelope -> verified claim -> registered root: every arrow is opaque"

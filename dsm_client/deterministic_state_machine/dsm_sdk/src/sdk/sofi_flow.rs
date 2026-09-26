@@ -23,7 +23,7 @@ use dsm::economic::write_set::CreditSourceFacts;
 use dsm::sofi::derive;
 use dsm::sofi::publication::{Publication, VaultPolicyClass};
 use dsm::sofi::registration::Registration;
-use dsm::sofi::resolution::{ParentPosition, VaultChain, WalkOutcome};
+use dsm::sofi::resolution::{VaultChain, WalkOutcome};
 use dsm::sofi::storage::Discovered;
 use dsm::sofi::validation::{close_vault_post, swap_vault_post, Evidence, EvidenceNeeds, Policies};
 use dsm::sofi::wire::{
@@ -440,7 +440,6 @@ struct Standing {
     local: LocalLeaves,
     tree: EconomicSmt,
     balances: BTreeMap<D32, u64>,
-    parents: BTreeMap<D32, ParentPosition>,
 }
 
 /// Stage 0 of §31: no pending position, and a resolved predecessor.
@@ -461,18 +460,6 @@ fn standing(core: &CoreSDK) -> Result<Standing, DsmError> {
         .ok_or_else(|| refuse("no admitted position to build on"))?;
     let (tree, pre_state) = producer_tree_and_pre_state(&validated)?;
     let local = LocalLeaves::of_validated(&genesis, &device_id, &validated)?;
-    let mut parents = BTreeMap::new();
-    if let AdmittedEconomicPosition::ResolvedSofi {
-        fulfillment_id,
-        selected_root,
-        ..
-    } = admitted
-    {
-        parents.insert(
-            fulfillment_id,
-            ParentPosition::ConditionalSelected { selected_root },
-        );
-    }
     Ok(Standing {
         genesis,
         device_id,
@@ -481,7 +468,6 @@ fn standing(core: &CoreSDK) -> Result<Standing, DsmError> {
         local,
         tree,
         balances: pre_state.balances,
-        parents,
     })
 }
 
@@ -582,7 +568,7 @@ impl Standing {
         ChainWalker {
             set,
             local: &self.local,
-            parents: &self.parents,
+            parent: Some(&self.admitted),
         }
     }
 }
@@ -785,7 +771,7 @@ async fn live_attempt(
     let mut advanced = 0;
     while advanced <= ATTEMPT_ADVANCE {
         match read_attempt_cell(set, vault_id, parent_root, attempt).await? {
-            Ok(read) if read.exercise.is_none() => return Ok(attempt),
+            Ok(read) if read.exercise().is_none() => return Ok(attempt),
             Ok(..) => {
                 attempt = next_attempt(attempt).map_err(refuse)?;
                 advanced += 1;
@@ -1005,7 +991,7 @@ async fn exercise_draft(
     let resolver = Resolver {
         set,
         local: &standing.local,
-        parents: &standing.parents,
+        parent: Some(&standing.admitted),
         chains: &chains,
     };
     let mut attempts = Vec::new();
@@ -1218,7 +1204,7 @@ pub async fn relay(set: &StorageSet, intent: &RelayIntent) -> Result<Relayed, Ds
     )
     .await?
     .map_err(|missing| storage("position pair", format!("not decided yet: {missing:?}")))?;
-    let fulfillment = match registration {
+    let fulfillment = match registration.into_registration() {
         Registration::Registered(signed) => signed,
         Registration::NeverRegistered { .. } => {
             return Err(refuse("the position holds no fulfillment"))

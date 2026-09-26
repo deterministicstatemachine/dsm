@@ -156,12 +156,83 @@ pub fn parent_status(established: Option<[u8; 32]>, claimed: &[u8; 32]) -> Paren
 /// POSITION here. A gap would shift every generation after it and turn a
 /// correct parent into a refuted one, so the builder stops at the first gap
 /// rather than recording past it.
+///
+/// A chain is established, never assembled: it starts at an accepted genesis
+/// ([`VaultChain::from_genesis`]) and grows by one Core-recomputed
+/// consumption at a time ([`VaultChain::extend`]). The one other way in is
+/// this verifier's own memo of generations it established before
+/// ([`VaultChain::from_recorded_generations`]), which the CI gate
+/// `ci/sofi_validated_root_constructors.sh` pins to its one caller. Nothing
+/// read off the network becomes a root here.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct VaultChain {
-    pub roots: Vec<[u8; 32]>,
+    roots: Vec<[u8; 32]>,
+}
+
+/// Why a post state does not extend a chain: it was not built on the chain's
+/// head. A chain grows one realized consumption at a time, from its head.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NotTheHead {
+    pub head: Option<(u64, [u8; 32])>,
+    pub pre_generation: u64,
+    pub pre_root: [u8; 32],
+}
+
+impl core::fmt::Display for NotTheHead {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "the post state was built on generation {} of the vault, which is not the \
+             chain's head {:?}",
+            self.pre_generation,
+            self.head.map(|(g, ..)| g)
+        )
+    }
 }
 
 impl VaultChain {
+    /// The chain at its start: `R*_0`, the root of the genesis this verifier
+    /// accepted (SoFi §19.8; §30 step 1).
+    pub fn from_genesis(genesis: &super::lineage::AcceptedVaultGenesis) -> Self {
+        Self {
+            roots: vec![*genesis.genesis_root()],
+        }
+    }
+
+    /// Extend the chain by the consumption `post` recomputes: `R*_{g+1}` is
+    /// the post root of the exercise that consumed `R*_g`, and only a post
+    /// state built on the chain's head extends it.
+    pub fn extend(&mut self, post: &super::validation::VaultPostState) -> Result<(), NotTheHead> {
+        let head = self.head();
+        let at_head = head.is_some_and(|(generation, root)| {
+            generation == post.pre_generation() && root == *post.pre_root()
+        });
+        if !at_head || post.generation() != post.pre_generation() + 1 {
+            return Err(NotTheHead {
+                head,
+                pre_generation: post.pre_generation(),
+                pre_root: *post.pre_root(),
+            });
+        }
+        self.roots.push(*post.root());
+        Ok(())
+    }
+
+    /// THE MEMO PUNCTURE: the generations this verifier itself established
+    /// earlier, as it recorded them — contiguous from generation zero, a
+    /// root per generation. A memo proves nothing by existing: what it holds
+    /// is this device's own earlier conclusion, read back, and a caller that
+    /// hands it anything else has fabricated a chain. That is why the CI gate
+    /// pins this constructor to its one caller, the chain walker's start.
+    pub fn from_recorded_generations(roots: Vec<[u8; 32]>) -> Self {
+        Self { roots }
+    }
+
+    /// `R*_g` for every generation established, in generation order.
+    pub fn roots(&self) -> &[[u8; 32]] {
+        &self.roots
+    }
+
     /// The status of a parent asked about at `generation` — [`parent_status`]
     /// over what this chain established there.
     pub fn status_of(&self, generation: u64, claimed: &[u8; 32]) -> ParentStatus {
@@ -197,18 +268,22 @@ impl VaultChain {
 
 /// The facts about one DLV leg of a registered fulfillment, at the attempt key
 /// that fulfillment fixed for it.
+///
+/// Built by [`super::facts::establish`] from the reads Core evaluated, and
+/// by nothing outside this crate: a leg fact stated by a caller would be a
+/// verdict nobody established.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LegFacts {
     /// The storage resolution of `K^(a_j)`.
-    pub cell: CellFact,
+    pub(crate) cell: CellFact,
     /// The named parent `R_j` against this vault's validated canonical root
     /// at that generation.
-    pub parent: ParentStatus,
+    pub(crate) parent: ParentStatus,
     /// `∀ b < a_j. Skipped(K^(b))`.
-    pub attempt_live: bool,
+    pub(crate) attempt_live: bool,
     /// The named parent was consumed by some `X ≠ E`. A parent that really
     /// was canonical and was then taken is THIS, never orphaning.
-    pub parent_consumed_elsewhere: bool,
+    pub(crate) parent_consumed_elsewhere: bool,
 }
 
 impl LegFacts {
@@ -240,34 +315,38 @@ impl LegFacts {
 /// `parent_pre_root` is `P.void_root`, which P15-2 pins to `T°.pre_root`: the
 /// root this operation was built on, and the root the parent must have
 /// selected for the guessed branch to be the taken one.
+///
+/// Built by [`super::facts::establish`] over reads Core evaluated, and by
+/// nothing outside this crate. Every field is a conclusion; a caller that
+/// could state one would be stating the verdict.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RouteFacts<'legs> {
     /// `E` — the ONE external commitment this operation is bound to. Every
     /// required leg must be final on exactly this value.
-    pub external_commitment: [u8; 32],
+    pub(crate) external_commitment: [u8; 32],
     /// `FulfillmentRegistered(q, F)` — the exercise boundary.
-    pub registered: bool,
+    pub(crate) registered: bool,
     /// `FulfillmentConformance(F)` (Section 20.2), as the ladder reads it.
     /// Registration supplies no truth value for it: a registered `F` may be
     /// `Invalid`, and a producer's pre-sign check is not this verifier's.
-    pub conformance: Validation,
+    pub(crate) conformance: Validation,
     /// Arm (v) of `RouteImpossible` (Section 23.5): position `q` already
     /// holds a different claim — an ordinary transition, or another
     /// fulfillment of the same trader naming other attempt keys — so this
     /// `F` can never register (Section 21.1). Read from the position pair
     /// (R10); never true together with `registered`.
-    pub position_lost: bool,
+    pub(crate) position_lost: bool,
     /// What is known about the claim at `p`.
-    pub parent: ParentPosition,
+    pub(crate) parent: ParentPosition,
     /// `P.void_root == T°.pre_root`.
-    pub parent_pre_root: [u8; 32],
+    pub(crate) parent_pre_root: [u8; 32],
     /// `RouteValidation(P, G, E)`, static.
-    pub validation: Validation,
+    pub(crate) validation: Validation,
     /// `StorageResolved(q)`: registration and every successor key.
-    pub storage_resolved: bool,
+    pub(crate) storage_resolved: bool,
     /// One entry per leg of `P`, in P's leg order. A single-vault trade is the
     /// one-leg case.
-    pub legs: &'legs [LegFacts],
+    pub(crate) legs: &'legs [LegFacts],
 }
 
 impl RouteFacts<'_> {
@@ -422,7 +501,10 @@ pub enum Incomplete {
 /// on a branch the parent never took is Invalid whatever its own legs did.
 /// Both predicates are binary, so Void never waits on a third value: rung 4
 /// has already turned an invalid route Invalid before rung 5 can Void it.
-pub fn resolve_position(facts: &RouteFacts<'_>) -> Result<Resolution, Incomplete> {
+///
+/// Crate-private: the one production caller is `advance_resolved`, which
+/// installs a root on this answer and on nothing a caller says.
+pub(crate) fn resolve_position(facts: &RouteFacts<'_>) -> Result<Resolution, Incomplete> {
     // 0 — nothing is exercised before registration.
     if !facts.registered {
         return Err(Incomplete::NotRegistered);
@@ -600,7 +682,7 @@ pub fn skip_in_hand(
 /// position is Invalid whatever the other facts are — rung 1 when the parent
 /// took another branch, else rung 2 for a non-conforming `F`, else rung 4
 /// for an invalid route, which nothing before it can consume.
-pub fn resolve_refuted_in_hand(registered: bool) -> Result<Resolution, Incomplete> {
+pub(crate) fn resolve_refuted_in_hand(registered: bool) -> Result<Resolution, Incomplete> {
     if registered {
         Ok(Resolution::Invalid)
     } else {
@@ -608,9 +690,23 @@ pub fn resolve_refuted_in_hand(registered: bool) -> Result<Resolution, Incomplet
     }
 }
 
-/// What the walk has for one attempt key.
+/// What the walk has for one attempt key, bound to the key it is about: the
+/// vault, the parent root and the attempt the facts were established at.
+/// [`walk`] classifies a key only over facts bound to that very key.
+///
+/// Built from a cell read Core evaluated and facts Core established
+/// ([`KeyFacts::of`], [`KeyFacts::refuted`]); a caller cannot say what a key
+/// holds.
 #[derive(Debug, Clone, Copy)]
-pub enum KeyFacts<'f> {
+pub struct KeyFacts<'f> {
+    vault_id: [u8; 32],
+    parent_root: [u8; 32],
+    attempt: u64,
+    known: KeyKnown<'f>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum KeyKnown<'f> {
     /// The complete facts of the exercise holding the key, and of the leg
     /// being walked.
     Complete(RouteFacts<'f>, LegFacts),
@@ -623,40 +719,220 @@ pub enum KeyFacts<'f> {
     },
 }
 
-/// Walk one DLV parent's attempt keys in ascending order: a skipped key moves
-/// to the next, a consumed key stops, anything else stops as unresolved.
+impl<'f> KeyFacts<'f> {
+    /// The key `read` was evaluated at, held by the exercise `facts` were
+    /// established for: the facts of that exercise's leg at this key. `None`
+    /// when the read holds no exercise, holds another exercise, or the
+    /// facts have no leg at this key — no fact about this key, never a skip.
+    pub fn of(
+        read: &super::exercise::AttemptCellRead,
+        facts: &'f super::facts::EstablishedFacts,
+    ) -> Option<Self> {
+        let exercise = read.exercise()?;
+        if exercise.external_commitment != *facts.external_commitment() {
+            return None;
+        }
+        let leg = facts.leg_at(read.vault_id(), read.parent_root(), read.attempt())?;
+        Some(Self {
+            vault_id: *read.vault_id(),
+            parent_root: *read.parent_root(),
+            attempt: read.attempt(),
+            known: KeyKnown::Complete(facts.route_facts(), leg),
+        })
+    }
+
+    /// The key `read` was evaluated at, held by an exercise its own bytes
+    /// refute (`refutation`, established by [`super::facts::refuted_in_hand`]
+    /// over those bytes). `None` when the read holds no exercise or another
+    /// one.
+    pub fn refuted(
+        read: &super::exercise::AttemptCellRead,
+        refutation: &super::facts::InHandRefutation,
+    ) -> Option<Self> {
+        let exercise = read.exercise()?;
+        if exercise.external_commitment != *refutation.external_commitment() {
+            return None;
+        }
+        Some(Self {
+            vault_id: *read.vault_id(),
+            parent_root: *read.parent_root(),
+            attempt: read.attempt(),
+            known: KeyKnown::RefutedInHand {
+                refuted: refutation.refuted(),
+                cell: read.fact(),
+                external_commitment: exercise.external_commitment,
+            },
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn complete_at(
+        vault_id: [u8; 32],
+        parent_root: [u8; 32],
+        attempt: u64,
+        facts: RouteFacts<'f>,
+        leg: LegFacts,
+    ) -> Self {
+        Self {
+            vault_id,
+            parent_root,
+            attempt,
+            known: KeyKnown::Complete(facts, leg),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn refuted_at(
+        vault_id: [u8; 32],
+        parent_root: [u8; 32],
+        attempt: u64,
+        refuted: RefutedInHand,
+        cell: CellFact,
+        external_commitment: [u8; 32],
+    ) -> Self {
+        Self {
+            vault_id,
+            parent_root,
+            attempt,
+            known: KeyKnown::RefutedInHand {
+                refuted,
+                cell,
+                external_commitment,
+            },
+        }
+    }
+}
+
+/// One walk over one DLV parent's attempt keys, as [`walk`] made it: which
+/// keys it was over, where it started, where it ended, and which operation
+/// consumed the parent when one did. What a leg's liveness is read from
+/// ([`AttemptWalk::liveness_of`]); built by `walk` and by nothing else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AttemptWalk {
+    vault_id: [u8; 32],
+    parent_root: [u8; 32],
+    base: u64,
+    outcome: WalkOutcome,
+    consumed_by: Option<[u8; 32]>,
+}
+
+impl AttemptWalk {
+    pub fn vault_id(&self) -> &[u8; 32] {
+        &self.vault_id
+    }
+
+    pub fn parent_root(&self) -> &[u8; 32] {
+        &self.parent_root
+    }
+
+    /// The attempt the walk started at.
+    pub fn base(&self) -> u64 {
+        self.base
+    }
+
+    pub fn outcome(&self) -> WalkOutcome {
+        self.outcome
+    }
+
+    /// `E` of the exercise that consumed the parent, when the walk found one.
+    pub fn consumed_by(&self) -> Option<&[u8; 32]> {
+        self.consumed_by.as_ref()
+    }
+
+    /// `AttemptLive(K^(attempt))` — every key before `attempt` skipped — and
+    /// whether the parent was consumed by an operation other than the one
+    /// bound to `e`, as this walk establishes them. `None` when the walk did
+    /// not start at the first key or did not reach `attempt`: not
+    /// established, never assumed.
+    pub(crate) fn liveness_of(&self, attempt: u64, e: &[u8; 32]) -> Option<(bool, bool)> {
+        if self.base != 0 {
+            return None;
+        }
+        match self.outcome {
+            // The parent went at an earlier key: this one was never live, and
+            // whether another operation took it is a different fact.
+            WalkOutcome::Consumed { attempt: at } if at < attempt => {
+                Some((false, self.consumed_by.is_some_and(|by| by != *e)))
+            }
+            // Consumed at this key or a later one: every key before this one
+            // was skipped.
+            WalkOutcome::Consumed { .. } => Some((true, false)),
+            WalkOutcome::Continue { cursor: reached }
+            | WalkOutcome::Unresolved { attempt: reached }
+            | WalkOutcome::CounterExhausted { attempt: reached } => {
+                (reached >= attempt).then_some((true, false))
+            }
+        }
+    }
+}
+
+/// Walk the attempt keys of `vault_id` at `parent_root` in ascending order
+/// from `base_attempt`: a skipped key moves to the next, a consumed key
+/// stops, anything else stops as unresolved.
 ///
 /// `keys` supplies what is known about attempt `a`, or `None` past what the
-/// caller has established — which is `Unresolved`, never a skip. `budget`
-/// bounds the examined keys only; it never changes the verdict, it only
-/// defers it.
-pub fn walk<'f, F>(base_attempt: u64, budget: usize, mut keys: F) -> WalkOutcome
+/// caller has established — which is `Unresolved`, never a skip. Facts bound
+/// to another key are no fact about this one. `budget` bounds the examined
+/// keys only; it never changes the verdict, it only defers it.
+pub fn walk<'f, F>(
+    vault_id: &[u8; 32],
+    parent_root: &[u8; 32],
+    base_attempt: u64,
+    budget: usize,
+    mut keys: F,
+) -> AttemptWalk
 where
     F: FnMut(u64) -> Option<KeyFacts<'f>>,
 {
     let mut attempt = base_attempt;
     let mut examined = 0;
-    while examined < budget {
+    let mut consumed_by = None;
+    let outcome = loop {
+        if examined >= budget {
+            break WalkOutcome::Continue { cursor: attempt };
+        }
         examined += 1;
-        let class = match keys(attempt) {
-            None => return WalkOutcome::Unresolved { attempt },
-            Some(KeyFacts::Complete(facts, leg)) => classify_attempt(&facts, &leg).0,
-            Some(KeyFacts::RefutedInHand {
-                refuted,
-                cell,
-                external_commitment,
-            }) => skip_in_hand(refuted, &cell, &external_commitment).0,
+        let (class, e) = match keys(attempt) {
+            Some(key)
+                if key.vault_id == *vault_id
+                    && key.parent_root == *parent_root
+                    && key.attempt == attempt =>
+            {
+                match key.known {
+                    KeyKnown::Complete(facts, leg) => {
+                        (classify_attempt(&facts, &leg).0, facts.external_commitment)
+                    }
+                    KeyKnown::RefutedInHand {
+                        refuted,
+                        cell,
+                        external_commitment,
+                    } => (
+                        skip_in_hand(refuted, &cell, &external_commitment).0,
+                        external_commitment,
+                    ),
+                }
+            }
+            Some(..) | None => break WalkOutcome::Unresolved { attempt },
         };
         match class {
-            AttemptClass::Consumed => return WalkOutcome::Consumed { attempt },
-            AttemptClass::Unresolved => return WalkOutcome::Unresolved { attempt },
+            AttemptClass::Consumed => {
+                consumed_by = Some(e);
+                break WalkOutcome::Consumed { attempt };
+            }
+            AttemptClass::Unresolved => break WalkOutcome::Unresolved { attempt },
             AttemptClass::Skipped => match next_attempt(attempt) {
                 Ok(next) => attempt = next,
-                Err(..) => return WalkOutcome::CounterExhausted { attempt },
+                Err(..) => break WalkOutcome::CounterExhausted { attempt },
             },
         }
+    };
+    AttemptWalk {
+        vault_id: *vault_id,
+        parent_root: *parent_root,
+        base: base_attempt,
+        outcome,
+        consumed_by,
     }
-    WalkOutcome::Continue { cursor: attempt }
 }
 
 #[cfg(test)]
@@ -669,6 +945,8 @@ mod tests {
     const OTHER_E: [u8; 32] = [0x11; 32];
     const PRE: [u8; 32] = [0x99; 32];
     const OTHER_ROOT: [u8; 32] = [0x77; 32];
+    /// The vault whose attempt keys the walk tests walk, at parent `PRE`.
+    const V: [u8; 32] = [0x5A; 32];
 
     #[test]
     fn the_established_root_of_that_generation_is_canonical() {
@@ -1430,7 +1708,10 @@ mod tests {
             } else {
                 (&live_legs, good_leg(), E, Valid)
             };
-            Some(KeyFacts::Complete(
+            Some(KeyFacts::complete_at(
+                V,
+                PRE,
+                attempt,
                 RouteFacts {
                     external_commitment: e,
                     registered: true,
@@ -1445,16 +1726,144 @@ mod tests {
                 leg,
             ))
         };
-        assert_eq!(walk(0, 16, facts_for), WalkOutcome::Consumed { attempt: 3 });
+        let consumed = walk(&V, &PRE, 0, 16, facts_for);
+        assert_eq!(consumed.outcome(), WalkOutcome::Consumed { attempt: 3 });
+        assert_eq!(
+            consumed.consumed_by(),
+            Some(&E),
+            "the walk names who consumed"
+        );
         // A budget of two defers without deciding, and resuming lands the same.
-        let WalkOutcome::Continue { cursor } = walk(0, 2, facts_for) else {
+        let WalkOutcome::Continue { cursor } = walk(&V, &PRE, 0, 2, facts_for).outcome() else {
             panic!("a two-key budget cannot reach attempt 3")
         };
         assert_eq!(cursor, 2);
         assert_eq!(
-            walk(cursor, 16, facts_for),
+            walk(&V, &PRE, cursor, 16, facts_for).outcome(),
             WalkOutcome::Consumed { attempt: 3 }
         );
+    }
+
+    /// Facts bound to another key are no fact about this one: a walk handed
+    /// the facts of a skipped key under a different vault, parent root or
+    /// attempt does not skip on them. The binding is what keeps a walk from
+    /// being fed one skipped key's facts for every key of a chain.
+    /// MUTATION CONTROL: a walk that classifies whatever facts it is handed
+    /// turns this red.
+    #[test]
+    fn a_walk_takes_only_facts_bound_to_the_key_it_asks_about() {
+        let rejected = LegFacts {
+            cell: CellFact::Held {
+                id: OTHER_E,
+                state: ChainState::Final,
+            },
+            ..good_leg()
+        };
+        let legs = [rejected];
+        let skipped = |vault: [u8; 32], root: [u8; 32], attempt: u64| {
+            KeyFacts::complete_at(
+                vault,
+                root,
+                attempt,
+                RouteFacts {
+                    external_commitment: OTHER_E,
+                    registered: true,
+                    conformance: Valid,
+                    position_lost: false,
+                    parent: ParentPosition::SingleRoot,
+                    parent_pre_root: PRE,
+                    validation: Invalid,
+                    storage_resolved: true,
+                    legs: &legs,
+                },
+                rejected,
+            )
+        };
+        // Bound to this key: skipped.
+        assert_eq!(
+            walk(&V, &PRE, 0, 1, |a| Some(skipped(V, PRE, a))).outcome(),
+            WalkOutcome::Continue { cursor: 1 }
+        );
+        // Bound to another vault, another parent root, another attempt:
+        // unresolved, never a skip.
+        for other in [
+            skipped(OTHER_ROOT, PRE, 0),
+            skipped(V, OTHER_ROOT, 0),
+            skipped(V, PRE, 7),
+        ] {
+            assert_eq!(
+                walk(&V, &PRE, 0, 1, |_| Some(other)).outcome(),
+                WalkOutcome::Unresolved { attempt: 0 }
+            );
+        }
+    }
+
+    /// What a walk establishes about a leg's liveness: every key before the
+    /// leg's attempt skipped, and whether the parent went to another
+    /// operation. A walk that did not start at the first key, or did not
+    /// reach the attempt, establishes nothing.
+    #[test]
+    fn a_walk_establishes_liveness_only_as_far_as_it_reached() {
+        let rejected = LegFacts {
+            cell: CellFact::Held {
+                id: OTHER_E,
+                state: ChainState::Final,
+            },
+            ..good_leg()
+        };
+        let rejected_legs = [rejected];
+        let consuming_legs = [good_leg()];
+        // Keys 0 and 1 are held by a rejected operation, skipped; key 2 is
+        // consumed by the operation bound to E.
+        let facts_for = |attempt: u64| match attempt {
+            0 | 1 => Some(KeyFacts::complete_at(
+                V,
+                PRE,
+                attempt,
+                RouteFacts {
+                    external_commitment: OTHER_E,
+                    registered: true,
+                    conformance: Valid,
+                    position_lost: false,
+                    parent: ParentPosition::SingleRoot,
+                    parent_pre_root: PRE,
+                    validation: Invalid,
+                    storage_resolved: true,
+                    legs: &rejected_legs,
+                },
+                rejected,
+            )),
+            2 => Some(KeyFacts::complete_at(
+                V,
+                PRE,
+                2,
+                realized(&consuming_legs),
+                good_leg(),
+            )),
+            _ => None,
+        };
+        let reached_two = walk(&V, &PRE, 0, 2, facts_for);
+        assert_eq!(reached_two.outcome(), WalkOutcome::Continue { cursor: 2 });
+        // Keys before 1 and before 2 are skipped: live. Key 3 is past what
+        // the walk reached: not established.
+        assert_eq!(reached_two.liveness_of(1, &OTHER_ROOT), Some((true, false)));
+        assert_eq!(reached_two.liveness_of(2, &OTHER_ROOT), Some((true, false)));
+        assert_eq!(reached_two.liveness_of(3, &OTHER_ROOT), None);
+
+        let consumed = walk(&V, &PRE, 0, 16, facts_for);
+        assert_eq!(consumed.outcome(), WalkOutcome::Consumed { attempt: 2 });
+        // A leg at attempt 3 of this parent was never live: the parent went
+        // at key 2, to E — another operation for a leg bound to OTHER_ROOT,
+        // and this very one for a leg bound to E.
+        assert_eq!(consumed.liveness_of(3, &OTHER_ROOT), Some((false, true)));
+        assert_eq!(consumed.liveness_of(3, &E), Some((false, false)));
+        // A leg at key 2 itself: every earlier key skipped.
+        assert_eq!(consumed.liveness_of(2, &E), Some((true, false)));
+
+        // A walk that did not start at the first key establishes no liveness.
+        let resumed = walk(&V, &PRE, 1, 16, facts_for);
+        assert_eq!(resumed.outcome(), WalkOutcome::Consumed { attempt: 2 });
+        assert_eq!(resumed.liveness_of(2, &E), None);
     }
 
     /// Every combination of the facts an in-hand refutation does not read,
@@ -1557,25 +1966,40 @@ mod tests {
         };
         let live_legs = [good_leg()];
         let facts_for = |attempt: u64| match attempt {
-            0 => Some(KeyFacts::RefutedInHand {
-                refuted: RefutedInHand::Conformance,
-                cell: final_e,
-                external_commitment: E,
-            }),
-            1 => Some(KeyFacts::Complete(realized(&live_legs), good_leg())),
+            0 => Some(KeyFacts::refuted_at(
+                V,
+                PRE,
+                0,
+                RefutedInHand::Conformance,
+                final_e,
+                E,
+            )),
+            1 => Some(KeyFacts::complete_at(
+                V,
+                PRE,
+                1,
+                realized(&live_legs),
+                good_leg(),
+            )),
             _ => None,
         };
-        assert_eq!(walk(0, 16, facts_for), WalkOutcome::Consumed { attempt: 1 });
+        assert_eq!(
+            walk(&V, &PRE, 0, 16, facts_for).outcome(),
+            WalkOutcome::Consumed { attempt: 1 }
+        );
         // Refuted, but not final on its E: nothing skips.
         let open_for = |attempt: u64| {
-            (attempt == 0).then_some(KeyFacts::RefutedInHand {
-                refuted: RefutedInHand::Route { legs: 1 },
-                cell: CellFact::Open,
-                external_commitment: E,
-            })
+            (attempt == 0).then_some(KeyFacts::refuted_at(
+                V,
+                PRE,
+                0,
+                RefutedInHand::Route { legs: 1 },
+                CellFact::Open,
+                E,
+            ))
         };
         assert_eq!(
-            walk(0, 16, open_for),
+            walk(&V, &PRE, 0, 16, open_for).outcome(),
             WalkOutcome::Unresolved { attempt: 0 }
         );
     }
@@ -1585,7 +2009,7 @@ mod tests {
     #[test]
     fn an_unfetched_key_is_unresolved_not_skipped() {
         assert_eq!(
-            walk(5, 16, |_| None),
+            walk(&V, &PRE, 5, 16, |_| None).outcome(),
             WalkOutcome::Unresolved { attempt: 5 }
         );
     }
@@ -1643,7 +2067,10 @@ mod tests {
         // Facts for the top of the counter only: a walk that went anywhere else
         // would find none and stop Unresolved.
         let facts_for = |attempt: u64| {
-            (attempt == u64::MAX).then_some(KeyFacts::Complete(
+            (attempt == u64::MAX).then_some(KeyFacts::complete_at(
+                V,
+                PRE,
+                attempt,
                 RouteFacts {
                     external_commitment: OTHER_E,
                     registered: true,
@@ -1659,7 +2086,7 @@ mod tests {
             ))
         };
         assert_eq!(
-            walk(u64::MAX, 4, facts_for),
+            walk(&V, &PRE, u64::MAX, 4, facts_for).outcome(),
             WalkOutcome::CounterExhausted { attempt: u64::MAX }
         );
     }

@@ -1965,6 +1965,40 @@ theorem selected_root_is_committed (r : Resolution) (P : PBody) {root : Nat}
   · exact Or.inl h.symm
   · exact Or.inr h.symm
 
+/-- THE ROOT THE ADVANCE INSTALLS (`advance_resolved`, stage 10): the ladder's
+answer over the facts selects it, and nothing else does. Stated as a function
+of the facts, not of a resolution: since the verdict moved inside the advance,
+no `Resolution` is an input anywhere a root is installed. -/
+def installedRoot (x : Facts) (legs : List Nat) (e : Nat) (P : PBody) : Option Nat :=
+  selectedRoot (resolve x legs e) P
+
+/-- The realize root is installed exactly when the ladder answers Realized
+over the facts. Mutation: let `installedRoot` read a resolution the caller
+passes -- the right-to-left direction fails for a caller naming Void. -/
+theorem realize_root_installed_iff_ladder_realized (x : Facts) (legs : List Nat) (e : Nat)
+    (P : PBody) (hne : P.realize ≠ P.void) :
+    installedRoot x legs e P = some P.realize ↔ resolve x legs e = .realized := by
+  unfold installedRoot selectedRoot
+  cases resolve x legs e <;> simp [hne.symm]
+
+/-- The void root is installed exactly when the ladder answers Void: a valid
+route the storage layer defeated moves nothing and the lineage continues
+where it was. -/
+theorem void_root_installed_iff_ladder_void (x : Facts) (legs : List Nat) (e : Nat)
+    (P : PBody) (hne : P.realize ≠ P.void) :
+    installedRoot x legs e P = some P.void ↔ resolve x legs e = .void := by
+  unfold installedRoot selectedRoot
+  cases resolve x legs e <;> simp [hne]
+
+/-- Nothing is installed exactly when the ladder does not select a root:
+the facts are incomplete, or the position is Invalid and terminal. -/
+theorem nothing_installed_iff_ladder_selects_no_root (x : Facts) (legs : List Nat) (e : Nat)
+    (P : PBody) :
+    installedRoot x legs e P = none ↔
+      resolve x legs e = .pending ∨ resolve x legs e = .invalid := by
+  unfold installedRoot selectedRoot
+  cases resolve x legs e <;> simp
+
 /-- The rejected verdict: parent canonicality inside RouteValidation. -/
 def validationWithCanonicality (x : Facts) (legs : List Nat) : Validation :=
   if legs.any (fun R => x.parentStatus R == .orphaned) then .invalid else x.validation
@@ -2123,6 +2157,39 @@ theorem an_undecided_or_terminal_position_extends_nothing {res : Nat → Resolut
     (hq : res q = .pending ∨ res q = .invalid) : ¬ ValidatedThrough res (q + 1) := by
   intro hv
   rcases hv q (Nat.lt_succ_self q) with h | h <;> rcases hq with hq | hq <;> rw [hq] at h <;> cases h
+
+/-- Validated ancestry stated over the LADDER: every earlier position's facts
+resolve to an answer that selects a root. `ValidatedThrough` takes the
+resolution as a free function; here it is derived from each position's facts,
+which is the shape `advance_resolved` has since the verdict moved inside it. -/
+def ValidatedThroughFacts (facts : Nat → Facts) (legs : Nat → List Nat) (e : Nat → Nat)
+    (q : Nat) : Prop :=
+  ValidatedThrough (fun q' => resolve (facts q') (legs q') (e q')) q
+
+/-- ADVANCE ON THE LADDER EXTENDS THE VALIDATED LINEAGE: a position at which
+the ladder over the facts installed a root -- and only such a position --
+extends validated ancestry by exactly one. The hypothesis is that a root was
+installed, not that a resolution was named. -/
+theorem advance_on_the_ladder_extends_validated_lineage {facts : Nat → Facts}
+    {legs : Nat → List Nat} {e : Nat → Nat} {q : Nat} (P : PBody)
+    (h : ValidatedThroughFacts facts legs e q)
+    (hinst : installedRoot (facts q) (legs q) (e q) P ≠ none) :
+    ValidatedThroughFacts facts legs e (q + 1) := by
+  apply advance_extends_validated_lineage h
+  unfold installedRoot selectedRoot at hinst
+  cases hres : resolve (facts q) (legs q) (e q) <;> simp [hres] at hinst
+  · exact Or.inl rfl
+  · exact Or.inr rfl
+
+/-- And a position at which nothing was installed extends nothing: with the
+verdict derived from the facts, "no root installed" and "not a validated
+predecessor" are the same fact. -/
+theorem no_install_extends_nothing {facts : Nat → Facts} {legs : Nat → List Nat}
+    {e : Nat → Nat} {q : Nat} (P : PBody)
+    (hnone : installedRoot (facts q) (legs q) (e q) P = none) :
+    ¬ ValidatedThroughFacts facts legs e (q + 1) := by
+  apply an_undecided_or_terminal_position_extends_nothing
+  exact (nothing_installed_iff_ladder_selects_no_root _ _ _ P).1 hnone
 
 inductive Kind where
   | single

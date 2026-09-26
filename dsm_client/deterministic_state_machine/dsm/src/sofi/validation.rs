@@ -607,27 +607,65 @@ pub fn route_invalid_in_hand(
 
 /// One vault's state after the operation: the root its tree holds, and the
 /// leaf preimages that root commits for the keys this operation touched.
+///
+/// Built by [`vault_post_states`] from the fold and by nothing else: what a
+/// vault chain grows by (`VaultChain::extend`) and what the head store
+/// records is always a state Core recomputed, never one a caller stated.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VaultPostState {
-    pub vault_id: D32,
+    vault_id: D32,
     /// `R_g`: the root this operation was built on, as the core states it.
     /// Carried so a recorded head is its own chain link — a store that kept
     /// only the post root would hold a set of roots and not a chain, and a
     /// parent's status is asked about a GENERATION.
-    pub pre_root: D32,
+    pre_root: D32,
     /// `g`: the generation `pre_root` belongs to, from the pre state.
-    pub pre_generation: u64,
+    pre_generation: u64,
     /// `R_{g+1}`: the post root the vault core's own entries fold to against
     /// the pre-root the core states. The same value `validate` computes and
     /// discards, returned here because the vault head store needs it.
-    pub root: D32,
+    root: D32,
     /// The vault state leaf at `vault_state_key(v)`, with its generation
     /// advanced and its reserves priced by the vault's own policies.
-    pub state: VaultStateLeaf,
+    state: VaultStateLeaf,
     /// The relationship leaf this operation advanced, at its own key: the
     /// trader's leaf in THIS vault's tree, which is not the trader's own
     /// relationship leaf in its own tree.
-    pub relationship: Option<(D32, VaultRelationshipLeaf)>,
+    relationship: Option<(D32, VaultRelationshipLeaf)>,
+}
+
+impl VaultPostState {
+    pub fn vault_id(&self) -> &D32 {
+        &self.vault_id
+    }
+
+    /// `R_g`, the root the operation was built on.
+    pub fn pre_root(&self) -> &D32 {
+        &self.pre_root
+    }
+
+    /// `g`, the generation of `pre_root`.
+    pub fn pre_generation(&self) -> u64 {
+        self.pre_generation
+    }
+
+    /// `R_{g+1}`, the post root.
+    pub fn root(&self) -> &D32 {
+        &self.root
+    }
+
+    /// `g + 1`, the generation of the post state.
+    pub fn generation(&self) -> u64 {
+        self.state.generation
+    }
+
+    pub fn state(&self) -> &VaultStateLeaf {
+        &self.state
+    }
+
+    pub fn relationship(&self) -> Option<&(D32, VaultRelationshipLeaf)> {
+        self.relationship.as_ref()
+    }
 }
 
 /// Every vault's state after the operation, recomputed from the pre states the

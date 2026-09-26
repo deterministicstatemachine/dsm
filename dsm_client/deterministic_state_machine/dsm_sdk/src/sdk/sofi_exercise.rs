@@ -13,10 +13,12 @@
 //! key is Core's (`sofi::exercise::exercise_names_key`): the first exercise
 //! at the leader whose `F` names `(v, a)` and whose `P` names `(v, R_n)`.
 
-use dsm::route_chain::{CellFact, CellReading};
+use dsm::route_chain::CellFact;
 use dsm::sofi::conformance::{derive_policy_fulfillments, ConformanceEvidence};
 use dsm::sofi::derive;
-use dsm::sofi::exercise::{attempt_completion, attempt_resolution, AttemptCell, RecognizedExercise};
+use dsm::sofi::exercise::{
+    attempt_completion, attempt_resolution, AttemptCell, AttemptCellRead, RecognizedExercise,
+};
 use dsm::sofi::publication::Publication;
 use dsm::sofi::wire::{DlvPolicyFulfillmentBody, SofiExercise};
 use dsm::types::error::DsmError;
@@ -145,49 +147,34 @@ pub async fn write_exercise(
     Ok(writes)
 }
 
-/// What the ladder reads at one attempt key (Section 23.1).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AttemptRead {
-    /// The storage fact: open, or which exercise (by its `E`) holds the
-    /// cell and how far its chain has gone.
-    pub fact: CellFact,
-    /// The exercise holding the cell, if any.
-    pub exercise: Option<RecognizedExercise>,
-}
-
 /// `SuccessorResolution(K^(attempt))` of `vault_id` at `parent_root`, as the
 /// ladder reads it (Section 23.1): Core evaluates the cell's route chains
-/// from every seat's reads. An exercise final at the cell has its completion
-/// proof kept (storage spec §9 rule 11). Reads that do not decide the cell
-/// yet — its leader unread, or its leader link not yet committed — are the
-/// inner `Err`, what Core names as missing: a network status for the caller
-/// to retry, never an open cell.
+/// from every seat's reads into a read bound to the key. An exercise final
+/// at the cell has its completion proof kept (storage spec §9 rule 11).
+/// Reads that do not decide the cell yet — its leader unread, or its leader
+/// link not yet committed — are the inner `Err`, what Core names as missing:
+/// a network status for the caller to retry, never an open cell.
 pub async fn read_attempt_cell(
     set: &StorageSet,
     vault_id: &D32,
     parent_root: &D32,
     attempt: u64,
-) -> Result<Result<AttemptRead, dsm::route_chain::Missing>, DsmError> {
+) -> Result<Result<AttemptCellRead, dsm::route_chain::Missing>, DsmError> {
     let cell = attempt_cell(set, vault_id, parent_root, attempt)?;
     let seats = NodeSeats::new(set)?;
     let evidence = read_cell(&seats, cell.routed()).await;
-    let reading = match attempt_resolution(&cell, &evidence) {
-        Ok(reading) => reading,
+    let read = match attempt_resolution(&cell, &evidence) {
+        Ok(read) => read,
         Err(missing) => return Ok(Err(missing)),
-    };
-    let fact = reading.fact();
-    let exercise = match reading {
-        CellReading::Held { object, .. } => Some(object),
-        CellReading::Open => None,
     };
     if let CellFact::Held {
         state: dsm::route_chain::ChainState::Final,
         ..
-    } = fact
+    } = read.fact()
     {
         keep_attempt_completion(&cell, &evidence)?;
     }
-    Ok(Ok(AttemptRead { fact, exercise }))
+    Ok(Ok(read))
 }
 
 /// Keep the completion proof of the exercise final at `cell`.

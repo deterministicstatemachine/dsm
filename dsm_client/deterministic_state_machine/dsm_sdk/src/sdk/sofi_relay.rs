@@ -19,7 +19,7 @@
 //! leader (storage spec §9). Nothing here re-gates on conformance: that gate
 //! is the PRODUCER's discipline before it publishes, not a second opinion at
 //! every carrier.
-use dsm::route_chain::CellReading;
+use dsm::route_chain::CellFact;
 use dsm::sofi::exercise::attempt_resolution;
 use dsm::sofi::publication::{Publication, Signed};
 use dsm::sofi::storage::Resolved;
@@ -146,12 +146,14 @@ pub async fn relay_fulfillment(
     for (.., cell) in &cells {
         let evidence = read_cell(&seats, cell.routed()).await;
         let id = match attempt_resolution(cell, &evidence) {
-            Ok(CellReading::Held { object, id, .. })
-                if object.fulfillment.body == fulfillment.body =>
-            {
-                id
-            }
-            Ok(CellReading::Held { .. } | CellReading::Open) => continue,
+            Ok(read) => match (read.fact(), read.exercise()) {
+                (CellFact::Held { id, .. }, Some(object))
+                    if object.fulfillment.body == fulfillment.body =>
+                {
+                    id
+                }
+                _ => continue,
+            },
             Err(undecided) => {
                 log::info!("[sofi relay] a leg cell is not decided yet: {undecided:?}");
                 continue;
