@@ -183,6 +183,48 @@ pub fn get_bilateral_session(commitment_hash: &[u8]) -> Result<Option<BilateralS
     .map_err(Into::into)
 }
 
+/// The phase tags of a step in flight: the steps a relationship's one-step-
+/// at-a-time rule counts.
+pub const IN_FLIGHT_PHASE_TAGS: [&str; 5] = [
+    "preparing",
+    "prepared",
+    "pending_user_action",
+    "accepted",
+    "confirm_pending",
+];
+
+/// The step this device holds in flight with `counterparty_device_id` —
+/// other than `other_than`, when given — as its commitment hash and phase tag.
+/// The durable rows are the authority: a step another handler took, or one not
+/// yet restored after a restart, counts as much as one in memory.
+pub fn bilateral_step_in_flight_with(
+    counterparty_device_id: &[u8],
+    other_than: Option<&[u8]>,
+) -> Result<Option<(Vec<u8>, String)>> {
+    let binding = get_db_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|_| anyhow!("Database lock poisoned - concurrent access error"))?;
+    let phases = IN_FLIGHT_PHASE_TAGS
+        .iter()
+        .map(|tag| format!("'{tag}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    conn.query_row(
+        &format!(
+            "SELECT commitment_hash, phase FROM bilateral_sessions
+             WHERE counterparty_device_id = ?1
+               AND (?2 IS NULL OR commitment_hash != ?2)
+               AND phase IN ({phases})
+             ORDER BY rowid LIMIT 1"
+        ),
+        params![counterparty_device_id, other_than],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
 /// Delete a bilateral session by commitment hash
 pub fn delete_bilateral_session(commitment_hash: &[u8]) -> Result<()> {
     let binding = get_db_connection()?;
@@ -487,6 +529,45 @@ mod tests {
             restored.stitched_receipt_bytes,
             Some(receipt_bytes),
             "previously-cached signed receipt must survive an upsert with None"
+        );
+    }
+
+    /// The relationship's step in flight is read from the durable rows: only
+    /// a row in an in-flight phase counts, only the counterparty's, and not
+    /// the step named as the one asking.
+    #[test]
+    #[serial]
+    fn the_step_in_flight_is_read_from_the_rows() {
+        init_test_db();
+        let counterparty = [0x22u8; 32];
+        let mut ended = make_session("rejected");
+        ended.commitment_hash = vec![0x61; 32];
+        store_bilateral_session(&ended).unwrap();
+        let mut elsewhere = make_session("accepted");
+        elsewhere.commitment_hash = vec![0x62; 32];
+        elsewhere.counterparty_device_id = vec![0x23; 32];
+        store_bilateral_session(&elsewhere).unwrap();
+        assert_eq!(
+            bilateral_step_in_flight_with(&counterparty, None).unwrap(),
+            None,
+            "an ended step, or another relationship's, is not in flight here"
+        );
+
+        let mut held = make_session("pending_user_action");
+        held.commitment_hash = vec![0x63; 32];
+        store_bilateral_session(&held).unwrap();
+        assert_eq!(
+            bilateral_step_in_flight_with(&counterparty, None).unwrap(),
+            Some((vec![0x63; 32], "pending_user_action".to_string()))
+        );
+        assert_eq!(
+            bilateral_step_in_flight_with(&counterparty, Some(&[0x63; 32])).unwrap(),
+            None,
+            "the step asking is not its own neighbour"
+        );
+        assert_eq!(
+            bilateral_step_in_flight_with(&counterparty, Some(&[0x64; 32])).unwrap(),
+            Some((vec![0x63; 32], "pending_user_action".to_string()))
         );
     }
 }

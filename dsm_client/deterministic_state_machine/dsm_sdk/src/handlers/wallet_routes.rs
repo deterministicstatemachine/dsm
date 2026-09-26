@@ -929,17 +929,27 @@ impl AppRouterImpl {
                     ) {
                         Ok(chunks) => chunks,
                         // A prepare that cannot be framed can never be sent: the
-                        // proposal, which reached no one, ends here.
+                        // proposal, which reached no one, is cancelled — signed and
+                        // kept, as any proposal its proposer ends before its
+                        // confirm.
                         Err(e) => {
-                            transport_adapter
-                                .fail_session_by_commitment(
+                            let cancelled = transport_adapter
+                                .bilateral_handler()
+                                .cancel_proposal(
                                     commitment_hash,
-                                    "wallet.sendOffline: failed to frame BLE prepare payload",
+                                    "the prepare could not be framed for BLE".to_string(),
                                 )
                                 .await;
-                            return err(format!(
-                                "wallet.sendOffline: failed to frame BLE prepare payload: {e}"
-                            ));
+                            return err(match cancelled {
+                                Ok(_) => format!(
+                                    "wallet.sendOffline: failed to frame BLE prepare payload \
+                                     (the proposal is cancelled): {e}"
+                                ),
+                                Err(cancel) => format!(
+                                    "wallet.sendOffline: failed to frame BLE prepare payload: \
+                                     {e}; the proposal is not cancelled: {cancel}"
+                                ),
+                            });
                         }
                     };
 

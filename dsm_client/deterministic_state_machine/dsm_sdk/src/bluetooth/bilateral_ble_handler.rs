@@ -45,13 +45,6 @@ use crate::storage::client_db::{
     BilateralSessionRecord,
 };
 
-fn option_string_or_default(opt: Option<String>, default: &str) -> String {
-    match opt {
-        Some(s) if !s.is_empty() => s,
-        _ => default.to_string(),
-    }
-}
-
 fn sdk_send_status_from_router_status(
     status: dsm::types::proto::RelationshipSendStatus,
 ) -> generated::RelationshipSendStatus {
@@ -83,6 +76,32 @@ fn local_device_tree_commitment(
 enum BilateralSide {
     A,
     B,
+}
+
+/// The step this device holds in flight with `counterparty` — other than
+/// `other_than`, when given — read from the durable rows.
+fn step_in_flight_with(
+    counterparty: &[u8; 32],
+    other_than: Option<&[u8; 32]>,
+) -> Result<Option<([u8; 32], String)>, DsmError> {
+    crate::storage::client_db::bilateral_step_in_flight_with(
+        counterparty,
+        other_than.map(|h| h.as_slice()),
+    )
+    .map_err(|e| {
+        DsmError::storage(
+            format!("the relationship's step in flight: {e}"),
+            None::<std::io::Error>,
+        )
+    })?
+    .map(|(hash, phase)| {
+        <[u8; 32]>::try_from(hash.as_slice())
+            .map(|hash| (hash, phase))
+            .map_err(|_| {
+                DsmError::invalid_operation("a persisted step in flight has a malformed commitment")
+            })
+    })
+    .transpose()
 }
 
 /// Bilateral BLE transaction coordinator
@@ -430,152 +449,6 @@ impl BilateralBleHandler {
         }
     }
 
-    // record_bcr_state(...) deleted: per §2.2/§4.3, canonical state is the
-    // per-relationship chain state + Per-Device SMT root. The BLE handler
-    // MUST NOT write a duplicate snapshot from a derived settlement-time
-    // State.
-    //
-    // Note: the BLE bilateral path advances the relationship chain via
-    // `BilateralTransactionManager::prepare_bilateral_advance` (§6.1
-    // tripwire) followed by the canonical Core advance in
-    // `AppRouter::execute_on_relationship_for_bilateral`.
-    /// Reject an incoming prepare (or any active session) identified by the origin commitment hash.
-    pub async fn reject_incoming_prepare(
-        &self,
-        origin_commitment_hash: [u8; 32],
-        counterparty_device_id: [u8; 32],
-        reason: Option<String>,
-    ) -> Result<(), DsmError> {
-        let mut sessions = self.sessions.sessions.lock().await;
-        if let Some(session) = sessions.get_mut(&origin_commitment_hash) {
-            session.phase = BilateralPhase::Rejected;
-            let pending_key = session
-                .local_commitment_hash
-                .unwrap_or(origin_commitment_hash);
-            drop(sessions);
-
-            // Emit rejection event to frontend for deterministic UI/test behavior.
-            // (If no callback is installed, this is a no-op.)
-            let msg = option_string_or_default(reason.clone(), "rejected");
-            self.emit_event(&generated::BilateralEventNotification {
-                // Rendered in emit_event, the one boundary all emitters cross.
-                display_amount: None,
-                event_type: generated::BilateralEventType::BilateralEventRejected.into(),
-                counterparty_device_id: counterparty_device_id.to_vec(),
-                commitment_hash: origin_commitment_hash.to_vec(),
-                transaction_hash: None,
-                amount: None,
-                token_id: None,
-                status: "rejected".to_string(),
-                message: msg,
-                sender_ble_address: None,
-                failure_reason: Some(
-                    generated::BilateralFailureReason::FailureReasonRejectedByPeer.into(),
-                ),
-            });
-
-            // Remove any pending commitment in the core manager keyed by this hash
-            {
-                let mut mgr = self.bilateral_tx_manager.write().await;
-                mgr.consume_pre_commitment(&pending_key);
-            }
-
-            // Persist rejected phase (keep session visible for frontend poller)
-            if let Err(e) = crate::storage::client_db::update_bilateral_session_phase(
-                &origin_commitment_hash,
-                "rejected",
-            ) {
-                warn!(
-                    "[BLE_HANDLER] Failed to update session phase to rejected: {}",
-                    e
-                );
-            }
-
-            self.prune_terminal_sessions_for_counterparty(&counterparty_device_id)
-                .await;
-
-            info!(
-                "[BLE_HANDLER] Rejected bilateral session origin={} for counterparty {} reason={:?}",
-                bytes_to_base32(&origin_commitment_hash[..8]),
-                bytes_to_base32(&counterparty_device_id[..8]),
-                reason
-            );
-        } else {
-            info!(
-                "[BLE_HANDLER] reject_incoming_prepare: no active session found for origin={} (already cleaned up?)",
-                bytes_to_base32(&origin_commitment_hash[..8])
-            );
-        }
-
-        Ok(())
-    }
-
-    /// Create a reject response envelope for an incoming prepare.
-    /// Returns serialized Envelope with BilateralPrepareReject payload.
-    pub async fn create_prepare_reject_envelope(
-        &self,
-        commitment_hash: [u8; 32],
-        counterparty_device_id: [u8; 32],
-        reason: String,
-    ) -> Result<Vec<u8>, DsmError> {
-        // Mark session rejected
-        self.reject_incoming_prepare(
-            commitment_hash,
-            counterparty_device_id,
-            Some(reason.clone()),
-        )
-        .await?;
-
-        let send_status =
-            crate::handlers::relationship_status::derive_local_send_status_for_device_id(
-                &counterparty_device_id,
-            );
-        let send_status = if send_status.send_ready {
-            crate::handlers::relationship_status::blocked_status(
-                dsm::types::proto::RelationshipSendBlockReason::StateDivergence,
-                reason.clone(),
-            )
-        } else {
-            send_status
-        };
-        let send_status = sdk_send_status_from_router_status(send_status);
-
-        // Build reject message, signed: the proposer abandons its proposal only
-        // for a rejection this device signed.
-        let rejector_signature = self
-            .bilateral_tx_manager
-            .read()
-            .await
-            .sign_rejection(&commitment_hash, &reason)?;
-        let reject = generated::BilateralPrepareReject {
-            commitment_hash: Some(generated::Hash32 {
-                v: commitment_hash.to_vec(),
-            }),
-            reason: reason.clone(),
-            rejector_device_id: self.device_id.to_vec(),
-            send_status: Some(send_status),
-            rejector_signature,
-        };
-
-        // Wrap in envelope with per-relationship chain tip
-        let envelope = self
-            .create_envelope(generated::envelope::Payload::BilateralPrepareReject(reject))
-            .await;
-
-        let mut buffer = Vec::new();
-        envelope.encode(&mut buffer).map_err(|e| {
-            DsmError::serialization_error(
-                "encode_prepare_reject",
-                "protobuf",
-                Some(e.to_string()),
-                Some(e),
-            )
-        })?;
-
-        info!("Bilateral prepare reject envelope created");
-        Ok(buffer)
-    }
-
     /// Public helper to query a session's current phase (for tests / diagnostics)
     pub async fn get_session_phase(&self, commitment_hash: &[u8; 32]) -> Option<BilateralPhase> {
         let sessions = self.sessions.sessions.lock().await;
@@ -782,37 +655,21 @@ impl BilateralBleHandler {
         )
     }
 
-    async fn detect_inflight_counterparty_session(
-        &self,
-        counterparty_device_id: &[u8; 32],
-    ) -> Option<([u8; 32], BilateralPhase)> {
-        let sessions = self.sessions.sessions.lock().await;
-        sessions
-            .iter()
-            .find(|(_hash, session)| {
-                session.counterparty_device_id == *counterparty_device_id
-                    && is_inflight_phase(&session.phase)
-            })
-            .map(|(hash, session)| (*hash, session.phase.clone()))
-    }
-
     /// Phase 1: Prepare bilateral transaction (sender initiates). One step at
     /// a time per relationship: while a step is in flight — however long it
-    /// has been — a new one is refused. Time does not end a step; its
-    /// completion, a signed rejection, invalid evidence or an explicit
-    /// cancellation does.
-    async fn ensure_counterparty_ready_for_prepare(
-        &self,
+    /// has been, and whichever door it came through — a new one is refused.
+    /// Time does not end a step; its completion, a signed rejection, invalid
+    /// evidence or an explicit cancellation does. Called under
+    /// [`crate::security::modal_sync_lock::STEP_DOOR`].
+    fn ensure_counterparty_ready_for_prepare(
         counterparty_device_id: &[u8; 32],
     ) -> Result<(), DsmError> {
-        if let Some((existing_commitment_hash, existing_phase)) = self
-            .detect_inflight_counterparty_session(counterparty_device_id)
-            .await
+        if let Some((existing_commitment_hash, existing_phase)) =
+            step_in_flight_with(counterparty_device_id, None)?
         {
             return Err(DsmError::invalid_operation(format!(
-                "Existing bilateral session in progress for this contact (phase={:?}, \
+                "Existing bilateral session in progress for this contact (phase={existing_phase}, \
                  commitment={}). Complete or resolve it before starting another transfer.",
-                existing_phase,
                 bytes_to_base32(&existing_commitment_hash[..8]),
             )));
         }
@@ -842,8 +699,10 @@ impl BilateralBleHandler {
             ));
         }
 
-        self.ensure_counterparty_ready_for_prepare(&counterparty_device_id)
-            .await?;
+        // Through the proposer's door: the step in flight is read and the new
+        // step's row written under the one door (the peer's door is the other).
+        let door = crate::security::modal_sync_lock::STEP_DOOR.lock().await;
+        Self::ensure_counterparty_ready_for_prepare(&counterparty_device_id)?;
 
         // FINALITY BARRIER — same authority as `wallet.send`, BEFORE any value
         // mutation: a BLE origination is an origination. Refused while our
@@ -988,6 +847,7 @@ impl BilateralBleHandler {
             let mut sessions = self.sessions.sessions.lock().await;
             sessions.insert(pre_commitment.bilateral_commitment_hash, session.clone());
         }
+        drop(door);
 
         // Build prepare request with BLE address lookup
         let expected_counterparty_state_hash = {
@@ -1161,102 +1021,13 @@ impl BilateralBleHandler {
             .await
     }
 
-    /// Cancel / fail the in-flight Prepared session for `counterparty_device_id`, if any.
-    ///
-    /// Called when the BLE send of the prepare message fails so that the next
-    /// attempt is not blocked by a stale `Prepared` session sitting in the
-    /// `active_sessions` map.
-    /// Fail and remove a single in-flight session by commitment hash.
-    ///
-    /// Used when BLE transport definitively fails after the session has already
-    /// transitioned out of `PendingUserAction` (for example, receiver-side accept
-    /// send failure). This prevents stale `Accepted` / `ConfirmPending` sessions
-    /// from blocking the next transfer attempt.
-    pub async fn fail_session_by_commitment(
-        &self,
-        commitment_hash: [u8; 32],
-        reason: &str,
-    ) -> bool {
-        let session = {
-            let mut sessions = self.sessions.sessions.lock().await;
-            let Some(mut session) = sessions.remove(&commitment_hash) else {
-                info!(
-                    "[BLE_HANDLER] fail_session_by_commitment: session {} already absent",
-                    bytes_to_base32(&commitment_hash[..8])
-                );
-                return false;
-            };
-
-            if !is_inflight_phase(&session.phase) {
-                info!(
-                    "[BLE_HANDLER] fail_session_by_commitment: session {} already terminal ({:?})",
-                    bytes_to_base32(&commitment_hash[..8]),
-                    session.phase
-                );
-                sessions.insert(commitment_hash, session);
-                return false;
-            }
-
-            session.phase = BilateralPhase::Failed;
-            session
-        };
-
-        warn!(
-            "[BLE_HANDLER] Failing session {} for counterparty {}: {}",
-            bytes_to_base32(&commitment_hash[..8]),
-            bytes_to_base32(&session.counterparty_device_id[..8]),
-            reason
-        );
-
-        let pending_key = session.local_commitment_hash.unwrap_or(commitment_hash);
-        {
-            let mut mgr = self.bilateral_tx_manager.write().await;
-            mgr.consume_pre_commitment(&pending_key);
-            if pending_key != commitment_hash {
-                mgr.consume_pre_commitment(&commitment_hash);
-            }
-        }
-
-        // Keep failed sessions in SQLite for poller visibility
-        if let Err(e) =
-            crate::storage::client_db::update_bilateral_session_phase(&commitment_hash, "failed")
-        {
-            warn!(
-                "[BLE_HANDLER] fail_session_by_commitment: failed to update session phase {}: {}",
-                bytes_to_base32(&commitment_hash[..8]),
-                e
-            );
-        }
-
-        self.emit_event(&generated::BilateralEventNotification {
-            // Rendered in emit_event, the one boundary all emitters cross.
-            display_amount: None,
-            event_type: generated::BilateralEventType::BilateralEventFailed.into(),
-            counterparty_device_id: session.counterparty_device_id.to_vec(),
-            commitment_hash: commitment_hash.to_vec(),
-            transaction_hash: None,
-            amount: None,
-            token_id: None,
-            status: "failed".to_string(),
-            message: reason.to_string(),
-            sender_ble_address: session.sender_ble_address.clone(),
-            failure_reason: Some(
-                generated::BilateralFailureReason::FailureReasonUnspecified.into(),
-            ),
-        });
-
-        self.prune_terminal_sessions_for_counterparty(&session.counterparty_device_id)
-            .await;
-
-        true
-    }
-
-    /// Phase 2: Handle incoming prepare request (receiver processes)
-    ///
-    /// This validates the proposal and stores it for user decision. Does NOT auto-accept.
-    /// Returns empty Vec on success (user must call create_prepare_accept_envelope or
-    /// create_prepare_reject_envelope to send a response).
-    /// Returns auto-reject envelope bytes if hash verification fails.
+    /// Phase 2: the peer's proposal, at this device's door. A proposal this
+    /// device already holds is answered from what it holds. A new one is held
+    /// for the user (the answer is empty: the user accepts with
+    /// `create_prepare_accept_envelope` or rejects with
+    /// `create_prepare_reject_envelope_with_cleanup`), or refused with a
+    /// signed rejection — while another step is in flight with the sender, or
+    /// when it does not extend the held tip.
     pub async fn handle_prepare_request(
         &self,
         envelope_bytes: &[u8],
@@ -1525,6 +1296,14 @@ impl BilateralBleHandler {
                 .map_err(|_| {
                     DsmError::invalid_operation("the sender's pinned genesis is not 32 bytes")
                 })?;
+        // Through the peer's door: the step this device holds in flight with
+        // the sender is read, Core decides with it, and the proposal's row is
+        // written, under the one door (this device's own proposals are the
+        // other).
+        let door = crate::security::modal_sync_lock::STEP_DOOR.lock().await;
+        let in_flight =
+            step_in_flight_with(&counterparty_device_id, Some(&origin_commitment_hash))?
+                .map(|(hash, _phase)| hash);
         let decision = dsm::bilateral::offline::decide_prepare(
             origin_commitment_hash,
             &operation,
@@ -1547,9 +1326,72 @@ impl BilateralBleHandler {
                 kyber_public_key: &sender_contact.kyber_public_key,
             },
             our_local_chain_tip,
+            in_flight,
         )?;
+
+        // The proposal delivered again is answered from what this device holds
+        // for it, whatever a fresh decision would be now. An acceptance answers
+        // with the response it owes (the first may not have arrived); a
+        // proposal this device refused, with its signed rejection. A proposal
+        // still awaiting its user, or a step that ended any other way, answers
+        // nothing; so does a step this device committed — its ack answers the
+        // confirm, and a committed step is never refused.
+        let existing = match self
+            .sessions
+            .sessions
+            .lock()
+            .await
+            .get(&origin_commitment_hash)
+            .cloned()
+        {
+            Some(session) => Some(session),
+            None => crate::storage::client_db::get_bilateral_session(&origin_commitment_hash)
+                .map_err(|e| {
+                    DsmError::storage(format!("the step's session: {e}"), None::<std::io::Error>)
+                })?
+                .map(|row| BilateralBleSession::from_record(&row))
+                .transpose()?,
+        };
+        if let Some(existing) = existing {
+            let answer = existing
+                .owed()
+                .filter(|frame| frame.kind == OfflineFrameKind::PrepareResponse)
+                .map(|frame| frame.bytes)
+                .or_else(|| existing.rejection())
+                .unwrap_or_default();
+            return Ok((answer, crate::sdk::transfer_hooks::TransferMeta::default()));
+        }
+        if crate::storage::client_db::transaction_exists(
+            &crate::util::text_id::encode_base32_crockford(&origin_commitment_hash),
+        )
+        .map_err(|e| {
+            DsmError::storage(format!("the step's history: {e}"), None::<std::io::Error>)
+        })? {
+            return Ok((
+                Vec::new(),
+                crate::sdk::transfer_hooks::TransferMeta::default(),
+            ));
+        }
+
         match decision {
             dsm::bilateral::offline::PrepareDecision::Consider { .. } => {}
+            // Another step is in flight with the sender: one step at a time.
+            dsm::bilateral::offline::PrepareDecision::StepInFlight { in_flight } => {
+                let rejection = self
+                    .refuse_while_in_flight(
+                        origin_commitment_hash,
+                        counterparty_device_id,
+                        sender_genesis,
+                        operation,
+                        sender_ble_address,
+                        in_flight,
+                    )
+                    .await?;
+                return Ok((
+                    rejection,
+                    crate::sdk::transfer_hooks::TransferMeta::default(),
+                ));
+            }
             // A proposal that does not extend the held tip is answered with a
             // signed rejection, and no precommitment is made.
             dsm::bilateral::offline::PrepareDecision::StaleTip {
@@ -1594,70 +1436,22 @@ impl BilateralBleHandler {
                     ),
                 });
 
-                // Build and return reject envelope (no pre-commitment created)
-                let send_status =
+                // The rejection is not kept: the held tip never comes back to
+                // the one the proposal extends, so the proposal delivered
+                // again is refused the same way. No precommitment is made.
+                let send_status = sdk_send_status_from_router_status(
                     crate::handlers::relationship_status::derive_local_send_status_for_device_id(
                         &counterparty_device_id,
-                    );
-                let send_status = sdk_send_status_from_router_status(send_status);
-                let rejector_signature = self
-                    .bilateral_tx_manager
-                    .read()
-                    .await
-                    .sign_rejection(&origin_commitment_hash, &reason)?;
-                let reject = generated::BilateralPrepareReject {
-                    commitment_hash: Some(generated::Hash32 {
-                        v: origin_commitment_hash.to_vec(),
-                    }),
-                    reason,
-                    rejector_device_id: self.device_id.to_vec(),
-                    send_status: Some(send_status),
-                    rejector_signature,
-                };
-                let envelope = self
-                    .create_envelope(generated::envelope::Payload::BilateralPrepareReject(reject))
-                    .await;
-                let mut buffer = Vec::new();
-                envelope.encode(&mut buffer).map_err(|e| {
-                    DsmError::serialization_error(
-                        "encode_auto_reject",
-                        "protobuf",
-                        Some(e.to_string()),
-                        Some(e),
-                    )
-                })?;
-                return Ok((buffer, crate::sdk::transfer_hooks::TransferMeta::default()));
+                    ),
+                );
+                let rejection = self
+                    .signed_rejection(origin_commitment_hash, reason, Some(send_status))
+                    .await?;
+                return Ok((
+                    rejection,
+                    crate::sdk::transfer_hooks::TransferMeta::default(),
+                ));
             }
-        }
-
-        // The proposal delivered again. An acceptance answers it with the
-        // response it owes (the first may not have arrived); a proposal this
-        // device rejected, with its signed rejection. A proposal still awaiting
-        // its user, or a step that ended any other way, answers nothing.
-        let existing = match self
-            .sessions
-            .sessions
-            .lock()
-            .await
-            .get(&origin_commitment_hash)
-            .cloned()
-        {
-            Some(session) => Some(session),
-            None => crate::storage::client_db::get_bilateral_session(&origin_commitment_hash)
-                .map_err(|e| {
-                    DsmError::storage(format!("the step's session: {e}"), None::<std::io::Error>)
-                })?
-                .map(|row| BilateralBleSession::from_record(&row))
-                .transpose()?,
-        };
-        if let Some(existing) = existing {
-            let answer = existing
-                .owed()
-                .filter(|frame| frame.kind == OfflineFrameKind::PrepareResponse)
-                .map(|frame| frame.bytes)
-                .or_else(|| existing.rejection())
-                .unwrap_or_default();
-            return Ok((answer, crate::sdk::transfer_hooks::TransferMeta::default()));
         }
 
         // The proposal is the sender's, and it extends the held tip: this
@@ -1712,6 +1506,7 @@ impl BilateralBleHandler {
             .lock()
             .await
             .insert(origin_commitment_hash, session.clone());
+        drop(door);
 
         // Obtain event display metadata from the delegate (coin-agnostic transport).
         let op_bytes_for_event = session.operation.to_bytes();
@@ -1898,17 +1693,25 @@ impl BilateralBleHandler {
         Ok((buffer, counterparty_device_id))
     }
 
-    /// Reject a pending proposal and clean up pre-commitment (receiver calls)
-    /// Returns the BilateralPrepareReject envelope bytes to send over BLE
+    /// The user's rejection of a proposal awaiting this device's decision: a
+    /// signed rejection, kept with the session's end before it leaves, as the
+    /// answer to the proposal delivered again. Only a proposal still awaiting
+    /// its user is rejected: an accepted step may be committing on its
+    /// proposer's confirm, and this device's own proposals end by cancellation
+    /// ([`Self::cancel_proposal`]).
     pub async fn create_prepare_reject_envelope_with_cleanup(
         &self,
         origin_commitment_hash: [u8; 32],
         reason: String,
     ) -> Result<Vec<u8>, DsmError> {
-        // Fetch session and get counterparty_device_id
-        let (counterparty_device_id, pending_key) = {
-            let sessions = self.sessions.sessions.lock().await;
-            let session = sessions.get(&origin_commitment_hash).ok_or_else(|| {
+        let session = self
+            .sessions
+            .sessions
+            .lock()
+            .await
+            .get(&origin_commitment_hash)
+            .cloned()
+            .ok_or_else(|| {
                 DsmError::not_found(
                     format!(
                         "bilateral session {}",
@@ -1917,30 +1720,13 @@ impl BilateralBleHandler {
                     Some("No pending session found for rejection".to_string()),
                 )
             })?;
-            let pending_key = session
-                .local_commitment_hash
-                .unwrap_or(origin_commitment_hash);
-            (session.counterparty_device_id, pending_key)
-        };
-
-        // Clean up receiver's pending commitment from BilateralTransactionManager
-        {
-            let mut mgr = self.bilateral_tx_manager.write().await;
-            if let Some(removed) = mgr.consume_pre_commitment(&pending_key) {
-                info!(
-                    "[BLE_HANDLER] Cleaned up receiver pre-commitment {} on reject",
-                    bytes_to_base32(&removed.bilateral_commitment_hash[..8])
-                );
-            }
+        if session.phase != BilateralPhase::PendingUserAction {
+            return Err(DsmError::invalid_operation(format!(
+                "a step in {:?} is not a proposal awaiting this device's decision",
+                session.phase
+            )));
         }
-
-        // Use existing reject method which handles session state + event emission
-        self.reject_incoming_prepare(
-            origin_commitment_hash,
-            counterparty_device_id,
-            Some(reason.clone()),
-        )
-        .await?;
+        let counterparty_device_id = session.counterparty_device_id;
 
         let send_status =
             crate::handlers::relationship_status::derive_local_send_status_for_device_id(
@@ -1954,57 +1740,150 @@ impl BilateralBleHandler {
         } else {
             send_status
         };
-        let send_status = sdk_send_status_from_router_status(send_status);
+        let rejection = self
+            .signed_rejection(
+                origin_commitment_hash,
+                reason.clone(),
+                Some(sdk_send_status_from_router_status(send_status)),
+            )
+            .await?;
 
-        // Build reject envelope, signed.
+        let mut rejected = session;
+        rejected.phase = BilateralPhase::Rejected;
+        rejected.owed_frame = Some(rejection.clone());
+        self.persist_session(&rejected).await?;
+        let pending_key = rejected
+            .local_commitment_hash
+            .unwrap_or(origin_commitment_hash);
+        self.sessions
+            .sessions
+            .lock()
+            .await
+            .insert(origin_commitment_hash, rejected);
+        self.bilateral_tx_manager
+            .write()
+            .await
+            .consume_pre_commitment(&pending_key);
+
+        self.emit_event(&generated::BilateralEventNotification {
+            // Rendered in emit_event, the one boundary all emitters cross.
+            display_amount: None,
+            event_type: generated::BilateralEventType::BilateralEventRejected.into(),
+            counterparty_device_id: counterparty_device_id.to_vec(),
+            commitment_hash: origin_commitment_hash.to_vec(),
+            transaction_hash: None,
+            amount: None,
+            token_id: None,
+            status: "rejected".to_string(),
+            message: reason,
+            sender_ble_address: None,
+            failure_reason: Some(
+                generated::BilateralFailureReason::FailureReasonRejectedByPeer.into(),
+            ),
+        });
+        self.prune_terminal_sessions_for_counterparty(&counterparty_device_id)
+            .await;
+        info!(
+            "Bilateral proposal {} rejected",
+            bytes_to_base32(&origin_commitment_hash[..8])
+        );
+        Ok(rejection)
+    }
+
+    /// A signed rejection of the step `commitment_hash`, as its envelope: the
+    /// receiver's refusal of a proposal, or the proposer's cancellation of its
+    /// own. A step ends on a rejection only when its rejector signed it.
+    async fn signed_rejection(
+        &self,
+        commitment_hash: [u8; 32],
+        reason: String,
+        send_status: Option<generated::RelationshipSendStatus>,
+    ) -> Result<Vec<u8>, DsmError> {
         let rejector_signature = self
             .bilateral_tx_manager
             .read()
             .await
-            .sign_rejection(&origin_commitment_hash, &reason)?;
-        let reject = generated::BilateralPrepareReject {
-            commitment_hash: Some(generated::Hash32 {
-                v: origin_commitment_hash.to_vec(),
-            }),
-            reason,
-            rejector_device_id: self.device_id.to_vec(),
-            send_status: Some(send_status),
-            rejector_signature,
-        };
-
+            .sign_rejection(&commitment_hash, &reason)?;
         let envelope = self
-            .create_envelope(generated::envelope::Payload::BilateralPrepareReject(reject))
+            .create_envelope(generated::envelope::Payload::BilateralPrepareReject(
+                generated::BilateralPrepareReject {
+                    commitment_hash: Some(generated::Hash32 {
+                        v: commitment_hash.to_vec(),
+                    }),
+                    reason,
+                    rejector_device_id: self.device_id.to_vec(),
+                    send_status,
+                    rejector_signature,
+                },
+            ))
             .await;
-
-        let mut buffer = Vec::new();
-        envelope.encode(&mut buffer).map_err(|e| {
-            DsmError::serialization_error("encode_reject", "protobuf", Some(e.to_string()), Some(e))
-        })?;
-        // The rejection is kept as the answer to the proposal delivered again.
-        self.keep_rejection(origin_commitment_hash, &buffer).await?;
-
-        info!(
-            "Bilateral prepare reject envelope created for {}",
-            bytes_to_base32(&origin_commitment_hash[..8])
-        );
-        Ok(buffer)
+        Ok(envelope.encode_to_vec())
     }
 
-    /// Keep the signed rejection or cancellation that ended the step
-    /// `commitment_hash` as the answer to its counterparty's next frame for it.
-    async fn keep_rejection(
+    /// Refuse a proposal while another step is in flight with its sender
+    /// ([`dsm::bilateral::offline::PrepareDecision::StepInFlight`]): a signed
+    /// rejection, kept as the step's answer before it leaves. The proposal
+    /// delivered again — even once the step in flight has ended — is answered
+    /// the same way and never taken: its proposer has ended it on the first
+    /// rejection, and would never answer an acceptance.
+    async fn refuse_while_in_flight(
         &self,
         commitment_hash: [u8; 32],
-        rejection: &[u8],
-    ) -> Result<(), DsmError> {
-        let mut sessions = self.sessions.sessions.lock().await;
-        let session = sessions
-            .get_mut(&commitment_hash)
-            .ok_or_else(|| DsmError::invalid_operation("the rejected step's session is gone"))?;
-        session.owed_frame = Some(rejection.to_vec());
-        let kept = session.clone();
-        drop(sessions);
-        self.persist_session(&kept).await
+        counterparty_device_id: [u8; 32],
+        counterparty_genesis_hash: [u8; 32],
+        operation: Operation,
+        sender_ble_address: Option<String>,
+        in_flight: [u8; 32],
+    ) -> Result<Vec<u8>, DsmError> {
+        let reason = format!(
+            "a step with this contact is in flight ({}): one step at a time",
+            bytes_to_base32(&in_flight[..8])
+        );
+        let send_status = sdk_send_status_from_router_status(
+            crate::handlers::relationship_status::derive_local_send_status_for_device_id(
+                &counterparty_device_id,
+            ),
+        );
+        let rejection = self
+            .signed_rejection(commitment_hash, reason.clone(), Some(send_status))
+            .await?;
+        self.persist_session(&BilateralBleSession {
+            commitment_hash,
+            local_commitment_hash: None,
+            counterparty_device_id,
+            counterparty_genesis_hash: Some(counterparty_genesis_hash),
+            operation,
+            phase: BilateralPhase::Rejected,
+            local_signature: None,
+            counterparty_signature: None,
+            sender_ble_address: sender_ble_address.clone(),
+            stitched_receipt_bytes: None,
+            counter_signed_receipt: None,
+            receiver_challenge: None,
+            anchor_leaf: None,
+            sent_child_root: None,
+            offline_spend: None,
+            parent_tip: None,
+            owed_frame: Some(rejection.clone()),
+        })
+        .await?;
+        // No pruning here: it also sweeps the contact's BLE reassembly
+        // chunks, and another step with the contact is in flight.
+        self.emit_event(&generated::BilateralEventNotification {
+            // Rendered in emit_event, the one boundary all emitters cross.
+            display_amount: None,
+            event_type: generated::BilateralEventType::BilateralEventRejected.into(),
+            counterparty_device_id: counterparty_device_id.to_vec(),
+            commitment_hash: commitment_hash.to_vec(),
+            transaction_hash: None,
+            amount: None,
+            token_id: None,
+            status: "step_in_flight".to_string(),
+            message: reason,
+            sender_ble_address,
+            failure_reason: None,
+        });
+        Ok(rejection)
     }
 
     /// The proposer ends a proposal before it has confirmed it: until the
@@ -2040,25 +1919,9 @@ impl BilateralBleHandler {
                 )))
             }
         }
-        let rejector_signature = self
-            .bilateral_tx_manager
-            .read()
-            .await
-            .sign_rejection(&commitment_hash, &reason)?;
-        let envelope = self
-            .create_envelope(generated::envelope::Payload::BilateralPrepareReject(
-                generated::BilateralPrepareReject {
-                    commitment_hash: Some(generated::Hash32 {
-                        v: commitment_hash.to_vec(),
-                    }),
-                    reason: reason.clone(),
-                    rejector_device_id: self.device_id.to_vec(),
-                    send_status: None,
-                    rejector_signature,
-                },
-            ))
-            .await;
-        let cancellation = envelope.encode_to_vec();
+        let cancellation = self
+            .signed_rejection(commitment_hash, reason.clone(), None)
+            .await?;
         let mut cancelled = session;
         cancelled.phase = BilateralPhase::Rejected;
         cancelled.owed_frame = Some(cancellation.clone());
@@ -3789,21 +3652,6 @@ impl BilateralBleHandler {
         Ok(ack_envelope.encode_to_vec())
     }
 
-    /// Remove all terminal sessions (Committed, ConfirmPending, or later)
-    /// from the in-memory map.  Allows the next transfer to the same
-    /// counterparty without hitting the "existing session" guard.
-    pub async fn clear_terminal_sessions(&self) {
-        let mut sessions = self.sessions.sessions.lock().await;
-        sessions.retain(|_, s| {
-            matches!(
-                s.phase,
-                BilateralPhase::Preparing
-                    | BilateralPhase::Prepared
-                    | BilateralPhase::PendingUserAction
-            )
-        });
-    }
-
     /// Get session status with core manager reconciliation
     pub async fn get_session_status(&self, commitment_hash: &[u8; 32]) -> Option<BilateralPhase> {
         // Try direct lookup only - single hash space
@@ -5288,27 +5136,28 @@ mod tests {
             "the step in flight holds its precommitment"
         );
 
-        handler
-            .test_insert_session(BilateralBleSession {
-                commitment_hash: [91u8; 32],
-                local_commitment_hash: Some(local_pending_hash),
-                counterparty_device_id,
-                counterparty_genesis_hash: Some(counterparty_genesis),
-                operation: stale_op,
-                phase: BilateralPhase::PendingUserAction,
-                local_signature: None,
-                counterparty_signature: None,
-                sender_ble_address: None,
-                stitched_receipt_bytes: None,
-                counter_signed_receipt: None,
-                receiver_challenge: None,
-                anchor_leaf: None,
-                sent_child_root: None,
-                offline_spend: None,
-                parent_tip: None,
-                owed_frame: None,
-            })
-            .await;
+        // The step in flight is durable, as every step is before it is held.
+        let in_flight = BilateralBleSession {
+            commitment_hash: [91u8; 32],
+            local_commitment_hash: Some(local_pending_hash),
+            counterparty_device_id,
+            counterparty_genesis_hash: Some(counterparty_genesis),
+            operation: stale_op,
+            phase: BilateralPhase::PendingUserAction,
+            local_signature: None,
+            counterparty_signature: None,
+            sender_ble_address: None,
+            stitched_receipt_bytes: None,
+            counter_signed_receipt: None,
+            receiver_challenge: None,
+            anchor_leaf: None,
+            sent_child_root: None,
+            offline_spend: None,
+            parent_tip: None,
+            owed_frame: None,
+        };
+        store_bilateral_session(&in_flight.to_record().expect("the row")).expect("persist");
+        handler.test_insert_session(in_flight).await;
 
         let refused = handler
             .prepare_bilateral_transaction(counterparty_device_id, next_op)
@@ -5536,207 +5385,6 @@ mod tests {
             crate::storage::client_db::get_transaction_history(None, None)
                 .expect("read the history")
                 .is_empty()
-        );
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn test_fail_session_by_commitment_cleans_receiver_accepted_session() {
-        init_test_db();
-        let device_id = [41u8; 32];
-        let genesis_hash = [42u8; 32];
-        let counterparty_device_id = [43u8; 32];
-        let counterparty_genesis = [44u8; 32];
-        let keypair =
-            SignatureKeyPair::generate_from_entropy(b"fail-accepted-session").expect("keypair");
-
-        let contact_manager = DsmContactManager::new(device_id);
-        let bilateral_manager = Arc::new(RwLock::new(BilateralTransactionManager::new(
-            contact_manager,
-            keypair,
-            device_id,
-            genesis_hash,
-            std::sync::Arc::new(crate::sdk::chain_tip_store::SqliteChainTipStore::new()),
-        )));
-        let handler = BilateralBleHandler::new(bilateral_manager.clone(), device_id);
-
-        let contact = dsm::types::contact_types::DsmVerifiedContact {
-            alias: "accepted_contact".to_string(),
-            device_id: counterparty_device_id,
-            genesis_hash: counterparty_genesis,
-            public_key: vec![9u8; 32],
-            chain_tip: Some([7u8; 32]),
-            genesis_verified_online: true,
-            verifying_storage_nodes: vec![],
-            ble_address: Some("AA:BB:CC:DD:EE:FF".to_string()),
-        };
-
-        {
-            let mut mgr = bilateral_manager.write().await;
-            crate::storage::client_db::store_contact_for_tests(&contact);
-            mgr.add_verified_contact(contact).expect("add contact");
-            mgr.establish_relationship(&counterparty_device_id)
-                .await
-                .expect("establish relationship");
-        }
-
-        let accepted_op = Operation::Transfer {
-            policy_commit: [0u8; 32],
-            to_device_id: counterparty_device_id.to_vec(),
-            amount: Balance::amount(1),
-            token_id: b"ERA".to_vec(),
-            mode: TransactionMode::Bilateral,
-            nonce: vec![1],
-            recipient: counterparty_device_id.to_vec(),
-            to: counterparty_device_id.to_vec(),
-            message: "accepted".to_string(),
-            signature: Vec::new(),
-            authority_policy: Some(dsm::types::operations::canonical_offline_bearer_policy()),
-        };
-
-        let local_pending_hash = {
-            let mut mgr = bilateral_manager.write().await;
-            let pre = mgr
-                .prepare_offline_transfer(&counterparty_device_id, accepted_op.clone())
-                .await
-                .expect("prepare local pending");
-            pre.bilateral_commitment_hash
-        };
-        let receiver_commitment_hash = [92u8; 32];
-
-        handler
-            .test_insert_session(BilateralBleSession {
-                commitment_hash: receiver_commitment_hash,
-                local_commitment_hash: Some(local_pending_hash),
-                counterparty_device_id,
-                counterparty_genesis_hash: Some(counterparty_genesis),
-                operation: accepted_op,
-                phase: BilateralPhase::Accepted,
-                local_signature: Some(vec![1u8; 32]),
-                counterparty_signature: None,
-                sender_ble_address: Some("AA:BB:CC:DD:EE:FF".to_string()),
-                stitched_receipt_bytes: None,
-                counter_signed_receipt: None,
-                receiver_challenge: None,
-                anchor_leaf: None,
-                sent_child_root: None,
-                offline_spend: None,
-                parent_tip: None,
-                owed_frame: None,
-            })
-            .await;
-
-        assert!(
-            handler
-                .fail_session_by_commitment(
-                    receiver_commitment_hash,
-                    "receiver accept send failed before completion"
-                )
-                .await,
-            "accepted receiver session should be failed"
-        );
-
-        assert!(
-            handler
-                .get_session_status(&receiver_commitment_hash)
-                .await
-                .is_none(),
-            "failed session should be removed from active map"
-        );
-        assert!(
-            !bilateral_manager
-                .read()
-                .await
-                .has_pending_commitment(&local_pending_hash),
-            "failed accepted session must remove the receiver-local pending commitment key"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_fail_session_by_commitment_preserves_other_inflight_session_for_same_counterparty(
-    ) {
-        let device_id = [51u8; 32];
-        let genesis_hash = [52u8; 32];
-        let counterparty_device_id = [53u8; 32];
-        let keypair =
-            SignatureKeyPair::generate_from_entropy(b"targeted-fail-cleanup").expect("keypair");
-
-        let contact_manager = DsmContactManager::new(device_id);
-        let bilateral_manager = Arc::new(RwLock::new(BilateralTransactionManager::new(
-            contact_manager,
-            keypair,
-            device_id,
-            genesis_hash,
-            std::sync::Arc::new(crate::sdk::chain_tip_store::SqliteChainTipStore::new()),
-        )));
-        let handler = BilateralBleHandler::new(bilateral_manager, device_id);
-
-        let failed_commitment = [61u8; 32];
-        let surviving_commitment = [62u8; 32];
-
-        handler
-            .test_insert_session(BilateralBleSession {
-                commitment_hash: failed_commitment,
-                local_commitment_hash: None,
-                counterparty_device_id,
-                counterparty_genesis_hash: Some([54u8; 32]),
-                operation: Operation::Noop,
-                phase: BilateralPhase::Prepared,
-                local_signature: Some(vec![1u8; 32]),
-                counterparty_signature: None,
-                sender_ble_address: Some("AA:BB:CC:DD:EE:FF".to_string()),
-                stitched_receipt_bytes: None,
-                counter_signed_receipt: None,
-                receiver_challenge: None,
-                anchor_leaf: None,
-                sent_child_root: None,
-                offline_spend: None,
-                parent_tip: None,
-                owed_frame: None,
-            })
-            .await;
-        handler
-            .test_insert_session(BilateralBleSession {
-                commitment_hash: surviving_commitment,
-                local_commitment_hash: None,
-                counterparty_device_id,
-                counterparty_genesis_hash: Some([54u8; 32]),
-                operation: Operation::Noop,
-                phase: BilateralPhase::Accepted,
-                local_signature: Some(vec![2u8; 32]),
-                counterparty_signature: Some(vec![3u8; 32]),
-                sender_ble_address: Some("AA:BB:CC:DD:EE:11".to_string()),
-                stitched_receipt_bytes: None,
-                counter_signed_receipt: None,
-                receiver_challenge: None,
-                anchor_leaf: None,
-                sent_child_root: None,
-                offline_spend: None,
-                parent_tip: None,
-                owed_frame: None,
-            })
-            .await;
-
-        assert!(
-            handler
-                .fail_session_by_commitment(
-                    failed_commitment,
-                    "precise cleanup should only remove the failed sender prepare"
-                )
-                .await,
-            "targeted prepared session should be failed"
-        );
-        assert!(
-            handler
-                .get_session_status(&failed_commitment)
-                .await
-                .is_none(),
-            "targeted session should be removed from active map"
-        );
-        assert_eq!(
-            handler.get_session_status(&surviving_commitment).await,
-            Some(BilateralPhase::Accepted),
-            "other same-counterparty session must remain untouched"
         );
     }
 

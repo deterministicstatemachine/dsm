@@ -984,3 +984,320 @@ async fn a_receiver_that_rejected_answers_the_prepare_again_with_its_rejection()
         .await
         .is_empty());
 }
+
+/// An operation of its own for a step: two steps on one tip are two steps
+/// only if their operations differ.
+fn marked(mark: u8) -> Operation {
+    Operation::Generic {
+        operation_type: b"offline-step-test".to_vec(),
+        data: vec![mark],
+        message: String::new(),
+        signature: Vec::new(),
+    }
+}
+
+/// Two proposals that cross — each device proposes before the other's
+/// proposal arrives — are each refused by its receiver with a signed
+/// rejection: the receiver has a step of its own in flight, and the
+/// relationship takes one step at a time at both doors. Each proposer ends its
+/// step on that rejection; nothing commits and no tip moves. The refusal is
+/// kept: the proposal delivered again, once nothing is in flight, is refused
+/// the same way rather than taken, since its proposer has ended it. The
+/// relationship is then free, and the next step commits on both devices.
+/// MUTATION CONTROLS: dropping the in-flight arm from Core's `decide_prepare`
+/// lets each receiver hold the other's proposal for its user (were both
+/// accepted and confirmed, each would commit the other's step and the
+/// relationship would fork); not keeping the refusal lets the proposal
+/// delivered again be taken. Each turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn proposals_that_cross_are_each_refused_and_nothing_commits() {
+    let pair = Pair::boot(0, 0).await;
+    let a = OfflineDevice::new(&pair.a);
+    let b = OfflineDevice::new(&pair.b);
+    let tip = a.tip_with(&b);
+
+    a.device.enter();
+    let (a_prepare, a_step) = a
+        .handler
+        .prepare_bilateral_transaction(b.device.device_id, marked(1))
+        .await
+        .expect("A proposes");
+    b.device.enter();
+    let (b_prepare, b_step) = b
+        .handler
+        .prepare_bilateral_transaction(a.device.device_id, marked(2))
+        .await
+        .expect("B proposes before A's proposal arrives");
+
+    b.device.enter();
+    let (b_refusal, _meta) = b
+        .handler
+        .handle_prepare_request(&a_prepare, None)
+        .await
+        .expect("B answers A's proposal");
+    assert!(
+        !b_refusal.is_empty(),
+        "B, with its own step in flight, holds A's proposal for its user"
+    );
+    a.device.enter();
+    let (a_refusal, _meta) = a
+        .handler
+        .handle_prepare_request(&b_prepare, None)
+        .await
+        .expect("A answers B's proposal");
+    assert!(
+        !a_refusal.is_empty(),
+        "A, with its own step in flight, holds B's proposal for its user"
+    );
+
+    a.device.enter();
+    a.handler
+        .handle_prepare_reject(&b_refusal)
+        .await
+        .expect("A takes B's signed refusal");
+    b.device.enter();
+    b.handler
+        .handle_prepare_reject(&a_refusal)
+        .await
+        .expect("B takes A's signed refusal");
+
+    for (device, own, refused) in [(&a, a_step, b_step), (&b, b_step, a_step)] {
+        device.device.enter();
+        assert_eq!(
+            device.handler.get_session_phase(&own).await,
+            Some(BilateralPhase::Rejected),
+            "{}: its own step did not end on the refusal",
+            device.device.slot
+        );
+        let kept = crate::storage::client_db::get_bilateral_session(&refused)
+            .expect("read the session")
+            .unwrap_or_else(|| panic!("{}: the refusal is not kept", device.device.slot));
+        assert_eq!(kept.phase, "rejected", "{}", device.device.slot);
+        for step in [own, refused] {
+            assert!(
+                !history_row_exists(&step),
+                "{}: a refused step committed",
+                device.device.slot
+            );
+        }
+    }
+    assert_eq!(
+        (a.tip_with(&b), b.tip_with(&a)),
+        (tip, tip),
+        "a refused step moved a tip"
+    );
+
+    b.device.enter();
+    let (again, _meta) = b
+        .handler
+        .handle_prepare_request(&a_prepare, None)
+        .await
+        .expect("B answers A's proposal delivered again");
+    assert_eq!(
+        again, b_refusal,
+        "B did not answer the proposal delivered again with the refusal it kept"
+    );
+
+    let commitment = offline_step(&a, &b, marked(3)).await;
+    assert_committed_on_both(&a, &b, &commitment);
+    assert_ne!(a.tip_with(&b), tip, "the next step did not move the tip");
+}
+
+/// Only a proposal awaiting this device's decision can be rejected. Once the
+/// receiver has accepted, its proposer may confirm and it may commit: its
+/// user's rejection is refused and changes nothing. A proposer's own step past
+/// its confirm is not rejected either — a proposer ends its proposal by
+/// cancelling it, and only before its confirm. The step then commits on both
+/// devices.
+/// MUTATION CONTROL: dropping the awaiting-decision guard from
+/// `create_prepare_reject_envelope_with_cleanup` lets both rejections through
+/// and turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn only_a_proposal_awaiting_its_user_can_be_rejected() {
+    let pair = Pair::boot(0, 0).await;
+    let a = OfflineDevice::new(&pair.a);
+    let b = OfflineDevice::new(&pair.b);
+
+    a.device.enter();
+    let (prepare, commitment) = a
+        .handler
+        .prepare_bilateral_transaction(b.device.device_id, Operation::Noop)
+        .await
+        .expect("A proposes");
+    b.device.enter();
+    let (answer, _meta) = b
+        .handler
+        .handle_prepare_request(&prepare, None)
+        .await
+        .expect("B takes the proposal");
+    assert!(answer.is_empty(), "the proposal waits for B's user");
+    let response = b
+        .handler
+        .create_prepare_accept_envelope(commitment)
+        .await
+        .expect("B's user accepts");
+    let refused = b
+        .handler
+        .create_prepare_reject_envelope_with_cleanup(commitment, "changed my mind".to_string())
+        .await
+        .expect_err("an accepted step is not rejected");
+    assert!(
+        refused
+            .to_string()
+            .contains("not a proposal awaiting this device's decision"),
+        "unexpected refusal: {refused}"
+    );
+    assert_eq!(
+        b.handler.get_session_phase(&commitment).await,
+        Some(BilateralPhase::Accepted)
+    );
+
+    a.device.enter();
+    let (confirm, _meta) = a
+        .handler
+        .handle_prepare_response(&response)
+        .await
+        .expect("A confirms");
+    let refused = a
+        .handler
+        .create_prepare_reject_envelope_with_cleanup(commitment, "no".to_string())
+        .await
+        .expect_err("a confirmed step is not rejected");
+    assert!(
+        refused
+            .to_string()
+            .contains("not a proposal awaiting this device's decision"),
+        "unexpected refusal: {refused}"
+    );
+    assert_eq!(
+        a.handler.get_session_phase(&commitment).await,
+        Some(BilateralPhase::ConfirmPending)
+    );
+
+    b.device.enter();
+    let ack = b
+        .handler
+        .handle_confirm_request(&confirm)
+        .await
+        .expect("B commits");
+    a.device.enter();
+    a.handler
+        .handle_commit_response(&ack)
+        .await
+        .expect("A commits");
+    assert_committed_on_both(&a, &b, &commitment);
+}
+
+/// The relationship's step in flight is the durable one, whichever handler
+/// holds it: production can build a second handler over the same store (the
+/// late BLE init), and a step in flight through one blocks the next through
+/// the other — at this device's own door and at the peer's.
+/// MUTATION CONTROLS: reading the step in flight from the handler's own
+/// sessions instead of the durable rows, at either door, lets the second step
+/// through and turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_step_in_flight_through_one_handler_blocks_the_next_through_another() {
+    let pair = Pair::boot(0, 0).await;
+    let a = OfflineDevice::new(&pair.a);
+    let a_again = OfflineDevice::new(&pair.a);
+    let b = OfflineDevice::new(&pair.b);
+
+    a.device.enter();
+    a.handler
+        .prepare_bilateral_transaction(b.device.device_id, marked(1))
+        .await
+        .expect("A proposes through one handler");
+    a_again.device.enter();
+    let refused = a_again
+        .handler
+        .prepare_bilateral_transaction(b.device.device_id, marked(2))
+        .await
+        .expect_err("the step in flight blocks the next through another handler");
+    assert!(
+        refused.to_string().contains("in progress"),
+        "unexpected refusal: {refused}"
+    );
+
+    b.device.enter();
+    let (b_prepare, _b_step) = b
+        .handler
+        .prepare_bilateral_transaction(a.device.device_id, marked(3))
+        .await
+        .expect("B proposes");
+    a_again.device.enter();
+    let (answer, _meta) = a_again
+        .handler
+        .handle_prepare_request(&b_prepare, None)
+        .await
+        .expect("A's other handler answers B's proposal");
+    assert!(
+        !answer.is_empty(),
+        "A's other handler held B's proposal for its user while A's step is in flight"
+    );
+}
+
+/// A prepare delivered again after its step committed is answered with
+/// nothing: the step's ack answers its confirm, and a device never signs a
+/// rejection of a step it committed — though the prepare no longer extends
+/// its tip. Delivered after a restart, when the step's history row is all the
+/// receiver holds of it.
+/// MUTATION CONTROL: dropping the committed-step answer lets the prepare be
+/// refused as stale and turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_committed_steps_prepare_delivered_again_is_not_refused() {
+    let pair = Pair::boot(0, 0).await;
+    let a = OfflineDevice::new(&pair.a);
+    let b = OfflineDevice::new(&pair.b);
+
+    a.device.enter();
+    let (prepare, commitment) = a
+        .handler
+        .prepare_bilateral_transaction(b.device.device_id, Operation::Noop)
+        .await
+        .expect("A proposes");
+    b.device.enter();
+    b.handler
+        .handle_prepare_request(&prepare, None)
+        .await
+        .expect("B takes the proposal");
+    let response = b
+        .handler
+        .create_prepare_accept_envelope(commitment)
+        .await
+        .expect("B's user accepts");
+    a.device.enter();
+    let (confirm, _meta) = a
+        .handler
+        .handle_prepare_response(&response)
+        .await
+        .expect("A confirms");
+    b.device.enter();
+    let ack = b
+        .handler
+        .handle_confirm_request(&confirm)
+        .await
+        .expect("B commits");
+    a.device.enter();
+    a.handler
+        .handle_commit_response(&ack)
+        .await
+        .expect("A commits");
+    assert_committed_on_both(&a, &b, &commitment);
+
+    let b = b.restarted().await;
+    b.device.enter();
+    let (answer, _meta) = b
+        .handler
+        .handle_prepare_request(&prepare, None)
+        .await
+        .expect("B answers the prepare delivered again");
+    assert!(
+        answer.is_empty(),
+        "B refused a step it committed ({} bytes)",
+        answer.len()
+    );
+}
