@@ -16,7 +16,6 @@ import {
   getWalletHistory,
   getTransactions,
   getInbox,
-  listB0xMessages,
 } from '../wallet';
 import {
   getAllBalancesStrictBridge,
@@ -254,7 +253,7 @@ describe('wallet.ts', () => {
 
       const result = await getInbox(10);
       expect(result.items).toHaveLength(2);
-      expect(result.items[0]).toMatchObject({ id: 'msg1', preview: 'Hello', sender_id: 'alice', isStaleRoute: false });
+      expect(result.items[0]).toMatchObject({ id: 'msg1', preview: 'Hello', senderId: 'alice', isStaleRoute: false });
       expect(result.items[1]).toMatchObject({ id: 'msg2', preview: 'World', isStaleRoute: true });
     });
 
@@ -303,47 +302,20 @@ describe('wallet.ts', () => {
       expect(result.items).toEqual([]);
     });
 
-    test('defaults empty fields in inbox items', async () => {
+    // Rust writes an id and a preview on every item; an item without them is
+    // refused, never shown as "" or a stand-in label.
+    test('an item without its id or preview is refused, never filled in', async () => {
       const env = new pb.Envelope({
         version: 3,
         payload: {
           case: 'inboxResponse',
-          value: new pb.InboxResponse({
-            items: [new pb.InboxItem({})],
-          }),
+          value: new pb.InboxResponse({ items: [new pb.InboxItem({ id: 'msg1' })] }),
         },
       });
       (getInboxStrictBridge as jest.Mock).mockResolvedValue(frameEnvelope(env));
 
-      const result = await getInbox();
-      expect(result.items[0].id).toBe('');
-      expect(result.items[0].preview).toBe('');
+      await expect(getInbox()).rejects.toThrow('STRICT');
     });
   });
 
-  // ── listB0xMessages ────────────────────────────────────────────────
-
-  describe('listB0xMessages', () => {
-    test('re-maps inbox items to expected shape', async () => {
-      const env = new pb.Envelope({
-        version: 3,
-        payload: {
-          case: 'inboxResponse',
-          value: new pb.InboxResponse({
-            items: [new pb.InboxItem({ id: 'b0x1', preview: 'hi', senderId: 'bob', isStaleRoute: true })],
-          }),
-        },
-      });
-      (getInboxStrictBridge as jest.Mock).mockResolvedValue(frameEnvelope(env));
-
-      const result = await listB0xMessages();
-      expect(result).toHaveLength(1);
-      expect(result[0]).toMatchObject({
-        id: 'b0x1',
-        preview: 'hi',
-        senderId: 'bob',
-        isStaleRoute: true,
-      });
-    });
-  });
 });

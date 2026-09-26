@@ -129,6 +129,18 @@ export interface ContactCard {
 }
 
 /**
+ * One item `inbox.pull` found queued for this device, as Rust described it.
+ * Rust writes the id and the preview on every item; `isStaleRoute` marks an
+ * item found at the address derived from the contact's previous tip.
+ */
+export interface InboxItemView {
+  id: string;
+  preview: string;
+  senderId?: string;
+  isStaleRoute: boolean;
+}
+
+/**
  * Add Contact Result
  */
 export type AddContactResult =
