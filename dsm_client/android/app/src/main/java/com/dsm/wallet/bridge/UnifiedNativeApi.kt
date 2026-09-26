@@ -59,7 +59,6 @@ internal object UnifiedNativeApi {
     @Keep @JvmStatic external fun processEnvelopeV3(envelope: ByteArray): ByteArray
     @Keep @JvmStatic external fun processEnvelopeV3WithAddress(envelope: ByteArray, deviceAddress: String): ByteArray
     @Keep @JvmStatic external fun getAllBalancesStrict(): ByteArray
-    @Keep @JvmStatic external fun getWalletHistoryStrict(): ByteArray
     @Keep @JvmStatic external fun ensureAppRouterInstalled(): Boolean
     @Keep @JvmStatic external fun getAppRouterStatus(): Int
     @Keep @JvmStatic external fun computeB0xAddress(genesis: ByteArray, deviceId: ByteArray, tip: ByteArray): String
@@ -111,7 +110,6 @@ internal object UnifiedNativeApi {
      */
     @Keep @JvmStatic external fun onAppBackgrounded(): Boolean
     @Keep @JvmStatic external fun getGenesisHashBin(): ByteArray
-    @Keep @JvmStatic external fun getSigningPublicKeyBin(): ByteArray
     @Keep @JvmStatic external fun resolveBleAddressForDeviceIdBin(deviceId: ByteArray): ByteArray
     @Keep @JvmStatic external fun resolvePeerIdentityForBleAddressBin(address: String): ByteArray
     @Keep @JvmStatic external fun isRejectEnvelope(envelopeBytes: ByteArray): ByteArray

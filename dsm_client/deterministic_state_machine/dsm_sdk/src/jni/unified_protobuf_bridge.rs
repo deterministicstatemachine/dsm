@@ -456,64 +456,6 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_initSdkV3(
     )
 }
 
-#[no_mangle]
-pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_getWalletHistoryStrict(
-    env: jni::sys::JNIEnv,
-    _clazz: jni::sys::jclass,
-) -> jni::sys::jbyteArray {
-    crate::jni::bridge_utils::jni_catch_unwind_jbytearray(
-        "getWalletHistoryStrict",
-        std::panic::AssertUnwindSafe(|| {
-            let mut env = match unsafe { env_from(env) } {
-                Some(e) => e,
-                None => return std::ptr::null_mut(),
-            };
-
-            let respond_envelope =
-                |payload: pb::envelope::Payload, env: &mut JNIEnv| -> jni::sys::jbyteArray {
-                    framed_payload_byte_array(env, payload).into_raw()
-                };
-
-            let respond_error = |env: &mut JNIEnv, code: u32, msg: &str| -> jni::sys::jbyteArray {
-                let envelope = crate::jni::helpers::encode_error_transport(code, msg);
-                let mut out = Vec::new();
-                out.push(0x03);
-                envelope.encode(&mut out).unwrap_or_default();
-                env.byte_array_from_slice(&out)
-                    .map(|a| a.into_raw())
-                    .unwrap_or_else(|_| empty_byte_array_or_empty(env).into_raw())
-            };
-
-            if !SDK_READY.load(Ordering::SeqCst) {
-                return respond_error(
-                    &mut env,
-                    helpers::JniErrorCode::RuntimeError as u32,
-                    "SDK not ready",
-                );
-            }
-
-            let result = crate::bridge::get_wallet_history_strict();
-            match result {
-                Ok(history) => {
-                    // Encode as the canonical WalletHistoryResponse payload
-                    respond_envelope(
-                        pb::envelope::Payload::WalletHistoryResponse(history),
-                        &mut env,
-                    )
-                }
-                Err(e) => {
-                    log::error!("getWalletHistoryStrict: failed: {}", e);
-                    respond_error(
-                        &mut env,
-                        helpers::JniErrorCode::BridgeCallFailed as u32,
-                        &format!("get_wallet_history_strict failed: {}", e),
-                    )
-                }
-            }
-        }),
-    )
-}
-
 /// Remove a contact by contact_id.
 /// Returns 1 on success, 0 on failure.
 #[no_mangle]
@@ -990,57 +932,6 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_getGenesisHas
                     .new_byte_array(0)
                     .map(|a| a.into_raw())
                     .unwrap_or(std::ptr::null_mut()),
-            }
-        }),
-    )
-}
-
-/// Returns the local signing public key as raw bytes (64 bytes for SPHINCS+) when available.
-///
-/// Kotlin expects this exact symbol for `Unified.getSigningPublicKeyBin()`.
-/// If identity has not been created yet, returns an empty byte array.
-#[no_mangle]
-pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_getSigningPublicKeyBin(
-    env: jni::sys::JNIEnv,
-    _clazz: jni::sys::jclass,
-) -> jni::sys::jbyteArray {
-    crate::jni::bridge_utils::jni_catch_unwind_jbytearray(
-        "getSigningPublicKeyBin",
-        std::panic::AssertUnwindSafe(|| {
-            crate::logging::init_android_device_logging();
-
-            let env = match unsafe { env_from(env) } {
-                Some(e) => e,
-                None => return std::ptr::null_mut(),
-            };
-
-            // Identity can be asked for before startup has set the storage base dir (an
-            // Android lifecycle callback, a restarted background service): answer "not
-            // available" instead of reaching AppState's missing-base-dir panic.
-            match crate::sdk::app_state::AppState::readable()
-                .then(crate::sdk::app_state::AppState::get_public_key)
-                .flatten()
-            {
-                Some(pk) => {
-                    log::info!("getSigningPublicKeyBin: returning {} bytes", pk.len());
-                    env.byte_array_from_slice(&pk)
-                        .map(|a| a.into_raw())
-                        .unwrap_or_else(|e| {
-                            log::error!(
-                                "getSigningPublicKeyBin: failed to create jbyteArray: {}",
-                                e
-                            );
-                            env.new_byte_array(0)
-                                .map(|a| a.into_raw())
-                                .unwrap_or(std::ptr::null_mut())
-                        })
-                }
-                None => {
-                    log::warn!("getSigningPublicKeyBin: no public key available");
-                    env.new_byte_array(0)
-                        .map(|a| a.into_raw())
-                        .unwrap_or(std::ptr::null_mut())
-                }
             }
         }),
     )
