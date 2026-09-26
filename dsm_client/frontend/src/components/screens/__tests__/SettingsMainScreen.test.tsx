@@ -107,6 +107,22 @@ describe('SettingsMainScreen developer unlock', () => {
     ).toBeInTheDocument();
   });
 
+  // A failed status read is that failure; it used to render as "NOT SET" —
+  // the status of a device that has no backup at all.
+  it('shows a failed NFC status read as its failure, not as NOT SET', async () => {
+    mockGetPreference.mockResolvedValueOnce('false');
+    mockGetNfcBackupStatus.mockRejectedValueOnce(new Error('recovery.status: the recovery tables are not migrated'));
+
+    render(<SettingsMainScreen />);
+
+    await waitFor(() =>
+      expect(screen.getByText(/Status not read: recovery.status: the recovery tables are not migrated/)).toBeInTheDocument(),
+    );
+    expect(screen.getByText('NOT READ')).toBeInTheDocument();
+    expect(screen.queryByText('NOT SET')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Not configured/)).not.toBeInTheDocument();
+  });
+
   it('dispatches diagnostics event from report-issue button (dev mode)', async () => {
     // Button is inside DEVELOPER OPTIONS — need dev mode enabled
     mockGetPreference.mockResolvedValueOnce('true');

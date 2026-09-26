@@ -10,6 +10,7 @@ import {
   startBleAdvertisingViaRouter,
 } from '../dsm/WebViewBridge';
 import { getHeaders } from '../dsm/identity';
+import type { AddContactResult, ContactCard } from '../dsm/types';
 
 /** A contact as Rust lists it, in Base32 Crockford. */
 export interface Contact {
@@ -33,7 +34,8 @@ export interface ContactsState {
 
 export interface ContactsContextValue extends ContactsState {
   refreshContacts: () => Promise<void>;
-  addContact: (alias: string, genesisHash: Uint8Array | string, deviceId: Uint8Array | string | undefined, signingPublicKey: Uint8Array | string | undefined) => Promise<boolean>;
+  /** Adds the contact a card names; empty alias: Rust names it by its device. */
+  addContact: (alias: string, card: ContactCard) => Promise<AddContactResult>;
   setError: (error: string | null) => void;
 }
 
@@ -42,7 +44,7 @@ const defaultValue: ContactsContextValue = {
   isLoading: false,
   error: null,
   refreshContacts: async () => {},
-  addContact: async () => false,
+  addContact: async () => { throw new Error('addContact is used outside ContactsProvider'); },
   setError: () => {},
 };
 

@@ -32,7 +32,7 @@ import androidx.annotation.Keep
 //   Shared boundary: dispatchStartup, dispatchIngress
 //   Bilateral: acceptBilateralByCommitment, ...
 //   BLE:       initBleCoordinator, processBleChunk, chunkEnvelopeForBle, ...
-//   Contacts:  removeContact, handleContactQrV3, hasContactForDeviceId
+//   Contacts:  removeContact, hasContactForDeviceId
 //
 // Full method list: See UnifiedNativeApi.kt for all 87+ external declarations.
 // ============================================================================
@@ -355,8 +355,6 @@ object Unified {
     // ---------- Contact management ----------
     @Keep @JvmStatic fun removeContact(contactId: String): Byte =
         UnifiedNativeApi.removeContact(contactId)
-    @Keep @JvmStatic fun handleContactQrV3(contactQrV3Bytes: ByteArray): ByteArray =
-        UnifiedNativeApi.handleContactQrV3(contactQrV3Bytes)
 
     // ---------- Bilateral BLE operations ----------
     
@@ -577,16 +575,6 @@ object Unified {
         val ready = UnifiedBleBridge.isBluetoothDeviceReady(deviceAddress)
         android.util.Log.d("Unified", "isBluetoothDeviceReady($deviceAddress): $ready")
         return ready
-    }
-
-    // ---------- Runtime JNI surface self-test (non-fatal) ----------
-    /**
-     * Performs lightweight invocation tests of core JNI externals.
-     * Returns binary report: [u32BE count] then per entry [u16BE nameLen][name][ok_byte][u16BE detailLen][detail].
-     * Never throws; failure details captured per entry.
-     */
-    @Keep @JvmStatic fun runNativeBridgeSelfTest(): ByteArray {
-        return UnifiedNativeDiagnostics.runNativeBridgeSelfTest()
     }
 
     // getCdbrwRuntimeSnapshot() was removed with the Protocol 6.2 collapse.

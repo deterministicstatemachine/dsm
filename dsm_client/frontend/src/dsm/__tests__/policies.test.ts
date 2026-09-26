@@ -2,6 +2,8 @@
 
 jest.mock('../WebViewBridge', () => ({
   routerInvokeBin: jest.fn(),
+  routerQueryBin: jest.fn(),
+  addTokenByAnchor: jest.fn(),
   publishTokenPolicyBytes: jest.fn(),
 }));
 
@@ -13,12 +15,16 @@ jest.mock('../events', () => ({
 
 import * as pb from '../../proto/dsm_app_pb';
 import {
+  addTokenByAnchor,
   createToken,
+  getTokenCreationFeeEra,
   publishTokenPolicyBytes,
   publishTokenPolicy,
 } from '../policies';
 import {
+  addTokenByAnchor as addTokenByAnchorBridge,
   routerInvokeBin,
+  routerQueryBin,
   publishTokenPolicyBytes as publishTokenPolicyBytesBridge,
 } from '../WebViewBridge';
 import { encodeBase32Crockford } from '../../utils/textId';
@@ -169,6 +175,58 @@ describe('policies.ts', () => {
 
 
   // ── publishTokenPolicyBytes ────────────────────────────────────────
+
+  describe('addTokenByAnchor', () => {
+    // The ticker and anchor are the answer's fields; the ticker used to be
+    // scraped from the "Added …" prose, and the anchor looked up elsewhere.
+    test('reads the adopted token’s ticker and anchor from the answer’s fields, not its prose', async () => {
+      const anchor = new Uint8Array(32).fill(0xab);
+      (addTokenByAnchorBridge as jest.Mock).mockResolvedValue(frameEnvelope(new pb.Envelope({
+        version: 3,
+        payload: {
+          case: 'tokenCreateResponse',
+          value: new pb.TokenCreateResponse({ success: true, tokenId: 'T1', ticker: 'ABC', policyAnchor: anchor as any, message: 'Added XYZ' }),
+        },
+      })));
+
+      await expect(addTokenByAnchor('ANCHORB32')).resolves.toEqual({
+        success: true, tokenId: 'T1', ticker: 'ABC', anchorBase32: encodeBase32Crockford(anchor),
+      });
+    });
+
+    test('a success answer without the ticker is refused, never shown as a blank name', async () => {
+      (addTokenByAnchorBridge as jest.Mock).mockResolvedValue(frameEnvelope(new pb.Envelope({
+        version: 3,
+        payload: {
+          case: 'tokenCreateResponse',
+          value: new pb.TokenCreateResponse({ success: true, tokenId: 'T1', policyAnchor: new Uint8Array(32) as any, message: 'Added XYZ' }),
+        },
+      })));
+
+      const result = await addTokenByAnchor('ANCHORB32');
+      expect(result.success).toBe(false);
+      expect((result as { error: string }).error).toContain('STRICT');
+    });
+  });
+
+  describe('getTokenCreationFeeEra', () => {
+    test('answers the fee Rust reports', async () => {
+      (routerQueryBin as jest.Mock).mockResolvedValue(frameEnvelope(new pb.Envelope({
+        version: 3,
+        payload: { case: 'tokenFeeScheduleResponse', value: new pb.TokenFeeScheduleResponse({ tokenCreationEra: 100n }) },
+      })));
+      await expect(getTokenCreationFeeEra()).resolves.toBe(100n);
+    });
+
+    // A failed query used to answer undefined, which the dialog showed as "…" for ever.
+    test('a refused fee query is the failure, not an absent fee', async () => {
+      (routerQueryBin as jest.Mock).mockResolvedValue(frameEnvelope(new pb.Envelope({
+        version: 3,
+        payload: { case: 'error', value: new pb.ErrorResponse({ message: 'tokens.getFeeSchedule: no fee schedule' }) },
+      })));
+      await expect(getTokenCreationFeeEra()).rejects.toThrow('no fee schedule');
+    });
+  });
 
   describe('amounts', () => {
     // A blank or non-numeric amount used to be read as 0 and sent.

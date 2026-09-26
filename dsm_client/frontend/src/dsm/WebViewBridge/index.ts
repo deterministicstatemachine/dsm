@@ -56,13 +56,9 @@ export const {
 } = bilateral;
 
 export const {
-  computeB0xAddressBridge,
   getArchitectureInfo,
   getDeviceIdBinBridgeAsync,
-  getDiagnosticsLogStrict,
-  getRouterStatusBridge,
-  getSigningPublicKeyBinBridgeAsync,
-  runNativeBridgeSelfTest,
+  getDiagnosticsLog,
 } = diagnostics;
 
 export const { addDsmEventListener } = events;

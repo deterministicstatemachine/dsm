@@ -1807,20 +1807,6 @@ html[data-shell-theme] .stateboy::before {
         return unwrapBridgeRpcSuccess(response, method);
       }
 
-      // Async wrapper for hasIdentityDirect (calls through binary bridge)
-      async function hasIdentityDirect() {
-        if (!port) return false;
-        try {
-          const req = encodeBridgeRequest('hasIdentityDirect', new Uint8Array(0));
-          const response = await sendMessageBin(req);
-          // Response is a single byte: 1 for true, 0 for false
-          return response.length > 0 && response[0] === 1;
-        } catch (err) {
-          console.error('[DSM] hasIdentityDirect error:', err);
-          return false;
-        }
-      }
-      
       // Expose bridge interface immediately (even before port arrives)
       window.DsmBridge = {
         __binary: true,
@@ -1830,7 +1816,6 @@ html[data-shell-theme] .stateboy::before {
         ingress: (payload) => callBridgeMethod('nativeBoundaryIngress', payload),
         hostRequest: (payload) => callBridgeMethod('nativeHostRequest', payload),
         getBridgeStatus: () => (port ? 3 : 0),
-        hasIdentityDirect,
       };
       
       try { console.log('[DSM] Bridge interface installed, waiting for port...'); } catch (_) {}

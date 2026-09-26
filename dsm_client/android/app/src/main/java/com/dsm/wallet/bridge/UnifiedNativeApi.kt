@@ -76,7 +76,6 @@ internal object UnifiedNativeApi {
     @Keep @JvmStatic external fun hasUnpairedContacts(): Boolean
     @Keep @JvmStatic external fun createTransactionErrorEnvelope(address: String, code: Int, message: String): ByteArray?
     @Keep @JvmStatic external fun removeContact(contactId: String): Byte
-    @Keep @JvmStatic external fun handleContactQrV3(contactQrV3Bytes: ByteArray): ByteArray
     @Keep @JvmStatic external fun isBleCoordinatorReady(): Boolean
     @Keep @JvmStatic external fun detectEnvelopeFrameType(envelopeBytes: ByteArray): Int
     @Keep @JvmStatic external fun processBleChunk(deviceAddress: String, chunkBytes: ByteArray): ByteArray

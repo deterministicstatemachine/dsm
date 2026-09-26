@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
 // SPDX-License-Identifier: Apache-2.0
 
 import React from 'react';
@@ -68,13 +67,16 @@ export default function DiagnosticsOverlay() {
   const { notifyToast } = useUX();
   const {
     envConfigError,
+    envConfigHelp,
     showDiagnostics,
     diagLoading,
     diagnostics,
     telemetryConsent,
+    lastBridgeError,
     setEnvConfigError,
     setShowDiagnostics,
     setTelemetryConsent,
+    clearBridgeError,
     gatherDiagnostics,
     copyDiagnostics,
     downloadDiagnostics,
@@ -83,28 +85,13 @@ export default function DiagnosticsOverlay() {
     openGitHubFeedback,
   } = useDiagnostics(notifyToast);
 
-  const hasBridgeError = !!(window as any).__lastBridgeError;
-
-  // Show overlay if there's an env config error, diagnostics are shown, or there's a bridge error
-  if (!envConfigError && !showDiagnostics && !hasBridgeError) return null;
+  // Shown for an env config error, an open diagnostics modal, or a bridge error.
+  if (!envConfigError && !showDiagnostics && !lastBridgeError) return null;
 
   const EnvConfigErrorBanner = () => {
     if (!envConfigError) return null;
-
-    // Parse error detail if available
-    let errorMessage = envConfigError;
-    let helpText = '';
-
-    try {
-      // Try to extract structured error from event
-      const errorData = (window as any).__envConfigErrorDetail;
-      if (errorData) {
-        errorMessage = errorData.message || envConfigError;
-        helpText = errorData.help || '';
-      }
-    } catch (_e) {
-      // Use raw error message
-    }
+    const errorMessage = envConfigError;
+    const helpText = envConfigHelp ?? '';
 
     return (
       <div style={{ position: 'absolute', left: 8, right: 8, top: 8, zIndex: 120, background: 'var(--stateboy-dark)', color: 'var(--text)', padding: '8px', borderRadius: 8, boxShadow: '0 2px 6px rgba(var(--text-rgb),0.2)', border: '2px solid var(--border)', flexDirection: 'column', maxHeight: 'calc(100% - 16px)', maxWidth: 'calc(100% - 16px)', overflow: 'auto', wordBreak: 'break-word', overflowWrap: 'anywhere', fontSize: '10px' }}>
@@ -125,13 +112,13 @@ export default function DiagnosticsOverlay() {
   };
 
   const BridgeErrorBanner = () => {
-    if (!hasBridgeError) return null;
+    if (!lastBridgeError) return null;
     return (
       <div style={{ position: 'absolute', left: 8, right: 8, top: 8, zIndex: 120, background: 'var(--bg)', color: 'var(--text-dark)', padding: '8px', borderRadius: 8, boxShadow: '0 2px 6px rgba(var(--text-rgb),0.2)', border: '2px solid var(--border)', display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap', maxHeight: 'calc(100% - 16px)', maxWidth: 'calc(100% - 16px)', overflow: 'auto', wordBreak: 'break-word', overflowWrap: 'anywhere', fontSize: '10px' }}>
-        <div style={{ fontWeight: 700, minWidth: 0, flex: '1 1 100%' }}>DSM error: {(window as any).__lastBridgeError?.message || 'Unknown error'}</div>
+        <div style={{ fontWeight: 700, minWidth: 0, flex: '1 1 100%' }}>DSM error: {lastBridgeError.message || `code ${lastBridgeError.code}`}</div>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
           <button onClick={() => setShowDiagnostics(true)} style={{ background: 'var(--stateboy-screen)', color: 'var(--text-dark)', padding: '6px 8px', borderRadius: 6, border: '1px solid var(--border)', cursor: 'pointer' }}>Show diagnostics</button>
-          <button onClick={() => { try { (window as any).__lastBridgeError = null; } catch (_e) {} }} style={{ background: 'transparent', color: 'var(--text-dark)', padding: '6px 8px', borderRadius: 6, border: '1px solid rgba(var(--text-rgb),0.35)', cursor: 'pointer' }}>Dismiss</button>
+          <button onClick={clearBridgeError} style={{ background: 'transparent', color: 'var(--text-dark)', padding: '6px 8px', borderRadius: 6, border: '1px solid rgba(var(--text-rgb),0.35)', cursor: 'pointer' }}>Dismiss</button>
         </div>
       </div>
     );
@@ -196,8 +183,8 @@ export default function DiagnosticsOverlay() {
             <pre style={{ fontSize: '10px', lineHeight: 1.4, whiteSpace: 'pre-wrap', wordBreak: 'break-all', background: 'rgba(var(--bg-rgb),0.78)', padding: '10px', borderRadius: 8, border: '1px solid var(--border)', color: 'var(--text-dark)', margin: 0 }}>{diagnostics ?? 'No diagnostics collected yet.'}</pre>
 
             {/* Bridge error debug UI */}
-            { (window as any).__lastBridgeError || null ? (() => {
-            const errorObj = (window as any).__lastBridgeError;
+            { lastBridgeError ? (() => {
+            const errorObj = lastBridgeError;
             let decodedMessage = '';
             let hexDisplay = '';
             let decodeError = '';
@@ -221,8 +208,8 @@ export default function DiagnosticsOverlay() {
                 // Valid UTF-8, show text
                 decodedMessage = utf8Text;
               }
-            } catch (e: any) {
-              decodeError = e?.message || String(e);
+            } catch (e: unknown) {
+              decodeError = e instanceof Error ? e.message : String(e);
               decodedMessage = errorObj?.debugB32 || '';
             }
 

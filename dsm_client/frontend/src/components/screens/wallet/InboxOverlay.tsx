@@ -1,13 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
-// Inbox (b0x) overlay — transient notification surface for applied transfers.
+// Inbox (b0x) overlay — transient notices for applied transfers, and the items
+// still queued on the storage nodes as Rust lists them.
 //
-// Transfers are applied automatically by the background poller (`storage.sync`).
-// When the poller reports processed transfers via `inbox.updated`, a short-lived
-// in-memory notification is shown. These notices are informational only and do
-// not require manual acknowledgement.
+// Transfers are applied by the background poller (`storage.sync`). When it
+// reports processed transfers via `inbox.updated`, a short-lived in-memory
+// notice is shown; the screen's own listener reloads the wallet data. Opening
+// the overlay lists what `inbox.pull` finds queued, every item as Rust
+// described it, including those Rust marked as found on a previous-tip route.
 import React, { useState, useCallback, useEffect } from 'react';
 import { dsmClient } from '../../../services/dsmClient';
 import { bridgeEvents } from '../../../bridge/bridgeEvents';
+import type { InboxItemView } from '../../../dsm/types';
 
 // ---------------------------------------------------------------------------
 // Notification record — ephemeral UI state only.
@@ -27,30 +30,14 @@ function formatTime(ts: number): string {
 }
 
 // ---------------------------------------------------------------------------
-// Live pending items from storage node (pre-ACK, informational).
-// ---------------------------------------------------------------------------
-type PendingItem = { id: string; preview: string; isStaleRoute: boolean };
-
-function mapPendingItems(items: unknown[]): PendingItem[] {
-  return items.map((x, i: number) => {
-    const e = typeof x === 'object' && x !== null ? (x as Record<string, unknown>) : {};
-    return {
-      id: typeof e.id === 'string' ? e.id : String(i),
-      preview: typeof e.preview === 'string' ? e.preview : 'Pending item',
-      isStaleRoute: e.isStaleRoute === true,
-    };
-  });
-}
-
-// ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
-type Props = { headerHeight: number; loadWalletData: () => Promise<void> };
+type Props = { headerHeight: number };
 
-function InboxOverlayInner({ headerHeight, loadWalletData }: Props): React.JSX.Element {
+function InboxOverlayInner({ headerHeight }: Props): React.JSX.Element {
   const [open, setOpen] = useState(false);
   const [records, setRecords] = useState<NotificationRecord[]>([]);
-  const [pending, setPending] = useState<PendingItem[]>([]);
+  const [pending, setPending] = useState<InboxItemView[]>([]);
   const [loadingPending, setLoadingPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -71,32 +58,39 @@ function InboxOverlayInner({ headerHeight, loadWalletData }: Props): React.JSX.E
         window.setTimeout(() => {
           setRecords((prev) => prev.filter((item) => item.id !== rec.id));
         }, APPLIED_NOTICE_TTL_MS);
-        void loadWalletData();
       }
     });
-  }, [loadWalletData]);
+  }, []);
 
   const loadPending = useCallback(async () => {
     setLoadingPending(true);
     setError(null);
     try {
-      const res = await dsmClient.listB0xMessages();
-      const nextPending = Array.isArray(res)
-        ? mapPendingItems(res).filter((item) => !item.isStaleRoute)
-        : [];
-      setPending(nextPending);
+      const res = await dsmClient.getInbox();
+      setPending(res.items);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load');
     } finally { setLoadingPending(false); }
   }, []);
 
+  // Other overlays (the bilateral transfer dialog) stand aside while the
+  // inbox is open; they learn of it from `inbox.open`.
   const handleOpen = useCallback(() => {
-    if (open) { setOpen(false); return; }
+    if (open) {
+      setOpen(false);
+      bridgeEvents.emit('inbox.open', { open: false });
+      return;
+    }
     setOpen(true);
+    bridgeEvents.emit('inbox.open', { open: true });
     void loadPending();
   }, [open, loadPending]);
 
-  const handleClose = useCallback(() => { setOpen(false); setError(null); }, []);
+  const handleClose = useCallback(() => {
+    setOpen(false);
+    setError(null);
+    bridgeEvents.emit('inbox.open', { open: false });
+  }, []);
 
   const mono: React.CSSProperties = { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace' };
 
@@ -149,7 +143,7 @@ function InboxOverlayInner({ headerHeight, loadWalletData }: Props): React.JSX.E
                 </div>
               )}
 
-              {/* ---- Live items queued on storage node (pre-ACK) ---- */}
+              {/* ---- Items queued on the storage nodes, as Rust lists them ---- */}
               {(loadingPending || pending.length > 0) && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                   <div style={{ ...mono, fontSize: 10, opacity: 0.6, textTransform: 'uppercase', letterSpacing: '0.05em' }}>

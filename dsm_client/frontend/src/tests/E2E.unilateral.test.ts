@@ -2,71 +2,21 @@
 
 /// <reference types="jest" />
 /* eslint-disable @typescript-eslint/no-explicit-any */
-/* E2E Test: Unilateral (Online) Transaction Flow
- * Simulates exact user journey: QR scan → add contact → send → verify
- * Uses same dsmClient methods as UI components
+/* Unilateral (online) transaction flow: the wire shapes its screens read —
+ * balances, history rows and contact labels. The contact add itself is
+ * covered by dsm/__tests__/contacts.manualAdd.test.ts and the scanner panel's
+ * tests.
  */
 
 (global as any).window = {
   ...(global as any).window,
 };
 
-import { dsmClient } from '../dsm/index';
 import * as pb from '../proto/dsm_app_pb';
 
 describe('E2E: Unilateral Transaction Flow', () => {
   const ALICE_DEVICE_ID = new Uint8Array(32).fill(1);
-  const ALICE_GENESIS = new Uint8Array(32).fill(2);
   const BOB_DEVICE_ID = new Uint8Array(32).fill(10);
-  const BOB_GENESIS = new Uint8Array(32).fill(11);
-
-  test('QR code decoding: protobuf ContactQrV3 format', () => {
-    // === User scans Bob's QR code ===
-    const bobContactQr = new pb.ContactQrV3({
-      deviceId: BOB_DEVICE_ID,
-      network: 'test',
-      storageNodes: ['http://localhost:8080', 'http://localhost:8081', 'http://localhost:8082'],
-      sdkFingerprint: new Uint8Array(32).fill(99),
-      genesisHash: BOB_GENESIS,
-    });
-
-    const qrBytes = bobContactQr.toBinary();
-    const qrBase64 = btoa(String.fromCharCode(...qrBytes));
-
-    // === Decode QR (simulating QRCodeScannerScreen.decodeContactQr) ===
-    const decodedBytes = Uint8Array.from(atob(qrBase64), c => c.charCodeAt(0));
-    const decodedContact = pb.ContactQrV3.fromBinary(decodedBytes);
-
-    expect(decodedContact.deviceId).toEqual(BOB_DEVICE_ID);
-    expect(decodedContact.network).toBe('test');
-    expect(decodedContact.genesisHash).toEqual(BOB_GENESIS);
-    expect(decodedContact.genesisHash.length).toBe(32);
-  });
-
-  test('contact alias validation rules', async () => {
-    const deviceId = new Uint8Array(32).fill(7);
-    const signingKey = new Uint8Array(64).fill(9);
-    const storageNodes = ['http://localhost:8080', 'http://localhost:8081', 'http://localhost:8082'];
-    // Empty alias should be rejected
-    await expect(
-      dsmClient.addContact({
-        alias: '',
-        genesisHash: new Uint8Array(32).fill(1),
-        deviceId,
-        signingPublicKey: signingKey,
-      })
-    ).rejects.toThrow();
-
-    // genesis_hash must be exactly 32 bytes
-    await expect(
-      dsmClient.addContact({
-        alias: 'ValidAlias',
-        genesisHash: new Uint8Array(16), // Wrong length
-        deviceId,
-        signingPublicKey: signingKey,
-      })
-    ).rejects.toThrow();
-  });
 
   test('protobuf balance response parsing', () => {
     // Verify balance response uses bigint (not string)

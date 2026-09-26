@@ -25,7 +25,6 @@ import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.security.SecureRandom
-import java.util.Locale
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.CyclicBarrier
 import java.util.concurrent.atomic.AtomicInteger
@@ -830,7 +829,7 @@ class AndroidLayerProofTest {
         // it. No storage nodes, no silicon — the BIP39 mnemonic is the sole root.
         val mnemonic = String(bridge.generateMnemonic(), Charsets.UTF_8)
         assertTrue("generateMnemonic must return a mnemonic", mnemonic.isNotBlank())
-        val envelope = bridge.createGenesisV2(mnemonic, Locale.getDefault().toLanguageTag())
+        val envelope = bridge.createGenesisV2(mnemonic)
         assertTrue("Genesis must produce non-empty envelope", envelope.isNotEmpty())
         genesisCreated = true
     }

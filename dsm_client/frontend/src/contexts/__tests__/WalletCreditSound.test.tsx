@@ -73,7 +73,7 @@ describe('wallet credit sound routing', () => {
     });
 
     act(() => {
-      bridgeEvents.emit('inbox.updated', { unreadCount: 1, newItems: 1, source: 'poll' });
+      bridgeEvents.emit('inbox.updated', { newItems: 1, source: 'poll' });
     });
 
     await waitFor(() => {

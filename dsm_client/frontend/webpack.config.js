@@ -24,8 +24,7 @@ module.exports = (env, argv) => {
     target: ['web', 'es2020'],                // no Node polyfills
 
     entry: {
-      main: './src/index.tsx',
-      deviceTest: './src/utils/deviceTesting.ts'
+      main: './src/index.tsx'
     },
 
     output: {

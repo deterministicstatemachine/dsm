@@ -13,7 +13,7 @@
 //! mounts.
 
 import React from 'react';
-import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
+import { act, render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import '@testing-library/jest-dom';
 import { dsmClient } from '../../../services/dsmClient';
 
@@ -199,6 +199,45 @@ describe('AccountsScreen — the screen TOKENS actually opens', () => {
   /// same ticker, so a superseded token blocks its own ticker. The only way out
   /// is to drop the identity, and that has to be reachable from the screen the
   /// user is already looking at — a route with no control is a dead end.
+  // The panel shows the token Rust registered — its ticker, id and the anchor
+  // Rust re-derived — as Rust answered them; the ticker used to be scraped
+  // from Rust's prose and the anchor looked up in the balance list.
+  it('shows the adopted token as Rust answered it', async () => {
+    (addTokenByAnchor as jest.Mock).mockResolvedValue({
+      success: true, tokenId: 'T1', ticker: 'ABC', anchorBase32: 'ANCHOR32',
+    });
+    render(<AccountsScreen />);
+    await screen.findByText('MYTOK');
+
+    fireEvent.click(screen.getByRole('button', { name: '+ Add Token (CPTA)' }));
+    fireEvent.change(screen.getByLabelText('CPTA policy anchor'), { target: { value: ' pasted-anchor ' } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'ADD' }));
+    });
+
+    expect(addTokenByAnchor).toHaveBeenCalledWith({ anchorBase32: 'pasted-anchor' });
+    expect(await screen.findByText('ABC added')).toBeInTheDocument();
+    expect(screen.getByText('T1')).toBeInTheDocument();
+    expect(screen.getByText('ANCHOR32')).toBeInTheDocument();
+  });
+
+  it('shows Rust’s refusal of an adoption as Rust worded it', async () => {
+    (addTokenByAnchor as jest.Mock).mockResolvedValue({
+      success: false, error: 'the policy fetched names ticker XYZ, not ABC',
+    });
+    render(<AccountsScreen />);
+    await screen.findByText('MYTOK');
+
+    fireEvent.click(screen.getByRole('button', { name: '+ Add Token (CPTA)' }));
+    fireEvent.change(screen.getByLabelText('CPTA policy anchor'), { target: { value: 'ANCHOR' } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'ADD' }));
+    });
+
+    expect(await screen.findByText(/the policy fetched names ticker XYZ, not ABC/)).toBeInTheDocument();
+    expect(screen.queryByText(/added$/)).not.toBeInTheDocument();
+  });
+
   it('offers FORGET on a token this device holds, and calls it by token id', async () => {
     (forgetToken as jest.Mock).mockResolvedValue({ success: true, message: 'MYTOK forgotten' });
     const confirmSpy = jest.spyOn(window, 'confirm').mockReturnValue(true);
@@ -327,12 +366,13 @@ describe('AccountsScreen — the screen TOKENS actually opens', () => {
   /// A scanned payload is a `dsm:token/v1:` URI. Echoing that back under the
   /// label "Policy Anchor (CPTA)" teaches the reader that a URI is an anchor —
   /// and the next person they hand it to gets something that resolves to
-  /// nothing. So the panel reads the value back off the reloaded registry row.
-  it('shows a durable success panel with the anchor from the registry, not the input', async () => {
+  /// nothing. So the panel shows the anchor Rust re-derived from the policy
+  /// bytes it fetched and answered with.
+  it('shows a durable success panel with the anchor Rust answered, not the input', async () => {
     const REAL_ANCHOR = '6PW31E7DEMNDVC11F88XTR9J9X90M90MF6M02JPV5BFRQE773BJ0';
     const PASTED_URI = 'dsm:token/v1:SOMEPAYLOADBYTES';
     (addTokenByAnchor as jest.Mock).mockResolvedValue({
-      success: true, ticker: 'RIGB', tokenId: 'Z68HWMYSPT9B',
+      success: true, ticker: 'RIGB', tokenId: 'Z68HWMYSPT9B', anchorBase32: REAL_ANCHOR,
     });
     (dsmClient.getAllBalances as jest.Mock).mockResolvedValue([
       ...balances,

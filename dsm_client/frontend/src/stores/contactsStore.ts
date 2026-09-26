@@ -3,9 +3,9 @@
 
 import { useSyncExternalStore } from 'react';
 import { dsmClient } from '../services/dsmClient';
-import { parseBinary32, parseBinary64, bytesToDisplay } from '../contexts/contacts/utils';
+import { bytesToDisplay } from '../contexts/contacts/utils';
 import type { Contact, ContactsState } from '../contexts/ContactsContext';
-import type { BilateralRelationshipDTO } from '../dsm/types';
+import type { AddContactResult, BilateralRelationshipDTO, ContactCard } from '../dsm/types';
 import logger from '../utils/logger';
 
 
@@ -144,41 +144,26 @@ class ContactsStore {
     this.scheduleRefreshContacts('bleUpdated');
   };
 
-  addContact = async (
-    alias: string,
-    genesisHash: Uint8Array | string,
-    deviceId: Uint8Array | string | undefined,
-    signingPublicKey: Uint8Array | string | undefined,
-  ): Promise<boolean> => {
+  /**
+   * Adds the contact a card names under `alias` (empty: Rust names it by its
+   * device) and answers what Rust answered.
+   */
+  addContact = async (alias: string, card: ContactCard): Promise<AddContactResult> => {
+    this.setState({ isLoading: true, error: null });
     try {
-      this.setState({ isLoading: true, error: null });
-
-      if (!deviceId || deviceId.length < 1) {
-        throw new Error('device_id required (must come from BLE identity)');
-      }
-
-      if (!signingPublicKey || signingPublicKey.length < 1) {
-        throw new Error('signingPublicKey required (must come from contact QR)');
-      }
-
       const result = await dsmClient.addContact({
         alias,
-        genesisHash: parseBinary32(genesisHash, 'genesis_hash'),
-        deviceId: parseBinary32(deviceId, 'device_id'),
-        signingPublicKey: parseBinary64(signingPublicKey, 'signingPublicKey'),
+        deviceId: card.deviceId,
+        genesisHash: card.genesisHash,
+        signingPublicKey: card.signingPublicKey,
       });
-
-      if (!result?.accepted) {
-        throw new Error(result?.error || 'Failed to add contact');
+      if (result.accepted) {
+        await this.refreshContacts();
+      } else {
+        logger.error('ContactsStore: addContact refused:', result.error);
+        this.setState({ error: result.error });
       }
-
-      await this.refreshContacts();
-      return true;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to add contact';
-      logger.error('ContactsStore: addContact failed:', message);
-      this.setState({ error: message });
-      return false;
+      return result;
     } finally {
       this.setState({ isLoading: false });
     }

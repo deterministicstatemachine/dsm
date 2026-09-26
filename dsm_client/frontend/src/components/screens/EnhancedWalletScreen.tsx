@@ -102,7 +102,7 @@ const EnhancedWalletScreen: React.FC<EnhancedWalletScreenProps> = ({ btcLogoSrc,
 
   const headerActions = (
     <>
-      <InboxOverlay headerHeight={headerHeight} loadWalletData={data.loadWalletData} />
+      <InboxOverlay headerHeight={headerHeight} />
       <button
         type="button"
         onClick={() => void data.handleRefresh()}

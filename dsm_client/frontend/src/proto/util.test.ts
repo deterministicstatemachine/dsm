@@ -11,7 +11,7 @@ import { extractGenesisCreated } from './util';
 
 describe('proto util', () => {
   test('extractGenesisCreated supports ES oneof {case, value}', () => {
-    const gc = new pb.GenesisCreated({ networkId: 'dsm-testnet', locale: 'en-US' });
+    const gc = new pb.GenesisCreated({ networkId: 'dsm-testnet' });
     const env: any = new pb.Envelope({
       version: 3,
       payload: { case: 'genesisCreatedResponse', value: gc },

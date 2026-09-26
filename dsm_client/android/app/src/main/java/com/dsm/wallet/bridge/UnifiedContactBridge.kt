@@ -12,10 +12,6 @@ internal object UnifiedContactBridge {
         return try { Unified.resolvePeerIdentityForBleAddressBin(address) } catch (_: Throwable) { ByteArray(0) }
     }
 
-    fun handleContactQrV3(bytes: ByteArray): ByteArray {
-        return try { Unified.handleContactQrV3(bytes) } catch (_: Throwable) { ByteArray(0) }
-    }
-
     fun removeContact(contactId: String): Byte {
         return try { Unified.removeContact(contactId) } catch (_: Throwable) { 0 }
     }

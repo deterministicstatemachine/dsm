@@ -236,7 +236,6 @@ pub(crate) fn handle_create_genesis_v2_query(q: AppQuery) -> AppResult {
         }),
         genesis_nonce: outcome.genesis_nonce.to_vec(),
         network_id,
-        locale: req.locale.clone(),
     };
     pack_envelope_ok(generated::envelope::Payload::GenesisCreatedResponse(resp))
 }
@@ -391,7 +390,6 @@ mod tests {
                 codec: generated::Codec::Proto as i32,
                 body: generated::WalletCreateGenesisV2Request {
                     mnemonic: crate::economic_fixtures::test_mnemonic(0x5B),
-                    locale: String::new(),
                 }
                 .encode_to_vec(),
                 ..Default::default()
@@ -429,7 +427,6 @@ mod tests {
 
         let mut body = generated::WalletCreateGenesisV2Request {
             mnemonic: crate::economic_fixtures::test_mnemonic(0x5C),
-            locale: String::new(),
         }
         .encode_to_vec();
         // Field 3, length-delimited: the network id a caller used to choose.

@@ -7,7 +7,6 @@ export {};
 declare global {
   interface Window {
     DsmBridge?: {
-      hasIdentityDirect?: () => boolean | Promise<boolean>;
       __binary?: boolean;
       sendMessageBin?: (payload: Uint8Array) => Promise<Uint8Array>;
     };

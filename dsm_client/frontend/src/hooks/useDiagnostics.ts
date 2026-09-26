@@ -1,5 +1,7 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
 // SPDX-License-Identifier: Apache-2.0
+// Diagnostics: a report of what was measured — Rust's identity, the native
+// session phase, the architecture check as the native side answered it (or
+// its failure as it happened), and the last errors this session saw.
 
 import { useCallback, useEffect, useState } from 'react';
 import { dsmClient } from '../services/dsmClient';
@@ -13,12 +15,16 @@ import { nativeSessionStore } from '../runtime/nativeSessionStore';
 
 type NotifyToast = (type: string, message?: string) => void;
 
+export type BridgeErrorRecord = { code: number; message: string; debugB32?: string };
+
 type DiagnosticsState = {
   envConfigError: string | null;
+  envConfigHelp: string | null;
   showDiagnostics: boolean;
   diagLoading: boolean;
   diagnostics: string | null;
   telemetryConsent: boolean;
+  lastBridgeError: BridgeErrorRecord | null;
 };
 
 const DIAGNOSTICS_CONSENT_PREF_KEY = 'diagnostics_consent';
@@ -28,9 +34,14 @@ type DiagnosticsOpenDetail = {
   autoGather?: boolean;
 };
 
+function messageOf(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
+
 export function useDiagnostics(notifyToast: NotifyToast) {
   const [envConfigError, setEnvConfigError] = useState<string | null>(null);
-  const [lastBridgeError, setLastBridgeError] = useState<{ code: number; message: string; debugB32?: string } | null>(null);
+  const [envConfigHelp, setEnvConfigHelp] = useState<string | null>(null);
+  const [lastBridgeError, setLastBridgeError] = useState<BridgeErrorRecord | null>(null);
   const [showDiagnostics, setShowDiagnostics] = useState(false);
   const [diagLoading, setDiagLoading] = useState(false);
   const [diagnostics, setDiagnostics] = useState<string | null>(null);
@@ -56,43 +67,22 @@ export function useDiagnostics(notifyToast: NotifyToast) {
   }, []);
 
   useEffect(() => {
-    const handler = (detail: { message: string; type?: string; help?: string }) => {
-      try {
-        const msg = detail?.message || 'Environment configuration error';
-        console.warn('[Diagnostics] env.config.error received:', msg, detail);
-        setEnvConfigError(String(msg));
-        
-        // Store full error detail for the banner to access
-        try {
-          (window as any).__envConfigErrorDetail = {
-            message: msg,
-            type: detail?.type || 'UNKNOWN',
-            help: detail?.help || ''
-          };
-        } catch (_e) {
-          // ignore
-        }
-      } catch (_e) {
-        setEnvConfigError('Environment configuration error (unknown)');
-      }
+    const envHandler = (detail: { message?: string; help?: string }) => {
+      const msg = detail?.message || 'Environment configuration error';
+      console.warn('[Diagnostics] env.config.error received:', msg, detail);
+      setEnvConfigError(String(msg));
+      setEnvConfigHelp(detail?.help || null);
     };
-    const unsubscribe = bridgeEvents.on('env.config.error', handler as any);
-
-    const bridgeErrHandler = (detail: { code: number; message: string; debugB32?: string }) => {
-      try {
-        console.warn('[Diagnostics] bridge.error received:', detail.message, detail.debugB32 ? 'debug present' : 'no debug');
-        const obj = { code: detail.code ?? 0, message: detail.message ?? '', debugB32: detail.debugB32 };
-        setLastBridgeError(obj);
-        // Mirror into global for simple modal consumption in tests/UI
-        try { (window as any).__lastBridgeError = obj; } catch (_e) {}
-      } catch {
-        // ignore
-      }
+    const bridgeErrHandler = (detail: { code?: number; message?: string; debugB32?: string }) => {
+      console.warn('[Diagnostics] bridge.error received:', detail?.message, detail?.debugB32 ? 'debug present' : 'no debug');
+      setLastBridgeError({ code: detail?.code ?? 0, message: detail?.message ?? '', debugB32: detail?.debugB32 });
     };
-    const unsub2 = bridgeEvents.on('bridge.error', bridgeErrHandler as any);
-
-    return () => { unsubscribe(); unsub2(); };
+    const offEnv = bridgeEvents.on('env.config.error', envHandler as never);
+    const offBridge = bridgeEvents.on('bridge.error', bridgeErrHandler as never);
+    return () => { offEnv(); offBridge(); };
   }, []);
+
+  const clearBridgeError = useCallback(() => setLastBridgeError(null), []);
 
   const updateTelemetryConsent = useCallback(async (next: boolean) => {
     setTelemetryConsent(next);
@@ -103,77 +93,64 @@ export function useDiagnostics(notifyToast: NotifyToast) {
     }
   }, [notifyToast]);
 
+  // Every line states a measurement or names the failure of measuring it.
   const gatherDiagnostics = useCallback(async () => {
     setDiagLoading(true);
     setDiagnostics(null);
     try {
       const wb = await import('../dsm/WebViewBridge');
-      const info: Record<string, any> = {};
+
+      const session = nativeSessionStore.getSnapshot();
+      const sessionLine = `session=${session.received ? session.phase : 'pending'}`;
+
+      let identityLine: string;
       try {
-        const session = nativeSessionStore.getSnapshot();
-        info.bridgeStatus = session.received ? `native-session:${session.phase}` : 'native-session:pending';
+        const id = await dsmClient.getIdentity();
+        identityLine = id
+          ? `identity=device ${id.deviceId} genesis ${id.genesisHash}`
+          : 'identity=none (getIdentity answered null)';
       } catch (e) {
-        info.bridgeStatus = `error: ${String(e)}`;
-      }
-      try { info.selfTest = wb.runNativeBridgeSelfTest(); } catch (e) { info.selfTest = `error: ${String(e)}`; }
-      try { info.lastError = (wb as any).getLastError?.() ?? (wb as any).lastError?.() ?? ''; } catch (e) { info.lastError = `error: ${String(e)}`; }
-      try { const p = await dsmClient.getPreference('DSM_ENV_CONFIG_PATH'); info.envPath = p; } catch (e) { info.envPath = `error: ${String(e)}`; }
-      try { const gh = await dsmClient.getPreference('genesis_hash_bytes'); info.genesisHash = gh; } catch (e) { info.genesisHash = `error: ${String(e)}`; }
-      try { const did = await dsmClient.getPreference('device_id_bytes'); info.deviceId = did; } catch (e) { info.deviceId = `error: ${String(e)}`; }
-      
-      // Add architecture compatibility info
-      try {
-        const arch = await wb.getArchitectureInfo();
-        info.archStatus = arch.status;
-        info.archDevice = arch.deviceArch;
-        info.archAbis = arch.supportedAbis;
-        info.archMessage = arch.message;
-        info.archRecommendation = arch.recommendation;
-      } catch (e) {
-        info.archStatus = 'UNKNOWN';
-        info.archError = String(e);
+        identityLine = `identity=not read: ${messageOf(e)}`;
       }
 
-      const lines = [
-        'DSM diagnostics (clockless)',
-        `message=${envConfigError ?? ''}`,
-        `bridgeStatus=${String(info.bridgeStatus ?? '')}`,
-        `selfTest=${String(info.selfTest ?? '')}`,
-        `lastError=${String(info.lastError ?? '')}`,
+      let archLine: string;
+      try {
+        const arch = await wb.getArchitectureInfo();
+        archLine = `arch=${arch.status} device=${arch.deviceArch} abis=${arch.supportedAbis} message=${arch.message} recommendation=${arch.recommendation}`;
+      } catch (e) {
+        archLine = `arch=not measured: ${messageOf(e)}`;
+      }
+
+      setDiagnostics([
+        'DSM diagnostics',
+        sessionLine,
+        identityLine,
+        archLine,
+        `envConfigError=${envConfigError ?? ''}`,
         `lastBridgeError=${lastBridgeError ? `${lastBridgeError.code}:${lastBridgeError.message}` : ''}`,
         `bridgeErrorDebugB32=${lastBridgeError?.debugB32 ?? ''}`,
-        `envPath=${String(info.envPath ?? '')}`,
-        `genesisHash=${String(info.genesisHash ?? '')}`,
-        `deviceId=${String(info.deviceId ?? '')}`,
-        `archStatus=${String(info.archStatus ?? 'UNKNOWN')}`,
-        `archDevice=${String(info.archDevice ?? 'unknown')}`,
-        `archAbis=${String(info.archAbis ?? '')}`,
-        `archMessage=${String(info.archMessage ?? '')}`,
-        `archRecommendation=${String(info.archRecommendation ?? '')}`,
-      ];
-      setDiagnostics(lines.join('\n'));
+      ].join('\n'));
       setShowDiagnostics(true);
     } catch (e) {
-      setDiagnostics(`Failed to gather diagnostics: ${String(e)}`);
+      setDiagnostics(`Failed to gather diagnostics: ${messageOf(e)}`);
       setShowDiagnostics(true);
     } finally {
       setDiagLoading(false);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [envConfigError]);
+  }, [envConfigError, lastBridgeError]);
 
+  // The report plus the native bridge log, or the reason the log was not read.
   const buildDiagnosticsBundle = useCallback(async (): Promise<string> => {
     const summary = diagnostics ?? 'No diagnostics collected yet.';
+    let bridgeLog: string;
     try {
-      const telemetry = await import('../services/telemetry');
-      const logBytes = await telemetry.exportDiagnosticsReport();
-      const bridgeLog = logBytes.length > 0
-        ? new TextDecoder().decode(logBytes)
-        : 'No native bridge log captured.';
-      return [summary, '', '--- Native Bridge Log ---', bridgeLog].join('\n');
-    } catch {
-      return summary;
+      const wb = await import('../dsm/WebViewBridge');
+      const logBytes = await wb.getDiagnosticsLog();
+      bridgeLog = logBytes.length > 0 ? new TextDecoder().decode(logBytes) : 'empty';
+    } catch (e) {
+      bridgeLog = `not read: ${messageOf(e)}`;
     }
+    return [summary, '', '--- Native Bridge Log ---', bridgeLog].join('\n');
   }, [diagnostics]);
 
   useEffect(() => {
@@ -191,6 +168,20 @@ export function useDiagnostics(notifyToast: NotifyToast) {
     };
   }, [gatherDiagnostics]);
 
+  const openUrlOrCopy = useCallback(async (url: string, opened: string, copied: string) => {
+    const popup = window.open(url, '_blank', 'noopener');
+    if (popup) {
+      notifyToast('success', opened);
+      return;
+    }
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(url);
+      notifyToast('success', copied);
+      return;
+    }
+    throw new Error('Popup blocked and clipboard unavailable.');
+  }, [notifyToast]);
+
   const openGitHubIssue = useCallback(() => {
     void (async () => {
       try {
@@ -203,35 +194,17 @@ export function useDiagnostics(notifyToast: NotifyToast) {
           : `**Diagnostics**\n\nAttach the downloaded \`dsm-diagnostics.txt\` file if you are comfortable sharing it.\n\n`;
         const body = `**Describe the problem**\n\nPlease describe the beta issue.\n\n${diagnosticsSection}**Steps to reproduce**\n1. Launch the app\n2. Reproduce the issue\n3. Note the exact screen, flow, and expected result\n\n**Additional info**\n- Attach adb logcat output if available\n`;
         const url = buildGitHubIssueUrl({ title, body, template: BETA_BUG_TEMPLATE });
-        const popup = window.open(url, '_blank', 'noopener');
-        if (!popup && navigator.clipboard?.writeText) {
-          await navigator.clipboard.writeText(url);
-          notifyToast('success', 'Bug report link copied to clipboard');
-          return;
-        }
-        if (!popup) {
-          throw new Error('Popup blocked and clipboard unavailable.');
-        }
-        notifyToast('success', 'Beta bug report opened');
+        await openUrlOrCopy(url, 'Beta bug report opened', 'Bug report link copied to clipboard');
       } catch {
         try {
           const defaultUrl = buildGitHubIssueUrl({ template: BETA_BUG_TEMPLATE });
-          const popup = window.open(defaultUrl, '_blank', 'noopener');
-          if (!popup && navigator.clipboard?.writeText) {
-            await navigator.clipboard.writeText(defaultUrl);
-            notifyToast('success', 'Bug report link copied to clipboard');
-            return;
-          }
-          if (!popup) {
-            throw new Error('Popup blocked and clipboard unavailable.');
-          }
-          notifyToast('success', 'Beta bug report opened');
-        } catch (_e) {
+          await openUrlOrCopy(defaultUrl, 'Beta bug report opened', 'Bug report link copied to clipboard');
+        } catch {
           notifyToast('error', 'Failed to open GitHub');
         }
       }
     })();
-  }, [buildDiagnosticsBundle, envConfigError, notifyToast, telemetryConsent]);
+  }, [buildDiagnosticsBundle, envConfigError, notifyToast, openUrlOrCopy, telemetryConsent]);
 
   const openGitHubFeedback = useCallback(() => {
     void (async () => {
@@ -244,21 +217,12 @@ export function useDiagnostics(notifyToast: NotifyToast) {
           title: 'Beta feedback',
           body,
         });
-        const popup = window.open(url, '_blank', 'noopener');
-        if (!popup && navigator.clipboard?.writeText) {
-          await navigator.clipboard.writeText(url);
-          notifyToast('success', 'Feedback link copied to clipboard');
-          return;
-        }
-        if (!popup) {
-          throw new Error('Popup blocked and clipboard unavailable.');
-        }
-        notifyToast('success', 'Beta feedback form opened');
+        await openUrlOrCopy(url, 'Beta feedback form opened', 'Feedback link copied to clipboard');
       } catch {
         notifyToast('error', 'Failed to open feedback form');
       }
     })();
-  }, [buildDiagnosticsBundle, diagnostics, notifyToast, telemetryConsent]);
+  }, [buildDiagnosticsBundle, diagnostics, notifyToast, openUrlOrCopy, telemetryConsent]);
 
   const sendDiagnosticsTelemetry = useCallback(async () => {
     if (!diagnostics) return;
@@ -267,7 +231,7 @@ export function useDiagnostics(notifyToast: NotifyToast) {
       await t.sendDiagnostics(diagnostics, telemetryConsent);
       notifyToast('success', 'Diagnostics saved to local log');
     } catch (e) {
-      notifyToast('error', `Failed to save diagnostics: ${String(e)}`);
+      notifyToast('error', `Failed to save diagnostics: ${messageOf(e)}`);
     }
   }, [diagnostics, notifyToast, telemetryConsent]);
 
@@ -301,10 +265,12 @@ export function useDiagnostics(notifyToast: NotifyToast) {
 
   const state: DiagnosticsState = {
     envConfigError,
+    envConfigHelp,
     showDiagnostics,
     diagLoading,
     diagnostics,
     telemetryConsent,
+    lastBridgeError,
   };
 
   return {
@@ -312,12 +278,12 @@ export function useDiagnostics(notifyToast: NotifyToast) {
     setEnvConfigError,
     setShowDiagnostics,
     setTelemetryConsent: updateTelemetryConsent,
+    clearBridgeError,
     gatherDiagnostics,
     openGitHubIssue,
     openGitHubFeedback,
     sendDiagnosticsTelemetry,
     copyDiagnostics,
     downloadDiagnostics,
-    lastBridgeError,
   };
 }

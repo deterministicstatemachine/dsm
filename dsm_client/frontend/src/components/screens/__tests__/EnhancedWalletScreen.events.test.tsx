@@ -37,7 +37,7 @@ function installStandardWalletMocks(contactList: any[] = []) {
 describe('EnhancedWalletScreen event-driven refresh', () => {
   beforeEach(() => {
     jest.restoreAllMocks();
-    (dsmClient.listB0xMessages as any) = jest.fn().mockResolvedValue([]);
+    (dsmClient.getInbox as any) = jest.fn().mockResolvedValue({ items: [] });
   });
 
   test('reloads transactions when dsm-wallet-refresh is dispatched', async () => {
@@ -254,9 +254,9 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
       .mockResolvedValue([{ tokenId: 'ERA', symbol: 'ERA', baseUnits: 100n, displayAmount: '100', decimals: 0 }]);
     (dsmClient.getWalletHistory as any) = jest.fn().mockResolvedValue({ transactions: [] });
     (dsmClient.syncWithStorage as any) = jest.fn().mockResolvedValue({ success: true, processed: 1 });
-    (dsmClient.listB0xMessages as any) = jest.fn().mockResolvedValue([
-      { id: 'inbox-1', preview: 'Incoming online transfer 25 ERA' },
-    ]);
+    (dsmClient.getInbox as any) = jest.fn().mockResolvedValue({
+      items: [{ id: 'inbox-1', preview: 'Incoming online transfer 25 ERA', isStaleRoute: false }],
+    });
 
     render(<EnhancedWalletScreen />);
 
@@ -266,7 +266,7 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
 
     await waitFor(() => {
       expect(dsmClient.syncWithStorage).not.toHaveBeenCalled();
-      expect(dsmClient.listB0xMessages).toHaveBeenCalled();
+      expect(dsmClient.getInbox).toHaveBeenCalled();
       expect(screen.getByText('Incoming online transfer 25 ERA')).toBeInTheDocument();
     });
   });
@@ -281,17 +281,72 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
       .fn()
       .mockResolvedValue([{ tokenId: 'ERA', symbol: 'ERA', baseUnits: 100n, displayAmount: '100', decimals: 0 }]);
     (dsmClient.getWalletHistory as any) = jest.fn().mockResolvedValue({ transactions: [] });
-    (dsmClient.listB0xMessages as any) = jest.fn().mockResolvedValue([]);
+    (dsmClient.getInbox as any) = jest.fn().mockResolvedValue({ items: [] });
 
     render(<EnhancedWalletScreen />);
 
     await waitFor(() => expect(screen.getByText('DSM Wallet')).toBeInTheDocument());
 
     await act(async () => {
-      bridgeEvents.emit('inbox.updated', { unreadCount: 2, newItems: 2, source: 'poll' });
+      bridgeEvents.emit('inbox.updated', { newItems: 2, source: 'poll' });
     });
 
     const button = screen.getByRole('button', { name: 'Inbox (2 new)' });
     expect(button.className).toContain('has-items');
+  });
+
+  // The overlay lists what Rust found, including an item Rust marked as found
+  // on the previous-tip route; it used to drop those and keep a label nothing
+  // could reach.
+  test('an item Rust marked stale-route is listed with that marking', async () => {
+    (dsmClient.isReady as any) = jest.fn().mockResolvedValue(true);
+    (dsmClient.getIdentity as any) = jest
+      .fn()
+      .mockResolvedValue({ genesisHash: 'G'.repeat(32), deviceId: 'D'.repeat(32) });
+    (dsmClient.getContacts as any) = jest.fn().mockResolvedValue({ contacts: [] });
+    (dsmClient.getAllBalances as any) = jest
+      .fn()
+      .mockResolvedValue([{ tokenId: 'ERA', symbol: 'ERA', baseUnits: 100n, displayAmount: '100', decimals: 0 }]);
+    (dsmClient.getWalletHistory as any) = jest.fn().mockResolvedValue({ transactions: [] });
+    (dsmClient.getInbox as any) = jest.fn().mockResolvedValue({
+      items: [
+        { id: 'inbox-1', preview: 'From: ALICE Amount: 25 ERA', isStaleRoute: false },
+        { id: 'inbox-2', preview: 'From: BOB Amount: 7 ERA', isStaleRoute: true },
+      ],
+    });
+
+    render(<EnhancedWalletScreen />);
+    await waitFor(() => expect(screen.getByText('DSM Wallet')).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: /Inbox/ }));
+
+    await waitFor(() => expect(screen.getByText('From: BOB Amount: 7 ERA')).toBeInTheDocument());
+    expect(screen.getByText('From: ALICE Amount: 25 ERA')).toBeInTheDocument();
+    expect(screen.getAllByText(/STALE ROUTE/)).toHaveLength(1);
+  });
+
+  // The bilateral transfer dialog stands aside while the inbox is open; it
+  // learns of it from `inbox.open`, which nothing emitted before.
+  test('opening and closing the inbox announces inbox.open', async () => {
+    (dsmClient.isReady as any) = jest.fn().mockResolvedValue(true);
+    (dsmClient.getIdentity as any) = jest
+      .fn()
+      .mockResolvedValue({ genesisHash: 'G'.repeat(32), deviceId: 'D'.repeat(32) });
+    (dsmClient.getContacts as any) = jest.fn().mockResolvedValue({ contacts: [] });
+    (dsmClient.getAllBalances as any) = jest
+      .fn()
+      .mockResolvedValue([{ tokenId: 'ERA', symbol: 'ERA', baseUnits: 100n, displayAmount: '100', decimals: 0 }]);
+    (dsmClient.getWalletHistory as any) = jest.fn().mockResolvedValue({ transactions: [] });
+    (dsmClient.getInbox as any) = jest.fn().mockResolvedValue({ items: [] });
+    const opened = jest.fn();
+    const off = bridgeEvents.on('inbox.open', opened as any);
+
+    render(<EnhancedWalletScreen />);
+    await waitFor(() => expect(screen.getByText('DSM Wallet')).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: /Inbox/ }));
+    expect(opened).toHaveBeenLastCalledWith({ open: true });
+    await waitFor(() => expect(screen.getByRole('dialog', { name: 'Inbox' })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: 'Close inbox' }));
+    expect(opened).toHaveBeenLastCalledWith({ open: false });
+    off();
   });
 });

@@ -2,7 +2,7 @@
 // Manual bilateral accept/reject/cancel (bytes-only).
 
 import { BilateralPayload, BridgeRpcRequest } from "../../proto/dsm_app_pb";
-import { callBin, maybeThrowOnEmpty, sendBridgeRequestBytes } from "./transportCore";
+import { callBin, sendBridgeRequestBytes } from "./transportCore";
 
 export async function acceptBilateralByCommitmentBridge(
   commitmentHash: Uint8Array
@@ -11,7 +11,7 @@ export async function acceptBilateralByCommitmentBridge(
     throw new Error("acceptBilateralByCommitmentBridge: commitmentHash must be 32 bytes");
   }
   const res = await callBin("acceptBilateralByCommitment", commitmentHash);
-  return maybeThrowOnEmpty(res);
+  return res;
 }
 
 export async function rejectBilateralByCommitmentBridge(
@@ -33,7 +33,7 @@ export async function rejectBilateralByCommitmentBridge(
     },
   });
   const res = await sendBridgeRequestBytes("rejectBilateralByCommitment", req.toBinary());
-  return maybeThrowOnEmpty(res);
+  return res;
 }
 
 /** The proposer cancels a proposal it has not confirmed; the SDK decides whether it still may. */
@@ -56,5 +56,5 @@ export async function cancelBilateralByCommitmentBridge(
     },
   });
   const res = await sendBridgeRequestBytes("cancelBilateralByCommitment", req.toBinary());
-  return maybeThrowOnEmpty(res);
+  return res;
 }

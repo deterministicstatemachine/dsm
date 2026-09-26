@@ -17,7 +17,6 @@ export type BridgeEventMap = {
   'contact.added': { contact?: unknown };
   'contact.bleMapped': { address: string; deviceId?: string; genesisHash?: string };
   'contact.bleUpdated': { bleAddress?: string; alias?: string; deviceId?: string; genesisHash?: string };
-  'bilateral.event': Uint8Array;
   'bilateral.transferComplete': void;
   'env.config.error': { message: string };
   'bridge.error': { code?: number; message: string; debugB32: string };
@@ -25,7 +24,7 @@ export type BridgeEventMap = {
   'port.rx': void;
   'ui.tick': void;
   'inbox.open': { open: boolean };
-  'inbox.updated': { unreadCount: number; newItems?: number; source: string };
+  'inbox.updated': { newItems: number; source: string };
   'visibility.change': { state: DocumentVisibilityState };
   'ble.permission.error': { message: string };
   'ble.permission.recovery.needed': void;

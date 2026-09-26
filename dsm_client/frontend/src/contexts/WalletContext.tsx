@@ -120,7 +120,7 @@ export const WalletProvider: React.FC<{ children: ReactNode }> = ({ children }) 
     void refreshWalletProjection();
   }, [refreshWalletProjection]);
 
-  useBridgeEvent('inbox.updated', (detail?: { unreadCount?: number; newItems?: number }) => {
+  useBridgeEvent('inbox.updated', (detail?: { newItems?: number }) => {
     const newItems = typeof detail?.newItems === 'number' ? detail.newItems : 0;
     if (newItems <= 0) return;
     void refreshWalletProjection();

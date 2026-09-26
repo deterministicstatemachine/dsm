@@ -1,54 +1,29 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
 import React, { useEffect, useRef, useState, useCallback } from 'react';
-import { dsmClient as servicesDsmClient } from '../../services/dsmClient';
 import { useContacts } from '../../contexts/ContactsContext';
-import { decodeContactQrV3Payload, decodeQrPayloadBase32ToText, type ContactQrV3Data } from '../../services/qr/contactQrService';
-import { parseBinary64, bytesToDisplay } from '../../contexts/contacts/utils';
-import { decodeFramedEnvelopeV3 } from '../../dsm/decoding';
+import { readContactCode } from '../../dsm/contacts';
+import type { ContactCard } from '../../dsm/types';
+import { bytesToDisplay } from '../../contexts/contacts/utils';
 import logger from '../../utils/logger';
-
-function suggestAliasFromDeviceId(deviceId: Uint8Array | undefined): string {
-  if (!deviceId || deviceId.length === 0) return 'contact';
-  return bytesToDisplay(deviceId).slice(0, 8).toLowerCase();
-}
-
-function decodeContactQrV3(qrData: string): { contact: ContactQrV3Data; rawBytes: Uint8Array } | null {
-  logger.debug('[QR] Raw data preview', {
-    length: qrData.length,
-    preview: qrData.substring(0, 100),
-  });
-  const decoded = decodeContactQrV3Payload(qrData);
-  if (!decoded) {
-    logger.warn('[QR] Failed to decode ContactQrV3 payload');
-    return null;
-  }
-  try {
-    const dev = decoded.contact.deviceId;
-    const gen = decoded.contact.genesisHash;
-    logger.debug('[QR] Parsed ContactQrV3 fields', {
-      deviceId_len: dev?.length ?? 0,
-      genesisHash_len: gen?.length ?? 0,
-      network: decoded.contact.network || '(none)',
-    });
-  } catch {}
-  return decoded;
-}
 
 type ScanPhase =
   | { status: 'idle' }
   | { status: 'scanning' }
-  | { status: 'prompt'; alias: string; contact: ContactQrV3Data }
+  | { status: 'reading' }
+  | { status: 'prompt'; card: ContactCard }
   | { status: 'adding'; alias: string }
   | { status: 'success'; alias: string }
   | { status: 'error'; message: string };
 
 type QRCodeScannerProps = {
   onCancel?: () => void;
-  onScan?: (scannedData: string) => void | Promise<void>;
   eraTokenSrc?: string;
 };
+
+function messageOf(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
 
 export default function QRCodeScannerPanel(props: QRCodeScannerProps = {}): React.JSX.Element {
   const { eraTokenSrc = 'images/logos/era_token_gb.gif' } = props;
@@ -62,7 +37,19 @@ export default function QRCodeScannerPanel(props: QRCodeScannerProps = {}): Reac
 
   const containerId = 'qr-reader';
 
-  const nextFrame = () => new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+  // The code goes to Rust as it was scanned or pasted; the card shown is the
+  // card Rust read, and a refusal is shown as Rust worded it.
+  const showCard = useCallback(async (text: string) => {
+    setPhase({ status: 'reading' });
+    try {
+      const card = await readContactCode(text);
+      setAliasInput(card.preferredAlias ?? '');
+      setPhase({ status: 'prompt', card });
+    } catch (e) {
+      logger.warn('[QRScanner] Rust refused the contact code:', messageOf(e));
+      setPhase({ status: 'error', message: messageOf(e) });
+    }
+  }, []);
 
   const startNativeScan = useCallback(async () => {
     if (nativeScanPendingRef.current) return;
@@ -133,198 +120,44 @@ export default function QRCodeScannerPanel(props: QRCodeScannerProps = {}): Reac
   // Handle result dispatched back from the native QrScannerActivity.
   useEffect(() => {
     const handleNativeScanResult = (e: Event) => {
-      const ce = e as CustomEvent<{ topic: string; payloadText?: string; payloadLatin1?: string; payloadBase32?: string; payloadBytes?: Uint8Array }>;
+      const ce = e as CustomEvent<{ topic: string; payloadText?: string }>;
       if (ce.detail?.topic !== 'qr_scan_result') return;
 
       nativeScanPendingRef.current = false;
-
-      // Future: direct Envelope bytes path (not yet sent by native side).
-      let qrData = '';
-      if (ce.detail.payloadBytes) {
-        try {
-          const env = decodeFramedEnvelopeV3(ce.detail.payloadBytes);
-          if (env.payload.case === 'error') {
-            const err = env.payload.value;
-            logger.info('[QRScanner] Native scan error envelope:', err.message);
-            if (err.code === 1) { props.onCancel?.(); return; }
-            setPhase({ status: 'error', message: err.message || 'Scan failed' });
-            setInitializing(false);
-            return;
-          }
-          logger.warn('[QRScanner] payloadBytes not yet implemented, using text path');
-        } catch (err) {
-          logger.error('[QRScanner] Failed to decode envelope from payloadBytes:', err);
-          setPhase({ status: 'error', message: 'Invalid QR format' });
-          setInitializing(false);
-          return;
-        }
-      }
-
-      if (ce.detail.payloadText) {
-        qrData = ce.detail.payloadText;
-      } else if (ce.detail.payloadBase32) {
-        const decoded = decodeQrPayloadBase32ToText(ce.detail.payloadBase32);
-        if (decoded) { qrData = decoded; }
-        else { logger.error('[QRScanner] Failed to decode Base32 payload'); }
-      } else {
-        qrData = ce.detail.payloadLatin1 || '';
-      }
-
-      logger.info('[QRScanner] Native scan result received, length:', qrData.length);
-
-      if (!qrData) {
-        logger.info('[QRScanner] Native scan cancelled/failed');
-        setInitializing(false);
+      setInitializing(false);
+      const text = ce.detail.payloadText ?? '';
+      logger.info('[QRScanner] Native scan result received, length:', text.length);
+      if (!text) {
+        // Cancelled, or the camera read nothing.
         setPhase({ status: 'idle' });
         return;
       }
-
-      const decoded = decodeContactQrV3(qrData);
-      if (!decoded) {
-        if (props.onScan) {
-          try {
-            const p = props.onScan(qrData);
-            if (p && typeof (p as Promise<void>).catch === 'function') {
-              (p as Promise<void>).catch((err: unknown) => logger.warn('[QR] onScan handler error:', err));
-            }
-          } catch (err: unknown) { logger.warn('[QR] onScan handler error:', err); }
-          return;
-        }
-        setPhase({ status: 'error', message: 'Invalid contact QR code' });
-        return;
-      }
-
-      const alias = suggestAliasFromDeviceId(decoded.contact.deviceId);
-      logger.info('[QRScanner] Native scan decoded contact:', alias);
-
-      if (props.onScan) {
-        try {
-          const p = props.onScan(qrData);
-          if (p && typeof (p as Promise<void>).catch === 'function') {
-            (p as Promise<void>).catch((err: unknown) => logger.warn('[QR] onScan handler error:', err));
-          }
-        } catch (err: unknown) { logger.warn('[QR] onScan handler error:', err); }
-        return;
-      }
-
-      setAliasInput(alias);
-      setPhase({ status: 'prompt', alias, contact: decoded.contact });
-      setInitializing(false);
+      void showCard(text);
     };
 
     window.addEventListener('dsm-event', handleNativeScanResult);
     return () => window.removeEventListener('dsm-event', handleNativeScanResult);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [props.onScan]);
+  }, [showCard]);
 
   const onConfirmAdd = useCallback(async () => {
-    logger.info('[QRScanner] onConfirmAdd called, phase:', phase.status);
     if (phase.status !== 'prompt') return;
-
     if (addingContactRef.current) {
       logger.warn('[QRScanner] Already adding contact, ignoring tap');
       return;
     }
-
-    const alias = aliasInput.trim();
-    logger.info('[QRScanner] Adding contact with alias:', alias);
-    if (!alias) {
-      setPhase({ status: 'error', message: 'Enter a contact alias' });
-      return;
-    }
-
-    const contact = phase.contact;
     addingContactRef.current = true;
+    const alias = aliasInput.trim();
     setPhase({ status: 'adding', alias });
-
     try {
-      let ready = true;
-      try { ready = await servicesDsmClient.isReady(); } catch { ready = false; }
-      if (!ready) {
-        addingContactRef.current = false;
-        setPhase({ status: 'error', message: 'Wallet identity not initialized: create your wallet identity first to add contacts.' });
-        return;
-      }
-
-      logger.debug('[QRScanner] Contact from QR', {
-        deviceId: contact.deviceId,
-        genesisHash: contact.genesisHash,
-        signingPublicKeyLen: contact.signingPublicKeyLength || 0,
-      });
-
-      if (!(contact.deviceId instanceof Uint8Array) || contact.deviceId.length !== 32) {
-        logger.error('[QRScanner] Invalid deviceId: expected 32 bytes, got', contact.deviceId?.length);
-        addingContactRef.current = false;
-        setPhase({ status: 'error', message: 'Invalid device ID in QR code' });
-        return;
-      }
-      if (!(contact.genesisHash instanceof Uint8Array) || contact.genesisHash.length !== 32) {
-        logger.error('[QRScanner] Invalid genesisHash: expected 32 bytes, got', contact.genesisHash?.length);
-        addingContactRef.current = false;
-        setPhase({ status: 'error', message: 'Invalid genesis hash in QR code' });
-        return;
-      }
-
-      if (!contact.signingPublicKeyB32) {
-        logger.error('[QRScanner] Missing signingPublicKeyB32 in QR payload');
-        addingContactRef.current = false;
-        setPhase({ status: 'error', message: 'Missing signing public key in QR code' });
-        return;
-      }
-      try {
-        parseBinary64(contact.signingPublicKeyB32, 'signingPublicKey');
-      } catch (e: any) {
-        logger.error('[QRScanner] Invalid signing public key:', e?.message || e);
-        addingContactRef.current = false;
-        setPhase({ status: 'error', message: 'Invalid signing public key in QR code' });
-        return;
-      }
-
-      logger.info('[QRScanner] Calling ContactsContext.addContact with alias:', alias);
-      const success = await addContact(
-        alias,
-        contact.genesisHash,
-        contact.deviceId,
-        contact.signingPublicKeyB32
-      );
-
-      if (success) {
-        logger.info('[QRScanner] Contact added successfully with alias:', alias);
-        addingContactRef.current = false;
-        setPhase({ status: 'success', alias });
-
-        await nextFrame();
-        await nextFrame();
-
-        try {
-          const bridge = (window as { DsmBridge?: Record<string, unknown> }).DsmBridge;
-          if (bridge) {
-            logger.info('[QRScanner] Contact added; Rust pairing orchestrator will handle BLE pairing automatically.');
-          }
-        } catch (bleErr) {
-          logger.warn('[QRScanner] BLE pairing initiation failed (non-fatal):', bleErr);
-        }
-      } else {
-        logger.error('[QRScanner] Contact add failed');
-        addingContactRef.current = false;
-        setPhase({ status: 'error', message: 'Failed to add contact' });
-      }
+      const result = await addContact(alias, phase.card);
+      setPhase(result.accepted
+        ? { status: 'success', alias: result.alias }
+        : { status: 'error', message: result.error });
     } catch (e) {
-      logger.error('[QRScanner] Exception in onConfirmAdd:', e);
-      logger.error('[QRScanner] Error stack:', (e as Error)?.stack);
+      logger.error('[QRScanner] addContact failed:', messageOf(e));
+      setPhase({ status: 'error', message: messageOf(e) });
+    } finally {
       addingContactRef.current = false;
-      const msg = e instanceof Error ? e.message : 'Failed to add contact';
-      if (/identity not initializ|identity not ready|identity not initialized|DSM bridge identity not ready|Identity not initialized/i.test(msg)) {
-        const bridge = (window as any)?.DsmBridge;
-        const hasIdent = bridge?.hasIdentityDirect?.() ?? false;
-        if (hasIdent) {
-          setPhase({ status: 'error', message: 'Wallet still initializing. Please wait a moment and try again.' });
-        } else {
-          setPhase({ status: 'error', message: 'Failed to add contact: Wallet identity not initialized. Create your wallet identity first before adding contacts.' });
-        }
-      } else {
-        setPhase({ status: 'error', message: msg });
-      }
     }
   }, [phase, aliasInput, addContact]);
 
@@ -335,30 +168,9 @@ export default function QRCodeScannerPanel(props: QRCodeScannerProps = {}): Reac
   const handleManualInput = useCallback(() => {
     const raw = pasteInput.trim();
     if (!raw) return;
-
-    // Route through same pipeline as native scan result
-    if (props.onScan) {
-      try {
-        const p = props.onScan(raw);
-        if (p && typeof (p as Promise<void>).catch === 'function') {
-          (p as Promise<void>).catch((err: unknown) => logger.warn('[QR] onScan handler error:', err));
-        }
-      } catch (err: unknown) { logger.warn('[QR] onScan handler error:', err); }
-      setPasteInput('');
-      return;
-    }
-
-    const decoded = decodeContactQrV3(raw);
-    if (!decoded) {
-      setPhase({ status: 'error', message: 'Invalid contact code — expected the full dsm:contact/v3 code or its Base32 payload.' });
-      return;
-    }
-
-    const alias = suggestAliasFromDeviceId(decoded.contact.deviceId);
-    setAliasInput(alias);
-    setPhase({ status: 'prompt', alias, contact: decoded.contact });
     setPasteInput('');
-  }, [pasteInput, props]);
+    void showCard(raw);
+  }, [pasteInput, showCard]);
 
   return (
     <div id={containerId}>
@@ -371,7 +183,15 @@ export default function QRCodeScannerPanel(props: QRCodeScannerProps = {}): Reac
             style={{ width: 48, height: 48, marginBottom: 12, imageRendering: 'pixelated' }}
           />
           <h3>Adding Contact</h3>
-          <div className="body">Saving &quot;{phase.alias}&quot; to your contacts...</div>
+          <div className="body">
+            {phase.alias ? <>Saving &quot;{phase.alias}&quot; to your contacts...</> : 'Saving the contact...'}
+          </div>
+        </div>
+      )}
+      {phase.status === 'reading' && (
+        <div className="center-state">
+          <h3>Reading Code</h3>
+          <div className="body">Reading the contact code...</div>
         </div>
       )}
       {(phase.status === 'idle' || phase.status === 'scanning') && (
@@ -409,12 +229,12 @@ export default function QRCodeScannerPanel(props: QRCodeScannerProps = {}): Reac
           ? 'Opening native camera…'
           : phase.status === 'scanning'
             ? 'Camera launched. If scanning fails, go back and enter the contact code here.'
-            : 'Enter the contact code shown under the QR, or use the camera.'}
+            : 'Enter the contact code shown with the QR, or use the camera.'}
       </div>
       <div className="alias-card" style={{ marginTop: 8 }}>
         <h3 style={{ margin: '0 0 8px' }}>Enter Contact Code</h3>
         <textarea
-          placeholder="dsm:contact/v3:... or the Base32 code shown under the QR"
+          placeholder="dsm:contact/v3:..."
           value={pasteInput}
           onChange={e => setPasteInput(e.target.value)}
           rows={4}
@@ -449,16 +269,16 @@ export default function QRCodeScannerPanel(props: QRCodeScannerProps = {}): Reac
             <div className="overlay-body">
               <div className="overlay-info-row">
                 <span style={{ fontSize: 9, fontFamily: "'Press Start 2P', monospace", color: 'var(--text)', textTransform: 'uppercase' }}>Device</span>
-                <span style={{ fontSize: 9, fontFamily: "'Martian Mono', monospace", color: 'var(--text-dark)', wordBreak: 'break-all', maxWidth: '60%', textAlign: 'right' }}>{bytesToDisplay(phase.contact.deviceId).slice(0, 16)}…</span>
+                <span style={{ fontSize: 9, fontFamily: "'Martian Mono', monospace", color: 'var(--text-dark)', wordBreak: 'break-all', maxWidth: '60%', textAlign: 'right' }}>{bytesToDisplay(phase.card.deviceId).slice(0, 16)}…</span>
               </div>
               <div className="overlay-info-row">
                 <span style={{ fontSize: 9, fontFamily: "'Press Start 2P', monospace", color: 'var(--text)', textTransform: 'uppercase' }}>Genesis</span>
-                <span style={{ fontSize: 9, fontFamily: "'Martian Mono', monospace", color: 'var(--text-dark)', wordBreak: 'break-all', maxWidth: '60%', textAlign: 'right' }}>{bytesToDisplay(phase.contact.genesisHash).slice(0, 16)}…</span>
+                <span style={{ fontSize: 9, fontFamily: "'Martian Mono', monospace", color: 'var(--text-dark)', wordBreak: 'break-all', maxWidth: '60%', textAlign: 'right' }}>{bytesToDisplay(phase.card.genesisHash).slice(0, 16)}…</span>
               </div>
               <div style={{ marginTop: 12, fontSize: 9, fontFamily: "'Press Start 2P', monospace", color: 'var(--text-dark)', textTransform: 'uppercase', marginBottom: 6 }}>Alias</div>
               <input
                 type="text"
-                placeholder="Choose an alias"
+                placeholder="Blank: named by its device"
                 value={aliasInput}
                 onChange={e => setAliasInput(e.target.value)}
                 style={{
