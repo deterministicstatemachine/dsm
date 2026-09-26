@@ -175,7 +175,7 @@ const ContactsTabScreen: React.FC<Props> = ({ eraTokenSrc = 'images/logos/era_to
   // Reactive BLE status: driven by actual BLE events, not timers.
   // scanning → found → connected → paired → idle
   useEffect(() => {
-    const hasUnpairedContacts = contacts.some(c => !c.bleAddress && c.deviceId);
+    const hasUnpairedContacts = contacts.some(c => !c.bleAddress);
     if (!hasUnpairedContacts) {
       // All contacts paired or none have deviceId — go idle (skip if already paired/idle)
       if (bleStatus !== 'idle') {
@@ -223,7 +223,7 @@ const ContactsTabScreen: React.FC<Props> = ({ eraTokenSrc = 'images/logos/era_to
   // new unpaired contacts are detected (avoids stop/start thrashing on every refresh).
   const prevUnpairedCountRef = useRef(0);
   useEffect(() => {
-    const unpairedCount = contacts.filter(c => !c.bleAddress && c.deviceId).length;
+    const unpairedCount = contacts.filter(c => !c.bleAddress).length;
     if (unpairedCount > 0 && unpairedCount > prevUnpairedCountRef.current) {
       if (CONTACTS_DEBUG) console.log(`[ContactsTab] ${unpairedCount} unpaired contacts detected, starting pairing orchestrator`);
       void startPairingAll().catch(e =>
@@ -484,7 +484,7 @@ const ContactsTabScreen: React.FC<Props> = ({ eraTokenSrc = 'images/logos/era_to
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 12, width: '100%' }}>
               {contacts.map((c, i) => (
-                <div key={c.id || c.alias || `contact-${i}`} style={{ width: '100%' }}>
+                <div key={c.id} style={{ width: '100%' }}>
                   <div
                     className={focusedIndex === i + 3 ? 'dpad-focus-ring' : undefined}
                     onClick={() => setSelected(selected === i ? null : i)}
@@ -538,27 +538,25 @@ const ContactsTabScreen: React.FC<Props> = ({ eraTokenSrc = 'images/logos/era_to
                       boxSizing: 'border-box',
                     }}>
                       <div style={{ marginBottom: 6, fontSize: 8, fontWeight: 'bold' }}>
-                        {c.bleAddress ? 'BLE PAIRED' : c.isVerified ? 'VERIFIED' : 'ONLINE'}
+                        {c.bleAddress ? 'BLE PAIRED' : c.isVerified ? 'VERIFIED' : 'NOT VERIFIED'}
                       </div>
                       <div style={{ display: 'grid', gap: 4 }}>
                         <div style={detailRowStyle}>
                           <span style={detailLabelStyle}>Device</span>
-                          <span>{c.deviceId ? c.deviceId : '—'}</span>
+                          <span>{c.deviceId}</span>
                         </div>
                         <div style={detailRowStyle}>
                           <span style={detailLabelStyle}>Genesis</span>
-                          <span>{c.genesisHash ? c.genesisHash : '—'}</span>
+                          <span>{c.genesisHash}</span>
                         </div>
                         <div style={detailRowStyle}>
                           <span style={detailLabelStyle}>Chain tip</span>
                           <span>{c.chainTip ? c.chainTip : '—'}</span>
                         </div>
-                        {c.publicKey && (
-                          <div style={detailRowStyle}>
-                            <span style={detailLabelStyle}>Pub Key</span>
-                            <span>{c.publicKey.length > 24 ? `${c.publicKey.slice(0, 12)}...${c.publicKey.slice(-10)}` : c.publicKey}</span>
-                          </div>
-                        )}
+                        <div style={detailRowStyle}>
+                          <span style={detailLabelStyle}>Pub Key</span>
+                          <span>{c.publicKey.length > 24 ? `${c.publicKey.slice(0, 12)}...${c.publicKey.slice(-10)}` : c.publicKey}</span>
+                        </div>
                         <div style={detailRowStyle}>
                           <span style={detailLabelStyle}>Verified</span>
                           <span>{c.isVerified ? 'YES' : 'NO'}</span>

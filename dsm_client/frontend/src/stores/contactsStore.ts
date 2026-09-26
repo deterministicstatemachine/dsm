@@ -5,6 +5,7 @@ import { useSyncExternalStore } from 'react';
 import { dsmClient } from '../services/dsmClient';
 import { parseBinary32, parseBinary64, bytesToDisplay } from '../contexts/contacts/utils';
 import type { Contact, ContactsState } from '../contexts/ContactsContext';
+import type { BilateralRelationshipDTO } from '../dsm/types';
 import logger from '../utils/logger';
 
 
@@ -77,48 +78,19 @@ class ContactsStore {
     this.emit();
   }
 
-  private mapContacts(list: any[]): Contact[] {
-    return list.map((contact: any) => {
-      // Strict proto field names — camelCase from @bufbuild/protobuf codegen.
-      // If snake_case fields appear, log an error: the bridge returned raw data.
-      if ('genesis_hash' in contact || 'device_id' in contact || 'ble_address' in contact) {
-        logger.error('[ContactsStore] snake_case fields detected — bridge returned raw data instead of protobuf');
-      }
-
-      const alias = String(contact.alias ?? 'Unknown');
-      const genesisRaw = contact.genesisHash;
-      const genesisHash = genesisRaw instanceof Uint8Array
-        ? bytesToDisplay(genesisRaw)
-        : String(genesisRaw ?? '');
-      const deviceRaw = contact.deviceId;
-      const deviceId = deviceRaw instanceof Uint8Array && deviceRaw.length > 0
-        ? bytesToDisplay(deviceRaw)
-        : (typeof deviceRaw === 'string' ? deviceRaw : '');
-      const id = alias ? `${genesisHash}:${alias}` : genesisHash;
-
-      const chainTipRaw = contact.chainTip?.v;
-      const chainTip = chainTipRaw instanceof Uint8Array && chainTipRaw.length > 0
-        ? bytesToDisplay(chainTipRaw)
-        : undefined;
-
+  private mapContacts(list: BilateralRelationshipDTO[]): Contact[] {
+    return list.map((c) => {
+      const deviceId = bytesToDisplay(c.deviceId);
       return {
-        id,
-        alias,
-        genesisHash,
-        deviceId: deviceId || undefined,
-        publicKey: (() => {
-          const signingKey = contact.signingPublicKey;
-          if (typeof signingKey === 'string' && signingKey.length > 0) return signingKey;
-          const rawKey = contact.publicKey;
-          if (rawKey instanceof Uint8Array && rawKey.length > 0) return bytesToDisplay(rawKey);
-          return undefined;
-        })(),
-        lastSeen: undefined,
-        isVerified: contact.genesisVerifiedOnline === true,
-        isFavorite: false,
-        notes: undefined,
-        bleAddress: contact.bleAddress || undefined,
-        chainTip,
+        // A contact is its device: the alias is a label and can change.
+        id: deviceId,
+        alias: c.alias,
+        genesisHash: bytesToDisplay(c.genesisHash),
+        deviceId,
+        publicKey: bytesToDisplay(c.publicKey),
+        isVerified: c.genesisVerifiedOnline,
+        bleAddress: c.bleAddress,
+        chainTip: c.chainTip ? bytesToDisplay(c.chainTip) : undefined,
       };
     });
   }
@@ -132,21 +104,10 @@ class ContactsStore {
       this.setState({ error: null });
 
       const data = await awaitWithFrameBudget(dsmClient.getContacts());
-      const list = Array.isArray((data as any)?.contacts) ? (data as any).contacts : [];
-      const mapped = this.mapContacts(list);
+      // Rust's list as it stands: an address Rust no longer holds is not kept.
+      const contacts = this.mapContacts(data.contacts);
 
       if (seq === this.refreshSeq) {
-        const previous = new Map(this.snapshot.contacts.map((contact) => [contact.id, contact]));
-        const contacts = mapped.map((contact) => {
-          if (!contact.bleAddress) {
-            const existing = previous.get(contact.id);
-            if (existing?.bleAddress) {
-              return { ...contact, bleAddress: existing.bleAddress };
-            }
-          }
-          return contact;
-        });
-
         this.setState({ contacts });
         this.hasLoadedOnce = true;
       }
@@ -221,67 +182,6 @@ class ContactsStore {
     } finally {
       this.setState({ isLoading: false });
     }
-  };
-
-  updateContact = async (id: string, updates: Partial<Contact>): Promise<boolean> => {
-    try {
-      this.setState({ isLoading: true, error: null });
-
-      const api = dsmClient as any;
-      if (typeof api.updateContactStrict !== 'function') {
-        throw new Error('updateContactStrict is not available on this build');
-      }
-
-      const result = await api.updateContactStrict({ id, ...updates });
-      if (!result?.success) {
-        throw new Error(result?.message || 'Failed to update contact');
-      }
-
-      await this.refreshContacts();
-      return true;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to update contact';
-      logger.error('ContactsStore: updateContact failed:', message);
-      this.setState({ error: message });
-      return false;
-    } finally {
-      this.setState({ isLoading: false });
-    }
-  };
-
-  deleteContact = async (id: string): Promise<boolean> => {
-    try {
-      this.setState({ isLoading: true, error: null });
-
-      const api = dsmClient as any;
-      if (typeof api.deleteContactStrict !== 'function') {
-        throw new Error('deleteContactStrict is not available on this build');
-      }
-
-      const result = await api.deleteContactStrict({ id });
-      if (!result?.success) {
-        throw new Error(result?.message || 'Failed to delete contact');
-      }
-
-      await this.refreshContacts();
-      return true;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to delete contact';
-      logger.error('ContactsStore: deleteContact failed:', message);
-      this.setState({ error: message });
-      return false;
-    } finally {
-      this.setState({ isLoading: false });
-    }
-  };
-
-  getContactByGenesisHash = (genesisHash: string): Contact | null => {
-    const target = String(genesisHash || '').trim().toLowerCase();
-    return this.snapshot.contacts.find((contact) => contact.genesisHash.toLowerCase() === target) || null;
-  };
-
-  getContactByAlias = (alias: string): Contact | null => {
-    return this.snapshot.contacts.find((contact) => contact.alias.toLowerCase() === alias.toLowerCase()) || null;
   };
 
   private emit(): void {

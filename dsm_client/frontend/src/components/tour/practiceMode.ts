@@ -60,7 +60,7 @@ function freshState(): PracticeState {
         alias: PRACTICE_CONTACT_ALIAS,
         deviceId: practiceId('PRACT1CEA11CE'),
         genesisHash: practiceId('PRACT1CEA11CEGENES1S'),
-        status: 'VERIFIED',
+        signingPublicKey: practiceId('PRACT1CEA11CEKEY'),
         genesisVerifiedOnline: true,
         sendReady: true,
         sendCheckState: 'ready',
@@ -194,7 +194,8 @@ function simulations(state: PracticeState, emit: (event: PracticeEvent) => void)
         alias: input.alias,
         genesisHash: typeof input.genesisHash === 'string' ? input.genesisHash : practiceId('PRACT1CEGENES1S'),
         deviceId: typeof input.deviceId === 'string' ? input.deviceId : practiceId('PRACT1CEDEV1CE'),
-        status: 'VERIFIED',
+        signingPublicKey: practiceId('PRACT1CEKEY'),
+        genesisVerifiedOnline: true,
         sendReady: true,
         sendCheckState: 'ready',
       });
