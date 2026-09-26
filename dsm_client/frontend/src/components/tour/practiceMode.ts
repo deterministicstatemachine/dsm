@@ -69,13 +69,18 @@ function freshState(): PracticeState {
     history: [
       {
         txId: 'practice-welcome',
+        txHash: practiceId('PRACT1CEWE1C0ME'),
+        txType: 'online',
         type: 'online',
         amount: BigInt(1000),
-        amountSigned: BigInt(1000),
-        recipient: 'you',
-        memo: 'Practice tokens for the tour',
+        displayAmount: '1000',
+        tokenId: 'ERA',
+        recipient: 'practice',
         status: 'confirmed',
-        txType: 'faucet',
+        fromDeviceId: practiceId('PRACT1CESENDER'),
+        toDeviceId: practiceId('PRACT1CEY0VDEV1CE'),
+        memo: 'Practice tokens for the tour',
+        receiptVerified: false,
       },
     ],
     sequence: 0,
@@ -115,20 +120,26 @@ function credit(state: PracticeState, tokenId: string, units: number): void {
   holding.displayAmount = holding.balance.toString();
 }
 
-function recordSend(state: PracticeState, to: string, amount: string | number | bigint, memo: string | undefined, mode: 'online' | 'offline'): string {
+function recordSend(state: PracticeState, to: string, tokenId: string, amount: string | number | bigint, memo: string | undefined, mode: 'online' | 'offline'): string {
   state.sequence += 1;
   const txId = `practice-${state.sequence}`;
   const units = wholeAmount(amount) ?? BigInt(0);
+  const contact = state.contacts.find((c) => c.alias === to || c.deviceId === to);
   state.history = [
     {
       txId,
+      txHash: practiceId(`PRACT1CETX${state.sequence}`),
+      txType: mode === 'offline' ? 'bilateral_offline' : 'online',
       type: mode,
-      amount: units,
-      amountSigned: -units,
-      recipient: to,
-      memo,
+      amount: -units,
+      displayAmount: `-${units.toString()}`,
+      tokenId,
+      recipient: contact?.alias ?? to,
       status: 'confirmed',
-      txType: 'transfer',
+      fromDeviceId: state.identity.deviceId,
+      toDeviceId: contact?.deviceId ?? practiceId('PRACT1CEPEER'),
+      memo,
+      receiptVerified: false,
     },
     ...state.history,
   ];
@@ -146,17 +157,19 @@ function simulations(state: PracticeState, emit: (event: PracticeEvent) => void)
     resolveBleAddressForContact: async () => undefined,
     sendOnlineTransferSmart: async (recipientAlias: string, scaledAmountStr: string | number | bigint, memo?: string, tokenId?: string) => {
       await pause(700);
-      const result = debit(state, tokenId || 'ERA', scaledAmountStr);
+      const token = tokenId || 'ERA';
+      const result = debit(state, token, scaledAmountStr);
       if (!result.ok) return { success: false, error: { message: result.message } };
-      recordSend(state, recipientAlias, scaledAmountStr, memo, 'online');
+      recordSend(state, recipientAlias, token, scaledAmountStr, memo, 'online');
       emit('sent');
       return { success: true, newBalance: result.balance };
     },
     sendOfflineTransfer: async (params: { tokenId: string; to: string; amount: number | bigint | string; memo?: string }) => {
       await pause(700);
-      const result = debit(state, params.tokenId || 'ERA', params.amount);
+      const token = params.tokenId || 'ERA';
+      const result = debit(state, token, params.amount);
       if (!result.ok) return { success: false, message: result.message };
-      const transactionId = recordSend(state, params.to, params.amount, params.memo, 'offline');
+      const transactionId = recordSend(state, params.to, token, params.amount, params.memo, 'offline');
       emit('sent');
       return { success: true, transactionId };
     },

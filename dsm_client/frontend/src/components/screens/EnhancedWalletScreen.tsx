@@ -162,7 +162,6 @@ const EnhancedWalletScreen: React.FC<EnhancedWalletScreenProps> = ({ btcLogoSrc,
         <OverviewTab
           balances={data.balances}
           transactions={data.transactions}
-          aliasLookup={data.aliasLookup}
           genesisB32={data.genesisB32}
           deviceB32={data.deviceB32}
           onSwitchToSend={switchToSend}
@@ -188,7 +187,6 @@ const EnhancedWalletScreen: React.FC<EnhancedWalletScreenProps> = ({ btcLogoSrc,
       {activeTab === 'history' && (
         <HistoryTab
           transactions={data.transactions}
-          aliasLookup={data.aliasLookup}
         />
       )}
 
