@@ -53,23 +53,6 @@ class WalletStore {
     this.emit();
   }
 
-  private balanceKey(entry: WalletBalance): string {
-    return String(entry.tokenId || entry.symbol || entry.tokenName || 'UNKNOWN');
-  }
-
-  private coerceBalance(value: unknown): bigint {
-    if (typeof value === 'bigint') return value;
-    if (typeof value === 'number') return BigInt(Number.isFinite(value) ? Math.trunc(value) : 0);
-    if (typeof value === 'string') {
-      try {
-        return BigInt(value);
-      } catch {
-        return 0n;
-      }
-    }
-    return 0n;
-  }
-
   private detectPositiveCredits(previous: WalletBalance[], next: WalletBalance[]): Array<{
     tokenId: string;
     delta: bigint;
@@ -77,12 +60,13 @@ class WalletStore {
   }> {
     const previousByToken = new Map<string, bigint>();
     previous.forEach((entry) => {
-      previousByToken.set(this.balanceKey(entry), this.coerceBalance(entry.balance));
+      previousByToken.set(entry.tokenId, entry.baseUnits);
     });
 
     return next.flatMap((entry) => {
-      const tokenId = this.balanceKey(entry);
-      const nextBalance = this.coerceBalance(entry.balance);
+      const tokenId = entry.tokenId;
+      const nextBalance = entry.baseUnits;
+      // A token first listed now was held at nothing before.
       const previousBalance = previousByToken.get(tokenId) ?? 0n;
       const delta = nextBalance - previousBalance;
       return delta > 0n ? [{ tokenId, delta, nextBalance }] : [];
@@ -127,20 +111,14 @@ class WalletStore {
       // Do not overwrite dBTC with the separate Bitcoin chain-wallet endpoint.
       let balances: WalletBalance[];
       if (eraResult.status === 'fulfilled') {
-        balances = (eraResult.value as any[])
-          .filter((entry: any) => String(entry.tokenId || '').toUpperCase() !== 'BTC_CHAIN')
-          .slice();
+        balances = eraResult.value.filter((entry) => entry.tokenId.toUpperCase() !== 'BTC_CHAIN');
       } else {
-        console.error('WalletStore: ERA balance fetch failed:', eraResult.reason);
+        console.error('WalletStore: balance fetch failed:', eraResult.reason);
         balances = this.snapshot.balances.slice();
       }
 
-      // Report partial failures as a non-blocking error
-      const failedParts: string[] = [];
-      if (eraResult.status === 'rejected') failedParts.push('ERA');
-      const error = failedParts.length > 0
-        ? `Failed to refresh ${failedParts.join(' & ')} balances`
-        : null;
+      // A failed refresh keeps the last list and says so.
+      const error = eraResult.status === 'rejected' ? 'Failed to refresh balances' : null;
 
       this.setState({ balances, error });
 

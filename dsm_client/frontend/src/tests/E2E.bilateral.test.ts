@@ -27,11 +27,13 @@ describe('E2E: Bilateral (Offline) Transaction Flow', () => {
       senderId: ALICE_DEVICE_ID,
       recipientId: BOB_DEVICE_ID,
       commitmentHash: new Uint8Array(32).fill(0xAA),
-      status: pb.OfflineBilateralTransactionStatus.OFFLINE_TX_PENDING,
-      metadata: {
-        token: 'ROOT',
-        amount: '100000000',
-      },
+      phase: pb.OfflineBilateralPhase.OFFLINE_PHASE_PREPARED,
+      direction: pb.OfflineBilateralDirection.OFFLINE_DIRECTION_OUTGOING,
+      amount: BigInt(100000000),
+      displayAmount: '1.00000000',
+      tokenId: 'ROOT',
+      counterpartyAlias: 'bob',
+      cancellable: true,
     });
 
     const bytes = offlineTx.toBinary();
@@ -42,9 +44,13 @@ describe('E2E: Bilateral (Offline) Transaction Flow', () => {
     expect(decoded.id).toBe('offline-tx-001');
     expect(decoded.senderId).toEqual(ALICE_DEVICE_ID);
     expect(decoded.recipientId).toEqual(BOB_DEVICE_ID);
-    expect(decoded.status).toBe(pb.OfflineBilateralTransactionStatus.OFFLINE_TX_PENDING);
-    expect(decoded.metadata['token']).toBe('ROOT');
-    expect(decoded.metadata['amount']).toBe('100000000');
+    expect(decoded.phase).toBe(pb.OfflineBilateralPhase.OFFLINE_PHASE_PREPARED);
+    expect(decoded.direction).toBe(pb.OfflineBilateralDirection.OFFLINE_DIRECTION_OUTGOING);
+    expect(decoded.amount).toBe(BigInt(100000000));
+    expect(decoded.displayAmount).toBe('1.00000000');
+    expect(decoded.tokenId).toBe('ROOT');
+    expect(decoded.counterpartyAlias).toBe('bob');
+    expect(decoded.cancellable).toBe(true);
   });
 
   test('BilateralAcceptRequest signature flow', () => {
@@ -99,25 +105,19 @@ describe('E2E: Bilateral (Offline) Transaction Flow', () => {
     expect(received.headers?.deviceId).toEqual(ALICE_DEVICE_ID);
   });
 
-  test('offline transaction status enumeration', () => {
-    // Verify status enum values
-    expect(pb.OfflineBilateralTransactionStatus.OFFLINE_TX_STATUS_UNSPECIFIED).toBe(0);
-    expect(pb.OfflineBilateralTransactionStatus.OFFLINE_TX_PENDING).toBe(1);
-    expect(pb.OfflineBilateralTransactionStatus.OFFLINE_TX_IN_PROGRESS).toBe(2);
-    expect(pb.OfflineBilateralTransactionStatus.OFFLINE_TX_CONFIRMED).toBe(3);
-    expect(pb.OfflineBilateralTransactionStatus.OFFLINE_TX_FAILED).toBe(4);
-    expect(pb.OfflineBilateralTransactionStatus.OFFLINE_TX_REJECTED).toBe(5);
-
-    // Status transitions in metadata
-    const tx = new pb.OfflineBilateralTransaction({
-      id: 'test-tx',
-      senderId: ALICE_DEVICE_ID,
-      recipientId: BOB_DEVICE_ID,
-      commitmentHash: new Uint8Array(32),
-      status: pb.OfflineBilateralTransactionStatus.OFFLINE_TX_CONFIRMED,
-    });
-
-    expect(tx.status).toBe(3); // CONFIRMED
+  test('offline bilateral phase and direction numbering', () => {
+    expect(pb.OfflineBilateralPhase.OFFLINE_PHASE_UNSPECIFIED).toBe(0);
+    expect(pb.OfflineBilateralPhase.OFFLINE_PHASE_PREPARING).toBe(1);
+    expect(pb.OfflineBilateralPhase.OFFLINE_PHASE_PREPARED).toBe(2);
+    expect(pb.OfflineBilateralPhase.OFFLINE_PHASE_PENDING_USER_ACTION).toBe(3);
+    expect(pb.OfflineBilateralPhase.OFFLINE_PHASE_ACCEPTED).toBe(4);
+    expect(pb.OfflineBilateralPhase.OFFLINE_PHASE_REJECTED).toBe(5);
+    expect(pb.OfflineBilateralPhase.OFFLINE_PHASE_CONFIRM_PENDING).toBe(6);
+    expect(pb.OfflineBilateralPhase.OFFLINE_PHASE_COMMITTED).toBe(7);
+    expect(pb.OfflineBilateralPhase.OFFLINE_PHASE_FAILED).toBe(8);
+    expect(pb.OfflineBilateralDirection.OFFLINE_DIRECTION_UNSPECIFIED).toBe(0);
+    expect(pb.OfflineBilateralDirection.OFFLINE_DIRECTION_INCOMING).toBe(1);
+    expect(pb.OfflineBilateralDirection.OFFLINE_DIRECTION_OUTGOING).toBe(2);
   });
 
   test('Bluetooth binary transport encoding (ISO-8859-1)', () => {
@@ -159,34 +159,30 @@ describe('E2E: Bilateral (Offline) Transaction Flow', () => {
       senderId: ALICE_DEVICE_ID,
       recipientId: BOB_DEVICE_ID,
       commitmentHash,
-      status: pb.OfflineBilateralTransactionStatus.OFFLINE_TX_PENDING,
     });
 
     expect(tx.commitmentHash).toHaveLength(32);
   });
 
-  test('bilateral transaction metadata encoding', () => {
-    // Metadata is string key-value map for transport/UI
+  test('fields the SDK leaves unset decode as absent, never as a value', () => {
+    // A device that does not know a token's decimals sends no display amount;
+    // a contact without an alias sends none. The UI must be able to tell.
     const tx = new pb.OfflineBilateralTransaction({
-      id: 'meta-test',
+      id: 'absent-test',
       senderId: ALICE_DEVICE_ID,
       recipientId: BOB_DEVICE_ID,
       commitmentHash: new Uint8Array(32),
-      status: pb.OfflineBilateralTransactionStatus.OFFLINE_TX_PENDING,
-      metadata: {
-        token_id: 'ROOT',
-        amount: '500000000', // 5 ERA
-        memo: 'Offline payment',
-        tick: '1234567890',
-      },
+      phase: pb.OfflineBilateralPhase.OFFLINE_PHASE_PENDING_USER_ACTION,
+      direction: pb.OfflineBilateralDirection.OFFLINE_DIRECTION_INCOMING,
+      amount: BigInt(500000000),
+      tokenId: 'ROOT',
     });
 
-    const bytes = tx.toBinary();
-    const decoded = pb.OfflineBilateralTransaction.fromBinary(bytes);
-    
-    expect(decoded.metadata['token_id']).toBe('ROOT');
-    expect(decoded.metadata['amount']).toBe('500000000');
-    expect(decoded.metadata['memo']).toBe('Offline payment');
-    expect(Object.keys(decoded.metadata)).toHaveLength(4);
+    const decoded = pb.OfflineBilateralTransaction.fromBinary(tx.toBinary());
+
+    expect(decoded.displayAmount).toBeUndefined();
+    expect(decoded.counterpartyAlias).toBeUndefined();
+    expect(decoded.senderBleAddress).toBeUndefined();
+    expect(decoded.cancellable).toBe(false);
   });
 });

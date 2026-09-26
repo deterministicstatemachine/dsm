@@ -288,14 +288,12 @@ describe('policies.ts', () => {
   describe('publishTokenPolicy', () => {
     test('returns error for empty base32', async () => {
       const result = await publishTokenPolicy({ policyBase32: '' });
-      expect(result.success).toBe(false);
-      expect(result.error).toMatch(/policy bytes required/);
+      expect(result).toEqual({ success: false, error: expect.stringMatching(/policy bytes required/) });
     });
 
     test('returns error for null input', async () => {
       const result = await publishTokenPolicy(null as any);
-      expect(result.success).toBe(false);
-      expect(result.error).toMatch(/policy bytes required/);
+      expect(result).toEqual({ success: false, error: expect.stringMatching(/policy bytes required/) });
     });
 
     test('successful publish returns id', async () => {
@@ -308,8 +306,34 @@ describe('policies.ts', () => {
       (publishTokenPolicyBytesBridge as jest.Mock).mockResolvedValue(anchor);
 
       const result = await publishTokenPolicy({ policyBase32: b32 });
+      expect(result).toEqual({ success: true, id: encodeBase32Crockford(anchor) });
+    });
+
+    test('publishes the pasted bytes exactly as pasted', async () => {
+      // An unknown field before policy_bytes: a decode and re-encode here would
+      // move it after the known field — other bytes, another anchor.
+      const policyBin = new pb.TokenPolicyV3({ policyBytes: new Uint8Array(16).fill(7) as any }).toBinary();
+      const pasted = new Uint8Array([0x78, 0x01, ...policyBin]); // field 15, varint 1
+      const { encodeBase32Crockford: enc } = await import('../../utils/textId');
+      (publishTokenPolicyBytesBridge as jest.Mock).mockResolvedValue(new Uint8Array(32).fill(0x22));
+
+      const result = await publishTokenPolicy({ policyBase32: enc(pasted) });
+
       expect(result.success).toBe(true);
-      expect(result.id).toBe(encodeBase32Crockford(anchor));
+      expect(Array.from((publishTokenPolicyBytesBridge as jest.Mock).mock.calls.at(-1)[0] as Uint8Array)).toEqual(
+        Array.from(pasted),
+      );
+    });
+
+    test("bytes that are not a policy are Rust's to refuse, in its words", async () => {
+      const { encodeBase32Crockford: enc } = await import('../../utils/textId');
+      (publishTokenPolicyBytesBridge as jest.Mock).mockRejectedValue(
+        new Error('tokens.publishPolicy: not a token policy: policy proto does not decode'),
+      );
+
+      const result = await publishTokenPolicy({ policyBase32: enc(new Uint8Array([0xff, 0xff])) });
+
+      expect(result).toEqual({ success: false, error: expect.stringMatching(/not a token policy/) });
     });
 
     test('returns error when bridge publish fails', async () => {
@@ -321,8 +345,7 @@ describe('policies.ts', () => {
       (publishTokenPolicyBytesBridge as jest.Mock).mockRejectedValue(new Error('publish boom'));
 
       const result = await publishTokenPolicy({ policyBase32: b32 });
-      expect(result.success).toBe(false);
-      expect(result.error).toMatch(/publish boom/);
+      expect(result).toEqual({ success: false, error: expect.stringMatching(/publish boom/) });
     });
   });
 });

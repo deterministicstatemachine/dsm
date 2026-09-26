@@ -12,56 +12,50 @@ import { decodeFramedEnvelopeV3 } from './decoding';
 import { mapTransactions } from '../domain/mappers';
 import logger from '../utils/logger';
 
-export async function getAllBalances(): Promise<TokenBalanceView[]> {
-  try {
-    const responseBytes = await getAllBalancesStrictBridge();
-    const env = decodeFramedEnvelopeV3(responseBytes);
-    if (env.payload.case === 'error') {
-      const err = env.payload.value;
-      throw new Error(`DSM native error: code=${err.code} msg=${err.message}`);
-    }
-    if (env.payload.case !== 'balancesListResponse') {
-      throw new Error(`Unexpected payload case for balances: ${env.payload.case}`);
-    }
-    const balancesResponse = env.payload.value;
+/** A string field Rust leaves empty when it names nothing, carried as absent. */
+function named(value: string): string | undefined {
+  return value.length > 0 ? value : undefined;
+}
 
-    const out = (balancesResponse.balances ?? []).map((b: any) => ({
-      tokenId: b.tokenId || 'ERA',
-      ticker: b.symbol || b.tokenId || 'ERA',
+export async function getAllBalances(): Promise<TokenBalanceView[]> {
+  const responseBytes = await getAllBalancesStrictBridge();
+  const env = decodeFramedEnvelopeV3(responseBytes);
+  if (env.payload.case === 'error') {
+    const err = env.payload.value;
+    throw new Error(`DSM native error: code=${err.code} msg=${err.message}`);
+  }
+  if (env.payload.case !== 'balancesListResponse') {
+    throw new Error(`Unexpected payload case for balances: ${env.payload.case}`);
+  }
+  return env.payload.value.balances.map((b: pb.BalanceGetResponse) => {
+    for (const [field, value] of [
+      ['token_id', b.tokenId],
+      ['symbol', b.symbol],
+      ['token_name', b.tokenName],
+      ['display_amount', b.displayAmount],
+    ] as const) {
+      if (value.length === 0) {
+        throw new Error(`STRICT: balance.list answered a row for ${b.tokenId || 'no token'} without its ${field}`);
+      }
+    }
+    return {
+      tokenId: b.tokenId,
+      symbol: b.symbol,
+      tokenName: b.tokenName,
+      baseUnits: b.available,
+      decimals: b.decimals,
       // Rust's rendered display form. This layer never computes it.
-      displayAmount: String(b.displayAmount ?? ''),
+      displayAmount: b.displayAmount,
+      canonicalTokenId: named(b.canonicalTokenId),
       // The token's CPTA anchor, rendered by Rust. Carried, never derived: a
       // second Base32 encoder pads the wrong group and yields an anchor that
       // resolves to nothing.
-      canonicalTokenId: String(b.canonicalTokenId ?? ''),
-      policyAnchorB32: String(b.policyAnchorB32 ?? ''),
-      anchorFingerprint: String(b.anchorFingerprint ?? ''),
+      policyAnchorB32: named(b.policyAnchorB32),
+      anchorFingerprint: named(b.anchorFingerprint),
       // The token policy's icon field, carried from Rust. The wallet draws the coin from it.
-      iconUrl: String(b.iconUrl ?? ''),
-      balance: (b.available ?? 0).toString(),
-      baseUnits: typeof b.available === 'bigint' ? b.available : BigInt(b.available || 0),
-      decimals: typeof b.decimals === 'number' ? b.decimals : 0,
-      symbol: b.symbol || b.tokenId || 'ERA',
-      tokenName: b.tokenName || b.symbol || b.tokenId || 'ERA',
-    }));
-    return out;
-  } catch (e) {
-    logger.warn('[DSM] getAllBalances failed:', e);
-    throw e;
-  }
-}
-
-export async function getWalletBalance(): Promise<string> {
-  try {
-    const balances = await getAllBalances();
-    if (balances.length > 0) {
-      return balances[0].balance;
-    }
-    return "0";
-  } catch (e) {
-    logger.warn('getWalletBalance failed:', e);
-    throw e;
-  }
+      iconUrl: named(b.iconUrl),
+    };
+  });
 }
 
 export async function getWalletHistory(): Promise<WalletHistory> {
@@ -160,24 +154,3 @@ export async function listB0xMessages(): Promise<any[]> {
   }));
 }
 
-export async function getTokens(): Promise<any[]> {
-  const balances = await getAllBalances();
-  return balances.map(balance => ({
-    tokenId: balance.tokenId,
-    balance: balance.balance,
-    decimals: balance.decimals,
-    symbol: balance.symbol || balance.tokenId || 'ERA',
-  }));
-}
-
-export async function getToken(tokenId: string): Promise<any> {
-  const balances = await getAllBalances();
-  const balance = balances.find(b => b.tokenId === tokenId);
-  if (!balance) return null;
-  return {
-    tokenId: balance.tokenId,
-    balance: balance.balance,
-    decimals: balance.decimals,
-    symbol: balance.symbol || balance.tokenId || 'ERA',
-  };
-}

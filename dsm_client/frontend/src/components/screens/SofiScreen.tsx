@@ -51,8 +51,8 @@ export default function SofiScreen(): React.JSX.Element {
       try {
         setStatus(await f());
         await refreshBalances();
-      } catch (e: any) {
-        setStatus(`${what} failed: ${e?.message ?? String(e)}`);
+      } catch (e: unknown) {
+        setStatus(`${what} failed: ${e instanceof Error ? e.message : String(e)}`);
       } finally {
         setBusy(false);
       }

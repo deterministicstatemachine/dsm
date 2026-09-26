@@ -64,9 +64,11 @@ enum AttestorType {
 // ============================== TRANSACTION TYPES =============================
 enum TransactionType {
   TX_TYPE_UNSPECIFIED      = 0;
-  TX_TYPE_FAUCET           = 1; // Faucet claim
+  // 1 was a faucet claim and 3 a recovered offline transfer: no history row
+  // of either kind is written.
+  reserved 1, 3;
+  reserved "TX_TYPE_FAUCET", "TX_TYPE_BILATERAL_OFFLINE_RECOVERED";
   TX_TYPE_BILATERAL_OFFLINE = 2; // Offline bilateral transfer
-  TX_TYPE_BILATERAL_OFFLINE_RECOVERED = 3; // Recovered offline bilateral
   TX_TYPE_ONLINE           = 4; // Online transfer
   TX_TYPE_DBTC_MINT        = 5; // BTC→dBTC deposit (mint)
   TX_TYPE_DBTC_BURN        = 6; // dBTC→BTC withdrawal (burn)
@@ -1726,14 +1728,23 @@ message BilateralTransferRequest {
   Hash32 expected_local_state_hash   = 7;
 }
 
-// UI-friendly offline bilateral summary (transport-only; not hashed).
-enum OfflineBilateralTransactionStatus {
-  OFFLINE_TX_STATUS_UNSPECIFIED = 0;
-  OFFLINE_TX_PENDING = 1;
-  OFFLINE_TX_IN_PROGRESS = 2;
-  OFFLINE_TX_CONFIRMED = 3;
-  OFFLINE_TX_FAILED = 4;
-  OFFLINE_TX_REJECTED = 5;
+// One bilateral step this device holds a session for, as the SDK reads it from
+// its own session store (transport/UI only; not hashed).
+enum OfflineBilateralPhase {
+  OFFLINE_PHASE_UNSPECIFIED = 0;
+  OFFLINE_PHASE_PREPARING = 1;
+  OFFLINE_PHASE_PREPARED = 2;
+  OFFLINE_PHASE_PENDING_USER_ACTION = 3;
+  OFFLINE_PHASE_ACCEPTED = 4;
+  OFFLINE_PHASE_REJECTED = 5;
+  OFFLINE_PHASE_CONFIRM_PENDING = 6;
+  OFFLINE_PHASE_COMMITTED = 7;
+  OFFLINE_PHASE_FAILED = 8;
+}
+enum OfflineBilateralDirection {
+  OFFLINE_DIRECTION_UNSPECIFIED = 0;
+  OFFLINE_DIRECTION_INCOMING = 1;
+  OFFLINE_DIRECTION_OUTGOING = 2;
 }
 message OfflineBilateralTransaction {
   string id = 1;
@@ -1743,8 +1754,25 @@ message OfflineBilateralTransaction {
   // 5, 6 carried state hashes the SDK never had and filled with zeros.
   reserved 5, 6;
   reserved "sender_state_hash", "recipient_state_hash";
-  OfflineBilateralTransactionStatus status = 7;
-  map<string,string> metadata = 8; // transport/UI only
+  // 7 folded four phases into one status; 8 was a string map whose keys the
+  // writer and the readers spelled differently, so every reader fell back to
+  // defaults it made up. The typed fields below replace both.
+  reserved 7, 8;
+  reserved "status", "metadata";
+  OfflineBilateralPhase phase = 9;
+  OfflineBilateralDirection direction = 10;
+  // The transfer's amount in base units, as its operation states it.
+  uint64 amount = 11;
+  // Rendered by the SDK from the token's decimals; absent when this device
+  // does not know them, and then only the base-unit amount is known.
+  optional string display_amount = 12;
+  string token_id = 13;
+  // The counterparty's contact alias, when the contact has one.
+  optional string counterparty_alias = 14;
+  optional string sender_ble_address = 15;
+  // Whether this device may cancel the step now: the rule the SDK's cancel
+  // enforces, stated where the UI reads it.
+  bool cancellable = 16;
 }
 message OfflineBilateralPendingListResponse {
   repeated OfflineBilateralTransaction transactions = 1;

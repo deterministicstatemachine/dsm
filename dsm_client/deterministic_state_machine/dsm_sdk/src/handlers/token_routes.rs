@@ -1460,6 +1460,11 @@ impl AppRouterImpl {
                 if body.is_empty() {
                     return err("tokens.publishPolicy: empty body".into());
                 }
+                // Only a policy Core's one parser accepts is published: the
+                // network holds it under the anchor devices adopt a token by.
+                if let Err(e) = dsm::economic::token_policy::parse_token_policy(body) {
+                    return err(format!("tokens.publishPolicy: not a token policy: {e}"));
+                }
 
                 // The anchor is the content hash, always. Publication is
                 // best-effort mirroring and can never change it.
@@ -1898,6 +1903,73 @@ mod tests {
             ..fungible_fixture()
         };
         assert!(build_policy_v3_bytes(&too_many).is_err());
+    }
+
+    /// Only bytes Core's one parser accepts as a token policy are published;
+    /// anything else is refused before it is kept or sent anywhere.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn bytes_that_are_not_a_token_policy_are_not_published() {
+        use crate::bridge::{AppInvoke, AppRouter};
+        let device = crate::test_support::one_device::Device::start(0x77).await;
+        let anchor_of = |body: &[u8]| {
+            dsm::crypto::blake3::domain_hash_bytes(dsm::common::domain_tags::TAG_DSM_POLICY, body)
+        };
+        let publish = |body: Vec<u8>| {
+            device.router.invoke(AppInvoke {
+                method: "tokens.publishPolicy".to_string(),
+                args: body,
+            })
+        };
+
+        let not_a_policy = b"not a policy".to_vec();
+        let refused = publish(not_a_policy.clone()).await;
+        assert!(!refused.success);
+        assert!(
+            refused
+                .error_message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("not a token policy"),
+            "{:?}",
+            refused.error_message
+        );
+        let anchor = anchor_of(&not_a_policy);
+        assert!(device
+            .router
+            .policy_cache
+            .lock()
+            .await
+            .get(&anchor)
+            .is_none());
+        assert!(
+            crate::storage::client_db::token_registry::load_policy_verified(&anchor)
+                .expect("the policy table")
+                .is_none()
+        );
+
+        // A policy Core accepts passes the check: it is kept, whatever the
+        // network answers.
+        let policy = v3_policy(&fungible_fixture());
+        let answer = publish(policy.clone()).await;
+        assert!(
+            !answer
+                .error_message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("not a token policy"),
+            "{:?}",
+            answer.error_message
+        );
+        assert_eq!(
+            device
+                .router
+                .policy_cache
+                .lock()
+                .await
+                .get(&anchor_of(&policy)),
+            Some(&policy)
+        );
     }
 
     #[test]

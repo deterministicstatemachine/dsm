@@ -69,10 +69,6 @@ jest.mock('../hooks/useGenesisFlow', () => ({
   useGenesisFlow: () => ({ handleGenerateGenesis: jest.fn() }),
 }));
 
-jest.mock('../services/pendingBilateralSync', () => ({
-  installPendingBilateralSync: () => () => undefined,
-}));
-
 jest.mock('../services/lock/lockService', () => ({
   getLockPrefs: jest.fn().mockResolvedValue({ enabled: false, promptDismissed: true, lockOnPause: true }),
 }));

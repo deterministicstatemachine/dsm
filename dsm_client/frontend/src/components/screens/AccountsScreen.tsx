@@ -13,14 +13,16 @@ import TokenIdentityPanel from '../TokenIdentityPanel';
 import { burnToken, addTokenByAnchor, forgetToken } from '../../dsm/policies';
 import { TokenCoin } from '../TokenCoin';
 
-type TokenSymbol = 'ERA' | string;
 type Tab = 'tokens' | 'faucet';
 
 export interface TokenBalance {
   tokenId: string;
-  balance: string;        // human-readable (already scaled by backend)
-  symbol: TokenSymbol;
-  lastUpdated?: number;   // optional, backend-provided; not used for logic
+  /** Display form, rendered by Rust from the token's decimals. */
+  balance: string;
+  /** The same balance in base units, as Rust reported it. */
+  baseUnits: bigint;
+  decimals: number;
+  symbol: string;
   /** The token's canonical id — `tokenId` here is the ticker, not an identity. */
   canonicalTokenId?: string;
   /** CPTA policy anchor, Base32 Crockford, rendered by Rust. */
@@ -38,17 +40,15 @@ interface CptaInfo {
   anchor: string;
   maxSupply: string;
   supplyLabel: string;
-  decimals: number;
 }
 
 const CPTA_INFO: Record<string, CptaInfo> = {
   ERA: {
     cptaType: 'DJTE EMISSION TOKEN',
     anchorId: 'PROTOCOL-DEFINED',
-    anchor: 'BLAKE3("DSM/cpta\\0" || djte_emission_genesis)\nDeterministic Join-Triggered Emission. ERA has an 80 billion total supply and is presented with 2 decimal places.',
+    anchor: 'BLAKE3("DSM/cpta\\0" || djte_emission_genesis)\nDeterministic Join-Triggered Emission. ERA has an 80 billion total supply.',
     maxSupply: '80,000,000,000',
     supplyLabel: 'Total Supply',
-    decimals: 2,
   },
   DBTC: {
     cptaType: 'BITCOIN TAP TOKEN',
@@ -56,7 +56,6 @@ const CPTA_INFO: Record<string, CptaInfo> = {
     anchor: 'BLAKE3("DSM/cpta\\0" || bitcoin_tap_genesis)\nMint/burn BTC tap asset. dBTC tracks the net BTC tapped into DSM; there is no fixed protocol cap. Fractional exits and possession transfers stay supported.',
     maxSupply: 'Variable \u2014 net BTC tapped into DSM',
     supplyLabel: 'Supply Model',
-    decimals: 8,
   },
 };
 
@@ -87,8 +86,8 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
   const faucetEnabled = !!isInitialized || !!(window as any).DsmBridge;
 
   // Token creation and supply control. ERA and dBTC are protocol-defined, so
-  // they are described by CPTA_INFO and are not user-mintable; anything else in
-  // this list was created by this device and carries its own policy.
+  // they are described by CPTA_INFO and offer no supply controls; anything else
+  // in this list was created or adopted by this device and carries its own policy.
   const [creating, setCreating] = useState(false);
   /// Adding a token created elsewhere, by its CPTA anchor. A device cannot
   /// hold a token whose policy it does not have, so this is the step between
@@ -107,7 +106,7 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
   const isProtocolToken = useCallback(
     (b: TokenBalance) =>
       Boolean(
-        CPTA_INFO[(b.tokenId || '').toUpperCase()] || CPTA_INFO[(b.symbol || '').toUpperCase()],
+        CPTA_INFO[b.tokenId.toUpperCase()] || CPTA_INFO[b.symbol.toUpperCase()],
       ),
     [],
   );
@@ -120,10 +119,9 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
     setSuccessMsg(null);
     try {
       const data = await dsmClient.getAllBalances();
-      const raw = Array.isArray(data) ? data : Array.isArray((data as any)?.balances) ? (data as any).balances : [];
-      const list: TokenBalance[] = (raw as any[]).map((b: any) => ({
-        tokenId: String(b.tokenId || ''),
-        symbol: String(b.symbol || b.tokenName || b.tokenId || ''),
+      const list: TokenBalance[] = data.map((b) => ({
+        tokenId: b.tokenId,
+        symbol: b.symbol,
         // Rust renders the display amount; this screen shows it.
         //
         // Converting base units here would be a SECOND implementation of the
@@ -131,12 +129,14 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
         // a token holding 100,000 base units at 2 decimals came to be created
         // as 1,000 and displayed as 100000. Amount conversion has one owner, in
         // Rust, in both directions.
-        balance: String(b.displayAmount ?? b.balance ?? '0'),
+        balance: b.displayAmount,
+        baseUnits: b.baseUnits,
+        decimals: b.decimals,
         // The anchor a peer needs to adopt this token, carried from Rust.
-        canonicalTokenId: String(b.canonicalTokenId ?? ''),
-        policyAnchorB32: String(b.policyAnchorB32 ?? ''),
-        anchorFingerprint: String(b.anchorFingerprint ?? ''),
-        iconUrl: String(b.iconUrl ?? ''),
+        canonicalTokenId: b.canonicalTokenId,
+        policyAnchorB32: b.policyAnchorB32,
+        anchorFingerprint: b.anchorFingerprint,
+        iconUrl: b.iconUrl,
       }));
       setBalances(list);
       return list;
@@ -164,7 +164,7 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
   /// refuses outright while any balance is held. The token can be adopted
   /// again from its anchor, so this is reversible while online.
   const handleForget = useCallback(async (b: TokenBalance) => {
-    const label = b.symbol || b.tokenId;
+    const label = b.symbol;
     if (!window.confirm(
       `Forget ${label}?\n\nThis removes the token from this device so its ticker ` +
       `can be used by another token. Your balance is not affected, and you can ` +
@@ -594,14 +594,14 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
               ) : (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 0, width: '100%' }}>
                   {balances.map((balance, bIdx) => {
-                    const sym = (balance.symbol || balance.tokenId || '').toLowerCase();
+                    const sym = balance.symbol.toLowerCase();
                     const isBtc = sym.includes('btc') || sym.includes('dbtc');
                     const logoSrc = isBtc ? btcLogoSrc : eraTokenSrc;
                     const logoAlt = isBtc ? 'BTC' : 'ERA';
                     const isFocused = focusedIndex === 2 + createOffset + bIdx;
                     const isExpanded = expandedToken === balance.tokenId;
-                    const cpta = CPTA_INFO[(balance.tokenId || '').toUpperCase()] || CPTA_INFO[(balance.symbol || '').toUpperCase()];
-                    const isZero = !balance.balance || balance.balance === '0' || balance.balance === '0.00000000';
+                    const cpta = CPTA_INFO[balance.tokenId.toUpperCase()] || CPTA_INFO[balance.symbol.toUpperCase()];
+                    const isZero = balance.baseUnits === 0n;
                     return (
                     <div
                       key={balance.tokenId}
@@ -650,12 +650,12 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
                           ) : (
                             <TokenCoin
                               iconUrl={balance.iconUrl}
-                              ticker={balance.symbol || balance.tokenId}
+                              ticker={balance.symbol}
                               className="era-gif small"
                               fallbackSrc={eraTokenSrc}
                             />
                           )}
-                          {balance.symbol || balance.tokenId}
+                          {balance.symbol}
                         </span>
                         <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                           <span style={{
@@ -666,7 +666,7 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
                             fontVariantNumeric: 'tabular-nums',
                             whiteSpace: 'nowrap',
                           }}>
-                            {String(balance.balance ?? '0')} {balance.symbol || ''}
+                            {balance.balance} {balance.symbol}
                           </span>
                           <span style={{ fontSize: 10, opacity: 0.5, color: 'var(--text-dark)' }}>
                             {isExpanded ? '\u25B2' : '\u25BC'}
@@ -687,9 +687,10 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
                             CPTA Information
                           </div>
                           {([
-                            ['Your Balance', `${balance.balance ?? '0'} ${balance.symbol || ''}`],
+                            ['Your Balance', `${balance.balance} ${balance.symbol}`],
                             ['CPTA Type', cpta.cptaType],
-                            ['Decimals', String(cpta.decimals)],
+                            // As Rust reports them for this token.
+                            ['Decimals', String(balance.decimals)],
                             [cpta.supplyLabel, cpta.maxSupply],
                             ['Anchor ID', cpta.anchorId],
                           ] as [string, string][]).map(([label, value]) => (
@@ -745,7 +746,7 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
                         <TokenIdentityPanel
                           tokenId={balance.tokenId}
                           canonicalTokenId={balance.canonicalTokenId}
-                          symbol={String(balance.symbol || '')}
+                          symbol={balance.symbol}
                           policyAnchorB32={balance.policyAnchorB32}
                           anchorFingerprint={balance.anchorFingerprint}
                           isProtocolToken={isProtocolToken(balance)}

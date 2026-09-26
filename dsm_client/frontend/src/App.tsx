@@ -21,7 +21,6 @@ import { useThemeAssets } from './hooks/useThemeAssets';
 import { useInputIntents } from './inputs/useInputIntents';
 import { StateBoyInputProvider } from './inputs/providers/StateBoyInputProvider';
 import type { AndroidBridgeV3 } from './dsm/bridgeTypes';
-import { installPendingBilateralSync } from './services/pendingBilateralSync';
 import logger from './utils/logger';
 import { appRuntimeStore, useAppRuntimeStore } from './runtime/appRuntimeStore';
 import { navigationStore, useNavigationStore } from './runtime/navigationStore';
@@ -57,12 +56,6 @@ export default function App() {
     themes,
     setThemeIndex,
   });
-
-  useEffect(() => {
-    if (runtime.appState !== 'wallet_ready') return;
-    const uninstall = installPendingBilateralSync();
-    return () => uninstall();
-  }, [runtime.appState]);
 
   const showIntro = useIntroGate(runtime.appState);
   const {

@@ -12,28 +12,20 @@ const MAX_OVERVIEW_BALANCES = 5;
 type Props = {
   balances: Balance[];
   transactions: DomainTransaction[];
-  aliasLookup: Map<string, string>;
   genesisB32: string;
   deviceB32: string;
   onSwitchToSend: () => void;
   onSwitchToHistory: () => void;
 };
 
-function OverviewTabInner({ balances, transactions, aliasLookup, genesisB32, deviceB32, onSwitchToSend, onSwitchToHistory }: Props): React.JSX.Element {
+function OverviewTabInner({ balances, transactions, genesisB32, deviceB32, onSwitchToSend, onSwitchToHistory }: Props): React.JSX.Element {
   const [showAllBalances, setShowAllBalances] = useState(false);
   const [expandedTxId, setExpandedTxId] = useState<string | null>(null);
 
-  const tokenOptions = useMemo(() => {
-    if (!Array.isArray(balances) || balances.length === 0) {
-      return [{ tokenId: 'ERA', symbol: 'ERA', balance: '0' } as Balance];
-    }
-    return balances;
-  }, [balances]);
-
   const visibleBalances = useMemo(() => {
-    if (showAllBalances) return tokenOptions;
-    return tokenOptions.slice(0, MAX_OVERVIEW_BALANCES);
-  }, [tokenOptions, showAllBalances]);
+    if (showAllBalances) return balances;
+    return balances.slice(0, MAX_OVERVIEW_BALANCES);
+  }, [balances, showAllBalances]);
 
   const recentTransactions = useMemo(() => transactions.slice(0, 5), [transactions]);
 
@@ -49,21 +41,20 @@ function OverviewTabInner({ balances, transactions, aliasLookup, genesisB32, dev
         </div>
         {balances.length === 0 ? (
           <>
-            <div className="sb-hero__value" style={{ textAlign: 'center' }}>0<span className="sb-hero__unit">ERA</span></div>
-            <div className="sb-hero__sub" style={{ textAlign: 'center' }}>Claim tokens from the faucet to get started</div>
+            <div className="sb-hero__sub" style={{ textAlign: 'center' }}>No balances yet. Claim tokens from the faucet to get started.</div>
           </>
         ) : (
           <>
             {visibleBalances.map((b) => (
               <div key={b.tokenId} className="sb-kv" style={{ padding: '6px 0' }}>
                 <span className="sb-kv__k" style={{ fontSize: 11, textTransform: 'none', letterSpacing: 0, display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                  <TokenMark ticker={b.symbol || b.tokenId} iconUrl={b.iconUrl} />
-                  {b.symbol || b.tokenId}
+                  <TokenMark ticker={b.symbol} iconUrl={b.iconUrl} />
+                  {b.symbol}
                 </span>
-                <span className="sb-kv__v" style={{ fontSize: 15, fontWeight: 700 }}>{String(b.balance ?? '0')}</span>
+                <span className="sb-kv__v" style={{ fontSize: 15, fontWeight: 700 }}>{b.balance}</span>
               </div>
             ))}
-            {tokenOptions.length > MAX_OVERVIEW_BALANCES && (
+            {balances.length > MAX_OVERVIEW_BALANCES && (
               <button
                 type="button"
                 onClick={() => setShowAllBalances((prev) => !prev)}
@@ -72,7 +63,7 @@ function OverviewTabInner({ balances, transactions, aliasLookup, genesisB32, dev
               >
                 {showAllBalances
                   ? 'Show Less'
-                  : `Show ${tokenOptions.length - MAX_OVERVIEW_BALANCES} More`}
+                  : `Show ${balances.length - MAX_OVERVIEW_BALANCES} More`}
               </button>
             )}
           </>
@@ -87,14 +78,12 @@ function OverviewTabInner({ balances, transactions, aliasLookup, genesisB32, dev
         <section className="recent-transactions" style={{ marginBottom: 8 }}>
           <h3 className="sb-section-title">Recent Activity</h3>
           <div className="transaction-items">
-            {recentTransactions.map((tx, idx) => (
+            {recentTransactions.map((tx) => (
               <TransactionItem
-                key={(tx.txId?.length ?? 0) > 0 ? tx.txId! : `tx:idx:${idx}`}
+                key={tx.txId}
                 tx={tx}
-                idx={idx}
                 expandedTxId={expandedTxId}
                 onToggle={handleToggleTx}
-                aliasLookup={aliasLookup}
               />
             ))}
           </div>

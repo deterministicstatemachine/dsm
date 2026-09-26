@@ -2026,19 +2026,16 @@ impl BilateralBleHandler {
             .get(&commitment_hash)
             .cloned()
             .ok_or_else(|| DsmError::invalid_operation("no proposal with that commitment"))?;
-        match session.phase {
-            BilateralPhase::Preparing | BilateralPhase::Prepared => {}
-            BilateralPhase::ConfirmPending => {
-                return Err(DsmError::invalid_operation(
+        if !crate::bluetooth::bilateral_session::is_cancellable_proposal_phase(&session.phase) {
+            return Err(match session.phase {
+                BilateralPhase::ConfirmPending => DsmError::invalid_operation(
                     "a confirmed step cannot be cancelled: its receiver may have committed; it \
                      completes, or is reconciled online",
-                ))
-            }
-            other => {
-                return Err(DsmError::invalid_operation(format!(
+                ),
+                other => DsmError::invalid_operation(format!(
                     "a step in {other:?} is not a proposal this device can cancel"
-                )))
-            }
+                )),
+            });
         }
         let rejector_signature = self
             .bilateral_tx_manager

@@ -89,10 +89,6 @@ jest.mock('../hooks/useLockState', () => ({
   useLockState: () => ({ unlock: jest.fn() }),
 }));
 
-jest.mock('../services/pendingBilateralSync', () => ({
-  installPendingBilateralSync: () => () => undefined,
-}));
-
 jest.mock('../utils/theme', () => ({
   getAvailableThemes: () => ['stateboy'],
 }));

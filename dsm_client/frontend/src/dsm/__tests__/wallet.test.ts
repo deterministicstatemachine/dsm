@@ -13,13 +13,10 @@ jest.mock('../../domain/mappers', () => ({
 import * as pb from '../../proto/dsm_app_pb';
 import {
   getAllBalances,
-  getWalletBalance,
   getWalletHistory,
   getTransactions,
   getInbox,
   listB0xMessages,
-  getTokens,
-  getToken,
 } from '../wallet';
 import {
   getAllBalancesStrictBridge,
@@ -48,8 +45,19 @@ describe('wallet.ts', () => {
           case: 'balancesListResponse',
           value: new pb.BalancesListResponse({
             balances: [
-              new pb.BalanceGetResponse({ tokenId: 'ERA', available: 1000n, symbol: 'ERA', decimals: 8, tokenName: 'Era Token' }),
-              new pb.BalanceGetResponse({ tokenId: 'dBTC', available: 50n, symbol: 'dBTC', decimals: 8 }),
+              new pb.BalanceGetResponse({ tokenId: 'ERA', available: 1000n, symbol: 'ERA', decimals: 0, tokenName: 'ERA', displayAmount: '1000' }),
+              new pb.BalanceGetResponse({
+                tokenId: 'RIGB',
+                available: 100000n,
+                symbol: 'RIGB',
+                decimals: 2,
+                tokenName: 'Rig Bucks',
+                displayAmount: '1000.00',
+                canonicalTokenId: 'CANON1CAL',
+                policyAnchorB32: 'ANCH0R',
+                anchorFingerprint: 'ANCH',
+                iconUrl: 'dsm:coin:v1:ABC',
+              }),
             ],
           }),
         },
@@ -57,25 +65,33 @@ describe('wallet.ts', () => {
       (getAllBalancesStrictBridge as jest.Mock).mockResolvedValue(frameEnvelope(env));
 
       const result = await getAllBalances();
-      expect(result).toHaveLength(2);
-      expect(result[0]).toEqual({
-        // Rendered by Rust; this layer only carries them. Absent in this
-        // hand-built fixture, so they arrive as empty strings.
-        displayAmount: '',
-        canonicalTokenId: '',
-        policyAnchorB32: '',
-        anchorFingerprint: '',
-        iconUrl: '',
-        tokenId: 'ERA',
-        ticker: 'ERA',
-        balance: '1000',
-        baseUnits: 1000n,
-        decimals: 8,
-        symbol: 'ERA',
-        tokenName: 'Era Token',
-      });
-      expect(result[1].tokenId).toBe('dBTC');
-      expect(result[1].baseUnits).toBe(50n);
+      expect(result).toEqual([
+        // Rust names no canonical id, anchor or icon for this row: absent, not empty.
+        {
+          tokenId: 'ERA',
+          symbol: 'ERA',
+          tokenName: 'ERA',
+          baseUnits: 1000n,
+          decimals: 0,
+          displayAmount: '1000',
+          canonicalTokenId: undefined,
+          policyAnchorB32: undefined,
+          anchorFingerprint: undefined,
+          iconUrl: undefined,
+        },
+        {
+          tokenId: 'RIGB',
+          symbol: 'RIGB',
+          tokenName: 'Rig Bucks',
+          baseUnits: 100000n,
+          decimals: 2,
+          displayAmount: '1000.00',
+          canonicalTokenId: 'CANON1CAL',
+          policyAnchorB32: 'ANCH0R',
+          anchorFingerprint: 'ANCH',
+          iconUrl: 'dsm:coin:v1:ABC',
+        },
+      ]);
     });
 
     test('returns empty array for empty balances list', async () => {
@@ -92,25 +108,20 @@ describe('wallet.ts', () => {
       expect(result).toEqual([]);
     });
 
-    test('handles missing optional fields with fallback defaults', async () => {
-      const env = new pb.Envelope({
-        version: 3,
-        payload: {
-          case: 'balancesListResponse',
-          value: new pb.BalancesListResponse({
-            balances: [new pb.BalanceGetResponse({})],
-          }),
-        },
-      });
-      (getAllBalancesStrictBridge as jest.Mock).mockResolvedValue(frameEnvelope(env));
+    test('a row without the fields Rust always writes is refused, never filled in', async () => {
+      const answer = (row: pb.BalanceGetResponse) =>
+        frameEnvelope(new pb.Envelope({
+          version: 3,
+          payload: { case: 'balancesListResponse', value: new pb.BalancesListResponse({ balances: [row] }) },
+        }));
 
-      const result = await getAllBalances();
-      expect(result).toHaveLength(1);
-      expect(result[0].tokenId).toBe('ERA');
-      expect(result[0].ticker).toBe('ERA');
-      expect(result[0].symbol).toBe('ERA');
-      expect(result[0].baseUnits).toBe(0n);
-      expect(result[0].decimals).toBe(0);
+      (getAllBalancesStrictBridge as jest.Mock).mockResolvedValue(answer(new pb.BalanceGetResponse({})));
+      await expect(getAllBalances()).rejects.toThrow(/STRICT.*without its token_id/);
+
+      (getAllBalancesStrictBridge as jest.Mock).mockResolvedValue(
+        answer(new pb.BalanceGetResponse({ tokenId: 'RIGB', available: 5n, symbol: 'RIGB', tokenName: 'RIGB' })),
+      );
+      await expect(getAllBalances()).rejects.toThrow(/STRICT.*RIGB without its display_amount/);
     });
 
     test('throws on error envelope', async () => {
@@ -136,38 +147,6 @@ describe('wallet.ts', () => {
     test('throws when bridge rejects', async () => {
       (getAllBalancesStrictBridge as jest.Mock).mockRejectedValue(new Error('bridge down'));
       await expect(getAllBalances()).rejects.toThrow('bridge down');
-    });
-  });
-
-  // ── getWalletBalance ───────────────────────────────────────────────
-
-  describe('getWalletBalance', () => {
-    test('returns first balance as string', async () => {
-      const env = new pb.Envelope({
-        version: 3,
-        payload: {
-          case: 'balancesListResponse',
-          value: new pb.BalancesListResponse({
-            balances: [new pb.BalanceGetResponse({ tokenId: 'ERA', available: 999n })],
-          }),
-        },
-      });
-      (getAllBalancesStrictBridge as jest.Mock).mockResolvedValue(frameEnvelope(env));
-
-      expect(await getWalletBalance()).toBe('999');
-    });
-
-    test('returns "0" when balances list is empty', async () => {
-      const env = new pb.Envelope({
-        version: 3,
-        payload: {
-          case: 'balancesListResponse',
-          value: new pb.BalancesListResponse({ balances: [] }),
-        },
-      });
-      (getAllBalancesStrictBridge as jest.Mock).mockResolvedValue(frameEnvelope(env));
-
-      expect(await getWalletBalance()).toBe('0');
     });
   });
 
@@ -365,59 +344,6 @@ describe('wallet.ts', () => {
         senderId: 'bob',
         isStaleRoute: true,
       });
-    });
-  });
-
-  // ── getTokens / getToken ───────────────────────────────────────────
-
-  describe('getTokens', () => {
-    test('maps balances to token list', async () => {
-      const env = new pb.Envelope({
-        version: 3,
-        payload: {
-          case: 'balancesListResponse',
-          value: new pb.BalancesListResponse({
-            balances: [
-              new pb.BalanceGetResponse({ tokenId: 'ERA', available: 100n, decimals: 8, symbol: 'ERA' }),
-            ],
-          }),
-        },
-      });
-      (getAllBalancesStrictBridge as jest.Mock).mockResolvedValue(frameEnvelope(env));
-
-      const tokens = await getTokens();
-      expect(tokens).toHaveLength(1);
-      expect(tokens[0]).toEqual({ tokenId: 'ERA', balance: '100', decimals: 8, symbol: 'ERA' });
-    });
-  });
-
-  describe('getToken', () => {
-    function setupBalances() {
-      const env = new pb.Envelope({
-        version: 3,
-        payload: {
-          case: 'balancesListResponse',
-          value: new pb.BalancesListResponse({
-            balances: [
-              new pb.BalanceGetResponse({ tokenId: 'ERA', available: 100n, decimals: 8, symbol: 'ERA' }),
-              new pb.BalanceGetResponse({ tokenId: 'dBTC', available: 50n, decimals: 8, symbol: 'dBTC' }),
-            ],
-          }),
-        },
-      });
-      (getAllBalancesStrictBridge as jest.Mock).mockResolvedValue(frameEnvelope(env));
-    }
-
-    test('returns matching token by id', async () => {
-      setupBalances();
-      const token = await getToken('dBTC');
-      expect(token).toEqual({ tokenId: 'dBTC', balance: '50', decimals: 8, symbol: 'dBTC' });
-    });
-
-    test('returns null for unknown token id', async () => {
-      setupBalances();
-      const token = await getToken('UNKNOWN');
-      expect(token).toBeNull();
     });
   });
 });

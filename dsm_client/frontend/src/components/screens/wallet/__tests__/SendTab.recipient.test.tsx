@@ -23,7 +23,7 @@ const NFF = { deviceId: 'RXDC8XQMZ7JHAB', alias: 'rxdc8xqm' } as any;
 const baseProps = (contacts: any[]) =>
   ({
     contacts,
-    balances: [{ tokenId: 'RIGB', symbol: 'RIGB', balance: '1000' }],
+    balances: [{ tokenId: 'RIGB', symbol: 'RIGB', balance: '1000', decimals: 0 }],
     onSend: jest.fn(),
     setError: jest.fn(),
   }) as any;

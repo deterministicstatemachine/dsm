@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
 // SPDX-License-Identifier: Apache-2.0
 
 // Domain-only helpers for bilateral flows. UI must not import protobuf types.
@@ -24,78 +23,96 @@ export function failureReasonMessage(code: number | undefined | null): string | 
   }
 }
 
-// DTO for pending bilateral transactions (UI-safe)
+/** A bilateral step's phase, as this device's session store holds it. */
+export type PendingBilateralPhase =
+  | 'preparing'
+  | 'prepared'
+  | 'pending_user_action'
+  | 'accepted'
+  | 'rejected'
+  | 'confirm_pending'
+  | 'committed'
+  | 'failed';
+
+/** A bilateral step this device holds a session for, each field as the SDK stated it. */
 export interface PendingBilateralDto {
   id: string;
-  type: 'incoming' | 'outgoing';
-  counterpartyAlias: string;
+  direction: 'incoming' | 'outgoing';
+  phase: PendingBilateralPhase;
+  /** The counterparty's contact alias, when the contact has one. */
+  counterpartyAlias?: string;
   counterpartyDeviceId: string;
-  amount: string;
+  /** Base units, as the transfer's operation states them. */
+  amount: bigint;
+  /** Rendered by the SDK; absent when this device does not know the token's decimals. */
+  displayAmount?: string;
   tokenId: string;
   commitmentHash: string;
-  status: 'pending' | 'verified' | 'accepted' | 'committed' | 'failed' | 'rejected';
   bleAddress?: string;
-  statusMessage?: string;
+  /** Whether this device may cancel the step now, as the SDK decides it. */
+  cancellable: boolean;
 }
 
-// Decode protobuf OfflineBilateralPendingListResponse bytes into DTOs.
-// This keeps protobuf parsing out of React components.
+// Decode the SDK's framed answer to `bilateral.pending_list` into DTOs.
+// This keeps protobuf parsing out of React components. Any other answer is an
+// error for the caller to show, and a row the SDK did not fully state is refused.
 export async function decodeOfflinePendingList(bytes: Uint8Array): Promise<PendingBilateralDto[]> {
   const pb = await import('../proto/dsm_app_pb');
   const { encodeBase32Crockford } = await import('../utils/textId');
   const { decodeFramedEnvelopeV3 } = await import('../dsm/decoding');
 
-  let items: Array<InstanceType<typeof pb.OfflineBilateralTransaction>> = [] as any;
-  try {
-    const env = decodeFramedEnvelopeV3(bytes);
-    if (env.payload.case === 'offlineBilateralPendingListResponse') {
-      const resp = env.payload.value;
-      items = resp.transactions;
-    }
-  } catch {
-    items = [] as any;
+  const env = decodeFramedEnvelopeV3(bytes);
+  if (env.payload.case === 'error') {
+    throw new Error(`bilateral.pending_list: ${env.payload.value.message}`);
+  }
+  if (env.payload.case !== 'offlineBilateralPendingListResponse') {
+    throw new Error(`bilateral.pending_list answered ${String(env.payload.case)}, not the list`);
   }
 
-  return items.map((it: any) => {
-    let statusStr: PendingBilateralDto['status'] = 'pending';
-    switch (it.status) {
-      case pb.OfflineBilateralTransactionStatus.OFFLINE_TX_CONFIRMED:
-        statusStr = 'verified';
-        break;
-      case pb.OfflineBilateralTransactionStatus.OFFLINE_TX_FAILED:
-        statusStr = 'failed';
-        break;
-      case pb.OfflineBilateralTransactionStatus.OFFLINE_TX_REJECTED:
-        statusStr = 'rejected';
-        break;
-      case pb.OfflineBilateralTransactionStatus.OFFLINE_TX_IN_PROGRESS:
-        statusStr = 'accepted';
-        break;
-      case pb.OfflineBilateralTransactionStatus.OFFLINE_TX_PENDING:
+  return env.payload.value.transactions.map((it) => {
+    let phase: PendingBilateralPhase;
+    switch (it.phase) {
+      case pb.OfflineBilateralPhase.OFFLINE_PHASE_PREPARING: phase = 'preparing'; break;
+      case pb.OfflineBilateralPhase.OFFLINE_PHASE_PREPARED: phase = 'prepared'; break;
+      case pb.OfflineBilateralPhase.OFFLINE_PHASE_PENDING_USER_ACTION: phase = 'pending_user_action'; break;
+      case pb.OfflineBilateralPhase.OFFLINE_PHASE_ACCEPTED: phase = 'accepted'; break;
+      case pb.OfflineBilateralPhase.OFFLINE_PHASE_REJECTED: phase = 'rejected'; break;
+      case pb.OfflineBilateralPhase.OFFLINE_PHASE_CONFIRM_PENDING: phase = 'confirm_pending'; break;
+      case pb.OfflineBilateralPhase.OFFLINE_PHASE_COMMITTED: phase = 'committed'; break;
+      case pb.OfflineBilateralPhase.OFFLINE_PHASE_FAILED: phase = 'failed'; break;
       default:
-        statusStr = 'pending';
-        break;
+        throw new Error(`bilateral.pending_list: step ${it.id} has phase ${it.phase}, which the wire does not name`);
     }
-
-    const dir = it.metadata?.['direction'] || 'incoming';
-    const amount = it.metadata?.['amount'] || '0';
-    const tokenId = it.metadata?.['token_id'] || 'ERA';
-    const alias = it.metadata?.['counterparty_alias'] || 'peer';
-    const bleAddr = it.metadata?.['ble_address'];
-    const statusMessage = it.metadata?.['status_message'];
-    const counterpartyId = dir === 'outgoing' ? it.recipientId : it.senderId;
-
+    let direction: PendingBilateralDto['direction'];
+    switch (it.direction) {
+      case pb.OfflineBilateralDirection.OFFLINE_DIRECTION_INCOMING: direction = 'incoming'; break;
+      case pb.OfflineBilateralDirection.OFFLINE_DIRECTION_OUTGOING: direction = 'outgoing'; break;
+      default:
+        throw new Error(`bilateral.pending_list: step ${it.id} has direction ${it.direction}, which the wire does not name`);
+    }
+    const counterpartyId = direction === 'outgoing' ? it.recipientId : it.senderId;
+    if (it.commitmentHash.length !== 32 || counterpartyId.length !== 32) {
+      throw new Error(
+        `bilateral.pending_list: step ${it.id} has a ${it.commitmentHash.length}-byte commitment ` +
+          `and a ${counterpartyId.length}-byte counterparty, not 32 and 32`,
+      );
+    }
+    if (!it.tokenId) {
+      throw new Error(`bilateral.pending_list: step ${it.id} names no token`);
+    }
+    const commitmentHash = encodeBase32Crockford(it.commitmentHash);
     return {
-      id: encodeBase32Crockford(it.commitmentHash),
-      type: dir === 'outgoing' ? 'outgoing' : 'incoming',
-      counterpartyAlias: alias,
+      id: commitmentHash,
+      direction,
+      phase,
+      counterpartyAlias: it.counterpartyAlias,
       counterpartyDeviceId: encodeBase32Crockford(counterpartyId),
-      amount,
-      tokenId,
-      commitmentHash: encodeBase32Crockford(it.commitmentHash),
-      status: statusStr,
-      bleAddress: bleAddr,
-      statusMessage: statusMessage || undefined,
+      amount: it.amount,
+      displayAmount: it.displayAmount,
+      tokenId: it.tokenId,
+      commitmentHash,
+      bleAddress: it.senderBleAddress,
+      cancellable: it.cancellable,
     };
   });
 }

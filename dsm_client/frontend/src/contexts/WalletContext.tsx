@@ -9,14 +9,10 @@ import { useBridgeEvent } from '@/hooks/useBridgeEvents';
 import type { Transaction } from '@/hooks/useTransactions';
 import { useWalletSync } from '@/hooks/useWalletSync';
 import { walletStore, useWalletStore } from '../stores/walletStore';
+import type { TokenBalanceView } from '../dsm/types';
 
-export interface WalletBalance {
-  tokenId: string;
-  tokenName: string;
-  balance: bigint;
-  decimals: number;
-  symbol: string;
-}
+/** A balance row as `balance.list` reported it. */
+export type WalletBalance = TokenBalanceView;
 
 export interface WalletContact {
   alias: string;

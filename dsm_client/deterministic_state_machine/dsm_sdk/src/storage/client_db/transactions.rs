@@ -249,21 +249,16 @@ fn transaction_from_row(row: &Row) -> rusqlite::Result<TransactionRecord> {
             format!("transaction metadata: {e}").into(),
         )
     })?;
-    let tx_type: String = row.get(5)?;
-    let proof_data = match row.get::<_, Option<Vec<u8>>>(8)? {
-        Some(_) if tx_type == "unilateral_send" => None,
-        other => other,
-    };
     Ok(TransactionRecord {
         tx_id: row.get(0)?,
         tx_hash: row.get(1)?,
         from_device: row.get(2)?,
         to_device: row.get(3)?,
         amount: row.get::<_, i64>(4)? as u64,
-        tx_type,
+        tx_type: row.get(5)?,
         status: row.get(6)?,
         commitment_hash: row.get::<_, Option<Vec<u8>>>(7)?,
-        proof_data,
+        proof_data: row.get::<_, Option<Vec<u8>>>(8)?,
         metadata,
     })
 }
@@ -307,7 +302,7 @@ pub fn get_transaction_history(
 mod tests {
     use super::*;
     use crate::storage::client_db::types::TransactionRecord;
-    use crate::storage::client_db::{get_transaction_history, init_database, reset_database_for_tests};
+    use crate::storage::client_db::{init_database, reset_database_for_tests};
     use serial_test::serial;
     use std::collections::HashMap;
 
@@ -465,42 +460,6 @@ mod tests {
             crate::storage::client_db::get_contact_chain_tip(&counterparty).expect("read"),
             Some(child),
             "a refused step moved the tip"
-        );
-    }
-
-    #[test]
-    #[serial]
-    fn unilateral_history_suppresses_proof_data() {
-        crate::economic_fixtures::use_test_storage_dir();
-        reset_database_for_tests();
-        init_database().expect("init db");
-
-        let device = crate::util::text_id::encode_base32_crockford(&[0x31u8; 32]);
-        let counterparty = crate::util::text_id::encode_base32_crockford(&[0x32u8; 32]);
-
-        store_transaction(&TransactionRecord {
-            tx_id: "unilateral-proof".to_string(),
-            tx_hash: crate::util::text_id::encode_base32_crockford(&[0x41u8; 32]),
-            from_device: device.clone(),
-            to_device: counterparty,
-            amount: 5,
-            tx_type: "unilateral_send".to_string(),
-            status: "submitted".to_string(),
-            commitment_hash: None,
-            proof_data: Some(vec![0xAA; 12]),
-            metadata: HashMap::new(),
-        })
-        .expect("store unilateral transaction");
-
-        let history = get_transaction_history(Some(&device), Some(10)).expect("load tx history");
-        let unilateral = history
-            .into_iter()
-            .find(|tx| tx.tx_id == "unilateral-proof")
-            .expect("unilateral tx in history");
-
-        assert!(
-            unilateral.proof_data.is_none(),
-            "unilateral proof_data should not surface in history"
         );
     }
 }

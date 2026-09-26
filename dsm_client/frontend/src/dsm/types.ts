@@ -38,25 +38,6 @@ export type ContactAddEvent = ContactAddProgress | ContactAddSuccess | ContactAd
 
 export type DsmEventListener = (e: ContactAddEvent | DsmRawEvent) => void;
 
-// Minimal structural type for the Android/iOS WebView bridge (or web stub)
-export type DsmBridgeLike = object;
-
-// Access the bridge defensively (SSR-safe) to avoid ReferenceErrors in non-DOM contexts
-import { getBridgeInstance } from '../bridge/BridgeRegistry';
-export const getDsmBridge = (): DsmBridgeLike | undefined => {
-  try {
-    return getBridgeInstance() as DsmBridgeLike | undefined;
-  } catch {
-    return undefined;
-  }
-};
-// path: dsm_client/frontend/src/lib/types.ts
-
-// Strict discriminated result types for DSM API (protobuf-only boundary)
-export type Ok<T>  = { success: true; data: T };
-export type Err    = { success: false; error: { code: number; message: string; isRecoverable: boolean } };
-export type Result<T> = Ok<T> | Err;
-
 /**
  * Backend-verified ChainTip (pb-aligned).
  * Canonical fields only; any time-like info is audit-only and optional.
@@ -88,90 +69,26 @@ export interface BilateralRelationshipDTO {
   sendStatus?: pb.RelationshipSendStatus;
 }
 
-export interface BilateralRelationshipsListDTO {
-  relationships: BilateralRelationshipDTO[];
-  totalCount?: number;
-}
-
-/**
- * Token balance in base units (no FP).
- */
-export interface BalanceDTO {
-  tokenId: string;                // canonical token id (proto string)
-  baseUnits: bigint;              // u128 as bigint (amount)
-  decimals: number;               // display hint (e.g., ERA=8)
-  symbol?: string;                // optional UI hint
-}
-
-/**
- * Deterministic transaction shape (pb-aligned).
- * No time fields in canon; optional audit tick is UI-only.
- */
-export interface TransactionDTO {
-  hash: Uint8Array;               // 32 bytes
-  amount: bigint;                 // s128/u128 normalized to bigint
-  from: Uint8Array;               // 32 bytes device id
-  to: Uint8Array;                 // 32 bytes device id
-  tokenId: string;                // token id
-  fee?: bigint;                   // optional fee in base units
-  type: 'transfer' | 'mint' | 'burn';
-}
-
-export interface TransactionHistoryDTO {
-  transactions: TransactionDTO[];
-  totalCount?: number;
-  hasMore?: boolean;
-}
-
-/**
- * Platform status (transport/UI only).
- */
-export interface BluetoothStatusDTO {
-  enabled: boolean;
-  scanning: boolean;
-  advertising: boolean;
-  available: boolean;
-}
-
-/**
- * Genesis/identity summary (pb-aligned).
- * Avoid clocks; include optional UI audit tick separately.
- */
-export interface GenesisDTO {
-  genesis_hash: Uint8Array;       // 32 bytes
-  identity_created: boolean;
-  chainIndex?: bigint;            // optional deterministic index
-}
-
-// Testnet faucet for token distribution.
-
-/**
- * Unilateral inbox check (UI helper).
- */
-export interface B0xCheckDTO {
-  pending_transactions: TransactionDTO[];
-  inbox_available: boolean;
-}
-
-export interface NetworkStatusDTO {
-  connected: boolean;
-  latency?: number;               // UI-only hint
-}
-
-/** UI-level transaction shape used by sendOnlineTransfer/offlineSend. */
+/** UI-level transaction shape used by offlineSend. */
 export type GenericTransaction = {
   tokenId: string;
   /** Base32 Crockford device id, or the raw 32 bytes. Both paths are
-   *  implemented in offlineSend/sendOnlineTransfer; the type said string only. */
+   *  implemented in offlineSend; the type said string only. */
   to: Uint8Array | string;
   amount: string | number | bigint;
   memo?: string;
   bleAddress?: string;
 };
 
-/** UI-level response shape returned by sendOnlineTransfer/offlineSend. */
+/** UI-level response shape returned by offlineSend. */
 export type GenericTxResponse = {
   accepted: boolean;
+  /**
+   * The screen stopped waiting while the step is still open: it completes when
+   * the devices meet again, and until its confirm its proposer may cancel it.
+   * Not a failure.
+   */
+  open?: boolean;
   result?: string;
   txHash?: string;
   newBalance?: bigint;
@@ -221,57 +138,6 @@ export interface StorageStatus {
 }
 
 /**
- * Deterministic Limbo Vault (DLV) index entry
- */
-export interface DlvIndexEntry {
-  vaultId: string;
-  createdAtTick: bigint;
-  status: 'locked' | 'unlocked' | 'expired' | 'LOCKED' | 'UNLOCKABLE' | 'LIVE' | 'SPENT' | 'EXPIRED';
-  balance: BalanceDTO;
-  conditions: Array<{
-    type: string;
-    description: string;
-    isMet: boolean;
-  }>;
-  cptaAnchorHex: string;
-  expectedReplication: number;
-  localLabel: string;
-  kind: string;
-}
-
-/**
- * Wallet History Item
- */
-export interface WalletHistoryItem {
-  id: string;
-  type: 'send' | 'receive' | 'mint' | 'burn';
-  amount: BalanceDTO;
-  counterparty: string;
-  status: 'pending' | 'completed' | 'failed';
-  date: Date;
-  txHash: string;
-}
-
-/**
- * Wallet Inbox Item (Pending Actions)
- */
-export interface WalletInboxItem {
-  id: string;
-  type: 'ble_request' | 'payment_request' | 'contact_request';
-  from: string;
-  summary: string;
-  receivedAt: Date;
-  expiresAt?: Date;
-  actions: Array<{
-    label: string;
-    actionId: string;
-    isPrimary: boolean;
-  }>;
-}
-
-// -- Missing Types from Refactor --
-
-/**
  * The device's identity as its transport headers carry it.
  */
 export interface IdentityInfo {
@@ -307,19 +173,21 @@ export interface AddContactResult {
 }
 
 /**
- * Token Balance View (UI Friendly)
+ * One row of `balance.list`, as Rust reported it. Rust enriches every row at
+ * its encoding boundary, so a row without its token, symbol, name or display
+ * amount is refused, never filled in.
  */
 export interface TokenBalanceView {
-  tokenId: string; // string id
-  ticker: string;
-  balance: string; // formatted decimal string
+  /** The ticker the balance is projected under. Not an identity: see `canonicalTokenId`. */
+  tokenId: string;
+  symbol: string;
+  tokenName: string;
+  /** The available balance in base units. */
   baseUnits: bigint;
   decimals: number;
-  symbol: string;
-  tokenName?: string;
   /** Display form of `baseUnits`, rendered by Rust. Never computed here. */
-  displayAmount?: string;
-  /** The token's canonical id. `tokenId` on the wire is the TICKER, which is not an identity. */
+  displayAmount: string;
+  /** The token's canonical id, when Rust names one (registered tokens). */
   canonicalTokenId?: string;
   /** CPTA policy anchor, Base32 Crockford, rendered by Rust. Carried, never derived. */
   policyAnchorB32?: string;

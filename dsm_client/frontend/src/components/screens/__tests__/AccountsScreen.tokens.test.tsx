@@ -19,16 +19,29 @@ import { dsmClient } from '../../../services/dsmClient';
 
 const MYTOK_ANCHOR = 'KYGP1FMF3X0QV4DXYQ4E5NZ1JVT9C9CW549NNZPXGC4SDD3MDHDG';
 
+/** A `balance.list` row as `getAllBalances` returns it: every field Rust writes. */
+function row(fields: {
+  tokenId: string;
+  baseUnits: bigint;
+  displayAmount: string;
+  decimals?: number;
+  canonicalTokenId?: string;
+  policyAnchorB32?: string;
+  anchorFingerprint?: string;
+}) {
+  return { symbol: fields.tokenId, tokenName: fields.tokenId, decimals: 0, ...fields };
+}
+
 const balances = [
-  { tokenId: 'ERA', symbol: 'ERA', balance: '264', policyAnchorB32: 'ERAANCHOR0000', anchorFingerprint: 'ERAANCHO' },
-  {
+  row({ tokenId: 'ERA', baseUnits: 264n, displayAmount: '264', policyAnchorB32: 'ERAANCHOR0000', anchorFingerprint: 'ERAANCHO' }),
+  row({
     tokenId: 'MYTOK',
-    symbol: 'MYTOK',
-    balance: '500',
+    baseUnits: 500n,
+    displayAmount: '500',
     canonicalTokenId: 'QMK5SY91DSJDY8KHAP6CCTWW80X7GHTVKFZ0KXTHAGQSTMFGV3GG',
     policyAnchorB32: MYTOK_ANCHOR,
     anchorFingerprint: MYTOK_ANCHOR.slice(0, 8),
-  },
+  }),
 ];
 
 jest.mock('../../../services/dsmClient', () => ({
@@ -219,6 +232,15 @@ describe('AccountsScreen — the screen TOKENS actually opens', () => {
     expect(screen.queryByRole('button', { name: /^FORGET$/ })).toBeNull();
   });
 
+  /// The panel's decimals are the ones Rust reports for the token. A table in
+  /// this screen said ERA took 2 decimals while Rust renders ERA whole.
+  it("shows a protocol token's decimals as Rust reports them", async () => {
+    render(<AccountsScreen />);
+    fireEvent.click(await screen.findByText('ERA'));
+    const label = await screen.findByText('Decimals');
+    expect(label.nextElementSibling).toHaveTextContent(/^0$/);
+  });
+
   /// The typed amount reaches Rust unchanged — no client-side rescaling.
   it('sends the entered amount verbatim to burn', async () => {
     (burnToken as jest.Mock).mockResolvedValue({ success: true });
@@ -260,7 +282,7 @@ describe('AccountsScreen — the screen TOKENS actually opens', () => {
       // Rust persisted it; the next registry read is what must reveal it.
       (dsmClient.getAllBalances as jest.Mock).mockResolvedValue([
         ...balances,
-        { tokenId: 'RIGB', symbol: 'RIGB', balance: '0' },
+        row({ tokenId: 'RIGB', baseUnits: 0n, displayAmount: '0' }),
       ]);
       return { success: true, ticker: 'RIGB', tokenId: 'Z68HWMYS' };
     });
@@ -292,14 +314,15 @@ describe('AccountsScreen — the screen TOKENS actually opens', () => {
     });
     (dsmClient.getAllBalances as jest.Mock).mockResolvedValue([
       ...balances,
-      {
+      row({
         tokenId: 'RIGB',
-        symbol: 'RIGB',
-        balance: '0.00',
+        baseUnits: 0n,
+        decimals: 2,
+        displayAmount: '0.00',
         canonicalTokenId: 'Z68HWMYSPT9B',
         policyAnchorB32: REAL_ANCHOR,
         anchorFingerprint: REAL_ANCHOR.slice(0, 8),
-      },
+      }),
     ]);
 
     render(<AccountsScreen />);

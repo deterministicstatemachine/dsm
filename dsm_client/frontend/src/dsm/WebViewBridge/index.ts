@@ -51,6 +51,7 @@ export const {
 
 export const {
   acceptBilateralByCommitmentBridge,
+  cancelBilateralByCommitmentBridge,
   rejectBilateralByCommitmentBridge,
 } = bilateral;
 
