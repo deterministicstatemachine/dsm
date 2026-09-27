@@ -196,11 +196,11 @@ const SettingsMainScreen: React.FC<SettingsMainScreenProps> = ({ onNavigate }) =
               ? nfcUi.compactSummary
               : `Status not read: ${(nfcRead as { error: string }).error}`}
         </div>
-        <div className="sb-actions" style={{ margin: 0 }}>
-          <button type="button" className="sb-btn" onClick={() => onNavigate?.('nfc_recovery')}>
+        <div style={{ display: 'grid', gap: 8 }}>
+          <button type="button" className="sb-btn sb-btn--block" onClick={() => onNavigate?.('nfc_recovery')}>
             Manage backup
           </button>
-          <button type="button" className="sb-btn" onClick={() => onNavigate?.('recovery')}>
+          <button type="button" className="sb-btn sb-btn--block" onClick={() => onNavigate?.('recovery')}>
             Inspect or recover
           </button>
         </div>

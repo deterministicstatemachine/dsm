@@ -1089,6 +1089,12 @@ button.sb-card--dark { color: var(--bg); }
 .sb-card--dark .sb-combo__dot { border-color: rgba(var(--bg-rgb), 0.6); color: var(--bg); }
 .sb-card--dark .sb-combo__dot.is-filled { background: var(--bg); color: var(--text-dark); border-color: var(--bg); }
 
+/* The shell (public/index.html) pins anything marked qr-code-above-scanlines to
+   the viewport so a QR clears the scanline overlay; its :has rule already
+   drops the scanlines beneath such a QR, and a framed screen lays its QR out
+   in flow like anything else on the card. */
+.sb-screen .qr-code-above-scanlines { position: static !important; z-index: auto !important; }
+
 /* A QR code keeps a white tile whatever the theme, so a camera can read it. */
 .sb-qr { display: inline-block; padding: 6px; background: #fff; border: 2px solid var(--border); border-radius: 8px; line-height: 0; }
 .sb-qr img,

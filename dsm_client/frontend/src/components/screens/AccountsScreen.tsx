@@ -582,11 +582,13 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
       ) : (
         <div className="faucet-tab">
           <section className="sb-card sb-card--dark sb-card--hero">
-            <img
-              src={eraTokenSrc}
-              alt="ERA Token"
-              style={{ width: 56, height: 56, imageRendering: 'pixelated' }}
-            />
+            <span className="sb-coin-tile">
+              <img
+                src={eraTokenSrc}
+                alt="ERA Token"
+                style={{ width: 48, height: 48, imageRendering: 'pixelated' }}
+              />
+            </span>
             <div className="sb-hero__label" style={{ marginTop: 6 }}>ERA token faucet</div>
             <div className="sb-hero__sub">Releases ERA from the network&apos;s reserve, under ERA&apos;s committed policy.</div>
           </section>
