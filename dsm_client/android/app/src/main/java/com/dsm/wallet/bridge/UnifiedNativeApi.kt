@@ -66,7 +66,8 @@ internal object UnifiedNativeApi {
     // health, signing, verifier key mgmt — is now reached exclusively through
     // `NativeBoundaryBridge.routerQuery("cdbrw.*", ...)`. Do not re-add any
     // `external fun cdbrw*` declarations here; they break the single-path rule.
-    @Keep @JvmStatic external fun bleNotifyConnectionState(address: String, connected: Boolean)
+    /** A link to the appliance deviceId, identity-anchored at address, came up or ended. */
+    @Keep @JvmStatic external fun bleNotifyLink(deviceId: ByteArray, address: String, up: Boolean)
     @Keep @JvmStatic external fun hasContactForDeviceId(deviceId: ByteArray): Boolean
     @Keep @JvmStatic external fun isBleAddressPaired(address: String): Boolean
     @Keep @JvmStatic external fun isCommitEnvelope(envelope: ByteArray): Boolean
@@ -86,15 +87,12 @@ internal object UnifiedNativeApi {
     @Keep @JvmStatic external fun bleDataResponseUsesReliableWrite(responseProto: ByteArray): Boolean
     /** Extract success flag from a BleGattIdentityReadResult proto. */
     @Keep @JvmStatic external fun identityReadResultGetSuccess(responseProto: ByteArray): Boolean
-    /** Extract write_back_envelope bytes from a BleGattIdentityReadResult proto. */
-    @Keep @JvmStatic external fun identityReadResultExtractWriteBack(responseProto: ByteArray): ByteArray
+    /** Extract write_back_envelope bytes from a BleGattIdentityReadResult proto: empty when none, null when the result does not decode. */
+    @Keep @JvmStatic external fun identityReadResultExtractWriteBack(responseProto: ByteArray): ByteArray?
     /** Extract peer_device_id (32 bytes) from a BleGattIdentityReadResult proto. */
-    @Keep @JvmStatic external fun identityReadResultExtractPeerDeviceId(responseProto: ByteArray): ByteArray
+    @Keep @JvmStatic external fun identityReadResultExtractPeerDeviceId(responseProto: ByteArray): ByteArray?
     /** Extract peer_genesis_hash (32 bytes) from a BleGattIdentityReadResult proto. */
-    @Keep @JvmStatic external fun identityReadResultExtractPeerGenesisHash(responseProto: ByteArray): ByteArray
-    /** Observe a paired peer's GATT identity read without emitting pairing write-back data. */
-    @Keep @JvmStatic external fun observeGattIdentityRead(bleAddress: String, rawProtoBytes: ByteArray): ByteArray
-    @Keep @JvmStatic external fun sendBleChunks(deviceAddress: String, chunks: Array<ByteArray>): Boolean
+    @Keep @JvmStatic external fun identityReadResultExtractPeerGenesisHash(responseProto: ByteArray): ByteArray?
     @Keep @JvmStatic external fun acceptBilateralByCommitment(commitmentHashBytes: ByteArray): ByteArray
     @Keep @JvmStatic external fun rejectBilateralByCommitment(commitmentHashBytes: ByteArray, reason: String): ByteArray
     @Keep @JvmStatic external fun cancelBilateralByCommitment(commitmentHashBytes: ByteArray, reason: String): ByteArray
@@ -108,7 +106,6 @@ internal object UnifiedNativeApi {
      */
     @Keep @JvmStatic external fun onAppBackgrounded(): Boolean
     @Keep @JvmStatic external fun getGenesisHashBin(): ByteArray
-    @Keep @JvmStatic external fun resolvePeerIdentityForBleAddressBin(address: String): ByteArray
     @Keep @JvmStatic external fun isRejectEnvelope(envelopeBytes: ByteArray): ByteArray
     @Keep @JvmStatic external fun isErrorEnvelope(envelopeBytes: ByteArray): Int
 
@@ -126,8 +123,10 @@ internal object UnifiedNativeApi {
 
     // Process raw protobuf bytes read from GATT identity characteristic.
     // Decodes BleIdentityCharValue, dispatches identity events, returns BleGattIdentityReadResult.
+    // expectedDeviceId: the appliance a reach is connecting for (empty when not a reach);
+    // a peer that is not it is reported not established, and nothing about it is recorded.
     // Kotlin MUST NOT split or interpret the raw bytes.
-    @Keep @JvmStatic external fun processGattIdentityRead(bleAddress: String, rawProtoBytes: ByteArray): ByteArray
+    @Keep @JvmStatic external fun processGattIdentityRead(bleAddress: String, rawProtoBytes: ByteArray, expectedDeviceId: ByteArray): ByteArray
 
     // BLE event envelope builders (JNI symbols in ble_events.rs)
     @Keep @JvmStatic external fun createBleDeviceFoundEnvelope(address: String, name: String, rssi: Int): ByteArray

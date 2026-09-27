@@ -101,7 +101,7 @@ pub struct BilateralBleSession {
 }
 
 /// The kind of an offline protocol frame, whatever carries it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OfflineFrameKind {
     Prepare,
     PrepareResponse,

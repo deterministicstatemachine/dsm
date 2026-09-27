@@ -273,31 +273,6 @@ pub fn get_contact_by_alias(alias: &str) -> Result<Option<ContactRecord>> {
     Ok(result)
 }
 
-/// Get contact by normalized BLE address.
-/// Returns None if not found.
-pub fn get_contact_by_ble_address(ble_address: &str) -> Result<Option<ContactRecord>> {
-    let normalized = ble_address.trim().to_uppercase();
-    if normalized.is_empty() {
-        return Ok(None);
-    }
-
-    let binding = get_connection()?;
-    let conn = binding.lock().unwrap_or_else(|poisoned| {
-        log::warn!("DB lock poisoned, recovering");
-        poisoned.into_inner()
-    });
-
-    let result = conn
-        .query_row(
-            &format!("SELECT {CONTACT_COLUMNS} FROM contacts WHERE UPPER(ble_address) = ?1"),
-            params![normalized],
-            contact_from_row,
-        )
-        .optional()?;
-
-    Ok(result)
-}
-
 /// Delete a contact by contact_id.
 pub fn delete_contact_by_id(contact_id: &str) -> Result<()> {
     if contact_id.trim().is_empty() {
@@ -1034,10 +1009,9 @@ mod tests {
         );
     }
 
-    /// Cold-peer RPA rotation: after a paired peer's BLE address rotates, the canonical re-persist
-    /// (`update_contact_ble_status(device_id, None, Some(new))`, driven by the probe's on-match
-    /// `observeGattIdentityRead`) must re-point the contact so the FRESH address resolves and the
-    /// STALE one no longer does — the storage half of the directed-probe fix.
+    /// After a paired peer's BLE address rotates, the re-persist on a later
+    /// identity read (`update_contact_ble_status(device_id, None, Some(new))`)
+    /// re-points the contact: it holds the fresh address, not the stale one.
     #[test]
     #[serial]
     fn update_contact_ble_status_repoints_rotated_address() {
@@ -1047,21 +1021,19 @@ mod tests {
 
         let old_addr = "AA:BB:CC:DD:EE:01";
         let new_addr = "11:22:33:44:55:66";
+        let held = || {
+            get_contact_by_device_id(&device_id)
+                .expect("read the contact")
+                .expect("the contact exists")
+                .ble_address
+        };
 
-        // Initial BLE address, then confirm it resolves.
         update_contact_ble_status(&device_id, None, Some(old_addr)).expect("set old addr");
-        assert!(get_contact_by_ble_address(old_addr).unwrap().is_some());
+        assert_eq!(held().as_deref(), Some(old_addr));
 
         // RPA rotates: re-point to the fresh address.
         update_contact_ble_status(&device_id, None, Some(new_addr)).expect("repoint addr");
-
-        let hit = get_contact_by_ble_address(new_addr).expect("query new addr");
-        assert!(hit.is_some(), "fresh rotated address must resolve");
-        assert_eq!(hit.unwrap().device_id, device_id.to_vec());
-        assert!(
-            get_contact_by_ble_address(old_addr).unwrap().is_none(),
-            "stale rotated address must no longer resolve",
-        );
+        assert_eq!(held().as_deref(), Some(new_addr));
     }
 
     #[test]

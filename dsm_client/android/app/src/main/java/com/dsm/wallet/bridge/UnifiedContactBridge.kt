@@ -4,10 +4,6 @@ package com.dsm.wallet.bridge
 
 internal object UnifiedContactBridge {
 
-    fun resolvePeerIdentityForBleAddressBin(address: String): ByteArray {
-        return try { Unified.resolvePeerIdentityForBleAddressBin(address) } catch (_: Throwable) { ByteArray(0) }
-    }
-
     fun removeContact(contactId: String): Byte {
         return try { Unified.removeContact(contactId) } catch (_: Throwable) { 0 }
     }
