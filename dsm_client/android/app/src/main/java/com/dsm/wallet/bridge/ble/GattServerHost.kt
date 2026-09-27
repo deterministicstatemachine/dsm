@@ -115,10 +115,15 @@ class GattServerHost(private val context: Context) {
                 peer(deviceAddress).serverDevice = device
                 Log.i("GattServerHost", "GATT server client connected: $deviceAddress")
             } else if (!connected && deviceAddress != "unknown") {
-                peer(deviceAddress).clearServerState()
+                val peer = peer(deviceAddress)
+                // A link to our server that was a route to an identified appliance:
+                // its delivered frames are undelivered again.
+                val carried = peer.identity?.takeIf { peer.isSubscribedTo(BleConstants.TX_RESPONSE_UUID) }
+                peer.clearServerState()
                 pendingTxWriteBuffers.remove(deviceAddress)
                 pendingPairingWriteBuffers.remove(deviceAddress)
                 Log.i("GattServerHost", "GATT server client disconnected: $deviceAddress")
+                carried?.let { com.dsm.wallet.bridge.UnifiedBleEvents.onLinkDown(it.deviceId, deviceAddress) }
             }
         }
 
@@ -953,9 +958,9 @@ class GattServerHost(private val context: Context) {
             val chunks = com.dsm.wallet.bridge.Unified.bleDataResponseExtractChunks(responseProto)
             val useReliableWrite = com.dsm.wallet.bridge.Unified.bleDataResponseUsesReliableWrite(responseProto)
 
-            // If Rust produced bilateral follow-up chunks, send them on a coroutine to
-            // avoid blocking the GATT server callback thread. requestGattWriteChunks uses
-            // runBlocking internally, which would stall the BLE stack's callback thread.
+            // If Rust produced bilateral follow-up chunks, send them on the link they
+            // answer, on a coroutine: dispatchRustBleFollowUp blocks until the link
+            // takes them, which would stall the BLE stack's callback thread.
             if (chunks.isNotEmpty()) {
                 val addr = deviceAddress
                 txResponseScope.launch {

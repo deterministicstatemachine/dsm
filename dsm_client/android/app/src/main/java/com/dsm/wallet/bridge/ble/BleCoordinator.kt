@@ -10,12 +10,12 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.os.Build
 import android.util.Log
-import com.dsm.wallet.bridge.UnifiedContactBridge
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.withLock
 
 /**
  * Public BLE Coordinator facade.
@@ -70,14 +70,6 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
     // Unified per-peer state.
     internal val peers = java.util.concurrent.ConcurrentHashMap<String, PeerSession>()
 
-    // Reverse index: BLE MAC address → PeerIdentity. Updated on every
-    // identity observation (pairing + reconnect). Enables O(1) resolution
-    // of stale addresses to the peer's current address.
-    internal val addressIndex = java.util.concurrent.ConcurrentHashMap<String, PeerIdentity>()
-    internal var persistedIdentityLookup: (String) -> PeerIdentity? = { address ->
-        decodePersistedPeerIdentity(UnifiedContactBridge.resolvePeerIdentityForBleAddressBin(address))
-    }
-
     // Internal components
     internal var permissionsGate = BlePermissionsGate(context)
     private var scanner = BleScanner(context)
@@ -109,8 +101,8 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
             }
         }
     }
-    // PairingMachine deleted — pairing state is Rust-authoritative via PairingOrchestrator.
-    // Use Unified.isBleAddressPaired(address) to query pairing status.
+    // PairingMachine deleted — pairing state is Rust-authoritative via PairingOrchestrator:
+    // Rust decides from the identity read on a link, by device id, whether it pairs.
 
 
     init {
@@ -160,8 +152,10 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
     }
 
     companion object {
-        /** Max time to wait for GATT connection readiness (connect + discover + MTU). */
-        private const val CONNECT_READY_TIMEOUT_MS = 12_000L
+        /** How long one reach looks for its appliance: connect, discovery, MTU, identity. */
+        private const val REACH_BUDGET_MS = 20_000L
+        /** How often a reach looks for a route that came up by another path. */
+        private const val REACH_POLL_MS = 500L
 
         private var instance: BleCoordinator? = null
 
@@ -173,16 +167,6 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                     com.dsm.wallet.bridge.Unified.initBleCoordinator(context.applicationContext)
                 }
             }
-        }
-
-        internal fun decodePersistedPeerIdentity(bytes: ByteArray): PeerIdentity? {
-            if (bytes.size != 64) {
-                return null
-            }
-            return PeerIdentity(
-                deviceId = bytes.copyOfRange(0, 32),
-                genesisHash = bytes.copyOfRange(32, 64),
-            )
         }
     }
 
@@ -289,6 +273,7 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                 for ((addr, peer) in peers) {
                     if (peer.gattClientSession == null) continue
                     val isActive = (
+                        peer.clientRouteReady ||
                         peer.connectionPending ||
                         peer.identityExchangeInProgress ||
                         peer.pairingInProgress ||
@@ -308,7 +293,7 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                         if (!gattServer.isServerClient(addr)) {
                             peer.gattClientSession?.disconnect()
                         }
-                        peer.clearClientState()
+                        clearClient(peer)
                         if (peer.isEmpty) peers.remove(addr)
                     }
                 }
@@ -362,7 +347,7 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
             var links = 0
             for ((address, peer) in peers) {
                 if (peer.gattClientSession != null || peer.isServerClient || peer.connectionPending) links++
-                peer.clearClientState()
+                clearClient(peer)
                 peer.clearServerState()
                 if (peer.isEmpty) peers.remove(address)
             }
@@ -454,41 +439,14 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
     }
 
     /**
-     * Mark a device as paired. No-op — pairing state is Rust-authoritative
-     * (persisted via finalizeScannerPairing / handle_pairing_confirm).
-     */
-    fun markDeviceAsPaired(deviceId: String) {
-        Log.d("BleCoordinator", "markDeviceAsPaired($deviceId) — no-op, Rust is authoritative")
-    }
-
-    /**
-     * Get list of paired device IDs. Returns empty — use Rust queries instead.
-     */
-    fun getPairedDeviceIds(): List<String> {
-        return emptyList()
-    }
-
-    /**
-     * Check if a device is paired. Delegates to Rust's SQLite-authoritative store.
-     */
-    fun isDevicePaired(deviceId: String): Boolean {
-        return try {
-            com.dsm.wallet.bridge.Unified.isBleAddressPaired(deviceId)
-        } catch (_: Throwable) {
-            false
-        }
-    }
-
-    /**
      * Called by GattServerHost when the advertiser side processes a PairingConfirm.
      * Keep advertising active so already-paired peers can reconnect later for
      * offline bilateral transfers.
      */
     fun notifyAdvertiserPairingComplete(bleAddress: String) {
         runOperation(BleOpLane.PAIRING) {
-            // Mark the session as disconnected but keep the entry so on-demand
-            // reconnect does not lose track of the device entirely. connectToDevice()
-            // will clean up and re-establish the GATT connection as needed.
+            // Mark the session as disconnected but keep the entry; a reach for the
+            // appliance re-establishes a link to it when a message needs one.
             peers[bleAddress]?.let { peer ->
                 peer.isConnected = false
                 peer.serviceDiscoveryCompleted = false
@@ -509,8 +467,8 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
         runOperation(BleOpLane.LIFECYCLE) {
             var closed = 0
             peers.values.forEach { peer ->
-                peer.gattClientSession?.let { session ->
-                    peer.clearClientState()
+                if (peer.gattClientSession != null) {
+                    clearClient(peer)
                     closed++
                 }
             }
@@ -538,6 +496,14 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
 
     override fun onDeviceDiscovered(device: BluetoothDevice, rssi: Int) {
         val address = device.address
+        // A reach connects only for its appliance, one candidate at a time,
+        // and keeps scanning past every other one.
+        activeReach?.let { reach ->
+            if (address !in reach.excluded && reach.seen.add(address)) {
+                runOperation(BleOpLane.LIFECYCLE) { tryCandidate(reach, address) }
+            }
+            return
+        }
         if (peers[address]?.connectionPending == true) {
             Log.d("BleCoordinator", "Skipping $address — GATT connection already in flight")
             return
@@ -560,14 +526,14 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
             val session = getOrCreateSession(address)
             // Mark connection in-flight via a sentinel deferred so connectionPending returns true.
             // This prevents double-connectGatt from scan overlap. The deferred is completed
-            // by handleSessionEvent (MtuNegotiated/Disconnected/Error).
+            // when the identity read anchors the link, or by clearClientState.
             peers[address]!!.connectResult = peers[address]!!.connectResult ?: kotlinx.coroutines.CompletableDeferred()
             val connected = session.connect()
             if (connected) {
                 Log.i("BleCoordinator", "GATT connection initiated to $address")
             } else {
                 Log.w("BleCoordinator", "Failed to initiate GATT connection to $address")
-                peers[address]?.clearClientState()
+                peers[address]?.let { clearClient(it) }
                 if (peers[address]?.isEmpty == true) peers.remove(address)
                 com.dsm.wallet.bridge.UnifiedBleEvents.onConnectionFailed(address, "GATT connection initiation failed")
                 resumePairingScan(address, "connect_init_failed")
@@ -661,8 +627,10 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                         peer.isConnected = false
                         peer.serviceDiscoveryCompleted = false
                         diagnostics.recordEvent(BleDiagEvent(phase = "coordinator_disconnected", device = event.deviceAddress, status = event.status))
+                        activeReach?.takeIf { it.isCandidate(event.deviceAddress) }
+                            ?.let { rejectCandidate(it, event.deviceAddress, "disconnected") }
                         // Remove stale session so future scans can reconnect to this peer
-                        peer.clearClientState()
+                        clearClient(peer)
                         if (peer.isEmpty) peers.remove(event.deviceAddress)
                         com.dsm.wallet.bridge.Unified.onDeviceDisconnected(event.deviceAddress)
                         // Exponential backoff on reconnection to prevent battery drain
@@ -684,46 +652,17 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                         peer.negotiatedMtu = event.mtu
                         // Successful connection — reset backoff counter.
                         peer.reconnectAttemptCount = 0
-                        // Complete the on-demand connect deferred if one is pending.
-                        // This replaces the 100ms polling loop that used to check
-                        // sessionStates from outside the dispatcher.
-                        peer.connectResult?.let { result ->
-                            peer.connectResult = null
-                            result.complete(true)
-                        }
                         diagnostics.recordEvent(BleDiagEvent(phase = "coordinator_mtu_negotiated", device = event.deviceAddress, bytes = event.mtu))
-                        // Query Rust for pairing status — skip identity read if already paired (bilateral reconnect)
-                        val alreadyPaired = try { com.dsm.wallet.bridge.Unified.isBleAddressPaired(event.deviceAddress) } catch (_: Throwable) { false }
-                        if (alreadyPaired) {
-                            // Normal bilateral reconnect — re-read identity only if we
-                            // have not yet anchored this live address to the peer's
-                            // stable device identity. This preserves RPA migration
-                            // without re-entering the pairing write-back flow.
-                            val session = peer.gattClientSession
-                            if (peer.identity == null && session != null) {
-                                peer.identityExchangeInProgress = true
-                                Log.i(
-                                    "BleCoordinator",
-                                    "MTU negotiated (${event.mtu}) for ${event.deviceAddress} — re-reading paired peer identity for route anchoring"
-                                )
-                                session.readIdentity()
-                            } else {
-                                Log.i(
-                                    "BleCoordinator",
-                                    "MTU negotiated (${event.mtu}) for ${event.deviceAddress} — paired route already anchored"
-                                )
-                            }
-                        } else {
-                            // Set identity exchange guard BEFORE reading — prevents
-                            // startScanning() eviction during the identity read/write phase.
+                        // The CCCD chain is done. The link becomes a route once the
+                        // identity read on it is anchored; Rust decides from that
+                        // identity, by the contact's device id, whether it re-anchors a
+                        // paired contact or starts pairing. The guard keeps
+                        // startScanning() eviction off the link meanwhile.
+                        val session = peer.gattClientSession
+                        if (session != null) {
                             peer.identityExchangeInProgress = true
-                            val session = peer.gattClientSession
-                            if (session != null) {
-                                Log.i("BleCoordinator", "MTU negotiated (${event.mtu}) for ${event.deviceAddress} — reading peer identity")
-                                session.readIdentity()
-                            } else {
-                                peer.identityExchangeInProgress = false
-                            }
+                            Log.i("BleCoordinator", "MTU negotiated (${event.mtu}) for ${event.deviceAddress} — reading peer identity")
+                            session.readIdentity()
                         }
                     }
                     is BleSessionEvent.ServiceDiscoveryCompleted -> {
@@ -736,58 +675,46 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                         // Identity exchange phase complete (read result received).
                         // Clear the guard — PairingAckReceived will set pairingInProgress.
                         peer.identityExchangeInProgress = false
+                        // A reach's candidate is identified against the appliance the
+                        // reach is for; any other link is not a reach.
+                        val reach = activeReach?.takeIf { it.isCandidate(event.deviceAddress) }
                         if (event.data != null && event.data.isNotEmpty()) {
                             Log.i("BleCoordinator", "Peer identity read from ${event.deviceAddress}: ${event.data.size} bytes")
                             diagnostics.recordEvent(BleDiagEvent(phase = "coordinator_identity_read_ok", device = event.deviceAddress, bytes = event.data.size))
 
-                            val alreadyPaired = try { com.dsm.wallet.bridge.Unified.isBleAddressPaired(event.deviceAddress) } catch (_: Throwable) { false }
-
                             // Send raw proto bytes to Rust — Kotlin MUST NOT parse or split identity data.
-                            // For already-paired peers, Rust only re-anchors the identity and
-                            // updates persistence; for first-time pairing it also returns the
-                            // write-back envelope for the peer's PAIRING characteristic.
                             try {
-                                val resultBytes = if (alreadyPaired) {
-                                    com.dsm.wallet.bridge.Unified.observeGattIdentityRead(
-                                        event.deviceAddress,
-                                        event.data
-                                    )
-                                } else {
-                                    com.dsm.wallet.bridge.Unified.processGattIdentityRead(
-                                        event.deviceAddress,
-                                        event.data
-                                    )
-                                }
-
+                                val resultBytes = com.dsm.wallet.bridge.Unified.processGattIdentityRead(
+                                    event.deviceAddress,
+                                    event.data,
+                                    reach?.deviceId ?: ByteArray(0),
+                                )
                                 // Extract fields via JNI helpers — Kotlin has no proto codegen.
-                                // Rust decodes the BleGattIdentityReadResult and returns individual fields.
                                 val success = com.dsm.wallet.bridge.Unified.identityReadResultGetSuccess(resultBytes)
+                                val peerDeviceId = com.dsm.wallet.bridge.Unified.identityReadResultExtractPeerDeviceId(resultBytes)
+                                val peerGenesisHash = com.dsm.wallet.bridge.Unified.identityReadResultExtractPeerGenesisHash(resultBytes)
 
-                                if (success) {
-                                    Log.i(
-                                        "BleCoordinator",
-                                        if (alreadyPaired) {
-                                            "observeGattIdentityRead succeeded for ${event.deviceAddress}"
-                                        } else {
-                                            "processGattIdentityRead succeeded for ${event.deviceAddress}"
-                                        }
-                                    )
-
-                                    // Anchor the peer's identity for RPA-proof addressing.
-                                    // Extract deviceId + genesisHash from the Rust-decoded result
-                                    // proto. Kotlin does not parse protobuf — all decoding is Rust-side.
-                                    val peerDeviceId = com.dsm.wallet.bridge.Unified.identityReadResultExtractPeerDeviceId(resultBytes)
-                                    val peerGenesisHash = com.dsm.wallet.bridge.Unified.identityReadResultExtractPeerGenesisHash(resultBytes)
-                                    if (peerDeviceId.size == 32 && peerGenesisHash.size == 32) {
-                                        anchorIdentity(event.deviceAddress, PeerIdentity(peerDeviceId, peerGenesisHash))
+                                if (success && peerDeviceId.size == 32 && peerGenesisHash.size == 32) {
+                                    Log.i("BleCoordinator", "processGattIdentityRead succeeded for ${event.deviceAddress}")
+                                    anchorIdentity(event.deviceAddress, PeerIdentity(peerDeviceId, peerGenesisHash))
+                                    // The link is a route now: CCCD chain done, identity read on it.
+                                    peer.clientRouteReady = true
+                                    peer.connectResult?.let { result ->
+                                        peer.connectResult = null
+                                        result.complete(true)
                                     }
-
-                                    val writeBackEnvelope = if (alreadyPaired) {
-                                        null
+                                    val address = event.deviceAddress
+                                    if (reach != null) {
+                                        // The reach's caller sends what it reached for.
+                                        reach.candidates.remove(address)
+                                        reach.found.complete(BleRoute(address, clientLink = true))
                                     } else {
-                                        com.dsm.wallet.bridge.Unified.identityReadResultExtractWriteBack(resultBytes)
-                                            .takeIf { it.isNotEmpty() }
+                                        // Rust delivers whatever it owes the appliance on this link.
+                                        bleScope.launch { com.dsm.wallet.bridge.UnifiedBleEvents.onLinkUp(peerDeviceId, address) }
                                     }
+
+                                    val writeBackEnvelope = com.dsm.wallet.bridge.Unified.identityReadResultExtractWriteBack(resultBytes)
+                                        .takeIf { it.isNotEmpty() }
                                     if (writeBackEnvelope != null) {
                                         val session = peer.gattClientSession
                                         if (session != null) {
@@ -798,42 +725,32 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                                             Log.w("BleCoordinator", "Identity write-back: no active session for ${event.deviceAddress}")
                                             resumePairingScan(event.deviceAddress, "identity_writeback_no_session")
                                         }
-                                    } else if (!alreadyPaired) {
-                                        Log.w("BleCoordinator", "Identity write-back: no envelope returned (local identity may not be set)")
                                     }
+                                } else if (reach != null) {
+                                    rejectCandidate(reach, event.deviceAddress, "not_the_addressed_appliance")
                                 } else {
-                                    Log.w(
-                                        "BleCoordinator",
-                                        if (alreadyPaired) {
-                                            "observeGattIdentityRead failed for ${event.deviceAddress}"
-                                        } else {
-                                            "processGattIdentityRead failed for ${event.deviceAddress}"
-                                        }
-                                    )
+                                    Log.w("BleCoordinator", "processGattIdentityRead failed for ${event.deviceAddress}")
                                     diagnostics.recordError(BleErrorCategory.CHARACTERISTIC_READ_FAILED, "coordinator_identity_rust_decode_failed")
                                 }
                             } catch (t: Throwable) {
-                                Log.w(
-                                    "BleCoordinator",
-                                    if (alreadyPaired) {
-                                        "observeGattIdentityRead exception for ${event.deviceAddress}"
-                                    } else {
-                                        "processGattIdentityRead exception for ${event.deviceAddress}"
-                                    },
-                                    t
-                                )
+                                Log.w("BleCoordinator", "processGattIdentityRead exception for ${event.deviceAddress}", t)
                                 diagnostics.recordError(BleErrorCategory.CHARACTERISTIC_READ_FAILED, "coordinator_identity_exception")
+                                reach?.let { rejectCandidate(it, event.deviceAddress, "identity_exception") }
                             }
                         } else {
                             diagnostics.recordError(BleErrorCategory.CHARACTERISTIC_READ_FAILED, "coordinator_identity_read")
                             Log.e("BleCoordinator", "Identity read failed for ${event.deviceAddress} — failing fast")
-                            peer.clearClientState()
-                            if (peer.isEmpty) peers.remove(event.deviceAddress)
-                            com.dsm.wallet.bridge.UnifiedBleEvents.onConnectionFailed(
-                                event.deviceAddress,
-                                "identity_read_failed"
-                            )
-                            resumePairingScan(event.deviceAddress, "identity_read_failed")
+                            if (reach != null) {
+                                rejectCandidate(reach, event.deviceAddress, "identity_read_failed")
+                            } else {
+                                clearClient(peer)
+                                if (peer.isEmpty) peers.remove(event.deviceAddress)
+                                com.dsm.wallet.bridge.UnifiedBleEvents.onConnectionFailed(
+                                    event.deviceAddress,
+                                    "identity_read_failed"
+                                )
+                                resumePairingScan(event.deviceAddress, "identity_read_failed")
+                            }
                         }
                     }
                     is BleSessionEvent.ResponseReceived -> {
@@ -847,8 +764,8 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                             Log.i("BleTransferTrace", "Response received from ${event.deviceAddress}|chunks=${chunks.size}|reliableWrite=$useReliableWrite")
                             Log.d("BleCoordinator", "Response processed from ${event.deviceAddress}: chunks=${chunks.size}, reliableWrite=$useReliableWrite")
 
-                            // If Rust produced follow-up chunks, send them outside the actor
-                            // to avoid self-deadlock (requestGattWriteChunks uses runBlocking).
+                            // If Rust produced follow-up chunks, send them on the link they answer,
+                            // outside the actor: dispatchRustBleFollowUp blocks until the link takes them.
                             if (chunks.isNotEmpty()) {
                                 val addr = event.deviceAddress
                                 bleScope.launch {
@@ -926,13 +843,18 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                         diagnostics.recordEvent(BleDiagEvent(phase = "coordinator_pairing_confirm_sent", device = event.deviceAddress))
                     }
                     is BleSessionEvent.ErrorOccurred -> {
-                        if (event.status == 133) {
+                        // A reach's candidate is not reconnected by this recovery: the
+                        // reach excludes it and connects its next candidate.
+                        val reach = activeReach
+                        val candidateOfReach = reach?.isCandidate(event.deviceAddress) == true
+                        if (event.status == 133 && !candidateOfReach) {
                             Log.w("BleCoordinator", "GATT 133 observed. Scheduling delay recovery...")
                             bleScope.launch {
                                 kotlinx.coroutines.delay(1500)
                                 runOperation(BleOpLane.LIFECYCLE) {
                                     val currentPeer = peers[event.deviceAddress]
-                                    if (currentPeer != null && currentPeer.gattClientSession == null && !currentPeer.connectionPending) {
+                                    val excluded = activeReach?.excluded?.contains(event.deviceAddress) == true
+                                    if (!excluded && currentPeer != null && currentPeer.gattClientSession == null && !currentPeer.connectionPending) {
                                         getOrCreateSession(event.deviceAddress).connect()
                                     }
                                 }
@@ -949,11 +871,16 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                             com.dsm.wallet.bridge.UnifiedBleEvents.onConnectionFailed(event.deviceAddress, event.details)
                         }
 
-                        val alreadyPaired = try { com.dsm.wallet.bridge.Unified.isBleAddressPaired(event.deviceAddress) } catch (_: Throwable) { false }
                         Log.w("BleCoordinator", "ErrorOccurred for ${event.deviceAddress} (${event.category}/${event.details}) — closing the session")
-                        peer.clearClientState()
+                        if (candidateOfReach) {
+                            rejectCandidate(reach!!, event.deviceAddress, event.details)
+                        }
+                        // A link never identified resumes the pairing scan; an identified
+                        // appliance is reached again by the SDK while frames are owed.
+                        val identified = peer.identity != null
+                        clearClient(peer)
                         if (peer.isEmpty) peers.remove(event.deviceAddress)
-                        if (!alreadyPaired) {
+                        if (!identified && reach == null) {
                             resumePairingScan(event.deviceAddress, event.details)
                         }
                     }
@@ -974,195 +901,181 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
         return result
     }
 
-    private fun dropClientSession(address: String, reason: String) {
-        val peer = peers[address]
-        val removed = peer?.gattClientSession
-
-        peer?.clearClientState()
-        gattServer.disconnectClient(address)
-        Log.w(
-            "BleCoordinator",
-            "dropClientSession($address): reason=$reason removedSession=${removed != null}"
-        )
-        if (peers[address]?.isEmpty == true) peers.remove(address)
+    /**
+     * Close our client link to [peer], reporting link-down for the appliance it
+     * carried when it was a route: that appliance's delivered frames are
+     * undelivered again, and the SDK reaches for it.
+     */
+    private fun clearClient(peer: PeerSession) {
+        val carried = peer.identity?.takeIf { peer.clientRouteReady }
+        peer.clearClientState()
+        if (carried != null) {
+            val address = peer.address
+            bleScope.launch { com.dsm.wallet.bridge.UnifiedBleEvents.onLinkDown(carried.deviceId, address) }
+        }
     }
 
-    private fun hydratePersistedIdentity(address: String): PeerIdentity? {
-        addressIndex[address]?.let { return it }
-        val identity = persistedIdentityLookup(address) ?: return null
-        addressIndex[address] = identity
-        Log.i("BleCoordinator", "hydratePersistedIdentity: $address → ${identity.key.take(16)}...")
-        return identity
-    }
+    /** Where a message goes: our client link to [address], or the peer's link to our server there. */
+    data class BleRoute(val address: String, val clientLink: Boolean)
 
     /**
-     * Resolve a BLE address (potentially stale) to the current PeerSession.
-     *
-     * Resolution order:
-     * 1. Direct peers[address] lookup (address is current)
-     * 2. Persisted contacts hydrate addressIndex when the app restarted on a stale BLE MAC
-     * 3. addressIndex[address] → PeerIdentity → find peer with matching identity
-     *
-     * Returns the PeerSession and its current address, or null if unknown.
+     * Where a message to the appliance [deviceId] goes now, or null: "no route",
+     * a liveness state — the frame stays owed.
+     * 1. Our client link anchored to it: the identity read on that link named
+     *    it, after the CCCD chain completed.
+     * 2. Its link to our server, anchored to it and subscribed to TX_RESPONSE.
+     * 3. A link to our server at [hint] — the address the SDK names for it —
+     *    subscribed and anchored to no other appliance.
+     * No other link is a substitute for the one addressed.
      */
-    fun resolveSession(address: String): Pair<PeerSession, String>? {
-        // 1. Direct hit — but only if the peer is actually reachable
-        peers[address]?.let { peer ->
-            if (peer.hasActiveClientSession || peer.isServerClient) {
-                return peer to address
-            }
-            // Entry exists but is a dead shell — fall through to identity lookup
-        }
-
-        // 2. Hydrate from persisted contacts so a stale BLE address from SQLite still
-        // carries enough identity to match a freshly rediscovered rotated RPA.
-        val targetIdentity = addressIndex[address] ?: hydratePersistedIdentity(address)
-
-        // 3. Identity-indexed lookup — address is stale but identity is known
-        targetIdentity?.let { identity ->
-            for ((addr, peer) in peers) {
-                if (peer.identity == identity && (peer.hasActiveClientSession || peer.isServerClient)) {
-                    Log.i("BleCoordinator", "resolveSession: stale $address → identity → current $addr")
-                    return peer to addr
+    fun resolveRoute(deviceId: ByteArray, hint: String): BleRoute? {
+        val anchored = peers.entries.filter { it.value.identity?.deviceId?.contentEquals(deviceId) == true }
+        anchored.firstOrNull { it.value.clientRouteReady && it.value.hasActiveClientSession }
+            ?.let { return BleRoute(it.key, clientLink = true) }
+        anchored.firstOrNull { it.value.isServerClient && it.value.isSubscribedTo(BleConstants.TX_RESPONSE_UUID) }
+            ?.let { return BleRoute(it.key, clientLink = false) }
+        if (hint.isNotEmpty()) {
+            peers[hint]?.let { peer ->
+                if (peer.identity == null && peer.isServerClient && peer.isSubscribedTo(BleConstants.TX_RESPONSE_UUID)) {
+                    return BleRoute(hint, clientLink = false)
                 }
             }
         }
-
-        // No match is "no route": a liveness state, not a failure. Another
-        // ready peer is never a substitute for the one addressed — the frame
-        // stays owed until the addressed peer is reached.
-        Log.w("BleCoordinator", "resolveSession: no route for $address")
         return null
     }
 
     /**
-     * Anchor a peer's identity after successful GATT identity read.
-     * Updates the addressIndex so future RPA rotations can be resolved.
+     * Anchor a peer's identity after a successful GATT identity read: the link
+     * at [address] carries that appliance.
      */
     fun anchorIdentity(address: String, identity: PeerIdentity) {
         val peer = peers[address] ?: return
         peer.identity = identity
-        addressIndex[address] = identity
-        Log.i("BleCoordinator", "anchorIdentity: $address → ${identity.key.take(16)}...")
+        Log.i("BleCoordinator", "anchorIdentity: $address → ${com.dsm.wallet.bridge.BridgeEncoding.base32CrockfordEncode(identity.deviceId).take(8)}")
     }
 
-    /**
-     * Update a peer's BLE address after RPA rotation detected during scan.
-     * Migrates the PeerSession from the old address key to the new one.
-     */
-    fun updatePeerAddress(identity: PeerIdentity, newAddress: String) {
-        // Find the old entry
-        val oldEntry = peers.entries.firstOrNull { it.value.identity == identity }
-        if (oldEntry == null || oldEntry.key == newAddress) return
+    /** One reach: connecting for the appliance [deviceId], [hint] first, past every other appliance. */
+    private class Reach(val deviceId: ByteArray, val hint: String) {
+        val target: String = com.dsm.wallet.bridge.BridgeEncoding.base32CrockfordEncode(deviceId).take(8)
+        /** Addresses whose identity read named another appliance, or whose link failed. */
+        val excluded: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+        /** Addresses discovered during the reach, each dispatched once. */
+        val seen: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+        /** Discovered while another candidate was connecting; tried in turn. */
+        val waiting = java.util.concurrent.ConcurrentLinkedDeque<String>()
+        /**
+         * The addresses being connected and identified now: the hint, and at
+         * most one discovered address beside it — a stale hint waits out its
+         * connect timeout without holding back the scan.
+         */
+        val candidates: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+        @Volatile var startedScan: Boolean = false
+        val found = CompletableDeferred<BleRoute>()
 
-        val oldAddr = oldEntry.key
-        val session = oldEntry.value
-
-        // Migrate: remove old key, insert under new key
-        peers.remove(oldAddr)
-        peers[newAddress] = session
-        addressIndex.remove(oldAddr)
-        addressIndex[newAddress] = identity
-        Log.i("BleCoordinator", "updatePeerAddress: ${identity.key.take(16)}... migrated $oldAddr → $newAddress")
+        fun isCandidate(address: String) = address in candidates
+        fun scanSlotBusy() = candidates.any { it != hint }
     }
 
-    /**
-     * Establish an on-demand GATT client connection to a device.
-     * Used when bilateral send needs to subscribe to TX_RESPONSE on the
-     * peer's server but no client session exists (torn down after pairing).
-     */
-    fun connectToDevice(address: String): kotlinx.coroutines.CompletableDeferred<Boolean> {
-        val deferred = kotlinx.coroutines.CompletableDeferred<Boolean>()
-        if (hasActiveClientSession(address)) {
-            deferred.complete(true)
-            return deferred
-        }
-        // If a connect is already in flight for this peer, piggy-back on it.
-        peers[address]?.connectResult?.let { existing ->
-             bleScope.launch { deferred.complete(existing.await()) }
-            return deferred
-        }
-        
-        bleScope.launch {
-            val shouldScan = runOperationBool(BleOpLane.LIFECYCLE) {
-                if (hasActiveClientSession(address)) {
-                    deferred.complete(true)
-                    return@runOperationBool false
-                }
-                // Clean up stale client session if one exists under this address
-                if (peers[address]?.gattClientSession != null) {
-                    dropClientSession(address, "pre_connect_stale_session")
-                }
+    @Volatile private var activeReach: Reach? = null
+    private val reachMutex = kotlinx.coroutines.sync.Mutex()
 
-                // ── Step 1: Start advertising so the receiver can find US ──
-                // The reverse path (receiver connects to our GATT server) is the
-                // most reliable route. Prime it before scanning.
+    /**
+     * Reach for the appliance [deviceId]: connect to [hint] first, and scan,
+     * connecting to DSM advertisers one at a time until the identity read on
+     * one names [deviceId]. An appliance that is not it is disconnected and
+     * excluded for this reach, and Rust records nothing about it. Returns the
+     * route once that link is ready, or null when the budget ends first — no
+     * route; the frame stays owed. One reach at a time.
+     */
+    suspend fun reach(deviceId: ByteArray, hint: String): BleRoute? = reachMutex.withLock {
+        resolveRoute(deviceId, hint)?.let { return@withLock it }
+        val reach = Reach(deviceId, hint)
+        activeReach = reach
+        try {
+            // Prime the reverse path: the appliance may reach our server first.
+            runOperationBool(BleOpLane.LIFECYCLE) {
                 gattServer.ensureStarted()
                 if (!advertiser.isAdvertising()) {
                     val requested = advertiser.startAdvertising()
-                    Log.i("BleCoordinator", "connectToDevice($address): advertising for the reverse path requested=$requested")
+                    Log.i("BleCoordinator", "reach ${reach.target}: advertising for the reverse path requested=$requested")
                 }
                 true
             }
-            
-            if (!shouldScan) return@launch
-
-            // ── Step 2: Scan the full budget, checking for reverse connection ──
-            // Scan up to 10s. Every second, check if:
-            //   a) We discovered the peer under a fresh address → connect to it
-            //   b) The peer connected to our GATT server → use server notifications
-            Log.i("BleCoordinator", "connectToDevice($address): scanning up to ${CONNECT_READY_TIMEOUT_MS}ms for peer discovery or reverse connection")
-            startScanning() // Use public safe method
-            val scanStartTime = android.os.SystemClock.elapsedRealtime()
-            var resolvedAddress: String? = null
-
-            while (android.os.SystemClock.elapsedRealtime() - scanStartTime < CONNECT_READY_TIMEOUT_MS) {
-                kotlinx.coroutines.delay(1000)
-
-                // Check identity-based resolution first
-                val resolved = resolveSession(address)
-                if (resolved != null) {
-                    val (peer, addr) = resolved
-                    if (peer.hasActiveClientSession) {
-                        Log.i("BleCoordinator", "connectToDevice: peer found with active client session at $addr")
-                        resolvedAddress = addr
-                        break
-                    }
-                    if (peer.isServerClient && peer.isSubscribedTo(BleConstants.TX_RESPONSE_UUID)) {
-                        Log.i("BleCoordinator", "connectToDevice: peer connected to our GATT server at $addr — using server path")
-                        resolvedAddress = addr
-                        break
-                    }
-                }
-
+            if (hint.isNotEmpty()) {
+                reach.seen.add(hint)
+                runOperation(BleOpLane.LIFECYCLE) { tryCandidate(reach, hint) }
             }
-
-            stopScanning() // safe method
-
-            if (resolvedAddress != null) {
-                deferred.complete(true)
-                return@launch
-            }
-
-            // ── Step 3: No peer found during full scan window, try direct connectGatt to the exact address ──
-            Log.i("BleCoordinator", "connectToDevice($address): no peer discovered after scan, attempting exact-address direct connectGatt")
-            runOperation(BleOpLane.LIFECYCLE) {
-                if (peers[address]?.connectionPending == true || peers[address]?.gattClientSession != null) {
-                    deferred.complete(false)
-                    return@runOperation
+            Log.i("BleCoordinator", "reach ${reach.target}: hint='$hint', up to ${REACH_BUDGET_MS}ms")
+            val deadline = android.os.SystemClock.elapsedRealtime() + REACH_BUDGET_MS
+            while (android.os.SystemClock.elapsedRealtime() < deadline) {
+                resolveRoute(deviceId, hint)?.let { return@withLock it }
+                if (!scanner.isScanning() && startScanning()) {
+                    reach.startedScan = true
                 }
-                val session = getOrCreateSession(address)
-                peers[address]!!.connectResult = deferred
-                val connected = session.connect()
-                if (!connected) {
-                    val p = peers[address]
-                    p?.clearClientState()
-                    if (p?.isEmpty == true) peers.remove(address)
-                    deferred.complete(false)
+                kotlinx.coroutines.withTimeoutOrNull(REACH_POLL_MS) { reach.found.await() }
+                    ?.let { return@withLock it }
+            }
+            Log.i("BleCoordinator", "reach ${reach.target}: not reached within ${REACH_BUDGET_MS}ms (excluded ${reach.excluded.size})")
+            null
+        } finally {
+            activeReach = null
+            if (reach.startedScan) stopScanning()
+            // Candidates still connecting belong to no reach now.
+            val leftover = reach.candidates.toList()
+            reach.candidates.clear()
+            if (leftover.isNotEmpty()) {
+                runOperation(BleOpLane.LIFECYCLE) {
+                    for (address in leftover) {
+                        val peer = peers[address] ?: continue
+                        if (!peer.clientRouteReady) {
+                            clearClient(peer)
+                            if (peer.isEmpty) peers.remove(address)
+                        }
+                    }
                 }
             }
         }
-        return deferred
+    }
+
+    /** On the dispatcher: connect to [address] for [reach], or queue it behind the candidate in flight. */
+    private fun tryCandidate(reach: Reach, address: String) {
+        if (activeReach !== reach || address in reach.excluded) return
+        val existing = peers[address]
+        if (existing?.gattClientSession != null) {
+            // A link there already: anchored to another appliance, it is not this
+            // one; otherwise its own identity read decides and resolveRoute sees it.
+            val other = existing.identity?.let { !it.deviceId.contentEquals(reach.deviceId) } == true
+            if (other) reach.excluded.add(address)
+            return
+        }
+        if (reach.isCandidate(address)) return
+        if (address != reach.hint && reach.scanSlotBusy()) {
+            if (!reach.waiting.contains(address)) reach.waiting.addLast(address)
+            return
+        }
+        reach.candidates.add(address)
+        Log.i("BleCoordinator", "reach ${reach.target}: connecting to candidate $address")
+        val session = getOrCreateSession(address)
+        val peer = peers.getOrPut(address) { PeerSession(address) }
+        // Marks the connect in flight (eviction and discovery leave it alone);
+        // completed when the identity read anchors the link, or by clearClientState.
+        peer.connectResult = peer.connectResult ?: CompletableDeferred()
+        if (!session.connect()) rejectCandidate(reach, address, "connect_init_failed")
+    }
+
+    /** On the dispatcher: [address] is not the appliance [reach] is for; try the next one. */
+    private fun rejectCandidate(reach: Reach, address: String, reason: String) {
+        if (!reach.candidates.remove(address)) return
+        Log.i("BleCoordinator", "reach ${reach.target}: $address excluded ($reason)")
+        reach.excluded.add(address)
+        peers[address]?.let { peer ->
+            clearClient(peer)
+            if (peer.isEmpty) peers.remove(address)
+        }
+        while (!reach.scanSlotBusy()) {
+            val next = reach.waiting.pollFirst() ?: break
+            tryCandidate(reach, next)
+        }
     }
 
     /**

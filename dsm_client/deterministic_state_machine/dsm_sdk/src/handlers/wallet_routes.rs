@@ -791,18 +791,14 @@ impl AppRouterImpl {
                         )
                     }
                 };
-                // Where the counterparty's appliance is over BLE is the SDK's to know:
-                // the address its contact holds, else the one its identity was
-                // seen at this session.
-                let ble_address = match crate::bluetooth::peer_address::counterparty_address(
+                // The counterparty's device id routes the prepare. Where its
+                // appliance was last seen over BLE — the address its contact
+                // holds, else the one its identity was seen at this session — is
+                // only where the transport looks first.
+                let address_hint = match crate::bluetooth::peer_address::counterparty_address(
                     &counterparty_device_id,
                 ) {
-                    Ok(Some(address)) => address,
-                    Ok(None) => {
-                        return err("wallet.sendOffline: no BLE address is known for the \
-                             counterparty: the appliances have not met over BLE"
-                            .into())
-                    }
+                    Ok(hint) => hint,
                     Err(e) => return err(format!("wallet.sendOffline: {e}")),
                 };
 
@@ -979,14 +975,24 @@ impl AppRouterImpl {
                         })?;
                         crate::jni::unified_protobuf_bridge::send_ble_chunks_via_unified(
                             &mut jni_env,
-                            &ble_address,
+                            &counterparty_device_id,
+                            address_hint.as_deref(),
                             &chunks,
                         )
                         .map_err(|e| format!("wallet.sendOffline: BLE dispatch failed: {e}"))
                     })();
                     // jni_env is dropped here — safe to .await below
+                    if !matches!(ble_send_result, Ok(true)) {
+                        crate::bluetooth::owed_frame_driver::kick();
+                    }
                     match ble_send_result {
-                        Ok(true) => {}
+                        Ok(true) => crate::bluetooth::owed_frame_driver::delivered(
+                            counterparty_device_id,
+                            &[(
+                                commitment_hash,
+                                crate::bluetooth::bilateral_session::OfflineFrameKind::Prepare,
+                            )],
+                        ),
                         Ok(false) => {
                             return err(
                                 "wallet.sendOffline: BLE bridge rejected the prepared chunks; the \
@@ -1012,7 +1018,7 @@ impl AppRouterImpl {
 
                 #[cfg(not(all(target_os = "android", feature = "bluetooth", feature = "jni")))]
                 {
-                    let _ = (counterparty_device_id, ble_address, operation);
+                    let _ = (counterparty_device_id, address_hint, operation);
                     err("wallet.sendOffline is only available on Android BLE builds".into())
                 }
             }

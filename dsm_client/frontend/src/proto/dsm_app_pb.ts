@@ -13226,7 +13226,7 @@ export class BleIncomingDataResponse extends Message<BleIncomingDataResponse> {
   responseChunks: Uint8Array[] = [];
 
   /**
-   * true = send via requestGattWriteChunks (bilateral follow-ups)
+   * true = prefer our client link to the peer's server subscription (bilateral follow-ups)
    *
    * @generated from field: bool use_reliable_write = 3;
    */
