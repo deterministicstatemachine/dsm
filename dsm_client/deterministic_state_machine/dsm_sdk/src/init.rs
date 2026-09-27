@@ -527,8 +527,8 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
         // Backfill Device Tree root (§2.3) for existing identities created before this was
         // persisted at genesis time.  The root of a single-device tree is deterministic from
         // dev_fixed, so it is always safe to recompute and overwrite.
-        // Without the root, build_bilateral_receipt_with_smt returns None → proof_data None →
-        // settle() rejects every bilateral transfer → balance never updates.
+        // Without the root no receipt is built: the producer checks each receipt's device
+        // proof against it, so every bilateral step would be refused.
         {
             let root = dsm::common::device_tree::DeviceTree::single(dev_fixed).root();
             crate::sdk::app_state::AppState::set_device_tree_root(root)

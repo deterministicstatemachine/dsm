@@ -31,6 +31,9 @@ pub mod proto; // generated OUT_DIR include (dsm.rs)
 pub mod receipt_types; // Canonical receipt structures
 pub mod serialization;
 pub mod state_types;
+#[cfg(test)]
+pub(crate) mod step_fixture; // real identities, real steps and their receipts, for tests
+pub mod step_transition; // every leaf one step writes, proven against its pre-root
 pub mod token_types;
 pub mod ui_error;
 pub mod unified_error;

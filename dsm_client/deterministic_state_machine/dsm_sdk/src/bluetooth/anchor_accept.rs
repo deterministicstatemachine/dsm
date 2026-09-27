@@ -229,6 +229,45 @@ pub(crate) fn pin_admit_decision(
     PinAdmitDecision::NoChange
 }
 
+/// The anchor-state leaves a sender's offline-bearer step moves, DERIVED — never read — from its
+/// release: the counter's successor is `u_i + 1`, and the frontier's successor is
+/// `anchor_root_advance(h_i, D_{i+1})` with `D_{i+1}` recomputed from the release's transition
+/// under this receiver's own challenge `r_R`. Both leaves are under `bundle`, the one this
+/// receiver pins (or is admitting) for the sender. A release whose carried successor is not the
+/// derived one is refused. The release's signatures are checked by [`accept_offline_release`]
+/// before anything commits; these leaves are what the step's receipt must prove it moved.
+pub fn bearer_leaves_of_release(
+    offline_release: &[u8],
+    bundle: &[u8; 32],
+    receiver_challenge: &[u8; 32],
+) -> Result<dsm::verification::receipt_verification::BearerLeaves, OfflineRecover> {
+    use anchor_core::root_advance::{anchor_root_advance, anchor_state_leaf, transition_digest};
+    if offline_release.is_empty() {
+        return Err(OfflineRecover::MissingRelease);
+    }
+    let rel = pb::OfflineRelease::decode(offline_release)
+        .map_err(|_| OfflineRecover::Malformed)?
+        .to_release()
+        .map_err(|_| OfflineRecover::Malformed)?;
+    let t = rel.transition.as_transition();
+    let next_counter = t
+        .anchor_counter
+        .checked_add(1)
+        .ok_or(OfflineRecover::Malformed)?;
+    let next_frontier =
+        anchor_root_advance(t.prev_root, &transition_digest(&t, receiver_challenge));
+    if t.next_anchor_counter != next_counter || *t.next_root != next_frontier {
+        return Err(OfflineRecover::Predicate(
+            AcceptError::TransitionProofInvalid,
+        ));
+    }
+    Ok(dsm::verification::receipt_verification::BearerLeaves {
+        bundle: *bundle,
+        anchor_before: anchor_state_leaf(bundle, t.prev_root, t.anchor_counter),
+        anchor_after: anchor_state_leaf(bundle, &next_frontier, next_counter),
+    })
+}
+
 /// The holder's successor frontier state, returned on acceptance so the receiver can ADOPT it
 /// (persist as the new accepted frontier) once the canonical commit succeeds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

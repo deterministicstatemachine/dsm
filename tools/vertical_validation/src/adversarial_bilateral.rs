@@ -15,7 +15,7 @@
 use instant::Instant;
 use serde::Serialize;
 
-use dsm::merkle::sparse_merkle_tree::SmtInclusionProof;
+use dsm::types::operations::Operation;
 use dsm::types::receipt_types::{ParentConsumptionTracker, StitchedReceiptV2};
 use dsm::verification::receipt_verification::verify_stitched_receipt;
 
@@ -86,22 +86,27 @@ fn funded_pair() -> (LiveDevice, LiveDevice) {
     (alice, bob)
 }
 
-/// Alice's transfer of `amount` to Bob from her current head, and the
-/// receipt of it both have signed.
-fn signed_step(alice: &LiveDevice, bob: &LiveDevice, amount: u64, nonce: u8) -> StitchedReceiptV2 {
+/// Alice's transfer of `amount` to Bob from her current head: the receipt of
+/// it both have signed, and the transfer.
+fn signed_step(
+    alice: &LiveDevice,
+    bob: &LiveDevice,
+    amount: u64,
+    nonce: u8,
+) -> (StitchedReceiptV2, Operation) {
     let op = alice.transfer(bob, amount, &[nonce; 8]).expect("transfer");
     let outcome = alice.send(bob, &op).expect("sender advance");
-    stitched_receipt(alice, bob, &outcome).expect("receipt")
+    (stitched_receipt(alice, bob, &outcome).expect("receipt"), op)
 }
 
 /// The verifier's judgement: `Ok(())` accepted, `Err(reason)` refused.
 fn judge(
     alice: &LiveDevice,
     bob: &LiveDevice,
-    receipt: &StitchedReceiptV2,
+    (receipt, op): (&StitchedReceiptV2, &Operation),
     tracker: &mut ParentConsumptionTracker,
 ) -> Result<(), String> {
-    let ctx = verification_context(alice, bob, alice.head.root());
+    let ctx = verification_context(alice, bob, alice.head.root(), op);
     match verify_stitched_receipt(receipt, &ctx, tracker) {
         Ok(acceptance) if acceptance.valid => Ok(()),
         Ok(acceptance) => Err(acceptance.reason.unwrap_or_default()),
@@ -136,17 +141,17 @@ fn attack_double_spend() -> AdversarialAttackResult {
     let (alice, bob) = funded_pair();
     // Two different transfers built from the SAME head: two children of one
     // parent tip, each fully signed.
-    let first = signed_step(&alice, &bob, 150, 0x01);
-    let second = signed_step(&alice, &bob, 120, 0x02);
+    let (first, first_op) = signed_step(&alice, &bob, 150, 0x01);
+    let (second, second_op) = signed_step(&alice, &bob, 120, 0x02);
     let mut tracker = ParentConsumptionTracker::new();
 
     let outcome = (|| {
         if first.parent_tip != second.parent_tip || first.child_tip == second.child_tip {
             return Err("the two spends are not two children of one parent".into());
         }
-        judge(&alice, &bob, &first, &mut tracker)
+        judge(&alice, &bob, (&first, &first_op), &mut tracker)
             .map_err(|r| format!("the honest first spend was refused: {r}"))?;
-        match judge(&alice, &bob, &second, &mut tracker) {
+        match judge(&alice, &bob, (&second, &second_op), &mut tracker) {
             Ok(()) => Err("the second child of a consumed parent was ACCEPTED".into()),
             Err(r) if r.contains("Parent uniqueness") => Ok(format!("second child refused: {r}")),
             Err(r) => Err(format!("refused for the wrong reason: {r}")),
@@ -166,12 +171,17 @@ fn attack_double_spend() -> AdversarialAttackResult {
 
 fn attack_forged_signature() -> AdversarialAttackResult {
     let (alice, bob) = funded_pair();
-    let honest = signed_step(&alice, &bob, 50, 0x03);
+    let (honest, op) = signed_step(&alice, &bob, 50, 0x03);
     let mallory = LiveDevice::new("adversarial-mallory").expect("mallory");
 
     let outcome = (|| {
-        judge(&alice, &bob, &honest, &mut ParentConsumptionTracker::new())
-            .map_err(|r| format!("the honest receipt was refused: {r}"))?;
+        judge(
+            &alice,
+            &bob,
+            (&honest, &op),
+            &mut ParentConsumptionTracker::new(),
+        )
+        .map_err(|r| format!("the honest receipt was refused: {r}"))?;
 
         // A valid SPHINCS+ signature over the right commitment, by the wrong key.
         let mut wrong_signer = honest.clone();
@@ -188,7 +198,7 @@ fn attack_forged_signature() -> AdversarialAttackResult {
         if judge(
             &alice,
             &bob,
-            &wrong_signer,
+            (&wrong_signer, &op),
             &mut ParentConsumptionTracker::new(),
         )
         .is_ok()
@@ -199,7 +209,14 @@ fn attack_forged_signature() -> AdversarialAttackResult {
         // Bytes that are no signature at all, at the production size.
         let mut garbage = honest.clone();
         garbage.sig_b = vec![0xDE; honest.sig_b.len()];
-        if judge(&alice, &bob, &garbage, &mut ParentConsumptionTracker::new()).is_ok() {
+        if judge(
+            &alice,
+            &bob,
+            (&garbage, &op),
+            &mut ParentConsumptionTracker::new(),
+        )
+        .is_ok()
+        {
             return Err("a garbage countersignature was ACCEPTED".into());
         }
         Ok("wrong-key and garbage countersignatures refused".into())
@@ -218,13 +235,13 @@ fn attack_forged_signature() -> AdversarialAttackResult {
 
 fn attack_replay() -> AdversarialAttackResult {
     let (alice, bob) = funded_pair();
-    let receipt = signed_step(&alice, &bob, 40, 0x04);
+    let (receipt, op) = signed_step(&alice, &bob, 40, 0x04);
     let mut tracker = ParentConsumptionTracker::new();
 
     let outcome = (|| {
-        judge(&alice, &bob, &receipt, &mut tracker)
+        judge(&alice, &bob, (&receipt, &op), &mut tracker)
             .map_err(|r| format!("the receipt was refused the first time: {r}"))?;
-        match judge(&alice, &bob, &receipt, &mut tracker) {
+        match judge(&alice, &bob, (&receipt, &op), &mut tracker) {
             Ok(()) => Err("the replayed receipt was ACCEPTED".into()),
             Err(r) if r.contains("Parent uniqueness") => Ok(format!("replay refused: {r}")),
             Err(r) => Err(format!("refused for the wrong reason: {r}")),
@@ -278,11 +295,16 @@ fn attack_balance_underflow() -> AdversarialAttackResult {
 
 fn attack_forged_post_state() -> AdversarialAttackResult {
     let (alice, bob) = funded_pair();
-    let honest = signed_step(&alice, &bob, 30, 0x07);
+    let (honest, op) = signed_step(&alice, &bob, 30, 0x07);
 
     let outcome = (|| {
-        judge(&alice, &bob, &honest, &mut ParentConsumptionTracker::new())
-            .map_err(|r| format!("the honest receipt was refused: {r}"))?;
+        judge(
+            &alice,
+            &bob,
+            (&honest, &op),
+            &mut ParentConsumptionTracker::new(),
+        )
+        .map_err(|r| format!("the honest receipt was refused: {r}"))?;
 
         // Both parties re-sign a receipt whose child root is not the one the
         // relationship path folds to: the signatures hold, the state does not.
@@ -293,23 +315,36 @@ fn attack_forged_post_state() -> AdversarialAttackResult {
         let commitment = forged.compute_commitment().map_err(|e| e.to_string())?;
         forged.add_sig_a(alice.keypair.sign(&commitment).map_err(|e| e.to_string())?);
         forged.add_sig_b(bob.keypair.sign(&commitment).map_err(|e| e.to_string())?);
-        if judge(&alice, &bob, &forged, &mut ParentConsumptionTracker::new()).is_ok() {
+        if judge(
+            &alice,
+            &bob,
+            (&forged, &op),
+            &mut ParentConsumptionTracker::new(),
+        )
+        .is_ok()
+        {
             return Err("a signed receipt over a forged post-state root was ACCEPTED".into());
         }
 
-        // The same with one sibling of the path changed: the path no longer
-        // authenticates the parent tip under the pre-state root.
+        // The same with one sibling of the path changed: the writes no
+        // longer fold to the pre-state root.
         let mut bent = honest.clone();
-        let mut path = SmtInclusionProof::from_bytes(&bent.rel_proof_parent)
-            .ok_or("the receipt's path does not decode")?;
-        path.siblings[0][0] ^= 0x01;
-        bent.rel_proof_parent = path.to_bytes();
+        let siblings = &mut bent.step_writes[0].path.siblings;
+        if siblings.is_empty() {
+            return Err("the relationship path carries no sibling to bend".into());
+        }
+        siblings[0] ^= 0x01;
         bent.sig_a.clear();
         bent.sig_b.clear();
         let commitment = bent.compute_commitment().map_err(|e| e.to_string())?;
         bent.add_sig_a(alice.keypair.sign(&commitment).map_err(|e| e.to_string())?);
         bent.add_sig_b(bob.keypair.sign(&commitment).map_err(|e| e.to_string())?);
-        match judge(&alice, &bob, &bent, &mut ParentConsumptionTracker::new()) {
+        match judge(
+            &alice,
+            &bob,
+            (&bent, &op),
+            &mut ParentConsumptionTracker::new(),
+        ) {
             Ok(()) => Err("a signed receipt over a bent relationship path was ACCEPTED".into()),
             Err(r) => Ok(format!("forged post-state and bent path refused: {r}")),
         }
@@ -334,12 +369,17 @@ fn attack_unexpected_parent_root() -> AdversarialAttackResult {
     alice.install(first);
     // A genuine, fully signed second step, presented to a verifier that still
     // expects the chain to stand where it stood before the first.
-    let second = signed_step(&alice, &bob, 10, 0x09);
+    let (second, second_op) = signed_step(&alice, &bob, 10, 0x09);
 
     let outcome = (|| {
-        judge(&alice, &bob, &second, &mut ParentConsumptionTracker::new())
-            .map_err(|r| format!("the second step was refused at its own root: {r}"))?;
-        let stale = verification_context(&alice, &bob, root_before);
+        judge(
+            &alice,
+            &bob,
+            (&second, &second_op),
+            &mut ParentConsumptionTracker::new(),
+        )
+        .map_err(|r| format!("the second step was refused at its own root: {r}"))?;
+        let stale = verification_context(&alice, &bob, root_before, &second_op);
         match verify_stitched_receipt(&second, &stale, &mut ParentConsumptionTracker::new()) {
             Ok(a) if a.valid => Err("a step over an unexpected parent root was ACCEPTED".into()),
             Ok(a) => {

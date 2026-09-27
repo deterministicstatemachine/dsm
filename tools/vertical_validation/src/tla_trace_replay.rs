@@ -681,7 +681,8 @@ impl DsmImplementationHarness {
                 .map_err(|e| anyhow!("the sender's advance was refused: {e}"))?;
             let receipt = stitched_receipt(sender, recipient, &sender_outcome)
                 .map_err(|e| anyhow!("the step's receipt could not be built: {e}"))?;
-            let ctx = verification_context(sender, recipient, sender.head.root());
+            let ctx =
+                verification_context(sender, recipient, sender.head.root(), &pending.operation);
             match verify_stitched_receipt(&receipt, &ctx, &mut self.parent_tracker) {
                 Ok(acceptance) if acceptance.valid => {}
                 Ok(acceptance) => bail!(

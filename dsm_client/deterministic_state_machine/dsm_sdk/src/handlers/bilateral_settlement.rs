@@ -215,6 +215,12 @@ impl StepSettlement {
                 if let Some(t) = &self.transfer {
                     m.insert("token_id".to_string(), t.token_id.as_bytes().to_vec());
                 }
+                // The receipt's tip binds the operation, so a later check of
+                // the receipt needs the operation it was built over.
+                m.insert(
+                    crate::storage::client_db::HISTORY_OPERATION_KEY.to_string(),
+                    self.operation_bytes.clone(),
+                );
                 m
             },
         };

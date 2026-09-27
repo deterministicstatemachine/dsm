@@ -3292,37 +3292,41 @@ mod tests {
     /// Field sizes decoded from a REAL stuck envelope pulled off the bench rig
     /// (submission RX6BA3TY6KRDEBVXGXNCTHWVT0, 168,400 bytes). Using measured
     /// production values, not guesses, is the whole point of this budget.
-    const REL_PROOF_LEN: usize = 8_261;
-    const DEV_PROOF_LEN: usize = 9;
     const KYBER_CT_LEN: usize = 1_088;
     const EK_PK_LEN: usize = 64;
     const CANONICAL_OP_LEN: usize = 303;
 
-    /// A production-sized one-way (A-side) ReceiptCommit.
+    /// A real one-way (A-side) receipt in its full wire form: a real step's
+    /// receipt, answered by its sender's per-step EK over the receipt's own
+    /// commitment (the online session binding).
     fn production_sized_receipt_a() -> Vec<u8> {
-        let sig = sphincs_sig_len();
-        let rc = dsm::types::proto::ReceiptCommit {
-            genesis: vec![0x01; 32],
-            devid_a: vec![0x02; 32],
-            devid_b: vec![0x03; 32],
-            parent_tip: vec![0x04; 32],
-            child_tip: vec![0x05; 32],
-            parent_root: vec![0x06; 32],
-            child_root: vec![0x07; 32],
-            // Canonical field 21 (Part VII step 3): the sender's transition
-            // entropy, required at the wire since #934.
-            transition_entropy: vec![0x0C; 32],
-            rel_proof_parent: vec![0x08; REL_PROOF_LEN],
-            dev_proof: vec![0x0A; DEV_PROOF_LEN],
-            sig_a: vec![0xAA; sig],
-            ek_cert_a: vec![0xCC; sig],
-            ek_pk_a: vec![0xDD; EK_PK_LEN],
-            kyber_ct_a: vec![0xEE; KYBER_CT_LEN],
-            ..Default::default()
-        };
-        let mut out = Vec::with_capacity(rc.encoded_len());
-        rc.encode(&mut out).expect("encode ReceiptCommit");
-        out
+        use crate::test_support::receipts::{transfer_step, Party};
+        static A_SIDE: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+        A_SIDE
+            .get_or_init(|| {
+                let (sender, receiver) = (Party::from_seed(0x41), Party::from_seed(0x42));
+                let step = transfer_step(&sender, &receiver, 7);
+                let mut receipt = step.receipt;
+                let commitment = receipt.compute_commitment().expect("commitment");
+                let a = sender.answer(
+                    &receiver,
+                    &receipt.parent_tip,
+                    &step.c_pre,
+                    &dsm::types::receipt_types::compute_receipt_challenge_response_target(
+                        &commitment,
+                        &commitment,
+                    ),
+                );
+                assert_eq!(a.sig.len(), sphincs_sig_len());
+                assert_eq!(a.ek_pk.len(), EK_PK_LEN);
+                assert_eq!(a.kyber_ct.len(), KYBER_CT_LEN);
+                receipt.add_sig_a(a.sig);
+                receipt.set_ek_cert_a(a.ek_cert);
+                receipt.set_ek_pk_a(a.ek_pk);
+                receipt.set_kyber_ct_a(a.kyber_ct);
+                receipt.to_full_protobuf().expect("encode the A side")
+            })
+            .clone()
     }
 
     /// Submission params carrying production-sized SIG A and canonical op bytes

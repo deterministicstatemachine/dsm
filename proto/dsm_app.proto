@@ -1468,8 +1468,8 @@ message AppStateStorage {
   // used for receipt paths that verify π_dev: DevID ∈ R_G.
   // Computed at genesis via: R_G = DeviceTree::single(device_id).root()
   // Persisted IMMEDIATELY after genesis, device addition, or recovery.
-  // If None: build_bilateral_receipt_with_smt() → None → proof_data=None → the affected
-  // receipt path rejects during settlement.
+  // If None: no receipt is built (the producer checks its device proof against R_G),
+  // and the affected step is refused.
   // INVARIANT: any local acceptance path carrying π_dev must have R_G or an equivalent
   // authenticated persisted device-tree commitment available.
   optional bytes device_tree_root = 9 [(dsm_fixed_len)=32];
@@ -1858,13 +1858,13 @@ message ReceiptCommit {
   bytes parent_root     = 6 [(dsm_fixed_len)=32]; // r_A
   bytes child_root      = 7 [(dsm_fixed_len)=32]; // r_A'
   // Proof fields are capped to enforce the 128 KiB strict-fail invariant end-to-end.
-  // pi_rel: the ONE relationship path. It authenticates h_n under r_A, and the
-  // same siblings folded with h_{n+1} are r_A' — there is no second proof.
-  bytes rel_proof_parent= 8 [(dsm_max_len)=131072];
   bytes dev_proof       = 10 [(dsm_max_len)=131072]; // pi_dev(DevID_A in R_G)
-  // 9 was a child inclusion proof and 11 a separate replace witness: both were
-  // second encodings of the path field 8 already carries.
-  reserved 9, 11;
+  // 8 was one relationship path: a bearer step writes three leaves under the
+  // one root the receipt names, so one path could not prove its move (the
+  // step's writes, field 22, do). 9 was a child inclusion proof and 11 a
+  // separate replace witness: second encodings of that path.
+  reserved 8, 9, 11;
+  reserved "rel_proof_parent";
   // Dual SPHINCS+ signatures. These are the receipt challenge responses.
   // The challenge is the proposed transition context carried by fields 1-8, 10 and 21
   // plus the bilateral session binding. Each response signs that context with
@@ -1917,6 +1917,52 @@ message ReceiptCommit {
   // derive it (e_n is the sender's own tip entropy); it feeds it into C_pre
   // and the symmetric tip and recomputes child_tip from it. Required.
   bytes transition_entropy = 21 [(dsm_fixed_len)=32];
+  // Every leaf the step writes, each with its path against parent_root: the
+  // writes fold from r_A to r_A' (§9: the counter and the value source are
+  // inside the root, so the root moves over all of them at once). CANONICAL
+  // and required.
+  StepWriteSet step_writes = 22;
+}
+
+// The leaves one step writes, as its receipt carries them. A verifier derives
+// each leaf's key and both its values from inputs it has validated
+// independently (the receipt's tips and operation, the pinned genesis and
+// anchor bundle, the release's signed counter pair); none is carried beside
+// its hash. The one exception is the offline allocation, whose leaf is an
+// opaque hash of (amount, sequence): its pre-state preimage is the minimum
+// witness, and the post-state is derived from it and the operation.
+message StepWriteSet {
+  repeated StepWrite writes = 1;
+}
+
+// One leaf a step writes: which leaf, and its path against the step's
+// parent_root in the one canonical encoding (a 256-bit set of the heights
+// whose sibling is not the tree's default there, and those siblings, lowest
+// height first). The writes are ordered by their derived key.
+message StepWrite {
+  oneof leaf {
+    StepWriteRelationship relationship = 1;
+    StepWriteAnchorState anchor_state = 2;
+    StepWriteOfflineAllocation offline_allocation = 3;
+  }
+  bytes path_heights = 4 [(dsm_fixed_len)=32];
+  bytes path_siblings = 5 [(dsm_max_len)=8192];
+}
+
+// The relationship leaf at compute_smt_key(devid_a, devid_b): parent_tip before,
+// child_tip after (child_tip recomputed from the operation and the entropy).
+message StepWriteRelationship {}
+
+// The anchor-state leaf of the pinned bundle B: before and after are the
+// anchor-state leaves the release's signed counter pair and frontiers name.
+message StepWriteAnchorState {}
+
+// The offline allocation leaf of (genesis, device, B, asset): the allocation as
+// it stood before the step. After is derived: amount less the operation's
+// amount, sequence plus one.
+message StepWriteOfflineAllocation {
+  uint64 pre_amount = 1;
+  uint64 pre_sequence = 2;
 }
 
 // Bilateral event notifications for frontend

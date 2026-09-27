@@ -3,8 +3,8 @@
 //! Production verification namespace for DSM.
 //!
 //! Issue #162 cleanup: this module is the single home for **runtime**
-//! verification used by the protocol — receipt verification, over the one
-//! relationship path `merkle::sparse_merkle_tree::verify_smt_replace` checks.
+//! verification used by the protocol — receipt verification, over the step's
+//! write set folded by `merkle::batch_fold`.
 //!
 //! Quick map:
 //!
