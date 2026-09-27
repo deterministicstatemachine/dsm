@@ -747,7 +747,7 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
             .setBlePermissions(NativeFirstCutoverReset.hasBlePermissions(this))
             .setBleScanning(service?.isScanningActive() == true)
             .setBleAdvertising(service?.isAdvertisingActive() == true)
-            .setQrAvailable(true)
+            .setQrAvailable(packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_CAMERA_ANY))
             .setQrActive(qrState.effectiveQrActive())
             .setCameraPermission(NativeFirstCutoverReset.hasCameraPermission(this))
             .setBatteryCharging(batteryCharging)
@@ -1759,20 +1759,6 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
                     Log.i(tag, "initDsmAndSignalReady: getAppRouterStatus() returned $status")
                 } catch (t: Throwable) {
                     Log.w(tag, "initDsmAndSignalReady: getAppRouterStatus() not available", t)
-                }
-
-                try {
-                    val deviceIdBin = try { Unified.getDeviceIdBin() } catch (_: Throwable) { byteArrayOf() }
-                    val genesis = ByteArray(32)
-                    val tip = ByteArray(32)
-                    if (deviceIdBin.size == 32) {
-                        val b0x = Unified.computeB0xAddress(genesis, deviceIdBin, tip)
-                        Log.i(tag, "initDsmAndSignalReady: computeB0xAddress (diag) = $b0x")
-                    } else {
-                        Log.i(tag, "initDsmAndSignalReady: computeB0xAddress skipped (missing device id)")
-                    }
-                } catch (t: Throwable) {
-                    Log.w(tag, "initDsmAndSignalReady: computeB0xAddress failed", t)
                 }
 
                 // CRITICAL: Bootstrap FIRST (background thread) — restores identity + SDK
