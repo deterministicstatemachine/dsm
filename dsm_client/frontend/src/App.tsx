@@ -158,7 +158,7 @@ export default function App() {
                     />
                     <GlobalToast />
                     <DiagnosticsOverlay />
-                    <BilateralTransferDialog />
+                    <BilateralTransferDialog walletReady={runtime.appState === 'wallet_ready'} />
                     <FxLayer />
                     <GuidedTour appState={runtime.appState} guideSrc={chameleonSrc} />
                     <TourOffer appState={runtime.appState} showIntro={showIntro} guideSrc={chameleonSrc} />
