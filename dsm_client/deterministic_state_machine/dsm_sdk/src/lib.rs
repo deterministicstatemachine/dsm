@@ -184,6 +184,18 @@ pub async fn init_dsm_sdk() -> Result<(), dsm::types::error::DsmError> {
     let base = ensure_storage_base_dir()?;
     log::info!("DSM storage base: {base:?}");
 
+    // The client store is a precondition of everything the SDK does, so it is
+    // opened here. A store this build refuses (a schema an older build left;
+    // beta does not migrate) fails startup in the store's own words. Unopened,
+    // the refusal surfaced later through whatever read the store first: on a
+    // phone that was the sealed-seed read, which reported a locked wallet.
+    crate::storage::client_db::init_database().map_err(|e| {
+        dsm::types::error::DsmError::storage(
+            format!("the client store: {e}"),
+            None::<std::io::Error>,
+        )
+    })?;
+
     // Load strict network config (or hermetic test config),
     // then install the multi-node registry.
     let cfg = crate::network::NetworkConfigLoader::load_env_config()?;

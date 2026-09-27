@@ -2552,8 +2552,6 @@ message Envelope {
     BilateralCommitResponse          bilateral_commit_response         = 28;
     DsmBtMessage                     dsm_bt_message                    = 29;
 
-    // SDK init/status responses
-    InitFailed                       init_failed                       = 31;
 
     // BLE events
     BleEvent                         ble_event                        = 32;
@@ -2698,6 +2696,8 @@ message Envelope {
   // 43 was secondary_device_response and 107 device_tree_snapshot_response:
   // no route produced either (the device tree store is not built).
   reserved 43, 107;
+  // 31 was init_failed: only a startup export no caller used produced it.
+  reserved 31;
 }
 
 // ===================== Sealed spool payloads (DSM Amendment A7) =====================
@@ -2841,19 +2841,6 @@ message SofiRelayResponse {
 // trial-decode of the forward transfer. The sender matches the delta to its ONE
 // persisted proposal by `commitment`, overlays it onto the A-side receipt it froze
 // at send, verifies against that proposal's CANONICAL pair, then finalizes.
-
-// ===================== SDK INIT / STATUS =====================
-// Returned when the app attempts to mark the SDK/wallet "initialized" but a
-// mandatory prerequisite is missing.
-message InitFailed {
-  enum Reason {
-    REASON_UNSPECIFIED = 0;
-    PLATFORM_CONTEXT_MISSING = 2;
-    INVALID_INPUT = 3;
-  }
-  Reason reason = 1;
-  string message = 2;
-}
 
 // ============ RECOVERY OPERATIONS (binary IDs) ==============
 

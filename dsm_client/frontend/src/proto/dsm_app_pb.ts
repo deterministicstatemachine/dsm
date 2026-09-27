@@ -16722,14 +16722,6 @@ export class Envelope extends Message<Envelope> {
     case: "dsmBtMessage";
   } | {
     /**
-     * SDK init/status responses
-     *
-     * @generated from field: dsm.InitFailed init_failed = 31;
-     */
-    value: InitFailed;
-    case: "initFailed";
-  } | {
-    /**
      * BLE events
      *
      * @generated from field: dsm.BleEvent ble_event = 32;
@@ -17279,7 +17271,6 @@ export class Envelope extends Message<Envelope> {
     { no: 27, name: "bilateral_accept_response", kind: "message", T: BilateralAcceptResponse, oneof: "payload" },
     { no: 28, name: "bilateral_commit_response", kind: "message", T: BilateralCommitResponse, oneof: "payload" },
     { no: 29, name: "dsm_bt_message", kind: "message", T: DsmBtMessage, oneof: "payload" },
-    { no: 31, name: "init_failed", kind: "message", T: InitFailed, oneof: "payload" },
     { no: 32, name: "ble_event", kind: "message", T: BleEvent, oneof: "payload" },
     { no: 34, name: "balances_list_response", kind: "message", T: BalancesListResponse, oneof: "payload" },
     { no: 35, name: "storage_sync_response", kind: "message", T: StorageSyncResponse, oneof: "payload" },
@@ -18232,79 +18223,6 @@ export class SofiRelayResponse extends Message<SofiRelayResponse> {
     return proto3.util.equals(SofiRelayResponse, a, b);
   }
 }
-
-/**
- * ===================== SDK INIT / STATUS =====================
- * Returned when the app attempts to mark the SDK/wallet "initialized" but a
- * mandatory prerequisite is missing.
- *
- * @generated from message dsm.InitFailed
- */
-export class InitFailed extends Message<InitFailed> {
-  /**
-   * @generated from field: dsm.InitFailed.Reason reason = 1;
-   */
-  reason = InitFailed_Reason.REASON_UNSPECIFIED;
-
-  /**
-   * @generated from field: string message = 2;
-   */
-  message = "";
-
-  constructor(data?: PartialMessage<InitFailed>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.InitFailed";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "reason", kind: "enum", T: proto3.getEnumType(InitFailed_Reason) },
-    { no: 2, name: "message", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): InitFailed {
-    return new InitFailed().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): InitFailed {
-    return new InitFailed().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): InitFailed {
-    return new InitFailed().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: InitFailed | PlainMessage<InitFailed> | undefined, b: InitFailed | PlainMessage<InitFailed> | undefined): boolean {
-    return proto3.util.equals(InitFailed, a, b);
-  }
-}
-
-/**
- * @generated from enum dsm.InitFailed.Reason
- */
-export enum InitFailed_Reason {
-  /**
-   * @generated from enum value: REASON_UNSPECIFIED = 0;
-   */
-  REASON_UNSPECIFIED = 0,
-
-  /**
-   * @generated from enum value: PLATFORM_CONTEXT_MISSING = 2;
-   */
-  PLATFORM_CONTEXT_MISSING = 2,
-
-  /**
-   * @generated from enum value: INVALID_INPUT = 3;
-   */
-  INVALID_INPUT = 3,
-}
-// Retrieve enum metadata with: proto3.getEnumType(InitFailed_Reason)
-proto3.util.setEnumType(InitFailed_Reason, "dsm.InitFailed.Reason", [
-  { no: 0, name: "REASON_UNSPECIFIED" },
-  { no: 2, name: "PLATFORM_CONTEXT_MISSING" },
-  { no: 3, name: "INVALID_INPUT" },
-]);
 
 /**
  * @generated from message dsm.ArchitectureInfoProto

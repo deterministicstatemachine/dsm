@@ -554,16 +554,17 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
         // create_genesis_v2 registered. No DBRW / device secret. The wallet seed is the
         // unlocked-session secret; it is cached at unlock (RecoverySDK::derive_and_cache_key)
         // and sealed at rest, so on a cold start we first try the hardware seed vault before
-        // demanding the mnemonic again. A missing/auth-gated bundle fails closed → locked UI.
+        // demanding the mnemonic again. Either way init fails without it, and the failure is
+        // the session's fatal error. A vault that cannot be read is that failure in its own
+        // words: reporting it as "not unlocked" sent a device whose store refused its schema
+        // looking for its mnemonic.
         if crate::sdk::recovery_sdk::RecoverySDK::get_cached_wallet_seed().is_none() {
             match crate::sdk::recovery_sdk::RecoverySDK::load_and_cache_wallet_seed() {
                 Ok(true) => log::info!("[SDK Init] Wallet seed unsealed from vault (cold start)"),
                 Ok(false) => {
                     log::info!("[SDK Init] No sealed wallet seed — mnemonic unlock required")
                 }
-                Err(e) => {
-                    log::warn!("[SDK Init] Seed vault unlock failed ({e}) — mnemonic required")
-                }
+                Err(e) => return Err(format!("the sealed wallet seed could not be read: {e}")),
             }
         }
         let wallet_seed = crate::sdk::recovery_sdk::RecoverySDK::get_cached_wallet_seed()
