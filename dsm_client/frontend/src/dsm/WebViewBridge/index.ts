@@ -67,7 +67,6 @@ export const {
   getInboxStrictBridge,
   getPendingBilateralListStrictBridge,
   getWalletHistoryStrictBridge,
-  syncWithStorageStrictBridge,
 } = strictQueries;
 
 export const { startNativeQrScannerViaRouter } = qr;
