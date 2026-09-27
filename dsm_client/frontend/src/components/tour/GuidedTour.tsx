@@ -196,6 +196,11 @@ export default function GuidedTour({ appState }: Props): React.JSX.Element | nul
           tourStore.next();
           return;
         }
+        if (wait.kind === 'gone' && here && !find(wait.selector)) {
+          play('tick');
+          tourStore.next();
+          return;
+        }
         if (wait.kind === 'value' && here) {
           const field = find(wait.selector) as HTMLInputElement | HTMLSelectElement | null;
           const value = field ? field.value : '';

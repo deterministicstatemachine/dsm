@@ -12574,11 +12574,11 @@ export class OfflineCashRequest extends Message<OfflineCashRequest> {
   tokenId = "";
 
   /**
-   * base units to load (online -> allocation) or unload (allocation -> online)
+   * decimal, as the user typed it; the SDK scales it by the token's decimals
    *
-   * @generated from field: uint64 amount = 2;
+   * @generated from field: string amount = 2;
    */
-  amount = protoInt64.zero;
+  amount = "";
 
   constructor(data?: PartialMessage<OfflineCashRequest>) {
     super();
@@ -12589,7 +12589,7 @@ export class OfflineCashRequest extends Message<OfflineCashRequest> {
   static readonly typeName = "dsm.OfflineCashRequest";
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
     { no: 1, name: "token_id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 2, name: "amount", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 2, name: "amount", kind: "scalar", T: 9 /* ScalarType.STRING */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): OfflineCashRequest {
@@ -12644,6 +12644,20 @@ export class OfflineCashResponse extends Message<OfflineCashResponse> {
    */
   message = "";
 
+  /**
+   * display form of `online_balance`, rendered by Rust
+   *
+   * @generated from field: string online_display = 6;
+   */
+  onlineDisplay = "";
+
+  /**
+   * display form of `allocation_balance`, rendered by Rust
+   *
+   * @generated from field: string allocation_display = 7;
+   */
+  allocationDisplay = "";
+
   constructor(data?: PartialMessage<OfflineCashResponse>) {
     super();
     proto3.util.initPartial(data, this);
@@ -12657,6 +12671,8 @@ export class OfflineCashResponse extends Message<OfflineCashResponse> {
     { no: 3, name: "allocation_balance", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
     { no: 4, name: "device_root", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 5, name: "message", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 6, name: "online_display", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 7, name: "allocation_display", kind: "scalar", T: 9 /* ScalarType.STRING */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): OfflineCashResponse {
@@ -21421,6 +21437,16 @@ export class BalanceGetResponse extends Message<BalanceGetResponse> {
    */
   permissions?: TokenPolicyPermissions;
 
+  /**
+   * The token's offline allocation on this device, stated only once an anchor
+   * appliance has been attached since the app started: the allocation leaf is
+   * keyed by the appliance's bundle, and only the appliance states its bundle.
+   * Absent means unknown, never zero.
+   *
+   * @generated from field: dsm.OfflineAllocationView offline_allocation = 15;
+   */
+  offlineAllocation?: OfflineAllocationView;
+
   constructor(data?: PartialMessage<BalanceGetResponse>) {
     super();
     proto3.util.initPartial(data, this);
@@ -21443,6 +21469,7 @@ export class BalanceGetResponse extends Message<BalanceGetResponse> {
     { no: 12, name: "protocol_defined", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
     { no: 13, name: "genesis_supply_display", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 14, name: "permissions", kind: "message", T: TokenPolicyPermissions },
+    { no: 15, name: "offline_allocation", kind: "message", T: OfflineAllocationView },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BalanceGetResponse {
@@ -21459,6 +21486,55 @@ export class BalanceGetResponse extends Message<BalanceGetResponse> {
 
   static equals(a: BalanceGetResponse | PlainMessage<BalanceGetResponse> | undefined, b: BalanceGetResponse | PlainMessage<BalanceGetResponse> | undefined): boolean {
     return proto3.util.equals(BalanceGetResponse, a, b);
+  }
+}
+
+/**
+ * Cash in hand: what this device has loaded into its offline allocation of a
+ * token, as Rust read it under the attached appliance's bundle. An offline send
+ * spends from it; it is not part of `available`.
+ *
+ * @generated from message dsm.OfflineAllocationView
+ */
+export class OfflineAllocationView extends Message<OfflineAllocationView> {
+  /**
+   * @generated from field: uint64 base_units = 1;
+   */
+  baseUnits = protoInt64.zero;
+
+  /**
+   * Display form of `base_units`, rendered by Rust.
+   *
+   * @generated from field: string display_amount = 2;
+   */
+  displayAmount = "";
+
+  constructor(data?: PartialMessage<OfflineAllocationView>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.OfflineAllocationView";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "base_units", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 2, name: "display_amount", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): OfflineAllocationView {
+    return new OfflineAllocationView().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): OfflineAllocationView {
+    return new OfflineAllocationView().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): OfflineAllocationView {
+    return new OfflineAllocationView().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: OfflineAllocationView | PlainMessage<OfflineAllocationView> | undefined, b: OfflineAllocationView | PlainMessage<OfflineAllocationView> | undefined): boolean {
+    return proto3.util.equals(OfflineAllocationView, a, b);
   }
 }
 

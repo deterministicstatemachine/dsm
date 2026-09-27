@@ -748,7 +748,7 @@ async fn bearer_pair() -> (
             "wallet.loadOffline",
             &crate::generated::OfflineCashRequest {
                 token_id: "ERA".to_string(),
-                amount: 20,
+                amount: "20".to_string(),
             },
         )
         .await;

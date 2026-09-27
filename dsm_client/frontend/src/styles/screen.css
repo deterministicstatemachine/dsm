@@ -650,7 +650,7 @@ button.sb-menu__item { width: 100%; font: inherit; color: inherit; text-align: l
 .sb-popover__body p { margin: 0 0 8px; }
 .sb-popover__body p:last-child { margin-bottom: 0; }
 .sb-popover__body b { font-weight: 700; }
-.sb-popover__body ul { margin: 0 0 8px; padding-left: 16px; }
+.sb-popover__body ul, .sb-popover__body ol { margin: 0 0 8px; padding-left: 16px; }
 .sb-popover__body li { margin-bottom: 4px; }
 .sb-popover .sb-popover__ok {
   background: var(--bg);

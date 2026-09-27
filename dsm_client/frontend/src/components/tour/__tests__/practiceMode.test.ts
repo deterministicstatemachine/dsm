@@ -36,4 +36,9 @@ describe('practice mode answers as the real calls do', () => {
     const online = await client.sendOnlineTransferSmart(PRACTICE_CONTACT_ALIAS, '5', undefined, '');
     expect(online).toEqual({ success: false, message: expect.stringContaining('names no token') });
   });
+
+  it('refuses moving offline cash: practice never touches the real allocation', async () => {
+    await expect(client.loadOfflineCash('PLAY', '5')).rejects.toThrow(/Practice mode/);
+    await expect(client.unloadOfflineCash('PLAY', '5')).rejects.toThrow(/Practice mode/);
+  });
 });

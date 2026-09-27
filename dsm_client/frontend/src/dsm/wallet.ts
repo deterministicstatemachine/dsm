@@ -7,7 +7,7 @@ import {
     getWalletHistoryStrictBridge,
     getInboxStrictBridge,
 } from './WebViewBridge';
-import { TokenBalanceView, WalletHistory, InboxItemView } from './types';
+import { TokenBalanceView, WalletHistory, InboxItemView, OfflineAllocationView } from './types';
 import { decodeFramedEnvelopeV3 } from './decoding';
 import { mapTransactions } from '../domain/mappers';
 import logger from '../utils/logger';
@@ -15,6 +15,20 @@ import logger from '../utils/logger';
 /** A string field Rust leaves empty when it names nothing, carried as absent. */
 function named(value: string): string | undefined {
   return value.length > 0 ? value : undefined;
+}
+
+/**
+ * The row's offline allocation as Rust stated it. Absent is unknown, not
+ * zero; present without its rendered form is a row Rust did not finish,
+ * refused like any other.
+ */
+function offlineView(b: pb.BalanceGetResponse): OfflineAllocationView | undefined {
+  const offline = b.offlineAllocation;
+  if (!offline) return undefined;
+  if (offline.displayAmount.length === 0) {
+    throw new Error(`STRICT: balance.list answered ${b.tokenId}'s offline allocation without its display form`);
+  }
+  return { baseUnits: offline.baseUnits, displayAmount: offline.displayAmount };
 }
 
 export async function getAllBalances(): Promise<TokenBalanceView[]> {
@@ -65,6 +79,7 @@ export async function getAllBalances(): Promise<TokenBalanceView[]> {
       permissions: b.permissions
         ? { burnEnabled: b.permissions.burnEnabled, transferable: b.permissions.transferable }
         : undefined,
+      offline: offlineView(b),
     };
   });
 }
