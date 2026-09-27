@@ -108,14 +108,8 @@ jest.mock('../../../hooks/useDpadNav', () => ({
   useDpadNav: () => ({ focusedIndex: -1 }),
 }));
 
-// The wizard's own behaviour is TokenCreationDialog.test.tsx's; here it only
-// has to open, with what this screen hands it.
-const mockDialogProps: { claimEra?: () => Promise<string> } = {};
 jest.mock('../../TokenCreationDialog', () => ({
-  TokenCreationDialog: (props: { claimEra?: () => Promise<string> }) => {
-    mockDialogProps.claimEra = props.claimEra;
-    return <div data-testid="create-dialog" />;
-  },
+  TokenCreationDialog: () => <div data-testid="create-dialog" />,
 }));
 
 import AccountsScreen from '../AccountsScreen';
@@ -146,29 +140,6 @@ describe('AccountsScreen — the screen TOKENS actually opens', () => {
     render(<AccountsScreen />);
     fireEvent.click(await screen.findByRole('button', { name: /create token/i }));
     expect(await screen.findByTestId('create-dialog')).toBeInTheDocument();
-  });
-
-  /// The wizard claims ERA for the creation fee through the same faucet claim
-  /// as the Faucet tab: Rust's words back, Rust's refusal thrown.
-  it("hands the wizard the faucet claim, answering Rust's words and throwing its refusal", async () => {
-    render(<AccountsScreen />);
-    fireEvent.click(await screen.findByRole('button', { name: /create token/i }));
-    await screen.findByTestId('create-dialog');
-    expect(mockDialogProps.claimEra).toBeDefined();
-
-    (dsmClient.claimFaucet as jest.Mock).mockResolvedValueOnce({
-      success: true,
-      tokensReceived: 100n,
-      message: 'claimed 100 ERA (economic position 1)',
-    });
-    await expect(mockDialogProps.claimEra!()).resolves.toBe('claimed 100 ERA (economic position 1)');
-
-    (dsmClient.claimFaucet as jest.Mock).mockResolvedValueOnce({
-      success: false,
-      message: 'faucet.claim: the reserve is spent',
-    });
-    await expect(mockDialogProps.claimEra!()).rejects.toThrow('faucet.claim: the reserve is spent');
-    expect(dsmClient.claimFaucet).toHaveBeenCalledTimes(2);
   });
 
   it('exposes BURN, and no MINT, on a token this device created', async () => {

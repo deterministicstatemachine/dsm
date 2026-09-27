@@ -157,43 +157,37 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
     }
   }, [loadBalances]);
 
-  /// Claim ERA from the faucet and refresh what shows it. Answers what Rust
-  /// released, in its words; a refusal is thrown. The Faucet tab and the
-  /// creation wizard both claim through this.
-  const claimEra = useCallback(async (): Promise<string> => {
-    if (!faucetEnabled) {
-      throw new Error('Faucet is unavailable until your wallet is initialized. Please finish genesis setup and try again.');
-    }
-    const result = await dsmClient.claimFaucet();
-    if (!result.success) {
-      throw new Error(result.message);
-    }
-    await loadBalances();
-    try {
-      await refreshAll();
-    } catch (refreshErr) {
-      // non-fatal UI refresh miss
-      console.warn('AccountsScreen: refreshAll failed after faucet claim:', refreshErr);
-    }
-    // refreshAll() already updated WalletContext (balance + history).
-    // Do NOT emit wallet.refresh here — that would reload, through the
-    // provider's listener, the data we just fetched.
-    return result.message;
-  }, [faucetEnabled, loadBalances, refreshAll]);
-
   const claimFromFaucet = useCallback(async () => {
     setError(null);
     setSuccessMsg(null);
     setClaiming(true);
     try {
+      if (!faucetEnabled) {
+        throw new Error('Faucet is unavailable until your wallet is initialized. Please finish genesis setup and try again.');
+      }
+      const result = await dsmClient.claimFaucet();
+      if (!result.success) {
+        throw new Error(result.message);
+      }
+      await loadBalances();
+      try {
+        await refreshAll();
+      } catch (refreshErr) {
+        // non-fatal UI refresh miss
+        console.warn('AccountsScreen: refreshAll failed after faucet claim:', refreshErr);
+      }
+      // refreshAll() already updated WalletContext (balance + history).
+      // Do NOT emit wallet.refresh here — that would reload, through the
+      // provider's listener, the data we just fetched.
+
       // What Rust released, in its words.
-      setSuccessMsg(await claimEra());
+      setSuccessMsg(result.message);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Faucet claim failed');
     } finally {
       setClaiming(false);
     }
-  }, [claimEra]);
+  }, [faucetEnabled, loadBalances, refreshAll]);
 
   /// Run a burn and show whatever the policy decided, verbatim.
   ///
@@ -616,7 +610,6 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
       {creating && (
         <TokenCreationDialog
           onClose={() => setCreating(false)}
-          claimEra={claimEra}
           onSuccess={() => {
             void loadBalances();
           }}

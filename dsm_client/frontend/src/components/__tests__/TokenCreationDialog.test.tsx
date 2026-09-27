@@ -114,59 +114,46 @@ describe('TokenCreationDialog creation fee', () => {
     (getTokenCreationFee as jest.Mock).mockReset();
   });
 
-  // A fresh wallet used to fill in every step and learn only at Publish that
-  // it held no ERA for the fee.
-  it("shows the ERA held beside the fee, and a claim from the faucet keeps what was entered", async () => {
-    (getTokenCreationFee as jest.Mock)
-      .mockResolvedValueOnce(standing(0n, false))
-      .mockResolvedValueOnce(standing(100n, true));
-    const claimEra = jest.fn().mockResolvedValue('Released 100 ERA from the reserve');
-    render(<TokenCreationDialog onClose={jest.fn()} claimEra={claimEra} />);
-    await toReview();
-
-    expect(screen.getByText('0 ERA')).toBeInTheDocument();
-    expect(screen.getByRole('status')).toHaveTextContent('Publishing burns 10 ERA and you hold 0.');
-    fireEvent.click(screen.getByRole('button', { name: 'Claim ERA' }));
-
-    expect(await screen.findByText('Released 100 ERA from the reserve')).toBeInTheDocument();
-    await waitFor(() => expect(screen.getByText('100 ERA')).toBeInTheDocument());
-    expect(claimEra).toHaveBeenCalledTimes(1);
-    expect(screen.queryByRole('button', { name: 'Claim ERA' })).toBeNull();
-    // Still the review of what was entered, ready to publish.
-    expect(screen.getByText('ART')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Publish' })).toBeEnabled();
-  });
-
-  it('offers no claim when the ERA held pays the fee', async () => {
-    (getTokenCreationFee as jest.Mock).mockResolvedValue(standing(100n, true));
-    render(<TokenCreationDialog onClose={jest.fn()} claimEra={jest.fn()} />);
-    await toReview();
-
-    expect(screen.getByText('100 ERA')).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Claim ERA' })).toBeNull();
-    expect(screen.queryByText(/Publishing burns/)).toBeNull();
-  });
-
-  it('points at the Tokens screen where the wizard has no faucet of its own', async () => {
-    (getTokenCreationFee as jest.Mock).mockResolvedValue(standing(3n, false));
+  // A fresh wallet used to fill in every step and learn only when it pressed
+  // the final button that it held no ERA for the fee.
+  it('shows the ERA held beside the fee, and where to get ERA when it does not pay', async () => {
+    (getTokenCreationFee as jest.Mock).mockResolvedValue(standing(0n, false));
     render(<TokenCreationDialog onClose={jest.fn()} />);
     await toReview();
 
+    expect(screen.getByText('0 ERA')).toBeInTheDocument();
     expect(screen.getByRole('status')).toHaveTextContent(
-      'Publishing burns 10 ERA and you hold 3. Claim ERA from the faucet on the Tokens screen first.',
+      'This burns 10 ERA and you hold 0. Get ERA from the Faucet tab first.',
     );
-    expect(screen.queryByRole('button', { name: 'Claim ERA' })).toBeNull();
+    // The review step burns ERA; getting ERA is the faucet's, not this step's.
+    expect(screen.queryByRole('button', { name: /claim/i })).toBeNull();
+    // Rust decides the burn: the button stays live.
+    expect(screen.getByRole('button', { name: 'Burn ERA' })).toBeEnabled();
   });
 
-  it('shows a refused claim and leaves the review as it was', async () => {
-    (getTokenCreationFee as jest.Mock).mockResolvedValue(standing(0n, false));
-    const claimEra = jest.fn().mockRejectedValue(new Error('faucet.claim: the reserve is spent'));
-    render(<TokenCreationDialog onClose={jest.fn()} claimEra={claimEra} />);
+  it('says nothing more when the ERA held pays the fee', async () => {
+    (getTokenCreationFee as jest.Mock).mockResolvedValue(standing(100n, true));
+    render(<TokenCreationDialog onClose={jest.fn()} />);
     await toReview();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Claim ERA' }));
-    expect(await screen.findByRole('alert')).toHaveTextContent('faucet.claim: the reserve is spent');
+    expect(screen.getByText('100 ERA')).toBeInTheDocument();
+    expect(screen.queryByText(/This burns/)).toBeNull();
+    expect(screen.getByRole('button', { name: 'Burn ERA' })).toBeEnabled();
+  });
+
+  // ERA can arrive or leave while the wizard is open; the review reads it again.
+  it('reads the standing again each time the review is reached', async () => {
+    (getTokenCreationFee as jest.Mock)
+      .mockResolvedValueOnce(standing(0n, false))
+      .mockResolvedValueOnce(standing(100n, true));
+    render(<TokenCreationDialog onClose={jest.fn()} />);
+    await toReview();
     expect(screen.getByText('0 ERA')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Claim ERA' })).toBeEnabled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Back' }));
+    fireEvent.click(screen.getByRole('button', { name: /Continue/i }));
+    expect(await screen.findByText('100 ERA')).toBeInTheDocument();
+    expect(screen.queryByText(/This burns/)).toBeNull();
+    expect(getTokenCreationFee).toHaveBeenCalledTimes(2);
   });
 });

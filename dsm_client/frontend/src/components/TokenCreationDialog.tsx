@@ -360,7 +360,7 @@ function Step2({
 
 // ── Sub-component: Step 3 — Access + Review ──────────────────────────────────
 function Step3({
-  state, set, effectiveDecimals, effectiveTransferable, creationFee, onClaimEra, claiming, claimNote,
+  state, set, effectiveDecimals, effectiveTransferable, creationFee,
 }: {
   state: WizardState;
   set: (p: Partial<WizardState>) => void;
@@ -368,11 +368,6 @@ function Step3({
   effectiveTransferable: boolean;
   /** The fee and this device's standing from Rust; `undefined` until the query returns. */
   creationFee: CreationFee;
-  /** Claims ERA from the faucet; absent where the wizard is opened without one. */
-  onClaimEra?: () => void;
-  claiming: boolean;
-  /** What the faucet released, in Rust's words. */
-  claimNote: string | null;
 }) {
   const supplyLine = state.genesisSupply ? BigInt(state.genesisSupply).toLocaleString() : '—';
 
@@ -464,19 +459,8 @@ function Step3({
       {creationFee !== undefined && 'feeEra' in creationFee && !creationFee.feeCovered && (
         <div className="sb-notice" role="status" style={{ marginTop: 8 }}>
           <span>
-            {`Publishing burns ${creationFee.feeEra} ERA and you hold ${creationFee.eraHeld}. `}
-            {onClaimEra ? 'Claim ERA from the faucet first.' : 'Claim ERA from the faucet on the Tokens screen first.'}
+            {`This burns ${creationFee.feeEra} ERA and you hold ${creationFee.eraHeld}. Get ERA from the Faucet tab first.`}
           </span>
-          {onClaimEra && (
-            <button type="button" className="sb-btn sb-btn--primary" onClick={onClaimEra} disabled={claiming}>
-              {claiming ? 'Claiming…' : 'Claim ERA'}
-            </button>
-          )}
-        </div>
-      )}
-      {claimNote && (
-        <div className="sb-notice sb-notice--success" role="status" style={{ marginTop: 8 }}>
-          <span>{claimNote}</span>
         </div>
       )}
       {state.description.trim() && (
@@ -555,13 +539,8 @@ function SuccessScreen({
 
 // ── Main component ────────────────────────────────────────────────────────────
 
-export const TokenCreationDialog: React.FC<{
-  onClose: () => void;
-  onSuccess?: () => void;
-  /** Claims ERA from the faucet and answers what Rust released; a refusal is thrown. */
-  claimEra?: () => Promise<string>;
-}> = ({
-  onClose, onSuccess, claimEra,
+export const TokenCreationDialog: React.FC<{ onClose: () => void; onSuccess?: () => void }> = ({
+  onClose, onSuccess,
 }) => {
   const [step, setStep]       = useState(1);
   const [state, _setState]    = useState<WizardState>(DEFAULT);
@@ -575,8 +554,6 @@ export const TokenCreationDialog: React.FC<{
   // conservation guard validates the charged fee against a core constant, and a
   // number invented in the UI could silently disagree with what is burned.
   const [creationFee, setCreationFee] = useState<CreationFee>(undefined);
-  const [claiming, setClaiming] = useState(false);
-  const [claimNote, setClaimNote] = useState<string | null>(null);
   const stateRef = useRef(state);
   const bodyRef = useRef<HTMLDivElement | null>(null);
   const mountedRef = useRef(true);
@@ -601,23 +578,6 @@ export const TokenCreationDialog: React.FC<{
     if (step === 3) void loadFee();
   }, [step, loadFee]);
 
-  const handleClaimEra = useCallback(async () => {
-    if (!claimEra) return;
-    setError(null);
-    setClaimNote(null);
-    setClaiming(true);
-    try {
-      const released = await claimEra();
-      if (mountedRef.current) setClaimNote(released);
-    } catch (e) {
-      if (mountedRef.current) setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      if (mountedRef.current) {
-        setClaiming(false);
-        void loadFee();
-      }
-    }
-  }, [claimEra, loadFee]);
 
   const set = useCallback((patch: Partial<WizardState>) => {
     _setState(prev => {
@@ -641,7 +601,7 @@ export const TokenCreationDialog: React.FC<{
   // B steps back through the wizard, and closes it from the first step. While
   // Rust is working the press is ignored: the outcome is on its way.
   useBackButton(!created, () => {
-    if (creating || resolving || claiming) return;
+    if (creating || resolving) return;
     if (step > 1) navigate(step - 1);
     else onClose();
   });
@@ -792,9 +752,6 @@ export const TokenCreationDialog: React.FC<{
               effectiveDecimals={effectiveDecimals}
               effectiveTransferable={effectiveTransferable}
               creationFee={creationFee}
-              onClaimEra={claimEra ? () => void handleClaimEra() : undefined}
-              claiming={claiming}
-              claimNote={claimNote}
             />
           )}
         </div>
@@ -807,7 +764,7 @@ export const TokenCreationDialog: React.FC<{
 
         <div className="sb-actions" style={{ margin: 0 }}>
           {step > 1 ? (
-            <button type="button" className="sb-btn" onClick={() => navigate(step - 1)} disabled={creating || claiming}>
+            <button type="button" className="sb-btn" onClick={() => navigate(step - 1)} disabled={creating}>
               Back
             </button>
           ) : (
@@ -824,9 +781,9 @@ export const TokenCreationDialog: React.FC<{
               type="button"
               className="sb-btn sb-btn--primary"
               onClick={handleCreate}
-              disabled={creating || claiming}
+              disabled={creating}
             >
-              {resolving ? 'Confirming outcome…' : creating ? 'Publishing policy…' : 'Publish'}
+              {resolving ? 'Confirming outcome…' : creating ? 'Publishing policy…' : 'Burn ERA'}
             </button>
           )}
         </div>
