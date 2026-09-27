@@ -112,13 +112,14 @@ describe('E2E: Offline BLE exchange -> wallet refresh', () => {
           if (ingress.operation.case === 'routerInvoke') {
             const ingressMethod = ingress.operation.value.method;
             if (ingressMethod === 'wallet.sendOffline') {
-              const resp = new pb.BilateralPrepareResponse({
-                commitmentHash: new pb.Hash32({ v: new Uint8Array(32) } as any),
-                localSignature: new Uint8Array(64),
+              const resp = new pb.BilateralTransferResponse({
+                success: true,
+                transactionHash: new pb.Hash32({ v: new Uint8Array(32) } as any),
+                message: 'prepare sent over BLE',
               });
               const env = new pb.Envelope({
                 version: 3,
-                payload: { case: 'bilateralPrepareResponse', value: resp },
+                payload: { case: 'bilateralTransferResponse', value: resp },
               } as any);
               return wrapIngressOk(frameEnvelope(env));
             }
