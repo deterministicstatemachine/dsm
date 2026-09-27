@@ -23,7 +23,6 @@ class BleCoordinatorResolveSessionTest {
             advertiser = mock(),
             gattServer = mock(),
             scanner = mock(),
-            outbox = mock<BleOutbox>(),
             diagnostics = BleDiagnostics(),
         )
         val staleAddress = "6B:CA:44:6D:D9:33"
@@ -70,7 +69,6 @@ class BleCoordinatorResolveSessionTest {
             advertiser = mock(),
             gattServer = mock(),
             scanner = mock(),
-            outbox = mock<BleOutbox>(),
             diagnostics = BleDiagnostics(),
         )
         coordinator.peers["49:63:1E:15:0A:AA"] = PeerSession("49:63:1E:15:0A:AA").apply {

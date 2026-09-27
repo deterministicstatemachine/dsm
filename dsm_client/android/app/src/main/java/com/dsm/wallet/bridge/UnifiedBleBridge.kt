@@ -19,7 +19,7 @@ internal object UnifiedBleBridge {
     private const val TX_RESPONSE_SUBSCRIBE_MAX_ATTEMPTS = 8
     private const val TX_RESPONSE_SUBSCRIBE_TIMEOUT_MS = 2500L
 
-    private fun sendViaActiveClientSession(
+    private suspend fun sendViaActiveClientSession(
         svc: BleCoordinator,
         deviceAddress: String,
         chunks: Array<ByteArray>,
@@ -29,23 +29,12 @@ internal object UnifiedBleBridge {
             "UnifiedBleBridge",
             "sendViaActiveClientSession: sending ${chunks.size} chunk(s) to $deviceAddress via existing GATT client session"
         )
-        var sentCount = 0
-        for ((index, chunk) in chunks.withIndex()) {
-            val sent = svc.sendTransactionRequest(deviceAddress, chunk)
-            if (sent) {
-                sentCount += 1
-            } else {
-                Log.e(
-                    "UnifiedBleBridge",
-                    "sendViaActiveClientSession: failed chunk ${index + 1}/${chunks.size} to $deviceAddress"
-                )
-                break // Fail fast instead of partial spray
-            }
+        val sent = svc.writeMessage(deviceAddress, chunks)
+        if (!sent) {
+            Log.e("UnifiedBleBridge", "sendViaActiveClientSession: the message to $deviceAddress was not written")
+            UnifiedBleEvents.onConnectionFailed(deviceAddress, failureCode)
         }
-        if (sentCount != chunks.size) {
-            UnifiedBleEvents.onConnectionFailed(deviceAddress, "$failureCode:$sentCount/${chunks.size}")
-        }
-        return sentCount == chunks.size
+        return sent
     }
 
     fun dispatchRustFollowUp(
@@ -74,12 +63,14 @@ internal object UnifiedBleBridge {
                     ok
                 }
             } else if (svc.hasActiveClientSession(deviceAddress)) {
-                sendViaActiveClientSession(
-                    svc,
-                    deviceAddress,
-                    chunks,
-                    "followup_client_send_partial",
-                )
+                runBlocking {
+                    sendViaActiveClientSession(
+                        svc,
+                        deviceAddress,
+                        chunks,
+                        "followup_client_send_failed",
+                    )
+                }
             } else {
                 Log.w(
                     "UnifiedBleBridge",
@@ -113,11 +104,6 @@ internal object UnifiedBleBridge {
                 }
             })
         }
-    }
-
-    fun requestGattWrite(deviceAddress: String, transactionData: ByteArray): Boolean {
-        val svc = bleCoordinator ?: return false
-        return try { svc.sendTransactionRequest(deviceAddress, transactionData) } catch (_: Throwable) { false }
     }
 
     fun startBlePairingAdvertise(): Boolean {
@@ -199,7 +185,7 @@ internal object UnifiedBleBridge {
                             svc,
                             effectiveAddr,
                             chunks,
-                            "tx_chunk_send_partial",
+                            "tx_chunk_send_failed",
                         )
                     } catch (t: Throwable) {
                         Log.w("UnifiedBleBridge", "requestGattWriteChunks: TX_RESPONSE subscription/send error for $effectiveAddr", t)
@@ -275,7 +261,7 @@ internal object UnifiedBleBridge {
                             return@runBlocking false
                         }
 
-                        sendViaActiveClientSession(svc, currentAddr, chunks, "tx_chunk_send_partial")
+                        sendViaActiveClientSession(svc, currentAddr, chunks, "tx_chunk_send_failed")
                     } catch (t: Throwable) {
                         Log.e("UnifiedBleBridge", "requestGattWriteChunks: on-demand error", t)
                         UnifiedBleEvents.onConnectionFailed(effectiveAddr, "on_demand_connect_exception")
@@ -294,11 +280,6 @@ internal object UnifiedBleBridge {
     fun getBleStats(deviceAddress: String): ByteArray {
         val svc = bleCoordinator ?: return ByteArray(0)
         return try { svc.getStatsString(deviceAddress).toByteArray(Charsets.UTF_8) } catch (_: Throwable) { ByteArray(0) }
-    }
-
-    fun retryLastBleTransaction(deviceAddress: String): Boolean {
-        val svc = bleCoordinator ?: return false
-        return try { svc.retryLastTransaction(deviceAddress) } catch (_: Throwable) { false }
     }
 
     fun getConnectedBluetoothDevices(): ByteArray {

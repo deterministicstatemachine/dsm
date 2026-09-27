@@ -10,7 +10,6 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.os.Build
 import android.util.Log
-import com.dsm.wallet.bridge.BleOutboxRepository
 import com.dsm.wallet.bridge.UnifiedContactBridge
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -68,8 +67,7 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
     // ── Reconnection backoff ──
     private val reconnectHandler = android.os.Handler(android.os.Looper.getMainLooper())
 
-    // Unified per-peer state. Replaces sessionStates, activeSessions,
-    // pendingConnectionAddresses, and pendingPairingConfirms.
+    // Unified per-peer state.
     internal val peers = java.util.concurrent.ConcurrentHashMap<String, PeerSession>()
 
     // Reverse index: BLE MAC address → PeerIdentity. Updated on every
@@ -85,7 +83,6 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
     private var scanner = BleScanner(context)
     private var advertiser = BleAdvertiser(context)
     private var gattServer = GattServerHost(context)
-    private var outbox = BleOutbox(context, BleOutboxRepository(context))
     private var diagnostics = BleDiagnostics()
     private var radioEvents: BleRadioEvents = UnifiedRadioEvents
 
@@ -145,7 +142,6 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
         advertiser: BleAdvertiser,
         gattServer: GattServerHost,
         scanner: BleScanner = BleScanner(context),
-        outbox: BleOutbox = BleOutbox(context, BleOutboxRepository(context)),
         diagnostics: BleDiagnostics = BleDiagnostics(),
         radioEvents: BleRadioEvents = UnifiedRadioEvents,
     ) : this(context) {
@@ -153,7 +149,6 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
         this.advertiser = advertiser
         this.gattServer = gattServer
         this.scanner = scanner
-        this.outbox = outbox
         this.diagnostics = diagnostics
         this.radioEvents = radioEvents
         // Re-wire scanner and advertiser callbacks after replacing the instances
@@ -167,7 +162,6 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
     companion object {
         /** Max time to wait for GATT connection readiness (connect + discover + MTU). */
         private const val CONNECT_READY_TIMEOUT_MS = 12_000L
-        private const val MAX_PENDING_PAIRING_CONFIRMS = 8
 
         private var instance: BleCoordinator? = null
 
@@ -199,14 +193,16 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
     }
 
     /**
-     * Send a transaction request to a peer device.
+     * Write one message's chunks over our client link to [address], in order.
+     * True only when the stack took every chunk; false when there is no client
+     * link, a chunk was refused or failed, or the link ended first. Not run on
+     * the dispatcher: the link's write callbacks complete it.
      */
-    fun sendTransactionRequest(deviceAddress: String, transactionData: ByteArray): Boolean {
-        return runOperationBool(BleOpLane.TRANSFER) {
-            outbox.enqueueTransaction(deviceAddress, transactionData)
-            processOutboxForDevice(deviceAddress)
-            true // Successfully enqueued and processed
-        }
+    suspend fun writeMessage(address: String, chunks: Array<ByteArray>): Boolean {
+        val peer = peers[address] ?: return false
+        val session = peer.gattClientSession ?: return false
+        if (!peer.isConnected) return false
+        return session.sendMessage(chunks).await()
     }
 
     /**
@@ -296,7 +292,7 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                         peer.connectionPending ||
                         peer.identityExchangeInProgress ||
                         peer.pairingInProgress ||
-                        peer.currentTransaction != null ||
+                        peer.gattClientSession?.hasPendingOperations == true ||
                         (peer.isConnected && !peer.serviceDiscoveryCompleted) ||
                         (peer.isConnected && peer.negotiatedMtu == 23)
                     )
@@ -444,17 +440,6 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
     }
 
     /**
-     * Retry the last transaction for a device.
-     */
-    fun retryLastTransaction(deviceAddress: String): Boolean {
-        return runOperationBool(BleOpLane.TRANSFER) {
-            outbox.retryLastTransaction(deviceAddress)
-            processOutboxForDevice(deviceAddress)
-            true // Successfully retried and processed
-        }
-    }
-
-    /**
      * Get list of connected device addresses.
      */
     fun getConnectedDeviceAddresses(): List<String> {
@@ -507,8 +492,6 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
             peers[bleAddress]?.let { peer ->
                 peer.isConnected = false
                 peer.serviceDiscoveryCompleted = false
-                peer.currentTransaction = null
-                peer.pendingPairingConfirm = null
                 peer.identityExchangeInProgress = false
                 peer.pairingInProgress = false
             }
@@ -614,19 +597,6 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
         return operationDispatcher.dispatchBlocking(lane, block)
     }
 
-    private fun storePendingPairingConfirm(deviceAddress: String, payload: ByteArray) {
-        if (peers[deviceAddress]?.pendingPairingConfirm == null &&
-            peers.values.count { it.pendingPairingConfirm != null } >= MAX_PENDING_PAIRING_CONFIRMS
-        ) {
-            val evicted = peers.entries.firstOrNull { it.value.pendingPairingConfirm != null }?.key
-            if (evicted != null) {
-                peers[evicted]?.pendingPairingConfirm = null
-                Log.w("BleCoordinator", "Evicted oldest pending PAIRING_CONFIRM for $evicted to keep BLE retry state bounded")
-            }
-        }
-        peers.getOrPut(deviceAddress) { PeerSession(deviceAddress) }.pendingPairingConfirm = payload.copyOf()
-    }
-
     private fun resumePairingScan(deviceAddress: String, reason: String) {
         // Already scanning - no action needed
         if (scanner.isScanning()) {
@@ -658,7 +628,6 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
 
     private fun handleSessionEvent(event: BleSessionEvent) {
         val lane = when (event) {
-            is BleSessionEvent.TransactionWriteCompleted,
             is BleSessionEvent.ResponseReceived -> BleOpLane.TRANSFER
             is BleSessionEvent.IdentityReadCompleted,
             is BleSessionEvent.MtuNegotiated,
@@ -691,7 +660,6 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                         // connectResult deferred is completed by clearClientState() below.
                         peer.isConnected = false
                         peer.serviceDiscoveryCompleted = false
-                        peer.currentTransaction = null // Clear any pending transaction
                         diagnostics.recordEvent(BleDiagEvent(phase = "coordinator_disconnected", device = event.deviceAddress, status = event.status))
                         // Remove stale session so future scans can reconnect to this peer
                         peer.clearClientState()
@@ -727,51 +695,23 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                         // Query Rust for pairing status — skip identity read if already paired (bilateral reconnect)
                         val alreadyPaired = try { com.dsm.wallet.bridge.Unified.isBleAddressPaired(event.deviceAddress) } catch (_: Throwable) { false }
                         if (alreadyPaired) {
-                            // Check if we have a PAIRING_CONFIRM that failed to deliver last
-                            // time (connection dropped between PAIRING_ACK and confirm write).
-                            // If so, retry the write before doing anything else.
-                            val pendingConfirm = peer.pendingPairingConfirm
-                            peer.pendingPairingConfirm = null
-                            if (pendingConfirm != null) {
-                                val session = peer.gattClientSession
-                                if (session != null) {
-                                    Log.i("BleCoordinator", "MTU negotiated (${event.mtu}) for ${event.deviceAddress} — retrying pending PAIRING_CONFIRM (${pendingConfirm.size}B)")
-                                    peer.pairingInProgress = true
-                                    val writeOk = session.writePairingConfirm(pendingConfirm)
-                                    Log.i("BleCoordinator", "PAIRING_CONFIRM retry for ${event.deviceAddress}: success=$writeOk")
-                                    if (!writeOk) {
-                                        // Still failing — put it back and scan again
-                                        storePendingPairingConfirm(event.deviceAddress, pendingConfirm)
-                                        peer.pairingInProgress = false
-                                        diagnostics.recordError(BleErrorCategory.CHARACTERISTIC_WRITE_FAILED, "coordinator_pairing_confirm_retry_failed")
-                                        peer.clearClientState()
-                                        if (peer.isEmpty) peers.remove(event.deviceAddress)
-                                        resumePairingScan(event.deviceAddress, "pairing_confirm_retry_failed")
-                                    }
-                                } else {
-                                    // No session yet — put back so the next MTU cycle retries
-                                    storePendingPairingConfirm(event.deviceAddress, pendingConfirm)
-                                    Log.w("BleCoordinator", "PAIRING_CONFIRM retry: no session for ${event.deviceAddress}; will retry on next connect")
-                                }
+                            // Normal bilateral reconnect — re-read identity only if we
+                            // have not yet anchored this live address to the peer's
+                            // stable device identity. This preserves RPA migration
+                            // without re-entering the pairing write-back flow.
+                            val session = peer.gattClientSession
+                            if (peer.identity == null && session != null) {
+                                peer.identityExchangeInProgress = true
+                                Log.i(
+                                    "BleCoordinator",
+                                    "MTU negotiated (${event.mtu}) for ${event.deviceAddress} — re-reading paired peer identity for route anchoring"
+                                )
+                                session.readIdentity()
                             } else {
-                                // Normal bilateral reconnect — re-read identity only if we
-                                // have not yet anchored this live address to the peer's
-                                // stable device identity. This preserves RPA migration
-                                // without re-entering the pairing write-back flow.
-                                val session = peer.gattClientSession
-                                if (peer.identity == null && session != null) {
-                                    peer.identityExchangeInProgress = true
-                                    Log.i(
-                                        "BleCoordinator",
-                                        "MTU negotiated (${event.mtu}) for ${event.deviceAddress} — re-reading paired peer identity for route anchoring"
-                                    )
-                                    session.readIdentity()
-                                } else {
-                                    Log.i(
-                                        "BleCoordinator",
-                                        "MTU negotiated (${event.mtu}) for ${event.deviceAddress} — paired route already anchored"
-                                    )
-                                }
+                                Log.i(
+                                    "BleCoordinator",
+                                    "MTU negotiated (${event.mtu}) for ${event.deviceAddress} — paired route already anchored"
+                                )
                             }
                         } else {
                             // Set identity exchange guard BEFORE reading — prevents
@@ -785,16 +725,11 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                                 peer.identityExchangeInProgress = false
                             }
                         }
-                        // Drain any pending outbox items now that the connection is ready
-                        runOperation(BleOpLane.TRANSFER) { processNextOutboxItem(event.deviceAddress) }
                     }
                     is BleSessionEvent.ServiceDiscoveryCompleted -> {
                         peer.serviceDiscoveryCompleted = event.success
                         if (!event.success) {
                             diagnostics.recordError(BleErrorCategory.SERVICE_DISCOVERY_FAILED, "coordinator_service_discovery")
-                        } else {
-                            // Drain any pending outbox items now that services are discovered
-                            runOperation(BleOpLane.TRANSFER) { processNextOutboxItem(event.deviceAddress) }
                         }
                     }
                     is BleSessionEvent.IdentityReadCompleted -> {
@@ -856,15 +791,9 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                                     if (writeBackEnvelope != null) {
                                         val session = peer.gattClientSession
                                         if (session != null) {
-                                            val writeOk = session.writePairingData(writeBackEnvelope)
-                                            Log.i("BleCoordinator", "Identity write-back to ${event.deviceAddress}: success=$writeOk (${writeBackEnvelope.size}B)")
-                                            if (!writeOk) {
-                                                diagnostics.recordError(BleErrorCategory.CHARACTERISTIC_WRITE_FAILED, "coordinator_identity_writeback_failed")
-                                                peer.clearClientState()
-                                                if (peer.isEmpty) peers.remove(event.deviceAddress)
-                                                com.dsm.wallet.bridge.UnifiedBleEvents.onConnectionFailed(event.deviceAddress, "identity_writeback_failed")
-                                                resumePairingScan(event.deviceAddress, "identity_writeback_failed")
-                                            }
+                                            // A failed write-back is reported as ErrorOccurred(pairing_write).
+                                            session.writePairingData(writeBackEnvelope)
+                                            Log.i("BleCoordinator", "Identity write-back to ${event.deviceAddress} queued (${writeBackEnvelope.size}B)")
                                         } else {
                                             Log.w("BleCoordinator", "Identity write-back: no active session for ${event.deviceAddress}")
                                             resumePairingScan(event.deviceAddress, "identity_writeback_no_session")
@@ -907,38 +836,6 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                             resumePairingScan(event.deviceAddress, "identity_read_failed")
                         }
                     }
-                    is BleSessionEvent.TransactionWriteCompleted -> {
-                        val currentTx = peer.currentTransaction
-                        if (currentTx != null) {
-                            if (event.success) {
-                                val expectsProtocolAck =
-                                    currentTx.payload.isNotEmpty() && com.dsm.wallet.bridge.Unified.requiresBleAck(currentTx.payload)
-                                if (expectsProtocolAck) {
-                                    diagnostics.recordEvent(
-                                        BleDiagEvent(
-                                            phase = "coordinator_tx_write_ok_waiting_response",
-                                            device = event.deviceAddress
-                                        )
-                                    )
-                                    // Keep currentTransaction set; completion occurs on ResponseReceived.
-                                } else {
-                                    outbox.markCompleted(currentTx.id)
-                                    diagnostics.recordEvent(BleDiagEvent(phase = "coordinator_tx_completed", device = event.deviceAddress))
-                                }
-                            } else {
-                                outbox.incrementAttempts(currentTx.id)
-                                diagnostics.recordError(BleErrorCategory.CHARACTERISTIC_WRITE_FAILED, "coordinator_tx_write")
-                            }
-                            val expectsProtocolAck =
-                                event.success && currentTx.payload.isNotEmpty() &&
-                                    com.dsm.wallet.bridge.Unified.requiresBleAck(currentTx.payload)
-                            if (!expectsProtocolAck) {
-                                peer.currentTransaction = null
-                                // Process next transaction in outbox (serialized)
-                                runOperation(BleOpLane.TRANSFER) { processNextOutboxItem(event.deviceAddress) }
-                            }
-                        }
-                    }
                     is BleSessionEvent.ResponseReceived -> {
                         // All routing — chunk vs envelope dispatch, frame-type detection, and
                         // bilateral follow-up chunking — is performed by Rust via processIncomingBleData.
@@ -966,22 +863,6 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                                 }
                             }
 
-                            val currentTx = peer.currentTransaction
-                            if (currentTx != null) {
-                                val expectsProtocolAck =
-                                    currentTx.payload.isNotEmpty() && com.dsm.wallet.bridge.Unified.requiresBleAck(currentTx.payload)
-                                if (expectsProtocolAck) {
-                                    outbox.markCompleted(currentTx.id)
-                                    peer.currentTransaction = null
-                                    diagnostics.recordEvent(
-                                        BleDiagEvent(
-                                            phase = "coordinator_tx_completed_on_response",
-                                            device = event.deviceAddress
-                                        )
-                                    )
-                                    runOperation(BleOpLane.TRANSFER) { processNextOutboxItem(event.deviceAddress) }
-                                }
-                            }
                         } catch (e: Exception) {
                             Log.e("BleCoordinator", "Failed to process response from ${event.deviceAddress}", e)
                             diagnostics.recordError(BleErrorCategory.CHARACTERISTIC_READ_FAILED, "coordinator_response_processing")
@@ -992,7 +873,7 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                         // and sent the PAIRING_ACK indication.
                         peer.pairingInProgress = true
                         Log.i("BleCoordinator", "PAIRING_ACK received from ${event.deviceAddress} (${event.data.size} bytes)")
-                        var successfullyStartedWrite = false
+                        var confirmQueued = false
                         try {
                             val response = com.dsm.wallet.bridge.Unified.processBleIdentityEnvelope(event.data, event.deviceAddress)
                             Log.i("BleCoordinator", "PAIRING_ACK processed through Rust for ${event.deviceAddress}: ${response.size} bytes")
@@ -1003,20 +884,11 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                             if (response.isNotEmpty()) {
                                 val session = peer.gattClientSession
                                 if (session != null) {
-                                    val writeOk = session.writePairingConfirm(response)
-                                    Log.i("BleCoordinator", "PAIRING_CONFIRM write-back to ${event.deviceAddress}: success=$writeOk (${response.size}B)")
-                                    if (!writeOk) {
-                                        // Stash payload — will be retried the moment we
-                                        // successfully reconnect and negotiate MTU again.
-                                        storePendingPairingConfirm(event.deviceAddress, response)
-                                        diagnostics.recordError(BleErrorCategory.CHARACTERISTIC_WRITE_FAILED, "coordinator_pairing_confirm_writeback_failed")
-                                        peer.clearClientState()
-                                        if (peer.isEmpty) peers.remove(event.deviceAddress)
-                                        com.dsm.wallet.bridge.UnifiedBleEvents.onConnectionFailed(event.deviceAddress, "pairing_confirm_writeback_failed")
-                                        resumePairingScan(event.deviceAddress, "pairing_confirm_writeback_failed")
-                                    } else {
-                                        successfullyStartedWrite = true
-                                    }
+                                    // Reported as PairingConfirmWritten when the stack acknowledges
+                                    // it, as ErrorOccurred(pairing_confirm_write) when it fails.
+                                    session.writePairingConfirm(response)
+                                    confirmQueued = true
+                                    Log.i("BleCoordinator", "PAIRING_CONFIRM write-back to ${event.deviceAddress} queued (${response.size}B)")
                                 } else {
                                     Log.w("BleCoordinator", "PAIRING_CONFIRM: no active session for ${event.deviceAddress}")
                                     resumePairingScan(event.deviceAddress, "pairing_confirm_no_session")
@@ -1025,7 +897,7 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                         } catch (e: Exception) {
                             Log.e("BleCoordinator", "Failed to process PAIRING_ACK from ${event.deviceAddress}", e)
                         } finally {
-                            if (!successfullyStartedWrite) {
+                            if (!confirmQueued) {
                                 peer.pairingInProgress = false
                             }
                         }
@@ -1067,31 +939,22 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                             }
                         }
 
+                        // The link failed at its connection, discovery, MTU, identity or
+                        // pairing step, so the session is unusable. A message write that
+                        // fails is not reported here: it fails that message alone.
                         // connectResult deferred is completed by clearClientState() below.
                         peer.lastError = event
-                        // Clear current transaction on error and try to process next item
-                        val currentTx = peer.currentTransaction
-                        if (currentTx != null) {
-                            outbox.incrementAttempts(currentTx.id)
-                            peer.currentTransaction = null
-                            // Try to process next item after error (serialized)
-                            runOperation(BleOpLane.TRANSFER) { processNextOutboxItem(event.deviceAddress) }
-                        }
                         diagnostics.recordError(event.category, event.details, event.deviceAddress, event.status)
+                        if (event.details == "pairing_write" || event.details == "pairing_confirm_write") {
+                            com.dsm.wallet.bridge.UnifiedBleEvents.onConnectionFailed(event.deviceAddress, event.details)
+                        }
 
                         val alreadyPaired = try { com.dsm.wallet.bridge.Unified.isBleAddressPaired(event.deviceAddress) } catch (_: Throwable) { false }
+                        Log.w("BleCoordinator", "ErrorOccurred for ${event.deviceAddress} (${event.category}/${event.details}) — closing the session")
+                        peer.clearClientState()
+                        if (peer.isEmpty) peers.remove(event.deviceAddress)
                         if (!alreadyPaired) {
-                            peer.clearClientState()
-                            if (peer.isEmpty) peers.remove(event.deviceAddress)
                             resumePairingScan(event.deviceAddress, event.details)
-                        } else {
-                            // Already-paired device hit a write failure — the GATT session
-                            // is stale (likely BLE MAC rotated since last transfer).  Close
-                            // the dead session so the next bilateral transfer gets a fresh
-                            // GATT connection to whatever address the peer is now advertising.
-                            Log.w("BleCoordinator", "ErrorOccurred for ${event.deviceAddress} (${event.category}), paired device — closing stale session for fresh reconnect")
-                            peer.clearClientState()
-                            if (peer.isEmpty) peers.remove(event.deviceAddress)
                         }
                     }
                 }
@@ -1364,55 +1227,6 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
     suspend fun sendViaServerNotifications(address: String, chunks: Array<ByteArray>): Boolean {
         Log.i("BleCoordinator", "sendViaServerNotifications: routing ${chunks.size} chunks to $address via GATT server")
         return gattServer.sendChunkedNotifications(address, chunks)
-    }
-
-    private suspend fun processOutboxForDevice(deviceAddress: String) {
-        val peer = peers[deviceAddress]
-
-        // If already processing a transaction, wait for it to complete
-        if (peer?.currentTransaction != null) {
-            return
-        }
-
-        // Only process outbox via GATT client path when we have an active client connection.
-        // If not connected as a GATT client, we cannot send via this path.
-        // (Server notification path is handled separately via sendViaServerNotifications)
-        if (peer?.isConnected != true) {
-            return
-        }
-
-        processNextOutboxItem(deviceAddress)
-    }
-
-    private suspend fun processNextOutboxItem(deviceAddress: String) {
-        val peer = peers[deviceAddress]
-        if (peer?.isConnected != true || peer.currentTransaction != null) {
-            return
-        }
-
-        val pendingItems = outbox.getPendingForDevice(deviceAddress)
-        val nextItem = pendingItems.firstOrNull()
-        if (nextItem == null) {
-            return // No more items to process
-        }
-
-        if (nextItem.attempts >= 5) {
-            outbox.removeItem(nextItem.id)
-            // Try next item
-            processNextOutboxItem(deviceAddress)
-            return
-        }
-
-        val session = getOrCreateSession(deviceAddress)
-        val started = session.sendTransaction(nextItem.payload)
-        if (started) {
-            peer.currentTransaction = nextItem
-        } else {
-            // Failed to start transaction, increment attempts
-            outbox.incrementAttempts(nextItem.id)
-            // Try next item
-            processNextOutboxItem(deviceAddress)
-        }
     }
 
     private fun getOrCreateSession(deviceAddress: String): GattClientSession {
