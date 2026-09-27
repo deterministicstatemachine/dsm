@@ -42,6 +42,21 @@ describe('screen.css', () => {
     expect(dark).toMatch(/color:\s*var\(--bg\)/);
   });
 
+  it("opens an inline token picker's list across its whole row", () => {
+    // Beside an amount field the picker's button is a narrow column. Its list
+    // is placed against the row, not the button, so it spans the amount field
+    // and the button together and a row's ticker is never cut to the column.
+    expect(rule('.sb-input-row:has(> .sb-tokensel--inline)')).toMatch(/position:\s*relative/);
+    const picker = rule('.sb-input-row > .sb-tokensel--inline');
+    expect(picker).toMatch(/position:\s*static/);
+    expect(picker).toMatch(/max-width:\s*50%/);
+    expect(picker).not.toMatch(/\swidth:/);
+    const list = rule('.sb-tokensel__list');
+    expect(list).toMatch(/position:\s*absolute/);
+    expect(list).toMatch(/left:\s*0/);
+    expect(list).toMatch(/right:\s*0/);
+  });
+
   it('keeps an FX scene inside the screen host', () => {
     // position: absolute against .stateboy-screen-host, never fixed to the page.
     expect(rule('.sb-fx-backdrop')).not.toMatch(/position:\s*fixed/);
