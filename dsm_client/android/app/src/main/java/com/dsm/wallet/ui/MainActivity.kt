@@ -1022,36 +1022,6 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
 
             Log.i(tag, "DSM bridge: parsed messageId=$messageId method='$method' bodyBytes=${body.size}")
 
-            // Biometric auth is async — return ACK immediately; result arrives via binary event.
-            if (method == "biometric.auth") {
-                Log.i(tag, "DSM bridge: biometric.auth — launching BiometricPrompt")
-                val ackResponse = ByteArray(8)
-                java.nio.ByteBuffer.wrap(ackResponse, 0, 8).order(java.nio.ByteOrder.BIG_ENDIAN).putLong(messageId)
-                if (WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_PORT_POST_MESSAGE)) {
-                    port.postMessage(WebMessageCompat(ackResponse))
-                }
-                runOnUiThread { showBiometricPrompt() }
-                return
-            }
-
-            // System bar color update: payload is UTF-8 "bgHex|darkHex".
-            if (method == "setSystemBarColors") {
-                try {
-                    val parts = String(body, Charsets.UTF_8).split("|", limit = 2)
-                    if (parts.size == 2) {
-                        applySystemBarColors(parts[0], parts[1])
-                    }
-                } catch (t: Throwable) {
-                    Log.w(tag, "DSM bridge: setSystemBarColors failed: ${t.message}")
-                }
-                val ackResponse = ByteArray(8)
-                java.nio.ByteBuffer.wrap(ackResponse, 0, 8).order(java.nio.ByteOrder.BIG_ENDIAN).putLong(messageId)
-                if (WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_PORT_POST_MESSAGE)) {
-                    port.postMessage(WebMessageCompat(ackResponse))
-                }
-                return
-            }
-
             // Wallet creation must publish a fresh session snapshot after completing — without it
             // React never sees phase=wallet_ready and the UI sits on the start screen despite the
             // wallet existing.
@@ -1440,14 +1410,6 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         // Rust receives app_foreground=false via publishSessionState and decides lock policy
         publishSessionState("pause")
         // Do not stop advertising here; background service owns BLE state.
-    }
-
-    /**
-     * System bars are permanently near-black (#0D0D0D), set once in onCreate().
-     * Bridge RPC "setSystemBarColors" still routes here but is intentionally a no-op.
-     */
-    fun applySystemBarColors(@Suppress("UNUSED_PARAMETER") bgHex: String, @Suppress("UNUSED_PARAMETER") darkHex: String) {
-        // No-op: bars are permanently dark. Kept so the bridge route doesn't error.
     }
 
     fun showBiometricPrompt(
