@@ -191,6 +191,109 @@ fn kept_receipt(commitment: &[u8; 32]) -> dsm::types::receipt_types::StitchedRec
     .expect("the kept receipt decodes")
 }
 
+/// A stale proposal's claimed tip is kept as evidence of the sender's tip
+/// only when the proposal's commitment recomputes on it. A's prepare for B
+/// with its claimed tip replaced (the claim travels outside σ_A) is refused
+/// as stale, and B keeps nothing of the claim. MUTATION CONTROL: keeping the
+/// claim whether or not it recomputes turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_claimed_tip_that_does_not_recompute_is_not_kept() {
+    use crate::generated;
+    use prost::Message;
+
+    let pair = Pair::boot(0, 0).await;
+    let a = OfflineDevice::new(&pair.a);
+    let b = OfflineDevice::new(&pair.b);
+
+    a.device.enter();
+    let (prepare, _commitment) = a
+        .handler
+        .prepare_bilateral_transaction(b.device.device_id, Operation::Noop)
+        .await
+        .expect("A prepares for B");
+
+    let mut envelope =
+        crate::envelope::from_canonical_bytes(&prepare).expect("the prepare decodes");
+    let Some(generated::envelope::Payload::UniversalTx(tx)) = envelope.payload.as_mut() else {
+        panic!("a prepare is a UniversalTx");
+    };
+    let Some(generated::universal_op::Kind::Invoke(invoke)) = tx.ops[0].kind.as_mut() else {
+        panic!("a prepare is an Invoke");
+    };
+    let args = invoke.args.as_mut().expect("the prepare's args");
+    let mut request = generated::BilateralPrepareRequest::decode(args.body.as_slice())
+        .expect("the prepare request");
+    request.expected_counterparty_state_hash = Some(generated::Hash32 { v: vec![0x5E; 32] });
+    args.body = request.encode_to_vec();
+    let tampered = envelope.encode_to_vec();
+
+    b.device.enter();
+    let (answer, _meta) = b
+        .handler
+        .handle_prepare_request(&tampered, None)
+        .await
+        .expect("a stale proposal is answered");
+    assert!(
+        !answer.is_empty(),
+        "a stale proposal is answered with a signed rejection"
+    );
+    assert_eq!(
+        crate::storage::client_db::get_observed_remote_chain_tip(&a.device.device_id)
+            .expect("read the observed tip"),
+        None,
+        "B kept a claimed tip the proposal's commitment does not recompute on"
+    );
+}
+
+/// A prepare addressed to another device is meaningless bytes to the one it
+/// reached: C, which holds A as a contact, is handed A's prepare for B. C
+/// answers nothing and writes nothing — no session, no tip, no observed tip
+/// — where, deciding the prepare as its own, it would answer a signed
+/// rejection of a proposal that does not extend its tip with A. MUTATION
+/// CONTROL: dropping Core's address check makes C answer, and turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_prepare_addressed_to_another_device_answers_nothing_and_writes_nothing() {
+    let pair = Pair::boot(0, 0).await;
+    let mut c_device = TestDevice::create("C", 0x0C);
+    c_device.boot(&pair.fleet).await;
+    c_device.add_contact(&pair.a).await;
+    let a = OfflineDevice::new(&pair.a);
+    let b = OfflineDevice::new(&pair.b);
+    let c = OfflineDevice::new(&c_device);
+    let c_tip_before = c.tip_with(&a);
+
+    a.device.enter();
+    let (prepare, commitment) = a
+        .handler
+        .prepare_bilateral_transaction(b.device.device_id, Operation::Noop)
+        .await
+        .expect("A prepares for B");
+
+    c.device.enter();
+    let (answer, _meta) = c
+        .handler
+        .handle_prepare_request(&prepare, None)
+        .await
+        .expect("a misaddressed prepare is dropped, not refused");
+    assert!(answer.is_empty(), "C answered a prepare addressed to B");
+    assert!(
+        crate::storage::client_db::get_bilateral_session(&commitment)
+            .expect("read the session")
+            .is_none(),
+        "C recorded a session for a prepare addressed to B"
+    );
+    assert_eq!(c.handler.get_session_phase(&commitment).await, None);
+    assert_eq!(c.tip_with(&a), c_tip_before, "C's tip with A moved");
+    assert_eq!(
+        crate::storage::client_db::get_observed_remote_chain_tip(&a.device.device_id)
+            .expect("read the observed tip"),
+        None,
+        "C recorded A's claimed tip from a prepare addressed to B"
+    );
+}
+
 /// Two offline steps between two devices over a byte carrier: each commits on
 /// both devices, both hold the same relationship tip after it, and the tip
 /// moves with each step. Each commit ends its session and moves both EK chain
