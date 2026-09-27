@@ -60,8 +60,6 @@ object Unified {
     // ---------- Protobuf-only externals ----------
     @Keep @JvmStatic fun initSdk(baseDir: String): Boolean =
         UnifiedNativeApi.initSdk(baseDir)
-    @Keep @JvmStatic fun initSdkV3(baseDir: String): ByteArray =
-        UnifiedNativeApi.initSdkV3(baseDir)
     @Keep @JvmStatic fun initStorageBaseDir(path: ByteArray) {
         UnifiedNativeApi.initStorageBaseDir(path)
     }

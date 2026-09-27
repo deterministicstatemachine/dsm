@@ -1613,8 +1613,13 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
                 }
                 
                 Log.i(tag, "initDsmAndSignalReady: Calling initSdk...")
-                Unified.initSdk(baseDir)
-                Log.i(tag, "initDsmAndSignalReady: SDK initialized; switching to UI thread...")
+                // A failed startup is Rust's to report: it records the reason as
+                // the session's fatal error, and the page shows it.
+                if (Unified.initSdk(baseDir)) {
+                    Log.i(tag, "initDsmAndSignalReady: SDK initialized")
+                } else {
+                    Log.e(tag, "initDsmAndSignalReady: SDK initialization failed; the session carries Rust's reason")
+                }
                 
                 Log.i(tag, "initDsmAndSignalReady: event-driven bridge mode enabled; will rely on dsm-bridge-ready signal")
                 try {

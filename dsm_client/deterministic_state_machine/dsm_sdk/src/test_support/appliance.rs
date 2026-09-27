@@ -139,16 +139,40 @@ impl HostAppliance {
     }
 
     /// Install this appliance as the process's anchor appliance: every
-    /// `CoreSDK` that attaches one from now on attaches this one.
-    pub fn install(&self) {
+    /// `CoreSDK` that attaches one attaches this one, until the returned
+    /// handle drops and the process has none again.
+    #[must_use = "the appliance stays installed only while the handle lives"]
+    pub fn install(self) -> InstalledAppliance {
         let appliance = self.clone();
         crate::bridge::install_anchor_appliance_factory(Arc::new(move || {
             Ok(Box::new(appliance.clone()) as Box<dyn AnchorAppliance + Send>)
         }));
+        InstalledAppliance { appliance: self }
     }
 
     fn with<R>(&self, f: impl FnOnce(&mut Appliance<SoftwareTropic, SphincsPartition>) -> R) -> R {
         f(&mut self.inner.lock().unwrap_or_else(|p| p.into_inner()))
+    }
+}
+
+/// An appliance installed as the process's anchor appliance; dropping it
+/// uninstalls it. An installation that outlived its test leaked into every
+/// later test in the process: the offline-cash gate tests, which assert what a
+/// device with no appliance is refused, found this one attached.
+pub struct InstalledAppliance {
+    appliance: HostAppliance,
+}
+
+impl std::ops::Deref for InstalledAppliance {
+    type Target = HostAppliance;
+    fn deref(&self) -> &HostAppliance {
+        &self.appliance
+    }
+}
+
+impl Drop for InstalledAppliance {
+    fn drop(&mut self) {
+        crate::bridge::uninstall_anchor_appliance_factory();
     }
 }
 

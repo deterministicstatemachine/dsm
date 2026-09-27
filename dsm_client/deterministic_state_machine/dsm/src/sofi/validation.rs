@@ -1896,7 +1896,12 @@ pub(crate) mod fixtures {
     //! conformance tests (R7): a real `P(E)`, its `E`, a precommit whose legs
     //! derive from it, and the acquired evidence.
     use super::*;
-    use crate::sofi::smt::batch_fold;
+    /// The one fold over the economic tree's hashes, as `verify_batch` runs it.
+    fn batch_fold(
+        entries: &[crate::sofi::smt::FoldEntry],
+    ) -> Result<crate::sofi::smt::Folded, crate::sofi::smt::FoldError> {
+        crate::merkle::batch_fold::batch_fold::<crate::sofi::smt::fold::EconomicHashes>(entries)
+    }
     use crate::economic::tree::EconomicSmt;
     use crate::sofi::wire::{PreEClosureIndex, PrecommitLeg, SofiSetupBody, ValidationRef};
 
@@ -2472,7 +2477,12 @@ mod tests {
     use super::fixtures::*;
     use super::*;
     use crate::economic::tree::{EconomicSmt, ECONOMIC_SMT_HEIGHT};
-    use crate::sofi::smt::batch_fold;
+    /// The one fold over the economic tree's hashes, as `verify_batch` runs it.
+    fn batch_fold(
+        entries: &[crate::sofi::smt::FoldEntry],
+    ) -> Result<crate::sofi::smt::Folded, crate::sofi::smt::FoldError> {
+        crate::merkle::batch_fold::batch_fold::<crate::sofi::smt::fold::EconomicHashes>(entries)
+    }
     use crate::sofi::wire::{PreEClosureIndex, PrecommitLeg};
 
     #[test]

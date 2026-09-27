@@ -48,7 +48,6 @@ internal object UnifiedNativeApi {
     }
 
     @Keep @JvmStatic external fun initSdk(baseDir: String): Boolean
-    @Keep @JvmStatic external fun initSdkV3(baseDir: String): ByteArray
     @Keep @JvmStatic external fun initStorageBaseDir(path: ByteArray)
     @Keep @JvmStatic external fun initDsmSdk(configPath: String)
     @Keep @JvmStatic external fun dispatchStartup(requestBytes: ByteArray): ByteArray

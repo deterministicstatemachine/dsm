@@ -258,6 +258,7 @@ fn initialize_sdk_core() -> Result<Vec<u8>, pb::Error> {
     match crate::runtime::get_runtime().block_on(crate::init_dsm_sdk()) {
         Ok(()) => {
             crate::sdk::session_manager::set_sdk_ready(true);
+            crate::sdk::session_manager::clear_startup_failure();
 
             // Resume any identity whose publication never reached quorum.
             // Publication is a precondition of "identity created", so a device
@@ -273,10 +274,9 @@ fn initialize_sdk_core() -> Result<Vec<u8>, pb::Error> {
         }
         Err(e) => {
             crate::sdk::session_manager::set_sdk_ready(false);
-            Err(ingress_error(
-                ERROR_CODE_NOT_READY,
-                format!("startup: init_dsm_sdk failed: {e}"),
-            ))
+            let message = format!("startup: init_dsm_sdk failed: {e}");
+            crate::sdk::session_manager::record_startup_failure(&message);
+            Err(ingress_error(ERROR_CODE_NOT_READY, message))
         }
     }
 }
@@ -974,6 +974,60 @@ mod tests {
         let phrase = String::from_utf8(pack.body).expect("a UTF-8 phrase");
         bip39::Mnemonic::parse_in(bip39::Language::English, &phrase)
             .expect("the minimal router answers a valid mnemonic");
+        drop(fleet);
+    }
+
+    /// A phone an older build provisioned keeps its store at that build's
+    /// schema, and this build refuses it: beta does not migrate. Startup fails
+    /// in the store's own words and that is the session's error, so the page
+    /// leaves "starting runtime" and says what to do. The nodes run, the device
+    /// is created as wallet creation creates it, and its store is left as the
+    /// older build left it: stamped 24, without the table 25 added.
+    #[test]
+    #[serial]
+    fn a_store_at_an_older_schema_fails_startup_as_the_sessions_error() {
+        let fleet = fleet();
+        let _identity = economic_fixtures::local_device(0x12).0;
+        {
+            let store = crate::storage::client_db::get_connection().expect("the store");
+            let conn = store.lock().expect("the store lock");
+            conn.execute_batch("DROP TABLE history_repair_queue; PRAGMA user_version = 24;")
+                .expect("leave the store as schema 24 left it");
+        }
+        // The process that provisioned it is gone.
+        crate::storage::client_db::close_database_for_tests();
+        crate::sdk::app_state::AppState::reset_memory_for_testing();
+        fresh_process();
+        crate::sdk::session_manager::clear_fatal_error_and_snapshot().expect("clear");
+
+        let start = || {
+            dispatch_startup(StartupRequest {
+                operation: Some(startup_request::Operation::InitializeSdk(
+                    pb::InitializeSdkOp {},
+                )),
+            })
+        };
+        let snapshot = || {
+            crate::sdk::session_manager::SESSION_MANAGER
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .compute_snapshot()
+        };
+        let error = expect_startup_error(start());
+        assert!(
+            error.message.contains("SCHEMA RESET REQUIRED"),
+            "{}",
+            error.message
+        );
+        assert_eq!(snapshot().phase, "error");
+        assert_eq!(snapshot().fatal_error, error.message);
+
+        // The remedy the refusal names, a wiped store: startup then succeeds
+        // and takes its own failure back.
+        crate::storage::client_db::reset_database_for_tests();
+        expect_startup_ok(start());
+        assert_eq!(snapshot().fatal_error, "");
+        assert_ne!(snapshot().phase, "error");
         drop(fleet);
     }
 
