@@ -308,15 +308,26 @@ export async function burnToken(args: { tokenId: string; amount: string | number
   }
 }
 
+/** The token-creation fee and this device's standing against it, as Rust reports them. */
+export type TokenCreationFee = {
+  /** The fee, in ERA. */
+  feeEra: bigint;
+  /** The ERA this device holds, from the head the fee is debited from. */
+  eraHeld: bigint;
+  /** Whether that pays the fee: the check token.create refuses on. */
+  feeCovered: boolean;
+};
+
 /**
- * The token-creation fee, in ERA, as Rust reports it.
+ * The token-creation fee, and whether this device can pay it, as Rust reports
+ * them.
  *
  * DISPLAY ONLY. Rust reads the same core constant the conservation guard
- * validates against, so the number shown can never disagree with the number
- * charged. A failed query is the failure, for the screen to show; it is not
- * an absent fee.
+ * validates against, and decides coverage with the check token.create refuses
+ * on, so neither can disagree with what happens at creation. A failed query is
+ * the failure, for the screen to show; it is not an absent fee.
  */
-export async function getTokenCreationFeeEra(): Promise<bigint> {
+export async function getTokenCreationFee(): Promise<TokenCreationFee> {
   const env = decodeFramedEnvelopeV3(
     await routerQueryBin('tokens.getFeeSchedule', new Uint8Array()),
   );
@@ -324,5 +335,6 @@ export async function getTokenCreationFeeEra(): Promise<bigint> {
   if (env.payload.case !== 'tokenFeeScheduleResponse') {
     throw new Error(`Expected tokenFeeScheduleResponse, got ${env.payload.case}`);
   }
-  return env.payload.value.tokenCreationEra;
+  const r = env.payload.value;
+  return { feeEra: r.tokenCreationEra, eraHeld: r.eraHeld, feeCovered: r.feeCovered };
 }

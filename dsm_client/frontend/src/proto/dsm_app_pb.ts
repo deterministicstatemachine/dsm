@@ -7304,6 +7304,10 @@ export class TokenBurnResponse extends Message<TokenBurnResponse> {
  * or assumes them, and it cannot change what is charged — the conservation
  * guard validates the fee against a core constant.
  *
+ * era_held and fee_covered are this device's standing against the creation
+ * fee, read from the head token.create debits it from and decided by the same
+ * check token.create refuses on, so the wizard's word and the refusal agree.
+ *
  * @generated from message dsm.TokenFeeScheduleResponse
  */
 export class TokenFeeScheduleResponse extends Message<TokenFeeScheduleResponse> {
@@ -7311,6 +7315,16 @@ export class TokenFeeScheduleResponse extends Message<TokenFeeScheduleResponse> 
    * @generated from field: uint64 token_creation_era = 1;
    */
   tokenCreationEra = protoInt64.zero;
+
+  /**
+   * @generated from field: uint64 era_held = 2;
+   */
+  eraHeld = protoInt64.zero;
+
+  /**
+   * @generated from field: bool fee_covered = 3;
+   */
+  feeCovered = false;
 
   constructor(data?: PartialMessage<TokenFeeScheduleResponse>) {
     super();
@@ -7321,6 +7335,8 @@ export class TokenFeeScheduleResponse extends Message<TokenFeeScheduleResponse> 
   static readonly typeName = "dsm.TokenFeeScheduleResponse";
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
     { no: 1, name: "token_creation_era", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 2, name: "era_held", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 3, name: "fee_covered", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): TokenFeeScheduleResponse {
