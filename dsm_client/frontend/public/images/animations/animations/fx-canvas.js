@@ -324,6 +324,22 @@
         mute: (v) => { this._muteOverride = !!v; }
       };
       this.readPalette();
+      // The app applies a color theme by writing CSS variables onto <html>;
+      // follow every such change so a scene already on screen (the intro
+      // before the saved theme lands, a popup while SELECT is pressed)
+      // repaints in the new palette.
+      if (!this._themeMo) {
+        try {
+          this._themeMo = new MutationObserver(() => {
+            this.readPalette();
+            if (this._cur && this._cv && this._connected) {
+              this._lastF = -1;
+              if (!this._raf) this._raf = requestAnimationFrame(this._step);
+            }
+          });
+          this._themeMo.observe(document.documentElement, { attributes: true, attributeFilter: ['style', 'data-theme'] });
+        } catch (e) {}
+      }
       // An `anim` attribute set while the fonts were loading has already
       // started a scene; do not restart it behind the user's back.
       const start = () => { if (this._connected && !this._cur) this.play(this.getAttribute('anim') || 'intro'); };
@@ -337,6 +353,7 @@
     disconnectedCallback() {
       this._connected = false;
       if (this._ro) { try { this._ro.disconnect(); } catch (e) {} }
+      if (this._themeMo) { try { this._themeMo.disconnect(); } catch (e) {} this._themeMo = null; }
       if (this._raf) { cancelAnimationFrame(this._raf); this._raf = null; }
     }
 
@@ -1431,6 +1448,7 @@
     play(name) {
       const anims = this.ANIMS();
       if (!anims[name]) return;
+      this.readPalette();
       this._cur = name;
       this._t0 = performance.now();
       this._lastF = -1;
