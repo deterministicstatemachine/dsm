@@ -16,6 +16,7 @@
 //   dlv           — Deterministic Limbo Vaults (sovereign finance primitives)
 //   storage       — Storage node communication
 //   transactions  — Bilateral/unilateral transfer logic
+//   offlineCash   — moving a token between the online account and the offline allocation
 //   diagnostics   — telemetry, debug
 //
 // BRIDGE HELPER RE-EXPORTS (not part of the curated `dsmClient` namespace):
@@ -43,6 +44,7 @@ export * from './wallet';
 export * from './policies';
 export * from './storage';
 export * from './transactions';
+export * from './offlineCash';
 export * from './diagnostics';
 
 // Re-export bridge helpers used by external consumers.
@@ -62,6 +64,7 @@ import * as Wallet from './wallet';
 import * as Policies from './policies';
 import * as Storage from './storage';
 import * as Transactions from './transactions';
+import * as OfflineCash from './offlineCash';
 import * as Diagnostics from './diagnostics';
 
 // Flat namespace export for consumers that prefer object-style access.
@@ -72,5 +75,6 @@ export const dsmClient = {
   ...Policies,
   ...Storage,
   ...Transactions,
+  ...OfflineCash,
   ...Diagnostics,
 };

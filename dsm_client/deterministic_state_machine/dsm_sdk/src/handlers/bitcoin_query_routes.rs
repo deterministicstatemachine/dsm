@@ -449,7 +449,10 @@ impl AppRouterImpl {
                     locked,
                     ..Default::default()
                 };
-                if let Err(e) = crate::handlers::wallet_routes::enrich_balance_metadata(&mut reply)
+                if let Err(e) =
+                    crate::handlers::wallet_routes::enrich_balance_metadata(&mut reply, &|asset| {
+                        self.core_sdk.offline_allocation_of(asset)
+                    })
                 {
                     return err(format!("bitcoin balance: {e}"));
                 }
@@ -636,6 +639,10 @@ impl AppRouterImpl {
                         protocol_defined: false,
                         genesis_supply_display: String::new(),
                         permissions: None,
+                        // An offline allocation leaf is keyed by the asset's
+                        // policy commit, which native BTC does not have: no
+                        // such leaf can exist, so there is nothing to state.
+                        offline_allocation: None,
                     },
                 ))
             }

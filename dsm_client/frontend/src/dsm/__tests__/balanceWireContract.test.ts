@@ -54,6 +54,11 @@ describe('balance wire contract (Rust -> TypeScript)', () => {
     expect(row.permissions).toBeDefined();
     expect(row.permissions.burnEnabled).toBe(true);
     expect(row.permissions.transferable).toBe(false);
+    // The offline allocation, PRESENT with its rendered form. Absent would
+    // mean no appliance has stated a bundle, and the wallet prints nothing.
+    expect(row.offlineAllocation).toBeDefined();
+    expect(row.offlineAllocation.baseUnits).toBe(2500n);
+    expect(row.offlineAllocation.displayAmount).toBe('25.00');
   });
 
   /// decimals must arrive as a real number, since the mapper's guard is

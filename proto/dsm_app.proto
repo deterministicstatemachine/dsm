@@ -2032,7 +2032,7 @@ message AnchorStatusResponse {
 // inside ArgPack.body for wallet.loadOffline / wallet.unloadOffline.
 message OfflineCashRequest {
   string token_id = 1;   // asset to move between regimes (resolved to a CPTA policy_commit)
-  uint64 amount   = 2;   // base units to load (online -> allocation) or unload (allocation -> online)
+  string amount   = 2;   // decimal, as the user typed it; the SDK scales it by the token's decimals
 }
 
 message OfflineCashResponse {
@@ -2041,6 +2041,8 @@ message OfflineCashResponse {
   uint64 allocation_balance   = 3;                       // device-bound offline allocation AFTER the move
   bytes  device_root    = 4 [(dsm_fixed_len)=32];  // new device SMT root r_A
   string message        = 5;
+  string online_display     = 6;                   // display form of `online_balance`, rendered by Rust
+  string allocation_display = 7;                   // display form of `allocation_balance`, rendered by Rust
 }
 
 // =========================== Bluetooth Transport ====================
@@ -3433,6 +3435,20 @@ message BalanceGetResponse {
   // token: "not stated" and "not permitted" are different facts, and a
   // defaulted bool cannot tell them apart.
   TokenPolicyPermissions permissions = 14;
+  // The token's offline allocation on this device, stated only once an anchor
+  // appliance has been attached since the app started: the allocation leaf is
+  // keyed by the appliance's bundle, and only the appliance states its bundle.
+  // Absent means unknown, never zero.
+  OfflineAllocationView offline_allocation = 15;
+}
+
+// Cash in hand: what this device has loaded into its offline allocation of a
+// token, as Rust read it under the attached appliance's bundle. An offline send
+// spends from it; it is not part of `available`.
+message OfflineAllocationView {
+  uint64 base_units = 1;
+  // Display form of `base_units`, rendered by Rust.
+  string display_amount = 2;
 }
 // The permission flags of a committed token policy, as Core's one parser read
 // them (SoFi §47).

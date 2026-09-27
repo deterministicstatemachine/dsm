@@ -70,8 +70,12 @@ pub fn enrich_transaction_display(tx: &mut generated::TransactionInfo) -> Result
     Ok(())
 }
 
+/// Fill in everything a balance row says beyond its amounts: the token's
+/// name, unit and policy facts, its anchor, and its offline allocation as
+/// `offline_of` reads it for the row's asset.
 pub(crate) fn enrich_balance_metadata(
     reply: &mut generated::BalanceGetResponse,
+    offline_of: &dyn Fn(&[u8; 32]) -> Option<u64>,
 ) -> Result<(), String> {
     let token_id = reply.token_id.trim().to_uppercase();
     match token_id.as_str() {
@@ -83,9 +87,10 @@ pub(crate) fn enrich_balance_metadata(
             reply.decimals = era.decimals;
             reply.token_name = era.alias.clone();
             reply.display_amount = format_base_units_for_display(reply.available, era.decimals);
-            set_anchor(
+            set_anchor_and_offline(
                 reply,
                 &dsm::core::token::token_state_manager::era_policy_commit(),
+                offline_of,
             );
             reply.protocol_defined = true;
             reply.genesis_supply_display =
@@ -102,7 +107,7 @@ pub(crate) fn enrich_balance_metadata(
             reply.token_name = "dBTC".to_string();
             reply.display_amount = format_base_units_for_display(reply.available, 8);
             if let Some(c) = crate::policy::builtin_policy_commit("dBTC") {
-                set_anchor(reply, &c);
+                set_anchor_and_offline(reply, &c, offline_of);
             }
             reply.protocol_defined = true;
         }
@@ -131,7 +136,7 @@ pub(crate) fn enrich_balance_metadata(
             };
             reply.decimals = row.decimals;
             reply.canonical_token_id = row.token_id.clone();
-            set_anchor(reply, &row.policy_commit);
+            set_anchor_and_offline(reply, &row.policy_commit, offline_of);
             reply.icon_url = policy.icon_url.unwrap_or_default();
             reply.display_amount = format_base_units_for_display(reply.available, reply.decimals);
             // A device created this token; its committed policy fixes the
@@ -186,17 +191,32 @@ fn registered_policy(
 /// identifier: nothing resolves a token by fingerprint.
 const ANCHOR_FINGERPRINT_LEN: usize = 8;
 
-/// Render a token's CPTA policy anchor onto the wire record.
+/// Render a token's CPTA policy anchor and its offline allocation onto the wire record.
 ///
 /// A creator could not see the anchor of a token it had created — the adoption
 /// card showed one, the creator's screen showed nothing — so handing it to a
 /// peer meant deriving it by hand, off-device. Base32 Crockford, encoded by the
 /// canonical encoder, because a second encoder gets the trailing-group padding
 /// wrong and produces a plausible string that resolves to nothing.
-fn set_anchor(reply: &mut generated::BalanceGetResponse, policy_commit: &[u8; 32]) {
+///
+/// The offline allocation rides with the anchor because it is the same asset's
+/// cash in hand, keyed by the commit the anchor renders, and rendered here with
+/// the row's decimals. `None` from the reader means no appliance has stated a
+/// bundle yet: the field stays absent, which the wallet reads as unknown. A
+/// zero there would claim a fact nobody holds.
+fn set_anchor_and_offline(
+    reply: &mut generated::BalanceGetResponse,
+    policy_commit: &[u8; 32],
+    offline_of: &dyn Fn(&[u8; 32]) -> Option<u64>,
+) {
     let b32 = crate::util::text_id::encode_base32_crockford(policy_commit);
     reply.anchor_fingerprint = b32.chars().take(ANCHOR_FINGERPRINT_LEN).collect();
     reply.policy_anchor_b32 = b32;
+    reply.offline_allocation =
+        offline_of(policy_commit).map(|base_units| generated::OfflineAllocationView {
+            base_units,
+            display_amount: format_base_units_for_display(base_units, reply.decimals),
+        });
 }
 
 fn ensure_default_visible_balances(
@@ -471,7 +491,9 @@ impl AppRouterImpl {
                             locked: bal.locked(),
                             ..Default::default()
                         };
-                        if let Err(e) = enrich_balance_metadata(&mut reply) {
+                        if let Err(e) = enrich_balance_metadata(&mut reply, &|asset| {
+                            self.core_sdk.offline_allocation_of(asset)
+                        }) {
                             return err(format!("balance.get: {e}"));
                         }
                         pack_envelope_ok(generated::envelope::Payload::BalanceGetResponse(reply))
@@ -739,7 +761,9 @@ impl AppRouterImpl {
                 // enrichment belongs at the encoding boundary, where it cannot
                 // be skipped by whichever path produced a row.
                 for item in items.iter_mut() {
-                    if let Err(e) = enrich_balance_metadata(item) {
+                    if let Err(e) = enrich_balance_metadata(item, &|asset| {
+                        self.core_sdk.offline_allocation_of(asset)
+                    }) {
                         return err(format!("balance.list: {e}"));
                     }
                 }
@@ -1515,7 +1539,7 @@ mod tests {
     fn era_reports_its_committed_policy_supply_permissions_and_anchor() {
         fresh_db();
         let mut era = seed("ERA", 264, 0);
-        super::enrich_balance_metadata(&mut era).expect("ERA is named");
+        super::enrich_balance_metadata(&mut era, &|_| None).expect("ERA is named");
         assert!(era.protocol_defined);
         assert_eq!((era.symbol.as_str(), era.decimals), ("ERA", 0));
         assert_eq!(era.genesis_supply_display, "80000000000");
@@ -1531,7 +1555,7 @@ mod tests {
             "JXPMPGJH45HDTE0ARWE2CTB9E9BWTQZ3T78CE5RFF1RXMR9VKK80"
         );
         let mut dbtc = seed("dBTC", 0, 0);
-        super::enrich_balance_metadata(&mut dbtc).expect("dBTC is named");
+        super::enrich_balance_metadata(&mut dbtc, &|_| None).expect("dBTC is named");
         assert!(dbtc.protocol_defined);
     }
 
@@ -1545,7 +1569,7 @@ mod tests {
         let (policy, commit) = store_created_policy("RIGB", 2, 100_000, true, false);
         register(&policy, commit, 100_000);
         let mut row = seed("RIGB", 5, 0);
-        super::enrich_balance_metadata(&mut row).expect("a registered token is named");
+        super::enrich_balance_metadata(&mut row, &|_| None).expect("a registered token is named");
         assert!(!row.protocol_defined);
         assert_eq!(row.genesis_supply_display, "1000.00");
         assert_eq!(
@@ -1560,6 +1584,34 @@ mod tests {
         assert_eq!(row.display_amount, "0.05");
     }
 
+    /// A row states its offline allocation only from a reader that knows the
+    /// attached appliance's bundle, for the row's own asset. With none attached
+    /// the field is absent: unknown is not zero, and the wallet must not print
+    /// a pot it cannot see.
+    #[test]
+    #[serial_test::serial]
+    fn a_row_states_its_offline_allocation_only_when_the_bundle_is_known() {
+        fresh_db();
+        let (policy, commit) = store_created_policy("RIGB", 2, 100_000, true, false);
+        register(&policy, commit, 100_000);
+        let mut unknown = seed("RIGB", 5, 0);
+        super::enrich_balance_metadata(&mut unknown, &|_| None).expect("named");
+        assert_eq!(unknown.offline_allocation, None);
+        let mut known = seed("RIGB", 5, 0);
+        super::enrich_balance_metadata(&mut known, &|asset| {
+            assert_eq!(asset, &commit, "read for the row's own asset");
+            Some(2_500)
+        })
+        .expect("named");
+        assert_eq!(
+            known.offline_allocation,
+            Some(generated::OfflineAllocationView {
+                base_units: 2_500,
+                display_amount: "25.00".to_string(),
+            })
+        );
+    }
+
     /// A row that disagrees with the bytes its own commit names is corrupt:
     /// refused, with nothing from either side reported.
     #[test]
@@ -1569,7 +1621,7 @@ mod tests {
         let (policy, commit) = store_created_policy("DISA", 0, 10, true, true);
         register(&policy, commit, 11);
         let mut row = seed("DISA", 0, 0);
-        let refused = super::enrich_balance_metadata(&mut row)
+        let refused = super::enrich_balance_metadata(&mut row, &|_| None)
             .expect_err("a row disagreeing with its policy is refused");
         assert!(refused.contains("disagrees with its policy"), "{refused}");
         assert!(

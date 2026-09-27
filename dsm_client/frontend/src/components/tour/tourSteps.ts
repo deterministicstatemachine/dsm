@@ -12,6 +12,8 @@ export type TourWait =
   | { kind: 'screen'; screen: ScreenType }
   /** Move on once this element is on screen. */
   | { kind: 'selector'; selector: string }
+  /** Move on once nothing on screen matches this selector any more. */
+  | { kind: 'gone'; selector: string }
   /** Move on once this field holds a value (a positive number when `positive`). */
   | { kind: 'value'; selector: string; positive?: boolean }
   /** Move on once practice mode reports this action. */
@@ -122,7 +124,39 @@ export const TOUR_STEPS: ReadonlyArray<TourStep> = [
     screen: 'wallet',
     target: '.send-tab [aria-label="Transaction mode"]',
     title: 'Online or offline',
-    body: "Online goes through the storage nodes and waits in their inbox, even if they're asleep. Offline goes phone to phone over Bluetooth when you're side by side. Keep Online for now.",
+    body: "Online goes through the storage nodes and waits in their inbox, even if they're asleep. Offline goes phone to phone over Bluetooth when you're side by side. Let's look at Offline for a moment.",
+  },
+  {
+    id: 'go-offline',
+    screen: 'wallet',
+    target: '.send-tab [aria-label="Transaction mode"] button:nth-of-type(2)',
+    title: 'Try Offline',
+    body: 'Tap Offline. An offline send needs two more things besides Bluetooth, and they appear here.',
+    wait: { kind: 'selector', selector: '[data-tour="offline-funding"]' },
+    prompt: 'Tap Offline',
+  },
+  {
+    id: 'offline-funding',
+    screen: 'wallet',
+    target: '[data-tour="offline-funding"]',
+    title: 'Offline funding',
+    body: 'Offline sends spend from a separate pot: your offline allocation, which the anchor appliance guards. Offline Funding moves tokens from your online account into that pot, and back again. The i beside it explains the two balances.',
+  },
+  {
+    id: 'appliance',
+    screen: 'wallet',
+    target: '[data-tour="appliance-setup"]',
+    title: 'The appliance',
+    body: "The DSM Anchor appliance plugs into this phone's USB port. Appliance shows whether it is connected and walks you through the first plug-in. Android asks for permission once; after that it connects on its own whenever you choose Offline.",
+  },
+  {
+    id: 'go-online',
+    screen: 'wallet',
+    target: '.send-tab [aria-label="Transaction mode"] button:nth-of-type(1)',
+    title: 'Back to Online',
+    body: "We'll send online in this tour. Tap Online.",
+    wait: { kind: 'gone', selector: '[data-tour="offline-funding"]' },
+    prompt: 'Tap Online',
   },
   {
     id: 'info',

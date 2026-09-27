@@ -289,8 +289,16 @@ describe('tour anchors', () => {
     ),
   );
 
-  it('the steps name at least the five tour anchors', () => {
-    expect(anchors.sort()).toEqual(['contacts-tabs', 'create-token', 'faucet-claim', 'tokens-tabs', 'tutorial-button']);
+  it('the steps name at least the seven tour anchors', () => {
+    expect(anchors.sort()).toEqual([
+      'appliance-setup',
+      'contacts-tabs',
+      'create-token',
+      'faucet-claim',
+      'offline-funding',
+      'tokens-tabs',
+      'tutorial-button',
+    ]);
   });
 
   it.each(anchors)('data-tour="%s" exists in the app', (anchor) => {

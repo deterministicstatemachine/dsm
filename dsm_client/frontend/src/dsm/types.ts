@@ -182,6 +182,21 @@ export interface TokenBalanceView {
   genesisSupplyDisplay?: string;
   /** What the committed policy permits, as Rust read it; absent when Rust holds no policy for the token. */
   permissions?: TokenPolicyPermissionsView;
+  /**
+   * Cash in hand: what this device has loaded into its offline allocation of
+   * the token, as Rust read it under the attached appliance's bundle. An
+   * offline send spends from it; it is not part of `baseUnits`. Absent until
+   * an anchor appliance has been attached since the app started: unknown,
+   * never zero.
+   */
+  offline?: OfflineAllocationView;
+}
+
+/** A token's offline allocation on this device, as Rust reported it. */
+export interface OfflineAllocationView {
+  baseUnits: bigint;
+  /** Display form of `baseUnits`, rendered by Rust. Never computed here. */
+  displayAmount: string;
 }
 
 /** The permission flags of a committed token policy, as Rust read them. */
