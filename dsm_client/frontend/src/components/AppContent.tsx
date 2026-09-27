@@ -14,7 +14,6 @@ type Props = {
   appState: AppState;
   error: string | null;
   showIntro: boolean;
-  onIntroPlayed: () => void;
   introGifSrc: string;
   eraTokenSrc: string;
   btcLogoSrc: string;
@@ -157,7 +156,6 @@ export default function AppContent({
   appState,
   error,
   showIntro,
-  onIntroPlayed,
   introGifSrc,
   eraTokenSrc,
   btcLogoSrc,
@@ -177,7 +175,7 @@ export default function AppContent({
   setCurrentMenuIndex,
 }: Props) {
   if (showIntro) {
-    return <SplashController showIntro={showIntro} introGifSrc={introGifSrc} onPlayed={onIntroPlayed} />;
+    return <SplashController showIntro={showIntro} introGifSrc={introGifSrc} />;
   }
 
   const errorMenuItems = ['RETRY CONNECTION', 'VIEW ERROR LOG'];

@@ -1,31 +1,23 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { useCallback, useEffect, useState } from 'react';
-import type { AppState } from '../types/app';
+import { useCallback, useState } from 'react';
 
 export type IntroGate = {
   /** The intro cutscene is on the screen. */
   showIntro: boolean;
-  /** The intro has played out: whatever phase the app is in shows its own screen. */
-  onIntroPlayed: () => void;
+  /** The user pressed A: the intro is over, and the app's phase shows its own screen. */
+  dismissIntro: () => void;
 };
 
 /**
- * The boot intro plays until the app is settled (the wallet, or genesis to set
- * up) or until it has played out, whichever comes first. A phase still waiting
- * on the network then shows its own screen (publishing, starting the runtime,
- * an error) instead of the intro's empty last frame. Once over, it stays over.
+ * The boot intro stays on the screen until the user presses A, however soon
+ * the app is settled, so the cutscene is always seen. Past it, whatever phase
+ * the app is in shows its own screen: the wallet, genesis to set up, or a phase
+ * still waiting on the network (publishing, starting the runtime, an error).
+ * Once over, it stays over.
  */
-export function useIntroGate(appState: AppState): IntroGate {
+export function useIntroGate(): IntroGate {
   const [showIntro, setShowIntro] = useState<boolean>(true);
-
-  useEffect(() => {
-    if (appState === 'wallet_ready' || appState === 'needs_genesis') {
-      setShowIntro(false);
-    }
-  }, [appState]);
-
-  const onIntroPlayed = useCallback(() => setShowIntro(false), []);
-
-  return { showIntro, onIntroPlayed };
+  const dismissIntro = useCallback(() => setShowIntro(false), []);
+  return { showIntro, dismissIntro };
 }

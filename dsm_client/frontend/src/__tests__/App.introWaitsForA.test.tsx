@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 import React from 'react';
-import { render, waitFor } from '@testing-library/react';
+import { act, render, screen } from '@testing-library/react';
 import App from '../App';
 
 jest.mock('../contexts/UXContext', () => ({
@@ -25,9 +25,10 @@ jest.mock('../components/ErrorBoundary', () => ({
   default: ({ children }: { children: React.ReactNode }) => <>{children}</>,
 }));
 
+// The screen shows the intro or the app's phase, as App tells it to.
 jest.mock('../components/AppContent', () => ({
   __esModule: true,
-  default: () => null,
+  default: ({ showIntro }: { showIntro: boolean }) => <div>{showIntro ? 'INTRO' : 'PHASE SCREEN'}</div>,
 }));
 
 jest.mock('../components/GlobalToast', () => ({
@@ -50,16 +51,17 @@ jest.mock('../components/DiagnosticsOverlay', () => ({
   default: () => null,
 }));
 
+// The shell's buttons reach App as intents; the test presses A through them.
+const pressed: { intents: { select?: () => void } } = { intents: {} };
 jest.mock('../inputs/providers/StateBoyInputProvider', () => ({
-  StateBoyInputProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
+  StateBoyInputProvider: ({ intents, children }: { intents: { select?: () => void }; children: React.ReactNode }) => {
+    pressed.intents = intents;
+    return <>{children}</>;
+  },
 }));
 
 jest.mock('../hooks/useGenesisFlow', () => ({
   useGenesisFlow: () => ({ handleGenerateGenesis: jest.fn() }),
-}));
-
-jest.mock('../hooks/useIntroGate', () => ({
-  useIntroGate: () => ({ showIntro: false, dismissIntro: () => {} }),
 }));
 
 jest.mock('../hooks/useThemeAssets', () => ({
@@ -73,8 +75,9 @@ jest.mock('../hooks/useThemeAssets', () => ({
   }),
 }));
 
+const menuSelect = jest.fn();
 jest.mock('../inputs/useInputIntents', () => ({
-  useInputIntents: () => ({}),
+  useInputIntents: () => ({ select: menuSelect }),
 }));
 
 jest.mock('../hooks/useBottomNav', () => ({
@@ -145,20 +148,26 @@ jest.mock('../services/lock/lockService', () => ({
   }),
 }));
 
-const runtimeStoreMock = jest.requireMock('../runtime/appRuntimeStore') as {
-  appRuntimeStore: { setShowLockPrompt: jest.Mock };
-};
-
-describe('App lock prompt gating', () => {
+describe('the boot intro waits for A', () => {
   beforeEach(() => {
     jest.clearAllMocks();
   });
 
-  test('uses session.status as source of truth and only checks promptDismissed from prefs', async () => {
+  test('a settled app keeps the intro until A is pressed, and A moves past it', async () => {
     render(<App />);
+    await act(async () => {});
 
-    await waitFor(() => {
-      expect(runtimeStoreMock.appRuntimeStore.setShowLockPrompt).toHaveBeenCalledWith(true);
-    });
+    // The wallet is ready, and the intro is still on the screen.
+    expect(screen.getByText('INTRO')).toBeTruthy();
+
+    act(() => pressed.intents.select?.());
+
+    expect(screen.getByText('PHASE SCREEN')).toBeTruthy();
+    // A moved past the intro; it did not also act on the menu behind it.
+    expect(menuSelect).not.toHaveBeenCalled();
+
+    // Past the intro, A is the menu's again.
+    act(() => pressed.intents.select?.());
+    expect(menuSelect).toHaveBeenCalledTimes(1);
   });
 });

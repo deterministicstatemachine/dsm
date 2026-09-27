@@ -1,13 +1,35 @@
 /* DSM Wallet Styles */
 
-/* Intro fade-out animation */
-@keyframes introFadeOut {
-  0% {
-    opacity: 1;
-  }
-  100% {
+/* The intro's "PRESS A" prompt comes in once the scene has played, and blinks. */
+@keyframes introPromptIn {
+  from {
     opacity: 0;
   }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes introPromptBlink {
+  50% {
+    opacity: 0.25;
+  }
+}
+
+.intro-press-a {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 8%;
+  text-align: center;
+  font-family: 'Press Start 2P', monospace;
+  font-size: 12px;
+  letter-spacing: 0.15em;
+  color: var(--stateboy-screen);
+  opacity: 0;
+  animation:
+    introPromptIn 0.4s ease-out 5.2s forwards,
+    introPromptBlink 1.2s steps(1) 5.6s infinite;
 }
 
 /* CSS Variables */
