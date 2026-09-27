@@ -4,7 +4,6 @@
 import { useSyncExternalStore } from 'react';
 import { dsmClient } from '../services/dsmClient';
 import { isIdentityUnavailable } from '../dsm/identityUnavailable';
-import { bridgeEvents } from '../bridge/bridgeEvents';
 import type { Transaction } from '@/hooks/useTransactions';
 import type { WalletBalance, WalletState } from '../contexts/WalletContext';
 
@@ -22,8 +21,6 @@ class WalletStore {
   private snapshot: WalletState = initialState;
 
   private listeners = new Set<() => void>();
-
-  private hasObservedBalances = false;
 
   // Track concurrent in-flight refresh calls so isLoading stays true
   // until ALL concurrent operations complete (prevents race where
@@ -52,26 +49,6 @@ class WalletStore {
       ...patch,
     };
     this.emit();
-  }
-
-  private detectPositiveCredits(previous: WalletBalance[], next: WalletBalance[]): Array<{
-    tokenId: string;
-    delta: bigint;
-    nextBalance: bigint;
-  }> {
-    const previousByToken = new Map<string, bigint>();
-    previous.forEach((entry) => {
-      previousByToken.set(entry.tokenId, entry.baseUnits);
-    });
-
-    return next.flatMap((entry) => {
-      const tokenId = entry.tokenId;
-      const nextBalance = entry.baseUnits;
-      // A token first listed now was held at nothing before.
-      const previousBalance = previousByToken.get(tokenId) ?? 0n;
-      const delta = nextBalance - previousBalance;
-      return delta > 0n ? [{ tokenId, delta, nextBalance }] : [];
-    });
   }
 
   initialize = async (): Promise<void> => {
@@ -107,7 +84,6 @@ class WalletStore {
     this.loadingCount++;
     this.setState({ isLoading: true });
     try {
-      const previousBalances = this.snapshot.balances.slice();
       const [eraResult] = await Promise.allSettled([
         dsmClient.getAllBalances(),
       ]);
@@ -125,23 +101,13 @@ class WalletStore {
       // A failed refresh keeps the last list and says so.
       const error = eraResult.status === 'rejected' ? 'Failed to refresh balances' : null;
 
+      // A balance that is higher than the last read is not a credit this
+      // store may announce: the last read may have been empty (the runtime
+      // still warming up at launch) or stale, and a difference between two
+      // reads is not Rust's word that anything arrived. What arrived is
+      // announced by Rust — inbox.updated for items it processed, the
+      // completion events for a deposit or a sealed transfer.
       this.setState({ balances, error });
-
-      const positiveCredits = this.hasObservedBalances
-        ? this.detectPositiveCredits(previousBalances, balances)
-        : [];
-      this.hasObservedBalances = true;
-
-      if (positiveCredits.length > 0) {
-        const firstCredit = positiveCredits[0];
-        bridgeEvents.emit('wallet.creditReceived', {
-          source: 'wallet.refreshBalances',
-          tokenId: firstCredit.tokenId,
-          amount: firstCredit.delta.toString(),
-          nextBalance: firstCredit.nextBalance.toString(),
-          creditCount: positiveCredits.length,
-        });
-      }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to refresh balances';
       console.error('WalletStore: refreshBalances failed:', message);

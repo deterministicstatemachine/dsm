@@ -68,7 +68,9 @@ export const UXProvider: React.FC<{ defaultHideComplexity?: boolean; children?: 
     notifyToast('exit_completed');
   }, [notifyToast]);
 
-  // Global coin sound when the local wallet receives a positive settled credit.
+  // The coin sound follows a credit Rust reported: a completed deposit
+  // (wallet.creditReceived) or items the inbox poller processed
+  // (inbox.updated, below). Never a difference between two balance reads.
   useBridgeEvent('wallet.creditReceived', () => {
     playCoinSound();
   }, []);
@@ -111,6 +113,7 @@ export const UXProvider: React.FC<{ defaultHideComplexity?: boolean; children?: 
   useBridgeEvent('inbox.updated', (detail?: { newItems?: number }) => {
     const newItems = typeof detail?.newItems === 'number' ? detail.newItems : 0;
     if (newItems <= 0) return;
+    playCoinSound();
     const label = newItems === 1 ? 'New inbox item received' : `${newItems} new inbox items received`;
     void triggerAutoBackupOrToast('inbox_received', label);
   }, [notifyToast]);

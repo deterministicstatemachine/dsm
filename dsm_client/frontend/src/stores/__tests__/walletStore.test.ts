@@ -192,36 +192,17 @@ describe('WalletStore', () => {
       expect(s.isLoading).toBe(false);
     });
 
-    it('emits wallet.creditReceived when balance increases after first observation', async () => {
+    // A higher balance on the next read is not a credit this store may
+    // announce: at launch the first read is empty and the second holds the
+    // whole balance, and every launch used to be greeted as a payment.
+    it('never reports a credit from the difference between two reads', async () => {
       const { walletStore, client, events } = freshModule();
       client.getAllBalances.mockResolvedValue([{ tokenId: 'DSM', baseUnits: 100n }]);
-      await walletStore.refreshBalances(); // first call → sets hasObservedBalances
-
+      await walletStore.refreshBalances();
       client.getAllBalances.mockResolvedValue([{ tokenId: 'DSM', baseUnits: 200n }]);
       await walletStore.refreshBalances();
-
-      expect(events.emit).toHaveBeenCalledWith('wallet.creditReceived', expect.objectContaining({
-        tokenId: 'DSM',
-        amount: '100',
-        creditCount: 1,
-      }));
-    });
-
-    it('does not emit creditReceived on first observation', async () => {
-      const { walletStore, client, events } = freshModule();
-      client.getAllBalances.mockResolvedValue([{ tokenId: 'DSM', baseUnits: 100n }]);
-      await walletStore.refreshBalances();
       expect(events.emit).not.toHaveBeenCalled();
-    });
-
-    it('does not emit creditReceived when balance decreases', async () => {
-      const { walletStore, client, events } = freshModule();
-      client.getAllBalances.mockResolvedValue([{ tokenId: 'DSM', baseUnits: 200n }]);
-      await walletStore.refreshBalances();
-
-      client.getAllBalances.mockResolvedValue([{ tokenId: 'DSM', baseUnits: 100n }]);
-      await walletStore.refreshBalances();
-      expect(events.emit).not.toHaveBeenCalled();
+      expect(walletStore.getSnapshot().balances[0].baseUnits).toBe(200n);
     });
 
     it('handles error in refreshBalances gracefully', async () => {
