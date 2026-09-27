@@ -175,6 +175,17 @@ pub(crate) fn handle_create_genesis_v2_query(q: AppQuery) -> AppResult {
         }
     }
 
+    //     THE BLUETOOTH TRANSFER STACK for the new identity, once its router is up. Startup builds it only when an
+    //     identity already exists, so without this a wallet created in this session paired over
+    //     Bluetooth but refused every offline send ("the BLE stack is not live yet") until the
+    //     app restarted.
+    #[cfg(all(target_os = "android", feature = "bluetooth"))]
+    if let Err(e) = crate::init::build_ble_stack_for_identity() {
+        return fail_rolled_back(format!(
+            "system.createGenesisV2: the Bluetooth transfer stack could not be built: {e}"
+        ));
+    }
+
     // 5c. IDENTITY PUBLICATION, driven in THIS session: this device's own
     //     directory entry, read back from the network's pinned set
     //     (`identity_publication`). The row FIRST, so a crash between here and
