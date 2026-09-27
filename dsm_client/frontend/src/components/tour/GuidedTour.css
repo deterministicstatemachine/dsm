@@ -99,22 +99,7 @@
   color: var(--text-dark);
 }
 
-.gt-dialog__main {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-}
-
-.gt-guide {
-  flex: none;
-  width: 40px;
-  height: 40px;
-  object-fit: contain;
-  image-rendering: pixelated;
-}
-
 .gt-copy {
-  flex: 1;
   min-width: 0;
 }
 

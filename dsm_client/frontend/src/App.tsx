@@ -9,6 +9,8 @@ import GlobalToast from './components/GlobalToast';
 import BilateralTransferDialog from './components/BilateralTransferDialog';
 import GuidedTour from './components/tour/GuidedTour';
 import TourOffer from './components/tour/TourOffer';
+import LockPromptModal from './components/lock/LockPromptModal';
+import { useTourStore } from './components/tour/tourStore';
 import ScreenContainer from './components/ScreenContainer';
 import { useLockState } from './hooks/useLockState';
 import { getLockPrefs } from './services/lock/lockService';
@@ -35,6 +37,7 @@ import './styles/screen.css';
 export default function App() {
   const runtime = useAppRuntimeStore();
   const navigation = useNavigationStore();
+  const tour = useTourStore();
   const lockPromptCheckedRef = useRef(false);
   const [_themeIndex, setThemeIndex] = useState(0);
 
@@ -151,8 +154,6 @@ export default function App() {
                       currentScreen={navigation.currentScreen}
                       navigate={navigationStore.navigate}
                       handleGenerateGenesis={handleGenerateGenesis}
-                      showLockPrompt={runtime.showLockPrompt}
-                      dismissLockPrompt={() => appRuntimeStore.setShowLockPrompt(false)}
                       unlockToWallet={() => { void unlock(); }}
                       menuItems={menuItems}
                       currentMenuIndex={navigation.currentMenuIndex}
@@ -162,9 +163,22 @@ export default function App() {
                     <DiagnosticsOverlay />
                     <BilateralTransferDialog walletReady={runtime.appState === 'wallet_ready' && !showIntro} />
                     <FxLayer />
-                    <GuidedTour appState={runtime.appState} guideSrc={chameleonSrc} />
-                    <TourOffer appState={runtime.appState} showIntro={showIntro} guideSrc={chameleonSrc} />
+                    <GuidedTour appState={runtime.appState} />
+                    <TourOffer appState={runtime.appState} showIntro={showIntro} />
                   </ScreenContainer>
+                  {/* The passcode prompt is its own layer over the whole screen,
+                      beside the screen host rather than inside the home
+                      screen's content, whose box ends above the screen's
+                      bottom: its shade reaches every edge. The tour portals
+                      above the screen, so it stays on top; while a tour runs
+                      the prompt waits, rather than covering what the tour
+                      points at, and comes back when the tour ends at home. */}
+                  {runtime.showLockPrompt && !showIntro && !tour.active && runtime.appState === 'wallet_ready' && navigation.currentScreen === 'home' ? (
+                    <LockPromptModal
+                      onNavigate={navigationStore.navigate}
+                      onDismiss={() => appRuntimeStore.setShowLockPrompt(false)}
+                    />
+                  ) : null}
                   </FxProvider>
                 </StateBoyInputProvider>
               </ErrorBoundary>

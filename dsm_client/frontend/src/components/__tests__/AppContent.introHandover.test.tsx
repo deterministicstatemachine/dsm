@@ -30,8 +30,6 @@ function Boot({ appState }: { appState: AppState }) {
       currentScreen="home"
       navigate={() => {}}
       handleGenerateGenesis={() => {}}
-      showLockPrompt={false}
-      dismissLockPrompt={() => {}}
       unlockToWallet={() => {}}
       menuItems={[]}
       currentMenuIndex={0}

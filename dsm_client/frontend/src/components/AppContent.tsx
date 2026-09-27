@@ -6,7 +6,6 @@ import type { AppState, ScreenType } from '../types/app';
 import LoadingSpinner from './common/LoadingSpinner';
 import SplashController from './SplashController';
 import LockScreen from './lock/LockScreen';
-import LockPromptModal from './lock/LockPromptModal';
 import AppScreenRouter from './AppScreenRouter';
 import { buildHomeStatusLines } from '../viewmodels/homeViewModel';
 
@@ -25,8 +24,6 @@ type Props = {
   currentScreen: ScreenType;
   navigate: (to: ScreenType) => void;
   handleGenerateGenesis: () => Promise<void> | void;
-  showLockPrompt: boolean;
-  dismissLockPrompt: () => void;
   unlockToWallet: () => void;
   menuItems: string[];
   currentMenuIndex: number;
@@ -167,8 +164,6 @@ export default function AppContent({
   currentScreen,
   navigate,
   handleGenerateGenesis,
-  showLockPrompt,
-  dismissLockPrompt,
   unlockToWallet,
   menuItems,
   currentMenuIndex,
@@ -328,12 +323,6 @@ export default function AppContent({
               }}
             />
             <StatusText lines={buildHomeStatusLines({ appState, soundEnabled, error })} />
-            {showLockPrompt ? (
-              <LockPromptModal
-                onNavigate={navigate}
-                onDismiss={dismissLockPrompt}
-              />
-            ) : null}
           </div>
         );
       }

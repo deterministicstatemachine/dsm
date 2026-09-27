@@ -22,8 +22,6 @@ describe('AppContent securing device state', () => {
         currentScreen="home"
         navigate={() => {}}
         handleGenerateGenesis={() => {}}
-        showLockPrompt={false}
-        dismissLockPrompt={() => {}}
         unlockToWallet={() => {}}
         menuItems={[]}
         currentMenuIndex={0}

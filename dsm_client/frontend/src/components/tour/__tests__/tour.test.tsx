@@ -36,7 +36,7 @@ import { practiceMode } from '../practiceMode';
 import { TOUR_STEPS } from '../tourSteps';
 import { TOUR_SEEN_PREF, hasSeenTour, tourStore } from '../tourStore';
 import TourOffer from '../TourOffer';
-import { placeDialog } from '../GuidedTour';
+import GuidedTour, { placeDialog } from '../GuidedTour';
 
 const client = dsmClient as unknown as { setPreference: jest.Mock; getPreference: jest.Mock };
 
@@ -120,13 +120,13 @@ describe('TourOffer', () => {
   beforeEach(resetTour);
 
   it('offers the tour on the home screen of a ready wallet that has not seen it', async () => {
-    render(<TourOffer appState="wallet_ready" showIntro={false} guideSrc="guide.gif" />);
+    render(<TourOffer appState="wallet_ready" showIntro={false} />);
     expect(await screen.findByTestId('tour-offer')).toBeInTheDocument();
   });
 
   it('does not offer it once seen', async () => {
     client.getPreference.mockResolvedValue('true');
-    render(<TourOffer appState="wallet_ready" showIntro={false} guideSrc="guide.gif" />);
+    render(<TourOffer appState="wallet_ready" showIntro={false} />);
     await waitFor(() => expect(client.getPreference).toHaveBeenCalled());
     expect(screen.queryByTestId('tour-offer')).toBeNull();
   });
@@ -137,7 +137,7 @@ describe('TourOffer', () => {
     ['a screen other than home', { appState: 'wallet_ready', showIntro: false, screen: 'wallet' }],
   ])('does not offer it with %s', async (_label, c) => {
     mockNav.currentScreen = c.screen;
-    render(<TourOffer appState={c.appState as never} showIntro={c.showIntro} guideSrc="guide.gif" />);
+    render(<TourOffer appState={c.appState as never} showIntro={c.showIntro} />);
     await act(async () => {
       await Promise.resolve();
     });
@@ -146,7 +146,7 @@ describe('TourOffer', () => {
   });
 
   it('"Not now" retires the offer and remembers it', async () => {
-    render(<TourOffer appState="wallet_ready" showIntro={false} guideSrc="guide.gif" />);
+    render(<TourOffer appState="wallet_ready" showIntro={false} />);
     fireEvent.click(await screen.findByText('Not now'));
     expect(screen.queryByTestId('tour-offer')).toBeNull();
     expect(client.setPreference).toHaveBeenCalledWith(TOUR_SEEN_PREF, 'true');
@@ -154,17 +154,89 @@ describe('TourOffer', () => {
   });
 
   it('"Start tour" starts the tour and the offer never comes back in this session', async () => {
-    const { rerender } = render(<TourOffer appState="wallet_ready" showIntro={false} guideSrc="guide.gif" />);
+    const { rerender } = render(<TourOffer appState="wallet_ready" showIntro={false} />);
     fireEvent.click(await screen.findByText('Start tour'));
     expect(practiceMode.enter).toHaveBeenCalledTimes(1);
     tourStore.end();
     // The preference write may not have landed yet; the offer must stay retired regardless.
     client.getPreference.mockResolvedValue(null);
-    rerender(<TourOffer appState="wallet_ready" showIntro={false} guideSrc="guide.gif" />);
+    rerender(<TourOffer appState="wallet_ready" showIntro={false} />);
     await act(async () => {
       await Promise.resolve();
     });
     expect(screen.queryByTestId('tour-offer')).toBeNull();
+  });
+});
+
+describe('the tour panels', () => {
+  beforeEach(resetTour);
+
+  // The guide's picture took the panel's left column; the words have it now.
+  it('carry words and no picture', async () => {
+    render(<TourOffer appState="wallet_ready" showIntro={false} />);
+    const offer = await screen.findByTestId('tour-offer');
+    expect(offer.querySelector('img')).toBeNull();
+    fireEvent.click(screen.getByText('Start tour'));
+
+    render(<GuidedTour appState="wallet_ready" />);
+    const dialog = await screen.findByRole('dialog', { name: TOUR_STEPS[0].title });
+    expect(dialog.querySelector('img')).toBeNull();
+  });
+});
+
+describe('the ring', () => {
+  const placed: HTMLElement[] = [];
+
+  function place(html: string, rect: { top: number; left: number; width: number; height: number }): void {
+    const holder = document.createElement('div');
+    holder.innerHTML = html;
+    const el = holder.firstElementChild as HTMLElement;
+    el.getBoundingClientRect = () =>
+      ({ ...rect, right: rect.left + rect.width, bottom: rect.top + rect.height, x: rect.left, y: rect.top, toJSON: () => ({}) }) as DOMRect;
+    document.body.appendChild(el);
+    placed.push(el);
+  }
+
+  function goTo(id: string): void {
+    const index = TOUR_STEPS.findIndex((s) => s.id === id);
+    act(() => {
+      while (tourStore.getSnapshot().index < index) tourStore.next();
+    });
+  }
+
+  beforeEach(() => {
+    resetTour();
+    act(() => tourStore.start());
+  });
+  afterEach(() => {
+    placed.splice(0).forEach((el) => el.remove());
+    act(() => tourStore.end());
+  });
+
+  // A step whose element was not on screen kept the previous step's ring: the
+  // last step, opening home from Settings, showed the replay button's ring
+  // over the home screen's logo.
+  it("never leaves the previous step's ring on a step whose element is not on screen", async () => {
+    mockNav.currentScreen = 'settings';
+    place('<button data-tour="tutorial-button">Replay</button>', { top: 300, left: 40, width: 200, height: 40 });
+    goTo('replay');
+    render(<GuidedTour appState="wallet_ready" />);
+    await waitFor(() => expect(document.querySelector('.gt-ring')).toHaveStyle({ top: '294px' }));
+
+    mockNav.currentScreen = 'home';
+    goTo('done');
+    await waitFor(() => expect(document.querySelector('.gt-ring')).toBeNull());
+    expect(document.querySelector('.gt-shade--full')).not.toBeNull();
+  });
+
+  it('closes the tour on the WALLET brick', async () => {
+    mockNav.currentScreen = 'home';
+    place('<div class="dsm-menu-item" data-label="WALLET">WALLET</div>', { top: 296, left: 60, width: 270, height: 55 });
+    goTo('done');
+    render(<GuidedTour appState="wallet_ready" />);
+    await waitFor(() =>
+      expect(document.querySelector('.gt-ring')).toHaveStyle({ top: '290px', left: '54px', width: '282px', height: '67px' }),
+    );
   });
 });
 

@@ -42,7 +42,9 @@ function LockPromptModal({ onNavigate, onDismiss }: Props) {
   return (
     <div
       className="sb-popover-backdrop"
-      // Above the home screen's chameleon (z 1000) and the menu.
+      // A layer of its own over the whole screen: above the screen host's
+      // content (the home screen's chameleon is z 1000), below the tour, which
+      // portals above the screen.
       style={{ zIndex: 8000 }}
       onClick={(e) => { if (e.target === e.currentTarget) handleLater(); }}
     >
