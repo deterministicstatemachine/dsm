@@ -2,8 +2,13 @@
 
 package com.dsm.wallet.bridge.ble
 
+import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.os.Build
 import android.util.Log
 import com.dsm.wallet.bridge.BleOutboxRepository
 import com.dsm.wallet.bridge.UnifiedContactBridge
@@ -53,7 +58,10 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
         if (scanner.isScanning()) {
             Log.i("BleCoordinator", "Scan downshift: LOW_LATENCY → BALANCED after ${BleConstants.SCAN_LOW_LATENCY_DURATION_MS}ms")
             scanner.stopScanning()
-            scanner.startScanning(lowLatency = false)
+            if (!scanner.startScanning(lowLatency = false)) {
+                Log.w("BleCoordinator", "Scan downshift: the balanced scan was refused; scanning ended")
+                radioEvents.scanStopped()
+            }
         }
     }
 
@@ -79,6 +87,31 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
     private var gattServer = GattServerHost(context)
     private var outbox = BleOutbox(context, BleOutboxRepository(context))
     private var diagnostics = BleDiagnostics()
+    private var radioEvents: BleRadioEvents = UnifiedRadioEvents
+
+    // The advertiser's word, relayed: started and stopped are reported when the
+    // stack confirms them, never when they are only requested.
+    private val advertiserCallback = object : BleAdvertiser.Callback {
+        override fun onAdvertisingStarted() = radioEvents.advertisingStarted()
+        override fun onAdvertisingStopped() = radioEvents.advertisingStopped()
+        override fun onAdvertisingFailed(errorCode: Int) {
+            Log.e("BleCoordinator", "The stack refused the advertising set: errorCode=$errorCode")
+            diagnostics.recordError(BleErrorCategory.HARDWARE_UNAVAILABLE, "advertise_failed_code_$errorCode")
+        }
+    }
+
+    // Bluetooth going off ends every advertising set, scan and GATT server
+    // registration with the radio. Registered for the life of the process (the
+    // coordinator is a process singleton), so the state is cleared whether or not
+    // the BLE service is running when it happens.
+    private val adapterStateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action != BluetoothAdapter.ACTION_STATE_CHANGED) return
+            when (intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)) {
+                BluetoothAdapter.STATE_TURNING_OFF, BluetoothAdapter.STATE_OFF -> onRadioOff()
+            }
+        }
+    }
     // PairingMachine deleted — pairing state is Rust-authoritative via PairingOrchestrator.
     // Use Unified.isBleAddressPaired(address) to query pairing status.
 
@@ -98,8 +131,11 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
         gattServer.peerLookup = { address -> peers.getOrPut(address) { PeerSession(address) } }
         gattServer.peerEntries = { peers.values }
 
+        advertiser.setCallback(advertiserCallback)
+
         // Initialize components
         permissionsGate.initialize()
+        registerAdapterStateReceiver()
     }
 
     // Secondary constructor for tests allowing dependency injection
@@ -110,7 +146,8 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
         gattServer: GattServerHost,
         scanner: BleScanner = BleScanner(context),
         outbox: BleOutbox = BleOutbox(context, BleOutboxRepository(context)),
-        diagnostics: BleDiagnostics = BleDiagnostics()
+        diagnostics: BleDiagnostics = BleDiagnostics(),
+        radioEvents: BleRadioEvents = UnifiedRadioEvents,
     ) : this(context) {
         this.permissionsGate = permissionsGate
         this.advertiser = advertiser
@@ -118,8 +155,10 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
         this.scanner = scanner
         this.outbox = outbox
         this.diagnostics = diagnostics
-        // Re-wire scanner callback after replacing the scanner instance
+        this.radioEvents = radioEvents
+        // Re-wire scanner and advertiser callbacks after replacing the instances
         this.scanner.setCallback(this)
+        this.advertiser.setCallback(advertiserCallback)
         // Re-wire peer lookup after replacing the gattServer instance
         this.gattServer.peerLookup = { address -> peers.getOrPut(address) { PeerSession(address) } }
         this.gattServer.peerEntries = { peers.values }
@@ -171,14 +210,18 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
     }
 
     /**
-     * Start advertising this device for pairing/discovery.
+     * Start advertising this appliance for pairing/discovery.
+     *
+     * True when an advertising set is on the air or requested from the stack;
+     * false when the advertiser refused. The started event is reported when the
+     * stack confirms the set, through the advertiser's callback.
      */
     fun startAdvertising(): Boolean {
         return runOperationBool(BleOpLane.LIFECYCLE) {
             if (!permissionsGate.hasAdvertisePermission()) {
                 diagnostics.recordError(BleErrorCategory.PERMISSION_DENIED, "advertising")
                 permissionsGate.recordPermissionFailure()
-                com.dsm.wallet.bridge.UnifiedNativeApi.createBlePermissionDeniedEnvelope("advertise").let { if (it.isNotEmpty()) com.dsm.wallet.bridge.BleEventRelay.dispatchEnvelope(it) }
+                radioEvents.permissionDenied("advertise")
                 return@runOperationBool false
             }
 
@@ -191,20 +234,19 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                 Log.w("BleCoordinator", "startAdvertising aborted: GATT server not ready")
                 return@runOperationBool false
             }
-            advertiser.startAdvertising()
-            com.dsm.wallet.bridge.Unified.onAdvertisingStarted()
-            true
+            val requested = advertiser.startAdvertising()
+            if (!requested) Log.w("BleCoordinator", "startAdvertising: the advertiser refused")
+            requested
         }
     }
 
     /**
-     * Stop advertising.
+     * Stop advertising. The advertiser's answer; the stopped event is reported
+     * when the stack confirms the stop, through the advertiser's callback.
      */
     fun stopAdvertising(): Boolean {
         return runOperationBool(BleOpLane.LIFECYCLE) {
             advertiser.stopAdvertising()
-            com.dsm.wallet.bridge.Unified.onAdvertisingStopped()
-            true // Always succeeds
         }
     }
 
@@ -216,7 +258,7 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
             if (!permissionsGate.hasScanPermission()) {
                 diagnostics.recordError(BleErrorCategory.PERMISSION_DENIED, "scanning")
                 permissionsGate.recordPermissionFailure()
-                com.dsm.wallet.bridge.UnifiedNativeApi.createBlePermissionDeniedEnvelope("scan").let { if (it.isNotEmpty()) com.dsm.wallet.bridge.BleEventRelay.dispatchEnvelope(it) }
+                radioEvents.permissionDenied("scan")
                 return@runOperationBool false
             }
 
@@ -276,28 +318,75 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                 }
             }
 
-            // Record timestamp BEFORE starting
+            // Record the attempt BEFORE starting: the platform's limit counts attempts
             scanStartTimestamps.add(now)
 
-            scanner.startScanning()
+            if (!scanner.startScanning()) {
+                Log.w("BleCoordinator", "startScanning: the scanner refused")
+                return@runOperationBool false
+            }
             // Schedule downshift from LOW_LATENCY → BALANCED after 12s
             scanDownshiftHandler.removeCallbacks(scanDownshiftRunnable)
             scanDownshiftHandler.postDelayed(scanDownshiftRunnable, BleConstants.SCAN_LOW_LATENCY_DURATION_MS)
-            com.dsm.wallet.bridge.Unified.onScanStarted()
+            radioEvents.scanStarted()
             true
         }
     }
 
     /**
-     * Stop scanning.
+     * Stop scanning. The scanner's answer; the stopped event is reported only
+     * for a scan that was running and stopped.
      */
     fun stopScanning(): Boolean {
         return runOperationBool(BleOpLane.LIFECYCLE) {
             lastScanStopTimestamp = System.currentTimeMillis()
             scanDownshiftHandler.removeCallbacks(scanDownshiftRunnable)
-            scanner.stopScanning()
-            com.dsm.wallet.bridge.Unified.onScanStopped()
-            true // Always succeeds
+            val wasScanning = scanner.isScanning()
+            val stopped = scanner.stopScanning()
+            if (wasScanning && stopped) radioEvents.scanStopped()
+            stopped
+        }
+    }
+
+    /**
+     * Bluetooth is going off: clear what the radio ended with it, so the next
+     * start (the STATE_ON refresh) opens a new GATT server and requests new
+     * advertising and scans instead of trusting state from before. Runs on the
+     * lifecycle lane, in order with every start and stop.
+     */
+    internal fun onRadioOff() {
+        runOperation(BleOpLane.LIFECYCLE) {
+            scanDownshiftHandler.removeCallbacks(scanDownshiftRunnable)
+            val wasScanning = scanner.radioOff()
+            val wasAdvertising = advertiser.radioOff()
+            gattServer.stop()
+            // Every link ended with the radio. The server that would have reported
+            // its clients' disconnects is closed, so no disconnect will clear them:
+            // clear each peer's links here, keeping what outlives a link.
+            var links = 0
+            for ((address, peer) in peers) {
+                if (peer.gattClientSession != null || peer.isServerClient || peer.connectionPending) links++
+                peer.clearClientState()
+                peer.clearServerState()
+                if (peer.isEmpty) peers.remove(address)
+            }
+            Log.i("BleCoordinator", "Bluetooth off: radio state cleared (scanning=$wasScanning advertising=$wasAdvertising links=$links)")
+            if (wasScanning) radioEvents.scanStopped()
+            if (wasAdvertising) radioEvents.advertisingStopped()
+        }
+    }
+
+    private fun registerAdapterStateReceiver() {
+        val appContext = context.applicationContext
+        val filter = IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED)
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                appContext.registerReceiver(adapterStateReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            } else {
+                appContext.registerReceiver(adapterStateReceiver, filter)
+            }
+        } catch (t: Throwable) {
+            Log.e("BleCoordinator", "Bluetooth state receiver not registered: ${t.message}")
         }
     }
 
@@ -453,7 +542,7 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
      */
     fun cleanup() {
         runOperation(BleOpLane.LIFECYCLE) {
-            scanner.stopScanning()
+            if (scanner.isScanning() && scanner.stopScanning()) radioEvents.scanStopped()
             advertiser.stopAdvertising()
             gattServer.stop()
             peers.values.forEach { it.gattClientSession?.disconnect() }
@@ -482,9 +571,8 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
             // Stop the active scan before connectGatt(). Android BLE guidance and
             // field experience both point to scan/connect overlap as a reliability hit,
             // especially on Samsung/Qualcomm stacks where callbacks can stall.
-            if (scanner.isScanning()) {
-                scanner.stopScanning()
-                com.dsm.wallet.bridge.Unified.onScanStopped()
+            if (scanner.isScanning() && scanner.stopScanning()) {
+                radioEvents.scanStopped()
             }
             val session = getOrCreateSession(address)
             // Mark connection in-flight via a sentinel deferred so connectionPending returns true.
@@ -507,6 +595,7 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
     override fun onScanFailed(errorCode: Int) {
         Log.e("BleCoordinator", "BLE scan failed: errorCode=$errorCode")
         diagnostics.recordError(BleErrorCategory.HARDWARE_UNAVAILABLE, "scan_failed_code_$errorCode")
+        radioEvents.scanStopped()
         com.dsm.wallet.bridge.UnifiedBleEvents.onConnectionFailed("", "scan_failed_code_$errorCode")
     }
 
@@ -563,7 +652,7 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
         val started = scanner.startScanning()
         Log.i("BleCoordinator", "Pairing scan resume for $deviceAddress: reason=$reason started=$started")
         if (started) {
-            com.dsm.wallet.bridge.Unified.onScanStarted()
+            radioEvents.scanStarted()
         }
     }
 
@@ -1163,10 +1252,8 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                 // most reliable route. Prime it before scanning.
                 gattServer.ensureStarted()
                 if (!advertiser.isAdvertising()) {
-                    try {
-                        advertiser.startAdvertising()
-                        Log.i("BleCoordinator", "connectToDevice($address): started advertising for reverse path")
-                    } catch (_: Throwable) { /* best-effort */ }
+                    val requested = advertiser.startAdvertising()
+                    Log.i("BleCoordinator", "connectToDevice($address): advertising for the reverse path requested=$requested")
                 }
                 true
             }
