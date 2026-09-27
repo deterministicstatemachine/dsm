@@ -53,10 +53,4 @@ object BleConstants {
     // ── Connection priority management ──
     // Reset HIGH → BALANCED after transfer completion to save battery.
     const val CONNECTION_PRIORITY_RESET_DELAY_MS = 500L
-
-    // ── MTU fallback ──
-    // Android 14+ auto-requests MTU 517. If the app's requestMtu() is
-    // ignored (returns false), this fallback fires after the delay to
-    // unblock the CCCD subscription chain.
-    const val MTU_FALLBACK_DELAY_MS = 2_000L
 }

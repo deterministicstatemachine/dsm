@@ -1268,7 +1268,7 @@ Found on the four-device run of 2026-09-26: A54's offline prepare for 5GN was wr
 **Open**
 
 - C2, second half: a contact's address is persisted on every GATT identity observation, not only on pairing confirm. The identity characteristic is open, so an address persisted from it is a hint and nothing more; since sends are routed by device id it costs liveness at worst, and moving persistence to confirm changes which contacts count as paired.
-- C3: the chunk budget is a constant (`MAX_BLE_CHUNK_SIZE`, sized for MTU 517), not the negotiated MTU of the link carrying the frame, and a refused MTU request falls back to an assumed 517.
+- C3: the chunk budget is a constant (`MAX_BLE_CHUNK_SIZE`, about 460-byte chunks, sized for MTU 517), not the negotiated MTU of the link carrying the frame. A link with a smaller MTU would take a chunk it cannot carry. Rust chunks before the transport knows the route, so the fix is either a route query before chunking or links whose MTU cannot carry the chunk not counting as routes; owner's call. (The assumed-517 fallback for an MTU that was never reported is deleted: the link does not become a route.)
 - C4 (frontend sweep): `PendingBilateralScreen` is routed nowhere, so a proposer's cancel is unreachable from it.
 - The device run of this round (A54 and 5GN alone, then all four) is owed; nothing above is proven on real Android devices yet.
 
