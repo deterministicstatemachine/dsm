@@ -7,7 +7,10 @@
 use std::env;
 use std::path::PathBuf;
 
+include!("../../scripts/real_code_guard_build.rs");
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    real_code_guard()?;
     let out_dir = PathBuf::from(env::var("OUT_DIR")?);
 
     // Use the vendored protoc so no system protoc is required.
