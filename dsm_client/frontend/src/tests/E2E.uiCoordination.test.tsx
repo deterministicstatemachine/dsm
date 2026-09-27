@@ -637,9 +637,6 @@ describe('INTEGRATED: Full chain with sendMessageBin-only mock', () => {
     balancesState = [{ tokenId: 'ERA', available: 10000n }];
     historyState = [{ amount: 100n, amountSigned: 100n }];
 
-    // Clear identity cache
-    (global as any).__dsmLastGoodHeaders = { deviceId: undefined, genesisHash: undefined, chainTip: undefined };
-
     // Re-install bridge mock (in case previous test modified it)
     installCallBinMock();
   });
@@ -1001,7 +998,6 @@ describe('INTEGRATED: Full bilateral transfer back-and-forth', () => {
     capturedMethods = [];
     balancesState = [{ tokenId: 'ERA', available: 5000n }];
     historyState = [];
-    (global as any).__dsmLastGoodHeaders = { deviceId: undefined, genesisHash: undefined, chainTip: undefined };
     installCallBinMock();
   });
 

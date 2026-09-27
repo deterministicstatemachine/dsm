@@ -51,8 +51,6 @@ function makeHeadersBinary(deviceId: Uint8Array, genesisHash: Uint8Array): Uint8
 describe('identity.ts', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    const g = globalThis as any;
-    g.__dsmLastGoodHeaders = { deviceId: undefined, genesisHash: undefined };
   });
 
   // ── getHeaders ─────────────────────────────────────────────────────
@@ -68,16 +66,20 @@ describe('identity.ts', () => {
       expect(headers.genesisHash).toEqual(genesisHash);
     });
 
-    test('caches valid headers for subsequent calls', async () => {
-      const deviceId = makeValidDeviceId();
+    test('reads the bridge on every call, so a changed identity is seen', async () => {
+      const first = makeValidDeviceId();
       const genesisHash = makeValidGenesisHash();
-      (queryTransportHeadersV3 as jest.Mock).mockResolvedValue(makeHeadersBinary(deviceId, genesisHash));
+      const second = new Uint8Array(32).fill(0x5c);
+      (queryTransportHeadersV3 as jest.Mock)
+        .mockResolvedValueOnce(makeHeadersBinary(first, genesisHash))
+        .mockResolvedValueOnce(makeHeadersBinary(second, genesisHash));
 
-      await getHeaders();
+      const headers1 = await getHeaders();
       const headers2 = await getHeaders();
-      // Second call should use cache, only 1 bridge call total
-      expect(queryTransportHeadersV3).toHaveBeenCalledTimes(1);
-      expect(headers2.deviceId).toEqual(deviceId);
+      // No cache: the second answer is what the bridge said the second time.
+      expect(queryTransportHeadersV3).toHaveBeenCalledTimes(2);
+      expect(headers1.deviceId).toEqual(first);
+      expect(headers2.deviceId).toEqual(second);
     });
 
     test('throws when bridge returns empty bytes', async () => {

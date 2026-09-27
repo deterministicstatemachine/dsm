@@ -255,8 +255,6 @@ beforeEach(() => {
   headersOverride = null;
   testIndex++;
   initializeEventBridge();
-  // Clear headers cache so each test gets fresh headers from bridge
-  (global as any).__dsmLastGoodHeaders = { deviceId: undefined, genesisHash: undefined, chainTip: undefined };
 });
 
 // ─────────────────────────────────────────────────────────────────

@@ -10,12 +10,6 @@ import { nativeSessionStore } from '../runtime/nativeSessionStore';
 import { bridgeEvents } from '../bridge/bridgeEvents';
 import { IdentityUnavailableError } from './identityUnavailable';
 
-// Cache the last known-good identity to avoid flip-flops.
-const g: any = globalThis as any;
-if (!g.__dsmLastGoodHeaders) {
-  g.__dsmLastGoodHeaders = { deviceId: undefined as Uint8Array | undefined, genesisHash: undefined as Uint8Array | undefined };
-}
-
 export async function getHeaders(): Promise<pb.Headers> {
   const isAllZero = (u: Uint8Array) => u.every((v) => v === 0);
 
@@ -42,14 +36,6 @@ export async function getHeaders(): Promise<pb.Headers> {
     }
   };
 
-  const cached = g.__dsmLastGoodHeaders as { deviceId?: Uint8Array; genesisHash?: Uint8Array };
-  const cachedDevOk = cached.deviceId instanceof Uint8Array && cached.deviceId.length === 32 && !isAllZero(cached.deviceId);
-  const cachedGhOk = cached.genesisHash instanceof Uint8Array && cached.genesisHash.length === 32 && !isAllZero(cached.genesisHash);
-  
-  if (cachedDevOk && cachedGhOk) {
-    return new pb.Headers({ deviceId: cached.deviceId as any, genesisHash: cached.genesisHash as any } as any);
-  }
-
   let lastSeen: { deviceId?: Uint8Array; genesisHash?: Uint8Array } = {};
 
   try {
@@ -62,8 +48,6 @@ export async function getHeaders(): Promise<pb.Headers> {
   const ghOk = lastSeen.genesisHash instanceof Uint8Array && lastSeen.genesisHash.length === 32 && !isAllZero(lastSeen.genesisHash);
 
   if (devOk && ghOk) {
-    cached.deviceId = lastSeen.deviceId;
-    cached.genesisHash = lastSeen.genesisHash;
     return new pb.Headers({
       deviceId: lastSeen.deviceId as any,
       genesisHash: lastSeen.genesisHash as any,
