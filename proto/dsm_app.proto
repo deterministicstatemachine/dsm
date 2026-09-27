@@ -2064,7 +2064,7 @@ message BleGattIdentityReadResult {
 message BleIncomingDataResponse {
   repeated bytes response_chunks = 1 [(dsm_max_len)=1024]; // BLE chunks to write back (may be empty)
   reserved 2, 4;
-  bool use_reliable_write        = 3; // true = send via requestGattWriteChunks (bilateral follow-ups)
+  bool use_reliable_write        = 3; // true = prefer our client link to the peer's server subscription (bilateral follow-ups)
 }
 
 // Status update emitted by PairingOrchestrator during the pairing loop.

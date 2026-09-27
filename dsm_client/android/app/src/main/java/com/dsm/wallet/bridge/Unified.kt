@@ -184,8 +184,8 @@ object Unified {
     }
 
     // ---------- Event notifications ----------
-    @Keep @JvmStatic fun bleNotifyConnectionState(address: String, connected: Boolean) {
-        UnifiedNativeApi.bleNotifyConnectionState(address, connected)
+    @Keep @JvmStatic fun bleNotifyLink(deviceId: ByteArray, address: String, up: Boolean) {
+        UnifiedNativeApi.bleNotifyLink(deviceId, address, up)
     }
 
     /**
@@ -282,18 +282,16 @@ object Unified {
 
     /**
      * Process raw protobuf bytes read from the GATT identity characteristic.
-     * Rust decodes BleIdentityCharValue, dispatches identity events, and returns
-     * BleGattIdentityReadResult with the write-back envelope.
+     * Rust decodes BleIdentityCharValue, decides by the contact's device id whether
+     * the link re-anchors a paired contact or starts pairing, and returns
+     * BleGattIdentityReadResult (with the write-back envelope when pairing starts).
+     * expectedDeviceId names the appliance a reach is connecting for (empty when the
+     * link is not a reach); any other peer is reported not established and nothing
+     * about it is recorded.
      * Kotlin MUST NOT split or interpret identity bytes.
      */
-    @Keep @JvmStatic fun processGattIdentityRead(bleAddress: String, rawProtoBytes: ByteArray): ByteArray =
-        UnifiedNativeApi.processGattIdentityRead(bleAddress, rawProtoBytes)
-    /**
-     * Observe raw protobuf bytes read from the GATT identity characteristic for an already-paired peer.
-     * Rust re-anchors the peer identity and updates persistence without sending write-back pairing data.
-     */
-    @Keep @JvmStatic fun observeGattIdentityRead(bleAddress: String, rawProtoBytes: ByteArray): ByteArray =
-        UnifiedNativeApi.observeGattIdentityRead(bleAddress, rawProtoBytes)
+    @Keep @JvmStatic fun processGattIdentityRead(bleAddress: String, rawProtoBytes: ByteArray, expectedDeviceId: ByteArray): ByteArray =
+        UnifiedNativeApi.processGattIdentityRead(bleAddress, rawProtoBytes, expectedDeviceId)
 
     @Keep @JvmStatic fun createTransactionErrorEnvelope(address: String, code: Int, message: String): ByteArray? =
         UnifiedNativeApi.createTransactionErrorEnvelope(address, code, message)
@@ -384,24 +382,20 @@ object Unified {
         UnifiedNativeApi.identityReadResultExtractPeerGenesisHash(responseProto)
 
     /**
-     * Called after bilateral prepare succeeds.
-     * deviceAddress: BLE MAC address of recipient
-     * chunks: Array of byte arrays, each containing a protobuf BleChunk
-     * Returns true if async send was successfully initiated.
+     * Send one message's chunks to the appliance deviceId (invoked by Rust). The
+     * device id routes: only a link whose identity is anchored to it carries the
+     * message; with none, the transport reaches for it, trying addressHint (where
+     * it was last seen, possibly empty) first. False is "not delivered now" — the
+     * SDK's frame stays owed.
      */
-    @Keep @JvmStatic fun sendBleChunks(deviceAddress: String, chunks: Array<ByteArray>): Boolean =
-        UnifiedNativeApi.sendBleChunks(deviceAddress, chunks)
-
-    /**
-     * Optimized multi-chunk writer invoked by JNI (sendBleChunks) after chunk diagnostics.
-     * Reuses / establishes a SINGLE GATT connection and writes all provided BleChunk protobuf
-     * messages sequentially, advancing only after onCharacteristicWrite callbacks succeed.
-     * Falls back to per-chunk failure envelope on first error.
-     */
-    @Keep @JvmStatic fun requestGattWriteChunks(deviceAddress: String, chunks: Array<ByteArray>): Boolean {
-        return UnifiedBleBridge.requestGattWriteChunks(deviceAddress, chunks)
+    @Keep @JvmStatic fun requestGattWriteChunks(deviceId: ByteArray, addressHint: String, chunks: Array<ByteArray>): Boolean {
+        return UnifiedBleBridge.requestGattWriteChunks(deviceId, addressHint, chunks)
     }
 
+    /**
+     * Send a reply on the link, at deviceAddress, that the frame it answers
+     * arrived on. Nothing reconnects for it.
+     */
     @Keep @JvmStatic fun dispatchRustBleFollowUp(deviceAddress: String, chunks: Array<ByteArray>, useReliableWrite: Boolean): Boolean {
         return UnifiedBleBridge.dispatchRustFollowUp(deviceAddress, chunks, useReliableWrite)
     }
@@ -440,8 +434,6 @@ object Unified {
      * Resolve the persisted peer identity for a BLE address.
      * Returns 64 bytes ordered as [device_id(32)][genesis_hash(32)], or empty if unknown.
      */
-    @Keep @JvmStatic fun resolvePeerIdentityForBleAddressBin(address: String): ByteArray =
-        UnifiedNativeApi.resolvePeerIdentityForBleAddressBin(address)
     @Keep @JvmStatic fun isRejectEnvelope(envelopeBytes: ByteArray): ByteArray =
         UnifiedNativeApi.isRejectEnvelope(envelopeBytes)
     @Keep @JvmStatic fun isErrorEnvelope(envelopeBytes: ByteArray): Int =

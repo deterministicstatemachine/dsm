@@ -49,6 +49,11 @@ data class PeerSession(
     var lastError: BleSessionEvent.ErrorOccurred? = null,
     var identityExchangeInProgress: Boolean = false,
     var pairingInProgress: Boolean = false,
+    /**
+     * True once the identity read on this client link is anchored, after its
+     * CCCD chain completed: the link carries that appliance and is a route to it.
+     */
+    var clientRouteReady: Boolean = false,
 
     // ── Connection lifecycle (was pendingConnectionAddresses + polling loop) ─
     // When non-null, a connect is in flight. Completed by handleSessionEvent
@@ -101,6 +106,7 @@ data class PeerSession(
         lastError = null
         identityExchangeInProgress = false
         pairingInProgress = false
+        clientRouteReady = false
         connectResult?.complete(false)
         connectResult = null
     }

@@ -618,9 +618,12 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
         })
         .join();
         match ble_inject_result {
-            Ok(Ok(())) => log::info!(
-                "[SDK Init] BLE coordinator and transport adapter injected into bilateral handler"
-            ),
+            Ok(Ok(())) => {
+                log::info!(
+                    "[SDK Init] BLE coordinator and transport adapter injected into bilateral handler"
+                );
+                crate::bluetooth::owed_frame_driver::start();
+            }
             Ok(Err(e)) => return Err(format!("BLE injection failed: {e}")),
             Err(panic) => return Err(format!("BLE injection thread panicked: {panic:?}")),
         }

@@ -4176,6 +4176,21 @@ impl BilateralBleHandler {
             .collect()
     }
 
+    /// Every frame this device owes, with the counterparty it is owed to.
+    pub async fn frames_owed(&self) -> Vec<([u8; 32], OwedFrame)> {
+        self.sessions
+            .sessions
+            .lock()
+            .await
+            .values()
+            .filter_map(|session| {
+                session
+                    .owed()
+                    .map(|frame| (session.counterparty_device_id, frame))
+            })
+            .collect()
+    }
+
     /// Test helper: insert a fully constructed session (bypassing normal flow).
     #[cfg(test)]
     pub(crate) async fn test_insert_session(&self, session: BilateralBleSession) {

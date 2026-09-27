@@ -14,8 +14,10 @@ pub mod bilateral_session;
 pub mod bilateral_transport_adapter;
 pub mod ble_frame_coordinator;
 pub mod frame_classify;
+pub mod gatt_identity;
 #[cfg(test)]
 mod offline_step_tests;
+pub mod owed_frame_driver;
 pub mod pairing_orchestrator;
 pub mod peer_address;
 
@@ -193,6 +195,9 @@ impl BluetoothManager {
                     log::warn!("Failed to restore bilateral sessions from storage: {}", e);
                 }
             });
+            // Steps restored in flight may owe frames nobody is reaching for.
+            #[cfg(all(target_os = "android", feature = "bluetooth"))]
+            owed_frame_driver::kick();
         });
 
         let transport_adapter = Arc::new(BilateralTransportAdapter::new(Arc::clone(
