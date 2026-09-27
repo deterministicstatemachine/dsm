@@ -9,9 +9,10 @@
 //! v2 needs NOTHING receiver-side (no relay, no counter reader, no verifier slot) — the receiver
 //! accepts from the release alone. So this is the ENTIRE device-layer install story.
 //!
-//! NOT auto-called from `initDsmSdk`: the install is gated behind an explicit device-layer trigger
-//! (feature `on_device_installs`, bench builds; the production flip is the owner's call). The
-//! factory is called once per send-session and fails CLOSED if the Pico/chip is absent — an
+//! Registered once at app start by the Kotlin `DsmInitProvider`, in every .so that carries it
+//! (feature `on_device_installs`; the production flip of that feature is the owner's call).
+//! Registering opens nothing. The factory is called once per send-session and fails CLOSED if
+//! the Pico/chip is absent — an
 //! uninstalled factory or an unreachable chip means every offline-bearer send errors
 //! ("offline = chips"); nothing falls back to a mock.
 
