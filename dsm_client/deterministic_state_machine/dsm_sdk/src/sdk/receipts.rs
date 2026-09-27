@@ -10,6 +10,8 @@ use dsm::types::error::DsmError;
 use dsm::types::receipt_types::{
     compute_receipt_challenge_response_target, DeviceTreeAcceptanceCommitment, StitchedReceiptV2,
 };
+use dsm::types::device_state::AdvanceOutcome;
+use dsm::verification::receipt_verification::BearerLeaves;
 #[cfg(test)]
 use dsm::verification::receipt_verification::{verify_per_step_ek_signing, BilateralSide};
 
@@ -312,76 +314,34 @@ pub fn sign_receipt_with_per_step_ek_target(
     })
 }
 
-/// Build the canonical receipt of one relationship step (§4.2).
+/// The stitched receipt of this device's step, in its canonical encoding:
+/// [`StitchedReceiptV2::of_step`] under this device's genesis. `bearer` is
+/// present exactly for this device's own offline-bearer spend.
 ///
-/// The single stitched-receipt constructor in the SDK. `parent_path` is the
-/// tree's own path at the relationship key, taken from the advance that made
-/// the step (`AdvanceOutcome::smt_proofs.parent_proof`): it must carry
-/// `parent_tip`, it is the receipt's one relationship proof, and the same
-/// siblings folded with `child_tip` are `child_root` — there is no second
-/// proof. `transition_entropy` is the same advance's derivation (Part VII
-/// step 3), the receipt's canonical field 21.
-///
-/// Refused when a part is missing or wrong: no genesis hash in the app state, a
-/// path that is not at the key or does not carry the parent tip, or a receipt
-/// that fails
-/// [`verify_receipt_state`](dsm::verification::receipt_verification::verify_receipt_state)
-/// against `device_tree_commitment`, the sender's authenticated `R_G`.
-#[allow(clippy::too_many_arguments)]
-pub fn build_bilateral_receipt_with_smt(
+/// Refused when the app state holds no genesis, or when the core producer
+/// refuses (a leaf no receipt names; a receipt that fails the state rules
+/// against `device_tree_commitment`, this device's authenticated `R_G`).
+pub fn build_bilateral_receipt(
     devid_a: [u8; 32],
     devid_b: [u8; 32],
-    parent_tip: [u8; 32],
-    child_tip: [u8; 32],
-    parent_root: [u8; 32],
-    child_root: [u8; 32],
-    parent_path: &dsm::merkle::sparse_merkle_tree::SmtInclusionProof,
+    outcome: &AdvanceOutcome,
+    bearer: Option<BearerLeaves>,
     device_tree_commitment: &DeviceTreeAcceptanceCommitment,
-    transition_entropy: [u8; 32],
 ) -> Result<Vec<u8>, DsmError> {
-    use dsm::common::device_tree;
-
     let genesis = crate::sdk::app_state::AppState::get_genesis_hash()
         .and_then(|g| <[u8; 32]>::try_from(g.as_slice()).ok())
         .ok_or_else(|| {
             DsmError::invalid_operation("receipt: the app state holds no 32-byte genesis hash")
         })?;
-
-    let relationship_key =
-        dsm::core::bilateral_transaction_manager::compute_smt_key(&devid_a, &devid_b);
-    if parent_path.key != relationship_key || parent_path.value != Some(parent_tip) {
-        return Err(DsmError::invalid_operation(
-            "receipt: the relationship path is not the parent tip's path at the relationship key",
-        ));
-    }
-
-    let dev_proof = device_tree::DeviceTree::single(devid_a)
-        .proof(&devid_a)
-        .ok_or_else(|| {
-            DsmError::invalid_operation(
-                "receipt: the single-device tree has no path for the sender",
-            )
-        })?;
-
-    let mut receipt = StitchedReceiptV2::new(
+    StitchedReceiptV2::of_step(
         genesis,
         devid_a,
         devid_b,
-        parent_tip,
-        child_tip,
-        parent_root,
-        child_root,
-        parent_path.to_bytes(),
-        dev_proof.to_bytes(),
-    );
-    receipt.set_transition_entropy(transition_entropy);
-
-    // The sender checks the state rules before anything is signed or sent.
-    dsm::verification::receipt_verification::verify_receipt_state(
-        &receipt,
+        outcome,
+        bearer,
         device_tree_commitment,
-    )?;
-    receipt.to_canonical_protobuf()
+    )?
+    .to_canonical_protobuf()
 }
 
 /// Deterministically encode a protocol-only transition payload.
@@ -413,9 +373,25 @@ pub fn compute_protocol_transition_commitment(payload_bytes: &[u8]) -> [u8; 32] 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::receipts::{transfer_chain, Party, Step};
     use dsm::types::operations::Operation;
+    use dsm::verification::receipt_verification::ReceiptStateContext;
 
     const TEST_SESSION_BINDING: [u8; 32] = [0x5A; 32];
+
+    /// The first four steps of a real relationship: the wallet
+    /// `setup_signing_identity` installs (seed 0x11) transferring to the
+    /// wallet of seed 0x12, each step from the tip the one before it left.
+    /// Derived once: SPHINCS+ keygen and signing are slow.
+    fn real_steps() -> &'static [Step] {
+        static STEPS: std::sync::OnceLock<Vec<Step>> = std::sync::OnceLock::new();
+        STEPS.get_or_init(|| transfer_chain(&Party::from_seed(0x11), &Party::from_seed(0x12), 7, 4))
+    }
+
+    /// The receipt of the relationship's `step`-th step.
+    fn real_receipt(step: usize) -> StitchedReceiptV2 {
+        real_steps()[step].receipt.clone()
+    }
 
     // ── derive_per_step_ek (whitepaper §11.1) ──
 
@@ -1041,17 +1017,7 @@ mod tests {
 
         // Build a minimal receipt with deterministic content so
         // `compute_commitment` is stable.
-        let mut receipt = StitchedReceiptV2::new(
-            [0x01; 32],     // genesis
-            [0x02; 32],     // devid_a
-            [0x03; 32],     // devid_b
-            [0xAA; 32],     // parent_tip == h_n the verifier will receive
-            [0x04; 32],     // child_tip
-            [0x05; 32],     // parent_root
-            [0x06; 32],     // child_root
-            vec![0x07; 16], // rel_proof_parent
-            vec![0x09; 16], // dev_proof
-        );
+        let mut receipt = real_receipt(0);
         let commitment = receipt.compute_commitment().unwrap();
 
         let inputs = PerStepSigningInputs {
@@ -1229,17 +1195,7 @@ mod tests {
         init_cert_chain_head(&sender_rel_key, CertChainSide::Counterparty, &sender_ak_pk).unwrap();
 
         // ────── Step 0 (sender signs) ──────
-        let mut receipt_step0 = StitchedReceiptV2::new(
-            [0x01; 32],
-            [0x02; 32],
-            [0x03; 32],
-            [0xAA; 32],
-            [0x04; 32],
-            [0x05; 32],
-            [0x06; 32],
-            vec![0x07; 16],
-            vec![0x09; 16],
-        );
+        let mut receipt_step0 = real_receipt(0);
         let commit0 = receipt_step0.compute_commitment().unwrap();
         let session0 = [0xF0; 32];
         let inputs0 = PerStepSigningInputs {
@@ -1290,17 +1246,7 @@ mod tests {
         assert_eq!(new_step, 1, "Counterparty step counter should advance to 1");
 
         // ────── Step 1 (sender signs again with advanced Local head) ──────
-        let mut receipt_step1 = StitchedReceiptV2::new(
-            [0x01; 32],
-            [0x02; 32],
-            [0x03; 32],
-            [0xCC; 32], // new h_n
-            [0x44; 32],
-            [0x55; 32],
-            [0x66; 32],
-            vec![0x77; 16],
-            vec![0x99; 16],
-        );
+        let mut receipt_step1 = real_receipt(1);
         let commit1 = receipt_step1.compute_commitment().unwrap();
         let session1 = [0xF1; 32];
         let inputs1 = PerStepSigningInputs {
@@ -1383,17 +1329,7 @@ mod tests {
         let kyber_kp = dsm::crypto::kyber::generate_kyber_keypair().expect("kyber keygen");
         let kyber_pk = kyber_kp.public_key.clone();
 
-        let mut receipt = StitchedReceiptV2::new(
-            [0x01; 32],
-            [0x02; 32],
-            [0x03; 32],
-            [0xAA; 32],
-            [0x04; 32],
-            [0x05; 32],
-            [0x06; 32],
-            vec![0x07; 16],
-            vec![0x09; 16],
-        );
+        let mut receipt = real_receipt(0);
         let commitment = receipt.compute_commitment().unwrap();
 
         let session_c1: [u8; 32] = [0xC1; 32];
@@ -1471,17 +1407,7 @@ mod tests {
         let (receiver_ak_pk, receiver_ak_sk) = generate_ephemeral_keypair(&[0xB1; 32]).unwrap();
         let kyber_kp = dsm::crypto::kyber::generate_kyber_keypair().expect("kyber keygen");
 
-        let mut receipt = StitchedReceiptV2::new(
-            [0x01; 32],
-            [0x02; 32],
-            [0x03; 32],
-            [0xAA; 32],
-            [0x04; 32],
-            [0x05; 32],
-            [0x06; 32],
-            vec![0x07; 16],
-            vec![0x09; 16],
-        );
+        let mut receipt = real_receipt(0);
         let commitment = receipt.compute_commitment().unwrap();
         let b_out = sign_receipt_with_per_step_ek(&PerStepSigningInputs {
             commitment: &commitment,
@@ -1555,17 +1481,7 @@ mod tests {
         let receiver_rel_key = [0xDA; 32];
         setup_signing_identity();
 
-        let mut receipt = StitchedReceiptV2::new(
-            [0x01; 32],
-            [0x02; 32],
-            [0x03; 32],
-            [0xAA; 32],
-            [0x04; 32],
-            [0x05; 32],
-            [0x06; 32],
-            vec![0x07; 16],
-            vec![0x09; 16],
-        );
+        let mut receipt = real_receipt(0);
         let commitment = receipt.compute_commitment().unwrap();
 
         // A-side stamping (sender's chain).
@@ -1729,17 +1645,7 @@ mod tests {
             // ─── Receipt body (canonical, identical fields aside ───
             // from per-step h_n). The per-step EK signing only depends
             // on the commit hash + h_n + cert-chain context.
-            let mut receipt = StitchedReceiptV2::new(
-                [0x01; 32],
-                [0x02; 32],
-                [0x03; 32],
-                h_n_a, // parent_tip on A-side view
-                [0x04 | step; 32],
-                [0x05 | step; 32],
-                [0x06 | step; 32],
-                vec![0x07; 16],
-                vec![0x09; 16],
-            );
+            let mut receipt = real_receipt(step as usize);
             let commitment = receipt.compute_commitment().unwrap();
             let session_binding = [0x90 | step; 32];
 
@@ -1897,17 +1803,7 @@ mod tests {
         // then assert it does NOT verify under any earlier step's
         // chain head. This cryptographically pins the chain freshness
         // invariant.
-        let mut substitution_check_receipt = StitchedReceiptV2::new(
-            [0x01; 32],
-            [0x02; 32],
-            [0x03; 32],
-            [0xAF; 32],
-            [0x04; 32],
-            [0x05; 32],
-            [0x06; 32],
-            vec![0x07; 16],
-            vec![0x09; 16],
-        );
+        let mut substitution_check_receipt = real_receipt(3);
         let sub_commitment = substitution_check_receipt.compute_commitment().unwrap();
         let sub_inputs = PerStepSigningInputs {
             commitment: &sub_commitment,
@@ -1960,17 +1856,7 @@ mod tests {
 
         let (ak_pk, ak_sk) = generate_ephemeral_keypair(&[0xC2; 32]).unwrap();
         let kyber_kp = dsm::crypto::kyber::generate_kyber_keypair().expect("kyber keygen");
-        let mut receipt = StitchedReceiptV2::new(
-            [0x01; 32],
-            [0x02; 32],
-            [0x03; 32],
-            [0xAA; 32],
-            [0x04; 32],
-            [0x05; 32],
-            [0x06; 32],
-            vec![0x07; 16],
-            vec![0x09; 16],
-        );
+        let mut receipt = real_receipt(0);
         let commitment = receipt.compute_commitment().unwrap();
         let session_binding = [0xD2; 32];
         let inputs = PerStepSigningInputs {
@@ -2006,17 +1892,7 @@ mod tests {
         use crate::storage::client_db::reset_database_for_tests;
         reset_database_for_tests();
 
-        let receipt = StitchedReceiptV2::new(
-            [0x01; 32],
-            [0x02; 32],
-            [0x03; 32],
-            [0xAA; 32],
-            [0x04; 32],
-            [0x05; 32],
-            [0x06; 32],
-            vec![0x07; 16],
-            vec![0x09; 16],
-        );
+        let receipt = real_receipt(0);
 
         let err = verify_per_step_ek_signing(
             &receipt,
@@ -2245,52 +2121,35 @@ mod tests {
             .expect("the first step");
         assert_eq!(outcome.parent_r_a, established.root());
         assert_eq!(
-            outcome.smt_proofs.pre_root,
+            outcome.transition.pre_root(),
             established.root(),
             "the first step's pre-state root is the root the device committed"
         );
-        let parent_tip = outcome
-            .smt_proofs
-            .parent_proof
-            .value
-            .expect("the parent path authenticates the established leaf");
-        assert_eq!(parent_tip, h0);
+        assert_eq!(outcome.relationship_pair().0, h0);
 
-        let child_tip = outcome.new_chain_state.compute_chain_tip();
-        let receipt = build_bilateral_receipt_with_smt(
-            devid_a,
-            devid_b,
-            parent_tip,
-            child_tip,
-            outcome.smt_proofs.pre_root,
-            outcome.child_r_a,
-            &outcome.smt_proofs.parent_proof,
-            &device_tree_commitment,
-            outcome.transition_entropy(),
-        )
-        .expect("the first step's receipt");
-        let decoded = StitchedReceiptV2::from_canonical_protobuf(&receipt)
+        let receipt =
+            build_bilateral_receipt(devid_a, devid_b, &outcome, None, &device_tree_commitment)
+                .expect("the first step's receipt");
+        let mut decoded = StitchedReceiptV2::from_canonical_protobuf(&receipt)
             .expect("the built receipt decodes");
-        dsm::verification::receipt_verification::verify_receipt_state(
-            &decoded,
-            &device_tree_commitment,
-        )
-        .expect("the first step's receipt holds its state rules");
+        assert_eq!(decoded.parent_root, established.root());
+        let genesis = crate::sdk::app_state::AppState::get_genesis_hash()
+            .and_then(|g| <[u8; 32]>::try_from(g.as_slice()).ok())
+            .expect("the installed genesis");
+        let context = ReceiptStateContext {
+            device_tree_commitment: &device_tree_commitment,
+            author_genesis: genesis,
+            operation: &outcome.new_chain_state.operation,
+            bearer: None,
+        };
+        dsm::verification::receipt_verification::verify_receipt_state(&decoded, &context)
+            .expect("the first step's receipt holds its state rules");
 
+        decoded.parent_root = head.root();
         assert!(
-            build_bilateral_receipt_with_smt(
-                devid_a,
-                devid_b,
-                parent_tip,
-                child_tip,
-                head.root(),
-                outcome.child_r_a,
-                &outcome.smt_proofs.parent_proof,
-                &device_tree_commitment,
-                outcome.transition_entropy(),
-            )
-            .is_err(),
-            "a root from before the relationship was established is not the step's parent: no receipt"
+            dsm::verification::receipt_verification::verify_receipt_state(&decoded, &context)
+                .is_err(),
+            "a root from before the relationship was established is not the step's parent"
         );
     }
 }

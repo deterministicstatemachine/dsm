@@ -123,6 +123,24 @@ async fn to_the_ack(
     receiver: &OfflineDevice,
     operation: Operation,
 ) -> ([u8; 32], Vec<u8>) {
+    let (commitment, confirm) = to_the_confirm(sender, receiver, operation).await;
+    receiver.device.enter();
+    let ack = receiver
+        .handler
+        .handle_confirm_request(&confirm)
+        .await
+        .expect("the receiver commits and acknowledges");
+    (commitment, ack)
+}
+
+/// An offline step of `operation` from `sender` to `receiver` up to the
+/// sender's confirm, every frame carried as bytes: prepare → accept →
+/// confirm. Returns the commitment and the confirm.
+async fn to_the_confirm(
+    sender: &OfflineDevice,
+    receiver: &OfflineDevice,
+    operation: Operation,
+) -> ([u8; 32], Vec<u8>) {
     sender.device.enter();
     let (prepare, commitment) = sender
         .handler
@@ -149,14 +167,7 @@ async fn to_the_ack(
         .handle_prepare_response(&response)
         .await
         .expect("the sender takes the acceptance and confirms");
-
-    receiver.device.enter();
-    let ack = receiver
-        .handler
-        .handle_confirm_request(&confirm)
-        .await
-        .expect("the receiver commits and acknowledges");
-    (commitment, ack)
+    (commitment, confirm)
 }
 
 /// One offline step of `operation` from `sender` to `receiver`, every frame
@@ -690,6 +701,426 @@ fn with_sender_signature(confirm: &[u8], signature: Vec<u8>) -> Vec<u8> {
     request.sender_signature = signature;
     args.body = request.encode_to_vec();
     envelope.encode_to_vec()
+}
+
+/// The request a confirm carries.
+fn confirm_request(confirm: &[u8]) -> crate::generated::BilateralConfirmRequest {
+    use prost::Message;
+    let envelope = crate::envelope::from_canonical_bytes(confirm).expect("the confirm decodes");
+    let Some(crate::generated::envelope::Payload::UniversalTx(tx)) = envelope.payload else {
+        panic!("a confirm is a universal transaction");
+    };
+    let Some(crate::generated::universal_op::Kind::Invoke(invoke)) = &tx.ops[0].kind else {
+        panic!("a confirm invokes bilateral.confirm");
+    };
+    let args = invoke.args.as_ref().expect("the confirm's arguments");
+    crate::generated::BilateralConfirmRequest::decode(args.body.as_slice()).expect("decodes")
+}
+
+/// The stitched receipt a confirm carries.
+fn confirm_receipt(confirm: &[u8]) -> dsm::types::receipt_types::StitchedReceiptV2 {
+    dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(
+        &confirm_request(confirm).stitched_receipt,
+    )
+    .expect("the confirm's receipt decodes")
+}
+
+/// A bearer pair: A funded and its offline allocation of 20 ERA loaded under
+/// its anchor — the real anchor-core appliance on a software chip, whose
+/// seed is the appliance's only typed-in value — and the transfer of 7 ERA
+/// from it to B.
+async fn bearer_pair() -> (
+    Pair,
+    OfflineDevice,
+    OfflineDevice,
+    crate::test_support::appliance::HostAppliance,
+    Operation,
+) {
+    let pair = Pair::boot(100, 0).await;
+    let a = OfflineDevice::new(&pair.a);
+    let b = OfflineDevice::new(&pair.b);
+    let appliance = crate::test_support::appliance::HostAppliance::birth(&pair.a, [0xC4; 32], 16);
+    appliance.install();
+    a.device.enter();
+    let loaded = a
+        .device
+        .invoke(
+            "wallet.loadOffline",
+            &crate::generated::OfflineCashRequest {
+                token_id: "ERA".to_string(),
+                amount: 20,
+            },
+        )
+        .await;
+    assert!(loaded.success, "the load: {:?}", loaded.error_message);
+    let operation = Operation::from_bytes(
+        &crate::handlers::wallet_routes::encode_offline_transfer_operation_canonical(
+            &b.device.device_id,
+            7,
+            "ERA",
+            "",
+            &dsm::core::token::token_state_manager::era_policy_commit(),
+        ),
+    )
+    .expect("the bearer transfer");
+    (pair, a, b, appliance, operation)
+}
+
+/// A bearer step between two devices, every frame carried as bytes, the
+/// sender's anchor the real anchor-core appliance on a software chip. A loads
+/// an offline allocation from its admitted ERA under that anchor and spends
+/// from it to B. A's receipt proves the three leaves the spend writes — its
+/// relationship tip, its anchor-state leaf and its allocation — and it is built
+/// and checked before the appliance commits a counter step; B derives the
+/// anchor leaves from the release, pins A's anchor and commits; A commits on
+/// B's acknowledgment.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_bearer_step_proves_its_whole_write_set_and_commits_on_both() {
+    use dsm::types::receipt_types::ReceiptLeaf;
+
+    let (_pair, a, b, _appliance, operation) = bearer_pair().await;
+    let (commitment, confirm) = to_the_confirm(&a, &b, operation).await;
+
+    let receipt = confirm_receipt(&confirm);
+    let kinds: Vec<ReceiptLeaf> = receipt.step_writes.iter().map(|w| w.leaf).collect();
+    assert_eq!(kinds.len(), 3, "the spend writes three leaves: {kinds:?}");
+    assert!(kinds.contains(&ReceiptLeaf::Relationship), "{kinds:?}");
+    assert!(kinds.contains(&ReceiptLeaf::AnchorState), "{kinds:?}");
+    assert!(
+        kinds.contains(&ReceiptLeaf::OfflineAllocation {
+            pre_amount: 20,
+            pre_sequence: 1,
+        }),
+        "the allocation's pre-state is the load: {kinds:?}"
+    );
+
+    b.device.enter();
+    let ack = b
+        .handler
+        .handle_confirm_request(&confirm)
+        .await
+        .expect("B commits and acknowledges");
+    a.device.enter();
+    a.handler
+        .handle_commit_response(&ack)
+        .await
+        .expect("A takes the acknowledgment and commits");
+    assert_committed_on_both(&a, &b, &commitment);
+    b.device.enter();
+    assert_eq!(b.device.era_balance(), 7, "B holds the spend");
+}
+
+/// The bearer arm of the receipt's state rules, on a real spend. A's receipt,
+/// judged as B judges it — under A's pinned genesis and Device Tree, the
+/// operation, and the anchor leaves B derives from the release under its own
+/// challenge — holds. Each forgery is refused for its own rule: the forger
+/// holds A's keys and recomputes the child root over what it keeps, so only
+/// the named rule stands.
+///
+/// MUTATION CONTROLS (run 2026-09-27): deleting the write-count check (with it
+/// gone, the receipt that omits the allocation's debit is accepted), the
+/// refusal of an allocation smaller than the spend, the refusal of anchor
+/// leaves that do not move, the key-order check, the refusal of a bearer spend
+/// judged without its anchor leaves, or `bearer_leaves_of_release`'s successor
+/// check each turns its named assertion red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_bearer_receipt_holds_only_for_the_write_set_its_spend_makes() {
+    use dsm::core::bilateral_transaction_manager::{anchor_state_leaf_key, compute_smt_key};
+    use dsm::merkle::batch_fold::{verify_batch, FoldEntry};
+    use dsm::merkle::sparse_merkle_tree::DeviceSmtHashes;
+    use dsm::types::offline_allocation_leaf::{offline_allocation_key, offline_allocation_value};
+    use dsm::types::receipt_types::{DeviceTreeAcceptanceCommitment, ReceiptLeaf, StitchedReceiptV2};
+    use dsm::verification::receipt_verification::{
+        verify_receipt_state, BearerLeaves, ReceiptStateContext,
+    };
+
+    let (_pair, a, b, _appliance, operation) = bearer_pair().await;
+    let (commitment, confirm) = to_the_confirm(&a, &b, operation.clone()).await;
+    let request = confirm_request(&confirm);
+    let receipt = confirm_receipt(&confirm);
+
+    b.device.enter();
+    let challenge: [u8; 32] = crate::storage::client_db::get_bilateral_session(&commitment)
+        .expect("read B's session")
+        .expect("B's session")
+        .receiver_challenge
+        .expect("B's challenge")
+        .try_into()
+        .expect("32 bytes");
+    let bundle: [u8; 32] = request
+        .anchor_disclosure
+        .as_ref()
+        .expect("the confirm discloses A's anchor")
+        .bundle
+        .as_slice()
+        .try_into()
+        .expect("32 bytes");
+    let leaves = crate::bluetooth::anchor_accept::bearer_leaves_of_release(
+        &request.offline_release,
+        &bundle,
+        &challenge,
+    )
+    .expect("the leaves B derives from the release");
+    // A release whose carried successor is not the one B derives names no
+    // leaves: the counter's successor, or the frontier's.
+    {
+        use prost::Message;
+        let bent = |bend: &dyn Fn(&mut anchor_core::proto::pb::TransitionPackage)| {
+            let mut release =
+                anchor_core::proto::pb::OfflineRelease::decode(request.offline_release.as_slice())
+                    .expect("the release decodes");
+            bend(
+                release
+                    .transition
+                    .as_mut()
+                    .expect("the release's transition"),
+            );
+            release.encode_to_vec()
+        };
+        for (why, release) in [
+            ("a counter successor", bent(&|t| t.next_anchor_counter += 1)),
+            (
+                "a frontier successor",
+                bent(&|t| t.next_root = leaves.anchor_before.to_vec()),
+            ),
+        ] {
+            assert!(
+                crate::bluetooth::anchor_accept::bearer_leaves_of_release(
+                    &release, &bundle, &challenge
+                )
+                .is_err(),
+                "a release carrying {why} it does not derive"
+            );
+        }
+        let mut another_challenge = challenge;
+        another_challenge[0] ^= 1;
+        assert!(
+            crate::bluetooth::anchor_accept::bearer_leaves_of_release(
+                &request.offline_release,
+                &bundle,
+                &another_challenge,
+            )
+            .is_err(),
+            "the release under another challenge"
+        );
+    }
+    let tree = DeviceTreeAcceptanceCommitment::from_root(
+        dsm::common::device_tree::DeviceTree::single(a.device.device_id).root(),
+    );
+    let context = ReceiptStateContext {
+        device_tree_commitment: &tree,
+        author_genesis: a.device.genesis,
+        operation: &operation,
+        bearer: Some(leaves),
+    };
+    verify_receipt_state(&receipt, &context).expect("the honest bearer receipt holds");
+
+    let refusal = |r: &StitchedReceiptV2, context: &ReceiptStateContext<'_>| {
+        verify_receipt_state(r, context)
+            .expect_err("a forged receipt is refused")
+            .to_string()
+    };
+    let refused_for = |why: &str, r: &StitchedReceiptV2, context: &ReceiptStateContext<'_>| {
+        let reason = refusal(r, context);
+        assert!(reason.contains(why), "refused for another reason: {reason}");
+    };
+
+    // The forger's fold: the writes it keeps, each with the values the rules
+    // derive, folded from the receipt's parent root.
+    let (amount, asset) = match &operation {
+        Operation::Transfer {
+            amount,
+            policy_commit,
+            ..
+        } => (amount.value(), *policy_commit),
+        _ => unreachable!("a bearer transfer"),
+    };
+    let refold = |r: &mut StitchedReceiptV2| {
+        let mut entries: Vec<FoldEntry> = r
+            .step_writes
+            .iter()
+            .map(|w| {
+                let (key, pre, post) = match w.leaf {
+                    ReceiptLeaf::Relationship => (
+                        compute_smt_key(&r.devid_a, &r.devid_b),
+                        r.parent_tip,
+                        r.child_tip,
+                    ),
+                    ReceiptLeaf::AnchorState => (
+                        anchor_state_leaf_key(&bundle),
+                        leaves.anchor_before,
+                        leaves.anchor_after,
+                    ),
+                    ReceiptLeaf::OfflineAllocation {
+                        pre_amount,
+                        pre_sequence,
+                    } => (
+                        offline_allocation_key(&r.genesis, &r.devid_a, &bundle, &asset),
+                        offline_allocation_value(pre_amount, pre_sequence),
+                        offline_allocation_value(pre_amount - amount, pre_sequence + 1),
+                    ),
+                };
+                FoldEntry {
+                    key,
+                    pre: Some(pre),
+                    post: Some(post),
+                    path: dsm::merkle::smt_path::decode::<DeviceSmtHashes>(
+                        &w.path.explicit_heights,
+                        &w.path.siblings,
+                    )
+                    .expect("the path decodes"),
+                }
+            })
+            .collect();
+        entries.sort_by_key(|e| e.key);
+        r.child_root = verify_batch::<DeviceSmtHashes>(&r.parent_root, &entries)
+            .expect("the kept writes fold from the parent root");
+    };
+    let without = |leaf: fn(&ReceiptLeaf) -> bool| {
+        let mut r = receipt.clone();
+        r.step_writes.retain(|w| !leaf(&w.leaf));
+        refold(&mut r);
+        r
+    };
+
+    refused_for(
+        "the step writes 3 leaves; the receipt proves 2",
+        &without(|l| matches!(l, ReceiptLeaf::OfflineAllocation { .. })),
+        &context,
+    );
+    refused_for(
+        "the step writes 3 leaves; the receipt proves 2",
+        &without(|l| matches!(l, ReceiptLeaf::AnchorState)),
+        &context,
+    );
+
+    let mut understated = receipt.clone();
+    for w in understated.step_writes.iter_mut() {
+        if let ReceiptLeaf::OfflineAllocation { pre_sequence, .. } = w.leaf {
+            w.leaf = ReceiptLeaf::OfflineAllocation {
+                pre_amount: amount - 1,
+                pre_sequence,
+            };
+        }
+    }
+    refused_for(
+        "holds less than the operation spends",
+        &understated,
+        &context,
+    );
+
+    let mut reordered = receipt.clone();
+    reordered.step_writes.reverse();
+    refused_for("not in the order of their keys", &reordered, &context);
+
+    let mut doubled = receipt.clone();
+    let again = doubled.step_writes[0].clone();
+    doubled.step_writes.push(again);
+    refused_for(
+        "the step writes 3 leaves; the receipt proves 4",
+        &doubled,
+        &context,
+    );
+
+    refused_for(
+        "moves its anchor-state leaf",
+        &receipt,
+        &ReceiptStateContext {
+            bearer: Some(BearerLeaves {
+                anchor_after: leaves.anchor_before,
+                ..leaves
+            }),
+            ..context
+        },
+    );
+    refused_for(
+        "is verified against its anchor-state leaves",
+        &receipt,
+        &ReceiptStateContext {
+            bearer: None,
+            ..context
+        },
+    );
+    for (why, other) in [
+        (
+            "an anchor pre-state that is not the release's",
+            BearerLeaves {
+                anchor_before: leaves.anchor_after,
+                anchor_after: leaves.anchor_before,
+                ..leaves
+            },
+        ),
+        (
+            "another bundle",
+            BearerLeaves {
+                bundle: a.device.genesis,
+                ..leaves
+            },
+        ),
+    ] {
+        assert!(
+            verify_receipt_state(
+                &receipt,
+                &ReceiptStateContext {
+                    bearer: Some(other),
+                    ..context
+                }
+            )
+            .is_err(),
+            "{why}"
+        );
+    }
+}
+
+/// A bearer confirm whose receipt does not hold spends no counter step: the
+/// sender checks its receipt before the appliance's COMMIT, so a refused
+/// receipt leaves the chip's counter and frontier where they were. Here A's
+/// Device Tree commitment is not the one its receipt's device proof is under.
+/// MUTATION CONTROL: building the receipt after the release (the order this
+/// replaced) moves the counter and turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_bearer_receipt_that_does_not_hold_spends_no_counter_step() {
+    use crate::anchor::AnchorAppliance;
+
+    let (_pair, a, b, appliance, operation) = bearer_pair().await;
+    let before = appliance.clone().status().expect("the chip's status");
+
+    a.device.enter();
+    let (prepare, commitment) = a
+        .handler
+        .prepare_bilateral_transaction(b.device.device_id, operation)
+        .await
+        .expect("A prepares");
+    b.device.enter();
+    b.handler
+        .handle_prepare_request(&prepare, None)
+        .await
+        .expect("B takes the proposal");
+    let response = b
+        .handler
+        .create_prepare_accept_envelope(commitment)
+        .await
+        .expect("B's user accepts");
+
+    a.device.enter();
+    crate::sdk::app_state::AppState::set_device_tree_root(
+        dsm::common::device_tree::DeviceTree::single(b.device.device_id).root(),
+    )
+    .expect("set A's Device Tree root");
+    a.handler
+        .handle_prepare_response(&response)
+        .await
+        .expect_err("a receipt that does not hold is not confirmed");
+
+    let after = appliance.clone().status().expect("the chip's status");
+    assert_eq!(
+        after.anchor_counter, before.anchor_counter,
+        "no counter step was spent"
+    );
+    assert_eq!(after.root, before.root, "the frontier did not move");
 }
 
 /// The history rows the entered device holds for the step.

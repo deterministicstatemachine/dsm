@@ -9966,8 +9966,8 @@ export class AppStateStorage extends Message<AppStateStorage> {
    * used for receipt paths that verify π_dev: DevID ∈ R_G.
    * Computed at genesis via: R_G = DeviceTree::single(device_id).root()
    * Persisted IMMEDIATELY after genesis, device addition, or recovery.
-   * If None: build_bilateral_receipt_with_smt() → None → proof_data=None → the affected
-   * receipt path rejects during settlement.
+   * If None: no receipt is built (the producer checks its device proof against R_G),
+   * and the affected step is refused.
    * INVARIANT: any local acceptance path carrying π_dev must have R_G or an equivalent
    * authenticated persisted device-tree commitment available.
    *
@@ -11950,14 +11950,7 @@ export class ReceiptCommit extends Message<ReceiptCommit> {
 
   /**
    * Proof fields are capped to enforce the 128 KiB strict-fail invariant end-to-end.
-   * pi_rel: the ONE relationship path. It authenticates h_n under r_A, and the
-   * same siblings folded with h_{n+1} are r_A' — there is no second proof.
    *
-   * @generated from field: bytes rel_proof_parent = 8;
-   */
-  relProofParent = new Uint8Array(0);
-
-  /**
    * pi_dev(DevID_A in R_G)
    *
    * @generated from field: bytes dev_proof = 10;
@@ -12057,6 +12050,16 @@ export class ReceiptCommit extends Message<ReceiptCommit> {
    */
   transitionEntropy = new Uint8Array(0);
 
+  /**
+   * Every leaf the step writes, each with its path against parent_root: the
+   * writes fold from r_A to r_A' (§9: the counter and the value source are
+   * inside the root, so the root moves over all of them at once). CANONICAL
+   * and required.
+   *
+   * @generated from field: dsm.StepWriteSet step_writes = 22;
+   */
+  stepWrites?: StepWriteSet;
+
   constructor(data?: PartialMessage<ReceiptCommit>) {
     super();
     proto3.util.initPartial(data, this);
@@ -12072,7 +12075,6 @@ export class ReceiptCommit extends Message<ReceiptCommit> {
     { no: 5, name: "child_tip", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 6, name: "parent_root", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 7, name: "child_root", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 8, name: "rel_proof_parent", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 10, name: "dev_proof", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 12, name: "sig_a", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 13, name: "sig_b", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
@@ -12083,6 +12085,7 @@ export class ReceiptCommit extends Message<ReceiptCommit> {
     { no: 18, name: "kyber_ct_a", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 19, name: "kyber_ct_b", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 21, name: "transition_entropy", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 22, name: "step_writes", kind: "message", T: StepWriteSet },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ReceiptCommit {
@@ -12099,6 +12102,240 @@ export class ReceiptCommit extends Message<ReceiptCommit> {
 
   static equals(a: ReceiptCommit | PlainMessage<ReceiptCommit> | undefined, b: ReceiptCommit | PlainMessage<ReceiptCommit> | undefined): boolean {
     return proto3.util.equals(ReceiptCommit, a, b);
+  }
+}
+
+/**
+ * The leaves one step writes, as its receipt carries them. A verifier derives
+ * each leaf's key and both its values from inputs it has validated
+ * independently (the receipt's tips and operation, the pinned genesis and
+ * anchor bundle, the release's signed counter pair); none is carried beside
+ * its hash. The one exception is the offline allocation, whose leaf is an
+ * opaque hash of (amount, sequence): its pre-state preimage is the minimum
+ * witness, and the post-state is derived from it and the operation.
+ *
+ * @generated from message dsm.StepWriteSet
+ */
+export class StepWriteSet extends Message<StepWriteSet> {
+  /**
+   * @generated from field: repeated dsm.StepWrite writes = 1;
+   */
+  writes: StepWrite[] = [];
+
+  constructor(data?: PartialMessage<StepWriteSet>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.StepWriteSet";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "writes", kind: "message", T: StepWrite, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): StepWriteSet {
+    return new StepWriteSet().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): StepWriteSet {
+    return new StepWriteSet().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): StepWriteSet {
+    return new StepWriteSet().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: StepWriteSet | PlainMessage<StepWriteSet> | undefined, b: StepWriteSet | PlainMessage<StepWriteSet> | undefined): boolean {
+    return proto3.util.equals(StepWriteSet, a, b);
+  }
+}
+
+/**
+ * One leaf a step writes: which leaf, and its path against the step's
+ * parent_root in the one canonical encoding (a 256-bit set of the heights
+ * whose sibling is not the tree's default there, and those siblings, lowest
+ * height first). The writes are ordered by their derived key.
+ *
+ * @generated from message dsm.StepWrite
+ */
+export class StepWrite extends Message<StepWrite> {
+  /**
+   * @generated from oneof dsm.StepWrite.leaf
+   */
+  leaf: {
+    /**
+     * @generated from field: dsm.StepWriteRelationship relationship = 1;
+     */
+    value: StepWriteRelationship;
+    case: "relationship";
+  } | {
+    /**
+     * @generated from field: dsm.StepWriteAnchorState anchor_state = 2;
+     */
+    value: StepWriteAnchorState;
+    case: "anchorState";
+  } | {
+    /**
+     * @generated from field: dsm.StepWriteOfflineAllocation offline_allocation = 3;
+     */
+    value: StepWriteOfflineAllocation;
+    case: "offlineAllocation";
+  } | { case: undefined; value?: undefined } = { case: undefined };
+
+  /**
+   * @generated from field: bytes path_heights = 4;
+   */
+  pathHeights = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes path_siblings = 5;
+   */
+  pathSiblings = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<StepWrite>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.StepWrite";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "relationship", kind: "message", T: StepWriteRelationship, oneof: "leaf" },
+    { no: 2, name: "anchor_state", kind: "message", T: StepWriteAnchorState, oneof: "leaf" },
+    { no: 3, name: "offline_allocation", kind: "message", T: StepWriteOfflineAllocation, oneof: "leaf" },
+    { no: 4, name: "path_heights", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "path_siblings", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): StepWrite {
+    return new StepWrite().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): StepWrite {
+    return new StepWrite().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): StepWrite {
+    return new StepWrite().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: StepWrite | PlainMessage<StepWrite> | undefined, b: StepWrite | PlainMessage<StepWrite> | undefined): boolean {
+    return proto3.util.equals(StepWrite, a, b);
+  }
+}
+
+/**
+ * The relationship leaf at compute_smt_key(devid_a, devid_b): parent_tip before,
+ * child_tip after (child_tip recomputed from the operation and the entropy).
+ *
+ * @generated from message dsm.StepWriteRelationship
+ */
+export class StepWriteRelationship extends Message<StepWriteRelationship> {
+  constructor(data?: PartialMessage<StepWriteRelationship>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.StepWriteRelationship";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): StepWriteRelationship {
+    return new StepWriteRelationship().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): StepWriteRelationship {
+    return new StepWriteRelationship().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): StepWriteRelationship {
+    return new StepWriteRelationship().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: StepWriteRelationship | PlainMessage<StepWriteRelationship> | undefined, b: StepWriteRelationship | PlainMessage<StepWriteRelationship> | undefined): boolean {
+    return proto3.util.equals(StepWriteRelationship, a, b);
+  }
+}
+
+/**
+ * The anchor-state leaf of the pinned bundle B: before and after are the
+ * anchor-state leaves the release's signed counter pair and frontiers name.
+ *
+ * @generated from message dsm.StepWriteAnchorState
+ */
+export class StepWriteAnchorState extends Message<StepWriteAnchorState> {
+  constructor(data?: PartialMessage<StepWriteAnchorState>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.StepWriteAnchorState";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): StepWriteAnchorState {
+    return new StepWriteAnchorState().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): StepWriteAnchorState {
+    return new StepWriteAnchorState().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): StepWriteAnchorState {
+    return new StepWriteAnchorState().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: StepWriteAnchorState | PlainMessage<StepWriteAnchorState> | undefined, b: StepWriteAnchorState | PlainMessage<StepWriteAnchorState> | undefined): boolean {
+    return proto3.util.equals(StepWriteAnchorState, a, b);
+  }
+}
+
+/**
+ * The offline allocation leaf of (genesis, device, B, asset): the allocation as
+ * it stood before the step. After is derived: amount less the operation's
+ * amount, sequence plus one.
+ *
+ * @generated from message dsm.StepWriteOfflineAllocation
+ */
+export class StepWriteOfflineAllocation extends Message<StepWriteOfflineAllocation> {
+  /**
+   * @generated from field: uint64 pre_amount = 1;
+   */
+  preAmount = protoInt64.zero;
+
+  /**
+   * @generated from field: uint64 pre_sequence = 2;
+   */
+  preSequence = protoInt64.zero;
+
+  constructor(data?: PartialMessage<StepWriteOfflineAllocation>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.StepWriteOfflineAllocation";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "pre_amount", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 2, name: "pre_sequence", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): StepWriteOfflineAllocation {
+    return new StepWriteOfflineAllocation().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): StepWriteOfflineAllocation {
+    return new StepWriteOfflineAllocation().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): StepWriteOfflineAllocation {
+    return new StepWriteOfflineAllocation().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: StepWriteOfflineAllocation | PlainMessage<StepWriteOfflineAllocation> | undefined, b: StepWriteOfflineAllocation | PlainMessage<StepWriteOfflineAllocation> | undefined): boolean {
+    return proto3.util.equals(StepWriteOfflineAllocation, a, b);
   }
 }
 

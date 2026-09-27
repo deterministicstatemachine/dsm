@@ -216,31 +216,15 @@ pub fn stitched_receipt(
     receiver: &LiveDevice,
     outcome: &AdvanceOutcome,
 ) -> Result<StitchedReceiptV2, DsmError> {
-    let proofs = &outcome.smt_proofs;
-    let parent_tip = proofs
-        .parent_proof
-        .value
-        .ok_or_else(|| DsmError::invalid_operation("the parent path authenticates no tip"))?;
-    let child_tip = proofs
-        .child_proof
-        .value
-        .ok_or_else(|| DsmError::invalid_operation("the child path authenticates no tip"))?;
-    let dev_proof = DeviceTree::single(sender.devid)
-        .proof(&sender.devid)
-        .ok_or_else(|| DsmError::invalid_operation("the sender is not in its own Device Tree"))?
-        .to_bytes();
-    let mut receipt = StitchedReceiptV2::new(
+    let mut receipt = StitchedReceiptV2::of_step(
         sender.genesis,
         sender.devid,
         receiver.devid,
-        parent_tip,
-        child_tip,
-        proofs.pre_root,
-        proofs.post_root,
-        proofs.parent_proof.to_bytes(),
-        dev_proof,
-    );
-    receipt.set_transition_entropy(outcome.transition_entropy());
+        outcome,
+        None,
+        &sender.device_tree_commitment(),
+    )?;
+    let parent_tip = receipt.parent_tip;
     receipt.set_ek_cert_a(sign_ek_cert(
         &sender.chain_head_sk,
         &sender.keypair.public_key,
@@ -257,18 +241,22 @@ pub fn stitched_receipt(
     Ok(receipt)
 }
 
-/// What a verifier expecting `sender`'s step from `parent_root` holds: the
-/// sender's authenticated Device Tree commitment and both chain heads.
+/// What a verifier expecting `sender`'s step of `operation` from
+/// `parent_root` holds: the sender's authenticated Device Tree commitment and
+/// genesis, the step's operation, and both chain heads.
 pub fn verification_context(
     sender: &LiveDevice,
     receiver: &LiveDevice,
     parent_root: [u8; 32],
+    operation: &Operation,
 ) -> ReceiptVerificationContext {
     ReceiptVerificationContext::new(
         sender.device_tree_commitment(),
         parent_root,
         sender.keypair.public_key.clone(),
         receiver.keypair.public_key.clone(),
+        sender.genesis,
+        operation.clone(),
     )
     .with_chain_head_a(sender.chain_head_pk.clone())
     .with_chain_head_b(receiver.chain_head_pk.clone())

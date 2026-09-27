@@ -40,10 +40,9 @@ const GOLDEN_DEFAULT_NODE_1: &str = "SVRH8ZTRABJ1G040KNKY042R9E3HC8E5ZNBWWF17Q0E
 const GOLDEN_DEVTREE_SINGLE: &str = "32D73DT2ME8YNVD6DFB2DSKZN1R5YYN87ARBBCGZJATC63D24JV0";
 const GOLDEN_INITIAL_TIP: &str = "KKF8ZAT6H6X292YFK5VBM5SCKYB8AR912HD0RN8VNEQVGBCQECR0";
 
-// Beta release (2026-03-29): inclusion proof + smt_replace golden vectors.
+// Beta release (2026-03-29): inclusion proof + first-write golden vectors.
 // These freeze the ZERO_LEAF non-inclusion proof behavior for absent keys
-// and the full smt_replace proof pipeline for first-ever transactions.
-// Placeholder — will be populated on first run with --nocapture.
+// and the root a relationship's first write folds to.
 const GOLDEN_SINGLE_LEAF_ROOT: &str = "Q6E1YEENJDT4ZQ9CN0Y52H144ZTHEB2EW94YTR8Y7BKCJPKKR7W0";
 const GOLDEN_FIRST_TX_POST_ROOT: &str = "Q6E1YEENJDT4ZQ9CN0Y52H144ZTHEB2EW94YTR8Y7BKCJPKKR7W0";
 
@@ -450,47 +449,55 @@ fn golden_inclusion_proof_present_key() {
     );
 }
 
+/// A relationship's first write, to a key the tree does not hold, folds from
+/// the empty root to the golden root: its entry holds nothing before, its
+/// path is a non-inclusion path under the pre-root, and after the write the
+/// tree proves the new tip under the post-root.
 #[test]
-fn golden_smt_replace_first_tx() {
+fn golden_first_write_folds_from_the_empty_root() {
     let mut smt = SparseMerkleTree::new();
     let key = [0x07u8; 32];
     let new_tip = [0x42u8; 32];
 
-    let result = smt.smt_replace(&key, &new_tip).expect("smt_replace");
-
-    // Pre-root is the empty tree root.
+    let pre_root = *smt.root();
     assert_eq!(
-        to_b32(&result.pre_root),
+        to_b32(&pre_root),
         GOLDEN_EMPTY_ROOT_32,
-        "first-tx pre_root must be the empty tree root"
+        "a first write's pre-root is the empty tree root"
+    );
+    let entries = smt
+        .apply_writes(&[(key, new_tip)])
+        .expect("the first write");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(
+        entries[0].pre, None,
+        "the key held nothing before its first write"
+    );
+    let post_root = *smt.root();
+    assert_eq!(
+        dsm::merkle::batch_fold::verify_batch::<dsm::merkle::sparse_merkle_tree::DeviceSmtHashes>(
+            &pre_root, &entries
+        )
+        .expect("the write folds from the pre-root"),
+        post_root,
+        "the write folds to the tree's root after it"
     );
 
-    // Parent proof: ZERO_LEAF (key absent before insert).
+    let child_proof = smt.get_inclusion_proof(&key, 256).expect("child proof");
     assert_eq!(
-        result.parent_proof.value,
-        Some(ZERO_LEAF),
-        "first-tx parent proof must be ZERO_LEAF"
-    );
-    assert!(
-        SparseMerkleTree::verify_proof_against_root(&result.parent_proof, &result.pre_root),
-        "first-tx parent proof must verify against pre_root"
-    );
-
-    // Child proof: the inserted value.
-    assert_eq!(
-        result.child_proof.value,
+        child_proof.value,
         Some(new_tip),
-        "first-tx child proof must contain the new tip"
+        "the tree holds the new tip after the write"
     );
     assert!(
-        SparseMerkleTree::verify_proof_against_root(&result.child_proof, &result.post_root),
-        "first-tx child proof must verify against post_root"
+        SparseMerkleTree::verify_proof_against_root(&child_proof, &post_root),
+        "the child proof verifies against the post-root"
     );
 
-    let post_root_b32 = to_b32(&result.post_root);
     assert_eq!(
-        post_root_b32, GOLDEN_FIRST_TX_POST_ROOT,
-        "first-tx post_root drifted — smt_replace proof pipeline changed"
+        to_b32(&post_root),
+        GOLDEN_FIRST_TX_POST_ROOT,
+        "first-write post-root drifted — tree structure or leaf hashing changed"
     );
 }
 

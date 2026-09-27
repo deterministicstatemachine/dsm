@@ -163,9 +163,10 @@ fn relationship_chain_continuity(iterations: u64, seed: u64) -> PropertyTestResu
             .expect("transfer");
         match alice.send(&bob, &op) {
             Ok(outcome) => {
-                if outcome.smt_proofs.parent_proof.value != Some(tip_before) {
+                let (parent_tip, child_tip) = outcome.relationship_pair();
+                if parent_tip != tip_before {
                     failures.push(format!(
-                        "iter {i}: the parent path does not carry the tip before the step"
+                        "iter {i}: the step does not extend the tip before it"
                     ));
                 }
                 if outcome.parent_r_a != root_before {
@@ -173,14 +174,12 @@ fn relationship_chain_continuity(iterations: u64, seed: u64) -> PropertyTestResu
                         "iter {i}: the step does not start from the head's root"
                     ));
                 }
-                if outcome.new_device_state.chain_tip(&rel_key)
-                    != outcome.smt_proofs.child_proof.value
-                {
+                if outcome.new_device_state.chain_tip(&rel_key) != Some(child_tip) {
                     failures.push(format!(
-                        "iter {i}: the child path does not carry the new tip"
+                        "iter {i}: the head does not hold the step's new tip"
                     ));
                 }
-                if outcome.smt_proofs.child_proof.value == Some(tip_before) {
+                if child_tip == tip_before {
                     failures.push(format!("iter {i}: the tip did not move"));
                 }
                 alice.install(outcome);
@@ -359,8 +358,9 @@ fn fork_exclusion(iterations: u64, seed: u64) -> PropertyTestResult {
                 "iter {i}: two different operations produced one child tip"
             ));
         }
-        let ctx = verification_context(&alice, &bob, alice.head.root());
-        match verify_stitched_receipt(&receipt_a, &ctx, &mut tracker) {
+        let ctx_a = verification_context(&alice, &bob, alice.head.root(), &op_a);
+        let ctx_b = verification_context(&alice, &bob, alice.head.root(), &op_b);
+        match verify_stitched_receipt(&receipt_a, &ctx_a, &mut tracker) {
             Ok(a) if a.valid => {}
             Ok(a) => failures.push(format!(
                 "iter {i}: the first child was refused: {}",
@@ -368,7 +368,7 @@ fn fork_exclusion(iterations: u64, seed: u64) -> PropertyTestResult {
             )),
             Err(e) => failures.push(format!("iter {i}: verifier error: {e}")),
         }
-        match verify_stitched_receipt(&receipt_b, &ctx, &mut tracker) {
+        match verify_stitched_receipt(&receipt_b, &ctx_b, &mut tracker) {
             Ok(a) if a.valid => failures.push(format!(
                 "iter {i}: FORK ACCEPTED: a second child of one parent"
             )),

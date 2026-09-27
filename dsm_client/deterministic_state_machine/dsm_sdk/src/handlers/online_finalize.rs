@@ -326,23 +326,28 @@ pub fn bind_countersign_delta(
 mod tests {
     use super::*;
 
+    /// A real step's receipt — the first transfer between two wallets —
+    /// naming the parties and tips under test. These tests judge a receipt's
+    /// binding to its proposal, never its state rules, so the step's roots,
+    /// writes and entropy are carried as the real step made them.
     fn base_receipt(
         a: [u8; 32],
         b: [u8; 32],
         parent: [u8; 32],
         child: [u8; 32],
     ) -> StitchedReceiptV2 {
-        StitchedReceiptV2::new(
-            [0u8; 32], // genesis
-            a,
-            b,
-            parent,
-            child,
-            [0u8; 32], // parent_root
-            [0u8; 32], // child_root
-            Vec::new(),
-            Vec::new(),
-        )
+        use crate::test_support::receipts::{transfer_step, Party};
+        static RECEIPT: std::sync::OnceLock<StitchedReceiptV2> = std::sync::OnceLock::new();
+        let mut receipt = RECEIPT
+            .get_or_init(|| {
+                transfer_step(&Party::from_seed(0x31), &Party::from_seed(0x32), 7).receipt
+            })
+            .clone();
+        receipt.devid_a = a;
+        receipt.devid_b = b;
+        receipt.parent_tip = parent;
+        receipt.child_tip = child;
+        receipt
     }
 
     /// A proposal whose CANONICAL pair is the transition under test, and whose

@@ -17,7 +17,8 @@ use crate::core::bilateral_transaction_manager::{
 };
 use crate::types::receipt_types::{DeviceTreeAcceptanceCommitment, StitchedReceiptV2};
 use crate::verification::receipt_verification::{
-    verify_per_step_ek_signing, verify_receipt_state, BilateralSide,
+    verify_per_step_ek_signing, verify_receipt_state, BearerLeaves, BilateralSide,
+    ReceiptStateContext,
 };
 use crate::crypto::signatures::SignatureKeyPair;
 use crate::types::error::DsmError;
@@ -298,6 +299,10 @@ pub struct AcceptedStep<'a> {
     /// The sender's EK chain head on this relationship, once a step has been
     /// received; before that, its pinned AK signs the first EK.
     pub sender_chain_head: Option<&'a [u8]>,
+    /// For an offline-bearer step, the sender's anchor-state leaves as this
+    /// device derived them from the step's release under the sender's pinned
+    /// bundle.
+    pub bearer: Option<BearerLeaves>,
 }
 
 /// A confirm the receiver may commit.
@@ -344,7 +349,14 @@ pub fn decide_confirm(
     }
     verify_receipt_state(
         &receipt,
-        &DeviceTreeAcceptanceCommitment::from_root(step.sender_device_tree_root),
+        &ReceiptStateContext {
+            device_tree_commitment: &DeviceTreeAcceptanceCommitment::from_root(
+                step.sender_device_tree_root,
+            ),
+            author_genesis: sender.genesis,
+            operation: step.operation,
+            bearer: step.bearer,
+        },
     )?;
     verify_per_step_ek_signing(
         &receipt,
@@ -395,6 +407,9 @@ pub struct ConfirmedStep<'a> {
     /// The receiver's EK chain head on this relationship, once a step has
     /// been acknowledged; before that, its pinned AK signs the first EK.
     pub receiver_chain_head: Option<&'a [u8]>,
+    /// The step's operation: the receiver's own receipt of it writes only its
+    /// relationship leaf, and its child tip is recomputed from it.
+    pub operation: &'a Operation,
 }
 
 /// The sender's decision on an acknowledgment: it is the receiver's
@@ -438,7 +453,14 @@ pub fn decide_commit_ack(
     }
     verify_receipt_state(
         &receipt,
-        &DeviceTreeAcceptanceCommitment::from_root(step.receiver_device_tree_root),
+        &ReceiptStateContext {
+            device_tree_commitment: &DeviceTreeAcceptanceCommitment::from_root(
+                step.receiver_device_tree_root,
+            ),
+            author_genesis: receiver.genesis,
+            operation: step.operation,
+            bearer: None,
+        },
     )?;
     verify_per_step_ek_signing(
         &receipt,
@@ -454,52 +476,62 @@ pub fn decide_commit_ack(
 mod tests {
     use super::*;
     use crate::bilateral::identity_binding::binding_digest;
-    use crate::crypto::kyber;
     use crate::types::operations::TransactionMode;
+    use crate::types::step_fixture::{credit_step, transfer_step, Party, Step};
     use crate::types::token_types::Balance;
 
+    /// A peer: the identity a wallet derives from its seed, and the binding
+    /// of its ML-KEM key its AK signs.
     struct Peer {
+        party: Party,
         device_id: [u8; 32],
         genesis: [u8; 32],
-        keys: SignatureKeyPair,
         kyber_public_key: Vec<u8>,
         binding_sig: Vec<u8>,
     }
 
     impl Peer {
+        /// The peer a wallet with seed `[seed; 32]` is.
         fn new(seed: u8) -> Self {
-            let device_id = [seed; 32];
-            let genesis = [seed.wrapping_add(1); 32];
-            let keys = SignatureKeyPair::generate_from_entropy(&[seed; 32]).expect("keys");
-            let kyber_public_key = kyber::generate_kyber_keypair()
-                .expect("kyber")
-                .public_key
-                .clone();
-            let binding_sig = keys
-                .sign(&binding_digest(&device_id, &genesis, &kyber_public_key))
-                .expect("binding");
+            let party = Party::from_seed(&[seed; 32]);
+            let (device_id, genesis) = (party.device_id(), party.genesis());
+            let kyber_public_key = party.kyber_public_key().to_vec();
+            let binding_sig = crate::crypto::sphincs::sphincs_sign(
+                party.signing_secret_key(),
+                &binding_digest(&device_id, &genesis, &kyber_public_key),
+            )
+            .expect("binding");
             Self {
+                party,
                 device_id,
                 genesis,
-                keys,
                 kyber_public_key,
                 binding_sig,
             }
+        }
+
+        /// The AK's public half.
+        fn public_key(&self) -> &[u8] {
+            self.party.signing_public_key()
+        }
+
+        /// The AK's signature over `message`.
+        fn sign(&self, message: &[u8]) -> Vec<u8> {
+            crate::crypto::sphincs::sphincs_sign(self.party.signing_secret_key(), message)
+                .expect("sign")
         }
 
         fn pinned(&self) -> PinnedPeer<'_> {
             PinnedPeer {
                 device_id: self.device_id,
                 genesis: self.genesis,
-                signing_key: self.keys.public_key(),
+                signing_key: self.public_key(),
                 kyber_public_key: &self.kyber_public_key,
             }
         }
 
         fn sign_step(&self, commitment_hash: &[u8; 32]) -> Vec<u8> {
-            self.keys
-                .sign(&bilateral_sign_message(commitment_hash))
-                .expect("sign")
+            self.sign(&bilateral_sign_message(commitment_hash))
         }
     }
 
@@ -527,15 +559,11 @@ mod tests {
             )
         };
 
-        check(
-            peer.keys.public_key(),
-            &peer.kyber_public_key,
-            &peer.binding_sig,
-        )
-        .expect("the pinned keys and their binding");
+        check(peer.public_key(), &peer.kyber_public_key, &peer.binding_sig)
+            .expect("the pinned keys and their binding");
         refused(
             check(
-                other.keys.public_key(),
+                other.public_key(),
                 &peer.kyber_public_key,
                 &peer.binding_sig,
             ),
@@ -547,34 +575,27 @@ mod tests {
         );
         refused(
             check(
-                peer.keys.public_key(),
+                peer.public_key(),
                 &other.kyber_public_key,
                 &peer.binding_sig,
             ),
             "not the contact's pinned Kyber key",
         );
         refused(
-            check(peer.keys.public_key(), &[], &peer.binding_sig),
+            check(peer.public_key(), &[], &peer.binding_sig),
             "not the contact's pinned Kyber key",
         );
         refused(
-            check(peer.keys.public_key(), &peer.kyber_public_key, &[]),
+            check(peer.public_key(), &peer.kyber_public_key, &[]),
             "does not verify under the pinned AK",
         );
-        let wrong_signer = other
-            .keys
-            .sign(&binding_digest(
-                &peer.device_id,
-                &peer.genesis,
-                &peer.kyber_public_key,
-            ))
-            .unwrap();
+        let wrong_signer = other.sign(&binding_digest(
+            &peer.device_id,
+            &peer.genesis,
+            &peer.kyber_public_key,
+        ));
         refused(
-            check(
-                peer.keys.public_key(),
-                &peer.kyber_public_key,
-                &wrong_signer,
-            ),
+            check(peer.public_key(), &peer.kyber_public_key, &wrong_signer),
             "does not verify under the pinned AK",
         );
     }
@@ -597,7 +618,7 @@ mod tests {
 
     fn credentials(peer: &Peer) -> PeerCredentials<'_> {
         PeerCredentials {
-            signing_key: peer.keys.public_key(),
+            signing_key: peer.public_key(),
             kyber_public_key: &peer.kyber_public_key,
             kyber_binding_sig: &peer.binding_sig,
         }
@@ -899,12 +920,15 @@ mod tests {
         );
     }
 
-    /// A confirm for `step`, genuinely built: the sender's first step toward
-    /// the receiver from a real advance, its A-side EK certified by the
-    /// sender's AK and answering the session-bound target, and σ_A.
+    /// A confirm for a step, genuinely built: the sender's first transfer
+    /// to the receiver from a real advance, its receipt answered on the A
+    /// side by the sender's per-step EK certified by its AK over the
+    /// session-bound target of the step's commitment on the tip the receiver
+    /// holds, and the successor both derive from the sender's entropy.
     struct BuiltConfirm {
         sender: Peer,
-        receiver_device_id: [u8; 32],
+        receiver: Peer,
+        transfer: Step,
         commitment_hash: [u8; 32],
         receipt: Vec<u8>,
         device_tree_root: [u8; 32],
@@ -913,96 +937,94 @@ mod tests {
         successor_tip: [u8; 32],
     }
 
-    /// `author`'s receipt of its first step toward `toward`, from a real
-    /// advance, with `side`'s EK certified by the author's AK and answering
-    /// the session-bound target of `commitment_hash`. Returns the receipt's
-    /// wire bytes and the author's Device Tree root.
+    /// The step between `sender` and `receiver`: the sender's transfer and
+    /// the receiver's credit of it, each with its receipt.
+    fn steps(sender: &Peer, receiver: &Peer) -> (Step, Step) {
+        let transfer = transfer_step(&sender.party, &receiver.party, 7);
+        let credit = credit_step(&receiver.party, &sender.party, &transfer.operation);
+        (transfer, credit)
+    }
+
+    /// The relationship tip `receiver` holds toward `sender` before their
+    /// first step, and the step's commitment on it.
+    fn held_tip_and_commitment(
+        receiver: &Peer,
+        sender: &Peer,
+        operation: &Operation,
+    ) -> ([u8; 32], [u8; 32]) {
+        let held_tip = receiver
+            .party
+            .head()
+            .establish_relationship(sender.device_id)
+            .expect("the relationship is established")
+            .chain_tip(
+                &crate::core::bilateral_transaction_manager::compute_smt_key(
+                    &receiver.device_id,
+                    &sender.device_id,
+                ),
+            )
+            .expect("the established relationship has a tip");
+        let commitment =
+            BilateralPreCommitment::new(held_tip, operation.clone()).bilateral_commitment_hash;
+        (held_tip, commitment)
+    }
+
+    /// `author`'s receipt of `step` toward `toward`, answered on `side` by
+    /// the author's per-step EK certified by its AK over the session-bound
+    /// target of `commitment_hash`. Returns the receipt's wire bytes and the
+    /// author's Device Tree root.
     fn signed_receipt(
         author: &Peer,
-        toward: [u8; 32],
+        toward: &Peer,
+        step: &Step,
         side: BilateralSide,
         commitment_hash: &[u8; 32],
     ) -> (Vec<u8>, [u8; 32]) {
-        use crate::common::device_tree::DeviceTree;
-        use crate::core::bilateral_transaction_manager::compute_smt_key;
-        use crate::crypto::ephemeral_key::{generate_ephemeral_keypair, sign_ek_cert};
-        use crate::types::device_state::DeviceState;
         use crate::types::receipt_types::compute_receipt_challenge_response_target;
 
-        let head = DeviceState::new(author.genesis, author.device_id, vec![0x77u8; 64])
-            .establish_relationship(toward)
-            .expect("establish");
-        let outcome = head
-            .advance(
-                compute_smt_key(&author.device_id, &toward),
-                toward,
-                Operation::Noop,
-                &[],
-                None,
-                None,
-            )
-            .expect("the first step");
-        let parent_tip = outcome
-            .smt_proofs
-            .parent_proof
-            .value
-            .expect("the path carries the established leaf");
-        let device_tree = DeviceTree::single(author.device_id);
-        let mut receipt = StitchedReceiptV2::new(
-            author.genesis,
-            author.device_id,
-            toward,
-            parent_tip,
-            outcome.new_chain_state.compute_chain_tip(),
-            outcome.smt_proofs.pre_root,
-            outcome.child_r_a,
-            outcome.smt_proofs.parent_proof.to_bytes(),
-            device_tree
-                .proof(&author.device_id)
-                .expect("device proof")
-                .to_bytes(),
-        );
-        receipt.set_transition_entropy(outcome.transition_entropy());
+        let mut receipt = step.receipt.clone();
         let commitment = receipt.compute_commitment().expect("commitment");
-        let (ek_pk, ek_sk) = generate_ephemeral_keypair(&[0x64u8; 32]).expect("ek");
-        let cert =
-            sign_ek_cert(author.keys.secret_key(), &ek_pk, &receipt.parent_tip).expect("cert");
-        let sig = crate::crypto::sphincs::sphincs_sign(
-            &ek_sk,
+        let answer = author.party.answer(
+            &toward.party,
+            &receipt.parent_tip,
+            &step.c_pre,
             &compute_receipt_challenge_response_target(&commitment, commitment_hash),
-        )
-        .expect("sig");
+        );
         match side {
             BilateralSide::A => {
-                receipt.set_ek_cert_a(cert);
-                receipt.set_ek_pk_a(ek_pk);
-                receipt.add_sig_a(sig);
+                receipt.set_ek_cert_a(answer.ek_cert);
+                receipt.set_ek_pk_a(answer.ek_pk);
+                receipt.add_sig_a(answer.sig);
+                receipt.set_kyber_ct_a(answer.kyber_ct);
             }
             BilateralSide::B => {
-                receipt.set_ek_cert_b(cert);
-                receipt.set_ek_pk_b(ek_pk);
-                receipt.add_sig_b(sig);
+                receipt.set_ek_cert_b(answer.ek_cert);
+                receipt.set_ek_pk_b(answer.ek_pk);
+                receipt.add_sig_b(answer.sig);
+                receipt.set_kyber_ct_b(answer.kyber_ct);
             }
         }
         (
             receipt.to_full_protobuf().expect("encode"),
-            device_tree.root(),
+            crate::common::device_tree::DeviceTree::single(author.device_id).root(),
         )
     }
 
     fn built_confirm() -> BuiltConfirm {
         let sender = Peer::new(0x61);
-        let receiver_device_id = [0x62u8; 32];
-        let commitment_hash = [0x63u8; 32];
+        let receiver = Peer::new(0x62);
+        let (transfer, _) = steps(&sender, &receiver);
+        let (held_tip, commitment_hash) =
+            held_tip_and_commitment(&receiver, &sender, &transfer.operation);
         let (receipt, device_tree_root) = signed_receipt(
             &sender,
-            receiver_device_id,
+            &receiver,
+            &transfer,
             BilateralSide::A,
             &commitment_hash,
         );
-        let held_tip = [0x70u8; 32];
-        let pre_entropy = [0x44u8; 32];
-        let op_bytes = Operation::Noop.to_bytes();
+        let pre_entropy = transfer.outcome.transition_entropy();
+        let op_bytes = transfer.operation.to_bytes();
         let successor_tip = compute_successor_tip(
             &held_tip,
             &op_bytes,
@@ -1010,14 +1032,15 @@ mod tests {
             &compute_precommit(&held_tip, &op_bytes, &pre_entropy),
         );
         BuiltConfirm {
-            receiver_device_id,
+            sender,
+            receiver,
+            transfer,
             commitment_hash,
             receipt,
             device_tree_root,
             held_tip,
             pre_entropy,
             successor_tip,
-            sender,
         }
     }
 
@@ -1031,7 +1054,7 @@ mod tests {
     #[test]
     fn a_confirm_is_committed_only_as_its_sender_signed_and_derived_it() {
         let c = built_confirm();
-        let operation = Operation::Noop;
+        let operation = c.transfer.operation.clone();
         let other = Peer::new(0x65);
         let decide = |signature: &[u8],
                       receipt: &[u8],
@@ -1053,6 +1076,7 @@ mod tests {
                     receiver_device_id,
                     sender_device_tree_root: c.device_tree_root,
                     sender_chain_head,
+                    bearer: None,
                 },
                 &c.sender.pinned(),
             )
@@ -1064,7 +1088,7 @@ mod tests {
             &c.receipt,
             &c.pre_entropy,
             c.successor_tip,
-            c.receiver_device_id,
+            c.receiver.device_id,
             None,
         )
         .expect("the sender's own confirm");
@@ -1076,7 +1100,7 @@ mod tests {
                 &c.receipt,
                 &c.pre_entropy,
                 c.successor_tip,
-                c.receiver_device_id,
+                c.receiver.device_id,
                 None,
             ),
             "carries no signature",
@@ -1087,7 +1111,7 @@ mod tests {
                 &c.receipt,
                 &c.pre_entropy,
                 c.successor_tip,
-                c.receiver_device_id,
+                c.receiver.device_id,
                 None,
             ),
             "not signed over its commitment by the pinned AK",
@@ -1098,7 +1122,7 @@ mod tests {
                 &c.receipt,
                 &c.pre_entropy,
                 c.successor_tip,
-                [0x66u8; 32],
+                other.device_id,
                 None,
             ),
             "not from this session's sender to this device",
@@ -1109,8 +1133,8 @@ mod tests {
                 &c.receipt,
                 &c.pre_entropy,
                 c.successor_tip,
-                c.receiver_device_id,
-                Some(other.keys.public_key()),
+                c.receiver.device_id,
+                Some(other.public_key()),
             ),
             "does NOT chain",
         );
@@ -1118,9 +1142,9 @@ mod tests {
             decide(
                 &sigma_a,
                 &c.receipt,
-                &[0x45u8; 32],
+                &c.held_tip,
                 c.successor_tip,
-                c.receiver_device_id,
+                c.receiver.device_id,
                 None,
             ),
             "h_{n+1} mismatch",
@@ -1131,7 +1155,7 @@ mod tests {
                 &vec![0u8; MAX_STITCHED_RECEIPT_BYTES + 1],
                 &c.pre_entropy,
                 c.successor_tip,
-                c.receiver_device_id,
+                c.receiver.device_id,
                 None,
             ),
             "128 KiB",
@@ -1182,11 +1206,15 @@ mod tests {
     #[test]
     fn an_ack_is_only_the_receivers_counter_signed_receipt() {
         let receiver = Peer::new(0x71);
-        let sender_device_id = [0x72u8; 32];
-        let commitment_hash = [0x73u8; 32];
+        let sender = Peer::new(0x72);
+        let sender_device_id = sender.device_id;
+        let (transfer, credit) = steps(&sender, &receiver);
+        let (held_tip, commitment_hash) =
+            held_tip_and_commitment(&receiver, &sender, &transfer.operation);
         let (ack, root) = signed_receipt(
             &receiver,
-            sender_device_id,
+            &sender,
+            &credit,
             BilateralSide::B,
             &commitment_hash,
         );
@@ -1196,6 +1224,7 @@ mod tests {
             sender_device_id,
             receiver_device_tree_root: root,
             receiver_chain_head: None,
+            operation: &transfer.operation,
         };
         let decide = |named: [u8; 32], bytes: &[u8], step: ConfirmedStep<'_>| {
             decide_commit_ack(Some(named), bytes, step, &receiver.pinned())
@@ -1204,7 +1233,7 @@ mod tests {
         decide(commitment_hash, &ack, step(sender_device_id))
             .expect("the receiver's own acknowledgment");
         refused(
-            decide([0x75u8; 32], &ack, step(sender_device_id)),
+            decide(held_tip, &ack, step(sender_device_id)),
             "names another commitment",
         );
         refused(
@@ -1212,7 +1241,7 @@ mod tests {
             "omits counter_signed_receipt",
         );
         refused(
-            decide(commitment_hash, &ack, step([0x76u8; 32])),
+            decide(commitment_hash, &ack, step(other.device_id)),
             "possible substitution",
         );
         refused(
@@ -1220,7 +1249,7 @@ mod tests {
                 commitment_hash,
                 &ack,
                 ConfirmedStep {
-                    receiver_chain_head: Some(other.keys.public_key()),
+                    receiver_chain_head: Some(other.public_key()),
                     ..step(sender_device_id)
                 },
             ),
@@ -1228,7 +1257,8 @@ mod tests {
         );
         let (a_side, _) = signed_receipt(
             &receiver,
-            sender_device_id,
+            &sender,
+            &credit,
             BilateralSide::A,
             &commitment_hash,
         );

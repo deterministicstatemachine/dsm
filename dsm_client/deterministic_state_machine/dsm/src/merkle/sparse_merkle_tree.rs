@@ -92,6 +92,27 @@ pub fn default_node(level: u32) -> [u8; 32] {
     }
 }
 
+/// How the device tree hashes, for the one batch fold and the one path
+/// encoding ([`crate::merkle::batch_fold`], [`crate::merkle::smt_path`]): a
+/// leaf commits its value only (the key is its position), and a leaf holding
+/// nothing is the tree's empty leaf, `default_node(0)`.
+pub struct DeviceSmtHashes;
+
+impl crate::merkle::batch_fold::SmtHashes for DeviceSmtHashes {
+    fn leaf(_key: &[u8; 32], value: Option<&[u8; 32]>) -> [u8; 32] {
+        match value {
+            Some(v) => hash_smt_leaf(v),
+            None => default_node(0),
+        }
+    }
+    fn node(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
+        hash_smt_node(left, right)
+    }
+    fn default_node(height: usize) -> [u8; 32] {
+        default_node(height as u32)
+    }
+}
+
 /// Canonical empty SMT root for a given tree height.
 pub fn empty_root(height: u32) -> [u8; 32] {
     default_node(height)
@@ -119,35 +140,6 @@ fn fold_path(key: &[u8; 32], leaf_hash: [u8; 32], siblings: &[[u8; 32]]) -> [u8;
         };
     }
     acc
-}
-
-/// The relationship-leaf replace (§4.2, Tripwire): the one primitive every
-/// receipt verifier uses.
-///
-/// `siblings` is the full leaf-to-root path at `key`. It must authenticate
-/// `old_value` under `pre_root`; folded with `new_value` it IS the post-state
-/// root, which is returned for the caller to compare with the root it was
-/// given. There is no separate replace witness: a second encoding of the same
-/// path would be a second authority able to disagree with it.
-pub fn verify_smt_replace(
-    pre_root: &[u8; 32],
-    key: &[u8; 32],
-    old_value: &[u8; 32],
-    new_value: &[u8; 32],
-    siblings: &[[u8; 32]],
-) -> Result<[u8; 32], DsmError> {
-    if siblings.len() != DEFAULT_SMT_HEIGHT as usize {
-        return Err(DsmError::invalid_operation(format!(
-            "an SMT path has {DEFAULT_SMT_HEIGHT} siblings, not {}",
-            siblings.len()
-        )));
-    }
-    if fold_path(key, hash_smt_leaf(old_value), siblings) != *pre_root {
-        return Err(DsmError::invalid_operation(
-            "the path does not authenticate the old leaf under the pre-state root",
-        ));
-    }
-    Ok(fold_path(key, hash_smt_leaf(new_value), siblings))
 }
 
 // ───────────────────────────────────────────────────────────────────
@@ -280,8 +272,8 @@ impl SparseMerkleTree {
     /// For absent keys the proof value is `ZERO_LEAF` — the canonical default
     /// leaf.  The sibling path is still valid and `verify_proof_against_root`
     /// will recompute `hash_smt_leaf(ZERO_LEAF)` at the leaf position, walk the
-    /// siblings up, and match the root.  This is the "non-inclusion proof" that
-    /// `smt_replace` needs for first-ever transactions in a relationship (§4.2).
+    /// siblings up, and match the root: the non-inclusion proof a write to a
+    /// key the tree does not hold is folded from.
     pub fn get_inclusion_proof(
         &self,
         key: &[u8; 32],
@@ -381,6 +373,44 @@ impl SparseMerkleTree {
         fold_path(&proof.key, hash_smt_leaf(&value), &proof.siblings) == *expected_root
     }
 
+    /// Apply a step's writes as ONE move of the tree, and return each write
+    /// as a fold entry: its key, the value it held and the value written,
+    /// and its path against the root the tree had BEFORE any of the writes
+    /// (the one pre-root every entry of a write set is stated against).
+    /// Entries come back sorted by key; a key written twice is refused, since
+    /// a write set names each key once.
+    pub fn apply_writes(
+        &mut self,
+        writes: &[([u8; 32], [u8; 32])],
+    ) -> Result<Vec<crate::merkle::batch_fold::FoldEntry>, DsmError> {
+        let mut entries = Vec::with_capacity(writes.len());
+        for (key, value) in writes {
+            let proof = self
+                .get_inclusion_proof(key, DEFAULT_SMT_HEIGHT as usize)
+                .map_err(|e| DsmError::invalid_operation(format!("a write's path: {e}")))?;
+            let path: Box<[[u8; 32]; crate::merkle::batch_fold::FOLD_HEIGHT]> =
+                proof.siblings.into_boxed_slice().try_into().map_err(|_| {
+                    DsmError::invalid_operation("a write's path is not 256 siblings")
+                })?;
+            entries.push(crate::merkle::batch_fold::FoldEntry {
+                key: *key,
+                pre: self.leaves.get(key).copied(),
+                post: Some(*value),
+                path,
+            });
+        }
+        entries.sort_by_key(|e| e.key);
+        if entries.windows(2).any(|w| w[0].key == w[1].key) {
+            return Err(DsmError::invalid_operation(
+                "a write set names one key twice",
+            ));
+        }
+        for (key, value) in writes {
+            self.update_leaf(key, value);
+        }
+        Ok(entries)
+    }
+
     /// Get current root.
     pub fn root(&self) -> &[u8; 32] {
         &self.root
@@ -395,62 +425,6 @@ impl SparseMerkleTree {
     pub fn leaf_count(&self) -> usize {
         self.leaves.len()
     }
-
-    /// Atomic SMT-Replace: update leaf from old value to `new_value`,
-    /// returning pre/post roots and inclusion proofs for both.
-    ///
-    /// This is the canonical §4.2 operation. A key with no leaf yields a
-    /// parent proof with `value: None` (non-inclusion); a relationship's
-    /// leaf exists from its establishment, so a relationship step always
-    /// replaces a present leaf.
-    pub fn smt_replace(
-        &mut self,
-        key: &[u8; 32],
-        new_value: &[u8; 32],
-    ) -> Result<SmtReplaceResult, &'static str> {
-        let pre_root = self.root;
-
-        // Parent proof: inclusion of h_n (or ZERO_LEAF for first tx).
-        // get_inclusion_proof now returns a valid non-inclusion proof for
-        // absent keys (value = ZERO_LEAF with real sibling path), so the
-        // receiver can verify π(h_n ∈ r_A) even on the first transaction.
-        let parent_proof = self.get_inclusion_proof(key, 256)?;
-
-        self.update_leaf(key, new_value);
-
-        let post_root = self.root;
-
-        // Child proof: inclusion of h_{n+1} — must succeed since we just inserted.
-        let child_proof = self.get_inclusion_proof(key, 256)?;
-
-        Ok(SmtReplaceResult {
-            pre_root,
-            post_root,
-            parent_proof,
-            child_proof,
-        })
-    }
-}
-
-// ───────────────────────────────────────────────────────────────────
-// SMT-Replace result (§4.2)
-// ───────────────────────────────────────────────────────────────────
-
-/// Result of an atomic SMT-Replace operation (§4.2).
-///
-/// Contains the pre/post roots and the relationship path needed to construct
-/// a ReceiptCommit with valid `parent_root`, `child_root` and
-/// `rel_proof_parent` fields.
-#[derive(Debug, Clone)]
-pub struct SmtReplaceResult {
-    /// SMT root before the update (r_A).
-    pub pre_root: [u8; 32],
-    /// SMT root after the update (r'_A).
-    pub post_root: [u8; 32],
-    /// Inclusion proof for h_n ∈ r_A (value=None for first-ever tx).
-    pub parent_proof: SmtInclusionProof,
-    /// Inclusion proof for h_{n+1} ∈ r'_A.
-    pub child_proof: SmtInclusionProof,
 }
 
 // ───────────────────────────────────────────────────────────────────

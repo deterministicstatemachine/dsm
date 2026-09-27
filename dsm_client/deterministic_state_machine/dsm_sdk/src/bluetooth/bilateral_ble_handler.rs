@@ -2446,7 +2446,7 @@ impl BilateralBleHandler {
         // The root the relationship path authenticates h_n under: the device
         // head the step starts from (the relationship was established before
         // its first step, so no seeding stands between the two).
-        let pre_root = sim_outcome.smt_proofs.pre_root;
+        let pre_root = sim_outcome.transition.pre_root();
         let sender_smt_root = sim_outcome.child_r_a;
 
         // The one entropy of this transition (§39.2–39.3): Core derived it
@@ -2467,6 +2467,42 @@ impl BilateralBleHandler {
             &pre_entropy,
             &receipt_digest,
         );
+        // 6. The stitched receipt proves the step's whole write set (§4.2), and
+        // the sender holds it to the state rules HERE, before the appliance's
+        // irreversible COMMIT below: a receipt that cannot hold never spends a
+        // counter step. Its canonical bytes do not depend on the release. For
+        // a bearer step its anchor-state leaves are the leaf the simulation
+        // moved and the successor the staging derived. Tips are A-side
+        // asymmetric (what T_A stores); the symmetric `h_n_plus_1` is still
+        // sent in the confirm envelope for tripwire + contacts.chain_tip
+        // alignment.
+        let sender_bearer_leaves = match staged_bearer.as_ref() {
+            None => None,
+            Some((staged, _)) => {
+                let before = sim_outcome
+                    .transition
+                    .write_at(&staged.anchor_leaf.key)
+                    .and_then(|write| write.pre)
+                    .ok_or_else(|| {
+                        DsmError::state_machine(
+                            "offline-bearer: the simulation did not move the anchor-state leaf (fail closed)",
+                        )
+                    })?;
+                Some(dsm::verification::receipt_verification::BearerLeaves {
+                    bundle: staged.pin.bundle,
+                    anchor_before: before,
+                    anchor_after: staged.anchor_leaf.new_value,
+                })
+            }
+        };
+        let unsigned_receipt_bytes = crate::sdk::receipts::build_bilateral_receipt(
+            self.device_id,
+            session.counterparty_device_id,
+            &sim_outcome,
+            sender_bearer_leaves,
+            &local_device_tree_commitment()?,
+        )?;
+
         // v2 producer phase 2: drive the appliance PREPARE(t, r_R, R_i, R_{i+1}) → COMMIT → EMIT →
         // FINALIZE with the REAL device roots the simulation just produced, and attach Π_i/Π_{i+1}
         // (the anchor-state inclusion proofs from the same simulation) to the release package. The
@@ -2512,33 +2548,6 @@ impl BilateralBleHandler {
             .as_ref()
             .map(|art| self.build_anchor_disclosure(&art.pin, &session.operation))
             .transpose()?;
-        // Override the receipt tips: SMT stores the asymmetric (A-side)
-        // chain tips, so the receipt must carry those to satisfy §4.3
-        // inclusion-proof acceptance.
-        let parent_tip_receipt = sim_outcome.smt_proofs.parent_proof.value.ok_or_else(|| {
-            DsmError::invalid_operation(
-                "send_bilateral_confirm: the advance's relationship path carries no parent tip",
-            )
-        })?;
-        let child_tip_receipt = sim_outcome.new_chain_state.compute_chain_tip();
-
-        // 6. Build stitched receipt with real SMT roots + proofs (§4.2).
-        // Tips are A-side asymmetric (what T_A stores + what the inclusion
-        // proofs prove inclusion of). The symmetric `h_n_plus_1` is still
-        // sent over the wire in the confirm envelope for tripwire +
-        // contacts.chain_tip alignment.
-        let unsigned_receipt_bytes = crate::sdk::receipts::build_bilateral_receipt_with_smt(
-            self.device_id,
-            session.counterparty_device_id,
-            parent_tip_receipt,
-            child_tip_receipt,
-            pre_root,
-            sender_smt_root,
-            &sim_outcome.smt_proofs.parent_proof,
-            &local_device_tree_commitment()?,
-            pre_entropy,
-        )?;
-
         // 6b. Per-step EK signing (whitepaper §11.1). Sign the receipt
         // commitment with a freshly-derived per-step EK, generate the cert
         // chaining it back to AK, and include the Kyber ciphertext for
@@ -2553,7 +2562,7 @@ impl BilateralBleHandler {
             &ak,
             unsigned_receipt_bytes,
             &session.counterparty_device_id,
-            parent_tip_receipt,
+            sim_outcome.relationship_pair().0,
             commitment_hash, // bilateral commitment IS the precommit for this step
             BilateralSide::A,
         )?;
@@ -2725,6 +2734,42 @@ impl BilateralBleHandler {
     /// matching disclosure is a no-op; a DIFFERING anchor is rejected and the pinned one kept
     /// (silent substitution never succeeds via a transfer). Admission is a memory of what to
     /// verify — it never implies acceptance. Malformed disclosures are ignored fail-closed.
+    /// The anchor bundle `B` this device holds for `sender`: its pinned one,
+    /// or on the first bearer transfer the one this confirm discloses and a
+    /// verified contact's pin would admit. Pure: the pin is written only by
+    /// [`Self::admit_anchor_disclosure`], after the confirm is checked.
+    async fn sender_anchor_bundle(
+        &self,
+        sender: [u8; 32],
+        confirm_request: &generated::BilateralConfirmRequest,
+    ) -> Result<[u8; 32], DsmError> {
+        let store = crate::bridge::anchor_enrollment_store().ok_or_else(|| {
+            DsmError::state_machine("offline-bearer confirm: no anchor enrollment store installed")
+        })?;
+        if let Some(existing) = store.get(&sender) {
+            return Ok(existing.pin.bundle);
+        }
+        let contact_verified = {
+            let mgr = self.bilateral_tx_manager.read().await;
+            mgr.has_verified_contact(&sender)
+        };
+        let disclosure = confirm_request.anchor_disclosure.as_ref().ok_or_else(|| {
+            DsmError::invalid_operation(
+                "offline-bearer confirm: the sender's anchor is not pinned and this confirm discloses none",
+            )
+        })?;
+        if !contact_verified {
+            return Err(DsmError::invalid_operation(
+                "offline-bearer confirm: an anchor disclosure is admitted only for a verified contact",
+            ));
+        }
+        <[u8; 32]>::try_from(disclosure.bundle.as_slice()).map_err(|_| {
+            DsmError::invalid_operation(
+                "offline-bearer confirm: the disclosed bundle is not 32 bytes",
+            )
+        })
+    }
+
     async fn admit_anchor_disclosure(
         &self,
         sender_device_id: [u8; 32],
@@ -2926,11 +2971,11 @@ impl BilateralBleHandler {
         // Core decides on the ack: it is the receiver's counter-signed receipt,
         // verified against the receiver's pinned identity, the Device Tree
         // commitment kept for it and its EK chain head on this relationship.
-        let counterparty_device_id = {
+        let (counterparty_device_id, step_operation) = {
             let sessions = self.sessions.sessions.lock().await;
             sessions
                 .get(&commitment_hash)
-                .map(|s| s.counterparty_device_id)
+                .map(|s| (s.counterparty_device_id, s.operation.clone()))
         }
         .ok_or_else(|| {
             DsmError::invalid_operation(format!(
@@ -2987,6 +3032,7 @@ impl BilateralBleHandler {
                 sender_device_id: self.device_id,
                 receiver_device_tree_root: receiver_device_tree,
                 receiver_chain_head: receiver_chain_head.as_deref(),
+                operation: &step_operation,
             },
             &dsm::bilateral::offline::PinnedPeer {
                 device_id: counterparty_device_id,
@@ -3172,6 +3218,34 @@ impl BilateralBleHandler {
                 None::<std::io::Error>,
             )
         })?;
+        // An offline-bearer step's receipt moves the sender's anchor-state
+        // leaf; its values are derived here from the release and this
+        // device's own challenge, under the bundle it pins (or is admitting)
+        // for the sender — before the receipt is checked, which needs them.
+        let sender_bearer_leaves =
+            if dsm::core::bilateral_transaction_manager::operation_requires_offline_bearer(
+                &session.operation,
+            ) {
+                let receiver_challenge = session.receiver_challenge.ok_or_else(|| {
+                    DsmError::invalid_operation(
+                    "offline-bearer confirm: this session holds no receiver challenge r_R — the \
+                     prepare response that issues it was never recorded",
+                )
+                })?;
+                let bundle = self
+                    .sender_anchor_bundle(session.counterparty_device_id, &confirm_request)
+                    .await?;
+                Some(
+                    crate::bluetooth::anchor_accept::bearer_leaves_of_release(
+                        &confirm_request.offline_release,
+                        &bundle,
+                        &receiver_challenge,
+                    )
+                    .map_err(|r| r.into_dsm_error())?,
+                )
+            } else {
+                None
+            };
         let verified = dsm::bilateral::offline::decide_confirm(
             dsm::bilateral::offline::ConfirmClaims {
                 signature: &confirm_request.sender_signature,
@@ -3189,6 +3263,7 @@ impl BilateralBleHandler {
                 receiver_device_id: self.device_id,
                 sender_device_tree_root: sender_device_tree,
                 sender_chain_head: sender_chain_head.as_deref(),
+                bearer: sender_bearer_leaves,
             },
             &dsm::bilateral::offline::PinnedPeer {
                 device_id: session.counterparty_device_id,
@@ -3394,21 +3469,15 @@ impl BilateralBleHandler {
         );
         let signed: std::sync::Mutex<Option<SignedReceipt>> = std::sync::Mutex::new(None);
         let sign_step = |o: &dsm::types::device_state::AdvanceOutcome| -> Result<(), DsmError> {
-            let parent_tip = o.smt_proofs.parent_proof.value.ok_or_else(|| {
-                DsmError::invalid_operation(
-                    "receiver confirm: the advance's relationship path carries no parent tip",
-                )
-            })?;
-            let unsigned_receipt_bytes = crate::sdk::receipts::build_bilateral_receipt_with_smt(
+            // The receiver's own step credits it: its receipt writes the
+            // relationship leaf only.
+            let parent_tip = o.relationship_pair().0;
+            let unsigned_receipt_bytes = crate::sdk::receipts::build_bilateral_receipt(
                 self.device_id,
                 counterparty_device_id,
-                parent_tip,
-                o.new_chain_state.compute_chain_tip(),
-                o.smt_proofs.pre_root,
-                o.child_r_a,
-                &o.smt_proofs.parent_proof,
+                o,
+                None,
                 &device_tree_commitment,
-                o.transition_entropy(),
             )?;
             // §11.1 receiver counter-sign: B-side per-step EK, cert, signature
             // and Kyber ciphertext on this device's copy of the receipt.
@@ -4837,70 +4906,36 @@ mod tests {
         crate::envelope::to_canonical_bytes(&envelope)
     }
 
-    /// The receipt of `devid_a`'s first step toward `devid_b`, built from a
-    /// real Core advance: the one relationship path, both roots, and the
-    /// sender's single-device Device Tree proof.
-    fn first_step_receipt(
-        devid_a: [u8; 32],
-        devid_b: [u8; 32],
-    ) -> dsm::types::receipt_types::StitchedReceiptV2 {
-        let head =
-            dsm::types::device_state::DeviceState::new([0x76u8; 32], devid_a, vec![0x77u8; 64])
-                .establish_relationship(devid_b)
-                .expect("establish");
-        let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(&devid_a, &devid_b);
-        let outcome = head
-            .advance(rel_key, devid_b, Operation::Noop, &[], None, None)
-            .expect("the first step");
-        let parent_tip = outcome
-            .smt_proofs
-            .parent_proof
-            .value
-            .expect("the path carries the established leaf");
-        let dev_proof = dsm::common::device_tree::DeviceTree::single(devid_a)
-            .proof(&devid_a)
-            .expect("device proof");
-        let mut receipt = dsm::types::receipt_types::StitchedReceiptV2::new(
-            [0x76u8; 32],
-            devid_a,
-            devid_b,
-            parent_tip,
-            outcome.new_chain_state.compute_chain_tip(),
-            outcome.smt_proofs.pre_root,
-            outcome.child_r_a,
-            outcome.smt_proofs.parent_proof.to_bytes(),
-            dev_proof.to_bytes(),
-        );
-        receipt.set_transition_entropy(outcome.transition_entropy());
-        receipt
-    }
-
     /// The receiver checks the confirm's stitched receipt — that it is this
-    /// session's sender's receipt toward this device, and that its one
-    /// relationship path and Device Tree proof hold against the commitment
-    /// kept for the sender — before the per-step EK check and before
-    /// anything commits. A holding receipt reaches the EK check, which
-    /// refuses it for carrying no A-side EK. MUTATION CONTROL: deleting the
-    /// `verify_receipt_state` call lets the bent receipt through to the EK
-    /// refusal; deleting the device binding does the same for the foreign
-    /// receipt — either turns this red.
+    /// session's sender's receipt toward this device, and that its writes and
+    /// Device Tree proof hold against the commitment kept for the sender —
+    /// before the per-step EK check and before anything commits. A holding
+    /// receipt reaches the EK check, which refuses it for carrying no A-side
+    /// EK. MUTATION CONTROL: deleting the `verify_receipt_state` call lets the
+    /// bent receipt through to the EK refusal; deleting the device binding
+    /// does the same for the foreign receipt — either turns this red.
     #[tokio::test]
     #[serial]
     async fn a_confirm_whose_receipt_does_not_hold_is_refused_before_the_ek_check() {
+        use crate::test_support::receipts::{transfer_step, Party};
+
         init_test_db();
-        let receiver = [0x71u8; 32];
-        let sender = [0x72u8; 32];
-        let (manager, handler) =
-            make_test_handler(receiver, [0x73u8; 32], b"confirm-receipt-gate-receiver");
-        let sender_keys = SignatureKeyPair::generate_from_entropy(b"confirm-receipt-gate-sender")
-            .expect("sender keys");
+        let sender = Party::from_seed(0x72);
+        let receiver = Party::from_seed(0x71);
+        let transfer = transfer_step(&sender, &receiver, 7);
+        let (sender_id, receiver_id) = (sender.device_id(), receiver.device_id());
+        let (manager, handler) = make_test_handler(
+            receiver_id,
+            receiver.genesis(),
+            b"confirm-receipt-gate-receiver",
+        );
         {
             let mut mgr = manager.write().await;
             mgr.add_verified_contact(dsm::types::contact_types::DsmVerifiedContact {
                 alias: "sender".to_string(),
-                device_id: sender,
-                genesis_hash: [0x74u8; 32],
-                public_key: sender_keys.public_key().to_vec(),
+                device_id: sender_id,
+                genesis_hash: sender.genesis(),
+                public_key: sender.signing_public_key().to_vec(),
                 chain_tip: None,
                 genesis_verified_online: true,
                 verifying_storage_nodes: vec![],
@@ -4908,14 +4943,18 @@ mod tests {
             })
             .expect("add contact");
         }
+        let held_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+            &receiver_id,
+            &sender_id,
+        );
         crate::storage::client_db::store_contact(&crate::storage::client_db::ContactRecord {
             contact_id: "sender".to_string(),
-            device_id: sender.to_vec(),
+            device_id: sender_id.to_vec(),
             alias: "sender".to_string(),
-            genesis_hash: vec![0x74u8; 32],
-            public_key: sender_keys.public_key().to_vec(),
-            kyber_public_key: vec![0x4B; 1184],
-            current_chain_tip: Some(vec![0x70; 32]),
+            genesis_hash: sender.genesis().to_vec(),
+            public_key: sender.signing_public_key().to_vec(),
+            kyber_public_key: sender.kyber_public_key().to_vec(),
+            current_chain_tip: Some(held_tip.to_vec()),
             verified: true,
             verification_proof: None,
             metadata: std::collections::HashMap::new(),
@@ -4926,14 +4965,19 @@ mod tests {
         })
         .expect("persist the contact and its Device Tree root");
 
-        let commitment_hash = [0x78u8; 32];
+        let commitment_hash =
+            dsm::core::bilateral_transaction_manager::BilateralPreCommitment::new(
+                held_tip,
+                transfer.operation.clone(),
+            )
+            .bilateral_commitment_hash;
         handler
             .test_insert_session(BilateralBleSession {
                 commitment_hash,
                 local_commitment_hash: None,
-                counterparty_device_id: sender,
-                counterparty_genesis_hash: Some([0x74u8; 32]),
-                operation: Operation::Noop,
+                counterparty_device_id: sender_id,
+                counterparty_genesis_hash: Some(sender.genesis()),
+                operation: transfer.operation.clone(),
                 phase: BilateralPhase::Accepted,
                 local_signature: None,
                 counterparty_signature: None,
@@ -4950,10 +4994,12 @@ mod tests {
             .await;
         let mut signed = b"DSM/bilateral-sign\0".to_vec();
         signed.extend_from_slice(&commitment_hash);
-        let sender_signature = sender_keys.sign(&signed).expect("sigma_A");
+        let sender_signature =
+            dsm::crypto::sphincs::sphincs_sign(sender.signing_secret_key(), &signed)
+                .expect("sigma_A");
         let refusal = |receipt: &dsm::types::receipt_types::StitchedReceiptV2| {
             confirm_envelope(
-                sender,
+                sender_id,
                 &generated::BilateralConfirmRequest {
                     commitment_hash: Some(generated::Hash32 {
                         v: commitment_hash.to_vec(),
@@ -4965,7 +5011,7 @@ mod tests {
             )
         };
 
-        let holding = first_step_receipt(sender, receiver);
+        let holding = transfer.receipt.clone();
         let msg = handler
             .handle_confirm_request(&refusal(&holding))
             .await
@@ -4977,18 +5023,18 @@ mod tests {
         );
 
         let mut bent = holding.clone();
-        bent.child_root[0] ^= 0x01;
+        bent.child_root = transfer.outcome.transition.pre_root();
         let msg = handler
             .handle_confirm_request(&refusal(&bent))
             .await
-            .expect_err("a receipt whose child root is not its path's fold is refused")
+            .expect_err("a receipt whose child root is not its writes' fold is refused")
             .to_string();
         assert!(
-            msg.contains("is not the child root"),
+            msg.contains("do not fold from its parent root to its child root"),
             "the receipt's state rules refuse it, got: {msg}"
         );
 
-        let foreign = first_step_receipt([0x79u8; 32], receiver);
+        let foreign = transfer_step(&Party::from_seed(0x79), &receiver, 7).receipt;
         let msg = handler
             .handle_confirm_request(&refusal(&foreign))
             .await

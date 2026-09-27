@@ -10,8 +10,8 @@
 //! - Canonical Protobuf encoding (deterministic, per whitepaper Sec. 4.2.1)
 //! - Domain-separated BLAKE3 hashing
 //! - Dual SPHINCS+ signatures (both parties)
-//! - One relationship path (old leaf under the pre-state root; the same path
-//!   folds the new leaf to the post-state root) and the device binding
+//! - The step's write set: every leaf the step writes, with its path against
+//!   the pre-state root, folding to the post-state root; and the device binding
 //! - Per-step receipt response through EK derivation and cert chaining
 
 use crate::common::domain_tags::TAG_RECEIPT_COMMIT;
@@ -28,12 +28,13 @@ use std::collections::HashMap;
 /// 5. child_tip (32B)
 /// 6. parent_root (32B)
 /// 7. child_root (32B)
-/// 8. rel_proof_parent (variable bstr): the one relationship path
 /// 10. dev_proof (variable bstr)
 /// 21. transition_entropy (32B)
+/// 22. step_writes (`StepWriteSet`): every leaf the step writes
 ///
-/// Fields 9 and 11 are reserved: a child inclusion proof and a separate replace
-/// witness were second encodings of the path field 8 carries.
+/// Fields 8, 9 and 11 are reserved: 8 was one relationship path, which could
+/// not prove a step that writes more than the relationship leaf; 9 and 11 were
+/// second encodings of it.
 #[derive(Clone, Debug)]
 pub struct StitchedReceiptV2 {
     /// Genesis hash (32 bytes)
@@ -68,11 +69,11 @@ pub struct StitchedReceiptV2 {
     /// name. Wire field 21, exactly 32 bytes, required.
     pub transition_entropy: [u8; 32],
 
-    /// The relationship path at `compute_smt_key(devid_a, devid_b)`, in the
-    /// tree's own encoding (`SmtInclusionProof::to_bytes`): it authenticates
-    /// `parent_tip` under `parent_root`, and the same siblings folded with
-    /// `child_tip` are `child_root`.
-    pub rel_proof_parent: Vec<u8>,
+    /// Every leaf the step writes, ordered by derived key, each with its path
+    /// against `parent_root` in the one canonical encoding. The verifier
+    /// derives each leaf's key and values; folded together they move
+    /// `parent_root` to `child_root`. Wire field 22, required.
+    pub step_writes: Vec<ReceiptWrite>,
 
     /// Inclusion proof for devid_a in Device Tree root R_G (variable length)
     pub dev_proof: Vec<u8>,
@@ -127,6 +128,81 @@ pub struct StitchedReceiptV2 {
     pub kyber_ct_b: Vec<u8>,
 }
 
+/// Which leaf one of a receipt's writes is, and the one witness a verifier
+/// cannot derive: the offline allocation's pre-state preimage (its leaf is an
+/// opaque hash of `(amount, sequence)`). Every other key and value is derived
+/// from inputs the verifier validated independently.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReceiptLeaf {
+    /// The relationship leaf: `parent_tip` before, `child_tip` after.
+    Relationship,
+    /// The anchor-state leaf of the pinned bundle: before and after from the
+    /// release's signed counter pair and frontiers.
+    AnchorState,
+    /// The offline allocation leaf, as it stood before the step.
+    OfflineAllocation { pre_amount: u64, pre_sequence: u64 },
+}
+
+/// One leaf a receipt's step writes: which leaf, and its path against the
+/// receipt's `parent_root` in the one canonical encoding.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReceiptWrite {
+    pub leaf: ReceiptLeaf,
+    pub path: crate::merkle::smt_path::EncodedPath,
+}
+
+impl ReceiptWrite {
+    fn to_proto(&self) -> crate::types::proto::StepWrite {
+        use crate::types::proto::{
+            step_write::Leaf, StepWriteAnchorState, StepWriteOfflineAllocation,
+            StepWriteRelationship,
+        };
+        crate::types::proto::StepWrite {
+            leaf: Some(match self.leaf {
+                ReceiptLeaf::Relationship => Leaf::Relationship(StepWriteRelationship {}),
+                ReceiptLeaf::AnchorState => Leaf::AnchorState(StepWriteAnchorState {}),
+                ReceiptLeaf::OfflineAllocation {
+                    pre_amount,
+                    pre_sequence,
+                } => Leaf::OfflineAllocation(StepWriteOfflineAllocation {
+                    pre_amount,
+                    pre_sequence,
+                }),
+            }),
+            path_heights: self.path.explicit_heights.to_vec(),
+            path_siblings: self.path.siblings.clone(),
+        }
+    }
+
+    fn from_proto(w: crate::types::proto::StepWrite) -> Result<Self, DsmError> {
+        use crate::merkle::smt_path::{decode, EncodedPath};
+        use crate::merkle::sparse_merkle_tree::DeviceSmtHashes;
+        use crate::types::proto::step_write::Leaf;
+        let leaf = match w.leaf {
+            None => return Err(DsmError::invalid_operation("a receipt write names no leaf")),
+            Some(Leaf::Relationship(_)) => ReceiptLeaf::Relationship,
+            Some(Leaf::AnchorState(_)) => ReceiptLeaf::AnchorState,
+            Some(Leaf::OfflineAllocation(a)) => ReceiptLeaf::OfflineAllocation {
+                pre_amount: a.pre_amount,
+                pre_sequence: a.pre_sequence,
+            },
+        };
+        // Only the one canonical encoding of a device-tree path is a path.
+        decode::<DeviceSmtHashes>(&w.path_heights, &w.path_siblings)
+            .map_err(|e| DsmError::invalid_operation(format!("a receipt write's path: {e}")))?;
+        let explicit_heights = w.path_heights.as_slice().try_into().map_err(|_| {
+            DsmError::invalid_operation("a receipt write's path height set is not 32 bytes")
+        })?;
+        Ok(Self {
+            leaf,
+            path: EncodedPath {
+                explicit_heights,
+                siblings: w.path_siblings,
+            },
+        })
+    }
+}
+
 /// Per-field bound for a strict length-delimited wire message.
 #[derive(Clone, Copy)]
 enum FieldLimit {
@@ -139,10 +215,11 @@ enum FieldLimit {
 fn receipt_commit_field_limit(tag: u32) -> Option<FieldLimit> {
     match tag {
         1..=7 => Some(FieldLimit::Fixed(32)),
-        8..=11 => Some(FieldLimit::Max(128 * 1024)),
+        10 => Some(FieldLimit::Max(128 * 1024)),
         12..=17 => Some(FieldLimit::Max(65_535)),
         18..=19 => Some(FieldLimit::Max(2_048)),
         21 => Some(FieldLimit::Fixed(32)),
+        22 => Some(FieldLimit::Max(128 * 1024)),
         _ => None,
     }
 }
@@ -309,9 +386,9 @@ fn validate_receipt_commit_wire(bytes: &[u8]) -> Result<(), DsmError> {
     validate_length_delimited_wire(
         bytes,
         "receipt wire",
-        21,
+        22,
         receipt_commit_field_limit,
-        |tag| (1..=7).contains(&tag) || tag == 21,
+        |tag| (1..=7).contains(&tag) || tag == 21 || tag == 22,
     )
 }
 
@@ -483,7 +560,8 @@ impl StitchedReceiptV2 {
         child_tip: [u8; 32],
         parent_root: [u8; 32],
         child_root: [u8; 32],
-        rel_proof_parent: Vec<u8>,
+        transition_entropy: [u8; 32],
+        step_writes: Vec<ReceiptWrite>,
         dev_proof: Vec<u8>,
     ) -> Self {
         Self {
@@ -494,8 +572,8 @@ impl StitchedReceiptV2 {
             child_tip,
             parent_root,
             child_root,
-            transition_entropy: [0u8; 32],
-            rel_proof_parent,
+            transition_entropy,
+            step_writes,
             dev_proof,
             sig_a: Vec::new(),
             sig_b: Vec::new(),
@@ -508,8 +586,69 @@ impl StitchedReceiptV2 {
         }
     }
 
+    /// The receipt of one step, from the advance that made it — the one
+    /// producer. It proves the step's whole write set: every leaf the advance
+    /// wrote, each with its path against the step's pre-root
+    /// ([`AdvanceOutcome::transition`]). `bearer` is present exactly for the
+    /// author's own offline-bearer spend: its anchor-state leaves under its
+    /// pinned bundle, as the step's release names them.
+    ///
+    /// Refused when the step writes a leaf no receipt names, or when the
+    /// receipt fails
+    /// [`verify_receipt_state`](crate::verification::receipt_verification::verify_receipt_state)
+    /// against `device_tree_commitment`, the author's authenticated `R_G`: an
+    /// author checks the state rules before anything is signed or sent.
+    ///
+    /// [`AdvanceOutcome::transition`]: crate::types::device_state::AdvanceOutcome::transition
+    pub fn of_step(
+        genesis: [u8; 32],
+        devid_a: [u8; 32],
+        devid_b: [u8; 32],
+        outcome: &crate::types::device_state::AdvanceOutcome,
+        bearer: Option<crate::verification::receipt_verification::BearerLeaves>,
+        device_tree_commitment: &DeviceTreeAcceptanceCommitment,
+    ) -> Result<Self, DsmError> {
+        use crate::core::bilateral_transaction_manager::{anchor_state_leaf_key, compute_smt_key};
+
+        let relationship_key = compute_smt_key(&devid_a, &devid_b);
+        let anchor_key = bearer.map(|b| anchor_state_leaf_key(&b.bundle));
+        let step_writes = outcome
+            .transition
+            .receipt_writes(&relationship_key, anchor_key.as_ref())?;
+        let (parent_tip, child_tip) = outcome.relationship_pair();
+        let dev_proof = crate::common::device_tree::DeviceTree::single(devid_a)
+            .proof(&devid_a)
+            .ok_or_else(|| {
+                DsmError::invalid_operation(
+                    "receipt: the single-device tree has no path for the author",
+                )
+            })?;
+        let receipt = Self::new(
+            genesis,
+            devid_a,
+            devid_b,
+            parent_tip,
+            child_tip,
+            outcome.transition.pre_root(),
+            outcome.transition.post_root(),
+            outcome.transition_entropy(),
+            step_writes,
+            dev_proof.to_bytes(),
+        );
+        crate::verification::receipt_verification::verify_receipt_state(
+            &receipt,
+            &crate::verification::receipt_verification::ReceiptStateContext {
+                device_tree_commitment,
+                author_genesis: genesis,
+                operation: &outcome.new_chain_state.operation,
+                bearer,
+            },
+        )?;
+        Ok(receipt)
+    }
+
     /// Convert to prost-generated `ReceiptCommit` (canonical form, no sigs):
-    /// fields 1–8, 10 and 21. Signatures (12, 13), ephemeral-key certs
+    /// fields 1–7, 10, 21 and 22. Signatures (12, 13), ephemeral-key certs
     /// (14, 15), EK pubkeys (16, 17), Kyber cts (18, 19) and the fork-aware
     /// finalization witness (20) live in the envelope only and are explicitly
     /// absent here.
@@ -523,7 +662,13 @@ impl StitchedReceiptV2 {
             parent_root: self.parent_root.to_vec(),
             child_root: self.child_root.to_vec(),
             transition_entropy: self.transition_entropy.to_vec(),
-            rel_proof_parent: self.rel_proof_parent.clone(),
+            step_writes: Some(crate::types::proto::StepWriteSet {
+                writes: self
+                    .step_writes
+                    .iter()
+                    .map(ReceiptWrite::to_proto)
+                    .collect(),
+            }),
             dev_proof: self.dev_proof.clone(),
             sig_a: vec![],
             sig_b: vec![],
@@ -553,16 +698,20 @@ impl StitchedReceiptV2 {
     /// Construct from prost-generated `ReceiptCommit`.
     fn from_proto(rc: crate::types::proto::ReceiptCommit) -> Result<Self, DsmError> {
         let copy32 = |src: &[u8], name: &str| -> Result<[u8; 32], DsmError> {
-            if src.len() != 32 {
-                return Err(DsmError::invalid_operation(format!(
+            <[u8; 32]>::try_from(src).map_err(|_| {
+                DsmError::invalid_operation(format!(
                     "receipt field {name}: expected 32 bytes, got {}",
                     src.len()
-                )));
-            }
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(src);
-            Ok(arr)
+                ))
+            })
         };
+        let step_writes = rc
+            .step_writes
+            .ok_or_else(|| DsmError::invalid_operation("receipt field step_writes is absent"))?
+            .writes
+            .into_iter()
+            .map(ReceiptWrite::from_proto)
+            .collect::<Result<Vec<_>, _>>()?;
 
         let mut receipt = Self::new(
             copy32(&rc.genesis, "genesis")?,
@@ -572,10 +721,10 @@ impl StitchedReceiptV2 {
             copy32(&rc.child_tip, "child_tip")?,
             copy32(&rc.parent_root, "parent_root")?,
             copy32(&rc.child_root, "child_root")?,
-            rc.rel_proof_parent,
+            copy32(&rc.transition_entropy, "transition_entropy")?,
+            step_writes,
             rc.dev_proof,
         );
-        receipt.set_transition_entropy(copy32(&rc.transition_entropy, "transition_entropy")?);
         if !rc.sig_a.is_empty() {
             receipt.add_sig_a(rc.sig_a);
         }
@@ -653,13 +802,6 @@ impl StitchedReceiptV2 {
         // Domain-separated BLAKE3-256: BLAKE3("DSM/receipt-commit\0" || canonical_protobuf_bytes)
         let hash = crate::crypto::blake3::domain_hash(TAG_RECEIPT_COMMIT, &protobuf_bytes);
         Ok(*hash.as_bytes())
-    }
-
-    /// Set the sender's transition entropy (canonical field 21). The producer
-    /// takes it from `AdvanceOutcome::transition_entropy()`; a receipt without
-    /// it does not pass wire validation.
-    pub fn set_transition_entropy(&mut self, entropy: [u8; 32]) {
-        self.transition_entropy = entropy;
     }
 
     /// Add signature from party A
@@ -800,22 +942,6 @@ impl StitchedReceiptV2 {
     pub fn id_b(&self) -> &[u8; 32] {
         &self.devid_b
     }
-
-    /// Extract sequence number from parent_tip hash
-    /// In the canonical format, sequence is encoded in the tip hash chain
-    pub fn t(&self) -> u64 {
-        // The sequence number is implicitly in the tip hash chain
-        u64::from_le_bytes([
-            self.parent_tip[24],
-            self.parent_tip[25],
-            self.parent_tip[26],
-            self.parent_tip[27],
-            self.parent_tip[28],
-            self.parent_tip[29],
-            self.parent_tip[30],
-            self.parent_tip[31],
-        ])
-    }
 }
 
 /// Receipt verification context
@@ -878,6 +1004,16 @@ pub struct ReceiptVerificationContext {
     /// Per-relationship cert chain head for party B.
     /// Same semantics as `chain_head_pubkey_a`.
     pub chain_head_pubkey_b: Option<Vec<u8>>,
+
+    /// The genesis the receipt's author (`devid_a`) is pinned under.
+    pub author_genesis: [u8; 32],
+
+    /// The operation the step carries: it decides which leaves the step
+    /// writes, and the child tip is recomputed from it.
+    pub operation: crate::types::operations::Operation,
+
+    /// For the author's own offline-bearer spend, its anchor-state leaves.
+    pub bearer: Option<crate::verification::receipt_verification::BearerLeaves>,
 }
 
 impl ReceiptVerificationContext {
@@ -886,6 +1022,8 @@ impl ReceiptVerificationContext {
         expected_parent_root: [u8; 32],
         pubkey_a: Vec<u8>,
         pubkey_b: Vec<u8>,
+        author_genesis: [u8; 32],
+        operation: crate::types::operations::Operation,
     ) -> Self {
         Self {
             device_tree_commitment: device_tree_commitment.into(),
@@ -894,6 +1032,9 @@ impl ReceiptVerificationContext {
             pubkey_b,
             chain_head_pubkey_a: None,
             chain_head_pubkey_b: None,
+            author_genesis,
+            operation,
+            bearer: None,
         }
     }
 
@@ -1003,6 +1144,7 @@ impl ParentConsumptionTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::step_fixture::{credit_step, transfer_step, Party, Step};
 
     /// TRANSPORT USES `to_full_protobuf`. COMMITMENT USES `to_canonical_protobuf`.
     ///
@@ -1028,21 +1170,9 @@ mod tests {
     /// bytes (`with_countersign_b`).
     #[test]
     fn canonical_encoding_erases_countersignature_evidence_that_full_encoding_keeps() {
-        let mut receipt = StitchedReceiptV2::new(
-            [0x00; 32],
-            [0x11; 32],
-            [0x22; 32],
-            [0x33; 32],
-            [0x44; 32],
-            [0x55; 32],
-            [0x66; 32],
-            Vec::new(),
-            Vec::new(),
-        );
-        receipt.ek_pk_b = vec![0xE1u8; 64];
-        receipt.ek_cert_b = vec![0xE2u8; 128];
-        receipt.sig_b = vec![0xE3u8; 128];
-        receipt.kyber_ct_b = vec![0xE4u8; 1088];
+        let receipt = a_side()
+            .with_countersign_b(countersign_b().0)
+            .expect("the receiver countersigns");
 
         let canonical = receipt.to_canonical_protobuf().expect("canonical");
         let full = receipt.to_full_protobuf().expect("full");
@@ -1079,92 +1209,119 @@ mod tests {
         );
     }
 
+    /// Two wallets, the sender's first transfer to the receiver, the
+    /// receiver's credit of it, and a second transfer from the sender's same
+    /// head (a fork of the first). Derived once: SPHINCS+ keygen and signing
+    /// are slow.
+    struct World {
+        sender: Party,
+        receiver: Party,
+        transfer: Step,
+        credit: Step,
+        fork: Step,
+    }
+
+    fn world() -> &'static World {
+        static WORLD: std::sync::OnceLock<World> = std::sync::OnceLock::new();
+        WORLD.get_or_init(|| {
+            let sender = Party::from_seed(b"receipt codec sender wallet seed");
+            let receiver = Party::from_seed(b"receipt codec receiver wallet seed");
+            let transfer = transfer_step(&sender, &receiver, 7);
+            let credit = credit_step(&receiver, &sender, &transfer.operation);
+            let fork = transfer_step(&sender, &receiver, 8);
+            World {
+                sender,
+                receiver,
+                transfer,
+                credit,
+                fork,
+            }
+        })
+    }
+
+    /// The transfer's receipt as the online sender ships it: answered with
+    /// its per-step EK, bound to the receipt's own commitment.
+    fn a_side() -> StitchedReceiptV2 {
+        let w = world();
+        let mut receipt = w.transfer.receipt.clone();
+        let commitment = receipt.compute_commitment().expect("commitment");
+        let a = w.sender.answer(
+            &w.receiver,
+            &receipt.parent_tip,
+            &w.transfer.c_pre,
+            &compute_receipt_challenge_response_target(&commitment, &commitment),
+        );
+        receipt.add_sig_a(a.sig);
+        receipt.set_ek_cert_a(a.ek_cert);
+        receipt.set_ek_pk_a(a.ek_pk);
+        receipt.set_kyber_ct_a(a.kyber_ct);
+        receipt
+    }
+
+    /// The receiver's countersignature of the transfer's receipt over its
+    /// own canonical pair (its credit step's tips), and that pair.
+    fn countersign_b() -> (CountersignB, ([u8; 32], [u8; 32])) {
+        let w = world();
+        let commitment = w.transfer.receipt.compute_commitment().expect("commitment");
+        let (b_parent, b_child) = w.credit.outcome.relationship_pair();
+        let b = w.receiver.answer(
+            &w.sender,
+            &b_parent,
+            &w.transfer.c_pre,
+            &compute_receipt_b_canonical_target(&commitment, &commitment, &b_parent, &b_child),
+        );
+        (
+            CountersignB {
+                sig_b: b.sig,
+                ek_cert_b: b.ek_cert,
+                ek_pk_b: b.ek_pk,
+                kyber_ct_b: b.kyber_ct,
+            },
+            (b_parent, b_child),
+        )
+    }
+
+    /// The A side's evidence digest: its role-separated content address.
+    fn evidence_digest_a(a: &StitchedReceiptV2) -> [u8; 32] {
+        crate::crypto::blake3::domain_hash_bytes(
+            crate::common::domain_tags::TAG_DSM_RECEIPT_EVIDENCE_A,
+            &a.to_full_protobuf().expect("encode"),
+        )
+    }
+
+    /// The receiver's countersign delta on the wire: the A side's commitment
+    /// and evidence digest, the countersignature, and the receiver's pair.
+    fn delta_wire() -> Vec<u8> {
+        use prost::Message;
+        let a = a_side();
+        let (b, (b_parent_tip, b_child_tip)) = countersign_b();
+        crate::types::proto::ReceiptCountersignB {
+            commitment: a.compute_commitment().expect("commitment").to_vec(),
+            receipt_evidence_digest_a: evidence_digest_a(&a).to_vec(),
+            sig_b: b.sig_b,
+            ek_cert_b: b.ek_cert_b,
+            ek_pk_b: b.ek_pk_b,
+            kyber_ct_b: b.kyber_ct_b,
+            b_parent_tip: b_parent_tip.to_vec(),
+            b_child_tip: b_child_tip.to_vec(),
+            recipient_economic_release_addr: Vec::new(),
+        }
+        .encode_to_vec()
+    }
+
+    /// A receipt's commitment is a function of the receipt: the same receipt
+    /// commits the same, another step commits otherwise.
     #[test]
     fn test_commitment_hash() {
-        let receipt = StitchedReceiptV2::new(
-            [0x00; 32],
-            [0x11; 32],
-            [0x22; 32],
-            [0x33; 32],
-            [0x44; 32],
-            [0x55; 32],
-            [0x66; 32],
-            vec![],
-            vec![],
-        );
-
-        let commitment = receipt.compute_commitment().unwrap();
-
-        // Should produce a 32-byte hash
-        assert_eq!(commitment.len(), 32);
-
-        // Should be deterministic
-        let commitment2 = receipt.compute_commitment().unwrap();
-        assert_eq!(commitment, commitment2);
-    }
-
-    #[test]
-    fn test_parent_consumption_tracker() {
-        let mut tracker = ParentConsumptionTracker::new();
-
-        let parent = [0xaa; 32];
-        let child1 = [0xbb; 32];
-        let child2 = [0xcc; 32];
-
-        // First consumption should succeed
-        assert!(tracker.try_consume(parent, child1).is_ok());
-
-        // Second consumption with same child (replay) should fail
-        assert!(tracker.try_consume(parent, child1).is_err());
-
-        // Consumption with different child (fork) should fail
-        assert!(tracker.try_consume(parent, child2).is_err());
-
-        // Query
-        assert!(tracker.is_consumed(&parent));
-        assert_eq!(tracker.get_child(&parent), Some(&child1));
-    }
-
-    #[test]
-    fn fork_rejects_duplicate_parent() {
-        let mut tracker = ParentConsumptionTracker::new();
-
-        let parent = [0x01; 32];
-        let child_a = [0x02; 32];
-        let child_b = [0x03; 32];
-
-        // First consume establishes the canonical child for this parent tip
-        tracker
-            .try_consume(parent, child_a)
-            .expect("first consumption must succeed");
-
-        // A different child for the same parent must trip the fork exclusion gate
-        let err = tracker
-            .try_consume(parent, child_b)
-            .expect_err("fork must be rejected deterministically");
-        let msg = format!("{err}");
-        assert!(
-            msg.contains("Fork detected"),
-            "error should explain fork tripwire; got: {msg}"
-        );
-
-        // Ensure original mapping is preserved and no overwrite occurred
-        assert_eq!(tracker.get_child(&parent), Some(&child_a));
+        let w = world();
+        let commitment = w.transfer.receipt.compute_commitment().unwrap();
+        assert_eq!(commitment, w.transfer.receipt.compute_commitment().unwrap());
+        assert_ne!(commitment, w.fork.receipt.compute_commitment().unwrap());
     }
 
     #[test]
     fn test_prost_canonical_roundtrip() {
-        let receipt = StitchedReceiptV2::new(
-            [1u8; 32],
-            [2u8; 32],
-            [3u8; 32],
-            [4u8; 32],
-            [5u8; 32],
-            [6u8; 32],
-            [7u8; 32],
-            vec![8u8; 64],
-            vec![10u8; 16],
-        );
+        let receipt = &world().transfer.receipt;
 
         let canonical = receipt.to_canonical_protobuf().unwrap();
         let decoded = StitchedReceiptV2::from_canonical_protobuf(&canonical).unwrap();
@@ -1175,10 +1332,12 @@ mod tests {
         assert_eq!(decoded.child_tip, receipt.child_tip);
         assert_eq!(decoded.parent_root, receipt.parent_root);
         assert_eq!(decoded.child_root, receipt.child_root);
-        assert_eq!(decoded.rel_proof_parent, receipt.rel_proof_parent);
+        assert_eq!(decoded.transition_entropy, receipt.transition_entropy);
+        assert_eq!(decoded.step_writes, receipt.step_writes);
         assert_eq!(decoded.dev_proof, receipt.dev_proof);
         assert!(decoded.sig_a.is_empty());
         assert!(decoded.sig_b.is_empty());
+        assert_eq!(decoded.to_canonical_protobuf().unwrap(), canonical);
 
         // Commitment stability: encode → decode → re-encode must match
         let commit1 = receipt.compute_commitment().unwrap();
@@ -1188,24 +1347,14 @@ mod tests {
 
     #[test]
     fn test_prost_full_roundtrip_with_sigs() {
-        let mut receipt = StitchedReceiptV2::new(
-            [1u8; 32],
-            [2u8; 32],
-            [3u8; 32],
-            [4u8; 32],
-            [5u8; 32],
-            [6u8; 32],
-            [7u8; 32],
-            vec![8u8; 64],
-            vec![10u8; 16],
-        );
-        receipt.add_sig_a(vec![0xAA; 128]);
-        receipt.add_sig_b(vec![0xBB; 128]);
+        let receipt = a_side()
+            .with_countersign_b(countersign_b().0)
+            .expect("the receiver countersigns");
 
         let full = receipt.to_full_protobuf().unwrap();
         let decoded = StitchedReceiptV2::from_canonical_protobuf(&full).unwrap();
-        assert_eq!(decoded.sig_a, vec![0xAA; 128]);
-        assert_eq!(decoded.sig_b, vec![0xBB; 128]);
+        assert_eq!(decoded.sig_a, receipt.sig_a);
+        assert_eq!(decoded.sig_b, receipt.sig_b);
 
         // Canonical bytes should NOT include sigs
         let canonical = receipt.to_canonical_protobuf().unwrap();
@@ -1222,321 +1371,161 @@ mod tests {
 
     #[test]
     fn receipt_decode_rejects_unknown_field() {
-        let receipt = StitchedReceiptV2::new(
-            [1u8; 32],
-            [2u8; 32],
-            [3u8; 32],
-            [4u8; 32],
-            [5u8; 32],
-            [6u8; 32],
-            [7u8; 32],
-            vec![],
-            vec![],
-        );
-        let mut bytes = receipt.to_canonical_protobuf().unwrap();
+        let mut bytes = world().transfer.receipt.to_canonical_protobuf().unwrap();
         bytes.extend_from_slice(&[0xA2, 0x01, 0x01, 0x00]); // tag 20, len 1
 
         let err = StitchedReceiptV2::from_canonical_protobuf(&bytes).unwrap_err();
-        assert!(err.to_string().contains("unknown field 20"));
+        assert!(err.to_string().contains("unknown field 20"), "{err}");
     }
 
     #[test]
     fn receipt_decode_rejects_duplicate_field() {
-        let receipt = StitchedReceiptV2::new(
-            [1u8; 32],
-            [2u8; 32],
-            [3u8; 32],
-            [4u8; 32],
-            [5u8; 32],
-            [6u8; 32],
-            [7u8; 32],
-            vec![],
-            vec![],
-        );
+        let receipt = &world().transfer.receipt;
         let mut bytes = receipt.to_canonical_protobuf().unwrap();
         bytes.push(0x0A); // tag 1
         bytes.push(0x20); // len 32
-        bytes.extend_from_slice(&[9u8; 32]);
+        bytes.extend_from_slice(&receipt.devid_b);
 
         let err = StitchedReceiptV2::from_canonical_protobuf(&bytes).unwrap_err();
-        assert!(err.to_string().contains("duplicate field 1"));
+        assert!(err.to_string().contains("duplicate field 1"), "{err}");
     }
 
     #[test]
     fn receipt_decode_rejects_bad_fixed_length() {
         let mut bytes = vec![0x0A, 0x1F];
-        bytes.extend_from_slice(&[1u8; 31]);
+        bytes.extend_from_slice(&world().transfer.receipt.genesis[..31]);
 
         let err = StitchedReceiptV2::from_canonical_protobuf(&bytes).unwrap_err();
-        assert!(err.to_string().contains("field 1 must be 32 bytes"));
+        assert!(
+            err.to_string().contains("field 1 must be 32 bytes"),
+            "{err}"
+        );
     }
 
     #[test]
     fn receipt_decode_rejects_non_canonical_varint() {
-        let receipt = StitchedReceiptV2::new(
-            [1u8; 32],
-            [2u8; 32],
-            [3u8; 32],
-            [4u8; 32],
-            [5u8; 32],
-            [6u8; 32],
-            [7u8; 32],
-            vec![],
-            vec![],
-        );
-        let mut bytes = receipt.to_canonical_protobuf().unwrap();
+        let mut bytes = world().transfer.receipt.to_canonical_protobuf().unwrap();
         bytes[1] = 0xA0;
         bytes.insert(2, 0x00);
 
         let err = StitchedReceiptV2::from_canonical_protobuf(&bytes).unwrap_err();
-        assert!(err.to_string().contains("non-canonical field length"));
+        assert!(
+            err.to_string().contains("non-canonical field length"),
+            "{err}"
+        );
     }
 
     #[test]
     fn receipt_decode_rejects_out_of_order_fields() {
-        let receipt = StitchedReceiptV2::new(
-            [1u8; 32],
-            [2u8; 32],
-            [3u8; 32],
-            [4u8; 32],
-            [5u8; 32],
-            [6u8; 32],
-            [7u8; 32],
-            vec![],
-            vec![],
-        );
-        let bytes = receipt.to_canonical_protobuf().unwrap();
+        let bytes = world().transfer.receipt.to_canonical_protobuf().unwrap();
         let mut reordered = bytes[34..].to_vec();
         reordered.extend_from_slice(&bytes[..34]);
 
         let err = StitchedReceiptV2::from_canonical_protobuf(&reordered).unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("non-canonical field ordering or encoding"));
+        assert!(
+            err.to_string()
+                .contains("non-canonical field ordering or encoding"),
+            "{err}"
+        );
     }
 
     #[test]
     fn test_prost_encoding_tag_format() {
-        let receipt = StitchedReceiptV2::new(
-            [0x42u8; 32],
-            [2u8; 32],
-            [3u8; 32],
-            [4u8; 32],
-            [5u8; 32],
-            [6u8; 32],
-            [7u8; 32],
-            vec![8u8; 4],
-            vec![10u8; 4],
-        );
-
+        let receipt = &world().transfer.receipt;
         let bytes = receipt.to_canonical_protobuf().unwrap();
         // Tag 1, wire type 2 (length-delimited) = (1 << 3) | 2 = 0x0A
         assert_eq!(bytes[0], 0x0A);
         // Length 32 = 0x20
         assert_eq!(bytes[1], 0x20);
-        // Content: genesis [0x42; 32]
-        assert_eq!(&bytes[2..34], &[0x42u8; 32]);
+        // Content: the author's genesis
+        assert_eq!(&bytes[2..34], &receipt.genesis);
     }
 
     #[test]
     fn test_size_cap_enforcement() {
-        let mut receipt = StitchedReceiptV2::new(
-            [0; 32],
-            [0; 32],
-            [0; 32],
-            [0; 32],
-            [0; 32],
-            [0; 32],
-            [0; 32],
-            vec![],
-            vec![],
-        );
+        let receipt = a_side()
+            .with_countersign_b(countersign_b().0)
+            .expect("the receiver countersigns");
+        receipt
+            .validate_size_cap()
+            .expect("a countersigned receipt is under the cap");
 
-        // Small receipt should pass
-        assert!(receipt.validate_size_cap().is_ok());
-
-        // Add huge proofs to exceed cap
-        receipt.rel_proof_parent = vec![0u8; 64 * 1024]; // 64 KiB
-        receipt.dev_proof = vec![0u8; 64 * 1024]; // 64 KiB
-
-        // Should exceed 128 KiB cap
-        assert!(receipt.validate_size_cap().is_err());
-    }
-
-    // --- Additional tests ---
-
-    #[test]
-    fn receipt_is_fully_signed_both_present() {
-        let mut receipt = StitchedReceiptV2::new(
-            [0; 32],
-            [1; 32],
-            [2; 32],
-            [3; 32],
-            [4; 32],
-            [5; 32],
-            [6; 32],
-            vec![],
-            vec![],
-        );
-        assert!(!receipt.is_fully_signed());
-
-        receipt.add_sig_a(vec![0xAA; 64]);
-        assert!(!receipt.is_fully_signed());
-
-        receipt.add_sig_b(vec![0xBB; 64]);
-        assert!(receipt.is_fully_signed());
+        // A hostile device proof past the cap.
+        let mut oversized = receipt;
+        oversized.dev_proof = vec![0u8; 128 * 1024];
+        assert!(oversized.validate_size_cap().is_err());
     }
 
     #[test]
-    fn receipt_not_fully_signed_empty_sigs() {
-        let receipt = StitchedReceiptV2::new(
-            [0; 32],
-            [1; 32],
-            [2; 32],
-            [3; 32],
-            [4; 32],
-            [5; 32],
-            [6; 32],
-            vec![],
-            vec![],
-        );
-        assert!(!receipt.is_fully_signed());
+    fn receipt_is_fully_signed_only_with_both_answers() {
+        assert!(!world().transfer.receipt.is_fully_signed());
+        let a = a_side();
+        assert!(!a.is_fully_signed());
+        let full = a
+            .with_countersign_b(countersign_b().0)
+            .expect("the receiver countersigns");
+        assert!(full.is_fully_signed());
     }
 
     #[test]
     fn receipt_id_accessors() {
-        let receipt = StitchedReceiptV2::new(
-            [0; 32],
-            [0x11; 32],
-            [0x22; 32],
-            [0; 32],
-            [0; 32],
-            [0; 32],
-            [0; 32],
-            vec![],
-            vec![],
-        );
-        assert_eq!(receipt.id_a(), &[0x11; 32]);
-        assert_eq!(receipt.id_b(), &[0x22; 32]);
-    }
-
-    #[test]
-    fn receipt_t_extracts_sequence_from_parent_tip() {
-        let mut parent_tip = [0u8; 32];
-        parent_tip[24..32].copy_from_slice(&42u64.to_le_bytes());
-        let receipt = StitchedReceiptV2::new(
-            [0; 32],
-            [0; 32],
-            [0; 32],
-            parent_tip,
-            [0; 32],
-            [0; 32],
-            [0; 32],
-            vec![],
-            vec![],
-        );
-        assert_eq!(receipt.t(), 42);
+        let w = world();
+        assert_eq!(w.transfer.receipt.id_a(), &w.sender.device_id());
+        assert_eq!(w.transfer.receipt.id_b(), &w.receiver.device_id());
     }
 
     #[test]
     fn receipt_serialized_size_grows_with_sigs() {
-        let mut receipt = StitchedReceiptV2::new(
-            [0; 32],
-            [0; 32],
-            [0; 32],
-            [0; 32],
-            [0; 32],
-            [0; 32],
-            [0; 32],
-            vec![],
-            vec![],
-        );
-        let base_size = receipt.serialized_size().expect("the receipt encodes");
-
-        receipt.add_sig_a(vec![0xAA; 100]);
-        receipt.add_sig_b(vec![0xBB; 200]);
+        let w = world();
+        let base_size = w
+            .transfer
+            .receipt
+            .serialized_size()
+            .expect("the receipt encodes");
+        let full = a_side()
+            .with_countersign_b(countersign_b().0)
+            .expect("the receiver countersigns");
         assert_eq!(
-            receipt.serialized_size().expect("the receipt encodes"),
-            base_size + 300
+            full.serialized_size().expect("the receipt encodes"),
+            base_size + full.sig_a.len() + full.sig_b.len()
         );
     }
 
     #[test]
     fn receipt_canonical_commit_alias() {
-        let receipt = StitchedReceiptV2::new(
-            [0; 32],
-            [1; 32],
-            [2; 32],
-            [3; 32],
-            [4; 32],
-            [5; 32],
-            [6; 32],
-            vec![],
-            vec![],
-        );
+        let receipt = &world().transfer.receipt;
         let a = receipt.compute_commitment().unwrap();
         let b = receipt.canonical_commit().unwrap();
         assert_eq!(a, b);
     }
 
     #[test]
-    fn receipt_different_fields_produce_different_commitments() {
-        let r1 = StitchedReceiptV2::new(
-            [0; 32],
-            [1; 32],
-            [2; 32],
-            [3; 32],
-            [4; 32],
-            [5; 32],
-            [6; 32],
-            vec![],
-            vec![],
-        );
-        let r2 = StitchedReceiptV2::new(
-            [0xFF; 32],
-            [1; 32],
-            [2; 32],
-            [3; 32],
-            [4; 32],
-            [5; 32],
-            [6; 32],
-            vec![],
-            vec![],
-        );
-        assert_ne!(
-            r1.compute_commitment().unwrap(),
-            r2.compute_commitment().unwrap(),
-        );
+    fn receipt_different_steps_produce_different_commitments() {
+        let w = world();
+        let transfer = w.transfer.receipt.compute_commitment().unwrap();
+        assert_ne!(transfer, w.fork.receipt.compute_commitment().unwrap());
+        assert_ne!(transfer, w.credit.receipt.compute_commitment().unwrap());
     }
 
     // --- DeviceTreeAcceptanceCommitment ---
 
     #[test]
     fn device_tree_acceptance_from_root() {
-        let root = [0xAB; 32];
+        let root =
+            crate::common::device_tree::DeviceTree::single(world().sender.device_id()).root();
         let c = DeviceTreeAcceptanceCommitment::from_root(root);
         assert_eq!(c.root(), root);
-    }
-
-    #[test]
-    fn device_tree_acceptance_from_array() {
-        let root = [0xCD; 32];
-        let c: DeviceTreeAcceptanceCommitment = root.into();
-        assert_eq!(c.root(), root);
-    }
-
-    #[test]
-    fn device_tree_acceptance_copy_eq() {
-        let a = DeviceTreeAcceptanceCommitment::from_root([0; 32]);
-        let b = a;
-        assert_eq!(a, b);
+        let from_array: DeviceTreeAcceptanceCommitment = root.into();
+        assert_eq!(from_array, c);
+        let copied = c;
+        assert_eq!(copied, c);
     }
 
     // --- ReceiptAcceptance ---
 
     #[test]
     fn receipt_acceptance_accept() {
-        let commitment = [0xEE; 32];
+        let commitment = world().transfer.receipt.compute_commitment().unwrap();
         let acc = ReceiptAcceptance::accept(commitment);
         assert!(acc.valid);
         assert!(acc.reason.is_none());
@@ -1553,59 +1542,6 @@ mod tests {
 
     // --- ADR 0003 return leg: CountersignB split / overlay / wire codec ---
 
-    /// Production-shaped receipt: SPHINCS+ SPX256f signature size, 64-byte
-    /// EK public keys, ML-KEM-768 ciphertexts, and the proof lengths measured
-    /// from a real bench envelope. Filler bytes — sizes are what matter here.
-    fn production_shaped_a_side() -> StitchedReceiptV2 {
-        const SIG: usize = 49_856;
-        let mut r = StitchedReceiptV2::new(
-            [0x01; 32],
-            [0x02; 32],
-            [0x03; 32],
-            [0x04; 32],
-            [0x05; 32],
-            [0x06; 32],
-            [0x07; 32],
-            vec![0x08; 8_261],
-            vec![0x0A; 9],
-        );
-        r.add_sig_a(vec![0xAA; SIG]);
-        r.set_ek_cert_a(vec![0xCA; SIG]);
-        r.set_ek_pk_a(vec![0xEA; 64]);
-        r.set_kyber_ct_a(vec![0x1A; 1_088]);
-        r
-    }
-
-    fn production_shaped_countersign_b() -> CountersignB {
-        const SIG: usize = 49_856;
-        CountersignB {
-            sig_b: vec![0xBB; SIG],
-            ek_cert_b: vec![0xCB; SIG],
-            ek_pk_b: vec![0xEB; 64],
-            kyber_ct_b: vec![0x1B; 1_088],
-        }
-    }
-
-    fn production_shaped_delta_wire(
-        commitment: [u8; 32],
-        digest_a: [u8; 32],
-        b: &CountersignB,
-    ) -> Vec<u8> {
-        use prost::Message;
-        crate::types::proto::ReceiptCountersignB {
-            commitment: commitment.to_vec(),
-            receipt_evidence_digest_a: digest_a.to_vec(),
-            sig_b: b.sig_b.clone(),
-            ek_cert_b: b.ek_cert_b.clone(),
-            ek_pk_b: b.ek_pk_b.clone(),
-            kyber_ct_b: b.kyber_ct_b.clone(),
-            b_parent_tip: vec![0x77; 32],
-            b_child_tip: vec![0x78; 32],
-            recipient_economic_release_addr: Vec::new(),
-        }
-        .encode_to_vec()
-    }
-
     /// The whole return-leg contract in one assertion chain: the recipient's
     /// split gives back EXACTLY the A bytes it received, and the sender's
     /// overlay of that delta onto its own A bytes gives back EXACTLY the
@@ -1613,42 +1549,55 @@ mod tests {
     /// over either side is a digest over the same object.
     #[test]
     fn split_then_overlay_reproduces_the_full_wire_bytes_exactly() {
-        let a_side = production_shaped_a_side();
+        let a_side = a_side();
         let a_bytes = a_side.to_full_protobuf().unwrap();
-        // The A side is what the sender ships and retains: 109 KB class (one
-        // relationship path; the child proof and replace witness are gone).
+        // The A side is what the sender ships and retains: two SPHINCS+
+        // objects of 49,856 bytes (σ_A and the EK certificate), the 64-byte
+        // EK, the 1,088-byte ML-KEM ciphertext, and the step's fields with
+        // its one compressed relationship path — 101 KB class, against the
+        // 109 KB of the uncompressed path.
         assert!(
-            (108_000..110_000).contains(&a_bytes.len()),
+            (101_000..102_000).contains(&a_bytes.len()),
             "{}",
             a_bytes.len()
         );
 
         // Recipient: countersign, encode, store.
-        let full = a_side
-            .with_countersign_b(production_shaped_countersign_b())
-            .unwrap();
+        let (b, _) = countersign_b();
+        let full = a_side.with_countersign_b(b.clone()).unwrap();
         let full_bytes = full.to_full_protobuf().unwrap();
-        // The observed 5GN specimen was 218,541 bytes with these exact shapes;
-        // canonical field 21 (`transition_entropy`: a two-byte key varint, one
-        // length byte and 32 bytes of value) adds 35, and dropping field 9 (an
-        // 8,261-byte child proof with its 3-byte header) and field 11 (a 4-byte
-        // witness with its 2-byte header) removes 8,270.
-        assert_eq!(full_bytes.len(), 210_306, "full countersigned receipt size");
+        // The countersignature adds exactly its four fields (σ_B 13, its EK
+        // certificate 15, the EK 17, the ML-KEM ciphertext 19), each with its
+        // field header, and nothing else.
+        let b_fields: usize = [
+            (13, &b.sig_b),
+            (15, &b.ek_cert_b),
+            (17, &b.ek_pk_b),
+            (19, &b.kyber_ct_b),
+        ]
+        .into_iter()
+        .map(|(tag, value)| prost::encoding::bytes::encoded_len(tag, value))
+        .sum();
+        assert_eq!(
+            full_bytes.len(),
+            a_bytes.len() + b_fields,
+            "full countersigned receipt size"
+        );
 
         // Recipient at reply time: decode its stored bytes and split.
         let decoded = StitchedReceiptV2::from_canonical_protobuf(&full_bytes).unwrap();
-        let (a_again, b) = decoded.split_countersign_b().unwrap();
+        let (a_again, b_again) = decoded.split_countersign_b().unwrap();
         assert_eq!(
             a_again.to_full_protobuf().unwrap(),
             a_bytes,
             "split A side must re-encode to the exact bytes the recipient received"
         );
-        assert_eq!(b, production_shaped_countersign_b());
+        assert_eq!(b_again, b);
 
         // Sender: overlay the delta onto its retained A bytes.
         let reconstructed = StitchedReceiptV2::from_canonical_protobuf(&a_bytes)
             .unwrap()
-            .with_countersign_b(b)
+            .with_countersign_b(b_again)
             .unwrap();
         assert_eq!(
             reconstructed.to_full_protobuf().unwrap(),
@@ -1664,7 +1613,7 @@ mod tests {
 
     #[test]
     fn split_refuses_a_receipt_without_a_countersignature() {
-        let a_side = production_shaped_a_side();
+        let a_side = a_side();
         let err = a_side.split_countersign_b().unwrap_err();
         assert!(
             format!("{err}").contains("no complete B-side countersignature"),
@@ -1673,41 +1622,40 @@ mod tests {
 
         // Partial B material is not a countersignature either.
         let mut half = a_side.clone();
-        half.add_sig_b(vec![0xBB; 16]);
+        half.add_sig_b(countersign_b().0.sig_b);
         assert!(half.split_countersign_b().is_err());
     }
 
     #[test]
     fn overlay_refuses_an_already_countersigned_receipt_and_an_incomplete_delta() {
-        let full = production_shaped_a_side()
-            .with_countersign_b(production_shaped_countersign_b())
-            .unwrap();
-        let err = full
-            .with_countersign_b(production_shaped_countersign_b())
-            .unwrap_err();
+        let (b, _) = countersign_b();
+        let full = a_side().with_countersign_b(b.clone()).unwrap();
+        let err = full.with_countersign_b(b.clone()).unwrap_err();
         assert!(
             format!("{err}").contains("already carries B-side material"),
             "{err}"
         );
 
-        let mut incomplete = production_shaped_countersign_b();
+        let mut incomplete = b;
         incomplete.kyber_ct_b.clear();
-        let err = production_shaped_a_side()
-            .with_countersign_b(incomplete)
-            .unwrap_err();
+        let err = a_side().with_countersign_b(incomplete).unwrap_err();
         assert!(format!("{err}").contains("incomplete"), "{err}");
     }
 
     #[test]
     fn countersign_wire_accepts_the_canonical_encoding_and_reencodes_identically() {
         use prost::Message;
-        let b = production_shaped_countersign_b();
-        let wire = production_shaped_delta_wire([0x11; 32], [0x22; 32], &b);
+        let a = a_side();
+        let (b, (b_parent_tip, b_child_tip)) = countersign_b();
+        let wire = delta_wire();
         let decoded = decode_receipt_countersign_b_wire(&wire).unwrap();
-        assert_eq!(decoded.commitment, vec![0x11; 32]);
-        assert_eq!(decoded.receipt_evidence_digest_a, vec![0x22; 32]);
-        assert_eq!(decoded.b_parent_tip, vec![0x77; 32]);
-        assert_eq!(decoded.b_child_tip, vec![0x78; 32]);
+        assert_eq!(decoded.commitment, a.compute_commitment().unwrap().to_vec());
+        assert_eq!(
+            decoded.receipt_evidence_digest_a,
+            evidence_digest_a(&a).to_vec()
+        );
+        assert_eq!(decoded.b_parent_tip, b_parent_tip.to_vec());
+        assert_eq!(decoded.b_child_tip, b_child_tip.to_vec());
         // The pair is delta-only metadata: it never enters the receipt, so the
         // split/overlay byte identity above is untouched by it.
         assert_eq!(CountersignB::from_wire(&decoded), b);
@@ -1724,19 +1672,20 @@ mod tests {
 
     /// A full countersigned receipt fed to the delta decoder is refused — the
     /// sender can never mistake a whole receipt for a delta, so no legacy
-    /// full-receipt reply can be consumed by accident. With the 8-tag delta
-    /// the first divergence is `ReceiptCommit` tag 8 (`rel_proof_parent`,
-    /// kilobytes long) where the delta requires a 32-byte `b_child_tip`.
+    /// full-receipt reply can be consumed by accident. Tags 1–7 of a receipt
+    /// are 32-byte fields the delta's first seven tags admit; the first
+    /// divergence is `ReceiptCommit` tag 10, the device proof, which the delta
+    /// does not have.
     #[test]
     fn countersign_wire_refuses_a_full_receipt_commit_body() {
-        let full_bytes = production_shaped_a_side()
-            .with_countersign_b(production_shaped_countersign_b())
+        let full_bytes = a_side()
+            .with_countersign_b(countersign_b().0)
             .unwrap()
             .to_full_protobuf()
             .unwrap();
         let err = decode_receipt_countersign_b_wire(&full_bytes).unwrap_err();
         assert!(
-            format!("{err}").contains("countersign wire: field 8 must be 32 bytes"),
+            format!("{err}").contains("countersign wire: unknown field 10"),
             "{err}"
         );
     }
@@ -1747,8 +1696,7 @@ mod tests {
     #[test]
     fn countersign_wire_requires_the_recipient_canonical_pair() {
         use prost::Message;
-        let b = production_shaped_countersign_b();
-        let good = production_shaped_delta_wire([0x11; 32], [0x22; 32], &b);
+        let good = delta_wire();
 
         let mut no_pair = crate::types::proto::ReceiptCountersignB::decode(&good[..]).unwrap();
         no_pair.b_parent_tip.clear();
@@ -1773,8 +1721,7 @@ mod tests {
     #[test]
     fn countersign_wire_refuses_missing_duplicate_and_oversized_fields() {
         use prost::Message;
-        let b = production_shaped_countersign_b();
-        let good = production_shaped_delta_wire([0x11; 32], [0x22; 32], &b);
+        let good = delta_wire();
 
         // Missing kyber_ct_b (field 6): the live gate is structural, so the
         // wire must not let it through silently.
@@ -1795,10 +1742,11 @@ mod tests {
             "{err}"
         );
 
-        // Duplicate field: append a second field-1 to the canonical bytes.
+        // Duplicate field: a hostile second field-1 appended to the canonical
+        // bytes.
         let mut dup = good.clone();
         let mut extra = crate::types::proto::ReceiptCountersignB {
-            commitment: vec![0x33; 32],
+            commitment: world().fork.receipt.compute_commitment().unwrap().to_vec(),
             ..Default::default()
         }
         .encode_to_vec();
@@ -1806,9 +1754,9 @@ mod tests {
         let err = decode_receipt_countersign_b_wire(&dup).unwrap_err();
         assert!(format!("{err}").contains("duplicate field 1"), "{err}");
 
-        // Oversized kyber_ct_b (cap 2,048).
+        // A hostile kyber_ct_b past its cap (2,048).
         let mut fat = crate::types::proto::ReceiptCountersignB::decode(&good[..]).unwrap();
-        fat.kyber_ct_b = vec![0x1B; 2_049];
+        fat.kyber_ct_b = vec![0u8; 2_049];
         let err = decode_receipt_countersign_b_wire(&fat.encode_to_vec()).unwrap_err();
         assert!(
             format!("{err}").contains("field 6 exceeds max length 2048"),
@@ -1874,11 +1822,7 @@ mod tests {
 
         // A countersign delta on the certificate method: refused at the wire
         // (its tag 3 is a signature, not a 32-byte tip).
-        let delta = production_shaped_delta_wire(
-            [0x11; 32],
-            [0x22; 32],
-            &production_shaped_countersign_b(),
-        );
+        let delta = delta_wire();
         let err = decode_relationship_finalized_wire(&delta).unwrap_err();
         assert!(
             format!("{err}").contains("field 3 must be 32 bytes"),

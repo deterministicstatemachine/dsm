@@ -27,7 +27,19 @@ EXTENDS Naturals, FiniteSets, TLC
 
 CONSTANTS
     H0,        \* enrolled TROPIC01 physical counter value
-    Content    \* the transition digests D_{i+1} an appliance/host may propose
+    Content,   \* the transition digests D_{i+1} an appliance/host may propose
+    ReceiptHolds,        \* the steps whose receipt holds its state rules
+    VerifyBeforePrepare  \* TRUE: the host proves the step's receipt first
+
+\* The host builds the step's receipt and holds it to the state rules
+\* (`StitchedReceiptV2::of_step`) BEFORE it drives PREPARE: COMMIT moves the
+\* physical counter and cannot be undone, so a step whose receipt does not
+\* hold must never reach it — its confirm could never be delivered and the
+\* counter step would be spent on nothing. `VerifyBeforePrepare = FALSE` is the
+\* order this replaced (release first, receipt after) and must violate
+\* `NoCommitWithoutDeliverableConfirm`.
+ASSUME ReceiptHolds \subseteq Content
+ASSUME VerifyBeforePrepare \in BOOLEAN
 
 VARIABLES
     root,             \* R_i : device SMT root
@@ -85,6 +97,7 @@ Init ==
 \* (u_i = H0 - H), the origin not already consumed, and one prepared record only.
 Prepare(content) ==
     /\ status = "Ready"
+    /\ VerifyBeforePrepare => content \in ReceiptHolds
     /\ smtCounter = H0 - physH
     /\ Origin(root, frontier, smtCounter) \notin consumedOrigins
     /\ prepared' = MkRecord(root, frontier, smtCounter, content)
@@ -216,6 +229,11 @@ SecondSameOriginFails ==
 \* package for the same counter step.
 RecoveryIdempotence ==
     \A p \in emitted : p \in committedLedger
+
+\* Every counter step the appliance committed is for a step whose receipt
+\* holds, so its confirm can be delivered.
+NoCommitWithoutDeliverableConfirm ==
+    \A p \in committedLedger : p.content \in ReceiptHolds
 
 \* State constraint for bounded model checking.
 StateConstraint ==

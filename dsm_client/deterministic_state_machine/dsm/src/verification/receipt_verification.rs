@@ -7,11 +7,18 @@
 //! when applying transitions, not from opaque receipt tip hashes alone.
 
 use crate::common::device_tree::DevTreeProof;
-use crate::core::bilateral_transaction_manager::compute_smt_key;
-use crate::merkle::sparse_merkle_tree::{verify_smt_replace, SmtInclusionProof};
+use crate::core::bilateral_transaction_manager::{
+    anchor_state_leaf_key, compute_smt_key, operation_requires_offline_bearer,
+};
+use crate::merkle::batch_fold::{verify_batch, FoldEntry};
+use crate::merkle::smt_path;
+use crate::merkle::sparse_merkle_tree::DeviceSmtHashes;
+use crate::types::device_state::relationship_chain_tip_v2;
 use crate::types::error::DsmError;
+use crate::types::offline_allocation_leaf::{offline_allocation_key, offline_allocation_value};
+use crate::types::operations::Operation;
 use crate::types::receipt_types::{
-    DeviceTreeAcceptanceCommitment, ParentConsumptionTracker, ReceiptAcceptance,
+    DeviceTreeAcceptanceCommitment, ParentConsumptionTracker, ReceiptAcceptance, ReceiptLeaf,
     ReceiptVerificationContext, StitchedReceiptV2,
 };
 
@@ -19,9 +26,9 @@ use crate::types::receipt_types::{
 ///
 /// Per whitepaper, a receipt is accepted iff:
 /// 1. Both SPHINCS+ signatures verify over canonical commit bytes
-/// 2. The receipt's state rules hold ([`verify_receipt_state`]): the one
-///    relationship path authenticates the parent tip and folds the child tip
-///    to `child_root`; the device proof verifies
+/// 2. The receipt's state rules hold ([`verify_receipt_state`]): the step's
+///    writes are exactly the ones its operation implies, and they fold from
+///    `parent_root` to `child_root`; the device proof verifies
 /// 4. Parent tip has not been previously consumed (uniqueness)
 /// 5. Size cap enforced (≤128 KiB)
 ///
@@ -140,10 +147,17 @@ pub fn verify_stitched_receipt(
         ));
     }
 
-    // Rules 3–4: the receipt's state — one relationship path authenticates the
-    // parent tip and folds the child tip to the claimed post-state root, and
-    // the device proof puts the sender under the authenticated Device Tree.
-    if let Err(e) = verify_receipt_state(receipt, &ctx.device_tree_commitment) {
+    // Rules 3–4: the receipt's state — the step's writes are the ones its
+    // operation implies and fold from the pre-state root to the post-state
+    // root, and the device proof puts the sender under the authenticated
+    // Device Tree.
+    let state = ReceiptStateContext {
+        device_tree_commitment: &ctx.device_tree_commitment,
+        author_genesis: ctx.author_genesis,
+        operation: &ctx.operation,
+        bearer: ctx.bearer,
+    };
+    if let Err(e) = verify_receipt_state(receipt, &state) {
         return Ok(ReceiptAcceptance::reject(e.to_string()));
     }
 
@@ -159,21 +173,59 @@ pub fn verify_stitched_receipt(
     Ok(ReceiptAcceptance::accept(commitment))
 }
 
-/// The state rules of a receipt, whoever checks it: the sender before it signs,
-/// the recipient before it accepts, and [`verify_stitched_receipt`] as its
-/// rules 3–4. There is one implementation, over one relationship path.
+/// The anchor-state leaf of the author's own offline-bearer spend, before and
+/// after, as the verifier derived them under the pinned bundle from the
+/// release's signed counter pair and frontiers — never read from the receipt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BearerLeaves {
+    /// The author's pinned anchor bundle `B`.
+    pub bundle: [u8; 32],
+    /// `anchor_state_leaf(B, h_i, u_i)`.
+    pub anchor_before: [u8; 32],
+    /// `anchor_state_leaf(B, h_{i+1}, u_i+1)`.
+    pub anchor_after: [u8; 32],
+}
+
+/// What a verifier holds, independently of the receipt, to derive every leaf
+/// the receipt's step writes.
+#[derive(Clone, Copy, Debug)]
+pub struct ReceiptStateContext<'a> {
+    /// The authenticated Device Tree commitment the author's device proof is
+    /// checked against — never one derived from the receipt.
+    pub device_tree_commitment: &'a DeviceTreeAcceptanceCommitment,
+    /// The genesis the receipt's author (`devid_a`) is pinned under.
+    pub author_genesis: [u8; 32],
+    /// The operation the step carries.
+    pub operation: &'a Operation,
+    /// Present exactly for the author's own offline-bearer spend.
+    pub bearer: Option<BearerLeaves>,
+}
+
+/// The state rules of a receipt, whoever checks it: the sender before it signs
+/// anything, the recipient before it accepts, and [`verify_stitched_receipt`]
+/// as its rules 3–4. There is one implementation.
 ///
 /// - Every fixed field names something: a zero genesis, device, tip, root or
-///   transition entropy is not a field of any transition.
-/// - The relationship path (`rel_proof_parent`, the tree's own encoding) is at
-///   `compute_smt_key(devid_a, devid_b)` and carries `parent_tip`; through
-///   [`verify_smt_replace`] it authenticates `parent_tip` under `parent_root`,
-///   and the same siblings folded with `child_tip` must be `child_root`.
-/// - The device proof puts `devid_a` under the authenticated Device Tree
-///   commitment the caller supplies — never one derived from the receipt.
+///   transition entropy is not a field of any transition; and the genesis is
+///   the author's pinned genesis.
+/// - `child_tip` is the successor its own fields name:
+///   `relationship_chain_tip_v2(k, parent_tip, devid_b, op, e)`.
+/// - The step's writes are exactly the leaves its operation implies, each
+///   once, ordered by key: the relationship leaf; and for the author's own
+///   offline-bearer spend also the anchor-state leaf of the pinned bundle and
+///   the offline allocation it drew from. Every key and value is derived here
+///   — the relationship's from the tips, the anchor's from [`BearerLeaves`],
+///   the allocation's after-state from its before-state and the operation's
+///   amount. Only the allocation's before-state is a witness, because its leaf
+///   is an opaque hash; it is bound by the fold like every other value.
+/// - Folded together against `parent_root`, the writes are `child_root`: the
+///   receipt proves the whole move of the author's root, so no leaf it names
+///   can move differently and no leaf it does not name can move at all.
+/// - The device proof puts `devid_a` under the Device Tree commitment the
+///   caller supplies.
 pub fn verify_receipt_state(
     receipt: &StitchedReceiptV2,
-    device_tree_commitment: &DeviceTreeAcceptanceCommitment,
+    ctx: &ReceiptStateContext<'_>,
 ) -> Result<(), DsmError> {
     let named = |b: &[u8; 32]| b.iter().any(|&v| v != 0);
     for (field, value) in [
@@ -192,36 +244,145 @@ pub fn verify_receipt_state(
             )));
         }
     }
+    if receipt.genesis != ctx.author_genesis {
+        return Err(DsmError::invalid_operation(
+            "the receipt's genesis is not its author's pinned genesis",
+        ));
+    }
 
-    let smt_key = compute_smt_key(&receipt.devid_a, &receipt.devid_b);
-    let path = SmtInclusionProof::from_bytes(&receipt.rel_proof_parent)
-        .ok_or_else(|| DsmError::invalid_operation("the relationship path does not decode"))?;
-    if path.key != smt_key {
-        return Err(DsmError::invalid_operation(
-            "the relationship path is not at the relationship key",
-        ));
-    }
-    if path.value != Some(receipt.parent_tip) {
-        return Err(DsmError::invalid_operation(
-            "the relationship path does not carry the parent tip",
-        ));
-    }
-    let post_root = verify_smt_replace(
-        &receipt.parent_root,
-        &smt_key,
+    let rel_key = compute_smt_key(&receipt.devid_a, &receipt.devid_b);
+    let op_bytes = ctx.operation.to_bytes();
+    if relationship_chain_tip_v2(
+        &rel_key,
         &receipt.parent_tip,
-        &receipt.child_tip,
-        &path.siblings,
-    )?;
+        &receipt.devid_b,
+        &op_bytes,
+        &receipt.transition_entropy,
+        None,
+    ) != receipt.child_tip
+    {
+        return Err(DsmError::invalid_operation(
+            "the receipt's child tip is not the successor of its parent tip under its operation and entropy",
+        ));
+    }
+
+    // The leaves the step writes follow from its operation: a spend the author
+    // makes offline also moves its anchor counter and its allocation.
+    let offline_spend = match ctx.operation {
+        Operation::Transfer {
+            to_device_id,
+            amount,
+            policy_commit,
+            ..
+        } if operation_requires_offline_bearer(ctx.operation)
+            && to_device_id.as_slice() == receipt.devid_b =>
+        {
+            Some((amount.value(), *policy_commit))
+        }
+        _ => None,
+    };
+    let bearer = match (offline_spend, ctx.bearer) {
+        (Some(spend), Some(leaves)) => Some((spend, leaves)),
+        (None, None) => None,
+        (Some(_), None) => {
+            return Err(DsmError::invalid_operation(
+                "an offline-bearer spend is verified against its anchor-state leaves",
+            ))
+        }
+        (None, Some(_)) => {
+            return Err(DsmError::invalid_operation(
+                "only the author's own offline-bearer spend writes its anchor-state leaf",
+            ))
+        }
+    };
+    let expected_count = if bearer.is_some() { 3 } else { 1 };
+    if receipt.step_writes.len() != expected_count {
+        return Err(DsmError::invalid_operation(format!(
+            "the step writes {expected_count} leaves; the receipt proves {}",
+            receipt.step_writes.len()
+        )));
+    }
+
+    let mut entries: Vec<FoldEntry> = Vec::with_capacity(expected_count);
+    let (mut relationship, mut anchor, mut allocation) = (false, false, false);
+    for write in &receipt.step_writes {
+        let (key, pre, post) = match (write.leaf, &bearer) {
+            (ReceiptLeaf::Relationship, _) if !relationship => {
+                relationship = true;
+                (rel_key, receipt.parent_tip, receipt.child_tip)
+            }
+            (ReceiptLeaf::AnchorState, Some((_, leaves))) if !anchor => {
+                anchor = true;
+                if leaves.anchor_before == leaves.anchor_after {
+                    return Err(DsmError::invalid_operation(
+                        "an offline-bearer spend moves its anchor-state leaf",
+                    ));
+                }
+                (
+                    anchor_state_leaf_key(&leaves.bundle),
+                    leaves.anchor_before,
+                    leaves.anchor_after,
+                )
+            }
+            (
+                ReceiptLeaf::OfflineAllocation {
+                    pre_amount,
+                    pre_sequence,
+                },
+                Some(((amount, asset), leaves)),
+            ) if !allocation => {
+                allocation = true;
+                let post_amount = pre_amount.checked_sub(*amount).ok_or_else(|| {
+                    DsmError::invalid_operation(
+                        "the offline allocation holds less than the operation spends",
+                    )
+                })?;
+                let post_sequence = pre_sequence.checked_add(1).ok_or_else(|| {
+                    DsmError::invalid_operation("the offline allocation's sequence overflows")
+                })?;
+                (
+                    offline_allocation_key(
+                        &ctx.author_genesis,
+                        &receipt.devid_a,
+                        &leaves.bundle,
+                        asset,
+                    ),
+                    offline_allocation_value(pre_amount, pre_sequence),
+                    offline_allocation_value(post_amount, post_sequence),
+                )
+            }
+            (leaf, _) => {
+                return Err(DsmError::invalid_operation(format!(
+                    "the receipt proves a write the step does not make: {leaf:?}"
+                )))
+            }
+        };
+        let path =
+            smt_path::decode::<DeviceSmtHashes>(&write.path.explicit_heights, &write.path.siblings)
+                .map_err(|e| DsmError::invalid_operation(format!("a receipt write's path: {e}")))?;
+        entries.push(FoldEntry {
+            key,
+            pre: Some(pre),
+            post: Some(post),
+            path,
+        });
+    }
+    if entries.windows(2).any(|w| w[0].key >= w[1].key) {
+        return Err(DsmError::invalid_operation(
+            "the receipt's writes are not in the order of their keys",
+        ));
+    }
+    let post_root = verify_batch::<DeviceSmtHashes>(&receipt.parent_root, &entries)
+        .map_err(|e| DsmError::invalid_operation(format!("the receipt's writes: {e}")))?;
     if post_root != receipt.child_root {
         return Err(DsmError::invalid_operation(
-            "the child tip folded through the relationship path is not the child root",
+            "the receipt's writes do not fold from its parent root to its child root",
         ));
     }
 
     let dev_proof = DevTreeProof::from_bytes(&receipt.dev_proof)
         .ok_or_else(|| DsmError::invalid_operation("the device proof does not decode"))?;
-    if !dev_proof.verify(&receipt.devid_a, &device_tree_commitment.root()) {
+    if !dev_proof.verify(&receipt.devid_a, &ctx.device_tree_commitment.root()) {
         return Err(DsmError::invalid_operation(
             "the device proof does not put the sender under the Device Tree commitment",
         ));
@@ -337,57 +498,91 @@ pub fn verify_per_step_ek_signing_target(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::merkle::smt_path::EncodedPath;
+    use crate::types::step_fixture::{transfer_step, Party, Step};
+
+    /// Two wallets, the sender's first transfer to the receiver, and a second
+    /// transfer from the sender's same head (a fork of the first). Derived
+    /// once: SPHINCS+ keygen and signing are slow.
+    struct World {
+        sender: Party,
+        receiver: Party,
+        transfer: Step,
+        fork: Step,
+    }
+
+    fn world() -> &'static World {
+        static WORLD: std::sync::OnceLock<World> = std::sync::OnceLock::new();
+        WORLD.get_or_init(|| {
+            let sender = Party::from_seed(b"receipt verification sender wallet seed");
+            let receiver = Party::from_seed(b"receipt verification receiver wallet seed");
+            let transfer = transfer_step(&sender, &receiver, 7);
+            let fork = transfer_step(&sender, &receiver, 8);
+            World {
+                sender,
+                receiver,
+                transfer,
+                fork,
+            }
+        })
+    }
+
+    /// The transfer's receipt signed as [`verify_stitched_receipt`] checks
+    /// it: each side's per-step EK, certified by that side's AK at the
+    /// receipt's parent tip, signs the receipt's commitment. With the context
+    /// a verifier expecting the step holds.
+    fn signed_receipt_and_context() -> (StitchedReceiptV2, ReceiptVerificationContext) {
+        let w = world();
+        let mut receipt = w.transfer.receipt.clone();
+        let commitment = receipt.compute_commitment().unwrap();
+        let a = w.sender.answer(
+            &w.receiver,
+            &receipt.parent_tip,
+            &w.transfer.c_pre,
+            &commitment,
+        );
+        let b = w.receiver.answer(
+            &w.sender,
+            &receipt.parent_tip,
+            &w.transfer.c_pre,
+            &commitment,
+        );
+        receipt.add_sig_a(a.sig);
+        receipt.set_ek_cert_a(a.ek_cert);
+        receipt.set_ek_pk_a(a.ek_pk.clone());
+        receipt.add_sig_b(b.sig);
+        receipt.set_ek_cert_b(b.ek_cert);
+        receipt.set_ek_pk_b(b.ek_pk.clone());
+        let ctx = ReceiptVerificationContext::new(
+            w.sender.device_tree_commitment(),
+            receipt.parent_root,
+            a.ek_pk,
+            b.ek_pk,
+            w.sender.genesis(),
+            w.transfer.operation.clone(),
+        )
+        .with_chain_head_a(w.sender.signing_public_key().to_vec())
+        .with_chain_head_b(w.receiver.signing_public_key().to_vec());
+        (receipt, ctx)
+    }
 
     #[test]
     fn test_verify_empty_receipt_rejects() {
-        let receipt = StitchedReceiptV2::new(
-            [0; 32],
-            [0; 32],
-            [0; 32],
-            [0; 32],
-            [0; 32],
-            [0; 32],
-            [0; 32],
-            vec![],
-            vec![],
-        );
-
-        let ctx = ReceiptVerificationContext::new([0u8; 32], [0u8; 32], vec![], vec![]);
-        let mut tracker = ParentConsumptionTracker::new();
-
-        let result = verify_stitched_receipt(&receipt, &ctx, &mut tracker).unwrap();
-
-        // Should reject due to missing sender signature
+        let (_, ctx) = signed_receipt_and_context();
+        let receipt = world().transfer.receipt.clone();
+        let result =
+            verify_stitched_receipt(&receipt, &ctx, &mut ParentConsumptionTracker::new()).unwrap();
         assert!(!result.valid);
         assert!(result.reason.unwrap().contains("Missing sender signature"));
     }
 
     #[test]
     fn test_verify_receipt_rejects_missing_receiver_signature() {
-        let keypair_a = crate::crypto::signatures::SignatureKeyPair::new().expect("keygen");
-        let mut receipt = StitchedReceiptV2::new(
-            [0; 32],
-            [0; 32],
-            [0; 32],
-            [0; 32],
-            [0; 32],
-            [0; 32],
-            [0; 32],
-            vec![],
-            vec![],
-        );
-        let commitment = receipt.compute_commitment().unwrap();
-        receipt.add_sig_a(keypair_a.sign(&commitment).unwrap());
-
-        let ctx = ReceiptVerificationContext::new(
-            [0u8; 32],
-            [0u8; 32],
-            keypair_a.public_key().to_vec(),
-            vec![],
-        );
-        let mut tracker = ParentConsumptionTracker::new();
-
-        let result = verify_stitched_receipt(&receipt, &ctx, &mut tracker).unwrap();
+        let (signed, ctx) = signed_receipt_and_context();
+        let mut receipt = world().transfer.receipt.clone();
+        receipt.add_sig_a(signed.sig_a.clone());
+        let result =
+            verify_stitched_receipt(&receipt, &ctx, &mut ParentConsumptionTracker::new()).unwrap();
         assert!(!result.valid);
         assert!(result
             .reason
@@ -395,162 +590,127 @@ mod tests {
             .contains("Missing receiver signature"));
     }
 
-    /// An unsigned receipt over real material, with the Device Tree
-    /// commitment it verifies against: the relationship leaf moves from
-    /// `0xaa..` to `0xbb..` in a tree that also keeps another relationship.
-    fn real_state_receipt() -> (StitchedReceiptV2, DeviceTreeAcceptanceCommitment) {
-        use crate::common::device_tree::DeviceTree;
-        use crate::merkle::sparse_merkle_tree::SparseMerkleTree;
-
-        let devid = |label: &[u8]| {
-            crate::crypto::blake3::domain_hash_bytes(
-                crate::common::domain_tags::TAG_DEVICE_ID,
-                label,
-            )
-        };
-        let (devid_a, devid_b) = (devid(b"state-a"), devid(b"state-b"));
-        let key = compute_smt_key(&devid_a, &devid_b);
-        let mut tree = SparseMerkleTree::new();
-        tree.update_leaf(&compute_smt_key(&devid_a, &devid(b"state-c")), &[0x5E; 32]);
-        tree.update_leaf(&key, &[0xaa; 32]);
-        let replace = tree.smt_replace(&key, &[0xbb; 32]).expect("replace");
-        let device_tree = DeviceTree::single(devid_a);
-        let mut receipt = StitchedReceiptV2::new(
-            [0x0E; 32],
-            devid_a,
-            devid_b,
-            [0xaa; 32],
-            [0xbb; 32],
-            replace.pre_root,
-            replace.post_root,
-            replace.parent_proof.to_bytes(),
-            device_tree.proof(&devid_a).expect("device path").to_bytes(),
-        );
-        receipt.set_transition_entropy([0x21; 32]);
-        (
-            receipt,
-            DeviceTreeAcceptanceCommitment::from_root(device_tree.root()),
-        )
-    }
-
-    /// The state rules hold for a receipt over real material and refuse each
-    /// thing that would let a receipt claim a state its one path does not
-    /// prove: a post-state root the child does not fold to, a pre-state root
-    /// the path does not authenticate the parent under, a changed sibling, a
-    /// path at another key or carrying another tip, a zero field, and a
-    /// device proof for another device.
+    /// The state rules hold for the receipt of a real step and refuse each
+    /// thing that would let a receipt claim a move its writes do not prove:
+    /// another post-state root, another pre-state root, a changed sibling, a
+    /// write naming another leaf, a write too many or none, a zero field, a
+    /// genesis that is not the author's, another operation, anchor-state
+    /// leaves for a step that moves none, a device proof for another device,
+    /// and another Device Tree.
+    ///
+    /// MUTATION CONTROLS (run 2026-09-27): deleting the genesis check, the
+    /// child-tip recompute, the fold-to-`child_root` check, the device-proof
+    /// check or the refusal of anchor-state leaves for a step that moves none
+    /// each turns one named assertion here red. The write-count check is not
+    /// load-bearing for a one-write step (a repeated leaf and an empty set are
+    /// refused without it); it carries the three-write bearer step.
     #[test]
-    fn the_state_rules_hold_only_for_what_the_one_path_proves() {
-        use crate::merkle::sparse_merkle_tree::SmtInclusionProof;
+    fn the_state_rules_hold_only_for_the_move_the_writes_prove() {
+        let w = world();
+        let receipt = &w.transfer.receipt;
+        let commitment = w.sender.device_tree_commitment();
+        let context = ReceiptStateContext {
+            device_tree_commitment: &commitment,
+            author_genesis: w.sender.genesis(),
+            operation: &w.transfer.operation,
+            bearer: None,
+        };
+        verify_receipt_state(receipt, &context).expect("the receipt of a real step holds");
 
-        let (receipt, commitment) = real_state_receipt();
-        verify_receipt_state(&receipt, &commitment).expect("a real receipt holds");
-
-        let refused = |mutate: &dyn Fn(&mut StitchedReceiptV2)| {
+        let refused = |why: &str, mutate: &dyn Fn(&mut StitchedReceiptV2)| {
             let mut r = receipt.clone();
             mutate(&mut r);
-            verify_receipt_state(&r, &commitment).is_err()
+            assert_ne!(
+                r.to_canonical_protobuf().unwrap(),
+                receipt.to_canonical_protobuf().unwrap(),
+                "the mutation changes the receipt: {why}"
+            );
+            assert!(verify_receipt_state(&r, &context).is_err(), "{why}");
         };
-        fn with_path(r: &mut StitchedReceiptV2, f: impl Fn(&mut SmtInclusionProof)) {
-            let mut p = SmtInclusionProof::from_bytes(&r.rel_proof_parent).expect("path");
-            f(&mut p);
-            r.rel_proof_parent = p.to_bytes();
-        }
+        refused("another post-state root", &|r| {
+            r.child_root = w.fork.receipt.child_root
+        });
+        refused("another pre-state root", &|r| {
+            r.parent_root = w.fork.receipt.child_root
+        });
+        assert!(
+            !receipt.step_writes[0].path.siblings.is_empty(),
+            "the relationship leaf shares its tree with the faucet's self-loop"
+        );
+        refused("a changed sibling", &|r| {
+            r.step_writes[0].path.siblings[0] ^= 1
+        });
+        refused("a sibling the path does not name", &|r| {
+            let path = &r.step_writes[0].path;
+            let mut heights = path.explicit_heights;
+            let free = (0..256)
+                .find(|h| heights[h / 8] & (0x80 >> (h % 8)) == 0)
+                .expect("a height the path carries no sibling at");
+            heights[free / 8] |= 0x80 >> (free % 8);
+            let mut siblings = path.siblings.clone();
+            siblings.extend_from_slice(&w.fork.receipt.child_tip);
+            r.step_writes[0].path = EncodedPath {
+                explicit_heights: heights,
+                siblings,
+            };
+        });
+        refused("a write naming another leaf", &|r| {
+            r.step_writes[0].leaf = ReceiptLeaf::AnchorState
+        });
+        refused("a write too many", &|r| {
+            let again = r.step_writes[0].clone();
+            r.step_writes.push(again)
+        });
+        refused("no writes", &|r| r.step_writes.clear());
+        refused("a zero field", &|r| r.transition_entropy = [0; 32]);
+        refused("a device proof for another device", &|r| {
+            r.dev_proof = crate::common::device_tree::DeviceTree::new(vec![
+                w.sender.device_id(),
+                w.receiver.device_id(),
+            ])
+            .proof(&w.receiver.device_id())
+            .expect("the receiver's device path")
+            .to_bytes()
+        });
 
+        let with = |context: ReceiptStateContext<'_>| verify_receipt_state(receipt, &context);
         assert!(
-            refused(&|r| r.child_root[0] ^= 1),
-            "a post-state root the child does not fold to"
-        );
-        assert!(
-            refused(&|r| r.parent_root[0] ^= 1),
-            "a pre-state root the path does not authenticate"
-        );
-        assert!(
-            refused(&|r| with_path(r, |p| p.siblings[200][3] ^= 1)),
-            "a changed sibling"
+            with(ReceiptStateContext {
+                author_genesis: w.receiver.genesis(),
+                ..context
+            })
+            .is_err(),
+            "a genesis that is not the author's"
         );
         assert!(
-            refused(&|r| with_path(r, |p| p.key[0] ^= 1)),
-            "a path at another key"
+            with(ReceiptStateContext {
+                operation: &w.fork.operation,
+                ..context
+            })
+            .is_err(),
+            "another operation"
         );
         assert!(
-            refused(&|r| with_path(r, |p| p.value = Some([0xab; 32]))),
-            "a path carrying another tip"
+            with(ReceiptStateContext {
+                bearer: Some(BearerLeaves {
+                    bundle: w.fork.receipt.child_root,
+                    anchor_before: w.fork.receipt.parent_tip,
+                    anchor_after: w.fork.receipt.child_tip,
+                }),
+                ..context
+            })
+            .is_err(),
+            "anchor-state leaves for a step that moves none"
         );
+        let other_tree = w.receiver.device_tree_commitment();
         assert!(
-            refused(&|r| with_path(r, |p| {
-                p.siblings.pop();
-            })),
-            "a path of another height"
+            with(ReceiptStateContext {
+                device_tree_commitment: &other_tree,
+                ..context
+            })
+            .is_err(),
+            "another Device Tree"
         );
-        assert!(refused(&|r| r.transition_entropy = [0; 32]), "a zero field");
-        assert!(
-            refused(&|r| r.devid_a[0] ^= 1),
-            "a device proof for another device"
-        );
-    }
-
-    /// A receipt over real material — a real per-device tree, the device's
-    /// own Device Tree path, both signatures and EK certs — with the context
-    /// a verifier expecting its step would hold.
-    fn signed_receipt_and_context() -> (StitchedReceiptV2, ReceiptVerificationContext) {
-        use crate::common::device_tree::DeviceTree;
-        use crate::crypto::ephemeral_key::{generate_ephemeral_keypair, sign_ek_cert};
-        use crate::merkle::sparse_merkle_tree::SparseMerkleTree;
-
-        let keypair_a = crate::crypto::signatures::SignatureKeyPair::new().expect("keygen");
-        let keypair_b = crate::crypto::signatures::SignatureKeyPair::new().expect("keygen");
-        let devid_a = crate::crypto::blake3::domain_hash_bytes(
-            crate::common::domain_tags::TAG_DEVICE_ID,
-            b"uniqueness-a",
-        );
-        let devid_b = crate::crypto::blake3::domain_hash_bytes(
-            crate::common::domain_tags::TAG_DEVICE_ID,
-            b"uniqueness-b",
-        );
-        let parent_tip = [0xaa; 32];
-        let child_tip = [0xbb; 32];
-
-        let key = compute_smt_key(&devid_a, &devid_b);
-        let mut tree = SparseMerkleTree::new();
-        tree.update_leaf(&key, &parent_tip);
-        let replace = tree.smt_replace(&key, &child_tip).expect("replace");
-        let device_tree = DeviceTree::single(devid_a);
-        let dev_proof = device_tree.proof(&devid_a).expect("device path").to_bytes();
-
-        let mut receipt = StitchedReceiptV2::new(
-            [0x0E; 32],
-            devid_a,
-            devid_b,
-            parent_tip,
-            child_tip,
-            replace.pre_root,
-            replace.post_root,
-            replace.parent_proof.to_bytes(),
-            dev_proof,
-        );
-        receipt.set_transition_entropy([0x21; 32]);
-        let commitment = receipt.compute_commitment().unwrap();
-        receipt.add_sig_a(keypair_a.sign(&commitment).unwrap());
-        receipt.add_sig_b(keypair_b.sign(&commitment).unwrap());
-        let (chain_head_pk, chain_head_sk) = generate_ephemeral_keypair(&[0xA5; 32]).unwrap();
-        let (chain_head_b_pk, chain_head_b_sk) = generate_ephemeral_keypair(&[0xB5; 32]).unwrap();
-        receipt.set_ek_cert_a(
-            sign_ek_cert(&chain_head_sk, keypair_a.public_key(), &parent_tip).unwrap(),
-        );
-        receipt.set_ek_cert_b(
-            sign_ek_cert(&chain_head_b_sk, keypair_b.public_key(), &parent_tip).unwrap(),
-        );
-
-        let ctx = ReceiptVerificationContext::new(
-            DeviceTreeAcceptanceCommitment::from_root(device_tree.root()),
-            replace.pre_root,
-            keypair_a.public_key().to_vec(),
-            keypair_b.public_key().to_vec(),
-        )
-        .with_chain_head_a(chain_head_pk)
-        .with_chain_head_b(chain_head_b_pk);
-        (receipt, ctx)
     }
 
     /// The real receipt is accepted on a fresh parent; once that parent is
@@ -563,8 +723,15 @@ mod tests {
             verify_stitched_receipt(&receipt, &ctx, &mut ParentConsumptionTracker::new()).unwrap();
         assert!(accepted.valid, "{:?}", accepted.reason);
 
+        let fork = &world().fork.receipt;
+        assert_eq!(
+            fork.parent_tip, receipt.parent_tip,
+            "the fork shares the parent"
+        );
         let mut tracker = ParentConsumptionTracker::new();
-        tracker.try_consume(receipt.parent_tip, [0xcc; 32]).unwrap();
+        tracker
+            .try_consume(fork.parent_tip, fork.child_tip)
+            .unwrap();
         let result = verify_stitched_receipt(&receipt, &ctx, &mut tracker).unwrap();
         assert!(!result.valid);
         let reason = result.reason.unwrap_or_default();
@@ -572,7 +739,7 @@ mod tests {
     }
 
     /// A verifier that expects the step to start from one root refuses a
-    /// receipt — fully signed, its path authentic — over any other root:
+    /// receipt — fully signed, its writes authentic — over any other root:
     /// that receipt is a different step.
     #[test]
     fn a_receipt_over_a_root_the_verifier_does_not_expect_is_refused() {
@@ -605,115 +772,38 @@ mod tests {
     /// cert and bypass AK-rooted authorization for the per-step EK.
     #[test]
     fn test_missing_ek_cert_a_rejected_when_chain_head_set() {
-        use crate::crypto::ephemeral_key::{generate_ephemeral_keypair, sign_ek_cert};
-
-        // Build a receipt with valid signatures but no ek_cert_a.
-        let keypair_a = crate::crypto::signatures::SignatureKeyPair::new().expect("keygen");
-        let keypair_b = crate::crypto::signatures::SignatureKeyPair::new().expect("keygen");
-        let mut receipt = StitchedReceiptV2::new(
-            [0; 32],
-            [0; 32],
-            [0; 32],
-            [0xaa; 32],
-            [0xbb; 32],
-            [0x01; 32],
-            [0x02; 32],
-            vec![],
-            vec![],
-        );
-        let commitment = receipt.compute_commitment().unwrap();
-        receipt.add_sig_a(keypair_a.sign(&commitment).unwrap());
-        receipt.add_sig_b(keypair_b.sign(&commitment).unwrap());
-        // Deliberately do NOT call set_ek_cert_a.
-
-        // Build a chain head pubkey (any valid SPHINCS+ key works).
-        let (chain_head_pk, _) = generate_ephemeral_keypair(&[0xCC; 32]).expect("keygen");
-        let (chain_head_b_pk, chain_head_b_sk) =
-            generate_ephemeral_keypair(&[0xBC; 32]).expect("keygen");
-        receipt.set_ek_cert_b(
-            sign_ek_cert(&chain_head_b_sk, keypair_b.public_key(), &[0xaa; 32]).unwrap(),
-        );
-
-        let ctx = ReceiptVerificationContext::new(
-            [0u8; 32],
-            [0u8; 32],
-            keypair_a.public_key().to_vec(),
-            keypair_b.public_key().to_vec(),
-        )
-        .with_chain_head_a(chain_head_pk)
-        .with_chain_head_b(chain_head_b_pk);
-
-        let mut tracker = ParentConsumptionTracker::new();
-        let result = verify_stitched_receipt(&receipt, &ctx, &mut tracker).unwrap();
+        let (mut receipt, ctx) = signed_receipt_and_context();
+        receipt.ek_cert_a.clear();
+        let result =
+            verify_stitched_receipt(&receipt, &ctx, &mut ParentConsumptionTracker::new()).unwrap();
         assert!(!result.valid, "missing ek_cert_a must be rejected");
         let reason = result.reason.unwrap();
         assert!(
-            reason.contains("Missing ek_cert_a") || reason.contains("cert chain"),
-            "wrong rejection reason: {}",
-            reason
+            reason.contains("Missing ek_cert_a"),
+            "wrong rejection reason: {reason}"
         );
     }
 
-    /// Forged ek_cert_a (signed by an unauthorized SK) must not verify against
-    /// the legitimate chain head — this is the core forgery resistance of the
-    /// cert chain.
+    /// An ek_cert_a signed by a key that is not the chain head — here the
+    /// receiver's AK certifying the sender's EK — must not verify against the
+    /// legitimate head: the core forgery resistance of the cert chain.
     #[test]
     fn test_ek_cert_a_signed_by_wrong_key_rejected() {
-        use crate::crypto::ephemeral_key::{generate_ephemeral_keypair, sign_ek_cert};
-
-        let keypair_a = crate::crypto::signatures::SignatureKeyPair::new().expect("keygen");
-        let keypair_b = crate::crypto::signatures::SignatureKeyPair::new().expect("keygen");
-        let mut receipt = StitchedReceiptV2::new(
-            [0; 32],
-            [0; 32],
-            [0; 32],
-            [0xaa; 32],
-            [0xbb; 32],
-            [0x01; 32],
-            [0x02; 32],
-            vec![],
-            vec![],
-        );
-        let commitment = receipt.compute_commitment().unwrap();
-        receipt.add_sig_a(keypair_a.sign(&commitment).unwrap());
-        receipt.add_sig_b(keypair_b.sign(&commitment).unwrap());
-
-        // The legitimate chain head.
-        let (legit_head_pk, _) = generate_ephemeral_keypair(&[0x01; 32]).expect("keygen");
-        let (legit_head_b_pk, legit_head_b_sk) =
-            generate_ephemeral_keypair(&[0x02; 32]).expect("keygen");
-        // The attacker's keypair (NOT the chain head).
-        let (_, attacker_sk) = generate_ephemeral_keypair(&[0x99; 32]).expect("keygen");
-
-        // Forge a cert under the attacker's SK over the correct (pubkey_a, h_n).
-        let forged = sign_ek_cert(
-            &attacker_sk,
-            keypair_a.public_key(),
-            &[0xaa; 32], // matches receipt.parent_tip
+        let w = world();
+        let (mut receipt, ctx) = signed_receipt_and_context();
+        receipt.ek_cert_a = crate::crypto::ephemeral_key::sign_ek_cert(
+            w.receiver.signing_secret_key(),
+            &ctx.pubkey_a,
+            &receipt.parent_tip,
         )
-        .expect("forge cert");
-        receipt.set_ek_cert_a(forged);
-        receipt.set_ek_cert_b(
-            sign_ek_cert(&legit_head_b_sk, keypair_b.public_key(), &[0xaa; 32]).unwrap(),
-        );
-
-        let ctx = ReceiptVerificationContext::new(
-            [0u8; 32],
-            [0u8; 32],
-            keypair_a.public_key().to_vec(),
-            keypair_b.public_key().to_vec(),
-        )
-        .with_chain_head_a(legit_head_pk)
-        .with_chain_head_b(legit_head_b_pk);
-
-        let mut tracker = ParentConsumptionTracker::new();
-        let result = verify_stitched_receipt(&receipt, &ctx, &mut tracker).unwrap();
+        .expect("the receiver's AK signs a cert");
+        let result =
+            verify_stitched_receipt(&receipt, &ctx, &mut ParentConsumptionTracker::new()).unwrap();
         assert!(!result.valid, "forged ek_cert_a must be rejected");
         let reason = result.reason.unwrap();
         assert!(
-            reason.contains("ek_cert_a verification failed") || reason.contains("not authorized"),
-            "wrong rejection reason: {}",
-            reason
+            reason.contains("ek_cert_a verification failed"),
+            "wrong rejection reason: {reason}"
         );
     }
 
@@ -722,47 +812,19 @@ mod tests {
     /// also verify the per-step EK cert chain.
     #[test]
     fn test_no_chain_head_rejects_receipt_authorization() {
-        // Reuse the parent_uniqueness test setup but without consuming the parent.
-        use crate::crypto::ephemeral_key::{generate_ephemeral_keypair, sign_ek_cert};
-
-        let keypair_a = crate::crypto::signatures::SignatureKeyPair::new().expect("keygen");
-        let keypair_b = crate::crypto::signatures::SignatureKeyPair::new().expect("keygen");
-        let mut receipt = StitchedReceiptV2::new(
-            [0; 32],
-            [0; 32],
-            [0; 32],
-            [0xaa; 32],
-            [0xbb; 32],
-            [0x01; 32],
-            [0x02; 32],
-            vec![],
-            vec![],
-        );
-        let commitment = receipt.compute_commitment().unwrap();
-        receipt.add_sig_a(keypair_a.sign(&commitment).unwrap());
-        receipt.add_sig_b(keypair_b.sign(&commitment).unwrap());
-        receipt.set_ek_cert_a(vec![0xAA; 32]);
-        let (chain_head_b_pk, chain_head_b_sk) =
-            generate_ephemeral_keypair(&[0xD1; 32]).expect("keygen");
-        receipt.set_ek_cert_b(
-            sign_ek_cert(&chain_head_b_sk, keypair_b.public_key(), &[0xaa; 32]).unwrap(),
-        );
-
-        let ctx = ReceiptVerificationContext::new(
-            [0u8; 32],
-            [0u8; 32],
-            keypair_a.public_key().to_vec(),
-            keypair_b.public_key().to_vec(),
-        )
-        .with_chain_head_b(chain_head_b_pk);
-        let mut tracker = ParentConsumptionTracker::new();
-        let result = verify_stitched_receipt(&receipt, &ctx, &mut tracker).unwrap();
+        let (receipt, ctx) = signed_receipt_and_context();
+        let headless = ReceiptVerificationContext {
+            chain_head_pubkey_a: None,
+            ..ctx
+        };
+        let result =
+            verify_stitched_receipt(&receipt, &headless, &mut ParentConsumptionTracker::new())
+                .unwrap();
         assert!(!result.valid, "missing chain head must reject");
         let reason = result.reason.unwrap();
         assert!(
-            reason.contains("chain_head_pubkey_a") || reason.contains("EK cert chain"),
-            "wrong rejection reason: {}",
-            reason
+            reason.contains("chain_head_pubkey_a"),
+            "wrong rejection reason: {reason}"
         );
     }
 }

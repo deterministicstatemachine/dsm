@@ -109,6 +109,62 @@ struct AcceptanceFixture {
     steps: std::collections::HashMap<[u8; 32], Vec<u8>>,
 }
 
+/// The sender's receipt of its first step toward the recipient: its faucet
+/// payout on its self-loop, then `op`, both by the real advance, with the
+/// receipt the one producer builds from the step.
+fn sender_step_receipt(ak_pk: &[u8], op: &Operation, amount: u64) -> StitchedReceiptV2 {
+    use dsm::core::bilateral_transaction_manager::compute_smt_key;
+    use dsm::types::device_state::{BalanceDelta, BalanceDirection, DeviceState};
+
+    let funded = DeviceState::new(G_SENDER, DEV_SENDER, ak_pk.to_vec())
+        .advance(
+            compute_smt_key(&DEV_SENDER, &DEV_SENDER),
+            DEV_SENDER,
+            Operation::FaucetClaim {
+                reserve_id: dsm::economic::native_reserve::era_reserve_id(
+                    dsm::economic::register::BETA_NETWORK_ID,
+                ),
+                generation: 1,
+            },
+            &[BalanceDelta {
+                policy_commit: era(),
+                direction: BalanceDirection::Credit,
+                amount: dsm::economic::native_reserve::ERA_FAUCET_PAYOUT,
+            }],
+            None,
+            None,
+        )
+        .unwrap()
+        .new_device_state
+        .establish_relationship(DEV_RECIP)
+        .unwrap();
+    let outcome = funded
+        .advance(
+            compute_smt_key(&DEV_SENDER, &DEV_RECIP),
+            DEV_RECIP,
+            op.clone(),
+            &[BalanceDelta {
+                policy_commit: era(),
+                direction: BalanceDirection::Debit,
+                amount,
+            }],
+            None,
+            None,
+        )
+        .unwrap();
+    StitchedReceiptV2::of_step(
+        G_SENDER,
+        DEV_SENDER,
+        DEV_RECIP,
+        &outcome,
+        None,
+        &dsm::types::receipt_types::DeviceTreeAcceptanceCommitment::from_root(
+            dsm::common::device_tree::DeviceTree::single(DEV_SENDER).root(),
+        ),
+    )
+    .unwrap()
+}
+
 /// Build a fully valid acceptance bundle with real keys, both sides at
 /// relationship genesis (EK certs signed directly by the AKs).
 fn acceptance_fixture() -> AcceptanceFixture {
@@ -119,20 +175,9 @@ fn acceptance_fixture() -> AcceptanceFixture {
 
     let op = transfer_to(DEV_RECIP, 40);
     let transfer_bytes = op.to_bytes();
-    let parent_tip = [0x71; 32];
-    let child_tip = [0x72; 32];
-
-    let mut receipt = StitchedReceiptV2::new(
-        G_SENDER,
-        DEV_SENDER,
-        DEV_RECIP,
-        parent_tip,
-        child_tip,
-        [0x73; 32],
-        [0x74; 32],
-        Vec::new(),
-        Vec::new(),
-    );
+    let mut receipt = sender_step_receipt(&sender_ak_pk, &op, 40);
+    let parent_tip = receipt.parent_tip;
+    let child_tip = receipt.child_tip;
     receipt.ek_pk_a = ek_pk_a.clone();
     receipt.ek_cert_a = sign_ek_cert(&sender_ak_sk, &ek_pk_a, &parent_tip).unwrap();
     let commitment = receipt.compute_commitment().unwrap();

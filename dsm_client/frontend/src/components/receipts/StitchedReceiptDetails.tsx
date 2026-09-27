@@ -95,9 +95,9 @@ const StitchedReceiptDetails: React.FC<Props> = ({ bytes, title = 'Stitched Rece
           <span style={valueStyle}>{toB32(decoded.childRoot) || '—'}</span>
         </div>
         <div style={rowStyle}>
-          <span style={labelStyle}>Proof sizes</span>
+          <span style={labelStyle}>Proofs</span>
           <span style={valueStyle}>
-            rel_path={decoded.relProofParent.length} · dev={decoded.devProof.length}
+            writes={decoded.stepWrites?.writes.length ?? '—'} · dev={decoded.devProof.length}
           </span>
         </div>
       </div>

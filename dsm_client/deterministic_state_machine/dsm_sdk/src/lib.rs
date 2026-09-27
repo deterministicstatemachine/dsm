@@ -135,9 +135,11 @@ pub mod storage;
 pub(crate) mod test_support {
     // Tests run against storage nodes on Postgres, never a fake one (owner,
     // 2026-09-23, 2026-09-24).
+    pub mod appliance;
     pub mod arrivals;
     pub mod nodes;
     pub mod one_device;
+    pub mod receipts;
     pub mod two_device;
 }
 #[cfg(test)]

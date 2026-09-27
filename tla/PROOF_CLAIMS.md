@@ -173,3 +173,46 @@ Rust is not written yet (Phase E), so no correspondence to shipping code is
 claimed; Phase E owes conformance vectors and mutation-tested gates against
 these invariants.
 
+
+## A step's receipt proves its whole write set
+
+```text
+lean4/DSMStepTransition.lean       the FOLD: a write set folded against one
+                                   pre-root yields the tree after the writes
+                                   (fold_sound), refuses no honest set
+                                   (fold_complete), and carries only the tree's
+                                   own paths (fold_canonical); with the
+                                   consistency checks deleted it stays sound but
+                                   not canonical (lax_fold_sound,
+                                   lax_fold_is_not_canonical)
+
+tla/DSM_ReceiptWriteSet.tla        the VERIFIER against an unconstrained author:
+                                   every accepted receipt proves the three
+                                   leaves a bearer spend writes, value leaves
+                                   the allocation only as receivers credit it,
+                                   the counter moves with every step, and no
+                                   honest spend is refused
+
+tla/DSM_OfflineAnchorSingleAppliance.tla
+                                   the ORDER: no counter step is committed for
+                                   a step whose receipt does not hold
+```
+
+The split is the one the code has. The pre-root check (`verify_batch`) is what
+makes the post-root right; the sibling-consistency checks are what make the
+proof canonical — the Lean anti-vacuity witness is a write set with a sibling
+the fold never uses, accepted without the checks and refused with them. The
+falsifications are the two verifiers the code replaced: one that checks the
+relationship leaf alone (`AllocationConserved` fails) and one that accepts one
+relationship path and nothing else (`HonestSpendAcceptable` fails: the honest
+bearer spend cannot be proven), and the order that released before proving the
+receipt (`NoCommitWithoutDeliverableConfirm` fails).
+
+**Boundary.** The Lean module rests on the symbolic digest abstraction declared
+in its header (equal roots have equal children); breaking it for the real tree
+means supplying a BLAKE3 collision between two leaf or node preimages. The TLC
+models are bounded (two peers, an allocation of three, three steps; three
+contents over an enrolled counter of three). Correspondence to the Rust is
+supported by the tests and mutation controls recorded in
+`specs/requirements/VERIFICATION_MATRIX.md`, not by a machine-checked
+refinement.
