@@ -191,7 +191,7 @@ async fn offline_step(
 /// `commitment`.
 fn kept_receipt(commitment: &[u8; 32]) -> dsm::types::receipt_types::StitchedReceiptV2 {
     let tx_id = crate::util::text_id::encode_base32_crockford(commitment);
-    let row = crate::storage::client_db::get_transaction_history(None, Some(1000))
+    let row = crate::storage::client_db::get_transaction_history(None, Some(1000), None)
         .expect("read the history")
         .into_iter()
         .find(|row| row.tx_id == tx_id)
@@ -1126,7 +1126,7 @@ async fn a_bearer_receipt_that_does_not_hold_spends_no_counter_step() {
 /// The history rows the entered device holds for the step.
 fn history_rows(commitment: &[u8; 32]) -> usize {
     let tx_id = crate::util::text_id::encode_base32_crockford(commitment);
-    crate::storage::client_db::get_transaction_history(None, Some(1000))
+    crate::storage::client_db::get_transaction_history(None, Some(1000), None)
         .expect("read the history")
         .into_iter()
         .filter(|row| row.tx_id == tx_id)

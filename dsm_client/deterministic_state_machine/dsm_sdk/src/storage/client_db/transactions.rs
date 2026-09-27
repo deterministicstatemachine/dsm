@@ -263,9 +263,12 @@ fn transaction_from_row(row: &Row) -> rusqlite::Result<TransactionRecord> {
     })
 }
 
+/// Newest first, `limit` rows (100 when none or zero is asked for) after
+/// skipping the `offset` newest.
 pub fn get_transaction_history(
     device_id: Option<&str>,
     limit: Option<usize>,
+    offset: Option<usize>,
 ) -> Result<Vec<TransactionRecord>> {
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|poisoned| {
@@ -277,6 +280,8 @@ pub fn get_transaction_history(
         Some(n) => n,
     };
     let lim = i64::try_from(lim).map_err(|e| anyhow::anyhow!("history limit: {e}"))?;
+    let off =
+        i64::try_from(offset.unwrap_or(0)).map_err(|e| anyhow::anyhow!("history offset: {e}"))?;
 
     // Newest first, in the order this device recorded them.
     const COLS: &str = TRANSACTION_COLUMNS;
@@ -284,15 +289,15 @@ pub fn get_transaction_history(
         Some(d) => conn
             .prepare(&format!(
                 "SELECT {COLS} FROM transactions WHERE from_device = ?1 OR to_device = ?1 \
-                 ORDER BY rowid DESC LIMIT ?2"
+                 ORDER BY rowid DESC LIMIT ?2 OFFSET ?3"
             ))?
-            .query_map(params![d, lim], transaction_from_row)?
+            .query_map(params![d, lim, off], transaction_from_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?,
         None => conn
             .prepare(&format!(
-                "SELECT {COLS} FROM transactions ORDER BY rowid DESC LIMIT ?1"
+                "SELECT {COLS} FROM transactions ORDER BY rowid DESC LIMIT ?1 OFFSET ?2"
             ))?
-            .query_map(params![lim], transaction_from_row)?
+            .query_map(params![lim, off], transaction_from_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?,
     };
     Ok(rows)
@@ -349,6 +354,29 @@ mod tests {
             proof_data: None,
             metadata: HashMap::new(),
         }
+    }
+
+    /// The history pages newest first: an offset skips that many newest rows.
+    #[test]
+    #[serial]
+    fn the_history_pages_by_offset_newest_first() {
+        crate::economic_fixtures::use_test_storage_dir();
+        reset_database_for_tests();
+        init_database().expect("init db");
+        for id in ["h1", "h2", "h3"] {
+            store_transaction(&history_row(id)).expect("store");
+        }
+        let ids = |limit, offset| {
+            get_transaction_history(None, limit, offset)
+                .expect("history")
+                .into_iter()
+                .map(|t| t.tx_id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(None, None), ["h3", "h2", "h1"]);
+        assert_eq!(ids(Some(2), Some(1)), ["h2", "h1"]);
+        assert_eq!(ids(Some(2), Some(2)), ["h1"]);
+        assert!(ids(Some(2), Some(3)).is_empty());
     }
 
     /// A settled step moves the relationship tip from its parent to its child
