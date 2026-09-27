@@ -11,6 +11,7 @@ describe('AppContent securing device state', () => {
         appState="securing_device"
         error={null}
         showIntro={false}
+        onIntroPlayed={() => {}}
         introGifSrc="intro.gif"
         eraTokenSrc="era.png"
         btcLogoSrc="btc.png"

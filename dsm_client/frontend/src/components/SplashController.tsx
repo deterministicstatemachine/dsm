@@ -9,12 +9,35 @@
 // script blocked) the theme's intro GIF is shown instead, so the boot path
 // never lands on a blank screen.
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { FxCanvas } from './fx/FxCanvas';
 import { loadFxEngine } from './fx/fxEngine';
 
-export default function SplashController({ showIntro, introGifSrc }: { showIntro: boolean; introGifSrc: string }) {
+export default function SplashController({
+  showIntro,
+  introGifSrc,
+  onPlayed,
+}: {
+  showIntro: boolean;
+  introGifSrc: string;
+  /** Called once the intro's own fade-out has finished. */
+  onPlayed: () => void;
+}) {
   const [engineReady, setEngineReady] = useState<boolean | null>(null);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+
+  // The intro is over when its fade-out animation ends, on the container itself
+  // (animations inside the scene do not count). The screen for the app's phase
+  // takes over from there.
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const onEnd = (e: Event) => {
+      if (e.target === el && (e as AnimationEvent).animationName === 'introFadeOut') onPlayed();
+    };
+    el.addEventListener('animationend', onEnd);
+    return () => el.removeEventListener('animationend', onEnd);
+  }, [onPlayed, showIntro]);
 
   useEffect(() => {
     let alive = true;
@@ -27,6 +50,7 @@ export default function SplashController({ showIntro, introGifSrc }: { showIntro
   if (!showIntro) return null;
   return (
     <div
+      ref={containerRef}
       className="intro-container"
       style={{
         display: 'flex',

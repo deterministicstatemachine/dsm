@@ -14,6 +14,7 @@ type Props = {
   appState: AppState;
   error: string | null;
   showIntro: boolean;
+  onIntroPlayed: () => void;
   introGifSrc: string;
   eraTokenSrc: string;
   btcLogoSrc: string;
@@ -156,6 +157,7 @@ export default function AppContent({
   appState,
   error,
   showIntro,
+  onIntroPlayed,
   introGifSrc,
   eraTokenSrc,
   btcLogoSrc,
@@ -175,7 +177,7 @@ export default function AppContent({
   setCurrentMenuIndex,
 }: Props) {
   if (showIntro) {
-    return <SplashController showIntro={showIntro} introGifSrc={introGifSrc} />;
+    return <SplashController showIntro={showIntro} introGifSrc={introGifSrc} onPlayed={onIntroPlayed} />;
   }
 
   const errorMenuItems = ['RETRY CONNECTION', 'VIEW ERROR LOG'];
@@ -245,8 +247,8 @@ export default function AppContent({
 
     // Local genesis is committed but the identity is not yet published to a
     // quorum of storage nodes, so it is not resolvable by peers. Rust retries
-    // publication on its own; this screen just reports the wait. Without a case
-    // here the switch falls through and renders an empty screen.
+    // publication on its own; this screen reports the wait once the intro has
+    // played out.
     case 'publication_pending':
       return (
         <div className="dsm-content">
