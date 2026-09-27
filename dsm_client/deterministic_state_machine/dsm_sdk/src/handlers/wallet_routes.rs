@@ -1016,13 +1016,21 @@ impl AppRouterImpl {
                         }
                     }
 
-                    let resp = generated::BilateralPrepareResponse {
-                        commitment_hash: Some(generated::Hash32 {
+                    // This device's own answer: the prepare went out and the proposal
+                    // is identified by its commitment. The peer's prepare response,
+                    // when it arrives over BLE, is a different message.
+                    let resp = generated::BilateralTransferResponse {
+                        success: true,
+                        transaction_hash: Some(generated::Hash32 {
                             v: commitment_hash.to_vec(),
                         }),
-                        ..Default::default()
+                        message: "prepare sent over BLE; the transfer completes when the peer's \
+                                  response arrives"
+                            .to_string(),
                     };
-                    pack_envelope_ok(generated::envelope::Payload::BilateralPrepareResponse(resp))
+                    pack_envelope_ok(generated::envelope::Payload::BilateralTransferResponse(
+                        resp,
+                    ))
                 }
 
                 #[cfg(not(all(target_os = "android", feature = "bluetooth", feature = "jni")))]

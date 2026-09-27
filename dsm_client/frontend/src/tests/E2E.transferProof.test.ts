@@ -109,15 +109,16 @@ function makeContactsFramedEnvelope(bleAddress?: string): Uint8Array {
   return frameEnvelope(env);
 }
 
-/** Build a BilateralPrepareResponse inside a framed Envelope. */
-function makeBilateralPrepareResponseEnvelope(commitHash: Uint8Array): Uint8Array {
-  // The commitment is what the frontend reads; the rest is Rust's to fill.
-  const resp = new pb.BilateralPrepareResponse({
-    commitmentHash: new pb.Hash32({ v: commitHash } as any),
+/** The SDK's answer to wallet.sendOffline: the prepare went out under this commitment. */
+function makeOfflineSendAnswerEnvelope(commitHash: Uint8Array): Uint8Array {
+  const resp = new pb.BilateralTransferResponse({
+    success: true,
+    transactionHash: new pb.Hash32({ v: commitHash } as any),
+    message: 'prepare sent over BLE',
   } as any);
   const env = new pb.Envelope({
     version: 3,
-    payload: { case: 'bilateralPrepareResponse', value: resp },
+    payload: { case: 'bilateralTransferResponse', value: resp },
   } as any);
   return frameEnvelope(env);
 }
@@ -215,7 +216,7 @@ function installBridge(opts?: { contactBleAddress?: string }) {
             if (bilateralResponseOverride) {
               return wrapIngressOk(bilateralResponseOverride());
             }
-            return wrapIngressOk(makeBilateralPrepareResponseEnvelope(COMMITMENT_HASH));
+            return wrapIngressOk(makeOfflineSendAnswerEnvelope(COMMITMENT_HASH));
           }
           return wrapIngressOk(new Uint8Array(0));
         }

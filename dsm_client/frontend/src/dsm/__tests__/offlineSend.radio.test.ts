@@ -42,8 +42,12 @@ function recordingBridge() {
         ? framed(new pb.Envelope({
           version: 3,
           payload: {
-            case: 'bilateralPrepareResponse',
-            value: new pb.BilateralPrepareResponse({ commitmentHash: new pb.Hash32({ v: COMMITMENT }) }),
+            case: 'bilateralTransferResponse',
+            value: new pb.BilateralTransferResponse({
+              success: true,
+              transactionHash: new pb.Hash32({ v: COMMITMENT }),
+              message: 'prepare sent over BLE',
+            }),
           },
         }))
         : new Uint8Array(0);
