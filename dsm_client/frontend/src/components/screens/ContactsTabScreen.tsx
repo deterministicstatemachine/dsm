@@ -201,7 +201,7 @@ const ContactsTabScreen: React.FC<Props> = () => {
           active={activeTab}
           onChange={setActiveTab}
           ariaLabel="Contact sections"
-          dataTour="contacts-tabs"
+          data-tour="contacts-tabs"
           focusedIndex={focusedIndex < 3 ? focusedIndex : undefined}
         />
       )}

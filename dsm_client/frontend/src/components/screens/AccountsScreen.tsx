@@ -318,7 +318,7 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
           active={activeTab}
           onChange={setActiveTab}
           ariaLabel="Token sections"
-          dataTour="tokens-tabs"
+          data-tour="tokens-tabs"
           focusedIndex={focusedIndex < 2 ? focusedIndex : undefined}
         />
       )}

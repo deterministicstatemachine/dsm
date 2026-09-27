@@ -66,14 +66,14 @@ type TabsProps<T extends string> = {
   active: T;
   onChange: (id: T) => void;
   ariaLabel?: string;
-  /** The guided tour's anchor for the strip (`data-tour`). */
-  dataTour?: string;
+  /** The guided tour's anchor for the strip, spelled as the attribute so the tour's source check reads it. */
+  'data-tour'?: string;
   /** The tab the D-pad focus is on, when the screen drives one. */
   focusedIndex?: number;
 };
 
 /** Segmented tab strip. Plain buttons, so keyboard and D-pad handling stay as they are. */
-export function ScreenTabs<T extends string>({ tabs, active, onChange, ariaLabel, dataTour, focusedIndex }: TabsProps<T>): React.JSX.Element {
+export function ScreenTabs<T extends string>({ tabs, active, onChange, ariaLabel, 'data-tour': dataTour, focusedIndex }: TabsProps<T>): React.JSX.Element {
   return (
     <div className="sb-tabs" aria-label={ariaLabel} data-tour={dataTour}>
       {tabs.map((tab, index) => (
