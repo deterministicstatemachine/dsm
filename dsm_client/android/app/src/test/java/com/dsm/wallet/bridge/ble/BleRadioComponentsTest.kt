@@ -12,6 +12,7 @@ import androidx.test.core.app.ApplicationProvider
 import java.util.concurrent.CopyOnWriteArrayList
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotSame
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -19,16 +20,23 @@ import org.junit.runner.RunWith
 import org.mockito.kotlin.any
 import org.mockito.kotlin.anyOrNull
 import org.mockito.kotlin.argumentCaptor
+import org.mockito.kotlin.doThrow
+import org.mockito.kotlin.eq
+import org.mockito.kotlin.inOrder
 import org.mockito.kotlin.mock
+import org.mockito.kotlin.never
 import org.mockito.kotlin.times
 import org.mockito.kotlin.verify
+import org.mockito.kotlin.whenever
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 
 /**
  * The advertiser and scanner forget what Bluetooth going off ended, and report
- * the stack's word. The framework's answers are simulated at the framework
+ * the stack's word. Every advertising request is its own callback instance, so
+ * the stack's answer about one request is never taken for another's, and a
+ * withdrawn request is withdrawn. The framework's answers are simulated at the framework
  * boundary: a stand-in BluetoothLeAdvertiser whose callbacks the test delivers,
  * and Robolectric's scanner.
  */
@@ -78,12 +86,15 @@ class BleRadioComponentsTest {
         assertFalse("requested is not on the air", advertiser.isAdvertising())
         assertEquals(emptyList<String>(), recorded.events)
 
-        startedSetCallback(framework, 1).onAdvertisingSetStarted(mock<AdvertisingSet>(), 0, AdvertisingSetCallback.ADVERTISE_SUCCESS)
+        val confirmed = startedSetCallback(framework, 1)
+        confirmed.onAdvertisingSetStarted(mock<AdvertisingSet>(), 0, AdvertisingSetCallback.ADVERTISE_SUCCESS)
         assertTrue(advertiser.isAdvertising())
         assertEquals(listOf("started"), recorded.events)
 
         assertTrue(advertiser.stopAdvertising())
-        startedSetCallback(framework, 1).onAdvertisingSetStopped(mock<AdvertisingSet>())
+        // The framework stops the set registered under the instance it is given.
+        verify(framework).stopAdvertisingSet(confirmed)
+        confirmed.onAdvertisingSetStopped(mock<AdvertisingSet>())
         assertFalse(advertiser.isAdvertising())
         assertEquals(listOf("started", "stopped"), recorded.events)
 
@@ -91,6 +102,97 @@ class BleRadioComponentsTest {
         startedSetCallback(framework, 2).onAdvertisingSetStarted(null, 0, AdvertisingSetCallback.ADVERTISE_FAILED_INTERNAL_ERROR)
         assertFalse(advertiser.isAdvertising())
         assertEquals(listOf("started", "stopped", "failed:${AdvertisingSetCallback.ADVERTISE_FAILED_INTERNAL_ERROR}"), recorded.events)
+    }
+
+    @Test
+    fun a_stop_while_the_start_is_in_flight_withdraws_the_requested_set_from_the_stack() {
+        val framework = mock<BluetoothLeAdvertiser>()
+        shadowOf(adapter).setBluetoothLeAdvertiser(framework)
+        val advertiser = BleAdvertiser(app)
+        val recorded = RecordedAdvertising()
+        advertiser.setCallback(recorded)
+
+        assertTrue(advertiser.startAdvertising())
+        val inFlight = startedSetCallback(framework, 1)
+        assertTrue(advertiser.stopAdvertising())
+        // The request is withdrawn under its own instance, or the set the stack
+        // confirms later stays on the air with nothing tracking it.
+        val order = inOrder(framework)
+        order.verify(framework).startAdvertisingSet(any(), any(), any(), anyOrNull(), anyOrNull(), eq(inFlight))
+        order.verify(framework).stopAdvertisingSet(inFlight)
+        assertFalse(advertiser.isAdvertising())
+
+        // The stack's late answers about the withdrawn request report nothing.
+        inFlight.onAdvertisingSetStarted(mock<AdvertisingSet>(), 0, AdvertisingSetCallback.ADVERTISE_SUCCESS)
+        inFlight.onAdvertisingSetStopped(mock<AdvertisingSet>())
+        assertFalse(advertiser.isAdvertising())
+        assertEquals(emptyList<String>(), recorded.events)
+
+        assertTrue(advertiser.startAdvertising())
+        startedSetCallback(framework, 2)
+    }
+
+    @Test
+    fun the_stacks_answer_for_a_withdrawn_request_is_not_taken_for_the_next_request() {
+        val framework = mock<BluetoothLeAdvertiser>()
+        shadowOf(adapter).setBluetoothLeAdvertiser(framework)
+        val advertiser = BleAdvertiser(app)
+        val recorded = RecordedAdvertising()
+        advertiser.setCallback(recorded)
+
+        assertTrue(advertiser.startAdvertising())
+        val withdrawn = startedSetCallback(framework, 1)
+        assertTrue(advertiser.stopAdvertising())
+        assertTrue(advertiser.startAdvertising())
+        val next = startedSetCallback(framework, 2)
+        assertNotSame("every request is its own callback instance", withdrawn, next)
+
+        withdrawn.onAdvertisingSetStarted(mock<AdvertisingSet>(), 0, AdvertisingSetCallback.ADVERTISE_SUCCESS)
+        withdrawn.onAdvertisingSetStopped(mock<AdvertisingSet>())
+        assertFalse("the withdrawn set is not the next request's", advertiser.isAdvertising())
+        assertEquals(emptyList<String>(), recorded.events)
+
+        next.onAdvertisingSetStarted(null, 0, AdvertisingSetCallback.ADVERTISE_FAILED_TOO_MANY_ADVERTISERS)
+        assertFalse(advertiser.isAdvertising())
+        assertEquals(listOf("failed:${AdvertisingSetCallback.ADVERTISE_FAILED_TOO_MANY_ADVERTISERS}"), recorded.events)
+    }
+
+    @Test
+    fun a_set_the_stack_confirms_for_a_request_no_longer_current_is_withdrawn() {
+        val framework = mock<BluetoothLeAdvertiser>()
+        shadowOf(adapter).setBluetoothLeAdvertiser(framework)
+        val advertiser = BleAdvertiser(app)
+        val recorded = RecordedAdvertising()
+        advertiser.setCallback(recorded)
+
+        assertTrue(advertiser.startAdvertising())
+        val first = startedSetCallback(framework, 1)
+        first.onAdvertisingSetStarted(null, 0, AdvertisingSetCallback.ADVERTISE_FAILED_INTERNAL_ERROR)
+        verify(framework, never()).stopAdvertisingSet(any())
+
+        // A set on the air that no current request wants is taken off and reported as nothing.
+        first.onAdvertisingSetStarted(mock<AdvertisingSet>(), 0, AdvertisingSetCallback.ADVERTISE_SUCCESS)
+        verify(framework).stopAdvertisingSet(first)
+        assertFalse(advertiser.isAdvertising())
+        assertEquals(listOf("failed:${AdvertisingSetCallback.ADVERTISE_FAILED_INTERNAL_ERROR}"), recorded.events)
+    }
+
+    @Test
+    fun a_stop_the_stack_rejects_leaves_the_set_on_the_air() {
+        val framework = mock<BluetoothLeAdvertiser>()
+        shadowOf(adapter).setBluetoothLeAdvertiser(framework)
+        val advertiser = BleAdvertiser(app)
+        val recorded = RecordedAdvertising()
+        advertiser.setCallback(recorded)
+
+        assertTrue(advertiser.startAdvertising())
+        val confirmed = startedSetCallback(framework, 1)
+        confirmed.onAdvertisingSetStarted(mock<AdvertisingSet>(), 0, AdvertisingSetCallback.ADVERTISE_SUCCESS)
+        doThrow(SecurityException("stop refused")).whenever(framework).stopAdvertisingSet(confirmed)
+
+        assertFalse("the stop was not taken", advertiser.stopAdvertising())
+        assertTrue("the stack's last word is that the set is on the air", advertiser.isAdvertising())
+        assertEquals(listOf("started"), recorded.events)
     }
 
     @Test
