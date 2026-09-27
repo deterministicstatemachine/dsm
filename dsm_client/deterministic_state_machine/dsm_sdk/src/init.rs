@@ -279,6 +279,14 @@ fn spawn_acceptance_recovery_sweep(origin: &'static str) {
                         ),
                     }
 
+                    match crate::storage::client_db::drain_history_repairs() {
+                        Ok((0, 0)) => {}
+                        Ok((written, remaining)) => log::info!(
+                            "[SDK] history repair ({origin}): {written} rows written, {remaining} retained"
+                        ),
+                        Err(e) => log::warn!("[SDK] history repair ({origin}) errored (non-fatal): {e}"),
+                    }
+
                     // Belt-and-braces: rebuild any projection that diverges from the
                     // canonical head, even if a failure was never queued (e.g. 8XK's
                     // projection was blanked out-of-band by the deleted rollback while

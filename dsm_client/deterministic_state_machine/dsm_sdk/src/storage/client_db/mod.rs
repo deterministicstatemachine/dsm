@@ -34,6 +34,7 @@ pub mod economic_admission;
 pub mod economic_lineage;
 pub mod frozen_publication_artifact; // publish-exact-bytes-to-quorum (namespaced; no glob re-export)
 mod genesis;
+mod history_repair;
 mod manifold_seeds;
 pub mod native_reserve;
 mod nonces;
@@ -69,6 +70,7 @@ pub use cert_chain::*;
 pub use recipient_receipt_fold::*;
 pub use canonical_rebuild::*;
 pub use cert_resync::*;
+pub use history_repair::*;
 pub use projection_repair::*;
 pub use sender_outbox::*;
 pub use sender_proposal::*;
@@ -420,7 +422,7 @@ fn get_database_path() -> Result<PathBuf> {
 /// sent root, a bearer step's anchor leaf and allocation spend) and the frame
 /// it owes its counterparty, so a restart continues a session instead of
 /// failing it and a returning link delivers what is owed.
-pub const CLIENT_DB_SCHEMA_VERSION: i64 = 24;
+pub const CLIENT_DB_SCHEMA_VERSION: i64 = 25;
 
 /// A 32-byte column, exactly. Any other length is a corrupt row and an error —
 /// never padded, never truncated.
@@ -999,6 +1001,23 @@ fn create_schema(conn: &Connection) -> Result<()> {
             token_id    TEXT NOT NULL,
             reason      TEXT NOT NULL,
             PRIMARY KEY (device_id, token_id)
+        );
+
+        -- A history row the process failed to write after its transaction
+        -- committed: the row itself, kept until the startup sweep writes it
+        -- (see history_repair.rs). Same columns as `transactions`.
+        CREATE TABLE IF NOT EXISTS history_repair_queue(
+            tx_id              TEXT PRIMARY KEY,
+            tx_hash            TEXT NOT NULL,
+            from_device        TEXT NOT NULL,
+            to_device          TEXT NOT NULL,
+            amount             INTEGER NOT NULL,
+            tx_type            TEXT NOT NULL,
+            status             TEXT NOT NULL,
+            commitment_hash    TEXT,
+            proof_data         BLOB,
+            metadata           BLOB,
+            reason             TEXT NOT NULL
         );
 
         -- Anchored token policies. A policy may exist WITHOUT a token: the

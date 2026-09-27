@@ -505,7 +505,7 @@ impl WalletSDK {
 
     pub fn get_balance(&self, token_id: &str) -> Result<Balance, DsmError> {
         let owner = self.device_id_array()?;
-        Ok(self.token_sdk.get_token_balance(&owner, token_id))
+        self.token_sdk.get_token_balance(&owner, token_id)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -765,10 +765,9 @@ impl WalletSDK {
                     "[WALLET] send_transfer_op: post-commit history row FAILED to persist \
                      ({e}). The transfer stands."
                 );
-                // Durable intent to rebuild — see the projection-repair queue.
-                if let Err(q) = crate::storage::client_db::enqueue_projection_repair(
-                    &sender,
-                    &token_id_owned,
+                // The row itself is kept for the startup sweep to write.
+                if let Err(q) = crate::storage::client_db::enqueue_history_repair(
+                    &rec,
                     &format!("post-commit history row failed: {e}"),
                 ) {
                     log::error!("[WALLET] send_transfer_op: could not QUEUE history repair: {q}");

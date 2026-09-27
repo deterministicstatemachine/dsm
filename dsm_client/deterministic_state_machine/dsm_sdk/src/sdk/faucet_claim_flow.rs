@@ -359,8 +359,8 @@ pub async fn claim_era_faucet(core: &CoreSDK, network_id: &[u8]) -> Result<Claim
 /// device from the native reserve. It names no sender device — its source is
 /// the reserve — and carries the release's operation digest as its hash, so
 /// a claim resumed on the same release upserts the same row. The credit is
-/// final before this runs; a row that fails to persist is logged and queued
-/// for projection repair, never reported as a failed claim.
+/// final before this runs; a row that fails to persist is kept in the history
+/// repair queue for the startup sweep, never reported as a failed claim.
 fn record_claim_history_row(
     genesis: &[u8; 32],
     devid: &[u8; 32],
@@ -396,9 +396,8 @@ fn record_claim_history_row(
     };
     if let Err(e) = crate::storage::client_db::store_transaction(&row) {
         log::error!("[faucet] the claim stands; its history row failed to persist: {e}");
-        if let Err(q) = crate::storage::client_db::enqueue_projection_repair(
-            &b32(devid),
-            "ERA",
+        if let Err(q) = crate::storage::client_db::enqueue_history_repair(
+            &row,
             &format!("faucet history row failed: {e}"),
         ) {
             log::error!("[faucet] could not queue the history repair: {q}");
