@@ -217,6 +217,17 @@ pub fn is_database_initialized() -> bool {
 /// Serializes with `init_database` via `TEST_DB_LIFECYCLE_LOCK`, so an
 /// `init_database` never observes a dropped connection with the old
 /// generation still current.
+/// Drop this process's connection to the store and leave the file as it is:
+/// what a process exit does. The next `get_connection()` opens the file again
+/// through `init_database`, schema check included.
+#[cfg(test)]
+pub(crate) fn close_database_for_tests() {
+    let _lifecycle = TEST_DB_LIFECYCLE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    *DB_CONNECTION.write().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
 #[cfg(any(test, feature = "test-utils"))]
 #[allow(clippy::panic)] // a reset that fails leaves the next test on stale rows; it must stop
 pub fn reset_database_for_tests() {

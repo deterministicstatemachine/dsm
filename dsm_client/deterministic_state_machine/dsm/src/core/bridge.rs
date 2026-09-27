@@ -648,16 +648,6 @@ pub fn handle_envelope_universal(env_bytes: &[u8]) -> Vec<u8> {
             })
         }
 
-        // Init/status messages are produced by the SDK/JNI surfaces and should not be routed
-        // through the core universal handler as "requests".
-        Some(gp::envelope::Payload::InitFailed(_)) => gp::envelope::Payload::Error(gp::Error {
-            code: 409,
-            message: "InitFailed should not be sent as a request".to_string(),
-            context: vec![],
-            source_tag: 10,
-            is_recoverable: false,
-            debug_b32: "".to_string(),
-        }),
 
         // NEW: Explicit guard for genesis-created responses (SDK-only)
         Some(gp::envelope::Payload::GenesisCreatedResponse(_)) => {

@@ -49,6 +49,30 @@ pub fn set_sdk_ready(ready: bool) {
     log::info!("session_manager::set_sdk_ready: SDK_READY={}", ready);
 }
 
+/// Record a failed startup as the session's fatal error.
+///
+/// The page learns the phase from the session. Without this a failed startup
+/// left the phase at `runtime_loading`, and the screen said the runtime was
+/// starting while nothing was: a device whose store refused its schema sat on
+/// that screen for good, and only the device log said why. This reads nothing
+/// from the store, because the store refusing is one of the failures it records.
+pub fn record_startup_failure(message: &str) {
+    let mut mgr = SESSION_MANAGER.lock().unwrap_or_else(|p| p.into_inner());
+    mgr.fatal_error = Some(message.to_string());
+    mgr.fatal_is_startup_failure = true;
+    log::error!("session_manager::record_startup_failure: {message}");
+}
+
+/// Startup succeeded: a failure an earlier attempt recorded is no longer
+/// true, so it goes. A fatal error anyone else reported stays.
+pub fn clear_startup_failure() {
+    let mut mgr = SESSION_MANAGER.lock().unwrap_or_else(|p| p.into_inner());
+    if mgr.fatal_is_startup_failure {
+        mgr.fatal_error = None;
+        mgr.fatal_is_startup_failure = false;
+    }
+}
+
 /// Process-global session manager instance.
 pub static SESSION_MANAGER: Lazy<Mutex<SessionManager>> =
     Lazy::new(|| Mutex::new(SessionManager::default()));
@@ -82,6 +106,9 @@ pub struct SessionManager {
     pub lock_method: String,
     pub lock_on_pause: bool,
     pub fatal_error: Option<String>,
+    /// Whether `fatal_error` is a failed startup, which a later successful
+    /// startup takes back. An error anyone else reported is theirs to clear.
+    pub fatal_is_startup_failure: bool,
     pub wallet_refresh_hint: u64,
     pub hardware: HardwareFacts,
     pub lock_state_initialized: bool,
@@ -95,6 +122,7 @@ impl Default for SessionManager {
             lock_method: "none".to_string(),
             lock_on_pause: true,
             fatal_error: None,
+            fatal_is_startup_failure: false,
             wallet_refresh_hint: 0,
             hardware: HardwareFacts::default(),
             lock_state_initialized: false,
@@ -440,6 +468,7 @@ pub fn set_fatal_error_and_snapshot(message: &str) -> Result<Vec<u8>, String> {
     mgr.sync_lock_config_from_app_state()
         .map_err(|e| format!("session lock settings: {e}"))?;
     mgr.fatal_error = Some(message.to_string());
+    mgr.fatal_is_startup_failure = false;
     log::error!("session_manager::set_fatal_error: {message}");
     Ok(envelope_wrap_snapshot(mgr.compute_snapshot()))
 }
@@ -450,6 +479,7 @@ pub fn clear_fatal_error_and_snapshot() -> Result<Vec<u8>, String> {
     mgr.sync_lock_config_from_app_state()
         .map_err(|e| format!("session lock settings: {e}"))?;
     mgr.fatal_error = None;
+    mgr.fatal_is_startup_failure = false;
     log::info!("session_manager::clear_fatal_error");
     Ok(envelope_wrap_snapshot(mgr.compute_snapshot()))
 }
@@ -485,6 +515,35 @@ mod tests {
     /// gate. Tests that are about publication itself must not use this.
     fn mark_identity_published_for_test() {
         IDENTITY_PUBLISHED.store(true, Ordering::SeqCst);
+    }
+
+    /// A failed startup is the session's fatal error until a startup
+    /// succeeds; an error someone else reported outlives a later success.
+    #[test]
+    #[serial_test::serial]
+    fn a_startup_failure_is_the_sessions_error_until_a_startup_succeeds() {
+        setup_test_env();
+        clear_fatal_error_and_snapshot().expect("clear");
+        let snapshot = || {
+            SESSION_MANAGER
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .compute_snapshot()
+        };
+        record_startup_failure("startup: init_dsm_sdk failed: the store refused");
+        assert_eq!(snapshot().phase, "error");
+        assert_eq!(
+            snapshot().fatal_error,
+            "startup: init_dsm_sdk failed: the store refused"
+        );
+        clear_startup_failure();
+        assert_eq!(snapshot().phase, "runtime_loading");
+        assert_eq!(snapshot().fatal_error, "");
+
+        set_fatal_error_and_snapshot("configuration file not found").expect("set");
+        clear_startup_failure();
+        assert_eq!(snapshot().fatal_error, "configuration file not found");
+        clear_fatal_error_and_snapshot().expect("clear");
     }
 
     #[test]

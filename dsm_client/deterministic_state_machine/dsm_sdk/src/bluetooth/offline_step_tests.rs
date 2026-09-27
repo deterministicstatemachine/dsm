@@ -733,14 +733,14 @@ async fn bearer_pair() -> (
     Pair,
     OfflineDevice,
     OfflineDevice,
-    crate::test_support::appliance::HostAppliance,
+    crate::test_support::appliance::InstalledAppliance,
     Operation,
 ) {
     let pair = Pair::boot(100, 0).await;
     let a = OfflineDevice::new(&pair.a);
     let b = OfflineDevice::new(&pair.b);
-    let appliance = crate::test_support::appliance::HostAppliance::birth(&pair.a, [0xC4; 32], 16);
-    appliance.install();
+    let appliance =
+        crate::test_support::appliance::HostAppliance::birth(&pair.a, [0xC4; 32], 16).install();
     a.device.enter();
     let loaded = a
         .device

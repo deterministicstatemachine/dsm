@@ -23,4 +23,4 @@
 //! decides no canonicality, because `advance_resolved` already did.
 pub mod fold;
 
-pub use fold::{batch_fold, verify_batch, FoldEntry, FoldError, Folded};
+pub use fold::{verify_batch, FoldEntry, FoldError, Folded};
