@@ -1374,7 +1374,7 @@ The State column says what this branch did; "Open" rows are holes left visible, 
 | C-K6 | `KT/bridge/NativeHostBridge.kt` | Five host-request arms nothing sends; `QR_STOP_SCAN` acknowledges and stops nothing. | Resolved: the bridge handles the four kinds the frontend builds (QR start, NFC reader start/stop, NFC tag write) and answers every other kind as unsupported; the seven pass-through parameters no arm read are gone. With the arms went their only reaches: `showBiometricPrompt`, the `androidx.biometric` dependency, `requestNamedPermissionsFromUi` with its camera request code, and the frontend's `BIOMETRIC_RESULT` event decode. The `'biometric'` lock-method value the frontend still declares is S-LOCK's. |
 | C-K17 | `KT/bridge/*` (`@VisibleForTesting` statics) | Statics that skip the port path; the instrumented proof never runs the port path production takes. | Open |
 | C-F10 | `FE/dsm/*` (`__dsmLastGoodHeaders`) | A window global never invalidated. | Resolved: `getHeaders` reads the bridge on every call; the window cache and the tests' resets of it are gone. |
-| C-C19 | `dsm/Cargo.toml` | Six features that gate only a name. | Open |
+| C-C19 | `dsm/Cargo.toml` | Six features that gate only a name. | Resolved: the six features (`bluetooth`, `storage`, `threadsafe`, `jni`, `web-stack`, `formal`) and the optional dependencies they carried (`jni`, `tokio-stream`, `rocksdb`, `axum`, `tower`) are deleted, with the build-info function that only listed them; `sphincs-trace` and `bitcoin-testnet-bypass` gate code and stay. |
 | C-C26 | `bitcoin-testnet-bypass` | §6.22; parked. | Open |
 
 **D. Repository constraints broken**
@@ -1382,10 +1382,10 @@ The State column says what this branch did; "Open" rows are holes left visible, 
 | ID | Location | Finding | State |
 |---|---|---|---|
 | D-CODEC | `KT/bridge/BridgeEnvelopeCodec.kt`; `dsm_client/frontend/public/index.html` | Hand-rolled protobuf codecs with hard-coded field numbers, beside "Kotlin MUST NOT implement custom wire decoders"; the index.html catch cleanup reads a variable out of scope. | Resolved: the page's port handler declares the response id outside its `try`, so the catch releases the pending entry it used to miss; `BridgeEnvelopeCodec` decodes and encodes through the generated protobuf classes (request, response, error, app-router, preference and bilateral payloads, and the envelope's error), and Kotlin holds no varint parser. Tests that asserted the hand-rolled parser's private rules (a second oneof member, a wrong wire type as a failure, an empty-versus-absent debug string) now assert protobuf's semantics. |
-| D-SAFETY | `KT/bridge/*` (safety scan); `FE/dsm/*` (safety classification) | Kotlin scans a field that cannot match on the ingress path; the frontend classifies safety by regex over message text instead of reading `Error.source_tag`. | Open |
+| D-SAFETY | `KT/bridge/*` (safety scan); `FE/dsm/*` (safety classification) | Kotlin scans a field that cannot match on the ingress path; the frontend classifies safety by regex over message text instead of reading `Error.source_tag`. | Resolved: the page classifies a deterministic-safety refusal by Rust's `Error.source_tag` (11) and reads the class from the error's context, at the two places every transport error surfaces (`decodeFramedEnvelopeV3`, the ingress unwrapper); the regex over message text and Kotlin's scan of the answer bytes (which never parsed a framed answer) are gone. |
 | D-F8 | `FE/dsm/WebViewBridge/strictQueries.ts` (`wallet.history`) | Sixteen raw little-endian bytes in a `Codec.PROTO` ArgPack. | Open |
 | D-F13 | `FE/services/recovery/nfcRecoveryService.ts` | A `key=value` text protocol with `'0'` defaults; JavaScript decodes capsule bytes (§6.29 Open, recovery boundary). | Open |
-| D-C15 | `CORE/deterministic_id.rs` | Hex UUID ids; dead. | Open |
+| D-C15 | `CORE/deterministic_id.rs` | Hex UUID ids; dead. | Resolved: `deterministic_id.rs` deleted. |
 | D-DBTC | `SDK/policy/builtins.rs` | The dBTC commit is checked with raw BLAKE3, not `TAG_DSM_POLICY`. Parked. | Open |
 | D-F17 | `FE/*` | `alert()` on production paths. | Resolved: the transfer dialog and the diagnostics overlay report through the app's toasts; no `alert()` remains in production code. |
 
@@ -1394,7 +1394,7 @@ The State column says what this branch did; "Open" rows are holes left visible, 
 | ID | Location | Finding | State |
 |---|---|---|---|
 | E-C14 | `CORE/emissions/` | The whole module; emissions are out of this round and nothing reaches it. | Open |
-| E-C15–18 | `CORE/deterministic_id.rs`; `crypto` (`calculate_next_entropy`, `hash_blake3`, `init_crypto`, `init_sphincs` — a self-test that never runs); `types/state_types.rs` (`State` methods nothing calls) | No production caller. | Open |
+| E-C15–18 | `CORE/deterministic_id.rs`; `crypto` (`calculate_next_entropy`, `hash_blake3`, `init_crypto`, `init_sphincs` — a self-test that never runs); `types/state_types.rs` (`State` methods nothing calls) | No production caller. | Resolved for the named items: `deterministic_id.rs`, `calculate_next_entropy` and `hash_blake3` (each reached only by its own test), `init_crypto` and the `init_sphincs` self-test it alone called are deleted; `init_kyber` stays (key generation calls it). The `State` methods are not enumerated by the audit and remain Open. |
 | E-C21 | `CORE/*` (`verify_offline_allocation_leaf`, `verify_rollup_sequence`, `classical_verify` (P-256), `is_drain_proof`, `position_leader`, `dlv_manager::{try_unlock, claim, create_vault_post}`, `common/device_admission`, the `external_commitment` verifier family) | Verifiers and helpers with no production caller. | Open |
 | E-C9 | `CORE/…` (dBTC builtin literal) | Parked. | Open |
 | E-S21 | `SDK/lib.rs` (non-Android or non-Bluetooth builds) | `initialize_bilateral_sdk` answers `Ok(())` and `is_bilateral_ready` is `true` on builds that have no bilateral stack (A27 residual). The shipped Android path reads a real flag. | Resolved: on a build without the stack `initialize_bilateral_sdk` is an error naming the missing stack and `is_bilateral_ready` is false. |
