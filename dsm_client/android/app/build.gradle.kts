@@ -296,6 +296,24 @@ tasks.named("preBuild").configure {
     dependsOn("failOnJsonOrB64")
 }
 
+// The build refuses what scripts/real_code_guard.py forbids anywhere under dsm_client/android:
+// a source line holding one of its tokens that the baseline does not already record fails it.
+val realCodeGuard = tasks.register<Exec>("realCodeGuard") {
+    val repoRoot = rootProject.projectDir.parentFile.parentFile
+    workingDir = repoRoot
+    commandLine(
+        "python3",
+        "scripts/real_code_guard.py",
+        "--root",
+        repoRoot.absolutePath,
+        "--scope",
+        "dsm_client/android",
+    )
+}
+tasks.named("preBuild").configure {
+    dependsOn(realCodeGuard)
+}
+
 
 // Disable Kotlin incremental compilation for release tasks to avoid flaky cache/daemon issues.
 val isCi = (System.getenv("CI") ?: "").equals("true", ignoreCase = true)

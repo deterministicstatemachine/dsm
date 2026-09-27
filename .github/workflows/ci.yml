@@ -108,6 +108,21 @@ jobs:
   # per crate so the PR critical path is the slowest crate rather than the
   # whole workspace in series.
   # --------------------------------------------------------------------------
+  # Every layer's build runs scripts/real_code_guard.py over its own sources. This job runs on
+  # every change, whatever layers it touches, against main: the guard must equal main's guard
+  # (only the owner changes it) and the baseline may only lose entries.
+  real-code-guard:
+    name: Real-code guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Fetch main, the guard's reference
+        run: git fetch --no-tags --depth=1 origin main
+      - name: Refuse placeholders, fabricated results and boolean literals
+        run: |
+          python3 scripts/real_code_guard.py --self-test
+          python3 scripts/real_code_guard.py --reference origin/main
+
   rust-gates:
     name: Rust gates
     needs: [select]

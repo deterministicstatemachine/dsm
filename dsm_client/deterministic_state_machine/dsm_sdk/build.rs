@@ -119,7 +119,13 @@ fn sanitize_generated_prost(out_dir: &std::path::Path) {
 // LZ78 / manufacturing-gate math now lives entirely in `security::cdbrw_ffi`
 // as pure Rust. No build-time C step is needed.
 
+include!("../../../scripts/real_code_guard_build.rs");
+
 fn main() {
+    if let Err(refusal) = real_code_guard() {
+        eprintln!("{refusal}");
+        std::process::exit(1);
+    }
     // Safety check: prevent release builds with test-only flags
     if std::env::var("PROFILE").as_deref() == Ok("release") {
         // Check if FORCE_NO_BACKEND is accessible in release builds
