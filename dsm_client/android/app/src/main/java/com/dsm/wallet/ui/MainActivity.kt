@@ -1924,6 +1924,9 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         wv.settings.apply {
             javaScriptEnabled = true
             domStorageEnabled = true
+            // The StateBoy UI is laid out in pixels on a fixed screen; the
+            // system font scale must not stretch its labels out of their bricks.
+            textZoom = 100
             @Suppress("DEPRECATION")
             savePassword = false
             @Suppress("DEPRECATION")

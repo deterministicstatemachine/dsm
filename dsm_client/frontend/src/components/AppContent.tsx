@@ -67,7 +67,7 @@ function MenuRenderer({
             }
           }}
         >
-          <span className={`brick-label ${options?.itemClassName ? 'visible' : ''}`}>{item}</span>
+          <span className={`brick-label${options?.itemClassName ? ' visible' : ''}${item.length > 10 ? ' brick-label--long' : ''}`}>{item}</span>
         </div>
       ))}
     </div>

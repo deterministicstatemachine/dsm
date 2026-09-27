@@ -585,19 +585,28 @@ input:checked + .toggle-slider:before { transform: translateX(20px); }
   filter: brightness(0.75) !important;
 }
 .dsm-menu-item.home-brick .brick-label {
+  /* Spans the brick's inner width (not half of it, as `left: 50%` allowed),
+     stays on one line, and a long label shrinks to fit. */
   position: absolute;
-  left: 50%;
+  left: 14px;
+  right: 14px;
   top: 50%;
-  transform: translate(-50%, -50%);
+  transform: translateY(-50%);
   font-family: 'Martian Mono', monospace;
   font-size: 11px;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.5px;
+  white-space: nowrap;
+  overflow: hidden;
   color: var(--text-dark);
   z-index: 2;
   text-align: center;
   pointer-events: none;
+}
+.dsm-menu-item.home-brick .brick-label--long {
+  font-size: 9px;
+  letter-spacing: 0.3px;
 }
 .dsm-menu-item.home-brick.focused .brick-label {
   color: var(--bg);
@@ -866,6 +875,84 @@ html[data-shell-theme="dmg"] {
   --dpad-center-shadow: rgba(0, 0, 0, 0.98);
 }
 
+/* Gold – polished metal all over: housing, trim, controls, logo */
+html[data-shell-theme="gold"] {
+  --shell-tint:       #d4af37;
+  --shell-bar-color:  #0a0a0a;
+  --trim-bg:          #0a0a0a;
+  --trim-border:      #3a2c08;
+  --housing-bg:       #8c6a12;
+  --btn-grad-light:   #fff0a8;
+  --btn-grad-dark:    #a67c0e;
+  --btn-border:       #fff6c8;
+  --dpad-grad-light:  #f7dc7a;
+  --dpad-grad-dark:   #9a7210;
+  --dpad-border:      #fff1b8;
+  --ab-btn-grad-light:#ffefa6;
+  --ab-btn-grad-dark: #a37a10;
+  --label-color:      #3b2a05;
+  --shell-label-color:#3b2a05;
+  --edge-glow:        rgba(255, 226, 122, 0.45);
+  --dpad-bottom-shadow: rgba(70, 48, 4, 0.9);
+  --dpad-cast-shadow: rgba(40, 26, 0, 0.45);
+  --dpad-cast-shadow-long: rgba(40, 26, 0, 0.25);
+  --dpad-center-shadow: rgba(0, 0, 0, 0.9);
+  --nav-lit-color:    #ffe27a;
+  --control-shell-glow: 0 0 0 1px rgba(255, 236, 160, 0.35);
+}
+
+/* Zebra – black-and-white hide, purple controls in black wells, black trim */
+html[data-shell-theme="zebra"] {
+  --shell-tint:       #f4f2ec;
+  --shell-bar-color:  #0a0a0a;
+  --trim-bg:          #0a0a0a;
+  --trim-border:      #2c2c2c;
+  --housing-bg:       #101010;
+  --btn-grad-light:   #6d28d9;
+  --btn-grad-dark:    #3b0764;
+  --btn-border:       #a78bfa;
+  --dpad-grad-light:  #6d28d9;
+  --dpad-grad-dark:   #3b0764;
+  --dpad-border:      #a78bfa;
+  --ab-btn-grad-light:#6d28d9;
+  --ab-btn-grad-dark: #3b0764;
+  --label-color:      rgba(30, 30, 30, 0.62);
+  --shell-label-color:rgba(30, 30, 30, 0.62);
+  --edge-glow:        rgba(167, 139, 250, 0.45);
+  --dpad-bottom-shadow: rgba(20, 20, 20, 0.85);
+  --dpad-cast-shadow: rgba(0, 0, 0, 0.4);
+  --dpad-cast-shadow-long: rgba(0, 0, 0, 0.22);
+  --dpad-center-shadow: rgba(0, 0, 0, 0.9);
+  --nav-lit-color:    #c4b5fd;
+  --control-shell-glow: 0 0 0 1px rgba(255, 255, 255, 0.35);
+}
+
+/* Leopard – spotted tan hide, pink controls in dark wells, black trim */
+html[data-shell-theme="leopard"] {
+  --shell-tint:       #d9b36a;
+  --shell-bar-color:  #0a0a0a;
+  --trim-bg:          #0a0a0a;
+  --trim-border:      #2b1d10;
+  --housing-bg:       #1c1410;
+  --btn-grad-light:   #e0157a;
+  --btn-grad-dark:    #7a0a45;
+  --btn-border:       #ff7ac2;
+  --dpad-grad-light:  #e0157a;
+  --dpad-grad-dark:   #7a0a45;
+  --dpad-border:      #ff7ac2;
+  --ab-btn-grad-light:#e0157a;
+  --ab-btn-grad-dark: #7a0a45;
+  --label-color:      rgba(30, 30, 30, 0.62);
+  --shell-label-color:rgba(30, 30, 30, 0.62);
+  --edge-glow:        rgba(255, 105, 180, 0.45);
+  --dpad-bottom-shadow: rgba(20, 20, 20, 0.85);
+  --dpad-cast-shadow: rgba(0, 0, 0, 0.4);
+  --dpad-cast-shadow-long: rgba(0, 0, 0, 0.22);
+  --dpad-center-shadow: rgba(0, 0, 0, 0.9);
+  --nav-lit-color:    #ff8ccf;
+  --control-shell-glow: 0 0 0 1px rgba(255, 234, 200, 0.35);
+}
+
 html[data-shell-theme] body { background-color: #000000 !important; }
 
 html[data-shell-theme="smoke"] .stateboy,
@@ -995,6 +1082,139 @@ html[data-shell-theme] .select div, html[data-shell-theme] .start div {
 html[data-shell-theme] .start-housing, html[data-shell-theme] .select-housing {
   background: var(--housing-bg) !important;
   transition: background 0.4s ease, box-shadow 0.4s ease !important;
+}
+
+/* Skins that draw their own housings or trim come after the generic theme
+   rules above, which have the same specificity and would otherwise win by
+   order. The controls themselves are always the shell's own bevels, drawn from
+   the skin's variables. */
+
+html[data-shell-theme="gold"] .stateboy {
+  background: linear-gradient(180deg, #2a1d03 0%, #120c01 100%) !important;
+}
+
+/* Housing: polished sheet, a bright band of reflected light across it. */
+html[data-shell-theme="gold"] .front-plate {
+  background-image:
+    repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.035) 0 1px, rgba(0, 0, 0, 0) 1px 3px),
+    linear-gradient(112deg, rgba(255, 255, 255, 0) 30%, rgba(255, 252, 230, 0.42) 44%, rgba(255, 255, 255, 0) 52%, rgba(255, 252, 230, 0.16) 68%, rgba(255, 255, 255, 0) 76%),
+    linear-gradient(165deg,
+      #f7e39a 0%, #e2c159 12%, #b8891a 26%, #f6e28d 40%, #d5ad3c 50%,
+      #9c7212 62%, #e6c65f 76%, #b58a1c 88%, #f3dd8e 100%) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 250, 220, 0.55),
+    inset 0 -3px 12px rgba(60, 40, 0, 0.45),
+    0 40px 60px 0 rgba(0, 0, 0, 0.6) !important;
+}
+
+/* The screen's trim stays black: glass, its bezel and the nav bar, with a thin
+   gold line where the bezel meets the housing. The logo and the nav icons are
+   the only gold on it. */
+html[data-shell-theme="gold"] .screen-container {
+  background-image: linear-gradient(180deg, #151515 0%, #070707 100%) !important;
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 226, 122, 0.35),
+    inset 0 2px 8px rgba(0, 0, 0, 0.6),
+    0 0 0 1px rgba(80, 56, 4, 0.6) !important;
+}
+html[data-shell-theme="gold"] .screen-nav-bar {
+  background-image: linear-gradient(180deg, #101010 0%, #050505 100%) !important;
+  border-top: 2px solid #3a2c08 !important;
+  box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.6) !important;
+}
+html[data-shell-theme="gold"] .screen-nav-icon { background: rgba(255, 226, 122, 0.06) !important; }
+html[data-shell-theme="gold"] .screen-nav-icon.pressed,
+html[data-shell-theme="gold"] .screen-nav-icon:active { background: rgba(255, 226, 122, 0.14) !important; }
+/* The icons: the white artwork tinted to the shell's gold. */
+html[data-shell-theme="gold"] .nav-icon-svg {
+  filter: brightness(0) invert(1) sepia(1) saturate(4) hue-rotate(-8deg) brightness(0.92) !important;
+}
+html[data-shell-theme="gold"] .screen-nav-icon.active .nav-icon-svg {
+  filter: brightness(0) invert(1) sepia(1) saturate(4) hue-rotate(-8deg) brightness(1.05)
+    drop-shadow(0 0 2px var(--nav-lit-color)) drop-shadow(0 0 4px var(--nav-lit-color)) drop-shadow(0 0 6px var(--nav-lit-color)) !important;
+}
+
+/* The logo: the wordmark cut from the same metal (its white artwork masks a gold gradient). */
+html[data-shell-theme="gold"] .dsm-shell-logo img { opacity: 0 !important; }
+html[data-shell-theme="gold"] .dsm-shell-logo::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(170deg, #fff3b4 0%, #f3d367 22%, #b8891a 45%, #ffe98f 58%, #cfa32e 74%, #8f6708 92%, #f5dc86 100%);
+  -webkit-mask: url('images/logos/dsm-screen-trim-logo-white.png') center / contain no-repeat;
+  mask: url('images/logos/dsm-screen-trim-logo-white.png') center / contain no-repeat;
+  filter: drop-shadow(0 1px 0 rgba(255, 245, 200, 0.55)) drop-shadow(0 -1px 0 rgba(60, 40, 0, 0.6));
+}
+
+/* Zebra – a black-and-white hide; the purple controls (the shell's own bevels) sit in black wells. */
+html[data-shell-theme="zebra"] .stateboy {
+  background: #000000 !important;
+}
+html[data-shell-theme="zebra"] .front-plate {
+  background-image: url('images/hardshell/zebra.png') !important;
+  background-size: cover !important;
+  background-position: center !important;
+}
+/* The glass and its bezel stay black, a purple hairline where they meet the hide. */
+html[data-shell-theme="zebra"] .screen-container {
+  background-image: linear-gradient(180deg, #151515 0%, #070707 100%) !important;
+  box-shadow:
+    inset 0 0 0 1px rgba(196, 181, 253, 0.45),
+    inset 0 2px 8px rgba(0, 0, 0, 0.6),
+    0 0 0 1px rgba(0, 0, 0, 0.7) !important;
+}
+/* The A and B letters keep the shell's own etched rule (black at 60%, a light
+   edge below), so they read as a darker purple. START and SELECT are etched
+   into the hide the same way: dark gray at 60%, the pattern showing through. */
+html[data-shell-theme="zebra"] .select-button-label,
+html[data-shell-theme="zebra"] .start-button-label {
+  color: rgba(30, 30, 30, 0.62) !important;
+  text-shadow: 0 1px 1px rgba(255, 255, 255, 0.35) !important;
+}
+/* The wells the controls sit in: black, a white hairline against the hide. */
+html[data-shell-theme="zebra"] .start-housing,
+html[data-shell-theme="zebra"] .select-housing,
+html[data-shell-theme="zebra"] .new-dpad-background,
+html[data-shell-theme="zebra"] .buttons-a-b {
+  background: linear-gradient(180deg, #050505 0%, #181818 100%) !important;
+  box-shadow:
+    inset 0 3px 10px rgba(0, 0, 0, 0.9),
+    inset 0 -2px 6px rgba(196, 181, 253, 0.12),
+    0 0 0 1px rgba(255, 255, 255, 0.35) !important;
+}
+
+/* Leopard – a spotted tan hide; the pink controls (the shell's own bevels) sit in dark wells. */
+html[data-shell-theme="leopard"] .stateboy {
+  background: #1a1008 !important;
+}
+html[data-shell-theme="leopard"] .front-plate {
+  background-image: url('images/hardshell/leopard.png') !important;
+  background-size: cover !important;
+  background-position: center !important;
+}
+html[data-shell-theme="leopard"] .screen-container {
+  background-image: linear-gradient(180deg, #151515 0%, #070707 100%) !important;
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 140, 207, 0.45),
+    inset 0 2px 8px rgba(0, 0, 0, 0.6),
+    0 0 0 1px rgba(26, 19, 15, 0.8) !important;
+}
+/* The A and B letters keep the shell's own etched rule (a darker pink);
+   START and SELECT are etched into the hide: dark gray at 60%. */
+html[data-shell-theme="leopard"] .select-button-label,
+html[data-shell-theme="leopard"] .start-button-label {
+  color: rgba(30, 30, 30, 0.62) !important;
+  text-shadow: 0 1px 1px rgba(255, 255, 255, 0.35) !important;
+}
+html[data-shell-theme="leopard"] .start-housing,
+html[data-shell-theme="leopard"] .select-housing,
+html[data-shell-theme="leopard"] .new-dpad-background,
+html[data-shell-theme="leopard"] .buttons-a-b {
+  background: linear-gradient(180deg, #17100a 0%, #2b1d10 100%) !important;
+  box-shadow:
+    inset 0 3px 10px rgba(0, 0, 0, 0.9),
+    inset 0 -2px 6px rgba(255, 140, 207, 0.12),
+    0 0 0 1px rgba(255, 234, 200, 0.35) !important;
 }
 
 html[data-shell-theme="smoke"],
@@ -1130,8 +1350,13 @@ html[data-shell-theme] .stateboy::before {
         // Sunburst theme: near-black trim but uses gold logo
         shellLogo.src = 'images/logos/dsm-screen-trim-logo-gold.png';
         shellLogo.alt = 'DSM Logo';
-      } else if (theme === 'white' || theme === 'violet' || theme === 'red') {
-        // Actual black trim (#080808 / #0f0f12) — white logo for contrast
+      } else if (theme === 'gold') {
+        // Gold: the wordmark is cut from the shell's metal (CSS masks the white
+        // artwork with the gold gradient); the img only keeps the box's size.
+        shellLogo.src = 'images/logos/dsm-screen-trim-logo-white.png';
+        shellLogo.alt = 'DSM Logo';
+      } else if (theme === 'white' || theme === 'violet' || theme === 'red' || theme === 'zebra' || theme === 'leopard') {
+        // Actual black trim (#080808 / #0f0f12 / #0a0a0a) — white logo for contrast
         shellLogo.src = 'images/logos/dsm-screen-trim-logo-white.png';
         shellLogo.alt = 'DSM Logo';
       } else if (theme === 'default') {
@@ -1342,7 +1567,10 @@ html[data-shell-theme] .stateboy::before {
         { key: 'blue',   label: 'BLUE'   },
         { key: 'pink',   label: 'PINK'   },
         { key: 'bitcoin', label: 'BITCOIN' },
-        { key: 'dmg',    label: 'DMG-01' }
+        { key: 'dmg',    label: 'DMG-01' },
+        { key: 'gold',   label: 'GOLD'   },
+        { key: 'zebra',  label: 'ZEBRA'  },
+        { key: 'leopard', label: 'LEOPARD' }
       ];
       var current = 0;
       var holdTimer = null;
