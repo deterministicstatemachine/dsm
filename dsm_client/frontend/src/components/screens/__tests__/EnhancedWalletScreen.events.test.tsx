@@ -287,7 +287,6 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
       .fn()
       .mockResolvedValue([{ tokenId: 'ERA', symbol: 'ERA', baseUnits: 100n, displayAmount: '100', decimals: 0 }]);
     (dsmClient.getWalletHistory as any) = jest.fn().mockResolvedValue({ transactions: [] });
-    (dsmClient.syncWithStorage as any) = jest.fn().mockResolvedValue({ success: true, processed: 1 });
     (dsmClient.getInbox as any) = jest.fn().mockResolvedValue({
       items: [{ id: 'inbox-1', preview: 'Incoming online transfer 25 ERA', isStaleRoute: false }],
     });
@@ -299,7 +298,6 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
     fireEvent.click(screen.getByRole('button', { name: /Inbox/ }));
 
     await waitFor(() => {
-      expect(dsmClient.syncWithStorage).not.toHaveBeenCalled();
       expect(dsmClient.getInbox).toHaveBeenCalled();
       expect(screen.getByText('Incoming online transfer 25 ERA')).toBeInTheDocument();
     });

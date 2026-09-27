@@ -1,88 +1,10 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 import * as pb from '../proto/dsm_app_pb';
-import { syncWithStorageStrictBridge, routerQueryBin } from './WebViewBridge';
+import { routerQueryBin } from './WebViewBridge';
 import { decodeFramedEnvelopeV3 } from './decoding';
 import type { StorageMember, StorageMemberAnswer, StorageStatus } from './types';
-import { bytesToBase32CrockfordPrefix, encodeBase32Crockford } from '../utils/textId';
-import { emitWalletRefresh } from './events';
-import logger from '../utils/logger';
-
-export async function syncWithStorage(params?: { pullInbox?: boolean; pushPending?: boolean; limit?: number }): Promise<{ success: boolean; processed?: number; pulled?: number; pushed?: number; errors?: string[]; message?: string }> {
-  const _params = { pullInbox: true, pushPending: false, limit: 50, ...params };
-  try {
-    const protobufBytes = await syncWithStorageStrictBridge({
-      pullInbox: _params.pullInbox,
-      pushPending: _params.pushPending,
-      limit: _params.limit,
-    });
-
-    if (protobufBytes.length === 0) {
-      return { success: false, message: 'Empty response from bridge' };
-    }
-
-    logger.debug('[DSM:syncWithStorage] Response bytes metadata', {
-      length: protobufBytes.length,
-      headB32: bytesToBase32CrockfordPrefix(protobufBytes, 8),
-    });
-
-    // CANONICAL PATH: All bridge responses are FramedEnvelopeV3
-    let env: pb.Envelope;
-    try {
-      env = decodeFramedEnvelopeV3(protobufBytes);
-    } catch (e) {
-      logger.error('[DSM:syncWithStorage] Failed to decode FramedEnvelopeV3:', e);
-      return { success: false, message: `Decode failed: ${e instanceof Error ? e.message : String(e)}` };
-    }
-
-    // Check for error envelope
-    if (env.payload.case === 'error') {
-      const err = env.payload.value;
-      logger.warn('[DSM:syncWithStorage] Bridge returned Error envelope:', err.message);
-      return { success: false, processed: 0, pulled: 0, pushed: 0, message: `Sync failed: ${err.message || 'unknown error'}` };
-    }
-
-    // Extract StorageSyncResponse from envelope
-    if (env.payload.case !== 'storageSyncResponse') {
-      logger.error('[DSM:syncWithStorage] Unexpected payload.case:', env.payload.case);
-      return { success: false, message: `Unexpected response type: ${env.payload.case}` };
-    }
-
-    const syncResponse = env.payload.value;
-    if (!syncResponse) {
-      logger.warn('[DSM:syncWithStorage] Null storageSyncResponse payload');
-      return { success: false, processed: 0, pulled: 0, pushed: 0, message: 'Sync failed: null response' };
-    }
-
-    logger.debug('[DSM:syncWithStorage] Result', {
-      success: syncResponse.success,
-      pulled: syncResponse.pulled,
-      processed: syncResponse.processed,
-      pushed: syncResponse.pushed,
-      errors: syncResponse.errors,
-    });
-
-    // Trigger balance refresh on the receiver side after items are ingested.
-    // SQLite was already credited by the Rust storage.sync handler; the UI
-    // just needs to read the new value.
-    const processed = syncResponse.processed ?? 0;
-    const result = {
-      success: syncResponse.success,
-      pulled: syncResponse.pulled,
-      processed: syncResponse.processed,
-      pushed: syncResponse.pushed,
-      errors: syncResponse.errors,
-      message: syncResponse.errors.length > 0 ? syncResponse.errors[0] : undefined,
-    };
-    if (processed > 0) {
-      try { emitWalletRefresh({ source: 'storage.sync' }); } catch {}
-    }
-    return result;
-  } catch (e) {
-    logger.warn('Bridge syncWithStorage failed:', e);
-    return { success: false, message: e instanceof Error ? e.message : 'Bridge call failed' };
-  }
-}
+import { encodeBase32Crockford } from '../utils/textId';
 
 /**
  * The storage set this device's traffic uses, and what each member answered

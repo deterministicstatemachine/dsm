@@ -810,7 +810,9 @@ async fn append_cell_entry(
     Ok((index, running_hash))
 }
 
-/// Everything held for `(namespace, key)`, in the order it arrived.
+/// Everything held for `(namespace, key)`, in the order it arrived: the
+/// store's own tests read through this; nothing served does.
+#[cfg(test)]
 pub async fn get_cell_values(pool: &Pool, namespace: &[u8], key: &[u8]) -> Result<Vec<Vec<u8>>> {
     Ok(get_cell_entries(pool, namespace, key)
         .await?

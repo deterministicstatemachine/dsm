@@ -2,7 +2,7 @@
 // Strict query helpers: contacts, balances, history, inbox, pending bilateral
 // list, storage sync. All return raw framed Envelope v3 bytes; callers decode.
 
-import { ArgPack, Codec, InboxRequest, StorageSyncRequest } from "../../proto/dsm_app_pb";
+import { ArgPack, Codec, InboxRequest } from "../../proto/dsm_app_pb";
 import { callBin, routerQueryBin, toBytes } from "./transportCore";
 
 export async function getContactsStrictBridge(): Promise<Uint8Array> {
@@ -51,20 +51,3 @@ export async function getPendingBilateralListStrictBridge(): Promise<Uint8Array>
   return res;
 }
 
-export async function syncWithStorageStrictBridge(args?: {
-  pullInbox?: boolean;
-  pushPending?: boolean;
-  limit?: number;
-}): Promise<Uint8Array> {
-  const req = new StorageSyncRequest({
-    pullInbox: args?.pullInbox !== false,
-    pushPending: args?.pushPending === true,
-    limit: typeof args?.limit === "number" ? args.limit : 50,
-  });
-  const arg = new ArgPack({
-    codec: Codec.PROTO,
-    body: toBytes(req.toBinary()),
-  });
-  const res = await routerQueryBin("storage.sync", arg.toBinary());
-  return res;
-}

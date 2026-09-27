@@ -71,10 +71,9 @@ class SinglePathWebViewBridgeFuzzTest {
 
         malformedEnvelopes.forEach { envelope ->
             try {
-                // Try to parse - should not crash
-                SinglePathWebViewBridge.handleBinaryRpcRaw("processEnvelopeV3", envelope)
-                // Result should be empty for invalid envelopes (error case)
-                // We don't assert emptiness since error handling may vary
+                // Every failure is answered as a protobuf error envelope, never as empty bytes.
+                val result = SinglePathWebViewBridge.handleBinaryRpc("processEnvelopeV3", envelope)
+                assert(isValidProtobufEnvelope(result)) { "expected a protobuf response envelope" }
             } catch (e: Exception) {
                 // Should handle gracefully, not crash
                 println("Envelope parsing handled exception: ${e.message}")

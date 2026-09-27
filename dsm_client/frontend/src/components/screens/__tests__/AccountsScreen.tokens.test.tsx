@@ -93,7 +93,6 @@ const mockCopyText = jest.fn().mockResolvedValue(true);
 jest.mock('../../../utils/anchorDisplay', () => ({
   copyText: (...a: unknown[]) => mockCopyText(...a),
   shortId: () => '',
-  prettyAnchor: () => '',
 }));
 
 jest.mock('../../../hooks/useWalletRefreshListener', () => ({

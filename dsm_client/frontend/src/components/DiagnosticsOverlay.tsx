@@ -231,9 +231,9 @@ export default function DiagnosticsOverlay() {
                     <button onClick={async () => {
                       try {
                         await navigator.clipboard.writeText(decodedMessage);
-                        alert('Copied to clipboard');
+                        notifyToast('success', 'Copied to clipboard');
                       } catch {
-                        alert('Copy failed');
+                        notifyToast('error', 'Copy failed');
                       }
                     }} style={actionButtonStyle}>Copy</button>
                     <button onClick={() => {
@@ -251,7 +251,7 @@ export default function DiagnosticsOverlay() {
                         a.click();
                         a.remove();
                         URL.revokeObjectURL(url);
-                      } catch { alert('decode/download failed'); }
+                      } catch { notifyToast('error', 'Decode or download failed'); }
                     }} style={actionButtonStyle}>Download Binary</button>
                   </div>
                 </div>

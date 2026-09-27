@@ -161,11 +161,6 @@ pub fn read_vec(r: &mut &[u8]) -> std::io::Result<Vec<u8>> {
     *r = &r[len..];
     Ok(v)
 }
-pub fn read_string(r: &mut &[u8]) -> std::io::Result<String> {
-    use std::str;
-    let v = read_vec(r)?;
-    Ok(str::from_utf8(&v).unwrap_or("").to_string())
-}
 
 #[cfg(test)]
 mod tests {
@@ -406,16 +401,5 @@ mod tests {
         let v = read_vec(&mut cursor).unwrap();
         assert_eq!(v, b"hello");
         assert_eq!(cursor, b"extra");
-    }
-
-    #[test]
-    fn read_string_reads_length_prefixed_utf8() {
-        let s = "world";
-        let mut data = Vec::new();
-        data.extend_from_slice(&(s.len() as u32).to_le_bytes());
-        data.extend_from_slice(s.as_bytes());
-
-        let mut cursor: &[u8] = &data;
-        assert_eq!(read_string(&mut cursor).unwrap(), "world");
     }
 }

@@ -246,8 +246,7 @@ pub fn list_balance_projections(device_id: &str) -> Result<Vec<BalanceProjection
                 source_state_hash: row.get(6)?,
             })
         })?
-        .filter_map(|r| r.ok())
-        .collect();
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
 }
 
@@ -318,6 +317,45 @@ mod tests {
             .expect("load projection")
             .expect("projection exists");
         assert_eq!(stored, second);
+    }
+
+    /// A row SQLite holds but Rust cannot decode fails the list. A list with
+    /// a row left out is not a list of this device's balances; `balance.list`
+    /// and the token cache would take it for one.
+    #[test]
+    #[serial]
+    fn a_projection_row_that_does_not_decode_fails_the_list() {
+        crate::economic_fixtures::use_test_storage_dir();
+        crate::storage::client_db::reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("init db");
+
+        let good = BalanceProjectionRecord {
+            balance_key: "k|TKN".to_string(),
+            device_id: "device-b".to_string(),
+            token_id: "TKN".to_string(),
+            policy_commit: "policy-b".to_string(),
+            available: 5,
+            locked: 0,
+            source_state_hash: "state-1".to_string(),
+        };
+        upsert_balance_projection(&good).expect("insert projection");
+        assert_eq!(list_balance_projections("device-b").expect("list").len(), 1);
+
+        {
+            let binding = crate::storage::client_db::get_connection().expect("connection");
+            let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+            let changed = conn
+                .execute(
+                    "UPDATE balance_projections SET available = 'not a number' WHERE device_id = ?1",
+                    params!["device-b"],
+                )
+                .expect("corrupt the row");
+            assert_eq!(changed, 1);
+        }
+        assert!(
+            list_balance_projections("device-b").is_err(),
+            "a row that does not decode is an error, never left out"
+        );
     }
 
     #[test]

@@ -1,19 +1,13 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 jest.mock('../WebViewBridge', () => ({
-  syncWithStorageStrictBridge: jest.fn(),
   routerQueryBin: jest.fn(),
 }));
 
-jest.mock('../events', () => ({
-  emitWalletRefresh: jest.fn(),
-}));
-
 import * as pb from '../../proto/dsm_app_pb';
-import { syncWithStorage, getStorageStatus } from '../storage';
-import { syncWithStorageStrictBridge, routerQueryBin } from '../WebViewBridge';
+import { getStorageStatus } from '../storage';
+import { routerQueryBin } from '../WebViewBridge';
 import { encodeBase32Crockford } from '../../utils/textId';
-import { emitWalletRefresh } from '../events';
 
 function frameEnvelope(envelope: pb.Envelope): Uint8Array {
   const bytes = envelope.toBinary();
@@ -25,151 +19,6 @@ function frameEnvelope(envelope: pb.Envelope): Uint8Array {
 
 describe('storage.ts', () => {
   beforeEach(() => jest.clearAllMocks());
-
-  // ── syncWithStorage ────────────────────────────────────────────────
-
-  describe('syncWithStorage', () => {
-    test('returns success with sync stats', async () => {
-      const env = new pb.Envelope({
-        version: 3,
-        payload: {
-          case: 'storageSyncResponse',
-          value: new pb.StorageSyncResponse({
-            success: true,
-            pulled: 3,
-            processed: 2,
-            pushed: 1,
-            errors: [],
-          }),
-        },
-      });
-      (syncWithStorageStrictBridge as jest.Mock).mockResolvedValue(frameEnvelope(env));
-
-      const result = await syncWithStorage();
-      expect(result.success).toBe(true);
-      expect(result.pulled).toBe(3);
-      expect(result.processed).toBe(2);
-      expect(result.pushed).toBe(1);
-    });
-
-    test('emits wallet refresh when processed > 0', async () => {
-      const env = new pb.Envelope({
-        version: 3,
-        payload: {
-          case: 'storageSyncResponse',
-          value: new pb.StorageSyncResponse({ success: true, processed: 5, errors: [] }),
-        },
-      });
-      (syncWithStorageStrictBridge as jest.Mock).mockResolvedValue(frameEnvelope(env));
-
-      await syncWithStorage();
-      expect(emitWalletRefresh).toHaveBeenCalledWith({ source: 'storage.sync' });
-    });
-
-    test('does not emit wallet refresh when processed is 0', async () => {
-      const env = new pb.Envelope({
-        version: 3,
-        payload: {
-          case: 'storageSyncResponse',
-          value: new pb.StorageSyncResponse({ success: true, processed: 0, errors: [] }),
-        },
-      });
-      (syncWithStorageStrictBridge as jest.Mock).mockResolvedValue(frameEnvelope(env));
-
-      await syncWithStorage();
-      expect(emitWalletRefresh).not.toHaveBeenCalled();
-    });
-
-    test('returns failure for empty response bytes', async () => {
-      (syncWithStorageStrictBridge as jest.Mock).mockResolvedValue(new Uint8Array(0));
-
-      const result = await syncWithStorage();
-      expect(result.success).toBe(false);
-      expect(result.message).toBe('Empty response from bridge');
-    });
-
-    test('returns failure on error envelope', async () => {
-      const env = new pb.Envelope({
-        version: 3,
-        payload: { case: 'error', value: new pb.Error({ code: 5, message: 'sync denied' }) },
-      });
-      (syncWithStorageStrictBridge as jest.Mock).mockResolvedValue(frameEnvelope(env));
-
-      const result = await syncWithStorage();
-      expect(result.success).toBe(false);
-      expect(result.message).toMatch(/sync denied/);
-    });
-
-    test('returns failure on unexpected payload case', async () => {
-      const env = new pb.Envelope({
-        version: 3,
-        payload: { case: 'balancesListResponse', value: new pb.BalancesListResponse() },
-      });
-      (syncWithStorageStrictBridge as jest.Mock).mockResolvedValue(frameEnvelope(env));
-
-      const result = await syncWithStorage();
-      expect(result.success).toBe(false);
-      expect(result.message).toMatch(/Unexpected response type/);
-    });
-
-    test('returns failure on decode error', async () => {
-      (syncWithStorageStrictBridge as jest.Mock).mockResolvedValue(new Uint8Array([0xFF, 0x01]));
-
-      const result = await syncWithStorage();
-      expect(result.success).toBe(false);
-      expect(result.message).toMatch(/Decode failed/);
-    });
-
-    test('returns failure when bridge throws', async () => {
-      (syncWithStorageStrictBridge as jest.Mock).mockRejectedValue(new Error('network error'));
-
-      const result = await syncWithStorage();
-      expect(result.success).toBe(false);
-      expect(result.message).toBe('network error');
-    });
-
-    test('merges default params', async () => {
-      const env = new pb.Envelope({
-        version: 3,
-        payload: {
-          case: 'storageSyncResponse',
-          value: new pb.StorageSyncResponse({ success: true, errors: [] }),
-        },
-      });
-      (syncWithStorageStrictBridge as jest.Mock).mockResolvedValue(frameEnvelope(env));
-
-      await syncWithStorage({ pullInbox: false });
-      const call = (syncWithStorageStrictBridge as jest.Mock).mock.calls[0][0];
-      expect(call.pullInbox).toBe(false);
-      expect(call.pushPending).toBe(false);
-      expect(call.limit).toBe(50);
-    });
-
-    test('includes first error in message when errors array is non-empty', async () => {
-      const env = new pb.Envelope({
-        version: 3,
-        payload: {
-          case: 'storageSyncResponse',
-          value: new pb.StorageSyncResponse({ success: true, processed: 0, errors: ['partial fail'] }),
-        },
-      });
-      (syncWithStorageStrictBridge as jest.Mock).mockResolvedValue(frameEnvelope(env));
-
-      const result = await syncWithStorage();
-      expect(result.message).toBe('partial fail');
-    });
-
-    test('returns failure for null storageSyncResponse', async () => {
-      const env = new pb.Envelope({
-        version: 3,
-        payload: { case: 'storageSyncResponse', value: undefined as any },
-      });
-      (syncWithStorageStrictBridge as jest.Mock).mockResolvedValue(frameEnvelope(env));
-
-      const result = await syncWithStorage();
-      expect(result.success).toBe(false);
-    });
-  });
 
   // ── getStorageStatus ───────────────────────────────────────────────
 

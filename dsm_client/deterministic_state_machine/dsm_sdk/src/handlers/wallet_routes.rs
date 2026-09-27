@@ -428,9 +428,14 @@ impl AppRouterImpl {
     pub(crate) async fn handle_wallet_query(&self, q: AppQuery) -> AppResult {
         match q.path.as_str() {
             "balance.get" => {
+                // A cold start with no state in memory restores it from the
+                // archive; a restore that fails is the answer, not a zero read
+                // over nothing.
                 if self.core_sdk.get_current_state().is_err() {
                     if let Err(e) = self.core_sdk.restore_latest_archived_state_for_device() {
-                        log::warn!("[balance.get] cold-start archive refresh failed: {}", e);
+                        return err(format!(
+                            "balance.get: no current state and the archive could not be restored: {e}"
+                        ));
                     }
                 }
                 let token_id_opt: Option<String> = match generated::ArgPack::decode(&*q.params) {
@@ -478,7 +483,7 @@ impl AppRouterImpl {
             // -------- wallet.history --------
             "wallet.history" => {
                 // Require ArgPack(codec=PROTO) with body = [limit_le_u64 | offset_le_u64].
-                let (limit, _offset): (Option<usize>, Option<usize>) =
+                let (limit, offset): (Option<usize>, Option<usize>) =
                     match generated::ArgPack::decode(&*q.params) {
                         Ok(pack) if pack.codec == generated::Codec::Proto as i32 => {
                             if pack.body.len() >= 16 {
@@ -504,6 +509,7 @@ impl AppRouterImpl {
                 let sqlite_txs = match crate::storage::client_db::get_transaction_history(
                     Some(&my_device_id_str),
                     limit,
+                    offset,
                 ) {
                     Ok(txs) => txs,
                     Err(e) => return err(format!("wallet.history: history unreadable: {e}")),

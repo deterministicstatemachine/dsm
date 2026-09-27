@@ -128,11 +128,6 @@ impl NodeStorageSet {
         Ok(self)
     }
 
-    /// The configured member ids, for logging and endpoint resolution.
-    pub fn member_ids(&self) -> impl Iterator<Item = &str> {
-        self.members.iter().map(|(m, _)| m.as_str())
-    }
-
     /// `(member id, endpoint)` for every member with a configured endpoint.
     pub fn member_endpoints(&self) -> impl Iterator<Item = (&str, &str)> {
         self.endpoints.iter().map(|(m, e)| (m.as_str(), e.as_str()))
@@ -167,13 +162,6 @@ impl AppState {
         self.storage_set = Some(Arc::new(set));
         self
     }
-}
-
-/// Keyed cells and indexes: no write authorization, nothing refused, nothing
-/// decided. Every object carries its own authority; whoever carries the bytes
-/// does not matter.
-pub fn cells_router(state: Arc<AppState>) -> axum::Router<()> {
-    api::cells::create_router(state)
 }
 
 /// The four operations of the storage contract (Part II §12) — put object,
@@ -287,17 +275,36 @@ pub struct AppLimits {
 }
 
 /// The node's whole app: every route it serves, with its limits and layers.
+/// `/api/v2/health`: ok only over a live Postgres. A node whose store is
+/// down is not healthy, whatever its process is doing.
+async fn health(state: std::sync::Arc<AppState>) -> (axum::http::StatusCode, String) {
+    use axum::http::StatusCode;
+    let client = match state.db_pool.get().await {
+        Ok(client) => client,
+        Err(e) => return (StatusCode::SERVICE_UNAVAILABLE, format!("postgres: {e}")),
+    };
+    match client.simple_query("SELECT 1").await {
+        Ok(_) => (StatusCode::OK, "ok".to_string()),
+        Err(e) => (StatusCode::SERVICE_UNAVAILABLE, format!("postgres: {e}")),
+    }
+}
+
 /// The binary serves exactly this, and so do tests that stand up real nodes,
 /// so no test ever runs against an assembly the binary does not serve.
 pub fn build_app(state: std::sync::Arc<AppState>, limits: AppLimits) -> axum::Router<()> {
-    use axum::http::StatusCode;
     use axum::routing::get;
     use axum::Router;
     use tower::limit::ConcurrencyLimitLayer;
     use tower_http::{limit::RequestBodyLimitLayer, trace::TraceLayer};
 
     Router::new()
-        .route("/api/v2/health", get(|| async { (StatusCode::OK, "ok") }))
+        .route(
+            "/api/v2/health",
+            get({
+                let state = state.clone();
+                move || health(state)
+            }),
+        )
         // The storage contract's four operations (Part II §12): no write
         // authorization, content-blind.
         .merge(crate::storage_contract_router(state.clone()))
