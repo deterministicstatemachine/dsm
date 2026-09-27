@@ -9,14 +9,16 @@ import type { AppState } from '../../types/app';
 // The intro scene's pixel engine loads a script; the fallback GIF is enough here.
 jest.mock('../fx/fxEngine', () => ({ loadFxEngine: () => Promise.resolve(false) }));
 
+let dismiss: () => void = () => {};
+
 function Boot({ appState }: { appState: AppState }) {
-  const { showIntro, onIntroPlayed } = useIntroGate(appState);
+  const { showIntro, dismissIntro } = useIntroGate();
+  dismiss = dismissIntro;
   return (
     <AppContent
       appState={appState}
       error={null}
       showIntro={showIntro}
-      onIntroPlayed={onIntroPlayed}
       introGifSrc="intro.gif"
       eraTokenSrc="era.png"
       btcLogoSrc="btc.png"
@@ -52,53 +54,40 @@ function intro(): HTMLElement {
   return el as HTMLElement;
 }
 
-describe('the boot intro hands over to the phase screen', () => {
-  test('a phase still waiting on the network shows its own screen once the intro has played out', async () => {
-    render(<Boot appState="publication_pending" />);
+describe('the boot intro stays until A', () => {
+  test('the intro stays on the screen, whatever the phase and however long it has played, and says to press A', async () => {
+    const { rerender } = render(<Boot appState="runtime_loading" />);
     await act(async () => {});
 
+    rerender(<Boot appState="wallet_ready" />);
+    animationEnd(intro(), 'introFadeOut');
+    animationEnd(intro(), 'introPromptIn');
+
     expect(intro()).toBeTruthy();
+    expect(screen.getByText('PRESS A')).toBeTruthy();
+  });
+
+  test('past the intro, a phase still waiting on the network shows its own screen', async () => {
+    render(<Boot appState="publication_pending" />);
+    await act(async () => {});
     expect(screen.queryByText(/PUBLISHING TO NETWORK/i)).toBeNull();
 
-    animationEnd(intro(), 'introFadeOut');
+    act(() => dismiss());
 
     expect(document.querySelector('.intro-container')).toBeNull();
     expect(screen.getByText(/PUBLISHING TO NETWORK/i)).toBeTruthy();
   });
-
-  test('an animation inside the scene, or another animation, does not end the intro', async () => {
-    render(<Boot appState="publication_pending" />);
-    await act(async () => {});
-
-    const scene = intro().firstElementChild;
-    if (!scene) throw new Error('the intro has no scene');
-    animationEnd(scene, 'introFadeOut');
-    animationEnd(intro(), 'somethingElse');
-
-    expect(intro()).toBeTruthy();
-    expect(screen.queryByText(/PUBLISHING TO NETWORK/i)).toBeNull();
-  });
 });
 
 describe('useIntroGate', () => {
-  test('a settled app ends the intro at once, and it stays over', () => {
-    const { result, rerender } = renderHook(({ appState }: { appState: AppState }) => useIntroGate(appState), {
-      initialProps: { appState: 'runtime_loading' as AppState },
-    });
+  test('the intro is on until it is dismissed, and it stays over', () => {
+    const { result } = renderHook(() => useIntroGate());
     expect(result.current.showIntro).toBe(true);
 
-    rerender({ appState: 'wallet_ready' });
+    act(() => result.current.dismissIntro());
     expect(result.current.showIntro).toBe(false);
 
-    rerender({ appState: 'locked' });
-    expect(result.current.showIntro).toBe(false);
-  });
-
-  test('the intro playing out ends it in any phase', () => {
-    const { result } = renderHook(() => useIntroGate('runtime_loading'));
-    expect(result.current.showIntro).toBe(true);
-
-    act(() => result.current.onIntroPlayed());
+    act(() => result.current.dismissIntro());
     expect(result.current.showIntro).toBe(false);
   });
 });

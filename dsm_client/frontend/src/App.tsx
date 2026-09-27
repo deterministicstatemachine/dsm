@@ -56,7 +56,7 @@ export default function App() {
     setThemeIndex,
   });
 
-  const { showIntro, onIntroPlayed } = useIntroGate(runtime.appState);
+  const { showIntro, dismissIntro } = useIntroGate();
   const {
     chameleonSrc,
     setChameleonSrc,
@@ -103,7 +103,7 @@ export default function App() {
     }
   }, [navigation.currentScreen, runtime.appState]);
 
-  const intents = useInputIntents({
+  const menuIntents = useInputIntents({
     appState: runtime.appState,
     menuItems,
     currentMenuIndex: navigation.currentMenuIndex,
@@ -118,6 +118,9 @@ export default function App() {
     soundEnabled: runtime.soundEnabled,
     setSoundEnabled: appRuntimeStore.setSoundEnabled,
   });
+
+  // While the intro is on the screen, A (select) moves past it.
+  const intents = showIntro ? { ...menuIntents, select: dismissIntro } : menuIntents;
 
   useLayoutEffect(() => {
     const screenHost = document.querySelector('.stateboy-screen-host');
@@ -137,7 +140,6 @@ export default function App() {
                       appState={runtime.appState}
                       error={runtime.error}
                       showIntro={showIntro}
-                      onIntroPlayed={onIntroPlayed}
                       introGifSrc={introGifSrc}
                       eraTokenSrc={eraTokenSrc}
                       btcLogoSrc={btcLogoSrc}
