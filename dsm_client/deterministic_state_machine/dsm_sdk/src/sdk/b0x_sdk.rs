@@ -1846,55 +1846,26 @@ impl B0xSDK {
         // signature already lives in OnlineTransferRequest.signature / OnlineMessageRequest.signature.
         // Do NOT duplicate that signature into EvidenceOracle.signature for b0x transport,
         // or envelopes can exceed storage-node body limits (HTTP 413).
-        // Keep only oracle_key in evidence so receivers can still verify without extra lookups.
         //
-        // Source of truth: signing_authority derives the pk deterministically from
-        // (genesis_hash, device_id, C-DBRW binding key) — the SAME derivation that
-        // produces the secret key used by `wallet.sign_operation_bytes`. Embedding
-        // this pk guarantees the receiver's sphincs_verify uses the same pk that
-        // produced the signature; using `state.device_info.public_key` or
-        // `AppState::get_public_key()` can drift (stale genesis pk, fallback
-        // 32-byte placeholder, etc.) and silently poison the inbox.
-        // DEADLOCK: the fallback here used to be `self.core_sdk.get_current_state()`,
-        // which takes the `state_machine` lock (core_sdk.rs:420). This builder runs
-        // inside `pre_write`, where that NON-REENTRANT parking_lot mutex is ALREADY
-        // held (core_sdk.rs:1116). Re-locking it hangs silently — no panic, no error.
-        //
-        // The caller has already resolved this key fail-closed, so prefer the value
-        // it handed us over re-deriving one. That removes the re-entry AND removes a
-        // live source of public-key drift: the param was previously length-validated
-        // and then ignored.
-        let sender_signing_public_key = match crate::sdk::signing_authority::current_public_key() {
-            Ok(pk) => pk,
-            Err(e) if !params.sender_signing_public_key.is_empty() => {
-                log::warn!(
-                    "submit_to_b0x: signing_authority pk unavailable ({e}); using caller-supplied \
-                     sender_signing_public_key"
-                );
-                params.sender_signing_public_key.clone()
-            }
-            Err(e) => {
-                log::warn!(
-                    "submit_to_b0x: signing_authority pk unavailable ({e}) and caller supplied \
-                     none; falling back to persisted app-state pk"
-                );
-                crate::sdk::app_state::AppState::get_public_key().unwrap_or_default()
-            }
-        };
-
-        let evidence = if !sender_signing_public_key.is_empty() {
+        // The evidence carries only the sender's signing public key, exactly as the
+        // caller resolved it from the signing authority (the routes fail closed when
+        // it is unavailable; `validate_submission_params` requires 64 bytes). The
+        // receiver roots verification in its STORED contact and treats a disagreeing
+        // wire key as a signal, so nothing here substitutes another key for it: no
+        // re-derivation under the state lock, no persisted app-state key, no
+        // default.
+        let evidence = if params.sender_signing_public_key.is_empty() {
+            None
+        } else {
             Some(dsm::types::proto::Evidence {
                 kind: Some(dsm::types::proto::evidence::Kind::Oracle(
                     dsm::types::proto::EvidenceOracle {
                         payload: vec![],
                         signature: vec![],
-                        // Carry sender signing public key so receivers can verify without contact lookups.
-                        oracle_key: sender_signing_public_key.clone(),
+                        oracle_key: params.sender_signing_public_key.clone(),
                     },
                 )),
             })
-        } else {
-            None
         };
 
         let invoke = dsm::types::proto::Invoke {
