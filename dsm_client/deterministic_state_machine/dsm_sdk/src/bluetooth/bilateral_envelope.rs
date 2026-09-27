@@ -46,6 +46,27 @@ pub fn build_envelope(
     envelope
 }
 
+/// Frame a BLE pairing message this device sends a peer (its identity
+/// write-back, a pairing accept or a pairing confirm): an Envelope v3 from
+/// `device_id` under `genesis_hash`, with its headers and message id, behind
+/// the `0x03` framing byte. The peer decodes pairing frames with the strict
+/// addressed decoder, which refuses the headerless local-answer form the
+/// WebView's BLE events use.
+pub fn pairing_frame(
+    device_id: &[u8; 32],
+    genesis_hash: &[u8; 32],
+    event: generated::BleEvent,
+) -> Vec<u8> {
+    let envelope = build_envelope(
+        device_id,
+        genesis_hash,
+        generated::envelope::Payload::BleEvent(event),
+    );
+    let mut frame = vec![0x03];
+    frame.extend(envelope.encode_to_vec());
+    frame
+}
+
 /// Extract a `BilateralPrepareRequest` from an incoming Envelope.
 ///
 /// Expects the envelope to contain a `UniversalTx` with a single `Invoke` op
@@ -166,6 +187,41 @@ mod tests {
     }
     fn test_genesis_hash() -> [u8; 32] {
         [0xBB; 32]
+    }
+
+    /// A pairing frame is taken by the strict addressed decoder the peer runs
+    /// it through (`processBleIdentityEnvelope`), headers and all, and carries
+    /// its event unchanged. The headerless local-answer form the pairing frames
+    /// used to be built in is refused by that decoder — on hardware, "Envelope.
+    /// headers is required" (9FF, 2026-09-27). MUTATION CONTROL: building the
+    /// frame as a local answer turns this red.
+    #[test]
+    fn a_pairing_frame_is_taken_by_the_peers_strict_decoder() {
+        let event = generated::BleEvent {
+            ev: Some(generated::ble_event::Ev::PairingConfirm(
+                generated::BlePairingConfirm {
+                    address: "43:CD:4F:E4:A9:19".to_string(),
+                    device_id: test_device_id().to_vec(),
+                },
+            )),
+        };
+        let frame = pairing_frame(&test_device_id(), &test_genesis_hash(), event.clone());
+
+        assert_eq!(frame.first(), Some(&0x03));
+        let envelope = crate::envelope::from_canonical_bytes(&frame[1..])
+            .expect("the peer's decoder takes a pairing frame");
+        let headers = envelope.headers.expect("a pairing frame names its sender");
+        assert_eq!(headers.device_id, test_device_id().to_vec());
+        assert_eq!(headers.genesis_hash, test_genesis_hash().to_vec());
+        assert!(matches!(
+            envelope.payload,
+            Some(generated::envelope::Payload::BleEvent(ref carried)) if *carried == event
+        ));
+
+        let local_answer =
+            crate::envelope::local_answer(generated::envelope::Payload::BleEvent(event))
+                .encode_to_vec();
+        assert!(crate::envelope::from_canonical_bytes(&local_answer).is_err());
     }
 
     fn tx_payload(atomic: bool) -> generated::envelope::Payload {

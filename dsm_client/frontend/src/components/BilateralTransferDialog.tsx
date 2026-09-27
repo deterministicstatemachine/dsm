@@ -10,13 +10,17 @@ import '../styles/BilateralTransfer.css';
 import { emitWalletRefresh } from '../dsm/events';
 import { bridgeEvents } from '../bridge/bridgeEvents';
 import { useFx } from './fx/FxProvider';
+import { getPendingBilateralListStrictBridge } from '../dsm/WebViewBridge';
+import { decodeOfflinePendingList } from '../domain/bilateral';
 
 interface BilateralTransferDialogProps {
   /** Optional: limit to specific contact alias */
   contactAlias?: string;
+  /** The wallet is up: an incoming step still awaiting this user is shown again. */
+  walletReady?: boolean;
 }
 
-export const BilateralTransferDialog: React.FC<BilateralTransferDialogProps> = ({ contactAlias: _contactAlias }) => {
+export const BilateralTransferDialog: React.FC<BilateralTransferDialogProps> = ({ contactAlias: _contactAlias, walletReady = false }) => {
   const [incomingTransfer, setIncomingTransfer] = useState<BilateralTransferEvent | null>(null);
   const [outgoingTransfer, setOutgoingTransfer] = useState<BilateralTransferEvent | null>(null);
   const [processing, setProcessing] = useState(false);
@@ -36,6 +40,39 @@ export const BilateralTransferDialog: React.FC<BilateralTransferDialogProps> = (
     if (c?.alias) return c.alias;
     return deviceIdB32 ? `${deviceIdB32.slice(0, 8)}…` : 'a contact';
   }, []);
+
+  // An incoming step waiting for this user's decision outlives an app restart
+  // in the SDK's session store, but its PREPARE_RECEIVED event does not: a
+  // prepare delivered again is answered from the stored step and announces
+  // nothing. So once the wallet is up, the first incoming step the SDK lists
+  // as awaiting this user is shown again, as the SDK states it.
+  useEffect(() => {
+    if (!walletReady) return;
+    let alive = true;
+    void (async () => {
+      try {
+        const pending = await decodeOfflinePendingList(await getPendingBilateralListStrictBridge());
+        const waiting = pending.find((p) => p.direction === 'incoming' && p.phase === 'pending_user_action');
+        if (!alive || !waiting) return;
+        setIncomingTransfer((current) => current ?? {
+          eventType: BilateralEventType.PREPARE_RECEIVED,
+          counterpartyDeviceId: waiting.counterpartyDeviceId,
+          commitmentHash: waiting.commitmentHash,
+          amount: waiting.amount,
+          displayAmount: waiting.displayAmount,
+          tokenId: waiting.tokenId,
+          status: 'pending_user_action',
+          message: 'Incoming transfer awaiting your decision',
+          senderBleAddress: waiting.bleAddress,
+        });
+      } catch (e) {
+        if (alive) {
+          notifyToast('error', `Offline transfers awaiting you could not be read: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+    })();
+    return () => { alive = false; };
+  }, [walletReady, notifyToast]);
 
   // Hide bilateral overlay when inbox is open
   useEffect(() => {

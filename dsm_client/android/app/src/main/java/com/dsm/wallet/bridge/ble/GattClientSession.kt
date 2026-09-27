@@ -5,6 +5,7 @@ package com.dsm.wallet.bridge.ble
 import android.annotation.SuppressLint
 import android.bluetooth.*
 import android.content.Context
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -19,6 +20,11 @@ import kotlinx.coroutines.CompletableDeferred
  * - MTU negotiation
  * - Characteristic read/write operations
  * - Connection timeouts and error handling
+ *
+ * Every GATT operation on the link — MTU request, both CCCD writes, the
+ * identity read, the pairing writes, message chunks and chunk ACKs — goes
+ * through one [GattOperationQueue], so exactly one is outstanding at a time
+ * and each start the stack refuses is reported as refused.
  *
  * State changes are reported directly to the coordinator dispatcher so BLE transport
  * stays on one bounded scheduling path.
@@ -37,18 +43,13 @@ class GattClientSession(
         private const val CONNECTION_TIMEOUT_MS = 15_000L
         /** Number of notification chunks to receive before sending ACK write-back. */
         private const val NOTIFICATION_ACK_WINDOW = 10
-        // TRANSFER_IDLE_THRESHOLD_MS removed — transfer boundaries are now
-        // detected via a 1-byte nonce prepended to the first chunk by the server.
-    }
-
-    private enum class TxRequestWriteKind {
-        NONE,
-        TRANSACTION,
-        CHUNK_ACK,
     }
 
     private var bluetoothGatt: BluetoothGatt? = null
     private val timeoutHandler = Handler(Looper.getMainLooper())
+
+    /** The link's GATT operations; a new connection gets a new queue. */
+    @Volatile private var ops = newQueue()
 
     /**
      * Per-transfer notification counter.  Resets to 0 when the server's
@@ -63,34 +64,19 @@ class GattClientSession(
         disconnect()
     }
 
-    // Remove all local state variables - state is now managed exclusively by BleCoordinator
     private var requestCharacteristic: BluetoothGattCharacteristic? = null
     private var responseCharacteristic: BluetoothGattCharacteristic? = null
     private var identityCharacteristic: BluetoothGattCharacteristic? = null
     private var pairingCharacteristic: BluetoothGattCharacteristic? = null
     private var pairingAckCharacteristic: BluetoothGattCharacteristic? = null
 
-    // Deferred MTU value: stored when MTU negotiation succeeds, emitted after
-    // all CCCD descriptor writes complete (onDescriptorWrite) so that the
-    // coordinator's identity read doesn't collide with a pending GATT op.
-    private var pendingMtu: Int = 0
-    // Track CCCD subscription chain: TX_RESPONSE → PAIRING_ACK → emit MTU
-    private var txResponseSubscribed: Boolean = false
-    // Deferred for re-subscription requests (outside the initial MTU chain)
-    private var pendingTxResponseResubscribe: CompletableDeferred<Boolean>? = null
-    // Transport-level chunk ACKs reuse TX_REQUEST writes but must not be reported as
-    // application transaction write completions.
-    private var pendingChunkAckWriteCount: Int? = null
-    // Only one TX_REQUEST GATT write may be in flight at a time. Queue follow-on work
-    // locally so transport ACKs and outbound payloads do not race at the Android stack.
-    private var txRequestWriteKind: TxRequestWriteKind = TxRequestWriteKind.NONE
-    private var queuedTransactionWrite: ByteArray? = null
-    private var queuedChunkAckWriteCount: Int? = null
-    // True while the scanner is waiting for its BlePairingConfirm write to be ACKed by the
-    // BLE stack.
-    private var awaitingConfirmWriteAck: Boolean = false
+    // The CCCD chain (TX_RESPONSE, then PAIRING_ACK) starts once per connection,
+    // from the first MTU the link reports; MtuNegotiated is emitted when it ends.
+    @Volatile private var subscriptionChainStarted: Boolean = false
+    @Volatile private var txResponseSubscribed: Boolean = false
+    @Volatile private var txResponseResubscribe: CompletableDeferred<Boolean>? = null
     // Whether the PAIRING_ACK CCCD subscription succeeded.
-    private var pairingAckCccdSubscribed: Boolean = false
+    @Volatile private var pairingAckCccdSubscribed: Boolean = false
     // Service discovery retry: Samsung/Qualcomm BT stacks can return status 133 if
     // discoverServices() fires before link-layer negotiation settles. One retry with
     // a GATT cache refresh catches the transient error without masking real failures.
@@ -100,42 +86,13 @@ class GattClientSession(
     // Status 133 is transient on most OEMs: close GATT, wait, retry fresh.
     private var connectionRetryCount: Int = 0
 
-    // ── MTU fallback for Android 14+ ──
-    // Android 14+ auto-requests MTU 517. If the app's requestMtu() is ignored,
-    // onMtuChanged never fires and the CCCD chain stalls. This flag + delayed
-    // runnable break the deadlock.
-    private var mtuCallbackReceived: Boolean = false
+    /** True while a GATT operation is in flight or waiting on this link. */
+    val hasPendingOperations: Boolean
+        get() = ops.busy
 
-    private val mtuFallbackRunnable = Runnable { handleMtuFallback() }
-
-    private fun handleMtuFallback() {
-        if (!mtuCallbackReceived && pendingMtu == 0) {
-            Log.w("GattClientSession", "MTU fallback: onMtuChanged never fired for $deviceAddress — assuming MTU ${BleConstants.MTU_SIZE}")
-            // Synthetically start the CCCD subscription chain with the expected MTU.
-            // Duplicates the happy-path from onMtuChanged to avoid circular init.
-            diagnostics.recordEvent(BleDiagEvent(phase = "mtu_fallback", device = deviceAddress, bytes = BleConstants.MTU_SIZE))
-            try {
-                bluetoothGatt?.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)
-            } catch (_: SecurityException) {}
-            pendingMtu = BleConstants.MTU_SIZE
-            txResponseSubscribed = false
-            if (!subscribeToTxResponse()) {
-                txResponseSubscribed = true
-                if (!subscribeToPairingAck()) {
-                    emitEvent(BleSessionEvent.MtuNegotiated(deviceAddress, BleConstants.MTU_SIZE))
-                }
-            }
-        }
+    private fun newQueue() = GattOperationQueue { op, reason ->
+        Log.w("GattClientSession", "GATT ${op.label} for $deviceAddress not started: $reason")
     }
-
-    // ── GATT operation queue ──
-    // Android allows only ONE GATT op per connection at a time. The CCCD chain
-    // self-serializes via onDescriptorWrite callbacks, but readIdentity() and
-    // other non-chained ops must be queued to avoid silent failures.
-    private var gattOpInFlight: Boolean = false
-    private val pendingGattOps: ArrayDeque<() -> Boolean> = ArrayDeque()
-
-    // Remove callback lambdas - operations are now fully asynchronous via events
 
     private fun emitEvent(event: BleSessionEvent) {
         try {
@@ -149,88 +106,305 @@ class GattClientSession(
         }
     }
 
-    // ── GATT operation queue ──────────────────────────────────────────────
-    // Android allows only one GATT op in-flight per connection. These helpers
-    // serialize non-chained ops (readIdentity, etc.) behind the CCCD chain.
-
-    private fun enqueueGattOp(op: () -> Boolean): Boolean {
-        if (!gattOpInFlight) {
-            gattOpInFlight = true
-            return op()
+    private fun reportPermissionFailure(e: SecurityException, operation: String) {
+        Log.e("GattClientSession", "Security exception during $operation for $deviceAddress", e)
+        BleCoordinator.getInstance(context).let { coordinator ->
+            coordinator.permissionsGate.recordPermissionFailure()
+            coordinator.callback?.onBlePermissionError("Bluetooth connection permission required")
         }
-        pendingGattOps.addLast(op)
-        return true // queued — caller should not treat as failure
     }
 
-    private fun drainNextGattOp() {
-        gattOpInFlight = false
-        val next = pendingGattOps.removeFirstOrNull() ?: return
-        gattOpInFlight = true
-        next()
-    }
+    // ── GATT operations ───────────────────────────────────────────────────
 
-    @Suppress("DEPRECATION")
-    private fun startTxRequestWrite(data: ByteArray, kind: TxRequestWriteKind): Boolean {
-        val char = requestCharacteristic
-        if (char == null) {
-            Log.w("GattClientSession", "startTxRequestWrite: TX_REQUEST not available for $deviceAddress")
-            return false
-        }
+    private fun writeKey(uuid: java.util.UUID) =
+        GattOperationQueue.Key(GattOperationQueue.Key.Type.WRITE, uuid)
 
-        char.setValue(data)
+    /** Asks the stack to write [value]; true only when the stack took the write. */
+    @SuppressLint("MissingPermission")
+    private fun startCharacteristicWrite(
+        characteristic: BluetoothGattCharacteristic?,
+        value: ByteArray,
+        writeType: Int,
+        operation: String,
+    ): Boolean {
+        val gatt = bluetoothGatt ?: return false
+        val char = characteristic ?: return false
         return try {
-            txRequestWriteKind = kind
-            val sent = bluetoothGatt?.writeCharacteristic(char) == true
-            if (!sent) {
-                txRequestWriteKind = TxRequestWriteKind.NONE
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                gatt.writeCharacteristic(char, value, writeType) == BluetoothStatusCodes.SUCCESS
+            } else {
+                char.writeType = writeType
+                char.value = value
+                gatt.writeCharacteristic(char)
             }
-            sent
         } catch (e: SecurityException) {
-            txRequestWriteKind = TxRequestWriteKind.NONE
-            Log.e("GattClientSession", "Security exception writing TX_REQUEST for $deviceAddress", e)
-            BleCoordinator.getInstance(context).let { coordinator ->
-                coordinator.permissionsGate.recordPermissionFailure()
-                coordinator.callback?.onBlePermissionError("Bluetooth connection permission required")
-            }
+            reportPermissionFailure(e, operation)
             false
         }
     }
 
-    private fun drainQueuedTxRequestWrite() {
-        if (txRequestWriteKind != TxRequestWriteKind.NONE) {
-            return
+    /**
+     * Enable notifications (or indications) on [uuid]: the local routing, then
+     * the peer's CCCD. [onDone] receives whether the CCCD write succeeded, or
+     * false when the stack refused it. A link that ends first reports nothing:
+     * the Disconnected event covers it.
+     */
+    private inner class CccdWrite(
+        private val uuid: java.util.UUID,
+        private val enableValue: ByteArray,
+        private val onDone: (Boolean) -> Unit,
+        private val onLinkEnded: () -> Unit = {},
+    ) : GattOperationQueue.Op {
+        override val key = GattOperationQueue.Key(GattOperationQueue.Key.Type.DESCRIPTOR_WRITE, uuid)
+        override val label = "CCCD write ($uuid)"
+
+        @SuppressLint("MissingPermission")
+        override fun start(): Boolean {
+            val gatt = bluetoothGatt ?: return false
+            val char = when (uuid) {
+                BleConstants.TX_RESPONSE_UUID -> responseCharacteristic
+                BleConstants.PAIRING_ACK_UUID -> pairingAckCharacteristic
+                else -> null
+            } ?: return false
+            val cccd = char.getDescriptor(BleConstants.CCCD_UUID) ?: return false
+            return try {
+                if (!gatt.setCharacteristicNotification(char, true)) return false
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    gatt.writeDescriptor(cccd, enableValue) == BluetoothStatusCodes.SUCCESS
+                } else {
+                    cccd.value = enableValue
+                    gatt.writeDescriptor(cccd)
+                }
+            } catch (e: SecurityException) {
+                reportPermissionFailure(e, label)
+                false
+            }
         }
 
-        val queuedAckCount = queuedChunkAckWriteCount
-        if (queuedAckCount != null) {
-            queuedChunkAckWriteCount = null
-            pendingChunkAckWriteCount = queuedAckCount
-            val ack = byteArrayOf(
-                0xFF.toByte(),
-                ((queuedAckCount shr 24) and 0xFF).toByte(),
-                ((queuedAckCount shr 16) and 0xFF).toByte(),
-                ((queuedAckCount shr 8) and 0xFF).toByte(),
-                (queuedAckCount and 0xFF).toByte()
-            )
-            val sent = startTxRequestWrite(ack, TxRequestWriteKind.CHUNK_ACK)
-            if (sent) {
-                Log.d("GattClientSession", "Queued chunk ACK written: $queuedAckCount chunks confirmed to $deviceAddress")
+        override fun finish(success: Boolean, value: ByteArray?) = onDone(success)
+
+        override fun abandon(reason: String) {
+            if (reason == GattOperationQueue.START_REFUSED) onDone(false) else onLinkEnded()
+        }
+    }
+
+    private inner class MtuRequest(private val mtu: Int) : GattOperationQueue.Op {
+        override val key = GattOperationQueue.Key(GattOperationQueue.Key.Type.MTU, null)
+        override val label = "MTU request ($mtu)"
+
+        @SuppressLint("MissingPermission")
+        override fun start(): Boolean = try {
+            bluetoothGatt?.requestMtu(mtu) == true
+        } catch (e: SecurityException) {
+            reportPermissionFailure(e, label)
+            false
+        }
+
+        // The MTU is taken from onMtuChanged itself, requested or not.
+        override fun finish(success: Boolean, value: ByteArray?) = Unit
+
+        override fun abandon(reason: String) {
+            if (reason != GattOperationQueue.START_REFUSED) return
+            // An MTU the link already reported (a peer-initiated or automatic
+            // exchange) has started the CCCD chain. Otherwise the link's MTU is
+            // unknown, and a chunk cannot be sized to it: the link does not
+            // become a route.
+            if (subscriptionChainStarted) return
+            Log.w("GattClientSession", "requestMtu($mtu) refused for $deviceAddress and no MTU reported — the link's MTU is unknown")
+            emitEvent(BleSessionEvent.ErrorOccurred(deviceAddress, BleErrorCategory.MTU_NEGOTIATION_FAILED, "mtu_request_refused"))
+        }
+    }
+
+    private inner class IdentityRead : GattOperationQueue.Op {
+        override val key = GattOperationQueue.Key(GattOperationQueue.Key.Type.READ, BleConstants.IDENTITY_UUID)
+        override val label = "identity read"
+
+        @SuppressLint("MissingPermission")
+        override fun start(): Boolean {
+            val char = identityCharacteristic ?: return false
+            return try {
+                bluetoothGatt?.readCharacteristic(char) == true
+            } catch (e: SecurityException) {
+                reportPermissionFailure(e, label)
+                false
+            }
+        }
+
+        override fun finish(success: Boolean, value: ByteArray?) {
+            if (success) {
+                emitEvent(BleSessionEvent.IdentityReadCompleted(deviceAddress, value))
             } else {
-                pendingChunkAckWriteCount = null
-                Log.w("GattClientSession", "drainQueuedTxRequestWrite: queued chunk ACK write failed for $deviceAddress (count=$queuedAckCount)")
+                failed("identity_read")
             }
-            return
         }
 
-        val queuedTx = queuedTransactionWrite
-        if (queuedTx != null) {
-            queuedTransactionWrite = null
-            val sent = startTxRequestWrite(queuedTx, TxRequestWriteKind.TRANSACTION)
-            if (!sent) {
-                emitEvent(BleSessionEvent.TransactionWriteCompleted(deviceAddress, false))
-                emitEvent(BleSessionEvent.ErrorOccurred(deviceAddress, BleErrorCategory.CHARACTERISTIC_WRITE_FAILED, "tx_write_queued", null))
+        override fun abandon(reason: String) {
+            if (reason == GattOperationQueue.START_REFUSED) failed("identity_read_not_started")
+        }
+
+        private fun failed(details: String) {
+            diagnostics.recordError(BleErrorCategory.CHARACTERISTIC_READ_FAILED, details)
+            emitEvent(BleSessionEvent.IdentityReadCompleted(deviceAddress, null))
+            emitEvent(BleSessionEvent.ErrorOccurred(deviceAddress, BleErrorCategory.CHARACTERISTIC_READ_FAILED, details))
+        }
+    }
+
+    /**
+     * A write to the peer's PAIRING characteristic: the scanner's identity
+     * write-back, or its Phase-3 BlePairingConfirm. A confirm the stack
+     * acknowledged is reported as PairingConfirmWritten; any failure of either
+     * as ErrorOccurred.
+     */
+    private inner class PairingWrite(
+        private val data: ByteArray,
+        private val isConfirm: Boolean,
+    ) : GattOperationQueue.Op {
+        override val key = writeKey(BleConstants.PAIRING_UUID)
+        override val label = if (isConfirm) "pairing confirm write" else "pairing identity write"
+        private val details = if (isConfirm) "pairing_confirm_write" else "pairing_write"
+
+        override fun start(): Boolean = startCharacteristicWrite(
+            pairingCharacteristic, data, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT, label,
+        )
+
+        override fun finish(success: Boolean, value: ByteArray?) {
+            when {
+                !success -> failed()
+                isConfirm -> {
+                    Log.i("GattClientSession", "PAIRING_CONFIRM write ACKed by BLE stack for $deviceAddress")
+                    emitEvent(BleSessionEvent.PairingConfirmWritten(deviceAddress))
+                }
+                !pairingAckCccdSubscribed -> {
+                    Log.w("GattClientSession", "Pairing identity write succeeded without PAIRING_ACK subscription for $deviceAddress")
+                    emitEvent(
+                        BleSessionEvent.ErrorOccurred(
+                            deviceAddress,
+                            BleErrorCategory.CHARACTERISTIC_READ_FAILED,
+                            "pairing_ack_subscription_unavailable"
+                        )
+                    )
+                }
+                else -> Log.i("GattClientSession", "Pairing identity write successful for $deviceAddress — waiting for PAIRING_ACK indication")
             }
         }
+
+        override fun abandon(reason: String) {
+            if (reason == GattOperationQueue.START_REFUSED) failed()
+        }
+
+        private fun failed() {
+            Log.w("GattClientSession", "$label failed for $deviceAddress")
+            diagnostics.recordError(BleErrorCategory.CHARACTERISTIC_WRITE_FAILED, details)
+            emitEvent(BleSessionEvent.ErrorOccurred(deviceAddress, BleErrorCategory.CHARACTERISTIC_WRITE_FAILED, details))
+        }
+    }
+
+    /** One message's chunks, written in order; [done] is true only when the stack took every chunk. */
+    private class OutboundMessage(val chunks: Array<ByteArray>) {
+        val done = CompletableDeferred<Boolean>()
+    }
+
+    private inner class ChunkWrite(
+        private val message: OutboundMessage,
+        private val index: Int,
+    ) : GattOperationQueue.Op {
+        override val key = writeKey(BleConstants.TX_REQUEST_UUID)
+        override val label = "chunk ${index + 1}/${message.chunks.size}"
+
+        // A message whose earlier chunk failed sends nothing more.
+        override fun obsolete(): Boolean = message.done.isCompleted
+
+        override fun start(): Boolean = startCharacteristicWrite(
+            requestCharacteristic,
+            message.chunks[index],
+            BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE,
+            label,
+        )
+
+        override fun finish(success: Boolean, value: ByteArray?) {
+            if (!success) {
+                failed("stack reported a failed write")
+            } else if (index == message.chunks.lastIndex) {
+                message.done.complete(true)
+            }
+        }
+
+        override fun abandon(reason: String) = failed(reason)
+
+        private fun failed(reason: String) {
+            if (message.done.complete(false)) {
+                Log.w("GattClientSession", "Message to $deviceAddress failed at $label: $reason")
+                diagnostics.recordError(BleErrorCategory.CHARACTERISTIC_WRITE_FAILED, "tx_write")
+            }
+        }
+    }
+
+    /**
+     * Transport-level chunk ACK back to the server's TX_REQUEST characteristic:
+     * [0xFF][b3][b2][b1][b0], the 32-bit count of notification chunks received,
+     * so the server can pace delivery. Queued ahead of waiting message chunks;
+     * a newer count supersedes a waiting one.
+     */
+    private inner class ChunkAckWrite(val count: Int) : GattOperationQueue.Op {
+        override val key = writeKey(BleConstants.TX_REQUEST_UUID)
+        override val label = "chunk ACK ($count)"
+
+        override fun start(): Boolean = startCharacteristicWrite(
+            requestCharacteristic,
+            byteArrayOf(
+                0xFF.toByte(),
+                ((count shr 24) and 0xFF).toByte(),
+                ((count shr 16) and 0xFF).toByte(),
+                ((count shr 8) and 0xFF).toByte(),
+                (count and 0xFF).toByte()
+            ),
+            BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE,
+            label,
+        )
+
+        override fun finish(success: Boolean, value: ByteArray?) {
+            if (success) {
+                Log.d("GattClientSession", "Transport chunk ACK write confirmed for $deviceAddress ($count chunks)")
+            } else {
+                Log.w("GattClientSession", "Transport chunk ACK write failed for $deviceAddress (count=$count)")
+            }
+        }
+
+        override fun abandon(reason: String) {
+            Log.w("GattClientSession", "Transport chunk ACK for $deviceAddress not written (count=$count): $reason")
+        }
+    }
+
+    /**
+     * The CCCD chain: TX_RESPONSE notifications, then PAIRING_ACK indications,
+     * then MtuNegotiated. A subscription the stack refused or failed does not
+     * stop the chain; its flag stays false.
+     */
+    @SuppressLint("MissingPermission")
+    private fun startSubscriptionChain(mtu: Int) {
+        if (subscriptionChainStarted) return
+        subscriptionChainStarted = true
+        // Transport-only optimization (rules.instructions.md §36): HIGH
+        // connection priority for data transfer.
+        try {
+            bluetoothGatt?.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)
+        } catch (e: SecurityException) {
+            Log.w("GattClientSession", "requestConnectionPriority failed: ${e.message}")
+        }
+        ops.enqueue(
+            CccdWrite(BleConstants.TX_RESPONSE_UUID, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE, { ok ->
+                txResponseSubscribed = ok
+                Log.i("GattClientSession", "TX_RESPONSE CCCD for $deviceAddress: subscribed=$ok")
+            })
+        )
+        ops.enqueue(
+            CccdWrite(BleConstants.PAIRING_ACK_UUID, BluetoothGattDescriptor.ENABLE_INDICATION_VALUE, { ok ->
+                pairingAckCccdSubscribed = ok
+                if (!ok) Log.w("GattClientSession", "PAIRING_ACK CCCD subscription failed for $deviceAddress")
+                Log.i("GattClientSession", "CCCD chain done for $deviceAddress — emitting MtuNegotiated($mtu)")
+                emitEvent(BleSessionEvent.MtuNegotiated(deviceAddress, mtu))
+            })
+        )
     }
 
     private val gattCallback = object : BluetoothGattCallback() {
@@ -254,12 +428,12 @@ class GattClientSession(
                             connectionRetryCount++
                             val delay = (BleConstants.GATT_RETRY_DELAY_MS * Math.pow(1.5, (connectionRetryCount - 1).toDouble())).toLong()
                             Log.w("GattClientSession", "Status 133 retry #$connectionRetryCount for $deviceAddress — retrying in ${delay}ms")
-                            cleanup()
+                            cleanup("connection_status_133_retry", resetRetries = false)
                             timeoutHandler.postDelayed({ connect() }, delay)
                             return
                         }
                         emitEvent(BleSessionEvent.ErrorOccurred(deviceAddress, BleErrorCategory.CONNECTION_FAILED, "connection_status_$status"))
-                        cleanup()
+                        cleanup("connection_status_$status")
                         return
                     }
                     connectionRetryCount = 0
@@ -277,13 +451,9 @@ class GattClientSession(
                         try {
                             gatt?.discoverServices()
                         } catch (e: SecurityException) {
-                            Log.e("GattClientSession", "Security exception discovering services for $deviceAddress", e)
-                            BleCoordinator.getInstance(context).let { coordinator ->
-                                coordinator.permissionsGate.recordPermissionFailure()
-                                coordinator.callback?.onBlePermissionError("Bluetooth connection permission required")
-                            }
+                            reportPermissionFailure(e, "service discovery")
                             emitEvent(BleSessionEvent.ErrorOccurred(deviceAddress, BleErrorCategory.PERMISSION_DENIED, "service_discovery"))
-                            cleanup()
+                            cleanup("service_discovery_permission")
                         }
                     }, 200L)
                 }
@@ -296,13 +466,13 @@ class GattClientSession(
                         connectionRetryCount++
                         val delay = (BleConstants.GATT_RETRY_DELAY_MS * Math.pow(1.5, (connectionRetryCount - 1).toDouble())).toLong()
                         Log.w("GattClientSession", "Status 133 on disconnect retry #$connectionRetryCount for $deviceAddress — retrying in ${delay}ms")
-                        cleanup()
+                        cleanup("disconnect_status_133_retry", resetRetries = false)
                         timeoutHandler.postDelayed({ connect() }, delay)
                         return
                     }
                     // Emit disconnection event - BleCoordinator manages state
                     emitEvent(BleSessionEvent.Disconnected(deviceAddress, status))
-                    cleanup()
+                    cleanup("disconnected")
                 }
             }
         }
@@ -310,212 +480,74 @@ class GattClientSession(
         override fun onServicesDiscovered(gatt: BluetoothGatt?, status: Int) {
             Log.d("GattClientSession", "Services discovered: $deviceAddress, status: $status")
 
-            if (status == BluetoothGatt.GATT_SUCCESS) {
-                val service = gatt?.getService(BleConstants.DSM_SERVICE_UUID_V2)
-                if (service != null) {
-                    requestCharacteristic = service.getCharacteristic(BleConstants.TX_REQUEST_UUID)
-                    responseCharacteristic = service.getCharacteristic(BleConstants.TX_RESPONSE_UUID)
-                    identityCharacteristic = service.getCharacteristic(BleConstants.IDENTITY_UUID)
-                    pairingCharacteristic = service.getCharacteristic(BleConstants.PAIRING_UUID)
-                    pairingAckCharacteristic = service.getCharacteristic(BleConstants.PAIRING_ACK_UUID)
+            val service = if (status == BluetoothGatt.GATT_SUCCESS) gatt?.getService(BleConstants.DSM_SERVICE_UUID_V2) else null
+            if (service != null) {
+                requestCharacteristic = service.getCharacteristic(BleConstants.TX_REQUEST_UUID)
+                responseCharacteristic = service.getCharacteristic(BleConstants.TX_RESPONSE_UUID)
+                identityCharacteristic = service.getCharacteristic(BleConstants.IDENTITY_UUID)
+                pairingCharacteristic = service.getCharacteristic(BleConstants.PAIRING_UUID)
+                pairingAckCharacteristic = service.getCharacteristic(BleConstants.PAIRING_ACK_UUID)
 
-                    // NOTE: Do NOT call subscribeToPairingAck() here.
-                    // Android BLE only allows one GATT operation at a time; the CCCD
-                    // descriptor write would conflict with the immediately following
-                    // MTU request. Instead, we subscribe after MTU negotiation
-                    // completes (onMtuChanged → subscribeToPairingAck → onDescriptorWrite → readIdentity).
-
-                    // Emit service discovery success event
-                    emitEvent(BleSessionEvent.ServiceDiscoveryCompleted(deviceAddress, true))
-                    // Negotiate MTU
-                    negotiateMtu()
-                } else {
-                    if (!serviceDiscoveryRetried) {
-                        Log.w("GattClientSession", "DSM service UUID not found for $deviceAddress — retrying after cache refresh")
-                        retryServiceDiscovery()
-                    } else {
-                        emitEvent(BleSessionEvent.ServiceDiscoveryCompleted(deviceAddress, false))
-                        emitEvent(BleSessionEvent.ErrorOccurred(deviceAddress, BleErrorCategory.SERVICE_DISCOVERY_FAILED, "service_discovery"))
-                    }
-                }
+                emitEvent(BleSessionEvent.ServiceDiscoveryCompleted(deviceAddress, true))
+                // The link's operations may start; the MTU request is the first.
+                ops.open()
+                ops.enqueue(MtuRequest(BleConstants.IDENTITY_MTU_REQUEST))
+            } else if (!serviceDiscoveryRetried) {
+                Log.w("GattClientSession", "Service discovery for $deviceAddress found no DSM service (status=$status) — retrying after cache refresh")
+                retryServiceDiscovery()
             } else {
-                if (!serviceDiscoveryRetried) {
-                    Log.w("GattClientSession", "Service discovery failed (status=$status) for $deviceAddress — retrying after cache refresh")
-                    retryServiceDiscovery()
-                } else {
-                    emitEvent(BleSessionEvent.ServiceDiscoveryCompleted(deviceAddress, false))
-                    emitEvent(BleSessionEvent.ErrorOccurred(deviceAddress, BleErrorCategory.SERVICE_DISCOVERY_FAILED, "service_discovery", status))
-                }
+                emitEvent(BleSessionEvent.ServiceDiscoveryCompleted(deviceAddress, false))
+                emitEvent(BleSessionEvent.ErrorOccurred(deviceAddress, BleErrorCategory.SERVICE_DISCOVERY_FAILED, "service_discovery", status))
             }
         }
 
         override fun onMtuChanged(gatt: BluetoothGatt?, mtu: Int, status: Int) {
             Log.d("GattClientSession", "MTU changed: $deviceAddress, mtu: $mtu, status: $status")
-            mtuCallbackReceived = true
-            timeoutHandler.removeCallbacks(mtuFallbackRunnable)
+            ops.completed(GattOperationQueue.Key(GattOperationQueue.Key.Type.MTU, null))
+                ?.finish(status == BluetoothGatt.GATT_SUCCESS, null)
 
             if (status == BluetoothGatt.GATT_SUCCESS) {
                 diagnostics.recordEvent(BleDiagEvent(phase = "mtu_negotiated", device = deviceAddress, bytes = mtu))
-
-                // P1.1: Request HIGH connection priority for data transfer.
-                // Transport-only optimization (rules.instructions.md §36).
-                // Vendor docs confirm 10-25x notification throughput improvement.
-                try {
-                    gatt?.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)
-                    Log.i("GattClientSession", "Requested CONNECTION_PRIORITY_HIGH for $deviceAddress")
-                } catch (e: SecurityException) {
-                    Log.w("GattClientSession", "requestConnectionPriority failed: ${e.message}")
-                }
-
-                // Store MTU value so we can emit it after all CCCD writes complete.
-                // Chain: TX_RESPONSE CCCD → onDescriptorWrite → PAIRING_ACK CCCD → onDescriptorWrite → emit MTU.
-                // Android BLE only allows one GATT op at a time, so we serialize.
-                pendingMtu = mtu
-                txResponseSubscribed = false
-                // Start the CCCD subscription chain with TX_RESPONSE
-                if (!subscribeToTxResponse()) {
-                    // TX_RESPONSE subscription failed — try PAIRING_ACK directly
-                    txResponseSubscribed = true // skip TX_RESPONSE step in onDescriptorWrite
-                    if (!subscribeToPairingAck()) {
-                        // Both failed — emit MTU immediately
-                        emitEvent(BleSessionEvent.MtuNegotiated(deviceAddress, mtu))
-                    }
-                }
+                startSubscriptionChain(mtu)
             } else {
                 emitEvent(BleSessionEvent.ErrorOccurred(deviceAddress, BleErrorCategory.MTU_NEGOTIATION_FAILED, "mtu_negotiation", status))
             }
+            ops.pump()
         }
 
-        override fun onDescriptorWrite(gatt: BluetoothGatt?, descriptor: android.bluetooth.BluetoothGattDescriptor?, status: Int) {
+        override fun onDescriptorWrite(gatt: BluetoothGatt?, descriptor: BluetoothGattDescriptor?, status: Int) {
             val charUuid = descriptor?.characteristic?.uuid
             Log.d("GattClientSession", "Descriptor write: $deviceAddress, uuid: $charUuid, status: $status")
-            if (charUuid == BleConstants.TX_RESPONSE_UUID) {
-                txResponseSubscribed = (status == BluetoothGatt.GATT_SUCCESS)
-                // Check if this was a re-subscription (not part of the initial MTU chain)
-                val resubDeferred = pendingTxResponseResubscribe
-                if (resubDeferred != null) {
-                    pendingTxResponseResubscribe = null
-                    Log.i("GattClientSession", "TX_RESPONSE re-subscription done (status=$status) for $deviceAddress")
-                    resubDeferred.complete(txResponseSubscribed)
-                } else {
-                    // Initial subscription chain — continue to PAIRING_ACK
-                    Log.i("GattClientSession", "TX_RESPONSE CCCD write done (status=$status) for $deviceAddress — subscribing to PAIRING_ACK next")
-                    if (!subscribeToPairingAck()) {
-                        // PAIRING_ACK subscription failed — emit MTU now
-                        val mtu = pendingMtu
-                        if (mtu > 0) {
-                            pendingMtu = 0
-                            emitEvent(BleSessionEvent.MtuNegotiated(deviceAddress, mtu))
-                        }
-                    }
-                }
-            } else if (charUuid == BleConstants.PAIRING_ACK_UUID) {
-                pairingAckCccdSubscribed = (status == BluetoothGatt.GATT_SUCCESS)
-                if (!pairingAckCccdSubscribed) {
-                    Log.w("GattClientSession",
-                        "PAIRING_ACK CCCD subscription failed for $deviceAddress (status=$status)")
-                }
-                // PAIRING_ACK CCCD write completed — all subscriptions done, emit MTU
-                val mtu = pendingMtu
-                if (mtu > 0) {
-                    pendingMtu = 0
-                    Log.i("GattClientSession", "PAIRING_ACK CCCD write done (status=$status) — emitting MtuNegotiated($mtu)")
-                    emitEvent(BleSessionEvent.MtuNegotiated(deviceAddress, mtu))
-                }
-                // CCCD chain complete — drain any ops queued during the chain.
-                drainNextGattOp()
+            val op = ops.completed(GattOperationQueue.Key(GattOperationQueue.Key.Type.DESCRIPTOR_WRITE, charUuid))
+            if (op == null) {
+                Log.w("GattClientSession", "Descriptor write callback for $charUuid on $deviceAddress with no such operation in flight")
+            } else {
+                op.finish(status == BluetoothGatt.GATT_SUCCESS, null)
             }
+            ops.pump()
         }
 
-        @Suppress("DEPRECATION")
         override fun onCharacteristicRead(gatt: BluetoothGatt?, characteristic: BluetoothGattCharacteristic?, status: Int) {
-            when (characteristic?.uuid) {
-                BleConstants.IDENTITY_UUID -> {
-                    if (status == BluetoothGatt.GATT_SUCCESS) {
-                        // Emit identity read completed event
-                        emitEvent(BleSessionEvent.IdentityReadCompleted(deviceAddress, characteristic.value))
-                    } else {
-                        emitEvent(BleSessionEvent.IdentityReadCompleted(deviceAddress, null))
-                        emitEvent(BleSessionEvent.ErrorOccurred(deviceAddress, BleErrorCategory.CHARACTERISTIC_READ_FAILED, "identity_read", status))
-                    }
-                }
+            val uuid = characteristic?.uuid
+            val op = ops.completed(GattOperationQueue.Key(GattOperationQueue.Key.Type.READ, uuid))
+            if (op == null) {
+                Log.w("GattClientSession", "Read callback for $uuid on $deviceAddress with no such operation in flight")
+            } else {
+                op.finish(status == BluetoothGatt.GATT_SUCCESS, characteristic?.value)
             }
-            // GATT op completed — drain next queued op.
-            drainNextGattOp()
+            ops.pump()
         }
 
         override fun onCharacteristicWrite(gatt: BluetoothGatt?, characteristic: BluetoothGattCharacteristic?, status: Int) {
             val uuid = characteristic?.uuid
             Log.d("GattClientSession", "Characteristic write: $deviceAddress, uuid=$uuid, status=$status")
-            when (uuid) {
-                BleConstants.PAIRING_UUID -> {
-                    if (awaitingConfirmWriteAck) {
-                        // This is the scanner's BlePairingConfirm write-back (Phase 3).
-                        // Do NOT wait for any additional ACK read-back — the round-trip is complete.
-                        // Emit PairingConfirmWritten so BleCoordinator can lift the eviction guard.
-                        awaitingConfirmWriteAck = false
-                        if (status == BluetoothGatt.GATT_SUCCESS) {
-                            Log.i("GattClientSession", "PAIRING_CONFIRM write ACKed by BLE stack for $deviceAddress")
-                            emitEvent(BleSessionEvent.PairingConfirmWritten(deviceAddress))
-                        } else {
-                            Log.w("GattClientSession", "PAIRING_CONFIRM write failed for $deviceAddress: status=$status")
-                            // Emit a plain error; BleCoordinator owns the fail-fast cleanup.
-                            emitEvent(BleSessionEvent.ErrorOccurred(deviceAddress, BleErrorCategory.CHARACTERISTIC_WRITE_FAILED, "pairing_confirm_write", status))
-                        }
-                    } else {
-                        if (status == BluetoothGatt.GATT_SUCCESS) {
-                            if (!pairingAckCccdSubscribed) {
-                                Log.w("GattClientSession", "Pairing identity write succeeded without PAIRING_ACK subscription for $deviceAddress")
-                                emitEvent(
-                                    BleSessionEvent.ErrorOccurred(
-                                        deviceAddress,
-                                        BleErrorCategory.CHARACTERISTIC_READ_FAILED,
-                                        "pairing_ack_subscription_unavailable"
-                                    )
-                                )
-                            } else {
-                                Log.i("GattClientSession", "Pairing identity write successful for $deviceAddress — waiting for PAIRING_ACK indication")
-                            }
-                        } else {
-                            Log.w("GattClientSession", "Pairing identity write failed for $deviceAddress: status=$status")
-                            emitEvent(BleSessionEvent.ErrorOccurred(deviceAddress, BleErrorCategory.CHARACTERISTIC_WRITE_FAILED, "pairing_write", status))
-                        }
-                    }
-                }
-                BleConstants.TX_REQUEST_UUID -> {
-                    val completedKind = txRequestWriteKind
-                    txRequestWriteKind = TxRequestWriteKind.NONE
-                    val ackCount = pendingChunkAckWriteCount
-                    if (ackCount != null) {
-                        pendingChunkAckWriteCount = null
-                        if (status == BluetoothGatt.GATT_SUCCESS) {
-                            Log.d("GattClientSession", "Transport chunk ACK write confirmed for $deviceAddress ($ackCount chunks)")
-                        } else {
-                            Log.w("GattClientSession", "Transport chunk ACK write failed for $deviceAddress (count=$ackCount, status=$status)")
-                        }
-                    } else if (completedKind == TxRequestWriteKind.TRANSACTION && status == BluetoothGatt.GATT_SUCCESS) {
-                        emitEvent(BleSessionEvent.TransactionWriteCompleted(deviceAddress, true))
-                    } else if (completedKind == TxRequestWriteKind.TRANSACTION) {
-                        emitEvent(BleSessionEvent.TransactionWriteCompleted(deviceAddress, false))
-                        emitEvent(BleSessionEvent.ErrorOccurred(deviceAddress, BleErrorCategory.CHARACTERISTIC_WRITE_FAILED, "tx_write", status))
-                    } else if (completedKind == TxRequestWriteKind.CHUNK_ACK) {
-                        Log.w("GattClientSession", "TX_REQUEST write completed without pending chunk ACK count for $deviceAddress (status=$status)")
-                    } else {
-                        emitEvent(BleSessionEvent.TransactionWriteCompleted(deviceAddress, false))
-                        emitEvent(BleSessionEvent.ErrorOccurred(deviceAddress, BleErrorCategory.CHARACTERISTIC_WRITE_FAILED, "tx_write_unclassified", status))
-                    }
-                    drainQueuedTxRequestWrite()
-                }
-                else -> {
-                    // Transaction write
-                    if (status == BluetoothGatt.GATT_SUCCESS) {
-                        emitEvent(BleSessionEvent.TransactionWriteCompleted(deviceAddress, true))
-                    } else {
-                        emitEvent(BleSessionEvent.TransactionWriteCompleted(deviceAddress, false))
-                        emitEvent(BleSessionEvent.ErrorOccurred(deviceAddress, BleErrorCategory.CHARACTERISTIC_WRITE_FAILED, "tx_write", status))
-                    }
-                }
+            val op = ops.completed(writeKey(uuid ?: return))
+            if (op == null) {
+                Log.w("GattClientSession", "Write callback for $uuid on $deviceAddress with no such operation in flight")
+            } else {
+                op.finish(status == BluetoothGatt.GATT_SUCCESS, null)
             }
+            ops.pump()
         }
 
         override fun onCharacteristicChanged(gatt: BluetoothGatt?, characteristic: BluetoothGattCharacteristic?) {
@@ -561,7 +593,8 @@ class GattClientSession(
                         Log.d("GattClientSession", "BLE RX chunk #$notificationChunkCount for $deviceAddress")
                     }
                     if (notificationChunkCount % NOTIFICATION_ACK_WINDOW == 0) {
-                        writeChunkAck(notificationChunkCount)
+                        val count = notificationChunkCount
+                        ops.enqueueFirst(ChunkAckWrite(count)) { it is ChunkAckWrite }
                     }
                 }
                 else -> {
@@ -577,13 +610,9 @@ class GattClientSession(
         try {
             bluetoothGatt?.disconnect()
         } catch (e: SecurityException) {
-            Log.e("GattClientSession", "Security exception disconnecting from $deviceAddress", e)
-            BleCoordinator.getInstance(context).let { coordinator ->
-                coordinator.permissionsGate.recordPermissionFailure()
-                coordinator.callback?.onBlePermissionError("Bluetooth connection permission required")
-            }
+            reportPermissionFailure(e, "disconnect")
         }
-        cleanup()
+        cleanup("disconnect")
     }
 
     /**
@@ -601,7 +630,7 @@ class GattClientSession(
             } catch (e: SecurityException) {
                 Log.e("GattClientSession", "Security exception retrying service discovery for $deviceAddress", e)
                 emitEvent(BleSessionEvent.ErrorOccurred(deviceAddress, BleErrorCategory.PERMISSION_DENIED, "service_discovery_retry"))
-                cleanup()
+                cleanup("service_discovery_retry_permission")
             }
         }, 300L)
     }
@@ -610,7 +639,7 @@ class GattClientSession(
      * Attempt to refresh the Android GATT cache using the hidden BluetoothGatt.refresh() API.
      * Clears cached characteristic values that cause stale reads after GATT errors (status 133).
      */
-    fun refreshGattCache(): Boolean {
+    private fun refreshGattCache(): Boolean {
         return try {
             val gatt = bluetoothGatt ?: return false
             val refreshMethod = gatt.javaClass.getMethod("refresh")
@@ -629,120 +658,12 @@ class GattClientSession(
      * so the Disconnected event doesn't race the coordinator cleanup.
      */
     fun closeQuietly() {
-        timeoutHandler.removeCallbacks(connectionTimeoutRunnable)
         try {
             bluetoothGatt?.disconnect()
-            bluetoothGatt?.close()
         } catch (e: SecurityException) {
             Log.e("GattClientSession", "Security exception closing GATT quietly for $deviceAddress", e)
         }
-        bluetoothGatt = null
-        requestCharacteristic = null
-        responseCharacteristic = null
-        identityCharacteristic = null
-        pairingCharacteristic = null
-        pairingAckCharacteristic = null
-        txResponseSubscribed = false
-        txRequestWriteKind = TxRequestWriteKind.NONE
-        queuedTransactionWrite = null
-        queuedChunkAckWriteCount = null
-        pendingChunkAckWriteCount = null
-        awaitingConfirmWriteAck = false
-        pairingAckCccdSubscribed = false
-        pendingTxResponseResubscribe?.cancel()
-        pendingTxResponseResubscribe = null
-    }
-
-    /**
-     * Subscribe to TX_RESPONSE notifications from the GATT server.
-     * This enables the sender (GATT client) to receive chunked response data from the
-     * receiver (GATT server), such as the accept envelope in bilateral transactions.
-     *
-     * @return true if the CCCD descriptor write was initiated (caller should wait for
-     *         onDescriptorWrite before issuing the next GATT operation), false if
-     *         subscription failed or was not possible (caller can proceed immediately).
-     */
-    @SuppressLint("MissingPermission")
-    private fun subscribeToTxResponse(): Boolean {
-        val char = responseCharacteristic
-        if (char == null) {
-            Log.w("GattClientSession", "subscribeToTxResponse: characteristic not found for $deviceAddress")
-            return false
-        }
-        val gatt = bluetoothGatt
-        if (gatt == null) {
-            Log.w("GattClientSession", "subscribeToTxResponse: GATT not available for $deviceAddress")
-            return false
-        }
-        // Enable local notification routing
-        val registered = gatt.setCharacteristicNotification(char, true)
-        if (!registered) {
-            Log.w("GattClientSession", "subscribeToTxResponse: setCharacteristicNotification failed for $deviceAddress")
-            return false
-        }
-        // Write to CCCD to enable server-side notifications (0x01 = NOTIFY)
-        val cccd = char.getDescriptor(BleConstants.CCCD_UUID)
-        if (cccd != null) {
-            @Suppress("DEPRECATION")
-            cccd.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-            try {
-                gatt.writeDescriptor(cccd)
-                Log.i("GattClientSession", "subscribeToTxResponse: CCCD written for $deviceAddress (notifications enabled)")
-                return true
-            } catch (e: SecurityException) {
-                Log.e("GattClientSession", "subscribeToTxResponse: security exception writing CCCD for $deviceAddress", e)
-                return false
-            }
-        } else {
-            Log.w("GattClientSession", "subscribeToTxResponse: CCCD not found on TX_RESPONSE for $deviceAddress")
-            return false
-        }
-    }
-
-    /**
-     * Subscribe to PAIRING_ACK indications from the advertiser.
-     * The advertiser sends a BlePairingAccept envelope as an INDICATE after processing
-     * the scanner's identity write — this is the bilateral confirmation gate.
-     *
-     * @return true if the CCCD descriptor write was initiated (caller should wait for
-     *         onDescriptorWrite before issuing the next GATT operation), false if
-     *         subscription failed or was not possible (caller can proceed immediately).
-     */
-    @SuppressLint("MissingPermission")
-    private fun subscribeToPairingAck(): Boolean {
-        val char = pairingAckCharacteristic
-        if (char == null) {
-            Log.w("GattClientSession", "subscribeToPairingAck: characteristic not found for $deviceAddress")
-            return false
-        }
-        val gatt = bluetoothGatt
-        if (gatt == null) {
-            Log.w("GattClientSession", "subscribeToPairingAck: GATT not available for $deviceAddress")
-            return false
-        }
-        // Enable local notification routing
-        val registered = gatt.setCharacteristicNotification(char, true)
-        if (!registered) {
-            Log.w("GattClientSession", "subscribeToPairingAck: setCharacteristicNotification failed for $deviceAddress")
-            return false
-        }
-        // Write to CCCD to enable server-side indications (0x02 = INDICATE)
-        val cccd = char.getDescriptor(BleConstants.CCCD_UUID)
-        if (cccd != null) {
-            @Suppress("DEPRECATION")
-            cccd.value = BluetoothGattDescriptor.ENABLE_INDICATION_VALUE
-            try {
-                gatt.writeDescriptor(cccd)
-                Log.i("GattClientSession", "subscribeToPairingAck: CCCD written for $deviceAddress (indications enabled)")
-                return true
-            } catch (e: SecurityException) {
-                Log.e("GattClientSession", "subscribeToPairingAck: security exception writing CCCD for $deviceAddress", e)
-                return false
-            }
-        } else {
-            Log.w("GattClientSession", "subscribeToPairingAck: CCCD not found on PAIRING_ACK for $deviceAddress")
-            return false
-        }
+        cleanup("closed")
     }
 
     /**
@@ -769,6 +690,8 @@ class GattClientSession(
             try { stale.close() } catch (_: Throwable) {}
         }
         bluetoothGatt = null
+        ops.close("reconnecting")
+        ops = newQueue()
 
         try {
             val device = adapter.getRemoteDevice(deviceAddress)
@@ -802,115 +725,34 @@ class GattClientSession(
     }
 
     /**
-     * Initiate identity read operation.
-     * Result is communicated via IdentityReadCompleted event.
+     * Read the peer's identity characteristic. The result is reported as
+     * IdentityReadCompleted (null data on failure, with an ErrorOccurred).
      */
-    fun readIdentity(): Boolean {
-        val char = identityCharacteristic
-        if (char == null) {
-            diagnostics.recordError(BleErrorCategory.CHARACTERISTIC_READ_FAILED, "identity_read_no_char")
-            emitEvent(BleSessionEvent.ErrorOccurred(deviceAddress, BleErrorCategory.CHARACTERISTIC_READ_FAILED, "identity_read_no_char"))
-            return false
-        }
-
-        // Queue through the GATT op serializer so this never collides with
-        // an in-flight CCCD descriptor write from the MTU chain.
-        return enqueueGattOp {
-            try {
-                bluetoothGatt?.readCharacteristic(char) == true
-            } catch (e: SecurityException) {
-                Log.e("GattClientSession", "Security exception reading characteristic for $deviceAddress", e)
-                BleCoordinator.getInstance(context).let { coordinator ->
-                    coordinator.permissionsGate.recordPermissionFailure()
-                    coordinator.callback?.onBlePermissionError("Bluetooth connection permission required")
-                }
-                diagnostics.recordError(BleErrorCategory.PERMISSION_DENIED, "characteristic_read")
-                emitEvent(BleSessionEvent.ErrorOccurred(deviceAddress, BleErrorCategory.PERMISSION_DENIED, "characteristic_read"))
-                false
-            }
-        }
+    fun readIdentity() {
+        ops.enqueue(IdentityRead())
     }
 
     /**
-     * Send transaction data.
-     * Result is communicated via TransactionWriteCompleted event.
+     * Write one message's chunks to the peer's TX_REQUEST characteristic, in
+     * order and contiguous. Completes true only when the stack took every
+     * chunk; false when any chunk was refused or failed, or the link ended
+     * first — the chunks after a failed one are not written.
      */
-    fun sendTransaction(data: ByteArray): Boolean {
-        if (requestCharacteristic == null) {
-            diagnostics.recordError(BleErrorCategory.CHARACTERISTIC_WRITE_FAILED, "tx_write_no_char")
-            emitEvent(BleSessionEvent.ErrorOccurred(deviceAddress, BleErrorCategory.CHARACTERISTIC_WRITE_FAILED, "tx_write_no_char"))
-            return false
+    fun sendMessage(chunks: Array<ByteArray>): CompletableDeferred<Boolean> {
+        val message = OutboundMessage(chunks)
+        if (chunks.isEmpty()) {
+            message.done.complete(false)
+            return message.done
         }
-
-        if (txRequestWriteKind != TxRequestWriteKind.NONE) {
-            if (queuedTransactionWrite != null) {
-                Log.w("GattClientSession", "sendTransaction: TX_REQUEST busy and queued slot already occupied for $deviceAddress")
-                return false
-            }
-            queuedTransactionWrite = data.copyOf()
-            Log.d("GattClientSession", "sendTransaction: deferred TX_REQUEST write for $deviceAddress (${data.size} bytes)")
-            return true
-        }
-
-        val sent = startTxRequestWrite(data, TxRequestWriteKind.TRANSACTION)
-        if (!sent) {
-            diagnostics.recordError(BleErrorCategory.CHARACTERISTIC_WRITE_FAILED, "tx_write")
-            emitEvent(BleSessionEvent.ErrorOccurred(deviceAddress, BleErrorCategory.CHARACTERISTIC_WRITE_FAILED, "tx_write_start_failed"))
-        }
-        return sent
-    }
-
-    /**
-     * Write a transport-level chunk ACK back to the server's TX_REQUEST characteristic.
-     * Frame format: [0xFF][chunk_count_hi][chunk_count_lo]
-     * This tells the server how many notification chunks the client has received,
-     * allowing it to pace delivery and detect drops.
-     */
-    private fun writeChunkAck(chunkCount: Int) {
-        if (requestCharacteristic == null) {
-            Log.w("GattClientSession", "writeChunkAck: TX_REQUEST not available for $deviceAddress")
-            return
-        }
-
-        if (txRequestWriteKind != TxRequestWriteKind.NONE) {
-            queuedChunkAckWriteCount = chunkCount
-            Log.d("GattClientSession", "writeChunkAck: deferred ACK for $deviceAddress until current TX_REQUEST write completes (count=$chunkCount)")
-            return
-        }
-
-        // 5-byte ACK frame: [0xFF][b3][b2][b1][b0] — 32-bit chunk count.
-        val ack = byteArrayOf(
-            0xFF.toByte(),
-            ((chunkCount shr 24) and 0xFF).toByte(),
-            ((chunkCount shr 16) and 0xFF).toByte(),
-            ((chunkCount shr 8) and 0xFF).toByte(),
-            (chunkCount and 0xFF).toByte()
-        )
-        pendingChunkAckWriteCount = chunkCount
-        val sent = startTxRequestWrite(ack, TxRequestWriteKind.CHUNK_ACK)
-        if (sent) {
-            Log.d("GattClientSession", "Chunk ACK written: $chunkCount chunks confirmed to $deviceAddress")
-        } else {
-            pendingChunkAckWriteCount = null
-            Log.w("GattClientSession", "writeChunkAck: write failed for $deviceAddress (count=$chunkCount)")
-        }
-    }
-
-    /**
-     * Reset the notification chunk counter and idle-gap timestamp.
-     * Called on connection reset; per-transfer resets are handled
-     * automatically by idle-gap detection in onCharacteristicChanged.
-     */
-    fun resetNotificationCounter() {
-        notificationChunkCount = 0
-        currentTransferNonce = -1
+        ops.enqueueAll(chunks.indices.map { index -> ChunkWrite(message, index) })
+        return message.done
     }
 
     /**
      * Ensure TX_RESPONSE notifications are subscribed before sending transaction data.
-     * If already subscribed, returns an immediately completed deferred.
-     * If not subscribed, initiates the CCCD write and returns a deferred that completes
-     * when the descriptor write callback fires.
+     * If already subscribed, returns an immediately completed deferred; otherwise
+     * queues the CCCD write and completes with its outcome (false when the stack
+     * refused it or the link ended).
      *
      * This is critical for receiving bilateral transaction responses: the receiver sends
      * the accept envelope back via GATT server notifications on TX_RESPONSE, so the
@@ -920,92 +762,49 @@ class GattClientSession(
         if (txResponseSubscribed) {
             return CompletableDeferred(true)
         }
+        txResponseResubscribe?.let { return it }
         Log.i("GattClientSession", "ensureTxResponseSubscribed: re-subscribing for $deviceAddress")
         val deferred = CompletableDeferred<Boolean>()
-        pendingTxResponseResubscribe = deferred
-        if (!subscribeToTxResponse()) {
-            pendingTxResponseResubscribe = null
-            deferred.complete(false)
-        }
+        txResponseResubscribe = deferred
+        ops.enqueue(
+            CccdWrite(
+                BleConstants.TX_RESPONSE_UUID,
+                BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE,
+                onDone = { ok ->
+                    txResponseSubscribed = ok
+                    txResponseResubscribe = null
+                    Log.i("GattClientSession", "TX_RESPONSE re-subscription for $deviceAddress: subscribed=$ok")
+                    deferred.complete(ok)
+                },
+                onLinkEnded = {
+                    txResponseResubscribe = null
+                    deferred.complete(false)
+                },
+            )
+        )
         return deferred
     }
 
     /**
-    * Write the Phase-3 BlePairingConfirm envelope to the advertiser's PAIRING characteristic.
-    * Sets [awaitingConfirmWriteAck] so that [onCharacteristicWrite] emits
-    * [BleSessionEvent.PairingConfirmWritten] instead of treating the confirm as a
-    * Phase-1 identity write.
+     * Write the Phase-3 BlePairingConfirm envelope to the advertiser's PAIRING
+     * characteristic. Reported as PairingConfirmWritten when the stack
+     * acknowledges it, as ErrorOccurred when it fails.
      */
-    fun writePairingConfirm(data: ByteArray): Boolean {
-        val char = pairingCharacteristic
-        if (char == null) {
-            Log.w("GattClientSession", "writePairingConfirm: pairing characteristic not found for $deviceAddress")
-            return false
-        }
-        @Suppress("DEPRECATION")
-        char.setValue(data)
-        return try {
-            awaitingConfirmWriteAck = true
-            val result = bluetoothGatt?.writeCharacteristic(char) == true
-            if (!result) awaitingConfirmWriteAck = false // write didn't even start; clear flag
-            Log.d("GattClientSession", "writePairingConfirm: wrote ${data.size} bytes to $deviceAddress, result=$result")
-            result
-        } catch (e: SecurityException) {
-            awaitingConfirmWriteAck = false
-            Log.e("GattClientSession", "Security exception writing pairing confirm for $deviceAddress", e)
-            BleCoordinator.getInstance(context).let { coordinator ->
-                coordinator.permissionsGate.recordPermissionFailure()
-                coordinator.callback?.onBlePermissionError("Bluetooth connection permission required")
-            }
-            false
-        }
+    fun writePairingConfirm(data: ByteArray) {
+        ops.enqueue(PairingWrite(data.copyOf(), isConfirm = true))
     }
 
     /**
      * Write identity/pairing data to the peer's PAIRING characteristic.
      * Used by the scanner to send its own identity back to the advertiser.
+     * A failure is reported as ErrorOccurred.
      */
-    fun writePairingData(data: ByteArray): Boolean {
-        val char = pairingCharacteristic
-        if (char == null) {
-            Log.w("GattClientSession", "writePairingData: pairing characteristic not found for $deviceAddress")
-            return false
-        }
-
-        @Suppress("DEPRECATION")
-        char.setValue(data)
-
-        try {
-            val result = bluetoothGatt?.writeCharacteristic(char) == true
-            Log.d("GattClientSession", "writePairingData: wrote ${data.size} bytes to $deviceAddress, result=$result")
-            return result
-        } catch (e: SecurityException) {
-            Log.e("GattClientSession", "Security exception writing pairing data for $deviceAddress", e)
-            BleCoordinator.getInstance(context).let { coordinator ->
-                coordinator.permissionsGate.recordPermissionFailure()
-                coordinator.callback?.onBlePermissionError("Bluetooth connection permission required")
-            }
-            return false
-        }
+    fun writePairingData(data: ByteArray) {
+        ops.enqueue(PairingWrite(data.copyOf(), isConfirm = false))
     }
 
-    @SuppressLint("MissingPermission")
-    private fun negotiateMtu() {
-        mtuCallbackReceived = false
-        val requestedMtu = BleConstants.IDENTITY_MTU_REQUEST
-        if (bluetoothGatt?.requestMtu(requestedMtu) != true) {
-            // Android 14+ auto-requests MTU 517 before the app calls requestMtu().
-            // If the auto-request already completed, requestMtu() returns false and
-            // onMtuChanged never fires from this call. Schedule a fallback that
-            // unblocks the CCCD chain after a short delay.
-            Log.w("GattClientSession", "requestMtu($requestedMtu) returned false for $deviceAddress — scheduling MTU fallback")
-            timeoutHandler.postDelayed(mtuFallbackRunnable, BleConstants.MTU_FALLBACK_DELAY_MS)
-        }
-    }
-
-    private fun cleanup() {
+    private fun cleanup(reason: String, resetRetries: Boolean = true) {
         timeoutHandler.removeCallbacks(connectionTimeoutRunnable)
-        timeoutHandler.removeCallbacks(mtuFallbackRunnable)
         // P1.1: Reset connection priority to balanced on cleanup to save battery.
         try {
             bluetoothGatt?.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_BALANCED)
@@ -1019,32 +818,19 @@ class GattClientSession(
             gatt?.close()
         } catch (t: Throwable) {
             Log.e("GattClientSession", "Exception closing GATT for $deviceAddress", t)
-            if (t is SecurityException) {
-                BleCoordinator.getInstance(context).let { coordinator ->
-                    coordinator.permissionsGate.recordPermissionFailure()
-                    coordinator.callback?.onBlePermissionError("Bluetooth connection permission required")
-                }
-            }
+            if (t is SecurityException) reportPermissionFailure(t, "close")
         }
         requestCharacteristic = null
         responseCharacteristic = null
         identityCharacteristic = null
         pairingCharacteristic = null
         pairingAckCharacteristic = null
-        pendingMtu = 0
+        subscriptionChainStarted = false
         txResponseSubscribed = false
-        txRequestWriteKind = TxRequestWriteKind.NONE
-        queuedTransactionWrite = null
-        queuedChunkAckWriteCount = null
-        pendingChunkAckWriteCount = null
-        awaitingConfirmWriteAck = false
         pairingAckCccdSubscribed = false
         notificationChunkCount = 0
-        mtuCallbackReceived = false
-        connectionRetryCount = 0
-        gattOpInFlight = false
-        pendingGattOps.clear()
-        pendingTxResponseResubscribe?.cancel()
-        pendingTxResponseResubscribe = null
+        if (resetRetries) connectionRetryCount = 0
+        // Every operation in flight or waiting ends with the link.
+        ops.close(reason)
     }
 }

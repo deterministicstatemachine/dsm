@@ -1248,6 +1248,30 @@ The §6.32 manifest is discharged: its 45 tests pass on this branch (release, Po
 
 Consequence (beta clean cut): ERA is re-keyed — every ERA balance key and the reserve id change. `R_0` is computed and never stored, so the fleet needs no reset. ERA held under the old commitment is left behind, so devices start from fresh installs.
 
+### 6.34 BLE transport: one operation per link, routes by device id, owed frames reached for (`fix/ble-offline-routing-and-redelivery`, 2026-09-27)
+
+Found on the four-device run of 2026-09-26: A54's offline prepare for 5GN was written to 8XK and step 392XXK8ZMME2E has been Prepared since. Owner rulings applied: BLE is transport only, a lost link is liveness, a misaddressed message is meaningless bytes, the SDK's owed frames are the only redelivery authority (the Kotlin outbox deleted, 2026-09-27).
+
+**Resolved**
+
+| Location | Finding | State |
+|---|---|---|
+| Kotlin · ble/GattClientSession.kt | Only TX_REQUEST writes and the identity read were serialized; the identity write-back and the first message chunk collided ("writeCharacteristic() - prior command is not finished" ×5) and the CCCD writes ignored `writeDescriptor`'s answer. | One `GattOperationQueue` per link for every operation; only the operation's own callback or the link ending clears the slot; a refused start is reported refused. Kotlin test `GattOperationQueueTest.aPairingWriteFollowedByAMessageMeetsNoRefusal` against a stack that refuses a second outstanding operation; the in-flight check and the key match each mutated → red. |
+| Kotlin · ble/BleCoordinator.kt `sendTransactionRequest`; BleOutbox, BleOutboxRepository | Answered a hard-coded `true`; a durable, address-keyed retransmission store dropped items after five attempts and held 5GN's prepare under 8XK's address. | `writeMessage` completes true only when the stack took every chunk; the outbox is deleted. |
+| Kotlin · ble/BleCoordinator.kt `resolveSession` | Routed an unknown or stale address to the sole ready session, whoever it was. | Deleted; `resolveRoute(deviceId, hint)` routes only to a link anchored to the addressed appliance (or an unanchored link to our server at the SDK's hint). Kotlin tests `BleCoordinatorTest.resolveRoute_*`; the identity match, the anchor check at the hint and the identity-read gate each mutated → red. |
+| Kotlin · connectToDevice, onDeviceDiscovered; Rust · jni/ble_events.rs identity reads | A link counted as ready at raw GATT Connected; pairing was decided by the rotating address; the scan stopped at the first DSM advertiser; a non-target's identity read wrote its contact address and a pairing session. | A client link is a route once the identity read on it is anchored; a reach connects advertisers one at a time and keeps scanning; `identity_read_verdict` records nothing for a non-target and decides pairing by device id. |
+| `dsm_sdk` · jni/unified_protobuf_bridge.rs `send_ble_chunks_via_unified`, `bleNotifyConnectionState`; handlers/wallet_routes.rs `wallet.sendOffline` | Every send was keyed by a BLE address; link-up was raised at raw Connected by address and delivered only to a contact holding that address; sendOffline and accept refused when no address was stored. | Sends are keyed by the counterparty's device id with the address as a hint; `bleNotifyLink(deviceId, address, up)` after anchoring; the address-required refusals are gone; replies go back on the link they answer. |
+| `dsm_sdk` · bluetooth/owed_frame_driver.rs (new) | Nothing reached for a counterparty an owed frame was not delivered to. | While an owed frame is undelivered on a live link the driver reaches for its counterparty, paced 15 s doubling to 5 min (transport pacing only). |
+| `dsm_sdk` · jni/ble_events.rs (identity write-back, pairing accept, pairing confirm); bluetooth/bilateral_envelope.rs `pairing_frame` | The pairing frames sent to a peer were built as local answers (no headers, no message id); the peer's strict addressed decoder refused them ("Envelope.headers is required", 9FF on hardware), so BLE pairing could not complete. | Built as addressed envelopes from this device (`pairing_frame`); the WebView's BLE events stay local answers. Test `dsm_sdk::bluetooth::bilateral_envelope::tests::a_pairing_frame_is_taken_by_the_peers_strict_decoder`; the local-answer form restored → red. |
+| `dsm` · bilateral/offline.rs `decide_prepare`; `dsm_sdk` · bilateral_ble_handler.rs `handle_prepare_request` | A prepare addressed to another device reached the step-in-flight and stale-tip checks, which answer and record; the online gate, contact sync and relationship setup ran before any decision; a stale proposal's claimed tip was recorded whether or not the commitment recomputed on it. | `NotAddressed` decided first from reads alone; the writes follow the decision; the claim is kept only when it recomputes. Matrix rows. |
+
+**Open**
+
+- C2, second half: a contact's address is persisted on every GATT identity observation, not only on pairing confirm. The identity characteristic is open, so an address persisted from it is a hint and nothing more; since sends are routed by device id it costs liveness at worst, and moving persistence to confirm changes which contacts count as paired.
+- C3: the chunk budget is a constant (`MAX_BLE_CHUNK_SIZE`, about 460-byte chunks, sized for MTU 517), not the negotiated MTU of the link carrying the frame. A link with a smaller MTU would take a chunk it cannot carry. Rust chunks before the transport knows the route, so the fix is either a route query before chunking or links whose MTU cannot carry the chunk not counting as routes; owner's call. (The assumed-517 fallback for an MTU that was never reported is deleted: the link does not become a route.)
+- C4 (frontend sweep): `PendingBilateralScreen` is routed nowhere, so a proposer's cancel is unreachable from it.
+- The device run of this round (A54 and 5GN alone, then all four) is owed; nothing above is proven on real Android devices yet.
+
 ## 7 Totals
 
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |
