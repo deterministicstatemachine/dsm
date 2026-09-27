@@ -1886,6 +1886,8 @@ html[data-shell-theme] .stateboy::before {
       // Single shared MessagePort onmessage handler (ID-based routing)
       function installPortHandler(p) {
         p.onmessage = (e) => {
+          // Declared outside the try so the catch can release the pending entry.
+          let respId;
           try {
             let bytes;
             const data = e.data;
@@ -1928,7 +1930,7 @@ html[data-shell-theme] .stateboy::before {
             const idView = new DataView(bytes.buffer, bytes.byteOffset, 8);
             const hi = idView.getUint32(0, false); // big-endian high 32 bits
             const lo = idView.getUint32(4, false); // big-endian low 32 bits
-            const respId = (BigInt(hi) << 32n) | BigInt(lo);
+            respId = (BigInt(hi) << 32n) | BigInt(lo);
             
             // Lookup pending request by ID
             const state = pending.get(respId);
@@ -2014,14 +2016,23 @@ html[data-shell-theme] .stateboy::before {
       
       try { console.log('[DSM] Bridge interface installed, waiting for port...'); } catch (_) {}
       
-      // Listen for MessagePort from Android
+      // The bridge port: Kotlin posts it once, as an empty-string message
+      // carrying the port. It is taken once; any later port-bearing message,
+      // or one without that handshake, is not the bridge and is ignored.
       window.addEventListener('message', (ev) => {
-        if (ev.ports && ev.ports[0]) {
-          port = ev.ports[0];
-          installPortHandler(port);
-          resolvePortWaiters(port);
-          window.dispatchEvent(new Event('dsm-bridge-ready'));
+        if (!(ev.ports && ev.ports[0])) return;
+        if (port) {
+          console.warn('[DSM] Ignoring a second MessagePort delivery');
+          return;
         }
+        if (ev.data !== '') {
+          console.warn('[DSM] Ignoring a MessagePort without the bridge handshake');
+          return;
+        }
+        port = ev.ports[0];
+        installPortHandler(port);
+        resolvePortWaiters(port);
+        window.dispatchEvent(new Event('dsm-bridge-ready'));
       });
     })();
   </script>
