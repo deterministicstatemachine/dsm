@@ -866,7 +866,7 @@ html[data-shell-theme="dmg"] {
   --dpad-center-shadow: rgba(0, 0, 0, 0.98);
 }
 
-/* Gold – polished metal all over: housing, trim, D-pad, A/B, Start/Select, logo */
+/* Gold – polished metal all over: housing, trim, controls, logo */
 html[data-shell-theme="gold"] {
   --shell-tint:       #d4af37;
   --shell-bar-color:  #0a0a0a;
@@ -899,14 +899,14 @@ html[data-shell-theme="zebra"] {
   --trim-bg:          #0a0a0a;
   --trim-border:      #2c2c2c;
   --housing-bg:       #101010;
-  --btn-grad-light:   #d9b8ff;
-  --btn-grad-dark:    #6d28d9;
-  --btn-border:       #ecd9ff;
-  --dpad-grad-light:  #b487f8;
-  --dpad-grad-dark:   #4c1d95;
-  --dpad-border:      #dcc2ff;
-  --ab-btn-grad-light:#c69bff;
-  --ab-btn-grad-dark: #5b21b6;
+  --btn-grad-light:   #6d28d9;
+  --btn-grad-dark:    #3b0764;
+  --btn-border:       #a78bfa;
+  --dpad-grad-light:  #6d28d9;
+  --dpad-grad-dark:   #3b0764;
+  --dpad-border:      #a78bfa;
+  --ab-btn-grad-light:#6d28d9;
+  --ab-btn-grad-dark: #3b0764;
   --label-color:      #e9d5ff;
   --shell-label-color:#e9d5ff;
   --edge-glow:        rgba(167, 139, 250, 0.45);
@@ -925,14 +925,14 @@ html[data-shell-theme="leopard"] {
   --trim-bg:          #0a0a0a;
   --trim-border:      #2b1d10;
   --housing-bg:       #1c1410;
-  --btn-grad-light:   #ffd1e8;
-  --btn-grad-dark:    #d81b70;
-  --btn-border:       #ffe6f2;
-  --dpad-grad-light:  #ff9ad2;
-  --dpad-grad-dark:   #b3145a;
-  --dpad-border:      #ffd6ea;
-  --ab-btn-grad-light:#ff8ccf;
-  --ab-btn-grad-dark: #c2185b;
+  --btn-grad-light:   #e0157a;
+  --btn-grad-dark:    #7a0a45;
+  --btn-border:       #ff7ac2;
+  --dpad-grad-light:  #e0157a;
+  --dpad-grad-dark:   #7a0a45;
+  --dpad-border:      #ff7ac2;
+  --ab-btn-grad-light:#e0157a;
+  --ab-btn-grad-dark: #7a0a45;
   --label-color:      #ffd1e8;
   --shell-label-color:#ffd1e8;
   --edge-glow:        rgba(255, 105, 180, 0.45);
@@ -1075,8 +1075,10 @@ html[data-shell-theme] .start-housing, html[data-shell-theme] .select-housing {
   transition: background 0.4s ease, box-shadow 0.4s ease !important;
 }
 
-/* Skins that draw their own controls come after the generic theme rules above,
-   which have the same specificity and would otherwise win by order. */
+/* Skins that draw their own housings or trim come after the generic theme
+   rules above, which have the same specificity and would otherwise win by
+   order. The controls themselves are always the shell's own bevels, drawn from
+   the skin's variables. */
 
 html[data-shell-theme="gold"] .stateboy {
   background: linear-gradient(180deg, #2a1d03 0%, #120c01 100%) !important;
@@ -1135,52 +1137,7 @@ html[data-shell-theme="gold"] .dsm-shell-logo::after {
   filter: drop-shadow(0 1px 0 rgba(255, 245, 200, 0.55)) drop-shadow(0 -1px 0 rgba(60, 40, 0, 0.6));
 }
 
-/* A and B: domed, a highlight at the top left, the bevel the shell already draws. */
-html[data-shell-theme="gold"] .button-a,
-html[data-shell-theme="gold"] .button-b {
-  background:
-    radial-gradient(circle at 35% 28%, #fff7c8 0%, #f6d96b 22%, #d4ad3a 48%, #a07710 78%, #7a5808 100%) !important;
-  box-shadow:
-    inset 0 2px 3px rgba(255, 250, 220, 0.7),
-    inset 0 -3px 5px rgba(70, 48, 4, 0.7),
-    0 4px 4px rgba(0, 0, 0, 0.8) !important;
-}
-html[data-shell-theme="gold"] .button-a-label,
-html[data-shell-theme="gold"] .button-b-label {
-  color: rgba(59, 42, 5, 0.85) !important;
-  text-shadow: 0 1px 0 rgba(255, 245, 200, 0.55) !important;
-}
-
-/* Start and Select: beveled pills of the same metal; the housings recessed and darker. */
-html[data-shell-theme="gold"] .select div,
-html[data-shell-theme="gold"] .start div {
-  background: linear-gradient(180deg, #fff2b0 0%, #f2d267 30%, #c99f2a 62%, #8f6708 100%) !important;
-  border-top-color: #fff8d6 !important;
-  box-shadow: 0 2px 5px rgba(0, 0, 0, 0.45), inset 0 -1px 2px rgba(70, 48, 4, 0.6) !important;
-}
-html[data-shell-theme="gold"] .start-housing,
-html[data-shell-theme="gold"] .select-housing,
-html[data-shell-theme="gold"] .new-dpad-background,
-html[data-shell-theme="gold"] .buttons-a-b {
-  background: linear-gradient(180deg, #7a5a0c 0%, #a07a14 100%) !important;
-  box-shadow:
-    inset 0 3px 10px rgba(50, 34, 2, 0.75),
-    inset 0 1px 4px rgba(0, 0, 0, 0.25),
-    inset 0 -2px 6px rgba(255, 236, 160, 0.14),
-    0 0 0 1px rgba(255, 236, 160, 0.3) !important;
-}
-html[data-shell-theme="gold"] .select-button-label,
-html[data-shell-theme="gold"] .start-button-label {
-  color: #3b2a05 !important;
-  text-shadow: 0 1px 0 rgba(255, 245, 200, 0.5) !important;
-}
-
-/* D-pad centre: a dimple in the metal. */
-html[data-shell-theme="gold"] .new-dpad-center {
-  background: radial-gradient(circle at 45% 38%, #c99f2a 8%, #8f6708 100%) !important;
-}
-
-/* Zebra – a black-and-white hide; the controls are purple, set in black wells. */
+/* Zebra – a black-and-white hide; the purple controls (the shell's own bevels) sit in black wells. */
 html[data-shell-theme="zebra"] .stateboy {
   background: #000000 !important;
 }
@@ -1197,15 +1154,6 @@ html[data-shell-theme="zebra"] .screen-container {
     inset 0 2px 8px rgba(0, 0, 0, 0.6),
     0 0 0 1px rgba(0, 0, 0, 0.7) !important;
 }
-/* A and B: domed purple. */
-html[data-shell-theme="zebra"] .button-a,
-html[data-shell-theme="zebra"] .button-b {
-  background: radial-gradient(circle at 35% 28%, #f1e6ff 0%, #c084fc 22%, #8b3df0 48%, #5b21b6 78%, #3b0f80 100%) !important;
-  box-shadow:
-    inset 0 2px 3px rgba(255, 255, 255, 0.45),
-    inset 0 -3px 5px rgba(30, 0, 70, 0.7),
-    0 4px 4px rgba(0, 0, 0, 0.8) !important;
-}
 /* Labels sit on the hide, so they carry a dark halo to read on both stripes. */
 html[data-shell-theme="zebra"] .button-a-label,
 html[data-shell-theme="zebra"] .button-b-label,
@@ -1213,13 +1161,6 @@ html[data-shell-theme="zebra"] .select-button-label,
 html[data-shell-theme="zebra"] .start-button-label {
   color: #e9d5ff !important;
   text-shadow: 0 0 2px #000, 0 0 3px #000, 0 1px 1px #000 !important;
-}
-/* Start and Select: purple pills. */
-html[data-shell-theme="zebra"] .select div,
-html[data-shell-theme="zebra"] .start div {
-  background: linear-gradient(180deg, #ecdcff 0%, #b487f8 30%, #7c3aed 62%, #4c1d95 100%) !important;
-  border-top-color: #f3e8ff !important;
-  box-shadow: 0 2px 5px rgba(0, 0, 0, 0.5), inset 0 -1px 2px rgba(30, 0, 70, 0.6) !important;
 }
 /* The wells the controls sit in: black, a white hairline against the hide. */
 html[data-shell-theme="zebra"] .start-housing,
@@ -1232,11 +1173,8 @@ html[data-shell-theme="zebra"] .buttons-a-b {
     inset 0 -2px 6px rgba(196, 181, 253, 0.12),
     0 0 0 1px rgba(255, 255, 255, 0.35) !important;
 }
-html[data-shell-theme="zebra"] .new-dpad-center {
-  background: radial-gradient(circle at 45% 38%, #7c3aed 8%, #3b0f80 100%) !important;
-}
 
-/* Leopard – a spotted tan hide; the controls are pink, set in dark wells. */
+/* Leopard – a spotted tan hide; the pink controls (the shell's own bevels) sit in dark wells. */
 html[data-shell-theme="leopard"] .stateboy {
   background: #1a1008 !important;
 }
@@ -1252,26 +1190,12 @@ html[data-shell-theme="leopard"] .screen-container {
     inset 0 2px 8px rgba(0, 0, 0, 0.6),
     0 0 0 1px rgba(26, 19, 15, 0.8) !important;
 }
-html[data-shell-theme="leopard"] .button-a,
-html[data-shell-theme="leopard"] .button-b {
-  background: radial-gradient(circle at 35% 28%, #ffeaf5 0%, #ff9ad2 22%, #ff4fa3 48%, #c2185b 78%, #8a0f42 100%) !important;
-  box-shadow:
-    inset 0 2px 3px rgba(255, 255, 255, 0.5),
-    inset 0 -3px 5px rgba(90, 0, 40, 0.7),
-    0 4px 4px rgba(0, 0, 0, 0.8) !important;
-}
 html[data-shell-theme="leopard"] .button-a-label,
 html[data-shell-theme="leopard"] .button-b-label,
 html[data-shell-theme="leopard"] .select-button-label,
 html[data-shell-theme="leopard"] .start-button-label {
   color: #ffd1e8 !important;
   text-shadow: 0 0 2px #1a1008, 0 0 3px #1a1008, 0 1px 1px #1a1008 !important;
-}
-html[data-shell-theme="leopard"] .select div,
-html[data-shell-theme="leopard"] .start div {
-  background: linear-gradient(180deg, #ffe4f1 0%, #ff9ad2 30%, #ff4fa3 62%, #b3145a 100%) !important;
-  border-top-color: #fff0f7 !important;
-  box-shadow: 0 2px 5px rgba(0, 0, 0, 0.5), inset 0 -1px 2px rgba(90, 0, 40, 0.6) !important;
 }
 html[data-shell-theme="leopard"] .start-housing,
 html[data-shell-theme="leopard"] .select-housing,
@@ -1282,9 +1206,6 @@ html[data-shell-theme="leopard"] .buttons-a-b {
     inset 0 3px 10px rgba(0, 0, 0, 0.9),
     inset 0 -2px 6px rgba(255, 140, 207, 0.12),
     0 0 0 1px rgba(255, 234, 200, 0.35) !important;
-}
-html[data-shell-theme="leopard"] .new-dpad-center {
-  background: radial-gradient(circle at 45% 38%, #e0307f 8%, #8a0f42 100%) !important;
 }
 
 html[data-shell-theme="smoke"],
