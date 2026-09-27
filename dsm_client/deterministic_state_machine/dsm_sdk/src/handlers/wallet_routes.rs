@@ -392,7 +392,7 @@ pub(crate) fn parse_display_amount_to_base_units(
         .map_err(|e| format!("amount out of range: {e}"))
 }
 
-fn encode_offline_transfer_operation_canonical(
+pub(crate) fn encode_offline_transfer_operation_canonical(
     to_device_id: &[u8; 32],
     amount: u64,
     token_id: &str,

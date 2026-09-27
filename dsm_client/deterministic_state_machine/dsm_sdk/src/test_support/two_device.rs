@@ -117,8 +117,9 @@ impl TestDevice {
 
     /// Bring the device up on `fleet`: build its `AppRouterImpl` (which loads
     /// its head, and installs its wallet's Kyber key), install the durable
-    /// policy resolver production bring-up installs beside it, and publish its
-    /// directory entry.
+    /// policy resolver and the pinned-anchor store production bring-up
+    /// installs beside it, and publish its directory entry. The store reads the
+    /// entered device's database, as each device's process reads its own.
     pub async fn boot(&mut self, fleet: &FleetGuard) {
         self.enter();
         let router = AppRouterImpl::new(crate::init::SdkConfig {
@@ -128,6 +129,9 @@ impl TestDevice {
         })
         .expect("router");
         router.install_policy_resolver();
+        crate::bridge::install_anchor_enrollment_store(Arc::new(
+            crate::sdk::anchor_enrollment_store::SqliteAnchorEnrollmentStore::new(),
+        ));
         self.kyber_pk = router
             .wallet
             .get_kyber_public_key()
