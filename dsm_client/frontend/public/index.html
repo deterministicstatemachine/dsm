@@ -892,6 +892,58 @@ html[data-shell-theme="gold"] {
   --control-shell-glow: 0 0 0 1px rgba(255, 236, 160, 0.35);
 }
 
+/* Zebra – black-and-white hide, purple controls in black wells, black trim */
+html[data-shell-theme="zebra"] {
+  --shell-tint:       #f4f2ec;
+  --shell-bar-color:  #0a0a0a;
+  --trim-bg:          #0a0a0a;
+  --trim-border:      #2c2c2c;
+  --housing-bg:       #101010;
+  --btn-grad-light:   #d9b8ff;
+  --btn-grad-dark:    #6d28d9;
+  --btn-border:       #ecd9ff;
+  --dpad-grad-light:  #b487f8;
+  --dpad-grad-dark:   #4c1d95;
+  --dpad-border:      #dcc2ff;
+  --ab-btn-grad-light:#c69bff;
+  --ab-btn-grad-dark: #5b21b6;
+  --label-color:      #e9d5ff;
+  --shell-label-color:#e9d5ff;
+  --edge-glow:        rgba(167, 139, 250, 0.45);
+  --dpad-bottom-shadow: rgba(40, 10, 80, 0.9);
+  --dpad-cast-shadow: rgba(20, 0, 50, 0.5);
+  --dpad-cast-shadow-long: rgba(20, 0, 50, 0.28);
+  --dpad-center-shadow: rgba(46, 16, 101, 0.85);
+  --nav-lit-color:    #c4b5fd;
+  --control-shell-glow: 0 0 0 1px rgba(255, 255, 255, 0.35);
+}
+
+/* Leopard – spotted tan hide, pink controls in dark wells, black trim */
+html[data-shell-theme="leopard"] {
+  --shell-tint:       #d9b36a;
+  --shell-bar-color:  #0a0a0a;
+  --trim-bg:          #0a0a0a;
+  --trim-border:      #2b1d10;
+  --housing-bg:       #1c1410;
+  --btn-grad-light:   #ffd1e8;
+  --btn-grad-dark:    #d81b70;
+  --btn-border:       #ffe6f2;
+  --dpad-grad-light:  #ff9ad2;
+  --dpad-grad-dark:   #b3145a;
+  --dpad-border:      #ffd6ea;
+  --ab-btn-grad-light:#ff8ccf;
+  --ab-btn-grad-dark: #c2185b;
+  --label-color:      #ffd1e8;
+  --shell-label-color:#ffd1e8;
+  --edge-glow:        rgba(255, 105, 180, 0.45);
+  --dpad-bottom-shadow: rgba(90, 0, 40, 0.9);
+  --dpad-cast-shadow: rgba(40, 0, 20, 0.5);
+  --dpad-cast-shadow-long: rgba(40, 0, 20, 0.28);
+  --dpad-center-shadow: rgba(138, 15, 66, 0.85);
+  --nav-lit-color:    #ff8ccf;
+  --control-shell-glow: 0 0 0 1px rgba(255, 234, 200, 0.35);
+}
+
 html[data-shell-theme] body { background-color: #000000 !important; }
 
 html[data-shell-theme="smoke"] .stateboy,
@@ -934,6 +986,97 @@ html[data-shell-theme="bitcoin"] .dsm-shell-logo img {
   height: 100% !important;
   max-width: 100% !important;
 }
+
+html[data-shell-theme] .front-plate {
+  background-color: var(--shell-tint) !important;
+  box-shadow:
+    inset 0 1px 1px -2px rgba(0,0,0,.6),
+    inset 0 -4px 16px 0 rgba(0,0,0,.25),
+    0 40px 60px 0 rgba(0,0,0,.5) !important;
+  transition: background-color 0.4s ease !important;
+}
+
+html[data-shell-theme] .screen-container {
+  background-color: var(--trim-bg) !important;
+  transition: background-color 0.4s ease !important;
+}
+
+html[data-shell-theme] .screen-nav-bar {
+  background: var(--trim-bg) !important;
+  border-top: 2px solid var(--trim-border) !important;
+  transition: background-color 0.4s ease !important;
+}
+
+html[data-shell-theme] .new-dpad-background {
+  background: var(--housing-bg) !important;
+  transition: background 0.4s ease, box-shadow 0.4s ease !important;
+}
+
+html[data-shell-theme] .buttons-a-b {
+  background: var(--housing-bg) !important;
+  transition: background 0.4s ease, box-shadow 0.4s ease !important;
+}
+
+html[data-shell-theme] .new-dpad-vertical,
+html[data-shell-theme] .new-dpad-horizontal,
+html[data-shell-theme] .new-dpad-center {
+  background: linear-gradient(135deg, var(--dpad-grad-light, var(--btn-grad-light)) 0%, var(--dpad-grad-dark, var(--btn-grad-dark)) 100%) !important;
+  border-top-color: var(--dpad-border, var(--btn-border)) !important;
+  transition: background 0.4s ease !important;
+}
+/* Split arm highlights/shadows: top uses dpad-border, bottom stays dark */
+html[data-shell-theme] .new-dpad-horizontal::before,
+html[data-shell-theme] .new-dpad-horizontal::after {
+  background: linear-gradient(var(--dpad-border, var(--btn-border)), var(--dpad-border, var(--btn-border))) top / 100% 2px no-repeat !important;
+  box-shadow:
+    inset 0 -2px 0 var(--dpad-bottom-shadow, rgba(54, 54, 54, 0.85)),
+    0 2px 3px var(--dpad-cast-shadow, rgba(28, 28, 28, 0.34)),
+    0 5px 7px var(--dpad-cast-shadow-long, rgba(0, 0, 0, 0.22)) !important;
+  transition: background 0.4s ease, box-shadow 0.4s ease !important;
+}
+/* Center dimple shadow adapts per theme */
+html[data-shell-theme] .new-dpad-center {
+  box-shadow: inset 9px 7px 9px var(--dpad-center-shadow, rgba(6, 0, 7, 0.95)) !important;
+}
+
+html[data-shell-theme] .button-a, html[data-shell-theme] .button-b {
+  background: linear-gradient(135deg, var(--ab-btn-grad-light, var(--btn-grad-light)) 0%, var(--ab-btn-grad-dark, var(--btn-grad-dark)) 100%) !important;
+  transition: background 0.4s ease !important;
+}
+
+html[data-shell-theme="sunburst"] .buttons-a-b {
+  background: rgba(246, 196, 0, 0.78) !important;
+}
+
+html[data-shell-theme="sunburst"] .button-b {
+  background: linear-gradient(135deg, #ff3a2f 0%, #b30000 100%) !important;
+}
+
+html[data-shell-theme="sunburst"] .button-a {
+  background: linear-gradient(135deg, #57a702 0%, #54a516 100%) !important;
+}
+
+html[data-shell-theme="sunburst"] .button-a-label,
+html[data-shell-theme="sunburst"] .button-b-label,
+html[data-shell-theme="sunburst"] .select-button-label,
+html[data-shell-theme="sunburst"] .start-button-label {
+  color: #121212 !important;
+  text-shadow: 0 1px 1px rgba(255, 240, 170, 0.45) !important;
+}
+
+html[data-shell-theme] .select div, html[data-shell-theme] .start div {
+  background: linear-gradient(180deg, var(--btn-grad-light) 0%, var(--btn-grad-light) 28%, var(--btn-grad-dark) 100%) !important;
+  border-top-color: var(--btn-border) !important;
+  transition: background 0.4s ease !important;
+}
+
+html[data-shell-theme] .start-housing, html[data-shell-theme] .select-housing {
+  background: var(--housing-bg) !important;
+  transition: background 0.4s ease, box-shadow 0.4s ease !important;
+}
+
+/* Skins that draw their own controls come after the generic theme rules above,
+   which have the same specificity and would otherwise win by order. */
 
 html[data-shell-theme="gold"] .stateboy {
   background: linear-gradient(180deg, #2a1d03 0%, #120c01 100%) !important;
@@ -1037,92 +1180,111 @@ html[data-shell-theme="gold"] .new-dpad-center {
   background: radial-gradient(circle at 45% 38%, #c99f2a 8%, #8f6708 100%) !important;
 }
 
-html[data-shell-theme] .front-plate {
-  background-color: var(--shell-tint) !important;
+/* Zebra – a black-and-white hide; the controls are purple, set in black wells. */
+html[data-shell-theme="zebra"] .stateboy {
+  background: #000000 !important;
+}
+html[data-shell-theme="zebra"] .front-plate {
+  background-image: url('images/hardshell/zebra.png') !important;
+  background-size: cover !important;
+  background-position: center !important;
+}
+/* The glass and its bezel stay black, a purple hairline where they meet the hide. */
+html[data-shell-theme="zebra"] .screen-container {
+  background-image: linear-gradient(180deg, #151515 0%, #070707 100%) !important;
   box-shadow:
-    inset 0 1px 1px -2px rgba(0,0,0,.6),
-    inset 0 -4px 16px 0 rgba(0,0,0,.25),
-    0 40px 60px 0 rgba(0,0,0,.5) !important;
-  transition: background-color 0.4s ease !important;
+    inset 0 0 0 1px rgba(196, 181, 253, 0.45),
+    inset 0 2px 8px rgba(0, 0, 0, 0.6),
+    0 0 0 1px rgba(0, 0, 0, 0.7) !important;
 }
-
-html[data-shell-theme] .screen-container {
-  background-color: var(--trim-bg) !important;
-  transition: background-color 0.4s ease !important;
-}
-
-html[data-shell-theme] .screen-nav-bar {
-  background: var(--trim-bg) !important;
-  border-top: 2px solid var(--trim-border) !important;
-  transition: background-color 0.4s ease !important;
-}
-
-html[data-shell-theme] .new-dpad-background {
-  background: var(--housing-bg) !important;
-  transition: background 0.4s ease, box-shadow 0.4s ease !important;
-}
-
-html[data-shell-theme] .buttons-a-b {
-  background: var(--housing-bg) !important;
-  transition: background 0.4s ease, box-shadow 0.4s ease !important;
-}
-
-html[data-shell-theme] .new-dpad-vertical,
-html[data-shell-theme] .new-dpad-horizontal,
-html[data-shell-theme] .new-dpad-center {
-  background: linear-gradient(135deg, var(--dpad-grad-light, var(--btn-grad-light)) 0%, var(--dpad-grad-dark, var(--btn-grad-dark)) 100%) !important;
-  border-top-color: var(--dpad-border, var(--btn-border)) !important;
-  transition: background 0.4s ease !important;
-}
-/* Split arm highlights/shadows: top uses dpad-border, bottom stays dark */
-html[data-shell-theme] .new-dpad-horizontal::before,
-html[data-shell-theme] .new-dpad-horizontal::after {
-  background: linear-gradient(var(--dpad-border, var(--btn-border)), var(--dpad-border, var(--btn-border))) top / 100% 2px no-repeat !important;
+/* A and B: domed purple. */
+html[data-shell-theme="zebra"] .button-a,
+html[data-shell-theme="zebra"] .button-b {
+  background: radial-gradient(circle at 35% 28%, #f1e6ff 0%, #c084fc 22%, #8b3df0 48%, #5b21b6 78%, #3b0f80 100%) !important;
   box-shadow:
-    inset 0 -2px 0 var(--dpad-bottom-shadow, rgba(54, 54, 54, 0.85)),
-    0 2px 3px var(--dpad-cast-shadow, rgba(28, 28, 28, 0.34)),
-    0 5px 7px var(--dpad-cast-shadow-long, rgba(0, 0, 0, 0.22)) !important;
-  transition: background 0.4s ease, box-shadow 0.4s ease !important;
+    inset 0 2px 3px rgba(255, 255, 255, 0.45),
+    inset 0 -3px 5px rgba(30, 0, 70, 0.7),
+    0 4px 4px rgba(0, 0, 0, 0.8) !important;
 }
-/* Center dimple shadow adapts per theme */
-html[data-shell-theme] .new-dpad-center {
-  box-shadow: inset 9px 7px 9px var(--dpad-center-shadow, rgba(6, 0, 7, 0.95)) !important;
+/* Labels sit on the hide, so they carry a dark halo to read on both stripes. */
+html[data-shell-theme="zebra"] .button-a-label,
+html[data-shell-theme="zebra"] .button-b-label,
+html[data-shell-theme="zebra"] .select-button-label,
+html[data-shell-theme="zebra"] .start-button-label {
+  color: #e9d5ff !important;
+  text-shadow: 0 0 2px #000, 0 0 3px #000, 0 1px 1px #000 !important;
 }
-
-html[data-shell-theme] .button-a, html[data-shell-theme] .button-b {
-  background: linear-gradient(135deg, var(--ab-btn-grad-light, var(--btn-grad-light)) 0%, var(--ab-btn-grad-dark, var(--btn-grad-dark)) 100%) !important;
-  transition: background 0.4s ease !important;
+/* Start and Select: purple pills. */
+html[data-shell-theme="zebra"] .select div,
+html[data-shell-theme="zebra"] .start div {
+  background: linear-gradient(180deg, #ecdcff 0%, #b487f8 30%, #7c3aed 62%, #4c1d95 100%) !important;
+  border-top-color: #f3e8ff !important;
+  box-shadow: 0 2px 5px rgba(0, 0, 0, 0.5), inset 0 -1px 2px rgba(30, 0, 70, 0.6) !important;
 }
-
-html[data-shell-theme="sunburst"] .buttons-a-b {
-  background: rgba(246, 196, 0, 0.78) !important;
+/* The wells the controls sit in: black, a white hairline against the hide. */
+html[data-shell-theme="zebra"] .start-housing,
+html[data-shell-theme="zebra"] .select-housing,
+html[data-shell-theme="zebra"] .new-dpad-background,
+html[data-shell-theme="zebra"] .buttons-a-b {
+  background: linear-gradient(180deg, #050505 0%, #181818 100%) !important;
+  box-shadow:
+    inset 0 3px 10px rgba(0, 0, 0, 0.9),
+    inset 0 -2px 6px rgba(196, 181, 253, 0.12),
+    0 0 0 1px rgba(255, 255, 255, 0.35) !important;
 }
-
-html[data-shell-theme="sunburst"] .button-b {
-  background: linear-gradient(135deg, #ff3a2f 0%, #b30000 100%) !important;
-}
-
-html[data-shell-theme="sunburst"] .button-a {
-  background: linear-gradient(135deg, #57a702 0%, #54a516 100%) !important;
-}
-
-html[data-shell-theme="sunburst"] .button-a-label,
-html[data-shell-theme="sunburst"] .button-b-label,
-html[data-shell-theme="sunburst"] .select-button-label,
-html[data-shell-theme="sunburst"] .start-button-label {
-  color: #121212 !important;
-  text-shadow: 0 1px 1px rgba(255, 240, 170, 0.45) !important;
-}
-
-html[data-shell-theme] .select div, html[data-shell-theme] .start div {
-  background: linear-gradient(180deg, var(--btn-grad-light) 0%, var(--btn-grad-light) 28%, var(--btn-grad-dark) 100%) !important;
-  border-top-color: var(--btn-border) !important;
-  transition: background 0.4s ease !important;
+html[data-shell-theme="zebra"] .new-dpad-center {
+  background: radial-gradient(circle at 45% 38%, #7c3aed 8%, #3b0f80 100%) !important;
 }
 
-html[data-shell-theme] .start-housing, html[data-shell-theme] .select-housing {
-  background: var(--housing-bg) !important;
-  transition: background 0.4s ease, box-shadow 0.4s ease !important;
+/* Leopard – a spotted tan hide; the controls are pink, set in dark wells. */
+html[data-shell-theme="leopard"] .stateboy {
+  background: #1a1008 !important;
+}
+html[data-shell-theme="leopard"] .front-plate {
+  background-image: url('images/hardshell/leopard.png') !important;
+  background-size: cover !important;
+  background-position: center !important;
+}
+html[data-shell-theme="leopard"] .screen-container {
+  background-image: linear-gradient(180deg, #151515 0%, #070707 100%) !important;
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 140, 207, 0.45),
+    inset 0 2px 8px rgba(0, 0, 0, 0.6),
+    0 0 0 1px rgba(26, 19, 15, 0.8) !important;
+}
+html[data-shell-theme="leopard"] .button-a,
+html[data-shell-theme="leopard"] .button-b {
+  background: radial-gradient(circle at 35% 28%, #ffeaf5 0%, #ff9ad2 22%, #ff4fa3 48%, #c2185b 78%, #8a0f42 100%) !important;
+  box-shadow:
+    inset 0 2px 3px rgba(255, 255, 255, 0.5),
+    inset 0 -3px 5px rgba(90, 0, 40, 0.7),
+    0 4px 4px rgba(0, 0, 0, 0.8) !important;
+}
+html[data-shell-theme="leopard"] .button-a-label,
+html[data-shell-theme="leopard"] .button-b-label,
+html[data-shell-theme="leopard"] .select-button-label,
+html[data-shell-theme="leopard"] .start-button-label {
+  color: #ffd1e8 !important;
+  text-shadow: 0 0 2px #1a1008, 0 0 3px #1a1008, 0 1px 1px #1a1008 !important;
+}
+html[data-shell-theme="leopard"] .select div,
+html[data-shell-theme="leopard"] .start div {
+  background: linear-gradient(180deg, #ffe4f1 0%, #ff9ad2 30%, #ff4fa3 62%, #b3145a 100%) !important;
+  border-top-color: #fff0f7 !important;
+  box-shadow: 0 2px 5px rgba(0, 0, 0, 0.5), inset 0 -1px 2px rgba(90, 0, 40, 0.6) !important;
+}
+html[data-shell-theme="leopard"] .start-housing,
+html[data-shell-theme="leopard"] .select-housing,
+html[data-shell-theme="leopard"] .new-dpad-background,
+html[data-shell-theme="leopard"] .buttons-a-b {
+  background: linear-gradient(180deg, #17100a 0%, #2b1d10 100%) !important;
+  box-shadow:
+    inset 0 3px 10px rgba(0, 0, 0, 0.9),
+    inset 0 -2px 6px rgba(255, 140, 207, 0.12),
+    0 0 0 1px rgba(255, 234, 200, 0.35) !important;
+}
+html[data-shell-theme="leopard"] .new-dpad-center {
+  background: radial-gradient(circle at 45% 38%, #e0307f 8%, #8a0f42 100%) !important;
 }
 
 html[data-shell-theme="smoke"],
@@ -1263,8 +1425,8 @@ html[data-shell-theme] .stateboy::before {
         // artwork with the gold gradient); the img only keeps the box's size.
         shellLogo.src = 'images/logos/dsm-screen-trim-logo-white.png';
         shellLogo.alt = 'DSM Logo';
-      } else if (theme === 'white' || theme === 'violet' || theme === 'red') {
-        // Actual black trim (#080808 / #0f0f12) — white logo for contrast
+      } else if (theme === 'white' || theme === 'violet' || theme === 'red' || theme === 'zebra' || theme === 'leopard') {
+        // Actual black trim (#080808 / #0f0f12 / #0a0a0a) — white logo for contrast
         shellLogo.src = 'images/logos/dsm-screen-trim-logo-white.png';
         shellLogo.alt = 'DSM Logo';
       } else if (theme === 'default') {
@@ -1476,7 +1638,9 @@ html[data-shell-theme] .stateboy::before {
         { key: 'pink',   label: 'PINK'   },
         { key: 'bitcoin', label: 'BITCOIN' },
         { key: 'dmg',    label: 'DMG-01' },
-        { key: 'gold',   label: 'GOLD'   }
+        { key: 'gold',   label: 'GOLD'   },
+        { key: 'zebra',  label: 'ZEBRA'  },
+        { key: 'leopard', label: 'LEOPARD' }
       ];
       var current = 0;
       var holdTimer = null;
