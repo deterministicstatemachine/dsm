@@ -748,11 +748,13 @@ class AndroidLayerProofTest {
 
     @Test
     fun t64_error_wrongPayloadSize_forAcceptBilateral() {
-        // acceptBilateralByCommitment expects exactly 32 bytes
-        val wrongSize = ByteArray(16)
-        val resp = callBridgeMethod("acceptBilateralByCommitment", wrongSize)
-        // Should return success with empty data (validation rejects < 32 bytes)
-        assertTrue("Must not crash", resp.first)
+        // acceptBilateralByCommitment takes exactly 32 bytes. Anything else is
+        // the dispatcher's error carrying the arm's reason, never a success.
+        val resp = callBridgeMethod("acceptBilateralByCommitment", ByteArray(16))
+        assertFalse("A 16-byte commitment is not accepted", resp.first)
+        val error = BridgeEnvelopeCodec.decodeBridgeRpcError(resp.second)
+        assertNotNull("The error decodes", error)
+        assertTrue(error!!.message, error.message.contains("expected 32 bytes, got 16"))
     }
 
     @Test

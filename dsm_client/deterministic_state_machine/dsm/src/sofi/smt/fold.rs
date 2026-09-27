@@ -32,11 +32,6 @@ impl SmtHashes for EconomicHashes {
     }
 }
 
-/// Fold a core's entries into its pre- and post-roots.
-pub fn batch_fold(entries: &[FoldEntry]) -> Result<Folded, FoldError> {
-    batch_fold::batch_fold::<EconomicHashes>(entries)
-}
-
 /// Fold against a claimed pre-root, returning the post-root.
 pub fn verify_batch(pre_root: &[u8; 32], entries: &[FoldEntry]) -> Result<[u8; 32], FoldError> {
     batch_fold::verify_batch::<EconomicHashes>(pre_root, entries)
@@ -48,6 +43,12 @@ mod tests {
     use super::*;
     use crate::economic::tree::{empty_economic_root, root_from_path, EconomicSmt};
     use proptest::prelude::*;
+
+    /// The one fold over the economic tree's hashes: what `verify_batch`
+    /// runs, with its pre-root returned instead of checked.
+    fn batch_fold(entries: &[FoldEntry]) -> Result<Folded, FoldError> {
+        batch_fold::batch_fold::<EconomicHashes>(entries)
+    }
 
     fn key(i: u64) -> [u8; 32] {
         let mut k = [0u8; 32];

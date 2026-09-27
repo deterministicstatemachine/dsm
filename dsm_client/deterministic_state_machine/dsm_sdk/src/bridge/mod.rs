@@ -386,6 +386,14 @@ pub fn install_anchor_appliance_factory(factory: AnchorApplianceFactory) {
     }
 }
 
+/// Remove the installed factory: the process has no appliance again.
+#[cfg(test)]
+pub(crate) fn uninstall_anchor_appliance_factory() {
+    if let Ok(mut g) = ANCHOR_APPLIANCE_FACTORY.write() {
+        *g = None;
+    }
+}
+
 #[must_use]
 pub fn anchor_appliance_factory() -> Option<AnchorApplianceFactory> {
     ANCHOR_APPLIANCE_FACTORY.read().ok()?.clone()
