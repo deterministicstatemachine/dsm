@@ -111,18 +111,6 @@ class PicoSelfTestActivity : Activity() {
                         Log.e(TAG, "counter-init REFUSED: confirm must be 'yes-init-counter-max' (got '$confirm')")
                     }
                 }
-                // GATED sender-transport install (for the 2-phone test): the USB anchor appliance
-                // factory — the ONLY v2 device install (the receiver needs no hardware). Runs ONLY
-                // when launched with `--ez install_anchor_transport true`. Absent from the default .so.
-                if (intent?.getBooleanExtra("install_anchor_transport", false) == true) {
-                    val ok = try {
-                        com.dsm.wallet.bridge.Unified.installAnchorTransport()
-                    } catch (e: UnsatisfiedLinkError) {
-                        Log.e(TAG, "installAnchorTransport not in this .so (needs on_device_installs): ${e.message}")
-                        false
-                    }
-                    Log.i(TAG, "*** installAnchorTransport = $ok ***")
-                }
                 // GATED IRREVERSIBLE slot-0 birth burn. Runs ONLY when launched with
                 // `--ez run_birth_cage true --es confirm yes-birth-cage-slot0`. Run LAST in device
                 // setup, AFTER counter-init. A normal launch never reaches this.
