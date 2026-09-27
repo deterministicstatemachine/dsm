@@ -11,9 +11,10 @@ const ASSETS_DIR = path.resolve(__dirname, '../../android/app/src/main/assets');
 
 const REQUIRED = [
   'index.html',
-  'js/main', // prefix match (hashed filename)
-  'js/runtime',
-  'js/vendors',
+  // prefix match (hashed filename). The Android build emits one entry chunk:
+  // webpack.config.js sets splitChunks and runtimeChunk off for it, so there
+  // is no js/runtime or js/vendors to find (those are the web build's).
+  'js/main',
   'css/main',
   'config/app.json',
   'images/logos/era_token_gb.gif',
@@ -49,6 +50,24 @@ for (const item of REQUIRED) {
     ok = false;
   } else {
     console.log(`OK: Found: ${item}`);
+  }
+}
+
+// The network config and the fleet's CA must be exactly the tracked files in
+// frontend/public/: a copy that differs by one byte means the APK would ship a
+// fleet or a CA nobody committed.
+const PUBLIC_DIR = path.resolve(__dirname, '../public');
+for (const name of ['dsm_env_config.toml', 'ca.crt']) {
+  const shipped = path.join(ASSETS_DIR, name);
+  const tracked = path.join(PUBLIC_DIR, name);
+  if (!fs.existsSync(shipped) || !fs.existsSync(tracked)) {
+    console.error(`Error: ${name} is missing from ${fs.existsSync(shipped) ? PUBLIC_DIR : ASSETS_DIR}`);
+    ok = false;
+  } else if (!fs.readFileSync(shipped).equals(fs.readFileSync(tracked))) {
+    console.error(`Error: ${shipped} is not the tracked ${tracked}`);
+    ok = false;
+  } else {
+    console.log(`OK: ${name} is the tracked public/${name}`);
   }
 }
 

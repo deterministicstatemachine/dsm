@@ -14,7 +14,7 @@
     "proto:gen": "npx protoc --plugin=protoc-gen-es=./node_modules/.bin/protoc-gen-es --es_out=import_extension=.js:./src/proto --es_opt=target=ts -I ../../proto ../../proto/dsm_app.proto",
     "copy:android": "node scripts/copy-to-android.js",
     "build:android": "cd ../android && ./gradlew assembleDebug",
-    "build:full-deploy": "npm run build:android-webpack && npm run copy:android",
+    "build:full-deploy": "npm run build:android-webpack && npm run copy:android && npm run validate:android-assets",
     "clean:android": "rimraf ../android/app/src/main/assets/*",
     "test:device": "./test-device.sh",
     "build:nuclear": "node scripts/build-and-deploy-nuclear.js",

@@ -698,7 +698,31 @@ impl SetClient {
 #[cfg(test)]
 #[allow(clippy::disallowed_methods)]
 mod tests {
-    use super::{build_ca_aware_client, read_ca_certs, LatestByteCommit, MemberClient};
+    use super::{
+        build_ca_aware_client, build_client_from, read_ca_certs, CaMaterial, LatestByteCommit,
+        MemberClient,
+    };
+
+    /// The env config the app bundles names the CA bundled beside it, and the
+    /// storage client builds from that CA through the same reader and builder
+    /// every client is made by. (Which CA issued the fleet's certificates is
+    /// not decidable offline; a device run against the fleet is what shows the
+    /// bundled CA verifies them.)
+    #[test]
+    fn the_bundled_env_config_names_a_ca_the_storage_client_builds_from() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../frontend/public/dsm_env_config.toml"
+        );
+        let certs = read_ca_certs(path).expect("the bundled CA is named and readable");
+        assert_eq!(certs.len(), 1, "exactly the fleet's CA");
+        assert!(certs[0].0.ends_with("ca.crt"));
+        build_client_from(&CaMaterial {
+            env_path: Some(path.to_string()),
+            certs,
+        })
+        .expect("the storage client builds from the bundled CA");
+    }
 
     /// A write the member did not take is not acknowledged. The same running
     /// node, reached at a path it does not serve, answers `404`: the put, the

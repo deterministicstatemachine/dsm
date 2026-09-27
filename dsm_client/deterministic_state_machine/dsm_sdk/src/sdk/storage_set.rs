@@ -180,7 +180,13 @@ impl StorageSetCatalog {
     /// where `name` is the node's configured protocol identity (`node.id`) and
     /// `endpoint` its transport address.
     pub fn from_env_config() -> Result<Self, DsmError> {
-        let env = crate::network::NetworkConfigLoader::load_env_config()?;
+        Self::from_env(crate::network::NetworkConfigLoader::load_env_config()?)
+    }
+
+    /// The catalog a parsed env config states — the one [`Self::from_env_config`]
+    /// reads from the configured file, and the one the env config bundled into
+    /// the app states.
+    pub(crate) fn from_env(env: crate::network::EnvConfig) -> Result<Self, DsmError> {
         let members: Vec<StorageMember> = env
             .nodes
             .into_iter()
@@ -245,14 +251,28 @@ impl StorageSetCatalog {
 /// Resolve the canonical register set for `network_id`, fail-closed, through
 /// the catalog (never `sole_set` — consumers RESOLVE).
 pub fn canonical_set(network_id: &[u8]) -> Result<StorageSet, DsmError> {
-    let profile =
-        dsm::economic::register::resolve_root_register_profile(network_id).map_err(|e| {
-            DsmError::storage(
-                format!("root register profile: {e}"),
-                None::<std::io::Error>,
-            )
-        })?;
-    let catalog = StorageSetCatalog::from_env_config()?;
+    let profile = root_register_profile(network_id)?;
+    canonical_set_in(&profile, &StorageSetCatalog::from_env_config()?)
+}
+
+/// The network's pinned root-register profile, fail-closed.
+fn root_register_profile(
+    network_id: &[u8],
+) -> Result<dsm::economic::register::RootRegisterProfile, DsmError> {
+    dsm::economic::register::resolve_root_register_profile(network_id).map_err(|e| {
+        DsmError::storage(
+            format!("root register profile: {e}"),
+            None::<std::io::Error>,
+        )
+    })
+}
+
+/// The set of `catalog` that re-derives `profile`'s pinned id, or the
+/// fail-closed refusal.
+fn canonical_set_in(
+    profile: &dsm::economic::register::RootRegisterProfile,
+    catalog: &StorageSetCatalog,
+) -> Result<StorageSet, DsmError> {
     // The set id is a function of `(member_id, register_incarnation_id)`
     // pairs, so it cannot be asked for by name: the catalog offers candidates
     // and `verify_candidate` refuses any that does not re-derive the pinned id.
@@ -310,6 +330,30 @@ mod tests {
             crate::util::text_id::encode_base32_crockford(&profile.storage_set_id),
             "7GBBB51DM8XP433F6H896G4R88W6RJZATZ3CT0WTRAFZ2EHYZ9D0",
             "core's derivation must equal what all five provisioned members logged"
+        );
+    }
+
+    /// The env config the app bundles is what a default install reaches the
+    /// network with, so its `(member, incarnation)` pairs must be the pinned
+    /// beta set: a stale pair (a retired fleet, an incarnation from before a
+    /// reprovision) makes every read of the canonical set fail closed on a
+    /// fresh device, with nothing on screen but the intro.
+    #[test]
+    fn the_bundled_env_config_resolves_the_pinned_beta_set() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../frontend/public/dsm_env_config.toml"
+        );
+        let text = std::fs::read_to_string(path).expect("the bundled env config");
+        let env = crate::network::parse_env_config_toml(&text)
+            .expect("the bundled env config parses under the loader");
+        let catalog = StorageSetCatalog::from_env(env).expect("its members form one set");
+        let profile = root_register_profile(b"dsm-testnet").expect("the beta profile");
+        let set = canonical_set_in(&profile, &catalog)
+            .expect("the bundled env config resolves the pinned beta set");
+        assert_eq!(
+            crate::util::text_id::encode_base32_crockford(&set.id()),
+            "7GBBB51DM8XP433F6H896G4R88W6RJZATZ3CT0WTRAFZ2EHYZ9D0"
         );
     }
 

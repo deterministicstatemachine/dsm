@@ -1625,7 +1625,7 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         val outFile = File(files, assetName)
 
         // Materialize bundled assets that the SDK reads from filesDir.
-        // ca.crt is the self-signed CA for AWS storage node TLS certs.
+        // ca.crt is the storage fleet's CA, the one the bundled env config names.
         materializeAssetIfBundled("ca.crt", files)
 
         fun firstExisting(vararg candidates: File?): File? = candidates.firstOrNull { it != null && it.exists() }

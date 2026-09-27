@@ -173,7 +173,7 @@ if [[ $LOCAL_DEV -eq 1 ]]; then
     echo ""
   fi
 else
-  echo "[fast_deploy_release] GCP mode: using bundled dsm_env_config.toml (6 GCP nodes)"
+  echo "[fast_deploy_release] GCP mode: using bundled dsm_env_config.toml (the beta fleet: 5 GCP nodes)"
 fi
 
 for d in "${DEVICES[@]}"; do
