@@ -75,6 +75,27 @@ class BleCoordinatorRadioTest {
         )
     }
 
+    private fun bluetoothStateReceivers(): Int =
+        shadowOf(ApplicationProvider.getApplicationContext<android.app.Application>())
+            .registeredReceivers
+            .count { it.intentFilter.hasAction(BluetoothAdapter.ACTION_STATE_CHANGED) }
+
+    @Test
+    fun bluetooth_state_is_observed_once_by_the_coordinator() {
+        val before = bluetoothStateReceivers()
+        BleCoordinator(
+            context = context,
+            permissionsGate = BlePermissionsGate(context),
+            advertiser = mock(),
+            gattServer = mock(),
+            scanner = mock(),
+            outbox = mock(),
+            diagnostics = BleDiagnostics(),
+            radioEvents = recorded,
+        )
+        assertEquals(1, bluetoothStateReceivers() - before)
+    }
+
     private fun advertiserCallback(): BleAdvertiser.Callback {
         val captor = argumentCaptor<BleAdvertiser.Callback>()
         verify(advertiser, atLeastOnce()).setCallback(captor.capture())

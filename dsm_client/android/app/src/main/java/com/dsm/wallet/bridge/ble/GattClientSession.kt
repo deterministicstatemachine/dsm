@@ -188,10 +188,6 @@ class GattClientSession(
         } catch (e: SecurityException) {
             txRequestWriteKind = TxRequestWriteKind.NONE
             Log.e("GattClientSession", "Security exception writing TX_REQUEST for $deviceAddress", e)
-            BleCoordinator.getInstance(context).let { coordinator ->
-                coordinator.permissionsGate.recordPermissionFailure()
-                coordinator.callback?.onBlePermissionError("Bluetooth connection permission required")
-            }
             false
         }
     }
@@ -278,10 +274,6 @@ class GattClientSession(
                             gatt?.discoverServices()
                         } catch (e: SecurityException) {
                             Log.e("GattClientSession", "Security exception discovering services for $deviceAddress", e)
-                            BleCoordinator.getInstance(context).let { coordinator ->
-                                coordinator.permissionsGate.recordPermissionFailure()
-                                coordinator.callback?.onBlePermissionError("Bluetooth connection permission required")
-                            }
                             emitEvent(BleSessionEvent.ErrorOccurred(deviceAddress, BleErrorCategory.PERMISSION_DENIED, "service_discovery"))
                             cleanup()
                         }
@@ -578,10 +570,6 @@ class GattClientSession(
             bluetoothGatt?.disconnect()
         } catch (e: SecurityException) {
             Log.e("GattClientSession", "Security exception disconnecting from $deviceAddress", e)
-            BleCoordinator.getInstance(context).let { coordinator ->
-                coordinator.permissionsGate.recordPermissionFailure()
-                coordinator.callback?.onBlePermissionError("Bluetooth connection permission required")
-            }
         }
         cleanup()
     }
@@ -820,10 +808,6 @@ class GattClientSession(
                 bluetoothGatt?.readCharacteristic(char) == true
             } catch (e: SecurityException) {
                 Log.e("GattClientSession", "Security exception reading characteristic for $deviceAddress", e)
-                BleCoordinator.getInstance(context).let { coordinator ->
-                    coordinator.permissionsGate.recordPermissionFailure()
-                    coordinator.callback?.onBlePermissionError("Bluetooth connection permission required")
-                }
                 diagnostics.recordError(BleErrorCategory.PERMISSION_DENIED, "characteristic_read")
                 emitEvent(BleSessionEvent.ErrorOccurred(deviceAddress, BleErrorCategory.PERMISSION_DENIED, "characteristic_read"))
                 false
@@ -953,10 +937,6 @@ class GattClientSession(
         } catch (e: SecurityException) {
             awaitingConfirmWriteAck = false
             Log.e("GattClientSession", "Security exception writing pairing confirm for $deviceAddress", e)
-            BleCoordinator.getInstance(context).let { coordinator ->
-                coordinator.permissionsGate.recordPermissionFailure()
-                coordinator.callback?.onBlePermissionError("Bluetooth connection permission required")
-            }
             false
         }
     }
@@ -981,10 +961,6 @@ class GattClientSession(
             return result
         } catch (e: SecurityException) {
             Log.e("GattClientSession", "Security exception writing pairing data for $deviceAddress", e)
-            BleCoordinator.getInstance(context).let { coordinator ->
-                coordinator.permissionsGate.recordPermissionFailure()
-                coordinator.callback?.onBlePermissionError("Bluetooth connection permission required")
-            }
             return false
         }
     }
@@ -1019,12 +995,6 @@ class GattClientSession(
             gatt?.close()
         } catch (t: Throwable) {
             Log.e("GattClientSession", "Exception closing GATT for $deviceAddress", t)
-            if (t is SecurityException) {
-                BleCoordinator.getInstance(context).let { coordinator ->
-                    coordinator.permissionsGate.recordPermissionFailure()
-                    coordinator.callback?.onBlePermissionError("Bluetooth connection permission required")
-                }
-            }
         }
         requestCharacteristic = null
         responseCharacteristic = null

@@ -168,10 +168,6 @@ class GattServerHost(private val context: Context) {
                         gattServer.get()?.sendResponse(device, requestId, BluetoothGatt.GATT_FAILURE, 0, null)
                     } catch (e: SecurityException) {
                         Log.e("GattServerHost", "Security exception sending response to ${device.address}", e)
-                        BleCoordinator.getInstance(context).let { coordinator ->
-                            coordinator.permissionsGate.recordPermissionFailure()
-                            coordinator.callback?.onBlePermissionError("Bluetooth connection permission required")
-                        }
                     }
                 }
             }
@@ -201,10 +197,6 @@ class GattServerHost(private val context: Context) {
                         gattServer.get()?.sendResponse(device, requestId, BluetoothGatt.GATT_FAILURE, 0, null)
                     } catch (e: SecurityException) {
                         Log.e("GattServerHost", "Security exception sending response to ${device.address}", e)
-                        BleCoordinator.getInstance(context).let { coordinator ->
-                            coordinator.permissionsGate.recordPermissionFailure()
-                            coordinator.callback?.onBlePermissionError("Bluetooth connection permission required")
-                        }
                     }
                 }
             }
@@ -256,20 +248,12 @@ class GattServerHost(private val context: Context) {
                     gattServer.get()?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
                 } catch (e: SecurityException) {
                     Log.e("GattServerHost", "Security exception sending response to ${device.address}", e)
-                    BleCoordinator.getInstance(context).let { coordinator ->
-                        coordinator.permissionsGate.recordPermissionFailure()
-                        coordinator.callback?.onBlePermissionError("Bluetooth connection permission required")
-                    }
                 }
             } else {
                 try {
                     gattServer.get()?.sendResponse(device, requestId, BluetoothGatt.GATT_FAILURE, 0, null)
                 } catch (e: SecurityException) {
                     Log.e("GattServerHost", "Security exception sending response to ${device.address}", e)
-                    BleCoordinator.getInstance(context).let { coordinator ->
-                        coordinator.permissionsGate.recordPermissionFailure()
-                        coordinator.callback?.onBlePermissionError("Bluetooth connection permission required")
-                    }
                 }
             }
         }
@@ -303,10 +287,6 @@ class GattServerHost(private val context: Context) {
                 gattServer.get()?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
             } catch (e: SecurityException) {
                 Log.e("GattServerHost", "Security exception sending response to ${device.address}", e)
-                BleCoordinator.getInstance(context).let { coordinator ->
-                    coordinator.permissionsGate.recordPermissionFailure()
-                    coordinator.callback?.onBlePermissionError("Bluetooth connection permission required")
-                }
             }
         }
     }
@@ -729,10 +709,6 @@ class GattServerHost(private val context: Context) {
                 gattServer.get()?.sendResponse(device, requestId, BluetoothGatt.GATT_FAILURE, 0, null)
             } catch (e: SecurityException) {
                 Log.e("GattServerHost", "Security exception sending response to ${device.address}", e)
-                BleCoordinator.getInstance(context).let { coordinator ->
-                    coordinator.permissionsGate.recordPermissionFailure()
-                    coordinator.callback?.onBlePermissionError("Bluetooth connection permission required")
-                }
             }
             return
         }
@@ -745,10 +721,6 @@ class GattServerHost(private val context: Context) {
                 gattServer.get()?.sendResponse(device, requestId, BluetoothGatt.GATT_INVALID_OFFSET, 0, null)
             } catch (e: SecurityException) {
                 Log.e("GattServerHost", "Security exception sending response to ${device.address}", e)
-                BleCoordinator.getInstance(context).let { coordinator ->
-                    coordinator.permissionsGate.recordPermissionFailure()
-                    coordinator.callback?.onBlePermissionError("Bluetooth connection permission required")
-                }
             }
             return
         }
@@ -763,10 +735,6 @@ class GattServerHost(private val context: Context) {
             gattServer.get()?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, chunk)
         } catch (e: SecurityException) {
             Log.e("GattServerHost", "Security exception sending response to ${device.address}", e)
-            BleCoordinator.getInstance(context).let { coordinator ->
-                coordinator.permissionsGate.recordPermissionFailure()
-                coordinator.callback?.onBlePermissionError("Bluetooth connection permission required")
-            }
         }
     }
 
@@ -827,10 +795,6 @@ class GattServerHost(private val context: Context) {
                     gattServer.get()?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
                 } catch (e: SecurityException) {
                     Log.e("GattServerHost", "Security exception sending response to ${device.address}", e)
-                    BleCoordinator.getInstance(context).let { coordinator ->
-                        coordinator.permissionsGate.recordPermissionFailure()
-                        coordinator.callback?.onBlePermissionError("Bluetooth connection permission required")
-                    }
                     return
                 }
             }
@@ -858,10 +822,6 @@ class GattServerHost(private val context: Context) {
                 gattServer.get()?.sendResponse(device, requestId, writeStatus, 0, null)
             } catch (e: SecurityException) {
                 Log.e("GattServerHost", "Security exception sending response to ${device.address}", e)
-                BleCoordinator.getInstance(context).let { coordinator ->
-                    coordinator.permissionsGate.recordPermissionFailure()
-                    coordinator.callback?.onBlePermissionError("Bluetooth connection permission required")
-                }
             }
         }
     }
@@ -893,10 +853,6 @@ class GattServerHost(private val context: Context) {
                     gattServer.get()?.sendResponse(device, requestId, writeStatus, 0, null)
                 } catch (e: SecurityException) {
                     Log.e("GattServerHost", "Security exception sending response to ${device.address}", e)
-                    BleCoordinator.getInstance(context).let { coordinator ->
-                        coordinator.permissionsGate.recordPermissionFailure()
-                        coordinator.callback?.onBlePermissionError("Bluetooth connection permission required")
-                    }
                 }
             }
         } else {
@@ -912,10 +868,6 @@ class GattServerHost(private val context: Context) {
                     gattServer.get()?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
                 } catch (e: SecurityException) {
                     Log.e("GattServerHost", "Security exception sending response to ${device.address}", e)
-                    BleCoordinator.getInstance(context).let { coordinator ->
-                        coordinator.permissionsGate.recordPermissionFailure()
-                        coordinator.callback?.onBlePermissionError("Bluetooth connection permission required")
-                    }
                 }
             }
             // Now safe to process — write response already sent

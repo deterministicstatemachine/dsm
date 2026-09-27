@@ -251,15 +251,6 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         )
     }
 
-    /**
-     * Dispatch custom event to WebView via binary MessagePort.
-     * Payload is UTF-8 encoded detail string.
-     */
-    fun dispatchCustomEventToWebView(eventName: String, detail: String) {
-        val safeName = sanitizeEventName(eventName)
-        dispatchDsmEventOnUi(safeName, detail.toByteArray(Charsets.UTF_8))
-    }
-
     private fun scheduleNfcModeTransition(targetMode: NfcHostMode) {
         nfcHostMode = targetMode
         runOnUiThread {
@@ -1706,14 +1697,6 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         return null
     }
     
-    /**
-     * Sanitize a string for safe use as a binary event topic name.
-     * Only allows alphanumeric, dash, dot, and underscore characters.
-     */
-    private fun sanitizeEventName(name: String): String {
-        return name.filter { it.isLetterOrDigit() || it == '-' || it == '.' || it == '_' }
-    }
-
     private fun signalBridgeReady() {
         Log.i(tag, "signalBridgeReady: Dispatching events to JS...")
         BleEventRelay.markBridgeReady(this)

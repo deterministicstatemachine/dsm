@@ -33,12 +33,6 @@ import kotlinx.coroutines.runBlocking
  */
 class BleCoordinator private constructor(private val context: Context) : BleScanner.Callback {
 
-    interface Callback {
-        fun onBlePermissionError(message: String)
-    }
-
-    internal var callback: Callback? = null
-
     private val bleScope = CoroutineScope(SupervisorJob())
     private val operationDispatcher = BleOperationDispatcher(bleScope)
 
@@ -144,8 +138,6 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
 
         advertiser.setCallback(advertiserCallback)
 
-        // Initialize components
-        permissionsGate.initialize()
         registerAdapterStateReceiver()
     }
 
@@ -205,10 +197,6 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
 
     // ===== PUBLIC API =====
 
-    fun setCallback(callback: Callback?) {
-        this.callback = callback
-    }
-
     /**
      * Send a transaction request to a peer device.
      */
@@ -231,7 +219,6 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
         return runOperationBool(BleOpLane.LIFECYCLE) {
             if (!permissionsGate.hasAdvertisePermission()) {
                 diagnostics.recordError(BleErrorCategory.PERMISSION_DENIED, "advertising")
-                permissionsGate.recordPermissionFailure()
                 radioEvents.permissionDenied("advertise")
                 return@runOperationBool false
             }
@@ -287,7 +274,6 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
     private fun beginScan(evictStale: Boolean): Boolean {
         if (!permissionsGate.hasScanPermission()) {
             diagnostics.recordError(BleErrorCategory.PERMISSION_DENIED, "scanning")
-            permissionsGate.recordPermissionFailure()
             radioEvents.permissionDenied("scan")
             return false
         }
@@ -582,7 +568,6 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
             gattServer.stop()
             peers.values.forEach { it.gattClientSession?.disconnect() }
             peers.clear()
-            permissionsGate.cleanup()
         }
     }
 
@@ -621,7 +606,6 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                 Log.w("BleCoordinator", "Failed to initiate GATT connection to $address")
                 peers[address]?.clearClientState()
                 if (peers[address]?.isEmpty == true) peers.remove(address)
-                com.dsm.wallet.bridge.UnifiedBleEvents.onConnectionFailed(address, "GATT connection initiation failed")
                 resumePairingScan(address, "connect_init_failed")
             }
         }
@@ -631,7 +615,6 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
         Log.e("BleCoordinator", "BLE scan failed: errorCode=$errorCode")
         diagnostics.recordError(BleErrorCategory.HARDWARE_UNAVAILABLE, "scan_failed_code_$errorCode")
         radioEvents.scanStopped()
-        com.dsm.wallet.bridge.UnifiedBleEvents.onConnectionFailed("", "scan_failed_code_$errorCode")
     }
 
     private fun runOperation(
@@ -885,7 +868,6 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                                                 diagnostics.recordError(BleErrorCategory.CHARACTERISTIC_WRITE_FAILED, "coordinator_identity_writeback_failed")
                                                 peer.clearClientState()
                                                 if (peer.isEmpty) peers.remove(event.deviceAddress)
-                                                com.dsm.wallet.bridge.UnifiedBleEvents.onConnectionFailed(event.deviceAddress, "identity_writeback_failed")
                                                 resumePairingScan(event.deviceAddress, "identity_writeback_failed")
                                             }
                                         } else {
@@ -923,10 +905,6 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                             Log.e("BleCoordinator", "Identity read failed for ${event.deviceAddress} — failing fast")
                             peer.clearClientState()
                             if (peer.isEmpty) peers.remove(event.deviceAddress)
-                            com.dsm.wallet.bridge.UnifiedBleEvents.onConnectionFailed(
-                                event.deviceAddress,
-                                "identity_read_failed"
-                            )
                             resumePairingScan(event.deviceAddress, "identity_read_failed")
                         }
                     }
@@ -1035,7 +1013,6 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                                         diagnostics.recordError(BleErrorCategory.CHARACTERISTIC_WRITE_FAILED, "coordinator_pairing_confirm_writeback_failed")
                                         peer.clearClientState()
                                         if (peer.isEmpty) peers.remove(event.deviceAddress)
-                                        com.dsm.wallet.bridge.UnifiedBleEvents.onConnectionFailed(event.deviceAddress, "pairing_confirm_writeback_failed")
                                         resumePairingScan(event.deviceAddress, "pairing_confirm_writeback_failed")
                                     } else {
                                         successfullyStartedWrite = true
