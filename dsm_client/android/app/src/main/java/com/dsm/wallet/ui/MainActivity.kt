@@ -1950,8 +1950,13 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
                 return false
             }
 
+            // The page's console reaches logcat in debug builds only: a release
+            // build's logcat is readable by other apps with the permission, and
+            // the page logs what it is doing with the wallet.
             override fun onConsoleMessage(consoleMessage: ConsoleMessage?): Boolean {
-                consoleMessage?.let { Log.i("WebViewConsole", it.message()) }
+                if (BuildConfig.DEBUG) {
+                    consoleMessage?.let { Log.i("WebViewConsole", it.message()) }
+                }
                 return true
             }
 
