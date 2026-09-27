@@ -26,7 +26,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::crypto::blake3::dsm_domain_hasher;
-use crate::merkle::sparse_merkle_tree::{SmtReplaceResult, SparseMerkleTree};
+use crate::merkle::sparse_merkle_tree::SparseMerkleTree;
 use crate::types::error::DsmError;
 use crate::types::operations::Operation;
 
@@ -640,10 +640,9 @@ pub struct AdvanceOutcome {
     /// receipt flow (§4.2) before CAS.
     pub new_chain_state: RelationshipChainState,
 
-    /// SMT replace proofs for the stitched receipt: parent inclusion
-    /// (`h_n ∈ r_A`) and child inclusion (`h_{n+1} ∈ r'_A`), plus the
-    /// pre/post root pair (§4.2).
-    pub smt_proofs: SmtReplaceResult,
+    /// Every leaf the step wrote, with its path against `parent_r_a`, and
+    /// both roots: what the step's receipt proves.
+    pub transition: crate::types::step_transition::StepTransition,
 
     /// Parent device root `r_A` at the time the outcome was built. Used
     /// by the caller to CAS-check the current head.
@@ -653,7 +652,7 @@ pub struct AdvanceOutcome {
     pub child_r_a: [u8; 32],
 
     /// Fused-anchor-state leaf inclusion proofs, `Some` iff an [`AnchorLeafUpdate`] was applied
-    /// (a bearer advance). `parent` binds the old commit under `parent_r_a`/`smt_proofs.pre_root`;
+    /// (a bearer advance). `parent` binds the old commit under `parent_r_a`;
     /// `child` binds the successor commit under `child_r_a`. `None` for ordinary transitions.
     pub anchor_proofs: Option<AnchorLeafProofs>,
 
@@ -767,24 +766,6 @@ impl DeviceState {
         Ok(next)
     }
 
-    /// Reconstruct a `DeviceState` from previously-encoded fields, replaying
-    /// the per-relationship tips into the SMT to recompute the canonical root.
-    ///
-    /// Phase 4.1 codec roundtrip path. The caller supplies the device-level
-    /// fields plus the sorted-by-`rel_key` tip list and this constructor:
-    ///
-    /// 1. Builds a fresh `DeviceState::new(...)` with empty SMT and balances.
-    /// 2. Replays each tip via `smt_replace(&rel_key, &tip.chain_tip)` in
-    ///    the supplied order. Determinism is guaranteed because
-    ///    `SparseMerkleTree` is purely functional in its leaf-replace path.
-    /// 3. Installs `balances`, `tips`, and `legacy_anchor` directly.
-    ///
-    /// The caller is responsible for verifying that the resulting `root()`
-    /// matches the stored sanity-check digest.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Err` on any SMT replace failure.
     /// The admission in flight, if any. Read by [`Self::advance`]'s fence.
     pub fn pending_economic_admission(
         &self,
@@ -806,6 +787,20 @@ impl DeviceState {
         next
     }
 
+    /// Reconstruct a `DeviceState` from previously-encoded fields, replaying
+    /// its leaves into the SMT to recompute the canonical root.
+    ///
+    /// The caller supplies the device-level fields plus the sorted-by-`rel_key`
+    /// tip list and this constructor:
+    ///
+    /// 1. Builds a fresh `DeviceState::new(...)` with empty SMT and balances.
+    /// 2. Writes each relationship tip, then every other leaf, in the supplied
+    ///    order. The tree is a pure function of its leaves, so the root is
+    ///    determined.
+    /// 3. Installs `balances`, `tips`, and `legacy_anchor` directly.
+    ///
+    /// The caller is responsible for verifying that the resulting `root()`
+    /// matches the stored sanity-check digest.
     #[allow(clippy::too_many_arguments)]
     pub fn restore(
         genesis: [u8; 32],
@@ -833,14 +828,7 @@ impl DeviceState {
         state.pending_economic_admission = pending_economic_admission;
 
         for (rel_key, tip) in tips_in_order.into_iter() {
-            state
-                .smt
-                .smt_replace(&rel_key, &tip.chain_tip)
-                .map_err(|e| {
-                    DsmError::invalid_operation(format!(
-                        "DeviceState::restore: SMT replace failed for rel_key: {e}"
-                    ))
-                })?;
+            state.smt.update_leaf(&rel_key, &tip.chain_tip);
             state.tips.insert(rel_key, tip);
         }
 
@@ -1216,28 +1204,47 @@ impl DeviceState {
                         "advance: offline-bearer spend requires an anchor-state leaf advance",
                     ));
                 }
+                // The allocation drawn from is the one for the operation's own
+                // asset: its receipt's verifier derives the key from it.
+                if !matches!(
+                    &operation,
+                    Operation::Transfer { policy_commit, .. } if *policy_commit == os.asset
+                ) {
+                    return Err(DsmError::invalid_operation(
+                        "advance: an offline-cash spend draws from the allocation of the operation's own asset",
+                    ));
+                }
                 let key = crate::types::offline_allocation_leaf::offline_allocation_key(
                     &self.genesis,
                     &self.devid,
                     &os.anchor_bundle_b,
                     &os.asset,
                 );
-                let cur = self
-                    .offline_allocations
-                    .get(&key)
-                    .copied()
-                    .unwrap_or_default();
+                let cur = self.offline_allocations.get(&key).copied().ok_or_else(|| {
+                    DsmError::invalid_operation(
+                        "advance: this device holds no offline-cash allocation for the anchor bundle and asset",
+                    )
+                })?;
                 let new_amount = cur.amount.checked_sub(os.amount).ok_or_else(|| {
                     DsmError::invalid_operation(
                         "advance: offline-cash allocation underflow (insufficient offline cash)",
                     )
                 })?;
-                let new_sequence = cur.sequence + 1;
+                let new_sequence = cur.sequence.checked_add(1).ok_or_else(|| {
+                    DsmError::invalid_operation(
+                        "advance: offline-cash allocation sequence overflow",
+                    )
+                })?;
                 let value = crate::types::offline_allocation_leaf::offline_allocation_value(
                     new_amount,
                     new_sequence,
                 );
-                Some((key, value, new_amount, new_sequence))
+                let before = crate::types::step_transition::AllocationBefore {
+                    key,
+                    amount: cur.amount,
+                    sequence: cur.sequence,
+                };
+                Some((key, value, new_amount, new_sequence, before))
             }
         };
 
@@ -1327,96 +1334,54 @@ impl DeviceState {
         // receipt's pre-state root.
         let parent_r_a = *self.smt.root();
         let mut new_smt = self.smt.clone();
-        // Ordinary transitions: a single relationship-leaf replace (unchanged bytes). Bearer
-        // transitions with an `anchor_leaf`: replace the relationship leaf AND the stable
-        // per-device anchor-state leaf as ONE atomic root update — all four inclusion proofs are
-        // taken against the true pre/post roots (never an intermediate root), so both the
-        // relationship and anchor-state proofs bind the same `child_r_a` the transfer commits.
-        let (smt_proofs, anchor_proofs) = match &anchor_leaf {
-            // The ordinary path, and the only one that keeps `smt_replace`: no
-            // anchor leaf, no receipt leaf, no reserve/vault-state leaves. Every
-            // transfer.
-            None if batch_leaves.is_empty() => {
-                let p = new_smt
-                    .smt_replace(&rel_key, &child_chain_tip)
-                    .map_err(|e| DsmError::invalid_operation(format!("SMT replace failed: {e}")))?;
-                (p, None)
-            }
-            // A reserve-moving advance (funding or owner-apply): the reserve
-            // leaves AND the derived vault-state leaf ride the SAME batch as the
-            // relationship leaf, so the encumbrance/settlement, the vault state
-            // and the transition share one device root. `smt_replace` cannot
-            // express this — its child proof binds a root taken before the extra
-            // leaves land — and two roots would put the reserve proof and the
-            // vault-state proof out of agreement, which `compose_vault_state`
-            // requires to be equal.
-            None => {
-                let pre_root = *new_smt.root();
-                let rel_parent = new_smt
-                    .get_inclusion_proof(&rel_key, 256)
-                    .map_err(|e| DsmError::invalid_operation(format!("rel parent proof: {e}")))?;
-                new_smt.update_leaf(&rel_key, &child_chain_tip);
-                for (k, v) in &batch_leaves {
-                    new_smt.update_leaf(k, v);
-                }
-                let post_root = *new_smt.root();
-                let rel_child = new_smt
-                    .get_inclusion_proof(&rel_key, 256)
-                    .map_err(|e| DsmError::invalid_operation(format!("rel child proof: {e}")))?;
-                (
-                    crate::merkle::sparse_merkle_tree::SmtReplaceResult {
-                        pre_root,
-                        post_root,
-                        parent_proof: rel_parent,
-                        child_proof: rel_child,
-                    },
-                    None,
-                )
-            }
+        // One move of the tree over every leaf the step writes: the
+        // relationship leaf; for a bearer transition the anchor-state leaf and,
+        // for an offline-bearer spend, the allocation leaf (§9: the counter and
+        // the value source are inside the root); and any adoption or reserve
+        // leaves. Every write's path is against the one pre-root, and the
+        // transition proves its own move before it is returned.
+        let mut writes: Vec<([u8; 32], [u8; 32])> = vec![(rel_key, child_chain_tip)];
+        if let Some(al) = &anchor_leaf {
+            writes.push((al.key, al.new_value));
+        }
+        if let Some((k, v, _, _, _)) = &allocation_update {
+            writes.push((*k, *v));
+        }
+        writes.extend(batch_leaves.iter().copied());
+        let transition = crate::types::step_transition::StepTransition::apply(
+            &mut new_smt,
+            &writes,
+            allocation_update
+                .as_ref()
+                .map(|(_, _, _, _, before)| *before),
+        )?;
+
+        // The anchor appliance's release hashes the anchor-state leaf's paths
+        // at both roots into its transition digest (`Π_i`, `Π_{i+1}`); until
+        // its firmware takes the counter record from the receipt, they are
+        // given to it. `Π_i` is the transition's own path for the leaf.
+        let anchor_proofs = match &anchor_leaf {
+            None => None,
             Some(al) => {
-                let pre_root = *new_smt.root();
-                let rel_parent = new_smt
-                    .get_inclusion_proof(&rel_key, 256)
-                    .map_err(|e| DsmError::invalid_operation(format!("rel parent proof: {e}")))?;
-                let anchor_parent = new_smt.get_inclusion_proof(&al.key, 256).map_err(|e| {
-                    DsmError::invalid_operation(format!("anchor parent proof: {e}"))
+                let pre = transition.write_at(&al.key).ok_or_else(|| {
+                    DsmError::invalid_operation("advance: the anchor-state leaf was not written")
                 })?;
-                new_smt.update_leaf(&rel_key, &child_chain_tip);
-                new_smt.update_leaf(&al.key, &al.new_value);
-                // Offline-bearer spend: the allocation debit's allocation leaf rides the SAME atomic
-                // batch, so the allocation draw-down and the transition share one device root. Updated
-                // before `post_root`/child proofs so the rel + anchor child proofs bind the final
-                // root (the receiver verifies rel + anchor against it; the allocation leaf need not be
-                // proven to the receiver — it is the sender's own accounting).
-                if let Some((k, v, _, _)) = &allocation_update {
-                    new_smt.update_leaf(k, v);
-                }
-                for (k, v) in &batch_leaves {
-                    new_smt.update_leaf(k, v);
-                }
-                let post_root = *new_smt.root();
-                let rel_child = new_smt
-                    .get_inclusion_proof(&rel_key, 256)
-                    .map_err(|e| DsmError::invalid_operation(format!("rel child proof: {e}")))?;
-                let anchor_child = new_smt
+                let parent = crate::merkle::sparse_merkle_tree::SmtInclusionProof {
+                    key: al.key,
+                    value: pre.pre,
+                    siblings: pre.path.to_vec(),
+                };
+                let child = new_smt
                     .get_inclusion_proof(&al.key, 256)
                     .map_err(|e| DsmError::invalid_operation(format!("anchor child proof: {e}")))?;
-                (
-                    crate::merkle::sparse_merkle_tree::SmtReplaceResult {
-                        pre_root,
-                        post_root,
-                        parent_proof: rel_parent,
-                        child_proof: rel_child,
-                    },
-                    Some(AnchorLeafProofs {
-                        parent: anchor_parent.to_bytes(),
-                        child: anchor_child.to_bytes(),
-                    }),
-                )
+                Some(AnchorLeafProofs {
+                    parent: parent.to_bytes(),
+                    child: child.to_bytes(),
+                })
             }
         };
 
-        let child_r_a = smt_proofs.post_root;
+        let child_r_a = transition.post_root();
 
         // Update the tip cache with the new state. value_capability is sticky-monotone:
         // a missing prior means we are witnessing this relationship's birth, so we start
@@ -1457,7 +1422,7 @@ impl DeviceState {
             new_extra_leaves.insert(*k, *v);
         }
         let mut new_offline_allocations = self.offline_allocations.clone();
-        if let Some((k, v, amount, sequence)) = allocation_update {
+        if let Some((k, v, amount, sequence, _)) = allocation_update {
             new_extra_leaves.insert(k, v);
             new_offline_allocations.insert(k, OfflineAllocation { amount, sequence });
         }
@@ -1477,7 +1442,7 @@ impl DeviceState {
         Ok(AdvanceOutcome {
             new_device_state,
             new_chain_state,
-            smt_proofs,
+            transition,
             parent_r_a,
             child_r_a,
             anchor_proofs,
@@ -2598,7 +2563,7 @@ mod tests {
         // prev proof verifies commit_0 ONLY against the prev root; next proof verifies commit_1
         // ONLY against the next root — and each rejects the other root/value pairing.
         assert!(verify_anchor_state_leaf(
-            &out.smt_proofs.pre_root,
+            &out.transition.pre_root(),
             &b,
             &commit0,
             &ap.parent
@@ -2616,7 +2581,7 @@ mod tests {
             &ap.parent
         ));
         assert!(!verify_anchor_state_leaf(
-            &out.smt_proofs.pre_root,
+            &out.transition.pre_root(),
             &b,
             &commit1,
             &ap.child
@@ -2676,7 +2641,7 @@ mod tests {
             .expect("bearer advance after a plain one");
         let ap2 = out2.anchor_proofs.clone().expect("anchor proofs");
         assert!(
-            verify_anchor_state_leaf(&out2.smt_proofs.pre_root, &b, &commit0, &ap2.parent),
+            verify_anchor_state_leaf(&out2.transition.pre_root(), &b, &commit0, &ap2.parent),
             "a non-bearer transition must not mutate the fused anchor state (commit_0 survives)"
         );
     }
@@ -2871,7 +2836,7 @@ mod tests {
         let out1 = bearer(&dev, 0xC0, leaf1, 1);
         let ap1 = out1.anchor_proofs.clone().unwrap();
         assert!(
-            verify_anchor_state_leaf(&out1.smt_proofs.pre_root, &b, &accepted, &ap1.parent),
+            verify_anchor_state_leaf(&out1.transition.pre_root(), &b, &accepted, &ap1.parent),
             "transfer 1 consumes the accepted leaf frontier"
         );
         assert!(verify_anchor_state_leaf(
@@ -2884,7 +2849,7 @@ mod tests {
 
         // ---- Replay: presenting Transfer 1's parent proof against the ADOPTED frontier rejects ----
         assert!(
-            !verify_anchor_state_leaf(&out1.smt_proofs.pre_root, &b, &accepted, &ap1.parent),
+            !verify_anchor_state_leaf(&out1.transition.pre_root(), &b, &accepted, &ap1.parent),
             "after adoption the consumed leaf_0 state no longer matches the accepted frontier"
         );
 
@@ -2892,7 +2857,7 @@ mod tests {
         let out2 = bearer(&out1.new_device_state, 0xC1, leaf2, 2);
         let ap2 = out2.anchor_proofs.clone().unwrap();
         assert!(
-            verify_anchor_state_leaf(&out2.smt_proofs.pre_root, &b, &accepted, &ap2.parent),
+            verify_anchor_state_leaf(&out2.transition.pre_root(), &b, &accepted, &ap2.parent),
             "transfer 2 must consume exactly the successor the receiver adopted"
         );
         assert!(verify_anchor_state_leaf(
@@ -3391,17 +3356,20 @@ mod tests {
             .expect("first step");
         assert_eq!(first.parent_r_a, established.root());
         assert_eq!(
-            first.smt_proofs.pre_root,
+            first.transition.pre_root(),
             established.root(),
             "the step's pre-state root is the root the device committed"
         );
-        assert_eq!(first.smt_proofs.parent_proof.value, Some(h0));
-        assert!(
-            crate::merkle::sparse_merkle_tree::SparseMerkleTree::verify_proof_against_root(
-                &first.smt_proofs.parent_proof,
-                &established.root(),
-            )
-        );
+        let rel_write = first
+            .transition
+            .write_at(&rk)
+            .expect("the step writes its relationship");
+        assert_eq!(rel_write.pre, Some(h0));
+        let folded = crate::merkle::batch_fold::verify_batch::<
+            crate::merkle::sparse_merkle_tree::DeviceSmtHashes,
+        >(&established.root(), first.transition.writes())
+        .expect("the step's writes fold from the committed root");
+        assert_eq!(folded, first.child_r_a);
     }
 
     // ─────────────────────────────────────────────────────────────

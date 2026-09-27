@@ -33,6 +33,10 @@ pub use tree::{MerkleTree, MerkleProof};
 // --- Per-Device Sparse Merkle Tree (§2.2) ---
 pub mod sparse_merkle_tree;
 
+// --- One batch fold and one path encoding, for every 256-level tree ---
+pub mod batch_fold;
+pub mod smt_path;
+
 // --- Tests ---
 #[cfg(test)]
 mod empty_leaf_tests;

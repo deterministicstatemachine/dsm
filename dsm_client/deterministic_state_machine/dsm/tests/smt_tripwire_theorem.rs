@@ -29,7 +29,8 @@ use dsm::merkle::sparse_merkle_tree::ZERO_LEAF;
 use dsm::types::operations::{Operation, TransactionMode};
 use dsm::types::receipt_types::ParentConsumptionTracker;
 use dsm::types::token_types::Balance;
-use dsm::merkle::sparse_merkle_tree::{hash_smt_leaf, hash_smt_node, verify_smt_replace};
+use dsm::merkle::batch_fold::{verify_batch, FoldEntry};
+use dsm::merkle::sparse_merkle_tree::{hash_smt_leaf, hash_smt_node, DeviceSmtHashes};
 
 // ---------------------------------------------------------------------------
 // Test Harness
@@ -118,9 +119,9 @@ fn bit_msb_first(key: &[u8; 32], bit_index: usize) -> bool {
     ((key[byte] >> bit) & 1) == 1
 }
 
-/// The replace check every receipt verifier makes, through the one
-/// primitive: the path authenticates `old` under `pre` and folds `new` to
-/// exactly `post`.
+/// The replace check every receipt verifier makes, through the one fold: the
+/// path authenticates `old` under `pre` and folds `new` to exactly `post`. A
+/// path of any other height is no path of this tree.
 fn replace_holds(
     pre: &[u8; 32],
     post: &[u8; 32],
@@ -129,7 +130,16 @@ fn replace_holds(
     key: &[u8; 32],
     siblings: &[[u8; 32]],
 ) -> bool {
-    matches!(verify_smt_replace(pre, key, old, new, siblings), Ok(root) if root == *post)
+    let Ok(path) = <[[u8; 32]; 256]>::try_from(siblings) else {
+        return false;
+    };
+    let entry = FoldEntry {
+        key: *key,
+        pre: Some(*old),
+        post: Some(*new),
+        path: Box::new(path),
+    };
+    matches!(verify_batch::<DeviceSmtHashes>(pre, &[entry]), Ok(root) if root == *post)
 }
 
 /// Fold a leaf up to a root taking each direction from `key`, mirroring the verifier.

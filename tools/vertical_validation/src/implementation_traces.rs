@@ -26,7 +26,6 @@ use dsm::emissions::{
     select_winner_for_event, verify_emission, EmissionReceipt, EmissionSchedule,
     JoinActivationProof, SourceDlvState,
 };
-use dsm::merkle::sparse_merkle_tree::SmtInclusionProof;
 use dsm::types::contact_types::DsmVerifiedContact;
 use dsm::types::device_state::{BalanceDelta, BalanceDirection, DeviceState};
 use dsm::types::operations::{Operation, TransactionMode};
@@ -234,9 +233,9 @@ fn trace_state_machine_transfer_chain(
                         "step {idx}: the step does not start from the head's root"
                     ));
                 }
-                if outcome.smt_proofs.parent_proof.value != Some(tip_before) {
+                if outcome.relationship_pair().0 != tip_before {
                     failures.push(format!(
-                        "step {idx}: the parent path does not carry the tip before it"
+                        "step {idx}: the step does not extend the tip before it"
                     ));
                 }
                 if outcome.new_device_state.chain_tip(&rel_key) == Some(tip_before) {
@@ -350,19 +349,19 @@ fn trace_state_machine_fork_divergence(
     let op_b = alice.transfer(&bob, 2, &[2; 8]).expect("transfer b");
     match (alice.send(&bob, &op_a), alice.send(&bob, &op_b)) {
         (Ok(child_a), Ok(child_b)) => {
-            if child_a.smt_proofs.parent_proof.value != Some(parent_tip)
-                || child_b.smt_proofs.parent_proof.value != Some(parent_tip)
-            {
+            let (pair_a, pair_b) = (child_a.relationship_pair(), child_b.relationship_pair());
+            if pair_a.0 != parent_tip || pair_b.0 != parent_tip {
                 failures.push("the fork children do not share the parent tip".into());
             }
-            if child_a.smt_proofs.child_proof.value == child_b.smt_proofs.child_proof.value {
+            if pair_a.1 == pair_b.1 {
                 failures.push("different operations produced the same child tip".into());
             }
             let receipt_a = stitched_receipt(&alice, &bob, &child_a).expect("receipt a");
             let receipt_b = stitched_receipt(&alice, &bob, &child_b).expect("receipt b");
-            let ctx = verification_context(&alice, &bob, alice.head.root());
+            let ctx_a = verification_context(&alice, &bob, alice.head.root(), &op_a);
+            let ctx_b = verification_context(&alice, &bob, alice.head.root(), &op_b);
             let mut tracker = ParentConsumptionTracker::new();
-            match verify_stitched_receipt(&receipt_a, &ctx, &mut tracker) {
+            match verify_stitched_receipt(&receipt_a, &ctx_a, &mut tracker) {
                 Ok(a) if a.valid => {}
                 Ok(a) => failures.push(format!(
                     "the first child was refused: {}",
@@ -370,7 +369,7 @@ fn trace_state_machine_fork_divergence(
                 )),
                 Err(e) => failures.push(format!("verifier error: {e}")),
             }
-            match verify_stitched_receipt(&receipt_b, &ctx, &mut tracker) {
+            match verify_stitched_receipt(&receipt_b, &ctx_b, &mut tracker) {
                 Ok(a) if a.valid => {
                     failures.push("the second child of one parent was accepted".into())
                 }
@@ -982,7 +981,7 @@ fn trace_receipt_verifier_tripwire(
     let start = Instant::now();
     let mut failures = Vec::new();
     let (alice, bob) = trace_pair("receipt-tripwire");
-    let ctx = verification_context(&alice, &bob, alice.head.root());
+    let root = alice.head.root();
     let mut tracker = ParentConsumptionTracker::new();
 
     let op_a = alice.transfer(&bob, 5, &[0xA1; 8]).expect("transfer a");
@@ -992,8 +991,15 @@ fn trace_receipt_verifier_tripwire(
     let receipt_a = stitched_receipt(&alice, &bob, &child_a).expect("receipt a");
     let receipt_b = stitched_receipt(&alice, &bob, &child_b).expect("receipt b");
 
-    let mut expect = |label: &str, receipt: &StitchedReceiptV2, want: Option<&str>| match (
-        refusal(receipt, &ctx, &mut tracker),
+    let mut expect = |label: &str,
+                      receipt: &StitchedReceiptV2,
+                      op: &dsm::types::operations::Operation,
+                      want: Option<&str>| match (
+        refusal(
+            receipt,
+            &verification_context(&alice, &bob, root, op),
+            &mut tracker,
+        ),
         want,
     ) {
         (Ok(None), None) => {}
@@ -1006,21 +1012,19 @@ fn trace_receipt_verifier_tripwire(
         (Err(e), _) => failures.push(format!("{label}: {e}")),
     };
 
-    expect("the receipt", &receipt_a, None);
-    expect("its replay", &receipt_a, Some("replay detected"));
+    expect("the receipt", &receipt_a, &op_a, None);
+    expect("its replay", &receipt_a, &op_a, Some("replay detected"));
     expect(
         "a second child of the parent",
         &receipt_b,
+        &op_b,
         Some("Fork detected"),
     );
 
-    // Both parties re-sign a receipt whose path no longer authenticates the
-    // parent tip under the pre-state root: one sibling changed.
+    // Both parties re-sign a receipt whose writes no longer fold to the
+    // pre-state root: one sibling changed.
     let mut bent = receipt_a.clone();
-    let mut path =
-        SmtInclusionProof::from_bytes(&bent.rel_proof_parent).expect("the receipt's path decodes");
-    path.siblings[0][0] ^= 0x01;
-    bent.rel_proof_parent = path.to_bytes();
+    bent.step_writes[0].path.siblings[0] ^= 0x01;
     bent.sig_a.clear();
     bent.sig_b.clear();
     let commitment = bent.compute_commitment().expect("commitment");
@@ -1029,7 +1033,8 @@ fn trace_receipt_verifier_tripwire(
     expect(
         "a signed receipt over a bent path",
         &bent,
-        Some("the path does not authenticate the old leaf"),
+        &op_a,
+        Some("do not fold to the claimed pre-root"),
     );
 
     if tracker.get_child(&receipt_a.parent_tip) != Some(&receipt_a.child_tip) {
@@ -1059,17 +1064,11 @@ fn trace_tripwire_first_contact_binding(
     // First contact: the relationship's first step extends h_0, which the
     // advance seeds into the tree, so its parent path carries h_0.
     let root0 = alice.head.root();
-    let first = alice
-        .send(
-            &bob,
-            &alice.transfer(&bob, 3, &[0x51; 8]).expect("transfer"),
-        )
-        .expect("first step");
+    let first_op = alice.transfer(&bob, 3, &[0x51; 8]).expect("transfer");
+    let first = alice.send(&bob, &first_op).expect("first step");
+    let alternate_op = alice.transfer(&bob, 4, &[0x52; 8]).expect("transfer");
     let alternate = alice
-        .send(
-            &bob,
-            &alice.transfer(&bob, 4, &[0x52; 8]).expect("transfer"),
-        )
+        .send(&bob, &alternate_op)
         .expect("alternate first step");
     let first_receipt = stitched_receipt(&alice, &bob, &first).expect("first receipt");
     let alternate_receipt = stitched_receipt(&alice, &bob, &alternate).expect("alternate receipt");
@@ -1079,16 +1078,13 @@ fn trace_tripwire_first_contact_binding(
     alice.install(first);
 
     let root1 = alice.head.root();
-    let extension = alice
-        .send(
-            &bob,
-            &alice.transfer(&bob, 5, &[0x53; 8]).expect("transfer"),
-        )
-        .expect("extension step");
+    let extension_op = alice.transfer(&bob, 5, &[0x53; 8]).expect("transfer");
+    let extension = alice.send(&bob, &extension_op).expect("extension step");
     let extension_receipt = stitched_receipt(&alice, &bob, &extension).expect("extension receipt");
 
-    let first_ctx = verification_context(&alice, &bob, root0);
-    let extension_ctx = verification_context(&alice, &bob, root1);
+    let first_ctx = verification_context(&alice, &bob, root0, &first_op);
+    let extension_ctx = verification_context(&alice, &bob, root1, &extension_op);
+    let alternate_ctx = verification_context(&alice, &bob, root0, &alternate_op);
     match refusal(&first_receipt, &first_ctx, &mut tracker) {
         Ok(None) => {}
         Ok(Some(r)) => failures.push(format!("the first-contact receipt was refused: {r}")),
@@ -1099,7 +1095,7 @@ fn trace_tripwire_first_contact_binding(
         Ok(Some(r)) => failures.push(format!("the extension was refused: {r}")),
         Err(e) => failures.push(e),
     }
-    match refusal(&alternate_receipt, &first_ctx, &mut tracker) {
+    match refusal(&alternate_receipt, &alternate_ctx, &mut tracker) {
         Ok(None) => failures.push("an alternate first-contact branch was accepted".into()),
         Ok(Some(r)) if r.contains("Fork detected") => {}
         Ok(Some(r)) => failures.push(format!(

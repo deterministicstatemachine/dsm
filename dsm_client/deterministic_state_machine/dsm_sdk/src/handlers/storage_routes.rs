@@ -35,10 +35,12 @@ fn mark_contact_needs_online_reconcile_and_refresh(device_id: &[u8]) -> Result<(
 /// reply is already enqueued by convergence. This writes the local transaction
 /// row the History tab reads and refreshes this device's balance cache. None of
 /// it is protocol state, so a failure does not hold the ACK; it is reported.
+#[allow(clippy::too_many_arguments)]
 fn record_accepted_split_history(
     wallet: &crate::sdk::wallet_sdk::WalletSDK,
     correlation_key: &str,
     receipt: &dsm::types::receipt_types::StitchedReceiptV2,
+    operation: Option<Vec<u8>>,
     sender_b32: &str,
     self_b32: &str,
     amount: u64,
@@ -52,6 +54,14 @@ fn record_accepted_split_history(
     let mut meta: std::collections::HashMap<String, Vec<u8>> = std::collections::HashMap::new();
     meta.insert("token_id".to_string(), token_id.into_bytes());
     meta.insert("adr0003_split".to_string(), b"true".to_vec());
+    // The operation the receipt's tip binds, when this delivery verified it; a
+    // row without it keeps a receipt its history cannot check again.
+    if let Some(operation) = operation {
+        meta.insert(
+            crate::storage::client_db::HISTORY_OPERATION_KEY.to_string(),
+            operation,
+        );
+    }
     let proof_data = receipt
         .to_full_protobuf()
         .map_err(|e| format!("{correlation_key}: the receipt does not encode: {e}"))?;
@@ -1629,6 +1639,10 @@ impl AppRouterImpl {
                 > = std::cell::RefCell::new(None);
                 let signed_op_stash: std::cell::RefCell<Option<dsm::types::operations::Operation>> =
                     std::cell::RefCell::new(None);
+                // The verified operation, for the history row: its receipt's
+                // tip binds it, so the row keeps it beside the receipt.
+                let history_operation: std::cell::RefCell<Option<Vec<u8>>> =
+                    std::cell::RefCell::new(None);
                 let mut accepted_admission: Option<
                     dsm::economic::admission::PendingEconomicAdmission,
                 > = None;
@@ -1647,6 +1661,7 @@ impl AppRouterImpl {
                         return Err("verified transfer differs from the prevalidated wire bytes"
                             .to_string());
                     }
+                    *history_operation.borrow_mut() = Some(v.signed_op.to_bytes());
                     // Everything derives from the VERIFIED transfer, exactly as
                     // the legacy path derives it from the verified entry. The
                     // transition entropy is the receipt's canonical field 21 —
@@ -1901,11 +1916,13 @@ impl AppRouterImpl {
                                 <dsm::types::proto::OnlineTransferRequest as prost::Message>::decode(b)
                                     .map_err(|e| format!("the frozen transfer half does not decode: {e}"))
                             });
+                        let operation = history_operation.borrow_mut().take();
                         let history = frozen.and_then(|r| {
                             record_accepted_split_history(
                                 &self.wallet,
                                 &key,
                                 &evidence_receipt,
+                                operation,
                                 &sender_b32,
                                 &self_device_b32,
                                 r.amount,

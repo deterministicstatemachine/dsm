@@ -658,6 +658,8 @@ impl WalletSDK {
                 },
             )?;
 
+        // The history row keeps the operation the step's receipt is built over.
+        let operation_bytes = op.to_bytes();
         log::debug!("[WALLET] send_transfer_op: calling token_sdk.execute_transfer_op...");
         let (new_state, artifacts) = self.token_sdk.execute_transfer_op_staged_with_admission(
             op,
@@ -734,6 +736,10 @@ impl WalletSDK {
             if let Some(m) = &transaction.memo {
                 meta.insert("memo".to_string(), m.as_bytes().to_vec());
             }
+            meta.insert(
+                crate::storage::client_db::HISTORY_OPERATION_KEY.to_string(),
+                operation_bytes,
+            );
             let rec = crate::storage::client_db::TransactionRecord {
                 tx_id: tx_copy.id.clone(),
                 tx_hash: tx_hash_txt,

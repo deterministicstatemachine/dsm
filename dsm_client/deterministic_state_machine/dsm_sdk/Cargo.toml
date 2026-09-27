@@ -171,6 +171,10 @@ axum = "0.8" # serves the node's app in tests (the node's own version)
 # through the REAL origins (faucet admission, authorized issuance, admitted
 # transfer), never by writing it onto a head.
 dsm_sdk = { path = ".", features = ["test-utils"] }
+# The software TROPIC01's resident key in the host test appliance
+# (`test_support::appliance`): the chip signs sigma^chip with Ed25519, which the
+# receiver verifies through `dsm::crypto::classical_verify`. Tests only.
+ed25519-dalek = { version = "2.1", default-features = false, features = ["std"] }
 
 
  

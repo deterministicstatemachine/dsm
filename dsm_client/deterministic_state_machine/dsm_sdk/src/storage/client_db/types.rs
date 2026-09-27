@@ -114,6 +114,12 @@ impl ContactRecord {
     }
 }
 
+/// The metadata key under which a history row keeps the canonical bytes of the
+/// operation its receipt was built over. A receipt's tip binds its operation,
+/// so a row whose receipt is checked again keeps the operation beside it; a
+/// row without one has a receipt nothing can check.
+pub const HISTORY_OPERATION_KEY: &str = "operation";
+
 pub struct TransactionRecord {
     pub tx_id: String,
     pub tx_hash: String,

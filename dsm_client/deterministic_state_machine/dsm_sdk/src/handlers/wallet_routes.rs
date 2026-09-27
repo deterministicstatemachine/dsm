@@ -392,7 +392,7 @@ pub(crate) fn parse_display_amount_to_base_units(
         .map_err(|e| format!("amount out of range: {e}"))
 }
 
-fn encode_offline_transfer_operation_canonical(
+pub(crate) fn encode_offline_transfer_operation_canonical(
     to_device_id: &[u8; 32],
     amount: u64,
     token_id: &str,
@@ -652,10 +652,13 @@ impl AppRouterImpl {
                             // §4.3#3: Derive R_G from the stored receipt's devid_a for
                             // display-only consistency check. This is historical UI display
                             // only; protocol acceptance already enforced at ingest time.
-                            receipt_verified: t
-                                .proof_data
-                                .as_ref()
-                                .is_some_and(|b| receipt_state_holds(b)),
+                            receipt_verified: t.proof_data.as_ref().is_some_and(|b| {
+                                receipt_state_holds(
+                                    b,
+                                    t.metadata
+                                        .get(crate::storage::client_db::HISTORY_OPERATION_KEY),
+                                )
+                            }),
                         })
                     })
                     .collect();
@@ -1113,22 +1116,36 @@ impl AppRouterImpl {
     }
 }
 
-/// Whether a stored receipt's state rules hold against the sender's
-/// AUTHENTICATED Device Tree commitment: this device's own, or the one kept
-/// for the contact. A root derived from the receipt itself is never used, so
-/// a receipt from a sender with no kept commitment is not shown as verified.
-fn receipt_state_holds(receipt_bytes: &[u8]) -> bool {
+/// Whether a stored receipt's state rules hold against its author's
+/// AUTHENTICATED Device Tree commitment and pinned genesis — this device's
+/// own, or the ones kept for the contact — and the operation the row keeps
+/// beside it. Nothing is derived from the receipt itself: a receipt whose
+/// author has no kept commitment, or a row that keeps no operation, is not
+/// shown as verified. A history row never holds the author's own
+/// offline-bearer spend (the sender keeps the receiver's counter-signed
+/// receipt), so no anchor-state leaves are needed and none are supplied.
+fn receipt_state_holds(receipt_bytes: &[u8], operation_bytes: Option<&Vec<u8>>) -> bool {
     let Ok(receipt) =
         dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(receipt_bytes)
     else {
         return false;
     };
+    let Some(Ok(operation)) =
+        operation_bytes.map(|b| dsm::types::operations::Operation::from_bytes(b))
+    else {
+        return false;
+    };
     let own = crate::sdk::app_state::AppState::get_device_id()
         .is_some_and(|id| id.as_slice() == receipt.devid_a.as_slice());
-    let commitment = if own {
-        crate::sdk::app_state::AppState::get_device_tree_commitment()
+    let pinned = if own {
+        crate::sdk::app_state::AppState::get_device_tree_commitment().zip(
+            crate::sdk::app_state::AppState::get_genesis_hash()
+                .and_then(|g| <[u8; 32]>::try_from(g.as_slice()).ok()),
+        )
     } else {
-        match crate::storage::client_db::get_contact_device_tree_root(&receipt.devid_a) {
+        let commitment = match crate::storage::client_db::get_contact_device_tree_root(
+            &receipt.devid_a,
+        ) {
             Ok(root) => {
                 root.map(dsm::types::receipt_types::DeviceTreeAcceptanceCommitment::from_root)
             }
@@ -1136,10 +1153,31 @@ fn receipt_state_holds(receipt_bytes: &[u8]) -> bool {
                 log::error!("[wallet] receipt verification: the sender's Device Tree root is unreadable: {e}");
                 return false;
             }
-        }
+        };
+        let genesis = match crate::storage::client_db::get_contact_by_device_id(&receipt.devid_a) {
+            Ok(contact) => {
+                contact.and_then(|c| <[u8; 32]>::try_from(c.genesis_hash.as_slice()).ok())
+            }
+            Err(e) => {
+                log::error!(
+                    "[wallet] receipt verification: the sender's contact is unreadable: {e}"
+                );
+                return false;
+            }
+        };
+        commitment.zip(genesis)
     };
-    commitment.is_some_and(|c| {
-        dsm::verification::receipt_verification::verify_receipt_state(&receipt, &c).is_ok()
+    pinned.is_some_and(|(commitment, author_genesis)| {
+        dsm::verification::receipt_verification::verify_receipt_state(
+            &receipt,
+            &dsm::verification::receipt_verification::ReceiptStateContext {
+                device_tree_commitment: &commitment,
+                author_genesis,
+                operation: &operation,
+                bearer: None,
+            },
+        )
+        .is_ok()
     })
 }
 
@@ -1743,5 +1781,79 @@ mod send_offline_tests {
         update_contact_ble_status(&peer, None, Some("AA:BB:CC:DD:EE:FF"))
             .expect("pairing persists the address");
         assert_eq!(send_offline(&device.router, peer).await, host_dispatch);
+    }
+}
+
+#[cfg(test)]
+mod receipt_badge_tests {
+    use super::receipt_state_holds;
+    use crate::test_support::receipts::{transfer_step, Party};
+
+    /// The history badge re-checks a row's receipt against the operation the
+    /// row keeps and its author's pinned genesis and Device Tree: this
+    /// device's own for its own receipts, the kept contact's for a contact's.
+    /// A row that keeps no operation, or another one, is not shown as
+    /// verified, and neither is a contact's receipt before the contact's
+    /// genesis and Device Tree are kept. MUTATION CONTROL (run 2026-09-27):
+    /// checking a contact's receipt against this device's own genesis and
+    /// Device Tree turns the contact assertions red.
+    #[test]
+    #[serial_test::serial]
+    fn the_history_badge_holds_only_for_the_operation_the_receipt_binds() {
+        let (identity, _core) = crate::economic_fixtures::local_device(0x21);
+        let me = Party::from_seed(0x21);
+        assert_eq!(
+            me.device_id(),
+            identity.device_id,
+            "the fixture is the wallet the device installed"
+        );
+        let peer = Party::from_seed(0x22);
+
+        let own = transfer_step(&me, &peer, 7);
+        let own_bytes = own.receipt.to_canonical_protobuf().expect("encode");
+        assert!(receipt_state_holds(
+            &own_bytes,
+            Some(&own.operation.to_bytes())
+        ));
+        assert!(
+            !receipt_state_holds(&own_bytes, None),
+            "a row with no operation"
+        );
+        let other = transfer_step(&me, &peer, 8);
+        assert!(
+            !receipt_state_holds(&own_bytes, Some(&other.operation.to_bytes())),
+            "a row keeping another operation"
+        );
+
+        let theirs = transfer_step(&peer, &me, 5);
+        let their_bytes = theirs.receipt.to_canonical_protobuf().expect("encode");
+        let their_operation = theirs.operation.to_bytes();
+        assert!(
+            !receipt_state_holds(&their_bytes, Some(&their_operation)),
+            "a contact nothing is kept for"
+        );
+        crate::storage::client_db::store_contact_for_tests(
+            &dsm::types::contact_types::DsmVerifiedContact {
+                alias: "peer".to_string(),
+                device_id: peer.device_id(),
+                genesis_hash: peer.genesis(),
+                public_key: peer.signing_public_key().to_vec(),
+                chain_tip: Some(
+                    dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+                        &me.device_id(),
+                        &peer.device_id(),
+                    ),
+                ),
+                genesis_verified_online: true,
+                verifying_storage_nodes: vec![],
+                ble_address: None,
+            },
+        );
+        crate::storage::client_db::store_contact_device_tree_root(
+            &peer.device_id(),
+            &peer.device_tree_commitment().root(),
+        )
+        .expect("keep the contact's Device Tree root");
+        assert!(receipt_state_holds(&their_bytes, Some(&their_operation)));
     }
 }

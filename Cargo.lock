@@ -1280,6 +1280,7 @@ dependencies = [
  "dsm-anchor-verifier",
  "dsm_sdk",
  "dsm_storage_node",
+ "ed25519-dalek",
  "env_logger",
  "erased-serde",
  "fastrand",

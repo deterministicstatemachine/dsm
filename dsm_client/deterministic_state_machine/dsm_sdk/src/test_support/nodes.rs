@@ -212,12 +212,33 @@ pub struct NodeSet {
     pub nodes: Vec<Node>,
 }
 
+/// The process's rustls provider, installed as the node binary's `main`
+/// installs it before its Postgres pool connects: nodes served in-process have
+/// no `main`, so without this a test's nodes start only if some earlier test
+/// in the process happened to install one.
+fn tls_provider_installed() {
+    use rustls::crypto::{ring, CryptoProvider};
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        if CryptoProvider::get_default().is_none() {
+            if let Err(e) = CryptoProvider::install_default(ring::default_provider()) {
+                // Refused only because another install won the race.
+                assert!(
+                    CryptoProvider::get_default().is_some(),
+                    "no rustls provider is installed: {e:?}"
+                );
+            }
+        }
+    });
+}
+
 impl NodeSet {
     /// Start one node per pinned register member of the network. Panics if
     /// any node cannot start: a test on a partial set would be testing
     /// something else. Must run inside a Tokio runtime, which serves the
     /// nodes for as long as it runs.
     pub async fn start() -> Self {
+        tls_provider_installed();
         let pinned = dsm::economic::register::pinned_root_register_members(NETWORK)
             .expect("the beta network is pinned");
         let members: Vec<(String, [u8; 32])> = pinned
