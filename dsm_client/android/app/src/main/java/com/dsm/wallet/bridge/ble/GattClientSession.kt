@@ -86,22 +86,6 @@ class GattClientSession(
     // Status 133 is transient on most OEMs: close GATT, wait, retry fresh.
     private var connectionRetryCount: Int = 0
 
-    // ── MTU fallback for Android 14+ ──
-    // Android 14+ auto-requests MTU 517. If the app's requestMtu() is ignored,
-    // onMtuChanged never fires and the CCCD chain stalls. This flag + delayed
-    // runnable break the deadlock.
-    @Volatile private var mtuCallbackReceived: Boolean = false
-
-    private val mtuFallbackRunnable = Runnable { handleMtuFallback() }
-
-    private fun handleMtuFallback() {
-        if (!mtuCallbackReceived && !subscriptionChainStarted) {
-            Log.w("GattClientSession", "MTU fallback: onMtuChanged never fired for $deviceAddress — assuming MTU ${BleConstants.MTU_SIZE}")
-            diagnostics.recordEvent(BleDiagEvent(phase = "mtu_fallback", device = deviceAddress, bytes = BleConstants.MTU_SIZE))
-            startSubscriptionChain(BleConstants.MTU_SIZE)
-        }
-    }
-
     /** True while a GATT operation is in flight or waiting on this link. */
     val hasPendingOperations: Boolean
         get() = ops.busy
@@ -221,12 +205,13 @@ class GattClientSession(
 
         override fun abandon(reason: String) {
             if (reason != GattOperationQueue.START_REFUSED) return
-            // Android 14+ auto-requests MTU 517 before the app calls requestMtu().
-            // If the auto-request already completed, requestMtu() returns false and
-            // onMtuChanged never fires from this call. Schedule a fallback that
-            // unblocks the CCCD chain after a short delay.
-            Log.w("GattClientSession", "requestMtu($mtu) refused for $deviceAddress — scheduling MTU fallback")
-            timeoutHandler.postDelayed(mtuFallbackRunnable, BleConstants.MTU_FALLBACK_DELAY_MS)
+            // An MTU the link already reported (a peer-initiated or automatic
+            // exchange) has started the CCCD chain. Otherwise the link's MTU is
+            // unknown, and a chunk cannot be sized to it: the link does not
+            // become a route.
+            if (subscriptionChainStarted) return
+            Log.w("GattClientSession", "requestMtu($mtu) refused for $deviceAddress and no MTU reported — the link's MTU is unknown")
+            emitEvent(BleSessionEvent.ErrorOccurred(deviceAddress, BleErrorCategory.MTU_NEGOTIATION_FAILED, "mtu_request_refused"))
         }
     }
 
@@ -505,7 +490,6 @@ class GattClientSession(
 
                 emitEvent(BleSessionEvent.ServiceDiscoveryCompleted(deviceAddress, true))
                 // The link's operations may start; the MTU request is the first.
-                mtuCallbackReceived = false
                 ops.open()
                 ops.enqueue(MtuRequest(BleConstants.IDENTITY_MTU_REQUEST))
             } else if (!serviceDiscoveryRetried) {
@@ -519,8 +503,6 @@ class GattClientSession(
 
         override fun onMtuChanged(gatt: BluetoothGatt?, mtu: Int, status: Int) {
             Log.d("GattClientSession", "MTU changed: $deviceAddress, mtu: $mtu, status: $status")
-            mtuCallbackReceived = true
-            timeoutHandler.removeCallbacks(mtuFallbackRunnable)
             ops.completed(GattOperationQueue.Key(GattOperationQueue.Key.Type.MTU, null))
                 ?.finish(status == BluetoothGatt.GATT_SUCCESS, null)
 
@@ -823,7 +805,6 @@ class GattClientSession(
 
     private fun cleanup(reason: String, resetRetries: Boolean = true) {
         timeoutHandler.removeCallbacks(connectionTimeoutRunnable)
-        timeoutHandler.removeCallbacks(mtuFallbackRunnable)
         // P1.1: Reset connection priority to balanced on cleanup to save battery.
         try {
             bluetoothGatt?.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_BALANCED)
@@ -848,7 +829,6 @@ class GattClientSession(
         txResponseSubscribed = false
         pairingAckCccdSubscribed = false
         notificationChunkCount = 0
-        mtuCallbackReceived = false
         if (resetRetries) connectionRetryCount = 0
         // Every operation in flight or waiting ends with the link.
         ops.close(reason)

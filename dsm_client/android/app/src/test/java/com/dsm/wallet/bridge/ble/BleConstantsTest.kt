@@ -176,13 +176,6 @@ class BleConstantsTest {
         assertEquals(500L, BleConstants.CONNECTION_PRIORITY_RESET_DELAY_MS)
     }
 
-    // ── MTU fallback ───────────────────────────────────────────────────────
-
-    @Test
-    fun mtuFallbackDelay_is2Seconds() {
-        assertEquals(2_000L, BleConstants.MTU_FALLBACK_DELAY_MS)
-    }
-
     // ── Constant immutability ──────────────────────────────────────────────
 
     @Test
@@ -198,6 +191,5 @@ class BleConstantsTest {
         assertTrue(BleConstants.GATT_RETRY_DELAY_MS > 0)
         assertTrue(BleConstants.GATT_RETRY_MAX_ATTEMPTS > 0)
         assertTrue(BleConstants.CONNECTION_PRIORITY_RESET_DELAY_MS > 0)
-        assertTrue(BleConstants.MTU_FALLBACK_DELAY_MS > 0)
     }
 }
