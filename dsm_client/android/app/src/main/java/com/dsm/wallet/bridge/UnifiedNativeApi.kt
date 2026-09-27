@@ -60,7 +60,6 @@ internal object UnifiedNativeApi {
     @Keep @JvmStatic external fun getAllBalancesStrict(): ByteArray
     @Keep @JvmStatic external fun ensureAppRouterInstalled(): Boolean
     @Keep @JvmStatic external fun getAppRouterStatus(): Int
-    @Keep @JvmStatic external fun computeB0xAddress(genesis: ByteArray, deviceId: ByteArray, tip: ByteArray): String
     // C-DBRW JNI surface removed: Kotlin is transport-only. All C-DBRW state —
     // enrollment (Algorithm 6.1), challenge/response (Algorithm 3), entropy
     // health, signing, verifier key mgmt — is now reached exclusively through

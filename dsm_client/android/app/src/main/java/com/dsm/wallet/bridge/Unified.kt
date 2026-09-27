@@ -146,13 +146,6 @@ object Unified {
      */
     @Keep @JvmStatic fun getAppRouterStatus(): Int = UnifiedNativeApi.getAppRouterStatus()
 
-    /**
-     * Compute deterministic b0x address for (genesis, deviceId, tip).
-     * All inputs MUST be 32-byte arrays. Returns Base32 Crockford string.
-     */
-    @Keep @JvmStatic fun computeB0xAddress(genesis: ByteArray, deviceId: ByteArray, tip: ByteArray): String =
-        UnifiedNativeApi.computeB0xAddress(genesis, deviceId, tip)
-
     // ---------- BLE unified surface ----------
     @Keep @JvmStatic fun initBleCoordinator(context: android.content.Context) {
         UnifiedBleBridge.initBleCoordinator(context) { eventName, detail ->
