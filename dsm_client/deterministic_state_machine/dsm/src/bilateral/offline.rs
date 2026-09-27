@@ -140,16 +140,26 @@ pub enum PrepareDecision {
     StepInFlight { in_flight: [u8; 32] },
     /// The proposal does not extend the tip this device holds: it is answered
     /// with a signed rejection, and the relationship is reconciled online.
+    /// `expected_recomputes` when the proposal's commitment is its operation's
+    /// commitment on the tip it claims — only then is that claim evidence of
+    /// the sender's tip.
     StaleTip {
         expected: Option<[u8; 32]>,
         held: [u8; 32],
+        expected_recomputes: bool,
     },
+    /// The prepare is addressed to another device. Here it is meaningless
+    /// bytes: nothing this device holds is read for it, nothing is written,
+    /// and nothing answers it.
+    NotAddressed,
 }
 
-/// What a prepare claims: the tip it expects the relationship to hold, its
-/// sender's keys, and its sender's signature (σ_A) over its commitment.
+/// What a prepare claims: the device it is addressed to, the tip it expects
+/// the relationship to hold, its sender's keys, and its sender's signature
+/// (σ_A) over its commitment.
 #[derive(Clone, Copy, Debug)]
 pub struct PrepareClaims<'a> {
+    pub addressed_to: &'a [u8],
     pub expected_tip: Option<[u8; 32]>,
     pub credentials: PeerCredentials<'a>,
     pub signature: &'a [u8],
@@ -157,21 +167,31 @@ pub struct PrepareClaims<'a> {
 
 /// The receiver's decision on a prepare. `operation` is what
 /// [`offline_operation`] admitted from the request, `commitment_hash` the
-/// commitment the proposal names, `held_tip` the relationship tip this device
-/// holds durably, and `in_flight` the step this device holds in flight on the
-/// relationship, if any. The proposal must come from the pinned sender (its
-/// keys, and its signature over the commitment); it is refused while another
-/// step is in flight; and its commitment must be its operation's commitment
-/// on the held tip — the receiver never signs a commitment it did not
-/// recompute.
+/// commitment the proposal names, `local_device_id` this device, `held_tip`
+/// the relationship tip this device holds durably, and `in_flight` the step
+/// this device holds in flight on the relationship, if any. A prepare
+/// addressed to another device — by the request, or by the transfer it
+/// commits — is not addressed here, and is decided so before anything else.
+/// The proposal must come from the pinned sender (its keys, and its
+/// signature over the commitment); it is refused while another step is in
+/// flight; and its commitment must be its operation's commitment on the held
+/// tip — the receiver never signs a commitment it did not recompute.
 pub fn decide_prepare(
     commitment_hash: [u8; 32],
     operation: &Operation,
     claims: PrepareClaims<'_>,
     sender: &PinnedPeer<'_>,
+    local_device_id: &[u8; 32],
     held_tip: [u8; 32],
     in_flight: Option<[u8; 32]>,
 ) -> Result<PrepareDecision, DsmError> {
+    let transfer_addressed_elsewhere = matches!(
+        operation,
+        Operation::Transfer { to_device_id, .. } if to_device_id.as_slice() != local_device_id.as_slice()
+    );
+    if claims.addressed_to != local_device_id.as_slice() || transfer_addressed_elsewhere {
+        return Ok(PrepareDecision::NotAddressed);
+    }
     verify_pinned_peer_keys(sender, claims.credentials)?;
     verify_step_signature(sender, &commitment_hash, claims.signature, "proposal")?;
 
@@ -181,9 +201,14 @@ pub fn decide_prepare(
         return Ok(PrepareDecision::StepInFlight { in_flight });
     }
     if claims.expected_tip != Some(held_tip) {
+        let expected_recomputes = claims.expected_tip.is_some_and(|tip| {
+            BilateralPreCommitment::new(tip, operation.clone()).bilateral_commitment_hash
+                == commitment_hash
+        });
         return Ok(PrepareDecision::StaleTip {
             expected: claims.expected_tip,
             held: held_tip,
+            expected_recomputes,
         });
     }
     let own = BilateralPreCommitment::new(held_tip, operation.clone()).bilateral_commitment_hash;
@@ -587,8 +612,9 @@ mod tests {
     fn a_proposal_is_considered_only_as_its_sender_signed_it_on_the_held_tip() {
         let sender = Peer::new(0x41);
         let other = Peer::new(0x42);
+        let receiver = [0x43u8; 32];
         let held = [0x70u8; 32];
-        let operation = bearer_transfer([0x43; 32]);
+        let operation = bearer_transfer(receiver);
         let commitment =
             BilateralPreCommitment::new(held, operation.clone()).bilateral_commitment_hash;
         let decide = |commitment: [u8; 32], expected_tip: Option<[u8; 32]>, signature: &[u8]| {
@@ -596,11 +622,13 @@ mod tests {
                 commitment,
                 &operation,
                 PrepareClaims {
+                    addressed_to: &receiver,
                     expected_tip,
                     credentials: credentials(&sender),
                     signature,
                 },
                 &sender.pinned(),
+                &receiver,
                 held,
                 None,
             )
@@ -637,8 +665,11 @@ mod tests {
                 PrepareDecision::StaleTip {
                     expected: e,
                     held: h,
+                    expected_recomputes,
                 } => {
-                    assert_eq!((e, h), (expected, held))
+                    assert_eq!((e, h), (expected, held));
+                    // The commitment was made on the held tip, not the one claimed.
+                    assert!(!expected_recomputes);
                 }
                 other => panic!("expected StaleTip, got {other:?}"),
             }
@@ -655,8 +686,9 @@ mod tests {
     #[test]
     fn a_proposal_is_refused_while_another_step_is_in_flight() {
         let sender = Peer::new(0x46);
+        let receiver = [0x47u8; 32];
         let held = [0x72u8; 32];
-        let operation = bearer_transfer([0x47; 32]);
+        let operation = bearer_transfer(receiver);
         let commitment =
             BilateralPreCommitment::new(held, operation.clone()).bilateral_commitment_hash;
         let own_step = [0x73u8; 32];
@@ -665,11 +697,13 @@ mod tests {
                 commitment,
                 &operation,
                 PrepareClaims {
+                    addressed_to: &receiver,
                     expected_tip,
                     credentials: credentials(&sender),
                     signature,
                 },
                 &sender.pinned(),
+                &receiver,
                 held,
                 in_flight,
             )
@@ -696,6 +730,105 @@ mod tests {
             decide(Some(held), &[], Some(own_step)),
             "carries no signature",
         );
+    }
+
+    /// A prepare addressed to another device is meaningless bytes to this
+    /// one: it is not addressed here whether the request names another device
+    /// or the transfer it commits pays another, and that is decided before
+    /// the signature, the step in flight or the tip — so nothing is answered
+    /// and nothing held is consulted. MUTATION CONTROL: dropping either
+    /// address check lets a misaddressed prepare reach the step and tip
+    /// checks and turns this red.
+    #[test]
+    fn a_prepare_addressed_to_another_device_is_not_addressed_here() {
+        let sender = Peer::new(0x48);
+        let receiver = [0x49u8; 32];
+        let third = [0x4Au8; 32];
+        let held = [0x75u8; 32];
+        let decide = |operation: &Operation, addressed_to: &[u8], in_flight| {
+            let commitment =
+                BilateralPreCommitment::new(held, operation.clone()).bilateral_commitment_hash;
+            decide_prepare(
+                commitment,
+                operation,
+                PrepareClaims {
+                    addressed_to,
+                    expected_tip: Some([0x76u8; 32]),
+                    credentials: credentials(&sender),
+                    signature: &[],
+                },
+                &sender.pinned(),
+                &receiver,
+                held,
+                in_flight,
+            )
+        };
+
+        // The request names a third device.
+        match decide(&bearer_transfer(receiver), &third, Some([0x77u8; 32]))
+            .expect("a misaddressed prepare is decided, not refused")
+        {
+            PrepareDecision::NotAddressed => {}
+            other => panic!("expected NotAddressed, got {other:?}"),
+        }
+        // The request names this device, but the transfer it commits pays a third.
+        match decide(&bearer_transfer(third), &receiver, None)
+            .expect("a misaddressed transfer is decided, not refused")
+        {
+            PrepareDecision::NotAddressed => {}
+            other => panic!("expected NotAddressed, got {other:?}"),
+        }
+        // Addressed here, the same unsigned prepare reaches the signature check.
+        refused(
+            decide(&bearer_transfer(receiver), &receiver, None),
+            "carries no signature",
+        );
+    }
+
+    /// A stale proposal's claimed tip is evidence of the sender's tip only
+    /// when the proposal's commitment is its operation's commitment on that
+    /// claimed tip.
+    #[test]
+    fn a_stale_proposal_says_whether_its_claimed_tip_recomputes() {
+        let sender = Peer::new(0x4B);
+        let receiver = [0x4Cu8; 32];
+        let held = [0x78u8; 32];
+        let claimed = [0x79u8; 32];
+        let operation = bearer_transfer(receiver);
+        let on_claimed =
+            BilateralPreCommitment::new(claimed, operation.clone()).bilateral_commitment_hash;
+        let decide = |commitment: [u8; 32]| {
+            decide_prepare(
+                commitment,
+                &operation,
+                PrepareClaims {
+                    addressed_to: &receiver,
+                    expected_tip: Some(claimed),
+                    credentials: credentials(&sender),
+                    signature: &sender.sign_step(&commitment),
+                },
+                &sender.pinned(),
+                &receiver,
+                held,
+                None,
+            )
+        };
+
+        match decide(on_claimed).expect("an authenticated stale proposal is answered") {
+            PrepareDecision::StaleTip {
+                expected_recomputes,
+                ..
+            } => assert!(expected_recomputes),
+            other => panic!("expected StaleTip, got {other:?}"),
+        }
+        let unrelated = [0x7Au8; 32];
+        match decide(unrelated).expect("an authenticated stale proposal is answered") {
+            PrepareDecision::StaleTip {
+                expected_recomputes,
+                ..
+            } => assert!(!expected_recomputes),
+            other => panic!("expected StaleTip, got {other:?}"),
+        }
     }
 
     /// Offline, only the bearer tier moves value: an online-tier transfer is

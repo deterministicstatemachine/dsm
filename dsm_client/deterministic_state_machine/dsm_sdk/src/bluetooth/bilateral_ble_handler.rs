@@ -1110,6 +1110,76 @@ impl BilateralBleHandler {
         // one door this device's own proposals and online sends also take.
         let door = crate::security::modal_sync_lock::STEP_DOOR.lock().await;
 
+        // Core decides on the proposal from the sender's pinned identity and
+        // the relationship tip this device holds durably, read before anything
+        // is written.
+        let our_local_chain_tip: [u8; 32] = stored_contact_tip(
+            crate::storage::client_db::get_contact_chain_tip(&counterparty_device_id),
+        )?
+        .ok_or_else(|| DsmError::relationship("the counterparty is not a contact"))?;
+        let sender_contact =
+            crate::storage::client_db::get_contact_by_device_id(&counterparty_device_id)
+                .map_err(|e| {
+                    DsmError::storage(format!("the sender's contact: {e}"), None::<std::io::Error>)
+                })?
+                .ok_or_else(|| DsmError::relationship("the sender is not a contact"))?;
+        let sender_genesis: [u8; 32] =
+            sender_contact
+                .genesis_hash
+                .as_slice()
+                .try_into()
+                .map_err(|_| {
+                    DsmError::invalid_operation("the sender's pinned genesis is not 32 bytes")
+                })?;
+        let in_flight =
+            step_in_flight_with(&counterparty_device_id, Some(&origin_commitment_hash))?
+                .map(|(hash, _phase)| hash);
+        let decision = dsm::bilateral::offline::decide_prepare(
+            origin_commitment_hash,
+            &operation,
+            dsm::bilateral::offline::PrepareClaims {
+                addressed_to: &prepare_request.counterparty_device_id,
+                expected_tip: prepare_request
+                    .expected_counterparty_state_hash
+                    .as_ref()
+                    .and_then(|h| <[u8; 32]>::try_from(h.v.as_slice()).ok()),
+                credentials: dsm::bilateral::offline::PeerCredentials {
+                    signing_key: &prepare_request.sender_signing_public_key,
+                    kyber_public_key: &prepare_request.sender_kyber_public_key,
+                    kyber_binding_sig: &prepare_request.sender_kyber_binding_sig,
+                },
+                signature: &prepare_request.sender_signature,
+            },
+            &dsm::bilateral::offline::PinnedPeer {
+                device_id: counterparty_device_id,
+                genesis: sender_genesis,
+                signing_key: &sender_contact.public_key,
+                kyber_public_key: &sender_contact.kyber_public_key,
+            },
+            &self.device_id,
+            our_local_chain_tip,
+            in_flight,
+        )?;
+
+        // A prepare addressed to another device is meaningless bytes here:
+        // decided from reads alone, before anything this device holds is
+        // written or answered — no online gate cleared, no contact synced, no
+        // relationship established, no tip recorded.
+        if matches!(
+            decision,
+            dsm::bilateral::offline::PrepareDecision::NotAddressed
+        ) {
+            info!(
+                "[BilateralBleHandler] prepare {} from {} is not addressed to this device; dropped",
+                bytes_to_base32(&origin_commitment_hash[..8]),
+                bytes_to_base32(&counterparty_device_id[..8]),
+            );
+            return Ok((
+                Vec::new(),
+                crate::sdk::transfer_hooks::TransferMeta::default(),
+            ));
+        }
+
         // Ensure contact and relationship (receiver side)
         // We verify the SENDER (counterparty_device_id) is a known contact
         {
@@ -1212,58 +1282,11 @@ impl BilateralBleHandler {
             }
         }
 
-        // Core decides on the proposal from the sender's pinned identity and
-        // the relationship tip this device holds durably; the manager builds
-        // on the same tip.
-        let our_local_chain_tip: [u8; 32] = stored_contact_tip(
-            crate::storage::client_db::get_contact_chain_tip(&counterparty_device_id),
-        )?
-        .ok_or_else(|| DsmError::relationship("the counterparty is not a contact"))?;
+        // The manager builds on the tip Core decided with.
         self.bilateral_tx_manager
             .write()
             .await
             .advance_chain_tip(&counterparty_device_id, our_local_chain_tip);
-        let sender_contact =
-            crate::storage::client_db::get_contact_by_device_id(&counterparty_device_id)
-                .map_err(|e| {
-                    DsmError::storage(format!("the sender's contact: {e}"), None::<std::io::Error>)
-                })?
-                .ok_or_else(|| DsmError::relationship("the sender is not a contact"))?;
-        let sender_genesis: [u8; 32] =
-            sender_contact
-                .genesis_hash
-                .as_slice()
-                .try_into()
-                .map_err(|_| {
-                    DsmError::invalid_operation("the sender's pinned genesis is not 32 bytes")
-                })?;
-        let in_flight =
-            step_in_flight_with(&counterparty_device_id, Some(&origin_commitment_hash))?
-                .map(|(hash, _phase)| hash);
-        let decision = dsm::bilateral::offline::decide_prepare(
-            origin_commitment_hash,
-            &operation,
-            dsm::bilateral::offline::PrepareClaims {
-                expected_tip: prepare_request
-                    .expected_counterparty_state_hash
-                    .as_ref()
-                    .and_then(|h| <[u8; 32]>::try_from(h.v.as_slice()).ok()),
-                credentials: dsm::bilateral::offline::PeerCredentials {
-                    signing_key: &prepare_request.sender_signing_public_key,
-                    kyber_public_key: &prepare_request.sender_kyber_public_key,
-                    kyber_binding_sig: &prepare_request.sender_kyber_binding_sig,
-                },
-                signature: &prepare_request.sender_signature,
-            },
-            &dsm::bilateral::offline::PinnedPeer {
-                device_id: counterparty_device_id,
-                genesis: sender_genesis,
-                signing_key: &sender_contact.public_key,
-                kyber_public_key: &sender_contact.kyber_public_key,
-            },
-            our_local_chain_tip,
-            in_flight,
-        )?;
 
         // The proposal delivered again is answered from what this device holds
         // for it, whatever a fresh decision would be now. An acceptance answers
@@ -1311,6 +1334,13 @@ impl BilateralBleHandler {
 
         match decision {
             dsm::bilateral::offline::PrepareDecision::Consider { .. } => {}
+            // Decided above: nothing is written or answered.
+            dsm::bilateral::offline::PrepareDecision::NotAddressed => {
+                return Ok((
+                    Vec::new(),
+                    crate::sdk::transfer_hooks::TransferMeta::default(),
+                ));
+            }
             // Another step is in flight with the sender: one step at a time.
             dsm::bilateral::offline::PrepareDecision::StepInFlight { in_flight } => {
                 let rejection = self
@@ -1332,6 +1362,7 @@ impl BilateralBleHandler {
             // signed rejection, and no precommitment is made.
             dsm::bilateral::offline::PrepareDecision::StaleTip {
                 expected: sender_expected_hash,
+                expected_recomputes,
                 ..
             } => {
                 let reason = format!(
@@ -1341,7 +1372,10 @@ impl BilateralBleHandler {
                 );
                 warn!("[BLE_HANDLER] Auto-rejecting proposal: {}", reason);
 
-                if let Some(expected_tip) = sender_expected_hash {
+                // The sender's claimed tip is kept only when the proposal's
+                // commitment recomputes on it: otherwise it is a claim and
+                // nothing more.
+                if let Some(expected_tip) = sender_expected_hash.filter(|_| expected_recomputes) {
                     if let Err(e) = crate::storage::client_db::record_observed_remote_chain_tip(
                         &counterparty_device_id,
                         &expected_tip,
