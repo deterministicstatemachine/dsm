@@ -5321,7 +5321,7 @@ mod tests {
             "no tip was written"
         );
         assert!(
-            crate::storage::client_db::get_transaction_history(None, None)
+            crate::storage::client_db::get_transaction_history(None, None, None)
                 .expect("read the history")
                 .is_empty(),
             "nothing settled"
@@ -5427,7 +5427,7 @@ mod tests {
             "the ack did not revive or complete the failed session"
         );
         assert!(
-            crate::storage::client_db::get_transaction_history(None, None)
+            crate::storage::client_db::get_transaction_history(None, None, None)
                 .expect("read the history")
                 .is_empty()
         );

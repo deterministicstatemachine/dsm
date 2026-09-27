@@ -478,7 +478,7 @@ impl AppRouterImpl {
             // -------- wallet.history --------
             "wallet.history" => {
                 // Require ArgPack(codec=PROTO) with body = [limit_le_u64 | offset_le_u64].
-                let (limit, _offset): (Option<usize>, Option<usize>) =
+                let (limit, offset): (Option<usize>, Option<usize>) =
                     match generated::ArgPack::decode(&*q.params) {
                         Ok(pack) if pack.codec == generated::Codec::Proto as i32 => {
                             if pack.body.len() >= 16 {
@@ -504,6 +504,7 @@ impl AppRouterImpl {
                 let sqlite_txs = match crate::storage::client_db::get_transaction_history(
                     Some(&my_device_id_str),
                     limit,
+                    offset,
                 ) {
                     Ok(txs) => txs,
                     Err(e) => return err(format!("wallet.history: history unreadable: {e}")),
