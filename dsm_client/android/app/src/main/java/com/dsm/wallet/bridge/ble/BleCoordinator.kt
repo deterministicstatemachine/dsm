@@ -53,17 +53,28 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
     // ── Scan downshift ──
     // LOW_LATENCY (100% duty) drains battery fast. After 12s, auto-downshift
     // to BALANCED (~33% duty) for sustained discovery without battery damage.
+    // The handler is only the timer: the downshift itself runs on the lifecycle
+    // lane, in order with every start and stop, so it can never restart a scan a
+    // stop just ended.
     private val scanDownshiftHandler = android.os.Handler(android.os.Looper.getMainLooper())
-    private val scanDownshiftRunnable = Runnable {
-        if (scanner.isScanning()) {
-            Log.i("BleCoordinator", "Scan downshift: LOW_LATENCY → BALANCED after ${BleConstants.SCAN_LOW_LATENCY_DURATION_MS}ms")
-            scanner.stopScanning()
-            if (!scanner.startScanning(lowLatency = false)) {
-                Log.w("BleCoordinator", "Scan downshift: the balanced scan was refused; scanning ended")
-                radioEvents.scanStopped()
-            }
+    private val scanDownshiftRunnable = Runnable { runOperation(BleOpLane.LIFECYCLE) { downshiftScan() } }
+
+    /** Lifecycle lane only. Downshift the scan that is running now, if one is. */
+    private fun downshiftScan() {
+        if (!scanner.isScanning()) return
+        Log.i("BleCoordinator", "Scan downshift: LOW_LATENCY → BALANCED after ${BleConstants.SCAN_LOW_LATENCY_DURATION_MS}ms")
+        scanner.stopScanning()
+        if (!scanner.startScanning(lowLatency = false)) {
+            Log.w("BleCoordinator", "Scan downshift: the balanced scan was refused; scanning ended")
+            radioEvents.scanStopped()
         }
     }
+
+    // Rust's pairing loop asks for a scan and withdraws it (startPairingScan /
+    // stopPairingScan); only those two write this. The coordinator restores the
+    // requested scan after its own transport interruptions, and never starts one
+    // Rust has not asked for. Read and written only inside dispatcher ops.
+    @Volatile private var pairingScanRequested = false
 
     // ── Reconnection backoff ──
     private val reconnectHandler = android.os.Handler(android.os.Looper.getMainLooper())
@@ -251,101 +262,125 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
     }
 
     /**
-     * Start scanning for peer devices.
+     * Start scanning for peer devices (the transfer scan). Not a pairing request:
+     * Rust's pairing loop uses [startPairingScan].
      */
-    fun startScanning(): Boolean {
-        return runOperationBool(BleOpLane.LIFECYCLE) {
-            if (!permissionsGate.hasScanPermission()) {
-                diagnostics.recordError(BleErrorCategory.PERMISSION_DENIED, "scanning")
-                permissionsGate.recordPermissionFailure()
-                radioEvents.permissionDenied("scan")
-                return@runOperationBool false
-            }
+    fun startScanning(): Boolean = runOperationBool(BleOpLane.LIFECYCLE) { beginScan(evictStale = true) }
 
-            // If already scanning, leave it alone
-            if (scanner.isScanning()) {
-                return@runOperationBool true
-            }
+    /** Rust's pairing loop asks for a scan; the request stands until [stopPairingScan]. */
+    fun startPairingScan(): Boolean = runOperationBool(BleOpLane.LIFECYCLE) {
+        pairingScanRequested = true
+        beginScan(evictStale = true)
+    }
 
-            // Rate limit check: enforce minimum gap since last stop
-            val now = System.currentTimeMillis()
-            val timeSinceLastStop = now - lastScanStopTimestamp
-            if (lastScanStopTimestamp > 0 && timeSinceLastStop < MIN_SCAN_GAP_MS) {
-                Log.w("BleCoordinator", "Scan throttled: ${timeSinceLastStop}ms since last stop (min ${MIN_SCAN_GAP_MS}ms)")
-                return@runOperationBool false
-            }
+    /** Rust's pairing loop withdraws its scan. */
+    fun stopPairingScan(): Boolean = runOperationBool(BleOpLane.LIFECYCLE) {
+        pairingScanRequested = false
+        endScan()
+    }
 
-            // Rate limit check: enforce 5-per-30-second window
-            scanStartTimestamps.removeAll { now - it > SCAN_RATE_LIMIT_WINDOW_MS }
-            if (scanStartTimestamps.size >= MAX_SCANS_PER_WINDOW) {
-                val oldestInWindow = scanStartTimestamps.minOrNull() ?: now
-                val waitTimeMs = SCAN_RATE_LIMIT_WINDOW_MS - (now - oldestInWindow)
-                Log.w("BleCoordinator", "Scan rate limited: ${scanStartTimestamps.size} scans in last ${SCAN_RATE_LIMIT_WINDOW_MS}ms, wait ${waitTimeMs}ms")
-                diagnostics.recordError(BleErrorCategory.HARDWARE_UNAVAILABLE, "scan_rate_limited")
-                return@runOperationBool false
-            }
-
-            // Selective eviction: only disconnect truly stale sessions.
-            // Preserve sessions mid-handshake (connected + discovering/negotiating/transacting)
-            // and sessions awaiting bilateral pairing confirmation (PAIRING_ACK).
-            if (peers.values.any { it.gattClientSession != null }) {
-                val staleAddresses = mutableListOf<String>()
-                for ((addr, peer) in peers) {
-                    if (peer.gattClientSession == null) continue
-                    val isActive = (
-                        peer.connectionPending ||
-                        peer.identityExchangeInProgress ||
-                        peer.pairingInProgress ||
-                        peer.currentTransaction != null ||
-                        (peer.isConnected && !peer.serviceDiscoveryCompleted) ||
-                        (peer.isConnected && peer.negotiatedMtu == 23)
-                    )
-                    if (!isActive) {
-                        staleAddresses.add(addr)
-                    }
-                }
-                if (staleAddresses.isNotEmpty()) {
-                    val activeCount = peers.values.count { it.gattClientSession != null } - staleAddresses.size
-                    Log.i("BleCoordinator", "Evicting ${staleAddresses.size} stale session(s), keeping $activeCount active")
-                    for (addr in staleAddresses) {
-                        val peer = peers[addr] ?: continue
-                        if (!gattServer.isServerClient(addr)) {
-                            peer.gattClientSession?.disconnect()
-                        }
-                        peer.clearClientState()
-                        if (peer.isEmpty) peers.remove(addr)
-                    }
-                }
-            }
-
-            // Record the attempt BEFORE starting: the platform's limit counts attempts
-            scanStartTimestamps.add(now)
-
-            if (!scanner.startScanning()) {
-                Log.w("BleCoordinator", "startScanning: the scanner refused")
-                return@runOperationBool false
-            }
-            // Schedule downshift from LOW_LATENCY → BALANCED after 12s
-            scanDownshiftHandler.removeCallbacks(scanDownshiftRunnable)
-            scanDownshiftHandler.postDelayed(scanDownshiftRunnable, BleConstants.SCAN_LOW_LATENCY_DURATION_MS)
-            radioEvents.scanStarted()
-            true
+    /**
+     * Dispatcher ops only. Start a scan unless one is running, within the
+     * platform's pacing; the scanner's answer is the answer. [evictStale] drops
+     * idle client sessions first (a fresh scan); a resumed scan keeps them.
+     */
+    private fun beginScan(evictStale: Boolean): Boolean {
+        if (!permissionsGate.hasScanPermission()) {
+            diagnostics.recordError(BleErrorCategory.PERMISSION_DENIED, "scanning")
+            permissionsGate.recordPermissionFailure()
+            radioEvents.permissionDenied("scan")
+            return false
         }
+
+        // If already scanning, leave it alone
+        if (scanner.isScanning()) {
+            return true
+        }
+
+        // Rate limit check: enforce minimum gap since last stop
+        val now = System.currentTimeMillis()
+        val timeSinceLastStop = now - lastScanStopTimestamp
+        if (lastScanStopTimestamp > 0 && timeSinceLastStop < MIN_SCAN_GAP_MS) {
+            Log.w("BleCoordinator", "Scan throttled: ${timeSinceLastStop}ms since last stop (min ${MIN_SCAN_GAP_MS}ms)")
+            return false
+        }
+
+        // Rate limit check: enforce 5-per-30-second window
+        scanStartTimestamps.removeAll { now - it > SCAN_RATE_LIMIT_WINDOW_MS }
+        if (scanStartTimestamps.size >= MAX_SCANS_PER_WINDOW) {
+            val oldestInWindow = scanStartTimestamps.minOrNull() ?: now
+            val waitTimeMs = SCAN_RATE_LIMIT_WINDOW_MS - (now - oldestInWindow)
+            Log.w("BleCoordinator", "Scan rate limited: ${scanStartTimestamps.size} scans in last ${SCAN_RATE_LIMIT_WINDOW_MS}ms, wait ${waitTimeMs}ms")
+            diagnostics.recordError(BleErrorCategory.HARDWARE_UNAVAILABLE, "scan_rate_limited")
+            return false
+        }
+
+        // Selective eviction: only disconnect truly stale sessions (a fresh scan only).
+        // Preserve sessions mid-handshake (connected + discovering/negotiating/transacting)
+        // and sessions awaiting bilateral pairing confirmation (PAIRING_ACK).
+        if (evictStale && peers.values.any { it.gattClientSession != null }) {
+            val staleAddresses = mutableListOf<String>()
+            for ((addr, peer) in peers) {
+                if (peer.gattClientSession == null) continue
+                val isActive = (
+                    peer.connectionPending ||
+                    peer.identityExchangeInProgress ||
+                    peer.pairingInProgress ||
+                    peer.currentTransaction != null ||
+                    (peer.isConnected && !peer.serviceDiscoveryCompleted) ||
+                    (peer.isConnected && peer.negotiatedMtu == 23)
+                )
+                if (!isActive) {
+                    staleAddresses.add(addr)
+                }
+            }
+            if (staleAddresses.isNotEmpty()) {
+                val activeCount = peers.values.count { it.gattClientSession != null } - staleAddresses.size
+                Log.i("BleCoordinator", "Evicting ${staleAddresses.size} stale session(s), keeping $activeCount active")
+                for (addr in staleAddresses) {
+                    val peer = peers[addr] ?: continue
+                    if (!gattServer.isServerClient(addr)) {
+                        peer.gattClientSession?.disconnect()
+                    }
+                    peer.clearClientState()
+                    if (peer.isEmpty) peers.remove(addr)
+                }
+            }
+        }
+
+        // Record the attempt BEFORE starting: the platform's limit counts attempts
+        scanStartTimestamps.add(now)
+
+        if (!scanner.startScanning()) {
+            Log.w("BleCoordinator", "startScanning: the scanner refused")
+            return false
+        }
+        // Schedule downshift from LOW_LATENCY → BALANCED after 12s
+        scanDownshiftHandler.removeCallbacks(scanDownshiftRunnable)
+        scanDownshiftHandler.postDelayed(scanDownshiftRunnable, BleConstants.SCAN_LOW_LATENCY_DURATION_MS)
+        radioEvents.scanStarted()
+        return true
     }
 
     /**
      * Stop scanning. The scanner's answer; the stopped event is reported only
      * for a scan that was running and stopped.
      */
-    fun stopScanning(): Boolean {
-        return runOperationBool(BleOpLane.LIFECYCLE) {
+    fun stopScanning(): Boolean = runOperationBool(BleOpLane.LIFECYCLE) { endScan() }
+
+    /**
+     * Dispatcher ops only. Stop the scan if one is running. Only a stop that
+     * reached the platform counts toward its pacing and is reported.
+     */
+    private fun endScan(): Boolean {
+        scanDownshiftHandler.removeCallbacks(scanDownshiftRunnable)
+        val wasScanning = scanner.isScanning()
+        val stopped = scanner.stopScanning()
+        if (wasScanning && stopped) {
             lastScanStopTimestamp = System.currentTimeMillis()
-            scanDownshiftHandler.removeCallbacks(scanDownshiftRunnable)
-            val wasScanning = scanner.isScanning()
-            val stopped = scanner.stopScanning()
-            if (wasScanning && stopped) radioEvents.scanStopped()
-            stopped
+            radioEvents.scanStopped()
         }
+        return stopped
     }
 
     /**
@@ -627,36 +662,22 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
         peers.getOrPut(deviceAddress) { PeerSession(deviceAddress) }.pendingPairingConfirm = payload.copyOf()
     }
 
+    /**
+     * Dispatcher ops only. Restore the pairing scan after one of the
+     * coordinator's own interruptions (a failed connect, a lost link), if Rust's
+     * pairing loop still requests it. Starts no scan Rust has not asked for.
+     */
     private fun resumePairingScan(deviceAddress: String, reason: String) {
-        // Already scanning - no action needed
-        if (scanner.isScanning()) {
+        if (!pairingScanRequested) {
+            Log.d("BleCoordinator", "No pairing scan requested; not resuming for $deviceAddress ($reason)")
             return
         }
-
-        // Rate limit check before attempting resume. This gates Android BLE radio
-        // behavior only and must not be interpreted as protocol timing.
-        val now = System.currentTimeMillis()
-        val timeSinceLastStop = now - lastScanStopTimestamp
-        if (lastScanStopTimestamp > 0 && timeSinceLastStop < MIN_SCAN_GAP_MS) {
-            Log.d("BleCoordinator", "Resume scan throttled for $deviceAddress: ${timeSinceLastStop}ms since last stop")
-            return
-        }
-
-        scanStartTimestamps.removeAll { now - it > SCAN_RATE_LIMIT_WINDOW_MS }
-        if (scanStartTimestamps.size >= MAX_SCANS_PER_WINDOW) {
-            Log.w("BleCoordinator", "Resume scan rate limited for $deviceAddress: ${scanStartTimestamps.size} scans in window")
-            return
-        }
-
-        scanStartTimestamps.add(now)
-        val started = scanner.startScanning()
+        if (scanner.isScanning()) return
+        val started = beginScan(evictStale = false)
         Log.i("BleCoordinator", "Pairing scan resume for $deviceAddress: reason=$reason started=$started")
-        if (started) {
-            radioEvents.scanStarted()
-        }
     }
 
-    private fun handleSessionEvent(event: BleSessionEvent) {
+    internal fun handleSessionEvent(event: BleSessionEvent) {
         val lane = when (event) {
             is BleSessionEvent.TransactionWriteCompleted,
             is BleSessionEvent.ResponseReceived -> BleOpLane.TRANSFER
@@ -707,7 +728,9 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                             peer.reconnectAttemptCount++
                             Log.i("BleCoordinator", "Reconnect backoff #${peer.reconnectAttemptCount} for ${event.deviceAddress} — resuming scan in ${delay}ms")
                             val addr = event.deviceAddress
-                            reconnectHandler.postDelayed({ resumePairingScan(addr, "disconnected_backoff") }, delay)
+                            reconnectHandler.postDelayed({
+                                runOperation(BleOpLane.LIFECYCLE) { resumePairingScan(addr, "disconnected_backoff") }
+                            }, delay)
                         } else {
                             Log.w("BleCoordinator", "Reconnect limit reached for ${event.deviceAddress} — waiting for user-initiated scan")
                         }
@@ -1044,9 +1067,6 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                         } catch (t: Throwable) {
                             Log.w("BleCoordinator", "finalizeScannerPairing(${event.deviceAddress}) threw: ${t.message}")
                         }
-                        // Pairing complete on scanner side — stop scanning so the next
-                        // transport action starts from a clean reconnect path.
-                        this@BleCoordinator.stopScanning()
                         // Keep peer consistent so hasActiveClientSession() returns true
                         // while the GATT link is still live.
                         peer.connectResult?.let { r -> peer.connectResult = null; r.complete(true) }
