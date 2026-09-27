@@ -161,7 +161,7 @@ class BleBackgroundService : Service() {
         val ble = bleCoordinator ?: return
         onLifecycleThread("refreshAdvertising") {
             if (!localIdentityAvailable()) {
-                if (ble.isAdvertising()) ble.stopAdvertising()
+                ble.stopAdvertising()
                 Log.i(TAG, "refreshAdvertising: no local identity; not advertising")
                 return@onLifecycleThread
             }
