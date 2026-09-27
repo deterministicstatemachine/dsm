@@ -92,6 +92,27 @@ pub fn default_node(level: u32) -> [u8; 32] {
     }
 }
 
+/// How the device tree hashes, for the one batch fold and the one path
+/// encoding ([`crate::merkle::batch_fold`], [`crate::merkle::smt_path`]): a
+/// leaf commits its value only (the key is its position), and a leaf holding
+/// nothing is the tree's empty leaf, `default_node(0)`.
+pub struct DeviceSmtHashes;
+
+impl crate::merkle::batch_fold::SmtHashes for DeviceSmtHashes {
+    fn leaf(_key: &[u8; 32], value: Option<&[u8; 32]>) -> [u8; 32] {
+        match value {
+            Some(v) => hash_smt_leaf(v),
+            None => default_node(0),
+        }
+    }
+    fn node(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
+        hash_smt_node(left, right)
+    }
+    fn default_node(height: usize) -> [u8; 32] {
+        default_node(height as u32)
+    }
+}
+
 /// Canonical empty SMT root for a given tree height.
 pub fn empty_root(height: u32) -> [u8; 32] {
     default_node(height)
