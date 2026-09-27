@@ -54,6 +54,13 @@ fn emit_balances_list_fixture() {
             burn_enabled: true,
             transferable: false,
         }),
+        // Cash in hand under the attached appliance's bundle, rendered by Rust:
+        // 2_500 base units at 2 decimals is 25.00. Present, because absent means
+        // unknown, and the wallet then prints no offline figure at all.
+        offline_allocation: Some(dsm_sdk::generated::OfflineAllocationView {
+            base_units: 2_500,
+            display_amount: crate_format(2_500, 2),
+        }),
     };
     let list = dsm_sdk::generated::BalancesListResponse {
         balances: vec![row],
@@ -89,6 +96,13 @@ fn emit_balances_list_fixture() {
                     transferable: false,
                 }),
                 "the policy's permissions must survive encoding, present"
+            );
+            assert_eq!(
+                b.offline_allocation
+                    .as_ref()
+                    .map(|o| (o.base_units, o.display_amount.as_str())),
+                Some((2_500, "25.00")),
+                "the offline allocation must survive encoding, present"
             );
         }
         other => panic!("unexpected payload {other:?}"),

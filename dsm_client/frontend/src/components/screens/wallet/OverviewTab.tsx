@@ -5,6 +5,7 @@ import TransactionItem from './TransactionItem';
 import { Disclosure } from '../../common/ScreenFrame';
 import type { TokenBalanceView } from '../../../dsm/types';
 import { TokenMark } from '../../TokenMark';
+import BluetoothIcon from '../../icons/BluetoothIcon';
 import type { DomainTransaction } from '../../../domain/types';
 
 const MAX_OVERVIEW_BALANCES = 5;
@@ -50,13 +51,27 @@ function OverviewTabInner({ balances, balancesLoading, transactions, genesisB32,
         ) : (
           <>
             {visibleBalances.map((b) => (
-              <div key={b.tokenId} className="sb-kv" style={{ padding: '6px 0' }}>
-                <span className="sb-kv__k" style={{ fontSize: 11, textTransform: 'none', letterSpacing: 0, display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                  <TokenMark ticker={b.symbol} iconUrl={b.iconUrl} />
-                  {b.symbol}
-                </span>
-                <span className="sb-kv__v" style={{ fontSize: 15, fontWeight: 700 }}>{b.displayAmount}</span>
-              </div>
+              <React.Fragment key={b.tokenId}>
+                <div className="sb-kv" style={{ padding: '6px 0' }}>
+                  <span className="sb-kv__k" style={{ fontSize: 11, textTransform: 'none', letterSpacing: 0, display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                    <TokenMark ticker={b.symbol} iconUrl={b.iconUrl} />
+                    {b.symbol}
+                  </span>
+                  <span className="sb-kv__v" style={{ fontSize: 15, fontWeight: 700 }}>{b.displayAmount}</span>
+                </div>
+                {/* Cash in hand, under the token it belongs to: the offline
+                    allocation an offline send spends, which the amount above
+                    does not include. Shown once there is some. */}
+                {b.offline && b.offline.baseUnits > BigInt(0) && (
+                  <div className="sb-kv" style={{ padding: '0 0 6px 22px' }} data-testid={`offline-allocation-${b.tokenId}`}>
+                    <span className="sb-kv__k" style={{ fontSize: 10, textTransform: 'none', letterSpacing: 0, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                      <BluetoothIcon size={11} title="Offline allocation" />
+                      offline
+                    </span>
+                    <span className="sb-kv__v" style={{ fontSize: 12, fontWeight: 600 }}>{b.offline.displayAmount}</span>
+                  </div>
+                )}
+              </React.Fragment>
             ))}
             {balances.length > MAX_OVERVIEW_BALANCES && (
               <button

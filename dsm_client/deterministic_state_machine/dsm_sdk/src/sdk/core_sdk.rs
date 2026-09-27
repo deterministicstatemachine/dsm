@@ -1749,6 +1749,28 @@ impl CoreSDK {
         }
     }
 
+    /// The offline allocation of `asset` under the bundle of the appliance
+    /// attached in this process, or `None` while none has been attached or
+    /// before genesis. The allocation leaf is keyed by the appliance's bundle,
+    /// which only the appliance states, so a device that has not attached one
+    /// cannot say what it holds offline: that is unknown, not zero.
+    pub fn offline_allocation_of(&self, asset: &[u8; 32]) -> Option<u64> {
+        let bundle = self
+            .anchor_appliance
+            .lock()
+            .as_ref()
+            .map(|appliance| appliance.pin().bundle)?;
+        let sm = self.state_machine.lock();
+        let ds = sm.device_head()?;
+        let key = dsm::types::offline_allocation_leaf::offline_allocation_key(
+            &ds.genesis_digest(),
+            &ds.devid(),
+            &bundle,
+            asset,
+        );
+        Some(ds.offline_allocation(&key))
+    }
+
     /// Get the canonical DeviceState head (§2.2 SMT root).
     pub fn device_head(&self) -> Option<dsm::types::device_state::DeviceState> {
         self.state_machine.lock().device_head().cloned()

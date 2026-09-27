@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Send tab — transaction form with online/offline mode toggle.
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { dsmClient } from '../../../services/dsmClient';
 import { failureReasonMessage } from '../../../domain/bilateral';
 import ConfirmModal from '../../ConfirmModal';
@@ -8,6 +8,11 @@ import { TokenMark } from '../../TokenMark';
 import { TokenSelect } from '../../common/TokenSelect';
 import { Notice } from '../../common/ScreenFrame';
 import { InfoTip } from '../../common/InfoTip';
+import BluetoothIcon from '../../icons/BluetoothIcon';
+import { getAnchorStatus } from '../../../dsm/anchor';
+import { OfflineFundingPopover } from './OfflineFundingPopover';
+import { AppliancePopover, applianceConnected } from './AppliancePopover';
+import type { ApplianceRead } from './AppliancePopover';
 import { useFx } from '../../fx/FxProvider';
 import { fxAmountLabel } from '../../fx/fxEngine';
 import type { TokenBalanceView } from '../../../dsm/types';
@@ -44,6 +49,33 @@ function SendTabInner({
   const [txMode, setTxMode] = useState<'online' | 'offline'>('online');
   const [sendingTx, setSendingTx] = useState(false);
   const [showSendConfirm, setShowSendConfirm] = useState(false);
+  const [fundingOpen, setFundingOpen] = useState(false);
+  const [applianceOpen, setApplianceOpen] = useState(false);
+  const [appliance, setAppliance] = useState<ApplianceRead>({ kind: 'unread' });
+  const [applianceBusy, setApplianceBusy] = useState(false);
+  const loadWalletDataRef = useRef(loadWalletData);
+  loadWalletDataRef.current = loadWalletData;
+
+  // Rust attaches the appliance on this read. The first time, Android asks the
+  // user to allow it; from then on, while it stays plugged in, it connects on
+  // its own, so choosing Offline is enough. Once it is connected the balances
+  // can name their offline allocations, so they are read again.
+  const connectAppliance = useCallback(async () => {
+    setApplianceBusy(true);
+    try {
+      const status = await getAnchorStatus();
+      setAppliance({ kind: 'read', status });
+      if (status.connected) await loadWalletDataRef.current();
+    } catch (e) {
+      setAppliance({ kind: 'error', message: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setApplianceBusy(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (txMode === 'offline') void connectAppliance();
+  }, [txMode, connectAppliance]);
 
   // Only what Rust listed. With no balances there is nothing to send, and the
   // form says so rather than offering a token the wallet does not hold.
@@ -183,10 +215,19 @@ function SendTabInner({
               <TokenMark ticker={selectedSendBalance.symbol} iconUrl={selectedSendBalance.iconUrl} className="sb-coin sb-coin--lg" />
               {selectedSendBalance.symbol}
             </span>
-            <span className="sb-kv__v" style={{ fontSize: 15, fontWeight: 700 }}>
-              {selectedSendBalance.displayAmount}
+            {/* An offline send spends the offline allocation, so in offline
+                mode the number is that pot: unknown until the appliance has
+                stated its bundle, and shown as unknown rather than as 0. */}
+            <span className="sb-kv__v" style={{ fontSize: 15, fontWeight: 700, display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+              {txMode === 'offline' && <BluetoothIcon size={13} title="Offline allocation" />}
+              {txMode === 'offline'
+                ? (selectedSendBalance.offline ? selectedSendBalance.offline.displayAmount : '—')
+                : selectedSendBalance.displayAmount}
             </span>
           </div>
+          {txMode === 'offline' && !selectedSendBalance.offline && (
+            <div className="sb-hint sb-hint--tight">Offline allocation unknown until the appliance connects.</div>
+          )}
         </div>
       ) : (
         <div className="sb-empty">No balances to send yet.</div>
@@ -205,9 +246,32 @@ function SendTabInner({
           <button type="button" className={`sb-seg__opt${txMode === 'offline' ? ' active' : ''}`} onClick={() => setTxMode('offline')}>Offline</button>
         </div>
         {txMode === 'offline' && (
-          <Notice>
-            <strong>Offline needs Bluetooth.</strong> Both appliances next to each other, Bluetooth on.
-          </Notice>
+          <>
+            <Notice>
+              <strong>Offline needs Bluetooth.</strong> Both appliances next to each other, Bluetooth on.
+            </Notice>
+            {/* The two things an offline send needs besides Bluetooth: tokens
+                in the offline allocation, and the appliance that spends them. */}
+            <div className="sb-actions" style={{ marginTop: 6 }}>
+              <button type="button" className="sb-btn sb-btn--small" data-tour="offline-funding" onClick={() => setFundingOpen(true)}>
+                Offline Funding
+              </button>
+              <InfoTip title="Offline Funding" label="About offline funding">
+                <p>Your wallet keeps two balances of each token. The <b>online account</b> spends through the storage nodes. The <b>offline allocation</b> is cash in hand: it spends appliance to appliance over Bluetooth, guarded by the anchor appliance, and an offline send draws from it.</p>
+                <p><b>Load</b> moves tokens from the online account into the offline allocation. <b>Unload</b> moves them back. Both need the appliance connected, and both change only which of your two balances holds the tokens.</p>
+              </InfoTip>
+              <button
+                type="button"
+                className="sb-btn sb-btn--small"
+                data-tour="appliance-setup"
+                style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}
+                onClick={() => setApplianceOpen(true)}
+              >
+                <span className={`sb-dot${applianceConnected(appliance) ? ' sb-dot--on' : ''}`} aria-hidden="true" />
+                {applianceBusy ? 'Appliance…' : 'Appliance'}
+              </button>
+            </div>
+          </>
         )}
       </div>
 
@@ -296,6 +360,22 @@ function SendTabInner({
         onConfirm={() => { setShowSendConfirm(false); void handleSendTransaction(); }}
         onCancel={() => setShowSendConfirm(false)}
       />
+      {fundingOpen && (
+        <OfflineFundingPopover
+          balances={balances}
+          initialTokenId={sendForm.token}
+          onMoved={loadWalletData}
+          onClose={() => setFundingOpen(false)}
+        />
+      )}
+      {applianceOpen && (
+        <AppliancePopover
+          read={appliance}
+          busy={applianceBusy}
+          onConnect={connectAppliance}
+          onClose={() => setApplianceOpen(false)}
+        />
+      )}
     </div>
   );
 }

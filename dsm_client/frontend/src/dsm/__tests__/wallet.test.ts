@@ -140,6 +140,31 @@ describe('wallet.ts', () => {
       await expect(getAllBalances()).rejects.toThrow(/STRICT.*created token RIGB without its policy facts/);
     });
 
+    test('carries the offline allocation as Rust stated it, and absent as unknown', async () => {
+      const answer = (row: pb.BalanceGetResponse) =>
+        frameEnvelope(new pb.Envelope({
+          version: 3,
+          payload: { case: 'balancesListResponse', value: new pb.BalancesListResponse({ balances: [row] }) },
+        }));
+      const era = { tokenId: 'ERA', available: 90n, symbol: 'ERA', decimals: 0, tokenName: 'ERA', displayAmount: '90', protocolDefined: true };
+
+      // No appliance has stated a bundle: the row carries no allocation, and
+      // the view says unknown rather than zero.
+      (getAllBalancesStrictBridge as jest.Mock).mockResolvedValue(answer(new pb.BalanceGetResponse(era)));
+      expect((await getAllBalances())[0].offline).toBeUndefined();
+
+      (getAllBalancesStrictBridge as jest.Mock).mockResolvedValue(
+        answer(new pb.BalanceGetResponse({ ...era, offlineAllocation: { baseUnits: 10n, displayAmount: '10' } })),
+      );
+      expect((await getAllBalances())[0].offline).toEqual({ baseUnits: 10n, displayAmount: '10' });
+
+      // Present without its rendered form is a row Rust did not finish.
+      (getAllBalancesStrictBridge as jest.Mock).mockResolvedValue(
+        answer(new pb.BalanceGetResponse({ ...era, offlineAllocation: { baseUnits: 10n } })),
+      );
+      await expect(getAllBalances()).rejects.toThrow(/STRICT.*ERA's offline allocation without its display form/);
+    });
+
     test('throws on error envelope', async () => {
       const env = new pb.Envelope({
         version: 3,

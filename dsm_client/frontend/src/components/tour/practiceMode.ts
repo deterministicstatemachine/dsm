@@ -24,7 +24,7 @@ export const PRACTICE_BLOCKED_MESSAGE =
 
 /** Calls whose names start like this change state, so practice mode refuses them. */
 const STATE_CHANGING =
-  /^(send|create|claim|add|remove|delete|publish|withdraw|deposit|swap|import|export|mint|burn|update|accept|reject|register|approve|revoke|write|reset|close|open|unlock|lock|execute|submit|broadcast|sign|pair|unpair|sync|reconcile|recover|restore|enroll|admit|fund|redeem|transfer|post|put|store|bind|advance|commit|finalize|apply|generate|start|stop|cancel|retry|refresh|clear|forget|rotate|set)/;
+  /^(send|load|unload|create|claim|add|remove|delete|publish|withdraw|deposit|swap|import|export|mint|burn|update|accept|reject|register|approve|revoke|write|reset|close|open|unlock|lock|execute|submit|broadcast|sign|pair|unpair|sync|reconcile|recover|restore|enroll|admit|fund|redeem|transfer|post|put|store|bind|advance|commit|finalize|apply|generate|start|stop|cancel|retry|refresh|clear|forget|rotate|set)/;
 
 /** Real even in practice: display preferences only. */
 const ALWAYS_REAL = new Set(['getPreference', 'setPreference']);
