@@ -31,13 +31,9 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
 
     <!-- Notifications (Android 13+) for FGS persistent notif -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
-
-    <!-- Start after reboot when user opts into Always-on scanning -->
-    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
 
     <!-- Camera for QR scanning in WebView -->
     <uses-permission android:name="android.permission.CAMERA"/>
@@ -112,50 +108,11 @@
             android:theme="@style/Theme.AppCompat.NoActionBar"
             tools:ignore="LockedOrientationActivity" />
 
-        <!-- MCP core host (protobuf-only runtime hub) -->
-        <service
-            android:name="com.dsm.wallet.mcp.McpService"
-            android:exported="false"
-            android:foregroundServiceType="connectedDevice|dataSync" />
-
-        <!-- Proximity Foreground Service (Always-on mode; if you use it) -->
-        <service
-            android:name="com.dsm.wallet.proximity.ProximityScanService"
-            android:exported="false"
-            android:foregroundServiceType="connectedDevice|dataSync" />
-
         <!-- BLE Foreground Service (keeps advertising/GATT alive for offline transfers) -->
         <service
             android:name="com.dsm.wallet.service.BleBackgroundService"
             android:exported="false"
             android:foregroundServiceType="connectedDevice|dataSync" />
-
-        <!-- Faucet background scanner (location-based availability signals) -->
-        <service
-            android:name="com.dsm.faucet.FaucetService"
-            android:exported="false"
-            android:foregroundServiceType="location" />
-
-
-        <!-- Restart DSM/MCP after app updates -->
-        <receiver
-            android:name="com.dsm.wallet.mcp.PackageReplacedReceiver"
-            android:enabled="true"
-            android:exported="true">
-            <intent-filter>
-                <action android:name="android.intent.action.MY_PACKAGE_REPLACED"/>
-            </intent-filter>
-        </receiver>
-
-        <!-- Auto-start proximity service on reboot IF user chose Always-on -->
-        <receiver
-            android:name="com.dsm.wallet.proximity.BootCompletedReceiver"
-            android:enabled="true"
-            android:exported="false">
-            <intent-filter>
-                <action android:name="android.intent.action.BOOT_COMPLETED"/>
-            </intent-filter>
-        </receiver>
 
         <!-- H2 bench self-test: launched when the Pico anchor attaches over USB-OTG (that launch
              also grants USB permission for the device). Replays one OP_SPI_PASSTHROUGH round-trip

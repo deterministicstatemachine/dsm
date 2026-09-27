@@ -62,7 +62,6 @@ import com.dsm.wallet.bridge.BleEventRelay
 import com.dsm.wallet.bridge.SinglePathWebViewBridge
 import com.dsm.wallet.bridge.Unified
 import com.dsm.wallet.bridge.ble.BleCoordinator
-import com.dsm.wallet.mcp.McpService
 import com.dsm.wallet.permissions.BluetoothPermissionHelper
 import com.dsm.wallet.service.BleBackgroundService
 import com.dsm.wallet.session.NativeFirstCutoverReset
@@ -82,7 +81,6 @@ import java.net.URL
 import java.util.Locale
 
 class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
-    @Volatile private var mcpStarted = false
 
     // Dedicated single-thread executor for genesis + heavy JNI work, keeping the main thread
     // free (Genesis v2 is mnemonic-rooted and fast — there is no silicon enrollment).
@@ -1364,8 +1362,6 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
 
         initDsmAndSignalReady()
         handleBackPress()
-        
-        com.dsm.wallet.EventPoller.start()
     }
 
     override fun onResume() {
@@ -1504,14 +1500,6 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         }
     }
 
-    override fun onPostResume() {
-        super.onPostResume()
-        if (!mcpStarted) {
-            startForegroundMcp()
-            mcpStarted = true
-        }
-    }
-    
     override fun onDestroy() {
         if (activeInstance?.get() === this) {
             activeInstance = null
@@ -1519,7 +1507,6 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         unregisterBatteryReceiver()
         unregisterBluetoothStateReceiver()
         super.onDestroy()
-        com.dsm.wallet.EventPoller.stop()
     }
 
 
@@ -1543,9 +1530,6 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         } catch (_: Throwable) {}
     }
 
-    private fun startForegroundMcp() {
-        ContextCompat.startForegroundService(this, Intent(this, McpService::class.java))
-    }
 
 
     private val permLauncher = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants ->
