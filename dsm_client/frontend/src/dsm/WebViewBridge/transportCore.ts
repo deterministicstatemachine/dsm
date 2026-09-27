@@ -79,13 +79,7 @@ const unwrapProtobufResponse = async (_method: string, buf: Uint8Array): Promise
       const hex = `0x${code.toString(16).toUpperCase()}`;
       let uiMessage = err.message ?? `Bridge error ${hex}`;
 
-      if (code === 460) {
-        uiMessage = `Transfer Rejected (Offline Mode) - Check peer connection [${hex}]`;
-      } else if (code === 404) {
-        uiMessage = `Item Not Found - State may be stale [${hex}]`;
-      } else if (code === 408) {
-        uiMessage = `Protocol Timeout - Peer did not respond [${hex}]`;
-      } else if (!uiMessage.includes(hex)) {
+      if (!uiMessage.includes(hex)) {
         uiMessage += ` [${hex}]`;
       }
 
