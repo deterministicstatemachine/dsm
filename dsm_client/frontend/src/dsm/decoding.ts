@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 import * as pb from '../proto/dsm_app_pb';
-import { encodeBase32Crockford, decodeBase32Crockford } from '../utils/textId';
+import { encodeBase32Crockford } from '../utils/textId';
 
 
 /**
@@ -59,11 +59,6 @@ export function decodeFramedEnvelopeV3(bytes: Uint8Array): pb.Envelope {
 /** Canonical base32 Crockford encoding for 32-byte identifiers. */
 export function toBase32Crockford(bytes: Uint8Array): string {
   return encodeBase32Crockford(bytes);
-}
-
-/** Canonical base32 Crockford decoder. */
-export function fromBase32Crockford(value: string): Uint8Array {
-  return decodeBase32Crockford(value);
 }
 
 // decodeEnvelope deleted: all transport ingress MUST go through decodeFramedEnvelopeV3.

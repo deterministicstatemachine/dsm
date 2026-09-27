@@ -1431,51 +1431,18 @@ html[data-shell-theme] .stateboy::before {
       }
     }
 
+    // No Battery API: the level is unknown, and the LED shows an unlit
+    // indicator rather than a full battery nobody measured. There is no
+    // native fallback; nothing installs one.
     function fallbackChargingDetection(batteryLight) {
-      if (!batteryLight) {
-        console.warn('Battery light element not available for fallback detection');
-        return;
+      if (!batteryLight) return;
+      batteryLight.classList.remove('charging', 'full', 'medium', 'low');
+      const lightSpan = batteryLight.querySelector('span');
+      if (lightSpan) {
+        lightSpan.style.background = '#222';
+        lightSpan.style.boxShadow = '0 0 3px rgba(0,0,0,.35), inset 0 1px 1px rgba(255,255,255,.18)';
+        lightSpan.style.transform = 'scale(1)';
       }
-      // Fallback method using connection API and periodic checks
-      let lastKnownCharging = false;
-      
-      function checkCharging() {
-        if (!batteryLight) return;
-        const lightSpan = batteryLight.querySelector('span');
-        batteryLight.classList.remove('charging', 'full', 'medium', 'low');
-        if (lightSpan) {
-          lightSpan.style.background = '#222';
-          lightSpan.style.boxShadow = '0 0 3px rgba(0,0,0,.35), inset 0 1px 1px rgba(255,255,255,.18)';
-          lightSpan.style.transform = 'scale(1)';
-        }
-        // Default to full battery (green) when we can't detect
-        batteryLight.classList.add('full');
-        if (lightSpan) {
-          lightSpan.style.background = '#44ffe3';
-          lightSpan.style.boxShadow = '0 0 4px rgba(68,255,227,.78), 0 0 8px rgba(68,255,227,.78), 0 0 14px rgba(68,255,227,.48)';
-          lightSpan.style.transform = 'scale(1.02)';
-        }
-        if (window.DSMBridge && window.DSMBridge.getBatteryStatus) {
-          try {
-            const batteryStatus = window.DSMBridge.getBatteryStatus();
-            if (batteryStatus.charging) {
-              batteryLight.classList.remove('full');
-              batteryLight.classList.add('charging');
-              if (lightSpan) {
-                lightSpan.style.background = '';
-                lightSpan.style.boxShadow = '';
-                lightSpan.style.transform = 'scale(1.04)';
-              }
-              console.log('Charging detected via native bridge - static indicator enabled');
-            }
-          } catch (e) {
-            console.log('Native battery status not available');
-          }
-        }
-      }
-      
-      // Perform a single check on load; avoid periodic timers for strict determinism.
-      checkCharging();
     }
   </script>
 </head>
@@ -1483,7 +1450,7 @@ html[data-shell-theme] .stateboy::before {
   <div class="stateboy power-on">
     <div class="front-plate">
       <div class="screen-container">
-        <div class="battery-light full"><span></span></div>
+        <div class="battery-light"><span></span></div>
         <div class="dsm-shell-logo">
           <img id="shell-logo-image" src="images/logos/dsm-screen-trim-logo-white.png" alt="DSM Logo" />
         </div>

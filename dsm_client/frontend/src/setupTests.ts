@@ -18,7 +18,7 @@ if (silenceLogs) {
 }
 
 // Avoid prototype patches that hide real issues. If BigInt needs serialization,
-// use a local helper (safeJsonStringify) within application code instead.
+// keep JSON out of application code: the wire is protobuf, and a diagnostic string is built by hand.
 
 // Polyfill btoa/atob for Node.js environment
 if (typeof (global as any).btoa === 'undefined') {

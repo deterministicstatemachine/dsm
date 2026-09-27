@@ -175,15 +175,15 @@ export const BilateralTransferDialog: React.FC<BilateralTransferDialogProps> = (
       if (result.success) {
         setIncomingTransfer(null);
       } else {
-        alert(`Failed to accept transfer: ${result.error}`);
+        notifyToast('error', `Failed to accept transfer: ${result.error}`);
       }
     } catch (err) {
       console.error('[BilateralTransfer] Accept error:', err);
-      alert(`Error accepting transfer: ${err}`);
+      notifyToast('error', `Error accepting transfer: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setProcessing(false);
     }
-  }, [incomingTransfer]);
+  }, [incomingTransfer, notifyToast]);
 
   const handleReject = useCallback(async () => {
     if (!incomingTransfer) return;
@@ -194,15 +194,15 @@ export const BilateralTransferDialog: React.FC<BilateralTransferDialogProps> = (
         setIncomingTransfer(null);
       } else {
         // The proposal still awaits a decision; the dialog stays.
-        alert(`Failed to reject transfer: ${result.error}`);
+        notifyToast('error', `Failed to reject transfer: ${result.error}`);
       }
     } catch (err) {
       console.error('[BilateralTransfer] Reject error:', err);
-      alert(`Error rejecting transfer: ${err}`);
+      notifyToast('error', `Error rejecting transfer: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setProcessing(false);
     }
-  }, [incomingTransfer]);
+  }, [incomingTransfer, notifyToast]);
 
   // Don't render if no active transfers or inbox is open
   if ((!incomingTransfer && !outgoingTransfer) || inboxOpen) {
