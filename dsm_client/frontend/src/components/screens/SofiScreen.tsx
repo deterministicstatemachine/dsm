@@ -71,7 +71,7 @@ export default function SofiScreen(): React.JSX.Element {
   const tokenOptions: TokenOption[] = useMemo(
     () => balances
       .filter((b) => !!b.policyAnchorB32)
-      .map((b) => ({ value: b.policyAnchorB32 as string, ticker: b.symbol, iconUrl: b.iconUrl, note: b.anchorFingerprint })),
+      .map((b) => ({ value: b.policyAnchorB32 as string, ticker: b.symbol, iconUrl: b.iconUrl })),
     [balances],
   );
   const held = useCallback(
