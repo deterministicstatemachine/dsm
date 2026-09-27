@@ -72,17 +72,3 @@ export const DEFAULT_NATIVE_SESSION: NativeSessionSnapshot = {
   fatal_error: null,
   wallet_refresh_hint: 0,
 };
-
-export function isNativeSessionSnapshot(value: unknown): value is NativeSessionSnapshot {
-  if (!value || typeof value !== 'object') {
-    return false;
-  }
-  const snapshot = value as Partial<NativeSessionSnapshot>;
-  return (
-    typeof snapshot.phase === 'string' &&
-    typeof snapshot.identity_status === 'string' &&
-    typeof snapshot.env_config_status === 'string' &&
-    typeof snapshot.lock_status === 'object' &&
-    typeof snapshot.hardware_status === 'object'
-  );
-}

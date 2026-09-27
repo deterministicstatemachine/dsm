@@ -121,33 +121,45 @@ function decodeSessionState(bytes: Uint8Array): NativeSessionSnapshot {
     throw new Error(`decodeSessionState: unexpected payload case '${payload?.case}'`);
   }
   const session = payload.value as pb.AppSessionStateProto;
+  // Rust fills every nested status on every snapshot (session_manager's
+  // compute_snapshot). A snapshot missing one is malformed, not a status of
+  // false, and is refused rather than filled in here.
+  const lock = session.lockStatus;
+  const hardware = session.hardwareStatus;
+  const ble = hardware?.ble;
+  const qr = hardware?.qr;
+  if (!lock || !hardware || !ble || !qr) {
+    throw new Error('decodeSessionState: the snapshot lacks its lock or hardware status');
+  }
   return {
     received: true,
     phase: session.phase as NativeSessionSnapshot['phase'],
     identity_status: session.identityStatus as NativeSessionSnapshot['identity_status'],
     env_config_status: session.envConfigStatus as NativeSessionSnapshot['env_config_status'],
     lock_status: {
-      enabled: session.lockStatus?.enabled ?? false,
-      locked: session.lockStatus?.locked ?? false,
-      method: (session.lockStatus?.method || 'none') as NativeSessionSnapshot['lock_status']['method'],
-      lock_on_pause: session.lockStatus?.lockOnPause ?? true,
+      enabled: lock.enabled,
+      locked: lock.locked,
+      // Rust spells the method itself ("none" when there is no lock).
+      method: lock.method as NativeSessionSnapshot['lock_status']['method'],
+      lock_on_pause: lock.lockOnPause,
     },
     hardware_status: {
-      app_foreground: session.hardwareStatus?.appForeground ?? true,
+      app_foreground: hardware.appForeground,
       ble: {
-        enabled: session.hardwareStatus?.ble?.enabled ?? false,
-        permissions_granted: session.hardwareStatus?.ble?.permissionsGranted ?? false,
-        scanning: session.hardwareStatus?.ble?.scanning ?? false,
-        advertising: session.hardwareStatus?.ble?.advertising ?? false,
+        enabled: ble.enabled,
+        permissions_granted: ble.permissionsGranted,
+        scanning: ble.scanning,
+        advertising: ble.advertising,
       },
       qr: {
-        available: session.hardwareStatus?.qr?.available ?? true,
-        active: session.hardwareStatus?.qr?.active ?? false,
-        camera_permission: session.hardwareStatus?.qr?.cameraPermission ?? false,
+        available: qr.available,
+        active: qr.active,
+        camera_permission: qr.cameraPermission,
       },
     },
+    // Rust sends an empty string for no error.
     fatal_error: session.fatalError || null,
-    wallet_refresh_hint: Number(session.walletRefreshHint ?? 0),
+    wallet_refresh_hint: Number(session.walletRefreshHint),
   };
 }
 
