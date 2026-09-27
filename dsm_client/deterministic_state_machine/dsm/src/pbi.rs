@@ -1,54 +1,36 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Platform Boundary Interface (PBI)
+//! Platform boundary: the identity pair the platform hands the SDK.
 //!
-//! This module implements the hard platform boundary described in the public
-//! protocol and security documentation.
-//! It acts as the sole entry point for ingesting raw, non-deterministic platform inputs (IO, JNI, Entropy)
-//! and transforming them into canonical, immutable, cryptographic types *before* they touch the Core State Machine.
-//!
-//! # Architecture
-//!
-//! 1. **Ingestion**: Raw bytes from JNI/Platform are accepted.
-//! 2. **Canonization**: Inputs are immediately hashed/validated into domain-separated types.
-//! 3. **Context Creation**: A `PlatformContext` is built. This is the ONLY object the Core trusts.
-//!
-//! # Invariants
-//!
-//! - No raw `Vec<u8>` or `String` inputs allowed deep in the core.
-//! - All inputs must be length-checked and domain-separated immediately.
+//! The platform (JNI/Kotlin) hands over the persisted device id and genesis hash
+//! as raw bytes. This module turns them into fixed-size arrays and nothing else:
+//! each must be exactly 32 bytes. It does not hash, derive or verify them; whether
+//! they name a real identity is established by the SDK's identity restore and by
+//! the signing authority that derives from them.
 
 use crate::types::error::DsmError;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-/// Canonical, immutable platform context.
-/// This is the "Safe" object that the Core consumes.
+/// The identity pair as two 32-byte arrays.
 #[derive(Debug, Clone, Zeroize, ZeroizeOnDrop)]
 pub struct PlatformContext {
-    /// Canonical Device ID (32 bytes)
+    /// Device ID (32 bytes)
     pub device_id: [u8; 32],
-    /// Canonical Genesis Hash (32 bytes)
+    /// Genesis hash (32 bytes)
     pub genesis_hash: [u8; 32],
 }
 
-/// Raw inputs from the platform (JNI/Kotlin/Swift).
-/// These are "unsafe" and must be processed immediately.
+/// The pair as the platform hands it over: raw bytes of any length.
 pub struct RawPlatformInputs {
     pub device_id_raw: Vec<u8>,
     pub genesis_hash_raw: Vec<u8>,
 }
 
 impl PlatformContext {
-    /// The Single Point of Entry for bootstrapping the Core.
-    ///
-    /// This function consumes raw inputs and returns a sanitized Context or an Error.
-    /// It enforces the "Zero Tolerance" policy at the perimeter.
+    /// Fixes both identifiers to 32 bytes, or refuses the pair.
     pub fn bootstrap(inputs: RawPlatformInputs) -> Result<Self, DsmError> {
-        // 1. Canonize Device ID
-        let device_id = Self::canonize_identifier(&inputs.device_id_raw, "DSM/devid\0")?;
-
-        // 2. Canonize Genesis Hash
-        let genesis_hash = Self::canonize_identifier(&inputs.genesis_hash_raw, "DSM/genesis\0")?;
+        let device_id = Self::exactly_32_bytes(&inputs.device_id_raw)?;
+        let genesis_hash = Self::exactly_32_bytes(&inputs.genesis_hash_raw)?;
 
         Ok(Self {
             device_id,
@@ -56,10 +38,7 @@ impl PlatformContext {
         })
     }
 
-    /// Helper to validate and canonize 32-byte identifiers.
-    /// STRICTNESS: We expect the platform to pass the *pre-calculated* digests for IDs,
-    /// but we verify lengths strictly.
-    fn canonize_identifier(input: &[u8], _domain_tag: &str) -> Result<[u8; 32], DsmError> {
+    fn exactly_32_bytes(input: &[u8]) -> Result<[u8; 32], DsmError> {
         if input.len() != 32 {
             return Err(DsmError::Validation {
                 context: format!(
@@ -87,17 +66,17 @@ mod tests {
     }
 
     #[test]
-    fn canonize_identifier_exact_32_bytes() {
+    fn exactly_32_bytes_exact_32_bytes() {
         let input = vec![0x42u8; 32];
-        let result = PlatformContext::canonize_identifier(&input, "DSM/test\0");
+        let result = PlatformContext::exactly_32_bytes(&input);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), [0x42u8; 32]);
     }
 
     #[test]
-    fn canonize_identifier_too_short() {
+    fn exactly_32_bytes_too_short() {
         let input = vec![0x01u8; 16];
-        let result = PlatformContext::canonize_identifier(&input, "DSM/test\0");
+        let result = PlatformContext::exactly_32_bytes(&input);
         assert!(result.is_err());
         match result.unwrap_err() {
             DsmError::Validation { context, .. } => {
@@ -109,9 +88,9 @@ mod tests {
     }
 
     #[test]
-    fn canonize_identifier_too_long() {
+    fn exactly_32_bytes_too_long() {
         let input = vec![0x01u8; 64];
-        let result = PlatformContext::canonize_identifier(&input, "DSM/test\0");
+        let result = PlatformContext::exactly_32_bytes(&input);
         assert!(result.is_err());
         match result.unwrap_err() {
             DsmError::Validation { context, .. } => {
@@ -123,15 +102,15 @@ mod tests {
     }
 
     #[test]
-    fn canonize_identifier_empty() {
-        let result = PlatformContext::canonize_identifier(&[], "DSM/test\0");
+    fn exactly_32_bytes_empty() {
+        let result = PlatformContext::exactly_32_bytes(&[]);
         assert!(result.is_err());
     }
 
     #[test]
-    fn canonize_identifier_preserves_bytes() {
+    fn exactly_32_bytes_preserves_bytes() {
         let input: Vec<u8> = (0..32).collect();
-        let arr = PlatformContext::canonize_identifier(&input, "DSM/devid\0").unwrap();
+        let arr = PlatformContext::exactly_32_bytes(&input).unwrap();
         assert_eq!(&arr[..], &input[..]);
     }
 
