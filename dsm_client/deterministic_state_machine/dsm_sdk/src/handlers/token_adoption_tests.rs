@@ -122,6 +122,83 @@ async fn an_adopted_token_resolves_on_the_receiving_device() {
     );
 }
 
+/// `balance.get` for `token_id`, as the wallet asks it.
+async fn balance_get(router: &AppRouterImpl, token_id: &str) -> AppResult {
+    router
+        .query(AppQuery {
+            path: "balance.get".to_string(),
+            params: dsm::types::proto::ArgPack {
+                schema_hash: None,
+                codec: dsm::types::proto::Codec::Proto as i32,
+                body: token_id.as_bytes().to_vec(),
+            }
+            .encode_to_vec(),
+        })
+        .await
+}
+
+fn balance_of(result: &AppResult) -> dsm::types::proto::BalanceGetResponse {
+    assert!(result.success, "balance.get: {:?}", result.error_message);
+    match crate::handlers::response_helpers::decode_local_envelope(&result.data)
+        .expect("a local answer")
+        .payload
+    {
+        Some(dsm::types::proto::envelope::Payload::BalanceGetResponse(r)) => r,
+        other => panic!("balance.get answered {other:?}"),
+    }
+}
+
+/// A balance the projection store holds but cannot decode is an error, never
+/// a zero. B adopted the token and holds none of it, so the read leaves the
+/// head for the projection store: with no row there, zero is established
+/// over a readable head and store; with a row Rust cannot decode, the answer
+/// is the failure. (The reader used to log "ignoring invalid projection row"
+/// and answer 0.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_balance_whose_projection_row_does_not_decode_is_an_error_not_zero() {
+    let (p, anchor) = created_on_a_adopted_on_b("RIGC").await;
+    let router = p.b.router();
+
+    let none = balance_get(router, "RIGC").await;
+    assert_eq!(
+        balance_of(&none).available,
+        0,
+        "no row, no holding: an established zero"
+    );
+
+    {
+        let binding = crate::storage::client_db::get_connection().expect("conn");
+        let conn = binding
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let inserted = conn
+            .execute(
+                "INSERT INTO balance_projections \
+                 (balance_key, device_id, token_id, policy_commit, available, locked, source_state_hash) \
+                 VALUES (?1, ?2, ?3, ?4, 'not a number', 0, ?5)",
+                rusqlite::params![
+                    "a row for RIGC",
+                    crate::util::text_id::encode_base32_crockford(&router.device_id_bytes),
+                    "RIGC",
+                    crate::util::text_id::encode_base32_crockford(&anchor),
+                    crate::util::text_id::encode_base32_crockford(&[0x5Au8; 32]),
+                ],
+            )
+            .expect("a row the store holds and Rust cannot decode");
+        assert_eq!(inserted, 1);
+    }
+
+    let broken = balance_get(router, "RIGC").await;
+    assert!(
+        !broken.success,
+        "a projection row that does not decode is the answer's failure, not 0: {:?}",
+        broken.error_message
+    );
+    let why = broken.error_message.unwrap_or_default();
+    assert!(why.contains("projection"), "{why}");
+}
+
 /// SELF-CERTIFYING, NOT TRUSTED. The registry holds the policy bytes under
 /// their commitment; if the stored bytes stop hashing to it — a damaged
 /// database — the token no longer resolves. A mutable cache is never granted

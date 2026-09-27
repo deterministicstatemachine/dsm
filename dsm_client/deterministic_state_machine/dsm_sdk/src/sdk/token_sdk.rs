@@ -412,9 +412,18 @@ impl TokenSDK {
         }
     }
 
-    fn read_projected_balance(&self, device_id: &[u8; 32], token_id: &str) -> Option<Balance> {
-        let state = self.core_sdk.get_current_state().ok()?;
-        let policy_commit = self.resolve_policy_commit_strict(token_id).ok()?;
+    /// The balance the canonical state holds for `token_id`, else the validated
+    /// projection row, else `None`: this device holds none of the token,
+    /// established over a readable head and store. A head that cannot be read,
+    /// a token that does not resolve, or a projection row the store holds but
+    /// cannot validate or decode is an error — never an absence.
+    fn read_projected_balance(
+        &self,
+        device_id: &[u8; 32],
+        token_id: &str,
+    ) -> Result<Option<Balance>, DsmError> {
+        let state = self.core_sdk.get_current_state()?;
+        let policy_commit = self.resolve_policy_commit_strict(token_id)?;
         let canonical = dsm::core::token::derive_canonical_balance_key(
             &policy_commit,
             &state.device_info.public_key,
@@ -425,7 +434,7 @@ impl TokenSDK {
 
         if let Some(balance) = state.token_balances.get(&canonical).cloned() {
             self.sync_projection_from_state(device_id, &state, token_id, &policy_commit, &balance);
-            return Some(balance);
+            return Ok(Some(balance));
         }
 
         match crate::storage::client_db::get_validated_balance_projection(
@@ -434,27 +443,12 @@ impl TokenSDK {
             &canonical,
             &policy_commit_txt,
         ) {
-            Ok(Some(record)) => match balance_from_projection(&record) {
-                Ok(balance) => return Some(balance),
-                Err(e) => {
-                    log::warn!(
-                        "[TokenSDK] Ignoring invalid projection row for {}: {}",
-                        token_id,
-                        e
-                    );
-                }
-            },
-            Ok(None) => {}
-            Err(e) => {
-                log::warn!(
-                    "[TokenSDK] Ignoring invalid projection row for {}: {}",
-                    token_id,
-                    e
-                );
-            }
+            Ok(Some(record)) => Ok(Some(balance_from_projection(&record)?)),
+            Ok(None) => Ok(None),
+            Err(e) => Err(DsmError::invalid_parameter(format!(
+                "balance projection for {token_id}: the store holds a row that does not validate: {e}"
+            ))),
         }
-
-        None
     }
 
     pub(crate) fn project_balance_cache_from_state(
@@ -856,37 +850,50 @@ impl TokenSDK {
     }
 
     /// Lane router: dispatches to the correct lane-specific reader based on token type.
-    pub fn get_token_balance(&self, device_id: &[u8; 32], token_id: &str) -> Balance {
+    /// A balance that could not be established is an error, never a zero.
+    pub fn get_token_balance(
+        &self,
+        device_id: &[u8; 32],
+        token_id: &str,
+    ) -> Result<Balance, DsmError> {
         match classify_token(token_id) {
             TokenLane::Dbtc => self.get_dbtc_balance(device_id),
             TokenLane::Canonical => self.get_canonical_token_balance(device_id, token_id),
         }
     }
 
-    fn get_canonical_token_balance(&self, device_id: &[u8; 32], token_id: &str) -> Balance {
-        let balances = self.balances.read();
-        if let Some(b) = balances
+    fn get_canonical_token_balance(
+        &self,
+        device_id: &[u8; 32],
+        token_id: &str,
+    ) -> Result<Balance, DsmError> {
+        if let Some(b) = self
+            .balances
+            .read()
             .get(device_id)
             .and_then(|m| m.get(token_id))
             .cloned()
         {
-            return b;
+            return Ok(b);
         }
-        if let Some(balance) = self.read_projected_balance(device_id, token_id) {
-            drop(balances);
-            self.balances
-                .write()
-                .entry(*device_id)
-                .or_default()
-                .insert(token_id.to_string(), balance.clone());
-            return balance;
+        match self.read_projected_balance(device_id, token_id)? {
+            Some(balance) => {
+                self.balances
+                    .write()
+                    .entry(*device_id)
+                    .or_default()
+                    .insert(token_id.to_string(), balance.clone());
+                Ok(balance)
+            }
+            // Established absence: the head and the store were read and
+            // neither holds this token for this device.
+            None => Ok(Balance::zero()),
         }
-        Balance::zero()
     }
 
     /// dBTC lane: canonical key via make_balance_key(pk, "dBTC").
     /// dBTC reads prefer canonical state and only fall back to validated projections.
-    fn get_dbtc_balance(&self, device_id: &[u8; 32]) -> Balance {
+    fn get_dbtc_balance(&self, device_id: &[u8; 32]) -> Result<Balance, DsmError> {
         self.get_canonical_token_balance(device_id, "dBTC")
     }
 
@@ -944,7 +951,7 @@ impl TokenSDK {
                 }
                 // Ensure free balance >= amount
                 let owner = self.core_sdk.get_current_state()?.device_info.device_id;
-                let bal = self.get_token_balance(&owner, token_id);
+                let bal = self.get_token_balance(&owner, token_id)?;
                 if bal.value() < *amount {
                     return Err(DsmError::invalid_operation("Insufficient balance to lock"));
                 }
@@ -997,7 +1004,7 @@ impl TokenSDK {
         }
 
         let creator_id = self.core_sdk.get_current_state()?.device_info.device_id;
-        let era_balance = self.get_token_balance(&creator_id, "ERA");
+        let era_balance = self.get_token_balance(&creator_id, "ERA")?;
 
         if era_balance.value() < fee {
             return Err(DsmError::invalid_operation(format!(
