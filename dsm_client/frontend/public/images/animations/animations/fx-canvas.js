@@ -312,8 +312,21 @@
               if (px[p * 4 + 3] >= 128 && lab[p] !== main.id) px[p * 4 + 3] = 0;
             }
             const mnX = main.mnX, mxX = main.mxX, mnY = main.mnY, mxY = main.mxY;
-            octx.putImageData(d, 0, 0);
-            if (mxX > mnX && mxY > mnY) this._sciImg = { cv: oc, x: mnX, y: mnY, w: mxX - mnX + 1, h: mxY - mnY + 1 };
+            // The art is drawn in the four DMG greens. Index each opaque pixel
+            // to a palette slot by its luminance (lightest = 0, darkest = 3),
+            // so the mascot is painted in whatever palette the screen wears.
+            if (mxX > mnX && mxY > mnY) {
+              const w = mxX - mnX + 1, h = mxY - mnY + 1;
+              const idx = new Uint8Array(w * h);
+              for (let yy = 0; yy < h; yy++) for (let xx = 0; xx < w; xx++) {
+                const i = ((yy + mnY) * Wd + (xx + mnX)) * 4;
+                if (px[i + 3] < 128) { idx[yy * w + xx] = 255; continue; }
+                const lum = 0.299 * px[i] + 0.587 * px[i + 1] + 0.114 * px[i + 2];
+                idx[yy * w + xx] = lum > 140 ? 0 : lum > 70 ? 1 : lum > 36 ? 2 : 3;
+              }
+              this._sciMap = { w, h, idx };
+              this._sciImg = null;
+            }
           } catch (e) {}
         };
         im.src = FX_BASE + 'sci-guy.png';
@@ -324,6 +337,22 @@
         mute: (v) => { this._muteOverride = !!v; }
       };
       this.readPalette();
+      // The app applies a color theme by writing CSS variables onto <html>;
+      // follow every such change so a scene already on screen (the intro
+      // before the saved theme lands, a popup while SELECT is pressed)
+      // repaints in the new palette.
+      if (!this._themeMo) {
+        try {
+          this._themeMo = new MutationObserver(() => {
+            this.readPalette();
+            if (this._cur && this._cv && this._connected) {
+              this._lastF = -1;
+              if (!this._raf) this._raf = requestAnimationFrame(this._step);
+            }
+          });
+          this._themeMo.observe(document.documentElement, { attributes: true, attributeFilter: ['style', 'data-theme'] });
+        } catch (e) {}
+      }
       // An `anim` attribute set while the fonts were loading has already
       // started a scene; do not restart it behind the user's back.
       const start = () => { if (this._connected && !this._cur) this.play(this.getAttribute('anim') || 'intro'); };
@@ -337,6 +366,7 @@
     disconnectedCallback() {
       this._connected = false;
       if (this._ro) { try { this._ro.disconnect(); } catch (e) {} }
+      if (this._themeMo) { try { this._themeMo.disconnect(); } catch (e) {} this._themeMo = null; }
       if (this._raf) { cancelAnimationFrame(this._raf); this._raf = null; }
     }
 
@@ -379,6 +409,36 @@
     fps() {
       const v = Number(this.getAttribute('fps'));
       return Math.max(4, Math.min(20, v || 10));
+    }
+
+    // The mascot painted in the palette in force; repainted only when it changes.
+    sciImgFor(pal) {
+      const m = this._sciMap;
+      if (!m) return null;
+      const key = pal.join('|');
+      if (this._sciImg && this._sciImg.key === key) return this._sciImg;
+      const oc = document.createElement('canvas');
+      oc.width = m.w; oc.height = m.h;
+      const octx = oc.getContext('2d');
+      const probe = octx; // normalises any CSS colour to #rrggbb through fillStyle
+      const rgb = pal.map((c) => {
+        probe.fillStyle = '#000'; probe.fillStyle = c;
+        const v = String(probe.fillStyle);
+        if (v[0] === '#' && v.length === 7) return [parseInt(v.slice(1, 3), 16), parseInt(v.slice(3, 5), 16), parseInt(v.slice(5, 7), 16)];
+        const mm = /rgba?\((\d+),\s*(\d+),\s*(\d+)/.exec(v);
+        return mm ? [Number(mm[1]), Number(mm[2]), Number(mm[3])] : [0, 0, 0];
+      });
+      const d = octx.createImageData(m.w, m.h);
+      const px = d.data;
+      for (let p = 0; p < m.w * m.h; p++) {
+        const k = m.idx[p];
+        if (k === 255) continue;
+        const c = rgb[k];
+        px[p * 4] = c[0]; px[p * 4 + 1] = c[1]; px[p * 4 + 2] = c[2]; px[p * 4 + 3] = 255;
+      }
+      octx.putImageData(d, 0, 0);
+      this._sciImg = { key, cv: oc, x: 0, y: 0, w: m.w, h: m.h };
+      return this._sciImg;
     }
 
     readPalette() {
@@ -829,7 +889,7 @@
         let yo = 0;
         if (pose === 'walk0') yo = -1;
         if (pose === 'cheer' && f % 4 < 2) yo = -2;
-        const IM = this._sciImg;
+        const IM = this.sciImgFor(this.pal || ['#9bbc0f', '#8bac0f', '#306230', '#0f380f']);
         if (IM) {
           const dh = 71, dw = Math.round(IM.w * dh / IM.h);
           S.drawImg(IM, cx - (dw >> 1), fy - dh + yo, dw, dh, true);
@@ -1431,6 +1491,7 @@
     play(name) {
       const anims = this.ANIMS();
       if (!anims[name]) return;
+      this.readPalette();
       this._cur = name;
       this._t0 = performance.now();
       this._lastF = -1;

@@ -79,7 +79,7 @@ export const StorageMembersPanel: React.FC<{ members: StorageMember[] }> = ({ me
   const [expanded, setExpanded] = useState<string | null>(null);
 
   return (
-    <section className="sb-card">
+    <section className="sb-card" aria-label="Storage members">
       <div className="sb-card__title">
         <span>Member</span>
         <span>Cycle · Used</span>

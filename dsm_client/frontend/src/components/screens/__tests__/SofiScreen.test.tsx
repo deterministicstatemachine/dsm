@@ -74,11 +74,11 @@ beforeEach(() => {
 });
 
 describe('SofiScreen', () => {
-  it('is a framed screen with Swap and Pools, and offers only anchored tokens', async () => {
+  it('is a framed screen with Swap and Liquidity, and offers only anchored tokens', async () => {
     render(<SofiScreen />);
     expect(screen.getByRole('heading', { name: 'SoFi' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Swap' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Pools' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Liquidity' })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'Token in' }));
     const list = await screen.findByRole('listbox', { name: 'Token in' });
@@ -90,7 +90,7 @@ describe('SofiScreen', () => {
     const LOOKALIKE = encodeBase32Crockford(new Uint8Array(32).fill(0x33));
     balances = [balance('PLAY', PLAY), balance('PLAY', LOOKALIKE)];
     render(<SofiScreen />);
-    fireEvent.click(screen.getByRole('button', { name: 'Pools' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Liquidity' }));
 
     fireEvent.click(screen.getByRole('button', { name: 'Token A' }));
     const list = await screen.findByRole('listbox', { name: 'Token A' });
@@ -161,10 +161,10 @@ describe('SofiScreen', () => {
     expect(findRoute).not.toHaveBeenCalled();
   });
 
-  it('creates a pool with the pair ordered bytewise and the reserves following their tokens', async () => {
+  it('creates liquidity with the pair ordered bytewise and the reserves following their tokens', async () => {
     createVault.mockResolvedValueOnce({ vaultId: VAULT_1, position: 3n });
     render(<SofiScreen />);
-    fireEvent.click(screen.getByRole('button', { name: 'Pools' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Liquidity' }));
 
     // PLAY (0x22…) is picked as A, ERA (0x11…) as B: ERA sorts first.
     fireEvent.change(screen.getByLabelText('Token A and its reserve'), { target: { value: '500' } });
@@ -172,22 +172,22 @@ describe('SofiScreen', () => {
     fireEvent.change(screen.getByLabelText('Token B and its reserve'), { target: { value: '100' } });
     await pickToken('Token B', 'ERA');
     fireEvent.change(screen.getByLabelText('Fee, in basis points'), { target: { value: '25' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Create pool' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Create Liquidity Vault' }));
 
     await waitFor(() => expect(createVault).toHaveBeenCalledTimes(1));
     expect(createVault).toHaveBeenCalledWith({ tokenA: ERA_BYTES, tokenB: PLAY_BYTES, reserveA: 100n, reserveB: 500n, feeBps: 25 });
-    const created = await screen.findByRole('status', { name: 'Pool created' });
+    const created = await screen.findByRole('status', { name: 'Liquidity vault created' });
     expect(within(created).getByText(encodeBase32Crockford(VAULT_1))).toBeInTheDocument();
     expect(screen.getByLabelText('Vault id')).toHaveValue(encodeBase32Crockford(VAULT_1));
-    expect(play).toHaveBeenCalledWith(expect.objectContaining({ anim: 'vault', title: 'Pool created' }));
+    expect(play).toHaveBeenCalledWith(expect.objectContaining({ anim: 'vault', title: 'Liquidity vault created' }));
   });
 
-  it('sets up with, and closes, a pool by its id; resolve is on the header', async () => {
+  it('sets up with, and closes, liquidity by its id; resolve is on the header', async () => {
     setup.mockResolvedValueOnce({ setupRef: new Uint8Array(32), position: 4n });
     close.mockResolvedValueOnce({ position: 5n, state: 'realized' });
     resolve.mockResolvedValueOnce({ position: 6n, state: 'retriesExhausted' });
     render(<SofiScreen />);
-    fireEvent.click(screen.getByRole('button', { name: 'Pools' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Liquidity' }));
 
     fireEvent.change(screen.getByLabelText('Vault id'), { target: { value: encodeBase32Crockford(VAULT_2) } });
     fireEvent.click(screen.getByRole('button', { name: 'Set up' }));
