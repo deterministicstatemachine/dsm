@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-// The passcode prompt is a layer of its own over the whole screen. Inside the
-// home screen's content its shade ended where that content ended, short of
-// the screen's bottom (owner, on the A54).
+// The passcode prompt is a layer of its own over the whole display: the screen
+// and the nav bar under it, which share the shell's screen wrapper. Inside the
+// home screen's content its shade stopped at the screen's bottom edge and left
+// the nav bar lit (owner, on the A54).
 
 import React from 'react';
 import { render, screen } from '@testing-library/react';
@@ -154,21 +155,29 @@ jest.mock('../services/lock/lockService', () => ({
 }));
 
 describe('App passcode prompt layer', () => {
+  // The shell's markup (public/index.html): the screen and its nav bar in one wrapper.
+  let wrapper: HTMLElement;
   beforeEach(() => {
     mockScreen.current = 'home';
     mockIntro.showIntro = false;
     mockTour.active = false;
+    wrapper = document.createElement('div');
+    wrapper.className = 'screen-wrapper';
+    wrapper.innerHTML = '<div class="screen" id="stateboy-screen"></div><div class="screen-nav-bar"></div>';
+    document.body.appendChild(wrapper);
   });
+  afterEach(() => wrapper.remove());
 
-  test("is a layer beside the screen host, not inside the home screen's content", () => {
-    const { container } = render(<App />);
+  test("shades the screen and its nav bar, not just the home screen's content", () => {
+    render(<App />);
     const dialog = screen.getByRole('dialog', { name: 'PROTECT YOUR WALLET?' });
     const shade = dialog.parentElement as HTMLElement;
     expect(shade).toHaveClass('sb-popover-backdrop');
     expect(dialog.closest('.stateboy-screen-host')).toBeNull();
     expect(screen.getByTestId('home-content').closest('.stateboy-screen-host')).not.toBeNull();
-    // Its shade's box is the app root's, which is the whole screen.
-    expect(shade.parentElement).toBe(container);
+    // Its shade's box is the wrapper's: the screen and the nav bar together.
+    expect(shade.parentElement).toBe(wrapper);
+    expect(wrapper.querySelector('.screen-nav-bar')).not.toBeNull();
   });
 
   test('is not shown off the home screen', () => {

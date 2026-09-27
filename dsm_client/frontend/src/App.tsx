@@ -166,13 +166,12 @@ export default function App() {
                     <GuidedTour appState={runtime.appState} />
                     <TourOffer appState={runtime.appState} showIntro={showIntro} />
                   </ScreenContainer>
-                  {/* The passcode prompt is its own layer over the whole screen,
-                      beside the screen host rather than inside the home
-                      screen's content, whose box ends above the screen's
-                      bottom: its shade reaches every edge. The tour portals
-                      above the screen, so it stays on top; while a tour runs
-                      the prompt waits, rather than covering what the tour
-                      points at, and comes back when the tour ends at home. */}
+                  {/* The passcode prompt is its own layer, not part of the home
+                      screen's content: it portals over the whole display, the
+                      screen and its nav bar. The tour portals above the shell,
+                      so it stays on top; while a tour runs the prompt waits,
+                      rather than covering what the tour points at, and comes
+                      back when the tour ends at home. */}
                   {runtime.showLockPrompt && !showIntro && !tour.active && runtime.appState === 'wallet_ready' && navigation.currentScreen === 'home' ? (
                     <LockPromptModal
                       onNavigate={navigationStore.navigate}
