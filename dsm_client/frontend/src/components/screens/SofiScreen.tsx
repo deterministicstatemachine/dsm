@@ -67,11 +67,13 @@ export default function SofiScreen(): React.JSX.Element {
   const [status, setStatus] = useState<Status | null>(null);
 
   // What the pickers offer: the held tokens that carry an anchor. The value is
-  // the anchor itself, which is the policy commit SoFi names a token by.
+  // the anchor itself, which is the policy commit SoFi names a token by. A
+  // ticker is display only, so each row also carries the anchor's fingerprint:
+  // two tokens can share a ticker, never an anchor.
   const tokenOptions: TokenOption[] = useMemo(
     () => balances
       .filter((b) => !!b.policyAnchorB32)
-      .map((b) => ({ value: b.policyAnchorB32 as string, ticker: b.symbol, iconUrl: b.iconUrl })),
+      .map((b) => ({ value: b.policyAnchorB32 as string, ticker: b.symbol, iconUrl: b.iconUrl, note: b.anchorFingerprint })),
     [balances],
   );
   const held = useCallback(
