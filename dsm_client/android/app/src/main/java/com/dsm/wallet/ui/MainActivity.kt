@@ -1004,18 +1004,6 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
                 }
                 Log.i(tag, "DSM bridge: method '$method' response size: ${respBytes.size} bytes")
 
-                // Optional: native-side deterministic safety routing (Error.source_tag == 11)
-                try {
-                    val (ok, data) = com.dsm.wallet.bridge.BridgeEnvelopeCodec.parseEnvelopeResponse(respBytes)
-                    if (ok) {
-                        com.dsm.wallet.bridge.BridgeEnvelopeCodec.extractDeterministicSafetyMessageFromEnvelope(data)?.let {
-                            dispatchDsmEventOnUi("dsm.deterministicSafety", it.toByteArray(Charsets.UTF_8))
-                        }
-                    }
-                } catch (_: Throwable) {
-                    // ignore parse errors (response may not be an Envelope)
-                }
-
                 // Prepend message ID to response (8 bytes u64)
                 val responseWithId = ByteArray(8 + respBytes.size)
                 java.nio.ByteBuffer.wrap(responseWithId, 0, 8).order(java.nio.ByteOrder.BIG_ENDIAN).putLong(messageId)

@@ -12,7 +12,6 @@ import { decodeNativeHostEventToLegacyTopic } from './NativeHostBridge';
 import { dispatchNativeQrScannerActive } from './qrScannerState';
 import { bytesToBase32CrockfordPrefix, encodeBase32Crockford } from '../utils/textId';
 import { bridgeEvents } from '../bridge/bridgeEvents';
-import { emitDeterministicSafetyIfPresent } from '../utils/deterministicSafety';
 import logger from '../utils/logger';
 import type { NativeSessionSnapshot } from '../runtime/nativeSessionTypes';
 
@@ -212,16 +211,6 @@ export function initializeEventBridge(): void {
           logger.warn('[EventBridge] canonical envelope decode failed:', e);
         }
         emit(topic, bytes);
-        return;
-      }
-
-      if (topic === 'dsm.deterministicSafety') {
-        try {
-          const msg = new TextDecoder().decode(bytes);
-          emitDeterministicSafetyIfPresent(msg);
-        } catch {
-          // ignore
-        }
         return;
       }
 

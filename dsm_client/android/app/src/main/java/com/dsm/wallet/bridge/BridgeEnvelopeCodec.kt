@@ -8,7 +8,6 @@ import dsm.types.proto.AppRouterPayload
 import dsm.types.proto.BilateralPayload
 import dsm.types.proto.BridgeRpcRequest
 import dsm.types.proto.BridgeRpcResponse
-import dsm.types.proto.Envelope
 import dsm.types.proto.ErrorResponse
 import dsm.types.proto.PreferencePayload
 import dsm.types.proto.SuccessResponse
@@ -22,8 +21,6 @@ internal object BridgeEnvelopeCodec {
 
     data class BridgeRequest(val method: String, val payload: ByteArray)
 
-    data class DsmErrorInfo(val sourceTag: Int, val message: String)
-
     data class BridgeRpcError(val errorCode: Int, val message: String, val debugB32: String?)
 
     data class AppRouterRequest(val methodName: String, val args: ByteArray)
@@ -33,9 +30,6 @@ internal object BridgeEnvelopeCodec {
     data class BilateralRequest(val commitment: ByteArray, val reason: String?)
 
     private const val METHOD_MAX_BYTES = 128
-
-    /** Rust's source tag on a deterministic-safety refusal. */
-    private const val SOURCE_TAG_DETERMINISTIC_SAFETY = 11
 
     /**
      * Decodes a `BridgeRpcRequest`. The method must be present, at most 128 bytes
@@ -72,12 +66,6 @@ internal object BridgeEnvelopeCodec {
             BridgeRpcRequest.PayloadCase.BILATERAL -> req.bilateral.toByteArray()
         }
         return BridgeRequest(method, payload)
-    }
-
-    /** The message of a deterministic-safety refusal carried by an `Envelope`, else null. */
-    fun extractDeterministicSafetyMessageFromEnvelope(envelopeBytes: ByteArray): String? {
-        val err = extractErrorInfoFromEnvelope(envelopeBytes) ?: return null
-        return if (err.sourceTag == SOURCE_TAG_DETERMINISTIC_SAFETY) err.message else null
     }
 
     /** (isSuccess, payload): the success data, or the `ErrorResponse` bytes. */
@@ -167,20 +155,5 @@ internal object BridgeEnvelopeCodec {
             .setDebugB32(debug)
             .build()
         return BridgeRpcResponse.newBuilder().setError(error).build().toByteArray()
-    }
-
-    private fun extractErrorInfoFromEnvelope(bytes: ByteArray): DsmErrorInfo? {
-        val env = try {
-            Envelope.parseFrom(bytes)
-        } catch (_: InvalidProtocolBufferException) {
-            return null
-        }
-        val error = when {
-            env.hasError() -> env.error
-            env.hasUniversalRx() -> env.universalRx.resultsList.firstOrNull { it.hasError() }?.error
-            else -> null
-        } ?: return null
-        if (error.sourceTag == 0 && error.message.isEmpty()) return null
-        return DsmErrorInfo(error.sourceTag, error.message)
     }
 }

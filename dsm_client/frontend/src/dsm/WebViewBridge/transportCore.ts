@@ -15,7 +15,7 @@ import {
 import { bridgeEvents } from "../../bridge/bridgeEvents";
 import { getBridgeInstance } from "../../bridge/BridgeRegistry";
 import type { AndroidBridgeV3 } from "../bridgeTypes";
-import { emitDeterministicSafetyIfPresent } from "../../utils/deterministicSafety";
+;
 import {
   buildRouterInvokeIngressRequest,
   buildRouterQueryIngressRequest,
@@ -47,7 +47,6 @@ export const toBytes = (bytes: Uint8Array): Uint8Array<ArrayBuffer> => {
   }
   return out;
 };
-
 
 export class BridgeError extends Error {
   errorCode?: number;
@@ -83,8 +82,6 @@ const unwrapProtobufResponse = async (_method: string, buf: Uint8Array): Promise
         uiMessage += ` [${hex}]`;
       }
 
-      emitDeterministicSafetyIfPresent(uiMessage);
-
       const be = new BridgeError(code, uiMessage);
       be.details = err;
 
@@ -100,7 +97,6 @@ const unwrapProtobufResponse = async (_method: string, buf: Uint8Array): Promise
       throw be;
     }
     const errorMessage = new TextDecoder().decode(buf);
-    emitDeterministicSafetyIfPresent(errorMessage);
     try {
       bridgeEvents.emit("bridge.error", { code: 0, message: errorMessage, debugB32: "" });
     } catch (_e) {
@@ -111,7 +107,6 @@ const unwrapProtobufResponse = async (_method: string, buf: Uint8Array): Promise
     if (e instanceof BridgeError) throw e;
 
     const errorMessage = new TextDecoder().decode(buf);
-    emitDeterministicSafetyIfPresent(errorMessage);
     try {
       bridgeEvents.emit("bridge.error", { code: 0, message: errorMessage, debugB32: "" });
     } catch (_e) {

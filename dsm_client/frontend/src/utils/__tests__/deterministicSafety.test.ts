@@ -7,66 +7,42 @@ declare const expect: any;
 declare const beforeEach: any;
 declare const afterEach: any;
 
-import { parseDeterministicSafety, emitDeterministicSafetyIfPresent } from '../deterministicSafety';
+import {
+  DETERMINISTIC_SAFETY_SOURCE_TAG,
+  deterministicSafetyFromError,
+  emitDeterministicSafetyForError,
+} from '../deterministicSafety';
 import { bridgeEvents } from '../../bridge/bridgeEvents';
 
-describe('parseDeterministicSafety', () => {
-  test('returns null for null/undefined/empty', () => {
-    expect(parseDeterministicSafety(null)).toBeNull();
-    expect(parseDeterministicSafety(undefined)).toBeNull();
-    expect(parseDeterministicSafety('')).toBeNull();
+const enc = (s: string) => new TextEncoder().encode(s);
+
+describe('deterministicSafetyFromError', () => {
+  test('an error Rust did not tag is not a safety refusal, whatever it says', () => {
+    expect(deterministicSafetyFromError({
+      sourceTag: 10,
+      message: 'Deterministic safety rejection [ParentConsumed]: parent already consumed',
+      context: enc('classification=ParentConsumed message=parent already consumed'),
+    })).toBeNull();
   });
 
-  test('returns null for non-matching messages', () => {
-    expect(parseDeterministicSafety('some random error')).toBeNull();
-    expect(parseDeterministicSafety('Deterministic safety')).toBeNull();
-    expect(parseDeterministicSafety('Deterministic safety rejection')).toBeNull();
+  test('a tagged error yields the class and message Rust put in its context', () => {
+    expect(deterministicSafetyFromError({
+      sourceTag: DETERMINISTIC_SAFETY_SOURCE_TAG,
+      message: 'Deterministic safety rejection [StalePrecommit]: tip moved',
+      context: enc('classification=StalePrecommit message=tip moved'),
+    })).toEqual({ classification: 'StalePrecommit', message: 'tip moved' });
   });
 
-  test('parses a valid deterministic safety rejection message', () => {
-    const msg = 'Deterministic safety rejection [OVERFLOW]: value exceeds maximum';
-    const result = parseDeterministicSafety(msg);
-    expect(result).toEqual({
-      classification: 'OVERFLOW',
-      message: 'value exceeds maximum',
-    });
-  });
-
-  test('is case-insensitive', () => {
-    const msg = 'deterministic safety rejection [Replay]: duplicate nonce detected';
-    const result = parseDeterministicSafety(msg);
-    expect(result).toEqual({
-      classification: 'Replay',
-      message: 'duplicate nonce detected',
-    });
-  });
-
-  test('handles empty classification gracefully', () => {
-    const msg = 'Deterministic safety rejection []: some detail';
-    const result = parseDeterministicSafety(msg);
-    expect(result).toBeNull();
-  });
-
-  test('handles empty detail', () => {
-    const msg = 'Deterministic safety rejection [CRITICAL]:';
-    const result = parseDeterministicSafety(msg);
-    expect(result).toEqual({
-      classification: 'CRITICAL',
-      message: '',
-    });
-  });
-
-  test('trims classification and detail', () => {
-    const msg = 'Deterministic safety rejection [ BOUNDS ]:  out of range  ';
-    const result = parseDeterministicSafety(msg);
-    expect(result).toEqual({
-      classification: 'BOUNDS',
-      message: 'out of range',
-    });
+  test('a tagged error without the context format keeps its message and no class', () => {
+    expect(deterministicSafetyFromError({
+      sourceTag: DETERMINISTIC_SAFETY_SOURCE_TAG,
+      message: 'refused',
+      context: new Uint8Array(0),
+    })).toEqual({ classification: '', message: 'refused' });
   });
 });
 
-describe('emitDeterministicSafetyIfPresent', () => {
+describe('emitDeterministicSafetyForError', () => {
   let emitSpy: any;
 
   beforeEach(() => {
@@ -77,29 +53,29 @@ describe('emitDeterministicSafetyIfPresent', () => {
     emitSpy.mockRestore();
   });
 
-  test('returns false and does not emit for non-matching messages', () => {
-    expect(emitDeterministicSafetyIfPresent('random error')).toBe(false);
+  test('emits nothing for an untagged error', () => {
+    expect(emitDeterministicSafetyForError({ sourceTag: 0, message: 'random error', context: new Uint8Array(0) })).toBe(false);
     expect(emitSpy).not.toHaveBeenCalled();
   });
 
-  test('returns false for null/undefined', () => {
-    expect(emitDeterministicSafetyIfPresent(null)).toBe(false);
-    expect(emitDeterministicSafetyIfPresent(undefined)).toBe(false);
-    expect(emitSpy).not.toHaveBeenCalled();
-  });
-
-  test('returns true and emits for valid safety rejection', () => {
-    const msg = 'Deterministic safety rejection [DOUBLE_SPEND]: already spent';
-    expect(emitDeterministicSafetyIfPresent(msg)).toBe(true);
+  test('emits the detail for a tagged error', () => {
+    expect(emitDeterministicSafetyForError({
+      sourceTag: DETERMINISTIC_SAFETY_SOURCE_TAG,
+      message: 'x',
+      context: enc('classification=TipMismatch message=expected tip differs'),
+    })).toBe(true);
     expect(emitSpy).toHaveBeenCalledWith('dsm.deterministicSafety', {
-      classification: 'DOUBLE_SPEND',
-      message: 'already spent',
+      classification: 'TipMismatch',
+      message: 'expected tip differs',
     });
   });
 
-  test('returns true even if emit throws', () => {
+  test('answers true even if a listener throws', () => {
     emitSpy.mockImplementation(() => { throw new Error('fail'); });
-    const msg = 'Deterministic safety rejection [ERROR]: something broke';
-    expect(emitDeterministicSafetyIfPresent(msg)).toBe(true);
+    expect(emitDeterministicSafetyForError({
+      sourceTag: DETERMINISTIC_SAFETY_SOURCE_TAG,
+      message: 'x',
+      context: enc('classification=ParentConsumed message=already consumed'),
+    })).toBe(true);
   });
 });

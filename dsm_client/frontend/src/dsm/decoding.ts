@@ -2,6 +2,7 @@
 
 import * as pb from '../proto/dsm_app_pb';
 import { encodeBase32Crockford } from '../utils/textId';
+import { emitDeterministicSafetyForError } from '../utils/deterministicSafety';
 
 
 /**
@@ -42,6 +43,11 @@ export function decodeFramedEnvelopeV3(bytes: Uint8Array): pb.Envelope {
       throw new Error(`Expected Envelope v3, got v${env.version}`);
     }
 
+    // A refusal Rust tagged as deterministic safety is announced from the one
+    // place every transport envelope is decoded; the tag, never the text, says so.
+    if (env.payload.case === 'error') {
+      emitDeterministicSafetyForError(env.payload.value);
+    }
     return env;
   }
 
