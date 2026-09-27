@@ -1124,6 +1124,19 @@ async fn deliver_pending_acceptance_replies(
             }
         };
 
+        // The post-admission RELEASE (3.5b PR4): the sweep only sees promoted
+        // rows, so a row carries its release by construction. A row without one
+        // is a local defect — the sender refuses a bare delta — and stays
+        // unmarked and visible rather than going out with an empty release.
+        let Some(release_bytes) = reply.release_bytes.as_deref() else {
+            log::error!(
+                "[storage.sync] §16.6 reply for commitment {}.. has no post-admission release — \
+                 local defect, left unmarked",
+                crate::util::text_id::encode_base32_crockford(&reply.commitment[..4]),
+            );
+            continue;
+        };
+
         // NOTE: the envelope is built from `dsm::types::proto`, which is a SEPARATE
         // prost generation from `crate::generated` — same schema, distinct Rust types.
         let mut b0x = match crate::sdk::b0x_sdk::B0xSDK::new(
@@ -1149,11 +1162,7 @@ async fn deliver_pending_acceptance_replies(
                 &reply.commitment,
                 &reply.receipt_bytes,
                 (reply.applied_parent_tip_b, reply.applied_child_tip_b),
-                // The post-admission RELEASE (3.5b PR4): the sweep only sees
-                // promoted rows, so a Some here is admission-terminal by
-                // construction. Rows from before the release existed carry
-                // none and the sender refuses them — beta clean cut.
-                reply.release_bytes.as_deref().unwrap_or_default(),
+                release_bytes,
             )
             .await
         {

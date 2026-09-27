@@ -142,19 +142,6 @@ pub fn hash_multiple(parts: &[&[u8]]) -> Vec<u8> {
     hasher.finalize().as_bytes().to_vec()
 }
 
-// ===== Initialization =====
-
-/// Initialize crypto subsystems used by DSM.
-pub fn init_crypto() -> Result<(), DsmError> {
-    // Kyber KEM/AES
-    kyber::init_kyber()?;
-
-    // SPHINCS+ (ensures self-tests run at startup)
-    sphincs::init_sphincs()?;
-
-    Ok(())
-}
-
 // ===== Nonce generation =====
 // Notes:
 // - AES-GCM requires a 96-bit (12-byte) nonce. Use `generate_gcm_nonce`.

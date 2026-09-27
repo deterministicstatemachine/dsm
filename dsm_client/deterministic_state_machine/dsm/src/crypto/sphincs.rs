@@ -59,7 +59,6 @@ use rand::rngs::OsRng;
 use rand::{RngCore, SeedableRng, TryRngCore};
 use rand_chacha::ChaCha20Rng;
 use subtle::ConstantTimeEq;
-use tracing::{debug, error, info};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 #[cfg(feature = "sphincs-trace")]
@@ -1107,27 +1106,6 @@ pub fn secret_key_bytes(v: SphincsVariant) -> usize {
 }
 pub fn signature_bytes(v: SphincsVariant) -> usize {
     param_set(v).sig_bytes
-}
-
-// ================================ Init ======================================
-
-pub fn init_sphincs() -> Result<(), DsmError> {
-    // self-test a small variant for sanity and log supported variants
-    info!("Initializing SPHINCS+ (BLAKE3-only) with 6 parameter sets");
-    let v = SphincsVariant::SPX128s;
-    let kp = generate_keypair(v)?;
-    let msg = b"SPHINCS+ self-test message";
-    let sig = sign(v, &kp.secret_key, msg)?;
-    let ok = verify(v, &kp.public_key, msg, &sig)?;
-    if !ok {
-        error!("SPHINCS+ self-test failed");
-        return Err(DsmError::crypto(
-            "SPHINCS+ self-test failure".to_string(),
-            None::<std::io::Error>,
-        ));
-    }
-    debug!("SPHINCS+ self-test passed for {:?}", v);
-    Ok(())
 }
 
 // ===================== Default Variant Wrappers ==========================

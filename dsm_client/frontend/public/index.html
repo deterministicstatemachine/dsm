@@ -16,8 +16,8 @@
     script-src 'self' 'unsafe-inline' 'unsafe-eval'; 
     style-src 'self' 'unsafe-inline'; 
     font-src 'self' data:; 
-    img-src 'self' data: blob: https://*.tile.openstreetmap.org https://tile.openstreetmap.org https://demotiles.maplibre.org; 
-    connect-src 'self' https://*.dsm-wallet.io https://demotiles.maplibre.org https://*.tile.openstreetmap.org https://tile.openstreetmap.org <% if (htmlWebpackPlugin && htmlWebpackPlugin.options && htmlWebpackPlugin.options.templateParameters && htmlWebpackPlugin.options.templateParameters.buildTarget === 'android') { %> http://localhost:8080 http://localhost:8081 http://localhost:8082 http://localhost:8083 http://localhost:8084 http://127.0.0.1:8080 http://127.0.0.1:8081 http://127.0.0.1:8082 http://127.0.0.1:8083 http://127.0.0.1:8084 <% } %>; 
+    img-src 'self' data: blob:; 
+    connect-src 'self'; 
     worker-src 'self' blob:; 
     object-src 'none';" />
   <meta http-equiv="X-XSS-Protection" content="1; mode=block" />
@@ -1886,6 +1886,8 @@ html[data-shell-theme] .stateboy::before {
       // Single shared MessagePort onmessage handler (ID-based routing)
       function installPortHandler(p) {
         p.onmessage = (e) => {
+          // Declared outside the try so the catch can release the pending entry.
+          let respId;
           try {
             let bytes;
             const data = e.data;
@@ -1928,7 +1930,7 @@ html[data-shell-theme] .stateboy::before {
             const idView = new DataView(bytes.buffer, bytes.byteOffset, 8);
             const hi = idView.getUint32(0, false); // big-endian high 32 bits
             const lo = idView.getUint32(4, false); // big-endian low 32 bits
-            const respId = (BigInt(hi) << 32n) | BigInt(lo);
+            respId = (BigInt(hi) << 32n) | BigInt(lo);
             
             // Lookup pending request by ID
             const state = pending.get(respId);
@@ -2014,14 +2016,23 @@ html[data-shell-theme] .stateboy::before {
       
       try { console.log('[DSM] Bridge interface installed, waiting for port...'); } catch (_) {}
       
-      // Listen for MessagePort from Android
+      // The bridge port: Kotlin posts it once, as an empty-string message
+      // carrying the port. It is taken once; any later port-bearing message,
+      // or one without that handshake, is not the bridge and is ignored.
       window.addEventListener('message', (ev) => {
-        if (ev.ports && ev.ports[0]) {
-          port = ev.ports[0];
-          installPortHandler(port);
-          resolvePortWaiters(port);
-          window.dispatchEvent(new Event('dsm-bridge-ready'));
+        if (!(ev.ports && ev.ports[0])) return;
+        if (port) {
+          console.warn('[DSM] Ignoring a second MessagePort delivery');
+          return;
         }
+        if (ev.data !== '') {
+          console.warn('[DSM] Ignoring a MessagePort without the bridge handshake');
+          return;
+        }
+        port = ev.ports[0];
+        installPortHandler(port);
+        resolvePortWaiters(port);
+        window.dispatchEvent(new Event('dsm-bridge-ready'));
       });
     })();
   </script>

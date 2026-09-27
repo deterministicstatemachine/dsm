@@ -256,7 +256,6 @@ pub mod algorithms {
     mod tests {
         use super::*;
         use crate::crypto::blake3::dsm_domain_hasher;
-        use crate::core::state_machine::utils;
 
         struct TestCsprng {
             current: [u8; 32],
@@ -408,21 +407,6 @@ pub mod algorithms {
                     })
                     .unwrap();
             assert!(!result2);
-        }
-
-        #[test]
-        fn test_calculate_next_entropy() {
-            let current_entropy = b"current_entropy";
-            let operation = b"operation";
-
-            // Same inputs → same entropy (deterministic)
-            let entropy1 = utils::calculate_next_entropy(current_entropy, operation, &[0u8; 32]);
-            let entropy2 = utils::calculate_next_entropy(current_entropy, operation, &[0u8; 32]);
-            assert_eq!(entropy1, entropy2);
-
-            // Different parent hash → different entropy
-            let entropy3 = utils::calculate_next_entropy(current_entropy, operation, &[0x01; 32]);
-            assert_ne!(entropy1, entropy3);
         }
     }
 }

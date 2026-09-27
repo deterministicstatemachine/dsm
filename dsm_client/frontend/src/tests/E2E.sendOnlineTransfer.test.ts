@@ -85,12 +85,6 @@ describe('E2E: sendOnlineTransfer (unit-level, mocked storage)', () => {
     jest.restoreAllMocks();
     // Provide a simple bridge with device identity getters and minimal hooks
     (global as any).window = (global as any).window || {};
-    (global as any).__dsmLastGoodHeaders = {
-      deviceId: undefined,
-      genesisHash: undefined,
-      chainTip: undefined,
-      seq: undefined,
-    };
     (global as any).window.DsmBridge = (global as any).window.DsmBridge || {};
 
     // Bytes-only MessagePort bridge contract (required by WebViewBridge.callBin)

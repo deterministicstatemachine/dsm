@@ -37,13 +37,16 @@ function decodeRouterInvoke(reqBytes: Uint8Array): { route: string; args: Uint8A
   };
 }
 
-function prepareResponseBytes(commitmentHash: Uint8Array): Uint8Array {
+/** The SDK's answer to wallet.sendOffline: the prepare went out under this commitment. */
+function sendAnswerBytes(commitmentHash: Uint8Array): Uint8Array {
   const env = new pb.Envelope({
     version: 3,
     payload: {
-      case: 'bilateralPrepareResponse',
-      value: new pb.BilateralPrepareResponse({
-        commitmentHash: new pb.Hash32({ v: new Uint8Array(commitmentHash) }),
+      case: 'bilateralTransferResponse',
+      value: new pb.BilateralTransferResponse({
+        success: true,
+        transactionHash: new pb.Hash32({ v: new Uint8Array(commitmentHash) }),
+        message: 'prepare sent over BLE',
       }),
     },
   });
@@ -80,7 +83,7 @@ describe('offlineSend', () => {
         amount: '1',
         memo: '',
       }).toBinary());
-      return prepareResponseBytes(commitmentHash);
+      return sendAnswerBytes(commitmentHash);
     };
 
     const promise = dsm.offlineSend({ to, amount: 1n, tokenId: 'ERA' });
@@ -105,7 +108,7 @@ describe('offlineSend', () => {
     (global as any).window.DsmBridge.sendMessageBin = async (reqBytes: Uint8Array) => {
       const { route } = decodeRouterInvoke(reqBytes);
       expect(route).toBe('wallet.sendOffline');
-      return prepareResponseBytes(commitmentHash);
+      return sendAnswerBytes(commitmentHash);
     };
 
     let settled = false;
@@ -135,7 +138,9 @@ describe('offlineSend', () => {
     await expect(promise).resolves.toEqual(expect.objectContaining({ accepted: true }));
   });
 
-  test('surfaces bilateral prepare rejects from wallet.sendOffline', async () => {
+  // The peer's reject is a BLE event, never wallet.sendOffline's own answer:
+  // an answer of any other shape is refused as what it is.
+  test("an answer that is not the SDK's send answer is refused", async () => {
     const to = new Uint8Array(32).fill(0x44);
 
     (global as any).window.DsmBridge.sendMessageBin = async (reqBytes: Uint8Array) => {
@@ -152,7 +157,10 @@ describe('offlineSend', () => {
     };
 
     await expect(dsm.offlineSend({ to, amount: 1n, tokenId: 'ERA' })).resolves.toEqual(
-      expect.objectContaining({ accepted: false, result: 'offline rejected' }),
+      expect.objectContaining({
+        accepted: false,
+        result: 'offlineSend: unexpected payload case bilateralPrepareReject',
+      }),
     );
   });
 });
