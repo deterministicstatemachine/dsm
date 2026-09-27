@@ -37,13 +37,10 @@ internal object UnifiedBleBridge {
             } else {
                 Log.e(
                     "UnifiedBleBridge",
-                    "sendViaActiveClientSession: failed chunk ${index + 1}/${chunks.size} to $deviceAddress"
+                    "sendViaActiveClientSession: $failureCode: failed chunk ${index + 1}/${chunks.size} to $deviceAddress"
                 )
                 break // Fail fast instead of partial spray
             }
-        }
-        if (sentCount != chunks.size) {
-            UnifiedBleEvents.onConnectionFailed(deviceAddress, "$failureCode:$sentCount/${chunks.size}")
         }
         return sentCount == chunks.size
     }
@@ -69,7 +66,7 @@ internal object UnifiedBleBridge {
                 runBlocking {
                     val ok = svc.sendViaServerNotifications(deviceAddress, chunks)
                     if (!ok) {
-                        UnifiedBleEvents.onConnectionFailed(deviceAddress, "followup_server_notify_failed")
+                        Log.e("UnifiedBleBridge", "dispatchRustFollowUp: server notifications to $deviceAddress failed")
                     }
                     ok
                 }
@@ -101,17 +98,9 @@ internal object UnifiedBleBridge {
         false
     }
 
-    fun initBleCoordinator(
-        context: android.content.Context,
-        eventDispatcher: (eventName: String, detail: String) -> Unit
-    ) {
+    fun initBleCoordinator(context: android.content.Context) {
         if (bleCoordinator == null) {
             bleCoordinator = BleCoordinator.getInstance(context)
-            bleCoordinator?.setCallback(object : BleCoordinator.Callback {
-                override fun onBlePermissionError(message: String) {
-                    eventDispatcher("ble-permission-error", message)
-                }
-            })
         }
     }
 
@@ -191,7 +180,6 @@ internal object UnifiedBleBridge {
                                 "UnifiedBleBridge",
                                 "requestGattWriteChunks: TX_RESPONSE subscription failed after ${TX_RESPONSE_SUBSCRIBE_MAX_ATTEMPTS} attempts for $effectiveAddr; aborting send"
                             )
-                            UnifiedBleEvents.onConnectionFailed(effectiveAddr, "tx_response_subscription_failed")
                             return@runBlocking false
                         }
 
@@ -203,7 +191,6 @@ internal object UnifiedBleBridge {
                         )
                     } catch (t: Throwable) {
                         Log.w("UnifiedBleBridge", "requestGattWriteChunks: TX_RESPONSE subscription/send error for $effectiveAddr", t)
-                        UnifiedBleEvents.onConnectionFailed(effectiveAddr, "tx_response_subscription_exception")
                         false
                     }
                 }
@@ -213,7 +200,7 @@ internal object UnifiedBleBridge {
                 runBlocking {
                     val ok = svc.sendViaServerNotifications(effectiveAddr, chunks)
                     if (!ok) {
-                        UnifiedBleEvents.onConnectionFailed(effectiveAddr, "server_notify_failed")
+                        Log.e("UnifiedBleBridge", "requestGattWriteChunks: server notifications to $effectiveAddr failed")
                     }
                     ok
                 }
@@ -239,7 +226,7 @@ internal object UnifiedBleBridge {
                             if (svc.isGattServerClient(currentAddr) && svc.isServerClientSubscribedToTxResponse(currentAddr)) {
                                 Log.i("UnifiedBleBridge", "requestGattWriteChunks: peer connected to our GATT server during wait — using server notifications for $currentAddr")
                                 val ok = svc.sendViaServerNotifications(currentAddr, chunks)
-                                if (!ok) UnifiedBleEvents.onConnectionFailed(currentAddr, "on_demand_server_notify_fallback_failed")
+                                if (!ok) Log.e("UnifiedBleBridge", "requestGattWriteChunks: server notifications to $currentAddr failed after the connect wait")
                                 return@runBlocking ok
                             }
                             // connectToDevice may have failed on the stale address while a
@@ -248,7 +235,6 @@ internal object UnifiedBleBridge {
                             // Fall through to TX_RESPONSE subscription if that happened.
                             if (!svc.hasActiveClientSession(currentAddr)) {
                                 Log.e("UnifiedBleBridge", "requestGattWriteChunks: on-demand GATT connection failed for $currentAddr")
-                                UnifiedBleEvents.onConnectionFailed(currentAddr, "on_demand_connect_failed")
                                 return@runBlocking false
                             }
                             Log.i("UnifiedBleBridge", "requestGattWriteChunks: scan-resolved client session at $currentAddr — continuing with TX_RESPONSE")
@@ -268,17 +254,15 @@ internal object UnifiedBleBridge {
                             // Last resort: server notification path
                             if (svc.isGattServerClient(currentAddr) && svc.isServerClientSubscribedToTxResponse(currentAddr)) {
                                 val ok = svc.sendViaServerNotifications(currentAddr, chunks)
-                                if (!ok) UnifiedBleEvents.onConnectionFailed(currentAddr, "on_demand_server_notify_after_subscribe_failed")
+                                if (!ok) Log.e("UnifiedBleBridge", "requestGattWriteChunks: server notifications to $currentAddr failed after the subscription failed")
                                 return@runBlocking ok
                             }
-                            UnifiedBleEvents.onConnectionFailed(currentAddr, "tx_response_subscription_failed")
                             return@runBlocking false
                         }
 
                         sendViaActiveClientSession(svc, currentAddr, chunks, "tx_chunk_send_partial")
                     } catch (t: Throwable) {
                         Log.e("UnifiedBleBridge", "requestGattWriteChunks: on-demand error", t)
-                        UnifiedBleEvents.onConnectionFailed(effectiveAddr, "on_demand_connect_exception")
                         false
                     }
                 }

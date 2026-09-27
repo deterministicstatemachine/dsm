@@ -3044,63 +3044,6 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_cancelBilater
 Unified init/status + header fetch (stable surface for Activity gating)
 ============================================================================= */
 
-/// Create a transaction error envelope for BLE operations
-/// Returns protobuf-encoded envelope with Error payload
-#[no_mangle]
-#[cfg(target_os = "android")]
-pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_createTransactionErrorEnvelope(
-    env: jni::sys::JNIEnv,
-    _clazz: jni::sys::jclass,
-    address: jni::sys::jstring,
-    code: jni::sys::jint,
-    message: jni::sys::jstring,
-) -> jni::sys::jbyteArray {
-    crate::jni::bridge_utils::jni_catch_unwind_jbytearray(
-        "createTransactionErrorEnvelope",
-        std::panic::AssertUnwindSafe(|| {
-            let mut env = match unsafe { env_from(env) } {
-                Some(e) => e,
-                None => return std::ptr::null_mut(),
-            };
-            let jaddr = unsafe { jstr_from(address) };
-            let jmsg = unsafe { jstr_from(message) };
-
-            let addr: String = match env.get_string(&jaddr) {
-                Ok(s) => s.into(),
-                Err(_) => return empty_byte_array_or_empty(&mut env).into_raw(),
-            };
-
-            let msg: String = match env.get_string(&jmsg) {
-                Ok(s) => s.into(),
-                Err(_) => return empty_byte_array_or_empty(&mut env).into_raw(),
-            };
-
-            // Create error message with device address context
-            let error_msg = format!("BLE transaction error for {}: {}", addr, msg);
-
-            // Use the existing error transport encoder
-            let envelope = crate::jni::helpers::encode_error_transport(code as u32, &error_msg);
-
-            let mut out = Vec::new();
-            if let Err(e) = envelope.encode(&mut out) {
-                log::error!("Failed to encode transaction error envelope: {}", e);
-                return empty_byte_array_or_empty(&mut env).into_raw();
-            }
-
-            match env.byte_array_from_slice(&out) {
-                Ok(arr) => arr.into_raw(),
-                Err(e) => {
-                    log::error!(
-                        "Failed to create byte array for transaction error envelope: {}",
-                        e
-                    );
-                    empty_byte_array_or_empty(&mut env).into_raw()
-                }
-            }
-        }),
-    )
-}
-
 /// Ensure the AppRouter is installed (idempotent; safe to call multiple times).
 /// This should be called after SDK context initialization to enable wallet/contacts screens.
 /// Returns true if AppRouter is available, false otherwise.

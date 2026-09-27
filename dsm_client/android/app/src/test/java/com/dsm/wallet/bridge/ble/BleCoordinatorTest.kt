@@ -36,7 +36,6 @@ class BleCoordinatorTest {
     fun tearDown() {
         coordinator.peers.clear()
         coordinator.addressIndex.clear()
-        coordinator.permissionsGate.cleanup()
     }
 
     @Test

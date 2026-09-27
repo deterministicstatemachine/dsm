@@ -10,8 +10,6 @@ internal object UnifiedBleEvents {
             Unified.bleNotifyConnectionState(address, true)
         } catch (t: Throwable) {
             android.util.Log.e("Unified", "bleNotifyConnectionState(true) failed", t)
-            Unified.createTransactionErrorEnvelope(address, 1, "bleNotifyConnectionState(true) failed: ${t.message}")
-                ?.let { if (it.isNotEmpty()) BleEventRelay.dispatchEnvelope(it) }
         }
         // Dispatch BleEvent.device_connected envelope via binary path
         try {
@@ -28,8 +26,6 @@ internal object UnifiedBleEvents {
             Unified.bleNotifyConnectionState(address, false)
         } catch (t: Throwable) {
             android.util.Log.e("Unified", "bleNotifyConnectionState(false) failed", t)
-            Unified.createTransactionErrorEnvelope(address, 1, "bleNotifyConnectionState(false) failed: ${t.message}")
-                ?.let { if (it.isNotEmpty()) BleEventRelay.dispatchEnvelope(it) }
         }
         // Dispatch BleEvent.device_disconnected envelope via binary path
         try {
@@ -91,20 +87,4 @@ internal object UnifiedBleEvents {
         }
     }
 
-
-    fun onConnectionFailed(address: String, reason: String) {
-        try {
-            val code = if (reason.contains(":")) {
-                reason.substringAfterLast(":").toIntOrNull() ?: 1
-            } else {
-                1
-            }
-
-            Unified.createTransactionErrorEnvelope(address, code, reason)?.let {
-                if (it.isNotEmpty()) BleEventRelay.dispatchEnvelope(it)
-            }
-        } catch (t: Throwable) {
-            android.util.Log.e("Unified", "Failed to dispatch connection failure envelope", t)
-        }
-    }
 }

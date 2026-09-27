@@ -155,9 +155,7 @@ object Unified {
 
     // ---------- BLE unified surface ----------
     @Keep @JvmStatic fun initBleCoordinator(context: android.content.Context) {
-        UnifiedBleBridge.initBleCoordinator(context) { eventName, detail ->
-            dispatchBlePermissionEvent(eventName, detail)
-        }
+        UnifiedBleBridge.initBleCoordinator(context)
     }
 
     /**
@@ -303,9 +301,6 @@ object Unified {
     @Keep @JvmStatic fun observeGattIdentityRead(bleAddress: String, rawProtoBytes: ByteArray): ByteArray =
         UnifiedNativeApi.observeGattIdentityRead(bleAddress, rawProtoBytes)
 
-    @Keep @JvmStatic fun createTransactionErrorEnvelope(address: String, code: Int, message: String): ByteArray? =
-        UnifiedNativeApi.createTransactionErrorEnvelope(address, code, message)
-        
     // ---------- Contact management ----------
     @Keep @JvmStatic fun removeContact(contactId: String): Byte =
         UnifiedNativeApi.removeContact(contactId)
@@ -522,10 +517,6 @@ object Unified {
     // `cdbrw.measure_trust` router query publishes a live CdbrwTrustSnapshot
     // with the same data, and frontend/UI consume that directly.
 
-    @Keep @JvmStatic fun onConnectionFailed(address: String, reason: String) {
-        UnifiedBleEvents.onConnectionFailed(address, reason)
-    }
-
     /**
      * Receive a deferred BlePairingAccept from Rust's async identity retry.
      * Called from a tokio background thread via JNI when the contact was not in
@@ -533,13 +524,6 @@ object Unified {
      */
     @Keep @JvmStatic fun deliverDeferredPairingAck(deviceAddress: String, ackBytes: ByteArray) {
         UnifiedBleBridge.deliverDeferredPairingAck(deviceAddress, ackBytes)
-    }
-
-    /**
-     * Dispatch BLE permission events to the frontend via JavaScript events.
-     */
-    @Keep @JvmStatic fun dispatchBlePermissionEvent(eventName: String, detail: String) {
-        UnifiedUiBridge.dispatchBlePermissionEvent(eventName, detail)
     }
 
     // ── Session state (Rust authority) ─────────────────────────────────────
