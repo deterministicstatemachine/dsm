@@ -16,6 +16,7 @@ import {
   LOCK_MAX_ATTEMPTS, LOCK_COOLDOWN_MS,
 } from '../../services/lock/lockService';
 import type { LockMethod } from '../../services/lock/lockService';
+import { Notice } from '../common/ScreenFrame';
 import './LockScreen.css';
 
 interface Props {
@@ -136,7 +137,7 @@ export default function LockScreen({ onUnlock }: Props) {
   const blocked = cooldown > 0;
 
   return (
-    <div className={`lock-screen${shake ? ' lock-screen--shake' : ''}${flash ? ' lock-screen--flash' : ''}`}>
+    <div className={`lock-screen sb-screen${shake ? ' lock-screen--shake' : ''}${flash ? ' lock-screen--flash' : ''}`}>
 
       {unlocking && (
         <div className="lock-pow-overlay">
@@ -145,39 +146,41 @@ export default function LockScreen({ onUnlock }: Props) {
           <div className="pow-text">{powWord.current}</div>
         </div>
       )}
-      <div className="lock-header">
-        <div className="lock-icon">[LOCKED]</div>
-        <div className="lock-subtitle">AUTHENTICATION REQUIRED</div>
+
+      <div className="sb-screen__body lock-screen__body">
+        <section className="sb-card sb-card--dark sb-card--hero lock-header">
+          <div className="sb-hero__label lock-subtitle">AUTHENTICATION REQUIRED</div>
+          <div className="sb-hero__value lock-icon">[LOCKED]</div>
+        </section>
+
+        {blocked && (
+          <Notice kind="error" role="status">
+            TOO MANY ATTEMPTS — WAIT {cooldown}s
+          </Notice>
+        )}
+
+        {verifying && !blocked && (
+          <Notice>VERIFYING…</Notice>
+        )}
+
+        {!blocked && !verifying && (
+          <section className="sb-card lock-body">
+            {method === 'pin' && (
+              <PinInput onComplete={handlePinComplete} label="ENTER PIN" />
+            )}
+
+            {method === 'combo' && (
+              <StateboyComboInput onComplete={handleComboComplete} label="ENTER BUTTON COMBO" />
+            )}
+          </section>
+        )}
+
+        {attempts > 0 && !blocked && (
+          <Notice kind="error">
+            ✗ INCORRECT — {LOCK_MAX_ATTEMPTS - attempts} ATTEMPTS REMAINING
+          </Notice>
+        )}
       </div>
-
-      {blocked && (
-        <div className="lock-cooldown">
-          TOO MANY ATTEMPTS<br />
-          WAIT {cooldown}s
-        </div>
-      )}
-
-      {verifying && !blocked && (
-        <div className="lock-cooldown" style={{ fontSize: 10 }}>VERIFYING…</div>
-      )}
-
-      {!blocked && !verifying && (
-        <div className="lock-body">
-          {method === 'pin' && (
-            <PinInput onComplete={handlePinComplete} label="ENTER PIN" />
-          )}
-
-          {method === 'combo' && (
-            <StateboyComboInput onComplete={handleComboComplete} label="ENTER BUTTON COMBO" />
-          )}
-        </div>
-      )}
-
-      {attempts > 0 && !blocked && (
-        <div className="lock-attempts">
-          ✗ INCORRECT — {LOCK_MAX_ATTEMPTS - attempts} ATTEMPTS REMAINING
-        </div>
-      )}
     </div>
   );
 }

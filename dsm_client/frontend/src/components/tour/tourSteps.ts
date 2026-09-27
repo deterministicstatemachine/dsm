@@ -290,13 +290,6 @@ export const TOUR_STEPS: ReadonlyArray<TourStep> = [
     prompt: 'Tap SETTINGS',
   },
   {
-    id: 'backup',
-    screen: 'settings',
-    target: '[aria-labelledby="backup-section-title"]',
-    title: 'Back up',
-    body: 'Export a backup and keep it somewhere safe. Import brings your wallet back from one.',
-  },
-  {
     id: 'security',
     screen: 'settings',
     target: '[aria-labelledby="security-section-title"]',

@@ -498,6 +498,7 @@
   cursor: pointer;
   outline: none;
 }
+button.sb-menu__item { width: 100%; font: inherit; color: inherit; text-align: left; }
 .sb-menu__item:focus-visible, .sb-menu__item.focused { border-color: var(--text-dark); box-shadow: 0 0 0 2px rgba(var(--text-rgb), 0.35); }
 .sb-menu__item:active { transform: translateY(1px); }
 .sb-menu__glyph {
@@ -1063,6 +1064,7 @@ button.sb-card--dark { color: var(--bg); }
 
 /* D-pad focus, on the frame's controls (useDpadNav sets `focused`). */
 .sb-btn.focused,
+.sb-seg.focused,
 .sb-seg__opt.focused,
 .sb-row.focused,
 .sb-card.focused,
