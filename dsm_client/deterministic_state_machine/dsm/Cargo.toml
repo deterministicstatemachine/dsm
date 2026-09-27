@@ -17,13 +17,7 @@ unused_must_use = "deny"
 
 [features]
 default = []                     # NO JNI, demos, or HTTP features in core - pure business logic
-bluetooth = ["dep:tokio-stream"]
-storage   = ["rocksdb"]
-threadsafe = []
-jni = ["dep:jni"]                         # JNI feature for Android integration
-web-stack = ["dep:axum", "dep:tower"]
 sphincs-trace = []                # Enable verbose SPHINCS+ tracing (debug only)
- formal = []
 # Issue #181 Finding 2: NON_PAPER_MODE testnet/signet bypass is OFF by default.
 # Without this feature, all Bitcoin networks (including Testnet/Signet) require
 # checkpoint-rooted header chains and entry-anchor verification — i.e. the
@@ -100,13 +94,6 @@ ml-kem = { version = "0.2.0", features = ["deterministic"] }  # Pure Rust FIPS 2
 # pqcrypto-mlkem = "0.1.0"  # REMOVED: Hardware optimized, caused SIGILL on Android
 # pqcrypto-sphincsplus has been replaced with a pure Rust implementation
 
-jni = { version = "0.21", optional = true }
-
-# Bluetooth support (optional)
-tokio-stream = { version = "0.1.14", optional = true, features = ["sync"] }
-
-# Storage - Optional for server-side components only (mobile apps use HTTP API)
-rocksdb = { version = "0.24.0", features = ["multi-threaded-cf"], optional = true }
 once_cell = "1.19"
 # Removed dsm-storage-node dependency to avoid circular dependency
 
@@ -141,10 +128,6 @@ env_logger = "0.11.10"
 
 # Type safety and validation
 derive_more = { version = "2.1.1", features = ["from", "display", "error", "debug", "into"] }
-
-# Web framework and middleware (optional; core must be network-agnostic by default; no JSON feature)
-axum = { version = "0.8", features = ["tracing"], optional = true }
-tower = { version = "0.5.3", features = ["util", "timeout", "load-shed", "limit"], optional = true }
 
 [dev-dependencies]
 mockall = "0.15.0"
