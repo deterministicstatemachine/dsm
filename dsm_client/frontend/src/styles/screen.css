@@ -959,6 +959,9 @@ button.sb-card--dark { color: var(--bg); }
 /* A popover that is a wizard scrolls its own body and keeps its strip and actions in view. */
 .sb-popover.token-wizard { max-height: 100%; }
 .sb-popover.token-wizard .sb-popover__body { flex: 1 1 auto; min-height: 0; }
+/* The wizard's action takes two shares of its row to Back's one: its busy
+   label ("Publishing token") is twice Back's length and must clear its edges. */
+.sb-popover.token-wizard .sb-actions > .sb-btn--primary { flex-grow: 2; }
 .sb-popover .sb-input[type="file"] { padding: 6px 8px; font-size: 9px; }
 
 /* Stat cells: a count or a short word, its label under it. */

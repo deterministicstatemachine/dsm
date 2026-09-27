@@ -783,7 +783,7 @@ export const TokenCreationDialog: React.FC<{ onClose: () => void; onSuccess?: ()
               onClick={handleCreate}
               disabled={creating}
             >
-              {resolving ? 'Confirming outcome…' : creating ? 'Publishing policy…' : 'Burn ERA'}
+              {resolving ? 'Confirming token' : creating ? 'Publishing token' : 'Burn ERA'}
             </button>
           )}
         </div>

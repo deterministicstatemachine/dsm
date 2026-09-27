@@ -22,10 +22,11 @@ jest.mock('../../utils/imageRgba', () => ({
 jest.mock('@/dsm/policies', () => ({
   ...jest.requireActual('@/dsm/policies'),
   getTokenCreationFee: jest.fn(),
+  createToken: jest.fn(),
 }));
 
 import { readImageRgba } from '../../utils/imageRgba';
-import { getTokenCreationFee } from '@/dsm/policies';
+import { createToken, getTokenCreationFee } from '@/dsm/policies';
 
 describe('TokenCreationDialog token kind selector', () => {
   // Fungible is the only kind the protocol enforces. NFT and SBT are not
@@ -139,6 +140,19 @@ describe('TokenCreationDialog creation fee', () => {
     expect(screen.getByText('100 ERA')).toBeInTheDocument();
     expect(screen.queryByText(/This burns/)).toBeNull();
     expect(screen.getByRole('button', { name: 'Burn ERA' })).toBeEnabled();
+  });
+
+  // The busy label names what is being made, and is short enough to clear the
+  // button's edges (measured on the A54: 115px of text in the wider action).
+  it('names the burn in progress "Publishing token"', async () => {
+    (getTokenCreationFee as jest.Mock).mockResolvedValue(standing(100n, true));
+    (createToken as jest.Mock).mockReturnValue(new Promise(() => {}));
+    render(<TokenCreationDialog onClose={jest.fn()} />);
+    await toReview();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Burn ERA' }));
+    expect(await screen.findByRole('button', { name: 'Publishing token' })).toBeDisabled();
+    expect(createToken).toHaveBeenCalledTimes(1);
   });
 
   // ERA can arrive or leave while the wizard is open; the review reads it again.
