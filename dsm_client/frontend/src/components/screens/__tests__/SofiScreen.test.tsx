@@ -86,6 +86,21 @@ describe('SofiScreen', () => {
     expect(within(list).queryByText('NOANCHOR')).toBeNull();
   });
 
+  it("tells two tokens with one ticker apart by their anchor's fingerprint", async () => {
+    const LOOKALIKE = encodeBase32Crockford(new Uint8Array(32).fill(0x33));
+    balances = [balance('PLAY', PLAY), balance('PLAY', LOOKALIKE)];
+    render(<SofiScreen />);
+    fireEvent.click(screen.getByRole('button', { name: 'Pools' }));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Token A' }));
+    const list = await screen.findByRole('listbox', { name: 'Token A' });
+    const rows = within(list).getAllByRole('option');
+    expect(rows.map((row) => row.textContent)).toEqual([
+      `PLAY${PLAY.slice(0, 8)}`,
+      `PLAY${LOOKALIKE.slice(0, 8)}`,
+    ]);
+  });
+
   it('quotes with the decoded anchors and trades one hop through sofi.trade', async () => {
     findRoute.mockResolvedValueOnce([
       { vaultId: VAULT_1, parentRoot: new Uint8Array(32), tokenIn: ERA_BYTES, tokenOut: PLAY_BYTES, amountIn: 25n, amountOut: 40n },

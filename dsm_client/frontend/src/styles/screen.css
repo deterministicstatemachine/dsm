@@ -837,18 +837,12 @@ button.sb-menu__item { width: 100%; font: inherit; color: inherit; text-align: l
 .sb-tokensel__opt.is-selected { background: rgba(var(--text-rgb), 0.18); font-weight: 700; }
 .sb-tokensel__note { flex: 0 0 auto; font-size: 9px; opacity: 0.6; }
 .sb-tokensel__empty { padding: 8px; font-size: 10px; opacity: 0.6; }
-/* Beside an amount field the picker is a fixed-width column, not a full row.
-   Its list is not: it opens under the button's right edge, as wide as its
-   longest row, so a coin and a ticker are never cut to the column's width. */
-.sb-input-row .sb-tokensel--inline { flex: 0 0 auto; width: 104px; }
-.sb-input-row .sb-tokensel--inline .sb-tokensel__list {
-  left: auto;
-  right: 0;
-  width: max-content;
-  min-width: 100%;
-  max-width: 236px;
-}
-.sb-input-row .sb-tokensel--inline .sb-tokensel__opt .sb-tokensel__ticker { overflow: visible; text-overflow: clip; }
+/* Beside an amount field the picker's button is as wide as its coin, ticker
+   and caret, and never more than half the row. Its list is the row's width:
+   it opens under the amount field and the button together, so every row has
+   room for its coin, its ticker and its fingerprint. */
+.sb-input-row:has(> .sb-tokensel--inline) { position: relative; }
+.sb-input-row > .sb-tokensel--inline { position: static; flex: 0 0 auto; max-width: 50%; }
 
 /* ------------------------------------------------------------------ */
 /* Dark container: the contrast of the FX window and the i popup,     */
