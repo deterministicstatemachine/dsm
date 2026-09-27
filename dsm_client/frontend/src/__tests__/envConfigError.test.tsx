@@ -84,7 +84,7 @@ jest.mock('../services/dsmClient', () => ({
 }));
 
 // Skip intro animation so App renders the main UI
-jest.mock('../hooks/useIntroGate', () => ({ useIntroGate: () => false }));
+jest.mock('../hooks/useIntroGate', () => ({ useIntroGate: () => ({ showIntro: false, onIntroPlayed: () => {} }) }));
 
 // Mock telemetry sendDiagnostics
 const mockSend = jest.fn().mockResolvedValue(undefined);

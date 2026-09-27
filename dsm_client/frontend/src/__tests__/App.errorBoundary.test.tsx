@@ -35,7 +35,7 @@ jest.mock('../inputs/providers/StateBoyInputProvider', () => ({
 
 
 jest.mock('../hooks/useIntroGate', () => ({
-  useIntroGate: () => false,
+  useIntroGate: () => ({ showIntro: false, onIntroPlayed: () => {} }),
 }));
 
 jest.mock('../hooks/useThemeAssets', () => ({

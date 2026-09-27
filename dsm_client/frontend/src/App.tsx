@@ -56,7 +56,7 @@ export default function App() {
     setThemeIndex,
   });
 
-  const showIntro = useIntroGate(runtime.appState);
+  const { showIntro, onIntroPlayed } = useIntroGate(runtime.appState);
   const {
     chameleonSrc,
     setChameleonSrc,
@@ -137,6 +137,7 @@ export default function App() {
                       appState={runtime.appState}
                       error={runtime.error}
                       showIntro={showIntro}
+                      onIntroPlayed={onIntroPlayed}
                       introGifSrc={introGifSrc}
                       eraTokenSrc={eraTokenSrc}
                       btcLogoSrc={btcLogoSrc}
