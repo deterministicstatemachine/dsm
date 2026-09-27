@@ -44,7 +44,6 @@ import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.VisibleForTesting
 import androidx.appcompat.app.AppCompatActivity
-import androidx.biometric.BiometricPrompt
 import androidx.core.content.ContextCompat
 import androidx.core.net.toUri
 import androidx.core.view.WindowCompat
@@ -65,7 +64,6 @@ import com.dsm.wallet.bridge.ble.BleCoordinator
 import com.dsm.wallet.permissions.BluetoothPermissionHelper
 import com.dsm.wallet.service.BleBackgroundService
 import com.dsm.wallet.session.NativeFirstCutoverReset
-import dsm.types.proto.BiometricAuthorizeResult
 import dsm.types.proto.NativeHostEvent
 import dsm.types.proto.NativeHostEventKind
 import dsm.types.proto.QrScanResultPayload
@@ -96,7 +94,6 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
             Thread(r, "dsm-bridge-worker").also { it.isDaemon = true }
         }
 
-    private val cameraPermCode = 2001
     private val runtimePermCode = 2002
     lateinit var btPermLauncher: ActivityResultLauncher<Array<String>> 
     private var btPermsRequested = false
@@ -1141,18 +1138,6 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         }
     }
 
-    fun requestNamedPermissionsFromUi(permissions: Array<String>) {
-        val needed = permissions
-            .map { it.trim() }
-            .filter { it.isNotEmpty() }
-            .filter { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }
-            .toTypedArray()
-        if (needed.isEmpty()) {
-            return
-        }
-        requestPermissions(needed, cameraPermCode)
-    }
-
     override fun onCreate(savedInstanceState: Bundle?) {
         // Drop the launch theme as soon as the activity starts so the splash artwork
         // does not remain as the live window background after the first frame.
@@ -1406,46 +1391,6 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         // Rust receives app_foreground=false via publishSessionState and decides lock policy
         publishSessionState("pause")
         // Do not stop advertising here; background service owns BLE state.
-    }
-
-    fun showBiometricPrompt(
-        promptTitle: String = "DSM Wallet",
-        promptSubtitle: String = "Authenticate to unlock",
-        negativeText: String = "Use PIN / Combo",
-    ) {
-        val executor = ContextCompat.getMainExecutor(this)
-        val callback = object : BiometricPrompt.AuthenticationCallback() {
-            override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
-                dispatchNativeHostEventOnUi(
-                    NativeHostEventKind.NATIVE_HOST_EVENT_KIND_BIOMETRIC_RESULT,
-                    BiometricAuthorizeResult.newBuilder()
-                        .setSuccess(true)
-                        .build()
-                        .toByteArray(),
-                )
-            }
-            override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
-                dispatchNativeHostEventOnUi(
-                    NativeHostEventKind.NATIVE_HOST_EVENT_KIND_BIOMETRIC_RESULT,
-                    BiometricAuthorizeResult.newBuilder()
-                        .setSuccess(false)
-                        .setErrorCode(errorCode)
-                        .setErrorMessage(errString.toString())
-                        .build()
-                        .toByteArray(),
-                )
-            }
-            override fun onAuthenticationFailed() {
-                // Finger not recognised — BiometricPrompt shows retry UI automatically.
-            }
-        }
-        val prompt = BiometricPrompt(this, executor, callback)
-        val promptInfo = BiometricPrompt.PromptInfo.Builder()
-            .setTitle(if (promptTitle.isBlank()) "DSM Wallet" else promptTitle)
-            .setSubtitle(if (promptSubtitle.isBlank()) "Authenticate to unlock" else promptSubtitle)
-            .setNegativeButtonText(if (negativeText.isBlank()) "Use PIN / Combo" else negativeText)
-            .build()
-        prompt.authenticate(promptInfo)
     }
 
     override fun onStart() {
@@ -1821,7 +1766,7 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == runtimePermCode || requestCode == cameraPermCode) {
+        if (requestCode == runtimePermCode) {
             val summary = permissions.zip(grantResults.toTypedArray()).joinToString(", ") { (p, r) ->
                 val state = if (r == PackageManager.PERMISSION_GRANTED) "granted" else "denied"
                 "$p=$state"
