@@ -284,6 +284,7 @@ impl PairingOrchestrator {
                         "[PairingOrchestrator] Genesis hash mismatch for {:02x}{:02x}... (identity_observed)",
                         peer_device_id[0], peer_device_id[1]
                     );
+                    #[cfg(all(target_os = "android", feature = "jni"))]
                     self.emit_pairing_status(
                         &peer_device_id,
                         "failed",
@@ -346,6 +347,7 @@ impl PairingOrchestrator {
 
         drop(sessions);
         self.signal_state_change();
+        #[cfg(all(target_os = "android", feature = "jni"))]
         self.emit_pairing_status(&peer_device_id, "connected", "", Some(&ble_address))
             .await;
 
@@ -464,6 +466,7 @@ impl PairingOrchestrator {
                     peer_device_id[1],
                     reason
                 );
+                #[cfg(all(target_os = "android", feature = "jni"))]
                 self.emit_pairing_status(&peer_device_id, "failed", &reason, None)
                     .await;
                 return Err(reason);
@@ -661,26 +664,41 @@ impl PairingOrchestrator {
 
         self.signal_state_change();
 
-        if let Err(reason) = outcome {
-            self.emit_pairing_status(&peer_device_id, "failed", &reason, Some(ble_address))
-                .await;
-            return Err(reason);
-        }
-
-        // Emit frontend notification; best-effort
         #[cfg(all(target_os = "android", feature = "jni"))]
-        {
-            if let Err(e) = self.notify_pairing_complete(&peer_device_id).await {
-                log::warn!(
-                    "[PairingOrchestrator] notify_pairing_complete (scanner finalize) failed for {:02x}{:02x}...: {}",
-                    peer_device_id[0],
-                    peer_device_id[1],
-                    e
-                );
+        self.report_scanner_finalize(peer_device_id, &outcome, ble_address)
+            .await;
+        // Host builds have no frontend to tell.
+        #[cfg(not(all(target_os = "android", feature = "jni")))]
+        let _ = peer_device_id;
+
+        outcome
+    }
+
+    /// Tell the frontend how the scanner's finalize ended: the failure, or the
+    /// completed pairing.
+    #[cfg(all(target_os = "android", feature = "jni"))]
+    async fn report_scanner_finalize(
+        &self,
+        peer_device_id: [u8; 32],
+        outcome: &Result<(), String>,
+        ble_address: &str,
+    ) {
+        match outcome {
+            Err(reason) => {
+                self.emit_pairing_status(&peer_device_id, "failed", reason, Some(ble_address))
+                    .await
+            }
+            Ok(()) => {
+                if let Err(e) = self.notify_pairing_complete(&peer_device_id).await {
+                    log::warn!(
+                        "[PairingOrchestrator] notify_pairing_complete (scanner finalize) failed for {:02x}{:02x}...: {}",
+                        peer_device_id[0],
+                        peer_device_id[1],
+                        e
+                    );
+                }
             }
         }
-
-        Ok(())
     }
 
     /// Reset any in-progress pairing session for a peer that just disconnected.
@@ -726,6 +744,7 @@ impl PairingOrchestrator {
             // for the next organic state-change notification.
             self.signal_state_change();
         }
+        #[cfg(all(target_os = "android", feature = "jni"))]
         for device_id in &reset {
             self.emit_pairing_status(device_id, "failed", "BLE link dropped", Some(ble_address))
                 .await;
@@ -751,6 +770,7 @@ impl PairingOrchestrator {
     ///
     /// Spawned on the tokio runtime when the session lets pairing run
     /// (`bluetooth::pairing_follows`, `bluetooth::contact_added`).
+    #[cfg(all(target_os = "android", feature = "jni"))]
     pub async fn start_pairing_all_unpaired(self: Arc<Self>) {
         // Reset stop flag first, then atomically claim the loop
         self.loop_stop.store(false, Ordering::SeqCst);
@@ -802,9 +822,10 @@ impl PairingOrchestrator {
             };
 
             // Filter to unpaired contacts (no ble_address, valid device_id)
-            let unpaired: Vec<_> = contacts
+            let unpaired: Vec<[u8; 32]> = contacts
                 .iter()
-                .filter(|c| c.ble_address.is_none() && c.device_id.len() == 32)
+                .filter(|c| c.ble_address.is_none())
+                .filter_map(|c| <[u8; 32]>::try_from(c.device_id.as_slice()).ok())
                 .collect();
 
             if unpaired.is_empty() {
@@ -846,13 +867,10 @@ impl PairingOrchestrator {
             );
 
             let mut initiated = Initiated::default();
-            for contact in &unpaired {
+            for &device_id in &unpaired {
                 if self.loop_stop.load(Ordering::SeqCst) {
                     break;
                 }
-
-                let mut device_id = [0u8; 32];
-                device_id.copy_from_slice(&contact.device_id);
 
                 // BLE sessions stale after 90s. This transport timer bounds
                 // handshake freshness and reconnect retry windows only.
@@ -1022,17 +1040,6 @@ impl PairingOrchestrator {
         }
     }
 
-    #[cfg(not(all(target_os = "android", feature = "jni")))]
-    async fn emit_pairing_status(
-        &self,
-        _device_id: &[u8; 32],
-        _status: &str,
-        _message: &str,
-        _ble_address: Option<&str>,
-    ) {
-        // No-op on non-Android
-    }
-
     /// Get pairing session status
     pub async fn get_session_status(&self, contact_device_id: &[u8; 32]) -> Option<PairingState> {
         let sessions = self.sessions.read().await;
@@ -1058,6 +1065,7 @@ impl PairingOrchestrator {
     /// peer reads this appliance's identity from its GATT server whichever side
     /// scans); it is the appliance's and is never withdrawn here. The scan
     /// follows [`ScanRequest::step`].
+    #[cfg(all(target_os = "android", feature = "jni"))]
     async fn follow_pairing_radio(&self, scan: &mut ScanRequest, initiated: Initiated) {
         if initiated.any {
             match request_radio("startBlePairingAdvertise") {
@@ -1182,6 +1190,7 @@ fn self_device_id() -> Result<[u8; 32], String> {
 
 /// Whether any session this appliance scans for is still outstanding (neither
 /// complete nor failed).
+#[cfg(any(test, all(target_os = "android", feature = "jni")))]
 fn wants_pairing_scan<'a>(
     self_device_id: &[u8; 32],
     sessions: impl IntoIterator<Item = &'a PairingSession>,
@@ -1193,6 +1202,7 @@ fn wants_pairing_scan<'a>(
 }
 
 /// What one pass of the pairing loop opened.
+#[cfg(all(target_os = "android", feature = "jni"))]
 #[derive(Debug, Default, Clone, Copy)]
 struct Initiated {
     /// A session, of either role.
@@ -1204,6 +1214,7 @@ struct Initiated {
 /// The pairing loop's scan request as the radio holds it
 /// (`BleCoordinator.pairingScanRequested`): it stands from the loop's start
 /// until the loop's stop, whatever the radio answered.
+#[cfg(any(test, all(target_os = "android", feature = "jni")))]
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct ScanRequest {
     /// The radio holds a request from this loop.
@@ -1212,6 +1223,7 @@ struct ScanRequest {
     accepted: bool,
 }
 
+#[cfg(any(test, all(target_os = "android", feature = "jni")))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ScanStep {
     Start,
@@ -1219,6 +1231,7 @@ enum ScanStep {
     Hold,
 }
 
+#[cfg(any(test, all(target_os = "android", feature = "jni")))]
 impl ScanRequest {
     /// What the loop asks of the radio, given whether a session it scans for
     /// is outstanding. Between requests the scan is the radio's: it stops the
@@ -1244,6 +1257,7 @@ impl ScanRequest {
 
 /// Withdraw the loop's scan request, if it made one. An undelivered withdrawal
 /// leaves the request standing, to be withdrawn again.
+#[cfg(all(target_os = "android", feature = "jni"))]
 fn withdraw_pairing_scan(scan: &mut ScanRequest) {
     if !scan.issued {
         return;
@@ -1272,12 +1286,6 @@ fn request_radio(method: &'static str) -> Result<bool, String> {
     env.call_static_method(&class, method, "()Z", &[])
         .and_then(|r| r.z())
         .map_err(|e| format!("{method} failed: {e:?}"))
-}
-
-/// Host builds have no BLE radio to pair over.
-#[cfg(not(all(target_os = "android", feature = "jni")))]
-fn request_radio(method: &'static str) -> Result<bool, String> {
-    Err(format!("{method}: this build has no BLE radio"))
 }
 
 /// Where BLE pairing with a contact stands, for the contact list: paired once
@@ -1312,12 +1320,34 @@ pub fn contact_pairing_phase(
 mod tests {
     use super::*;
     use crate::storage::client_db;
-    use crate::storage::client_db::ContactRecord;
-    use std::collections::HashMap;
+    use crate::test_support::two_device::Pair;
 
-    fn session_with(contact: u8, state: PairingState) -> PairingSession {
+    /// A device id as a wallet derives its own: the test mnemonic's BIP-39
+    /// seed through the Genesis v3 chain on the beta network.
+    fn device_id_of(entropy: u8) -> [u8; 32] {
+        let seed = bip39::Mnemonic::parse(crate::economic_fixtures::test_mnemonic(entropy))
+            .expect("a mnemonic")
+            .to_seed("");
+        crate::sdk::identity_presentation::derive_own_authority_context(
+            &seed,
+            crate::sdk::identity_presentation::OwnerIdentityInputs::beta(
+                dsm::economic::register::BETA_NETWORK_ID,
+            ),
+        )
+        .expect("an identity")
+        .devid
+    }
+
+    /// `n` derived device ids, in ascending order.
+    fn ascending_device_ids(n: u8) -> Vec<[u8; 32]> {
+        let mut ids: Vec<[u8; 32]> = (1..=n).map(device_id_of).collect();
+        ids.sort();
+        ids
+    }
+
+    fn session_with(contact: [u8; 32], state: PairingState) -> PairingSession {
         PairingSession {
-            contact_device_id: [contact; 32],
+            contact_device_id: contact,
             state,
             ble_address: None,
             peer_genesis_hash: None,
@@ -1332,16 +1362,18 @@ mod tests {
     };
 
     #[test]
-    fn exactly_one_side_of_a_pair_scans() {
-        let (low, high) = ([0x10u8; 32], [0x20u8; 32]);
+    fn the_higher_device_id_scans_and_the_lower_advertises() {
+        let ids = ascending_device_ids(2);
+        let (low, high) = (ids[0], ids[1]);
         assert!(scans_for(&high, &low));
         assert!(!scans_for(&low, &high));
     }
 
     #[test]
     fn the_scan_is_wanted_while_a_session_this_appliance_scans_for_is_outstanding() {
-        let me = [0x80u8; 32];
-        let (scanned, advertised_to) = (0x10u8, 0xF0u8);
+        let ids = ascending_device_ids(4);
+        let me = ids[2];
+        let (scanned, also_scanned, advertised_to) = (ids[0], ids[1], ids[3]);
         assert!(!wants_pairing_scan(&me, &[]));
         assert!(!wants_pairing_scan(
             &me,
@@ -1375,7 +1407,7 @@ mod tests {
             &me,
             &[
                 session_with(scanned, PairingState::Complete),
-                session_with(scanned + 1, PairingState::WaitingForConnection),
+                session_with(also_scanned, PairingState::WaitingForConnection),
             ]
         ));
     }
@@ -1426,18 +1458,10 @@ mod tests {
         }
     }
 
-    #[cfg(not(all(target_os = "android", feature = "jni")))]
-    #[test]
-    fn an_undelivered_withdrawal_leaves_the_request_standing() {
-        let mut scan = STANDING;
-        withdraw_pairing_scan(&mut scan);
-        assert_eq!(scan, STANDING);
-    }
-
     #[tokio::test]
     async fn test_pairing_session_lifecycle() {
         let orchestrator = PairingOrchestrator::new();
-        let device_id = [0x42u8; 32];
+        let device_id = device_id_of(1);
 
         // Check no session initially
         assert!(orchestrator.get_session_status(&device_id).await.is_none());
@@ -1449,9 +1473,7 @@ mod tests {
     #[tokio::test]
     async fn test_session_state_transitions() {
         let orchestrator = PairingOrchestrator::new();
-        let device_id = [0x43u8; 32];
-        let _ble_address = "AA:BB:CC:DD:EE:FF".to_string();
-        let _genesis_hash = [0x44u8; 32];
+        let device_id = device_id_of(1);
 
         // Create session manually for testing
         {
@@ -1478,98 +1500,49 @@ mod tests {
         assert!(orchestrator.get_session_status(&device_id).await.is_none());
     }
 
-    #[tokio::test]
+    /// A session opens for a contact on a device with an identity: A's
+    /// contact B, both created, booted and added to each other as production
+    /// does it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[serial_test::serial]
     async fn test_initiate_pairing_creates_session() {
-        // Initialize fresh in-memory DB (serialized to avoid OnceCell races),
-        // in this test's own storage directory.
-        crate::economic_fixtures::use_test_storage_dir();
-        client_db::reset_database_for_tests();
-        client_db::init_database().expect("init db");
-
-        // Ensure device ID is available using idempotent bootstrap
-        crate::sdk::app_state::AppState::set_identity_info_if_empty(
-            vec![0xAA; 32],
-            vec![0xBB; 32],
-            vec![0xCC; 32],
-            vec![0x00; 32],
-        )
-        .expect("AppState identity");
-
-        // Create a contact record so initiate_pairing's SQLite gate passes
-        let device_id = [0x11u8; 32];
-        let rec = ContactRecord {
-            contact_id: "ct-test-initiate".to_string(),
-            device_id: device_id.to_vec(),
-            alias: "test-peer".to_string(),
-            genesis_hash: vec![0x33; 32],
-            current_chain_tip: Some(vec![0x70; 32]),
-            verified: true,
-            verification_proof: None,
-            metadata: HashMap::new(),
-            ble_address: None,
-            status: "Created".to_string(),
-            needs_online_reconcile: false,
-            public_key: vec![0u8; 32],
-            kyber_public_key: vec![0x4B; 1184],
-            previous_chain_tip: None,
-        };
-        client_db::store_contact(&rec).expect("store contact");
-
+        let pair = Pair::boot(0, 0).await;
+        pair.a.enter();
         let orchestrator = PairingOrchestrator::new();
         orchestrator
-            .initiate_pairing(device_id)
+            .initiate_pairing(pair.b.device_id)
             .await
             .expect("initiate");
-        let status = orchestrator.get_session_status(&device_id).await;
-        assert_eq!(status, Some(PairingState::WaitingForConnection));
+        assert_eq!(
+            orchestrator.get_session_status(&pair.b.device_id).await,
+            Some(PairingState::WaitingForConnection)
+        );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[serial_test::serial]
     async fn test_identity_observed_success_updates_status() {
-        // Initialize fresh in-memory DB (serialized to avoid OnceCell races)
-        crate::economic_fixtures::use_test_storage_dir();
-        client_db::reset_database_for_tests();
-        client_db::init_database().expect("init db");
-
-        // Create a contact record matching the observed identity
-        let device_id = [0x22u8; 32];
-        let genesis = [0x33u8; 32];
-        let rec = ContactRecord {
-            contact_id: "ct-1".to_string(),
-            device_id: device_id.to_vec(),
-            alias: "peer".to_string(),
-            genesis_hash: genesis.to_vec(),
-            current_chain_tip: Some(vec![0x70; 32]),
-            verified: true,
-            verification_proof: None,
-            metadata: HashMap::new(),
-            ble_address: None,
-            status: "Created".to_string(),
-            needs_online_reconcile: false,
-            public_key: vec![0u8; 32],
-            kyber_public_key: vec![0x4B; 1184],
-            previous_chain_tip: None,
-        };
-        client_db::store_contact(&rec).expect("store contact");
+        let pair = Pair::boot(0, 0).await;
+        let (a, b) = (&pair.a, &pair.b);
+        a.enter();
+        let address = "AA:BB:CC:00:00:0B";
 
         let orchestrator = PairingOrchestrator::new();
-        // No explicit initiate; observe identity directly
+        // No explicit initiate; observe B's identity directly.
         orchestrator
-            .handle_identity_observed("AA:BB:CC".to_string(), genesis, device_id)
+            .handle_identity_observed(address.to_string(), b.genesis, b.device_id)
             .await
             .expect("identity observed ok");
 
         // Session should NOT be complete yet; mutual confirmation (PAIR1/PAIR2)
         // is required before finalization.
-        let status = orchestrator.get_session_status(&device_id).await;
+        let status = orchestrator.get_session_status(&b.device_id).await;
         assert_eq!(status, Some(PairingState::ExchangingChainTips));
 
         // Contact status should be promoted to BleCapable but ble_address must NOT
         // be written yet — we defer that to the ACK so the pairing loop on the
         // initiator side stays alive until PAIR2 arrives.
-        let contact = client_db::get_contact_by_device_id(&device_id)
+        let contact = client_db::get_contact_by_device_id(&b.device_id)
             .expect("get contact")
             .expect("exists");
         assert_eq!(contact.status, "BleCapable");
@@ -1578,72 +1551,55 @@ mod tests {
             "ble_address must not be set until bilateral ACK"
         );
 
-        // Now simulate the mutual handshake completion by receiving PAIR2.
+        // Now the mutual handshake completes by receiving PAIR2.
         orchestrator
-            .handle_pairing_ack(device_id, None, "")
+            .handle_pairing_ack(b.device_id, None, "")
             .await
             .expect("ack transitions to ConfirmSent");
         // Scanner is ConfirmSent — ble_address not persisted until confirm delivered.
-        let status2 = orchestrator.get_session_status(&device_id).await;
+        let status2 = orchestrator.get_session_status(&b.device_id).await;
         assert_eq!(status2, Some(PairingState::ConfirmSent));
 
-        // Simulate BlePairingConfirm GATT write ACK (onCharacteristicWrite → finalize).
+        // The BlePairingConfirm GATT write ACK (onCharacteristicWrite → finalize).
         orchestrator
-            .finalize_scanner_pairing_by_address("AA:BB:CC")
+            .finalize_scanner_pairing_by_address(address)
             .await
             .expect("finalize after confirm delivery");
-        let status3 = orchestrator.get_session_status(&device_id).await;
+        let status3 = orchestrator.get_session_status(&b.device_id).await;
         assert_eq!(status3, Some(PairingState::Complete));
 
         // ble_address must be committed to SQLite now that bilateral ACK is done.
-        let contact2 = client_db::get_contact_by_device_id(&device_id)
+        let contact2 = client_db::get_contact_by_device_id(&b.device_id)
             .expect("get contact post-ack")
             .expect("exists post-ack");
         assert_eq!(
             contact2.ble_address.as_deref(),
-            Some("AA:BB:CC"),
+            Some(address),
             "ble_address must be set after scanner finalization"
         );
     }
 
-    #[tokio::test]
+    /// An identity read that names B's device id with a genesis that is not
+    /// B's (here A's own, a real genesis of another device) pairs nothing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[serial_test::serial]
     async fn test_identity_observed_genesis_mismatch_fails() {
-        crate::economic_fixtures::use_test_storage_dir();
-        client_db::reset_database_for_tests();
-        client_db::init_database().expect("init db");
-
-        let device_id = [0x44u8; 32];
-        let genesis_stored = [0x55u8; 32];
-        let genesis_observed = [0x66u8; 32];
-        let rec = ContactRecord {
-            contact_id: "ct-2".to_string(),
-            device_id: device_id.to_vec(),
-            alias: "peer2".to_string(),
-            genesis_hash: genesis_stored.to_vec(),
-            current_chain_tip: Some(vec![0x70; 32]),
-            verified: true,
-            verification_proof: None,
-            metadata: HashMap::new(),
-            ble_address: None,
-            status: "Created".to_string(),
-            needs_online_reconcile: false,
-            public_key: vec![0u8; 32],
-            kyber_public_key: vec![0x4B; 1184],
-            previous_chain_tip: None,
-        };
-        client_db::store_contact(&rec).expect("store contact");
+        let pair = Pair::boot(0, 0).await;
+        let (a, b) = (&pair.a, &pair.b);
+        a.enter();
+        let before = client_db::get_contact_by_device_id(&b.device_id)
+            .expect("get contact")
+            .expect("exists");
 
         let orchestrator = PairingOrchestrator::new();
         let err = orchestrator
-            .handle_identity_observed("11:22".to_string(), genesis_observed, device_id)
+            .handle_identity_observed("AA:BB:CC:00:00:0B".to_string(), a.genesis, b.device_id)
             .await
             .expect_err("expected mismatch error");
         assert!(err.contains("Genesis hash mismatch"));
 
-        // Session should be marked Failed
         let state = orchestrator
-            .get_session_status(&device_id)
+            .get_session_status(&b.device_id)
             .await
             .expect("session exists");
         match state {
@@ -1651,32 +1607,12 @@ mod tests {
             other => panic!("expected Failed state, got {:?}", other),
         }
 
-        // Status should remain unchanged (not promoted to BleCapable)
-        let contact = client_db::get_contact_by_device_id(&device_id)
+        // The contact is left exactly as it was (not promoted to BleCapable).
+        let after = client_db::get_contact_by_device_id(&b.device_id)
             .expect("get contact")
             .expect("exists");
-        assert_eq!(contact.status, "Created");
-        assert_eq!(contact.ble_address, None);
-    }
-
-    fn store_peer(device_id: [u8; 32]) {
-        client_db::store_contact(&ContactRecord {
-            contact_id: format!("ct-{:02x}", device_id[0]),
-            device_id: device_id.to_vec(),
-            alias: "peer".to_string(),
-            genesis_hash: vec![0x55; 32],
-            current_chain_tip: Some(vec![0x70; 32]),
-            verified: true,
-            verification_proof: None,
-            metadata: HashMap::new(),
-            ble_address: None,
-            status: "Created".to_string(),
-            needs_online_reconcile: false,
-            public_key: vec![0u8; 32],
-            kyber_public_key: vec![0x4B; 1184],
-            previous_chain_tip: None,
-        })
-        .expect("store contact");
+        assert_eq!(after.status, before.status);
+        assert_eq!(after.ble_address, None);
     }
 
     async fn session_in(
@@ -1702,41 +1638,35 @@ mod tests {
     /// stored address is what makes the contact paired, and a complete session
     /// is never retried. The advertiser's confirm used to complete, and report
     /// the contact paired, when the store failed.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[serial_test::serial]
     async fn a_confirm_that_cannot_store_the_address_does_not_complete() {
-        crate::economic_fixtures::use_test_storage_dir();
-        client_db::reset_database_for_tests();
-        client_db::init_database().expect("init db");
+        let pair = Pair::boot(0, 0).await;
+        pair.a.enter();
         let orchestrator = PairingOrchestrator::new();
-        let peer = [0x71u8; 32];
+        let address = "AA:00:00:00:00:71";
 
-        // No contact to store the address on.
+        // A derived device that is no contact of A: no row to store the address on.
+        let stranger = device_id_of(1);
         session_in(
             &orchestrator,
-            peer,
+            stranger,
             PairingState::AwaitingConfirm,
-            "AA:00:00:00:00:71",
+            address,
         )
         .await;
         let refused = orchestrator
-            .handle_pairing_confirm(peer)
+            .handle_pairing_confirm(stranger)
             .await
             .expect_err("the address was not stored");
         assert!(refused.contains("not stored"), "{refused}");
         assert!(matches!(
-            orchestrator.get_session_status(&peer).await,
+            orchestrator.get_session_status(&stranger).await,
             Some(PairingState::Failed(_))
         ));
 
-        store_peer(peer);
-        session_in(
-            &orchestrator,
-            peer,
-            PairingState::AwaitingConfirm,
-            "AA:00:00:00:00:71",
-        )
-        .await;
+        let peer = pair.b.device_id;
+        session_in(&orchestrator, peer, PairingState::AwaitingConfirm, address).await;
         orchestrator
             .handle_pairing_confirm(peer)
             .await
@@ -1748,33 +1678,32 @@ mod tests {
         let contact = client_db::get_contact_by_device_id(&peer)
             .expect("read")
             .expect("contact");
-        assert_eq!(contact.ble_address.as_deref(), Some("AA:00:00:00:00:71"));
+        assert_eq!(contact.ble_address.as_deref(), Some(address));
     }
 
     /// As the advertiser's confirm: the scanner's finalize completes only once
     /// the address is stored.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[serial_test::serial]
     async fn a_scanner_finalize_that_cannot_store_the_address_does_not_complete() {
-        crate::economic_fixtures::use_test_storage_dir();
-        client_db::reset_database_for_tests();
-        client_db::init_database().expect("init db");
+        let pair = Pair::boot(0, 0).await;
+        pair.a.enter();
         let orchestrator = PairingOrchestrator::new();
-        let peer = [0x72u8; 32];
         let address = "AA:00:00:00:00:72";
 
-        session_in(&orchestrator, peer, PairingState::ConfirmSent, address).await;
+        let stranger = device_id_of(1);
+        session_in(&orchestrator, stranger, PairingState::ConfirmSent, address).await;
         let refused = orchestrator
             .finalize_scanner_pairing_by_address(address)
             .await
             .expect_err("the address was not stored");
         assert!(refused.contains("not stored"), "{refused}");
         assert!(matches!(
-            orchestrator.get_session_status(&peer).await,
+            orchestrator.get_session_status(&stranger).await,
             Some(PairingState::Failed(_))
         ));
 
-        store_peer(peer);
+        let peer = pair.b.device_id;
         session_in(&orchestrator, peer, PairingState::ConfirmSent, address).await;
         orchestrator
             .finalize_scanner_pairing_by_address(address)
