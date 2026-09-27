@@ -887,7 +887,7 @@ html[data-shell-theme="gold"] {
   --dpad-bottom-shadow: rgba(70, 48, 4, 0.9);
   --dpad-cast-shadow: rgba(40, 26, 0, 0.45);
   --dpad-cast-shadow-long: rgba(40, 26, 0, 0.25);
-  --dpad-center-shadow: rgba(92, 64, 6, 0.75);
+  --dpad-center-shadow: rgba(0, 0, 0, 0.9);
   --nav-lit-color:    #ffe27a;
   --control-shell-glow: 0 0 0 1px rgba(255, 236, 160, 0.35);
 }
@@ -907,13 +907,13 @@ html[data-shell-theme="zebra"] {
   --dpad-border:      #a78bfa;
   --ab-btn-grad-light:#6d28d9;
   --ab-btn-grad-dark: #3b0764;
-  --label-color:      #e9d5ff;
-  --shell-label-color:#e9d5ff;
+  --label-color:      #7d6f99;
+  --shell-label-color:#7d6f99;
   --edge-glow:        rgba(167, 139, 250, 0.45);
-  --dpad-bottom-shadow: rgba(40, 10, 80, 0.9);
-  --dpad-cast-shadow: rgba(20, 0, 50, 0.5);
-  --dpad-cast-shadow-long: rgba(20, 0, 50, 0.28);
-  --dpad-center-shadow: rgba(46, 16, 101, 0.85);
+  --dpad-bottom-shadow: rgba(20, 20, 20, 0.85);
+  --dpad-cast-shadow: rgba(0, 0, 0, 0.4);
+  --dpad-cast-shadow-long: rgba(0, 0, 0, 0.22);
+  --dpad-center-shadow: rgba(0, 0, 0, 0.9);
   --nav-lit-color:    #c4b5fd;
   --control-shell-glow: 0 0 0 1px rgba(255, 255, 255, 0.35);
 }
@@ -933,13 +933,13 @@ html[data-shell-theme="leopard"] {
   --dpad-border:      #ff7ac2;
   --ab-btn-grad-light:#e0157a;
   --ab-btn-grad-dark: #7a0a45;
-  --label-color:      #ffd1e8;
-  --shell-label-color:#ffd1e8;
+  --label-color:      #a8848f;
+  --shell-label-color:#a8848f;
   --edge-glow:        rgba(255, 105, 180, 0.45);
-  --dpad-bottom-shadow: rgba(90, 0, 40, 0.9);
-  --dpad-cast-shadow: rgba(40, 0, 20, 0.5);
-  --dpad-cast-shadow-long: rgba(40, 0, 20, 0.28);
-  --dpad-center-shadow: rgba(138, 15, 66, 0.85);
+  --dpad-bottom-shadow: rgba(20, 20, 20, 0.85);
+  --dpad-cast-shadow: rgba(0, 0, 0, 0.4);
+  --dpad-cast-shadow-long: rgba(0, 0, 0, 0.22);
+  --dpad-center-shadow: rgba(0, 0, 0, 0.9);
   --nav-lit-color:    #ff8ccf;
   --control-shell-glow: 0 0 0 1px rgba(255, 234, 200, 0.35);
 }
@@ -1154,13 +1154,17 @@ html[data-shell-theme="zebra"] .screen-container {
     inset 0 2px 8px rgba(0, 0, 0, 0.6),
     0 0 0 1px rgba(0, 0, 0, 0.7) !important;
 }
-/* Labels sit on the hide, so they carry a dark halo to read on both stripes. */
+/* The A and B letters sit on the buttons; the START and SELECT words are
+   engraved in the shell: purple-gray, a dark edge above and a light edge below. */
 html[data-shell-theme="zebra"] .button-a-label,
-html[data-shell-theme="zebra"] .button-b-label,
-html[data-shell-theme="zebra"] .select-button-label,
-html[data-shell-theme="zebra"] .start-button-label {
+html[data-shell-theme="zebra"] .button-b-label {
   color: #e9d5ff !important;
   text-shadow: 0 0 2px #000, 0 0 3px #000, 0 1px 1px #000 !important;
+}
+html[data-shell-theme="zebra"] .select-button-label,
+html[data-shell-theme="zebra"] .start-button-label {
+  color: #7d6f99 !important;
+  text-shadow: 0 -1px 0 rgba(0, 0, 0, 0.6), 0 1px 0 rgba(255, 255, 255, 0.45) !important;
 }
 /* The wells the controls sit in: black, a white hairline against the hide. */
 html[data-shell-theme="zebra"] .start-housing,
@@ -1191,11 +1195,15 @@ html[data-shell-theme="leopard"] .screen-container {
     0 0 0 1px rgba(26, 19, 15, 0.8) !important;
 }
 html[data-shell-theme="leopard"] .button-a-label,
-html[data-shell-theme="leopard"] .button-b-label,
-html[data-shell-theme="leopard"] .select-button-label,
-html[data-shell-theme="leopard"] .start-button-label {
+html[data-shell-theme="leopard"] .button-b-label {
   color: #ffd1e8 !important;
   text-shadow: 0 0 2px #1a1008, 0 0 3px #1a1008, 0 1px 1px #1a1008 !important;
+}
+/* START and SELECT engraved in the shell: pinkish-gray. */
+html[data-shell-theme="leopard"] .select-button-label,
+html[data-shell-theme="leopard"] .start-button-label {
+  color: #a8848f !important;
+  text-shadow: 0 -1px 0 rgba(0, 0, 0, 0.6), 0 1px 0 rgba(255, 240, 230, 0.5) !important;
 }
 html[data-shell-theme="leopard"] .start-housing,
 html[data-shell-theme="leopard"] .select-housing,
