@@ -140,3 +140,65 @@ impl StepTransition {
             .collect()
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::disallowed_methods)] // test asserts; a failure here is the signal
+mod tests {
+    use super::*;
+    use crate::core::bilateral_transaction_manager::compute_smt_key;
+    use crate::merkle::batch_fold::verify_batch;
+    use crate::types::step_fixture::{transfer_step, Party};
+
+    /// A real step's transition folds from its pre-root to its post-root,
+    /// names the relationship leaf it moved, and its receipt carries exactly
+    /// that write; a relationship key the step did not write names nothing,
+    /// so no receipt proves the step in part.
+    #[test]
+    fn a_transition_proves_its_own_move_and_nothing_less() {
+        let sender = Party::from_seed(b"step transition sender wallet seed");
+        let receiver = Party::from_seed(b"step transition receiver wallet seed");
+        let step = transfer_step(&sender, &receiver, 7);
+        let transition = &step.outcome.transition;
+        assert_eq!(
+            verify_batch::<DeviceSmtHashes>(&transition.pre_root(), transition.writes())
+                .expect("the writes fold from the pre-root"),
+            transition.post_root()
+        );
+        let rel_key = compute_smt_key(&sender.device_id(), &receiver.device_id());
+        let write = transition
+            .write_at(&rel_key)
+            .expect("the step moved its leaf");
+        assert_eq!(write.post, Some(step.receipt.child_tip));
+        assert_eq!(
+            transition
+                .receipt_writes(&rel_key, None)
+                .expect("receipt writes"),
+            step.receipt.step_writes
+        );
+        let self_loop = compute_smt_key(&sender.device_id(), &sender.device_id());
+        assert!(
+            transition.receipt_writes(&self_loop, None).is_err(),
+            "a written leaf no receipt names refuses the receipt"
+        );
+    }
+
+    /// A step that names the allocation it drew from but does not write it
+    /// is refused: the witness would describe a leaf the root never moved.
+    #[test]
+    fn an_allocation_the_step_does_not_write_is_refused() {
+        let sender = Party::from_seed(b"step transition sender wallet seed");
+        let receiver = Party::from_seed(b"step transition receiver wallet seed");
+        let step = transfer_step(&sender, &receiver, 7);
+        let rel_key = compute_smt_key(&sender.device_id(), &receiver.device_id());
+        let mut tree = SparseMerkleTree::new();
+        let written = [(rel_key, step.receipt.child_tip)];
+        let unwritten = AllocationBefore {
+            key: compute_smt_key(&receiver.device_id(), &receiver.device_id()),
+            amount: crate::economic::native_reserve::ERA_FAUCET_PAYOUT,
+            sequence: 0,
+        };
+        assert!(StepTransition::apply(&mut tree, &written, Some(unwritten)).is_err());
+        let mut tree = SparseMerkleTree::new();
+        StepTransition::apply(&mut tree, &written, None).expect("the same writes, no allocation");
+    }
+}

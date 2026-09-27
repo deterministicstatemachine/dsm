@@ -3296,37 +3296,68 @@ mod tests {
     const EK_PK_LEN: usize = 64;
     const CANONICAL_OP_LEN: usize = 303;
 
-    /// A real one-way (A-side) receipt in its full wire form: a real step's
-    /// receipt, answered by its sender's per-step EK over the receipt's own
-    /// commitment (the online session binding).
-    fn production_sized_receipt_a() -> Vec<u8> {
+    /// The budget's step: two wallets, the sender's first transfer, its A
+    /// side answered by the sender's per-step EK over the receipt's own
+    /// commitment (the online session binding), and the receiver's
+    /// countersignature of it over its canonical pair. Derived once: SPHINCS+
+    /// keygen and signing are slow, and a countersignature is compared with
+    /// itself across tests.
+    struct BudgetStep {
+        a_side: Vec<u8>,
+        countersign_b: dsm::types::receipt_types::CountersignB,
+    }
+
+    fn budget_step() -> &'static BudgetStep {
         use crate::test_support::receipts::{transfer_step, Party};
-        static A_SIDE: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
-        A_SIDE
-            .get_or_init(|| {
-                let (sender, receiver) = (Party::from_seed(0x41), Party::from_seed(0x42));
-                let step = transfer_step(&sender, &receiver, 7);
-                let mut receipt = step.receipt;
-                let commitment = receipt.compute_commitment().expect("commitment");
-                let a = sender.answer(
-                    &receiver,
-                    &receipt.parent_tip,
-                    &step.c_pre,
-                    &dsm::types::receipt_types::compute_receipt_challenge_response_target(
-                        &commitment,
-                        &commitment,
-                    ),
-                );
-                assert_eq!(a.sig.len(), sphincs_sig_len());
-                assert_eq!(a.ek_pk.len(), EK_PK_LEN);
-                assert_eq!(a.kyber_ct.len(), KYBER_CT_LEN);
-                receipt.add_sig_a(a.sig);
-                receipt.set_ek_cert_a(a.ek_cert);
-                receipt.set_ek_pk_a(a.ek_pk);
-                receipt.set_kyber_ct_a(a.kyber_ct);
-                receipt.to_full_protobuf().expect("encode the A side")
-            })
-            .clone()
+        static STEP: std::sync::OnceLock<BudgetStep> = std::sync::OnceLock::new();
+        STEP.get_or_init(|| {
+            let (sender, receiver) = (Party::from_seed(0x41), Party::from_seed(0x42));
+            let step = transfer_step(&sender, &receiver, 7);
+            let mut receipt = step.receipt;
+            let commitment = receipt.compute_commitment().expect("commitment");
+            let a = sender.answer(
+                &receiver,
+                &receipt.parent_tip,
+                &step.c_pre,
+                &dsm::types::receipt_types::compute_receipt_challenge_response_target(
+                    &commitment,
+                    &commitment,
+                ),
+            );
+            assert_eq!(a.sig.len(), sphincs_sig_len());
+            assert_eq!(a.ek_pk.len(), EK_PK_LEN);
+            assert_eq!(a.kyber_ct.len(), KYBER_CT_LEN);
+            receipt.add_sig_a(a.sig);
+            receipt.set_ek_cert_a(a.ek_cert);
+            receipt.set_ek_pk_a(a.ek_pk);
+            receipt.set_kyber_ct_a(a.kyber_ct);
+            let (b_parent, b_child) = TEST_B_PAIR;
+            let b = receiver.answer(
+                &sender,
+                &b_parent,
+                &step.c_pre,
+                &dsm::types::receipt_types::compute_receipt_b_canonical_target(
+                    &commitment,
+                    &commitment,
+                    &b_parent,
+                    &b_child,
+                ),
+            );
+            BudgetStep {
+                a_side: receipt.to_full_protobuf().expect("encode the A side"),
+                countersign_b: dsm::types::receipt_types::CountersignB {
+                    sig_b: b.sig,
+                    ek_cert_b: b.ek_cert,
+                    ek_pk_b: b.ek_pk,
+                    kyber_ct_b: b.kyber_ct,
+                },
+            }
+        })
+    }
+
+    /// A real one-way (A-side) receipt in its full wire form.
+    fn production_sized_receipt_a() -> Vec<u8> {
+        budget_step().a_side.clone()
     }
 
     /// Submission params carrying production-sized SIG A and canonical op bytes
@@ -3758,33 +3789,32 @@ mod tests {
         );
     }
 
-    /// The FULL countersigned receipt as the recipient stores it: the
-    /// production-shaped A side plus production-shaped B fields. 218,576 bytes
-    /// — the 218,541 observed on 5GN plus canonical field 21 (#934), and 170%
-    /// of the node cap.
+    /// The FULL countersigned receipt as the recipient stores it: the real A
+    /// side plus the receiver's real countersignature — about 202 KB, over
+    /// 150% of the node cap, which is why it never travels whole.
     fn production_sized_full_countersigned_receipt() -> Vec<u8> {
-        let sig = sphincs_sig_len();
-        let a = dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(
-            &production_sized_receipt_a(),
-        )
-        .expect("A side decodes");
-        let full = a
-            .with_countersign_b(dsm::types::receipt_types::CountersignB {
-                sig_b: vec![0xBB; sig],
-                ek_cert_b: vec![0xCB; sig],
-                ek_pk_b: vec![0xEB; EK_PK_LEN],
-                kyber_ct_b: vec![0x1B; KYBER_CT_LEN],
-            })
-            .expect("overlay");
-        let bytes = full.to_full_protobuf().expect("encode");
-        // The 5GN specimen was 218,541 bytes; canonical field 21 (a two-byte
-        // key varint, one length byte, 32 bytes of value) adds 35, and the
-        // dropped child proof (field 9, 8,261 + 3) and replace witness
-        // (field 11, 4 + 2) remove 8,270.
+        let a_bytes = production_sized_receipt_a();
+        let a = dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(&a_bytes)
+            .expect("A side decodes");
+        let b = budget_step().countersign_b.clone();
+        let b_fields: usize = [
+            (13, &b.sig_b),
+            (15, &b.ek_cert_b),
+            (17, &b.ek_pk_b),
+            (19, &b.kyber_ct_b),
+        ]
+        .into_iter()
+        .map(|(tag, value)| prost::encoding::bytes::encoded_len(tag, value))
+        .sum();
+        let bytes = a
+            .with_countersign_b(b)
+            .expect("overlay")
+            .to_full_protobuf()
+            .expect("encode");
         assert_eq!(
             bytes.len(),
-            210_306,
-            "the 5GN specimen size plus field 21, without fields 9 and 11"
+            a_bytes.len() + b_fields,
+            "the countersignature adds exactly its four fields"
         );
         bytes
     }
@@ -3843,24 +3873,26 @@ mod tests {
         let delta =
             dsm::types::receipt_types::decode_receipt_countersign_b_wire(&body).expect("codec");
         let sig = sphincs_sig_len();
-        assert_eq!(delta.sig_b, vec![0xBB; sig]);
-        assert_eq!(delta.ek_cert_b, vec![0xCB; sig]);
-        assert_eq!(delta.ek_pk_b, vec![0xEB; EK_PK_LEN]);
-        assert_eq!(delta.kyber_ct_b, vec![0x1B; KYBER_CT_LEN]);
+        let b = &budget_step().countersign_b;
+        assert_eq!(delta.sig_b, b.sig_b);
+        assert_eq!(delta.ek_cert_b, b.ek_cert_b);
+        assert_eq!(delta.ek_pk_b, b.ek_pk_b);
+        assert_eq!(delta.kyber_ct_b, b.kyber_ct_b);
         assert!(
             body.len() < 2 * sig + 8 * 1024,
             "B delta grew beyond two signatures plus reference material: {} bytes",
             body.len()
         );
-        // Nothing A-side rides back: the sig_a / ek_cert_a filler runs are absent.
-        assert!(!built
-            .bytes
-            .windows(1024)
-            .any(|w| w.iter().all(|&b| b == 0xAA)));
-        assert!(!built
-            .bytes
-            .windows(1024)
-            .any(|w| w.iter().all(|&b| b == 0xCC)));
+        // Nothing A-side rides back: no run of σ_A or of the A-side EK
+        // certificate appears in the reply.
+        let a = dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(
+            &production_sized_receipt_a(),
+        )
+        .expect("A side decodes");
+        for a_object in [&a.sig_a, &a.ek_cert_a] {
+            let run = &a_object[..1024];
+            assert!(!built.bytes.windows(1024).any(|w| w == run));
+        }
         // Born canonical: the ArgPack codec is PROTO.
         let Some(dsm::types::proto::envelope::Payload::UniversalTx(tx)) = &env.payload else {
             panic!("UniversalTx")
