@@ -148,7 +148,7 @@ impl NetworkConfigLoader {
 }
 
 /// Parse TOML using serde for type safety and automatic deserialization.
-fn parse_env_config_toml(toml_str: &str) -> Result<EnvConfig, DsmError> {
+pub(crate) fn parse_env_config_toml(toml_str: &str) -> Result<EnvConfig, DsmError> {
     let mut config: EnvConfig = toml::from_str(toml_str).map_err(|e| {
         DsmError::serialization_error(
             "STRICT: failed to parse TOML env config",

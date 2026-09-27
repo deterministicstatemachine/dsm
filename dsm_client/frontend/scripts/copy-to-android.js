@@ -19,13 +19,12 @@ if (!fs.existsSync(targetDir)) {
   console.log('Created Android assets directory');
 }
 
-// Remove stale assets (but preserve whitelisted files such as env configs)
-const whitelist = new Set(['dsm_env_config.toml', 'ca.crt']);
-console.log('Cleaning existing Android assets (preserving whitelist)...');
+// The Android assets directory is regenerated on every build: nothing in it
+// is kept from a previous build, so nothing stale can be packaged.
+console.log('Cleaning existing Android assets...');
 try {
   const existing = fs.readdirSync(targetDir);
   existing.forEach((name) => {
-    if (whitelist.has(name)) return; // keep whitelisted files
     const full = path.join(targetDir, name);
     try {
       const stat = fs.lstatSync(full);
@@ -90,5 +89,27 @@ if (fs.existsSync(overlayDir)) {
   copyRecursive(overlayDir, targetDir);
 }
 
-// Single source of truth for config: android/app/src/main/assets/dsm_env_config.toml.
-// Do NOT add code that copies over that file — it will break allow_localhost.
+// The network config and the fleet's CA the app ships with. Their one tracked
+// source is frontend/public/; they are written here straight from it, after
+// everything else, and checked byte for byte. They are not taken from dist/:
+// a build once packaged dist/'s previous copy of both while public/ held the
+// new ones, and the app then trusted a retired CA and a retired fleet. For a
+// local fleet, push an override config to the device
+// (scripts/push_env_override.sh); do not edit the copies here — every build
+// rewrites them.
+const RUNTIME_CONFIG = ['dsm_env_config.toml', 'ca.crt'];
+const publicDir = path.join(__dirname, '..', 'public');
+for (const name of RUNTIME_CONFIG) {
+  const source = path.join(publicDir, name);
+  const target = path.join(targetDir, name);
+  if (!fs.existsSync(source)) {
+    console.error(`Error: ${source} is missing; the app cannot reach the network without it`);
+    process.exit(1);
+  }
+  fs.copyFileSync(source, target);
+  if (!fs.readFileSync(source).equals(fs.readFileSync(target))) {
+    console.error(`Error: ${target} does not equal ${source} after copying`);
+    process.exit(1);
+  }
+  console.log(`OK: ${name} written from public/`);
+}
