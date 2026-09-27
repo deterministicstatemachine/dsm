@@ -68,13 +68,10 @@ import dsm.types.proto.NativeHostEvent
 import dsm.types.proto.NativeHostEventKind
 import dsm.types.proto.QrScanResultPayload
 import dsm.types.proto.SessionHardwareFactsProto
-import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
-import java.io.InputStream
 import java.lang.ref.WeakReference
-import java.net.HttpURLConnection
 import java.net.URL
 import java.util.Locale
 
@@ -877,57 +874,6 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
     }
 
 
-
-    // The WebView external-host allowlist lives at file scope below so that
-    // `WebViewAllowlistTest` (src/test) can read the set literals and the
-    // `isAllowlistedExternalHost` predicate directly. The lock is the test
-    // — any change to the allowlist requires a matching test diff that is
-    // visible in PR review.
-
-    @VisibleForTesting
-    internal fun proxyWithCorsForTest(request: WebResourceRequest): WebResourceResponse? {
-        return proxyWithCorsInternal(request)
-    }
-
-    private fun proxyWithCorsInternal(request: WebResourceRequest): WebResourceResponse? {
-        val url = request.url?.toString() ?: return null
-        val host = request.url?.host ?: return null
-        if (!isAllowlistedExternalHost(host)) return null
-        return try {
-            val conn = (URL(url).openConnection() as HttpURLConnection).apply {
-                connectTimeout = 10_000
-                readTimeout = 15_000
-                requestMethod = request.method
-                for ((k, v) in request.requestHeaders) {
-                    if (k.isNullOrBlank()) continue
-                    setRequestProperty(k, v)
-                }
-            }
-            val code = conn.responseCode
-            val rawContentType = conn.contentType ?: "application/octet-stream"
-            val parts = rawContentType.split(';').map { it.trim() }
-            val mime = parts.firstOrNull()?.ifBlank { "application/octet-stream" } ?: "application/octet-stream"
-            val charset = parts.firstOrNull { it.startsWith("charset=", ignoreCase = true) }
-                ?.substringAfter('=')
-                ?.ifBlank { null }
-                ?: "utf-8"
-
-            val stream: InputStream = try {
-                conn.inputStream
-            } catch (_: Throwable) {
-                conn.errorStream ?: ByteArrayInputStream(ByteArray(0))
-            }
-
-            val headers = mutableMapOf<String, String>()
-            headers["Access-Control-Allow-Origin"] = "https://appassets.androidplatform.net"
-            headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
-            headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
-
-            WebResourceResponse(mime, charset, code, conn.responseMessage ?: "OK", headers, stream)
-        } catch (_: Throwable) {
-            null
-        }
-    }
 
     private fun installDsmBinaryBridge(wv: WebView) {
         if (!WebViewFeature.isFeatureSupported(WebViewFeature.CREATE_WEB_MESSAGE_CHANNEL)) {
@@ -1964,11 +1910,9 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
                     ?: return super.shouldInterceptRequest(view, request as WebResourceRequest?)
                 val uri = req.url
                     ?: return super.shouldInterceptRequest(view, request as WebResourceRequest?)
-                // APK assets are served by WebViewAssetLoader.
-                // Allowlisted external hosts fall through to the CORS proxy.
-                // Everything else returns null so WebView handles it normally.
+                // APK assets are served by WebViewAssetLoader; everything else
+                // returns null so WebView handles it normally.
                 return assetLoader.shouldInterceptRequest(uri)
-                    ?: proxyWithCorsInternal(req)
             }
 
             override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
@@ -2008,37 +1952,3 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
     }
 }
 
-// =============================================================================
-// SECURITY: WebView external-host allowlist (CI-locked).
-//
-// These declarations are deliberately at file scope (not inside MainActivity)
-// so that `dsm_client/android/app/src/test/.../WebViewAllowlistTest.kt` can
-// read the set literals and call `isAllowlistedExternalHost` directly. The
-// lock is the test: any change to either set requires a matching test diff
-// that is visible in PR review.
-//
-// `proxyWithCorsInternal` consults `isAllowlistedExternalHost` BEFORE
-// performing any external fetch or injecting CORS response headers. Adding
-// a new external host therefore requires both:
-//   1. updating the set(s) below, AND
-//   2. updating WebViewAllowlistTest.kt to match.
-// Both edits land in the same PR diff and trigger explicit review.
-// =============================================================================
-
-internal val WEBVIEW_ALLOWED_EXACT_HOSTS: Set<String> = setOf(
-    "tile.openstreetmap.org",
-    "localhost",
-    "127.0.0.1",
-)
-
-internal val WEBVIEW_ALLOWED_HOST_SUFFIXES: Set<String> = setOf(
-    ".tile.openstreetmap.org",
-)
-
-internal fun isAllowlistedExternalHost(host: String): Boolean {
-    if (host in WEBVIEW_ALLOWED_EXACT_HOSTS) return true
-    for (suffix in WEBVIEW_ALLOWED_HOST_SUFFIXES) {
-        if (host.endsWith(suffix)) return true
-    }
-    return false
-}
