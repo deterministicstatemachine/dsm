@@ -276,8 +276,6 @@ tasks.register("failOnJsonOrB64") {
         fileTree("src").matching {
             include("**/*.kt", "**/*.java")
             exclude("**/build/**")
-            // Allow JSON in infrastructure plumbing (event dispatch, MCP serialization)
-            exclude("**/EventPoller.kt", "**/McpService.kt")
         }.files.forEach { f ->
             val t = f.readText()
             if (rx.containsMatchIn(t)) {

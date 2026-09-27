@@ -1142,50 +1142,6 @@ pub(crate) fn handle_ble_identity_observed_from_envelope(
     }
 }
 
-// ==================== MCP JNI externs ====================
-#[no_mangle]
-pub extern "system" fn Java_com_dsm_wallet_mcp_McpServiceBus_jniGetDeviceId(
-    env: jni::sys::JNIEnv,
-    _clazz: jni::sys::jclass,
-) -> jni::sys::jbyteArray {
-    let env_raw = env;
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let mut env = match unsafe { env_from(env_raw) } {
-            Some(e) => e,
-            None => return std::ptr::null_mut(),
-        };
-
-        match crate::sdk::app_state::AppState::get_device_id() {
-            Some(id) if id.len() == 32 => env
-                .byte_array_from_slice(&id)
-                .map(|a| a.into_raw())
-                .unwrap_or_else(|_| empty_byte_array_or_empty(&mut env).into_raw()),
-            _ => env
-                .new_byte_array(0)
-                .map(|a| a.into_raw())
-                .unwrap_or_else(|_| empty_byte_array_or_empty(&mut env).into_raw()),
-        }
-    })) {
-        Ok(result) => result,
-        Err(panic) => {
-            log::error!(
-                "jniGetDeviceId: panic captured: {}",
-                crate::jni::bridge_utils::panic_message(&panic)
-            );
-            let mut env = match unsafe { env_from(env_raw) } {
-                Some(e) => e,
-                None => return std::ptr::null_mut(),
-            };
-            error_byte_array(
-                &mut env,
-                helpers::JniErrorCode::ProcessingFailed as u32,
-                "panic in jniGetDeviceId",
-            )
-            .into_raw()
-        }
-    }
-}
-
 /// UnifiedNativeApi JNI entry for processEnvelopeV3.
 /// Delegates to the internal `process_envelope_v3()` helper.
 /// Kotlin BLE layer (GattServerHost, GattClientSession, BleCoordinator) calls
