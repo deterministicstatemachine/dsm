@@ -837,8 +837,18 @@ button.sb-menu__item { width: 100%; font: inherit; color: inherit; text-align: l
 .sb-tokensel__opt.is-selected { background: rgba(var(--text-rgb), 0.18); font-weight: 700; }
 .sb-tokensel__note { flex: 0 0 auto; font-size: 9px; opacity: 0.6; }
 .sb-tokensel__empty { padding: 8px; font-size: 10px; opacity: 0.6; }
-/* Beside an amount field the picker is a fixed-width column, not a full row. */
+/* Beside an amount field the picker is a fixed-width column, not a full row.
+   Its list is not: it opens under the button's right edge, as wide as its
+   longest row, so a coin and a ticker are never cut to the column's width. */
 .sb-input-row .sb-tokensel--inline { flex: 0 0 auto; width: 104px; }
+.sb-input-row .sb-tokensel--inline .sb-tokensel__list {
+  left: auto;
+  right: 0;
+  width: max-content;
+  min-width: 100%;
+  max-width: 236px;
+}
+.sb-input-row .sb-tokensel--inline .sb-tokensel__opt .sb-tokensel__ticker { overflow: visible; text-overflow: clip; }
 
 /* ------------------------------------------------------------------ */
 /* Dark container: the contrast of the FX window and the i popup,     */
@@ -1094,6 +1104,22 @@ button.sb-card--dark { color: var(--bg); }
    drops the scanlines beneath such a QR, and a framed screen lays its QR out
    in flow like anything else on the card. */
 .sb-screen .qr-code-above-scanlines { position: static !important; z-index: auto !important; }
+
+/* A file control kept off screen; the brick that labels it opens the picker. */
+.sb-file {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+label.sb-btn { cursor: pointer; }
+label.sb-btn.is-disabled { opacity: 0.45; pointer-events: none; }
+.sb-file:focus-visible + label.sb-btn { outline: 2px solid var(--text-dark); outline-offset: 2px; }
 
 /* A QR code keeps a white tile whatever the theme, so a camera can read it. */
 .sb-qr { display: inline-block; padding: 6px; background: #fff; border: 2px solid var(--border); border-radius: 8px; line-height: 0; }

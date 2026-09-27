@@ -78,17 +78,19 @@ export default function DevPolicyScreen(): React.JSX.Element {
     >
       <section className="sb-card">
         <div className="sb-card__title">Create a token</div>
+        <p className="sb-hint">The same wizard as Tokens → Create Token: your ticker, name, coin and supply.</p>
         <button
           type="button"
           className={`sb-btn sb-btn--primary sb-btn--block${fc(0)}`}
           onClick={() => setIsCreationDialogOpen(true)}
         >
-          Create Token (advanced)
+          Create Token
         </button>
       </section>
 
       <section className="sb-card">
-        <div className="sb-card__title">Publish a policy</div>
+        <div className="sb-card__title">Publish a policy (advanced)</div>
+        <p className="sb-hint">Serialized TokenPolicyV3 bytes, published exactly as pasted.</p>
         <div className="sb-field">
           <label htmlFor="policy-base32">TokenPolicyV3 bytes, Base32 Crockford</label>
           <textarea
