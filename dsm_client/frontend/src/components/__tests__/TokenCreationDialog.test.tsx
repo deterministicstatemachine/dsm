@@ -19,7 +19,14 @@ jest.mock('../../utils/imageRgba', () => ({
   readImageRgba: jest.fn(),
 }));
 
+jest.mock('@/dsm/policies', () => ({
+  ...jest.requireActual('@/dsm/policies'),
+  getTokenCreationFee: jest.fn(),
+  createToken: jest.fn(),
+}));
+
 import { readImageRgba } from '../../utils/imageRgba';
+import { createToken, getTokenCreationFee } from '@/dsm/policies';
 
 describe('TokenCreationDialog token kind selector', () => {
   // Fungible is the only kind the protocol enforces. NFT and SBT are not
@@ -92,3 +99,75 @@ describe('TokenCreationDialog coin artwork', () => {
   });
 });
 
+
+describe('TokenCreationDialog creation fee', () => {
+  const standing = (eraHeld: bigint, feeCovered: boolean) => ({ feeEra: 10n, eraHeld, feeCovered });
+
+  async function toReview() {
+    fireEvent.change(screen.getByLabelText(/Ticker/i), { target: { value: 'ART' } });
+    fireEvent.change(screen.getByLabelText(/Display Name/i), { target: { value: 'Artwork' } });
+    fireEvent.click(screen.getByRole('button', { name: /Continue/i }));
+    fireEvent.click(screen.getByRole('button', { name: /Continue/i }));
+    await screen.findByText('10 ERA (burned)');
+  }
+
+  beforeEach(() => {
+    (getTokenCreationFee as jest.Mock).mockReset();
+  });
+
+  // A fresh wallet used to fill in every step and learn only when it pressed
+  // the final button that it held no ERA for the fee.
+  it('shows the ERA held beside the fee, and where to get ERA when it does not pay', async () => {
+    (getTokenCreationFee as jest.Mock).mockResolvedValue(standing(0n, false));
+    render(<TokenCreationDialog onClose={jest.fn()} />);
+    await toReview();
+
+    expect(screen.getByText('0 ERA')).toBeInTheDocument();
+    expect(screen.getByRole('status')).toHaveTextContent(
+      'This burns 10 ERA and you hold 0. Get ERA from the Faucet tab first.',
+    );
+    // The review step burns ERA; getting ERA is the faucet's, not this step's.
+    expect(screen.queryByRole('button', { name: /claim/i })).toBeNull();
+    // Rust decides the burn: the button stays live.
+    expect(screen.getByRole('button', { name: 'Burn ERA' })).toBeEnabled();
+  });
+
+  it('says nothing more when the ERA held pays the fee', async () => {
+    (getTokenCreationFee as jest.Mock).mockResolvedValue(standing(100n, true));
+    render(<TokenCreationDialog onClose={jest.fn()} />);
+    await toReview();
+
+    expect(screen.getByText('100 ERA')).toBeInTheDocument();
+    expect(screen.queryByText(/This burns/)).toBeNull();
+    expect(screen.getByRole('button', { name: 'Burn ERA' })).toBeEnabled();
+  });
+
+  // The busy label names what is being made, and is short enough to clear the
+  // button's edges (measured on the A54: 115px of text in the wider action).
+  it('names the burn in progress "Publishing token"', async () => {
+    (getTokenCreationFee as jest.Mock).mockResolvedValue(standing(100n, true));
+    (createToken as jest.Mock).mockReturnValue(new Promise(() => {}));
+    render(<TokenCreationDialog onClose={jest.fn()} />);
+    await toReview();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Burn ERA' }));
+    expect(await screen.findByRole('button', { name: 'Publishing token' })).toBeDisabled();
+    expect(createToken).toHaveBeenCalledTimes(1);
+  });
+
+  // ERA can arrive or leave while the wizard is open; the review reads it again.
+  it('reads the standing again each time the review is reached', async () => {
+    (getTokenCreationFee as jest.Mock)
+      .mockResolvedValueOnce(standing(0n, false))
+      .mockResolvedValueOnce(standing(100n, true));
+    render(<TokenCreationDialog onClose={jest.fn()} />);
+    await toReview();
+    expect(screen.getByText('0 ERA')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Back' }));
+    fireEvent.click(screen.getByRole('button', { name: /Continue/i }));
+    expect(await screen.findByText('100 ERA')).toBeInTheDocument();
+    expect(screen.queryByText(/This burns/)).toBeNull();
+    expect(getTokenCreationFee).toHaveBeenCalledTimes(2);
+  });
+});

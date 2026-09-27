@@ -57,6 +57,12 @@ describe('screen.css', () => {
     expect(list).toMatch(/right:\s*0/);
   });
 
+  it("gives the token wizard's action two shares of its row", () => {
+    // "Publishing token" is 115px of text: in an even split the action's
+    // content box is 99px and the label ran into the button's edges.
+    expect(rule('.sb-popover.token-wizard .sb-actions > .sb-btn--primary')).toMatch(/flex-grow:\s*2/);
+  });
+
   it('keeps an FX scene inside the screen host', () => {
     // position: absolute against .stateboy-screen-host, never fixed to the page.
     expect(rule('.sb-fx-backdrop')).not.toMatch(/position:\s*fixed/);

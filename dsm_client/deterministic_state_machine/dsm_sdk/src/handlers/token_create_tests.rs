@@ -18,7 +18,7 @@ use serial_test::serial;
 
 use dsm::types::proto as generated;
 
-use crate::bridge::{AppInvoke, AppResult, AppRouter};
+use crate::bridge::{AppInvoke, AppQuery, AppResult, AppRouter};
 use crate::handlers::app_router_impl::AppRouterImpl;
 use crate::storage::client_db::token_registry;
 use crate::test_support::one_device::Device;
@@ -91,6 +91,69 @@ async fn an_unaffordable_creation_moves_nothing_and_registers_nothing() {
     assert!(token_registry::get_token_by_ticker("POOR")
         .expect("registry")
         .is_none());
+}
+
+async fn fee_schedule(router: &AppRouterImpl) -> generated::TokenFeeScheduleResponse {
+    let result = router
+        .query(AppQuery {
+            path: "tokens.getFeeSchedule".to_string(),
+            params: Vec::new(),
+        })
+        .await;
+    assert!(
+        result.success,
+        "tokens.getFeeSchedule: {:?}",
+        result.error_message
+    );
+    match crate::handlers::response_helpers::decode_local_envelope(&result.data)
+        .expect("a local answer")
+        .payload
+    {
+        Some(generated::envelope::Payload::TokenFeeScheduleResponse(r)) => r,
+        other => panic!("tokens.getFeeSchedule answered {other:?}"),
+    }
+}
+
+/// The fee schedule tells the wizard what `token.create` will decide. A
+/// device holding no ERA is reported as not covering the fee, holding exactly
+/// what its head holds, and the creation is refused naming that amount.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn the_fee_schedule_reports_an_unfunded_device_as_not_covering_the_fee() {
+    let d = Device::start(0xD6).await;
+    let schedule = fee_schedule(&d.router).await;
+    assert_eq!(
+        schedule.token_creation_era,
+        dsm::core::token::TOKEN_CREATION_FEE_ERA
+    );
+    assert_eq!(schedule.era_held, d.era_balance());
+    assert!(!schedule.fee_covered);
+    let msg = refusal(&create(&d.router, &request("SHORT", 0, 1_000)).await);
+    assert!(
+        msg.contains(&format!("(have {})", schedule.era_held)),
+        "{msg}"
+    );
+}
+
+/// After the faucet the schedule reports the ERA the head holds as covering
+/// the fee, and the creation it describes goes through.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn the_fee_schedule_reports_a_funded_device_as_covering_the_fee() {
+    let d = Device::funded(0xD7).await;
+    let schedule = fee_schedule(&d.router).await;
+    assert_eq!(schedule.era_held, d.era_balance());
+    assert_eq!(
+        schedule.era_held,
+        dsm::economic::native_reserve::ERA_FAUCET_PAYOUT
+    );
+    assert!(schedule.fee_covered);
+    created(&create(&d.router, &request("PAID", 0, 1_000)).await);
+    assert_eq!(
+        fee_schedule(&d.router).await.era_held,
+        dsm::economic::native_reserve::ERA_FAUCET_PAYOUT - dsm::core::token::TOKEN_CREATION_FEE_ERA,
+        "the schedule reads the head the fee was debited from"
+    );
 }
 
 /// The token id is the creation commitment. The same creation again is

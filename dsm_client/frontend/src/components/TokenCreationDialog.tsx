@@ -7,12 +7,11 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { TokenCoin } from './TokenCoin';
 import { encodeCoinSource, silhouetteFromRgba } from '../utils/coinArtwork';
 import { readImageRgba } from '../utils/imageRgba';
-import { createToken } from '@/dsm/policies';
-import { getTokenCreationFeeEra } from '@/dsm/policies';
+import { createToken, getTokenCreationFee, type TokenCreationFee } from '@/dsm/policies';
 import { useBackButton } from '../hooks/useBackButton';
 
-/** The creation fee as Rust reported it, the failure of asking, or not asked yet. */
-type CreationFee = { era: bigint } | { error: string } | undefined;
+/** The creation fee and this device's standing as Rust reported them, the failure of asking, or not asked yet. */
+type CreationFee = TokenCreationFee | { error: string } | undefined;
 
 // ── Types ────────────────────────────────────────────────────────────────────
 // Fungible is the only token kind the protocol enforces. NFT/SBT would need
@@ -367,7 +366,7 @@ function Step3({
   set: (p: Partial<WizardState>) => void;
   effectiveDecimals: number;
   effectiveTransferable: boolean;
-  /** The fee from Rust; `undefined` until the query returns. */
+  /** The fee and this device's standing from Rust; `undefined` until the query returns. */
   creationFee: CreationFee;
 }) {
   const supplyLine = state.genesisSupply ? BigInt(state.genesisSupply).toLocaleString() : '—';
@@ -446,11 +445,24 @@ function Step3({
         <span className="sb-kv__v">
           {creationFee === undefined
             ? '…'
-            : 'era' in creationFee
-              ? `${creationFee.era} ERA (burned)`
+            : 'feeEra' in creationFee
+              ? `${creationFee.feeEra} ERA (burned)`
               : `not available: ${creationFee.error}`}
         </span>
       </div>
+      {creationFee !== undefined && 'feeEra' in creationFee && (
+        <div className="sb-kv">
+          <span className="sb-kv__k">Your ERA</span>
+          <span className="sb-kv__v">{`${creationFee.eraHeld} ERA`}</span>
+        </div>
+      )}
+      {creationFee !== undefined && 'feeEra' in creationFee && !creationFee.feeCovered && (
+        <div className="sb-notice" role="status" style={{ marginTop: 8 }}>
+          <span>
+            {`This burns ${creationFee.feeEra} ERA and you hold ${creationFee.eraHeld}. Get ERA from the Faucet tab first.`}
+          </span>
+        </div>
+      )}
       {state.description.trim() && (
         <div className="sb-kv">
           <span className="sb-kv__k">Desc</span>
@@ -544,19 +556,28 @@ export const TokenCreationDialog: React.FC<{ onClose: () => void; onSuccess?: ()
   const [creationFee, setCreationFee] = useState<CreationFee>(undefined);
   const stateRef = useRef(state);
   const bodyRef = useRef<HTMLDivElement | null>(null);
+  const mountedRef = useRef(true);
 
   useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      try {
-        const era = await getTokenCreationFeeEra();
-        if (!cancelled) setCreationFee({ era });
-      } catch (e) {
-        if (!cancelled) setCreationFee({ error: e instanceof Error ? e.message : String(e) });
-      }
-    })();
-    return () => { cancelled = true; };
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
   }, []);
+
+  const loadFee = useCallback(async () => {
+    try {
+      const fee = await getTokenCreationFee();
+      if (mountedRef.current) setCreationFee(fee);
+    } catch (e) {
+      if (mountedRef.current) setCreationFee({ error: e instanceof Error ? e.message : String(e) });
+    }
+  }, []);
+
+  // The device's standing against the fee is read where it is shown, each
+  // time the review is reached: ERA may have arrived or left since.
+  useEffect(() => {
+    if (step === 3) void loadFee();
+  }, [step, loadFee]);
+
 
   const set = useCallback((patch: Partial<WizardState>) => {
     _setState(prev => {
@@ -762,7 +783,7 @@ export const TokenCreationDialog: React.FC<{ onClose: () => void; onSuccess?: ()
               onClick={handleCreate}
               disabled={creating}
             >
-              {resolving ? 'Confirming outcome…' : creating ? 'Publishing policy…' : 'Publish'}
+              {resolving ? 'Confirming token' : creating ? 'Publishing token' : 'Burn ERA'}
             </button>
           )}
         </div>
