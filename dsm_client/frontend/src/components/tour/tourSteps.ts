@@ -99,7 +99,7 @@ export const TOUR_STEPS: ReadonlyArray<TourStep> = [
     screen: 'wallet',
     target: '.sb-tabs[aria-label="Wallet sections"]',
     title: 'Wallet tabs',
-    body: 'These tabs switch the wallet between Overview, Send, Swap, History and Bitcoin.',
+    body: 'These tabs switch the wallet between Overview, Send, History and Bitcoin. Swapping lives on the TRADE screen.',
   },
   {
     id: 'go-send',

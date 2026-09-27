@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // path: src/components/screens/SofiScreen.tsx
 // SoFi (SoFi §27) on the StateBoy frame: swap one token for another through
-// the pools, create and close a pool, set up with one, resolve a pending
-// position. A token is named by its policy commit, the CPTA anchor the
+// sovereign liquidity, create and close liquidity of your own, set up with
+// it, resolve a pending position. A token is named by its policy commit, the CPTA anchor the
 // wallet's balances carry (the SDK renders policy_anchor_b32 from those same
 // 32 bytes); the app sends intent only and Core decides.
 
@@ -16,11 +16,11 @@ import { TokenSelect, type TokenOption } from '../common/TokenSelect';
 import { useFx } from '../fx/FxProvider';
 import { copyText } from '../../utils/anchorDisplay';
 
-type SofiTab = 'swap' | 'pools';
+type SofiTab = 'swap' | 'liquidity';
 
 const TABS: ReadonlyArray<{ id: SofiTab; label: string }> = [
   { id: 'swap', label: 'Swap' },
-  { id: 'pools', label: 'Pools' },
+  { id: 'liquidity', label: 'Liquidity' },
 ];
 
 type Status = { kind: 'info' | 'success' | 'error'; text: string };
@@ -101,7 +101,7 @@ export default function SofiScreen(): React.JSX.Element {
   const effectiveTokenOut = tokenOutAnchor.trim() || tokenOut;
   const inBalance = tokenIn ? held(tokenIn) : null;
 
-  // --- Pools ---
+  // --- Liquidity ---
   const [tokenA, setTokenA] = useState('');
   const [tokenB, setTokenB] = useState('');
   const [reserveA, setReserveA] = useState('');
@@ -151,7 +151,7 @@ export default function SofiScreen(): React.JSX.Element {
     });
     if (hops.length === 0) {
       setQuote(null);
-      throw new Error('no pool trades between these two tokens');
+      throw new Error('no liquidity trades between these two tokens');
     }
     setQuote(hops);
     const out = hops[hops.length - 1].amountOut;
@@ -172,7 +172,7 @@ export default function SofiScreen(): React.JSX.Element {
     return showPosition('Trade', r, coin);
   });
 
-  const onCreate = () => run('Create pool', async () => {
+  const onCreate = () => run('Create liquidity vault', async () => {
     const a = id32('token A', tokenA);
     const b = id32('token B', tokenB);
     // The pair is ordered bytewise (§28); order it for the user.
@@ -191,7 +191,7 @@ export default function SofiScreen(): React.JSX.Element {
     setVaultId(id);
     fx.play({
       anim: 'vault',
-      title: 'Pool created',
+      title: 'Liquidity vault created',
       caption: `${nameOf(tokenA)} / ${nameOf(tokenB)} · position ${r.position}`,
     });
     return `Vault created: ${id}`;
@@ -223,9 +223,9 @@ export default function SofiScreen(): React.JSX.Element {
       className="sofi-screen"
       info={(
         <InfoTip title="SoFi">
-          <p>Sovereign finance: pools and trades that settle between devices, with no exchange in the middle.</p>
-          <p><b>Swap</b> trades one token for another through a pool at the pool&apos;s price. Quote first: you see the exact amount before you confirm. A trade lands at a position, or is void if another trade won the race, and then nothing moved.</p>
-          <p><b>Pools</b> puts two of your tokens into a pool of your own. Every trade against it pays the fee you set, and you can close it and take the reserves back.</p>
+          <p>Sovereign finance: sovereign liquidity and trades that settle between devices, with no exchange in the middle.</p>
+          <p><b>Swap</b> trades one token for another through sovereign liquidity at its price. Quote first: you see the exact amount before you confirm. A trade lands at a position, or is void if another trade won the race, and then nothing moved.</p>
+          <p><b>Liquidity</b> puts two of your tokens into a liquidity vault of your own: sovereign liquidity. Every trade against it pays the fee you set, and you can close it and take the reserves back.</p>
           <p><b>Resolve</b> advances a position this device still has pending, after a trade that did not finish.</p>
         </InfoTip>
       )}
@@ -350,11 +350,11 @@ export default function SofiScreen(): React.JSX.Element {
         </div>
       )}
 
-      {tab === 'pools' && (
-        <div className="pools-tab">
+      {tab === 'liquidity' && (
+        <div className="liquidity-tab">
           {createdVault && (
-            <section className="sb-card sb-card--dark" role="status" aria-label="Pool created">
-              <div className="sb-card__title">Pool created</div>
+            <section className="sb-card sb-card--dark" role="status" aria-label="Liquidity vault created">
+              <div className="sb-card__title">Liquidity vault created</div>
               <div className="sb-kv">
                 <span className="sb-kv__k">Vault</span>
                 <span className="sb-kv__v sb-kv__v--mono">{createdVault}</span>
@@ -367,7 +367,7 @@ export default function SofiScreen(): React.JSX.Element {
           )}
 
           <section className="sb-card">
-            <div className="sb-card__title">Create a pool</div>
+            <div className="sb-card__title">Create a liquidity vault</div>
             <div className="sb-field">
               <label htmlFor="sofi-reserve-a">Token A and its reserve</label>
               <div className="sb-input-row">
@@ -409,19 +409,19 @@ export default function SofiScreen(): React.JSX.Element {
                 onChange={(e) => setFeeBps(e.target.value)}
               />
             </div>
-            <p className="sb-hint">Both reserves leave your balance into the pool, in base units. Every trade against it pays this fee.</p>
+            <p className="sb-hint">Both reserves leave your balance into the vault, in base units. Every trade against it pays this fee.</p>
             <button
               type="button"
               className="sb-btn sb-btn--primary sb-btn--block"
               onClick={onCreate}
               disabled={busy || !tokenA || !tokenB || !reserveA.trim() || !reserveB.trim() || !feeBps.trim()}
             >
-              Create pool
+              Create Liquidity Vault
             </button>
           </section>
 
           <section className="sb-card">
-            <div className="sb-card__title">A pool by id</div>
+            <div className="sb-card__title">A liquidity vault by id</div>
             <div className="sb-field">
               <label htmlFor="sofi-vault">Vault id</label>
               <input
@@ -438,7 +438,7 @@ export default function SofiScreen(): React.JSX.Element {
               <button type="button" className="sb-btn" onClick={onSetup} disabled={busy || !vaultId.trim()}>Set up</button>
               <button type="button" className="sb-btn" onClick={onClose} disabled={busy || !vaultId.trim()}>Close</button>
             </div>
-            <p className="sb-hint sb-hint--tight">Set up once with a pool before trading against it. Close is for a pool of your own.</p>
+            <p className="sb-hint sb-hint--tight">Set up once with a liquidity vault before trading against it. Close is for a vault of your own.</p>
           </section>
 
           <Disclosure summary="Advanced: relay a fulfillment">
