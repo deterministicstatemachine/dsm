@@ -34,15 +34,16 @@ describe('wallet credit sound routing', () => {
       error: null,
     };
     (walletStore as any).loadingCount = 0;
-    (walletStore as any).hasObservedBalances = false;
   });
 
   // What the event bridge announces for one change reloads the projection
   // once: a completed bilateral transfer (`bilateral.event`) and an inbox sync
   // with new items (`inbox.updated`) each become one `wallet.refresh`, and the
-  // provider reloads on that alone. The provider used to reload on the raw
-  // events as well. The coin sound follows a credit, not a reload.
-  it('reloads once per announced change and plays the coin sound only on a credit', async () => {
+  // provider reloads on that alone. The coin sound follows what Rust reports
+  // landed (the inbox items it processed), never a higher number on a reload:
+  // a balance that grew between two reads used to be announced as a payment,
+  // and at launch the first read is empty, so every launch was greeted as one.
+  it('reloads once per announced change and plays the coin sound only for items Rust reports', async () => {
     initializeEventBridge();
     jest.spyOn(dsmClient, 'getIdentity' as any).mockResolvedValue({
       genesisHash: 'G'.repeat(32),
@@ -88,11 +89,10 @@ describe('wallet credit sound routing', () => {
     });
 
     await waitFor(() => {
-      expect(playCoinSound).toHaveBeenCalledTimes(1);
-    });
-    await waitFor(() => {
       expect((dsmClient.getAllBalances as any)).toHaveBeenCalledTimes(2);
     });
+    // The balance rose from 5 to 6 on that reload; that is not a credit.
+    expect(playCoinSound).not.toHaveBeenCalled();
 
     act(() => {
       announce('inbox.updated', new pb.StorageSyncResponse({ processed: 1 } as any).toBinary());
