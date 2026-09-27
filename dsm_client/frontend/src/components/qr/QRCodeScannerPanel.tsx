@@ -1,10 +1,15 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
+// Add Contact: the native camera or a pasted contact code. The code goes to
+// Rust as it was scanned or pasted; the card shown is the card Rust read, and
+// a refusal is shown as Rust worded it.
 
-import React, { useEffect, useRef, useState, useCallback } from 'react';
+import React, { useEffect, useRef, useState, useCallback, useId } from 'react';
 import { useContacts } from '../../contexts/ContactsContext';
 import { readContactCode } from '../../dsm/contacts';
 import type { ContactCard } from '../../dsm/types';
 import { bytesToDisplay } from '../../contexts/contacts/utils';
+import { useBackButton, useConfirmButton } from '../../hooks/useBackButton';
+import { Notice } from '../common/ScreenFrame';
 import logger from '../../utils/logger';
 
 type ScanPhase =
@@ -34,11 +39,9 @@ export default function QRCodeScannerPanel(props: QRCodeScannerProps = {}): Reac
   const [pasteInput, setPasteInput] = useState('');
   const nativeScanPendingRef = useRef<boolean>(false);
   const addingContactRef = useRef<boolean>(false);
+  const promptTitleId = `${useId()}-title`;
+  const aliasId = `${useId()}-alias`;
 
-  const containerId = 'qr-reader';
-
-  // The code goes to Rust as it was scanned or pasted; the card shown is the
-  // card Rust read, and a refusal is shown as Rust worded it.
   const showCard = useCallback(async (text: string) => {
     setPhase({ status: 'reading' });
     try {
@@ -67,54 +70,6 @@ export default function QRCodeScannerPanel(props: QRCodeScannerProps = {}): Reac
       setPhase({ status: 'error', message: 'Native QR scanner not available.' });
       setInitializing(false);
     }
-  }, []);
-
-  // Inject scanner-local styles only; camera launch is explicit.
-  useEffect(() => {
-    const style = document.createElement('style');
-    style.setAttribute('data-qrcode-scanner-style', '1');
-    style.textContent = `
-        #${containerId}, #${containerId} * { box-sizing: border-box; }
-        #${containerId} { display: flex; flex-direction: column; align-items: center; padding: 4px 8px 8px; width: 100%; overflow: hidden; }
-        #${containerId} .center-state { width: 100%; max-width: 420px; border: 2px solid var(--border); border-radius: 8px; padding: 10px; background: var(--bg); box-shadow: inset 0 -2px 0 rgba(var(--text-rgb),0.18), inset 0 2px 0 rgba(var(--bg-rgb),0.08); margin-bottom: 8px; text-align: center; }
-        #${containerId} .center-state h3 { margin: 0 0 6px; font-size: 10px; font-family: 'Press Start 2P', monospace; letter-spacing: 1px; color: var(--text-dark); text-transform: uppercase; }
-        #${containerId} .center-state .body { font-family: 'Martian Mono', monospace; font-size: 11px; line-height: 1.35; color: var(--text); opacity: 0.95; }
-        #${containerId} .controls { width: 100%; max-width: 420px; display: flex; flex-direction: column; gap: 6px; margin-top: 2px; align-items: stretch; }
-        #${containerId} .controls .left { flex: 1; display: flex; flex-direction: column; gap: 6px; }
-        #${containerId} .controls .right { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
-        #${containerId} select, #${containerId} button { font-family: 'Martian Mono', monospace; text-transform: uppercase; font-size: 10px; }
-        #${containerId} button.wallet-style-button, #${containerId} .wallet-style-button { padding: 8px 12px; min-height: 36px; }
-        #${containerId} .hint { font-size: 9px; opacity: .9; color: var(--text-dark); margin-top: 2px; text-align: center; font-family: 'Press Start 2P', monospace; letter-spacing: 1px; }
-        #${containerId} .alias-card { width: 100%; max-width: 420px; background: var(--bg); border: 2px solid var(--border); border-radius: 8px; padding: 10px 12px; margin-top: 8px; font-size: 11px; font-family: 'Martian Mono', monospace; line-height: 1.35; box-shadow: inset 0 -2px 0 rgba(var(--text-rgb),0.18), inset 0 2px 0 rgba(var(--bg-rgb),0.08); }
-        #${containerId} .alias-card h3 { margin: 0 0 6px; font-size: 10px; font-family: 'Press Start 2P', monospace; letter-spacing: 1px; color: var(--text-dark); text-transform: uppercase; }
-        #${containerId} .alias-card .row { display: flex; gap: 8px; align-items: stretch; flex-wrap: nowrap; }
-        #${containerId} .alias-card .row input { flex: 1 1 auto; min-width: 0; background: var(--bg); border: 2px solid var(--border); border-radius: 4px; padding: 6px 8px; font-family: 'Martian Mono', monospace; font-size: 11px; color: var(--text); }
-        #${containerId} .alias-card .row input:focus { outline: none; border-color: var(--stateboy-screen); background: var(--bg-secondary); }
-        #${containerId} .alias-card .row button { flex: 0 0 auto; }
-        #${containerId} .alias-meta { font-size: 9px; opacity: 0.85; margin-top: 8px; font-family: 'Martian Mono', monospace; word-break: break-all; }
-        #${containerId} .alias-meta code { font-size: 9px; }
-        #${containerId} .alias-card.success { border-color: var(--border); background: var(--bg-secondary); color: var(--text-dark); }
-        #${containerId} .alias-card.error { border-color: var(--border); background: var(--bg-secondary); color: var(--text-dark); }
-        #${containerId} textarea::placeholder { color: var(--text-dark); opacity: 0.55; }
-        #${containerId} input::placeholder { color: var(--text-dark); opacity: 0.55; }
-        @keyframes contact-fade-in { from { opacity: 0; } to { opacity: 1; } }
-        @keyframes contact-slide-up { from { transform: translateY(20px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
-        #${containerId} .contact-found-overlay { position: absolute; top: 0; left: 0; right: 0; bottom: 0; z-index: 100; display: flex; align-items: center; justify-content: center; background: rgba(var(--text-rgb), 0.86); border-radius: 8px 8px 0 0; overflow: hidden; animation: contact-fade-in 0.2s ease-in; }
-        #${containerId} .contact-found-overlay .overlay-card { -webkit-appearance: none; appearance: none; width: 92%; max-width: 92%; background: var(--bg, #9bbc0f); background-image: linear-gradient(0deg, rgba(var(--text-rgb),0.12), rgba(var(--text-rgb),0.04)), repeating-linear-gradient(45deg, rgba(var(--text-rgb),0.14) 0px, rgba(var(--text-rgb),0.14) 2px, transparent 2px, transparent 4px); border: 4px solid var(--border, #306230); border-radius: 8px; max-height: 85%; overflow-y: auto; box-shadow: inset 0 -3px 0 rgba(var(--text-rgb),0.25), inset 0 3px 0 rgba(var(--text-dark-rgb),0.1), 0 8px 24px rgba(var(--text-rgb),0.4); animation: contact-slide-up 0.3s ease-out; image-rendering: pixelated; }
-        #${containerId} .contact-found-overlay .overlay-header { padding: 14px 12px; border-bottom: 3px solid var(--border, #306230); text-align: center; }
-        #${containerId} .contact-found-overlay .overlay-body { padding: 12px; }
-        #${containerId} .contact-found-overlay .overlay-info-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; padding: 10px 12px; background: var(--bg, #9bbc0f); border: 2px solid var(--border, #306230); border-radius: 6px; }
-        #${containerId} .contact-found-overlay .overlay-actions { padding: 12px; border-top: 2px solid var(--border, #306230); display: flex; gap: 8px; }
-        #${containerId} .wallet-style-button { position: relative; background: linear-gradient(0deg, rgba(var(--text-rgb),0.12), rgba(var(--bg-rgb),0.06)), repeating-linear-gradient(45deg, rgba(var(--text-rgb),0.14) 0px, rgba(var(--text-rgb),0.14) 2px, transparent 2px, transparent 4px); image-rendering: pixelated; border: 2px solid var(--border); border-radius: 8px; color: var(--text-dark); cursor: pointer; transition: all 0.2s ease; box-shadow: inset 0 -2px 0 rgba(var(--text-rgb),0.18), inset 0 2px 0 rgba(var(--bg-rgb),0.08); display: inline-flex; align-items: center; justify-content: center; gap: 6px; font-family: 'Martian Mono', monospace; }
-        #${containerId} .wallet-style-button:hover { transform: scale(1.02); }
-        #${containerId} .wallet-style-button:active { transform: scale(0.98); }
-        @media (min-width: 480px) { #${containerId} .controls { flex-direction: row; align-items: center; justify-content: space-between; } #${containerId} .controls .left { flex-direction: row; align-items: center; } }
-        @media (max-width: 380px) { #${containerId} .alias-card .row { flex-wrap: wrap; } #${containerId} .alias-card .row button { width: 100%; } }
-      `;
-    document.head.appendChild(style);
-
-    return () => { document.head.removeChild(style); };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Handle result dispatched back from the native QrScannerActivity.
@@ -161,6 +116,16 @@ export default function QRCodeScannerPanel(props: QRCodeScannerProps = {}): Reac
     }
   }, [phase, aliasInput, addContact]);
 
+  const dismissPrompt = useCallback(() => {
+    setPhase({ status: 'idle' });
+    setAliasInput('');
+  }, []);
+
+  // While the found-contact card is up, B puts it away and A adds.
+  const promptOpen = phase.status === 'prompt';
+  useBackButton(promptOpen, dismissPrompt);
+  useConfirmButton(promptOpen, () => { void onConfirmAdd(); });
+
   const onCancel = useCallback(() => {
     props.onCancel?.();
   }, [props]);
@@ -172,152 +137,146 @@ export default function QRCodeScannerPanel(props: QRCodeScannerProps = {}): Reac
     void showCard(raw);
   }, [pasteInput, showCard]);
 
+  const openCamera = () => {
+    setPasteInput('');
+    setPhase({ status: 'idle' });
+    setAliasInput('');
+    nativeScanPendingRef.current = false;
+    void startNativeScan();
+  };
+
   return (
-    <div id={containerId}>
-      {/* Contact found overlay renders at the bottom of the component as a full-screen modal */}
+    <div className="qr-scanner">
       {phase.status === 'adding' && (
-        <div className="center-state" style={{ padding: 24 }}>
+        <section className="sb-card sb-card--dark sb-card--hero" aria-live="polite">
           <img
             src={eraTokenSrc}
             alt="Adding contact..."
-            style={{ width: 48, height: 48, marginBottom: 12, imageRendering: 'pixelated' }}
+            style={{ width: 48, height: 48, imageRendering: 'pixelated' }}
           />
-          <h3>Adding Contact</h3>
-          <div className="body">
+          <div className="sb-hero__label" style={{ marginTop: 6 }}>Adding Contact</div>
+          <div className="sb-hero__sub">
             {phase.alias ? <>Saving &quot;{phase.alias}&quot; to your contacts...</> : 'Saving the contact...'}
           </div>
-        </div>
+        </section>
       )}
+
       {phase.status === 'reading' && (
-        <div className="center-state">
-          <h3>Reading Code</h3>
-          <div className="body">Reading the contact code...</div>
-        </div>
+        <section className="sb-card sb-card--dark" aria-live="polite">
+          <div className="sb-card__title">Reading Code</div>
+          <p className="sb-hint sb-hint--tight">Reading the contact code...</p>
+        </section>
       )}
+
       {(phase.status === 'idle' || phase.status === 'scanning') && (
-        <div className="center-state">
-          <h3>{phase.status === 'scanning' ? 'Camera Open' : 'Add Contact'}</h3>
-          <div className="body">
+        <section className="sb-card sb-card--dark">
+          <div className="sb-card__title">{phase.status === 'scanning' ? 'Camera Open' : 'Add Contact'}</div>
+          <p className="sb-hint">
             {phase.status === 'scanning'
-              ? 'Scan the QR code with the native camera, or back out and enter the contact code manually below.'
-              : 'Open the camera to scan a contact QR code, or enter the contact code manually below.'}
+              ? 'Scan the QR code with the camera, or back out and enter the contact code below.'
+              : 'Open the camera to scan a contact QR code, or enter the contact code below.'}
+          </p>
+          <div className="sb-actions" style={{ margin: 0 }}>
+            <button type="button" className="sb-btn" onClick={onCancel}>Cancel</button>
+            <button
+              type="button"
+              className="sb-btn sb-btn--primary"
+              onClick={openCamera}
+              disabled={initializing || phase.status === 'scanning'}
+            >
+              {phase.status === 'scanning' ? 'Camera Active' : 'Open Camera'}
+            </button>
           </div>
-        </div>
+        </section>
       )}
-      <div className="controls">
-        <div className="left">
-          <button
-            className="wallet-style-button"
-            onClick={() => {
-              setPasteInput('');
-              setPhase({ status: 'idle' });
-              setAliasInput('');
-              nativeScanPendingRef.current = false;
-              void startNativeScan();
-            }}
-            disabled={initializing || phase.status === 'scanning'}
-          >
-            {phase.status === 'scanning' ? 'Camera Active' : 'Open Camera'}
+
+      {(phase.status === 'success' || phase.status === 'error') && (
+        <div className="sb-actions" style={{ marginTop: 0 }}>
+          <button type="button" className="sb-btn" onClick={onCancel}>Back to contacts</button>
+          <button type="button" className="sb-btn sb-btn--primary" onClick={openCamera} disabled={initializing}>
+            Open Camera
           </button>
         </div>
-        <div className="right">
-          <button className="wallet-style-button" onClick={onCancel}>Cancel</button>
-        </div>
-      </div>
-      <div className="hint">
+      )}
+
+      <p className="sb-hint" aria-live="polite">
         {initializing
-          ? 'Opening native camera…'
+          ? 'Opening the camera…'
           : phase.status === 'scanning'
-            ? 'Camera launched. If scanning fails, go back and enter the contact code here.'
+            ? 'Camera launched. If scanning fails, come back and enter the contact code here.'
             : 'Enter the contact code shown with the QR, or use the camera.'}
-      </div>
-      <div className="alias-card" style={{ marginTop: 8 }}>
-        <h3 style={{ margin: '0 0 8px' }}>Enter Contact Code</h3>
-        <textarea
-          placeholder="dsm:contact/v3:..."
-          value={pasteInput}
-          onChange={e => setPasteInput(e.target.value)}
-          rows={4}
-          style={{
-            width: '100%',
-            fontFamily: '\'Martian Mono\', monospace',
-            fontSize: 11,
-            padding: '6px 8px',
-            background: 'var(--bg)',
-            border: '2px solid var(--border)',
-            borderRadius: 4,
-            color: 'var(--text)',
-            resize: 'vertical',
-            boxSizing: 'border-box',
-          }}
-        />
+      </p>
+
+      <section className="sb-card">
+        <div className="sb-card__title">Enter Contact Code</div>
+        <div className="sb-field">
+          <textarea
+            className="sb-input sb-input--mono"
+            aria-label="Contact code"
+            placeholder="dsm:contact/v3:..."
+            value={pasteInput}
+            onChange={e => setPasteInput(e.target.value)}
+            rows={4}
+            spellCheck={false}
+          />
+        </div>
         <button
-          className="wallet-style-button"
+          type="button"
+          className="sb-btn sb-btn--primary sb-btn--block"
           onClick={handleManualInput}
           disabled={!pasteInput.trim()}
-          style={{ marginTop: 6, width: '100%' }}
         >
           Use Contact Code
         </button>
-      </div>
+      </section>
+
+      {phase.status === 'success' && (
+        <Notice kind="success" role="status">Contact &quot;{phase.alias}&quot; added.</Notice>
+      )}
+      {phase.status === 'error' && (
+        <Notice kind="error">{phase.message}</Notice>
+      )}
+
       {phase.status === 'prompt' && (
-        <div className="contact-found-overlay" onClick={(e) => { if (e.target === e.currentTarget) { setPhase({ status: 'idle' }); setAliasInput(''); } }}>
-          <div className="overlay-card">
-            <div className="overlay-header">
-              <h3 style={{ margin: 0, fontSize: 10, fontFamily: "'Press Start 2P', monospace", letterSpacing: 1, color: 'var(--text-dark)', textTransform: 'uppercase', fontWeight: 700, textShadow: '1px 1px 0 rgba(var(--bg-rgb),0.5)' }}>Contact Found</h3>
+        <div className="sb-popover-backdrop" onClick={(e) => { if (e.target === e.currentTarget) dismissPrompt(); }}>
+          <div
+            className="sb-popover sb-card--dark"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby={promptTitleId}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="sb-popover__head">
+              <h3 id={promptTitleId} className="sb-popover__title">Contact Found</h3>
+              <button type="button" className="sb-popover__close" onClick={dismissPrompt} aria-label="Close">{'×'}</button>
             </div>
-            <div className="overlay-body">
-              <div className="overlay-info-row">
-                <span style={{ fontSize: 9, fontFamily: "'Press Start 2P', monospace", color: 'var(--text)', textTransform: 'uppercase' }}>Device</span>
-                <span style={{ fontSize: 9, fontFamily: "'Martian Mono', monospace", color: 'var(--text-dark)', wordBreak: 'break-all', maxWidth: '60%', textAlign: 'right' }}>{bytesToDisplay(phase.card.deviceId).slice(0, 16)}…</span>
+            <div className="sb-popover__body">
+              <div className="sb-kv">
+                <span className="sb-kv__k">Device</span>
+                <span className="sb-kv__v sb-kv__v--mono">{bytesToDisplay(phase.card.deviceId).slice(0, 16)}…</span>
               </div>
-              <div className="overlay-info-row">
-                <span style={{ fontSize: 9, fontFamily: "'Press Start 2P', monospace", color: 'var(--text)', textTransform: 'uppercase' }}>Genesis</span>
-                <span style={{ fontSize: 9, fontFamily: "'Martian Mono', monospace", color: 'var(--text-dark)', wordBreak: 'break-all', maxWidth: '60%', textAlign: 'right' }}>{bytesToDisplay(phase.card.genesisHash).slice(0, 16)}…</span>
+              <div className="sb-kv">
+                <span className="sb-kv__k">Genesis</span>
+                <span className="sb-kv__v sb-kv__v--mono">{bytesToDisplay(phase.card.genesisHash).slice(0, 16)}…</span>
               </div>
-              <div style={{ marginTop: 12, fontSize: 9, fontFamily: "'Press Start 2P', monospace", color: 'var(--text-dark)', textTransform: 'uppercase', marginBottom: 6 }}>Alias</div>
-              <input
-                type="text"
-                placeholder="Blank: named by its device"
-                value={aliasInput}
-                onChange={e => setAliasInput(e.target.value)}
-                style={{
-                  width: '100%',
-                  boxSizing: 'border-box',
-                  background: 'var(--bg)',
-                  border: '2px solid var(--border)',
-                  borderRadius: 4,
-                  padding: '8px 10px',
-                  fontFamily: "'Martian Mono', monospace",
-                  fontSize: 11,
-                  color: 'var(--text)',
-                }}
-              />
+              <div className="sb-field" style={{ marginTop: 10, marginBottom: 0 }}>
+                <label htmlFor={aliasId}>Alias</label>
+                <input
+                  id={aliasId}
+                  type="text"
+                  className="sb-input"
+                  placeholder="Blank: named by its device"
+                  value={aliasInput}
+                  onChange={e => setAliasInput(e.target.value)}
+                />
+              </div>
             </div>
-            <div className="overlay-actions">
-              <button
-                className="wallet-style-button"
-                onClick={() => { setPhase({ status: 'idle' }); setAliasInput(''); }}
-                style={{ flex: 1 }}
-              >
-                Cancel
-              </button>
-              <button
-                className="wallet-style-button"
-                onClick={onConfirmAdd}
-                style={{ flex: 1, fontWeight: 700 }}
-              >
-                Add
-              </button>
+            <div className="sb-actions" style={{ margin: 0 }}>
+              <button type="button" className="sb-btn" onClick={dismissPrompt}>Cancel</button>
+              <button type="button" className="sb-btn sb-btn--primary" onClick={() => void onConfirmAdd()}>Add</button>
             </div>
           </div>
         </div>
-      )}
-      {phase.status === 'success' && (
-        <div className="alias-card success">✓ Contact &quot;{phase.alias}&quot; added.</div>
-      )}
-      {phase.status === 'error' && (
-        <div className="alias-card error">✗ Error: {phase.message}</div>
       )}
     </div>
   );

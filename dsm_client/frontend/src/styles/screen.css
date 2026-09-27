@@ -925,6 +925,12 @@ button.sb-card,
 button.sb-card:active { transform: translateY(1px); }
 button.sb-card--dark { color: var(--bg); }
 
+/* A popover that carries the dark card's controls keeps its own border and lift. */
+.sb-popover.sb-card--dark {
+  border-color: var(--bg);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+
 /* Stat cells: a count or a short word, its label under it. */
 .sb-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
 .sb-stats--2 { grid-template-columns: repeat(2, 1fr); }
