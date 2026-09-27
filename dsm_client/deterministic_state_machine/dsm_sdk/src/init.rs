@@ -496,181 +496,192 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
 
     log::info!("[SDK Init] Core handlers (Unilateral, Bilateral, Recovery) installed successfully");
 
-    // 6) BLE (Android only). BLE init can be deferred if identity is not ready, but the core
-    // handlers above must remain installed so bootstrap queries work before genesis.
+    // 6) BLE (Android only): this identity's Bluetooth transfer stack. Deferred until an
+    // identity exists; the core handlers above stay installed so bootstrap queries work before
+    // genesis, and wallet creation builds it once the identity is there.
     #[cfg(all(target_os = "android", feature = "bluetooth"))]
+    build_ble_stack_for_identity()?;
+
+    Ok(())
+}
+
+/// Build this identity's Bluetooth transfer stack: the BluetoothManager for the identity in
+/// AppState, the frame coordinator and transport adapter injected into the bilateral handler,
+/// the owed-frame driver, and the persisted contacts loaded into the manager.
+///
+/// Startup init runs it when an identity already exists. Wallet creation runs it once the new
+/// identity is installed: without it a device that created its wallet in this session paired
+/// over Bluetooth but refused every offline send ("the BLE stack is not live yet") until the
+/// app restarted. With no identity yet it builds nothing and says so.
+#[cfg(all(target_os = "android", feature = "bluetooth"))]
+pub(crate) fn build_ble_stack_for_identity() -> Result<(), String> {
+    // Create and register BluetoothManager using AppState identity.
+    // Identity MUST be available - this is called post-genesis only.
+    use tokio::sync::RwLock as TokioRwLock;
+    use dsm::core::{
+        contact_manager::DsmContactManager,
+        bilateral_transaction_manager::BilateralTransactionManager,
+    };
+
+    let (dev, gen) = match (
+        crate::sdk::app_state::AppState::get_device_id(),
+        crate::sdk::app_state::AppState::get_genesis_hash(),
+    ) {
+        (Some(d), Some(g)) => (d, g),
+        (None, ..) | (.., None) => {
+            // Identity not ready: no BLE stack yet; the SDK still answers
+            // bootstrap queries. The init after genesis builds the stack.
+            log::warn!(
+                "[SDK Init] identity not ready (device_id/genesis missing): no BLE stack yet"
+            );
+            return Ok(());
+        }
+    };
+
+    let mut dev_fixed = [0u8; 32];
+    let mut gen_fixed = [0u8; 32];
+    if dev.len() != 32 || gen.len() != 32 {
+        log::error!("[SDK Init] device_id and genesis_hash must be exactly 32 bytes");
+        return Err("device_id and genesis_hash must be exactly 32 bytes".to_string());
+    }
+    dev_fixed.copy_from_slice(&dev);
+    gen_fixed.copy_from_slice(&gen);
+
+    // Backfill Device Tree root (§2.3) for existing identities created before this was
+    // persisted at genesis time.  The root of a single-device tree is deterministic from
+    // dev_fixed, so it is always safe to recompute and overwrite.
+    // Without the root no receipt is built: the producer checks each receipt's device
+    // proof against it, so every bilateral step would be refused.
     {
-        // Create and register BluetoothManager using AppState identity.
-        // Identity MUST be available - this is called post-genesis only.
-        use tokio::sync::RwLock as TokioRwLock;
-        use dsm::core::{
-            contact_manager::DsmContactManager,
-            bilateral_transaction_manager::BilateralTransactionManager,
-        };
-
-        let (dev, gen) = match (
-            crate::sdk::app_state::AppState::get_device_id(),
-            crate::sdk::app_state::AppState::get_genesis_hash(),
-        ) {
-            (Some(d), Some(g)) => (d, g),
-            (None, ..) | (.., None) => {
-                // Identity not ready: no BLE stack yet; the SDK still answers
-                // bootstrap queries. The init after genesis builds the stack.
-                log::warn!(
-                    "[SDK Init] identity not ready (device_id/genesis missing): no BLE stack yet"
-                );
-                return Ok(());
-            }
-        };
-
-        let mut dev_fixed = [0u8; 32];
-        let mut gen_fixed = [0u8; 32];
-        if dev.len() != 32 || gen.len() != 32 {
-            log::error!("[SDK Init] device_id and genesis_hash must be exactly 32 bytes");
-            return Err("device_id and genesis_hash must be exactly 32 bytes".to_string());
-        }
-        dev_fixed.copy_from_slice(&dev);
-        gen_fixed.copy_from_slice(&gen);
-
-        // Backfill Device Tree root (§2.3) for existing identities created before this was
-        // persisted at genesis time.  The root of a single-device tree is deterministic from
-        // dev_fixed, so it is always safe to recompute and overwrite.
-        // Without the root no receipt is built: the producer checks each receipt's device
-        // proof against it, so every bilateral step would be refused.
-        {
-            let root = dsm::common::device_tree::DeviceTree::single(dev_fixed).root();
-            crate::sdk::app_state::AppState::set_device_tree_root(root)
-                .map_err(|e| format!("persist the device tree root: {e}"))?;
-            log::info!(
-                "[SDK Init] Device tree root computed and persisted (dev={})",
-                crate::util::text_id::encode_base32_crockford(&dev_fixed)
-            );
-        }
-
-        let contact_manager = DsmContactManager::new(dev_fixed);
-
-        // Genesis v2: the device signing keypair is the AK keypair derived deterministically
-        // from the BIP39 wallet seed (mnemonic.to_seed) — byte-identical to what
-        // create_genesis_v2 registered. No DBRW / device secret. The wallet seed is the
-        // unlocked-session secret; it is cached at unlock (RecoverySDK::derive_and_cache_key)
-        // and sealed at rest, so on a cold start we first try the hardware seed vault before
-        // demanding the mnemonic again. Either way init fails without it, and the failure is
-        // the session's fatal error. A vault that cannot be read is that failure in its own
-        // words: reporting it as "not unlocked" sent a device whose store refused its schema
-        // looking for its mnemonic.
-        if crate::sdk::recovery_sdk::RecoverySDK::get_cached_wallet_seed().is_none() {
-            match crate::sdk::recovery_sdk::RecoverySDK::load_and_cache_wallet_seed() {
-                Ok(true) => log::info!("[SDK Init] Wallet seed unsealed from vault (cold start)"),
-                Ok(false) => {
-                    log::info!("[SDK Init] No sealed wallet seed — mnemonic unlock required")
-                }
-                Err(e) => return Err(format!("the sealed wallet seed could not be read: {e}")),
-            }
-        }
-        let wallet_seed = crate::sdk::recovery_sdk::RecoverySDK::get_cached_wallet_seed()
-            .ok_or_else(|| {
-                "wallet seed not unlocked: cache the mnemonic (RecoverySDK::derive_and_cache_key) \
-                 before initializing wallet/signing"
-                    .to_string()
-            })?;
-        let keypair = derive_device_signing_keypair(&wallet_seed, &gen_fixed)
-            .map_err(|e| format!("device signing keypair derivation failed: {e}"))?;
+        let root = dsm::common::device_tree::DeviceTree::single(dev_fixed).root();
+        crate::sdk::app_state::AppState::set_device_tree_root(root)
+            .map_err(|e| format!("persist the device tree root: {e}"))?;
         log::info!(
-            "[SDK Init] Derived signing keypair, pubkey_len={}",
-            keypair.public_key.len()
+            "[SDK Init] Device tree root computed and persisted (dev={})",
+            crate::util::text_id::encode_base32_crockford(&dev_fixed)
         );
-
-        // The AK the identity holds is the one the wallet derives: genesis
-        // installed it, and nothing else writes it.
-        let stored_pk = crate::sdk::app_state::AppState::get_public_key()
-            .ok_or_else(|| "the identity holds no signing key".to_string())?;
-        if stored_pk != keypair.public_key {
-            return Err(
-                "the identity's signing key is not the one this wallet derives".to_string(),
-            );
-        }
-
-        // The process's one BLE stack: reused when init runs again for this
-        // identity, built only when none is live for it.
-        let manager_arc = crate::bluetooth::bluetooth_manager_for(dev_fixed, || {
-            let chain_tip_store =
-                std::sync::Arc::new(crate::sdk::chain_tip_store::SqliteChainTipStore::new());
-            let manager = BilateralTransactionManager::new(
-                contact_manager,
-                keypair,
-                dev_fixed,
-                gen_fixed,
-                chain_tip_store,
-            );
-            Ok(crate::bluetooth::BluetoothManager::new(
-                dev_fixed,
-                std::sync::Arc::new(TokioRwLock::new(manager)),
-            ))
-        })?;
-        log::info!("[SDK Init] the BLE stack is live");
-
-        // Inject BLE frame coordinator into BiImpl so offline sends dispatch over BLE.
-        // Use a separate thread with its own runtime to avoid "Cannot start a runtime
-        // within a runtime" when init_dsm_sdk is called from an async context (e.g.
-        // the `system.createGenesisV2` route's block_on future).
-        let coordinator = manager_arc.frame_coordinator().clone();
-        let transport_adapter = manager_arc.transport_adapter().clone();
-        let ble_inject_result = std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(|e| format!("ble coordinator runtime: {e}"))?;
-            rt.block_on(async move {
-                crate::bridge::inject_ble_coordinator(coordinator).await?;
-                crate::bridge::inject_ble_transport_adapter(transport_adapter).await
-            })
-        })
-        .join();
-        match ble_inject_result {
-            Ok(Ok(())) => {
-                log::info!(
-                    "[SDK Init] BLE coordinator and transport adapter injected into bilateral handler"
-                );
-                crate::bluetooth::owed_frame_driver::start();
-            }
-            Ok(Err(e)) => return Err(format!("BLE injection failed: {e}")),
-            Err(panic) => return Err(format!("BLE injection thread panicked: {panic:?}")),
-        }
-
-        // Load the persisted contacts into the BluetoothManager before the
-        // first BLE prepare can arrive; otherwise the handler rejects a known
-        // sender. A thread with its own runtime, because init can run inside
-        // a runtime (JNI).
-        let manager_for_sync = manager_arc.clone();
-        let synced = std::thread::spawn(move || -> Result<usize, String> {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(|e| format!("contact sync runtime: {e}"))?;
-            rt.block_on(async move {
-                let contacts = crate::storage::client_db::get_all_contacts()
-                    .map_err(|e| format!("load contacts: {e}"))?;
-                let count = contacts.len();
-                for record in contacts {
-                    let contact = record.to_verified_contact().map_err(|e| e.to_string())?;
-                    manager_for_sync
-                        .add_verified_contact(contact)
-                        .await
-                        .map_err(|e| format!("contact {}: {e}", record.alias))?;
-                }
-                Ok(count)
-            })
-        })
-        .join();
-        match synced {
-            Ok(Ok(count)) => {
-                log::info!("[SDK Init] {count} contacts synced to the BluetoothManager")
-            }
-            Ok(Err(e)) => return Err(format!("contact sync to the BluetoothManager: {e}")),
-            Err(panic) => return Err(format!("contact sync thread panicked: {panic:?}")),
-        }
     }
 
+    let contact_manager = DsmContactManager::new(dev_fixed);
+
+    // Genesis v2: the device signing keypair is the AK keypair derived deterministically
+    // from the BIP39 wallet seed (mnemonic.to_seed) — byte-identical to what
+    // create_genesis_v2 registered. No DBRW / device secret. The wallet seed is the
+    // unlocked-session secret; it is cached at unlock (RecoverySDK::derive_and_cache_key)
+    // and sealed at rest, so on a cold start we first try the hardware seed vault before
+    // demanding the mnemonic again. Either way init fails without it, and the failure is
+    // the session's fatal error. A vault that cannot be read is that failure in its own
+    // words: reporting it as "not unlocked" sent a device whose store refused its schema
+    // looking for its mnemonic.
+    if crate::sdk::recovery_sdk::RecoverySDK::get_cached_wallet_seed().is_none() {
+        match crate::sdk::recovery_sdk::RecoverySDK::load_and_cache_wallet_seed() {
+            Ok(true) => log::info!("[SDK Init] Wallet seed unsealed from vault (cold start)"),
+            Ok(false) => {
+                log::info!("[SDK Init] No sealed wallet seed — mnemonic unlock required")
+            }
+            Err(e) => return Err(format!("the sealed wallet seed could not be read: {e}")),
+        }
+    }
+    let wallet_seed =
+        crate::sdk::recovery_sdk::RecoverySDK::get_cached_wallet_seed().ok_or_else(|| {
+            "wallet seed not unlocked: cache the mnemonic (RecoverySDK::derive_and_cache_key) \
+             before initializing wallet/signing"
+                .to_string()
+        })?;
+    let keypair = derive_device_signing_keypair(&wallet_seed, &gen_fixed)
+        .map_err(|e| format!("device signing keypair derivation failed: {e}"))?;
+    log::info!(
+        "[SDK Init] Derived signing keypair, pubkey_len={}",
+        keypair.public_key.len()
+    );
+
+    // The AK the identity holds is the one the wallet derives: genesis
+    // installed it, and nothing else writes it.
+    let stored_pk = crate::sdk::app_state::AppState::get_public_key()
+        .ok_or_else(|| "the identity holds no signing key".to_string())?;
+    if stored_pk != keypair.public_key {
+        return Err("the identity's signing key is not the one this wallet derives".to_string());
+    }
+
+    // The process's one BLE stack: reused when init runs again for this
+    // identity, built only when none is live for it.
+    let manager_arc = crate::bluetooth::bluetooth_manager_for(dev_fixed, || {
+        let chain_tip_store =
+            std::sync::Arc::new(crate::sdk::chain_tip_store::SqliteChainTipStore::new());
+        let manager = BilateralTransactionManager::new(
+            contact_manager,
+            keypair,
+            dev_fixed,
+            gen_fixed,
+            chain_tip_store,
+        );
+        Ok(crate::bluetooth::BluetoothManager::new(
+            dev_fixed,
+            std::sync::Arc::new(TokioRwLock::new(manager)),
+        ))
+    })?;
+    log::info!("[SDK Init] the BLE stack is live");
+
+    // Inject BLE frame coordinator into BiImpl so offline sends dispatch over BLE.
+    // Use a separate thread with its own runtime to avoid "Cannot start a runtime
+    // within a runtime" when init_dsm_sdk is called from an async context (e.g.
+    // the `system.createGenesisV2` route's block_on future).
+    let coordinator = manager_arc.frame_coordinator().clone();
+    let transport_adapter = manager_arc.transport_adapter().clone();
+    let ble_inject_result = std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| format!("ble coordinator runtime: {e}"))?;
+        rt.block_on(async move {
+            crate::bridge::inject_ble_coordinator(coordinator).await?;
+            crate::bridge::inject_ble_transport_adapter(transport_adapter).await
+        })
+    })
+    .join();
+    match ble_inject_result {
+        Ok(Ok(())) => {
+            log::info!(
+                "[SDK Init] BLE coordinator and transport adapter injected into bilateral handler"
+            );
+            crate::bluetooth::owed_frame_driver::start();
+        }
+        Ok(Err(e)) => return Err(format!("BLE injection failed: {e}")),
+        Err(panic) => return Err(format!("BLE injection thread panicked: {panic:?}")),
+    }
+
+    // Load the persisted contacts into the BluetoothManager before the
+    // first BLE prepare can arrive; otherwise the handler rejects a known
+    // sender. A thread with its own runtime, because init can run inside
+    // a runtime (JNI).
+    let manager_for_sync = manager_arc.clone();
+    let synced = std::thread::spawn(move || -> Result<usize, String> {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| format!("contact sync runtime: {e}"))?;
+        rt.block_on(async move {
+            let contacts = crate::storage::client_db::get_all_contacts()
+                .map_err(|e| format!("load contacts: {e}"))?;
+            let count = contacts.len();
+            for record in contacts {
+                let contact = record.to_verified_contact().map_err(|e| e.to_string())?;
+                manager_for_sync
+                    .add_verified_contact(contact)
+                    .await
+                    .map_err(|e| format!("contact {}: {e}", record.alias))?;
+            }
+            Ok(count)
+        })
+    })
+    .join();
+    match synced {
+        Ok(Ok(count)) => {
+            log::info!("[SDK Init] {count} contacts synced to the BluetoothManager")
+        }
+        Ok(Err(e)) => return Err(format!("contact sync to the BluetoothManager: {e}")),
+        Err(panic) => return Err(format!("contact sync thread panicked: {panic:?}")),
+    }
     Ok(())
 }
 
