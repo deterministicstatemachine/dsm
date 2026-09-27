@@ -92,10 +92,9 @@ export function placeDialog(target: Box | null, screen: Box | null): 'top' | 'bo
 
 type Props = {
   appState: AppState;
-  guideSrc: string;
 };
 
-export default function GuidedTour({ appState, guideSrc }: Props): React.JSX.Element | null {
+export default function GuidedTour({ appState }: Props): React.JSX.Element | null {
   const tour = useTourStore();
   const navigation = useNavigationStore();
   const step: TourStep | undefined = tour.active ? TOUR_STEPS[tour.index] : undefined;
@@ -156,8 +155,11 @@ export default function GuidedTour({ appState, guideSrc }: Props): React.JSX.Ele
   useEffect(() => {
     if (!step || celebrating) return undefined;
     let frame = 0;
-    let lastTarget: Box | null = null;
-    let lastScreen: Box | null = null;
+    // Nothing published yet for this step: its first frame always publishes,
+    // so a step that points at nothing, or whose element is not on screen
+    // yet, clears the previous step's ring instead of leaving it drawn.
+    let lastTarget: Box | null | undefined;
+    let lastScreen: Box | null | undefined;
     let scrolled = false;
     const loop = (): void => {
       const here = navigationStore.getSnapshot().currentScreen === step.screen;
@@ -172,13 +174,13 @@ export default function GuidedTour({ appState, guideSrc }: Props): React.JSX.Ele
         }
       }
       const box = element ? toBox(element.getBoundingClientRect(), RING_PAD) : null;
-      if (!sameBox(box, lastTarget)) {
+      if (lastTarget === undefined || !sameBox(box, lastTarget)) {
         lastTarget = box;
         setTarget(box);
       }
       const host = document.querySelector('.stateboy-screen-host');
       const screenBox = host ? toBox(host.getBoundingClientRect(), 0) : null;
-      if (!sameBox(screenBox, lastScreen)) {
+      if (lastScreen === undefined || !sameBox(screenBox, lastScreen)) {
         lastScreen = screenBox;
         setScreen(screenBox);
       }
@@ -351,16 +353,13 @@ export default function GuidedTour({ appState, guideSrc }: Props): React.JSX.Ele
             {tour.index + 1}/{TOUR_STEPS.length}
           </span>
         </div>
-        <div className="gt-dialog__main">
-          <img className="gt-guide" src={guideSrc} alt="" aria-hidden="true" />
-          <div className="gt-copy">
-            <div id="gt-title" className="gt-title">{step.title}</div>
-            <p className="gt-body" aria-hidden="true">
-              {text.slice(0, shown)}
-              {typing ? <span className="gt-caret">▌</span> : null}
-            </p>
-            <p id="gt-body" className="gt-sr">{text}</p>
-          </div>
+        <div className="gt-copy">
+          <div id="gt-title" className="gt-title">{step.title}</div>
+          <p className="gt-body" aria-hidden="true">
+            {text.slice(0, shown)}
+            {typing ? <span className="gt-caret">▌</span> : null}
+          </p>
+          <p id="gt-body" className="gt-sr">{text}</p>
         </div>
         <div className="gt-controls">
           <button
