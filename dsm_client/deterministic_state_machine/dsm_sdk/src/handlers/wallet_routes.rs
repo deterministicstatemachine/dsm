@@ -428,9 +428,14 @@ impl AppRouterImpl {
     pub(crate) async fn handle_wallet_query(&self, q: AppQuery) -> AppResult {
         match q.path.as_str() {
             "balance.get" => {
+                // A cold start with no state in memory restores it from the
+                // archive; a restore that fails is the answer, not a zero read
+                // over nothing.
                 if self.core_sdk.get_current_state().is_err() {
                     if let Err(e) = self.core_sdk.restore_latest_archived_state_for_device() {
-                        log::warn!("[balance.get] cold-start archive refresh failed: {}", e);
+                        return err(format!(
+                            "balance.get: no current state and the archive could not be restored: {e}"
+                        ));
                     }
                 }
                 let token_id_opt: Option<String> = match generated::ArgPack::decode(&*q.params) {
