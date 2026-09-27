@@ -26,9 +26,9 @@ describe('bilateral accept event dispatch', () => {
     jest.restoreAllMocks();
   });
 
-  // One accept, one committed signal. It used to be dispatched as a window
+  // One accept, one accepted signal. It used to be dispatched as a window
   // event the adapter re-emitted on the bus, and emitted on the bus again.
-  test('acceptOfflineTransfer emits wallet.bilateralCommitted exactly once', async () => {
+  test('acceptOfflineTransfer emits wallet.bilateralAccepted exactly once', async () => {
     const commitmentHash = new Uint8Array(32).fill(2);
     const counterpartyDeviceId = new Uint8Array(32).fill(3);
     const env = new pb.Envelope({
@@ -51,15 +51,13 @@ describe('bilateral accept event dispatch', () => {
     };
 
     const handler = jest.fn();
-    const off = bridgeEvents.on('wallet.bilateralCommitted', handler as any);
+    const off = bridgeEvents.on('wallet.bilateralAccepted', handler as any);
 
     await acceptOfflineTransfer({ commitmentHash, counterpartyDeviceId });
     off();
 
     expect(handler).toHaveBeenCalledTimes(1);
     expect(handler.mock.calls[0]?.[0]).toEqual(expect.objectContaining({
-      accepted: true,
-      committed: true,
       commitmentHash,
       counterpartyDeviceId,
     }));

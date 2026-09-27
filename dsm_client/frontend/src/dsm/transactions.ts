@@ -13,7 +13,7 @@ import {
     getPendingBilateralListStrictBridge,
 } from './WebViewBridge';
 import { on as eventBridgeOn } from './EventBridge';
-import { emitBilateralCommitted } from './events';
+import { emitBilateralAccepted } from './events';
 import { bridgeEvents } from '../bridge/bridgeEvents';
 
 import logger from '../utils/logger';
@@ -364,17 +364,15 @@ export async function acceptOfflineTransfer(args: { commitmentHash: Uint8Array, 
     if (!answer.success) {
       return answer;
     }
-    // The committed signal, once, on the event bus. It used to be dispatched
-    // twice: as a window event the adapter re-emitted here, and here again.
+    // The accept went out: that, and only that, is signalled here, once. The
+    // transfer commits when the peer's confirm arrives as a BLE event.
     try {
-      emitBilateralCommitted({
+      emitBilateralAccepted({
         commitmentHash: new Uint8Array(args.commitmentHash),
         counterpartyDeviceId: new Uint8Array(args.counterpartyDeviceId),
-        accepted: true,
-        committed: true,
       });
     } catch (e) {
-      logger.warn('[DSM] Failed to emit bilateral committed event:', e);
+      logger.warn('[DSM] Failed to emit bilateral accepted event:', e);
     }
     // Don't fire wallet.refresh here — the balance hasn't changed yet (Accept
     // was sent, but Confirm hasn't arrived).  Firing now queries balance=0 and

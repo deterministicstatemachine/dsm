@@ -355,19 +355,13 @@ describe('BridgeEventBus — core event delivery', () => {
     u1(); u2();
   });
 
-  test('wallet.bilateralCommitted carries typed payload', () => {
+  test('wallet.bilateralAccepted carries typed payload', () => {
     const spy = jest.fn();
-    const unsub = bridgeEvents.on('wallet.bilateralCommitted', spy);
-    bridgeEvents.emit('wallet.bilateralCommitted', {
-      commitmentHash: makeCommitmentHash(),
-      counterpartyDeviceId: makeDeviceId(),
-      accepted: true,
-      committed: true,
-    });
-    expect(spy).toHaveBeenCalledWith(expect.objectContaining({
-      accepted: true,
-      committed: true,
-    }));
+    const unsub = bridgeEvents.on('wallet.bilateralAccepted', spy);
+    const commitmentHash = makeCommitmentHash();
+    const counterpartyDeviceId = makeDeviceId();
+    bridgeEvents.emit('wallet.bilateralAccepted', { commitmentHash, counterpartyDeviceId });
+    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ commitmentHash, counterpartyDeviceId }));
     unsub();
   });
 
@@ -389,11 +383,11 @@ describe('useEventSignal — React external store integration', () => {
 
   test('increments on bridge event emission', async () => {
     const C: React.FC = () => {
-      const s = useEventSignal('wallet.bilateralCommitted');
+      const s = useEventSignal('wallet.bilateralAccepted');
       return <div data-testid="sig2">{s}</div>;
     };
     const { unmount } = render(<C />);
-    act(() => { bridgeEvents.emit('wallet.bilateralCommitted', {} as any); });
+    act(() => { bridgeEvents.emit('wallet.bilateralAccepted', {} as any); });
     await waitFor(() => {
       expect(parseInt(screen.getByTestId('sig2').textContent || '0')).toBeGreaterThan(0);
     });
@@ -931,11 +925,11 @@ describe('INTEGRATED: Full chain with sendMessageBin-only mock', () => {
     balancesState = [{ tokenId: 'ERA', available: 10500n }];
     capturedMethods = [];
 
-    // What the accept path emits: the committed signal (the toast's trigger)
+    // What the accept path emits: the accepted signal (the toast's trigger)
     // and its own wallet.refresh (the reload's). The provider reloads on the
     // second alone.
     act(() => {
-      bridgeEvents.emit('wallet.bilateralCommitted', { accepted: true, committed: true } as any);
+      bridgeEvents.emit('wallet.bilateralAccepted', { commitmentHash: makeCommitmentHash(), counterpartyDeviceId: makeDeviceId() });
       bridgeEvents.emit('wallet.refresh', { source: 'bilateral.accept_followup' });
     });
 
@@ -1098,14 +1092,13 @@ describe('INTEGRATED: Full bilateral transfer back-and-forth', () => {
     // Verify sendMessageBin was called for the balance refresh
     expect(capturedMethods).toContain('getAllBalancesStrict');
 
-    // ──── Step 7: wallet.bilateralCommitted → refresh again via sendMessageBin ────
+    // ──── Step 7: wallet.bilateralAccepted → refresh again via sendMessageBin ────
     capturedMethods = [];
     act(() => {
-      bridgeEvents.emit('wallet.bilateralCommitted', {
+      bridgeEvents.emit('wallet.bilateralAccepted', {
         commitmentHash: makeCommitmentHash(0x22),
-        accepted: true,
-        committed: true,
-      } as any);
+        counterpartyDeviceId: makeDeviceId(),
+      });
     });
 
     await waitFor(() => {
@@ -1194,9 +1187,9 @@ describe('Error resilience', () => {
   test('handler error does not break other handlers', () => {
     const bad = jest.fn(() => { throw new Error('crash'); });
     const good = jest.fn();
-    const u1 = bridgeEvents.on('wallet.bilateralCommitted', bad as any);
-    const u2 = bridgeEvents.on('wallet.bilateralCommitted', good);
-    bridgeEvents.emit('wallet.bilateralCommitted', { accepted: true } as any);
+    const u1 = bridgeEvents.on('wallet.bilateralAccepted', bad as any);
+    const u2 = bridgeEvents.on('wallet.bilateralAccepted', good);
+    bridgeEvents.emit('wallet.bilateralAccepted', { accepted: true } as any);
     expect(bad).toHaveBeenCalled();
     expect(good).toHaveBeenCalled();
     u1(); u2();

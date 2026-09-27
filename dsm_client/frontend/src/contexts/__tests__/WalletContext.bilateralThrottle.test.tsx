@@ -6,7 +6,12 @@ import { UXProvider } from '../UXContext';
 import { WalletProvider } from '../WalletContext';
 import GlobalToast from '../../components/GlobalToast';
 import { dsmClient } from '@/dsm/index';
-import { emitBilateralCommitted } from '@/dsm/events';
+import { emitBilateralAccepted } from '@/dsm/events';
+
+const accepted = {
+  commitmentHash: new Uint8Array(32).fill(0x11),
+  counterpartyDeviceId: new Uint8Array(32).fill(0x22),
+};
 
 describe('WalletContext bilateral event throttle & toast', () => {
   afterEach(() => {
@@ -52,9 +57,9 @@ describe('WalletContext bilateral event throttle & toast', () => {
 
     // Rapidly dispatch 3 events at t=0
     act(() => {
-      emitBilateralCommitted();
-      emitBilateralCommitted();
-      emitBilateralCommitted();
+      emitBilateralAccepted(accepted);
+      emitBilateralAccepted(accepted);
+      emitBilateralAccepted(accepted);
     });
 
     // Deterministic coalescing uses a microtask gate. Flush microtasks to allow it to run.
@@ -68,8 +73,8 @@ describe('WalletContext bilateral event throttle & toast', () => {
 
     // A second burst: one more toast, still no reload from the signal.
     act(() => {
-      emitBilateralCommitted();
-      emitBilateralCommitted();
+      emitBilateralAccepted(accepted);
+      emitBilateralAccepted(accepted);
     });
 
     await act(async () => {

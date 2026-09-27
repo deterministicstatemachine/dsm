@@ -8,7 +8,7 @@ export type BridgeEventMap = {
   'session.state': NativeSessionSnapshot;
   'identity.ready': void;
   'wallet.refresh': { source: string; [k: string]: any };
-  'wallet.bilateralCommitted': { commitmentHash?: Uint8Array; counterpartyDeviceId?: Uint8Array; accepted?: boolean; committed?: boolean; rejected?: boolean };
+  'wallet.bilateralAccepted': { commitmentHash: Uint8Array; counterpartyDeviceId: Uint8Array };
   'wallet.creditReceived': { source: string; tokenId?: string; amount?: bigint | string | number; nextBalance?: bigint | string | number; creditCount?: number };
   'dsm.deterministicSafety': { classification: string; message?: string };
   'contact.bleMapped': { address: string; deviceId?: string; genesisHash?: string };
