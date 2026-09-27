@@ -412,20 +412,25 @@ pub fn counterparty_has_unconverged_inbound(counterparty_device_id: &[u8]) -> Re
             },
         )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    // A frozen half the store holds but cannot read is an error, never "nothing
+    // in flight": the barrier must not let a send cross a transfer it cannot see.
     for (transfer, evidence) in rows {
         if let Some(t) = transfer {
-            if let Ok(req) = dsm::types::proto::OnlineTransferRequest::decode(t.as_slice()) {
-                if req.from_device_id.as_slice() == counterparty_device_id {
-                    return Ok(true);
-                }
+            let req =
+                dsm::types::proto::OnlineTransferRequest::decode(t.as_slice()).map_err(|e| {
+                    anyhow!("recipient_staging: a staged transfer half does not decode: {e}")
+                })?;
+            if req.from_device_id.as_slice() == counterparty_device_id {
+                return Ok(true);
             }
         }
         if let Some(e) = evidence {
-            if let Ok(r) = dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(&e)
-            {
-                if r.devid_a.as_slice() == counterparty_device_id {
-                    return Ok(true);
-                }
+            let r = dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(&e)
+                .map_err(|e| {
+                    anyhow!("recipient_staging: a staged evidence half does not decode: {e}")
+                })?;
+            if r.devid_a.as_slice() == counterparty_device_id {
+                return Ok(true);
             }
         }
     }
@@ -543,6 +548,44 @@ mod tests {
             super::super::sender_outbox::ArtifactRole::EvidenceA,
             bytes,
         )
+    }
+
+    /// The finality barrier reads the counterparty from the frozen half itself.
+    #[test]
+    #[serial]
+    fn an_unconverged_inbound_half_names_its_sender() {
+        use prost::Message;
+        fresh_db();
+        let peer = [0x5Au8; 32];
+        let half = dsm::types::proto::OnlineTransferRequest {
+            from_device_id: peer.to_vec(),
+            ..Default::default()
+        }
+        .encode_to_vec();
+        stage_transfer_half("XFER-PEER", &half, &digest_of(&evidence(0xC1)), "TESTROUTE")
+            .expect("stage transfer");
+        assert!(counterparty_has_unconverged_inbound(&peer).expect("readable"));
+        assert!(!counterparty_has_unconverged_inbound(&[0x5Bu8; 32]).expect("readable"));
+    }
+
+    /// A staged half the store holds but cannot decode is an error, never
+    /// "nothing in flight": the barrier must not let a send cross a transfer it
+    /// cannot read.
+    #[test]
+    #[serial]
+    fn a_staged_half_that_does_not_decode_is_an_error_not_absence() {
+        fresh_db();
+        // A lone field tag with no value: prost refuses it.
+        stage_transfer_half(
+            "XFER-BAD",
+            b"\x08",
+            &digest_of(&evidence(0xC3)),
+            "TESTROUTE",
+        )
+        .expect("stage transfer");
+        let err = counterparty_has_unconverged_inbound(&[0x5Au8; 32])
+            .expect_err("an unreadable half is an error");
+        assert!(err.to_string().contains("does not decode"), "{err}");
     }
 
     /// Transfer first, then a restart, then evidence. The staged half must
