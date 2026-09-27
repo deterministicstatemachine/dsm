@@ -150,5 +150,17 @@ class BleScanner(private val context: Context) {
 
     fun isScanning(): Boolean = scanning.get()
 
+    /**
+     * Bluetooth is going off: the stack ends the scan with the radio. Nothing is
+     * scanning after this, so the next start issues a new scan. Returns whether a
+     * scan was running.
+     */
+    fun radioOff(): Boolean {
+        val wasScanning = scanning.getAndSet(false)
+        bluetoothLeScanner = null
+        if (wasScanning) Log.i("BleScanner", "Bluetooth off: scan state cleared")
+        return wasScanning
+    }
+
     private fun getBluetoothAdapter() = BlePermissionsGate(context).getBluetoothAdapter()
 }

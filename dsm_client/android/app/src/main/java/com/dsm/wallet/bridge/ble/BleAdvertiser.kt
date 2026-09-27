@@ -23,7 +23,13 @@ import java.util.concurrent.atomic.AtomicReference
  */
 class BleAdvertiser(private val context: Context) {
 
+    /** The stack's answers about the advertising set, as they arrive. */
     interface Callback {
+        /** The stack confirmed the set: it is on the air. */
+        fun onAdvertisingStarted()
+        /** The stack confirmed a requested stop: it is off the air. */
+        fun onAdvertisingStopped()
+        /** The stack refused the set it was asked to start. */
         fun onAdvertisingFailed(errorCode: Int)
     }
 
@@ -64,6 +70,7 @@ class BleAdvertiser(private val context: Context) {
                 currentAdvertisingSet.set(advertisingSet)
                 state.set(2) // STARTED
                 Log.i(TAG, "Advertising set started (txPower=$txPower, id=$currentId)")
+                callback?.onAdvertisingStarted()
             } else {
                 currentAdvertisingSet.set(null)
                 state.set(0) // IDLE
@@ -82,6 +89,7 @@ class BleAdvertiser(private val context: Context) {
             currentAdvertisingSet.set(null)
             state.set(0) // IDLE
             Log.i(TAG, "Advertising set stopped (id=$currentId)")
+            callback?.onAdvertisingStopped()
         }
 
         override fun onAdvertisingDataSet(advertisingSet: AdvertisingSet?, status: Int) {
@@ -232,6 +240,20 @@ class BleAdvertiser(private val context: Context) {
     }
 
     fun isAdvertising(): Boolean = state.get() == 2
+
+    /**
+     * Bluetooth is going off: the stack ends every advertising set with the radio,
+     * and a callback for it may never come. Nothing is advertising and nothing is
+     * in flight after this, so the next start requests a new set. Returns whether a
+     * confirmed set was on the air (started, or stopping from started).
+     */
+    fun radioOff(): Boolean {
+        val previous = state.getAndSet(0) // IDLE
+        currentAdvertisingSet.set(null)
+        bluetoothLeAdvertiser = null
+        if (previous != 0) Log.i(TAG, "Bluetooth off: advertising state $previous cleared")
+        return previous == 2 || previous == 3
+    }
 
     companion object {
         private const val TAG = "BleAdvertiser"
