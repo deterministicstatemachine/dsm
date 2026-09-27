@@ -59,7 +59,7 @@ jest.mock('../hooks/useGenesisFlow', () => ({
 }));
 
 jest.mock('../hooks/useIntroGate', () => ({
-  useIntroGate: () => false,
+  useIntroGate: () => ({ showIntro: false, onIntroPlayed: () => {} }),
 }));
 
 jest.mock('../hooks/useThemeAssets', () => ({
