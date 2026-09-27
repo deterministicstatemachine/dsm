@@ -17,10 +17,9 @@ import './GuidedTour.css';
 type Props = {
   appState: AppState;
   showIntro: boolean;
-  guideSrc: string;
 };
 
-export default function TourOffer({ appState, showIntro, guideSrc }: Props): React.JSX.Element | null {
+export default function TourOffer({ appState, showIntro }: Props): React.JSX.Element | null {
   const tour = useTourStore();
   const navigation = useNavigationStore();
   const [unseen, setUnseen] = useState(false);
@@ -65,15 +64,12 @@ export default function TourOffer({ appState, showIntro, guideSrc }: Props): Rea
   return createPortal(
     <div className="gt-root" data-testid="tour-offer">
       <div className="gt-dialog" role="dialog" aria-labelledby="gt-offer-title" style={style}>
-        <div className="gt-dialog__main">
-          <img className="gt-guide" src={guideSrc} alt="" aria-hidden="true" />
-          <div className="gt-copy">
-            <div id="gt-offer-title" className="gt-title">New here?</div>
-            <p className="gt-body">
-              Take a quick tour. It runs in practice mode, so nothing you do in it is real. You can replay it from
-              Settings any time.
-            </p>
-          </div>
+        <div className="gt-copy">
+          <div id="gt-offer-title" className="gt-title">New here?</div>
+          <p className="gt-body">
+            Take a quick tour. It runs in practice mode, so nothing you do in it is real. You can replay it from
+            Settings any time.
+          </p>
         </div>
         <div className="gt-controls">
           <button type="button" className="gt-btn gt-btn--ghost" onClick={dismiss}>

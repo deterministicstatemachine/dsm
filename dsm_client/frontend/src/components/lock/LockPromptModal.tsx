@@ -6,6 +6,7 @@
  */
 
 import React, { memo, useEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import type { ScreenType } from '../../types/app';
 import { saveLockPrefs } from '../../services/lock/lockService';
 import { useBackButton } from '../../hooks/useBackButton';
@@ -39,10 +40,16 @@ function LockPromptModal({ onNavigate, onDismiss }: Props) {
     dialogRef.current?.focus({ preventScroll: true });
   }, []);
 
-  return (
+  // Its shade covers the whole display: the screen and the nav bar under it,
+  // which both sit in the shell's screen wrapper (the controller stays live,
+  // so B puts the prompt away). Above the screen (z 5), its nav bar (z 20)
+  // and the home screen's chameleon; below the tour, which portals above the
+  // whole shell.
+  const layer = document.querySelector('.screen-wrapper') ?? document.body;
+
+  return createPortal(
     <div
       className="sb-popover-backdrop"
-      // Above the home screen's chameleon (z 1000) and the menu.
       style={{ zIndex: 8000 }}
       onClick={(e) => { if (e.target === e.currentTarget) handleLater(); }}
     >
@@ -73,7 +80,8 @@ function LockPromptModal({ onNavigate, onDismiss }: Props) {
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    layer,
   );
 }
 

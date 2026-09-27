@@ -313,6 +313,7 @@ export const TOUR_STEPS: ReadonlyArray<TourStep> = [
   {
     id: 'done',
     screen: 'home',
+    target: '.dsm-menu-item[data-label="WALLET"]',
     title: "You're ready",
     body: 'That is everything. Your real wallet is back, exactly as you left it. Press B to back out of any screen, and look for i whenever you want an explanation.',
   },
