@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { useSyncExternalStore } from 'react';
-import type { AppState, ScreenType } from '../types/app';
+import { SCREEN_TYPES, type AppState, type ScreenType } from '../types/app';
 import logger from '../utils/logger';
 
 type NavigationSnapshot = {
@@ -12,30 +12,10 @@ type NavigationSnapshot = {
 
 type MenuIndexUpdate = number | ((prev: number) => number);
 
-// Allowlist of valid navigation targets.  Every entry MUST also be
-// routed by `AppScreenRouter.tsx` and present in the `ScreenType`
-// union in `types/app.ts`.  Adding a screen anywhere else without
-// updating this set causes silent navigation drops (the `navigate`
-// early-returns when `to` is not in the set).
-const VALID_NAV_TARGETS = new Set<ScreenType>([
-  'home',
-  'wallet',
-  'transactions',
-  'contacts',
-  'accounts',
-  'storage',
-  'settings',
-  'tokens',
-  'qr',
-  'mycontact',
-  'dev_policy',
-  'lock_setup',
-  'recovery',
-  'nfc_recovery',
-  'recovery_pipeline',
-  'vault',
-  'bluetooth',
-]);
+// The valid navigation targets: exactly the app's screens (`SCREEN_TYPES`,
+// from which `ScreenType` is derived). `navigate` refuses anything else — a
+// string from an untyped caller — and there is no second list to fall behind.
+const VALID_NAV_TARGETS = new Set<ScreenType>(SCREEN_TYPES);
 
 class NavigationStore {
   private snapshot: NavigationSnapshot = {
