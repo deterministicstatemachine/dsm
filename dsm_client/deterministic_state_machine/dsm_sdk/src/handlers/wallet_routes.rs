@@ -1701,13 +1701,14 @@ mod send_offline_tests {
         }
     }
 
-    /// Where the counterparty's appliance is over BLE is the SDK's to know; the
-    /// request names no address. A send to a contact whose appliance the SDK has
-    /// not met is refused, saying so; once the contact holds an address, the
-    /// send goes past that refusal.
+    /// The counterparty's device id routes an offline send; where its appliance
+    /// was last seen over BLE is only where the transport looks first. A send
+    /// to a contact whose appliance this device has never met is not refused
+    /// for want of an address: it goes on exactly as far as one to a contact
+    /// holding an address, which on a host build is the dispatch.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[serial_test::serial]
-    async fn an_offline_send_goes_where_the_sdk_has_seen_the_appliance() {
+    async fn an_offline_send_needs_no_address_for_its_counterparty() {
         let device = crate::test_support::one_device::Device::start(0x75).await;
         let peer = [0x76u8; 32];
         store_contact(&ContactRecord {
@@ -1727,23 +1728,20 @@ mod send_offline_tests {
             previous_chain_tip: None,
         })
         .expect("store the contact");
-
-        let refused = send_offline(&device.router, peer)
-            .await
-            .expect_err("the appliances have not met");
-        assert!(
-            refused.contains("no BLE address is known for the counterparty"),
-            "{refused}"
+        assert_eq!(
+            crate::bluetooth::peer_address::counterparty_address(&peer).expect("contacts read"),
+            None,
+            "the appliances have not met"
         );
+
+        // A host build has no BLE: the send stops only at the dispatch, past
+        // the relationship's send status, the token, the amount and its policy.
+        let host_dispatch =
+            Err("wallet.sendOffline is only available on Android BLE builds".to_string());
+        assert_eq!(send_offline(&device.router, peer).await, host_dispatch);
 
         update_contact_ble_status(&peer, None, Some("AA:BB:CC:DD:EE:FF"))
             .expect("pairing persists the address");
-        // A host build has no BLE: the send stops only at the dispatch, past
-        // the address, the relationship's send status, the token, the amount
-        // and its policy.
-        assert_eq!(
-            send_offline(&device.router, peer).await,
-            Err("wallet.sendOffline is only available on Android BLE builds".to_string())
-        );
+        assert_eq!(send_offline(&device.router, peer).await, host_dispatch);
     }
 }
