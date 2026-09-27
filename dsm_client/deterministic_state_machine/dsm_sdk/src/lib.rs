@@ -416,10 +416,13 @@ pub async fn initialize_bilateral_sdk() -> Result<(), dsm::types::error::DsmErro
     Ok(())
 }
 
+/// A build without the Android BLE stack has no bilateral runtime to make
+/// ready, and says so rather than reporting one.
 #[cfg(not(all(target_os = "android", feature = "bluetooth")))]
 pub async fn initialize_bilateral_sdk() -> Result<(), dsm::types::error::DsmError> {
-    log::debug!("initialize_bilateral_sdk: not available on this platform");
-    Ok(())
+    Err(dsm::types::error::DsmError::invalid_operation(
+        "no bilateral stack on this build: the offline protocol runs on Android with the bluetooth feature",
+    ))
 }
 
 /// Returns true once bilateral preconditions have been verified (context + handler).
@@ -436,10 +439,10 @@ pub fn is_sdk_fully_ready() -> bool {
 
 #[cfg(not(all(target_os = "android", feature = "bluetooth")))]
 pub fn is_bilateral_ready() -> bool {
-    true
+    false
 }
 
 #[cfg(not(all(target_os = "android", feature = "bluetooth")))]
 pub fn is_sdk_fully_ready() -> bool {
-    is_sdk_context_initialized()
+    is_sdk_context_initialized() && is_bilateral_ready()
 }
