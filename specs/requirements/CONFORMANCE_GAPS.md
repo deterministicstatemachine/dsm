@@ -1355,12 +1355,12 @@ The State column says what this branch did; "Open" rows are holes left visible, 
 | B-8 | `SDK/handlers/wallet_routes.rs` (`wallet.sendOffline`) | Answers the peer's message type with default fields. | Open |
 | B-9 | `SDK/handlers/storage_routes.rs` (reply rows) | A reply row without its release submits an empty release. | Open |
 | B-10 | `SDK/sdk/recovery_impl.rs` | A recovered `AppState` genesis is `succession.new_device_commitment`. | Open (recovery boundary) |
-| B-K11 | `KT/bridge/…` (`qr.available`) | Hard-coded `true`. | Open |
+| B-K11 | `KT/bridge/…` (`qr.available`) | Hard-coded `true`. | Resolved: `qr_available` is the device's camera feature (`FEATURE_CAMERA_ANY`), not a literal. |
 | B-F4 | `FE/dsm/transactions.ts` (accept) | Emits `committed: true` before the confirm arrived. | Open |
 | B-F7 | `FE/dsm/*` error mapping | Invents causes for error codes Kotlin never emits. | Open |
 | B-F9 | `FE/runtime/nativeSessionStore.ts` | A session snapshot fills absent fields with defaults. | Open |
 | B-F11 | `FE/components/screens/StorageScreen.tsx` (DLVs) | A failed vault list shows as "No DLVs"; JavaScript sums locked dBTC. Bitcoin, parked. | Open |
-| B-F16 | `dsm_client/frontend/public/index.html` (battery LED) | Defaults to full and reads a `window.DSMBridge.getBatteryStatus` nothing installs. | Open |
+| B-F16 | `dsm_client/frontend/public/index.html` (battery LED) | Defaults to full and reads a `window.DSMBridge.getBatteryStatus` nothing installs. | Resolved: without the Battery API the LED is unlit and unclassed, and the phantom native fallback is deleted; the markup no longer starts as `full`. |
 | B-C13 | `CORE/recovery/tombstone.rs` (`TombstoneReceipt.old_counter`); `init_*` no-ops | Signs a counter DSM does not keep; initialisers that initialise nothing. | Open (recovery boundary) |
 | B-C11 | `CORE/recovery/succession_proof.rs` (`verify`) | Assumes a receipt verification nothing performs (§6.35 link). | Open (recovery boundary) |
 
@@ -1387,7 +1387,7 @@ The State column says what this branch did; "Open" rows are holes left visible, 
 | D-F13 | `FE/services/recovery/nfcRecoveryService.ts` | A `key=value` text protocol with `'0'` defaults; JavaScript decodes capsule bytes (§6.29 Open, recovery boundary). | Open |
 | D-C15 | `CORE/deterministic_id.rs` | Hex UUID ids; dead. | Open |
 | D-DBTC | `SDK/policy/builtins.rs` | The dBTC commit is checked with raw BLAKE3, not `TAG_DSM_POLICY`. Parked. | Open |
-| D-F17 | `FE/*` | `alert()` on production paths. | Open |
+| D-F17 | `FE/*` | `alert()` on production paths. | Resolved: the transfer dialog and the diagnostics overlay report through the app's toasts; no `alert()` remains in production code. |
 
 **E. Dead code, to delete**
 
@@ -1403,14 +1403,14 @@ The State column says what this branch did; "Open" rows are holes left visible, 
 | E-S25 | `SDK/sdk/token_sdk.rs` (`Create` arm) | Unreachable, with a made-up fee counterparty (`system.fee.device_id`). | Open |
 | E-S26–32 | `SDK/wire/mod.rs` (`author_contact_*`, `make_state_transition_proto`); `sdk/bootstrap.rs`; `SdkConfig` fields nothing reads; `sdk/recovery_sdk.rs` wrappers; `identity_presentation`; some thirty uncalled functions; `TransferMeta` | No caller. | Open |
 | E-S-CODEC | `SDK/storage/codecs.rs` (`read_string`) | Turns invalid UTF-8 into a successful empty string; referenced only by its own unit test (A27 residual). | Resolved: deleted with its test. |
-| E-N2 | `NODE/lib.rs` (`cells_router`, `member_ids`, `get_cell_values`) | Test-only. | Open |
+| E-N2 | `NODE/lib.rs` (`cells_router`, `member_ids`, `get_cell_values`) | Test-only. | Resolved: `cells_router` and `member_ids` deleted; `get_cell_values` is `cfg(test)`, the store's own tests being its only readers. |
 | E-K12 | `KT/service/FaucetService.kt` + `FOREGROUND_SERVICE_LOCATION` | Decides "tokens nearby" from a SHA-256 of a location bit; unreachable. | Open |
 | E-K13 | `KT/service/McpService.kt`, `ProximityScanService.kt`, `EventPoller`, `DsmInitManager` references | A foreground notification that does nothing, and no-ops. | Open |
 | E-K14 | `KT/bridge/BleEventRelay.kt` | Drops rows on a failed delivery; reaches a private-API app context. | Open |
 | E-K16 | `KT/*` (uncalled members, incl. the `processEnvelopeV3WithAddress` and `processBleChunk` JNI exports) | No caller. | Open |
-| E-K3 | `KT/ui/MainActivity.kt` (startup) | A zero-genesis diagnostics call. | Open |
-| E-F5 | `FE/*` text and `dsm/transactions.ts` (`cancelOfflineTransfer`) | Copy promising a "Pending transfers" screen that #1028 deleted; the cancel export has no caller. | Open |
-| E-F18 | `FE/services/headerService.ts`, `syncWithStorage`, `safeJsonStringify`, `fromBase32Crockford`, `prettyAnchor` | No importer. | Open |
+| E-K3 | `KT/ui/MainActivity.kt` (startup) | A zero-genesis diagnostics call. | Resolved: the zero-genesis `computeB0xAddress` diagnostics call is deleted, and with it the export's Kotlin wrapper, its `external` declaration and the Rust JNI export, which it was the only caller of. |
+| E-F5 | `FE/*` text and `dsm/transactions.ts` (`cancelOfflineTransfer`) | Copy promising a "Pending transfers" screen that #1028 deleted; the cancel export has no caller. | Resolved in part: the copy no longer names a screen #1028 deleted. Open (owner): `cancelOfflineTransfer` is wired down to `cancel_proposal` and no control reaches it since the pending panel went; where the proposer's cancel lives on the frame is a design choice. |
+| E-F18 | `FE/services/headerService.ts`, `syncWithStorage`, `safeJsonStringify`, `fromBase32Crockford`, `prettyAnchor` | No importer. | Resolved: `services/headerService.ts`, `utils/safeJsonStringify.ts`, `dsm/storage.ts::syncWithStorage` with its bridge function (the poller's sync is Rust's), `decoding.ts::fromBase32Crockford` and `anchorDisplay.ts::prettyAnchor` deleted with their tests; the related suites pass (82 suites). |
 
 **F. The external investigation (A27-01–A27-07, at `519537f1d`), re-verified on main**
 
