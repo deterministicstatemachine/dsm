@@ -69,7 +69,6 @@ class BleCoordinatorRadioTest {
             advertiser = advertiser,
             gattServer = gattServer,
             scanner = scanner,
-            outbox = mock(),
             diagnostics = BleDiagnostics(),
             radioEvents = recorded,
         )

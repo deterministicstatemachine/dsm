@@ -161,14 +161,6 @@ object Unified {
     }
 
     /**
-     * Request a GATT write to the DSM TX characteristic of the given device.
-     * Returns true if the async flow was successfully started.
-     */
-    @Keep @JvmStatic fun requestGattWrite(deviceAddress: String, transactionData: ByteArray): Boolean {
-        return UnifiedBleBridge.requestGattWrite(deviceAddress, transactionData)
-    }
-
-    /**
      * Start BLE pairing in advertiser role using the instance-bound service.
      * Returns false if BLE service is not initialized.
      */
@@ -481,13 +473,9 @@ object Unified {
         counterpartyDeviceId
     )
 
-    // ---------- BLE diagnostics + retry helpers (non-external; pure-Kotlin wrappers) ----------
+    // ---------- BLE diagnostics helpers (non-external; pure-Kotlin wrappers) ----------
     @Keep @JvmStatic fun getBleStats(deviceAddress: String): ByteArray {
         return UnifiedBleBridge.getBleStats(deviceAddress)
-    }
-
-    @Keep @JvmStatic fun retryLastBleTransaction(deviceAddress: String): Boolean {
-        return UnifiedBleBridge.retryLastBleTransaction(deviceAddress)
     }
 
     // ---------- Bluetooth pairing status API ----------

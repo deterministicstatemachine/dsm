@@ -198,7 +198,6 @@ class PeerSessionTest {
             serviceDiscoveryCompleted = true
             identityExchangeInProgress = true
             pairingInProgress = true
-            pendingPairingConfirm = byteArrayOf(1)
         }
         s.clearClientState()
 
@@ -206,11 +205,9 @@ class PeerSessionTest {
         assertEquals(23, s.negotiatedMtu)
         assertFalse(s.serviceDiscoveryCompleted)
         assertNull(s.lastError)
-        assertNull(s.currentTransaction)
         assertFalse(s.identityExchangeInProgress)
         assertFalse(s.pairingInProgress)
         assertNull(s.connectResult)
-        assertNull(s.pendingPairingConfirm)
     }
 
     @Test
