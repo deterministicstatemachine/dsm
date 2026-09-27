@@ -6,6 +6,7 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -33,6 +34,7 @@ class BleCoordinatorTest {
     @After
     fun tearDown() {
         coordinator.peers.clear()
+        coordinator.abandonedCandidates.clear()
         coordinator.permissionsGate.cleanup()
     }
 
@@ -161,6 +163,20 @@ class BleCoordinatorTest {
 
         assertNull(coordinator.resolveRoute(target.deviceId, "shell"))
         assertNull(coordinator.resolveRoute(target.deviceId, "missing"))
+    }
+
+    /**
+     * A reach ended while one of its candidates was still connecting: that
+     * link's identity read is judged against the same appliance, once. With
+     * no reach and no abandoned candidate, a read expects no one.
+     */
+    @Test
+    fun anAbandonedCandidatesIdentityReadExpectsTheReachsAppliance() {
+        coordinator.abandonedCandidates["76:9B:A6:69:67:06"] = target.deviceId
+
+        assertTrue(coordinator.takeExpectedIdentity("76:9B:A6:69:67:06").contentEquals(target.deviceId))
+        assertEquals(0, coordinator.takeExpectedIdentity("76:9B:A6:69:67:06").size)
+        assertEquals(0, coordinator.takeExpectedIdentity("2C:DA:46:4B:73:FA").size)
     }
 
     @Test

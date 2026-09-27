@@ -678,6 +678,9 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                         // A reach's candidate is identified against the appliance the
                         // reach is for; any other link is not a reach.
                         val reach = activeReach?.takeIf { it.isCandidate(event.deviceAddress) }
+                        val expected = takeExpectedIdentity(event.deviceAddress)
+                        // A finished reach's candidate: not a reach now, but still not anyone else's link.
+                        val abandoned = reach == null && expected.isNotEmpty()
                         if (event.data != null && event.data.isNotEmpty()) {
                             Log.i("BleCoordinator", "Peer identity read from ${event.deviceAddress}: ${event.data.size} bytes")
                             diagnostics.recordEvent(BleDiagEvent(phase = "coordinator_identity_read_ok", device = event.deviceAddress, bytes = event.data.size))
@@ -687,7 +690,7 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                                 val resultBytes = com.dsm.wallet.bridge.Unified.processGattIdentityRead(
                                     event.deviceAddress,
                                     event.data,
-                                    reach?.deviceId ?: ByteArray(0),
+                                    expected,
                                 )
                                 // Extract fields via JNI helpers — Kotlin has no proto codegen.
                                 val success = com.dsm.wallet.bridge.Unified.identityReadResultGetSuccess(resultBytes)
@@ -728,6 +731,10 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                                     }
                                 } else if (reach != null) {
                                     rejectCandidate(reach, event.deviceAddress, "not_the_addressed_appliance")
+                                } else if (abandoned) {
+                                    Log.i("BleCoordinator", "${event.deviceAddress}: a finished reach's candidate, not its appliance — closed")
+                                    clearClient(peer)
+                                    if (peer.isEmpty) peers.remove(event.deviceAddress)
                                 } else {
                                     Log.w("BleCoordinator", "processGattIdentityRead failed for ${event.deviceAddress}")
                                     diagnostics.recordError(BleErrorCategory.CHARACTERISTIC_READ_FAILED, "coordinator_identity_rust_decode_failed")
@@ -980,6 +987,24 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
     private val reachMutex = kotlinx.coroutines.sync.Mutex()
 
     /**
+     * Addresses a finished reach was still connecting, each with the appliance
+     * that reach was for. The link is closed when the reach ends, but its
+     * identity read may already be queued behind that close; it is judged
+     * against the same appliance, so a non-target is still recorded nowhere.
+     */
+    internal val abandonedCandidates = java.util.concurrent.ConcurrentHashMap<String, ByteArray>()
+
+    /**
+     * The appliance an identity read on the link at [address] must name: the
+     * active reach's, when [address] is its candidate; else the one a finished
+     * reach was connecting it for (taken once); else none — not a reach.
+     */
+    internal fun takeExpectedIdentity(address: String): ByteArray =
+        activeReach?.takeIf { it.isCandidate(address) }?.deviceId
+            ?: abandonedCandidates.remove(address)
+            ?: ByteArray(0)
+
+    /**
      * Reach for the appliance [deviceId]: connect to [hint] first, and scan,
      * connecting to DSM advertisers one at a time until the identity read on
      * one names [deviceId]. An appliance that is not it is disconnected and
@@ -990,6 +1015,8 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
     suspend fun reach(deviceId: ByteArray, hint: String): BleRoute? = reachMutex.withLock {
         resolveRoute(deviceId, hint)?.let { return@withLock it }
         val reach = Reach(deviceId, hint)
+        // Candidates of earlier reaches whose identity read never came: nothing is owed them.
+        abandonedCandidates.clear()
         activeReach = reach
         try {
             // Prime the reverse path: the appliance may reach our server first.
@@ -1023,6 +1050,7 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
             // Candidates still connecting belong to no reach now.
             val leftover = reach.candidates.toList()
             reach.candidates.clear()
+            for (address in leftover) abandonedCandidates[address] = reach.deviceId
             if (leftover.isNotEmpty()) {
                 runOperation(BleOpLane.LIFECYCLE) {
                     for (address in leftover) {
