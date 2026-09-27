@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex, RwLock};
 
 pub use crate::storage::codecs::{
     deserialize_operation, encode_genesis_record_bytes, generate_hash_chain_proof_bytes,
-    hash_blake3_bytes, meta_from_blob, meta_to_blob, read_len_u32, read_string, read_u64, read_u8,
-    read_vec, serialize_operation, smt_proof_bytes,
+    hash_blake3_bytes, meta_from_blob, meta_to_blob, read_len_u32, read_u64, read_u8, read_vec,
+    serialize_operation, smt_proof_bytes,
 };
 
 // --- Submodules (domain-specific) ---
