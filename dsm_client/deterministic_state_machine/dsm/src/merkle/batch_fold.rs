@@ -15,14 +15,22 @@
 //! paths. Both roots come out of the same shape, so the post-root is what the
 //! tree holds after ALL the writes, in one pass.
 //!
-//! ## What makes it sound
+//! ## What makes it sound, and what makes it canonical
 //!
-//! Wherever two entries separate, each one's path already names what the other
-//! side must be — and this checks it ([`FoldError::InconsistentPath`]).
-//! Without that check a caller could hand in paths taken from different trees
-//! and get a post-root that no single tree ever held. The check is what turns
-//! "these paths are individually well-formed" into "these paths are of one
-//! tree".
+//! The two roots the fold yields are always those of one tree: the tree its
+//! entries' values and the siblings it reads describe. [`verify_batch`]
+//! requires that tree's pre-root to be the claimed one, and that is what makes
+//! the post-root the claimed tree after the writes
+//! (`lean4/DSMStepTransition.lean`, `fold_sound`).
+//!
+//! The fold does not read every sibling it is given: where the keys separate,
+//! each side comes from its own entries, and where they do not, it reads the
+//! first entry's. The siblings it does not read must still be the tree's, and
+//! this checks them ([`FoldError::InconsistentPath`]), so every path a write
+//! set carries is the tree's own path at its key (`fold_canonical`). Without
+//! the check a sibling the fold never reads would be free: the same move would
+//! have many encodings, and a proof carrying it would be malleable
+//! (`lax_fold_is_not_canonical`).
 //!
 //! ## What it does not know
 //!
@@ -173,7 +181,8 @@ fn subtree<H: SmtHashes>(
     let (low_pre, low_post) = subtree::<H>(depth + 1, low)?;
     let (high_pre, high_post) = subtree::<H>(depth + 1, high)?;
     // Where the keys separate, each side's path already names the other side
-    // AS IT WAS. This is the check that makes one fold out of many paths.
+    // AS IT WAS. The fold reads neither of these siblings; the check is what
+    // keeps them the tree's, so the proof has one encoding.
     if low.iter().any(|e| sibling_at(e, depth) != high_pre)
         || high.iter().any(|e| sibling_at(e, depth) != low_pre)
     {

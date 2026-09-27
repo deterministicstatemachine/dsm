@@ -32,9 +32,9 @@ use crate::tla_trace_replay::{
 /// anti-skip tripwire is cheap, and a silently shrinking formal suite is the
 /// failure mode that looks most like success.
 ///
-/// 87 since `SofiFulfillment/install-on-caller-value` and
-/// `SofiFulfillment/install-reachable` (the installed root is the ladder's).
-pub const EXPECTED_STANDARD_SPECS: usize = 87;
+/// 91 since the receipt's write set (`ReceiptWriteSet` and its two
+/// falsifications) and `OfflineAnchorSingleAppliance/release-before-receipt`.
+pub const EXPECTED_STANDARD_SPECS: usize = 91;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TlaSpec {
@@ -515,6 +515,7 @@ impl TlaRunner {
                     "CommitAdvancesOrigin".into(),
                     "SecondSameOriginFails".into(),
                     "RecoveryIdempotence".into(),
+                    "NoCommitWithoutDeliverableConfirm".into(),
                 ],
                 properties: vec![],
                 linked_implementation_traces: vec![],
@@ -522,6 +523,52 @@ impl TlaRunner {
                 expect_violation: None,
                 exhaustive: false,
             },
+            // The host proves a step's receipt before it drives PREPARE: the
+            // order that released first and built the receipt after spends a
+            // counter step on a confirm that can never be delivered.
+            expect_violation(
+                "OfflineAnchorSingleAppliance/release-before-receipt",
+                "DSM_OfflineAnchorSingleAppliance.tla",
+                "DSM_OfflineAnchorSingleAppliance_ReleaseBeforeReceipt.cfg",
+                "NoCommitWithoutDeliverableConfirm",
+            ),
+            // ── A receipt proves its step's whole write set ───────────────────
+            // An offline-bearer spend moves its relationship tip, anchor
+            // counter and offline allocation in one root; the receipt proves
+            // all three against the parent root and the verifier derives every
+            // post-value. The Rust twin is `verify_receipt_state`
+            // (dsm/src/verification/receipt_verification.rs) over the batch
+            // fold (dsm/src/merkle/batch_fold.rs); the fold's algebra is
+            // lean4/DSMStepTransition.lean. Finite by construction.
+            TlaSpec {
+                label: "ReceiptWriteSet".into(),
+                spec_file: "DSM_ReceiptWriteSet.tla".into(),
+                config_file: "DSM_ReceiptWriteSet.cfg".into(),
+                invariants: vec![
+                    "TypeOK".into(),
+                    "ClosedWriteSet".into(),
+                    "AllocationConserved".into(),
+                    "CounterMovesWithRoot".into(),
+                    "HonestSpendAcceptable".into(),
+                ],
+                properties: vec!["HonestBearerStepAccepted".into()],
+                linked_implementation_traces: vec![],
+                supports_trace_replay: false,
+                expect_violation: None,
+                exhaustive: true,
+            },
+            expect_violation(
+                "ReceiptWriteSet/relationship-only-check",
+                "DSM_ReceiptWriteSet.tla",
+                "DSM_ReceiptWriteSet_RelationshipOnlyCheck.cfg",
+                "AllocationConserved",
+            ),
+            expect_violation(
+                "ReceiptWriteSet/one-path-rule",
+                "DSM_ReceiptWriteSet.tla",
+                "DSM_ReceiptWriteSet_OnePathRule.cfg",
+                "HonestSpendAcceptable",
+            ),
             // ── The native ERA reserve: one lineage, released leader first ────
             // Part IX §51, rebuild step R4, owner ruling 2026-09-20. The
             // reserve's successor cell at the members while claimants, garbage,
@@ -1381,7 +1428,9 @@ fn crashed_without_a_finding(result: &TlcResult) -> bool {
 /// The SoFi modules and the offline step model are finite by construction
 /// (see `TlaSpec::exhaustive`).
 fn exhaustive_by_construction(spec_file: &str) -> bool {
-    spec_file.starts_with("DSM_Sofi") || spec_file == "DSM_OfflineFinality.tla"
+    spec_file.starts_with("DSM_Sofi")
+        || spec_file == "DSM_OfflineFinality.tla"
+        || spec_file == "DSM_ReceiptWriteSet.tla"
 }
 
 /// A falsification config whose named finding is a `[][P]_vars` action
