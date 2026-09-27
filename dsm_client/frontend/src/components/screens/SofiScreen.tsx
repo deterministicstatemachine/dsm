@@ -225,6 +225,7 @@ export default function SofiScreen(): React.JSX.Element {
         <InfoTip title="SoFi">
           <p>Sovereign finance: sovereign liquidity and trades that settle between devices, with no exchange in the middle.</p>
           <p><b>Swap</b> trades one token for another through sovereign liquidity at its price. Quote first: you see the exact amount before you confirm. A trade lands at a position, or is void if another trade won the race, and then nothing moved.</p>
+          <p>Your fee can increase if the trade needs a hop through a second vault to be secured: each vault takes its own fee. The quote shows it before you confirm.</p>
           <p><b>Liquidity</b> puts two of your tokens into a liquidity vault of your own: sovereign liquidity. Every trade against it pays the fee you set, and you can close it and take the reserves back.</p>
           <p><b>Resolve</b> advances a position this device still has pending, after a trade that did not finish.</p>
         </InfoTip>
@@ -308,6 +309,7 @@ export default function SofiScreen(): React.JSX.Element {
             >
               Quote
             </button>
+            <p className="sb-hint sb-hint--tight">Your fee can increase if the trade needs a hop to be secured. The quote shows it.</p>
           </section>
 
           {quote && quoteOut !== null && (
@@ -340,6 +342,7 @@ export default function SofiScreen(): React.JSX.Element {
                   onChange={(e) => setMinOut(e.target.value)}
                 />
               </div>
+              {quote.length > 1 && <p className="sb-hint sb-hint--tight">Two hops: each vault took its own fee.</p>}
               <p className="sb-hint">A fill below this is refused. Once it lands there is no undo.</p>
               <div className="sb-actions" style={{ margin: 0 }}>
                 <button type="button" className="sb-btn" onClick={() => setQuote(null)} disabled={busy}>Cancel</button>
