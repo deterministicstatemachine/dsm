@@ -79,37 +79,18 @@ class BleCoordinatorTest {
     }
 
     /**
-     * `resolveSession` routes an unknown/stale address to the SOLE ready
-     * session (restored single-peer fallback from the "Harden BLE multi-peer
-     * fallback" lineage). BLE RPA rotation moves a peer's advertised address
-     * faster than the frontend/SDK contact cache can follow, so the send
-     * target is routinely stale even while a live GATT session to that same
-     * peer exists at the (fixed) connected address — without this fallback
-     * every bilateral send eventually dead-ends with "no route". With exactly
-     * one ready session there is no ambiguity about where the traffic
-     * belongs; misdirected bytes are additionally rejected by the
-     * relationship-bound crypto envelope on the far side. The fallback stays
-     * guarded to a single ready peer: the sibling test below
-     * (`_doesNotFallbackWhenMultipleReadyPeersExist`) is the regression guard
-     * for the ambiguous multi-peer case, which is still refused.
+     * An unknown address has no route, even when exactly one session is ready:
+     * that session may belong to any appliance in range.
      */
     @Test
-    fun resolveSession_fallsBackToSoleReadyPeerForUnknownAddress() {
-        val fallbackPeer = PeerSession(address = "fallback").apply {
+    fun resolveSession_neverRoutesAnUnknownAddressToTheSoleReadyPeer() {
+        coordinator.persistedIdentityLookup = { null }
+        coordinator.peers["fallback"] = PeerSession(address = "fallback").apply {
             gattClientSession = activeGattClientSession("fallback")
             isConnected = true
         }
-        coordinator.peers["fallback"] = fallbackPeer
 
-        val resolved = coordinator.resolveSession("unknown")
-
-        assertNotNull(
-            "resolveSession must route an unknown address to the sole ready " +
-                "session (RPA rotation makes cached addresses stale)",
-            resolved,
-        )
-        assertSame(fallbackPeer, resolved!!.first)
-        assertEquals("fallback", resolved.second)
+        assertNull(coordinator.resolveSession("unknown"))
     }
 
     @Test
