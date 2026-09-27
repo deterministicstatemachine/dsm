@@ -694,7 +694,7 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                                 val peerDeviceId = com.dsm.wallet.bridge.Unified.identityReadResultExtractPeerDeviceId(resultBytes)
                                 val peerGenesisHash = com.dsm.wallet.bridge.Unified.identityReadResultExtractPeerGenesisHash(resultBytes)
 
-                                if (success && peerDeviceId.size == 32 && peerGenesisHash.size == 32) {
+                                if (success && peerDeviceId?.size == 32 && peerGenesisHash?.size == 32) {
                                     Log.i("BleCoordinator", "processGattIdentityRead succeeded for ${event.deviceAddress}")
                                     anchorIdentity(event.deviceAddress, PeerIdentity(peerDeviceId, peerGenesisHash))
                                     // The link is a route now: CCCD chain done, identity read on it.
@@ -714,7 +714,7 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                                     }
 
                                     val writeBackEnvelope = com.dsm.wallet.bridge.Unified.identityReadResultExtractWriteBack(resultBytes)
-                                        .takeIf { it.isNotEmpty() }
+                                        ?.takeIf { it.isNotEmpty() }
                                     if (writeBackEnvelope != null) {
                                         val session = peer.gattClientSession
                                         if (session != null) {
