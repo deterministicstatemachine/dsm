@@ -104,7 +104,7 @@ object Unified {
     // installs the USB anchor appliance factory so offline-bearer sends drive the phone's own
     // physical RP2350/TROPIC01 (v2: the receiver needs NO hardware — this is the entire device
     // install story). Fail-closed: without it every offline-bearer send errors ("offline = chips").
-    // Catch UnsatisfiedLinkError.
+    // `DsmInitProvider` registers it once at app start. Catch UnsatisfiedLinkError.
     @Keep @JvmStatic external fun installAnchorTransport(): Boolean
     @Keep @JvmStatic fun dispatchStartup(requestBytes: ByteArray): ByteArray =
         UnifiedNativeApi.dispatchStartup(requestBytes)
