@@ -32,6 +32,7 @@ import android.view.Gravity
 import android.view.View
 import android.webkit.ConsoleMessage
 import android.webkit.PermissionRequest
+import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -109,6 +110,11 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
     // Native QR scanner launcher and callback
     lateinit var qrScannerLauncher: ActivityResultLauncher<Intent>
     @Volatile var qrScanCallback: ((String?) -> Unit)? = null
+    // The page's file control (the token wizard's coin artwork): an
+    // <input type="file"> opens the system picker only if the host launches
+    // it. The WebView's default is to do nothing on the tap.
+    lateinit var fileChooserLauncher: ActivityResultLauncher<Intent>
+    @Volatile private var fileChooserCallback: ValueCallback<Array<Uri>>? = null
     @Volatile private var qrLockRoundTripState = QrLockRoundTripState()
     @Volatile private var walletRefreshHint = 0L
     @Volatile private var isAppForeground = true
@@ -1320,6 +1326,15 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
             cb?.invoke(data)
         }
 
+        fileChooserLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            val cb = fileChooserCallback
+            fileChooserCallback = null
+            // A cancelled picker answers null, which the page sees as no file chosen.
+            val uris = WebChromeClient.FileChooserParams.parseResult(result.resultCode, result.data)
+            Log.i(tag, "File chooser result: code=${result.resultCode} files=${uris?.size ?: 0}")
+            cb?.onReceiveValue(uris)
+        }
+
         val neededBt = BluetoothPermissionHelper.requiredPermissions()
         if (!BluetoothPermissionHelper.hasAll(this, neededBt) && !btPermsRequested) {
             btPermsRequested = true
@@ -1973,6 +1988,32 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
             override fun onConsoleMessage(consoleMessage: ConsoleMessage?): Boolean {
                 consoleMessage?.let { Log.i("WebViewConsole", it.message()) }
                 return true
+            }
+
+            // One chooser at a time: a request that arrives while one is open
+            // answers the open one with nothing first.
+            override fun onShowFileChooser(
+                webView: WebView?,
+                filePathCallback: ValueCallback<Array<Uri>>?,
+                fileChooserParams: FileChooserParams?
+            ): Boolean {
+                fileChooserCallback?.onReceiveValue(null)
+                fileChooserCallback = filePathCallback
+                return try {
+                    // The page's accept types (image/png, image/jpeg, image/webp) ride
+                    // on the intent the params build.
+                    val intent = fileChooserParams?.createIntent() ?: Intent(Intent.ACTION_GET_CONTENT).apply {
+                        addCategory(Intent.CATEGORY_OPENABLE)
+                        type = "image/*"
+                    }
+                    fileChooserLauncher.launch(intent)
+                    true
+                } catch (t: Throwable) {
+                    Log.w(tag, "onShowFileChooser: the picker did not open", t)
+                    fileChooserCallback = null
+                    filePathCallback?.onReceiveValue(null)
+                    false
+                }
             }
 
             override fun onPermissionRequest(request: PermissionRequest?) {

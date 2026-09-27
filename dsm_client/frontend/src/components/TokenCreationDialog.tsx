@@ -178,10 +178,13 @@ function CoinArtworkField({ state, set }: { state: WizardState; set: (p: Partial
           <TokenCoin iconUrl={state.iconUrl} ticker={ticker} size={PREVIEW_COIN_SIZE} className="sb-coin sb-coin--xl" alt="Your token's coin" />
         </span>
       </div>
+      {/* The native file control cannot be drawn in the frame's look, so it is
+          kept off screen and the brick beside it is its label: tapping the
+          brick opens the same picker. */}
       <input
         id="tcd-coin-art"
         type="file"
-        className="sb-input sb-input--small"
+        className="sb-file"
         accept="image/png,image/jpeg,image/webp"
         disabled={reading}
         onChange={e => {
@@ -190,6 +193,9 @@ function CoinArtworkField({ state, set }: { state: WizardState; set: (p: Partial
           if (file) void upload(file);
         }}
       />
+      <label htmlFor="tcd-coin-art" className={`sb-btn sb-btn--block${reading ? ' is-disabled' : ''}`} aria-hidden="true">
+        {reading ? 'Reading image…' : state.iconUrl ? 'Choose another image' : 'Choose an image'}
+      </label>
       {state.iconUrl && (
         <div style={{ display: 'grid', gap: 6, marginTop: 6 }}>
           {image && (
