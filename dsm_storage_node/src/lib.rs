@@ -128,11 +128,6 @@ impl NodeStorageSet {
         Ok(self)
     }
 
-    /// The configured member ids, for logging and endpoint resolution.
-    pub fn member_ids(&self) -> impl Iterator<Item = &str> {
-        self.members.iter().map(|(m, _)| m.as_str())
-    }
-
     /// `(member id, endpoint)` for every member with a configured endpoint.
     pub fn member_endpoints(&self) -> impl Iterator<Item = (&str, &str)> {
         self.endpoints.iter().map(|(m, e)| (m.as_str(), e.as_str()))
@@ -167,13 +162,6 @@ impl AppState {
         self.storage_set = Some(Arc::new(set));
         self
     }
-}
-
-/// Keyed cells and indexes: no write authorization, nothing refused, nothing
-/// decided. Every object carries its own authority; whoever carries the bytes
-/// does not matter.
-pub fn cells_router(state: Arc<AppState>) -> axum::Router<()> {
-    api::cells::create_router(state)
 }
 
 /// The four operations of the storage contract (Part II §12) — put object,
