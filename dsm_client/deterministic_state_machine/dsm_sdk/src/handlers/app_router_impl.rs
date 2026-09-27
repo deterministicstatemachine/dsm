@@ -1156,7 +1156,7 @@ impl AppRouterImpl {
                 let rc_canonical = crate::sdk::receipts::build_bilateral_receipt(
                     from_device_id,
                     to_device_id,
-                    &advance_outcome,
+                    advance_outcome,
                     None,
                     &local_device_tree_commitment,
                 )?;
