@@ -1,10 +1,10 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 /* eslint-disable no-console */
-// Tabbed contacts interface with "My Contacts" and "Add Contact"
+// Contacts on the StateBoy frame: the people this wallet deals with, adding
+// one from a contact code, and this wallet's own code.
 const CONTACTS_DEBUG = false; // flip to true for on-device BLE/contacts debugging
 import React, { useCallback, useEffect, useState, useRef, useMemo } from 'react';
 import BluetoothIcon from '../icons/BluetoothIcon';
-import ArrowIcon from '../icons/ArrowIcon';
 import QRCodeScannerPanel from '../qr/QRCodeScannerPanel';
 import MyContactInfoPanel from '../contacts/MyContactInfoPanel';
 import { useContacts } from '../../contexts/ContactsContext';
@@ -12,45 +12,34 @@ import { useTransactions } from '../../hooks/useTransactions';
 import { bridgeEvents } from '../../bridge/bridgeEvents';
 import StitchedReceiptDetails from '../receipts/StitchedReceiptDetails';
 import { useDpadNav } from '../../hooks/useDpadNav';
+import { Disclosure, Notice, ScreenFrame, ScreenTabs } from '../common/ScreenFrame';
+import { InfoTip } from '../common/InfoTip';
+import type { DomainContact } from '../../domain/types';
 
 interface Props { onNavigate?: (screen: string) => void; eraTokenSrc?: string }
 
 type Tab = 'list' | 'add' | 'myqr';
 
-// Loading overlay with the era token GIF - covers entire tab content
-const LoadingOverlay: React.FC<{ message?: string; eraTokenSrc?: string }> = ({ message = 'Loading...', eraTokenSrc = 'images/logos/era_token_gb.gif' }) => (
-  <div style={{
-    position: 'absolute',
-    inset: 0,
-    background: 'rgba(var(--text-dark-rgb), 0.92)',
-    display: 'flex',
-    flexDirection: 'column',
-    alignItems: 'center',
-    justifyContent: 'center',
-    zIndex: 100,
-    borderRadius: 8,
-  }}>
-    <img 
-      src={eraTokenSrc}
-      alt="Loading" 
-      style={{ width: 64, height: 64, marginBottom: 12, imageRendering: 'pixelated' }} 
-    />
-    <div style={{
-      fontSize: 10,
-      fontFamily: "'Press Start 2P', monospace",
-      letterSpacing: '1px',
-      color: 'var(--text)',
-      textTransform: 'uppercase',
-    }}>
-      {message}
-    </div>
-  </div>
-);
-
+const TABS: ReadonlyArray<{ id: Tab; label: string }> = [
+  { id: 'list', label: 'My Contacts' },
+  { id: 'add', label: 'Add Contact' },
+  { id: 'myqr', label: 'My QR' },
+];
 
 const TAB_STORAGE_KEY = 'dsm_contacts_active_tab';
 
-const ContactsTabScreen: React.FC<Props> = ({ eraTokenSrc = 'images/logos/era_token_gb.gif' }) => {
+/** Where a contact's pairing stands, as Rust states it on the contact. */
+function pairingLineFor(c: DomainContact): string | null {
+  switch (c.pairing) {
+    case 'paired': return 'Paired over Bluetooth';
+    case 'connected': return 'Connecting…';
+    case 'searching':
+    case 'retrying': return 'Pairing…';
+    default: return null;
+  }
+}
+
+const ContactsTabScreen: React.FC<Props> = () => {
   const [activeTab, setActiveTab] = useState<Tab>(() => {
     try {
       const saved = localStorage.getItem(TAB_STORAGE_KEY);
@@ -62,8 +51,6 @@ const ContactsTabScreen: React.FC<Props> = ({ eraTokenSrc = 'images/logos/era_to
   const { transactions, refresh: refreshTransactions } = useTransactions();
   const [selected, setSelected] = useState<number | null>(null);
   const [error] = useState<string | null>(null);
-  const [loadingMessage] = useState('Loading contacts...');
-  
 
   // Debounce ref to prevent rapid refresh calls
   const refreshPendingRef = useRef(false);
@@ -76,7 +63,7 @@ const ContactsTabScreen: React.FC<Props> = ({ eraTokenSrc = 'images/logos/era_to
 
   // Load contacts on mount
   useEffect(() => { void load('mount'); }, [load]);
-  
+
   // Load when switching to ANY tab - ensures pairing checks have fresh contact data
   useEffect(() => {
     if (CONTACTS_DEBUG) console.log('[ContactsTab] Tab switched to:', activeTab);
@@ -99,27 +86,8 @@ const ContactsTabScreen: React.FC<Props> = ({ eraTokenSrc = 'images/logos/era_to
     return () => clearInterval(interval);
   }, [load]);
 
-  const detailRowStyle: React.CSSProperties = {
-    display: 'grid',
-    gridTemplateColumns: '62px 1fr',
-    gap: 4,
-    alignItems: 'start',
-    fontSize: 7,
-    wordBreak: 'break-all',
-    overflowWrap: 'anywhere',
-  };
-
-  const detailLabelStyle: React.CSSProperties = {
-    color: 'var(--text-dark)',
-    textTransform: 'uppercase',
-    letterSpacing: '0.5px',
-    flexShrink: 0,
-  };
-
-  // Listen for BLE mapping events - refresh the list. No loading overlay —
-  // the refresh is near-instant and the overlay just causes a visible
-  // flicker. An added contact reaches this screen through the contacts
-  // store, which the add itself refreshes.
+  // Listen for BLE mapping events - refresh the list. An added contact reaches
+  // this screen through the contacts store, which the add itself refreshes.
   useEffect(() => {
     const offBleMapped = bridgeEvents.on('contact.bleMapped', () => {
       if (CONTACTS_DEBUG) console.log('[ContactsTab] contact.bleMapped event received');
@@ -161,23 +129,21 @@ const ContactsTabScreen: React.FC<Props> = ({ eraTokenSrc = 'images/logos/era_to
   // When pairing runs is Rust's: while the app is in the foreground with
   // Bluetooth on and permitted, until no contact is left unpaired. Where it
   // stands is Rust's too: each contact carries its phase from the pairing
-  // loop, and the line shows the furthest a pairing has got. This screen used
-  // to start and stop pairing itself, and to infer its progress from raw radio
-  // events, showing "Paired!" when an appliance's identity was read.
+  // loop, and the line shows the furthest a pairing has got.
   const pairingLine: 'connected' | 'searching' | null = contacts.some((c) => c.pairing === 'connected')
     ? 'connected'
     : contacts.some((c) => c.pairing === 'searching' || c.pairing === 'retrying')
       ? 'searching'
       : null;
 
-  // Only show loading overlay on cold start when there are truly no contacts yet.
-  // Contact-add refreshes are too fast for an overlay — it just flickers.
-  const showLoadingOverlay = contextLoading && contacts.length === 0;
+  // Only on a cold start with no contacts at all: a refresh with rows already
+  // on screen is near-instant and would only flicker.
+  const showLoading = contextLoading && contacts.length === 0;
 
   // --- D-pad navigation ---
   // Items: 3 tab buttons + content items (contact rows on list tab, or scan button if empty)
   const contentItemCount = activeTab === 'list'
-    ? (contacts.length > 0 ? contacts.length : 1) // contacts or "Scan QR" button
+    ? (contacts.length > 0 ? contacts.length : 1) // contacts or "Scan QR Code" button
     : 0; // add/myqr tabs have no navigable items below tabs
   const navItemCount = 3 + contentItemCount;
 
@@ -207,321 +173,181 @@ const ContactsTabScreen: React.FC<Props> = ({ eraTokenSrc = 'images/logos/era_to
   const fc = (idx: number) => (idx === focusedIndex ? ' focused' : '');
 
   return (
-    <div className="dsm-content" style={{ padding: 12, position: 'relative', minHeight: 200 }}>
-      {/* Loading overlay for contact add/refresh operations */}
-      {showLoadingOverlay && <LoadingOverlay message={loadingMessage} eraTokenSrc={eraTokenSrc} />}
-      
-      {/* Tab navigation */}
-      <div data-tour="contacts-tabs" style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+    <ScreenFrame
+      title="Contacts"
+      className="contacts-screen"
+      info={(
+        <InfoTip title="Contacts">
+          <p><b>My Contacts</b> lists everyone you have added. Open one for its device, genesis and key, and the receipts you hold with it.</p>
+          <p><b>Add Contact</b> reads someone&apos;s contact code, from the camera or pasted. <b>My QR</b> shows your own code, so others can add you.</p>
+          <p>Bluetooth pairing runs on its own while the app is open with Bluetooth on, until every contact&apos;s appliance has been met. Where it stands is shown on the list.</p>
+        </InfoTip>
+      )}
+      actions={activeTab === 'list' ? (
         <button
-          className={`wallet-style-button${fc(0)}`}
-          onClick={() => setActiveTab('list')}
-          style={{
-            flex: 1,
-            padding: '10px 12px',
-            fontSize: 10,
-            fontFamily: '\'Martian Mono\', monospace',
-            textTransform: 'uppercase',
-            background: activeTab === 'list'
-              ? 'linear-gradient(0deg, rgba(var(--bg-rgb),0.08), rgba(var(--text-rgb),0.12)), repeating-linear-gradient(45deg, rgba(var(--bg-rgb),0.12) 0px, rgba(var(--bg-rgb),0.12) 2px, transparent 2px, transparent 4px)'
-              : 'linear-gradient(0deg, rgba(var(--text-rgb),0.12), rgba(var(--bg-rgb),0.06)), repeating-linear-gradient(45deg, rgba(var(--text-rgb),0.14) 0px, rgba(var(--text-rgb),0.14) 2px, transparent 2px, transparent 4px)',
-            color: activeTab === 'list' ? 'var(--text)' : 'var(--text-dark)',
-            border: '2px solid var(--border)',
-            borderRadius: 8,
-            cursor: 'pointer',
-            transition: 'all 0.2s ease',
-            boxShadow: 'inset 0 -2px 0 rgba(var(--text-rgb),0.18), inset 0 2px 0 rgba(var(--bg-rgb),0.08)',
-          }}
+          type="button"
+          onClick={() => { void load('manual'); void refreshTransactions(); }}
+          className={`sb-icon-btn${contextLoading ? ' spinning' : ''}`}
+          disabled={contextLoading}
+          title="Refresh"
+          aria-label="Refresh"
         >
-          My Contacts
+          <img src="images/icons/icon_refresh.svg" alt="" />
         </button>
-        <button
-          className={`wallet-style-button${fc(1)}`}
-          onClick={() => setActiveTab('add')}
-          style={{
-            flex: 1,
-            padding: '10px 12px',
-            fontSize: 10,
-            fontFamily: '\'Martian Mono\', monospace',
-            textTransform: 'uppercase',
-            background: activeTab === 'add'
-              ? 'linear-gradient(0deg, rgba(var(--bg-rgb),0.08), rgba(var(--text-rgb),0.12)), repeating-linear-gradient(45deg, rgba(var(--bg-rgb),0.12) 0px, rgba(var(--bg-rgb),0.12) 2px, transparent 2px, transparent 4px)'
-              : 'linear-gradient(0deg, rgba(var(--text-rgb),0.12), rgba(var(--bg-rgb),0.06)), repeating-linear-gradient(45deg, rgba(var(--text-rgb),0.14) 0px, rgba(var(--text-rgb),0.14) 2px, transparent 2px, transparent 4px)',
-            color: activeTab === 'add' ? 'var(--text)' : 'var(--text-dark)',
-            border: '2px solid var(--border)',
-            borderRadius: 8,
-            cursor: 'pointer',
-            transition: 'all 0.2s ease',
-            boxShadow: 'inset 0 -2px 0 rgba(var(--text-rgb),0.18), inset 0 2px 0 rgba(var(--bg-rgb),0.08)',
-          }}
-        >
-          Add Contact
-        </button>
-        <button
-          className={`wallet-style-button${fc(2)}`}
-          onClick={() => setActiveTab('myqr')}
-          style={{
-            flex: 1,
-            padding: '10px 12px',
-            fontSize: 10,
-            fontFamily: '\'Martian Mono\', monospace',
-            textTransform: 'uppercase',
-            background: activeTab === 'myqr'
-              ? 'linear-gradient(0deg, rgba(var(--bg-rgb),0.08), rgba(var(--text-rgb),0.12)), repeating-linear-gradient(45deg, rgba(var(--bg-rgb),0.12) 0px, rgba(var(--bg-rgb),0.12) 2px, transparent 2px, transparent 4px)'
-              : 'linear-gradient(0deg, rgba(var(--text-rgb),0.12), rgba(var(--bg-rgb),0.06)), repeating-linear-gradient(45deg, rgba(var(--text-rgb),0.14) 0px, rgba(var(--text-rgb),0.14) 2px, transparent 2px, transparent 4px)',
-            color: activeTab === 'myqr' ? 'var(--text)' : 'var(--text-dark)',
-            border: '2px solid var(--border)',
-            borderRadius: 8,
-            cursor: 'pointer',
-            transition: 'all 0.2s ease',
-            boxShadow: 'inset 0 -2px 0 rgba(var(--text-rgb),0.18), inset 0 2px 0 rgba(var(--bg-rgb),0.08)',
-          }}
-        >
-          My QR
-        </button>
-      </div>
-
-      {/* Tab content */}
+      ) : undefined}
+      tabs={(
+        <ScreenTabs
+          tabs={TABS}
+          active={activeTab}
+          onChange={setActiveTab}
+          ariaLabel="Contact sections"
+          data-tour="contacts-tabs"
+          focusedIndex={focusedIndex < 3 ? focusedIndex : undefined}
+        />
+      )}
+      banner={error ? <Notice kind="error" banner>{error}</Notice> : null}
+    >
       {activeTab === 'list' ? (
-        <div style={{ width: '100%' }}>
-          {error && (
-            <div style={{ 
-              fontSize: 10, 
-              color: 'var(--text-dark)', 
-              border: '1px solid var(--error)', 
-              padding: 8, 
-              marginBottom: 10,
-              borderRadius: 4,
-              fontFamily: '\'Martian Mono\', monospace'
-            }}>
-              {error}
-            </div>
-          )}
-          
+        <div className="contacts-list-tab">
           {/* Where pairing stands, as Rust states it on each contact */}
           {pairingLine && (
-            <div style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 12,
-              padding: 12,
-              marginBottom: 12,
-              background: pairingLine === 'connected'
-                ? 'rgba(var(--text-dark-rgb), 0.65)'
-                : 'rgba(var(--text-dark-rgb), 0.6)',
-              border: '2px solid var(--border)',
-              borderRadius: 8,
-              fontFamily: "'Martian Mono', monospace",
-              transition: 'background 0.3s, border-color 0.3s',
-            }}>
-              <img
-                src={eraTokenSrc}
-                alt="BLE Status"
-                style={{ width: 32, height: 32, imageRendering: 'pixelated' }}
-              />
-              <div>
-                <div style={{
-                  fontSize: 9,
-                  fontFamily: "'Press Start 2P', monospace",
-                  letterSpacing: '1px',
-                  color: 'var(--text)',
-                  marginBottom: 4,
-                }}>
-                  {pairingLine === 'searching' && 'Scanning for Peers'}
-                  {pairingLine === 'connected' && 'Connected'}
-                </div>
-                <div style={{ fontSize: 9, opacity: 0.8, color: 'var(--text-dark)' }}>
-                  {pairingLine === 'searching' && 'Keep the app open on both appliances, near each other'}
-                  {pairingLine === 'connected' && 'Exchanging identity...'}
+            <section className="sb-card sb-card--dark" aria-live="polite">
+              <div className="sb-row" style={{ padding: 0, borderBottom: 0 }}>
+                <span className="sb-row__lead">
+                  <BluetoothIcon size={18} color="var(--bg)" />
+                </span>
+                <div className="sb-row__main">
+                  <div className="sb-row__title">
+                    {pairingLine === 'searching' && 'Scanning for Peers'}
+                    {pairingLine === 'connected' && 'Connected'}
+                  </div>
+                  <div className="sb-row__sub">
+                    {pairingLine === 'searching' && 'Keep the app open on both appliances, near each other'}
+                    {pairingLine === 'connected' && 'Exchanging identity...'}
+                  </div>
                 </div>
               </div>
-            </div>
+            </section>
           )}
-          
-          {contacts.length === 0 ? (
-            <div style={{ 
-              textAlign: 'center', 
-              padding: 24, 
-              fontSize: 10, 
-              border: '1px dashed var(--border)', 
-              background: 'var(--bg)', 
-              borderRadius: 8,
-              fontFamily: '\'Martian Mono\', monospace'
-            }}>
-              <div style={{ 
-                marginBottom: 12, 
-                fontSize: 9, 
-                fontFamily: '\'Press Start 2P\', monospace',
-                letterSpacing: '1px',
-                color: 'var(--text-dark)'
-              }}>
-                No contacts yet
-              </div>
-              <div style={{ marginBottom: 16, opacity: 0.8, fontSize: 9 }}>
-                Scan a contact&#39;s QR code to get started
-              </div>
+
+          {showLoading ? (
+            <div className="sb-empty">Loading contacts{'…'}</div>
+          ) : contacts.length === 0 ? (
+            <div className="sb-empty">
+              <div style={{ fontWeight: 700, marginBottom: 4 }}>No contacts yet</div>
+              <div>Scan a contact&#39;s QR code to get started</div>
               <button
-                className={`wallet-style-button${fc(3)}`}
-                style={{
-                  fontSize: 10,
-                  padding: '10px 16px',
-                  fontFamily: '\'Martian Mono\', monospace',
-                  textTransform: 'uppercase',
-                  background: 'linear-gradient(0deg, rgba(var(--text-rgb),0.12), rgba(var(--bg-rgb),0.06)), repeating-linear-gradient(45deg, rgba(var(--text-rgb),0.14) 0px, rgba(var(--text-rgb),0.14) 2px, transparent 2px, transparent 4px)',
-                  color: 'var(--text)',
-                  border: '2px solid var(--border)',
-                  borderRadius: 8,
-                  boxShadow: 'inset 0 -2px 0 rgba(var(--text-rgb),0.18), inset 0 2px 0 rgba(var(--bg-rgb),0.08)',
-                }}
+                type="button"
+                className={`sb-btn sb-btn--primary${fc(3)}`}
+                style={{ marginTop: 12 }}
                 onClick={() => setActiveTab('add')}
               >
                 Scan QR Code
               </button>
             </div>
           ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 12, width: '100%' }}>
-              {contacts.map((c, i) => (
-                <div key={c.deviceId} style={{ width: '100%' }}>
-                  <div
-                    className={focusedIndex === i + 3 ? 'dpad-focus-ring' : undefined}
-                    onClick={() => setSelected(selected === i ? null : i)}
-                    style={{
-                      padding: '10px 12px',
-                      border: `2px solid ${selected === i ? 'var(--stateboy-screen)' : 'var(--border)'}`,
-                      borderRadius: selected === i ? '8px 8px 0 0' : 8,
-                      background: selected === i
-                        ? 'linear-gradient(0deg, rgba(var(--bg-rgb),0.08), rgba(var(--text-rgb),0.12)), repeating-linear-gradient(45deg, rgba(var(--bg-rgb),0.12) 0px, rgba(var(--bg-rgb),0.12) 2px, transparent 2px, transparent 4px)'
-                        : 'linear-gradient(0deg, rgba(var(--text-rgb),0.08), rgba(var(--bg-rgb),0.04)), repeating-linear-gradient(45deg, rgba(var(--text-rgb),0.10) 0px, rgba(var(--text-rgb),0.10) 2px, transparent 2px, transparent 4px)',
-                      cursor: 'pointer',
-                      transition: 'all 0.15s ease',
-                      boxShadow: 'inset 0 -2px 0 rgba(var(--text-rgb),0.18), inset 0 2px 0 rgba(var(--bg-rgb),0.08)',
-                      fontFamily: '\'Martian Mono\', monospace',
-                      width: '100%',
-                      boxSizing: 'border-box',
-                    }}
-                  >
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <div style={{ fontSize: 10, fontWeight: 'bold', color: 'var(--text-dark)' }}>
-                        {c.alias}
+            <section className="sb-card">
+              {contacts.map((c, i) => {
+                const isOpen = selected === i;
+                const toggle = () => setSelected(isOpen ? null : i);
+                const sub = pairingLineFor(c);
+                const contactTxs = isOpen
+                  ? transactions.filter((tx) => tx.fromDeviceId === c.deviceId || tx.toDeviceId === c.deviceId)
+                  : [];
+                return (
+                  <React.Fragment key={c.deviceId}>
+                    <div
+                      className={`sb-row sb-row--tap${isOpen ? ' is-open' : ''}${fc(i + 3)}`}
+                      role="button"
+                      tabIndex={0}
+                      aria-expanded={isOpen}
+                      onClick={toggle}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault();
+                          toggle();
+                        }
+                      }}
+                    >
+                      <div className="sb-row__main">
+                        <div className="sb-row__title">{c.alias}</div>
+                        {sub && <div className="sb-row__sub">{sub}</div>}
                       </div>
-                      <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
-                        {c.bleAddress && (
-                          <BluetoothIcon size={12} color="var(--stateboy-dark)" />
-                        )}
-                        <ArrowIcon
-                          direction={selected === i ? 'down' : 'right'}
-                          size={12}
-                          color={selected === i ? 'var(--stateboy-dark)' : 'var(--stateboy-gray)'}
-                        />
-                      </div>
+                      {c.bleAddress && (
+                        <span className="sb-row__lead" title="Bluetooth address known">
+                          <BluetoothIcon size={12} color="var(--text-dark)" />
+                        </span>
+                      )}
+                      <span className="sb-row__chev" aria-hidden="true">{isOpen ? '▾' : '›'}</span>
                     </div>
-                  </div>
 
-                  {selected === i && (
-                    <div style={{
-                      padding: '8px 12px',
-                      background: 'rgba(var(--text-dark-rgb),0.06)',
-                      border: '2px solid var(--border)',
-                      borderTop: 'none',
-                      borderRadius: '0 0 8px 8px',
-                      fontFamily: '\'Martian Mono\', monospace',
-                      fontSize: 7,
-                      color: 'var(--text-dark)',
-                      maxHeight: '200px',
-                      overflowY: 'auto',
-                      overflowX: 'hidden',
-                      wordBreak: 'break-all',
-                      width: '100%',
-                      boxSizing: 'border-box',
-                    }}>
-                      <div style={{ marginBottom: 6, fontSize: 8, fontWeight: 'bold' }}>
-                        {c.pairing === 'paired' ? 'BLE PAIRED' : c.genesisVerifiedOnline ? 'VERIFIED' : 'NOT VERIFIED'}
-                      </div>
-                      <div style={{ display: 'grid', gap: 4 }}>
-                        <div style={detailRowStyle}>
-                          <span style={detailLabelStyle}>Device</span>
-                          <span>{c.deviceId}</span>
-                        </div>
-                        <div style={detailRowStyle}>
-                          <span style={detailLabelStyle}>Genesis</span>
-                          <span>{c.genesisHash}</span>
-                        </div>
-                        <div style={detailRowStyle}>
-                          <span style={detailLabelStyle}>Chain tip</span>
-                          <span>{c.chainTip ? c.chainTip : '—'}</span>
-                        </div>
-                        <div style={detailRowStyle}>
-                          <span style={detailLabelStyle}>Pub Key</span>
-                          <span>{c.signingPublicKey.length > 24 ? `${c.signingPublicKey.slice(0, 12)}...${c.signingPublicKey.slice(-10)}` : c.signingPublicKey}</span>
-                        </div>
-                        <div style={detailRowStyle}>
-                          <span style={detailLabelStyle}>Verified</span>
-                          <span>{c.genesisVerifiedOnline ? 'YES' : 'NO'}</span>
-                        </div>
-                      </div>
-                      <div style={{ marginTop: 10 }}>
-                        <div style={{ fontSize: 8, textTransform: 'uppercase', marginBottom: 6, fontWeight: 'bold' }}>Stitched receipts</div>
-                        {(() => {
-                          const contactTxs = transactions.filter(
-                            (tx) => tx.fromDeviceId === c.deviceId || tx.toDeviceId === c.deviceId,
-                          );
+                    {isOpen && (
+                      <div className="sb-row__detail">
+                        <div className="sb-card sb-card--dark" style={{ marginBottom: 0 }}>
+                          <div className="sb-card__title">
+                            <span>{c.pairing === 'paired' ? 'BLE PAIRED' : c.genesisVerifiedOnline ? 'VERIFIED' : 'NOT VERIFIED'}</span>
+                          </div>
+                          <div className="sb-kv">
+                            <span className="sb-kv__k">Device</span>
+                            <span className="sb-kv__v sb-kv__v--mono">{c.deviceId}</span>
+                          </div>
+                          <div className="sb-kv">
+                            <span className="sb-kv__k">Genesis</span>
+                            <span className="sb-kv__v sb-kv__v--mono">{c.genesisHash}</span>
+                          </div>
+                          <div className="sb-kv">
+                            <span className="sb-kv__k">Chain tip</span>
+                            <span className="sb-kv__v sb-kv__v--mono">{c.chainTip ? c.chainTip : '—'}</span>
+                          </div>
+                          <div className="sb-kv">
+                            <span className="sb-kv__k">Pub Key</span>
+                            <span className="sb-kv__v sb-kv__v--mono">
+                              {c.signingPublicKey.length > 24 ? `${c.signingPublicKey.slice(0, 12)}...${c.signingPublicKey.slice(-10)}` : c.signingPublicKey}
+                            </span>
+                          </div>
+                          <div className="sb-kv">
+                            <span className="sb-kv__k">Verified</span>
+                            <span className="sb-kv__v">{c.genesisVerifiedOnline ? 'YES' : 'NO'}</span>
+                          </div>
 
-                          if (contactTxs.length === 0) {
-                            return <div style={{ opacity: 0.8 }}>No receipts yet</div>;
-                          }
-
-                          return (
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                              {contactTxs.map((tx, idx) => {
+                          <Disclosure summary={`Stitched receipts (${contactTxs.length})`} className="sb-details--plain">
+                            {contactTxs.length === 0 ? (
+                              <div className="sb-hint sb-hint--tight">No receipts yet</div>
+                            ) : (
+                              contactTxs.map((tx, idx) => {
                                 const direction = tx.amount < 0n ? 'Sent' : 'Received';
                                 const amountLabel = `${tx.displayAmount} ${tx.tokenId}`;
-                                const summary = `#${idx + 1} · ${direction} ${amountLabel}`;
                                 return (
-                                  <details key={`${tx.txId}-${idx}`}>
-                                    <summary style={{ cursor: 'pointer' }}>{summary}</summary>
-                                    <div style={{ marginTop: 6 }}>
-                                      <div style={detailRowStyle}>
-                                        <span style={detailLabelStyle}>Tx ID</span>
-                                        <span>{tx.txId}</span>
-                                      </div>
-                                      <div style={detailRowStyle}>
-                                        <span style={detailLabelStyle}>Type</span>
-                                        <span>{tx.txType}</span>
-                                      </div>
-                                      <StitchedReceiptDetails bytes={tx.stitchedReceipt} />
+                                  <Disclosure key={`${tx.txId}-${idx}`} summary={`#${idx + 1} · ${direction} ${amountLabel}`} className="sb-details--plain">
+                                    <div className="sb-kv">
+                                      <span className="sb-kv__k">Tx ID</span>
+                                      <span className="sb-kv__v sb-kv__v--mono">{tx.txId}</span>
                                     </div>
-                                  </details>
+                                    <div className="sb-kv">
+                                      <span className="sb-kv__k">Type</span>
+                                      <span className="sb-kv__v">{tx.txType}</span>
+                                    </div>
+                                    <StitchedReceiptDetails bytes={tx.stitchedReceipt} />
+                                  </Disclosure>
                                 );
-                              })}
-                            </div>
-                          );
-                        })()}
+                              })
+                            )}
+                          </Disclosure>
+                        </div>
                       </div>
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
+                    )}
+                  </React.Fragment>
+                );
+              })}
+            </section>
           )}
         </div>
       ) : activeTab === 'add' ? (
-        <div
-          style={{
-            display: 'flex',
-            flexDirection: 'column',
-            height: '100%',
-            width: '100%',
-            overflow: 'hidden'
-          }}
-        >
-          <div style={{ flex: 1, minHeight: 0 }}>
-            <QRCodeScannerPanel onCancel={() => setActiveTab('list')} />
-          </div>
-        </div>
+        <QRCodeScannerPanel onCancel={() => setActiveTab('list')} />
       ) : (
         <MyContactInfoPanel />
       )}
-    </div>
+    </ScreenFrame>
   );
 };
 

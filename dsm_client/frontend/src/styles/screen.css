@@ -498,6 +498,7 @@
   cursor: pointer;
   outline: none;
 }
+button.sb-menu__item { width: 100%; font: inherit; color: inherit; text-align: left; }
 .sb-menu__item:focus-visible, .sb-menu__item.focused { border-color: var(--text-dark); box-shadow: 0 0 0 2px rgba(var(--text-rgb), 0.35); }
 .sb-menu__item:active { transform: translateY(1px); }
 .sb-menu__glyph {
@@ -838,3 +839,276 @@
 .sb-tokensel__empty { padding: 8px; font-size: 10px; opacity: 0.6; }
 /* Beside an amount field the picker is a fixed-width column, not a full row. */
 .sb-input-row .sb-tokensel--inline { flex: 0 0 auto; width: 104px; }
+
+/* ------------------------------------------------------------------ */
+/* Dark container: the contrast of the FX window and the i popup,     */
+/* brought onto the screen itself. One per screen, for the hero or   */
+/* the status it is about: dark card, light type, light outlines.    */
+/* ------------------------------------------------------------------ */
+.sb-card--dark {
+  background: var(--text-dark);
+  color: var(--bg);
+  border-color: var(--border);
+  box-shadow: inset 0 1px 0 rgba(var(--bg-rgb), 0.18), 0 2px 0 rgba(var(--text-rgb), 0.25);
+}
+.sb-card--dark .sb-card__title,
+.sb-card--dark .sb-section-title,
+.sb-screen .sb-card--dark h3.sb-section-title,
+.sb-card--dark .sb-kv__k,
+.sb-card--dark .sb-hint,
+.sb-card--dark .sb-hero__label,
+.sb-card--dark .sb-hero__sub,
+.sb-card--dark .sb-row__sub,
+.sb-card--dark .sb-stats__label,
+.sb-card--dark .sb-keypad__hint,
+.sb-card--dark .sb-menu__desc,
+.sb-card--dark .sb-menu__chev { color: rgba(var(--bg-rgb), 0.72); }
+.sb-card--dark .sb-kv { border-bottom-color: rgba(var(--bg-rgb), 0.25); }
+.sb-card--dark .sb-row { border-bottom-color: rgba(var(--bg-rgb), 0.3); }
+.sb-card--dark .sb-hero__row { border-top-color: rgba(var(--bg-rgb), 0.35); }
+.sb-card--dark .sb-btn {
+  background: transparent;
+  color: var(--bg);
+  border-color: var(--bg);
+  box-shadow: none;
+}
+.sb-card--dark .sb-btn--primary,
+.sb-card--dark .sb-keypad__key--confirm {
+  background: var(--bg);
+  color: var(--text-dark);
+  border-color: var(--bg);
+}
+.sb-card--dark .sb-btn--primary:active { box-shadow: none; }
+.sb-screen .sb-card--dark .sb-input,
+.sb-screen .sb-card--dark select.sb-input,
+.sb-screen .sb-card--dark textarea.sb-input {
+  background: rgba(var(--bg-rgb), 0.12);
+  color: var(--bg);
+  border-color: rgba(var(--bg-rgb), 0.6);
+}
+.sb-screen .sb-card--dark .sb-input::placeholder { color: var(--bg); opacity: 0.45; }
+.sb-screen .sb-card--dark .sb-input:focus { border-color: var(--bg); }
+.sb-screen .sb-card--dark select.sb-input {
+  background-image: linear-gradient(45deg, transparent 50%, var(--bg) 50%), linear-gradient(135deg, var(--bg) 50%, transparent 50%);
+}
+.sb-card--dark .sb-field > label,
+.sb-card--dark .sb-label { color: var(--bg); }
+.sb-card--dark .sb-tag { color: var(--bg); border-color: rgba(var(--bg-rgb), 0.6); }
+.sb-card--dark .sb-tag--solid { background: var(--bg); color: var(--text-dark); border-color: var(--bg); }
+.sb-card--dark .sb-empty { color: rgba(var(--bg-rgb), 0.72); border-color: rgba(var(--bg-rgb), 0.45); }
+.sb-card--dark .sb-details { border-color: rgba(var(--bg-rgb), 0.45); background: rgba(var(--bg-rgb), 0.06); }
+.sb-card--dark .sb-details > summary { color: var(--bg); }
+.sb-card--dark .sb-details[open] > summary { border-bottom-color: rgba(var(--bg-rgb), 0.45); }
+.sb-card--dark .sb-info { background: var(--bg); color: var(--text-dark); border-color: var(--bg); }
+.sb-card--dark .sb-notice { border-color: rgba(var(--bg-rgb), 0.5); background: rgba(var(--bg-rgb), 0.1); color: var(--bg); }
+.sb-card--dark .sb-notice--success { background: var(--bg); color: var(--text-dark); }
+.sb-card--dark .sb-menu__item { border-color: var(--bg); background: transparent; box-shadow: none; }
+.sb-card--dark .sb-menu__glyph { background: var(--bg); color: var(--text-dark); border-color: var(--bg); }
+.sb-card--dark .sb-progress { border-color: rgba(var(--bg-rgb), 0.6); background: rgba(var(--bg-rgb), 0.12); }
+.sb-card--dark .sb-progress__fill { background: var(--bg); }
+.sb-card--dark .sb-seg { border-color: var(--bg); }
+.sb-card--dark .sb-seg__opt { color: rgba(var(--bg-rgb), 0.6); border-right-color: rgba(var(--bg-rgb), 0.4); }
+.sb-card--dark .sb-seg__opt.active { background: var(--bg); color: var(--text-dark); }
+
+/* A card that is itself the control: a row that opens, a version to tap. */
+button.sb-card,
+.sb-card--tap {
+  -webkit-appearance: none;
+  appearance: none;
+  display: block;
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+button.sb-card:active { transform: translateY(1px); }
+button.sb-card--dark { color: var(--bg); }
+
+/* A popover that carries the dark card's controls keeps its own border and lift. */
+.sb-popover.sb-card--dark {
+  border-color: var(--bg);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+
+/* The step strip and a range inside a dark container. */
+.sb-card--dark .sb-steps__step { border-color: rgba(var(--bg-rgb), 0.5); color: rgba(var(--bg-rgb), 0.6); }
+.sb-card--dark .sb-steps__step.is-done { background: var(--bg); color: var(--text-dark); border-color: var(--bg); }
+.sb-card--dark .sb-steps__step.is-active { color: var(--bg); border-color: var(--bg); }
+.sb-range { width: 100%; margin: 4px 0; accent-color: var(--text-dark); }
+.sb-card--dark .sb-range { accent-color: var(--bg); }
+
+/* A coin on a light disc, so its artwork reads on a dark container too. */
+.sb-coin-tile {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px;
+  border: 2px solid var(--border);
+  border-radius: 50%;
+  background: var(--bg);
+  line-height: 0;
+}
+.sb-coin-tile--sm { padding: 3px; }
+.sb-coin--xl { width: 72px; height: 72px; }
+
+/* A popover that is a wizard scrolls its own body and keeps its strip and actions in view. */
+.sb-popover.token-wizard { max-height: 100%; }
+.sb-popover.token-wizard .sb-popover__body { flex: 1 1 auto; min-height: 0; }
+.sb-popover .sb-input[type="file"] { padding: 6px 8px; font-size: 9px; }
+
+/* Stat cells: a count or a short word, its label under it. */
+.sb-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.sb-stats--2 { grid-template-columns: repeat(2, 1fr); }
+.sb-stats--4 { grid-template-columns: repeat(4, 1fr); }
+.sb-stats__cell {
+  min-width: 0;
+  padding: 7px 4px 6px;
+  text-align: center;
+  border: 1px dotted rgba(var(--text-rgb), 0.4);
+  border-radius: 8px;
+}
+.sb-card--dark .sb-stats__cell { border-color: rgba(var(--bg-rgb), 0.4); }
+.sb-stats__val {
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: -0.3px;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+.sb-stats__val--sm { font-size: 10px; font-weight: 700; line-height: 1.25; overflow-wrap: anywhere; }
+.sb-stats__label {
+  margin-top: 3px;
+  font-size: 7px;
+  font-weight: 700;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: var(--text-disabled);
+}
+
+/* A state marker beside a row: answered, answered oddly, silent. */
+.sb-dot {
+  flex: 0 0 auto;
+  width: 9px;
+  height: 9px;
+  border: 2px solid var(--text-dark);
+  border-radius: 50%;
+  background: transparent;
+  box-sizing: border-box;
+}
+.sb-dot--on { background: var(--text-dark); }
+.sb-dot--warn { background: repeating-linear-gradient(45deg, var(--text-dark) 0 1px, transparent 1px 3px); }
+.sb-card--dark .sb-dot { border-color: var(--bg); }
+.sb-card--dark .sb-dot--on { background: var(--bg); }
+
+/* Rows that open on tap, with a lead slot (dot, coin) and a trailing chevron. */
+.sb-row--tap { cursor: pointer; }
+.sb-row__lead { flex: 0 0 auto; display: inline-flex; align-items: center; }
+.sb-row__chev { flex: 0 0 auto; font-size: 12px; color: var(--text-disabled); }
+.sb-row.is-open .sb-row__chev { color: var(--text-dark); }
+.sb-row__detail { padding: 2px 0 6px; }
+.sb-card > .sb-row:first-child { padding-top: 2px; }
+.sb-card > .sb-row:last-child { padding-bottom: 2px; }
+
+/* Phase strip: which step a pipeline is on. */
+.sb-steps { display: flex; gap: 4px; }
+.sb-steps__step {
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 6px 2px;
+  text-align: center;
+  border: 2px solid var(--border);
+  border-radius: 8px;
+  font-size: 7px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  color: var(--text-disabled);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sb-steps__step.is-done { background: var(--text-dark); color: var(--bg); border-color: var(--text-dark); }
+.sb-steps__step.is-active { color: var(--text-dark); border-color: var(--text-dark); border-style: dashed; }
+.sb-steps__mark { display: block; margin-bottom: 2px; font-size: 11px; line-height: 1.1; }
+
+/* PIN keypad and shell-button combo entry: dots for what was entered, bricks to press. */
+.sb-keypad,
+.sb-combo { display: flex; flex-direction: column; align-items: center; gap: 8px; width: 100%; }
+.sb-keypad__label,
+.sb-combo__label { font-size: 9px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; text-align: center; }
+.sb-keypad__dots { display: flex; gap: 6px; align-items: center; height: 22px; }
+.sb-keypad__dot { width: 14px; height: 14px; border: 2px solid var(--text-dark); border-radius: 50%; box-sizing: border-box; }
+.sb-keypad__dot.is-filled { background: var(--text-dark); }
+.sb-card--dark .sb-keypad__dot { border-color: var(--bg); }
+.sb-card--dark .sb-keypad__dot.is-filled { background: var(--bg); }
+.sb-keypad__hint,
+.sb-combo__hint {
+  min-height: 12px;
+  font-size: 7px;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  text-align: center;
+  color: var(--text-disabled);
+}
+.sb-keypad__hint.is-ready { color: inherit; font-weight: 700; }
+.sb-keypad__grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; width: 100%; max-width: 210px; }
+.sb-keypad__key {
+  -webkit-appearance: none;
+  appearance: none;
+  min-height: 40px;
+  border: 2px solid var(--text-dark);
+  border-radius: 10px;
+  background: var(--text-dark);
+  color: var(--bg);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+  box-shadow: inset 0 -2px 0 rgba(0, 0, 0, 0.35);
+}
+.sb-keypad__key:active { transform: translateY(1px); box-shadow: none; }
+.sb-keypad__key:focus { outline: none; }
+.sb-keypad__key:focus-visible { outline: 2px solid var(--border); outline-offset: 2px; }
+.sb-keypad__key--confirm { background: var(--bg); color: var(--text-dark); font-size: 16px; }
+.sb-keypad__key--back { font-size: 12px; }
+.sb-card--dark .sb-keypad__key { background: transparent; border-color: var(--bg); color: var(--bg); box-shadow: none; }
+.sb-combo__dots { display: grid; grid-template-columns: repeat(4, 26px); gap: 4px; justify-content: center; }
+.sb-combo__dot {
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid var(--border);
+  border-radius: 6px;
+  font-size: 9px;
+  color: var(--text-dark);
+}
+.sb-combo__dot.is-filled { background: var(--text-dark); color: var(--bg); border-color: var(--text-dark); }
+.sb-card--dark .sb-combo__dot { border-color: rgba(var(--bg-rgb), 0.6); color: var(--bg); }
+.sb-card--dark .sb-combo__dot.is-filled { background: var(--bg); color: var(--text-dark); border-color: var(--bg); }
+
+/* The shell (public/index.html) pins anything marked qr-code-above-scanlines to
+   the viewport so a QR clears the scanline overlay; its :has rule already
+   drops the scanlines beneath such a QR, and a framed screen lays its QR out
+   in flow like anything else on the card. */
+.sb-screen .qr-code-above-scanlines { position: static !important; z-index: auto !important; }
+
+/* A QR code keeps a white tile whatever the theme, so a camera can read it. */
+.sb-qr { display: inline-block; padding: 6px; background: #fff; border: 2px solid var(--border); border-radius: 8px; line-height: 0; }
+.sb-qr img,
+.sb-qr canvas { display: block; background: #fff; image-rendering: pixelated; }
+
+/* D-pad focus, on the frame's controls (useDpadNav sets `focused`). */
+.sb-btn.focused,
+.sb-seg.focused,
+.sb-seg__opt.focused,
+.sb-row.focused,
+.sb-card.focused,
+.sb-keypad__key.focused { outline: 2px solid var(--text-dark); outline-offset: 2px; }
+.sb-tabs__tab.focused { outline: 2px dashed currentColor; outline-offset: -4px; }
+.sb-card--dark.focused,
+.sb-card--dark .sb-btn.focused,
+.sb-card--dark .sb-row.focused,
+.sb-card--dark .sb-keypad__key.focused { outline-color: var(--bg); }

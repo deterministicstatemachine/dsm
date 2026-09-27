@@ -27,6 +27,21 @@ describe('screen.css', () => {
     expect(rule('.sb-info')).toMatch(/text-transform:\s*none/);
   });
 
+  it("scrolls the frame's body, and only the body", () => {
+    // Screens put their content in the body; a card taller than the screen
+    // must be reachable by scrolling it, not clipped.
+    expect(rule('.sb-screen__body')).toMatch(/overflow-y:\s*auto/);
+    expect(rule('.sb-screen')).not.toMatch(/overflow-y:\s*auto/);
+  });
+
+  it('inverts the dark card: background and type together', () => {
+    // The contrast container carries the popup's look onto the screen. A dark
+    // background with the screen's default dark type would be unreadable.
+    const dark = rule('.sb-card--dark');
+    expect(dark).toMatch(/background:\s*var\(--text-dark\)/);
+    expect(dark).toMatch(/color:\s*var\(--bg\)/);
+  });
+
   it('keeps an FX scene inside the screen host', () => {
     // position: absolute against .stateboy-screen-host, never fixed to the page.
     expect(rule('.sb-fx-backdrop')).not.toMatch(/position:\s*fixed/);

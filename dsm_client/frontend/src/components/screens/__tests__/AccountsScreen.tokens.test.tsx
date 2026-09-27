@@ -152,15 +152,14 @@ describe('AccountsScreen — the screen TOKENS actually opens', () => {
   /// Being in the DOM is not being reachable. The screen is a fixed-height
   /// container, and an expanded card pushes BURN / FORGET below the
   /// fold; with overflow hidden on the vertical axis they rendered (so the test
-  /// above passed) and could never be scrolled to or tapped on a device.
+  /// above passed) and could never be scrolled to or tapped on a device. The
+  /// frame's body is its one scrolling region (screen.css, checked as text in
+  /// screenCss.test), so the actions must sit inside it.
   it('lets an expanded card scroll its supply actions into reach', async () => {
     render(<AccountsScreen />);
     fireEvent.click(await screen.findByText('MYTOK'));
     const burn = await screen.findByRole('button', { name: /^BURN$/ });
-    const container = burn.closest('.dsm-content') as HTMLElement | null;
-    expect(container).not.toBeNull();
-    expect(container!.style.overflowY).toBe('auto');
-    expect(container!.style.overflowX).toBe('hidden');
+    expect(burn.closest('.sb-screen__body')).not.toBeNull();
   });
 
   /// THE GAP THIS CLOSES. A device that ADOPTS a token is shown its anchor on

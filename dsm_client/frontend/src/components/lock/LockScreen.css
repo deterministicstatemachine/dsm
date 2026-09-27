@@ -1,5 +1,6 @@
-/* LockScreen.css — DSM wallet lock overlay.
-   Uses the existing CSS custom properties from the Stateboy theme. */
+/* LockScreen.css — the lock overlay's own motion: the wrong-try shake and
+   flash, and the comic POW on unlock. Everything drawn inside it is the
+   StateBoy frame's (styles/screen.css). */
 
 /* ---- Full-screen overlay ---- */
 .lock-screen {
@@ -7,13 +8,10 @@
   inset: 0;
   z-index: 100;
   background: var(--bg, #9bbc0f);
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  overflow-y: auto;
-  padding: 16px 12px 32px;
-  font-family: 'Martian Mono', monospace;
-  color: var(--text-dark, #0f380f);
+}
+
+.lock-screen__body {
+  padding-top: 18px;
 }
 
 /* ---- Shake animation ---- */
@@ -32,48 +30,11 @@
   animation: shake 0.55s ease-in-out;
 }
 
+/* A wrong try inverts the whole screen for a beat. */
 .lock-screen--flash {
   background: var(--stateboy-dark, #0f380f);
-  color: var(--bg, #9bbc0f);
-  transition: background 0.1s, color 0.1s;
+  transition: background 0.1s;
 }
-
-.lock-screen--flash .lock-subtitle,
-.lock-screen--flash .lock-icon {
-  color: var(--bg, #9bbc0f);
-}
-
-/* ---- Button press flash (monochrome green) ---- */
-@keyframes btn-flash {
-  0%   { filter: brightness(1); }
-  30%  { filter: brightness(1.9); }
-  100% { filter: brightness(1); }
-}
-
-.btn--active-flash {
-  animation: btn-flash 0.18s ease-out;
-  transform: scale(0.88);
-}
-
-/* ---- Header ---- */
-.lock-header {
-  text-align: center;
-  margin-bottom: 20px;
-  padding-top: 16px;
-}
-
-.lock-icon {
-  font-size: 36px;
-  margin-bottom: 8px;
-}
-
-.lock-subtitle {
-  font-size: 8px;
-  letter-spacing: 1px;
-  opacity: 0.7;
-}
-
-/* ---- Cooldown display ---- */
 
 /* ---- Comic-book POW overlay (monochrome green) ---- */
 @keyframes pow-screen-flash {
@@ -149,208 +110,4 @@
   transform: rotate(-12deg);
   animation: pow-burst 0.75s cubic-bezier(0.34,1.56,0.64,1) forwards;
   white-space: nowrap;
-}
-
-.lock-cooldown {
-  font-size: 12px;
-  font-weight: bold;
-  text-align: center;
-  color: var(--text-dark, #0f380f);
-  border: 2px solid var(--border, #306230);
-  padding: 16px 24px;
-  border-radius: 4px;
-  letter-spacing: 1px;
-  line-height: 1.6;
-  background: rgba(var(--text-rgb), 0.1);
-  animation: pulse 1s ease-in-out infinite;
-}
-
-@keyframes pulse {
-  0%, 100% { opacity: 1; }
-  50%       { opacity: 0.6; }
-}
-
-/* ---- Body ---- */
-.lock-body {
-  width: 100%;
-  max-width: 300px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-}
-
-/* ---- Wrong attempt notice ---- */
-.lock-attempts {
-  margin-top: 12px;
-  font-size: 8px;
-  letter-spacing: 1px;
-  color: var(--text-dark, #0f380f);
-  font-weight: bold;
-  text-align: center;
-  opacity: 0.8;
-}
-
-/* ===========================================================================
-   PIN INPUT
-   =========================================================================== */
-.pin-input {
-  width: 100%;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 10px;
-}
-
-.pin-label {
-  font-size: 9px;
-  letter-spacing: 1px;
-  font-weight: bold;
-  margin-bottom: 2px;
-}
-
-.pin-dots {
-  display: flex;
-  gap: 8px;
-  height: 24px;
-  align-items: center;
-}
-
-.pin-dot {
-  font-size: 18px;
-  color: var(--text-dark, #0f380f);
-  line-height: 1;
-  width: 20px;
-  text-align: center;
-  display: inline-block;
-}
-
-.pin-hint {
-  font-size: 7px;
-  letter-spacing: 1px;
-  opacity: 0.65;
-  height: 12px;
-}
-
-.pin-hint--ready {
-  opacity: 1;
-  font-weight: bold;
-}
-
-.pin-grid {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 6px;
-  width: 200px;
-}
-
-.pin-key {
-  background: var(--stateboy-dark, #0f380f);
-  color: var(--bg, #9bbc0f);
-  border: 2px solid var(--border, #306230);
-  border-radius: 4px;
-  font-family: 'Martian Mono', monospace;
-  font-size: 14px;
-  font-weight: bold;
-  padding: 12px 0;
-  cursor: pointer;
-  transition: background 0.08s, transform 0.08s;
-  letter-spacing: 0;
-  text-align: center;
-}
-
-.pin-key:active {
-  background: var(--border, #306230);
-  transform: scale(0.94);
-}
-
-.pin-key:focus {
-  outline: none;
-}
-
-.pin-key:focus-visible {
-  outline: 2px solid var(--border, #306230);
-  outline-offset: 2px;
-}
-
-.pin-key--confirm {
-  background: var(--border, #306230);
-  font-size: 16px;
-}
-
-.pin-key--back {
-  font-size: 12px;
-}
-
-/* ===========================================================================
-   STATEBOY COMBO INPUT
-   =========================================================================== */
-.combo-input {
-  width: 100%;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 10px;
-}
-
-.combo-label {
-  font-size: 9px;
-  letter-spacing: 1px;
-  font-weight: bold;
-  margin-bottom: 2px;
-}
-
-.combo-dots {
-  display: grid;
-  grid-template-columns: repeat(4, 26px);
-  gap: 4px;
-  justify-content: center;
-  min-height: 24px;
-}
-
-.combo-dot {
-  font-size: 10px;
-  width: 26px;
-  height: 22px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid var(--border, #306230);
-  border-radius: 3px;
-  font-family: 'Martian Mono', monospace;
-  color: var(--text-dark, #0f380f);
-  background: transparent;
-  letter-spacing: 0;
-}
-
-.combo-dot--filled {
-  background: var(--stateboy-dark, #0f380f);
-  color: var(--bg, #9bbc0f);
-  font-size: 9px;
-}
-
-.combo-hint {
-  font-size: 7px;
-  letter-spacing: 1px;
-  opacity: 0.65;
-  height: 12px;
-  text-align: center;
-}
-
-/* ---- Backspace ---- */
-.combo-back-btn {
-  background: transparent;
-  color: var(--text-dark, #0f380f);
-  border: 1px solid var(--border, #306230);
-  border-radius: 3px;
-  font-family: 'Martian Mono', monospace;
-  font-size: 8px;
-  letter-spacing: 1px;
-  padding: 5px 10px;
-  cursor: pointer;
-  margin-top: 2px;
-  transition: background 0.08s;
-}
-
-.combo-back-btn:active {
-  background: rgba(var(--text-rgb),0.15);
 }

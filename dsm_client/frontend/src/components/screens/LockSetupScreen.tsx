@@ -16,7 +16,7 @@ import {
   type LockMethod,
 } from '../../services/lock/lockService';
 import { useDpadNav } from '../../hooks/useDpadNav';
-import './SettingsScreen.css';
+import { Notice, ScreenFrame } from '../common/ScreenFrame';
 
 interface Props {
   onNavigate?: (screen: ScreenType) => void;
@@ -25,11 +25,16 @@ interface Props {
 type Step = 'method' | 'setup_entry1' | 'setup_entry2' | 'timeout' | 'done' | 'disable_confirm';
 
 const TIMEOUTS: { label: string; ms: number }[] = [
-  { label: '1 MINUTE',  ms: 60_000 },
-  { label: '5 MINUTES', ms: 5 * 60_000 },
-  { label: '15 MINUTES', ms: 15 * 60_000 },
-  { label: '30 MINUTES', ms: 30 * 60_000 },
-  { label: 'NEVER',     ms: 0 },
+  { label: '1 minute',  ms: 60_000 },
+  { label: '5 minutes', ms: 5 * 60_000 },
+  { label: '15 minutes', ms: 15 * 60_000 },
+  { label: '30 minutes', ms: 30 * 60_000 },
+  { label: 'Never',     ms: 0 },
+];
+
+const METHODS: ReadonlyArray<{ id: LockMethod; glyph: string; label: string; desc: string }> = [
+  { id: 'pin', glyph: '#', label: 'PIN code', desc: '4 to 8 digits on the keypad.' },
+  { id: 'combo', glyph: 'AB', label: 'Button combo', desc: "8 presses of the shell's own buttons." },
 ];
 
 function LockSetupScreen({ onNavigate }: Props) {
@@ -122,35 +127,24 @@ function LockSetupScreen({ onNavigate }: Props) {
   };
 
   // --- D-pad navigation ---
-  // Build flat list of navigable items based on current step
+  // The shell's B button (and the header chevron) go back; the list holds the
+  // rest of what the step offers, in the order it is drawn.
   const navActions = useMemo(() => {
     const actions: Array<() => void> = [];
     if (step === 'method') {
-      // BACK button
-      actions.push(back);
-      // DISABLE LOCK (only when enabled)
       if (existingEnabled) actions.push(() => setStep('disable_confirm'));
-      // PIN, COMBO
-      actions.push(() => pickMethod('pin'));
-      actions.push(() => pickMethod('combo'));
+      for (const m of METHODS) actions.push(() => pickMethod(m.id));
     } else if (step === 'disable_confirm') {
       actions.push(handleDisable);
       actions.push(() => setStep('method'));
     } else if (step === 'timeout') {
-      // BACK button
-      actions.push(() => setStep('method'));
       actions.push(() => setLockOnPause((value) => !value));
-      // Timeout options
       for (const t of TIMEOUTS) {
         actions.push(() => void save(t.ms));
       }
-    } else if (step === 'done') {
-      actions.push(back);
-    } else {
-      // setup_entry1/entry2 with PIN/COMBO — custom input handles keys
-      // Just the back button
-      actions.push(() => setStep('method'));
     }
+    // setup_entry1 / setup_entry2: the keypad or the shell buttons take the
+    // presses; done: nothing to pick, the screen returns by itself.
     return actions;
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [step, method, existingEnabled, saving, lockOnPause]);
@@ -161,156 +155,164 @@ function LockSetupScreen({ onNavigate }: Props) {
   });
 
   const fc = (idx: number) => (idx === focusedIndex ? ' focused' : '');
+  const methodOffset = existingEnabled ? 1 : 0;
+
+  const onBack = step === 'done'
+    ? undefined
+    : step === 'method'
+      ? back
+      : () => setStep('method');
 
   // ---- Render ----
   return (
-    <div className="settings-shell settings-shell--lock">
-      <div className="settings-shell__title">
-        WALLET LOCK SETUP
-      </div>
-
-      {/* BACK button */}
-      {step !== 'done' && (
-        <button
-          className={`settings-shell__button${fc(0)}`}
-          onClick={step === 'method' ? back : () => setStep('method')}
-          style={{ marginBottom: '12px', fontSize: '8px', width: 'auto', alignSelf: 'flex-start', padding: '4px 10px' }}
-        >
-          ← BACK
-        </button>
-      )}
-
+    <ScreenFrame title="Wallet Lock" onBack={onBack} className="lock-setup-screen">
       {/* ---- STEP: method picker ---- */}
       {step === 'method' && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', width: '100%' }}>
+        <>
           {existingEnabled && (
-            <button
-              className={`settings-shell__button${fc(1)}`}
-              onClick={() => setStep('disable_confirm')}
-              style={{ fontSize: '9px', borderColor: 'var(--text-dark)', marginBottom: '6px' }}
-            >
-              DISABLE LOCK (CURRENTLY ON)
-            </button>
+            <section className="sb-card sb-card--dark">
+              <div className="sb-kv">
+                <span className="sb-kv__k">Lock</span>
+                <span className="sb-kv__v"><span className="sb-tag sb-tag--solid">On</span></span>
+              </div>
+              <button
+                type="button"
+                className={`sb-btn sb-btn--block${fc(0)}`}
+                style={{ marginTop: 8 }}
+                onClick={() => setStep('disable_confirm')}
+              >
+                Disable lock
+              </button>
+            </section>
           )}
 
-          <div style={{ fontSize: '9px', letterSpacing: '1px', color: 'var(--text-dark)', marginBottom: '4px' }}>
-            SELECT UNLOCK METHOD:
+          <h3 className="sb-section-title">Unlock method</h3>
+          <div className="sb-menu">
+            {METHODS.map((m, mIdx) => (
+              <button
+                key={m.id}
+                type="button"
+                className={`sb-menu__item${fc(methodOffset + mIdx)}`}
+                onClick={() => pickMethod(m.id)}
+              >
+                <span className="sb-menu__glyph">{m.glyph}</span>
+                <span className="sb-menu__text">
+                  <span className="sb-menu__label">{m.label}</span>
+                  <span className="sb-menu__desc">{m.desc}</span>
+                </span>
+                <span className="sb-menu__chev" aria-hidden="true">{'›'}</span>
+              </button>
+            ))}
           </div>
-
-          {(['pin', 'combo'] as LockMethod[]).map((m, mIdx) => (
-            <button
-              key={m}
-              className={`settings-shell__button${fc((existingEnabled ? 2 : 1) + mIdx)}`}
-              onClick={() => pickMethod(m)}
-              style={{ fontSize: '10px', fontWeight: 'bold' }}
-            >
-              {m === 'pin' ? 'PIN CODE' : 'BUTTON COMBO'}
-            </button>
-          ))}
-        </div>
+        </>
       )}
 
       {/* ---- STEP: disable confirm ---- */}
       {step === 'disable_confirm' && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', alignItems: 'center' }}>
-          <div style={{ fontSize: '9px', letterSpacing: '1px', textAlign: 'center', lineHeight: '1.5' }}>
-            DISABLE WALLET LOCK?<br />YOUR WALLET WILL BE UNPROTECTED.
+        <section className="sb-card">
+          <div className="sb-card__title">Disable wallet lock?</div>
+          <p className="sb-hint">Your wallet will open without a PIN or combo.</p>
+          <div className="sb-actions" style={{ margin: 0 }}>
+            <button
+              type="button"
+              className={`sb-btn${fc(1)}`}
+              onClick={() => setStep('method')}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className={`sb-btn sb-btn--primary${fc(0)}`}
+              onClick={handleDisable}
+              disabled={saving}
+            >
+              {saving ? 'Disabling…' : 'Confirm disable'}
+            </button>
           </div>
-          <button
-            className={`settings-shell__button${fc(0)}`}
-            onClick={handleDisable}
-            disabled={saving}
-            style={{ fontSize: '10px', fontWeight: 'bold' }}
-          >
-            {saving ? 'DISABLING…' : 'CONFIRM DISABLE'}
-          </button>
-          <button
-            className={`settings-shell__button${fc(1)}`}
-            onClick={() => setStep('method')}
-            style={{ fontSize: '9px' }}
-          >
-            CANCEL
-          </button>
-        </div>
+        </section>
       )}
 
       {/* ---- STEP: setup_entry1 (first entry) ---- */}
-      {step === 'setup_entry1' && method === 'pin' && (
-        <PinInput onComplete={handleEntry1Pin} label="CHOOSE A PIN (4-8 DIGITS)" />
+      {step === 'setup_entry1' && (
+        <section className="sb-card">
+          {method === 'pin'
+            ? <PinInput onComplete={handleEntry1Pin} label="Choose a PIN (4-8 digits)" />
+            : <StateboyComboInput onComplete={handleEntry1Combo} label="Choose your 8-button combo" />}
+        </section>
       )}
-      {step === 'setup_entry1' && method === 'combo' && (
-        <StateboyComboInput onComplete={handleEntry1Combo} label="CHOOSE YOUR 8-BUTTON COMBO" />
-      )}
+
       {/* ---- STEP: setup_entry2 (confirm entry) ---- */}
-      {step === 'setup_entry2' && method === 'pin' && (
+      {step === 'setup_entry2' && (
         <>
           {mismatch && (
-            <div style={{ fontSize: '8px', color: 'var(--text-dark)', fontWeight: 'bold',
-              letterSpacing: '1px', marginBottom: '8px', textAlign: 'center' }}>
-              ✗ PINS DO NOT MATCH — TRY AGAIN
-            </div>
+            <Notice kind="error">
+              {method === 'pin' ? 'PINs do not match. Try again.' : 'Combos do not match. Try again.'}
+            </Notice>
           )}
-          <PinInput onComplete={handleEntry2Pin} label="CONFIRM PIN — ENTER AGAIN" />
-        </>
-      )}
-      {step === 'setup_entry2' && method === 'combo' && (
-        <>
-          {mismatch && (
-            <div style={{ fontSize: '8px', color: 'var(--text-dark)', fontWeight: 'bold',
-              letterSpacing: '1px', marginBottom: '8px', textAlign: 'center' }}>
-              ✗ COMBOS DO NOT MATCH — TRY AGAIN
-            </div>
-          )}
-          <StateboyComboInput onComplete={handleEntry2Combo} label="CONFIRM COMBO — ENTER AGAIN" />
+          <section className="sb-card">
+            {method === 'pin'
+              ? <PinInput onComplete={handleEntry2Pin} label="Confirm PIN: enter it again" />
+              : <StateboyComboInput onComplete={handleEntry2Combo} label="Confirm combo: enter it again" />}
+          </section>
         </>
       )}
 
       {/* ---- STEP: timeout picker ---- */}
       {step === 'timeout' && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', width: '100%' }}>
-          <div style={{ fontSize: '9px', letterSpacing: '1px', marginBottom: '4px' }}>
-            AUTO-LOCK AFTER INACTIVITY:
+        <>
+          <section className="sb-card">
+            <div className="sb-kv" style={{ alignItems: 'center' }}>
+              <span className="sb-kv__k">Lock on exit</span>
+              <div className={`sb-seg${fc(0)}`} role="group" aria-label="Lock on exit">
+                <button
+                  type="button"
+                  className={`sb-seg__opt${lockOnPause ? ' active' : ''}`}
+                  aria-pressed={lockOnPause}
+                  onClick={() => setLockOnPause(true)}
+                >
+                  On
+                </button>
+                <button
+                  type="button"
+                  className={`sb-seg__opt${lockOnPause ? '' : ' active'}`}
+                  aria-pressed={!lockOnPause}
+                  onClick={() => setLockOnPause(false)}
+                >
+                  Off
+                </button>
+              </div>
+            </div>
+          </section>
+
+          <h3 className="sb-section-title">Auto-lock after inactivity</h3>
+          <div style={{ display: 'grid', gap: 8 }}>
+            {TIMEOUTS.map((t, tIdx) => (
+              <button
+                key={t.label}
+                type="button"
+                className={`sb-btn sb-btn--block${t.ms === timeoutMs ? ' sb-btn--primary' : ''}${fc(tIdx + 1)}`}
+                onClick={() => void save(t.ms)}
+                disabled={saving}
+              >
+                {t.label}
+              </button>
+            ))}
           </div>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '4px 0', gap: '8px' }}>
-            <span style={{ fontSize: '9px', letterSpacing: '1px' }}>LOCK ON EXIT</span>
-            <button
-              className={`settings-shell__button${fc(1)}`}
-              onClick={() => setLockOnPause((value) => !value)}
-              style={{ fontSize: '9px', width: 'auto', minWidth: '44px', padding: '4px 10px', flexShrink: 0 }}
-            >
-              {lockOnPause ? 'ON' : 'OFF'}
-            </button>
-          </div>
-          {TIMEOUTS.map((t, tIdx) => (
-            <button
-              key={t.label}
-              className={`settings-shell__button${fc(tIdx + 2)}`}
-              onClick={() => void save(t.ms)}
-              disabled={saving}
-              style={{ fontSize: '10px' }}
-            >
-              {t.label}
-            </button>
-          ))}
-        </div>
+        </>
       )}
 
       {/* ---- STEP: done ---- */}
       {step === 'done' && (
-        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '14px' }}>
-          <div style={{ fontSize: '14px', fontWeight: 'bold', letterSpacing: '2px', fontFamily: "'Martian Mono', monospace" }}>[LOCKED]</div>
-          <div style={{ fontSize: '11px', fontWeight: 'bold', letterSpacing: '2px', textAlign: 'center' }}>
-            LOCK ENABLED
-          </div>
-          <div style={{ fontSize: '8px', letterSpacing: '1px', opacity: 0.7, textAlign: 'center', lineHeight: '1.5' }}>
-            METHOD: {method.toUpperCase()}<br />
-            AUTO-LOCK: {TIMEOUTS.find(t => t.ms === timeoutMs)?.label ?? 'CUSTOM'}<br />
-            EXIT LOCK: {lockOnPause ? 'ON' : 'OFF'}
-          </div>
-          <div style={{ fontSize: '8px', letterSpacing: '1px', opacity: 0.5, marginTop: '4px' }}>RETURNING…</div>
-        </div>
+        <section className="sb-card sb-card--dark sb-card--hero">
+          <div className="sb-hero__label">Lock enabled</div>
+          <div className="sb-hero__value">[LOCKED]</div>
+          <div className="sb-hero__row"><span>Method</span><b>{method.toUpperCase()}</b></div>
+          <div className="sb-hero__row"><span>Auto-lock</span><b>{TIMEOUTS.find(t => t.ms === timeoutMs)?.label ?? 'Custom'}</b></div>
+          <div className="sb-hero__row"><span>Exit lock</span><b>{lockOnPause ? 'On' : 'Off'}</b></div>
+          <div className="sb-hero__sub">Returning…</div>
+        </section>
       )}
-    </div>
+    </ScreenFrame>
   );
 }
 
