@@ -585,19 +585,28 @@ input:checked + .toggle-slider:before { transform: translateX(20px); }
   filter: brightness(0.75) !important;
 }
 .dsm-menu-item.home-brick .brick-label {
+  /* Spans the brick's inner width (not half of it, as `left: 50%` allowed),
+     stays on one line, and a long label shrinks to fit. */
   position: absolute;
-  left: 50%;
+  left: 14px;
+  right: 14px;
   top: 50%;
-  transform: translate(-50%, -50%);
+  transform: translateY(-50%);
   font-family: 'Martian Mono', monospace;
   font-size: 11px;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.5px;
+  white-space: nowrap;
+  overflow: hidden;
   color: var(--text-dark);
   z-index: 2;
   text-align: center;
   pointer-events: none;
+}
+.dsm-menu-item.home-brick .brick-label--long {
+  font-size: 9px;
+  letter-spacing: 0.3px;
 }
 .dsm-menu-item.home-brick.focused .brick-label {
   color: var(--bg);
