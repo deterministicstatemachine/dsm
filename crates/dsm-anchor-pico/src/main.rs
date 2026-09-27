@@ -221,9 +221,7 @@ struct ChipTropic<'a, SPI: SpiDevice, CS: OutputPin> {
 }
 impl<SPI: SpiDevice, CS: OutputPin> Tropic for ChipTropic<'_, SPI, CS> {
     fn counter_get(&mut self) -> Result<u32, TropicError> {
-        self.sess
-            .mcounter_get(COUNTER)
-            .map_err(|_| TropicError::Comm)
+        self.sess.mcounter_get(COUNTER).map_err(|_| TropicError::Comm)
     }
     fn counter_update(&mut self) -> Result<(), TropicError> {
         self.sess
@@ -268,9 +266,7 @@ fn ensure_chip_key<SPI: SpiDevice, CS: OutputPin>(
     }
     sess.ecc_key_generate(CHIP_KEY_SLOT.into(), EccCurve::Ed25519)
         .map_err(|_| "ecc_key_generate")?;
-    let res = sess
-        .ecc_key_read(CHIP_KEY_SLOT.into())
-        .map_err(|_| "ecc_key_read")?;
+    let res = sess.ecc_key_read(CHIP_KEY_SLOT.into()).map_err(|_| "ecc_key_read")?;
     Ok(res.pub_key().to_vec())
 }
 
@@ -627,10 +623,7 @@ fn main() -> ! {
     let (h0, b) = match enroll(&mut sess, &ident, &policy_hash) {
         Ok(v) => v,
         Err(_) => {
-            put(
-                &mut serial,
-                b"[T4] enroll FAIL (halting; no fallback identity)\r\n",
-            );
+            put(&mut serial, b"[T4] enroll FAIL (halting; no fallback identity)\r\n");
             let _ = serial.flush();
             loop {
                 usb_dev.poll(&mut [&mut serial]);
