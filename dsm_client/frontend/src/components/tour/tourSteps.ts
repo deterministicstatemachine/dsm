@@ -275,7 +275,7 @@ export const TOUR_STEPS: ReadonlyArray<TourStep> = [
   {
     id: 'storage',
     screen: 'storage',
-    target: '.storage-screen-header',
+    target: '.sb-tabs[aria-label="Storage sections"]',
     title: 'Storage nodes',
     body: "Storage nodes keep copies of what you publish, so people can reach you while you're offline. They hold bytes and decide nothing. These tabs show how they're doing and let you make a backup.",
   },
@@ -288,13 +288,6 @@ export const TOUR_STEPS: ReadonlyArray<TourStep> = [
     body: 'Last stop. Tap SETTINGS.',
     wait: { kind: 'screen', screen: 'settings' },
     prompt: 'Tap SETTINGS',
-  },
-  {
-    id: 'backup',
-    screen: 'settings',
-    target: '[aria-labelledby="backup-section-title"]',
-    title: 'Back up',
-    body: 'Export a backup and keep it somewhere safe. Import brings your wallet back from one.',
   },
   {
     id: 'security',

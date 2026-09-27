@@ -31,7 +31,6 @@ describe('TokenCreationDialog token kind selector', () => {
 
     const fungible = screen.getByRole('button', { name: /FUNGIBLE/i });
     expect(fungible).toHaveAttribute('aria-pressed', 'true');
-    expect(fungible.className).toContain('tcd-kind-btn--active');
 
     expect(screen.queryByRole('button', { name: /^NFT$/i })).toBeNull();
     expect(screen.queryByRole('button', { name: /^SBT$/i })).toBeNull();

@@ -3,7 +3,7 @@
 // src/components/screens/StorageScreen.tsx
 // The storage set this device's traffic uses and what each member answered
 // (SDK storage.status). Rendering only.
-import React, { useEffect, useState, useMemo } from "react";
+import React, { useEffect, useState, useMemo, useCallback } from "react";
 import { StorageMembersPanel, StorageSetPanel } from "../storage/StorageNodePanels";
 import type { StorageStatus } from "../../dsm/types";
 import { useDpadNav } from "../../hooks/useDpadNav";
@@ -12,16 +12,16 @@ import {
   useStorageStore,
 } from "../../stores/storageStore";
 import { formatBtc, type VaultSummary } from "../../services/bitcoinTap";
-import "./StorageScreen.css";
+import { Notice, ScreenFrame, ScreenTabs } from "../common/ScreenFrame";
+import { InfoTip } from "../common/InfoTip";
 
-const TABS = ["set", "members", "dlvs"] as const;
-type StorageTab = (typeof TABS)[number];
+type StorageTab = "set" | "members" | "dlvs";
 
-const TAB_LABELS: Record<StorageTab, string> = {
-  set: "Set",
-  members: "Members",
-  dlvs: "DLVs",
-};
+const TABS: ReadonlyArray<{ id: StorageTab; label: string }> = [
+  { id: "set", label: "Set" },
+  { id: "members", label: "Members" },
+  { id: "dlvs", label: "DLVs" },
+];
 
 const StorageScreen: React.FC = () => {
   const storage = useStorageStore();
@@ -33,59 +33,73 @@ const StorageScreen: React.FC = () => {
     void storageStore.refreshDlvsAndPresence();
   }, []);
 
-  // --- D-pad navigation ---
-  const navActions = useMemo(() => TABS.map((tab) => () => setActiveTab(tab)), []);
+  // --- D-pad navigation: the tabs ---
+  const navActions = useMemo(() => TABS.map((tab) => () => setActiveTab(tab.id)), []);
 
   const { focusedIndex } = useDpadNav({
     itemCount: TABS.length,
     onSelect: (idx) => navActions[idx]?.(),
   });
 
+  const refresh = useCallback(() => {
+    void storageStore.refreshStatus();
+    if (activeTab === "dlvs") void storageStore.refreshDlvsAndPresence();
+  }, [activeTab]);
+
+  const busy = activeTab === "dlvs" ? storage.dlvLoading : storage.statusLoading;
+
   return (
-    <div className="storage-screen-shell">
-      <div className="storage-screen-header">
-        {/* Header */}
-        <div className="storage-toolbar">
-          <h2>Storage Nodes</h2>
-        </div>
+    <ScreenFrame
+      title="Storage Nodes"
+      className="storage-screen"
+      info={(
+        <InfoTip title="Storage nodes">
+          <p>The storage set is pinned for this device&apos;s network. Its members keep what you publish so others can reach you while you are away. They hold bytes and decide nothing.</p>
+          <p>Each member&apos;s latest ByteCommit is shown as that member states it. A member that did not answer has not failed, and nothing a member answers is a verdict.</p>
+          <p><b>Syncs</b> counts the inbox syncs that ran to their end on this device.</p>
+        </InfoTip>
+      )}
+      actions={(
+        <button
+          type="button"
+          onClick={refresh}
+          className={`sb-icon-btn${busy ? " spinning" : ""}`}
+          disabled={busy}
+          title="Refresh"
+          aria-label="Refresh"
+        >
+          <img src="images/icons/icon_refresh.svg" alt="" />
+        </button>
+      )}
+      tabs={(
+        <ScreenTabs
+          tabs={TABS}
+          active={activeTab}
+          onChange={setActiveTab}
+          ariaLabel="Storage sections"
+          focusedIndex={focusedIndex}
+        />
+      )}
+    >
+      {(activeTab === "set" || activeTab === "members") && (
+        <StatusTab
+          tab={activeTab}
+          loading={storage.statusLoading}
+          error={storage.statusError}
+          status={storage.status}
+          onRefresh={() => void storageStore.refreshStatus()}
+        />
+      )}
 
-        {/* Tab Navigation — inverted: inactive = dark, active = light */}
-        <div className="storage-tab-nav">
-          {TABS.map((tab, tIdx) => (
-            <button
-              key={tab}
-              onClick={() => setActiveTab(tab)}
-              className={`storage-tab-button ${activeTab === tab ? "active" : ""}${tIdx === focusedIndex ? " focused" : ""}`}
-            >
-              {TAB_LABELS[tab]}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      <div className="storage-screen-stage">
-        {(activeTab === "set" || activeTab === "members") && (
-          <StatusTab
-            tab={activeTab}
-            loading={storage.statusLoading}
-            error={storage.statusError}
-            status={storage.status}
-            onRefresh={() => void storageStore.refreshStatus()}
-          />
-        )}
-
-        {activeTab === "dlvs" && (
-          <DlvTab
-            dlvLoading={storage.dlvLoading}
-            dlvs={storage.dlvs}
-            expandedDlv={expandedDlv}
-            setExpandedDlv={setExpandedDlv}
-          />
-        )}
-      </div>
-
-      <div className="storage-navigation-hint">Press B to go back</div>
-    </div>
+      {activeTab === "dlvs" && (
+        <DlvTab
+          dlvLoading={storage.dlvLoading}
+          dlvs={storage.dlvs}
+          expandedDlv={expandedDlv}
+          setExpandedDlv={setExpandedDlv}
+        />
+      )}
+    </ScreenFrame>
   );
 };
 
@@ -101,38 +115,24 @@ const StatusTab: React.FC<{
   status: StorageStatus | null;
   onRefresh: () => void;
 }> = ({ tab, loading, error, status, onRefresh }) => {
-  if (loading) return <div className="storage-loading">Asking the storage set...</div>;
+  if (loading) return <div className="sb-empty">Asking the storage set…</div>;
 
   if (error || !status) {
     return (
-      <div className="snd-stack">
-        <div className="snd-card storage-card-body">
-          <div className="snd-stat-label storage-card-title">ERROR</div>
-          <div className="storage-card-copy">{error ?? "No storage status."}</div>
-          <div className="storage-top-gap-sm">
-            <button className="snd-btn" onClick={onRefresh}>
-              Try Again
-            </button>
-          </div>
+      <>
+        <Notice kind="error">{error ?? "No storage status."}</Notice>
+        <div className="sb-actions">
+          <button type="button" className="sb-btn sb-btn--primary" onClick={onRefresh}>
+            Try Again
+          </button>
         </div>
-      </div>
+      </>
     );
   }
 
-  return (
-    <div className="snd-stack">
-      {tab === "set" ? (
-        <StorageSetPanel status={status} />
-      ) : (
-        <StorageMembersPanel members={status.members} />
-      )}
-      <div className="snd-actions">
-        <button className="snd-btn" onClick={onRefresh}>
-          Refresh
-        </button>
-      </div>
-    </div>
-  );
+  return tab === "set"
+    ? <StorageSetPanel status={status} />
+    : <StorageMembersPanel members={status.members} />;
 };
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -148,8 +148,8 @@ const STATE_LABELS: Record<string, string> = {
 };
 
 const DIRECTION_LABELS: Record<string, string> = {
-  btc_to_dbtc: "BTC \u2192 dBTC",
-  dbtc_to_btc: "dBTC \u2192 BTC",
+  btc_to_dbtc: "BTC → dBTC",
+  dbtc_to_btc: "dBTC → BTC",
 };
 
 function stateLabel(s: string): string {
@@ -161,8 +161,8 @@ function directionLabel(d: string): string {
 }
 
 function shortId(id: string, len = 12): string {
-  if (!id || id.length <= len) return id || "\u2014";
-  return `${id.slice(0, len)}\u2026`;
+  if (!id || id.length <= len) return id || "—";
+  return `${id.slice(0, len)}…`;
 }
 
 const DlvTab: React.FC<{
@@ -171,103 +171,104 @@ const DlvTab: React.FC<{
   expandedDlv: string | null;
   setExpandedDlv: (v: string | null) => void;
 }> = ({ dlvLoading, dlvs, expandedDlv, setExpandedDlv }) => {
-  if (dlvLoading) return <div className="storage-loading">Scanning DLVs...</div>;
+  if (dlvLoading) return <div className="sb-empty">Scanning DLVs…</div>;
 
   if (dlvs.length === 0) {
-    return <div className="storage-empty">No DLVs found for this device.</div>;
+    return <div className="sb-empty">No DLVs found for this device.</div>;
   }
 
-  const active = dlvs.filter((d) => d.state === "active" || d.state === "limbo").length;
+  const live = dlvs.filter((d) => d.state === "active" || d.state === "limbo");
+  const active = live.length;
   const hist = dlvs.length - active;
-  const totalLockedSats = dlvs
-    .filter((d) => d.state === "active" || d.state === "limbo")
-    .reduce((sum, d) => sum + d.amountSats, 0n);
+  const totalLockedSats = live.reduce((sum, d) => sum + d.amountSats, 0n);
 
   return (
-    <div className="snd-stack">
-      {/* Summary stats */}
-      <div className="snd-card">
-        <div className="snd-stat-grid">
-          <div className="snd-stat-cell">
-            <div className="snd-stat-val">{active}</div>
-            <div className="snd-stat-label">Active</div>
+    <>
+      <section className="sb-card sb-card--dark" aria-label="DLV summary">
+        <div className="sb-stats">
+          <div className="sb-stats__cell">
+            <div className="sb-stats__val">{active}</div>
+            <div className="sb-stats__label">Active</div>
           </div>
-          <div className="snd-stat-cell">
-            <div className="snd-stat-val">{hist}</div>
-            <div className="snd-stat-label">Historical</div>
+          <div className="sb-stats__cell">
+            <div className="sb-stats__val">{hist}</div>
+            <div className="sb-stats__label">Historical</div>
           </div>
-          <div className="snd-stat-cell">
-            <div className="snd-stat-val-sm">{formatBtc(totalLockedSats)}</div>
-            <div className="snd-stat-label">Locked dBTC</div>
+          <div className="sb-stats__cell">
+            <div className="sb-stats__val sb-stats__val--sm">{formatBtc(totalLockedSats)}</div>
+            <div className="sb-stats__label">Locked dBTC</div>
           </div>
         </div>
-      </div>
+      </section>
 
-      {/* Vault list */}
-      <div className="snd-card">
+      <section className="sb-card">
         {dlvs.map((d) => {
           const isSpent = d.state === "claimed" || d.state === "invalidated";
           const isExp = expandedDlv === d.vaultId;
+          const toggle = () => setExpandedDlv(isExp ? null : d.vaultId);
 
           return (
-            <div
-              key={d.vaultId}
-              className={`snd-dlv-item${isSpent ? " snd-dlv-item-spent" : ""}${isExp ? " snd-dlv-item-exp" : ""}`}
-              onClick={() => setExpandedDlv(isExp ? null : d.vaultId)}
-              style={{ cursor: "pointer" }}
-            >
-              <div className="snd-dlv-header">
-                <div>
-                  <div className="snd-dlv-name">{directionLabel(d.direction)}</div>
-                  <div className="snd-dlv-kind">
-                    {shortId(d.vaultId)}
-                  </div>
+            <React.Fragment key={d.vaultId}>
+              <div
+                className={`sb-row sb-row--tap${isExp ? " is-open" : ""}`}
+                role="button"
+                tabIndex={0}
+                aria-expanded={isExp}
+                onClick={toggle}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    toggle();
+                  }
+                }}
+                style={isSpent ? { opacity: 0.6 } : undefined}
+              >
+                <div className="sb-row__main">
+                  <div className="sb-row__title">{directionLabel(d.direction)}</div>
+                  <div className="sb-row__sub sb-mono">{shortId(d.vaultId)}</div>
                 </div>
                 <div style={{ textAlign: "right" }}>
-                  <div className="snd-dlv-status">{stateLabel(d.state)}</div>
-                  <div className="snd-dlv-repl">{formatBtc(d.amountSats)} dBTC</div>
+                  <div><span className={`sb-tag${isSpent ? " sb-tag--dim" : " sb-tag--solid"}`}>{stateLabel(d.state)}</span></div>
+                  <div className="sb-row__amount">{formatBtc(d.amountSats)} dBTC</div>
                 </div>
+                <span className="sb-row__chev" aria-hidden="true">{isExp ? "▾" : "›"}</span>
               </div>
               {isExp && (
-                <div className="snd-dlv-nodes">
-                  <div className="snd-dlv-node-row">
-                    <span>Vault ID</span>
-                    <span style={{ wordBreak: "break-all", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: 9 }}>
-                      {d.vaultId}
-                    </span>
+                <div className="sb-row__detail">
+                  <div className="sb-kv">
+                    <span className="sb-kv__k">Vault ID</span>
+                    <span className="sb-kv__v sb-kv__v--mono">{d.vaultId}</span>
                   </div>
-                  <div className="snd-dlv-node-row">
-                    <span>State</span>
-                    <span>{stateLabel(d.state)}</span>
+                  <div className="sb-kv">
+                    <span className="sb-kv__k">State</span>
+                    <span className="sb-kv__v">{stateLabel(d.state)}</span>
                   </div>
-                  <div className="snd-dlv-node-row">
-                    <span>Amount</span>
-                    <span>{formatBtc(d.amountSats)} dBTC</span>
+                  <div className="sb-kv">
+                    <span className="sb-kv__k">Amount</span>
+                    <span className="sb-kv__v">{formatBtc(d.amountSats)} dBTC</span>
                   </div>
-                  <div className="snd-dlv-node-row">
-                    <span>Direction</span>
-                    <span>{directionLabel(d.direction)}</span>
+                  <div className="sb-kv">
+                    <span className="sb-kv__k">Direction</span>
+                    <span className="sb-kv__v">{directionLabel(d.direction)}</span>
                   </div>
                   {d.htlcAddress && (
-                    <div className="snd-dlv-node-row">
-                      <span>HTLC</span>
-                      <span style={{ wordBreak: "break-all", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: 9 }}>
-                        {d.htlcAddress}
-                      </span>
+                    <div className="sb-kv">
+                      <span className="sb-kv__k">HTLC</span>
+                      <span className="sb-kv__v sb-kv__v--mono">{d.htlcAddress}</span>
                     </div>
                   )}
                   {d.entryHeader.length > 0 && (
-                    <div className="snd-dlv-node-row">
-                      <span>Entry Header</span>
-                      <span>{d.entryHeader.length} bytes</span>
+                    <div className="sb-kv">
+                      <span className="sb-kv__k">Entry Header</span>
+                      <span className="sb-kv__v">{d.entryHeader.length} bytes</span>
                     </div>
                   )}
                 </div>
               )}
-            </div>
+            </React.Fragment>
           );
         })}
-      </div>
-    </div>
+      </section>
+    </>
   );
 };

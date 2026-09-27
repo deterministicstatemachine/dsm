@@ -1,52 +1,60 @@
-/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unused-vars, security/detect-object-injection, security/detect-unsafe-regex, no-console, react-hooks/exhaustive-deps */
 // SPDX-License-Identifier: Apache-2.0
-import React, { useState, useMemo } from 'react';
+// Policy tools (developer options): the token-creation wizard, and publishing
+// a TokenPolicyV3 exactly as pasted. Rust refuses bytes Core's policy parser
+// does not accept; the anchor is the BLAKE3 hash of the bytes.
+import React, { useState, useMemo, useCallback } from 'react';
 import { dsmClient } from '../../services/dsmClient';
 import { TokenCreationDialog } from '../TokenCreationDialog';
 import { useDpadNav } from '../../hooks/useDpadNav';
-import './SettingsScreen.css';
+import { Notice, ScreenFrame } from '../common/ScreenFrame';
+import { InfoTip } from '../common/InfoTip';
+
+function messageOf(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
 
 export default function DevPolicyScreen(): React.JSX.Element {
   const [policyBase32, setPolicyBase32] = useState('');
-  const [status, setStatus] = useState<string>('');
+  const [status, setStatus] = useState<{ kind: 'info' | 'error' | 'success'; text: string } | null>(null);
   const [isCreationDialogOpen, setIsCreationDialogOpen] = useState(false);
 
-  const pasteFromClipboard = async () => {
+  const pasteFromClipboard = useCallback(async () => {
     try {
       if (!navigator?.clipboard?.readText) {
-        setStatus('Clipboard API unavailable; paste manually.');
+        setStatus({ kind: 'error', text: 'Clipboard API unavailable; paste manually.' });
         return;
       }
       const txt = await navigator.clipboard.readText();
       if (!txt) {
-        setStatus('Clipboard empty');
+        setStatus({ kind: 'info', text: 'Clipboard empty' });
         return;
       }
       setPolicyBase32(txt.trim());
-      setStatus('Pasted from clipboard');
-    } catch (e: any) {
-      setStatus(e?.message || 'Clipboard read failed');
+      setStatus({ kind: 'success', text: 'Pasted from clipboard' });
+    } catch (e) {
+      setStatus({ kind: 'error', text: messageOf(e) || 'Clipboard read failed' });
     }
-  };
+  }, []);
 
-  const handlePublish = async () => {
-    setStatus('');
+  const handlePublish = useCallback(async () => {
+    setStatus(null);
     try {
       const out = await dsmClient.publishTokenPolicy({ policyBase32 });
-      setStatus(out.success ? `Policy published: ${out.id}` : `Publish failed: ${out.error}`);
-    } catch (e: any) {
-      setStatus(e?.message || 'Policy publish failed');
+      setStatus(out.success
+        ? { kind: 'success', text: `Policy published: ${out.id}` }
+        : { kind: 'error', text: `Publish failed: ${out.error}` });
+    } catch (e) {
+      setStatus({ kind: 'error', text: messageOf(e) || 'Policy publish failed' });
     }
-  };
+  }, [policyBase32]);
 
   // --- D-pad navigation ---
-  // Items: Create Token Policy (0), Publish Policy (1), Paste from Clipboard (2)
+  // Items: Create Token (0), Publish Policy (1), Paste from Clipboard (2)
   const navActions = useMemo(() => [
     () => setIsCreationDialogOpen(true),
     () => void handlePublish(),
     () => void pasteFromClipboard(),
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  ], [policyBase32]);
+  ], [handlePublish, pasteFromClipboard]);
 
   const { focusedIndex } = useDpadNav({
     itemCount: navActions.length,
@@ -56,49 +64,70 @@ export default function DevPolicyScreen(): React.JSX.Element {
   const fc = (idx: number) => (idx === focusedIndex ? ' focused' : '');
 
   return (
-    <div className="settings-shell settings-shell--dev">
-      <div className="settings-shell__title">Policy Tools</div>
+    <ScreenFrame
+      title="Policy Tools"
+      info={(
+        <InfoTip title="Policy tools">
+          <p><b>Create Token</b> is the same wizard as Tokens → Create Token: it defines the token&apos;s CPTA policy (supply, ticker, decimals, burn authority), anchors it, and creates the token bound to that anchor. A token&apos;s whole supply exists at creation; nothing mints more.</p>
+          <p><b>Publish Policy</b> takes the Base32 (Crockford) encoding of serialized TokenPolicyV3 bytes and publishes them exactly as pasted. Rust refuses bytes Core&apos;s policy parser does not accept. The anchor is the BLAKE3 hash of the bytes.</p>
+        </InfoTip>
+      )}
+      banner={status ? (
+        <Notice banner kind={status.kind} onClose={() => setStatus(null)}>{status.text}</Notice>
+      ) : null}
+    >
+      <section className="sb-card">
+        <div className="sb-card__title">Create a token</div>
+        <button
+          type="button"
+          className={`sb-btn sb-btn--primary sb-btn--block${fc(0)}`}
+          onClick={() => setIsCreationDialogOpen(true)}
+        >
+          Create Token (advanced)
+        </button>
+      </section>
 
-      <div className="settings-shell__panel">
-         <button
-           className={`settings-shell__button${fc(0)}`}
-           onClick={() => setIsCreationDialogOpen(true)}
-           style={{ width: '100%', marginBottom: 4 }}
-         >
-           Create Token (advanced)
-         </button>
-         <div style={{ fontSize: 10, color: 'var(--text-disabled)' }}>
-          Same wizard as Tokens → + CREATE TOKEN. Defines the token&apos;s CPTA policy (supply, ticker, decimals, burn authority), anchors it, and creates the token bound to that anchor. A token&apos;s whole supply exists at creation: nothing mints more.
-         </div>
-      </div>
-
-      <div className="settings-shell__stack">
-        <div style={{ fontSize: 10, lineHeight: 1.4, color: 'var(--text-dark)', display: 'grid', gap: 4 }}>
-          <div>
-            Paste the Base32 (Crockford) encoding of serialized <strong>TokenPolicyV3</strong> bytes. They are published exactly as pasted: Rust refuses bytes Core&apos;s policy parser does not accept, and the anchor is the BLAKE3 hash of the bytes.
-          </div>
+      <section className="sb-card">
+        <div className="sb-card__title">Publish a policy</div>
+        <div className="sb-field">
+          <label htmlFor="policy-base32">TokenPolicyV3 bytes, Base32 Crockford</label>
+          <textarea
+            id="policy-base32"
+            className="sb-input sb-input--mono"
+            value={policyBase32}
+            onChange={(e) => setPolicyBase32(e.target.value)}
+            rows={6}
+            spellCheck={false}
+          />
         </div>
-        <label style={{ fontSize: 10 }}>
-          Token Policy (Base32 Crockford of TokenPolicyV3 bytes)
-          <textarea className="settings-input" value={policyBase32} onChange={e => setPolicyBase32(e.target.value)} rows={8} style={{ width: '100%', padding: 6, fontFamily: 'monospace', fontSize: 10, background: 'var(--bg)', color: 'var(--text-dark)', border: '2px solid var(--border)', borderRadius: '4px', outline: 'none' }} />
-        </label>
-        <div className="settings-shell__button-row">
-          <button className={`settings-shell__button${fc(1)}`} onClick={() => void handlePublish()} style={{ fontSize: '9px' }}>Publish Policy</button>
-          <button className={`settings-shell__button${fc(2)}`} onClick={() => void pasteFromClipboard()} style={{ fontSize: '9px', background: 'var(--bg-secondary)', color: 'var(--text-dark)' }}>Paste from Clipboard</button>
+        <div className="sb-actions" style={{ margin: 0 }}>
+          <button
+            type="button"
+            className={`sb-btn${fc(2)}`}
+            onClick={() => void pasteFromClipboard()}
+          >
+            Paste
+          </button>
+          <button
+            type="button"
+            className={`sb-btn sb-btn--primary${fc(1)}`}
+            onClick={() => void handlePublish()}
+            disabled={!policyBase32.trim()}
+          >
+            Publish Policy
+          </button>
         </div>
-        {status && <div className="settings-shell__status">{status}</div>}
-      </div>
-      <div className="settings-shell__hint">Press B to go back</div>
+      </section>
 
       {isCreationDialogOpen && (
         <TokenCreationDialog
           onClose={() => setIsCreationDialogOpen(false)}
           onSuccess={() => {
-            setStatus('Token created successfully via interactive dialog');
+            setStatus({ kind: 'success', text: 'Token created' });
             setIsCreationDialogOpen(false);
           }}
         />
       )}
-    </div>
+    </ScreenFrame>
   );
 }

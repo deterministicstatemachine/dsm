@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
+// The token-creation wizard, as a StateBoy popover: identity, supply and
+// rules, access and review; then the policy is published and the token
+// created bound to its anchor. Rust reports the fee and the outcome.
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import './TokenCreationDialog.css';
 import { TokenCoin } from './TokenCoin';
 import { encodeCoinSource, silhouetteFromRgba } from '../utils/coinArtwork';
 import { readImageRgba } from '../utils/imageRgba';
 import { createToken } from '@/dsm/policies';
 import { getTokenCreationFeeEra } from '@/dsm/policies';
+import { useBackButton } from '../hooks/useBackButton';
 
 /** The creation fee as Rust reported it, the failure of asking, or not asked yet. */
 type CreationFee = { era: bigint } | { error: string } | undefined;
@@ -64,38 +67,53 @@ function validateStep2(s: WizardState): string | null {
   return null;
 }
 
-// ── Sub-component: ProgressBar ───────────────────────────────────────────────
-const STEP_LABELS = ['Identity', 'Supply & Rules', 'Access & Review'];
+// ── Sub-component: the step strip ────────────────────────────────────────────
+const STEP_LABELS = ['Identity', 'Supply', 'Review'];
 
-function ProgressBar({ step }: { step: number }) {
+function StepStrip({ step }: { step: number }) {
   return (
-    <>
-      <div className="tcd-progress">
-        {STEP_LABELS.map((_, i) => (
+    <div className="sb-steps" aria-label={`Step ${step} of ${STEP_LABELS.length}`}>
+      {STEP_LABELS.map((label, i) => {
+        const done = i + 1 < step;
+        const active = i + 1 === step;
+        return (
           <div
-            key={i}
-            className={`tcd-progress-seg${i + 1 < step ? ' tcd-progress-seg--done' : i + 1 === step ? ' tcd-progress-seg--active' : ''}`}
-          />
-        ))}
-      </div>
-      <div className="tcd-progress-label">{STEP_LABELS[step - 1]} — Step {step} of 3</div>
-    </>
+            key={label}
+            className={`sb-steps__step${done ? ' is-done' : ''}${active ? ' is-active' : ''}`}
+            aria-current={active ? 'step' : undefined}
+          >
+            <span className="sb-steps__mark" aria-hidden="true">{done ? '✓' : i + 1}</span>
+            {label}
+          </div>
+        );
+      })}
+    </div>
   );
 }
 
-// ── Sub-component: Toggle ────────────────────────────────────────────────────
-function Toggle({ checked, onChange, id }: { checked: boolean; onChange: (v: boolean) => void; id: string }) {
+// ── Sub-component: a two-way choice ─────────────────────────────────────────
+function Seg<T extends string>({
+  label, value, options, onChange,
+}: {
+  label: string;
+  value: T;
+  options: ReadonlyArray<{ id: T; label: string }>;
+  onChange: (v: T) => void;
+}) {
   return (
-    <label className="tcd-toggle-switch" htmlFor={id}>
-      <input
-        id={id}
-        type="checkbox"
-        checked={checked}
-        onChange={e => onChange(e.target.checked)}
-      />
-      <span className="tcd-toggle-track" />
-      <span className="tcd-toggle-thumb" />
-    </label>
+    <div className="sb-seg sb-seg--block" role="group" aria-label={label}>
+      {options.map((o) => (
+        <button
+          key={o.id}
+          type="button"
+          className={`sb-seg__opt${o.id === value ? ' active' : ''}`}
+          aria-pressed={o.id === value}
+          onClick={() => onChange(o.id)}
+        >
+          {o.label}
+        </button>
+      ))}
+    </div>
   );
 }
 
@@ -153,16 +171,17 @@ function CoinArtworkField({ state, set }: { state: WizardState; set: (p: Partial
   };
 
   return (
-    <div className="tcd-field">
-      <label className="tcd-label" htmlFor="tcd-coin-art">
-        Coin artwork <span className="tcd-optional">(optional)</span>
-      </label>
-      <div className="tcd-coin-preview">
-        <TokenCoin iconUrl={state.iconUrl} ticker={ticker} size={PREVIEW_COIN_SIZE} className="tcd-coin-img" alt="Your token's coin" />
+    <div className="sb-field">
+      <label htmlFor="tcd-coin-art">Coin artwork (optional)</label>
+      <div style={{ display: 'flex', justifyContent: 'center', margin: '4px 0 8px' }}>
+        <span className="sb-coin-tile">
+          <TokenCoin iconUrl={state.iconUrl} ticker={ticker} size={PREVIEW_COIN_SIZE} className="sb-coin sb-coin--xl" alt="Your token's coin" />
+        </span>
       </div>
       <input
         id="tcd-coin-art"
         type="file"
+        className="sb-input sb-input--small"
         accept="image/png,image/jpeg,image/webp"
         disabled={reading}
         onChange={e => {
@@ -172,16 +191,16 @@ function CoinArtworkField({ state, set }: { state: WizardState; set: (p: Partial
         }}
       />
       {state.iconUrl && (
-        <div className="tcd-coin-actions">
+        <div style={{ display: 'grid', gap: 6, marginTop: 6 }}>
           {image && (
-            <label className="tcd-label">
-              <input type="checkbox" checked={state.artworkInvert} onChange={e => cutOut(image, e.target.checked)} />{' '}
+            <label className="sb-hint sb-hint--tight" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <input type="checkbox" checked={state.artworkInvert} onChange={e => cutOut(image, e.target.checked)} />
               Cut out the background instead
             </label>
           )}
           <button
             type="button"
-            className="tcd-btn tcd-btn--sec"
+            className="sb-btn sb-btn--small sb-btn--block"
             onClick={() => {
               reads.current++;
               setImage(null);
@@ -194,12 +213,12 @@ function CoinArtworkField({ state, set }: { state: WizardState; set: (p: Partial
           </button>
         </div>
       )}
-      <span className="tcd-hint">
+      <p className="sb-hint sb-hint--tight">
         Your logo is cut through the coin the way ERA&apos;s lettering is, in every screen colour. Without an image the
         ticker is used. The artwork is part of the policy and cannot be changed after creation.
-      </span>
-      {reading && <span className="tcd-hint" role="status">Reading image…</span>}
-      {error && <span className="tcd-hint" role="alert">{error}</span>}
+      </p>
+      {reading && <p className="sb-hint sb-hint--tight" role="status">Reading image…</p>}
+      {error && <p className="sb-hint sb-hint--tight" role="alert">{error}</p>}
     </div>
   );
 }
@@ -207,18 +226,16 @@ function CoinArtworkField({ state, set }: { state: WizardState; set: (p: Partial
 function Step1({ state, set }: { state: WizardState; set: (p: Partial<WizardState>) => void }) {
   return (
     <div>
-      <div className="tcd-hint" style={{ marginBottom: 12, padding: '8px 10px', border: '1px solid var(--border)', borderRadius: 6, background: 'rgba(var(--text-dark-rgb),0.08)', lineHeight: 1.5 }}>
-        Tokens require a <strong>CPTA policy</strong>. This wizard defines the policy parameters,
-        publishes it on-chain, then creates a token bound to that policy anchor.
-        Policy settings are immutable after creation.
-      </div>
-      <div className="tcd-section-title">Token Type</div>
-      <div className="tcd-kind-grid">
+      <p className="sb-hint">
+        Tokens require a <b>CPTA policy</b>. This wizard defines the policy, publishes it, then creates a token bound to that policy anchor. Policy settings are immutable after creation.
+      </p>
+      <h3 className="sb-section-title">Token type</h3>
+      <div className="sb-menu" style={{ marginBottom: 10 }}>
         {KIND_META.map(m => (
           <button
             key={m.kind}
             type="button"
-            className={`tcd-kind-btn${state.kind === m.kind ? ' tcd-kind-btn--active' : ''}`}
+            className={`sb-menu__item${state.kind === m.kind ? ' focused' : ''}`}
             aria-pressed={state.kind === m.kind}
             onClick={() => {
               const patch: Partial<WizardState> = { kind: m.kind };
@@ -226,55 +243,53 @@ function Step1({ state, set }: { state: WizardState; set: (p: Partial<WizardStat
               set(patch);
             }}
           >
-            <span className="tcd-kind-icon">{m.icon}</span>
-            <span className="tcd-kind-name">{m.name}</span>
-            <span className="tcd-kind-desc">{m.desc}</span>
+            <span className="sb-menu__glyph">{m.icon}</span>
+            <span className="sb-menu__text">
+              <span className="sb-menu__label">{m.name}</span>
+              <span className="sb-menu__desc">{m.desc}</span>
+            </span>
           </button>
         ))}
       </div>
 
-      <div className="tcd-section-title">Identity</div>
+      <h3 className="sb-section-title">Identity</h3>
 
-      <div className="tcd-field">
-        <label className="tcd-label" htmlFor="tcd-ticker">Ticker</label>
+      <div className="sb-field">
+        <label htmlFor="tcd-ticker">Ticker</label>
         <input
           id="tcd-ticker"
-          className="tcd-input"
+          className="sb-input sb-input--mono"
           placeholder="e.g. GOLD"
           maxLength={8}
           value={state.ticker}
           onChange={e => set({ ticker: e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '') })}
         />
-        <span className="tcd-hint">2–8 uppercase letters / digits. Cannot be changed after creation.</span>
+        <p className="sb-hint sb-hint--tight">2–8 uppercase letters or digits. Cannot be changed after creation.</p>
       </div>
 
-      <div className="tcd-field">
-        <label className="tcd-label" htmlFor="tcd-alias">Display Name</label>
+      <div className="sb-field">
+        <label htmlFor="tcd-alias">Display Name</label>
         <input
           id="tcd-alias"
-          className="tcd-input"
+          className="sb-input"
           placeholder="e.g. Gold Coin"
           value={state.alias}
           onChange={e => set({ alias: e.target.value })}
         />
       </div>
 
-      <div className="tcd-section-title">Optional Details</div>
-
-      <div className="tcd-field">
-        <label className="tcd-label" htmlFor="tcd-desc">
-          Description <span className="tcd-optional">(optional)</span>
-        </label>
+      <div className="sb-field">
+        <label htmlFor="tcd-desc">Description (optional)</label>
         <textarea
           id="tcd-desc"
-          className="tcd-textarea"
+          className="sb-input"
           placeholder="What is this token for?"
           maxLength={200}
           rows={3}
           value={state.description}
           onChange={e => set({ description: e.target.value })}
         />
-        <span className="tcd-char-count">{state.description.length} / 200</span>
+        <p className="sb-hint sb-hint--tight" style={{ textAlign: 'right' }}>{state.description.length} / 200</p>
       </div>
 
       <CoinArtworkField state={state} set={set} />
@@ -292,47 +307,48 @@ function Step2({
 }) {
   return (
     <div>
-      <div className="tcd-section-title">Precision</div>
+      <h3 className="sb-section-title">Precision</h3>
 
-      <div className="tcd-field">
-        <label className="tcd-label">Decimals</label>
-        <div className="tcd-slider-row">
-          <input
-            type="range"
-            className="tcd-slider"
-            min={0}
-            max={18}
-            value={effectiveDecimals}
-            onChange={e => set({ decimals: Number(e.target.value) })}
-          />
-          <span className="tcd-slider-val">{effectiveDecimals}</span>
-        </div>
+      <div className="sb-field">
+        <label htmlFor="tcd-decimals">Decimals: {effectiveDecimals}</label>
+        <input
+          id="tcd-decimals"
+          type="range"
+          className="sb-range"
+          min={0}
+          max={18}
+          value={effectiveDecimals}
+          onChange={e => set({ decimals: Number(e.target.value) })}
+        />
       </div>
 
-      <div className="tcd-section-title">Supply</div>
+      <h3 className="sb-section-title">Supply</h3>
 
-      <div className="tcd-field">
-        <label className="tcd-label" htmlFor="tcd-supply">Total Supply</label>
+      <div className="sb-field">
+        <label htmlFor="tcd-supply">Total Supply</label>
         <input
           id="tcd-supply"
-          className="tcd-input"
+          className="sb-input sb-input--mono"
+          inputMode="numeric"
           placeholder="1000000"
           value={state.genesisSupply}
           onChange={e => set({ genesisSupply: e.target.value.replace(/[^0-9]/g, '') })}
         />
-        <span className="tcd-hint">The whole supply, fixed at creation. All of it is released to your wallet; no more can ever be issued.</span>
+        <p className="sb-hint sb-hint--tight">The whole supply, fixed at creation. All of it is released to your wallet; no more can ever be issued.</p>
       </div>
 
-      <div className="tcd-section-title">Permissions</div>
+      <h3 className="sb-section-title">Permissions</h3>
 
-      <div className="tcd-toggle-row">
-        <div className="tcd-toggle-info">
-          <span className="tcd-toggle-name">Burn</span>
-          <span className="tcd-toggle-sub">Allow holders to destroy their own units</span>
-        </div>
-        <Toggle id="tcd-burn" checked={state.burnEnabled} onChange={v => set({ burnEnabled: v })} />
+      <div className="sb-field">
+        <span className="sb-label">Burn</span>
+        <Seg
+          label="Burn"
+          value={state.burnEnabled ? 'on' : 'off'}
+          options={[{ id: 'off', label: 'Off' }, { id: 'on', label: 'On' }] as const}
+          onChange={(v) => set({ burnEnabled: v === 'on' })}
+        />
+        <p className="sb-hint sb-hint--tight">Allow holders to destroy their own units.</p>
       </div>
-
     </div>
   );
 }
@@ -352,115 +368,100 @@ function Step3({
 
   return (
     <div>
-      <div className="tcd-section-title">Allowlist</div>
-      <div className="tcd-radio-group">
-        <label className="tcd-radio-label">
-          <input
-            type="radio"
-            name="tcd-al"
-            value="NONE"
-            checked={state.allowlistKind === 'NONE'}
-            onChange={() => set({ allowlistKind: 'NONE', allowlistData: '' })}
-          />
-          Open — anyone can hold this token
-        </label>
-        <label className="tcd-radio-label">
-          <input
-            type="radio"
-            name="tcd-al"
-            value="INLINE"
-            checked={state.allowlistKind === 'INLINE'}
-            onChange={() => set({ allowlistKind: 'INLINE' })}
-          />
-          Restricted — only allowlisted genesis IDs
-        </label>
-        <span className="tcd-radio-sub">Allowlisted wallets are committed into the policy at creation time.</span>
+      <h3 className="sb-section-title">Allowlist</h3>
+      <div className="sb-field">
+        <Seg
+          label="Allowlist"
+          value={state.allowlistKind}
+          options={[{ id: 'NONE', label: 'Open' }, { id: 'INLINE', label: 'Restricted' }] as const}
+          onChange={(v) => set(v === 'NONE' ? { allowlistKind: 'NONE', allowlistData: '' } : { allowlistKind: 'INLINE' })}
+        />
+        <p className="sb-hint sb-hint--tight">
+          {state.allowlistKind === 'NONE'
+            ? 'Anyone can hold this token.'
+            : 'Only allowlisted genesis IDs can hold it. They are committed into the policy at creation.'}
+        </p>
       </div>
 
-      <div className={`tcd-al-expand${state.allowlistKind === 'INLINE' ? ' tcd-al-expand--open' : ''}`}>
-        <div className="tcd-field">
-          <label className="tcd-label" htmlFor="tcd-al-data">
-            Genesis IDs <span className="tcd-optional">(one per line)</span>
-          </label>
+      {state.allowlistKind === 'INLINE' && (
+        <div className="sb-field">
+          <label htmlFor="tcd-al-data">Genesis IDs (one per line)</label>
           <textarea
             id="tcd-al-data"
-            className="tcd-textarea"
+            className="sb-input sb-input--mono"
             placeholder={'GENESIS1ABC...\nGENESIS2DEF...'}
             rows={4}
             value={state.allowlistData}
             onChange={e => set({ allowlistData: e.target.value })}
+            spellCheck={false}
           />
         </div>
-      </div>
+      )}
 
-      <div className="tcd-section-title">Review</div>
-      <div className="tcd-review-card">
-        <div className="tcd-review-row">
-          <span className="tcd-review-key">Kind</span>
-          <span className="tcd-review-val">
-            <span className={`tcd-badge tcd-badge--${state.kind}`}>{state.kind}</span>
-          </span>
-        </div>
-        <div className="tcd-review-row">
-          <span className="tcd-review-key">Ticker</span>
-          <span className="tcd-review-val">{state.ticker.toUpperCase()}</span>
-        </div>
-        <div className="tcd-review-row">
-          <span className="tcd-review-key">Name</span>
-          <span className="tcd-review-val">{state.alias}</span>
-        </div>
-        <div className="tcd-review-row">
-          <span className="tcd-review-key">Decimals</span>
-          <span className="tcd-review-val">{effectiveDecimals}</span>
-        </div>
-        <div className="tcd-review-row">
-          <span className="tcd-review-key">Total Supply</span>
-          <span className="tcd-review-val">{supplyLine}</span>
-        </div>
-        <div className="tcd-review-row">
-          <span className="tcd-review-key">Burn</span>
-          <span className="tcd-review-val">{state.burnEnabled ? 'Enabled' : 'Disabled'}</span>
-        </div>
-        <div className="tcd-review-row">
-          <span className="tcd-review-key">Transferable</span>
-          <span className="tcd-review-val">{effectiveTransferable ? 'Yes' : 'No'}</span>
-        </div>
-        <div className="tcd-review-row">
-          <span className="tcd-review-key">Allowlist</span>
-          <span className="tcd-review-val">
-            {state.allowlistKind === 'NONE'
-              ? 'Open'
-              : `Restricted (${state.allowlistData.trim().split('\n').filter(Boolean).length} entries)`}
-          </span>
-        </div>
-        <div className="tcd-review-row">
-          <span className="tcd-review-key">Creation fee</span>
-          <span className="tcd-review-val">
-            {creationFee === undefined
-              ? '…'
-              : 'era' in creationFee
-                ? `${creationFee.era} ERA (burned)`
-                : `not available: ${creationFee.error}`}
-          </span>
-        </div>
-        {state.description.trim() && (
-          <div className="tcd-review-row">
-            <span className="tcd-review-key">Desc</span>
-            <span className="tcd-review-val" style={{ fontSize: 10 }}>{state.description.trim()}</span>
-          </div>
-        )}
-        <div className="tcd-review-row">
-          <span className="tcd-review-key">Coin</span>
-          <span className="tcd-review-val">
-            <TokenCoin iconUrl={state.iconUrl} ticker={state.ticker} size={PREVIEW_COIN_SIZE} className="tcd-coin-img tcd-coin-img--review" />
-          </span>
-        </div>
+      <h3 className="sb-section-title">Review</h3>
+      <div className="sb-kv">
+        <span className="sb-kv__k">Kind</span>
+        <span className="sb-kv__v"><span className="sb-tag">{state.kind}</span></span>
       </div>
-      <div className="tcd-hint" style={{ marginTop: 8, padding: '6px 8px', border: '1px solid var(--border)', borderRadius: 6, background: 'rgba(var(--text-dark-rgb),0.06)', lineHeight: 1.5 }}>
-        A CPTA policy will be published first (content-addressed, immutable).
-        The token is then created bound to that policy anchor.
-        These settings cannot be changed afterwards.
+      <div className="sb-kv">
+        <span className="sb-kv__k">Ticker</span>
+        <span className="sb-kv__v">{state.ticker.toUpperCase()}</span>
       </div>
+      <div className="sb-kv">
+        <span className="sb-kv__k">Name</span>
+        <span className="sb-kv__v">{state.alias}</span>
+      </div>
+      <div className="sb-kv">
+        <span className="sb-kv__k">Decimals</span>
+        <span className="sb-kv__v">{effectiveDecimals}</span>
+      </div>
+      <div className="sb-kv">
+        <span className="sb-kv__k">Total Supply</span>
+        <span className="sb-kv__v">{supplyLine}</span>
+      </div>
+      <div className="sb-kv">
+        <span className="sb-kv__k">Burn</span>
+        <span className="sb-kv__v">{state.burnEnabled ? 'Enabled' : 'Disabled'}</span>
+      </div>
+      <div className="sb-kv">
+        <span className="sb-kv__k">Transferable</span>
+        <span className="sb-kv__v">{effectiveTransferable ? 'Yes' : 'No'}</span>
+      </div>
+      <div className="sb-kv">
+        <span className="sb-kv__k">Allowlist</span>
+        <span className="sb-kv__v">
+          {state.allowlistKind === 'NONE'
+            ? 'Open'
+            : `Restricted (${state.allowlistData.trim().split('\n').filter(Boolean).length} entries)`}
+        </span>
+      </div>
+      <div className="sb-kv">
+        <span className="sb-kv__k">Creation fee</span>
+        <span className="sb-kv__v">
+          {creationFee === undefined
+            ? '…'
+            : 'era' in creationFee
+              ? `${creationFee.era} ERA (burned)`
+              : `not available: ${creationFee.error}`}
+        </span>
+      </div>
+      {state.description.trim() && (
+        <div className="sb-kv">
+          <span className="sb-kv__k">Desc</span>
+          <span className="sb-kv__v">{state.description.trim()}</span>
+        </div>
+      )}
+      <div className="sb-kv" style={{ alignItems: 'center' }}>
+        <span className="sb-kv__k">Coin</span>
+        <span className="sb-kv__v">
+          <span className="sb-coin-tile sb-coin-tile--sm">
+            <TokenCoin iconUrl={state.iconUrl} ticker={state.ticker} size={PREVIEW_COIN_SIZE} className="sb-coin sb-coin--lg" />
+          </span>
+        </span>
+      </div>
+      <p className="sb-hint" style={{ marginTop: 8 }}>
+        A CPTA policy is published first, content-addressed and immutable. The token is then created bound to that policy anchor. These settings cannot be changed afterwards.
+      </p>
     </div>
   );
 }
@@ -474,35 +475,46 @@ function SuccessScreen({
   onClose: () => void;
 }) {
   return (
-    <div className="tcd-card">
-      <div className="tcd-success">
-        <TokenCoin iconUrl={state.iconUrl} ticker={state.ticker} size={PREVIEW_COIN_SIZE} className="tcd-coin-img" />
-        <div className="tcd-success-icon">OK</div>
-        <div className="tcd-success-title">Policy Published &amp; Token Created</div>
-        <div className="tcd-success-detail">
-          <strong>Kind</strong>
-          <span className={`tcd-badge tcd-badge--${state.kind}`}>{state.kind}</span>
-          <strong>Ticker</strong>
-          {state.ticker.toUpperCase()}
-          <strong>Name</strong>
-          {state.alias}
-          {created.tokenId && (
-            <>
-              <strong>Token ID</strong>
-              {created.tokenId}
-            </>
-          )}
-          {created.anchorBase32 && (
-            <>
-              <strong>Policy Anchor (CPTA)</strong>
-              {created.anchorBase32}
-            </>
-          )}
-        </div>
-        <button className="tcd-btn tcd-btn--pri" style={{ width: '100%' }} onClick={onClose}>
-          Done
-        </button>
+    <div className="sb-popover sb-card--dark" role="dialog" aria-modal="true" aria-label="Token created">
+      <div className="sb-popover__head">
+        <h3 className="sb-popover__title">Token created</h3>
+        <button type="button" className="sb-popover__close" onClick={onClose} aria-label="Close">{'×'}</button>
       </div>
+      <div className="sb-popover__body">
+        <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 8 }}>
+          <span className="sb-coin-tile">
+            <TokenCoin iconUrl={state.iconUrl} ticker={state.ticker} size={PREVIEW_COIN_SIZE} className="sb-coin sb-coin--xl" />
+          </span>
+        </div>
+        <p className="sb-hint" style={{ textAlign: 'center' }}>Policy published and token created.</p>
+        <div className="sb-kv">
+          <span className="sb-kv__k">Kind</span>
+          <span className="sb-kv__v"><span className="sb-tag">{state.kind}</span></span>
+        </div>
+        <div className="sb-kv">
+          <span className="sb-kv__k">Ticker</span>
+          <span className="sb-kv__v">{state.ticker.toUpperCase()}</span>
+        </div>
+        <div className="sb-kv">
+          <span className="sb-kv__k">Name</span>
+          <span className="sb-kv__v">{state.alias}</span>
+        </div>
+        {created.tokenId && (
+          <div className="sb-kv">
+            <span className="sb-kv__k">Token ID</span>
+            <span className="sb-kv__v sb-kv__v--mono">{created.tokenId}</span>
+          </div>
+        )}
+        {created.anchorBase32 && (
+          <div className="sb-kv">
+            <span className="sb-kv__k">Policy Anchor (CPTA)</span>
+            <span className="sb-kv__v sb-kv__v--mono">{created.anchorBase32}</span>
+          </div>
+        )}
+      </div>
+      <button type="button" className="sb-btn sb-btn--primary sb-btn--block sb-popover__ok" onClick={onClose}>
+        Done
+      </button>
     </div>
   );
 }
@@ -513,8 +525,6 @@ export const TokenCreationDialog: React.FC<{ onClose: () => void; onSuccess?: ()
   onClose, onSuccess,
 }) => {
   const [step, setStep]       = useState(1);
-  const [dir,  setDir]        = useState<'fwd' | 'bck'>('fwd');
-  const [animKey, setAnimKey] = useState(0);
   const [state, _setState]    = useState<WizardState>(DEFAULT);
   const [creating, setCreating] = useState(false);
   /// Set while an ambiguous outcome is being settled against canonical state,
@@ -527,6 +537,7 @@ export const TokenCreationDialog: React.FC<{ onClose: () => void; onSuccess?: ()
   // number invented in the UI could silently disagree with what is burned.
   const [creationFee, setCreationFee] = useState<CreationFee>(undefined);
   const stateRef = useRef(state);
+  const bodyRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -555,11 +566,18 @@ export const TokenCreationDialog: React.FC<{ onClose: () => void; onSuccess?: ()
   const effectiveTransferable = true;
 
   const navigate = useCallback((to: number) => {
-    setDir(to > step ? 'fwd' : 'bck');
-    setAnimKey(k => k + 1);
     setStep(to);
     setError(null);
-  }, [step]);
+    if (bodyRef.current) bodyRef.current.scrollTop = 0;
+  }, []);
+
+  // B steps back through the wizard, and closes it from the first step. While
+  // Rust is working the press is ignored: the outcome is on its way.
+  useBackButton(!created, () => {
+    if (creating || resolving) return;
+    if (step > 1) navigate(step - 1);
+    else onClose();
+  });
 
   const handleNext = useCallback(() => {
     if (step === 1) {
@@ -674,7 +692,7 @@ export const TokenCreationDialog: React.FC<{ onClose: () => void; onSuccess?: ()
   // ── Success screen ───────────────────────────────────────────────────────
   if (created) {
     return (
-      <div className="tcd-overlay">
+      <div className="sb-popover-backdrop" onClick={(e) => e.stopPropagation()}>
         <SuccessScreen created={created} state={state} onClose={onClose} />
       </div>
     );
@@ -682,21 +700,16 @@ export const TokenCreationDialog: React.FC<{ onClose: () => void; onSuccess?: ()
 
   // ── Wizard shell ─────────────────────────────────────────────────────────
   return (
-    <div className="tcd-overlay">
-      <div className="tcd-card">
-        {/* Header */}
-        <div className="tcd-header">
-          <span className="tcd-header-title">Create Token Policy (CPTA)</span>
-          <button className="tcd-close" onClick={onClose} aria-label="Close">X</button>
+    <div className="sb-popover-backdrop" onClick={(e) => e.stopPropagation()}>
+      <div className="sb-popover sb-card--dark token-wizard" role="dialog" aria-modal="true" aria-labelledby="tcd-title">
+        <div className="sb-popover__head">
+          <h3 id="tcd-title" className="sb-popover__title">Create Token</h3>
+          <button type="button" className="sb-popover__close" onClick={onClose} aria-label="Close">{'×'}</button>
         </div>
 
-        <ProgressBar step={step} />
+        <StepStrip step={step} />
 
-        {/* Step body */}
-        <div
-          key={animKey}
-          className={`tcd-step-body tcd-step-body--${dir}`}
-        >
+        <div className="sb-popover__body" ref={bodyRef}>
           {step === 1 && <Step1 state={state} set={set} />}
           {step === 2 && (
             <Step2
@@ -716,31 +729,34 @@ export const TokenCreationDialog: React.FC<{ onClose: () => void; onSuccess?: ()
           )}
         </div>
 
-        {/* Error bar */}
-        {error && <div className="tcd-error-bar">{error}</div>}
+        {error && (
+          <div className="sb-notice sb-notice--error" role="alert" style={{ margin: 0 }}>
+            <span>{error}</span>
+          </div>
+        )}
 
-        {/* Nav */}
-        <div className="tcd-nav">
+        <div className="sb-actions" style={{ margin: 0 }}>
           {step > 1 ? (
-            <button className="tcd-btn tcd-btn--sec" onClick={() => navigate(step - 1)}>
-              ← Back
+            <button type="button" className="sb-btn" onClick={() => navigate(step - 1)} disabled={creating}>
+              Back
             </button>
           ) : (
-            <button className="tcd-btn tcd-btn--sec" onClick={onClose}>
+            <button type="button" className="sb-btn" onClick={onClose}>
               Cancel
             </button>
           )}
           {step < 3 ? (
-            <button className="tcd-btn tcd-btn--pri" onClick={handleNext}>
-              Continue →
+            <button type="button" className="sb-btn sb-btn--primary" onClick={handleNext}>
+              Continue
             </button>
           ) : (
             <button
-              className="tcd-btn tcd-btn--create"
+              type="button"
+              className="sb-btn sb-btn--primary"
               onClick={handleCreate}
               disabled={creating}
             >
-              {resolving ? 'Confirming outcome\u2026' : creating ? 'Publishing policy\u2026' : 'Publish'}
+              {resolving ? 'Confirming outcome…' : creating ? 'Publishing policy…' : 'Publish'}
             </button>
           )}
         </div>

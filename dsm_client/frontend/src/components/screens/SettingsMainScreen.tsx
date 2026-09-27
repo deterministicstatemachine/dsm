@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
 // src/components/screens/SettingsMainScreen.tsx
+// Settings on the StateBoy frame: the version (and its 7-tap developer
+// unlock), the tour, the wallet lock, the ring backup as Rust reports it, and
+// the developer options once unlocked.
 import React, { useCallback, useEffect, useRef, useState, memo } from 'react';
 import { dsmClient } from '../../services/dsmClient';
 import {
@@ -11,7 +13,8 @@ import {
 } from '../../services/recovery/nfcRecoveryService';
 import { getNfcBackupUiModel } from '../../services/recovery/nfcBackupUi';
 import { tourStore } from '../tour/tourStore';
-import './SettingsScreen.css';
+import { Notice, ScreenFrame } from '../common/ScreenFrame';
+import { InfoTip } from '../common/InfoTip';
 
 const client = dsmClient;
 const DEV_MODE_PREF_KEY = 'dev_mode';
@@ -30,7 +33,6 @@ const SettingsMainScreen: React.FC<SettingsMainScreenProps> = ({ onNavigate }) =
   const [devModeResolved, setDevModeResolved] = useState<boolean>(() => cachedDevMode !== null);
   const [tapCount, setTapCount] = useState<number>(0);
   const devModeUnlockingRef = useRef(false);
-  // ringId is stored in native prefs via setPreference; no React state needed.
   const [status, setStatus] = useState<string>('');
 
   // --- Compact NFC status (full management is on NfcRecoveryScreen) ---
@@ -115,245 +117,141 @@ const SettingsMainScreen: React.FC<SettingsMainScreenProps> = ({ onNavigate }) =
     setStatus('Diagnostics workspace opened');
   }, []);
 
-  return (
-    <main className="settings-shell settings-shell--main" role="main" aria-labelledby="settings-title">
-      <div id="settings-title" className="settings-shell__title">
-        SETTINGS
-      </div>
+  const onToggleAutoWrite = useCallback((next: boolean) => {
+    if (!nfcStatus || nfcStatus.autoWriteEnabled === next) return;
+    void setAutoWriteEnabled(next).then(() =>
+      setNfcRead({ status: { ...nfcStatus, autoWriteEnabled: next } }),
+    );
+  }, [nfcStatus]);
 
+  return (
+    <ScreenFrame
+      title="Settings"
+      className="settings-screen"
+      banner={status ? (
+        <Notice banner kind="success" onClose={() => setStatus('')}>{status}</Notice>
+      ) : null}
+    >
       {/* Version row with 7-tap unlock (deterministic counter, no timers) */}
       <button
         type="button"
-        className="settings-shell__button settings-shell__button--stack"
+        className="sb-card"
         onClick={onVersionTap}
         aria-describedby={!devMode ? 'dev-hint' : undefined}
-        style={{
-          marginBottom: '12px',
-          textAlign: 'left',
-        }}
       >
-        <div
-          style={{
-            fontSize: '10px',
-            fontWeight: 'bold',
-            marginBottom: '4px',
-          }}
-        >
-          VERSION
+        <div className="sb-kv">
+          <span className="sb-kv__k">VERSION</span>
+          <span className="sb-kv__v">1.0.0</span>
         </div>
-        <div style={{ fontSize: '9px' }}>1.0.0</div>
         {!devMode && devModeResolved && (
-          <div
-            id="dev-hint"
-            style={{
-              fontSize: '8px',
-              opacity: 0.7,
-              marginTop: '6px',
-            }}
-          >
+          <div id="dev-hint" className="sb-hint sb-hint--tight">
             TAP 7X FOR DEV OPTIONS ({tapCount}/7)
           </div>
         )}
       </button>
 
-      {/* Backup & Restore Section */}
       {/* Guided tour — replay at any time */}
-      <section
-        aria-labelledby="tour-section-title"
-        className="settings-shell__panel"
-      >
-        <div
-          id="tour-section-title"
-          style={{
-            fontSize: '10px',
-            fontWeight: 'bold',
-            marginBottom: '6px',
-            letterSpacing: '1px',
-          }}
+      <section className="sb-card" aria-labelledby="tour-section-title">
+        <div id="tour-section-title" className="sb-card__title">Guided tour</div>
+        <button
+          type="button"
+          className="sb-btn sb-btn--block"
+          data-tour="tutorial-button"
+          onClick={() => tourStore.start()}
         >
-          GUIDED TOUR
-        </div>
-        <div className="settings-shell__button-row">
-          <button
-            type="button"
-            className="settings-shell__button"
-            data-tour="tutorial-button"
-            onClick={() => tourStore.start()}
-          >
-            Replay tutorial
-          </button>
-        </div>
+          Replay tutorial
+        </button>
       </section>
 
       {/* Security / Wallet Lock */}
-      <section
-        aria-labelledby="security-section-title"
-        className="settings-shell__panel"
-      >
-        <div
-          id="security-section-title"
-          style={{
-            fontSize: '10px',
-            fontWeight: 'bold',
-            marginBottom: '8px',
-            color: 'var(--text-dark)',
-            letterSpacing: '1px',
-          }}
-        >
-          SECURITY
+      <section className="sb-card" aria-labelledby="security-section-title">
+        <div id="security-section-title" className="sb-card__title">
+          <span>Security</span>
+          <InfoTip title="Wallet lock">
+            <p>A lock asks for a PIN or a sequence of the shell&apos;s buttons before the wallet opens.</p>
+            <p>It locks after the idle time you pick, and on leaving the app if you choose so. Too many wrong tries wait out a cooldown that survives a restart.</p>
+          </InfoTip>
         </div>
-        <div
-          style={{
-            fontSize: '8px',
-            color: 'var(--text-dark)',
-            marginBottom: '12px',
-            lineHeight: '1.4',
-            opacity: 0.8,
-          }}
-        >
-          PROTECT YOUR WALLET WITH A PIN, BUTTON COMBO, OR BIOMETRIC LOCK.
-        </div>
+        <p className="sb-hint">Protect your wallet with a PIN or a button combo.</p>
         <button
-          className="settings-shell__button"
+          type="button"
+          className="sb-btn sb-btn--primary sb-btn--block"
           onClick={() => onNavigate?.('lock_setup')}
-          style={{ fontSize: '9px', width: '100%' }}
         >
-          CONFIGURE WALLET LOCK
+          Configure wallet lock
         </button>
       </section>
 
       {/* NFC Ring Backup — compact card, full management on dedicated screen */}
-      <section
-        aria-labelledby="nfc-section-title"
-        className="settings-shell__panel"
-      >
-        <div
-          id="nfc-section-title"
-          style={{
-            fontSize: '10px',
-            fontWeight: 'bold',
-            marginBottom: '6px',
-            letterSpacing: '1px',
-          }}
-        >
-          NFC RING BACKUP
+      <section className="sb-card sb-card--dark" aria-labelledby="nfc-section-title">
+        <div id="nfc-section-title" className="sb-card__title">NFC ring backup</div>
+        <div className="sb-hero__value" style={{ fontSize: 14, marginTop: 0 }}>
+          {nfcRead === undefined ? '…' : nfcUi ? nfcUi.backupLabel : 'NOT READ'}
+          {nfcUi && nfcUi.writeStateLabel !== '--' ? ` / ${nfcUi.writeStateLabel}` : ''}
         </div>
-        <div style={{ marginBottom: 8 }}>
-          <div
-            style={{
-              fontSize: '9px',
-              fontWeight: 'bold',
-              color: 'var(--text-dark)',
-              marginBottom: 4,
-            }}
-          >
-            {nfcRead === undefined ? '…' : nfcUi ? nfcUi.backupLabel : 'NOT READ'}
-            {nfcUi && nfcUi.writeStateLabel !== '--' ? ` / ${nfcUi.writeStateLabel}` : ''}
-          </div>
-          <div
-            style={{
-              fontSize: '8px',
-              color: 'var(--text-dark)',
-              lineHeight: '1.4',
-              opacity: 0.82,
-            }}
-          >
-            {nfcRead === undefined
-              ? 'Reading the backup status…'
-              : nfcUi
-                ? nfcUi.compactSummary
-                : `Status not read: ${(nfcRead as { error: string }).error}`}
-          </div>
+        <div className="sb-hint sb-hint--tight" style={{ marginBottom: 8 }}>
+          {nfcRead === undefined
+            ? 'Reading the backup status…'
+            : nfcUi
+              ? nfcUi.compactSummary
+              : `Status not read: ${(nfcRead as { error: string }).error}`}
         </div>
-        <div className="settings-shell__button-row">
-          <button
-            className="settings-shell__button"
-            onClick={() => onNavigate?.('nfc_recovery')}
-            style={{ fontSize: '9px' }}
-          >
-            MANAGE BACKUP
+        <div style={{ display: 'grid', gap: 8 }}>
+          <button type="button" className="sb-btn sb-btn--block" onClick={() => onNavigate?.('nfc_recovery')}>
+            Manage backup
           </button>
-          <button
-            className="settings-shell__button"
-            onClick={() => onNavigate?.('recovery')}
-            style={{ fontSize: '9px' }}
-          >
-            INSPECT OR RECOVER
+          <button type="button" className="sb-btn sb-btn--block" onClick={() => onNavigate?.('recovery')}>
+            Inspect or recover
           </button>
         </div>
         {nfcStatus && nfcStatus.enabled && nfcStatus.configured && (
-          <button
-            className="settings-shell__button"
-            onClick={() => {
-              const next = !nfcStatus.autoWriteEnabled;
-              void setAutoWriteEnabled(next).then(() =>
-                setNfcRead({ status: { ...nfcStatus, autoWriteEnabled: next } }),
-              );
-            }}
-            style={{ fontSize: '9px', width: '100%', marginTop: 6 }}
-          >
-            AUTO-BACKUP TO RING: {nfcStatus.autoWriteEnabled ? 'ON' : 'OFF'}
-          </button>
+          <div className="sb-kv" style={{ marginTop: 8, alignItems: 'center' }}>
+            <span className="sb-kv__k">Auto-backup to ring</span>
+            <div className="sb-seg" role="group" aria-label="Auto-backup to ring">
+              <button
+                type="button"
+                className={`sb-seg__opt${nfcStatus.autoWriteEnabled ? ' active' : ''}`}
+                aria-pressed={nfcStatus.autoWriteEnabled}
+                onClick={() => onToggleAutoWrite(true)}
+              >
+                On
+              </button>
+              <button
+                type="button"
+                className={`sb-seg__opt${nfcStatus.autoWriteEnabled ? '' : ' active'}`}
+                aria-pressed={!nfcStatus.autoWriteEnabled}
+                onClick={() => onToggleAutoWrite(false)}
+              >
+                Off
+              </button>
+            </div>
+          </div>
         )}
       </section>
 
       {/* Developer Options (only when unlocked) */}
       {devMode && (
-        <section
-          aria-labelledby="dev-section-title"
-          className="settings-shell__panel"
-        >
-          <div
-            style={{
-              fontSize: '10px',
-              fontWeight: 'bold',
-              marginBottom: '8px',
-              color: 'var(--text-dark)',
-              letterSpacing: '1px',
-            }}
-          >
-            DEVELOPER OPTIONS
-          </div>
-          <div
-            style={{
-              display: 'grid',
-              gap: '8px',
-            }}
-          >
-
+        <section className="sb-card" aria-labelledby="dev-section-title">
+          <div id="dev-section-title" className="sb-card__title">DEVELOPER OPTIONS</div>
+          <div style={{ display: 'grid', gap: 8 }}>
             <button
               type="button"
-              className="settings-shell__button"
-              style={{ fontSize: '9px' }}
+              className="sb-btn sb-btn--block"
               onClick={() => onNavigate?.('dev_policy')}
             >
-              POLICY TOOLS
+              Policy tools
             </button>
-
-
             <button
               type="button"
-              className="settings-shell__button"
-              style={{ fontSize: '9px' }}
+              className="sb-btn sb-btn--block"
               onClick={openDiagnosticsWorkspace}
             >
-              REPORT ISSUE / FEEDBACK
+              Report issue / feedback
             </button>
-
           </div>
         </section>
       )}
-
-      {status && (
-        <div
-          role="status"
-          aria-live="polite"
-          className="settings-shell__status settings-shell__status--flush"
-        >
-          {status.toUpperCase()}
-        </div>
-      )}
-    </main>
+    </ScreenFrame>
   );
 };
 
