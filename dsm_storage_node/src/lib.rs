@@ -287,17 +287,36 @@ pub struct AppLimits {
 }
 
 /// The node's whole app: every route it serves, with its limits and layers.
+/// `/api/v2/health`: ok only over a live Postgres. A node whose store is
+/// down is not healthy, whatever its process is doing.
+async fn health(state: std::sync::Arc<AppState>) -> (axum::http::StatusCode, String) {
+    use axum::http::StatusCode;
+    let client = match state.db_pool.get().await {
+        Ok(client) => client,
+        Err(e) => return (StatusCode::SERVICE_UNAVAILABLE, format!("postgres: {e}")),
+    };
+    match client.simple_query("SELECT 1").await {
+        Ok(_) => (StatusCode::OK, "ok".to_string()),
+        Err(e) => (StatusCode::SERVICE_UNAVAILABLE, format!("postgres: {e}")),
+    }
+}
+
 /// The binary serves exactly this, and so do tests that stand up real nodes,
 /// so no test ever runs against an assembly the binary does not serve.
 pub fn build_app(state: std::sync::Arc<AppState>, limits: AppLimits) -> axum::Router<()> {
-    use axum::http::StatusCode;
     use axum::routing::get;
     use axum::Router;
     use tower::limit::ConcurrencyLimitLayer;
     use tower_http::{limit::RequestBodyLimitLayer, trace::TraceLayer};
 
     Router::new()
-        .route("/api/v2/health", get(|| async { (StatusCode::OK, "ok") }))
+        .route(
+            "/api/v2/health",
+            get({
+                let state = state.clone();
+                move || health(state)
+            }),
+        )
         // The storage contract's four operations (Part II §12): no write
         // authorization, content-blind.
         .merge(crate::storage_contract_router(state.clone()))
