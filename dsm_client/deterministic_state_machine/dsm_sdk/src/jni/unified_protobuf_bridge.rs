@@ -2305,7 +2305,8 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_identityReadR
 }
 
 /// Extract `write_back_envelope` from a `BleGattIdentityReadResult` proto.
-/// Returns the raw envelope bytes, or empty array on decode error / no envelope.
+/// Returns the raw envelope bytes (empty when the result carries none), or
+/// null when the result does not decode.
 /// Kotlin uses this instead of proto-java codegen (which is not available).
 #[no_mangle]
 #[cfg(all(target_os = "android", feature = "bluetooth"))]
@@ -2331,9 +2332,6 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_identityReadR
                     Ok(r) => r,
                     Err(_) => return std::ptr::null_mut(),
                 };
-            if resp.write_back_envelope.is_empty() {
-                return std::ptr::null_mut();
-            }
             match env.byte_array_from_slice(&resp.write_back_envelope) {
                 Ok(out) => out.into_raw(),
                 Err(_) => std::ptr::null_mut(),
@@ -2343,7 +2341,8 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_identityReadR
 }
 
 /// Extract `peer_device_id` from a `BleGattIdentityReadResult` proto.
-/// Returns the 32-byte device ID, or empty array on decode error.
+/// Returns the peer device id (empty when the result carries none), or null
+/// when the result does not decode.
 #[no_mangle]
 #[cfg(all(target_os = "android", feature = "bluetooth"))]
 pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_identityReadResultExtractPeerDeviceId(
@@ -2368,9 +2367,6 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_identityReadR
                     Ok(r) => r,
                     Err(_) => return std::ptr::null_mut(),
                 };
-            if resp.peer_device_id.is_empty() {
-                return std::ptr::null_mut();
-            }
             match env.byte_array_from_slice(&resp.peer_device_id) {
                 Ok(out) => out.into_raw(),
                 Err(_) => std::ptr::null_mut(),
@@ -2380,7 +2376,8 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_identityReadR
 }
 
 /// Extract `peer_genesis_hash` from a `BleGattIdentityReadResult` proto.
-/// Returns the 32-byte genesis hash, or empty array on decode error.
+/// Returns the peer genesis hash (empty when the result carries none), or
+/// null when the result does not decode.
 #[no_mangle]
 #[cfg(all(target_os = "android", feature = "bluetooth"))]
 pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_identityReadResultExtractPeerGenesisHash(
@@ -2405,9 +2402,6 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_identityReadR
                     Ok(r) => r,
                     Err(_) => return std::ptr::null_mut(),
                 };
-            if resp.peer_genesis_hash.is_empty() {
-                return std::ptr::null_mut();
-            }
             match env.byte_array_from_slice(&resp.peer_genesis_hash) {
                 Ok(out) => out.into_raw(),
                 Err(_) => std::ptr::null_mut(),
