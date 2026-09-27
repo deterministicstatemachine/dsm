@@ -178,62 +178,6 @@ class SinglePathWebViewBridge(private val context: Context) {
             }
         }
 
-        /**
-         * Parse envelope response and extract payload data.
-         * STRICT: Only accepts valid protobuf envelopes.
-         */
-        private fun parseEnvelopeResponse(responseBytes: ByteArray): Pair<Boolean, ByteArray> {
-            return BridgeEnvelopeCodec.parseEnvelopeResponse(responseBytes)
-        }
-
-        /**
-         * Raw bytes RPC dispatcher (for internal use).
-         * Returns the raw response data from protobuf envelope, not envelope-wrapped.
-         */
-        fun handleBinaryRpcRaw(method: String, payload: ByteArray): ByteArray {
-            val envelopeResponse = handleBinaryRpc(method, payload)
-            return try {
-                val (isSuccess, data) = parseEnvelopeResponse(envelopeResponse)
-                if (isSuccess) {
-                    data
-                } else {
-                    ByteArray(0) // Error case
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "handleBinaryRpcRaw: failed to parse envelope", e)
-                ByteArray(0)
-            }
-        }
-
-        /**
-         * Raw bytes RPC dispatcher that preserves native bridge errors.
-         * Returns the raw success payload or throws with the decoded bridge error.
-         */
-        fun handleBinaryRpcRawStrict(method: String, payload: ByteArray): ByteArray {
-            val envelopeResponse = handleBinaryRpc(method, payload)
-            try {
-                val (isSuccess, data) = parseEnvelopeResponse(envelopeResponse)
-                if (isSuccess) {
-                    return data
-                }
-
-                val err = BridgeEnvelopeCodec.decodeBridgeRpcError(data)
-                val baseMessage = err?.message?.takeIf { it.isNotBlank() }
-                    ?: "Bridge call failed for $method"
-                val suffix = if (err != null && err.errorCode != 0) {
-                    " (code ${err.errorCode})"
-                } else {
-                    ""
-                }
-                throw IllegalStateException(baseMessage + suffix)
-            } catch (e: IllegalStateException) {
-                throw e
-            } catch (e: Exception) {
-                Log.w(TAG, "handleBinaryRpcRawStrict: failed to parse envelope", e)
-                throw IllegalStateException("Failed to decode bridge response for $method", e)
-            }
-        }
-
         /** Escape control characters in strings for diagnostic payloads. */
         private fun escapeForString(s: String?): String {
             if (s == null) return ""
@@ -269,14 +213,9 @@ class SinglePathWebViewBridge(private val context: Context) {
                     inst.createGenesisV2(mnemonic = req.mnemonic)
                 }
 
-                // strict balances (JNI). Returns FramedEnvelopeV3 bytes or empty on error.
+                // strict balances (JNI): FramedEnvelopeV3 bytes; a failure is the dispatcher's error response.
                 "getAllBalancesStrict" -> {
-                    try {
-                        Unified.getAllBalancesStrict()
-                    } catch (t: Throwable) {
-                        Log.w(TAG, "getAllBalancesStrict failed", t)
-                        ByteArray(0)
-                    }
+                    Unified.getAllBalancesStrict()
                 }
 
                 // Diagnostics: append raw payload to persisted bridge log
@@ -315,29 +254,17 @@ class SinglePathWebViewBridge(private val context: Context) {
                 }
 
                 "nativeHostRequest" -> {
-                    NativeHostBridge.hostRequest(
-                        context = inst.context,
-                        prefs = inst.prefs(),
-                        sdkContextInitialized = sdkContextInitialized,
-                        logTag = TAG,
-                        keyDeviceId = KEY_DEVICE_ID,
-                        keyGenesisHash = KEY_GENESIS_HASH,
-                        keyGenesisEnvelope = KEY_GENESIS_ENVELOPE,
-                        requestBytes = payload,
-                    )
+                    NativeHostBridge.hostRequest(payload)
                 }
 
                 // Transport headers (bytes-only). Must be available early for identity/QR/faucet.
+                // Empty means Rust reports NO_IDENTITY (status 0); a failure to restore the
+                // identity or to read the status is the dispatcher's error response.
                 "getTransportHeadersV3Bin" -> {
                     if (!sdkContextInitialized.get()) {
-                        try {
-                            inst.bootstrapFromPrefs()
-                        } catch (_: Throwable) {
-                            // fall through
-                        }
+                        inst.bootstrapFromPrefs()
                     }
-                    val st = try { Unified.getTransportHeadersV3Status().toInt() } catch (_: Throwable) { -1 }
-                    if (st >= 1) {
+                    if (Unified.getTransportHeadersV3Status().toInt() >= 1) {
                         Unified.getTransportHeadersV3()
                     } else {
                         ByteArray(0)
@@ -350,55 +277,37 @@ class SinglePathWebViewBridge(private val context: Context) {
                 }
 
                 "openBluetoothSettings" -> {
-                    try {
-                        val act = com.dsm.wallet.ui.MainActivity.getActiveInstance()
-                        act?.runOnUiThread {
-                            try {
-                                val intent = android.content.Intent(android.provider.Settings.ACTION_BLUETOOTH_SETTINGS)
-                                act.startActivity(intent)
-                            } catch (e: Throwable) {
-                                Log.w(TAG, "openBluetoothSettings: failed to launch intent", e)
-                            }
+                    val act = com.dsm.wallet.ui.MainActivity.getActiveInstance()
+                        ?: throw IllegalStateException("openBluetoothSettings: no active activity")
+                    act.runOnUiThread {
+                        try {
+                            val intent = android.content.Intent(android.provider.Settings.ACTION_BLUETOOTH_SETTINGS)
+                            act.startActivity(intent)
+                        } catch (e: Throwable) {
+                            // The launch runs after this answer went out; the UI thread can only log it.
+                            Log.w(TAG, "openBluetoothSettings: failed to launch intent", e)
                         }
-                    } catch (e: Throwable) {
-                        Log.w(TAG, "openBluetoothSettings: failed", e)
                     }
                     ByteArray(0)
                 }
 
                 "acceptBilateralByCommitment" -> {
-                    if (payload.size != 32) {
-                        Log.w(TAG, "acceptBilateralByCommitment: expected 32 bytes, got ${payload.size}")
-                        return ByteArray(0)
+                    require(payload.size == 32) {
+                        "acceptBilateralByCommitment: expected 32 bytes, got ${payload.size}"
                     }
-                    try {
-                        Unified.acceptBilateralByCommitment(payload)
-                    } catch (t: Throwable) {
-                        Log.w(TAG, "acceptBilateralByCommitment failed", t)
-                        ByteArray(0)
-                    }
+                    Unified.acceptBilateralByCommitment(payload)
                 }
 
                 "rejectBilateralByCommitment" -> {
                     val parsed = BridgeEnvelopeCodec.decodeBilateralPayload(payload)
-                        ?: return ByteArray(0)
-                    try {
-                        Unified.rejectBilateralByCommitment(parsed.commitment, parsed.reason ?: "")
-                    } catch (t: Throwable) {
-                        Log.w(TAG, "rejectBilateralByCommitment failed", t)
-                        ByteArray(0)
-                    }
+                        ?: throw IllegalArgumentException("rejectBilateralByCommitment: payload is not a BilateralPayload")
+                    Unified.rejectBilateralByCommitment(parsed.commitment, parsed.reason ?: "")
                 }
 
                 "cancelBilateralByCommitment" -> {
                     val parsed = BridgeEnvelopeCodec.decodeBilateralPayload(payload)
-                        ?: return ByteArray(0)
-                    try {
-                        Unified.cancelBilateralByCommitment(parsed.commitment, parsed.reason ?: "")
-                    } catch (t: Throwable) {
-                        Log.w(TAG, "cancelBilateralByCommitment failed", t)
-                        ByteArray(0)
-                    }
+                        ?: throw IllegalArgumentException("cancelBilateralByCommitment: payload is not a BilateralPayload")
+                    Unified.cancelBilateralByCommitment(parsed.commitment, parsed.reason ?: "")
                 }
 
                 // Generic Envelope v3 processing (online transfers, DBRW export, etc.)
@@ -473,23 +382,14 @@ class SinglePathWebViewBridge(private val context: Context) {
     }
 
     /** Generate a fresh BIP39 mnemonic for display/backup (canonical Genesis v2). */
-    fun generateMnemonic(): ByteArray {
-        if (!ready) {
-            Log.e(TAG, "generateMnemonic: bridge not ready")
-            return ByteArray(0)
-        }
-        return BridgeIdentityHandler.generateMnemonic()
-    }
+    fun generateMnemonic(): ByteArray = BridgeIdentityHandler.generateMnemonic()
 
     /**
      * Canonical mnemonic-rooted Genesis v2 wallet creation. The (backed-up) mnemonic is the sole
-     * root. Returns framed Envelope v3 bytes; failures may be returned as error envelopes.
+     * root. Returns framed Envelope v3 bytes: Rust's own error envelope is forwarded, and any
+     * other failure is the dispatcher's error response.
      */
     fun createGenesisV2(mnemonic: String): ByteArray {
-        if (!ready) {
-            Log.e(TAG, "createGenesisV2: bridge not ready")
-            return ByteArray(0)
-        }
         return BridgeIdentityHandler.createGenesisV2(
             prefs = prefs(),
             sdkContextInitialized = sdkContextInitialized,
