@@ -27,10 +27,10 @@ import androidx.annotation.Keep
 //   - All crypto (SPHINCS+, ML-KEM-768, DBRW) handled in Rust beneath.
 //
 // DOMAIN GROUPS:
-//   Protocol:  processEnvelopeV3, processEnvelopeV3WithAddress
+//   Protocol:  processEnvelopeV3
 //   Shared boundary: dispatchStartup, dispatchIngress
 //   Bilateral: acceptBilateralByCommitment, ...
-//   BLE:       initBleCoordinator, processBleChunk, chunkEnvelopeForBle, ...
+//   BLE:       initBleCoordinator, chunkEnvelopeForBle, ...
 //   Contacts:  removeContact, hasContactForDeviceId
 //
 // Full method list: UnifiedNativeApi.kt holds every external declaration.
@@ -118,8 +118,6 @@ object Unified {
         UnifiedNativeApi.getTransportHeadersV3()
     @Keep @JvmStatic fun processEnvelopeV3(envelope: ByteArray): ByteArray =
         UnifiedNativeApi.processEnvelopeV3(envelope)
-    @Keep @JvmStatic fun processEnvelopeV3WithAddress(envelope: ByteArray, deviceAddress: String): ByteArray =
-        UnifiedNativeApi.processEnvelopeV3WithAddress(envelope, deviceAddress)
     /**
      * Fetch all token balances (strict, protobuf-encoded).
      * Returns: ByteArray (protobuf-encoded TokenBalanceView[])
@@ -297,7 +295,7 @@ object Unified {
     
     /**
      * Check if BleFrameCoordinator has been injected and is ready to process BLE chunks.
-     * MUST be called before passing any BLE chunks to processBleChunk to avoid dropping frames.
+     * Rust builds the coordinator during SDK init once an identity exists.
      * Returns true if coordinator is ready, false otherwise.
      */
     @Keep @JvmStatic fun isBleCoordinatorReady(): Boolean = UnifiedNativeApi.isBleCoordinatorReady()
@@ -318,21 +316,6 @@ object Unified {
      */
     @Keep @JvmStatic fun detectEnvelopeFrameType(envelopeBytes: ByteArray): Int =
         UnifiedNativeApi.detectEnvelopeFrameType(envelopeBytes)
-
-    /**
-     * Process incoming BLE chunk (bilateral frame).
-     * Returns empty array if chunk is buffered (multi-chunk reassembly in progress).
-     * Returns response envelope bytes if frame is complete and processed.
-     * 
-     * IMPORTANT: Call isBleCoordinatorReady() before calling this method.
-     * If coordinator is not ready, chunks will be dropped silently.
-     */
-    /**
-     * Process incoming BLE chunk (bilateral frame) for a specific device address.
-     * NOTE: Signature updated to include deviceAddress to match JNI binding in unified_protobuf_bridge.rs
-     */
-    @Keep @JvmStatic fun processBleChunk(deviceAddress: String, chunkBytes: ByteArray): ByteArray =
-        UnifiedNativeApi.processBleChunk(deviceAddress, chunkBytes)
 
     /**
      * Returns true if the payload is a framed Envelope v3 (0x03 prefix) that expects
