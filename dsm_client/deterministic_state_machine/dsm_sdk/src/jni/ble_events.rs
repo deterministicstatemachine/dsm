@@ -542,7 +542,7 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_processBleIde
                             let confirm_event = BleEvent {
                                 ev: Some(pb::ble_event::Ev::PairingConfirm(confirm)),
                             };
-                            match build_ble_event_envelope(confirm_event) {
+                            match local_pairing_frame(confirm_event) {
                                 Ok(confirm_bytes) => {
                                     log::info!(
                                         "processBleIdentityEnvelope: built BlePairingConfirm ({} bytes) for {}",
@@ -748,7 +748,26 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_finalizeScann
     )
 }
 
-/// Build a framed Envelope with BleEvent as the direct payload.
+/// A BLE pairing frame from this device to a peer: an addressed envelope
+/// under this device's id and genesis (see `bilateral_envelope::pairing_frame`).
+/// An error while this device has no identity.
+fn local_pairing_frame(ble_event: BleEvent) -> Result<Vec<u8>, String> {
+    let device_id: [u8; 32] = crate::sdk::app_state::AppState::get_device_id()
+        .and_then(|d| <[u8; 32]>::try_from(d.as_slice()).ok())
+        .ok_or("the local device id is not set")?;
+    let genesis_hash: [u8; 32] = crate::sdk::app_state::AppState::get_genesis_hash()
+        .and_then(|g| <[u8; 32]>::try_from(g.as_slice()).ok())
+        .ok_or("the local genesis is not set")?;
+    Ok(crate::bluetooth::bilateral_envelope::pairing_frame(
+        &device_id,
+        &genesis_hash,
+        ble_event,
+    ))
+}
+
+/// Build a framed Envelope with BleEvent as the direct payload, for the
+/// WebView (a local answer: no headers, no message id). Never a frame sent to
+/// a peer — those are `local_pairing_frame`.
 /// Uses the dedicated Payload::BleEvent field (proto schema v2.4+).
 pub(crate) fn build_ble_event_envelope(ble_event: BleEvent) -> Result<Vec<u8>, String> {
     let envelope =
@@ -884,7 +903,7 @@ fn process_deferred_identity(
             let ble_event = BleEvent {
                 ev: Some(pb::ble_event::Ev::PairingAccept(accept)),
             };
-            match build_ble_event_envelope(ble_event) {
+            match local_pairing_frame(ble_event) {
                 Ok(ack_bytes) => {
                     log::info!(
                         "process_deferred_identity: built ACK ({} bytes), delivering to Kotlin for {}",
@@ -1277,7 +1296,7 @@ fn local_identity_write_back(ble_address: &str) -> Vec<u8> {
             let ble_event = BleEvent {
                 ev: Some(pb::ble_event::Ev::IdentityObserved(local_obs)),
             };
-            build_ble_event_envelope(ble_event).unwrap_or_else(|e| {
+            local_pairing_frame(ble_event).unwrap_or_else(|e| {
                 log::warn!("processGattIdentityRead: write-back envelope build failed: {e}");
                 Vec::new()
             })
