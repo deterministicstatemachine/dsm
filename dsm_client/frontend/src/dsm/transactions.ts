@@ -259,14 +259,13 @@ export async function offlineSend(transfer: GenericTransaction): Promise<Generic
 
     try {
       const p = env1.payload;
-      if (p.case === 'bilateralPrepareResponse') {
-        const resp = p.value as pb.BilateralPrepareResponse;
-        const h = resp.commitmentHash?.v;
+      // The SDK's own answer: the prepare went out and the proposal is named by
+      // its commitment. The peer's response, or its reject, arrives later as a
+      // BLE event, never as this answer.
+      if (p.case === 'bilateralTransferResponse') {
+        const resp = p.value as pb.BilateralTransferResponse;
+        const h = resp.transactionHash?.v;
         if (h instanceof Uint8Array && h.length === 32) commitmentHash = h;
-      } else if (p.case === 'bilateralPrepareReject') {
-        const rej = p.value as pb.BilateralPrepareReject;
-        finish({ accepted: false, result: rej?.reason || 'offlineSend: rejected' });
-        return { accepted: false, result: rej?.reason || 'offlineSend: rejected' };
       } else {
         finish({ accepted: false, result: `offlineSend: unexpected payload case ${p.case}` });
         return { accepted: false, result: `offlineSend: unexpected payload case ${p.case}` };
