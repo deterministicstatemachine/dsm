@@ -3,21 +3,18 @@
 //! # DSM SDK — Platform Integration Layer
 //!
 //! The `dsm_sdk` crate bridges the pure, deterministic [`dsm`] core library to
-//! platform-specific runtimes (Android/JNI, iOS/FFI, desktop test harnesses).
+//! platform-specific runtimes (Android/JNI, desktop test harnesses).
 //!
 //! ## Architecture: One Agnostic Ingress
 //!
 //! The crate is organised into three tiers:
 //!
-//! 1. **ABI shims** - platform-specific marshalling only, no semantic logic:
+//! 1. **ABI shim** - platform-specific marshalling only, no semantic logic:
 //!    - Android: `jni/unified_protobuf_bridge.rs` - `extern "system"` JNI exports
-//!    - iOS: `platform/ios/transport.rs` - `extern "C"` FFI exports
 //!
 //! 2. **Shared ingress** (`ingress`) - the single semantic boundary:
-//!    - Both shims translate ABI inputs into [`generated::IngressRequest`] and
-//!      call [`ingress::dispatch_ingress`].
-//!    - Equivalent Android and iOS operations map to the same `IngressRequest`
-//!      and produce the same `IngressResponse`.
+//!    - The shim translates ABI inputs into [`generated::IngressRequest`] and
+//!      calls [`ingress::dispatch_ingress`].
 //!
 //! 3. **SDK internals** - `sdk`, `handlers`, `bluetooth`, `bridge`, etc.
 //!
@@ -32,8 +29,6 @@
 //!                                              |
 //!                                              v
 //!                                        IngressRequest
-//!                                              |
-//! iOS:     Swift caller -> FFI shim -----------+
 //!                                              |
 //!                                              v
 //!                              ingress::dispatch_ingress
@@ -167,15 +162,6 @@ pub use dsm::commitments;
 
 pub use logging::*;
 pub mod bluetooth;
-pub mod platform;
-
-// iOS protobuf-native transport functions (extern "C" for Swift bridging)
-#[cfg(target_os = "ios")]
-pub use platform::ios::transport::{
-    dsm_configure_env, dsm_dispatch_ingress_request, dsm_dispatch_startup_request,
-    dsm_free_envelope_bytes, dsm_init_dsm_sdk, dsm_initialize_sdk, dsm_initialize_sdk_context,
-    dsm_process_envelope_protobuf, dsm_set_storage_base_dir,
-};
 
 pub mod runtime;
 
