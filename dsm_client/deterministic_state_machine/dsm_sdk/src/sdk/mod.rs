@@ -19,18 +19,15 @@
 //! * `contact_sdk`: Manages peer relationships and communications
 //! * `wallet_sdk`: Key management and secure storage capabilities
 //!
-pub mod bootstrap;
 pub mod economic_admission_flow;
 pub mod economic_registers;
 pub mod faucet_claim_flow;
-pub mod kv;
 pub mod native_reserve;
 pub mod runtime_config;
 pub mod sdk_context;
 
 // Re-export SdkContext for convenient access
 pub use sdk_context::SdkContext;
-pub use bootstrap::SdkBootstrap;
 
 // Core SDK modules - fundamental building blocks
 

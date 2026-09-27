@@ -968,7 +968,9 @@ impl PairingOrchestrator {
         // Stop the pairing scan on loop exit so it does not linger ("stuck
         // scanning") once the peer has completed pairing. Advertising follows
         // the identity and is not the loop's.
-        let _ = self.stop_ble_discovery().await;
+        if let Err(e) = self.stop_ble_discovery().await {
+            log::warn!("[PairingOrchestrator] loop ended with the scan not stopped: {e}");
+        }
 
         self.loop_running.store(false, Ordering::SeqCst);
         log::info!("[PairingOrchestrator] start_pairing_all_unpaired: loop ended");
@@ -1166,9 +1168,17 @@ impl PairingOrchestrator {
         let class = find_class_with_app_loader(&mut env, "com/dsm/wallet/bridge/Unified")
             .map_err(|e| format!("Failed to find Unified class: {e:?}"))?;
 
-        let _ = env.call_static_method(&class, "stopBlePairingScan", "()Z", &[]);
+        let stopped = env
+            .call_static_method(&class, "stopBlePairingScan", "()Z", &[])
+            .and_then(|v| v.z())
+            .map_err(|e| format!("Unified.stopBlePairingScan failed: {e:?}"))?;
+        if !stopped {
+            return Err(
+                "Unified.stopBlePairingScan answered false: the scan was not stopped".to_string(),
+            );
+        }
 
-        log::info!("[PairingOrchestrator] stop_ble_discovery: stopped scan");
+        log::info!("[PairingOrchestrator] stop_ble_discovery: scan stopped");
         Ok(())
     }
 

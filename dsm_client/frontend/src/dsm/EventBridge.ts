@@ -247,21 +247,6 @@ export function initializeEventBridge(): void {
         return;
       }
 
-      if (topic === 'dsm-biometric-result') {
-        // Payload: [0x01] = success, [0x00][u16 BE errorCode][UTF-8 message] = error
-        try {
-          const success = bytes.length > 0 && bytes[0] === 0x01;
-          const detail: { success: boolean; errorCode?: number; error?: string } = { success };
-          if (!success && bytes.length >= 3) {
-            detail.errorCode = (bytes[1] << 8) | bytes[2];
-            detail.error = bytes.length > 3 ? new TextDecoder().decode(bytes.subarray(3)) : '';
-          }
-          window.dispatchEvent(new CustomEvent('dsm-biometric-result', { detail }));
-        } catch {}
-        emit(topic, bytes);
-        return;
-      }
-
       if (topic === 'dsm-env-config-error') {
         // Payload: UTF-8 "type|message" or "type|message|help"
         try {

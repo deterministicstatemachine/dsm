@@ -44,7 +44,6 @@ import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.VisibleForTesting
 import androidx.appcompat.app.AppCompatActivity
-import androidx.biometric.BiometricPrompt
 import androidx.core.content.ContextCompat
 import androidx.core.net.toUri
 import androidx.core.view.WindowCompat
@@ -62,11 +61,9 @@ import com.dsm.wallet.bridge.BleEventRelay
 import com.dsm.wallet.bridge.SinglePathWebViewBridge
 import com.dsm.wallet.bridge.Unified
 import com.dsm.wallet.bridge.ble.BleCoordinator
-import com.dsm.wallet.mcp.McpService
 import com.dsm.wallet.permissions.BluetoothPermissionHelper
 import com.dsm.wallet.service.BleBackgroundService
 import com.dsm.wallet.session.NativeFirstCutoverReset
-import dsm.types.proto.BiometricAuthorizeResult
 import dsm.types.proto.NativeHostEvent
 import dsm.types.proto.NativeHostEventKind
 import dsm.types.proto.QrScanResultPayload
@@ -82,7 +79,6 @@ import java.net.URL
 import java.util.Locale
 
 class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
-    @Volatile private var mcpStarted = false
 
     // Dedicated single-thread executor for genesis + heavy JNI work, keeping the main thread
     // free (Genesis v2 is mnemonic-rooted and fast — there is no silicon enrollment).
@@ -98,7 +94,6 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
             Thread(r, "dsm-bridge-worker").also { it.isDaemon = true }
         }
 
-    private val cameraPermCode = 2001
     private val runtimePermCode = 2002
     lateinit var btPermLauncher: ActivityResultLauncher<Array<String>> 
     private var btPermsRequested = false
@@ -747,7 +742,7 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
             .setBlePermissions(NativeFirstCutoverReset.hasBlePermissions(this))
             .setBleScanning(service?.isScanningActive() == true)
             .setBleAdvertising(service?.isAdvertisingActive() == true)
-            .setQrAvailable(true)
+            .setQrAvailable(packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_CAMERA_ANY))
             .setQrActive(qrState.effectiveQrActive())
             .setCameraPermission(NativeFirstCutoverReset.hasCameraPermission(this))
             .setBatteryCharging(batteryCharging)
@@ -1022,36 +1017,6 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
 
             Log.i(tag, "DSM bridge: parsed messageId=$messageId method='$method' bodyBytes=${body.size}")
 
-            // Biometric auth is async — return ACK immediately; result arrives via binary event.
-            if (method == "biometric.auth") {
-                Log.i(tag, "DSM bridge: biometric.auth — launching BiometricPrompt")
-                val ackResponse = ByteArray(8)
-                java.nio.ByteBuffer.wrap(ackResponse, 0, 8).order(java.nio.ByteOrder.BIG_ENDIAN).putLong(messageId)
-                if (WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_PORT_POST_MESSAGE)) {
-                    port.postMessage(WebMessageCompat(ackResponse))
-                }
-                runOnUiThread { showBiometricPrompt() }
-                return
-            }
-
-            // System bar color update: payload is UTF-8 "bgHex|darkHex".
-            if (method == "setSystemBarColors") {
-                try {
-                    val parts = String(body, Charsets.UTF_8).split("|", limit = 2)
-                    if (parts.size == 2) {
-                        applySystemBarColors(parts[0], parts[1])
-                    }
-                } catch (t: Throwable) {
-                    Log.w(tag, "DSM bridge: setSystemBarColors failed: ${t.message}")
-                }
-                val ackResponse = ByteArray(8)
-                java.nio.ByteBuffer.wrap(ackResponse, 0, 8).order(java.nio.ByteOrder.BIG_ENDIAN).putLong(messageId)
-                if (WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_PORT_POST_MESSAGE)) {
-                    port.postMessage(WebMessageCompat(ackResponse))
-                }
-                return
-            }
-
             // Wallet creation must publish a fresh session snapshot after completing — without it
             // React never sees phase=wallet_ready and the UI sits on the start screen despite the
             // wallet existing.
@@ -1171,18 +1136,6 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         } else {
             ensureBluetoothEnabled()
         }
-    }
-
-    fun requestNamedPermissionsFromUi(permissions: Array<String>) {
-        val needed = permissions
-            .map { it.trim() }
-            .filter { it.isNotEmpty() }
-            .filter { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }
-            .toTypedArray()
-        if (needed.isEmpty()) {
-            return
-        }
-        requestPermissions(needed, cameraPermCode)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -1394,8 +1347,6 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
 
         initDsmAndSignalReady()
         handleBackPress()
-        
-        com.dsm.wallet.EventPoller.start()
     }
 
     override fun onResume() {
@@ -1440,54 +1391,6 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         // Rust receives app_foreground=false via publishSessionState and decides lock policy
         publishSessionState("pause")
         // Do not stop advertising here; background service owns BLE state.
-    }
-
-    /**
-     * System bars are permanently near-black (#0D0D0D), set once in onCreate().
-     * Bridge RPC "setSystemBarColors" still routes here but is intentionally a no-op.
-     */
-    fun applySystemBarColors(@Suppress("UNUSED_PARAMETER") bgHex: String, @Suppress("UNUSED_PARAMETER") darkHex: String) {
-        // No-op: bars are permanently dark. Kept so the bridge route doesn't error.
-    }
-
-    fun showBiometricPrompt(
-        promptTitle: String = "DSM Wallet",
-        promptSubtitle: String = "Authenticate to unlock",
-        negativeText: String = "Use PIN / Combo",
-    ) {
-        val executor = ContextCompat.getMainExecutor(this)
-        val callback = object : BiometricPrompt.AuthenticationCallback() {
-            override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
-                dispatchNativeHostEventOnUi(
-                    NativeHostEventKind.NATIVE_HOST_EVENT_KIND_BIOMETRIC_RESULT,
-                    BiometricAuthorizeResult.newBuilder()
-                        .setSuccess(true)
-                        .build()
-                        .toByteArray(),
-                )
-            }
-            override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
-                dispatchNativeHostEventOnUi(
-                    NativeHostEventKind.NATIVE_HOST_EVENT_KIND_BIOMETRIC_RESULT,
-                    BiometricAuthorizeResult.newBuilder()
-                        .setSuccess(false)
-                        .setErrorCode(errorCode)
-                        .setErrorMessage(errString.toString())
-                        .build()
-                        .toByteArray(),
-                )
-            }
-            override fun onAuthenticationFailed() {
-                // Finger not recognised — BiometricPrompt shows retry UI automatically.
-            }
-        }
-        val prompt = BiometricPrompt(this, executor, callback)
-        val promptInfo = BiometricPrompt.PromptInfo.Builder()
-            .setTitle(if (promptTitle.isBlank()) "DSM Wallet" else promptTitle)
-            .setSubtitle(if (promptSubtitle.isBlank()) "Authenticate to unlock" else promptSubtitle)
-            .setNegativeButtonText(if (negativeText.isBlank()) "Use PIN / Combo" else negativeText)
-            .build()
-        prompt.authenticate(promptInfo)
     }
 
     override fun onStart() {
@@ -1542,14 +1445,6 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         }
     }
 
-    override fun onPostResume() {
-        super.onPostResume()
-        if (!mcpStarted) {
-            startForegroundMcp()
-            mcpStarted = true
-        }
-    }
-    
     override fun onDestroy() {
         if (activeInstance?.get() === this) {
             activeInstance = null
@@ -1557,7 +1452,6 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         unregisterBatteryReceiver()
         unregisterBluetoothStateReceiver()
         super.onDestroy()
-        com.dsm.wallet.EventPoller.stop()
     }
 
 
@@ -1581,9 +1475,6 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         } catch (_: Throwable) {}
     }
 
-    private fun startForegroundMcp() {
-        ContextCompat.startForegroundService(this, Intent(this, McpService::class.java))
-    }
 
 
     private val permLauncher = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants ->
@@ -1799,20 +1690,6 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
                     Log.w(tag, "initDsmAndSignalReady: getAppRouterStatus() not available", t)
                 }
 
-                try {
-                    val deviceIdBin = try { Unified.getDeviceIdBin() } catch (_: Throwable) { byteArrayOf() }
-                    val genesis = ByteArray(32)
-                    val tip = ByteArray(32)
-                    if (deviceIdBin.size == 32) {
-                        val b0x = Unified.computeB0xAddress(genesis, deviceIdBin, tip)
-                        Log.i(tag, "initDsmAndSignalReady: computeB0xAddress (diag) = $b0x")
-                    } else {
-                        Log.i(tag, "initDsmAndSignalReady: computeB0xAddress skipped (missing device id)")
-                    }
-                } catch (t: Throwable) {
-                    Log.w(tag, "initDsmAndSignalReady: computeB0xAddress failed", t)
-                }
-
                 // CRITICAL: Bootstrap FIRST (background thread) — restores identity + SDK
                 // context that bilateral SDK init depends on.
                 // All heavy JNI calls stay here; only lightweight signals go to UI thread.
@@ -1889,7 +1766,7 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == runtimePermCode || requestCode == cameraPermCode) {
+        if (requestCode == runtimePermCode) {
             val summary = permissions.zip(grantResults.toTypedArray()).joinToString(", ") { (p, r) ->
                 val state = if (r == PackageManager.PERMISSION_GRANTED) "granted" else "denied"
                 "$p=$state"
@@ -1988,8 +1865,13 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
                 return false
             }
 
+            // The page's console reaches logcat in debug builds only: a release
+            // build's logcat is readable by other apps with the permission, and
+            // the page logs what it is doing with the wallet.
             override fun onConsoleMessage(consoleMessage: ConsoleMessage?): Boolean {
-                consoleMessage?.let { Log.i("WebViewConsole", it.message()) }
+                if (BuildConfig.DEBUG) {
+                    consoleMessage?.let { Log.i("WebViewConsole", it.message()) }
+                }
                 return true
             }
 

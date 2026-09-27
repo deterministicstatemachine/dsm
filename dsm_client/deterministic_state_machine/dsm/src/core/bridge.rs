@@ -606,79 +606,16 @@ pub fn handle_envelope_universal(env_bytes: &[u8]) -> Vec<u8> {
             debug_b32: "".to_string(),
         }),
 
-        // App state helper (SDK should own this; we only route if a router is present).
-        Some(gp::envelope::Payload::AppStateRequest(req)) => match req.operation.as_str() {
-            "get" => {
-                if let Some(router) = app_router() {
-                    // Route as a query: path=req.key, params=[]
-                    match router.handle_query(&req.key, &[]) {
-                        Ok(_bytes) => {
-                            gp::envelope::Payload::AppStateResponse(gp::AppStateResponse {
-                                key: req.key,
-                                value: Some(
-                                    "App state operations must be handled by SDK layer".to_string(),
-                                ),
-                            })
-                        }
-                        Err(e) => gp::envelope::Payload::Error(gp::Error {
-                            code: 500,
-                            message: format!("App state get failed: {e}"),
-                            context: vec![],
-                            source_tag: 10,
-                            is_recoverable: false,
-                            debug_b32: "".to_string(),
-                        }),
-                    }
-                } else {
-                    gp::envelope::Payload::Error(gp::Error {
-                        code: 501,
-                        message: "App state operations require the DSM SDK runtime".to_string(),
-                        context: vec![],
-                        source_tag: 10,
-                        is_recoverable: false,
-                        debug_b32: "".to_string(),
-                    })
-                }
-            }
-            "set" => {
-                if let Some(router) = app_router() {
-                    let value_bytes = req.value.as_bytes();
-                    match router.handle_invoke(&req.key, value_bytes) {
-                        Ok(_body) => {
-                            gp::envelope::Payload::AppStateResponse(gp::AppStateResponse {
-                                key: req.key,
-                                value: Some("App state set completed".to_string()),
-                            })
-                        }
-                        Err(e) => gp::envelope::Payload::Error(gp::Error {
-                            code: 500,
-                            message: format!("App state set failed: {e}"),
-                            context: vec![],
-                            source_tag: 10,
-                            is_recoverable: false,
-                            debug_b32: "".to_string(),
-                        }),
-                    }
-                } else {
-                    gp::envelope::Payload::Error(gp::Error {
-                        code: 501,
-                        message: "App state operations require the DSM SDK runtime".to_string(),
-                        context: vec![],
-                        source_tag: 10,
-                        is_recoverable: false,
-                        debug_b32: "".to_string(),
-                    })
-                }
-            }
-            _ => gp::envelope::Payload::Error(gp::Error {
-                code: 400,
-                message: format!("Unsupported app state operation: {}", req.operation),
-                context: vec![],
-                source_tag: 10,
-                is_recoverable: false,
-                debug_b32: "".to_string(),
-            }),
-        },
+        // App state is the SDK router's (prefs.*, recovery.*); the Core holds none.
+        Some(gp::envelope::Payload::AppStateRequest(_)) => gp::envelope::Payload::Error(gp::Error {
+            code: 400,
+            message: "AppStateRequest is not a Core operation: app state is answered by the SDK router"
+                .to_string(),
+            context: vec![],
+            source_tag: 10,
+            is_recoverable: false,
+            debug_b32: "".to_string(),
+        }),
 
         Some(gp::envelope::Payload::AppStateResponse(_)) => {
             gp::envelope::Payload::Error(gp::Error {

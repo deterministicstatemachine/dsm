@@ -5,20 +5,20 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-class SinglePathWebViewBridgeStrictRawTest {
+class SinglePathWebViewBridgeErrorResponseTest {
 
     @Test
-    fun handleBinaryRpcRawStrictThrowsDecodedBridgeError() {
-        val err = try {
-            SinglePathWebViewBridge.handleBinaryRpcRawStrict("nativeBoundaryIngress", ByteArray(0))
-            null
-        } catch (e: IllegalStateException) {
-            e
-        }
+    fun aFailedDispatchAnswersADecodableErrorWithItsReason() {
+        // No bridge instance exists in a unit test: the dispatcher answers ERROR_BRIDGE_NOT_INITIALIZED.
+        val response = SinglePathWebViewBridge.handleBinaryRpc("nativeBoundaryIngress", ByteArray(0))
+        val (isSuccess, payload) = BridgeEnvelopeCodec.parseEnvelopeResponse(response)
+        val err = BridgeEnvelopeCodec.decodeBridgeRpcError(payload)
 
-        assertNotNull("expected strict raw bridge call to throw", err)
+        assertEquals(false, isSuccess)
+        assertNotNull("expected a decodable bridge error", err)
+        assertEquals(1, err?.errorCode)
         assertTrue(
-            "expected bridge not initialized message, got: ${err?.message}",
+            "expected the reason in the message, got: ${err?.message}",
             err?.message?.contains("Bridge not initialized") == true
         )
     }

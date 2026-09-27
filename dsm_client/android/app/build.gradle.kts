@@ -276,8 +276,6 @@ tasks.register("failOnJsonOrB64") {
         fileTree("src").matching {
             include("**/*.kt", "**/*.java")
             exclude("**/build/**")
-            // Allow JSON in infrastructure plumbing (event dispatch, MCP serialization)
-            exclude("**/EventPoller.kt", "**/McpService.kt")
         }.files.forEach { f ->
             val t = f.readText()
             if (rx.containsMatchIn(t)) {
@@ -487,7 +485,6 @@ dependencies {
     // Reverted upgrades: latest versions require AGP >=8.6 & compileSdk 36.
     // Keep previous stable versions until AGP/toolchain bump planned.
     implementation("androidx.core:core-ktx:1.12.0")
-    implementation("androidx.biometric:biometric:1.1.0")
     // Phase 13: androidx.security:security-crypto dependency removed.
     // The only consumer was `security/CdbrwKeystoreSalt.kt` which
     // wrapped the now-defunct random DBRW salt in

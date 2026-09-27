@@ -14,7 +14,7 @@ import org.junit.runner.RunWith
 /**
  * Instrumentation test for BleEventRelay SQLite persistence:
  * - Events persist across process death
- * - Flush replays events and prunes
+ * - A flush deletes only what the bridge accepted; a failed delivery leaves the rows
  * - Cap enforcement (200 rows)
  */
 @RunWith(AndroidJUnit4::class)
@@ -48,7 +48,7 @@ class BleEventRelayPersistenceTest {
     }
 
     @Test
-    fun flushReplaysAndPrunesEvents() {
+    fun flushLeavesEventsWhenDeliveryFails() {
         // Given: 3 persisted events
         for (i in 1..3) {
             val envelope = "event$i".toByteArray(Charsets.ISO_8859_1)
@@ -57,14 +57,12 @@ class BleEventRelayPersistenceTest {
         assertEquals(3, BleEventRelay.getPendingCount(ctx))
 
         // When: the bridge is ready and we flush. There is no WebView in an
-        // instrumented process, so delivery throws and the relay DROPS the
-        // replayed event (persistIfUnavailable = false) instead of re-inserting
-        // it — which is exactly what lets the row count reach zero.
+        // instrumented process, so every delivery fails.
         BleEventRelay.markBridgeReady(ctx)
         BleEventRelay.flushPersisted(ctx)
 
-        // Then: all events flushed and pruned
-        assertEquals(0, BleEventRelay.getPendingCount(ctx))
+        // Then: nothing is dropped — a row leaves only once the bridge accepted it
+        assertEquals(3, BleEventRelay.getPendingCount(ctx))
     }
 
     @Test
@@ -93,24 +91,5 @@ class BleEventRelayPersistenceTest {
         // Then: only last 200 kept (FIFO pruning)
         val count = BleEventRelay.getPendingCount(ctx)
         assertTrue("Expected ~200, got $count", count <= 200)
-    }
-
-    @Test
-    fun transactionRollbackOnError() {
-        // Given: 2 persisted events
-        for (i in 1..2) {
-            val envelope = "event$i".toByteArray(Charsets.ISO_8859_1)
-            BleEventRelay.testPersistDirect(ctx, envelope)
-        }
-        assertEquals(2, BleEventRelay.getPendingCount(ctx))
-
-        // When: flush with the bridge ready (testing a mid-transaction DB
-        // failure would need a fault-injecting database; here the flush must
-        // complete and commit as one transaction)
-        BleEventRelay.markBridgeReady(ctx)
-        BleEventRelay.flushPersisted(ctx)
-
-        // Then: events cleared
-        assertEquals(0, BleEventRelay.getPendingCount(ctx))
     }
 }

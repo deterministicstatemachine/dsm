@@ -6,7 +6,7 @@ import { bridgeEvents } from '../bridge/bridgeEvents';
 import logger from '../utils/logger';
 import type { AndroidBridgeV3 } from './bridgeTypes';
 import { bridgeGate } from './BridgeGate';
-import { BiometricAuthorizeResult, NativeHostEvent, NativeHostEventKind, NativeHostRequest, NativeHostRequestKind, NativeHostResponse, NfcTagWritePayload, NfcTagWriteResult, QrScanResultPayload } from '../proto/dsm_app_pb';
+import { NativeHostEvent, NativeHostEventKind, NativeHostRequest, NativeHostRequestKind, NativeHostResponse, NfcTagWritePayload, NfcTagWriteResult, QrScanResultPayload } from '../proto/dsm_app_pb';
 
 function mustBridge(): AndroidBridgeV3 {
   const bridge = getBridgeInstance();
@@ -107,24 +107,6 @@ export function decodeNativeHostEventToLegacyTopic(eventBytes: Uint8Array): { to
         return { topic: 'qr_scan_result', payload: new TextEncoder().encode(payload.textUtf8) };
       } catch (error) {
         logger.warn('[NativeHostBridge] malformed QR host event', error);
-        return null;
-      }
-    }
-    case NativeHostEventKind.BIOMETRIC_RESULT: {
-      try {
-        const payload = BiometricAuthorizeResult.fromBinary(event.payload);
-        if (payload.success) {
-          return { topic: 'dsm-biometric-result', payload: new Uint8Array([0x01]) };
-        }
-        const msgBytes = new TextEncoder().encode(payload.errorMessage || '');
-        const out = new Uint8Array(3 + msgBytes.length);
-        out[0] = 0x00;
-        out[1] = (payload.errorCode >>> 8) & 0xff;
-        out[2] = payload.errorCode & 0xff;
-        out.set(msgBytes, 3);
-        return { topic: 'dsm-biometric-result', payload: out };
-      } catch (error) {
-        logger.warn('[NativeHostBridge] malformed biometric host event', error);
         return null;
       }
     }

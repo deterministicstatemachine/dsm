@@ -25,56 +25,6 @@ pub mod pb {
     pub use self::dsm::*;
 }
 
-/* ---------------------- Normative v3 authoring helpers --------------------- */
-
-// The trimming shim is DELETED. It called `tag.trim_end_matches('\0')` before
-// delegating, so a domain spelled "X\0" silently became domain "X" — two
-// declared domains sharing one digest space, and the same tag hashing
-// differently in the SDK than in core. Callers now use
-// `dsm::crypto::blake3::domain_hash_bytes` directly, which appends exactly one
-// delimiter and never normalizes the tag.
-// See docs/adr/0001-three-domain-separation-constructions.md.
-
-/// Author a ContactAddV3 request for a new peer.
-///
-/// This is signature-free authoring; device-side authenticity is provided
-/// by signing the `ContactAddV3` deterministic bytes with SPHINCS+ in the
-/// envelope layer.
-pub fn author_contact_add(
-    author_id: &[u8; 32],
-    device_id: &[u8; 32],
-    counterparty_tip: &[u8; 32],
-) -> pb::ContactAddV3 {
-    pb::ContactAddV3 {
-        author_device_id: author_id.to_vec(),
-        contact_device_id: device_id.to_vec(),
-        contact_chain_tip: counterparty_tip.to_vec(),
-        // Root of author's contact stream (optional)
-        parent_digest: Vec::new(),
-    }
-}
-
-/// Author a ContactAcceptV3 response following a received add request.
-///
-/// Computes add_digest = H("DSM/contact/add" \0 || ProtoDet(ContactAddV3)).
-pub fn author_contact_accept(
-    accepter_id: &[u8; 32],
-    add_req: &pb::ContactAddV3,
-    local_tip: &[u8; 32],
-) -> pb::ContactAcceptV3 {
-    let add_bytes = add_req.encode_to_vec();
-    let add_digest = dsm::crypto::blake3::domain_hash_bytes(
-        dsm::common::domain_tags::TAG_DSM_CONTACT_ADD,
-        &add_bytes,
-    );
-
-    pb::ContactAcceptV3 {
-        accepter_device_id: accepter_id.to_vec(),
-        add_digest: add_digest.to_vec(),
-        local_chain_tip: local_tip.to_vec(),
-    }
-}
-
 /* ---------------------------- Hash/Int wrappers ---------------------------- */
 
 impl From<[u8; 32]> for pb::Hash32 {
@@ -382,70 +332,6 @@ impl From<pb::Error> for TransportError {
             recoverable: e.is_recoverable,
             context: e.context,
         }
-    }
-}
-
-// state_to_wire(&State) → pb::StateWire deleted: zero Rust callers.
-// The pb::StateWire proto type is still generated and consumed by the
-// frontend JS, but the Rust-side conversion was dead — the function had
-// `state_number: 0` hardcoded after §4.3, and the only legitimate use of
-// the wire format is from the JS layer building it directly from received
-// bytes.
-
-/// Minimal canonical verb for Operation variants (no serde; stable strings).
-/// Used by `make_state_transition_proto` below.
-fn canonical_operation_name(op: &Operation) -> String {
-    use Operation::*;
-    match op {
-        Create { .. } => "CREATE",
-        Transfer { .. } => "TRANSFER",
-        AddRelationship { .. } => "ADD_REL",
-        // …extend with all variants, keep ALLCAPS ASCII and stable.
-        _ => "CUSTOM",
-    }
-    .to_string()
-}
-
-/* -------------------------- Transitions / Results ------------------------- */
-
-/// Build a `StateTransitionProto` deterministically from a domain transition.
-/// Make sure the `balance_delta` list is sorted by token_id.
-#[allow(clippy::too_many_arguments)]
-pub fn make_state_transition_proto(
-    actor_id: &[u8],
-    counterparty_id: &[u8],
-    bilateral_chain_id: &str,
-    prev_hash: [u8; 32],
-    new_hash: [u8; 32],
-    state_number: u64,
-    operation: &Operation,
-    balance_delta: &[(String, i128)],
-    tx_dir: &str, // e.g. "send" | "recv" (stable ASCII)
-    signature: &[u8],
-) -> pb::StateTransitionProto {
-    let mut deltas = balance_delta.to_vec();
-    deltas.sort_by(|(a, _), (b, _)| a.cmp(b));
-    let balance_delta = deltas
-        .into_iter()
-        .map(|(token_id, d)| pb::BalanceDeltaEntry {
-            token_id,
-            delta: Some(pb::S128 {
-                le: d.to_le_bytes().to_vec(),
-            }),
-        })
-        .collect();
-
-    pb::StateTransitionProto {
-        device_id: actor_id.to_vec(),
-        counterparty_id: counterparty_id.to_vec(),
-        bilateral_chain_id: bilateral_chain_id.to_string(),
-        prev_state_hash: prev_hash.to_vec(),
-        new_state_hash: new_hash.to_vec(),
-        state_number,
-        operation: canonical_operation_name(operation),
-        balance_delta,
-        signature: signature.to_vec(),
-        transaction_direction: tx_dir.to_string(),
     }
 }
 

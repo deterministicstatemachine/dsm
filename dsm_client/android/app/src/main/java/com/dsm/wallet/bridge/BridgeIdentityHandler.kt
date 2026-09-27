@@ -55,11 +55,7 @@ internal object BridgeIdentityHandler {
         } else {
             envelopeBytes
         }
-        return try {
-            Unified.isErrorEnvelope(rawEnvelope)
-        } catch (_: Throwable) {
-            0
-        }
+        return Unified.isErrorEnvelope(rawEnvelope)
     }
 
     /** Dispatch a router query through the native ingress boundary, returning the raw ok-bytes. */
@@ -173,10 +169,7 @@ internal object BridgeIdentityHandler {
         keyGenesisEnvelope: String,
         mnemonic: String,
     ): ByteArray {
-        if (mnemonic.trim().isEmpty()) {
-            Log.e(logTag, "createGenesisV2: mnemonic is required")
-            return ByteArray(0)
-        }
+        require(mnemonic.isNotBlank()) { "createGenesisV2: mnemonic is required" }
         return try {
             val req = WalletCreateGenesisV2Request.newBuilder()
                 .setMnemonic(mnemonic)
@@ -218,10 +211,7 @@ internal object BridgeIdentityHandler {
                 keyGenesisEnvelope = keyGenesisEnvelope,
                 logTag = logTag,
             )
-            if (t is DsmNativeException) {
-                throw t
-            }
-            ByteArray(0)
+            throw t
         }
     }
 

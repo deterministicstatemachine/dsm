@@ -195,7 +195,7 @@ export async function offlineSend(transfer: GenericTransaction): Promise<Generic
         finish({
           accepted: false,
           open: true,
-          result: 'The transfer is still open. It completes when the two appliances are together again; Pending transfers shows it.',
+          result: 'The transfer is still open. It completes when the two appliances are together again.',
         });
         return;
       }

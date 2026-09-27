@@ -56,11 +56,9 @@ internal object UnifiedNativeApi {
     @Keep @JvmStatic external fun getTransportHeadersV3Status(): Byte
     @Keep @JvmStatic external fun getTransportHeadersV3(): ByteArray
     @Keep @JvmStatic external fun processEnvelopeV3(envelope: ByteArray): ByteArray
-    @Keep @JvmStatic external fun processEnvelopeV3WithAddress(envelope: ByteArray, deviceAddress: String): ByteArray
     @Keep @JvmStatic external fun getAllBalancesStrict(): ByteArray
     @Keep @JvmStatic external fun ensureAppRouterInstalled(): Boolean
     @Keep @JvmStatic external fun getAppRouterStatus(): Int
-    @Keep @JvmStatic external fun computeB0xAddress(genesis: ByteArray, deviceId: ByteArray, tip: ByteArray): String
     // C-DBRW JNI surface removed: Kotlin is transport-only. All C-DBRW state —
     // enrollment (Algorithm 6.1), challenge/response (Algorithm 3), entropy
     // health, signing, verifier key mgmt — is now reached exclusively through
@@ -76,7 +74,6 @@ internal object UnifiedNativeApi {
     @Keep @JvmStatic external fun removeContact(contactId: String): Byte
     @Keep @JvmStatic external fun isBleCoordinatorReady(): Boolean
     @Keep @JvmStatic external fun detectEnvelopeFrameType(envelopeBytes: ByteArray): Int
-    @Keep @JvmStatic external fun processBleChunk(deviceAddress: String, chunkBytes: ByteArray): ByteArray
     /** Returns true if payload is a framed Envelope v3 that expects a BLE protocol ACK. */
     @Keep @JvmStatic external fun requiresBleAck(payloadBytes: ByteArray): Boolean
     /** Unified BLE incoming data router. Returns serialized BleIncomingDataResponse. */
