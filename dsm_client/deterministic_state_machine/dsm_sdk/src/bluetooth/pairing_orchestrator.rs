@@ -93,10 +93,9 @@ impl PairingOrchestrator {
         self.state_change.notify_waiters();
     }
 
-    /// Initiate pairing for a specific contact
-    ///
-    /// Frontend may call this, but pairing can also start implicitly when identity is observed.
-    /// We do not gate on any prior online state; we simply spin up a session and begin discovery.
+    /// Open a pairing session for a contact. The pairing loop opens one per
+    /// unpaired contact and then asks the radio for what its sessions need
+    /// (`follow_pairing_radio`); opening a session requests nothing of the radio.
     ///
     /// Returns the deterministic role:
     /// - `Ok(true)` = should advertise (be peripheral)
@@ -158,15 +157,8 @@ impl PairingOrchestrator {
 
         self.signal_state_change();
 
-        // Get self device ID to determine role
-        let self_device_id = crate::sdk::app_state::AppState::get_device_id()
-            .ok_or_else(|| "Self device ID not available".to_string())?;
-        let self_device_id_array: [u8; 32] = self_device_id
-            .try_into()
-            .map_err(|_| "Self device ID is not 32 bytes".to_string())?;
-
-        // Determine role: if self < contact, advertise (be peripheral); else scan (be central)
-        let should_advertise = self_device_id_array < contact_device_id;
+        let self_device_id_array = self_device_id()?;
+        let should_advertise = !scans_for(&self_device_id_array, &contact_device_id);
 
         log::info!(
             "[PairingOrchestrator] Initiated pairing for contact: {:02x}{:02x}{:02x}{:02x}... self={:02x}{:02x}... role={}",
@@ -179,30 +171,6 @@ impl PairingOrchestrator {
             if should_advertise { "advertiser" } else { "scanner" }
         );
 
-        // Fire-and-forget: also request BLE discovery start from Rust via JNI as a safety net.
-        // This complements the Kotlin WebView bridge which also starts the role-specific op.
-        // Duplicate starts are harmless due to idempotent guards in DsmBluetoothService
-        // (they will log "already scanning/advertising").
-        #[cfg(all(target_os = "android", feature = "jni"))]
-        {
-            let contact = contact_device_id;
-            // Spawn without awaiting to avoid blocking the JNI caller path
-            crate::runtime::get_runtime().spawn(async move {
-                let orchestrator = crate::bluetooth::get_pairing_orchestrator();
-                if let Err(e) = orchestrator.start_ble_discovery(contact).await {
-                    log::warn!(
-                        "[PairingOrchestrator] start_ble_discovery secondary path failed: {}",
-                        e
-                    );
-                } else {
-                    log::info!(
-                        "[PairingOrchestrator] start_ble_discovery secondary path issued successfully"
-                    );
-                }
-            });
-        }
-
-        // Return the role - Kotlin will start the appropriate BLE operation
         Ok(should_advertise)
     }
 
@@ -802,6 +770,9 @@ impl PairingOrchestrator {
         /// are recovered even when no explicit disconnect event fires.
         const PAIRING_LOOP_WAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
+        // The scan this loop has asked the radio for; withdrawn by this loop only.
+        let mut scan = ScanRequest::default();
+
         loop {
             let state_changed = self.state_change.notified();
 
@@ -858,6 +829,8 @@ impl PairingOrchestrator {
                     log::info!(
                         "[PairingOrchestrator] All contacts paired in SQLite but sessions still in-flight — waiting for state change"
                     );
+                    self.follow_pairing_radio(&mut scan, Initiated::default())
+                        .await;
                     // Use a bounded timeout: if the BLE link drops silently the
                     // in-flight check will still time out and re-evaluate.
                     let _ = tokio::time::timeout(PAIRING_LOOP_WAKE_TIMEOUT, state_changed).await;
@@ -872,6 +845,7 @@ impl PairingOrchestrator {
                 unpaired.len()
             );
 
+            let mut initiated = Initiated::default();
             for contact in &unpaired {
                 if self.loop_stop.load(Ordering::SeqCst) {
                     break;
@@ -936,6 +910,8 @@ impl PairingOrchestrator {
                 // Initiate pairing for this contact
                 match self.initiate_pairing(device_id).await {
                     Ok(should_advertise) => {
+                        initiated.any = true;
+                        initiated.scanner |= !should_advertise;
                         let role_str = if should_advertise {
                             "advertise"
                         } else {
@@ -958,6 +934,11 @@ impl PairingOrchestrator {
                 }
             }
 
+            if self.loop_stop.load(Ordering::SeqCst) {
+                break;
+            }
+            self.follow_pairing_radio(&mut scan, initiated).await;
+
             // Wait for the next state-change event or a periodic transport timeout,
             // whichever arrives first. The timeout ensures that stale sessions that
             // were not detected via a disconnect notification are still re-evaluated
@@ -965,10 +946,11 @@ impl PairingOrchestrator {
             let _ = tokio::time::timeout(PAIRING_LOOP_WAKE_TIMEOUT, state_changed).await;
         }
 
-        // Stop the pairing scan on loop exit so it does not linger ("stuck
-        // scanning") once the peer has completed pairing. Advertising follows
-        // the identity and is not the loop's.
-        let _ = self.stop_ble_discovery().await;
+        // Withdraw the loop's scan so it does not linger ("stuck scanning") once
+        // the peer has completed pairing. A scan the loop did not request (the
+        // transfer scan) is not the loop's to end, and advertising follows the
+        // identity.
+        withdraw_pairing_scan(&mut scan);
 
         self.loop_running.store(false, Ordering::SeqCst);
         log::info!("[PairingOrchestrator] start_pairing_all_unpaired: loop ended");
@@ -1070,111 +1052,45 @@ impl PairingOrchestrator {
         );
     }
 
-    /// Start BLE discovery using the deterministic role assignment.
-    ///
-    /// Role is determined by lexicographic comparison of device IDs:
-    ///   self_device_id < contact_device_id → this device ADVERTISES (peripheral)
-    ///   self_device_id > contact_device_id → this device SCANS (central)
-    ///
-    /// Both devices ALWAYS start the GATT server (advertise) so the scanning
-    /// device can read the identity characteristic. Only ONE device scans.
-    /// This prevents the race condition where both devices discover each other
-    /// simultaneously, both call connectGatt(), and the crossing GATT connections
-    /// cause error 133 or timeout on Samsung/Qualcomm stacks.
-    #[cfg(all(target_os = "android", feature = "jni"))]
-    async fn start_ble_discovery(&self, contact_device_id: [u8; 32]) -> Result<(), String> {
-        let self_device_id = crate::sdk::app_state::AppState::get_device_id()
-            .ok_or_else(|| "Self device ID not available".to_string())?;
-        let self_device_id_array: [u8; 32] = self_device_id
-            .try_into()
-            .map_err(|_| "Self device ID is not 32 bytes".to_string())?;
-
-        let should_advertise = self_device_id_array < contact_device_id;
-
-        log::info!(
-            "[PairingOrchestrator] Starting BLE discovery for contact {:02x}{:02x}... role={}",
-            contact_device_id[0],
-            contact_device_id[1],
-            if should_advertise {
-                "advertiser"
-            } else {
-                "scanner"
-            },
-        );
-
-        use crate::jni::jni_common::{get_java_vm_borrowed, find_class_with_app_loader};
-
-        let vm = get_java_vm_borrowed().ok_or_else(|| "JavaVM not initialized".to_string())?;
-
-        let mut env = vm
-            .attach_current_thread()
-            .map_err(|e| format!("Failed to attach JNI thread: {e}"))?;
-
-        let class_name = "com/dsm/wallet/bridge/Unified";
-        let class = find_class_with_app_loader(&mut env, class_name)
-            .map_err(|e| format!("Failed to find class {}: {:?}", class_name, e))?;
-
-        // GATT server must always be up so the scanner can read our identity
-        let adv_result = env.call_static_method(&class, "startBlePairingAdvertise", "()Z", &[]);
-        let adv_ok = adv_result.map(|r| r.z().unwrap_or(false)).unwrap_or(false);
-
-        if should_advertise {
-            // Advertiser role: GATT server only, no scanning. The peer will scan and connect.
-            log::info!(
-                "[PairingOrchestrator] BLE discovery started (advertiser-only): advertise={}",
-                adv_ok,
-            );
-            if !adv_ok {
-                return Err("startBlePairingAdvertise failed".to_string());
-            }
-        } else {
-            // Scanner role: also start scanning to discover the peer's advertisement.
-            let scan_result = env.call_static_method(&class, "startBlePairingScan", "()Z", &[]);
-            let scan_ok = scan_result.map(|r| r.z().unwrap_or(false)).unwrap_or(false);
-
-            log::info!(
-                "[PairingOrchestrator] BLE discovery started (scanner): advertise={} scan={}",
-                adv_ok,
-                scan_ok,
-            );
-            if !adv_ok && !scan_ok {
-                return Err(
-                    "Both startBlePairingAdvertise and startBlePairingScan failed".to_string(),
-                );
+    /// Bring the radio in line with the sessions after a pass of the pairing
+    /// loop, in order: nothing is spawned, so no request lands after the loop's
+    /// last word. Advertising is requested when the pass opened a session (the
+    /// peer reads this appliance's identity from its GATT server whichever side
+    /// scans); it is the appliance's and is never withdrawn here. The scan
+    /// follows [`ScanRequest::step`].
+    async fn follow_pairing_radio(&self, scan: &mut ScanRequest, initiated: Initiated) {
+        if initiated.any {
+            match request_radio("startBlePairingAdvertise") {
+                Ok(true) => {}
+                Ok(false) => {
+                    log::warn!("[PairingOrchestrator] The radio refused pairing advertising")
+                }
+                Err(e) => {
+                    log::warn!("[PairingOrchestrator] Pairing advertising not requested: {e}")
+                }
             }
         }
-
-        Ok(())
-    }
-
-    /// Stop the scan pairing started, via JNI.
-    /// Called when the pairing loop exits to prevent lingering radio activity
-    /// that causes "stuck scanning" after pairing completes. Advertising is not
-    /// pairing's to stop: it follows the appliance's identity (the Android BLE
-    /// service owns it), and an appliance that stopped advertising here could not
-    /// be found for an offline transfer by the contact it had just paired with.
-    #[cfg(all(target_os = "android", feature = "jni"))]
-    async fn stop_ble_discovery(&self) -> Result<(), String> {
-        use crate::jni::jni_common::{find_class_with_app_loader, get_java_vm_borrowed};
-
-        let vm = get_java_vm_borrowed().ok_or_else(|| "JavaVM not initialized".to_string())?;
-
-        let mut env = vm
-            .attach_current_thread()
-            .map_err(|e| format!("Failed to attach JNI thread: {e}"))?;
-
-        let class = find_class_with_app_loader(&mut env, "com/dsm/wallet/bridge/Unified")
-            .map_err(|e| format!("Failed to find Unified class: {e:?}"))?;
-
-        let _ = env.call_static_method(&class, "stopBlePairingScan", "()Z", &[]);
-
-        log::info!("[PairingOrchestrator] stop_ble_discovery: stopped scan");
-        Ok(())
-    }
-
-    #[cfg(not(all(target_os = "android", feature = "jni")))]
-    async fn stop_ble_discovery(&self) -> Result<(), String> {
-        Ok(())
+        let wanted = match self_device_id() {
+            Ok(self_id) => wants_pairing_scan(&self_id, self.sessions.read().await.values()),
+            Err(_) => false,
+        };
+        match scan.step(wanted, initiated.scanner) {
+            ScanStep::Start => match request_radio("startBlePairingScan") {
+                Ok(accepted) => {
+                    *scan = ScanRequest {
+                        issued: true,
+                        accepted,
+                    };
+                    log::info!("[PairingOrchestrator] Pairing scan requested: accepted={accepted}");
+                }
+                Err(e) => {
+                    scan.accepted = false;
+                    log::warn!("[PairingOrchestrator] Pairing scan not requested: {e}");
+                }
+            },
+            ScanStep::Stop => withdraw_pairing_scan(scan),
+            ScanStep::Hold => {}
+        }
     }
 
     /// Notify frontend that pairing completed
@@ -1248,6 +1164,122 @@ impl PairingOrchestrator {
     }
 }
 
+/// Whether this appliance scans for the contact in pairing (the central)
+/// rather than advertising to it (the peripheral): the higher device id scans.
+/// Exactly one side of a pair scans, so the two never both call connectGatt()
+/// on each other, whose crossing connections fail with error 133 or time out
+/// on Samsung/Qualcomm stacks.
+fn scans_for(self_device_id: &[u8; 32], contact_device_id: &[u8; 32]) -> bool {
+    self_device_id > contact_device_id
+}
+
+fn self_device_id() -> Result<[u8; 32], String> {
+    crate::sdk::app_state::AppState::get_device_id()
+        .ok_or_else(|| "Self device ID not available".to_string())?
+        .try_into()
+        .map_err(|_| "Self device ID is not 32 bytes".to_string())
+}
+
+/// Whether any session this appliance scans for is still outstanding (neither
+/// complete nor failed).
+fn wants_pairing_scan<'a>(
+    self_device_id: &[u8; 32],
+    sessions: impl IntoIterator<Item = &'a PairingSession>,
+) -> bool {
+    sessions.into_iter().any(|s| {
+        scans_for(self_device_id, &s.contact_device_id)
+            && !matches!(s.state, PairingState::Complete | PairingState::Failed(_))
+    })
+}
+
+/// What one pass of the pairing loop opened.
+#[derive(Debug, Default, Clone, Copy)]
+struct Initiated {
+    /// A session, of either role.
+    any: bool,
+    /// A session this appliance scans for.
+    scanner: bool,
+}
+
+/// The pairing loop's scan request as the radio holds it
+/// (`BleCoordinator.pairingScanRequested`): it stands from the loop's start
+/// until the loop's stop, whatever the radio answered.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct ScanRequest {
+    /// The radio holds a request from this loop.
+    issued: bool,
+    /// The radio's answer to the last start: a scan runs (or already ran).
+    accepted: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScanStep {
+    Start,
+    Stop,
+    Hold,
+}
+
+impl ScanRequest {
+    /// What the loop asks of the radio, given whether a session it scans for
+    /// is outstanding. Between requests the scan is the radio's: it stops the
+    /// scan to connect and resumes it after its own failures, so a standing,
+    /// accepted request is issued again only for a session the pass opened (a
+    /// new contact, or one reopened after it went stale or failed), and a
+    /// refused start is retried. A scan the loop did not request is never
+    /// stopped.
+    fn step(self, wanted: bool, initiated_scanner: bool) -> ScanStep {
+        if wanted {
+            if !self.issued || !self.accepted || initiated_scanner {
+                ScanStep::Start
+            } else {
+                ScanStep::Hold
+            }
+        } else if self.issued {
+            ScanStep::Stop
+        } else {
+            ScanStep::Hold
+        }
+    }
+}
+
+/// Withdraw the loop's scan request, if it made one. An undelivered withdrawal
+/// leaves the request standing, to be withdrawn again.
+fn withdraw_pairing_scan(scan: &mut ScanRequest) {
+    if !scan.issued {
+        return;
+    }
+    match request_radio("stopBlePairingScan") {
+        Ok(stopped) => {
+            *scan = ScanRequest::default();
+            log::info!("[PairingOrchestrator] Pairing scan withdrawn: a scan stopped={stopped}");
+        }
+        Err(e) => log::warn!("[PairingOrchestrator] Pairing scan withdrawal not delivered: {e}"),
+    }
+}
+
+/// One pairing request to the Android BLE layer (`Unified.<method>`, `()Z`),
+/// and the radio's answer.
+#[cfg(all(target_os = "android", feature = "jni"))]
+fn request_radio(method: &'static str) -> Result<bool, String> {
+    use crate::jni::jni_common::{find_class_with_app_loader, get_java_vm_borrowed};
+
+    let vm = get_java_vm_borrowed().ok_or_else(|| "JavaVM not initialized".to_string())?;
+    let mut env = vm
+        .attach_current_thread()
+        .map_err(|e| format!("Failed to attach JNI thread: {e}"))?;
+    let class = find_class_with_app_loader(&mut env, "com/dsm/wallet/bridge/Unified")
+        .map_err(|e| format!("Failed to find Unified class: {e:?}"))?;
+    env.call_static_method(&class, method, "()Z", &[])
+        .and_then(|r| r.z())
+        .map_err(|e| format!("{method} failed: {e:?}"))
+}
+
+/// Host builds have no BLE radio to pair over.
+#[cfg(not(all(target_os = "android", feature = "jni")))]
+fn request_radio(method: &'static str) -> Result<bool, String> {
+    Err(format!("{method}: this build has no BLE radio"))
+}
+
 /// Where BLE pairing with a contact stands, for the contact list: paired once
 /// the contact holds the address pairing confirmed (a session completes only
 /// once that address is stored); otherwise the phase of its pairing session,
@@ -1282,6 +1314,125 @@ mod tests {
     use crate::storage::client_db;
     use crate::storage::client_db::ContactRecord;
     use std::collections::HashMap;
+
+    fn session_with(contact: u8, state: PairingState) -> PairingSession {
+        PairingSession {
+            contact_device_id: [contact; 32],
+            state,
+            ble_address: None,
+            peer_genesis_hash: None,
+            peer_chain_tip: None,
+            last_activity: Instant::now(),
+        }
+    }
+
+    const STANDING: ScanRequest = ScanRequest {
+        issued: true,
+        accepted: true,
+    };
+
+    #[test]
+    fn exactly_one_side_of_a_pair_scans() {
+        let (low, high) = ([0x10u8; 32], [0x20u8; 32]);
+        assert!(scans_for(&high, &low));
+        assert!(!scans_for(&low, &high));
+    }
+
+    #[test]
+    fn the_scan_is_wanted_while_a_session_this_appliance_scans_for_is_outstanding() {
+        let me = [0x80u8; 32];
+        let (scanned, advertised_to) = (0x10u8, 0xF0u8);
+        assert!(!wants_pairing_scan(&me, &[]));
+        assert!(!wants_pairing_scan(
+            &me,
+            &[session_with(
+                advertised_to,
+                PairingState::WaitingForConnection
+            )]
+        ));
+        for state in [
+            PairingState::WaitingForConnection,
+            PairingState::ReadingIdentity,
+            PairingState::ExchangingChainTips,
+            PairingState::AwaitingConfirm,
+            PairingState::ConfirmSent,
+            PairingState::UpdatingStatus,
+        ] {
+            assert!(
+                wants_pairing_scan(&me, &[session_with(scanned, state.clone())]),
+                "{state:?}"
+            );
+        }
+        assert!(!wants_pairing_scan(
+            &me,
+            &[session_with(scanned, PairingState::Complete)]
+        ));
+        assert!(!wants_pairing_scan(
+            &me,
+            &[session_with(scanned, PairingState::Failed("link".into()))]
+        ));
+        assert!(wants_pairing_scan(
+            &me,
+            &[
+                session_with(scanned, PairingState::Complete),
+                session_with(scanned + 1, PairingState::WaitingForConnection),
+            ]
+        ));
+    }
+
+    /// Bluetooth back on: the new loop holds no request, and its sessions are
+    /// still fresh, so no pass reopens them. The scan is requested anyway.
+    #[test]
+    fn a_loop_holding_no_request_requests_the_scan_its_sessions_want() {
+        assert_eq!(ScanRequest::default().step(true, false), ScanStep::Start);
+    }
+
+    #[test]
+    fn the_loop_never_stops_a_scan_it_did_not_request() {
+        assert_eq!(ScanRequest::default().step(false, false), ScanStep::Hold);
+    }
+
+    /// The radio stopped the scan to connect; asking again would scan over the
+    /// handshake it is making.
+    #[test]
+    fn a_standing_accepted_request_leaves_the_scan_to_the_radio() {
+        assert_eq!(STANDING.step(true, false), ScanStep::Hold);
+    }
+
+    /// A contact whose session went stale while the radio's scan was stopped
+    /// for another contact's connect is reopened, and must be discovered.
+    #[test]
+    fn a_session_the_pass_opened_is_asked_for_again() {
+        assert_eq!(STANDING.step(true, true), ScanStep::Start);
+    }
+
+    #[test]
+    fn a_refused_start_is_asked_for_again() {
+        let refused = ScanRequest {
+            issued: true,
+            accepted: false,
+        };
+        assert_eq!(refused.step(true, false), ScanStep::Start);
+    }
+
+    #[test]
+    fn the_loop_withdraws_its_request_once_no_session_wants_it() {
+        for accepted in [true, false] {
+            let request = ScanRequest {
+                issued: true,
+                accepted,
+            };
+            assert_eq!(request.step(false, false), ScanStep::Stop);
+        }
+    }
+
+    #[cfg(not(all(target_os = "android", feature = "jni")))]
+    #[test]
+    fn an_undelivered_withdrawal_leaves_the_request_standing() {
+        let mut scan = STANDING;
+        withdraw_pairing_scan(&mut scan);
+        assert_eq!(scan, STANDING);
+    }
 
     #[tokio::test]
     async fn test_pairing_session_lifecycle() {
