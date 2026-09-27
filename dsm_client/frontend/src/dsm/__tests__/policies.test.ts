@@ -16,7 +16,7 @@ import * as pb from '../../proto/dsm_app_pb';
 import {
   addTokenByAnchor,
   createToken,
-  getTokenCreationFeeEra,
+  getTokenCreationFee,
   publishTokenPolicyBytes,
   publishTokenPolicy,
 } from '../policies';
@@ -208,22 +208,25 @@ describe('policies.ts', () => {
     });
   });
 
-  describe('getTokenCreationFeeEra', () => {
-    test('answers the fee Rust reports', async () => {
+  describe('getTokenCreationFee', () => {
+    test("answers the fee and this device's standing as Rust reports them", async () => {
       (routerQueryBin as jest.Mock).mockResolvedValue(frameEnvelope(new pb.Envelope({
         version: 3,
-        payload: { case: 'tokenFeeScheduleResponse', value: new pb.TokenFeeScheduleResponse({ tokenCreationEra: 100n }) },
+        payload: {
+          case: 'tokenFeeScheduleResponse',
+          value: new pb.TokenFeeScheduleResponse({ tokenCreationEra: 10n, eraHeld: 3n, feeCovered: false }),
+        },
       })));
-      await expect(getTokenCreationFeeEra()).resolves.toBe(100n);
+      await expect(getTokenCreationFee()).resolves.toEqual({ feeEra: 10n, eraHeld: 3n, feeCovered: false });
     });
 
     // A failed query used to answer undefined, which the dialog showed as "…" for ever.
     test('a refused fee query is the failure, not an absent fee', async () => {
       (routerQueryBin as jest.Mock).mockResolvedValue(frameEnvelope(new pb.Envelope({
         version: 3,
-        payload: { case: 'error', value: new pb.ErrorResponse({ message: 'tokens.getFeeSchedule: no fee schedule' }) },
+        payload: { case: 'error', value: new pb.ErrorResponse({ message: 'tokens.getFeeSchedule: no device head' }) },
       })));
-      await expect(getTokenCreationFeeEra()).rejects.toThrow('no fee schedule');
+      await expect(getTokenCreationFee()).rejects.toThrow('no device head');
     });
   });
 

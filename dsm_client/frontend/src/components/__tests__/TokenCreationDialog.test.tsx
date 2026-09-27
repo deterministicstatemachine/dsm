@@ -19,7 +19,13 @@ jest.mock('../../utils/imageRgba', () => ({
   readImageRgba: jest.fn(),
 }));
 
+jest.mock('@/dsm/policies', () => ({
+  ...jest.requireActual('@/dsm/policies'),
+  getTokenCreationFee: jest.fn(),
+}));
+
 import { readImageRgba } from '../../utils/imageRgba';
+import { getTokenCreationFee } from '@/dsm/policies';
 
 describe('TokenCreationDialog token kind selector', () => {
   // Fungible is the only kind the protocol enforces. NFT and SBT are not
@@ -92,3 +98,75 @@ describe('TokenCreationDialog coin artwork', () => {
   });
 });
 
+
+describe('TokenCreationDialog creation fee', () => {
+  const standing = (eraHeld: bigint, feeCovered: boolean) => ({ feeEra: 10n, eraHeld, feeCovered });
+
+  async function toReview() {
+    fireEvent.change(screen.getByLabelText(/Ticker/i), { target: { value: 'ART' } });
+    fireEvent.change(screen.getByLabelText(/Display Name/i), { target: { value: 'Artwork' } });
+    fireEvent.click(screen.getByRole('button', { name: /Continue/i }));
+    fireEvent.click(screen.getByRole('button', { name: /Continue/i }));
+    await screen.findByText('10 ERA (burned)');
+  }
+
+  beforeEach(() => {
+    (getTokenCreationFee as jest.Mock).mockReset();
+  });
+
+  // A fresh wallet used to fill in every step and learn only at Publish that
+  // it held no ERA for the fee.
+  it("shows the ERA held beside the fee, and a claim from the faucet keeps what was entered", async () => {
+    (getTokenCreationFee as jest.Mock)
+      .mockResolvedValueOnce(standing(0n, false))
+      .mockResolvedValueOnce(standing(100n, true));
+    const claimEra = jest.fn().mockResolvedValue('Released 100 ERA from the reserve');
+    render(<TokenCreationDialog onClose={jest.fn()} claimEra={claimEra} />);
+    await toReview();
+
+    expect(screen.getByText('0 ERA')).toBeInTheDocument();
+    expect(screen.getByRole('status')).toHaveTextContent('Publishing burns 10 ERA and you hold 0.');
+    fireEvent.click(screen.getByRole('button', { name: 'Claim ERA' }));
+
+    expect(await screen.findByText('Released 100 ERA from the reserve')).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText('100 ERA')).toBeInTheDocument());
+    expect(claimEra).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('button', { name: 'Claim ERA' })).toBeNull();
+    // Still the review of what was entered, ready to publish.
+    expect(screen.getByText('ART')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Publish' })).toBeEnabled();
+  });
+
+  it('offers no claim when the ERA held pays the fee', async () => {
+    (getTokenCreationFee as jest.Mock).mockResolvedValue(standing(100n, true));
+    render(<TokenCreationDialog onClose={jest.fn()} claimEra={jest.fn()} />);
+    await toReview();
+
+    expect(screen.getByText('100 ERA')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Claim ERA' })).toBeNull();
+    expect(screen.queryByText(/Publishing burns/)).toBeNull();
+  });
+
+  it('points at the Tokens screen where the wizard has no faucet of its own', async () => {
+    (getTokenCreationFee as jest.Mock).mockResolvedValue(standing(3n, false));
+    render(<TokenCreationDialog onClose={jest.fn()} />);
+    await toReview();
+
+    expect(screen.getByRole('status')).toHaveTextContent(
+      'Publishing burns 10 ERA and you hold 3. Claim ERA from the faucet on the Tokens screen first.',
+    );
+    expect(screen.queryByRole('button', { name: 'Claim ERA' })).toBeNull();
+  });
+
+  it('shows a refused claim and leaves the review as it was', async () => {
+    (getTokenCreationFee as jest.Mock).mockResolvedValue(standing(0n, false));
+    const claimEra = jest.fn().mockRejectedValue(new Error('faucet.claim: the reserve is spent'));
+    render(<TokenCreationDialog onClose={jest.fn()} claimEra={claimEra} />);
+    await toReview();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Claim ERA' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('faucet.claim: the reserve is spent');
+    expect(screen.getByText('0 ERA')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Claim ERA' })).toBeEnabled();
+  });
+});

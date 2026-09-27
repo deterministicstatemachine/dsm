@@ -878,8 +878,14 @@ message TokenBurnResponse {
 // Authoritative fee schedule. The UI DISPLAYS these values; it never computes
 // or assumes them, and it cannot change what is charged — the conservation
 // guard validates the fee against a core constant.
+//
+// era_held and fee_covered are this device's standing against the creation
+// fee, read from the head token.create debits it from and decided by the same
+// check token.create refuses on, so the wizard's word and the refusal agree.
 message TokenFeeScheduleResponse {
   uint64 token_creation_era = 1;
+  uint64 era_held = 2;
+  bool fee_covered = 3;
 }
 
 // The payload inside a token-adoption QR, and the reply that carries it.

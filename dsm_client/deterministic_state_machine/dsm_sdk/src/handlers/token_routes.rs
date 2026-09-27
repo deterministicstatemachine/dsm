@@ -26,6 +26,18 @@ use dsm::economic::token_policy::{
 /// A committed token policy, as Core parses it.
 pub(crate) type ParsedTokenPolicy = dsm::economic::token_policy::TokenPolicy;
 
+/// The ERA `head` holds against the token-creation fee: the balance
+/// `token.create` debits the fee from.
+fn era_held_for_creation_fee(head: &dsm::types::device_state::DeviceState) -> u64 {
+    head.balance(&dsm::core::token::token_state_manager::era_policy_commit())
+}
+
+/// Whether `held` ERA pays the token-creation fee. `token.create` refuses on
+/// this and `tokens.getFeeSchedule` reports it, so the two cannot disagree.
+fn creation_fee_covered(held: u64) -> bool {
+    held >= dsm::core::token::TOKEN_CREATION_FEE_ERA
+}
+
 /// Pack the canonical v3 policy blob.
 ///
 /// This is the SOLE packer for the token-policy format (SoFi §47). It lives in
@@ -908,10 +920,17 @@ impl AppRouterImpl {
             "tokens.getFeeSchedule" => {
                 // Reads the same core constant the conservation guard
                 // validates against, so the displayed fee can never disagree
-                // with the fee actually charged.
+                // with the fee actually charged; and this device's standing
+                // against it from the head and the check `token.create` uses.
+                let Some(head) = self.core_sdk.device_head() else {
+                    return err("tokens.getFeeSchedule: no device head".into());
+                };
+                let era_held = era_held_for_creation_fee(&head);
                 pack_envelope_ok(generated::envelope::Payload::TokenFeeScheduleResponse(
                     generated::TokenFeeScheduleResponse {
                         token_creation_era: dsm::core::token::TOKEN_CREATION_FEE_ERA,
+                        era_held,
+                        fee_covered: creation_fee_covered(era_held),
                     },
                 ))
             }
@@ -1272,19 +1291,12 @@ impl AppRouterImpl {
                 // Reject insufficient ERA BEFORE anything is committed. The
                 // advance's checked_sub is the backstop; this is the clear
                 // error the caller can act on.
-                if fee_amount > 0 {
-                    let era_commit = match dsm::core::token::builtin_policy_commit_for_token("ERA")
-                    {
-                        Some(c) => c,
-                        None => return err("token.create: ERA policy commit missing".into()),
-                    };
-                    let era_balance = head.balance(&era_commit);
-                    if era_balance < fee_amount {
-                        return err(format!(
-                            "token.create: insufficient ERA for the {fee_amount} ERA creation fee \
-                             (have {era_balance}) — claim from the faucet and retry"
-                        ));
-                    }
+                let era_balance = era_held_for_creation_fee(&head);
+                if !creation_fee_covered(era_balance) {
+                    return err(format!(
+                        "token.create: insufficient ERA for the {fee_amount} ERA creation fee \
+                         (have {era_balance}) — claim from the faucet and retry"
+                    ));
                 }
 
                 let create_op = dsm::types::operations::Operation::CreateToken {
@@ -1715,6 +1727,17 @@ mod tests {
             threshold,
             signers,
         }
+    }
+
+    /// The fee is covered from exactly the fee: one ERA short is refused.
+    #[test]
+    fn the_creation_fee_is_covered_from_exactly_the_fee() {
+        let fee = dsm::core::token::TOKEN_CREATION_FEE_ERA;
+        assert!(fee > 0, "a free creation would make this test vacuous");
+        assert!(!creation_fee_covered(0));
+        assert!(!creation_fee_covered(fee - 1));
+        assert!(creation_fee_covered(fee));
+        assert!(creation_fee_covered(fee + 1));
     }
 
     fn fungible_fixture() -> ParsedTokenPolicy {
