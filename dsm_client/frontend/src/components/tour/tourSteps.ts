@@ -68,7 +68,7 @@ export const TOUR_STEPS: ReadonlyArray<TourStep> = [
     screen: 'home',
     target: '#button-start',
     title: 'START and SELECT',
-    body: 'START turns sound on and off. SELECT, right beside it, changes the color theme.',
+    body: 'START turns sound on and off. SELECT, right beside it, changes the color theme. Long-press SELECT to change the shell itself: gold, zebra, leopard and more.',
   },
   {
     id: 'menu',
