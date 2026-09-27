@@ -5,6 +5,7 @@ import { getBridgeInstance } from '../bridge/BridgeRegistry';
 import { bridgeEvents } from '../bridge/bridgeEvents';
 import type { AndroidBridgeV3 } from './bridgeTypes';
 import { IngressRequest, IngressResponse, RouterInvokeOp, RouterQueryOp } from '../proto/dsm_app_pb';
+import { emitDeterministicSafetyForError } from '../utils/deterministicSafety';
 
 function mustBridge(): AndroidBridgeV3 {
   const bridge = getBridgeInstance();
@@ -51,6 +52,8 @@ function unwrapIngressResponse(responseBytes: Uint8Array): Uint8Array {
     return response.result.value;
   }
   if (response.result.case === 'error') {
+    // A refusal Rust tagged as deterministic safety is announced by its tag.
+    emitDeterministicSafetyForError(response.result.value);
     throw new Error(response.result.value?.message || 'ingress boundary error');
   }
   throw new Error('ingress boundary returned no result');

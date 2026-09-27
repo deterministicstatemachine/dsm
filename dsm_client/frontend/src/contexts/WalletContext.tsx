@@ -63,7 +63,7 @@ export const WalletContext = createContext<WalletContextValue>(defaultValue);
 export const WalletProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
   const { notifyToast } = useUX();
   const state = useWalletStore();
-  const bilateralSignal = useEventSignal('wallet.bilateralCommitted');
+  const bilateralSignal = useEventSignal('wallet.bilateralAccepted');
 
   const refreshWalletProjection = React.useCallback(async () => {
     try {

@@ -2,26 +2,17 @@
 
 import { useSyncExternalStore } from 'react';
 import { bridgeEvents } from '../bridge/bridgeEvents';
-import {
-  DEFAULT_NATIVE_SESSION,
-  type NativeSessionSnapshot,
-  isNativeSessionSnapshot,
-} from './nativeSessionTypes';
+import { DEFAULT_NATIVE_SESSION, type NativeSessionSnapshot } from './nativeSessionTypes';
 
 class NativeSessionStore {
   private snapshot: NativeSessionSnapshot = DEFAULT_NATIVE_SESSION;
   private listeners = new Set<() => void>();
 
   constructor() {
+    // The bus carries whole snapshots (decodeSessionState refuses a partial
+    // one); the store adds only its own fact, that one arrived.
     bridgeEvents.on('session.state', (next) => {
-      if (!isNativeSessionSnapshot(next)) {
-        return;
-      }
-      this.snapshot = {
-        ...DEFAULT_NATIVE_SESSION,
-        ...next,
-        received: true,
-      };
+      this.snapshot = { ...next, received: true };
       this.emit();
     });
   }

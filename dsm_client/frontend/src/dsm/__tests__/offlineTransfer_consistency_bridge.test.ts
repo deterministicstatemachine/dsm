@@ -65,9 +65,11 @@ describe('offline transfer sender/recipient consistency through WebView bridge',
       const env = new pb.Envelope({
         version: 3,
         payload: {
-          case: 'bilateralPrepareResponse',
-          value: new pb.BilateralPrepareResponse({
-            commitmentHash: new pb.Hash32({ v: commitmentHash }),
+          case: 'bilateralTransferResponse',
+          value: new pb.BilateralTransferResponse({
+            success: true,
+            transactionHash: new pb.Hash32({ v: commitmentHash }),
+            message: 'prepare sent over BLE',
           }),
         },
       });
@@ -98,9 +100,11 @@ describe('offline transfer sender/recipient consistency through WebView bridge',
       const env = new pb.Envelope({
         version: 3,
         payload: {
-          case: 'bilateralPrepareResponse',
-          value: new pb.BilateralPrepareResponse({
-            commitmentHash: new pb.Hash32({ v: commitmentHash }),
+          case: 'bilateralTransferResponse',
+          value: new pb.BilateralTransferResponse({
+            success: true,
+            transactionHash: new pb.Hash32({ v: commitmentHash }),
+            message: 'prepare sent over BLE',
           }),
         },
       });

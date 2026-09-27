@@ -101,8 +101,6 @@ pub mod verification;
 use crate::types::error::DsmError;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
-const RUST_VERSION: &str = env!("DSM_RUSTC_VERSION");
-const TARGET: &str = env!("DSM_BUILD_TARGET");
 
 /// Returns the version of the SDK
 ///
@@ -113,58 +111,4 @@ const TARGET: &str = env!("DSM_BUILD_TARGET");
 /// A string containing the version number in semver format (e.g., "0.1.0")
 pub fn version() -> String {
     VERSION.to_string()
-}
-
-/// Build information for debugging and support
-pub fn build_info() -> BuildInfo {
-    BuildInfo {
-        version: VERSION.to_string(),
-        rust_version: RUST_VERSION.to_string(),
-        target: TARGET.to_string(),
-        features: get_enabled_features(),
-    }
-}
-
-/// Build information structure
-#[derive(Debug, Clone)]
-pub struct BuildInfo {
-    /// SDK version
-    pub version: String,
-    /// Rust compiler version
-    pub rust_version: String,
-    /// Target architecture
-    pub target: String,
-    /// Enabled features
-    pub features: Vec<String>,
-}
-
-#[allow(unused_mut)]
-#[allow(clippy::vec_init_then_push)]
-fn get_enabled_features() -> Vec<String> {
-    let mut features = vec![];
-    // JNI moved to dsm_sdk
-    #[cfg(feature = "bluetooth")]
-    features.push("bluetooth".to_string());
-    #[cfg(feature = "storage")]
-    features.push("storage".to_string());
-    #[cfg(feature = "threadsafe")]
-    features.push("threadsafe".to_string());
-    features
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{build_info, version, VERSION};
-
-    #[test]
-    fn build_info_is_compile_time_stamped() {
-        let info = build_info();
-
-        assert_eq!(version(), VERSION);
-        assert_eq!(info.version, VERSION);
-        assert_ne!(info.rust_version, "unknown");
-        assert!(!info.rust_version.is_empty());
-        assert_ne!(info.target, "unknown");
-        assert!(!info.target.is_empty());
-    }
 }

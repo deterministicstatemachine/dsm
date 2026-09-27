@@ -40,7 +40,7 @@ describe('WalletContext bilateral committed event', () => {
   });
 
   // An accepted transfer reaches the provider as two events from the accept
-  // path: `wallet.bilateralCommitted` (the signal) and `wallet.refresh` (the
+  // path: `wallet.bilateralAccepted` (the signal) and `wallet.refresh` (the
   // reload). The provider reloads once, on the second; it used to reload on
   // both.
   it('reloads once for an accepted transfer, on the accept path’s wallet.refresh', async () => {
@@ -71,7 +71,7 @@ describe('WalletContext bilateral committed event', () => {
 
     // The signal alone reloads nothing.
     await act(async () => {
-      bridgeEvents.emit('wallet.bilateralCommitted', {} as any);
+      bridgeEvents.emit('wallet.bilateralAccepted', {} as any);
       await Promise.resolve();
       await Promise.resolve();
     });
@@ -106,7 +106,7 @@ describe('WalletContext bilateral committed event', () => {
     await renderWalletProvider();
 
     await act(async () => {
-      bridgeEvents.emit('wallet.bilateralCommitted', { accepted: true } as any);
+      bridgeEvents.emit('wallet.bilateralAccepted', { accepted: true } as any);
       await Promise.resolve();
     });
 
