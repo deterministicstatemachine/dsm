@@ -237,10 +237,11 @@ pub fn get_transaction(tx_id: &str) -> Result<Option<TransactionRecord>> {
         .optional()?)
 }
 
-const TRANSACTION_COLUMNS: &str = "tx_id, tx_hash, from_device, to_device, amount, tx_type, \
+pub(super) const TRANSACTION_COLUMNS: &str =
+    "tx_id, tx_hash, from_device, to_device, amount, tx_type, \
                                    status, commitment_hash, proof_data, metadata";
 
-fn transaction_from_row(row: &Row) -> rusqlite::Result<TransactionRecord> {
+pub(super) fn transaction_from_row(row: &Row) -> rusqlite::Result<TransactionRecord> {
     let meta_blob: Vec<u8> = row.get(9)?;
     let metadata = meta_from_blob(&meta_blob).map_err(|e| {
         rusqlite::Error::FromSqlConversionFailure(
