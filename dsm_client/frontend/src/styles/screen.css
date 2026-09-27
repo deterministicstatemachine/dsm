@@ -931,6 +931,32 @@ button.sb-card--dark { color: var(--bg); }
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
 }
 
+/* The step strip and a range inside a dark container. */
+.sb-card--dark .sb-steps__step { border-color: rgba(var(--bg-rgb), 0.5); color: rgba(var(--bg-rgb), 0.6); }
+.sb-card--dark .sb-steps__step.is-done { background: var(--bg); color: var(--text-dark); border-color: var(--bg); }
+.sb-card--dark .sb-steps__step.is-active { color: var(--bg); border-color: var(--bg); }
+.sb-range { width: 100%; margin: 4px 0; accent-color: var(--text-dark); }
+.sb-card--dark .sb-range { accent-color: var(--bg); }
+
+/* A coin on a light disc, so its artwork reads on a dark container too. */
+.sb-coin-tile {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px;
+  border: 2px solid var(--border);
+  border-radius: 50%;
+  background: var(--bg);
+  line-height: 0;
+}
+.sb-coin-tile--sm { padding: 3px; }
+.sb-coin--xl { width: 72px; height: 72px; }
+
+/* A popover that is a wizard scrolls its own body and keeps its strip and actions in view. */
+.sb-popover.token-wizard { max-height: 100%; }
+.sb-popover.token-wizard .sb-popover__body { flex: 1 1 auto; min-height: 0; }
+.sb-popover .sb-input[type="file"] { padding: 6px 8px; font-size: 9px; }
+
 /* Stat cells: a count or a short word, its label under it. */
 .sb-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
 .sb-stats--2 { grid-template-columns: repeat(2, 1fr); }
