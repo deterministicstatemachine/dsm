@@ -345,6 +345,17 @@ typecheck: ## Run frontend TypeScript type-check
 # LINT / QUALITY
 # ---------------------------------------------------------------------------
 
+.PHONY: requirement-map
+MAP ?= target/requirement-map
+requirement-map: ## Call graph, finding seals and dead-code marks (MAP=dir): rust-analyzer index of the Android view, then ci/conformance_evidence.py --map
+	rustup component add rust-analyzer --toolchain $(RUST_PIN)
+	mkdir -p $(MAP)
+	rustup run $(RUST_PIN) rust-analyzer scip . --config-path ci/requirement_map.rust-analyzer.json --output $(MAP)/index.scip
+	rustup run $(RUST_PIN) cargo build --locked --release -p requirement_map
+	target/release/requirement_map index --scip $(MAP)/index.scip --root . --out $(MAP)
+	REQUIREMENT_MAP_BIN=target/release/requirement_map python3 ci/conformance_evidence.py --map $(MAP) --report $(MAP)/requirement-map.html
+	python3 ci/sofi_reachability.py --map $(MAP)
+
 .PHONY: lint
 # THE canonical toolchain, read from rust-toolchain.toml — never hardcoded here.
 # A second copy of the version in this file would be exactly the drift that made
