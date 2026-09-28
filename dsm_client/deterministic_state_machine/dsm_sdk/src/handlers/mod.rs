@@ -36,7 +36,6 @@ pub mod faucet_routes;
 pub mod identity_routes;
 pub mod inbox_routes;
 pub mod mempool_api;
-pub mod message_routes;
 #[cfg(test)]
 mod node_e2e_tests;
 pub mod offline_cash_routes;

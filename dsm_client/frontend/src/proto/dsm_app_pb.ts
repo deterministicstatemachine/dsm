@@ -16791,12 +16791,6 @@ export class Envelope extends Message<Envelope> {
     case: "onlineTransferResponse";
   } | {
     /**
-     * @generated from field: dsm.OnlineMessageResponse online_message_response = 41;
-     */
-    value: OnlineMessageResponse;
-    case: "onlineMessageResponse";
-  } | {
-    /**
      * @generated from field: dsm.StateInfoResponse state_info_response = 42;
      */
     value: StateInfoResponse;
@@ -17296,7 +17290,6 @@ export class Envelope extends Message<Envelope> {
     { no: 38, name: "wallet_history_response", kind: "message", T: WalletHistoryResponse, oneof: "payload" },
     { no: 39, name: "contacts_list_response", kind: "message", T: ContactsListResponse, oneof: "payload" },
     { no: 40, name: "online_transfer_response", kind: "message", T: OnlineTransferResponse, oneof: "payload" },
-    { no: 41, name: "online_message_response", kind: "message", T: OnlineMessageResponse, oneof: "payload" },
     { no: 42, name: "state_info_response", kind: "message", T: StateInfoResponse, oneof: "payload" },
     { no: 44, name: "contact_qr_response", kind: "message", T: ContactQrV3, oneof: "payload" },
     { no: 45, name: "balance_get_response", kind: "message", T: BalanceGetResponse, oneof: "payload" },
@@ -20920,132 +20913,6 @@ export class OnlineTransferResponse extends Message<OnlineTransferResponse> {
 
   static equals(a: OnlineTransferResponse | PlainMessage<OnlineTransferResponse> | undefined, b: OnlineTransferResponse | PlainMessage<OnlineTransferResponse> | undefined): boolean {
     return proto3.util.equals(OnlineTransferResponse, a, b);
-  }
-}
-
-/**
- * ======================= Online Message Messages ====================
- *
- * @generated from message dsm.OnlineMessageRequest
- */
-export class OnlineMessageRequest extends Message<OnlineMessageRequest> {
-  /**
-   * @generated from field: bytes to_device_id = 1;
-   */
-  toDeviceId = new Uint8Array(0);
-
-  /**
-   * @generated from field: bytes payload = 2;
-   */
-  payload = new Uint8Array(0);
-
-  /**
-   * @generated from field: string memo = 3;
-   */
-  memo = "";
-
-  /**
-   * optional sender signature
-   *
-   * @generated from field: bytes signature = 4;
-   */
-  signature = new Uint8Array(0);
-
-  /**
-   * @generated from field: bytes nonce = 5;
-   */
-  nonce = new Uint8Array(0);
-
-  /**
-   * @generated from field: bytes from_device_id = 6;
-   */
-  fromDeviceId = new Uint8Array(0);
-
-  /**
-   * @generated from field: bytes chain_tip = 7;
-   */
-  chainTip = new Uint8Array(0);
-
-  constructor(data?: PartialMessage<OnlineMessageRequest>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.OnlineMessageRequest";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "to_device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 2, name: "payload", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 3, name: "memo", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 4, name: "signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 5, name: "nonce", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 6, name: "from_device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 7, name: "chain_tip", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): OnlineMessageRequest {
-    return new OnlineMessageRequest().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): OnlineMessageRequest {
-    return new OnlineMessageRequest().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): OnlineMessageRequest {
-    return new OnlineMessageRequest().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: OnlineMessageRequest | PlainMessage<OnlineMessageRequest> | undefined, b: OnlineMessageRequest | PlainMessage<OnlineMessageRequest> | undefined): boolean {
-    return proto3.util.equals(OnlineMessageRequest, a, b);
-  }
-}
-
-/**
- * @generated from message dsm.OnlineMessageResponse
- */
-export class OnlineMessageResponse extends Message<OnlineMessageResponse> {
-  /**
-   * @generated from field: bool success = 1;
-   */
-  success = false;
-
-  /**
-   * @generated from field: string message = 2;
-   */
-  message = "";
-
-  /**
-   * @generated from field: bytes message_id = 3;
-   */
-  messageId = new Uint8Array(0);
-
-  constructor(data?: PartialMessage<OnlineMessageResponse>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.OnlineMessageResponse";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "success", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
-    { no: 2, name: "message", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 3, name: "message_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): OnlineMessageResponse {
-    return new OnlineMessageResponse().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): OnlineMessageResponse {
-    return new OnlineMessageResponse().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): OnlineMessageResponse {
-    return new OnlineMessageResponse().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: OnlineMessageResponse | PlainMessage<OnlineMessageResponse> | undefined, b: OnlineMessageResponse | PlainMessage<OnlineMessageResponse> | undefined): boolean {
-    return proto3.util.equals(OnlineMessageResponse, a, b);
   }
 }
 

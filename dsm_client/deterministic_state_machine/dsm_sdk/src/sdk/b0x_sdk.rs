@@ -23,9 +23,8 @@ use crate::sdk::core_sdk::CoreSDK;
 use crate::util::text_id;
 // blake3 usage: all calls go through dsm::crypto::blake3::dsm_domain_hasher() for domain separation
 
-use log::{info, warn, debug};
+use log::{info, warn};
 use prost::Message;
-use rand::rngs::OsRng;
 use reqwest;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -270,8 +269,6 @@ pub struct RetrievalOutcome {
 pub enum B0xEntryKind {
     /// An online transfer request.
     Transfer,
-    /// An online message: the payload's size.
-    Message { payload_len: usize },
     /// A request whose body is not what its invoke method names, and why.
     /// Listed as unverified; nothing is taken from it.
     Unrecognized { reason: String },
@@ -329,7 +326,6 @@ pub struct B0xSubmissionParams {
     pub transaction: Operation,
     pub signature: Vec<u8>,
     pub sender_genesis_hash: String, // base32 of 32-byte genesis
-    pub sender_chain_tip: String,    // base32 of 32-byte tip
     /// Tip-scoped b0x routing address (§16.4).
     /// Computed via `B0xSDK::compute_b0x_address(recipient_genesis, recipient_device, chain_tip)`.
     pub routing_address: String,
@@ -337,21 +333,16 @@ pub struct B0xSubmissionParams {
     /// The exact bytes the sender signed with SPHINCS+.  The receiver MUST
     /// use these directly for verification — no field-by-field reconstruction.
     pub canonical_operation_bytes: Vec<u8>,
-    /// §16.6 defect zero: caller-supplied DETERMINISTIC submission id.
-    ///
-    /// The forward-transfer path derives this from the receipt commitment
-    /// (`sender_outbox::derive_submission_id`) so the id is known BEFORE the
-    /// send is committed locally and is identical on every retry. Storage nodes
-    /// enforce `UNIQUE(message_id)` with `ON CONFLICT DO NOTHING`, so a resend
-    /// collapses onto the same spool row instead of spawning duplicates.
-    ///
-    /// `None` keeps the legacy random derivation for callers with no durable
-    /// identity to key on (non-transfer submissions).
-    pub submission_id: Option<String>,
+    /// §16.6 defect zero: the DETERMINISTIC submission id, derived from the
+    /// receipt commitment (`sender_outbox::derive_submission_id`), so it is
+    /// known BEFORE the send is committed locally and is identical on every
+    /// retry. Storage nodes enforce `UNIQUE(message_id)` with
+    /// `ON CONFLICT DO NOTHING`, so a resend collapses onto the same spool row
+    /// instead of spawning duplicates.
+    pub submission_id: String,
     /// Sender economic locators (3.5b): OUTPUTS of the sender's built
     /// admission — the admitted position and THE debit mutation index of the
     /// exact write set. Untrusted locators on the wire, never authority.
-    /// Zero/absent only for non-economic submissions.
     pub sender_economic_position: u64,
     pub sender_debit_mutation_index: u32,
 }
@@ -1571,223 +1562,49 @@ impl B0xSDK {
         // Enhanced input validation
         self.validate_submission_params(params)?;
 
-        // 2) Build Envelope v3 with proper request payload.
+        // 2) Build Envelope v3 with the transfer request.
         //
-        // MESSAGE ID. A caller-supplied deterministic id WINS and short-circuits
-        // the random derivation entirely — the fallback is never evaluated, so a
-        // deterministic send consumes no OS entropy. The supplied id comes from the receipt
-        // commitment (`sender_outbox::derive_submission_id`), so it is known
+        // MESSAGE ID: the submission id the send derived from the receipt
+        // commitment (`sender_outbox::derive_submission_id`). It is known
         // before the send is committed locally and is identical on every retry;
-        // storage nodes enforce `UNIQUE(message_id)`, making a resend collapse
-        // onto the same spool row instead of spooling a duplicate.
-        let (message_id_bytes, message_id_b32) = match params.submission_id.as_deref() {
-            Some(supplied) => {
-                let decoded = text_id::decode_base32_crockford(supplied).ok_or_else(|| {
-                    DsmError::invalid_parameter("submission_id must be canonical base32 Crockford")
-                })?;
-                let arr: [u8; 16] = decoded.as_slice().try_into().map_err(|_| {
-                    DsmError::invalid_parameter(format!(
-                        "submission_id must decode to 16 bytes (deployed nodes enforce this), got {}",
-                        decoded.len()
-                    ))
-                })?;
-                (arr, supplied.to_string())
-            }
-            // Legacy random derivation, for callers with no durable identity to
-            // key on (non-transfer submissions). Retries here are NOT idempotent
-            // at the node — each attempt spools a distinct row.
-            None => {
-                let mut rand_bytes = [0u8; 16];
-                let mut os_rng = OsRng;
-                rand::TryRngCore::try_fill_bytes(&mut os_rng, &mut rand_bytes).map_err(|e| {
-                    DsmError::crypto(
-                        format!("OsRng entropy failure: {e}"),
-                        None::<std::io::Error>,
-                    )
-                })?;
-                let mut msgid_buf = Vec::with_capacity(16 + self.device_id.len());
-                msgid_buf.extend_from_slice(&rand_bytes);
-                msgid_buf.extend_from_slice(self.device_id.as_bytes());
-                let full = dsm::crypto::blake3::domain_hash(
-                    dsm::common::domain_tags::TAG_DSM_B0X_MSGID,
-                    &msgid_buf,
-                );
-                let mut b = [0u8; 16];
-                b.copy_from_slice(&full.as_bytes()[..16]);
-                let b32 = text_id::encode_base32_crockford(&b);
-                (b, b32)
-            }
+        // storage nodes enforce `UNIQUE(message_id)`, so a resend collapses onto
+        // the same spool row instead of spooling a duplicate.
+        let message_id_b32 = params.submission_id.clone();
+        let message_id_bytes: [u8; 16] = {
+            let decoded = text_id::decode_base32_crockford(&message_id_b32).ok_or_else(|| {
+                DsmError::invalid_parameter("submission_id must be canonical base32 Crockford")
+            })?;
+            <[u8; 16]>::try_from(decoded.as_slice()).map_err(|e| {
+                DsmError::invalid_parameter(format!(
+                    "submission_id must decode to 16 bytes (deployed nodes enforce this), got {}: {e}",
+                    decoded.len()
+                ))
+            })?
         };
         let actor_device_bytes = crate::util::text_id::decode_base32_crockford(&self.device_id)
             .ok_or_else(|| {
                 DsmError::internal("device_id base32 decode failed", None::<std::io::Error>)
             })?;
-        let sender_tip_bytes = if params.sender_chain_tip.is_empty() {
-            Vec::new()
-        } else {
-            crate::util::text_id::decode_base32_crockford(&params.sender_chain_tip).ok_or_else(
-                || {
-                    DsmError::internal(
-                        "sender_chain_tip base32 decode failed",
-                        None::<std::io::Error>,
-                    )
-                },
-            )?
+        let Operation::Transfer { to_device_id, .. } = &params.transaction else {
+            return Err(DsmError::internal(
+                "submit_to_b0x: expected Operation::Transfer",
+                None::<std::io::Error>,
+            ));
         };
+        let to_device_id_bytes = to_device_id.clone();
 
-        enum SubmitOp {
-            Transfer {
-                to_device_id_bytes: Vec<u8>,
-            },
-            Message {
-                to_device_id_bytes: Vec<u8>,
-                payload: Vec<u8>,
-                memo: String,
-                nonce_bytes: Vec<u8>,
-            },
-        }
-
-        let submit_op = match &params.transaction {
-            Operation::Transfer { to_device_id, .. } => SubmitOp::Transfer {
-                to_device_id_bytes: to_device_id.clone(),
-            },
-            Operation::Generic {
-                operation_type,
-                data,
-                message,
-                ..
-            } if operation_type.as_slice() == b"online.message" => {
-                let to_device_id_bytes =
-                    crate::util::text_id::decode_base32_crockford(&params.recipient_device_id)
-                        .ok_or_else(|| {
-                            DsmError::internal(
-                                "submit_to_b0x: recipient_device_id base32 decode failed",
-                                None::<std::io::Error>,
-                            )
-                        })?;
-                let exact_32 = |bytes: &[u8], what: &str| -> Result<[u8; 32], DsmError> {
-                    <[u8; 32]>::try_from(bytes).map_err(|_| {
-                        DsmError::invalid_parameter(format!(
-                            "submit_to_b0x: {what} is {} bytes, not 32",
-                            bytes.len()
-                        ))
-                    })
-                };
-                let from_arr = exact_32(&actor_device_bytes, "the sender device id")?;
-                let to_arr = exact_32(&to_device_id_bytes, "the recipient device id")?;
-                let tip_arr = exact_32(&sender_tip_bytes, "the sender chain tip")?;
-                let nonce_arr = dsm::envelope::compute_online_message_nonce_v3(
-                    &from_arr, &to_arr, &tip_arr, data, message,
-                );
-                SubmitOp::Message {
-                    to_device_id_bytes,
-                    payload: data.clone(),
-                    memo: message.clone(),
-                    nonce_bytes: nonce_arr.to_vec(),
-                }
+        // The signed operation and nothing that restates it: the recipient reads
+        // every term from the bytes SIG A covers.
+        let arg_pack = dsm::types::proto::ArgPack {
+            schema_hash: None,
+            codec: dsm::types::proto::Codec::Proto as i32,
+            body: dsm::types::proto::OnlineTransferRequest {
+                signature: params.signature.clone(),
+                canonical_operation_bytes: params.canonical_operation_bytes.clone(),
+                sender_economic_position: params.sender_economic_position,
+                sender_debit_mutation_index: params.sender_debit_mutation_index,
             }
-            _ => {
-                return Err(DsmError::internal(
-                    "submit_to_b0x: expected Operation::Transfer or online.message",
-                    None::<std::io::Error>,
-                ));
-            }
-        };
-
-        let (invoke_method, arg_pack, to_device_id_bytes, log_context) = match submit_op {
-            SubmitOp::Transfer { to_device_id_bytes } => {
-                // The signed operation and nothing that restates it: the
-                // recipient reads every term from the bytes SIG A covers.
-                let transfer_req = dsm::types::proto::OnlineTransferRequest {
-                    signature: params.signature.clone(),
-                    canonical_operation_bytes: params.canonical_operation_bytes.clone(),
-                    sender_economic_position: params.sender_economic_position,
-                    sender_debit_mutation_index: params.sender_debit_mutation_index,
-                };
-
-                let mut transfer_req_bytes = Vec::with_capacity(transfer_req.encoded_len());
-                transfer_req.encode(&mut transfer_req_bytes).map_err(|e| {
-                    DsmError::internal(
-                        format!("OnlineTransferRequest encode failed: {e}"),
-                        None::<std::io::Error>,
-                    )
-                })?;
-                let arg_pack = dsm::types::proto::ArgPack {
-                    schema_hash: None,
-                    codec: dsm::types::proto::Codec::Proto as i32,
-                    body: transfer_req_bytes.clone(),
-                };
-                let decoded_req = dsm::types::proto::OnlineTransferRequest::decode(&*arg_pack.body)
-                    .map_err(|e| {
-                        DsmError::serialization_error(
-                            "decode transfer req",
-                            "OnlineTransferRequest",
-                            None::<String>,
-                            Some(e),
-                        )
-                    })?;
-                debug!(
-                    "submit_to_b0x: decoded OnlineTransferRequest signature len={}",
-                    decoded_req.signature.len()
-                );
-                assert_eq!(decoded_req.signature, params.signature);
-
-                (
-                    "wallet.send".to_string(),
-                    arg_pack,
-                    to_device_id_bytes,
-                    format!("transfer {message_id_b32}"),
-                )
-            }
-            SubmitOp::Message {
-                to_device_id_bytes,
-                payload,
-                memo,
-                nonce_bytes,
-            } => {
-                let msg_req = dsm::types::proto::OnlineMessageRequest {
-                    to_device_id: to_device_id_bytes.clone(),
-                    payload: payload.clone(),
-                    memo: memo.clone(),
-                    signature: params.signature.clone(),
-                    nonce: nonce_bytes.clone(),
-                    from_device_id: actor_device_bytes.clone(),
-                    chain_tip: sender_tip_bytes.clone(),
-                };
-                let mut msg_req_bytes = Vec::with_capacity(msg_req.encoded_len());
-                msg_req.encode(&mut msg_req_bytes).map_err(|e| {
-                    DsmError::internal(
-                        format!("OnlineMessageRequest encode failed: {e}"),
-                        None::<std::io::Error>,
-                    )
-                })?;
-                let arg_pack = dsm::types::proto::ArgPack {
-                    schema_hash: None,
-                    codec: dsm::types::proto::Codec::Proto as i32,
-                    body: msg_req_bytes.clone(),
-                };
-                let decoded_req = dsm::types::proto::OnlineMessageRequest::decode(&*arg_pack.body)
-                    .map_err(|e| {
-                        DsmError::serialization_error(
-                            "decode message req",
-                            "OnlineMessageRequest",
-                            None::<String>,
-                            Some(e),
-                        )
-                    })?;
-                debug!(
-                    "submit_to_b0x: decoded OnlineMessageRequest signature len={}",
-                    decoded_req.signature.len()
-                );
-                assert_eq!(decoded_req.signature, params.signature);
-
-                (
-                    "message.send".to_string(),
-                    arg_pack,
-                    to_device_id_bytes,
-                    format!("payload_len={}", payload.len()),
-                )
-            }
+            .encode_to_vec(),
         };
 
         // The Invoke carries no evidence. The sender's signature is inside the
@@ -1795,7 +1612,7 @@ impl B0xSDK {
         // for the contact — a key carried here would be a key nothing reads.
         let invoke = dsm::types::proto::Invoke {
             program: None,
-            method: invoke_method,
+            method: "wallet.send".to_string(),
             args: Some(arg_pack),
             cosigners: vec![],
             evidence: None,
@@ -1844,7 +1661,7 @@ impl B0xSDK {
             )),
         };
 
-        info!("📦 submit_to_b0x: envelope built with {}", log_context);
+        info!("📦 submit_to_b0x: envelope built for transfer {message_id_b32}");
 
         let mut buf = Vec::with_capacity(envelope.encoded_len());
         prost::Message::encode(&envelope, &mut buf).map_err(|e| {
@@ -2171,20 +1988,6 @@ impl B0xSDK {
             ));
         }
 
-        // Validate sender chain tip
-        if params.sender_chain_tip.is_empty() {
-            return Err(DsmError::internal(
-                "sender_chain_tip cannot be empty",
-                None::<std::io::Error>,
-            ));
-        }
-        if !base32_decodes_to_32_bytes(&params.sender_chain_tip) {
-            return Err(DsmError::internal(
-                "sender_chain_tip must be valid base32 encoding of 32 bytes",
-                None::<std::io::Error>,
-            ));
-        }
-
         if params.routing_address.is_empty() {
             return Err(DsmError::internal(
                 "routing_address cannot be empty",
@@ -2220,38 +2023,12 @@ impl B0xSDK {
                     ));
                 }
             }
-            dsm::types::operations::Operation::Generic {
-                operation_type,
-                data,
-                ..
-            } if operation_type.as_slice() == b"online.message" => {
-                if data.is_empty() {
-                    return Err(DsmError::internal(
-                        "online.message payload cannot be empty",
-                        None::<std::io::Error>,
-                    ));
-                }
-                if data.len() > 4096 {
-                    return Err(DsmError::internal(
-                        "online.message payload exceeds 4096 bytes",
-                        None::<std::io::Error>,
-                    ));
-                }
-            }
             _ => {
                 return Err(DsmError::internal(
-                    "only Transfer or online.message operations are supported for b0x submission",
+                    "only Transfer operations are supported for b0x submission",
                     None::<std::io::Error>,
                 ));
             }
-        }
-
-        // Validate signature if present
-        if !params.signature.is_empty() && params.signature.len() < 64 {
-            return Err(DsmError::internal(
-                "signature must be at least 64 bytes if present",
-                None::<std::io::Error>,
-            ));
         }
 
         Ok(())
@@ -2548,54 +2325,34 @@ impl B0xSDK {
             let Some(dsm::types::proto::universal_op::Kind::Invoke(invoke)) = &op.kind else {
                 continue;
             };
-            let method = invoke.method.as_str();
-            if method != "wallet.send" && method != "message.send" {
+            if invoke.method != "wallet.send" {
                 continue;
             }
             let Some(arg_pack) = &invoke.args else {
-                // A transfer or a message with no request is listed as what it
-                // is, never dropped.
-                info!("📥 envelope_to_b0x_entry: {method} {tid} carries no request");
+                // A transfer with no request is listed as what it is, never
+                // dropped.
+                info!("📥 envelope_to_b0x_entry: transfer {tid} carries no request");
                 return Some(B0xEntry {
                     transaction_id: tid,
                     inbox_key: String::new(),
                     sender_device_id: sender_dev,
                     kind: B0xEntryKind::Unrecognized {
-                        reason: format!("the {method} invoke carries no request"),
+                        reason: "the wallet.send invoke carries no request".to_string(),
                     },
                     transfer_wire_bytes: Vec::new(),
                 });
             };
-            if method == "wallet.send" {
-                // The request bytes, exactly as they arrived. Nothing in them is
-                // read here: the ingestion boundary verifies SIG A over the
-                // canonical operation and reads every term from it.
-                info!("📥 envelope_to_b0x_entry: transfer {tid}");
-                return Some(B0xEntry {
-                    transaction_id: tid,
-                    inbox_key: String::new(),
-                    sender_device_id: sender_dev,
-                    kind: B0xEntryKind::Transfer,
-                    transfer_wire_bytes: arg_pack.body.clone(),
-                });
-            } else {
-                let kind = match dsm::types::proto::OnlineMessageRequest::decode(&*arg_pack.body) {
-                    Ok(msg_req) => B0xEntryKind::Message {
-                        payload_len: msg_req.payload.len(),
-                    },
-                    Err(e) => B0xEntryKind::Unrecognized {
-                        reason: format!("the message does not decode: {e}"),
-                    },
-                };
-                info!("📥 envelope_to_b0x_entry: online message {tid} ({kind:?})");
-                return Some(B0xEntry {
-                    transaction_id: tid,
-                    inbox_key: String::new(),
-                    sender_device_id: sender_dev,
-                    kind,
-                    transfer_wire_bytes: Vec::new(),
-                });
-            }
+            // The request bytes, exactly as they arrived. Nothing in them is
+            // read here: the ingestion boundary verifies SIG A over the
+            // canonical operation and reads every term from it.
+            info!("📥 envelope_to_b0x_entry: transfer {tid}");
+            return Some(B0xEntry {
+                transaction_id: tid,
+                inbox_key: String::new(),
+                sender_device_id: sender_dev,
+                kind: B0xEntryKind::Transfer,
+                transfer_wire_bytes: arg_pack.body.clone(),
+            });
         }
         None
     }
@@ -3026,82 +2783,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    #[serial_test::serial]
-    async fn test_envelope_to_b0x_entry_names_an_online_message(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let (device_b32, core, fleet) = test_device();
-        let sdk = B0xSDK::new(device_b32, core, fleet.endpoints()).unwrap();
-
-        let payload = vec![1, 2, 3, 4, 5, 6];
-        let memo = "hello".to_string();
-        let msg_req = dsm::types::proto::OnlineMessageRequest {
-            to_device_id: vec![0x11; 32],
-            payload: payload.clone(),
-            memo: memo.clone(),
-            signature: vec![9, 9, 9],
-            nonce: vec![0xAA; 32],
-            from_device_id: vec![0x22; 32],
-            chain_tip: vec![0x33; 32],
-        };
-        let mut msg_req_bytes = Vec::with_capacity(msg_req.encoded_len());
-        msg_req.encode(&mut msg_req_bytes).map_err(|e| {
-            DsmError::internal(
-                format!("OnlineMessageRequest encode failed: {e}"),
-                None::<std::io::Error>,
-            )
-        })?;
-
-        let arg_pack = dsm::types::proto::ArgPack {
-            schema_hash: None,
-            codec: dsm::types::proto::Codec::Proto as i32,
-            body: msg_req_bytes,
-        };
-
-        let invoke = dsm::types::proto::Invoke {
-            program: None,
-            method: "message.send".to_string(),
-            args: Some(arg_pack),
-            cosigners: vec![],
-            evidence: None,
-            nonce: None,
-        };
-
-        let op = dsm::types::proto::UniversalOp {
-            op_id: Some(dsm::types::proto::Hash32 { v: vec![9; 32] }),
-            actor: vec![2; 32],
-            kind: Some(dsm::types::proto::universal_op::Kind::Invoke(invoke)),
-        };
-
-        let env = dsm::types::proto::Envelope {
-            version: 3,
-            headers: Some(dsm::types::proto::Headers {
-                device_id: vec![0xAB; 32],
-                genesis_hash: vec![0; 32],
-            }),
-            message_id: vec![8; 16],
-            payload: Some(dsm::types::proto::envelope::Payload::UniversalTx(
-                dsm::types::proto::UniversalTx {
-                    ops: vec![op],
-                    atomic: true,
-                },
-            )),
-        };
-
-        let entry = sdk
-            .envelope_to_b0x_entry(env)
-            .expect("should extract B0xEntry");
-
-        assert_eq!(
-            entry.kind,
-            B0xEntryKind::Message {
-                payload_len: payload.len()
-            }
-        );
-
-        Ok(())
-    }
-
     // ==================================================================
     // WIRE BUDGET (ADR 0003) — real-size encoded artifacts must fit the
     // storage node's MAX_ENVELOPE_BYTES.
@@ -3236,10 +2917,9 @@ mod tests {
             },
             signature: vec![0xA5; sphincs_sig_len()],
             sender_genesis_hash: crate::util::text_id::encode_base32_crockford(&[0x66u8; 32]),
-            sender_chain_tip: crate::util::text_id::encode_base32_crockford(&[0x77u8; 32]),
             routing_address: crate::util::text_id::encode_base32_crockford(&[0xABu8; 32]),
             canonical_operation_bytes: vec![0xCD; CANONICAL_OP_LEN],
-            submission_id: Some(crate::util::text_id::encode_base32_crockford(&[0xEFu8; 16])),
+            submission_id: crate::util::text_id::encode_base32_crockford(&[0xEFu8; 16]),
             sender_economic_position: 0,
             sender_debit_mutation_index: 0,
         }

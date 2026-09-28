@@ -169,10 +169,6 @@ impl AppRouterImpl {
                                 }
                             }
                         }
-                        crate::sdk::b0x_sdk::B0xEntryKind::Message { payload_len } => (
-                            format!("From: {} message:{} bytes", e.sender_device_id, payload_len),
-                            Some(e.sender_device_id.clone()),
-                        ),
                         crate::sdk::b0x_sdk::B0xEntryKind::Unrecognized { reason } => {
                             (format!("Unverified: {reason}"), None)
                         }
