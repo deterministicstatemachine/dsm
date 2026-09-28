@@ -123,6 +123,46 @@ jobs:
           python3 scripts/real_code_guard.py --self-test
           python3 scripts/real_code_guard.py --reference origin/main
 
+  # The code map (make requirement-map): every source file hashed with BLAKE3,
+  # and the Rust backend's call graph from a rust-analyzer index of the Android
+  # build's view, with every definition's item and closure hash and whether a
+  # production entry point or a test reaches it. The page is kept as an
+  # artifact. It checks nothing yet; checks come in later stages.
+  requirement-map:
+    name: Code map
+    needs: [select]
+    if: needs.select.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@1.98.0
+        with:
+          components: rust-analyzer
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: requirement-map
+
+      - name: Install CI system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
+      - name: Map
+        run: make requirement-map MAP=target/requirement-map
+
+      - name: Keep the map
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: code-map
+          path: |
+            target/requirement-map/code-map.html
+            target/requirement-map/files.tsv
+            target/requirement-map/defs.tsv
+            target/requirement-map/edges.tsv
+
   rust-gates:
     name: Rust gates
     needs: [select]

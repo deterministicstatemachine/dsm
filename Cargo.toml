@@ -7,6 +7,7 @@ members = [
     "dsm_client/deterministic_state_machine/dsm",
     "dsm_client/deterministic_state_machine/dsm_sdk",
     "dsm_storage_node",
+    "tools/requirement_map",
     "tools/vertical_validation",
 ]
 # RP2350 firmware is a thumbv8m-only binary; built separately from inside the

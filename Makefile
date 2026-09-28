@@ -345,6 +345,19 @@ typecheck: ## Run frontend TypeScript type-check
 # LINT / QUALITY
 # ---------------------------------------------------------------------------
 
+.PHONY: requirement-map
+MAP ?= target/requirement-map
+SOURCES := '*.rs' '*.kt' '*.kts' '*.java' '*.ts' '*.tsx' '*.js' '*.mjs' '*.proto'
+requirement-map: ## Code map (MAP=dir): every source file hashed, the Rust backend's call graph (rust-analyzer, Android view), dead and test-only marks; MAP/code-map.html
+	rustup component add rust-analyzer --toolchain $(RUST_PIN)
+	mkdir -p $(MAP)
+	git ls-files --cached --others --exclude-standard -- $(SOURCES) > $(MAP)/sources.txt
+	rustup run $(RUST_PIN) cargo build --locked --release -p requirement_map
+	target/release/requirement_map fingerprint --root . --files $(MAP)/sources.txt --out $(MAP)/tree
+	rustup run $(RUST_PIN) rust-analyzer scip . --config-path ci/requirement_map.rust-analyzer.json --output $(MAP)/index.scip
+	target/release/requirement_map index --scip $(MAP)/index.scip --root . --files $(MAP)/sources.txt --fingerprint $(MAP)/tree --out $(MAP)
+	python3 ci/requirement_map.py --map $(MAP) --report $(MAP)/code-map.html
+
 .PHONY: lint
 # THE canonical toolchain, read from rust-toolchain.toml — never hardcoded here.
 # A second copy of the version in this file would be exactly the drift that made
