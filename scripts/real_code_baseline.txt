@@ -1315,7 +1315,6 @@ bool-literal	dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/app_rou
 bool-literal	dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/app_router_impl.rs	b5bea41b6c623f7c
 bool-literal	dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/app_router_impl.rs	c8bcf2506ce9c98e
 bool-literal	dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/app_router_impl.rs	d7e1509935225cfb
-bool-literal	dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/app_router_impl.rs	d7e1509935225cfb
 bool-literal	dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/app_router_impl.rs	e8031c4037360845
 bool-literal	dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/app_router_impl.rs	fcbcf165908dd18a
 bool-literal	dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/artifact_republish.rs	1c00cc58f7615921
@@ -1653,7 +1652,6 @@ bool-literal	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/app_state.rs
 bool-literal	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/app_state.rs	e18af8ed3aa6566e
 bool-literal	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/app_state.rs	e18af8ed3aa6566e
 bool-literal	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/app_state.rs	fdab6269b78f94a4
-bool-literal	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/b0x_sdk.rs	372e900f8597fbf0
 bool-literal	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/b0x_sdk.rs	372e900f8597fbf0
 bool-literal	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/b0x_sdk.rs	372e900f8597fbf0
 bool-literal	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/b0x_sdk.rs	8b2fa6da35099363
@@ -5753,10 +5751,8 @@ rust-error-discarded	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/app_
 rust-error-discarded	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/b0x_sdk.rs	2b44744983d62b31
 rust-error-discarded	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/b0x_sdk.rs	5ae82e892c00085c
 rust-error-discarded	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/b0x_sdk.rs	82f2693231979c92
-rust-error-discarded	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/b0x_sdk.rs	941f7ced1db136bc
 rust-error-discarded	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/b0x_sdk.rs	a30b80d2a1291305
 rust-error-discarded	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/b0x_sdk.rs	ac0df8e8a0a647b5
-rust-error-discarded	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/b0x_sdk.rs	ae7d4302f8cd2dfe
 rust-error-discarded	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/bitcoin_key_store.rs	86d9ac6896e4f6e7
 rust-error-discarded	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/bitcoin_tap_sdk.rs	177d2bc8a32c75c4
 rust-error-discarded	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/bitcoin_tap_sdk.rs	18081e320906d415
@@ -6550,7 +6546,6 @@ rust-zero-id	dsm_client/deterministic_state_machine/dsm/src/emissions/shard_coun
 rust-zero-id	dsm_client/deterministic_state_machine/dsm/src/emissions/shard_count_smt.rs	70d7128d99f6b4c4
 rust-zero-id	dsm_client/deterministic_state_machine/dsm/src/emissions/spent_proof_smt.rs	0bb2a19e28653aca
 rust-zero-id	dsm_client/deterministic_state_machine/dsm/src/emissions/spent_proof_smt.rs	8915d1637890830a
-rust-zero-id	dsm_client/deterministic_state_machine/dsm/src/envelope.rs	b41c2477f4e535f8
 rust-zero-id	dsm_client/deterministic_state_machine/dsm/src/merkle/batch_fold.rs	46d25b954f03715e
 rust-zero-id	dsm_client/deterministic_state_machine/dsm/src/merkle/mod.rs	42863c12a27524fd
 rust-zero-id	dsm_client/deterministic_state_machine/dsm/src/merkle/smt_path.rs	46d25b954f03715e
@@ -6843,7 +6838,6 @@ rust-zero-id	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/b0x_sdk.rs	0
 rust-zero-id	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/b0x_sdk.rs	293bc0c092b02347
 rust-zero-id	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/b0x_sdk.rs	45004c34620ad679
 rust-zero-id	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/b0x_sdk.rs	a9ec518c893ad019
-rust-zero-id	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/b0x_sdk.rs	afc9ba7840386d41
 rust-zero-id	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/b0x_sdk.rs	b41c2477f4e535f8
 rust-zero-id	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/bitcoin_key_store.rs	6ff8d2c597eaca45
 rust-zero-id	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/bitcoin_key_store.rs	71a6517e940624de

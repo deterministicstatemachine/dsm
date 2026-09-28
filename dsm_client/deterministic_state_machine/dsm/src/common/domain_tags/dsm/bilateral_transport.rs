@@ -5,7 +5,6 @@
 use crate::crypto::domain::TaggedHashDomain;
 
 pub const TAG_DSM_B0X: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DSM/b0x");
-pub const TAG_DSM_B0X_MSGID: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/b0x-msgid");
 pub const TAG_DSM_B0X_UNILATERAL: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/B0X/UNILATERAL");
 pub const TAG_DSM_BILATERAL_COMMIT: TaggedHashDomain<'static> =
@@ -34,10 +33,6 @@ pub const TAG_DSM_OFFLINE_KEY_CTX: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/offline-key-ctx");
 pub const TAG_DSM_OFFLINE_TX_CTX: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/offline-tx-ctx");
-pub const TAG_DSM_ONLINE_MESSAGE_NONCE_V3: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/online-message/nonce/v3");
-pub const TAG_DSM_ONLINE_MESSAGE_V3: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/online-message/v3");
 pub const TAG_DSM_RELATIONSHIP: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/relationship");
 pub const TAG_DSM_RELATIONSHIP_KEY: TaggedHashDomain<'static> =
@@ -48,7 +43,6 @@ pub const TAG_DSM_SDK_BILATERAL_ENTRY_V1: TaggedHashDomain<'static> =
 #[cfg(test)]
 pub(super) const TAGS: &[TaggedHashDomain<'static>] = &[
     TAG_DSM_B0X,
-    TAG_DSM_B0X_MSGID,
     TAG_DSM_B0X_UNILATERAL,
     TAG_DSM_BILATERAL_COMMIT,
     TAG_DSM_BILATERAL_OP_COMMIT,
@@ -64,8 +58,6 @@ pub(super) const TAGS: &[TaggedHashDomain<'static>] = &[
     TAG_DSM_KYBER_IDENTITY_BINDING,
     TAG_DSM_OFFLINE_KEY_CTX,
     TAG_DSM_OFFLINE_TX_CTX,
-    TAG_DSM_ONLINE_MESSAGE_NONCE_V3,
-    TAG_DSM_ONLINE_MESSAGE_V3,
     TAG_DSM_RELATIONSHIP,
     TAG_DSM_RELATIONSHIP_KEY,
     TAG_DSM_SDK_BILATERAL_ENTRY_V1,

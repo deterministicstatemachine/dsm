@@ -22,10 +22,11 @@
 //!
 //! # Three byte layers (in order of layering)
 //!
-//! 1. **Canonical signing-preimage bytes** — built by
-//!    `compute_transfer_signing_bytes_v3` / `compute_online_message_signing_bytes_v3`.
-//!    These are the deterministic preimages fed into BLAKE3/SPHINCS+; they
-//!    bind to specific protocol fields, NOT to the proto wire format.
+//! 1. **Canonical signing-preimage bytes** — a transfer's canonical
+//!    operation bytes (`Operation::to_bytes` of the unsigned operation), which
+//!    SIG A covers. These are the deterministic preimages fed into
+//!    BLAKE3/SPHINCS+; they bind to specific protocol fields, NOT to the proto
+//!    wire format.
 //! 2. **Unframed `Envelope` protobuf bytes** — produced by
 //!    [`to_canonical_bytes`], consumed by [`from_canonical_bytes`]. Just
 //!    `Envelope::encode_to_vec` with deterministic-encoding round-trip
@@ -34,7 +35,6 @@
 //!    OUTSIDE this module (see `dsm_sdk::sdk::session_manager` at the
 //!    transport boundary).
 
-use crate::crypto::blake3::dsm_domain_hasher;
 use crate::types::error::DsmError;
 use crate::types::proto::Envelope;
 use prost::Message;
@@ -383,50 +383,6 @@ fn decode_envelope_v3(bytes: &[u8], form: EnvelopeForm) -> Result<Envelope, DsmE
     require_envelope_v3(envelope)
 }
 
-/// Compute canonical signing bytes for Envelope v3 online messages.
-///
-/// Required invariants:
-/// 1. Preimage derivable from received protobuf bytes
-/// 2. Includes from_device_id (signer selection)
-/// 3. Excludes signature fields
-pub fn compute_online_message_signing_bytes_v3(
-    from_device_id: &[u8; 32],
-    to_device_id: &[u8; 32],
-    chain_tip: &[u8; 32],
-    nonce: &[u8],
-    payload: &[u8],
-    memo: &str,
-) -> Vec<u8> {
-    let mut hasher = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_ONLINE_MESSAGE_V3);
-    hasher.update(from_device_id);
-    hasher.update(to_device_id);
-    hasher.update(chain_tip);
-    hasher.update(nonce);
-    hasher.update(payload);
-    hasher.update(memo.as_bytes());
-    hasher.finalize().as_bytes().to_vec()
-}
-
-/// Compute deterministic nonce for online messages (v3).
-pub fn compute_online_message_nonce_v3(
-    from_device_id: &[u8; 32],
-    to_device_id: &[u8; 32],
-    chain_tip: &[u8; 32],
-    payload: &[u8],
-    memo: &str,
-) -> [u8; 32] {
-    let mut hasher = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_ONLINE_MESSAGE_NONCE_V3);
-    hasher.update(from_device_id);
-    hasher.update(to_device_id);
-    hasher.update(chain_tip);
-    hasher.update(payload);
-    hasher.update(memo.as_bytes());
-    let digest = hasher.finalize();
-    let mut out = [0u8; 32];
-    out.copy_from_slice(digest.as_bytes());
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -593,49 +549,6 @@ mod tests {
             err.to_string().contains("Envelope.version must be 3"),
             "unexpected error: {err}"
         );
-    }
-
-    #[test]
-    fn online_message_signing_bytes_v3_is_deterministic() {
-        let from = [10u8; 32];
-        let to = [20u8; 32];
-        let tip = [30u8; 32];
-        let a =
-            compute_online_message_signing_bytes_v3(&from, &to, &tip, b"nonce", b"payload", "hi");
-        let b =
-            compute_online_message_signing_bytes_v3(&from, &to, &tip, b"nonce", b"payload", "hi");
-        assert_eq!(a, b);
-        assert_eq!(a.len(), 32);
-    }
-
-    #[test]
-    fn online_message_signing_bytes_v3_different_payloads_differ() {
-        let from = [10u8; 32];
-        let to = [20u8; 32];
-        let tip = [30u8; 32];
-        let a = compute_online_message_signing_bytes_v3(&from, &to, &tip, b"n", b"alpha", "");
-        let b = compute_online_message_signing_bytes_v3(&from, &to, &tip, b"n", b"beta", "");
-        assert_ne!(a, b);
-    }
-
-    #[test]
-    fn online_message_nonce_v3_is_deterministic() {
-        let from = [0xAAu8; 32];
-        let to = [0xBBu8; 32];
-        let tip = [0xCCu8; 32];
-        let a = compute_online_message_nonce_v3(&from, &to, &tip, b"data", "m");
-        let b = compute_online_message_nonce_v3(&from, &to, &tip, b"data", "m");
-        assert_eq!(a, b);
-    }
-
-    #[test]
-    fn online_message_nonce_v3_different_payloads_differ() {
-        let from = [0xAAu8; 32];
-        let to = [0xBBu8; 32];
-        let tip = [0xCCu8; 32];
-        let a = compute_online_message_nonce_v3(&from, &to, &tip, b"d1", "");
-        let b = compute_online_message_nonce_v3(&from, &to, &tip, b"d2", "");
-        assert_ne!(a, b);
     }
 
     #[test]

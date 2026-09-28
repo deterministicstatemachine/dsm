@@ -2568,7 +2568,6 @@ message Envelope {
     WalletHistoryResponse             wallet_history_response          = 38;
     ContactsListResponse              contacts_list_response           = 39;
     OnlineTransferResponse            online_transfer_response         = 40;
-    OnlineMessageResponse             online_message_response          = 41;
     StateInfoResponse                 state_info_response              = 42;
     ContactQrV3                       contact_qr_response              = 44;
     BalanceGetResponse                balance_get_response             = 45;
@@ -2702,6 +2701,10 @@ message Envelope {
   reserved 43, 107;
   // 31 was init_failed: only a startup export no caller used produced it.
   reserved 31;
+  // 41 was online_message_response: message.send had no caller and nothing
+  // received what it sent (online messages deleted, 2026-09-28).
+  reserved 41;
+  reserved "online_message_response";
 }
 
 // ===================== Sealed spool payloads (DSM Amendment A7) =====================
@@ -3324,27 +3327,6 @@ message OnlineTransferResponse {
   string message = 3;
   optional uint64 new_balance = 4; // absent when the post-send balance could not be read
 }
-
-// ======================= Online Message Messages ====================
-message OnlineMessageRequest {
-  bytes to_device_id = 1 [(dsm_fixed_len)=32];
-  bytes payload = 2 [(dsm_max_len)=4096];
-  string memo = 3;
-  bytes signature = 4; // optional sender signature
-  bytes nonce = 5 [(dsm_fixed_len)=32];
-  bytes from_device_id = 6 [(dsm_fixed_len)=32];
-  bytes chain_tip = 7 [(dsm_fixed_len)=32];
-  // DSM keeps no counter: a message is ordered by its chain tip alone.
-  reserved 8;
-  reserved "seq";
-}
-
-message OnlineMessageResponse {
-  bool success = 1;
-  string message = 2;
-  bytes message_id = 3 [(dsm_fixed_len)=16];
-}
-
 
 message TokenPolicyCacheEntry {
   bytes  policy_commit = 1 [(dsm_fixed_len)=32];

@@ -13,7 +13,6 @@
 //! - `contacts_routes.rs` — `contacts.*` routes
 //! - `faucet_routes.rs` — `faucet.*` routes
 //! - `token_routes.rs` — `token.*`, `tokens.*` routes
-//! - `message_routes.rs` — `message.*` routes
 //! - `system_routes.rs` — `system.*`, `state.*`, `sys.*` routes
 //! - `bilateral_routes.rs` — `bilateral.*` routes
 //! - `inbox_routes.rs` — `inbox.*` routes
@@ -1477,8 +1476,6 @@ impl AppRouterImpl {
             // block that must become a synchronous builder.
             let sender_genesis_b32 =
                 crate::util::text_id::encode_base32_crockford(&local_genesis_for_routing);
-            let sender_chain_tip_b32 =
-                crate::util::text_id::encode_base32_crockford(&sender_proposal.projection_parent);
 
             // Recipient genesis hash comes from the primed contact record that also
             // defines the canonical relationship tip used for routing.
@@ -1552,13 +1549,12 @@ impl AppRouterImpl {
                 // Deterministic, derived from the receipt commitment: known
                 // before the local commit and identical on every retry, so a
                 // resend collapses onto the same node spool row.
-                submission_id: Some(submission_id.clone()),
+                submission_id: submission_id.clone(),
                 recipient_device_id: to_device_id_str.clone(),
                 recipient_genesis_hash: recipient_genesis_b32,
                 transaction: transfer_op,
                 signature: canonical_signature.clone(),
                 sender_genesis_hash: sender_genesis_b32,
-                sender_chain_tip: sender_chain_tip_b32,
                 routing_address: routing_address.clone(),
                 canonical_operation_bytes: signing_bytes.clone(),
                 // OUTPUTS of the built admission (correction C).
@@ -2030,151 +2026,6 @@ impl AppRouterImpl {
         };
         // NEW: Return as Envelope.onlineTransferResponse (field 40)
         pack_envelope_ok(generated::envelope::Payload::OnlineTransferResponse(
-            response,
-        ))
-    }
-
-    // Helper: Shared logic for OnlineMessageRequest processing
-    pub(crate) async fn process_online_message_logic(
-        &self,
-        msg_req: generated::OnlineMessageRequest,
-    ) -> AppResult {
-        // Check network connectivity before attempting online message send
-        let Ok(from_device_id) = <[u8; 32]>::try_from(msg_req.from_device_id.as_slice()) else {
-            return err("message.send: from_device_id must be 32 bytes".into());
-        };
-        let Ok(to_device_id) = <[u8; 32]>::try_from(msg_req.to_device_id.as_slice()) else {
-            return err("message.send: to_device_id must be 32 bytes".into());
-        };
-        let Ok(chain_tip_arr) = <[u8; 32]>::try_from(msg_req.chain_tip.as_slice()) else {
-            return err("message.send: chain_tip must be 32 bytes".into());
-        };
-
-        let memo = msg_req.memo.clone();
-
-        let nonce = dsm::envelope::compute_online_message_nonce_v3(
-            &from_device_id,
-            &to_device_id,
-            &chain_tip_arr,
-            &msg_req.payload,
-            &memo,
-        );
-
-        if msg_req.nonce.len() == 32 && msg_req.nonce.as_slice() != nonce.as_slice() {
-            return err("message.send: nonce mismatch".into());
-        }
-
-        let signing_bytes = dsm::envelope::compute_online_message_signing_bytes_v3(
-            &from_device_id,
-            &to_device_id,
-            &chain_tip_arr,
-            &nonce,
-            &msg_req.payload,
-            &memo,
-        );
-
-        let canonical_signature = match self.wallet.sign_operation_bytes(&signing_bytes) {
-            Ok(sig) => sig,
-            Err(e) => return err(format!("message.send: canonical signing failed: {e}")),
-        };
-
-        let to_device_id_str = crate::util::text_id::encode_base32_crockford(&to_device_id);
-        let sender_genesis = match self.core_sdk.local_genesis_hash().await {
-            Ok(genesis) if genesis.len() == 32 => genesis,
-            Ok(genesis) => {
-                return err(format!(
-                    "message.send: local genesis is {} bytes, not 32",
-                    genesis.len()
-                ))
-            }
-            Err(e) => return err(format!("message.send: local genesis unavailable: {e}")),
-        };
-        let sender_genesis_b32 = crate::util::text_id::encode_base32_crockford(&sender_genesis);
-        let sender_chain_tip_b32 = crate::util::text_id::encode_base32_crockford(&chain_tip_arr);
-
-        let recipient_genesis_raw: [u8; 32] =
-            match crate::storage::client_db::get_contact_by_device_id(&to_device_id) {
-                Ok(Some(contact)) => match <[u8; 32]>::try_from(contact.genesis_hash.as_slice()) {
-                    Ok(genesis) => genesis,
-                    Err(e) => {
-                        return err(format!(
-                            "message.send: the recipient contact's genesis is not 32 bytes: {e}"
-                        ))
-                    }
-                },
-                Ok(None) => return err("message.send: the recipient is not a contact".into()),
-                Err(e) => return err(format!("message.send: contact lookup failed: {e}")),
-            };
-        let recipient_genesis_b32 =
-            crate::util::text_id::encode_base32_crockford(&recipient_genesis_raw);
-
-        let storage_endpoints = match crate::sdk::storage_set::pinned_endpoints() {
-            Ok(endpoints) => endpoints,
-            Err(e) => return err(format!("message.send: no pinned storage set: {e}")),
-        };
-
-        let msg_op = dsm::types::operations::Operation::Generic {
-            operation_type: b"online.message".to_vec(),
-            data: msg_req.payload.clone(),
-            message: memo.clone(),
-            signature: vec![],
-        };
-
-        // §16.4: Compute tip-scoped b0x routing address for message delivery.
-        let routing_address = match crate::sdk::b0x_sdk::B0xSDK::compute_b0x_address(
-            &recipient_genesis_raw,
-            &to_device_id,
-            &chain_tip_arr,
-        ) {
-            Ok(addr) => addr,
-            Err(e) => return err(format!("message.send: b0x address rotation failed: {e}")),
-        };
-
-        let b0x_params = crate::sdk::b0x_sdk::B0xSubmissionParams {
-            submission_id: None,
-            recipient_device_id: to_device_id_str.clone(),
-            recipient_genesis_hash: recipient_genesis_b32,
-            transaction: msg_op,
-            signature: canonical_signature,
-            sender_genesis_hash: sender_genesis_b32,
-            sender_chain_tip: sender_chain_tip_b32,
-            routing_address,
-            canonical_operation_bytes: Vec::new(),
-            sender_economic_position: 0,
-            sender_debit_mutation_index: 0,
-        };
-
-        let sender_device_id_b32 = crate::util::text_id::encode_base32_crockford(&from_device_id);
-        let mut b0x_sdk = match crate::sdk::b0x_sdk::B0xSDK::new(
-            sender_device_id_b32,
-            self.core_sdk.clone(),
-            storage_endpoints,
-        ) {
-            Ok(sdk) => sdk,
-            Err(e) => {
-                return err(format!("message.send: b0x init failed: {e}"));
-            }
-        };
-        let msg_id = match b0x_sdk.submit_to_b0x(b0x_params).await {
-            Ok(mid) => mid,
-            Err(e) => {
-                return err(format!("message.send: b0x submit failed: {e}"));
-            }
-        };
-
-        let Some(msg_id_bytes) = crate::util::text_id::decode_base32_crockford(&msg_id) else {
-            return err(format!(
-                "message.send: the spool returned a message id that is not Base32: {msg_id}"
-            ));
-        };
-        let response = generated::OnlineMessageResponse {
-            success: true,
-            message: "Message queued".to_string(),
-            message_id: msg_id_bytes,
-        };
-
-        // NEW: Return as Envelope.onlineMessageResponse (field 41)
-        pack_envelope_ok(generated::envelope::Payload::OnlineMessageResponse(
             response,
         ))
     }
@@ -2679,8 +2530,6 @@ impl AppRouter for AppRouterImpl {
             }
             // Contacts invoke routes
             "contacts.addManual" => self.handle_contacts_invoke(i).await,
-            // Message
-            "message.send" => self.handle_message_invoke(i).await,
             // Token
             "token.create" | "token.forget" | "token.burn" | "tokens.publishPolicy" => {
                 self.handle_token_invoke(i).await
