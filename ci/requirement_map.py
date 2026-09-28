@@ -46,23 +46,17 @@ production_text = _load_module("production_text", "ci/production_text.py")
 
 
 def load(map_dir):
-    """The graph: definitions (dicts, lines as ints) and the adjacency."""
+    """The map the report reads: every definition (dicts, lines as ints,
+    classified) and every hashed source file."""
     with open(os.path.join(map_dir, "defs.tsv"), encoding="utf-8") as fh:
         defs = list(csv.DictReader(fh, delimiter="\t", quoting=csv.QUOTE_NONE))
     for d in defs:
         d["start_line"] = int(d["start_line"])
         d["end_line"] = int(d["end_line"])
-    adjacency = {}
-    with open(os.path.join(map_dir, "edges.tsv"), encoding="utf-8") as fh:
-        for row in csv.DictReader(fh, delimiter="\t", quoting=csv.QUOTE_NONE):
-            adjacency.setdefault(row["from"], set()).add(row["to"])
-    by_file = {}
-    for d in defs:
-        by_file.setdefault(d["file"], []).append(d)
     with open(os.path.join(map_dir, "files.tsv"), encoding="utf-8") as fh:
         files = list(csv.DictReader(fh, delimiter="\t", quoting=csv.QUOTE_NONE))
     classify(defs)
-    return {"defs": defs, "by_file": by_file, "adjacency": adjacency, "files": files}
+    return {"defs": defs, "files": files}
 
 
 def cfg_test_module_files():
