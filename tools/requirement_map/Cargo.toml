@@ -1,0 +1,20 @@
+[package]
+name = "requirement_map"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "MIT OR Apache-2.0"
+description = "The DSM backend's function-level call graph, read from a SCIP index and content-hashed with BLAKE3, and the seals that lock each requirement finding to it"
+
+[[bin]]
+name = "requirement_map"
+path = "src/main.rs"
+
+[dependencies]
+dsm = { path = "../../dsm_client/deterministic_state_machine/dsm" }
+scip = "0.10.0"
+protobuf = "3"
+proc-macro2 = "1"
+
+[lints]
+workspace = true

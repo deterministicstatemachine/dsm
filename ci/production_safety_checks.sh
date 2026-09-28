@@ -44,11 +44,9 @@ echo ""
 # stay where the conjunctions that earn them are written.
 bash ci/sofi_validated_root_constructors.sh
 
-# Gate G1 (SoFi §37): every pub fn under CORE/sofi has a production caller.
-# The baseline lists what the rebuild (R1..R14) has not wired yet and only
-# ever shrinks; R14 deletes it.
-python3 ci/sofi_reachability.py
-echo ""
+# Gate G1 (SoFi §37), every pub fn under CORE/sofi reached from a production
+# entry point, runs on the call graph in the `requirement-map` job
+# (`make requirement-map` runs `ci/sofi_reachability.py --map`).
 
 # A vault genesis must not be consumable from a PRESENTED creation operation.
 # The funding pair is stated by a signed operation, never asserted, and F10

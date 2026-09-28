@@ -703,3 +703,44 @@ mod registered_root_construction_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod position_seed_tests {
+    use super::position_seed;
+
+    /// MR-DSM-0032, MR-DSM-0081: a device cell's route seed is committed
+    /// state only: genesis, device id, economic position and the validated
+    /// root at the previous position. Each of the four moves the seed, and
+    /// the function takes no other input, so no node id or availability view
+    /// can enter it.
+    #[test]
+    fn the_position_seed_commits_to_genesis_device_position_and_parent_root() {
+        let (genesis, device, parent) = ([0x11; 32], [0x22; 32], [0x33; 32]);
+        let seed = position_seed(&genesis, &device, 7, &parent);
+        assert_ne!(
+            seed,
+            position_seed(&[0x12; 32], &device, 7, &parent),
+            "genesis"
+        );
+        assert_ne!(
+            seed,
+            position_seed(&genesis, &[0x23; 32], 7, &parent),
+            "device id"
+        );
+        assert_ne!(
+            seed,
+            position_seed(&genesis, &device, 8, &parent),
+            "economic position"
+        );
+        assert_ne!(
+            seed,
+            position_seed(&genesis, &device, 7, &[0x34; 32]),
+            "parent root"
+        );
+        assert_eq!(
+            seed,
+            position_seed(&genesis, &device, 7, &parent),
+            "the same inputs give the same seed"
+        );
+    }
+}

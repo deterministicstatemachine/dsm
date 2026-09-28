@@ -41,9 +41,20 @@
 #      the crates, the proto or the Cargo manifests and lockfiles differs from
 #      it, tracked or untracked.
 #
+#   6. REACHABLE (`--map DIR`). Every code item a Met row names resolves in the
+#      call graph (tools/requirement_map, ci/requirement_map.py) and is reached
+#      from a production entry point.
+#   7. SEALED (`--map DIR`). Every §8 row's Seal is the BLAKE3 hash of its
+#      requirement, its own cells, and the closure of every code item and test
+#      it names; any change to them breaks it until the row is re-verified and
+#      resealed with --write.
+#   8. MARKED (`--map DIR`). §9 lists every dead, test-only and unlinked
+#      production item exactly as the call graph finds them.
+#
 # Mutation evidence (a named test observed red with its gate removed) is not
 # derivable from a log and stays in the verification matrix's own column.
 import argparse
+import importlib.util
 import os
 import re
 import subprocess
@@ -433,6 +444,8 @@ def main():
     ap.add_argument("--board-log", action="append", default=[])
     ap.add_argument("--write", action="store_true")
     ap.add_argument("--tested-at", default="HEAD")
+    ap.add_argument("--map", help="a requirement_map index directory (make requirement-map): checks 6-8")
+    ap.add_argument("--report", help="with --map: write the map as one HTML page here")
     args = ap.parse_args()
     use_logs = bool(args.board_log)
 
@@ -549,6 +562,17 @@ def main():
         for t in named:
             check_ref(t, index, results, where, use_logs)
 
+    # 6-8. The call graph (ci/requirement_map.py): every item a Met row names
+    # is reached from a production entry point; every §8 row's seal matches
+    # its requirement, its row, and the code and tests it names; §9 marks
+    # every dead and test-only production item.
+    if args.map:
+        spec = importlib.util.spec_from_file_location("requirement_map", "ci/requirement_map.py")
+        requirement_map = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(requirement_map)
+        map_failures, gaps = requirement_map.check(args.map, sys.modules[__name__], req, gaps, args.write, args.report)
+        for f in map_failures:
+            fail(f)
     if errors:
         for e in errors:
             print("FAIL", e)
@@ -579,7 +603,10 @@ def main():
             f.write(gaps)
         with open(REQ, "w", encoding="utf-8") as f:
             f.write(req)
-    print(f"conformance evidence: {len(rows)} rows, {len(index)} tests indexed, " + ("board logs checked" if use_logs else "static"))
+    checked = ["board logs checked" if use_logs else "static"]
+    if args.map:
+        checked.append("call graph reachable, sealed and marked")
+    print(f"conformance evidence: {len(rows)} rows, {len(index)} tests indexed, " + ", ".join(checked))
     return 0
 
 

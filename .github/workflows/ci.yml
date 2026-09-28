@@ -123,6 +123,47 @@ jobs:
           python3 scripts/real_code_guard.py --self-test
           python3 scripts/real_code_guard.py --reference origin/main
 
+  # The requirement map (make requirement-map): a rust-analyzer index of the
+  # Android build's view of the workspace, the call graph tools/requirement_map
+  # builds from it, and ci/conformance_evidence.py --map over it: every Met row
+  # names code a production entry point reaches (check 6), every §8 row's
+  # BLAKE3 seal still matches its requirement, its row and the code and tests
+  # it names (check 7), and §9 marks every dead and test-only production item
+  # exactly (check 8). The page it writes is kept as an artifact.
+  requirement-map:
+    name: Requirement map
+    needs: [select]
+    if: needs.select.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@1.98.0
+        with:
+          components: rust-analyzer
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: requirement-map
+
+      - name: Install CI system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
+      - name: Map, seals and marks
+        run: make requirement-map MAP=target/requirement-map
+
+      - name: Keep the map
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: requirement-map
+          path: |
+            target/requirement-map/requirement-map.html
+            target/requirement-map/defs.tsv
+            target/requirement-map/edges.tsv
+
   rust-gates:
     name: Rust gates
     needs: [select]

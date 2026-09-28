@@ -1,0 +1,1 @@
+{"cargo": {"features": ["dsm_sdk/jni", "dsm_sdk/bluetooth"], "cfgs": ["target_os=android"]}}

@@ -47,3 +47,12 @@ dsm_client/deterministic_state_machine/dsm/src/sofi/registration.rs check_fulfil
 # binds the claimant key to the trader's proven AK wires it and deletes this
 # line.
 dsm_client/deterministic_state_machine/dsm/src/sofi/signature.rs verify_signed_object
+#
+# A FOURTH ENTRY (2026-09-27), found when G1 moved onto the call graph
+# (tools/requirement_map): `first_member` passed the text matcher through
+# `position_leader`, but nothing calls `position_leader`, so no production
+# entry point reaches either. Production takes a cell's leader as seat 0 of
+# `Route::of` (`Route::leader`); `first_member` is the tests' oracle for that.
+# The change that gives it a production caller or makes it test code deletes
+# this line.
+dsm_client/deterministic_state_machine/dsm/src/sofi/fisher_yates.rs first_member
