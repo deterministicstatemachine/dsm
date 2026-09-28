@@ -433,7 +433,18 @@ fn get_database_path() -> Result<PathBuf> {
 /// sent root, a bearer step's anchor leaf and allocation spend) and the frame
 /// it owes its counterparty, so a restart continues a session instead of
 /// failing it and a returning link delivers what is owed.
-pub const CLIENT_DB_SCHEMA_VERSION: i64 = 25;
+///
+/// 24: `sofi_vault_root` — the vault's root chain, one row per generation.
+///
+/// 25: `history_repair_queue` — a history row the process failed to write
+/// after its transaction committed, kept until the startup sweep writes it.
+///
+/// 26: the recipient stages recognized objects, not received bytes.
+/// `recipient_staging` is gone; `recipient_staged_transfer` (keyed by the
+/// signed operation), `recipient_staged_receipt` (keyed by the commitment),
+/// `recipient_pair` and the two observation tables replace it, and the
+/// sender of each object is the contact whose key verified it.
+pub const CLIENT_DB_SCHEMA_VERSION: i64 = 26;
 
 /// A 32-byte column, exactly. Any other length is a corrupt row and an error —
 /// never padded, never truncated.
@@ -1127,44 +1138,60 @@ fn create_schema(conn: &Connection) -> Result<()> {
             CHECK (role IN ('evidence_a', 'countersign_b', 'relationship_finalized'))
         );
 
-        -- ADR 0003 step 3: the recipient's durable staging area.
+        -- ADR 0003 step 3: the recipient's durable staging area. Only the
+        -- ingestion boundary writes it, and only objects it has verified: a
+        -- transfer's SIG A under the stored key of the contact it came from, a
+        -- receipt's signature chain for (that contact, this device). Each is
+        -- keyed by what it IS -- a transfer by its op id (the signed operation
+        -- bytes, signature included), a receipt by its commitment -- so two
+        -- copies of one object are one row and arrival order decides nothing.
+        -- The sender column is the contact whose key verified the object, never
+        -- a field the object carries.
         --
-        -- A split transfer arrives as two independent artifacts. Neither half
-        -- alone authorises anything, so each is staged durably and NOTHING is
-        -- acknowledged or applied until both are present, digest-bound and
-        -- verified. Arrival order is not part of identity: the row is keyed by
-        -- the logical transfer correlation id, and whichever half arrives first
-        -- creates it.
-        --
-        -- Exact received bytes are stored for both halves. Pairing and
-        -- verification operate on those frozen bytes, never on a protobuf
-        -- reconstructed from them -- a re-encode is how "the bytes I verified"
-        -- silently stops being "the bytes that arrived".
-        --
-        -- There is no rejected state. A pair that does not verify does not
-        -- execute, and a transfer that does not execute changes no state and
-        -- records nothing negative (DSM Amendment A1).
-        CREATE TABLE IF NOT EXISTS recipient_staging(
-            correlation_key          TEXT PRIMARY KEY,
-            state                    TEXT NOT NULL,
-            -- transfer half (exact received bytes)
-            transfer_bytes           BLOB,
-            -- the evidence reference the transfer carries (proto field 12)
-            expected_evidence_digest BLOB,
-            -- evidence half (exact received bytes) + the digest computed over them
-            evidence_bytes           BLOB,
-            evidence_digest          BLOB,
-            -- The b0x inbox address the FIRST half arrived on. Kept in the
-            -- recipient's poll set while the pair is incomplete or unACKed, so
-            -- a partner artifact replayed by the sender under the same frozen
-            -- route is still received after the relationship tip advances.
-            -- Both halves must arrive on the same route (set-or-require-equal);
-            -- released to NULL only when this key's ACKs succeed.
-            retained_route           TEXT,
-            CHECK (state IN (
-                'staged_transfer', 'staged_evidence', 'ready_to_verify',
-                'accepted'
-            ))
+        -- There is no rejected state. A pair that does not execute changes no
+        -- state and records nothing negative (DSM Amendment A1). Whether an
+        -- object can still execute is read from the canonical apply's own
+        -- conflict identity (spent_nonces, canonical_apply_identity).
+        CREATE TABLE IF NOT EXISTS recipient_staged_transfer(
+            op_id                     BLOB PRIMARY KEY,
+            sender_device_id          BLOB NOT NULL,
+            nonce_hash                BLOB NOT NULL,
+            canonical_operation_bytes BLOB NOT NULL,
+            signature                 BLOB NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS recipient_staged_receipt(
+            commitment        BLOB PRIMARY KEY,
+            sender_device_id  BLOB NOT NULL,
+            relationship_key  BLOB NOT NULL,
+            parent_tip        BLOB NOT NULL,
+            evidence_bytes    BLOB NOT NULL,
+            evidence_digest   BLOB NOT NULL
+        );
+        -- A staged transfer bound to the staged receipt whose signed child tip
+        -- is the successor recomputed from that transfer's operation.
+        CREATE TABLE IF NOT EXISTS recipient_pair(
+            op_id       BLOB PRIMARY KEY,
+            commitment  BLOB NOT NULL UNIQUE,
+            state       TEXT NOT NULL,
+            CHECK (state IN ('bound', 'accepted'))
+        );
+        -- What the spool showed: the address and message id each copy of a
+        -- staged object was read under, and a transfer copy's economic locator
+        -- hints. Transport observations for dedup, polling and collection
+        -- only -- never an identity, never a verdict.
+        CREATE TABLE IF NOT EXISTS recipient_transfer_observation(
+            op_id                 BLOB NOT NULL,
+            address               TEXT NOT NULL,
+            message_id            TEXT NOT NULL,
+            economic_position     INTEGER NOT NULL,
+            debit_mutation_index  INTEGER NOT NULL,
+            PRIMARY KEY (op_id, address, message_id, economic_position, debit_mutation_index)
+        );
+        CREATE TABLE IF NOT EXISTS recipient_receipt_observation(
+            commitment  BLOB NOT NULL,
+            address     TEXT NOT NULL,
+            message_id  TEXT NOT NULL,
+            PRIMARY KEY (commitment, address, message_id)
         );
 
         CREATE TABLE IF NOT EXISTS recipient_outbound_reply(

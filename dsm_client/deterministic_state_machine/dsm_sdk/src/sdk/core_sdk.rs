@@ -2552,18 +2552,20 @@ impl CoreSDK {
         use crate::storage::codecs::hash_blake3_bytes;
 
         // ---- validate the request (fail closed) ----
-        let (nonce, amount_val, to_device_id, token_id) = match &op {
+        let (nonce, amount_val, to_device_id, token_id, signed_policy_commit) = match &op {
             dsm::types::operations::Operation::Transfer {
                 nonce,
                 amount,
                 to_device_id,
                 token_id,
+                policy_commit,
                 ..
             } => (
                 nonce.clone(),
                 amount.value(),
                 to_device_id.clone(),
                 token_id.clone(),
+                *policy_commit,
             ),
             _ => {
                 return Err(DsmError::invalid_operation(
@@ -2593,7 +2595,9 @@ impl CoreSDK {
                 "local device_id must be 32 bytes (AppState corrupt)",
             ));
         }
-        if to_device_id.as_slice() != local_device_id_bytes.as_slice() {
+        let local_for_check = <[u8; 32]>::try_from(local_device_id_bytes.as_slice())
+            .map_err(|e| DsmError::state_machine(format!("local device_id: {e}")))?;
+        if !addressed_to(&to_device_id, &local_for_check) {
             return Err(DsmError::invalid_operation(
                 "apply_incoming_transfer_full_state: transfer not addressed to this device",
             ));
@@ -2718,13 +2722,12 @@ impl CoreSDK {
         // the sender advanced, `decode_and_bind_signed` guarantees it) and the
         // entropy Core derived for that step. A receipt whose child is anything
         // else names a successor no honest advance produced.
-        let expected_child = dsm::types::device_state::relationship_chain_tip_v2(
+        let expected_child = successor_child_tip(
             &rel_key,
             &parent_tip,
             &local_arr,
             &op.to_bytes(),
             &sender_transition_entropy,
-            None,
         );
         if child_tip != expected_child {
             return Ok(ApplyOutcome::Conflict {
@@ -2738,14 +2741,14 @@ impl CoreSDK {
         }
 
         // ---- fresh: execute under the global lock with the single full-state tx ----
-        let deltas = {
-            let pc = self.resolve_policy_commit_strict(&token_id)?;
-            vec![dsm::types::device_state::BalanceDelta {
-                policy_commit: pc,
-                direction: dsm::types::device_state::BalanceDirection::Credit,
-                amount: amount_val,
-            }]
-        };
+        // The credit is in the token the SIGNED operation commits to — the same
+        // policy commitment Core's write set, provenance and conservation read —
+        // never a local resolution of its token id.
+        let deltas = vec![dsm::types::device_state::BalanceDelta {
+            policy_commit: signed_policy_commit,
+            direction: dsm::types::device_state::BalanceDirection::Credit,
+            amount: amount_val,
+        }];
         let tx_id_str = String::from_utf8_lossy(tx_id.as_bytes()).into_owned();
         // The record every in-tx write derives from — built ONCE from the
         // outcome so the durable row and the returned value cannot drift.
@@ -2911,6 +2914,34 @@ impl CoreSDK {
 
 /* ---------------------------------- Tests ----------------------------------- */
 
+/// Whether a signed operation's `to_device_id` is this device. The one rule
+/// for "addressed here": the ingestion boundary and the canonical apply both
+/// call it.
+pub(crate) fn addressed_to(to_device_id: &[u8], this_device: &[u8; 32]) -> bool {
+    to_device_id == this_device.as_slice()
+}
+
+/// The child tip a receipt must sign for a step: the v2 successor of the
+/// signed parent under the signed operation (signature included) and the
+/// sender's transition entropy (§39.3). The ingestion boundary binds a
+/// receipt to its transfer with it; the canonical apply checks it again.
+pub(crate) fn successor_child_tip(
+    relationship_key: &[u8; 32],
+    parent_tip: &[u8; 32],
+    this_device: &[u8; 32],
+    signed_operation_bytes: &[u8],
+    transition_entropy: &[u8; 32],
+) -> [u8; 32] {
+    dsm::types::device_state::relationship_chain_tip_v2(
+        relationship_key,
+        parent_tip,
+        this_device,
+        signed_operation_bytes,
+        transition_entropy,
+        None,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3061,7 +3092,7 @@ mod tests {
     #[serial]
     async fn an_apply_consults_the_signed_pair_never_the_projection() {
         use crate::handlers::recipient_dispatch::{
-            dispatch_evidence_half, dispatch_transfer_half, DispatchOutcome,
+            ingest_evidence_half, ingest_transfer_half, IngestOutcome, Ingested,
         };
         let p = Pair::boot(100, 0).await;
         let sent = p.a.send(&p.b, 10).await;
@@ -3077,16 +3108,29 @@ mod tests {
         assert!(sent.success, "{:?}", sent.error_message);
         let one = crate::test_support::arrivals::the_one_transfer(&p.b, &p.fleet).await;
         p.b.enter();
-        assert!(matches!(
-            dispatch_transfer_half(&one.key, &one.transfer_bytes, &p.a.ak_pk, &one.route)
-                .expect("stage the transfer"),
-            DispatchOutcome::Staged(_)
-        ));
-        assert!(matches!(
-            dispatch_evidence_half(&one.evidence, &p.a.ak_pk, &one.evidence_route)
-                .expect("stage the evidence"),
-            DispatchOutcome::Staged(_)
-        ));
+        let staged = IngestOutcome {
+            ingested: Ingested::Staged,
+            unreadable_candidates: Vec::new(),
+        };
+        assert_eq!(
+            ingest_transfer_half(
+                &one.transfer_bytes,
+                &one.header_sender,
+                &one.route,
+                &one.message_id
+            )
+            .expect("ingest the transfer"),
+            staged
+        );
+        assert_eq!(
+            ingest_evidence_half(
+                &one.evidence_bytes,
+                &one.evidence_route,
+                &one.evidence_message_id
+            )
+            .expect("ingest the evidence"),
+            staged
+        );
 
         {
             let binding = client_db::get_connection().expect("conn");

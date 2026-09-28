@@ -188,11 +188,6 @@ fn acceptance_fixture() -> AcceptanceFixture {
     let request = generated::OnlineTransferRequest {
         signature: sphincs_sign(&sender_ak_sk, &transfer_bytes).unwrap(),
         canonical_operation_bytes: transfer_bytes.clone(),
-        receipt_evidence_digest: dsm::crypto::blake3::domain_hash_bytes(
-            dsm::common::domain_tags::TAG_DSM_RECEIPT_EVIDENCE_A,
-            &evidence_a_bytes,
-        )
-        .to_vec(),
         ..Default::default()
     };
 
@@ -201,7 +196,11 @@ fn acceptance_fixture() -> AcceptanceFixture {
         compute_receipt_b_canonical_target(&commitment, &commitment, &b_parent, &b_child);
     let countersign = generated::ReceiptCountersignB {
         commitment: commitment.to_vec(),
-        receipt_evidence_digest_a: request.receipt_evidence_digest.clone(),
+        receipt_evidence_digest_a: dsm::crypto::blake3::domain_hash_bytes(
+            dsm::common::domain_tags::TAG_DSM_RECEIPT_EVIDENCE_A,
+            &evidence_a_bytes,
+        )
+        .to_vec(),
         sig_b: sphincs_sign(&ek_sk_b, &b_target).unwrap(),
         ek_cert_b: sign_ek_cert(&recipient_ak_sk, &ek_pk_b, &parent_tip).unwrap(),
         ek_pk_b: ek_pk_b.clone(),

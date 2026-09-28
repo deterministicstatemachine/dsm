@@ -4,10 +4,15 @@
 //! funds a peer-debit credit.
 //!
 //! `CreditSourceValidatedPeerDebit.acceptance_evidence_addr` names the exact
-//! bytes of a [`PeerTransferAcceptanceEvidenceV1`]: the exact signed
-//! `OnlineTransferRequest`, the exact A-side full receipt wire, and the exact
-//! recipient countersignature. The A-side material alone is a PROPOSAL; the
-//! `sig_b` countersignature is the acceptance.
+//! bytes of a [`PeerTransferAcceptanceEvidenceV1`]: the signed transfer (its
+//! canonical operation bytes and SIG A), the exact A-side full receipt wire,
+//! and the exact recipient countersignature. The A-side material alone is a
+//! PROPOSAL; the `sig_b` countersignature is the acceptance.
+//!
+//! The transfer and the receipt are bound to each other by what they sign,
+//! not by a reference one carries to the other: the operation must be the
+//! validated debit's, and the receipt's child tip must be that debit's
+//! successor.
 //!
 //! ## Certificate ancestry follows the signer, not the receipt role
 //!
@@ -199,16 +204,7 @@ pub fn verify_peer_transfer_acceptance(
         ));
     }
 
-    // ── The A-side receipt evidence, bound to the request by digest ────────
-    let evidence_digest = crate::crypto::blake3::domain_hash_bytes(
-        crate::common::domain_tags::TAG_DSM_RECEIPT_EVIDENCE_A,
-        &bundle.receipt_evidence_a_bytes,
-    );
-    if request.receipt_evidence_digest != evidence_digest {
-        return Err(invalid(
-            "receipt evidence bytes are not the ones the transfer request names",
-        ));
-    }
+    // ── The A-side receipt evidence, bound to the same debit step ──────────
     let receipt = StitchedReceiptV2::from_canonical_protobuf(&bundle.receipt_evidence_a_bytes)
         .map_err(|e| malformed("receipt decode", e))?;
     if receipt.devid_a != sender.devid || receipt.devid_b != recipient.devid {

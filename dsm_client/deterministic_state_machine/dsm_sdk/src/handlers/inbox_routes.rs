@@ -121,40 +121,69 @@ impl AppRouterImpl {
                     ));
                 }
 
-                let inbox_items: Vec<generated::InboxItem> = all_items
-                    .iter()
-                    .map(|(e, freshness)| generated::InboxItem {
-                        id: e.transaction_id.clone(),
-                        preview: match &e.kind {
-                            crate::sdk::b0x_sdk::B0xEntryKind::Transfer { amount, token_id } => {
-                                // The amount as the request states it, in the
-                                // token's own decimals when they are known.
-                                match super::wallet_routes::token_decimals(token_id) {
-                                    Ok(decimals) => format!(
-                                        "From: {} Amount: {} {}",
-                                        e.sender_device_id,
-                                        super::wallet_routes::format_base_units_for_display(
-                                            *amount, decimals
-                                        ),
-                                        token_id
-                                    ),
-                                    Err(_) => format!(
-                                        "From: {} Amount: {} base units of {}",
-                                        e.sender_device_id, amount, token_id
-                                    ),
+                // A transfer is listed with its sender and terms only once the
+                // boundary's read-only stages recognize it: SIG A verified under
+                // the stored key of the contact its header names, addressed to
+                // this device. Its sender is that contact, and its amount and
+                // token are read from the signed operation. A copy that is not
+                // recognized is listed as unverified, with the reason and no
+                // sender, and nothing is taken from it; a store that cannot be
+                // read fails the pull.
+                let mut inbox_items: Vec<generated::InboxItem> = Vec::new();
+                for (e, freshness) in &all_items {
+                    let (preview, sender_id) = match &e.kind {
+                        crate::sdk::b0x_sdk::B0xEntryKind::Transfer => {
+                            use crate::handlers::recipient_dispatch::{
+                                recognize_transfer, TransferRecognition,
+                            };
+                            match recognize_transfer(&e.transfer_wire_bytes, &e.sender_device_id) {
+                                Err(why) => return err(format!("inbox.pull: {why}")),
+                                Ok(TransferRecognition::NotRecognized(why)) => {
+                                    (format!("Unverified: {why}"), None)
+                                }
+                                Ok(TransferRecognition::Recognized(recognized)) => {
+                                    let sender = crate::util::text_id::encode_base32_crockford(
+                                        &recognized.staged.sender,
+                                    );
+                                    let terms = &recognized.terms;
+                                    // The amount in the token's own decimals when
+                                    // they are known here; otherwise the exact
+                                    // base units, and why.
+                                    let amount =
+                                        match super::wallet_routes::token_decimals(&terms.token_id)
+                                        {
+                                            Ok(decimals) => format!(
+                                                "{} {}",
+                                                super::wallet_routes::format_base_units_for_display(
+                                                    terms.amount,
+                                                    decimals
+                                                ),
+                                                terms.token_id
+                                            ),
+                                            Err(e) => format!(
+                                                "{} base units of {} ({e})",
+                                                terms.amount, terms.token_id
+                                            ),
+                                        };
+                                    (format!("From: {sender} Amount: {amount}"), Some(sender))
                                 }
                             }
-                            crate::sdk::b0x_sdk::B0xEntryKind::Message { payload_len } => {
-                                format!(
-                                    "From: {} message:{} bytes",
-                                    e.sender_device_id, payload_len
-                                )
-                            }
-                        },
-                        sender_id: Some(e.sender_device_id.clone()),
+                        }
+                        crate::sdk::b0x_sdk::B0xEntryKind::Message { payload_len } => (
+                            format!("From: {} message:{} bytes", e.sender_device_id, payload_len),
+                            Some(e.sender_device_id.clone()),
+                        ),
+                        crate::sdk::b0x_sdk::B0xEntryKind::Unrecognized { reason } => {
+                            (format!("Unverified: {reason}"), None)
+                        }
+                    };
+                    inbox_items.push(generated::InboxItem {
+                        id: e.transaction_id.clone(),
+                        preview,
+                        sender_id,
                         is_stale_route: *freshness == RouteFreshness::PreviousTip,
-                    })
-                    .collect();
+                    });
+                }
 
                 let resp = generated::InboxResponse { items: inbox_items };
                 pack_envelope_ok(generated::envelope::Payload::InboxResponse(resp))

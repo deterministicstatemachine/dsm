@@ -679,8 +679,14 @@ mod tests {
         {
             let binding = get_connection().expect("conn");
             let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
-            conn.execute("DELETE FROM recipient_staging", [])
-                .expect("reap staging");
+            conn.execute_batch(
+                "DELETE FROM recipient_pair;
+                 DELETE FROM recipient_transfer_observation;
+                 DELETE FROM recipient_receipt_observation;
+                 DELETE FROM recipient_staged_transfer;
+                 DELETE FROM recipient_staged_receipt;",
+            )
+            .expect("reap staging");
         }
 
         assert!(
