@@ -3909,7 +3909,6 @@ rust-default-on-error	dsm_client/deterministic_state_machine/dsm/tests/universal
 rust-default-on-error	dsm_client/deterministic_state_machine/dsm/tests/universal_faucet_invoke_test.rs	bc54f6f78a9deba0
 rust-default-on-error	dsm_client/deterministic_state_machine/dsm/tests/whitepaper_kat.rs	7e7ae9f1e990da50
 rust-default-on-error	dsm_client/deterministic_state_machine/dsm_sdk/build.rs	6837a49ed4db6b0b
-rust-default-on-error	dsm_client/deterministic_state_machine/dsm_sdk/build.rs	874ad14d9f3207f6
 rust-default-on-error	dsm_client/deterministic_state_machine/dsm_sdk/src/bluetooth/anchor_accept.rs	320a0da93bc224c3
 rust-default-on-error	dsm_client/deterministic_state_machine/dsm_sdk/src/bluetooth/android_ble_bridge.rs	fe41f512563b6001
 rust-default-on-error	dsm_client/deterministic_state_machine/dsm_sdk/src/bluetooth/bilateral_ble_handler.rs	141d8343a00b4732
@@ -4770,7 +4769,6 @@ rust-discarded-result	dsm_client/deterministic_state_machine/dsm/tests/ccb_confo
 rust-discarded-result	dsm_client/deterministic_state_machine/dsm/tests/ccb_conformance.rs	916c6c58df3d3eca
 rust-discarded-result	dsm_client/deterministic_state_machine/dsm/tests/ccb_conformance.rs	916c6c58df3d3eca
 rust-discarded-result	dsm_client/deterministic_state_machine/dsm/tests/sofi_v8_independent.rs	026ddd65c75007ea
-rust-discarded-result	dsm_client/deterministic_state_machine/dsm_sdk/build.rs	9901b8191539b12e
 rust-discarded-result	dsm_client/deterministic_state_machine/dsm_sdk/src/bluetooth/android_ble_bridge.rs	5f1a8bacd648dc0b
 rust-discarded-result	dsm_client/deterministic_state_machine/dsm_sdk/src/bluetooth/android_ble_bridge.rs	67087ca324041baf
 rust-discarded-result	dsm_client/deterministic_state_machine/dsm_sdk/src/bluetooth/android_ble_bridge.rs	67087ca324041baf
@@ -5481,10 +5479,6 @@ rust-error-discarded	dsm_client/deterministic_state_machine/dsm/tests/sofi_v8_op
 rust-error-discarded	dsm_client/deterministic_state_machine/dsm/tests/sofi_v8_vault_bytes.rs	3cd5c63766586989
 rust-error-discarded	dsm_client/deterministic_state_machine/dsm/tests/sofi_v8_vault_bytes.rs	671454a5ab98f845
 rust-error-discarded	dsm_client/deterministic_state_machine/dsm/tests/sofi_v8_vault_bytes.rs	6ea993b78250c7fe
-rust-error-discarded	dsm_client/deterministic_state_machine/dsm_sdk/build.rs	41ade59ddec1e216
-rust-error-discarded	dsm_client/deterministic_state_machine/dsm_sdk/build.rs	5f93066d23f210b3
-rust-error-discarded	dsm_client/deterministic_state_machine/dsm_sdk/build.rs	61e6da10094488a3
-rust-error-discarded	dsm_client/deterministic_state_machine/dsm_sdk/build.rs	61e6da10094488a3
 rust-error-discarded	dsm_client/deterministic_state_machine/dsm_sdk/build.rs	d7bcc9d175f74431
 rust-error-discarded	dsm_client/deterministic_state_machine/dsm_sdk/build.rs	e8d50ab9ecc0fd2c
 rust-error-discarded	dsm_client/deterministic_state_machine/dsm_sdk/src/bluetooth/anchor_accept.rs	2a7e44d0fbf91707
