@@ -369,14 +369,14 @@ requirement-map: ## Code map (MAP=dir): every source file hashed; each shipped b
 	# Each build's features, and the ones the index resolves (cargo metadata
 	# unifies dev-dependencies): the difference is what the index compiles that
 	# the build does not.
-	rustup run $(RUST_PIN) cargo tree --locked -p dsm_sdk --features jni,bluetooth --target aarch64-linux-android -e normal,build --prefix none -f '{p} {f}' > $(MAP)/android-features.txt
-	rustup run $(RUST_PIN) cargo tree --locked --workspace --features dsm_sdk/jni,dsm_sdk/bluetooth --target aarch64-linux-android -e normal,build,dev --prefix none -f '{p} {f}' > $(MAP)/android-features-indexed.txt
+	rustup run $(RUST_PIN) cargo tree --locked --color never -p dsm_sdk --features jni,bluetooth --target aarch64-linux-android -e normal,build --prefix none -f '{p} {f}' > $(MAP)/android-features.txt
+	rustup run $(RUST_PIN) cargo tree --locked --color never --workspace --features dsm_sdk/jni,dsm_sdk/bluetooth --target aarch64-linux-android -e normal,build,dev --prefix none -f '{p} {f}' > $(MAP)/android-features-indexed.txt
 	env CC_aarch64_linux_android=$(NDK_BIN)/aarch64-linux-android23-clang AR_aarch64_linux_android=$(NDK_BIN)/llvm-ar \
 		rustup run $(RUST_PIN) rust-analyzer scip . --config-path ci/requirement_map.android.rust-analyzer.json --output $(MAP)/android.scip > $(MAP)/android.log 2>&1
 	if [ "$$(uname -s)" = Linux ]; then \
 		rustup target add x86_64-unknown-linux-gnu --toolchain $(RUST_PIN) && \
-		rustup run $(RUST_PIN) cargo tree --locked -p dsm_storage_node --target x86_64-unknown-linux-gnu -e normal,build --prefix none -f '{p} {f}' > $(MAP)/node-features.txt && \
-		rustup run $(RUST_PIN) cargo tree --locked --workspace --target x86_64-unknown-linux-gnu -e normal,build,dev --prefix none -f '{p} {f}' > $(MAP)/node-features-indexed.txt && \
+		rustup run $(RUST_PIN) cargo tree --locked --color never -p dsm_storage_node --target x86_64-unknown-linux-gnu -e normal,build --prefix none -f '{p} {f}' > $(MAP)/node-features.txt && \
+		rustup run $(RUST_PIN) cargo tree --locked --color never --workspace --target x86_64-unknown-linux-gnu -e normal,build,dev --prefix none -f '{p} {f}' > $(MAP)/node-features-indexed.txt && \
 		rustup run $(RUST_PIN) rust-analyzer scip . --config-path ci/requirement_map.node.rust-analyzer.json --output $(MAP)/node.scip > $(MAP)/node.log 2>&1; \
 	fi
 	rustup run $(RUST_PIN) rust-analyzer scip . --config-path ci/requirement_map.tests.rust-analyzer.json --output $(MAP)/tests.scip > $(MAP)/tests.log 2>&1
