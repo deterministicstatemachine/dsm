@@ -477,6 +477,7 @@ mod tests {
     //! the bad input and that the honest transfer is credited exactly once.
 
     use super::*;
+    use crate::handlers::app_router_impl::transfer_nonce;
     use crate::storage::client_db;
     use crate::test_support::arrivals::{the_one_transfer, OneTransfer};
     use crate::test_support::two_device::Pair;
@@ -769,40 +770,21 @@ mod tests {
     }
 
     /// A transfer A signed to another device, sent to B: SIG A verifies, and
-    /// it is still not B's. Nothing is staged.
+    /// it is still not B's. The other device is A itself, and the nonce the
+    /// one A's send would derive. Nothing is staged.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[serial]
     async fn a_transfer_addressed_to_another_device_is_not_recognized() {
         let (p, one) = sent().await;
-        p.a.enter();
-        let elsewhere = [0xE5u8; 32];
-        let op = Operation::Transfer {
-            to_device_id: elsewhere.to_vec(),
-            amount: dsm::types::token_types::Balance::amount(5),
-            token_id: b"ERA".to_vec(),
-            policy_commit: crate::policy::builtin_policy_commit("ERA").expect("ERA"),
-            mode: dsm::types::operations::TransactionMode::Unilateral,
-            nonce: vec![0x42; 32],
-            recipient: elsewhere.to_vec(),
-            to: elsewhere.to_vec(),
-            message: String::new(),
-            signature: Vec::new(),
-            authority_policy: None,
-        };
-        let canonical = op.to_bytes();
-        let signature = dsm::crypto::sphincs::sphincs_sign(
-            &crate::sdk::signing_authority::current_secret_key().expect("A's signing key"),
-            &canonical,
-        )
-        .expect("A signs");
-        let request = dsm::types::proto::OnlineTransferRequest {
-            signature,
-            canonical_operation_bytes: canonical,
-            sender_economic_position: 1,
-            sender_debit_mutation_index: 0,
-        }
-        .encode_to_vec();
-        p.b.enter();
+        let (tip, _) = a_view_of_b(&p);
+        let elsewhere = p.a.device_id;
+        let request = signed_by_a(
+            &p,
+            elsewhere,
+            p.a.ak_pk.clone(),
+            5,
+            transfer_nonce(&tip, 5, "ERA", &elsewhere),
+        );
         let out = ingested(ingest_transfer_half(
             &request,
             &one.header_sender,
@@ -926,19 +908,38 @@ mod tests {
         nothing_staged();
     }
 
-    /// A transfer A signs to B beside the one it sent, on the nonce A
-    /// chooses: another signed object from the same sender.
-    fn another_transfer_signed_by_a(p: &Pair, amount: u64, nonce: Vec<u8>) -> Vec<u8> {
+    /// A's relationship tip with B and the key A holds for B: what A's own
+    /// send signs over.
+    fn a_view_of_b(p: &Pair) -> ([u8; 32], Vec<u8>) {
+        p.a.enter();
+        let b = client_db::get_contact_by_device_id(&p.b.device_id)
+            .expect("A's contacts")
+            .expect("A holds B as a contact");
+        let tip = crate::handlers::app_router_impl::contact_relationship_tip(&b)
+            .expect("A's relationship tip with B");
+        (tip, b.public_key)
+    }
+
+    /// A transfer A signs, built as A's send builds one (`to` the recipient's
+    /// device id in Base32, `recipient` the key A holds for it), on the nonce
+    /// A chooses; the locator hints are A's to write. As B's poll reads it.
+    fn signed_by_a(
+        p: &Pair,
+        to_device_id: [u8; 32],
+        recipient_key: Vec<u8>,
+        amount: u64,
+        nonce: Vec<u8>,
+    ) -> Vec<u8> {
         p.a.enter();
         let op = Operation::Transfer {
-            to_device_id: p.b.device_id.to_vec(),
+            to_device_id: to_device_id.to_vec(),
             amount: dsm::types::token_types::Balance::amount(amount),
             token_id: b"ERA".to_vec(),
             policy_commit: crate::policy::builtin_policy_commit("ERA").expect("ERA"),
             mode: dsm::types::operations::TransactionMode::Unilateral,
             nonce,
-            recipient: p.b.device_id.to_vec(),
-            to: p.b.device_id.to_vec(),
+            recipient: recipient_key,
+            to: crate::util::text_id::encode_base32_crockford(&to_device_id).into_bytes(),
             message: String::new(),
             signature: Vec::new(),
             authority_policy: None,
@@ -971,7 +972,14 @@ mod tests {
             &one.evidence_route,
             &one.evidence_message_id,
         ));
-        let other = another_transfer_signed_by_a(&p, 7, vec![0x43; 32]);
+        let (tip, b_key) = a_view_of_b(&p);
+        let other = signed_by_a(
+            &p,
+            p.b.device_id,
+            b_key,
+            7,
+            transfer_nonce(&tip, 7, "ERA", &p.b.device_id),
+        );
         staged(ingest_transfer_half(
             &other,
             &one.header_sender,
@@ -1021,7 +1029,8 @@ mod tests {
         let Operation::Transfer { nonce, .. } = &honest.op else {
             panic!("the sent operation is a transfer");
         };
-        let rival = another_transfer_signed_by_a(&p, 7, nonce.clone());
+        let (_, b_key) = a_view_of_b(&p);
+        let rival = signed_by_a(&p, p.b.device_id, b_key, 7, nonce.clone());
         staged(ingest_transfer_half(
             &rival,
             &one.header_sender,
