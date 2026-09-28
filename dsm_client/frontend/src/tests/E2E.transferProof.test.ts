@@ -339,80 +339,6 @@ describe('Online Transfer — Full Cycle (wallet.sendSmart, the path the send sc
 // ─────────────────────────────────────────────────────────────────
 
 describe('Online Transfer — Proto Fidelity', () => {
-  test('OnlineTransferRequest field roundtrip preserves all fields', () => {
-    const req = new pb.OnlineTransferRequest({
-      tokenId: 'ERA',
-      toDeviceId: DEVICE_B as any,
-      amount: 42n as any,
-      memo: 'test memo',
-      nonce: new Uint8Array(0),
-      signature: new Uint8Array(0),
-      fromDeviceId: DEVICE_A as any,
-    } as any);
-
-    const bytes = req.toBinary();
-    const decoded = pb.OnlineTransferRequest.fromBinary(bytes);
-
-    expect(decoded.tokenId).toBe('ERA');
-    expect(decoded.toDeviceId).toEqual(DEVICE_B);
-    expect(decoded.toDeviceId).toHaveLength(32);
-    expect(decoded.amount).toBe(42n);
-    expect(decoded.memo).toBe('test memo');
-    expect(decoded.fromDeviceId).toEqual(DEVICE_A);
-    expect(decoded.fromDeviceId).toHaveLength(32);
-  });
-
-  test('Envelope v3 wraps UniversalTx → UniversalOp → Invoke(wallet.send) → ArgPack', () => {
-    const req = new pb.OnlineTransferRequest({
-      tokenId: 'ERA',
-      toDeviceId: DEVICE_B as any,
-      amount: 10n as any,
-      fromDeviceId: DEVICE_A as any,
-    } as any);
-
-    const argPack = new pb.ArgPack({
-      codec: pb.Codec.PROTO as any,
-      body: new Uint8Array(req.toBinary()),
-    });
-    const invoke = new pb.Invoke({ method: 'wallet.send', args: argPack });
-    const opId = new pb.Hash32({ v: new Uint8Array(32).fill(0x77) } as any);
-    const uop = new pb.UniversalOp({
-      opId,
-      actor: DEVICE_A as any,
-      kind: { case: 'invoke', value: invoke } as any,
-    });
-    const tx = new pb.UniversalTx({ ops: [uop], atomic: true });
-
-    const env = new pb.Envelope({
-      version: 3,
-      headers: makeHeaders(),
-      messageId: new Uint8Array(16) as any,
-      payload: { case: 'universalTx', value: tx },
-    } as any);
-
-    // Roundtrip
-    const envBytes = env.toBinary();
-    const decoded = pb.Envelope.fromBinary(envBytes);
-
-    expect(decoded.version).toBe(3);
-    expect(decoded.payload.case).toBe('universalTx');
-    const decodedTx = decoded.payload.value as pb.UniversalTx;
-    expect(decodedTx.ops).toHaveLength(1);
-    expect(decodedTx.atomic).toBe(true);
-
-    const decodedOp = decodedTx.ops[0];
-    expect(decodedOp.actor).toEqual(DEVICE_A);
-    expect(decodedOp.kind.case).toBe('invoke');
-    const decodedInvoke = decodedOp.kind.value as pb.Invoke;
-    expect(decodedInvoke.method).toBe('wallet.send');
-
-    const decodedArgPack = decodedInvoke.args!;
-    const innerReq = pb.OnlineTransferRequest.fromBinary(decodedArgPack.body);
-    expect(innerReq.tokenId).toBe('ERA');
-    expect(innerReq.toDeviceId).toEqual(DEVICE_B);
-    expect(innerReq.amount).toBe(10n);
-  });
-
   test('headers carry correct identity (deviceId, genesisHash, chainTip, seq)', () => {
     const headers = makeHeaders();
     const env = new pb.Envelope({
@@ -616,24 +542,6 @@ describe('Offline Transfer — Proto Constraints', () => {
     expect(decoded.expectedGenesisHash?.v).toHaveLength(32);
     expect(decoded.expectedCounterpartyStateHash?.v).toHaveLength(32);
     expect(decoded.senderGenesisHash?.v).toHaveLength(32);
-  });
-
-  test('canonical encoding is deterministic (same input = same bytes)', () => {
-    const params = {
-      tokenId: 'ERA',
-      toDeviceId: DEVICE_B as any,
-      amount: 42n as any,
-      memo: 'test',
-      fromDeviceId: DEVICE_A as any,
-    };
-
-    const req1 = new pb.OnlineTransferRequest(params as any);
-    const req2 = new pb.OnlineTransferRequest(params as any);
-    const bytes1 = req1.toBinary();
-    const bytes2 = req2.toBinary();
-
-    expect(bytes1).toEqual(bytes2);
-    expect(bytes1.length).toBeGreaterThan(0);
   });
 
   test('BilateralPrepareResponse roundtrip preserves commitment_hash', () => {

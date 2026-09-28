@@ -12,9 +12,10 @@
 //! identity is created as wallet creation creates it
 //! ([`economic_fixtures::create_identity`]) and published on the fleet; a
 //! contact is added through `contacts.addManual`, which resolves the peer's
-//! directory entry on the fleet; a send is `wallet.send` with the request the
-//! frontend builds; a receive, a reply and a finalize are `storage.sync`. The
-//! fleet is the network's pinned set of storage nodes on Postgres
+//! directory entry on the fleet; a send is `wallet.sendSmart` with the request
+//! the frontend builds (`dsm/transactions.ts`); a receive, a reply and a
+//! finalize are the `storage.sync` query the inbox poller makes, through the
+//! router. The fleet is the network's pinned set of storage nodes on Postgres
 //! ([`NodeSet`]).
 //!
 //! STRICTLY SERIALIZED. Exactly one device is active while production code runs;
@@ -26,7 +27,7 @@
 //! would sync whichever device is entered at times of its own. This harness
 //! proves protocol SEQUENCING, not concurrency.
 
-use crate::bridge::{AppInvoke, AppRouter};
+use crate::bridge::{AppInvoke, AppQuery, AppRouter};
 use crate::economic_fixtures::{self, FleetGuard};
 use crate::handlers::app_router_impl::AppRouterImpl;
 use crate::sdk::app_state::AppState;
@@ -218,51 +219,71 @@ impl TestDevice {
             .balance(&pc)
     }
 
-    /// `wallet.send` of `amount` ERA to `to`: builds, signs, advances, freezes
-    /// and delivers an online transfer through the production handler.
+    /// `wallet.sendSmart` of `amount` ERA to `to`: builds, signs, advances,
+    /// freezes and delivers an online transfer through the production route.
     pub async fn send(&self, to: &TestDevice, amount: u64) -> crate::bridge::AppResult {
         self.send_token(to, "ERA", amount).await
     }
 
     /// As [`send`](Self::send), for any asset this device holds, by ticker —
-    /// a created token moves through exactly the handler ERA does. The request
-    /// is the one the frontend builds (`dsm/transactions.ts`): the SDK owns
-    /// every protocol field.
+    /// a created token moves through exactly the route ERA does. The request is
+    /// the one the frontend builds (`dsm/transactions.ts`): the recipient in
+    /// Base32, the amount as the display string in the token's own decimals.
+    /// The SDK owns every protocol field.
     pub async fn send_token(
         &self,
         to: &TestDevice,
         token_id: &str,
         amount: u64,
     ) -> crate::bridge::AppResult {
+        self.enter();
+        let decimals = crate::handlers::wallet_routes::token_decimals(token_id)
+            .expect("the harness sends tokens this device can name");
         let seq = self.seq.fetch_add(1, Ordering::SeqCst);
         self.invoke(
-            "wallet.send",
-            &generated::OnlineTransferRequest {
+            "wallet.sendSmart",
+            &generated::OnlineTransferSmartRequest {
+                recipient: crate::util::text_id::encode_base32_crockford(&to.device_id),
+                amount: crate::handlers::wallet_routes::format_base_units_for_display(
+                    amount, decimals,
+                ),
                 token_id: token_id.to_string(),
-                to_device_id: to.device_id.to_vec(),
-                amount,
                 memo: format!("{}->{} #{seq}", self.slot, to.slot),
-                from_device_id: self.device_id.to_vec(),
-                ..Default::default()
             },
         )
         .await
     }
 
-    /// `storage.sync` (pull + push), with the request the frontend sends: on
-    /// a recipient this stages the polled halves, verifies and applies the
-    /// pair, converges and posts the countersign delta; on a sender it
+    /// `storage.sync` (pull + push), the query the inbox poller makes, through
+    /// the router: on a recipient this ingests the polled halves, applies the
+    /// bound pair, converges and posts the countersign delta; on a sender it
     /// consumes deltas (finalize), re-drives unsettled outbox rows and runs GC.
     pub async fn sync(&self) -> generated::StorageSyncResponse {
         self.enter();
-        self.router()
-            .run_storage_sync_request(generated::StorageSyncRequest {
-                pull_inbox: true,
-                push_pending: true,
-                limit: 50,
+        let params = generated::ArgPack {
+            codec: generated::Codec::Proto as i32,
+            body: crate::sdk::inbox_poller::poll_sync_request().encode_to_vec(),
+            schema_hash: None,
+        }
+        .encode_to_vec();
+        let answered = self
+            .router()
+            .query(AppQuery {
+                path: "storage.sync".to_string(),
+                params,
             })
-            .await
-            .expect("storage.sync")
+            .await;
+        assert!(
+            answered.success,
+            "storage.sync: {:?}",
+            answered.error_message
+        );
+        let env = crate::handlers::response_helpers::decode_local_envelope(&answered.data)
+            .expect("storage.sync answers an envelope");
+        match env.payload {
+            Some(generated::envelope::Payload::StorageSyncResponse(resp)) => resp,
+            other => panic!("storage.sync answered {other:?}"),
+        }
     }
 }
 

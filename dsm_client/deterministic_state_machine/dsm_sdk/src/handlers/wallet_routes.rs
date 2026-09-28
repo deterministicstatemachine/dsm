@@ -590,11 +590,66 @@ impl AppRouterImpl {
                         // Prefix to avoid ambiguity with other ids and keep stable format.
                         let safe_id: String = format!("tx_{}", t.tx_hash);
 
+                        // A row that keeps its signed operation shows the terms
+                        // that operation carries — the same bytes its receipt
+                        // badge is checked against. Only a row with no operation
+                        // (a faucet claim, a Bitcoin event) shows its stored
+                        // figures.
+                        let (amount, token_id, memo) = match t
+                            .metadata
+                            .get(crate::storage::client_db::HISTORY_OPERATION_KEY)
+                        {
+                            Some(operation) => {
+                                let op = dsm::types::operations::Operation::from_bytes(operation)
+                                    .map_err(|e| {
+                                    format!(
+                                        "wallet.history: transaction {}'s operation does \
+                                             not decode: {e}",
+                                        t.tx_id
+                                    )
+                                })?;
+                                let terms =
+                                    super::recipient_accept::transfer_terms(&op).map_err(|e| {
+                                        format!("wallet.history: transaction {}: {e}", t.tx_id)
+                                    })?;
+                                (terms.amount, terms.token_id, terms.memo)
+                            }
+                            None => {
+                                let token = t.metadata.get("token_id").ok_or_else(|| {
+                                    format!(
+                                        "wallet.history: transaction {} names no token",
+                                        t.tx_id
+                                    )
+                                })?;
+                                let token = String::from_utf8(token.clone()).map_err(|e| {
+                                    format!(
+                                        "wallet.history: transaction {}'s token is not text: {e}",
+                                        t.tx_id
+                                    )
+                                })?;
+                                // A row with no memo has none; one whose memo is
+                                // not text is corrupt.
+                                let memo = match t.metadata.get("memo") {
+                                    Some(bytes) => {
+                                        String::from_utf8(bytes.clone()).map_err(|e| {
+                                            format!(
+                                            "wallet.history: transaction {}'s memo is not text: \
+                                             {e}",
+                                            t.tx_id
+                                        )
+                                        })?
+                                    }
+                                    None => String::new(),
+                                };
+                                (t.amount, token, memo)
+                            }
+                        };
+
                         // Compute signed amount: positive if incoming, negative if outgoing
                         let amount_signed: i64 = if t.to_device == my_device_id_str {
-                            t.amount as i64 // incoming: positive
+                            amount as i64 // incoming: positive
                         } else {
-                            -(t.amount as i64) // outgoing: negative
+                            -(amount as i64) // outgoing: negative
                         };
 
                         // Determine recipient/sender for UI display - resolve aliases
@@ -636,13 +691,6 @@ impl AppRouterImpl {
                             }
                         };
 
-                        let token_id = t
-                            .metadata
-                            .get("token_id")
-                            .and_then(|b| String::from_utf8(b.clone()).ok())
-                            .ok_or_else(|| {
-                                format!("wallet.history: transaction {} names no token", t.tx_id)
-                            })?;
                         Ok(generated::TransactionInfo {
                             // Filled at the encoding boundary by enrich_transaction_display.
                             display_amount: String::new(),
@@ -664,7 +712,7 @@ impl AppRouterImpl {
                             },
                             to_device_id: bytes32("recipient device id", &t.to_device)?,
                             token_id: canonicalize_token_id(&token_id),
-                            amount: t.amount,
+                            amount,
                             // tx_hash is stored as canonical base32 text in SQLite.
                             tx_hash: bytes32("transaction hash", &t.tx_hash)?,
                             amount_signed,
@@ -672,11 +720,7 @@ impl AppRouterImpl {
                             status: t.status.clone(),
                             recipient,
                             stitched_receipt: t.proof_data.clone().unwrap_or_default(),
-                            memo: t
-                                .metadata
-                                .get("memo")
-                                .map(|b| String::from_utf8_lossy(b).to_string())
-                                .unwrap_or_default(),
+                            memo,
                             // §4.3#3: Derive R_G from the stored receipt's devid_a for
                             // display-only consistency check. This is historical UI display
                             // only; protocol acceptance already enforced at ingest time.
@@ -779,25 +823,6 @@ impl AppRouterImpl {
 
     pub(crate) async fn handle_wallet_invoke(&self, i: AppInvoke) -> AppResult {
         match i.method.as_str() {
-            "wallet.send" => {
-                // Decode ArgPack from args
-                let arg_pack = match generated::ArgPack::decode(&*i.args) {
-                    Ok(p) => p,
-                    Err(e) => return err(format!("decode ArgPack failed: {e}")),
-                };
-                if arg_pack.codec != generated::Codec::Proto as i32 {
-                    return err("wallet.send: ArgPack.codec must be PROTO".into());
-                }
-
-                // Decode OnlineTransferRequest
-                let transfer_req = match generated::OnlineTransferRequest::decode(&*arg_pack.body) {
-                    Ok(r) => r,
-                    Err(e) => return err(format!("decode OnlineTransferRequest failed: {e}")),
-                };
-
-                self.process_online_transfer_logic(transfer_req).await
-            }
-
             "wallet.sendOffline" => {
                 let arg_pack = match generated::ArgPack::decode(&*i.args) {
                     Ok(p) => p,
@@ -1087,28 +1112,39 @@ impl AppRouterImpl {
                 // Try base32 decode first — only accept if it produces exactly 32 bytes
                 // (a valid device ID). Otherwise fall through to alias lookup, since
                 // short aliases like "ej8w2khr" are valid base32 but decode to <32 bytes.
-                let to_device_id_vec = {
+                let to_device_id: [u8; 32] = {
                     let as_device_id =
                         crate::util::text_id::decode_base32_crockford(&smart_req.recipient)
                             .filter(|b| b.len() == 32);
 
                     if let Some(bytes) = as_device_id {
-                        bytes
+                        match <[u8; 32]>::try_from(bytes.as_slice()) {
+                            Ok(id) => id,
+                            Err(e) => return err(format!("Recipient device id: {e}")),
+                        }
                     } else {
                         match get_contact_by_alias(&smart_req.recipient) {
-                            Ok(Some(c)) if c.device_id.len() == 32 => c.device_id.clone(),
-                            Ok(Some(c)) => {
+                            Ok(Some(c)) => match <[u8; 32]>::try_from(c.device_id.as_slice()) {
+                                Ok(id) => id,
+                                Err(e) => {
+                                    return err(format!(
+                                        "Contact {} has an invalid device id: {e}",
+                                        smart_req.recipient
+                                    ))
+                                }
+                            },
+                            Ok(None) => {
+                                let recipient = &smart_req.recipient;
                                 return err(format!(
-                                    "Contact {} has invalid device ID length: {}",
-                                    smart_req.recipient,
-                                    c.device_id.len()
-                                ))
+                                    "Recipient not found (not a device id or known alias): \
+                                     {recipient}"
+                                ));
                             }
-                            _ => {
+                            Err(e) => {
                                 return err(format!(
-                                "Recipient not found (not a valid device id or known alias): {}",
-                                smart_req.recipient
-                            ))
+                                    "Recipient {} could not be looked up: {e}",
+                                    smart_req.recipient
+                                ))
                             }
                         }
                     }
@@ -1130,23 +1166,15 @@ impl AppRouterImpl {
                         Err(e) => return err(format!("Invalid amount: {}", e)),
                     };
 
-                // 3. The request process_online_transfer_logic signs. It derives
-                // the relationship tip and the nonce itself.
-                let inner_req = generated::OnlineTransferRequest {
+                // 3. What the send asks for. The sender, the relationship tip,
+                // the nonce and the signed operation are derived from here on.
+                self.process_online_transfer_logic(super::app_router_impl::OnlineSendIntent {
+                    to_device_id,
                     token_id,
-                    to_device_id: to_device_id_vec.clone(),
                     amount,
                     memo: smart_req.memo,
-                    nonce: vec![],
-                    signature: vec![],
-                    from_device_id: self.device_id_bytes.to_vec(),
-                    canonical_operation_bytes: Vec::new(),
-                    receipt_evidence_digest: Vec::new(),
-                    sender_economic_position: 0,
-                    sender_debit_mutation_index: 0,
-                };
-
-                self.process_online_transfer_logic(inner_req).await
+                })
+                .await
             }
 
             _ => err(format!("unknown wallet invoke method: {}", i.method)),

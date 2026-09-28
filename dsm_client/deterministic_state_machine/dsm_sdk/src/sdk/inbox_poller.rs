@@ -261,6 +261,16 @@ pub fn resume_poller() {
     }
 }
 
+/// The `storage.sync` request every poll makes: pull the inbox, push what is
+/// owed, 50 items.
+pub(crate) fn poll_sync_request() -> generated::StorageSyncRequest {
+    generated::StorageSyncRequest {
+        pull_inbox: true,
+        push_pending: true,
+        limit: 50,
+    }
+}
+
 /// Run one sync cycle: call `storage.sync` through the app router,
 /// then push `inbox.updated` to the WebView if items were processed.
 /// Returns (processed, pulled) counts for adaptive polling.
@@ -273,12 +283,7 @@ async fn run_inbox_sync_cycle_counted(source: &str) -> (u32, u32) {
         }
     };
 
-    // Build a storage.sync request: pull inbox, push pending, limit 50.
-    let sync_req = generated::StorageSyncRequest {
-        pull_inbox: true,
-        push_pending: true,
-        limit: 50,
-    };
+    let sync_req = poll_sync_request();
     let arg_pack = generated::ArgPack {
         codec: generated::Codec::Proto as i32,
         body: sync_req.encode_to_vec(),

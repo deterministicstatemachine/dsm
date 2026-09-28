@@ -11,20 +11,6 @@ use serial_test::serial;
 use crate::storage::client_db;
 use crate::test_support::two_device::{assert_incomplete, Pair, TestDevice};
 
-/// The transfer halves `B` staged on receipt — its transfer request and A's
-/// receipt evidence, exactly as delivered.
-fn staged_halves() -> (Vec<u8>, Vec<u8>) {
-    let binding = client_db::get_connection().expect("device db");
-    let conn = binding.lock().unwrap_or_else(|e| e.into_inner());
-    conn.query_row(
-        "SELECT transfer_bytes, evidence_bytes FROM recipient_staging
-         WHERE transfer_bytes IS NOT NULL AND evidence_bytes IS NOT NULL",
-        [],
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    )
-    .expect("the staged halves")
-}
-
 /// ADOPTION PRECEDES RECEIPT (owner ruling 2026-09-13). A receiver that never
 /// ADDED a token is not credited when that token is sent to it — the policy it
 /// would validate against is not in its own committed state, and nothing may
@@ -191,8 +177,9 @@ fn facts_sender_position(p: &Pair) -> u64 {
 #[serial]
 async fn fabricated_sender_coordinates_are_refused_before_any_durable_state() {
     use crate::sdk::economic_admission_flow::{
-        prevalidate_incoming_transfer_admission, PrevalidationRefusal,
+        prevalidate_incoming_transfer_admission, IncomingTransfer, PrevalidationRefusal,
     };
+    use crate::storage::client_db::recipient_staging::LocatorHint;
     use prost::Message;
 
     let p = Pair::boot(100, 0).await;
@@ -200,13 +187,19 @@ async fn fabricated_sender_coordinates_are_refused_before_any_durable_state() {
     // A REAL settled generation first: A's debit is registered and walkable.
     let sent = p.a.send(&p.b, 10).await;
     assert!(sent.success, "{:?}", sent.error_message);
+    // The halves exactly as B's poll reads them — the signed transfer, its
+    // locator hints and A's receipt, what production prevalidation consumes.
+    let one = crate::test_support::arrivals::the_one_transfer(&p.b, &p.fleet).await;
     let b_sync = p.b.sync().await;
     assert!(b_sync.success, "{:?}", b_sync.errors);
-
-    // The exact frozen halves as the RECIPIENT staged them — what production
-    // prevalidation actually consumes.
-    p.b.enter();
-    let (wire, evidence_bytes) = staged_halves();
+    let wire = dsm::types::proto::OnlineTransferRequest::decode(one.transfer_bytes.as_slice())
+        .expect("the delivered transfer request");
+    let incoming = |hint: LocatorHint| IncomingTransfer {
+        canonical_operation_bytes: &wire.canonical_operation_bytes,
+        signature: &wire.signature,
+        hint,
+        evidence_bytes: &one.evidence_bytes,
+    };
 
     let durable_state_is_clean = |p: &Pair| {
         p.b.enter();
@@ -226,15 +219,15 @@ async fn fabricated_sender_coordinates_are_refused_before_any_durable_state() {
 
     // Fabricated debit index: TERMINAL, nothing durable. (The real transfer
     // already applied, so the admitted coordinate stays at 1 throughout.)
-    let mut tampered = dsm::types::proto::OnlineTransferRequest::decode(wire.as_slice()).unwrap();
-    tampered.sender_debit_mutation_index = 7;
     let refusal = prevalidate_incoming_transfer_admission(
         &p.b.router().core_sdk,
         &p.a.genesis,
         &p.a.device_id,
         &sender_ak,
-        &tampered.encode_to_vec(),
-        &evidence_bytes,
+        &incoming(LocatorHint {
+            economic_position: wire.sender_economic_position,
+            debit_mutation_index: 7,
+        }),
         &rel,
     )
     .await
@@ -248,16 +241,16 @@ async fn fabricated_sender_coordinates_are_refused_before_any_durable_state() {
 
     // Nonexistent position: an outage shape — HELD, never terminal, nothing
     // durable, no permanent fence.
-    let mut ghost = dsm::types::proto::OnlineTransferRequest::decode(wire.as_slice()).unwrap();
-    ghost.sender_economic_position += 40;
     p.b.enter();
     let refusal = prevalidate_incoming_transfer_admission(
         &p.b.router().core_sdk,
         &p.a.genesis,
         &p.a.device_id,
         &sender_ak,
-        &ghost.encode_to_vec(),
-        &evidence_bytes,
+        &incoming(LocatorHint {
+            economic_position: wire.sender_economic_position + 40,
+            debit_mutation_index: wire.sender_debit_mutation_index,
+        }),
         &rel,
     )
     .await
@@ -283,14 +276,14 @@ async fn the_same_sender_debit_cannot_fund_a_second_credit() {
     let rel = p.a.rel_key_with(&p.b);
     let sent = p.a.send(&p.b, 10).await;
     assert!(sent.success, "{:?}", sent.error_message);
+    let one = crate::test_support::arrivals::the_one_transfer(&p.b, &p.fleet).await;
     let b_sync = p.b.sync().await;
     assert!(b_sync.success, "{:?}", b_sync.errors);
     assert_eq!(p.b.era_balance(), 10, "credited once");
 
     p.b.enter();
-    let wire = staged_halves().0;
-    let transfer = dsm::types::proto::OnlineTransferRequest::decode(wire.as_slice())
-        .expect("the staged transfer request");
+    let transfer = dsm::types::proto::OnlineTransferRequest::decode(one.transfer_bytes.as_slice())
+        .expect("the delivered transfer request");
     let op = dsm::types::operations::Operation::decode_and_bind_signed(
         &transfer.canonical_operation_bytes,
         &transfer.signature,
