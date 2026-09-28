@@ -8136,7 +8136,8 @@ export class EkCertStepV1 extends Message<EkCertStepV1> {
  */
 export class PeerTransferAcceptanceEvidenceV1 extends Message<PeerTransferAcceptanceEvidenceV1> {
   /**
-   * exact OnlineTransferRequest
+   * The verified transfer: an OnlineTransferRequest holding its signature and
+   * canonical operation bytes. Nothing else in it is read.
    *
    * @generated from field: bytes transfer_request_bytes = 1;
    */
@@ -20393,52 +20394,23 @@ export class FaucetClaimResponse extends Message<FaucetClaimResponse> {
 
 /**
  * ======================= Online Transfer Messages ====================
+ * An online transfer on the wire: the signed operation and nothing that
+ * restates it. SIG A (`signature`) covers `canonical_operation_bytes`, the
+ * unsigned `Operation::Transfer` preimage, and that operation already names
+ * the recipient, amount, token, policy commitment, nonce and memo. The
+ * recipient decodes every term from those bytes after verifying them; the
+ * sender is the stored contact whose key verified them. Nothing else here
+ * is authority.
  *
  * @generated from message dsm.OnlineTransferRequest
  */
 export class OnlineTransferRequest extends Message<OnlineTransferRequest> {
   /**
-   * @generated from field: string token_id = 1;
-   */
-  tokenId = "";
-
-  /**
-   * @generated from field: bytes to_device_id = 2;
-   */
-  toDeviceId = new Uint8Array(0);
-
-  /**
-   * @generated from field: uint64 amount = 3;
-   */
-  amount = protoInt64.zero;
-
-  /**
-   * @generated from field: string memo = 4;
-   */
-  memo = "";
-
-  /**
-   * optional sender signature (crypto proof)
+   * SIG A: the sender's SPHINCS+ signature over `canonical_operation_bytes`.
    *
    * @generated from field: bytes signature = 5;
    */
   signature = new Uint8Array(0);
-
-  /**
-   * Deterministic 32-byte nonce signed by sender to prevent replays (AF-2)
-   *
-   * @generated from field: bytes nonce = 6;
-   */
-  nonce = new Uint8Array(0);
-
-  /**
-   * Envelope v3 signing context (AF-2 remediation)
-   *
-   * REQUIRED: sender identity for key selection
-   *
-   * @generated from field: bytes from_device_id = 7;
-   */
-  fromDeviceId = new Uint8Array(0);
 
   /**
    * §4.2.1 Canonical unsigned Operation bytes (signing preimage).
@@ -20451,27 +20423,11 @@ export class OnlineTransferRequest extends Message<OnlineTransferRequest> {
   canonicalOperationBytes = new Uint8Array(0);
 
   /**
-   * ADR 0003: content address of the A-side receipt-evidence artifact this
-   * transfer refers to. Role-domain-separated
-   * (BLAKE3("DSM/receipt-evidence/A/v1" ‖ full_wire_bytes)) and computed over
-   * the FULL wire bytes, never ReceiptCommit::compute_commitment(), which
-   * hard-zeroes fields 12-20 — a commitment-addressed object could be served
-   * with substituted signatures.
-   *
-   * A dedicated field rather than reusing 10: the two carry different semantic
-   * types (a 32-byte address vs a full object), and encoding both in one field
-   * would make "which form is this?" a runtime guess.
-   *
-   * @generated from field: bytes receipt_evidence_digest = 12;
-   */
-  receiptEvidenceDigest = new Uint8Array(0);
-
-  /**
    * ── Sender economic locators (3.5b) ──────────────────────────────────────
-   * Sender economic coordinates on OnlineTransferRequest are untrusted
-   * locators, never authority; the verifier accepts them only after the
-   * resolved ValidatedEconomicRoot proves that the named debit belongs to the
-   * exact signed online Transfer addressed to this consuming identity.
+   * Untrusted hints, never authority: the verifier accepts them only after
+   * the resolved ValidatedEconomicRoot proves that the named debit belongs to
+   * the exact signed online Transfer addressed to this consuming identity. A
+   * hint that does not resolve is not a verdict on the transfer.
    * The values are OUTPUTS of the sender's built admission (the admitted
    * position and THE debit mutation index of the exact write set), populated
    * in the same staged build phase that freezes this envelope — never
@@ -20494,15 +20450,8 @@ export class OnlineTransferRequest extends Message<OnlineTransferRequest> {
   static readonly runtime: typeof proto3 = proto3;
   static readonly typeName = "dsm.OnlineTransferRequest";
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "token_id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 2, name: "to_device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 3, name: "amount", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
-    { no: 4, name: "memo", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 5, name: "signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 6, name: "nonce", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 7, name: "from_device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 11, name: "canonical_operation_bytes", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 12, name: "receipt_evidence_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 13, name: "sender_economic_position", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
     { no: 14, name: "sender_debit_mutation_index", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
   ]);
@@ -20529,30 +20478,13 @@ export class OnlineTransferRequest extends Message<OnlineTransferRequest> {
  * rather than inline in the transfer. Its own message and its own invoke
  * method -- it is not an Operation and must not be threaded through one.
  *
- * INVARIANT:
- *   receipt_evidence_digest == BLAKE3("DSM/receipt-evidence/A/v1\0" || full_receipt_bytes)
- *
- * The digest here is cryptographically redundant (the recipient can recompute
- * it) but structurally useful: the artifact can identify itself before the
- * recipient has paired it with a transfer. The AUTHORITATIVE binding remains
- * the digest in field 12 of the transfer.
+ * The receipt pairs with its transfer by what it signs: its child tip is the
+ * successor of its parent under the signed operation, which the recipient
+ * recomputes. Nothing the artifact says about itself pairs it.
  *
  * @generated from message dsm.ReceiptEvidenceA
  */
 export class ReceiptEvidenceA extends Message<ReceiptEvidenceA> {
-  /**
-   * The transfer artifact this evidence belongs to, for correlation while
-   * staging. Not authority -- the digest is.
-   *
-   * @generated from field: string transfer_submission_id = 1;
-   */
-  transferSubmissionId = "";
-
-  /**
-   * @generated from field: bytes receipt_evidence_digest = 2;
-   */
-  receiptEvidenceDigest = new Uint8Array(0);
-
   /**
    * The FULL ReceiptCommit wire object: canonical fields plus sig_a,
    * ek_cert_a, ek_pk_a and Kyber material. ~118 KB with production-sized
@@ -20570,8 +20502,6 @@ export class ReceiptEvidenceA extends Message<ReceiptEvidenceA> {
   static readonly runtime: typeof proto3 = proto3;
   static readonly typeName = "dsm.ReceiptEvidenceA";
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "transfer_submission_id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 2, name: "receipt_evidence_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 3, name: "full_receipt_bytes", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 

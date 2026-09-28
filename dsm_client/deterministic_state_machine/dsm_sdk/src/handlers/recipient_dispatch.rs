@@ -1,260 +1,489 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! ADR 0003 step 3c: dispatch polled halves into recipient staging.
+//! ADR 0003 step 3c: the ingestion boundary — the only way spool bytes become
+//! recipient state.
 //!
 //! Fetch and decode happen in `b0x_sdk` (explicit invoke methods, never a
-//! trial-decode). This module owns the decision of what is allowed to OCCUPY a
-//! staging slot, and it enforces one rule that is not obvious:
+//! trial-decode). Everything a half becomes here, it becomes through the same
+//! stages, each taking only what the previous stage produced:
 //!
-//! # Verify BEFORE the bytes take the slot
+//! ```text
+//! parse → resolve candidate identity → verify → derive sender
+//!       → check recipient → derive the object key → stage → bind
+//! ```
 //!
-//! [`recipient_staging::stage_transfer_half`] is first-writer-wins on the
-//! correlation key: the first bytes to arrive own the slot, a divergent copy is
-//! refused, and a half that does not bind the staged one is not staged. That
-//! is the correct invariant — one
-//! correlation key names one commitment — but it makes ARRIVAL ORDER decide the
-//! outcome if unverified bytes are allowed to stage.
+//! - **resolve candidate identity**: the envelope header (transfer) or the
+//!   receipt's `devid_a` (evidence) names a contact. That is a lookup hint and
+//!   nothing more: it only chooses which STORED key the next stage tries.
+//! - **verify**: SIG A over the canonical operation bytes, or the receipt's
+//!   per-step signature chain for (that contact, this device), under the key
+//!   this device stored for the contact — never a key the artifact carries.
+//! - **derive sender**: the contact whose key verified. No field the sender
+//!   wrote names the sender.
+//! - **check recipient**: the operation's `to_device_id`, or the receipt's
+//!   `devid_b`, is this device.
+//! - **derive the object key**: what the object IS — a transfer by its op id
+//!   (the signed operation bytes, signature included), a receipt by its
+//!   commitment. Two copies of one object are one staged row, so a copy that
+//!   arrives first decides nothing.
+//! - **bind**: a receipt and a transfer from the same verified sender are one
+//!   pair when the receipt's signed child tip is the successor recomputed from
+//!   the transfer's operation — the one rule the canonical apply also checks.
 //!
-//! That matters now specifically because the cross-endpoint merge deliberately
-//! stopped collapsing divergent copies of one message id (it was
-//! first-responder-wins, which let a single replica shadow honest copies on
-//! every poll, forever). Divergent copies now BOTH arrive, by design. If a
-//! tampered copy could stage first, it would take the slot, permanently refuse
-//! the honest copy sitting in the same batch, fail verification, and stick at
-//! terminal reject — reproducing on the recipient exactly the wedge that was
-//! just removed from the sender.
-//!
-//! So each half is authenticated on its own, against the LOCALLY TRUSTED sender
-//! AK, before it is offered to staging:
-//!
-//! - transfer half — SIG A over `canonical_operation_bytes`;
-//! - evidence half — the receipt's own SIG A over its commitment.
-//!
-//! Neither check needs the other half, and neither trusts the unsigned digest
-//! reference. A tampered copy is discarded as a CANDIDATE and never becomes
-//! staging state, so the honest copy stages normally regardless of order.
+//! A half that fails any stage is not recognized, and nothing is recorded
+//! about it (DSM Amendment A1). Copies are observed by the address and message
+//! id the spool held them under; those observations are transport data, used
+//! to mark copies consumed and to keep a route polled, never as identity.
 
-use crate::handlers::recipient_accept::{verify_and_accept, Acceptance};
-use crate::sdk::apply_outcome::ApplyOutcome;
-use crate::storage::client_db::recipient_staging::{
-    self, stage_evidence_half, stage_transfer_half, StagingState,
-};
+use dsm::types::operations::Operation;
 use dsm::types::receipt_types::StitchedReceiptV2;
 use prost::Message;
 
-/// What a polled half did.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DispatchOutcome {
-    /// Authenticated and staged; the pair is not complete yet.
-    Staged(StagingState),
-    /// Both halves present, verified, and canonically applied.
-    Accepted(Acceptance),
-    /// The candidate failed its OWN signature check and was discarded without
-    /// touching staging. Deliberately not a terminal reject: no slot was taken,
-    /// so an honest copy of the same half can still arrive and stage.
-    DiscardedCandidate(String),
+use crate::storage::client_db::recipient_staging::{self, LocatorHint, StagedReceipt, StagedTransfer};
+
+/// A transfer half this device verified: SIG A under the stored key of
+/// `staged.sender`, addressed to this device.
+#[derive(Debug, Clone)]
+pub struct RecognizedTransfer {
+    /// The signed operation, with SIG A attached — byte-identical to what the
+    /// sender advanced.
+    pub op: Operation,
+    /// What the transfer moves and says, read from `op`.
+    pub terms: super::recipient_accept::TransferTerms,
+    pub staged: StagedTransfer,
+    /// The economic locator hints this copy carried. Untrusted.
+    pub hint: LocatorHint,
 }
 
-/// Authenticate a candidate transfer half, then stage it.
-///
-/// `sender_ak_pk` MUST come from the locally stored contact — never from the
-/// wire artifact. `route` is the b0x inbox address this half was polled from;
-/// it is retained on the staging row so the partner half — replayed by the
-/// sender under the same frozen route — is still received after the
-/// relationship tip advances. Both halves must arrive on the same route.
-pub fn dispatch_transfer_half(
-    correlation_key: &str,
-    transfer_bytes: &[u8],
-    sender_ak_pk: &[u8],
-    route: &str,
-) -> Result<DispatchOutcome, String> {
-    let req = match dsm::types::proto::OnlineTransferRequest::decode(transfer_bytes) {
-        Ok(r) => r,
-        Err(e) => {
-            return Ok(DispatchOutcome::DiscardedCandidate(format!(
-                "transfer half for {correlation_key} does not decode: {e}"
-            )))
+/// A receipt half this device verified: its `sig_a` chain for
+/// (`staged.sender`, this device).
+#[derive(Debug, Clone)]
+pub struct RecognizedReceipt {
+    pub receipt: StitchedReceiptV2,
+    pub staged: StagedReceipt,
+}
+
+/// What the boundary made of a transfer half. Not being recognized is a fact
+/// about the half, not a failure: an `Err` from recognition is reserved for
+/// this device being unable to decide (its own id or its store unreadable).
+#[derive(Debug, Clone)]
+pub enum TransferRecognition {
+    Recognized(Box<RecognizedTransfer>),
+    /// Why the half is not a transfer this device can take.
+    NotRecognized(String),
+}
+
+/// What the boundary made of a receipt half.
+#[derive(Debug, Clone)]
+pub enum ReceiptRecognition {
+    /// A copy of a receipt this device already accepted: its commitment is
+    /// the one the relationship's acceptance journal holds. Its signature chain
+    /// is not checked again — it was checked when the receipt was accepted,
+    /// and the cert head it chained to has since advanced past it.
+    Accepted,
+    /// A receipt verified now.
+    Verified(Box<RecognizedReceipt>),
+    /// Why the half is not a receipt this device can take.
+    NotRecognized(String),
+}
+
+/// What ingesting one copy did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Ingested {
+    /// Recognized; its object is staged (now or already) and this copy observed.
+    Staged,
+    /// Recognized, but the canonical apply has already decided its step — the
+    /// transfer's nonce is spent, or the receipt's step is taken — so it can
+    /// never execute here. Nothing is staged; the copy may be consumed.
+    Decided,
+    /// Not recognized. Nothing is recorded about it.
+    NotRecognized(String),
+}
+
+/// What ingesting one copy did, and every staged object of the same sender
+/// that could not be read back while looking for its partner. Such an object
+/// can bind nothing; it is reported, and it never stops this copy's ingestion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IngestOutcome {
+    pub ingested: Ingested,
+    pub unreadable_candidates: Vec<String>,
+}
+
+impl IngestOutcome {
+    fn only(ingested: Ingested) -> Self {
+        Self {
+            ingested,
+            unreadable_candidates: Vec::new(),
         }
+    }
+}
+
+/// This device's id. Nothing can be checked as addressed here without it.
+pub(crate) fn this_device() -> Result<[u8; 32], String> {
+    let id = crate::sdk::app_state::AppState::get_device_id()
+        .ok_or_else(|| "this device has no device id".to_string())?;
+    <[u8; 32]>::try_from(id.as_slice())
+        .map_err(|e| format!("this device's id is not 32 bytes: {e}"))
+}
+
+/// What a transfer IS: the id of its signed operation bytes (signature
+/// included), the exact bytes a receipt's child tip consumes.
+pub(crate) fn transfer_object_id(signed_operation_bytes: &[u8]) -> [u8; 32] {
+    let mut h = dsm::crypto::blake3::dsm_domain_hasher(dsm::tagged_domain!(
+        b"DSM/recipient-transfer-object/v1"
+    ));
+    h.update(signed_operation_bytes);
+    *h.finalize().as_bytes()
+}
+
+/// Recognize a transfer half: `wire` is the `OnlineTransferRequest` a spooled
+/// envelope carried, `header_sender` the Base32 device id its header named.
+pub fn recognize_transfer(wire: &[u8], header_sender: &str) -> Result<TransferRecognition, String> {
+    use TransferRecognition::NotRecognized;
+    // parse
+    let req = match dsm::types::proto::OnlineTransferRequest::decode(wire) {
+        Ok(r) => r,
+        Err(e) => return Ok(NotRecognized(format!("the transfer does not decode: {e}"))),
     };
     if req.canonical_operation_bytes.is_empty() {
-        return Ok(DispatchOutcome::DiscardedCandidate(format!(
-            "transfer half for {correlation_key} carries no canonical_operation_bytes"
-        )));
-    }
-    // The candidate gate. A copy that cannot prove itself never reaches storage.
-    if let Err(e) = dsm::types::operations::Operation::decode_and_bind_signed(
-        &req.canonical_operation_bytes,
-        &req.signature,
-        sender_ak_pk,
-    ) {
-        return Ok(DispatchOutcome::DiscardedCandidate(format!(
-            "transfer half for {correlation_key} failed SIG A: {e}"
-        )));
-    }
-
-    let digest: [u8; 32] = req
-        .receipt_evidence_digest
-        .as_slice()
-        .try_into()
-        .map_err(|_| {
-            format!("transfer half for {correlation_key} has a malformed evidence reference")
-        })?;
-
-    let state = stage_transfer_half(correlation_key, transfer_bytes, &digest, route)
-        .map_err(|e| format!("staging the transfer half for {correlation_key} failed: {e}"))?;
-    Ok(DispatchOutcome::Staged(state))
-}
-
-/// Authenticate a candidate evidence half, then stage it.
-///
-/// The artifact's self-declared digest is NOT trusted as authentication — an
-/// attacker who rewrites the bytes can rewrite that field too. What cannot be
-/// forged without the sender's AK is the receipt's own SIG A, so that is the
-/// gate. The digest BINDING to the transfer half is re-checked later, by
-/// `verify_staged_transfer`, against the frozen bytes.
-pub fn dispatch_evidence_half(
-    evidence: &dsm::types::proto::ReceiptEvidenceA,
-    sender_ak_pk: &[u8],
-    route: &str,
-) -> Result<DispatchOutcome, String> {
-    let correlation_key = evidence.transfer_submission_id.as_str();
-    if correlation_key.is_empty() {
-        return Ok(DispatchOutcome::DiscardedCandidate(
-            "evidence half names no transfer submission id".to_string(),
+        return Ok(NotRecognized(
+            "the transfer carries no canonical operation bytes".to_string(),
         ));
     }
-
-    let receipt = match StitchedReceiptV2::from_canonical_protobuf(&evidence.full_receipt_bytes) {
-        Ok(r) => r,
+    // resolve candidate identity: a hint choosing which stored key to try
+    let Some(candidate) = crate::util::text_id::decode_base32_crockford(header_sender) else {
+        return Ok(NotRecognized(format!(
+            "the header names {header_sender}, not a Base32 device id"
+        )));
+    };
+    let candidate = match <[u8; 32]>::try_from(candidate.as_slice()) {
+        Ok(id) => id,
         Err(e) => {
-            return Ok(DispatchOutcome::DiscardedCandidate(format!(
-                "evidence half for {correlation_key} does not decode: {e}"
+            return Ok(NotRecognized(format!(
+                "the header names {header_sender}, not a device id: {e}"
             )))
         }
     };
+    let Some(ak) = super::storage_routes::stored_sender_ak(header_sender)? else {
+        return Ok(NotRecognized(format!(
+            "no locally trusted sender AK for {header_sender}"
+        )));
+    };
+    // verify
+    let op = match Operation::decode_and_bind_signed(
+        &req.canonical_operation_bytes,
+        &req.signature,
+        &ak,
+    ) {
+        Ok(op) => op,
+        Err(e) => {
+            return Ok(NotRecognized(format!(
+                "SIG A does not verify under {header_sender}'s stored key: {e}"
+            )))
+        }
+    };
+    // derive sender: the contact whose key verified
+    let sender = candidate;
+    // check recipient
+    let Operation::Transfer {
+        to_device_id,
+        nonce,
+        amount,
+        token_id,
+        message,
+        ..
+    } = &op
+    else {
+        return Ok(NotRecognized(format!(
+            "the signed operation is a {}, not a transfer",
+            op.get_operation_type()
+        )));
+    };
+    let here = this_device()?;
+    if !crate::sdk::core_sdk::addressed_to(to_device_id, &here) {
+        return Ok(NotRecognized(
+            "the signed transfer is addressed to another device".to_string(),
+        ));
+    }
+    // derive the object key
+    let staged = StagedTransfer {
+        op_id: transfer_object_id(&op.to_bytes()),
+        sender,
+        nonce_hash: crate::storage::codecs::hash_blake3_bytes(nonce),
+        canonical_operation_bytes: req.canonical_operation_bytes,
+        signature: req.signature,
+    };
+    let terms = super::recipient_accept::TransferTerms::of(amount, token_id, message);
+    Ok(TransferRecognition::Recognized(Box::new(
+        RecognizedTransfer {
+            op,
+            terms,
+            staged,
+            hint: LocatorHint {
+                economic_position: req.sender_economic_position,
+                debit_mutation_index: req.sender_debit_mutation_index,
+            },
+        },
+    )))
+}
+
+/// Recognize a receipt half from the full A-side receipt wire bytes.
+pub fn recognize_receipt(full_receipt_bytes: &[u8]) -> Result<ReceiptRecognition, String> {
+    use ReceiptRecognition::NotRecognized;
+    // parse
+    let receipt = match StitchedReceiptV2::from_canonical_protobuf(full_receipt_bytes) {
+        Ok(r) => r,
+        Err(e) => return Ok(NotRecognized(format!("the receipt does not decode: {e}"))),
+    };
+    // check recipient before anything is verified against a relationship: the
+    // chain is looked up for (devid_a, devid_b), which must include this device
+    let here = this_device()?;
+    if receipt.devid_b != here {
+        return Ok(NotRecognized(
+            "the receipt names another device as its recipient".to_string(),
+        ));
+    }
     let commitment = match receipt.compute_commitment() {
         Ok(c) => c,
         Err(e) => {
-            return Ok(DispatchOutcome::DiscardedCandidate(format!(
-                "evidence half for {correlation_key}: commitment failed: {e}"
+            return Ok(NotRecognized(format!(
+                "the receipt commitment cannot be computed: {e}"
             )))
         }
     };
-    if let Err(e) =
-        super::storage_routes::verify_inbound_receipt_sig_a(&receipt, &commitment, sender_ak_pk)
+    let relationship_key =
+        dsm::core::bilateral_transaction_manager::compute_smt_key(&here, &receipt.devid_a);
+    // what the object is: one this device has already accepted
+    if crate::storage::client_db::get_acceptance_journal_by_commitment(
+        &relationship_key,
+        &commitment,
+    )
+    .map_err(|e| format!("the acceptance journal is unreadable: {e}"))?
+    .is_some()
     {
-        return Ok(DispatchOutcome::DiscardedCandidate(format!(
-            "evidence half for {correlation_key} failed the receipt chain: {e}"
+        return Ok(ReceiptRecognition::Accepted);
+    }
+    // resolve candidate identity
+    let candidate_b32 = crate::util::text_id::encode_base32_crockford(&receipt.devid_a);
+    let Some(ak) = super::storage_routes::stored_sender_ak(&candidate_b32)? else {
+        return Ok(NotRecognized(format!(
+            "no locally trusted sender AK for {candidate_b32}"
+        )));
+    };
+    // verify
+    if let Err(e) = super::storage_routes::verify_inbound_receipt_sig_a(&receipt, &commitment, &ak)?
+    {
+        return Ok(NotRecognized(format!(
+            "the receipt's sig_a chain does not verify: {e}"
         )));
     }
-
-    let state = stage_evidence_half(correlation_key, &evidence.full_receipt_bytes, route)
-        .map_err(|e| format!("staging the evidence half for {correlation_key} failed: {e}"))?;
-    Ok(DispatchOutcome::Staged(state))
+    // derive sender
+    let sender = receipt.devid_a;
+    // derive the object key
+    let staged = StagedReceipt {
+        commitment,
+        sender,
+        relationship_key,
+        parent_tip: receipt.parent_tip,
+        evidence_bytes: full_receipt_bytes.to_vec(),
+        evidence_digest: crate::storage::client_db::evidence_content_digest(
+            crate::storage::client_db::ArtifactRole::EvidenceA,
+            full_receipt_bytes,
+        ),
+    };
+    Ok(ReceiptRecognition::Verified(Box::new(RecognizedReceipt {
+        receipt,
+        staged,
+    })))
 }
 
-/// Complete a pair that has both halves: verify, canonically apply, accept.
-///
-/// Returns `None` when the pair is not `ready_to_verify`, so the caller can keep
-/// polling without treating an incomplete pair as an error.
-pub fn try_complete<F>(
-    correlation_key: &str,
-    sender_ak_pk: &[u8],
-    apply: F,
-) -> Result<Option<Acceptance>, String>
-where
-    F: FnOnce(&crate::handlers::recipient_accept::VerifiedTransfer) -> Result<ApplyOutcome, String>,
-{
-    let state = recipient_staging::staging_state(correlation_key)
-        .map_err(|e| format!("staging state load failed for {correlation_key}: {e}"))?;
-    if state != StagingState::ReadyToVerify {
-        return Ok(None);
-    }
-    let acceptance = verify_and_accept(correlation_key, sender_ak_pk, apply)?.1;
-    Ok(Some(acceptance))
+/// The signed operation of a staged transfer, re-derived from its canonical
+/// bytes and SIG A under the sender's stored key — the staged row is the signed
+/// material itself, and its meaning is read from it again every time.
+pub fn signed_operation_of(t: &StagedTransfer) -> Result<Operation, String> {
+    let sender_b32 = crate::util::text_id::encode_base32_crockford(&t.sender);
+    let ak = super::storage_routes::resolve_trusted_sender_ak(&sender_b32)?;
+    Operation::decode_and_bind_signed(&t.canonical_operation_bytes, &t.signature, &ak).map_err(
+        |e| format!("the staged transfer no longer verifies under {sender_b32}'s key: {e}"),
+    )
 }
 
-/// What the poll loop is allowed to do with a pair.
-///
-/// The live handler must not decide this inline. Every "never ACKs" rule in the
-/// design is a property of this one value, so it is computed in one place and
-/// unit-tested against real durable state.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AckDecision {
-    /// The pair reached `Accepted`. The acceptance kind is carried, NOT collapsed:
-    /// `AcceptedFresh` is the semantic finality path, `AcceptedDuplicate` is the
-    /// idempotent convergence path and must never mint a second value result.
-    Ack(Acceptance),
-    /// Not ACK-able, with the reason. Covers every non-accepted state — a single
-    /// half, and `ready_to_verify` before apply.
-    DoNotAck(String),
+/// Whether `receipt` is the receipt of `op`: its signed child tip is the
+/// successor of its signed parent under `op` and its transition entropy.
+fn binds(receipt: &StitchedReceiptV2, op: &Operation, here: &[u8; 32]) -> bool {
+    let relationship_key =
+        dsm::core::bilateral_transaction_manager::compute_smt_key(here, &receipt.devid_a);
+    crate::sdk::core_sdk::successor_child_tip(
+        &relationship_key,
+        &receipt.parent_tip,
+        here,
+        &op.to_bytes(),
+        &receipt.transition_entropy,
+    ) == receipt.child_tip
 }
 
-/// The whole per-pair decision: complete the pair if it is ready, then report
-/// whether (and how) it may be acknowledged.
+/// Ingest one copy of a transfer half read at `address` under `message_id`.
 ///
-/// A failing apply is propagated as `Err`, deliberately distinct from
-/// `DoNotAck`: the pair stays retryable and un-ACK-able, and the caller should
-/// log it rather than treat it as a decision about the transfer.
-pub fn decide_ack<F>(
-    correlation_key: &str,
-    sender_ak_pk: &[u8],
-    apply: F,
-) -> Result<AckDecision, String>
-where
-    F: FnOnce(&crate::handlers::recipient_accept::VerifiedTransfer) -> Result<ApplyOutcome, String>,
-{
-    let state = recipient_staging::staging_state(correlation_key)
-        .map_err(|e| format!("staging state load failed for {correlation_key}: {e}"))?;
-
-    // ALREADY ACCEPTED. This is the crash-after-apply-before-ACK window: the
-    // canonical apply committed durably but the acknowledgement never went out.
-    // The pair must re-ACK so the sender converges, and it must NOT re-apply —
-    // so it reports Duplicate, which is exactly what a fresh apply attempt would
-    // have returned anyway (the canonical apply is keyed on authenticated
-    // material, not on this delivery).
-    if state == StagingState::Accepted {
-        return Ok(AckDecision::Ack(Acceptance::AcceptedDuplicate));
-    }
-
-    match try_complete(correlation_key, sender_ak_pk, apply)? {
-        Some(acceptance) => {
-            // Belt and braces: the ACK is gated on DURABLE state, never on the
-            // fact that a call returned Ok.
-            if !may_ack(correlation_key)? {
-                return Ok(AckDecision::DoNotAck(format!(
-                    "{correlation_key} reported acceptance but durable state is not Accepted"
-                )));
-            }
-            Ok(AckDecision::Ack(acceptance))
+/// `Err` is this device failing (its store, its own id); a half that fails a
+/// stage is `NotRecognized`, never an error.
+pub fn ingest_transfer_half(
+    wire: &[u8],
+    header_sender: &str,
+    address: &str,
+    message_id: &str,
+) -> Result<IngestOutcome, String> {
+    let recognized = match recognize_transfer(wire, header_sender)? {
+        TransferRecognition::Recognized(r) => *r,
+        TransferRecognition::NotRecognized(why) => {
+            return Ok(IngestOutcome::only(Ingested::NotRecognized(why)))
         }
-        None => Ok(AckDecision::DoNotAck(format!(
-            "{correlation_key} is {} — not ACK-able",
-            state.as_str()
-        ))),
+    };
+    let store = |e: anyhow::Error| format!("staging a transfer from {header_sender}: {e}");
+    if recipient_staging::nonce_decided(&recognized.staged.nonce_hash).map_err(store)? {
+        return Ok(IngestOutcome::only(Ingested::Decided));
     }
+    recipient_staging::stage_transfer(&recognized.staged).map_err(store)?;
+    recipient_staging::observe_transfer(
+        &recognized.staged.op_id,
+        address,
+        message_id,
+        recognized.hint,
+    )
+    .map_err(store)?;
+    let here = this_device()?;
+    let mut unreadable_candidates = Vec::new();
+    for staged in
+        recipient_staging::unbound_receipts_from(&recognized.staged.sender).map_err(store)?
+    {
+        let receipt = match StitchedReceiptV2::from_canonical_protobuf(&staged.evidence_bytes) {
+            Ok(r) => r,
+            Err(e) => {
+                unreadable_candidates.push(format!("a staged receipt no longer decodes: {e}"));
+                continue;
+            }
+        };
+        if binds(&receipt, &recognized.op, &here) {
+            recipient_staging::bind(&recognized.staged.op_id, &staged.commitment).map_err(store)?;
+            break;
+        }
+    }
+    Ok(IngestOutcome {
+        ingested: Ingested::Staged,
+        unreadable_candidates,
+    })
 }
 
-/// Whether a completed pair may be acknowledged on the wire.
-///
-/// The ACK decision is deliberately NOT `outcome.is_ok()`. Only a pair that
-/// reached `Accepted` in durable staging may be acknowledged, and the
-/// fresh/duplicate distinction is carried through so the caller cannot collapse
-/// a converged retry into a second value-bearing acknowledgement by accident.
-pub fn may_ack(correlation_key: &str) -> Result<bool, String> {
-    recipient_staging::staging_state(correlation_key)
-        .map(|s| s.may_ack())
-        .map_err(|e| format!("staging state load failed for {correlation_key}: {e}"))
+/// Ingest one copy of an evidence half read at `address` under `message_id`.
+pub fn ingest_evidence_half(
+    full_receipt_bytes: &[u8],
+    address: &str,
+    message_id: &str,
+) -> Result<IngestOutcome, String> {
+    let recognized = match recognize_receipt(full_receipt_bytes)? {
+        ReceiptRecognition::Verified(r) => *r,
+        ReceiptRecognition::Accepted => return Ok(IngestOutcome::only(Ingested::Decided)),
+        ReceiptRecognition::NotRecognized(why) => {
+            return Ok(IngestOutcome::only(Ingested::NotRecognized(why)))
+        }
+    };
+    let store = |e: anyhow::Error| format!("staging a receipt: {e}");
+    if recipient_staging::step_decided(
+        &recognized.staged.relationship_key,
+        &recognized.staged.parent_tip,
+    )
+    .map_err(store)?
+    {
+        return Ok(IngestOutcome::only(Ingested::Decided));
+    }
+    recipient_staging::stage_receipt(&recognized.staged).map_err(store)?;
+    recipient_staging::observe_receipt(&recognized.staged.commitment, address, message_id)
+        .map_err(store)?;
+    let here = this_device()?;
+    let mut unreadable_candidates = Vec::new();
+    for staged in
+        recipient_staging::unbound_transfers_from(&recognized.staged.sender).map_err(store)?
+    {
+        let op = match signed_operation_of(&staged) {
+            Ok(op) => op,
+            Err(e) => {
+                unreadable_candidates.push(e);
+                continue;
+            }
+        };
+        if binds(&recognized.receipt, &op, &here) {
+            recipient_staging::bind(&staged.op_id, &recognized.staged.commitment).map_err(store)?;
+            break;
+        }
+    }
+    Ok(IngestOutcome {
+        ingested: Ingested::Staged,
+        unreadable_candidates,
+    })
+}
+
+/// What a copy read on a PREVIOUS-tip route is. Such a route fixes a tip this
+/// device advanced past, so nothing on it is staged: a copy of an object the
+/// canonical apply has decided is consumed, and anything else is left where it
+/// is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StaleCopy {
+    /// Recognized, and the apply has decided its step.
+    Decided,
+    /// Recognized; its step is not decided. Left unconsumed.
+    Undecided,
+    /// Not recognized. Nothing is recorded about it.
+    NotRecognized(String),
+}
+
+pub fn classify_stale_transfer_copy(wire: &[u8], header_sender: &str) -> Result<StaleCopy, String> {
+    let recognized = match recognize_transfer(wire, header_sender)? {
+        TransferRecognition::Recognized(r) => r,
+        TransferRecognition::NotRecognized(why) => return Ok(StaleCopy::NotRecognized(why)),
+    };
+    let decided = recipient_staging::nonce_decided(&recognized.staged.nonce_hash)
+        .map_err(|e| format!("reading the spent nonces: {e}"))?;
+    Ok(if decided {
+        StaleCopy::Decided
+    } else {
+        StaleCopy::Undecided
+    })
+}
+
+pub fn classify_stale_receipt_copy(full_receipt_bytes: &[u8]) -> Result<StaleCopy, String> {
+    let recognized = match recognize_receipt(full_receipt_bytes)? {
+        ReceiptRecognition::Verified(r) => r,
+        ReceiptRecognition::Accepted => return Ok(StaleCopy::Decided),
+        ReceiptRecognition::NotRecognized(why) => return Ok(StaleCopy::NotRecognized(why)),
+    };
+    let decided = recipient_staging::step_decided(
+        &recognized.staged.relationship_key,
+        &recognized.staged.parent_tip,
+    )
+    .map_err(|e| format!("reading the canonical apply identities: {e}"))?;
+    Ok(if decided {
+        StaleCopy::Decided
+    } else {
+        StaleCopy::Undecided
+    })
 }
 
 #[cfg(test)]
 mod tests {
+    //! The ingestion boundary against what a hostile sender, anyone who can
+    //! seal to the recipient, and a withholding node can put on the spool.
+    //! Every transfer here is a real send on the fleet; a hostile copy is that
+    //! send's own material changed the way its sender could change it, posted
+    //! through the sender's own spool client or handed to the boundary exactly
+    //! as the poll loop hands it. Each asserts that nothing durable came from
+    //! the bad input and that the honest transfer is credited exactly once.
+
     use super::*;
+    use crate::storage::client_db;
     use crate::test_support::arrivals::{the_one_transfer, OneTransfer};
     use crate::test_support::two_device::Pair;
     use serial_test::serial;
 
-    /// A sends B 10; B has not polled. The transfer's halves as B's poll
-    /// reads them, with B entered.
+    /// A sends B 10; B has not polled. The transfer as B's poll reads it,
+    /// with B entered.
     async fn sent() -> (Pair, OneTransfer) {
         let p = Pair::boot(100, 0).await;
         let sent = p.a.send(&p.b, 10).await;
@@ -264,215 +493,615 @@ mod tests {
         (p, one)
     }
 
-    fn flipped(bytes: &[u8]) -> Vec<u8> {
-        let mut out = bytes.to_vec();
-        let middle = out.len() / 2;
-        out[middle] ^= 0xFF;
+    /// Rows in a staging table on the ENTERED device.
+    fn rows(table: &str) -> i64 {
+        let binding = client_db::get_connection().expect("conn");
+        let conn = binding.lock().expect("the store lock");
+        conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+            .expect("count")
+    }
+
+    /// Nothing is staged, bound or observed on the ENTERED device.
+    fn nothing_staged() {
+        for table in [
+            "recipient_staged_transfer",
+            "recipient_staged_receipt",
+            "recipient_pair",
+            "recipient_transfer_observation",
+            "recipient_receipt_observation",
+        ] {
+            assert_eq!(rows(table), 0, "{table} holds nothing");
+        }
+    }
+
+    /// `wire` with raw protobuf fields appended: what a sender can write into
+    /// its own request beside the signed bytes.
+    fn with_appended_fields(wire: &[u8], fields: &[(u32, FieldValue)]) -> Vec<u8> {
+        use prost::encoding::{encode_key, encode_varint, WireType};
+        let mut out = wire.to_vec();
+        for (tag, value) in fields {
+            match value {
+                FieldValue::Varint(v) => {
+                    encode_key(*tag, WireType::Varint, &mut out);
+                    encode_varint(*v, &mut out);
+                }
+                FieldValue::Bytes(b) => {
+                    encode_key(*tag, WireType::LengthDelimited, &mut out);
+                    encode_varint(b.len() as u64, &mut out);
+                    out.extend_from_slice(b);
+                }
+            }
+        }
         out
     }
 
-    fn state(key: &str) -> StagingState {
-        recipient_staging::staging_state(key).expect("staging state")
+    enum FieldValue {
+        Varint(u64),
+        Bytes(Vec<u8>),
     }
 
-    /// THE ARRIVAL-ORDER PROOF. Staging is first-writer-wins and terminal
-    /// rejection is sticky, so if an unverified copy could stage, whichever
-    /// copy arrived first would decide the outcome. A tampered copy of the
-    /// transfer arriving FIRST cannot take the slot: it is discarded and
-    /// leaves no staging state, and the honest copy behind it stages and
-    /// applies.
+    /// A sync that completed and recorded no error. `success` alone is not
+    /// that: a sync reports success while its passes record errors.
+    fn clean(synced: &dsm::types::proto::StorageSyncResponse) {
+        assert!(synced.success, "{:?}", synced.errors);
+        assert!(synced.errors.is_empty(), "{:?}", synced.errors);
+    }
+
+    /// The copy was staged, and every staged object it was checked against
+    /// could be read.
+    fn staged(outcome: Result<IngestOutcome, String>) {
+        assert_eq!(
+            outcome.expect("ingest"),
+            IngestOutcome::only(Ingested::Staged)
+        );
+    }
+
+    /// What ingesting the copy did; every staged object it was checked against
+    /// could be read.
+    fn ingested(outcome: Result<IngestOutcome, String>) -> Ingested {
+        let outcome = outcome.expect("ingest");
+        assert!(
+            outcome.unreadable_candidates.is_empty(),
+            "{:?}",
+            outcome.unreadable_candidates
+        );
+        outcome.ingested
+    }
+
+    /// The fields the wire used to restate, filled with lies: 3 `amount`,
+    /// 1 `token_id`, 7 `from_device_id` naming a device that never sent it.
+    fn lying_wrapper(wire: &[u8], named_sender: [u8; 32]) -> Vec<u8> {
+        with_appended_fields(
+            wire,
+            &[
+                (3, FieldValue::Varint(1_000_000)),
+                (1, FieldValue::Bytes(b"NOTX".to_vec())),
+                (7, FieldValue::Bytes(named_sender.to_vec())),
+            ],
+        )
+    }
+
+    /// Post `request` as a transfer from A to B under `message_id` on
+    /// `route`, sealed to B, through A's own spool client — what A, as a
+    /// hostile sender, can do with its own transfer. The envelope is A's own
+    /// frozen transfer envelope (A kept the sealed bytes; B opens them), with
+    /// only its id and its request body changed.
+    async fn post_as_the_sender(
+        p: &Pair,
+        route: &str,
+        original_id: &str,
+        message_id: &str,
+        request: Vec<u8>,
+    ) {
+        use dsm::types::proto as pb;
+        p.a.enter();
+        let sealed = crate::sdk::b0x_sdk::kept_seal(original_id).expect("A kept the sealed send");
+        p.b.enter();
+        let outer = dsm::envelope::from_canonical_bytes(&sealed).expect("the sealed envelope");
+        let mut inner = crate::sdk::b0x_sdk::open_sealed(&outer).expect("B opens it");
+        let id = crate::util::text_id::decode_base32_crockford(message_id).expect("a Base32 id");
+        inner.message_id = id.clone();
+        let Some(pb::envelope::Payload::UniversalTx(tx)) = &mut inner.payload else {
+            panic!("A's transfer envelope carries a UniversalTx");
+        };
+        for op in &mut tx.ops {
+            op.op_id = Some(pb::Hash32 { v: id.clone() });
+            if let Some(pb::universal_op::Kind::Invoke(invoke)) = &mut op.kind {
+                if let Some(args) = &mut invoke.args {
+                    args.body = request.clone();
+                }
+            }
+        }
+        p.a.enter();
+        crate::sdk::b0x_sdk::seal_for(&p.b.device_id, message_id, &inner.encode_to_vec())
+            .expect("seal for B");
+        let mut spool = crate::sdk::b0x_sdk::B0xSDK::new(
+            crate::util::text_id::encode_base32_crockford(&p.a.device_id),
+            p.a.router().core_sdk.clone(),
+            p.fleet.endpoints(),
+        )
+        .expect("A's spool client");
+        spool
+            .submit_stored_envelope_with_retry(
+                route,
+                message_id,
+                &crate::sdk::b0x_sdk::B0xRetryConfig::default(),
+            )
+            .await
+            .expect("the copy reaches the members");
+    }
+
+    /// Every received online transfer in B's history: (id, amount, token).
+    fn received_history(p: &Pair) -> Vec<(String, u64, String)> {
+        p.b.enter();
+        let b = crate::util::text_id::encode_base32_crockford(&p.b.device_id);
+        client_db::get_transaction_history(Some(&b), None, None)
+            .expect("history")
+            .into_iter()
+            .filter(|t| t.tx_type == "online" && t.to_device == b)
+            .map(|t| {
+                let token = String::from_utf8(
+                    t.metadata
+                        .get("token_id")
+                        .expect("the row names its token")
+                        .clone(),
+                )
+                .expect("a text token");
+                (t.tx_id, t.amount, token)
+            })
+            .collect()
+    }
+
+    /// THE ARRIVAL-ORDER AND DUPLICATE-TRUTH PROOF, end to end. A hostile
+    /// sender posts its own transfer a second time under another id, the
+    /// wrapper now claiming a million NOTX from a third device. Both copies
+    /// reach B's spool; B syncs. They are one signed object, so they stage as
+    /// one and bind to one receipt: B is credited 10 ERA once, its history
+    /// reads the signed terms, and both copies are marked consumed under the
+    /// ids the spool holds them by.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[serial]
-    async fn a_tampered_transfer_arriving_first_cannot_lock_out_the_honest_copy() {
+    async fn a_second_copy_with_a_lying_wrapper_is_the_same_transfer_credited_once() {
         let (p, one) = sent().await;
-        let out = dispatch_transfer_half(
-            &one.key,
-            &flipped(&one.transfer_bytes),
-            &p.a.ak_pk,
+        let second_id = crate::util::text_id::encode_base32_crockford(&[0x7Au8; 16]);
+        post_as_the_sender(
+            &p,
             &one.route,
+            &one.message_id,
+            &second_id,
+            lying_wrapper(&one.transfer_bytes, [0xC7; 32]),
         )
-        .expect("dispatch");
-        assert!(
-            matches!(out, DispatchOutcome::DiscardedCandidate(_)),
-            "a copy that cannot prove itself is discarded, got {out:?}"
-        );
-        assert_eq!(
-            state(&one.key),
-            StagingState::Absent,
-            "not even a rejection is recorded"
-        );
+        .await;
 
-        let applied = p.b.sync().await;
-        assert!(applied.success, "{:?}", applied.errors);
-        assert_eq!(p.b.era_balance(), 10, "the honest copy staged and applied");
+        clean(&p.b.sync().await);
+        assert_eq!(p.b.era_balance(), 10, "credited once, in the signed amount");
+        assert_eq!(
+            received_history(&p),
+            vec![(one.message_id.clone(), 10, "ERA".to_string())],
+            "one row, named by the transfer, with the signed terms"
+        );
+        p.b.enter();
+        for id in [&one.message_id, &second_id] {
+            assert!(
+                client_db::b0x_consumed::is_consumed(&one.route, id).expect("consumed"),
+                "the copy the spool holds under {id} is consumed"
+            );
+        }
+        nothing_staged();
     }
 
-    /// The same for the evidence half, whose gate is the receipt's own SIG A
-    /// — never the artifact's self-declared digest, which an attacker who
-    /// rewrites the bytes rewrites too.
+    /// A sender named in a wrapper is not a sender. The copy's wrapper names a
+    /// third device; the boundary stages the transfer under the contact whose
+    /// key verified it, so while it waits it holds the send barrier toward A
+    /// only.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[serial]
-    async fn a_tampered_evidence_arriving_first_cannot_lock_out_the_honest_copy() {
+    async fn a_sender_named_in_a_wrapper_blocks_nothing() {
         let (p, one) = sent().await;
-        let out = dispatch_evidence_half(
-            &one.evidence_with(flipped(&one.evidence.full_receipt_bytes)),
-            &p.a.ak_pk,
+        let named = [0xC7u8; 32];
+        staged(ingest_transfer_half(
+            &lying_wrapper(&one.transfer_bytes, named),
+            &one.header_sender,
+            &one.route,
+            &one.message_id,
+        ));
+        assert!(
+            recipient_staging::counterparty_has_unconverged_inbound(&p.a.device_id)
+                .expect("barrier"),
+            "the transfer in flight holds the barrier toward its real sender"
+        );
+        assert!(
+            !recipient_staging::counterparty_has_unconverged_inbound(&named).expect("barrier"),
+            "and toward nobody the wrapper names"
+        );
+    }
+
+    /// Junk sealed to B, and a copy whose header names a device B holds no key
+    /// for, are not recognized: nothing is staged, bound or observed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial]
+    async fn junk_and_an_unknown_sender_are_recorded_nowhere() {
+        let (p, one) = sent().await;
+        let junk = ingested(ingest_transfer_half(
+            b"not a request",
+            &one.header_sender,
+            &one.route,
+            "JUNK",
+        ));
+        assert!(matches!(junk, Ingested::NotRecognized(_)), "{junk:?}");
+        let stranger = crate::util::text_id::encode_base32_crockford(&p.b.device_id);
+        let unknown = ingested(ingest_transfer_half(
+            &one.transfer_bytes,
+            &stranger,
+            &one.route,
+            &one.message_id,
+        ));
+        assert!(
+            matches!(&unknown, Ingested::NotRecognized(why) if why.contains("no locally trusted sender AK")),
+            "{unknown:?}"
+        );
+        nothing_staged();
+    }
+
+    /// A transfer A signed to another device, sent to B: SIG A verifies, and
+    /// it is still not B's. Nothing is staged.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial]
+    async fn a_transfer_addressed_to_another_device_is_not_recognized() {
+        let (p, one) = sent().await;
+        p.a.enter();
+        let elsewhere = [0xE5u8; 32];
+        let op = Operation::Transfer {
+            to_device_id: elsewhere.to_vec(),
+            amount: dsm::types::token_types::Balance::amount(5),
+            token_id: b"ERA".to_vec(),
+            policy_commit: crate::policy::builtin_policy_commit("ERA").expect("ERA"),
+            mode: dsm::types::operations::TransactionMode::Unilateral,
+            nonce: vec![0x42; 32],
+            recipient: elsewhere.to_vec(),
+            to: elsewhere.to_vec(),
+            message: String::new(),
+            signature: Vec::new(),
+            authority_policy: None,
+        };
+        let canonical = op.to_bytes();
+        let signature = dsm::crypto::sphincs::sphincs_sign(
+            &crate::sdk::signing_authority::current_secret_key().expect("A's signing key"),
+            &canonical,
+        )
+        .expect("A signs");
+        let request = dsm::types::proto::OnlineTransferRequest {
+            signature,
+            canonical_operation_bytes: canonical,
+            sender_economic_position: 1,
+            sender_debit_mutation_index: 0,
+        }
+        .encode_to_vec();
+        p.b.enter();
+        let out = ingested(ingest_transfer_half(
+            &request,
+            &one.header_sender,
+            &one.route,
+            "ELSEWHERE",
+        ));
+        assert!(
+            matches!(&out, Ingested::NotRecognized(why) if why.contains("another device")),
+            "{out:?}"
+        );
+        nothing_staged();
+    }
+
+    /// A receipt whose `sig_a` does not verify is not recognized; the
+    /// transfer it would pair with stays unbound.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial]
+    async fn a_receipt_that_does_not_verify_is_recorded_nowhere() {
+        let (_p, one) = sent().await;
+        let mut receipt =
+            StitchedReceiptV2::from_canonical_protobuf(&one.evidence_bytes).expect("the receipt");
+        receipt.sig_a[0] ^= 0xFF;
+        let tampered = receipt.to_full_protobuf().expect("re-encode");
+        let out = ingested(ingest_evidence_half(
+            &tampered,
             &one.evidence_route,
-        )
-        .expect("dispatch");
-        assert!(
-            matches!(out, DispatchOutcome::DiscardedCandidate(_)),
-            "a tampered evidence copy is discarded, got {out:?}"
-        );
-        assert_eq!(state(&one.key), StagingState::Absent);
-
-        let applied = p.b.sync().await;
-        assert!(applied.success, "{:?}", applied.errors);
-        assert_eq!(p.b.era_balance(), 10, "the honest copy staged and applied");
+            &one.evidence_message_id,
+        ));
+        assert!(matches!(out, Ingested::NotRecognized(_)), "{out:?}");
+        assert_eq!(rows("recipient_staged_receipt"), 0);
+        assert_eq!(rows("recipient_receipt_observation"), 0);
     }
 
-    /// RAW-BYTE FREEZE: staging holds byte-for-byte what the dispatcher was
-    /// handed, a re-read returns the same bytes, and that frozen pair is what
-    /// verification and the apply consume.
+    /// Either half may arrive first: evidence first, the pair still binds
+    /// when the transfer lands, and the sync credits it once.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[serial]
-    async fn staging_freezes_the_exact_bytes_and_the_frozen_pair_is_what_applies() {
+    async fn evidence_first_binds_when_the_transfer_lands() {
         let (p, one) = sent().await;
-        assert!(matches!(
-            dispatch_transfer_half(&one.key, &one.transfer_bytes, &p.a.ak_pk, &one.route)
-                .expect("transfer"),
-            DispatchOutcome::Staged(StagingState::StagedTransfer)
+        staged(ingest_evidence_half(
+            &one.evidence_bytes,
+            &one.evidence_route,
+            &one.evidence_message_id,
         ));
-        assert!(matches!(
-            dispatch_evidence_half(&one.evidence, &p.a.ak_pk, &one.evidence_route)
-                .expect("evidence"),
-            DispatchOutcome::Staged(StagingState::ReadyToVerify)
+        assert_eq!(rows("recipient_pair"), 0, "a receipt alone binds nothing");
+        staged(ingest_transfer_half(
+            &one.transfer_bytes,
+            &one.header_sender,
+            &one.route,
+            &one.message_id,
         ));
-        let row = recipient_staging::get_staging(&one.key)
-            .expect("load")
-            .expect("row");
         assert_eq!(
-            row.transfer_bytes.as_deref(),
-            Some(one.transfer_bytes.as_slice()),
-            "the EXACT bytes, not a re-encode"
+            rows("recipient_pair"),
+            1,
+            "the transfer binds the waiting receipt"
         );
-        assert_eq!(
-            row.evidence_bytes.as_deref(),
-            Some(one.evidence.full_receipt_bytes.as_slice())
-        );
-        assert_eq!(row.state, StagingState::ReadyToVerify);
-
-        let applied = p.b.sync().await;
-        assert!(applied.success, "{:?}", applied.errors);
+        clean(&p.b.sync().await);
         assert_eq!(p.b.era_balance(), 10);
         p.b.enter();
-        assert_eq!(state(&one.key), StagingState::Accepted);
+        nothing_staged();
     }
 
-    /// A single half never completes, and evidence the transfer does not name
-    /// is not staged: neither pair can reach the apply.
+    /// Copies of a finished transfer are decided, not staged: its nonce is
+    /// spent and its step is taken, so a later copy of either half is
+    /// consumed where it lies and never becomes staging state again.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[serial]
-    async fn a_single_half_or_an_unbound_half_never_completes() {
+    async fn copies_of_a_finished_transfer_are_decided_not_staged() {
         let (p, one) = sent().await;
-        assert!(matches!(
-            dispatch_transfer_half(&one.key, &one.transfer_bytes, &p.a.ak_pk, &one.route)
-                .expect("transfer"),
-            DispatchOutcome::Staged(StagingState::StagedTransfer)
-        ));
+        clean(&p.b.sync().await);
+        assert_eq!(p.b.era_balance(), 10);
+        p.b.enter();
         assert_eq!(
-            try_complete(&one.key, &p.a.ak_pk, |_| panic!("apply must never run"))
-                .expect("complete"),
-            None
+            ingested(ingest_transfer_half(
+                &one.transfer_bytes,
+                &one.header_sender,
+                &one.route,
+                "LATE",
+            )),
+            Ingested::Decided
         );
-        assert!(!may_ack(&one.key).expect("gate"));
+        assert_eq!(
+            ingested(ingest_evidence_half(
+                &one.evidence_bytes,
+                &one.evidence_route,
+                "LATE-EVIDENCE",
+            )),
+            Ingested::Decided
+        );
+        nothing_staged();
+        assert_eq!(p.b.era_balance(), 10, "and nothing is credited twice");
+    }
 
-        // Evidence bytes the transfer does not name: the digest the transfer
-        // commits to is over other bytes.
-        let unbound = dispatch_evidence_half(
-            &one.evidence_with(flipped(&one.evidence.full_receipt_bytes)),
-            &p.a.ak_pk,
-            &one.evidence_route,
-        );
+    /// A locator hint that does not locate the debit is not a verdict. A copy
+    /// under another id points at the sender's previous economic position;
+    /// the honest copy's hint admits, and B is credited once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial]
+    async fn a_wrong_locator_hint_is_not_a_verdict() {
+        let (p, one) = sent().await;
+        let honest =
+            dsm::types::proto::OnlineTransferRequest::decode(one.transfer_bytes.as_slice())
+                .expect("the delivered request");
         assert!(
-            !matches!(
-                unbound,
-                Ok(DispatchOutcome::Staged(StagingState::ReadyToVerify))
-            ),
-            "evidence the transfer does not name never completes the pair, got {unbound:?}"
+            honest.sender_economic_position > 0,
+            "the debit sits after the sender's funding"
         );
-        assert_eq!(
-            state(&one.key),
-            StagingState::StagedTransfer,
-            "nothing negative recorded"
-        );
-        assert!(matches!(
-            decide_ack(&one.key, &p.a.ak_pk, |_| panic!("apply must never run")).expect("decide"),
-            AckDecision::DoNotAck(_)
+        let misleading = dsm::types::proto::OnlineTransferRequest {
+            sender_economic_position: honest.sender_economic_position - 1,
+            ..honest.clone()
+        };
+        staged(ingest_transfer_half(
+            &misleading.encode_to_vec(),
+            &one.header_sender,
+            &one.route,
+            "MISLEADING",
         ));
+        clean(&p.b.sync().await);
+        assert_eq!(p.b.era_balance(), 10, "the honest hint admitted it");
+        p.b.enter();
+        nothing_staged();
     }
 
-    /// Order independence: evidence-first and transfer-first both reach
-    /// ready_to_verify, and so does a poisoned transfer replica arriving
-    /// ahead of the honest pair. Each order starts from an empty staging
-    /// table on the same honest halves.
+    /// A transfer A signs to B beside the one it sent, on the nonce A
+    /// chooses: another signed object from the same sender.
+    fn another_transfer_signed_by_a(p: &Pair, amount: u64, nonce: Vec<u8>) -> Vec<u8> {
+        p.a.enter();
+        let op = Operation::Transfer {
+            to_device_id: p.b.device_id.to_vec(),
+            amount: dsm::types::token_types::Balance::amount(amount),
+            token_id: b"ERA".to_vec(),
+            policy_commit: crate::policy::builtin_policy_commit("ERA").expect("ERA"),
+            mode: dsm::types::operations::TransactionMode::Unilateral,
+            nonce,
+            recipient: p.b.device_id.to_vec(),
+            to: p.b.device_id.to_vec(),
+            message: String::new(),
+            signature: Vec::new(),
+            authority_policy: None,
+        };
+        let canonical = op.to_bytes();
+        let signature = dsm::crypto::sphincs::sphincs_sign(
+            &crate::sdk::signing_authority::current_secret_key().expect("A's signing key"),
+            &canonical,
+        )
+        .expect("A signs");
+        p.b.enter();
+        dsm::types::proto::OnlineTransferRequest {
+            signature,
+            canonical_operation_bytes: canonical,
+            sender_economic_position: 1,
+            sender_debit_mutation_index: 0,
+        }
+        .encode_to_vec()
+    }
+
+    /// A receipt binds only the transfer whose operation its child tip is the
+    /// successor under. With A's receipt staged, another transfer A signed to B
+    /// stages but binds nothing; the transfer the receipt signs binds it.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[serial]
-    async fn every_arrival_order_converges() {
+    async fn a_receipt_binds_only_the_transfer_it_signs() {
         let (p, one) = sent().await;
-        let clear = || {
-            let binding = crate::storage::client_db::get_connection().expect("conn");
-            let conn = binding
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            conn.execute("DELETE FROM recipient_staging", [])
-                .expect("empty the staging table");
-        };
-        let transfer = || {
-            let out = dispatch_transfer_half(&one.key, &one.transfer_bytes, &p.a.ak_pk, &one.route)
-                .expect("transfer");
-            assert!(matches!(out, DispatchOutcome::Staged(_)), "{out:?}");
-        };
-        let evidence = || {
-            let out = dispatch_evidence_half(&one.evidence, &p.a.ak_pk, &one.evidence_route)
-                .expect("evidence");
-            assert!(matches!(out, DispatchOutcome::Staged(_)), "{out:?}");
-        };
-
-        transfer();
-        evidence();
-        assert_eq!(
-            state(&one.key),
-            StagingState::ReadyToVerify,
-            "transfer first"
-        );
-
-        clear();
-        evidence();
-        transfer();
-        assert_eq!(
-            state(&one.key),
-            StagingState::ReadyToVerify,
-            "evidence first"
-        );
-
-        clear();
-        assert!(matches!(
-            dispatch_transfer_half(
-                &one.key,
-                &flipped(&one.transfer_bytes),
-                &p.a.ak_pk,
-                &one.route
-            )
-            .expect("poisoned"),
-            DispatchOutcome::DiscardedCandidate(_)
+        staged(ingest_evidence_half(
+            &one.evidence_bytes,
+            &one.evidence_route,
+            &one.evidence_message_id,
         ));
-        transfer();
-        evidence();
+        let other = another_transfer_signed_by_a(&p, 7, vec![0x43; 32]);
+        staged(ingest_transfer_half(
+            &other,
+            &one.header_sender,
+            &one.route,
+            "OTHER",
+        ));
         assert_eq!(
-            state(&one.key),
-            StagingState::ReadyToVerify,
-            "a poisoned replica arriving first does not block convergence"
+            rows("recipient_pair"),
+            0,
+            "the receipt does not sign the other transfer"
         );
+        staged(ingest_transfer_half(
+            &one.transfer_bytes,
+            &one.header_sender,
+            &one.route,
+            &one.message_id,
+        ));
+        let pairs = recipient_staging::pairs_in_flight().expect("pairs");
+        let TransferRecognition::Recognized(signed) =
+            recognize_transfer(&one.transfer_bytes, &one.header_sender).expect("recognition")
+        else {
+            panic!("the sent transfer is recognized");
+        };
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(
+            pairs[0].op_id, signed.staged.op_id,
+            "bound to the transfer it signs"
+        );
+    }
+
+    /// Object identity is not step identity. A hostile sender signs a second
+    /// transfer to B on the nonce of the one it sent, for another amount, and
+    /// it reaches B before B polls. The two are different signed objects, so
+    /// both are staged: nothing in staging decides between them. Only the one
+    /// A's receipt signs can bind, and the canonical apply takes the nonce with
+    /// it. B is credited that transfer once, and the rival, its nonce spent,
+    /// holds no barrier and is collected.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial]
+    async fn a_rival_on_the_same_nonce_is_staged_and_never_executes() {
+        let (p, one) = sent().await;
+        let TransferRecognition::Recognized(honest) =
+            recognize_transfer(&one.transfer_bytes, &one.header_sender).expect("recognition")
+        else {
+            panic!("the sent transfer is recognized");
+        };
+        let Operation::Transfer { nonce, .. } = &honest.op else {
+            panic!("the sent operation is a transfer");
+        };
+        let rival = another_transfer_signed_by_a(&p, 7, nonce.clone());
+        staged(ingest_transfer_half(
+            &rival,
+            &one.header_sender,
+            &one.route,
+            "RIVAL",
+        ));
+        assert!(
+            recipient_staging::counterparty_has_unconverged_inbound(&p.a.device_id)
+                .expect("barrier"),
+            "while its nonce is unspent, the rival is in flight"
+        );
+
+        clean(&p.b.sync().await);
+        assert_eq!(
+            p.b.era_balance(),
+            10,
+            "the transfer the receipt signs executes, once"
+        );
+        p.b.enter();
+        nothing_staged();
+        assert!(
+            !recipient_staging::counterparty_has_unconverged_inbound(&p.a.device_id)
+                .expect("barrier"),
+            "the rival holds nothing once its nonce is spent"
+        );
+    }
+
+    /// The inbox lists a transfer by what its sender signed. A hostile
+    /// sender's second copy, its wrapper claiming a million NOTX, is listed
+    /// with the signed terms; junk sealed to B is listed as unverified, with
+    /// no sender and no terms.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial]
+    async fn the_inbox_shows_what_the_sender_signed() {
+        use crate::bridge::AppRouter;
+        let (p, one) = sent().await;
+        let second_id = crate::util::text_id::encode_base32_crockford(&[0x7Bu8; 16]);
+        post_as_the_sender(
+            &p,
+            &one.route,
+            &one.message_id,
+            &second_id,
+            lying_wrapper(&one.transfer_bytes, [0xC7; 32]),
+        )
+        .await;
+        let junk_id = crate::util::text_id::encode_base32_crockford(&[0x7Cu8; 16]);
+        post_as_the_sender(
+            &p,
+            &one.route,
+            &one.message_id,
+            &junk_id,
+            b"not a request".to_vec(),
+        )
+        .await;
+
+        p.b.enter();
+        let params = dsm::types::proto::ArgPack {
+            codec: dsm::types::proto::Codec::Proto as i32,
+            body: dsm::types::proto::InboxRequest {
+                limit: 50,
+                chain_tip: String::new(),
+            }
+            .encode_to_vec(),
+            schema_hash: None,
+        }
+        .encode_to_vec();
+        let answered =
+            p.b.router()
+                .query(crate::bridge::AppQuery {
+                    path: "inbox.pull".to_string(),
+                    params,
+                })
+                .await;
+        assert!(answered.success, "inbox.pull: {:?}", answered.error_message);
+        let env = crate::handlers::response_helpers::decode_local_envelope(&answered.data)
+            .expect("an envelope");
+        let Some(dsm::types::proto::envelope::Payload::InboxResponse(listed)) = env.payload else {
+            panic!("inbox.pull answers an InboxResponse");
+        };
+        fn listing<'a>(
+            items: &'a [dsm::types::proto::InboxItem],
+            id: &str,
+        ) -> &'a dsm::types::proto::InboxItem {
+            let Some(item) = items.iter().find(|i| i.id == id) else {
+                panic!("{id} is listed: {items:?}");
+            };
+            item
+        }
+        let sender = crate::util::text_id::encode_base32_crockford(&p.a.device_id);
+        for id in [&one.message_id, &second_id] {
+            let item = listing(&listed.items, id);
+            assert_eq!(
+                item.preview,
+                format!("From: {sender} Amount: 10 ERA"),
+                "every copy of the transfer shows the signed terms"
+            );
+            assert_eq!(item.sender_id.as_deref(), Some(sender.as_str()));
+        }
+        let junk = listing(&listed.items, &junk_id);
+        assert!(
+            junk.preview.starts_with("Unverified: "),
+            "junk is not listed as a transfer: {}",
+            junk.preview
+        );
+        assert_eq!(junk.sender_id, None, "and names no sender");
+        assert_eq!(listed.items.len(), 3, "{:?}", listed.items);
     }
 }

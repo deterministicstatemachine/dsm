@@ -281,36 +281,58 @@ async fn sequential_admissions_stay_monotonic_across_operation_kinds() {
 #[serial]
 async fn a_transfer_naming_no_token_or_a_misspelled_one_is_refused_and_nothing_moves() {
     let p = Pair::boot(100, 0).await;
+    let request = |token_id: &str| crate::generated::OnlineTransferSmartRequest {
+        recipient: crate::util::text_id::encode_base32_crockford(&p.b.device_id),
+        amount: "10".to_string(),
+        token_id: token_id.to_string(),
+        memo: String::new(),
+    };
 
-    let unnamed = p.a.send_token(&p.b, "", 10).await;
+    let unnamed = p.a.invoke("wallet.sendSmart", &request("")).await;
     assert!(!unnamed.success, "an omitted token is not ERA");
     let msg = unnamed.error_message.unwrap_or_default();
     assert!(msg.contains("names no token"), "got: {msg}");
     assert_eq!(p.a.era_balance(), 100);
 
-    let folded = p.a.send_token(&p.b, "era", 10).await;
+    let folded = p.a.invoke("wallet.sendSmart", &request("era")).await;
     assert!(!folded.success, "`era` does not name ERA");
     assert_eq!(p.a.era_balance(), 100);
     assert_eq!(p.b.era_balance(), 0);
 }
 
-#[test]
-fn online_transfer_request_locators_round_trip_on_the_wire() {
-    // Every wire change owes its inverse immediately. The locator fields
-    // must survive encode → decode exactly, with values distinctive enough
-    // that a dropped field cannot alias a default.
+/// Every wire change owes its inverse immediately. The request a real send
+/// delivers survives decode → encode byte for byte, and its signature still
+/// verifies over its operation bytes under the key B holds for A. Its locator
+/// hints, which the sender writes, survive the round trip with values
+/// distinctive enough that a dropped field cannot alias a default.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn online_transfer_request_locators_round_trip_on_the_wire() {
+    let p = Pair::boot(100, 0).await;
+    let sent = p.a.send(&p.b, 10).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+    let one = crate::test_support::arrivals::the_one_transfer(&p.b, &p.fleet).await;
+    let delivered = crate::generated::OnlineTransferRequest::decode(one.transfer_bytes.as_slice())
+        .expect("the delivered request decodes");
+    assert_eq!(
+        delivered.encode_to_vec(),
+        one.transfer_bytes,
+        "the delivered request re-encodes byte-identically"
+    );
+    p.b.enter();
+    let ak = super::storage_routes::resolve_trusted_sender_ak(&one.header_sender)
+        .expect("B holds A's key");
+    dsm::types::operations::Operation::decode_and_bind_signed(
+        &delivered.canonical_operation_bytes,
+        &delivered.signature,
+        &ak,
+    )
+    .expect("the decoded transfer verifies under A's key");
+
     let req = crate::generated::OnlineTransferRequest {
-        token_id: "ERA".to_string(),
-        to_device_id: vec![0x11; 32],
-        amount: 40,
-        memo: String::new(),
-        signature: vec![0x22; 8],
-        nonce: vec![0x33; 32],
-        from_device_id: vec![0x44; 32],
-        canonical_operation_bytes: vec![0x55; 16],
-        receipt_evidence_digest: vec![0x66; 32],
         sender_economic_position: 0x0102_0304_0506_0708,
         sender_debit_mutation_index: 0x0A0B_0C0D,
+        ..delivered
     };
     let bytes = req.encode_to_vec();
     let back = crate::generated::OnlineTransferRequest::decode(bytes.as_slice())

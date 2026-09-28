@@ -263,50 +263,45 @@ pub struct RetrievalOutcome {
     pub coverage: SpoolCoverage,
 }
 
-/// What a polled entry carries, as its request states it. Nothing here is
-/// verified: the transfer pipeline checks the signed bytes it retains.
+/// What kind of request a polled entry carries. Nothing about its content is
+/// read here: a transfer's terms are read from its signed operation, after the
+/// ingestion boundary has verified it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum B0xEntryKind {
-    /// An online transfer request: the amount and token it names.
-    Transfer { amount: u64, token_id: String },
+    /// An online transfer request.
+    Transfer,
     /// An online message: the payload's size.
     Message { payload_len: usize },
+    /// A request whose body is not what its invoke method names, and why.
+    /// Listed as unverified; nothing is taken from it.
+    Unrecognized { reason: String },
 }
 
+/// One polled request, as the spool showed it. Transport data only: the id the
+/// spool holds it by, the address it was read at, the device its header names
+/// (a hint for which stored key to try), and the request bytes.
 #[derive(Debug, Clone)]
 pub struct B0xEntry {
+    /// The message id the spool holds this copy by (Base32).
     pub transaction_id: String,
+    /// The inbox address this copy was read at.
     pub inbox_key: String,
-    // Textual fields are base32-encoded (Crockford: 0-9,A-H,J-K,M-N,P-T,V-Z with substitutions)
+    /// The device the envelope header names (Base32). Unsigned: the ingestion
+    /// boundary only uses it to choose which stored key to verify against.
     pub sender_device_id: String,
-    pub sender_genesis_hash: String,
-    pub recipient_device_id: String,
-    /// What the entry carries, as its request states it.
     pub kind: B0xEntryKind,
-    /// Sender's SPHINCS+ public key (optional, embedded in envelope evidence)
-    pub sender_signing_public_key: Vec<u8>,
-    /// §4.2.1 Canonical unsigned Operation bytes (signing preimage).
-    /// Receiver uses these directly for SPHINCS+ verification and tip computation.
-    pub canonical_operation_bytes: Vec<u8>,
-    /// ADR 0003: the EXACT `OnlineTransferRequest` wire bytes this entry was
-    /// decoded from, retained verbatim.
-    ///
-    /// Not reconstructed fields, and NOT a protobuf re-encode. Recipient staging
-    /// FREEZES the bytes it is handed, and every later check — SIG A over the
-    /// canonical operation, the evidence digest binding — runs against that
-    /// frozen copy. Re-encoding here would mean verifying something the sender
-    /// never signed and the peer never sent, so the original must survive the
-    /// decode. Whether a re-encode would be byte-identical is beside the point:
-    /// the guarantee is that the question never has to be asked.
-    ///
-    /// Empty for entries not decoded from an `OnlineTransferRequest` (locally
-    /// built entries, fixtures). The split path requires it and fails closed.
+    /// A transfer's `OnlineTransferRequest` bytes, exactly as decoded — the
+    /// boundary verifies SIG A over the canonical operation inside them. Empty
+    /// for a message.
     pub transfer_wire_bytes: Vec<u8>,
-    /// ADR 0003: the A-side evidence reference carried by the request (proto
-    /// field 12). NON-EMPTY is the recipient's discriminator that this entry is
-    /// only ONE HALF of a split transfer and must not take the legacy inline
-    /// path. Empty means the legacy whole-receipt-inline composition.
-    pub receipt_evidence_digest: Vec<u8>,
+}
+
+/// One A-side evidence artifact, with the message id the spool holds it by —
+/// the id its consumed marker is written with.
+#[derive(Debug, Clone)]
+pub struct EvidenceArtifact {
+    pub message_id: String,
+    pub evidence: dsm::types::proto::ReceiptEvidenceA,
 }
 
 /// The product of pure envelope construction: the exact canonical wire bytes
@@ -335,8 +330,6 @@ pub struct B0xSubmissionParams {
     pub signature: Vec<u8>,
     pub sender_genesis_hash: String, // base32 of 32-byte genesis
     pub sender_chain_tip: String,    // base32 of 32-byte tip
-    /// Sender's SPHINCS+ public key (optional, embedded for verification hints)
-    pub sender_signing_public_key: Vec<u8>,
     /// Tip-scoped b0x routing address (§16.4).
     /// Computed via `B0xSDK::compute_b0x_address(recipient_genesis, recipient_device, chain_tip)`.
     pub routing_address: String,
@@ -344,10 +337,6 @@ pub struct B0xSubmissionParams {
     /// The exact bytes the sender signed with SPHINCS+.  The receiver MUST
     /// use these directly for verification — no field-by-field reconstruction.
     pub canonical_operation_bytes: Vec<u8>,
-    /// ADR 0003: content address of the A-side receipt-evidence artifact this
-    /// transfer refers to, populated into proto field 12. Every transfer
-    /// carries one; the receipt never rides inline.
-    pub receipt_evidence_digest: Vec<u8>,
     /// §16.6 defect zero: caller-supplied DETERMINISTIC submission id.
     ///
     /// The forward-transfer path derives this from the receipt commitment
@@ -388,7 +377,7 @@ pub struct B0xSDK {
     pending_relationship_finalized: Vec<RelationshipFinalizedMessage>,
     /// ADR 0003 A-side evidence halves decoded by the most recent retrieve,
     /// drained by [`Self::take_evidence_artifacts`].
-    pending_evidence_artifacts: Vec<dsm::types::proto::ReceiptEvidenceA>,
+    pending_evidence_artifacts: Vec<EvidenceArtifact>,
     /// Cert-resync control messages decoded on retrieve: (method, framed body).
     pending_cert_resync: Vec<(String, Vec<u8>)>,
 }
@@ -831,9 +820,9 @@ impl B0xSDK {
     /// discriminated on the EXPLICIT invoke method — never trial-decoded.
     ///
     /// Returning the artifact does NOT mean it is trustworthy: nothing here is
-    /// verified. `full_receipt_bytes` and the digest it carries are unauthenticated
-    /// wire data until the dispatcher checks them against the transfer half's
-    /// reference, which is why this is a pure decoder with no side effects.
+    /// verified. `full_receipt_bytes` are unauthenticated wire data until the
+    /// ingestion boundary verifies the receipt's signature chain, which is why
+    /// this is a pure decoder with no side effects.
     pub(crate) fn decode_receipt_evidence_a(
         env: &dsm::types::proto::Envelope,
     ) -> Option<dsm::types::proto::ReceiptEvidenceA> {
@@ -858,11 +847,10 @@ impl B0xSDK {
 
     /// Drain the ADR 0003 evidence halves decoded by the most recent retrieve.
     ///
-    /// Draining rather than cloning mirrors [`Self::take_countersign_deltas`], but the
-    /// durable idempotency guarantee is different and lives downstream: staging is
-    /// keyed on the transfer submission id, so a re-polled evidence half with the
-    /// SAME bytes is idempotent and one with DIFFERENT bytes fails closed.
-    pub fn take_evidence_artifacts(&mut self) -> Vec<dsm::types::proto::ReceiptEvidenceA> {
+    /// Draining rather than cloning mirrors [`Self::take_countersign_deltas`]; the
+    /// durable idempotency lives downstream: staging keys a receipt by its
+    /// commitment, so every copy of one receipt is one staged object.
+    pub fn take_evidence_artifacts(&mut self) -> Vec<EvidenceArtifact> {
         std::mem::take(&mut self.pending_evidence_artifacts)
     }
 
@@ -1455,7 +1443,6 @@ impl B0xSDK {
         &self,
         recipient_device_id: &str,
         recipient_genesis_hash: &str,
-        transfer_submission_id: &str,
         evidence_submission_id: &str,
         evidence_digest: &[u8; 32],
         full_receipt_bytes: &[u8],
@@ -1498,8 +1485,6 @@ impl B0xSDK {
         }
 
         let body = dsm::types::proto::ReceiptEvidenceA {
-            transfer_submission_id: transfer_submission_id.to_string(),
-            receipt_evidence_digest: evidence_digest.to_vec(),
             full_receipt_bytes: full_receipt_bytes.to_vec(),
         };
         let mut body_bytes = Vec::with_capacity(body.encoded_len());
@@ -1653,10 +1638,6 @@ impl B0xSDK {
         enum SubmitOp {
             Transfer {
                 to_device_id_bytes: Vec<u8>,
-                amount: u64,
-                token_id: String,
-                memo: String,
-                nonce_bytes: Vec<u8>,
             },
             Message {
                 to_device_id_bytes: Vec<u8>,
@@ -1667,26 +1648,9 @@ impl B0xSDK {
         }
 
         let submit_op = match &params.transaction {
-            Operation::Transfer {
-                to_device_id,
-                amount,
-                token_id,
-                message,
-                nonce,
-                ..
-            } => {
-                info!(
-                    "🔍 submit_to_b0x: to_device_id raw bytes (first 8): {:?}",
-                    &to_device_id[..8.min(to_device_id.len())]
-                );
-                SubmitOp::Transfer {
-                    to_device_id_bytes: to_device_id.clone(),
-                    amount: amount.value(),
-                    token_id: String::from_utf8_lossy(token_id).into_owned(),
-                    memo: message.clone(),
-                    nonce_bytes: nonce.clone(),
-                }
-            }
+            Operation::Transfer { to_device_id, .. } => SubmitOp::Transfer {
+                to_device_id_bytes: to_device_id.clone(),
+            },
             Operation::Generic {
                 operation_type,
                 data,
@@ -1731,30 +1695,15 @@ impl B0xSDK {
         };
 
         let (invoke_method, arg_pack, to_device_id_bytes, log_context) = match submit_op {
-            SubmitOp::Transfer {
-                to_device_id_bytes,
-                amount,
-                token_id,
-                memo,
-                nonce_bytes,
-            } => {
+            SubmitOp::Transfer { to_device_id_bytes } => {
+                // The signed operation and nothing that restates it: the
+                // recipient reads every term from the bytes SIG A covers.
                 let transfer_req = dsm::types::proto::OnlineTransferRequest {
-                    token_id: token_id.clone(),
-                    to_device_id: to_device_id_bytes.clone(),
-                    amount,
-                    memo: memo.clone(),
                     signature: params.signature.clone(),
-                    nonce: nonce_bytes.clone(),
-                    from_device_id: actor_device_bytes.clone(),
                     canonical_operation_bytes: params.canonical_operation_bytes.clone(),
-                    receipt_evidence_digest: params.receipt_evidence_digest.clone(),
                     sender_economic_position: params.sender_economic_position,
                     sender_debit_mutation_index: params.sender_debit_mutation_index,
                 };
-                info!(
-                    "submit_to_b0x: transfer req context from_device_id(first4)={:?}",
-                    &transfer_req.from_device_id[..4.min(transfer_req.from_device_id.len())],
-                );
 
                 let mut transfer_req_bytes = Vec::with_capacity(transfer_req.encoded_len());
                 transfer_req.encode(&mut transfer_req_bytes).map_err(|e| {
@@ -1787,7 +1736,7 @@ impl B0xSDK {
                     "wallet.send".to_string(),
                     arg_pack,
                     to_device_id_bytes,
-                    format!("amount={}, token={}", amount, token_id),
+                    format!("transfer {message_id_b32}"),
                 )
             }
             SubmitOp::Message {
@@ -1841,39 +1790,15 @@ impl B0xSDK {
             }
         };
 
-        // Build Invoke with method="wallet.send"
-        // IMPORTANT: SPHINCS+ signatures are large (~50KB). The canonical sender
-        // signature already lives in OnlineTransferRequest.signature / OnlineMessageRequest.signature.
-        // Do NOT duplicate that signature into EvidenceOracle.signature for b0x transport,
-        // or envelopes can exceed storage-node body limits (HTTP 413).
-        //
-        // The evidence carries only the sender's signing public key, exactly as the
-        // caller resolved it from the signing authority (the routes fail closed when
-        // it is unavailable; `validate_submission_params` requires 64 bytes). The
-        // receiver roots verification in its STORED contact and treats a disagreeing
-        // wire key as a signal, so nothing here substitutes another key for it: no
-        // re-derivation under the state lock, no persisted app-state key, no
-        // default.
-        let evidence = if params.sender_signing_public_key.is_empty() {
-            None
-        } else {
-            Some(dsm::types::proto::Evidence {
-                kind: Some(dsm::types::proto::evidence::Kind::Oracle(
-                    dsm::types::proto::EvidenceOracle {
-                        payload: vec![],
-                        signature: vec![],
-                        oracle_key: params.sender_signing_public_key.clone(),
-                    },
-                )),
-            })
-        };
-
+        // The Invoke carries no evidence. The sender's signature is inside the
+        // request (SIG A), and the receiver verifies it under the key it stored
+        // for the contact — a key carried here would be a key nothing reads.
         let invoke = dsm::types::proto::Invoke {
             program: None,
             method: invoke_method,
             args: Some(arg_pack),
             cosigners: vec![],
-            evidence,
+            evidence: None,
             nonce: None,
         };
 
@@ -2329,16 +2254,6 @@ impl B0xSDK {
             ));
         }
 
-        // Validate sender public key if present
-        if !params.sender_signing_public_key.is_empty()
-            && params.sender_signing_public_key.len() != 64
-        {
-            return Err(DsmError::internal(
-                "sender_signing_public_key must be exactly 64 bytes (SPHINCS+ public key)",
-                None::<std::io::Error>,
-            ));
-        }
-
         Ok(())
     }
 
@@ -2488,8 +2403,11 @@ impl B0xSDK {
                     } else {
                         consumed_run = false;
                         // DSM Amendment A7: open the seal before anything reads
-                        // the envelope. What does not open is not from this
-                        // relationship's counterparty and is skipped.
+                        // the envelope. What does not open was not sealed to
+                        // this device and is skipped. What opens says nothing
+                        // about who sealed it: anyone can seal to this device,
+                        // and the sender is whoever the ingestion boundary
+                        // verifies.
                         match open_sealed(&env) {
                             Ok(inner) => {
                                 map.entry(envelope_merge_key(&inner)).or_insert(inner);
@@ -2559,12 +2477,16 @@ impl B0xSDK {
                 continue;
             }
             if let Some(evidence) = Self::decode_receipt_evidence_a(&env) {
+                let message_id = text_id::encode_base32_crockford(&env.message_id);
                 info!(
-                    "📬 ADR 0003 evidence half for transfer={} ({}B receipt)",
-                    evidence.transfer_submission_id,
+                    "📬 ADR 0003 evidence half message_id={} ({}B receipt)",
+                    message_id,
                     evidence.full_receipt_bytes.len()
                 );
-                self.pending_evidence_artifacts.push(evidence);
+                self.pending_evidence_artifacts.push(EvidenceArtifact {
+                    message_id,
+                    evidence,
+                });
                 continue;
             }
             if let Some(mut e) = self.envelope_to_b0x_entry(env) {
@@ -2614,116 +2536,67 @@ impl B0xSDK {
 
     fn envelope_to_b0x_entry(&self, env: dsm::types::proto::Envelope) -> Option<B0xEntry> {
         let tid = text_id::encode_base32_crockford(&env.message_id);
-        let (sender_dev, genesis_b32) = match &env.headers {
-            Some(h) => (
-                crate::util::text_id::encode_base32_crockford(&h.device_id),
-                text_id::encode_base32_crockford(&h.genesis_hash),
-            ),
-            None => (String::new(), String::new()),
+        let sender_dev = match &env.headers {
+            Some(h) => crate::util::text_id::encode_base32_crockford(&h.device_id),
+            None => String::new(),
         };
 
-        if let Some(dsm::types::proto::envelope::Payload::UniversalTx(tx)) = &env.payload {
-            for op in &tx.ops {
-                if let Some(dsm::types::proto::universal_op::Kind::Invoke(invoke)) = &op.kind {
-                    if invoke.method == "wallet.send" {
-                        if let Some(ref arg_pack) = invoke.args {
-                            if let Ok(transfer_req) =
-                                dsm::types::proto::OnlineTransferRequest::decode(&*arg_pack.body)
-                            {
-                                if transfer_req.nonce.len() != 32 {
-                                    log::warn!(
-                                        "📥 envelope_to_b0x_entry: nonce len={} (expected 32)",
-                                        transfer_req.nonce.len()
-                                    );
-                                }
-
-                                let recipient_id =
-                                    text_id::encode_base32_crockford(&transfer_req.to_device_id);
-
-                                // Capture sender signing public key from Evidence.oracle.oracle_key if present
-                                let sender_pk = match &invoke.evidence {
-                                    Some(ev) => match &ev.kind {
-                                        Some(dsm::types::proto::evidence::Kind::Oracle(oracle)) => {
-                                            oracle.oracle_key.clone()
-                                        }
-                                        _ => Vec::new(),
-                                    },
-                                    None => Vec::new(),
-                                };
-
-                                info!(
-                                    "📥 envelope_to_b0x_entry: extracted Transfer (amount={}, to={})",
-                                    transfer_req.amount, recipient_id
-                                );
-                                return Some(B0xEntry {
-                                    // Verbatim, from the SAME buffer the decode read.
-                                    transfer_wire_bytes: arg_pack.body.clone(),
-                                    receipt_evidence_digest: transfer_req
-                                        .receipt_evidence_digest
-                                        .clone(),
-                                    transaction_id: tid,
-                                    inbox_key: String::new(),
-                                    sender_device_id: sender_dev,
-                                    sender_genesis_hash: genesis_b32,
-                                    recipient_device_id: recipient_id,
-                                    kind: B0xEntryKind::Transfer {
-                                        amount: transfer_req.amount,
-                                        token_id: transfer_req.token_id.clone(),
-                                    },
-                                    sender_signing_public_key: sender_pk,
-                                    canonical_operation_bytes: transfer_req
-                                        .canonical_operation_bytes
-                                        .clone(),
-                                });
-                            }
-                        }
-                    } else if invoke.method == "message.send" {
-                        if let Some(ref arg_pack) = invoke.args {
-                            if let Ok(msg_req) =
-                                dsm::types::proto::OnlineMessageRequest::decode(&*arg_pack.body)
-                            {
-                                let recipient_id =
-                                    text_id::encode_base32_crockford(&msg_req.to_device_id);
-                                let sender_pk = match &invoke.evidence {
-                                    Some(ev) => match &ev.kind {
-                                        Some(dsm::types::proto::evidence::Kind::Oracle(oracle)) => {
-                                            oracle.oracle_key.clone()
-                                        }
-                                        _ => Vec::new(),
-                                    },
-                                    None => Vec::new(),
-                                };
-
-                                info!(
-                                    "📥 envelope_to_b0x_entry: extracted OnlineMessage (payload_len={}, to={})",
-                                    msg_req.payload.len(),
-                                    recipient_id,
-                                );
-                                return Some(B0xEntry {
-                                    // This branch decoded an OnlineMessageRequest, not a
-                                    // transfer: there is no transfer half and no evidence
-                                    // reference, so both stay empty and the split path
-                                    // can never mistake a message for a half.
-                                    transfer_wire_bytes: Vec::new(),
-                                    receipt_evidence_digest: Vec::new(),
-                                    transaction_id: tid,
-                                    inbox_key: String::new(),
-                                    sender_device_id: sender_dev,
-                                    sender_genesis_hash: genesis_b32,
-                                    recipient_device_id: recipient_id,
-                                    kind: B0xEntryKind::Message {
-                                        payload_len: msg_req.payload.len(),
-                                    },
-                                    sender_signing_public_key: sender_pk,
-                                    canonical_operation_bytes: Vec::new(),
-                                });
-                            }
-                        }
-                    }
-                }
+        let Some(dsm::types::proto::envelope::Payload::UniversalTx(tx)) = &env.payload else {
+            return None;
+        };
+        for op in &tx.ops {
+            let Some(dsm::types::proto::universal_op::Kind::Invoke(invoke)) = &op.kind else {
+                continue;
+            };
+            let method = invoke.method.as_str();
+            if method != "wallet.send" && method != "message.send" {
+                continue;
+            }
+            let Some(arg_pack) = &invoke.args else {
+                // A transfer or a message with no request is listed as what it
+                // is, never dropped.
+                info!("📥 envelope_to_b0x_entry: {method} {tid} carries no request");
+                return Some(B0xEntry {
+                    transaction_id: tid,
+                    inbox_key: String::new(),
+                    sender_device_id: sender_dev,
+                    kind: B0xEntryKind::Unrecognized {
+                        reason: format!("the {method} invoke carries no request"),
+                    },
+                    transfer_wire_bytes: Vec::new(),
+                });
+            };
+            if method == "wallet.send" {
+                // The request bytes, exactly as they arrived. Nothing in them is
+                // read here: the ingestion boundary verifies SIG A over the
+                // canonical operation and reads every term from it.
+                info!("📥 envelope_to_b0x_entry: transfer {tid}");
+                return Some(B0xEntry {
+                    transaction_id: tid,
+                    inbox_key: String::new(),
+                    sender_device_id: sender_dev,
+                    kind: B0xEntryKind::Transfer,
+                    transfer_wire_bytes: arg_pack.body.clone(),
+                });
+            } else {
+                let kind = match dsm::types::proto::OnlineMessageRequest::decode(&*arg_pack.body) {
+                    Ok(msg_req) => B0xEntryKind::Message {
+                        payload_len: msg_req.payload.len(),
+                    },
+                    Err(e) => B0xEntryKind::Unrecognized {
+                        reason: format!("the message does not decode: {e}"),
+                    },
+                };
+                info!("📥 envelope_to_b0x_entry: online message {tid} ({kind:?})");
+                return Some(B0xEntry {
+                    transaction_id: tid,
+                    inbox_key: String::new(),
+                    sender_device_id: sender_dev,
+                    kind,
+                    transfer_wire_bytes: Vec::new(),
+                });
             }
         }
-
         None
     }
 }
@@ -3065,84 +2938,92 @@ mod tests {
         assert!(res.is_err());
     }
 
-    #[tokio::test]
+    /// A transfer as its sender sealed it, opened here, is a transfer entry:
+    /// the id the spool holds it by, the device its header names, and the
+    /// request bytes exactly as the sender wrote them. Those bytes are SIG A
+    /// over the canonical operation and nothing that restates it. The same
+    /// envelope with its request stripped, as a hostile sender can send it,
+    /// is listed as unrecognized, never dropped.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[serial_test::serial]
-    async fn test_envelope_to_b0x_entry_names_the_requested_transfer(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let (device_b32, core, fleet) = test_device();
-        let sdk = B0xSDK::new(device_b32, core, fleet.endpoints()).unwrap();
-
-        // Build an OnlineTransferRequest with an embedded signature
-        let transfer_req = dsm::types::proto::OnlineTransferRequest {
-            token_id: "ERA".to_string(),
-            to_device_id: vec![0x11; 32],
-            amount: 42,
-            memo: "test".to_string(),
-            signature: vec![1, 2, 3, 4, 5],
-            nonce: vec![0xAA; 32],
-            from_device_id: vec![0x22; 32],
-            canonical_operation_bytes: vec![],
-            receipt_evidence_digest: Vec::new(),
-            sender_economic_position: 0,
-            sender_debit_mutation_index: 0,
+    async fn a_sent_transfer_opens_to_an_entry_carrying_its_request_verbatim() {
+        use crate::util::text_id::encode_base32_crockford;
+        let p = crate::test_support::two_device::Pair::boot(100, 0).await;
+        let sent = p.a.send(&p.b, 10).await;
+        assert!(sent.success, "{:?}", sent.error_message);
+        let one = crate::test_support::arrivals::the_one_transfer(&p.b, &p.fleet).await;
+        p.a.enter();
+        let sealed = kept_seal(&one.message_id).expect("A kept the sealed send");
+        p.b.enter();
+        let outer = dsm::envelope::from_canonical_bytes(&sealed).expect("the sealed envelope");
+        let inner = open_sealed(&outer).expect("B opens it");
+        let Some(dsm::types::proto::envelope::Payload::UniversalTx(tx)) = &inner.payload else {
+            panic!("A's transfer envelope carries a UniversalTx");
         };
-        let mut transfer_req_bytes = Vec::with_capacity(transfer_req.encoded_len());
-        transfer_req.encode(&mut transfer_req_bytes).map_err(|e| {
-            DsmError::internal(
-                format!("OnlineTransferRequest encode failed: {e}"),
-                None::<std::io::Error>,
-            )
-        })?;
-
-        // Build ArgPack directly (not serialized - passed as struct)
-        let arg_pack = dsm::types::proto::ArgPack {
-            schema_hash: None,
-            codec: dsm::types::proto::Codec::Proto as i32,
-            body: transfer_req_bytes.clone(),
+        let Some(dsm::types::proto::universal_op::Kind::Invoke(invoke)) = &tx.ops[0].kind else {
+            panic!("its op is an invoke");
         };
+        let written = invoke
+            .args
+            .as_ref()
+            .expect("the invoke carries A's request")
+            .body
+            .clone();
 
-        let invoke = dsm::types::proto::Invoke {
-            program: None,
-            method: "wallet.send".to_string(),
-            args: Some(arg_pack),
-            cosigners: vec![],
-            evidence: None,
-            nonce: None,
-        };
-
-        let op = dsm::types::proto::UniversalOp {
-            op_id: Some(dsm::types::proto::Hash32 { v: vec![9; 32] }),
-            actor: vec![2; 32],
-            kind: Some(dsm::types::proto::universal_op::Kind::Invoke(invoke)),
-        };
-
-        let env = dsm::types::proto::Envelope {
-            version: 3,
-            headers: Some(dsm::types::proto::Headers {
-                device_id: vec![0xAB; 32],
-                genesis_hash: vec![0; 32],
-            }),
-            message_id: vec![8; 16],
-            payload: Some(dsm::types::proto::envelope::Payload::UniversalTx(
-                dsm::types::proto::UniversalTx {
-                    ops: vec![op],
-                    atomic: true,
-                },
-            )),
-        };
-
+        let sdk = B0xSDK::new(
+            encode_base32_crockford(&p.b.device_id),
+            p.b.router().core_sdk.clone(),
+            p.fleet.endpoints(),
+        )
+        .expect("B's spool client");
         let entry = sdk
-            .envelope_to_b0x_entry(env)
-            .expect("should extract B0xEntry");
+            .envelope_to_b0x_entry(inner.clone())
+            .expect("a transfer entry");
+        assert_eq!(entry.kind, B0xEntryKind::Transfer);
+        assert_eq!(entry.transaction_id, one.message_id);
         assert_eq!(
-            entry.kind,
-            B0xEntryKind::Transfer {
-                amount: 42,
-                token_id: "ERA".to_string()
-            }
+            entry.sender_device_id,
+            encode_base32_crockford(&p.a.device_id)
         );
-        assert_eq!(entry.transfer_wire_bytes, transfer_req_bytes);
-        Ok(())
+        assert_eq!(entry.transfer_wire_bytes, written, "the request, verbatim");
+
+        let request =
+            dsm::types::proto::OnlineTransferRequest::decode(entry.transfer_wire_bytes.as_slice())
+                .expect("A's request decodes");
+        // Decoding drops any field the message does not define, so the bytes
+        // re-encode to themselves only if they carry nothing else.
+        assert_eq!(
+            request.encode_to_vec(),
+            entry.transfer_wire_bytes,
+            "the request restates nothing"
+        );
+        let ak =
+            crate::handlers::storage_routes::resolve_trusted_sender_ak(&entry.sender_device_id)
+                .expect("B holds A's key");
+        dsm::types::operations::Operation::decode_and_bind_signed(
+            &request.canonical_operation_bytes,
+            &request.signature,
+            &ak,
+        )
+        .expect("SIG A verifies over the canonical operation");
+
+        let mut stripped = inner;
+        let Some(dsm::types::proto::envelope::Payload::UniversalTx(tx)) = &mut stripped.payload
+        else {
+            panic!("a UniversalTx");
+        };
+        for op in &mut tx.ops {
+            let Some(dsm::types::proto::universal_op::Kind::Invoke(invoke)) = &mut op.kind else {
+                panic!("an invoke");
+            };
+            invoke.args = None;
+        }
+        let entry = sdk.envelope_to_b0x_entry(stripped).expect("still listed");
+        assert!(
+            matches!(&entry.kind, B0xEntryKind::Unrecognized { reason } if reason.contains("carries no request")),
+            "{:?}",
+            entry.kind
+        );
     }
 
     #[tokio::test]
@@ -3211,10 +3092,6 @@ mod tests {
             .envelope_to_b0x_entry(env)
             .expect("should extract B0xEntry");
 
-        assert_eq!(
-            entry.recipient_device_id,
-            crate::util::text_id::encode_base32_crockford(&[0x11u8; 32])
-        );
         assert_eq!(
             entry.kind,
             B0xEntryKind::Message {
@@ -3331,15 +3208,6 @@ mod tests {
         budget_step().a_side.clone()
     }
 
-    /// Submission params carrying production-sized SIG A and canonical op bytes
-    /// in the ADR 0003 split composition: no inline receipt, a 32-byte reference.
-    fn params_split_shape() -> B0xSubmissionParams {
-        let digest = evidence_content_digest_for_test();
-        let mut p = params_base();
-        p.receipt_evidence_digest = digest.to_vec();
-        p
-    }
-
     fn evidence_content_digest_for_test() -> [u8; 32] {
         crate::storage::client_db::evidence_content_digest(
             crate::storage::client_db::ArtifactRole::EvidenceA,
@@ -3347,8 +3215,8 @@ mod tests {
         )
     }
 
-    /// A production-shaped transfer submission (ADR 0003 split: no inline
-    /// receipt; the evidence reference is set by `params_split_shape`).
+    /// A production-shaped transfer submission: production-sized SIG A and
+    /// canonical operation bytes, no inline receipt (ADR 0003).
     fn params_base() -> B0xSubmissionParams {
         B0xSubmissionParams {
             recipient_device_id: crate::util::text_id::encode_base32_crockford(&[0x44u8; 32]),
@@ -3369,10 +3237,8 @@ mod tests {
             signature: vec![0xA5; sphincs_sig_len()],
             sender_genesis_hash: crate::util::text_id::encode_base32_crockford(&[0x66u8; 32]),
             sender_chain_tip: crate::util::text_id::encode_base32_crockford(&[0x77u8; 32]),
-            sender_signing_public_key: vec![0x88; EK_PK_LEN],
             routing_address: crate::util::text_id::encode_base32_crockford(&[0xABu8; 32]),
             canonical_operation_bytes: vec![0xCD; CANONICAL_OP_LEN],
-            receipt_evidence_digest: Vec::new(),
             submission_id: Some(crate::util::text_id::encode_base32_crockford(&[0xEFu8; 16])),
             sender_economic_position: 0,
             sender_debit_mutation_index: 0,
@@ -3525,18 +3391,12 @@ mod tests {
             .len()
     }
 
-    /// ADR 0003 shape 1, as PRODUCTION now builds it: no inline receipt, a
-    /// 32-byte role-separated reference in field 12.
+    /// ADR 0003 shape 1, as PRODUCTION builds it: the signed operation and
+    /// SIG A, no inline receipt.
     #[test]
     #[serial_test::serial]
     fn adr0003_transfer_envelope_fits_the_node_cap() {
-        let params = params_split_shape();
-        assert_eq!(
-            params.receipt_evidence_digest.len(),
-            32,
-            "the split transfer must carry a 32-byte evidence reference"
-        );
-
+        let params = params_base();
         let bytes = encode_via_production_path(&params);
         report_budget("ADR0003 TransferEnvelope", bytes);
         assert!(
@@ -3571,7 +3431,6 @@ mod tests {
             .build_evidence_envelope(
                 &crate::util::text_id::encode_base32_crockford(&[0x44u8; 32]),
                 &crate::util::text_id::encode_base32_crockford(&[0x55u8; 32]),
-                "TRANSFER-ID",
                 &crate::util::text_id::encode_base32_crockford(&[0xEFu8; 16]),
                 &digest,
                 &oversized,
@@ -3599,7 +3458,6 @@ mod tests {
             .build_evidence_envelope(
                 &crate::util::text_id::encode_base32_crockford(&[0x44u8; 32]),
                 &crate::util::text_id::encode_base32_crockford(&[0x55u8; 32]),
-                "TRANSFER-ID",
                 &crate::util::text_id::encode_base32_crockford(&[0xEFu8; 16]),
                 &wrong_digest,
                 &receipt,
@@ -3612,8 +3470,7 @@ mod tests {
     }
 
     /// The evidence artifact round-trips: it decodes to the EXACT receipt bytes
-    /// the digest was derived from, and carries that digest for self-
-    /// identification before a recipient has paired it with a transfer.
+    /// the digest was derived from, and says nothing else about itself.
     #[test]
     #[serial_test::serial]
     fn the_evidence_artifact_carries_the_exact_bytes_its_digest_binds() {
@@ -3629,7 +3486,6 @@ mod tests {
             .build_evidence_envelope(
                 &crate::util::text_id::encode_base32_crockford(&[0x44u8; 32]),
                 &crate::util::text_id::encode_base32_crockford(&[0x55u8; 32]),
-                "TRANSFER-ID",
                 &crate::util::text_id::encode_base32_crockford(&[0xEFu8; 16]),
                 &digest,
                 &receipt,
@@ -3648,16 +3504,19 @@ mod tests {
             panic!("expected an Invoke");
         };
         assert_eq!(invoke.method, "receipt.evidence.a");
-        let body =
-            dsm::types::proto::ReceiptEvidenceA::decode(invoke.args.expect("args").body.as_slice())
-                .expect("decode ReceiptEvidenceA");
+        let invoke_body_bytes = invoke.args.expect("args").body;
+        let body = dsm::types::proto::ReceiptEvidenceA::decode(invoke_body_bytes.as_slice())
+            .expect("decode ReceiptEvidenceA");
 
         assert_eq!(
             body.full_receipt_bytes, receipt,
             "the artifact must carry the EXACT bytes the digest binds"
         );
-        assert_eq!(body.receipt_evidence_digest, digest.to_vec());
-        assert_eq!(body.transfer_submission_id, "TRANSFER-ID");
+        assert_eq!(
+            body.encode_to_vec(),
+            invoke_body_bytes,
+            "the artifact carries the receipt and nothing else"
+        );
     }
 
     /// Byte stability: the same logical send must produce an identical digest
@@ -3671,8 +3530,8 @@ mod tests {
         let d2 = evidence_content_digest_for_test();
         assert_eq!(d1, d2, "evidence digest must be deterministic");
 
-        let a = encode_via_production_path(&params_split_shape());
-        let b = encode_via_production_path(&params_split_shape());
+        let a = encode_via_production_path(&params_base());
+        let b = encode_via_production_path(&params_base());
         assert_eq!(
             a, b,
             "the same logical send must encode to the same number of bytes"
@@ -3688,7 +3547,6 @@ mod tests {
             sdk.build_evidence_envelope(
                 &crate::util::text_id::encode_base32_crockford(&[0x44u8; 32]),
                 &crate::util::text_id::encode_base32_crockford(&[0x55u8; 32]),
-                "TRANSFER-ID",
                 &crate::util::text_id::encode_base32_crockford(&[0xEFu8; 16]),
                 &d1,
                 &receipt,
@@ -3706,44 +3564,6 @@ mod tests {
         assert_eq!(
             crate::storage::client_db::derive_artifact_submission_id(&d1),
             crate::storage::client_db::derive_artifact_submission_id(&d2),
-        );
-    }
-
-    /// The PRODUCTION transfer envelope, decoded from its actual encoded bytes:
-    /// field 10 empty, field 12 exactly 32 bytes. Asserting on the params would
-    /// only prove what was passed in, not what went on the wire.
-    #[test]
-    #[serial_test::serial]
-    fn the_encoded_transfer_envelope_carries_the_reference_not_the_receipt() {
-        let params = params_split_shape();
-        let (device_b32, core, fleet) = test_device();
-        let sdk = B0xSDK::new(device_b32, core, fleet.endpoints()).expect("B0xSDK");
-        let built = sdk
-            .build_envelope_for_submission(&params)
-            .expect("build envelope");
-
-        let env = dsm::types::proto::Envelope::decode(built.bytes.as_slice()).expect("decode");
-        let Some(dsm::types::proto::envelope::Payload::UniversalTx(utx)) = env.payload else {
-            panic!("expected a UniversalTx payload");
-        };
-        let Some(dsm::types::proto::universal_op::Kind::Invoke(invoke)) = utx.ops[0].kind.clone()
-        else {
-            panic!("expected an Invoke");
-        };
-        let req = dsm::types::proto::OnlineTransferRequest::decode(
-            invoke.args.expect("args").body.as_slice(),
-        )
-        .expect("decode OnlineTransferRequest");
-
-        assert_eq!(
-            req.receipt_evidence_digest.len(),
-            32,
-            "field 12 must carry a 32-byte evidence reference"
-        );
-        assert_eq!(
-            req.receipt_evidence_digest,
-            evidence_content_digest_for_test().to_vec(),
-            "the wire reference must be the A-role digest of the evidence bytes"
         );
     }
 

@@ -1277,6 +1277,16 @@ impl core::fmt::Display for PrevalidationRefusal {
     }
 }
 
+/// The signed transfer a recipient is admitting: SIG A and its message, the
+/// A-side receipt wire, and the economic locator hint one of the transfer's
+/// copies carried.
+pub(crate) struct IncomingTransfer<'a> {
+    pub canonical_operation_bytes: &'a [u8],
+    pub signature: &'a [u8],
+    pub hint: crate::storage::client_db::recipient_staging::LocatorHint,
+    pub evidence_bytes: &'a [u8],
+}
+
 /// Everything the SYNC accept closure needs, established BEFORE the fence
 /// exists: the validated sender debit, the Stored foreign closure, and
 /// this device's own admission prerequisites. No awaits remain past here.
@@ -1299,29 +1309,30 @@ pub(crate) struct RecipientAdmissionPrereqs {
 
 /// Prevalidate an inbound online transfer BEFORE any durable local state
 /// (owner corrections 3+8): resolve and validate the sender's debit via the
-/// PR2 walker (wire locators as untrusted hints), bind the wire bytes to the
-/// validated operation, require EK-ancestry portability, establish the
+/// PR2 walker (a copy's locators as untrusted hints), bind the signed bytes to
+/// the validated operation, require EK-ancestry portability, establish the
 /// Stored evidence closure (correction 5, recorded at the ACTUAL fetch
 /// boundary — correction 2), and assemble this device's own admission
 /// prerequisites.
+///
+/// A refusal is about `incoming.hint`, not about the transfer: another
+/// copy's hint may locate the debit.
 pub(crate) async fn prevalidate_incoming_transfer_admission(
     core: &CoreSDK,
     peer_genesis: &[u8; 32],
     peer_devid: &[u8; 32],
     sender_ak: &[u8],
-    transfer_wire_bytes: &[u8],
-    evidence_bytes: &[u8],
+    incoming: &IncomingTransfer<'_>,
     rel_key: &[u8; 32],
 ) -> Result<RecipientAdmissionPrereqs, PrevalidationRefusal> {
-    use prost::Message;
     let incomplete = |m: String| PrevalidationRefusal::Incomplete(m);
     let terminal = |m: String| PrevalidationRefusal::Terminal(m);
 
-    // ── The wire: locators are untrusted HINTS; bytes are the binding ──────
-    let wire = dsm::types::proto::OnlineTransferRequest::decode(transfer_wire_bytes)
-        .map_err(|e| terminal(format!("transfer wire does not decode: {e}")))?;
-    let sender_economic_position = wire.sender_economic_position;
-    let sender_debit_mutation_index = wire.sender_debit_mutation_index;
+    // ── The locators are untrusted HINTS; the signed bytes are the binding ─
+    let canonical_operation_bytes = incoming.canonical_operation_bytes;
+    let evidence_bytes = incoming.evidence_bytes;
+    let sender_economic_position = incoming.hint.economic_position;
+    let sender_debit_mutation_index = incoming.hint.debit_mutation_index;
     let evidence_receipt =
         dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(evidence_bytes)
             .map_err(|e| terminal(format!("evidence receipt does not decode: {e}")))?;
@@ -1417,11 +1428,10 @@ pub(crate) async fn prevalidate_incoming_transfer_admission(
         .verified_operation()
         .with_cleared_signature()
         .to_bytes()
-        != wire.canonical_operation_bytes
+        != canonical_operation_bytes
     {
         return Err(terminal(
-            "the wire's canonical operation bytes are not the validated debit operation"
-                .to_string(),
+            "the signed operation bytes are not the validated debit operation".to_string(),
         ));
     }
     if evidence_receipt.child_tip != *peer.c_dsm_plus() {
@@ -1478,8 +1488,8 @@ pub(crate) async fn prevalidate_incoming_transfer_admission(
 
     // ── The prepared admission for the exact signed op the apply will see ──
     let signed_op = dsm::types::operations::Operation::decode_and_bind_signed(
-        &wire.canonical_operation_bytes,
-        &wire.signature,
+        canonical_operation_bytes,
+        incoming.signature,
         sender_ak,
     )
     .map_err(|e| terminal(format!("signed operation does not bind: {e}")))?;
@@ -1503,7 +1513,7 @@ pub(crate) async fn prevalidate_incoming_transfer_admission(
         pre_state,
         authority,
         prepared,
-        pinned_canonical_bytes: wire.canonical_operation_bytes,
+        pinned_canonical_bytes: canonical_operation_bytes.to_vec(),
     })
 }
 
@@ -1534,11 +1544,11 @@ pub(crate) fn build_recipient_admission(
     chain_state: &RelationshipChainState,
     signed_op: &Operation,
     b_artifacts: &crate::handlers::recipient_receipt::GeneratedBArtifacts,
-    transfer_wire_bytes: &[u8],
-    evidence_bytes: &[u8],
+    incoming: &IncomingTransfer<'_>,
     rel_key: &[u8; 32],
 ) -> Result<RecipientAdmissionBuild, DsmError> {
     use prost::Message;
+    let evidence_bytes = incoming.evidence_bytes;
 
     // ── The exact countersign wire bytes (deterministic from the journal
     // receipt — the same derivation the reply delta uses) ──────────────────
@@ -1594,9 +1604,19 @@ pub(crate) fn build_recipient_admission(
     let a_step_addr = dsm::economic::peer_acceptance::ek_cert_step_addr(&a_step_bytes);
     let b_step_addr = dsm::economic::peer_acceptance::ek_cert_step_addr(&b_step_bytes);
 
-    // ── The acceptance bundle — exact frozen wire bytes on all three legs ──
+    // ── The acceptance bundle — the signed transfer, and the exact receipt
+    // and countersign wire bytes. The transfer leg carries the signed parts
+    // only (SIG A and its message): no locator hints — those are transport,
+    // and the write set's facts carry the validated position — and nothing
+    // a copy's wrapper said.
+    let transfer_request_bytes = dsm::types::proto::OnlineTransferRequest {
+        signature: incoming.signature.to_vec(),
+        canonical_operation_bytes: incoming.canonical_operation_bytes.to_vec(),
+        ..Default::default()
+    }
+    .encode_to_vec();
     let bundle_bytes = dsm::types::proto::PeerTransferAcceptanceEvidenceV1 {
-        transfer_request_bytes: transfer_wire_bytes.to_vec(),
+        transfer_request_bytes,
         receipt_evidence_a_bytes: evidence_bytes.to_vec(),
         receipt_countersign_b_bytes: countersign_bytes,
         a_prior_step_addr: a_prior.map(|a| a.to_vec()),

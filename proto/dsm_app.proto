@@ -1116,7 +1116,9 @@ message EkCertStepV1 {
 // proposal. Each side's EK certificate ancestry is referenced through
 // EkCertStepV1 predecessors (by signer, see above).
 message PeerTransferAcceptanceEvidenceV1 {
-  bytes transfer_request_bytes      = 1 [(dsm_max_len)=262144]; // exact OnlineTransferRequest
+  // The verified transfer: an OnlineTransferRequest holding its signature and
+  // canonical operation bytes. Nothing else in it is read.
+  bytes transfer_request_bytes      = 1 [(dsm_max_len)=262144];
   bytes receipt_evidence_a_bytes    = 2 [(dsm_max_len)=262144]; // exact full ReceiptCommit wire
   bytes receipt_countersign_b_bytes = 3 [(dsm_max_len)=262144]; // exact ReceiptCountersignB wire
   optional bytes a_prior_step_addr  = 4 [(dsm_fixed_len)=32];   // sender EK ancestry
@@ -3171,46 +3173,43 @@ message FaucetClaimResponse {
 }
 
 // ======================= Online Transfer Messages ====================
+// An online transfer on the wire: the signed operation and nothing that
+// restates it. SIG A (`signature`) covers `canonical_operation_bytes`, the
+// unsigned `Operation::Transfer` preimage, and that operation already names
+// the recipient, amount, token, policy commitment, nonce and memo. The
+// recipient decodes every term from those bytes after verifying them; the
+// sender is the stored contact whose key verified them. Nothing else here
+// is authority.
 message OnlineTransferRequest {
-  string token_id = 1;
-  bytes to_device_id = 2 [(dsm_fixed_len)=32];
-  uint64 amount = 3;
-  string memo = 4;
-  bytes signature = 5 [(dsm_max_len)=65535]; // optional sender signature (crypto proof)
-  // Deterministic 32-byte nonce signed by sender to prevent replays (AF-2)
-  bytes nonce = 6 [(dsm_fixed_len)=32];
-  // Envelope v3 signing context (AF-2 remediation)
-  bytes from_device_id = 7 [(dsm_fixed_len)=32]; // REQUIRED: sender identity for key selection
+  // 1-4 and 6 restated terms of the signed operation (token, recipient,
+  // amount, memo, nonce), and 7 a sender id nothing signed; 12 named the
+  // evidence artifact by digest, which the receipt's signed child tip now
+  // binds instead. None of them was covered by SIG A. Reserved so the
+  // numbers are never reused.
+  reserved 1, 2, 3, 4, 6, 7, 12;
+  reserved "token_id", "to_device_id", "amount", "memo", "nonce",
+           "from_device_id", "receipt_evidence_digest";
+  // SIG A: the sender's SPHINCS+ signature over `canonical_operation_bytes`.
+  bytes signature = 5 [(dsm_max_len)=65535];
   // The SDK derives the relationship tip itself; a caller never supplies it.
   // DSM keeps no counter: a transfer is ordered by its chain tip alone.
   reserved 8, 9;
   reserved "chain_tip", "seq";
   // 10 was `receipt_commit`: the inline full-receipt composition (168,400 B
   // against the node's 128 KiB cap, failing every send with 413). Deleted under
-  // ADR 0003 — the A-side receipt travels as its own artifact, referenced by
-  // `receipt_evidence_digest` (12). Reserved so the number is never reused.
+  // ADR 0003 — the A-side receipt travels as its own artifact. Reserved so the
+  // number is never reused.
   reserved 10;
   // §4.2.1 Canonical unsigned Operation bytes (signing preimage).
   // Sender populates with signing_op.to_bytes() (signature field empty).
   // Receiver MUST use these bytes directly for SPHINCS+ verification and
   // h_{n+1} tip computation — no reconstruction from individual fields.
   bytes canonical_operation_bytes = 11 [(dsm_max_len)=65535];
-  // ADR 0003: content address of the A-side receipt-evidence artifact this
-  // transfer refers to. Role-domain-separated
-  // (BLAKE3("DSM/receipt-evidence/A/v1" ‖ full_wire_bytes)) and computed over
-  // the FULL wire bytes, never ReceiptCommit::compute_commitment(), which
-  // hard-zeroes fields 12-20 — a commitment-addressed object could be served
-  // with substituted signatures.
-  //
-  // A dedicated field rather than reusing 10: the two carry different semantic
-  // types (a 32-byte address vs a full object), and encoding both in one field
-  // would make "which form is this?" a runtime guess.
-  bytes receipt_evidence_digest = 12 [(dsm_fixed_len)=32];
   // ── Sender economic locators (3.5b) ──────────────────────────────────────
-  // Sender economic coordinates on OnlineTransferRequest are untrusted
-  // locators, never authority; the verifier accepts them only after the
-  // resolved ValidatedEconomicRoot proves that the named debit belongs to the
-  // exact signed online Transfer addressed to this consuming identity.
+  // Untrusted hints, never authority: the verifier accepts them only after
+  // the resolved ValidatedEconomicRoot proves that the named debit belongs to
+  // the exact signed online Transfer addressed to this consuming identity. A
+  // hint that does not resolve is not a verdict on the transfer.
   // The values are OUTPUTS of the sender's built admission (the admitted
   // position and THE debit mutation index of the exact write set), populated
   // in the same staged build phase that freezes this envelope — never
@@ -3223,18 +3222,14 @@ message OnlineTransferRequest {
 // rather than inline in the transfer. Its own message and its own invoke
 // method -- it is not an Operation and must not be threaded through one.
 //
-// INVARIANT:
-//   receipt_evidence_digest == BLAKE3("DSM/receipt-evidence/A/v1\0" || full_receipt_bytes)
-//
-// The digest here is cryptographically redundant (the recipient can recompute
-// it) but structurally useful: the artifact can identify itself before the
-// recipient has paired it with a transfer. The AUTHORITATIVE binding remains
-// the digest in field 12 of the transfer.
+// The receipt pairs with its transfer by what it signs: its child tip is the
+// successor of its parent under the signed operation, which the recipient
+// recomputes. Nothing the artifact says about itself pairs it.
 message ReceiptEvidenceA {
-  // The transfer artifact this evidence belongs to, for correlation while
-  // staging. Not authority -- the digest is.
-  string transfer_submission_id = 1;
-  bytes  receipt_evidence_digest = 2 [(dsm_fixed_len)=32];
+  // 1 named the transfer's submission id and 2 the artifact's own digest:
+  // self-descriptions nothing signed. Reserved so they are never reused.
+  reserved 1, 2;
+  reserved "transfer_submission_id", "receipt_evidence_digest";
   // The FULL ReceiptCommit wire object: canonical fields plus sig_a,
   // ek_cert_a, ek_pk_a and Kyber material. ~118 KB with production-sized
   // SPHINCS+ material, against the node's 128 KiB envelope cap.
