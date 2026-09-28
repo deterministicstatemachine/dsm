@@ -53,6 +53,27 @@ pub(crate) struct OnlineSendIntent {
     pub memo: String,
 }
 
+/// §4.1: a transfer's nonce, "fresh entropy e", derived by the SDK and never
+/// supplied: BLAKE3("DSM/nonce\0" || h_n || amount || token_id || recipient).
+/// `h_n` is the relationship's chain tip, unique per step, and the payload
+/// separates transfers at one step. Clockless: no wall-clock, no OS randomness,
+/// no counter. The nonce travels inside the signed operation, so both sides use
+/// identical bytes for `compute_precommit`.
+pub(crate) fn transfer_nonce(
+    relationship_tip: &[u8; 32],
+    amount: u64,
+    token_id: &str,
+    to_device_id: &[u8; 32],
+) -> Vec<u8> {
+    let mut hasher =
+        dsm::crypto::blake3::dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_NONCE);
+    hasher.update(relationship_tip);
+    hasher.update(&amount.to_le_bytes());
+    hasher.update(token_id.as_bytes());
+    hasher.update(to_device_id);
+    hasher.finalize().as_bytes().to_vec()
+}
+
 pub struct AppRouterImpl {
     pub(crate) _config: SdkConfig,
     pub(crate) contact_manager: ContactManager,
@@ -663,24 +684,7 @@ impl AppRouterImpl {
         }
         let recipient_owner = contact_record.public_key.clone();
 
-        // §4.1: Nonce = "fresh entropy e" — generated deterministically by the SDK.
-        // Formula: BLAKE3("DSM/nonce\0" || h_n || amount || token_id || recipient)
-        // The nonce is derived here; no caller supplies one.
-        // The nonce is embedded in the Operation payload and transmitted to the receiver via the
-        // b0x envelope, so both sides use identical bytes for compute_precommit. Clockless: no
-        // wall-clock, no OS randomness, no counter — h_n is the per-relationship bilateral chain
-        // tip, unique per relationship step, and the payload separates transfers at one step.
-        let nonce: Vec<u8> = {
-            let mut hasher =
-                dsm::crypto::blake3::dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_NONCE);
-            // h_n: bilateral chain tip — unique per relationship step
-            hasher.update(&chain_tip_arr);
-            // payload binding: amount + token_id + recipient — prevents cross-transfer reuse
-            hasher.update(&intent.amount.to_le_bytes());
-            hasher.update(token_id.as_bytes());
-            hasher.update(&to_device_id);
-            hasher.finalize().as_bytes().to_vec()
-        };
+        let nonce = transfer_nonce(&chain_tip_arr, intent.amount, &token_id, &to_device_id);
         // =====================================================================
         // CANONICAL SIGNATURE GENERATION
         // Sign the canonical Operation bytes (signature field cleared) so the

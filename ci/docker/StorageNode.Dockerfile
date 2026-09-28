@@ -1,7 +1,7 @@
 FROM rust:slim-trixie AS build
 WORKDIR /src
 COPY . .
-RUN apt-get update && apt-get install -y --no-install-recommends protobuf-compiler \
+RUN apt-get update && apt-get install -y --no-install-recommends protobuf-compiler python3 \
 	&& rm -rf /var/lib/apt/lists/*
 RUN cargo build -p dsm_storage_node --release --locked
 
