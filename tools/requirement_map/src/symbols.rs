@@ -32,6 +32,9 @@ pub struct Item {
     pub container: String,
     /// The trait an impl block implements. Empty for inherent impls and free items.
     pub trait_name: String,
+    /// Written inside an impl block (`impl#[Self]…`), as associated items are;
+    /// a field or a trait's own item is not.
+    pub in_impl_block: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -104,6 +107,7 @@ pub fn item(symbol: &str) -> Result<Option<Item>, String> {
                         name: name.clone(),
                         container: container_of(&last_type, &impl_self, in_impl),
                         trait_name: String::new(),
+                        in_impl_block: in_impl >= 2,
                     }));
                 }
                 last_type = name.clone();
@@ -128,6 +132,7 @@ pub fn item(symbol: &str) -> Result<Option<Item>, String> {
                     } else {
                         String::new()
                     },
+                    in_impl_block: in_impl >= 2,
                 }));
             }
             Descriptor::Method(name) | Descriptor::Term(name) | Descriptor::Macro(name) => {
@@ -287,6 +292,21 @@ mod tests {
             (Kind::Callable, "advance", "DeviceState")
         );
         assert!(it.trait_name.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn impl_block_items_are_told_from_fields_and_trait_items() -> Result<(), String> {
+        let constant = parsed("m/impl#[Config]LIMIT.")?;
+        let field = parsed("m/Config#limit.")?;
+        let declared = parsed("m/Example#LIMIT.")?;
+        assert_eq!(constant.kind, Kind::Term);
+        assert!(constant.in_impl_block);
+        assert_eq!(constant.container, "Config");
+        assert_eq!(field.kind, Kind::Term);
+        assert!(!field.in_impl_block);
+        assert!(!declared.in_impl_block);
+        assert_eq!(declared.container, "Example");
         Ok(())
     }
 
