@@ -70,11 +70,6 @@ function makeErrorResponseFramed(message: string, code = 1): Uint8Array {
   return framed;
 }
 
-function decodeOnlineTransferRequest(argPackBytes: Uint8Array): pb.OnlineTransferRequest {
-  const argPack = pb.ArgPack.fromBinary(argPackBytes);
-  return pb.OnlineTransferRequest.fromBinary(argPack.body);
-}
-
 function decodeOnlineTransferSmartRequest(argPackBytes: Uint8Array): pb.OnlineTransferSmartRequest {
   const argPack = pb.ArgPack.fromBinary(argPackBytes);
   return pb.OnlineTransferSmartRequest.fromBinary(argPack.body);

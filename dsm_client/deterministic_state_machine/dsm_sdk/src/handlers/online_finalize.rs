@@ -605,7 +605,9 @@ mod tests {
             verify().is_ok(),
             "readable again: the chain check itself answers"
         );
-        let err = sig_a().expect_err("no per-step EK material in this receipt");
+        let err = sig_a()
+            .expect("readable again: the check can be made")
+            .expect_err("no per-step EK material in this receipt");
         assert!(!err.contains("could not be read"), "{err}");
     }
 

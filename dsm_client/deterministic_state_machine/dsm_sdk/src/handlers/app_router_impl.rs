@@ -42,6 +42,38 @@ include!(concat!(env!("OUT_DIR"), "/dsm_contact_schema_hash.rs"));
 
 use super::response_helpers::{pack_envelope_ok, err};
 
+/// What a sender asks for when it pays a contact online. Everything else —
+/// the sender (this device), the relationship tip, the nonce, the signed
+/// operation — the SDK derives.
+#[derive(Debug, Clone)]
+pub(crate) struct OnlineSendIntent {
+    pub to_device_id: [u8; 32],
+    pub token_id: String,
+    pub amount: u64,
+    pub memo: String,
+}
+
+/// §4.1: a transfer's nonce, "fresh entropy e", derived by the SDK and never
+/// supplied: BLAKE3("DSM/nonce\0" || h_n || amount || token_id || recipient).
+/// `h_n` is the relationship's chain tip, unique per step, and the payload
+/// separates transfers at one step. Clockless: no wall-clock, no OS randomness,
+/// no counter. The nonce travels inside the signed operation, so both sides use
+/// identical bytes for `compute_precommit`.
+pub(crate) fn transfer_nonce(
+    relationship_tip: &[u8; 32],
+    amount: u64,
+    token_id: &str,
+    to_device_id: &[u8; 32],
+) -> Vec<u8> {
+    let mut hasher =
+        dsm::crypto::blake3::dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_NONCE);
+    hasher.update(relationship_tip);
+    hasher.update(&amount.to_le_bytes());
+    hasher.update(token_id.as_bytes());
+    hasher.update(to_device_id);
+    hasher.finalize().as_bytes().to_vec()
+}
+
 pub struct AppRouterImpl {
     pub(crate) _config: SdkConfig,
     pub(crate) contact_manager: ContactManager,
@@ -416,28 +448,16 @@ impl AppRouterImpl {
         }
     }
 
-    // Helper: Shared logic for OnlineTransferRequest processing
+    /// Send an online transfer: this device pays `intent.amount` of
+    /// `intent.token_id` to `intent.to_device_id`. The sender is this device;
+    /// the relationship tip, the nonce and the signed operation are derived
+    /// here, never supplied.
     pub(crate) async fn process_online_transfer_logic(
         &self,
-        transfer_req: generated::OnlineTransferRequest,
+        intent: OnlineSendIntent,
     ) -> AppResult {
-        // Check network connectivity before attempting online transfer
-        // Validate required fields for canonical signing (AF-2 remediation)
-        if transfer_req.from_device_id.len() != 32 {
-            return err("wallet.send: from_device_id must be 32 bytes".into());
-        }
-        if transfer_req.to_device_id.len() != 32 {
-            return err("wallet.send: to_device_id must be 32 bytes".into());
-        }
-
-        // Resolve device IDs first — needed to derive the bilateral chain tip below.
-        let Ok(from_device_id) = <[u8; 32]>::try_from(transfer_req.from_device_id.as_slice())
-        else {
-            return err("wallet.send: from_device_id must be 32 bytes".into());
-        };
-        let Ok(to_device_id) = <[u8; 32]>::try_from(transfer_req.to_device_id.as_slice()) else {
-            return err("wallet.send: to_device_id must be 32 bytes".into());
-        };
+        let from_device_id = self.device_id_bytes;
+        let to_device_id = intent.to_device_id;
         let to_device_id_str = crate::util::text_id::encode_base32_crockford(&to_device_id);
         // The network's pinned set: the recipient's directory entry is read
         // there, and the send is delivered there.
@@ -653,7 +673,7 @@ impl AppRouterImpl {
 
         // A transfer names its token exactly; an omitted token is not ERA, and a
         // ticker is not case-folded into one it does not spell.
-        let token_id = transfer_req.token_id.clone();
+        let token_id = intent.token_id.clone();
         if token_id.is_empty() {
             return err("wallet.send: the request names no token".to_string());
         }
@@ -664,24 +684,7 @@ impl AppRouterImpl {
         }
         let recipient_owner = contact_record.public_key.clone();
 
-        // §4.1: Nonce = "fresh entropy e" — generated deterministically by the SDK.
-        // Formula: BLAKE3("DSM/nonce\0" || h_n || amount || token_id || recipient)
-        // transfer_req.nonce from the frontend is ignored (reserved/ignored per proto comment).
-        // The nonce is embedded in the Operation payload and transmitted to the receiver via the
-        // b0x envelope, so both sides use identical bytes for compute_precommit. Clockless: no
-        // wall-clock, no OS randomness, no counter — h_n is the per-relationship bilateral chain
-        // tip, unique per relationship step, and the payload separates transfers at one step.
-        let nonce: Vec<u8> = {
-            let mut hasher =
-                dsm::crypto::blake3::dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_NONCE);
-            // h_n: bilateral chain tip — unique per relationship step
-            hasher.update(&chain_tip_arr);
-            // payload binding: amount + token_id + recipient — prevents cross-transfer reuse
-            hasher.update(&transfer_req.amount.to_le_bytes());
-            hasher.update(token_id.as_bytes());
-            hasher.update(&to_device_id);
-            hasher.finalize().as_bytes().to_vec()
-        };
+        let nonce = transfer_nonce(&chain_tip_arr, intent.amount, &token_id, &to_device_id);
         // =====================================================================
         // CANONICAL SIGNATURE GENERATION
         // Sign the canonical Operation bytes (signature field cleared) so the
@@ -699,14 +702,14 @@ impl AppRouterImpl {
         };
         let signing_op = dsm::types::operations::Operation::Transfer {
             to_device_id: to_device_id.to_vec(),
-            amount: dsm::types::token_types::Balance::amount(transfer_req.amount),
+            amount: dsm::types::token_types::Balance::amount(intent.amount),
             token_id: token_id.as_bytes().to_vec(),
             policy_commit,
             mode: dsm::types::operations::TransactionMode::Unilateral,
             nonce: nonce.clone(),
             recipient: recipient_owner.clone(),
             to: to_device_id_str.as_bytes().to_vec(),
-            message: transfer_req.memo.clone(),
+            message: intent.memo.clone(),
             signature: Vec::new(),
             authority_policy: None,
         };
@@ -720,7 +723,7 @@ impl AppRouterImpl {
         log::info!(
             "🔐 wallet.send: canonical signing preimage hash(first8)={:?} amount={} token={}",
             &preimage_hash.as_bytes()[..8],
-            transfer_req.amount,
+            intent.amount,
             token_id
         );
 
@@ -856,9 +859,9 @@ impl AppRouterImpl {
             .wallet
             .create_transaction(
                 &to_device_id_str,
-                transfer_req.amount,
+                intent.amount,
                 Some(&token_id),
-                Some(&transfer_req.memo),
+                Some(&intent.memo),
                 None, // fee
                 // Identity v2: bind the transfer id to the relationship and the
                 // operation nonce, so two same-amount sends can no longer share an
@@ -882,14 +885,14 @@ impl AppRouterImpl {
         // canonical signature generation, so every verifier reads identical bytes.
         let signed_op = dsm::types::operations::Operation::Transfer {
             to_device_id: to_device_id.to_vec(),
-            amount: dsm::types::token_types::Balance::amount(transfer_req.amount),
+            amount: dsm::types::token_types::Balance::amount(intent.amount),
             token_id: token_id.as_bytes().to_vec(),
             policy_commit,
             mode: dsm::types::operations::TransactionMode::Unilateral,
             nonce: nonce.clone(),
             recipient: recipient_owner.clone(),
             to: to_device_id_str.as_bytes().to_vec(),
-            message: transfer_req.memo.clone(),
+            message: intent.memo.clone(),
             signature: canonical_signature.clone(),
             authority_policy: None,
         };
@@ -1390,7 +1393,7 @@ impl AppRouterImpl {
                     message_id: None,
                     tx_id: signed_tx.id.to_string(),
                     counterparty_device_id: to_device_id,
-                    amount: transfer_req.amount,
+                    amount: intent.amount,
                     token_id: token_id.clone(),
                     status: crate::storage::client_db::PROPOSAL_PROPOSED.to_string(),
                 }
@@ -1457,14 +1460,14 @@ impl AppRouterImpl {
             // Build Operation for b0x submission
             let transfer_op = dsm::types::operations::Operation::Transfer {
                 to_device_id: to_device_id.to_vec(),
-                amount: dsm::types::token_types::Balance::amount(transfer_req.amount),
+                amount: dsm::types::token_types::Balance::amount(intent.amount),
                 token_id: token_id.as_bytes().to_vec(),
                 policy_commit,
                 mode: dsm::types::operations::TransactionMode::Unilateral,
                 nonce: nonce.to_vec(),
                 recipient: recipient_owner,
                 to: to_device_id_str.as_bytes().to_vec(),
-                message: transfer_req.memo.clone(),
+                message: intent.memo.clone(),
                 signature: canonical_signature.clone(),
                 authority_policy: None,
             };
@@ -1479,18 +1482,6 @@ impl AppRouterImpl {
                 crate::util::text_id::encode_base32_crockford(&local_genesis_for_routing);
             let sender_chain_tip_b32 =
                 crate::util::text_id::encode_base32_crockford(&sender_proposal.projection_parent);
-            // Use the signing authority's public key — derived from the same
-            // (genesis_hash, device_id, binding_key) triple that produced the
-            // secret key used for signing.  This is the ONLY correct source.
-            let sender_signing_public_key = match crate::sdk::signing_authority::current_public_key(
-            ) {
-                Ok(pk) => pk,
-                Err(e) => {
-                    return Err(dsm::types::error::DsmError::invalid_operation(format!(
-                            "wallet.send: cannot retrieve signing authority public key: {e}"
-                        )));
-                }
-            };
 
             // Recipient genesis hash comes from the primed contact record that also
             // defines the canonical relationship tip used for routing.
@@ -1571,13 +1562,6 @@ impl AppRouterImpl {
                 signature: canonical_signature.clone(),
                 sender_genesis_hash: sender_genesis_b32,
                 sender_chain_tip: sender_chain_tip_b32,
-                sender_signing_public_key,
-                // ADR 0003: the transfer no longer carries the receipt inline.
-                // It carries a 32-byte role-separated reference to the evidence
-                // artifact, which travels separately. Field 10 stays empty --
-                // the two forms are different semantic types and must not share
-                // a field.
-                receipt_evidence_digest: evidence_digest.to_vec(),
                 routing_address: routing_address.clone(),
                 canonical_operation_bytes: signing_bytes.clone(),
                 // OUTPUTS of the built admission (correction C).
@@ -1651,7 +1635,6 @@ impl AppRouterImpl {
             let evidence_envelope = match evidence_builder.build_evidence_envelope(
                 &to_device_id_str,
                 &recipient_genesis_b32_for_evidence,
-                &submission_id,
                 &evidence_submission_id,
                 &evidence_digest,
                 &receipt_commit_bytes,
@@ -2111,14 +2094,6 @@ impl AppRouterImpl {
         };
         let sender_genesis_b32 = crate::util::text_id::encode_base32_crockford(&sender_genesis);
         let sender_chain_tip_b32 = crate::util::text_id::encode_base32_crockford(&chain_tip_arr);
-        let sender_signing_public_key = match crate::sdk::signing_authority::current_public_key() {
-            Ok(pk) => pk,
-            Err(e) => {
-                return err(format!(
-                    "message.send: cannot retrieve signing authority public key: {e}"
-                ));
-            }
-        };
 
         let recipient_genesis_raw: [u8; 32] =
             match crate::storage::client_db::get_contact_by_device_id(&to_device_id) {
@@ -2166,10 +2141,8 @@ impl AppRouterImpl {
             signature: canonical_signature,
             sender_genesis_hash: sender_genesis_b32,
             sender_chain_tip: sender_chain_tip_b32,
-            sender_signing_public_key,
             routing_address,
             canonical_operation_bytes: Vec::new(),
-            receipt_evidence_digest: Vec::new(),
             sender_economic_position: 0,
             sender_debit_mutation_index: 0,
         };
@@ -2702,9 +2675,7 @@ impl AppRouter for AppRouterImpl {
 
         match i.method.as_str() {
             // Wallet invoke routes
-            "wallet.send" | "wallet.sendSmart" | "wallet.sendOffline" => {
-                self.handle_wallet_invoke(i).await
-            }
+            "wallet.sendSmart" | "wallet.sendOffline" => self.handle_wallet_invoke(i).await,
             // Offline-cash load/unload (two-regime money model)
             "wallet.loadOffline" | "wallet.unloadOffline" => {
                 self.handle_offline_cash_invoke(i).await

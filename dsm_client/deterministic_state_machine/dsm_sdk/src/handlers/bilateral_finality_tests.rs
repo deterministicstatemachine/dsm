@@ -105,12 +105,13 @@ fn outbox_statuses(rel: &[u8; 32]) -> Vec<String> {
         .collect()
 }
 
-/// Every recipient staging state on the ENTERED device.
+/// The state of every staged pair still in flight on the ENTERED device. A
+/// finished pair is released, so it is not listed.
 fn staging_states() -> Vec<String> {
     let binding = cdb::get_connection().expect("conn");
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
     let mut stmt = conn
-        .prepare("SELECT state FROM recipient_staging ORDER BY rowid")
+        .prepare("SELECT state FROM recipient_pair ORDER BY rowid")
         .expect("prepare");
     stmt.query_map([], |r| r.get::<_, String>(0))
         .expect("query")
@@ -375,7 +376,11 @@ async fn r1_role_reversal_applies_once_on_a_and_finalizes_on_b() {
     assert_eq!(p.b.era_balance(), 115);
     p.a.enter();
     assert_eq!(rows_for_relationship("canonical_apply_identity", &rel), 1);
-    assert_eq!(staging_states(), vec!["accepted".to_string()]);
+    assert_eq!(
+        staging_states(),
+        Vec::<String>::new(),
+        "the applied pair was finished and released in the same pass"
+    );
     assert_eq!(
         applied_signed_parents(&rel),
         vec![b_pair_2.1],
@@ -902,8 +907,8 @@ async fn r8_a_next_generation_transfer_is_held_until_the_certificate_lands() {
         assert_eq!(rows_for_relationship("canonical_apply_identity", &rel), 1);
         assert_eq!(
             staging_states(),
-            vec!["accepted".to_string(), "ready_to_verify".to_string()],
-            "held at ready_to_verify — not rejected, not accepted"
+            vec!["bound".to_string()],
+            "generation #1 finished and released; #2 held bound — not rejected, not accepted"
         );
         assert!(cdb::relationship_awaits_peer_finalization(&rel).expect("await"));
     }
@@ -922,7 +927,8 @@ async fn r8_a_next_generation_transfer_is_held_until_the_certificate_lands() {
     assert_eq!(rows_for_relationship("canonical_apply_identity", &rel), 2);
     assert_eq!(
         staging_states(),
-        vec!["accepted".to_string(), "accepted".to_string()]
+        Vec::<String>::new(),
+        "both generations finished and released"
     );
     // And generation #2 finalizes normally on both sides.
     let a_sync = p.a.sync().await;
