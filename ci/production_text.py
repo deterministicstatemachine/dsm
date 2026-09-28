@@ -111,9 +111,9 @@ def _item_end(text, i):
     return n
 
 
-def production_text(path):
-    text = open(path, encoding="utf-8").read()
-    out, pos = [], 0
+def test_item_spans(text):
+    """(start, end) offsets of every `#[cfg(test)]`-attributed item, in order."""
+    spans, pos = [], 0
     for m in ATTR.finditer(text):
         if m.start() < pos:
             continue
@@ -121,7 +121,16 @@ def production_text(path):
         while text.startswith("#[", i):
             i = _skip_ws_and_comments(text, _skip_attribute(text, i))
         end = _item_end(text, i)
-        out.append(text[pos:m.start()])
+        spans.append((m.start(), end))
+        pos = end
+    return spans
+
+
+def production_text(path):
+    text = open(path, encoding="utf-8").read()
+    out, pos = [], 0
+    for start, end in test_item_spans(text):
+        out.append(text[pos:start])
         pos = end
     out.append(text[pos:])
     return "".join(out)
