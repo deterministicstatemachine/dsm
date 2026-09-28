@@ -13,8 +13,8 @@
 //!    - `"balance.list"`, `"wallet.history"`, `"contacts.list"`,
 //!      `"bitcoin.balance"`, `"bilateral.pending_list"`, etc.
 //! 3. Use [`AppRouter::invoke()`] for state-mutating operations:
-//!    - `"wallet.send"`, `"token.create"`, `"faucet.claim"`, `"prefs.set"`,
-//!      `"message.send"`, `"dbrw.export_report"`, etc.
+//!    - `"wallet.sendSmart"`, `"token.create"`, `"faucet.claim"`, `"prefs.set"`,
+//!      `"dbrw.export_report"`, etc.
 //! 4. All parameters (`AppQuery::params`, `AppInvoke::args`) and return values
 //!    (`AppResult::data`) are prost-encoded protobuf bytes. See `dsm_app.proto`.
 //!

@@ -581,7 +581,6 @@ pub fn handle_envelope_universal(env_bytes: &[u8]) -> Vec<u8> {
             | gp::envelope::Payload::WalletHistoryResponse(_)
             | gp::envelope::Payload::ContactsListResponse(_)
             | gp::envelope::Payload::OnlineTransferResponse(_)
-            | gp::envelope::Payload::OnlineMessageResponse(_)
             | gp::envelope::Payload::ContactAddResponse(_)
             | gp::envelope::Payload::BalanceGetResponse(_)
             | gp::envelope::Payload::BleCommandResponse(_)
