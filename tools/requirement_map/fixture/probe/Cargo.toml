@@ -1,0 +1,10 @@
+[package]
+name = "probe"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "MIT OR Apache-2.0"
+description = "Dispatch shapes the requirement map must read: a type argument, a qualified path, a value, a type only named"
+
+[lib]
+path = "src/lib.rs"

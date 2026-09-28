@@ -348,15 +348,55 @@ typecheck: ## Run frontend TypeScript type-check
 .PHONY: requirement-map
 MAP ?= target/requirement-map
 SOURCES := '*.rs' '*.kt' '*.kts' '*.java' '*.ts' '*.tsx' '*.js' '*.mjs' '*.proto'
-requirement-map: ## Code map (MAP=dir): every source file hashed, the Rust backend's call graph (rust-analyzer, Android view), dead and test-only marks; MAP/code-map.html
+# What the indexes depend on besides the sources: each is hashed into the tree
+# fingerprint, so a map is refused against any other configuration.
+MAP_INPUTS := ci/requirement_map.android.rust-analyzer.json ci/requirement_map.node.rust-analyzer.json ci/requirement_map.tests.rust-analyzer.json Cargo.lock rust-toolchain.toml
+# The NDK Gradle pins; the Android index is built for the real target with it.
+NDK_PIN := $(shell sed -n 's/.*ndkVersion = "\([^"]*\)".*/\1/p' dsm_client/android/app/build.gradle.kts | head -1)
+NDK_BIN = $(ANDROID_NDK_HOME)/toolchains/llvm/prebuilt/$(shell uname -s | tr A-Z a-z)-x86_64/bin
+requirement-map: ## Code map (MAP=dir): every source file hashed; each shipped build's call graph (Android: aarch64-linux-android; storage node: Linux, built on Linux only) and the host test build, each definition reached, dead or indeterminate with a reason code; MAP/code-map.html
+	@test -n "$(ANDROID_NDK_HOME)" || { echo "requirement-map: set ANDROID_NDK_HOME to the NDK Gradle pins ($(NDK_PIN)): the Android index is built for the real aarch64-linux-android target"; exit 1; }
+	@test -x "$(NDK_BIN)/aarch64-linux-android23-clang" || { echo "requirement-map: no aarch64-linux-android23-clang in $(NDK_BIN)"; exit 1; }
 	rustup component add rust-analyzer --toolchain $(RUST_PIN)
+	rustup target add aarch64-linux-android --toolchain $(RUST_PIN)
 	mkdir -p $(MAP)
+	rm -f $(MAP)/node.scip $(MAP)/node.log $(MAP)/node-features.txt $(MAP)/node-features-indexed.txt
 	git ls-files --cached --others --exclude-standard -- $(SOURCES) > $(MAP)/sources.txt
+	rustup run $(RUST_PIN) rust-analyzer --version > $(MAP)/analyzer.txt
+	printf '%s\n' $(MAP_INPUTS) $(MAP)/analyzer.txt > $(MAP)/inputs.txt
 	rustup run $(RUST_PIN) cargo build --locked --release -p requirement_map
-	target/release/requirement_map fingerprint --root . --files $(MAP)/sources.txt --out $(MAP)/tree
-	rustup run $(RUST_PIN) rust-analyzer scip . --config-path ci/requirement_map.rust-analyzer.json --output $(MAP)/index.scip
-	target/release/requirement_map index --scip $(MAP)/index.scip --root . --files $(MAP)/sources.txt --fingerprint $(MAP)/tree --out $(MAP)
+	target/release/requirement_map fingerprint --root . --files $(MAP)/sources.txt --inputs $(MAP)/inputs.txt --out $(MAP)/tree
+	# Each build's features, and the ones the index resolves (cargo metadata
+	# unifies dev-dependencies): the difference is what the index compiles that
+	# the build does not.
+	rustup run $(RUST_PIN) cargo tree --locked -p dsm_sdk --features jni,bluetooth --target aarch64-linux-android -e normal,build --prefix none -f '{p} {f}' > $(MAP)/android-features.txt
+	rustup run $(RUST_PIN) cargo tree --locked --workspace --features dsm_sdk/jni,dsm_sdk/bluetooth --target aarch64-linux-android -e normal,build,dev --prefix none -f '{p} {f}' > $(MAP)/android-features-indexed.txt
+	env CC_aarch64_linux_android=$(NDK_BIN)/aarch64-linux-android23-clang AR_aarch64_linux_android=$(NDK_BIN)/llvm-ar \
+		rustup run $(RUST_PIN) rust-analyzer scip . --config-path ci/requirement_map.android.rust-analyzer.json --output $(MAP)/android.scip > $(MAP)/android.log 2>&1
+	if [ "$$(uname -s)" = Linux ]; then \
+		rustup target add x86_64-unknown-linux-gnu --toolchain $(RUST_PIN) && \
+		rustup run $(RUST_PIN) cargo tree --locked -p dsm_storage_node --target x86_64-unknown-linux-gnu -e normal,build --prefix none -f '{p} {f}' > $(MAP)/node-features.txt && \
+		rustup run $(RUST_PIN) cargo tree --locked --workspace --target x86_64-unknown-linux-gnu -e normal,build,dev --prefix none -f '{p} {f}' > $(MAP)/node-features-indexed.txt && \
+		rustup run $(RUST_PIN) rust-analyzer scip . --config-path ci/requirement_map.node.rust-analyzer.json --output $(MAP)/node.scip > $(MAP)/node.log 2>&1; \
+	fi
+	rustup run $(RUST_PIN) rust-analyzer scip . --config-path ci/requirement_map.tests.rust-analyzer.json --output $(MAP)/tests.scip > $(MAP)/tests.log 2>&1
+	target/release/requirement_map index --root . --files $(MAP)/sources.txt --inputs $(MAP)/inputs.txt --fingerprint $(MAP)/tree \
+		--android $(MAP)/android.scip --android-log $(MAP)/android.log \
+		--android-features $(MAP)/android-features.txt --android-features-indexed $(MAP)/android-features-indexed.txt \
+		$$(if [ -f $(MAP)/node.scip ]; then echo --node $(MAP)/node.scip --node-log $(MAP)/node.log --node-features $(MAP)/node-features.txt --node-features-indexed $(MAP)/node-features-indexed.txt; fi) \
+		--tests $(MAP)/tests.scip --tests-log $(MAP)/tests.log \
+		--jni-declarations dsm_client/android/app/src/main --unindexed-consumer crates/dsm-android-anchor/src \
+		--out $(MAP)
 	python3 ci/requirement_map.py --map $(MAP) --report $(MAP)/code-map.html
+
+.PHONY: requirement-map-fixture
+requirement-map-fixture: ## The map's end-to-end fixture: dispatch through a type argument, a qualified path and a value, and a type only named, read through the real pipeline
+	rustup component add rust-analyzer --toolchain $(RUST_PIN)
+	mkdir -p $(MAP)/fixture
+	rustup run $(RUST_PIN) cargo build --locked --release -p requirement_map
+	rustup run $(RUST_PIN) rust-analyzer scip tools/requirement_map/fixture --config-path ci/requirement_map.fixture.rust-analyzer.json --output $(MAP)/fixture/index.scip > $(MAP)/fixture/index.log 2>&1
+	target/release/requirement_map fixture --root tools/requirement_map/fixture --scip $(MAP)/fixture/index.scip --log $(MAP)/fixture/index.log \
+		--jni-declarations kotlin --crate probe/src/ --expect tools/requirement_map/fixture/expected.tsv
 
 .PHONY: lint
 # THE canonical toolchain, read from rust-toolchain.toml — never hardcoded here.

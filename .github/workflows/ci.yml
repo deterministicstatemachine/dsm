@@ -123,11 +123,14 @@ jobs:
           python3 scripts/real_code_guard.py --self-test
           python3 scripts/real_code_guard.py --reference origin/main
 
-  # The code map (make requirement-map): every source file hashed with BLAKE3,
-  # and the Rust backend's call graph from a rust-analyzer index of the Android
-  # build's view, with every definition's item and closure hash and whether a
-  # production entry point or a test reaches it. The page is kept as an
-  # artifact. It checks nothing yet; checks come in later stages.
+  # The code map (make requirement-map): every source file hashed with BLAKE3;
+  # each shipped build's call graph from a rust-analyzer index of that build
+  # (Android: the real aarch64-linux-android target with the NDK Gradle pins;
+  # the storage node: Linux, which only this job builds), and the host test
+  # build. Every definition is reached, dead or indeterminate in each build,
+  # with a reason code; the map refuses an index whose analyzer log shows a
+  # failure or a line of no known kind, and definitions that do not add up.
+  # The page and its tables are kept as an artifact.
   requirement-map:
     name: Code map
     needs: [select]
@@ -136,9 +139,18 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Free disk space
+        # Three indexes build their build scripts for three targets. The
+        # Android SDK stays: the NDK comes from it.
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL \
+                      /usr/local/.ghcup /usr/local/share/boost /usr/share/swift
+          df -h /
+
       - uses: dtolnay/rust-toolchain@1.98.0
         with:
           components: rust-analyzer
+          targets: aarch64-linux-android
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -148,6 +160,22 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler
+
+      - name: Install the NDK version Gradle pins
+        # `yes` is ended by a broken pipe once sdkmanager has read enough;
+        # `|| :` covers yes alone, so sdkmanager's own status still decides.
+        run: |
+          NDK_VERSION="$(sed -n 's/.*ndkVersion = "\([^"]*\)".*/\1/p' dsm_client/android/app/build.gradle.kts | head -1)"
+          test -n "$NDK_VERSION"
+          (yes || :) | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;$NDK_VERSION" > /dev/null
+          test -d "$ANDROID_HOME/ndk/$NDK_VERSION/toolchains/llvm/prebuilt"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+
+      - name: The map reads its fixture as expected
+        # Dispatch through a type argument, a qualified path and a value, and
+        # a type only named: tools/requirement_map/fixture/expected.tsv.
+        run: make requirement-map-fixture MAP=target/requirement-map
 
       - name: Map
         run: make requirement-map MAP=target/requirement-map
@@ -161,7 +189,12 @@ jobs:
             target/requirement-map/code-map.html
             target/requirement-map/files.tsv
             target/requirement-map/defs.tsv
+            target/requirement-map/reach.tsv
             target/requirement-map/edges.tsv
+            target/requirement-map/accounting.tsv
+            target/requirement-map/health.tsv
+            target/requirement-map/token-read.tsv
+            target/requirement-map/*.log
 
   rust-gates:
     name: Rust gates
