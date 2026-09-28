@@ -743,6 +743,31 @@ mod tests {
         nothing_staged();
     }
 
+    /// A transfer whose SIG A does not verify under the key B holds for the
+    /// contact its header names is not recognized, and nothing is recorded
+    /// about it: the sent request with one byte of its signature changed, as
+    /// anyone who can seal to B can post it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial]
+    async fn a_transfer_whose_sig_a_does_not_verify_is_recorded_nowhere() {
+        let (_p, one) = sent().await;
+        let mut forged =
+            dsm::types::proto::OnlineTransferRequest::decode(one.transfer_bytes.as_slice())
+                .expect("the delivered request");
+        forged.signature[0] ^= 0xFF;
+        let out = ingested(ingest_transfer_half(
+            &forged.encode_to_vec(),
+            &one.header_sender,
+            &one.route,
+            &one.message_id,
+        ));
+        assert!(
+            matches!(&out, Ingested::NotRecognized(why) if why.contains("SIG A does not verify")),
+            "{out:?}"
+        );
+        nothing_staged();
+    }
+
     /// A transfer A signed to another device, sent to B: SIG A verifies, and
     /// it is still not B's. Nothing is staged.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
