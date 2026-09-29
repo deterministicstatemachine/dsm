@@ -1571,16 +1571,41 @@ A finding stays until it is fixed or disproved, whatever a later change touches.
 |---|---|
 | `dsm/src/economic/provenance.rs` · P15-9 | Unchanged (§6.30): the peer walk refuses a resolved SoFi position. A trader whose setup follows a SoFi position of its own has no setup claim another verifier can accept, so its later routes stay unjudgeable by others. |
 
+### 6.42 DSM core rows that cited deleted code (`test/dsm-core-stale-partial-rows-reverified`, 2026-09-29)
+
+Eight MR-DSM rows cited files or items that no longer exist, most deleted in #976, so their statuses rested on code nobody could read any more. Each is re-verified here against the specification and the current code.
+
+| Row | Was | Now | Why |
+|---|---|---|---|
+| MR-DSM-0046 | Partial (`sofi/arith.rs`) | Met | The receiver admits a payer's position only through the peer walk, and an open root cell is `Incomplete`: the receiver cannot accept, and nothing is Invalid. |
+| MR-DSM-0056 | Partial (`replication.rs`, `gossip.rs`) | Met | The only traffic between nodes is ByteCommit mirroring, and a mirror keeps both versions of a rewritten cycle. |
+| MR-DSM-0170 | Partial (`dlv_pre_commitment_sdk.rs`) | Met | The canonical apply records the (relationship, parent) each realized step consumed; a second transition from it is a conflict. |
+| MR-DSM-0017 | Partial (`sofi/arith.rs`) | Partial | Not-yet-obtained evidence is an acquisition status; the challenge rule that ends retrying is not built (G8). |
+| MR-DSM-0019 | Partial (`sofi/arith.rs`) | Partial | The attempt walk derives liveness from raw reads; its can-never arms carry the Violated SoFi rows MR-SOFI-0238, 0239 and 0241. |
+| MR-DSM-0126 | Partial (`cpta/mod.rs`) | Partial | Adopted token policies are committed leaves of the device root; there is no Π component (G3). |
+| MR-DSM-0138 | Missing (`ForkCandidate`) | Missing | `ForkCandidate` was deleted; no candidate tuple exists (G3). |
+| MR-DSM-0141 | Partial (`dlv_pre_commitment_sdk.rs`) | Missing | The cited module was deleted; nothing commits a candidate set (G3). |
+
+Mutation controls, run on 2026-09-29, each restored byte for byte:
+
+- The peer walk reading an open root cell as Invalid instead of Incomplete: `dsm::economic::peer_lineage::tests::a_claim_naming_other_coordinates_never_holds_the_root_cell` goes red.
+- `lookup_canonical_apply_status` no longer matching the (relationship, parent) alone: `dsm_sdk::storage::client_db::canonical_apply::tests::the_same_relationship_and_parent_with_a_different_transition_conflicts` goes red.
+
+Found, not changed here:
+
+- **The tripwire's integration test proves it through machinery production never runs.** `dsm/tests/smt_tripwire_theorem.rs::theorem2_two_successors_same_parent_rejected` rejects the second child through `ParentConsumptionTracker`. Its only other user is `verification::receipt_verification::verify_stitched_receipt`, which only tests call. Production verifies receipts with `verify_receipt_state` and records consumption in the canonical apply (MR-DSM-0170). `ParentConsumptionTracker::with_capacity` also ignores its argument.
+- **Nine more MR-DSM rows cite items that no longer exist** inside files that do: 0002, 0004, 0005, 0014, 0092 and 0199 (`sdk/receipts.rs::verify_receipt_bytes`); 0034 and 0083 (`sdk/storage_node_sdk.rs::put_cell_leader_first`); 0068 (`StorageNodeSDK`, `sdk/storage_io.rs::fetch_immutable_payload`). Their statuses are unverified until re-examined.
+
 ## 7 Totals
 
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |
 |---|---|---|---|---|---|---|---|
-| DSM high-level (MR-DSM) | 272 | 69 | 114 | 38 | 4 | 29 | 18 |
+| DSM high-level (MR-DSM) | 272 | 72 | 110 | 39 | 4 | 29 | 18 |
 | SoFi (MR-SOFI) | 342 | 215 | 84 | 18 | 8 | 17 | 0 |
 | dBTC (MR-DBTC) | 135 | 0 | 0 | 0 | 0 | 0 | 135 |
 | Storage node (MR-STOR) | 158 | 39 | 38 | 60 | 2 | 18 | 1 |
 | Storage §14 lines added after the pin (STOR-014) | 11 | 9 | 1 | 1 | 0 | 0 | 0 |
-| **All** | **918** | **332** | **237** | **117** | **14** | **64** | **154** |
+| **All** | **918** | **335** | **233** | **118** | **14** | **64** | **154** |
 
 ## 8 Per-requirement results
 
@@ -1604,9 +1629,9 @@ A finding stays until it is fixed or disproved, whatever a later change touches.
 | MR-DSM-0014 | Partial | dsm · types/device_state.rs · `advance`; dsm_sdk · sdk/receipts.rs · `verify_receipt_bytes` | no test found | Structural, linearity (heads only) and policy checks exist as separate steps. CandidateOK and GuardOK have nothing to check: there is no P or Γ. |
 | MR-DSM-0015 | Partial | dsm · types/device_state.rs · `advance` (returns `Result`) | no test found | No Accept predicate of named conjuncts exists (MR-DSM-0014). |
 | MR-DSM-0016 | Met | `dsm::types::device_state::advance` (takes &self; an Err produces no state) | `dsm::types::device_state::tests::advance_rejects_balance_underflow`; `dsm::types::device_state::tests::advance_rejects_balance_overflow` | — |
-| MR-DSM-0017 | Partial | dsm · sofi/arith.rs::CellResolution (43-51) | sofi::arith::tests::leader_held_settles_the_race_before_finality | SoFi-cell only; general Pending/Unavailable not traced. ChatGPT CG-02: the undecided status lives in Core's predicate type (see MR-SOFI-0030). |
+| MR-DSM-0017 | Partial | `dsm::sofi::resolve::Acquired`; `dsm::economic::peer_lineage::validate_peer_lineage`; `dsm_sdk::sdk::economic_registers::RootClaimSettlement` | `dsm::economic::peer_lineage::tests::a_step_failure_keeps_the_class_it_was_established_in`; `dsm::economic::peer_lineage::tests::a_claim_that_is_not_final_decides_nothing_yet` | Re-verified 2026-09-29 (§6.42). sofi/arith.rs was deleted in #976. Evidence not in hand is an acquisition status, never a predicate value: acquisition ends in `Acquired::Exhausted`, with nothing evaluated and nothing recorded, and the peer walk keeps each failure's class, so evidence it could not obtain is retried and only evidence that verified as wrong is Invalid. Gap: the challenge rule (storage §9.1) that ends retrying where others depend on the outcome is not built (G8, ladder step 3a). |
 | MR-DSM-0018 | Partial | dsm_sdk · handlers/recipient_dispatch.rs (the ingestion boundary); storage/client_db/recipient_staging.rs; handlers/recipient_accept.rs · `accept_bound_pair` | `dsm_sdk::handlers::recipient_dispatch::tests::junk_and_an_unknown_sender_are_recorded_nowhere`; `dsm_sdk::handlers::recipient_dispatch::tests::a_receipt_that_does_not_verify_is_recorded_nowhere`; `dsm_sdk::handlers::recipient_dispatch::tests::a_second_copy_with_a_lying_wrapper_is_the_same_transfer_credited_once` | The recipient records nothing for a half it does not recognize and has no rejected state; a staged copy is never a verdict against another copy (§6.37). Open: the sender parks a step on an unsigned countersign digest (§6.37). Core `advance` itself records nothing. |
-| MR-DSM-0019 | Partial | dsm · sofi/arith.rs::resolve | sofi::arith::tests (multiple) | Admission wiring to a waiting caller not traced. |
+| MR-DSM-0019 | Partial | `dsm::sofi::resolution::walk`; `dsm::sofi::resolution::route_impossible`; `dsm::sofi::resolution::consumed_route` | `dsm::sofi::resolution::tests::a_route_with_one_leg_still_open_is_not_consumed`; `dsm::sofi::resolution::tests::a_walk_establishes_liveness_only_as_far_as_it_reached`; `dsm::sofi::resolution::tests::a_stranded_final_cell_of_an_impossible_route_is_skipped` | Re-verified 2026-09-29 (§6.42). sofi/arith.rs was deleted in #976. A vault's attempt walk derives from raw reads whether each earlier attempt realized or can never realize, and goes no further than it established. Partial because the can-never arms carry the SoFi gaps recorded at MR-SOFI-0238, 0239 and 0241 (Violated), which §6.42 did not re-examine. |
 | MR-DSM-0020 | Partial | dsm · types/device_state.rs · `DeviceState`, `RelationshipChainState` (no counter field) | no test found | True by field absence: no counter in `State` or `DeviceState`. No test fails if one is added. |
 | MR-DSM-0021 | Partial | dsm · economic/lineage.rs (per-identity `economic_position`, no external service) | no test found | True by construction: per-identity `economic_position`, no external service. No test. |
 | MR-DSM-0022 | Met | `dsm::economic::lineage::advance_validated` | `dsm::economic_admission_lifecycle::a_faucet_claim_transition_advances_the_validated_lineage` | Root + funded-credit set returned/adopted together or the call errors. |
@@ -1633,7 +1658,7 @@ A finding stays until it is fixed or disproved, whatever a later change touches.
 | MR-DSM-0043 | Met | `dsm::economic::register` | `dsm::economic_lineage_register::each_position_of_each_identity_is_its_own_cell` | — |
 | MR-DSM-0044 | Not code | — | — | Operator durability property. |
 | MR-DSM-0045 | Not code | — | — | Offline/recovery, out of scope. |
-| MR-DSM-0046 | Partial | dsm · sofi/arith.rs | — | SoFi-only; general framing not traced. |
+| MR-DSM-0046 | Met | `dsm::economic::peer_lineage::validate_peer_lineage`; `dsm::economic::register::read_root_cell`; `dsm_sdk::sdk::economic_registers::resolve_peer_with_cache` | `dsm::economic::peer_lineage::tests::a_claim_naming_other_coordinates_never_holds_the_root_cell`; `dsm::economic::peer_lineage::tests::a_claim_that_is_not_final_decides_nothing_yet`; `dsm::economic::register::registered_root_construction_tests::a_held_root_cell_carries_the_exact_bytes_that_hold_it` | Re-verified 2026-09-29 (§6.42). sofi/arith.rs was deleted in #976. A receiver admits a payer's position only through the peer walk, which reads the payer's root cell. An open cell, where the payer withheld its claim, is `Incomplete`: retried, never Invalid and never accepted, which is a liveness failure. The first claim at the cell's leader binds the position, so withholding gains no second spend (MR-DSM-0036). |
 | MR-DSM-0047 | Met | `dsm::core::bilateral_transaction_manager::compute_smt_key`; `dsm::types::device_state::RelationshipChainState` | `dsm::smt_tripwire_theorem::theorem1_relationship_scoped_keys` | `compute_smt_key` = BLAKE3(min(id)‖max(id)) IS the per-device SMT leaf key and is directly tested for distinctness/order-invariance across device pairs. |
 | MR-DSM-0048 | Met | `dsm::economic::peer_acceptance` | `dsm::economic_peer_evidence::a_valid_acceptance_bundle_verifies_and_every_binding_is_load_bearing` | — |
 | MR-DSM-0049 | Met | `dsm::economic::peer_acceptance` (same) | `dsm::economic_peer_evidence::a_valid_acceptance_bundle_verifies_and_every_binding_is_load_bearing` (different recipient devid / different child tip both rejected) | — |
@@ -1643,7 +1668,7 @@ A finding stays until it is fixed or disproved, whatever a later change touches.
 | MR-DSM-0053 | Met | `dsm_storage_node::api::objects::immutable::put_immutable` | `dsm_storage_node::api::objects::immutable::tests::proto_decodable_bytes_are_just_bytes` (+ inline proto_decodable_bytes_are_just_bytes) | — |
 | MR-DSM-0054 | Met | `dsm_storage_node::api::objects::immutable` (no decode path) | `dsm_storage_node::api::objects::immutable::tests::proto_decodable_bytes_are_just_bytes` | — |
 | MR-DSM-0055 | Partial | dsm_storage_node · crate-wide (`BIGSERIAL` arrival order, no clock) | no test found | The `current_tick` the row cited is gone with the legacy store (#992); the node orders by arrival sequence only. Not exhaustively checked; no test asserts it. |
-| MR-DSM-0056 | Partial | dsm_storage_node · replication.rs; api/transport/gossip.rs | — | No Raft/Paxos/vote code found; inherently a negative claim, no test asserts it. |
+| MR-DSM-0056 | Met | `dsm_storage_node::api::objects::bytecommit::mirror_sync`; `dsm_storage_node::api::objects::bytecommit::sync_one`; `dsm_storage_node::set_client::pinned_set_client` | `dsm_storage_node::bytecommit_chain::a_set_mate_mirrors_by_fetching_from_the_member_itself`; `dsm_storage_node::bytecommit_chain::an_impostor_at_a_set_mates_endpoint_is_not_mirrored`; `dsm_storage_node::bytecommit_chain::a_rewritten_cycle_is_kept_beside_the_first` | Re-verified 2026-09-29 (§6.42). replication.rs and api/transport/gossip.rs no longer exist. A node reaches a set-mate only to mirror its ByteCommits (`set_client`), and a mirror keeps a rewritten cycle beside the first instead of choosing between them. Nothing elects, votes or runs a consensus round: `git grep -niE 'raft|paxos|leader_election|\bvote\b' origin/main -- dsm_storage_node/src` finds nothing. |
 | MR-DSM-0057 | Missing | — | — | The legacy object store, PaidK, `device_auth` and the registry are deleted (#992, §6.28; re-examined 2026-09-27, §6.36 H). No write is gated by a spend permission; the spend gate is removed rather than fixed (§5). |
 | MR-DSM-0058 | Missing | — | — | The legacy object store, PaidK, `device_auth` and the registry are deleted (#992, §6.28; re-examined 2026-09-27, §6.36 H). The three-link admission is G2; no payment split exists. |
 | MR-DSM-0059 | Missing | — | — | No opt-out/network-cut code found anywhere in `dsm_storage_node` or `dsm`. |
@@ -1713,7 +1738,7 @@ A finding stays until it is fixed or disproved, whatever a later change touches.
 | MR-DSM-0123 | Missing | — | — | No committed candidate structure `P`. |
 | MR-DSM-0124 | Missing | — | — | No `Γ` structure. |
 | MR-DSM-0125 | Partial | `dsm/src/economic/state.rs::EconomicConsumedSourceState` (84) | no test found in `economic/state.rs` (zero `#[test]` in file) | Write-once leaf exists only for economic sources, not a general `Σ`. |
-| MR-DSM-0126 | Partial | `dsm/src/cpta/mod.rs` | not checked in depth | Policy data exists but is not committed into the state root as `Π`. |
+| MR-DSM-0126 | Partial | `dsm::types::device_state::DeviceState::token_adoption_leaf_key` | `dsm::types::device_state::tests::adoption_precedes_receipt_and_is_committed` | Re-verified 2026-09-29 (§6.42). cpta/mod.rs no longer exists. The device root commits each token policy the device adopted, as a leaf keyed by `token_adoption_leaf_key`, so policy data is in committed state. There is no Π component of the state as the specification defines it (G3, the candidate and guard state model, out of beta by §5). |
 | MR-DSM-0127 | Missing | — | — | No `Ω` component in `DeviceState`. |
 | MR-DSM-0128 | Met | `dsm::types::device_state::root` | `dsm::core::state_machine::state_machine_tests::current_state_always_reflects_the_canonical_head_never_an_override` (e.g. current_state_always_reflects_the_canonical_head_never_an_override in mod.rs:341) | — |
 | MR-DSM-0129 | Missing | `dsm/src/types/device_state.rs::root()` | — | Single flat root; no separate `ρcore` excluding candidate/guard space (because no such space exists). |
@@ -1725,10 +1750,10 @@ A finding stays until it is fixed or disproved, whatever a later change touches.
 | MR-DSM-0135 | Met | `dsm::types::device_state::advance` (pure fn of &self + args, no external history param) | `dsm::types::device_state::tests::tripwire_same_relationship_same_parent_different_children` | — |
 | MR-DSM-0136 | Met | `dsm::types::device_state::RelationshipChainState` (no counter/height/timestamp) | `dsm::types::device_state::tests::the_chain_tip_commits_succession_facts_and_no_balances` (3205, corroborating) | — |
 | MR-DSM-0137 | Missing | — | — | No parent-committed candidate space. |
-| MR-DSM-0138 | Missing | `dsm/src/commitments/precommit.rs::ForkCandidate` (121) | — | `ForkCandidate { fork_id: String, payload: Vec<u8>, entropy: Vec<u8> }` lacks a guard descriptor and a resource-key set — does not match `(s_i,b_i,g_i,K_i,d_i)` even structurally. |
+| MR-DSM-0138 | Missing | — | — | Re-verified 2026-09-29 (§6.42). `ForkCandidate` was deleted; `commitments/precommit.rs` now holds only `branch_commitment_hash`, the bilateral pre-commit digest. No candidate tuple `(s_i,b_i,g_i,K_i,d_i)` exists (G3, out of beta by §5). |
 | MR-DSM-0139 | Missing | — | — | No candidate-to-parent binding exists (no candidate exists). |
 | MR-DSM-0140 | Partial | `dsm/src/types/device_state.rs::advance` (embedded_parent binding) | `tripwire_same_relationship_same_parent_different_children` | Effect achieved via hash-adjacency, not a committed candidate list. |
-| MR-DSM-0141 | Partial | `dsm/src/commitments/precommit.rs`; `dsm_sdk/src/sdk/dlv_pre_commitment_sdk.rs` (34 tests, 520-1073) | tests exist in-file but not production-reachable | No handler calls `DlvPreCommitmentSdk`. |
+| MR-DSM-0141 | Missing | — | — | Re-verified 2026-09-29 (§6.42). The unreached module the row cited, dsm_sdk/src/sdk/dlv_pre_commitment_sdk.rs, was deleted, and `ForkCandidate` with it. Nothing commits a candidate set P (MR-DSM-0123); G3, out of beta by §5. |
 | MR-DSM-0142 | Partial | `dsm/src/merkle/sparse_merkle_tree.rs` (relationship heads); `dsm/src/economic/state.rs` (economic sources); NOT `dsm/src/vault/dlv_manager.rs` (33-47) | dlv_manager.rs has exactly one `#[test]` in file (`dlv_manager_default`, line 404 — a trivial constructor check) | Re-read the doc comment at dlv_manager.rs:33-47 directly: confirms "double-claim across stitched receipts" is explicitly documented as NOT enforced. |
 | MR-DSM-0143 | Missing | — | — | Precommitment is not part of canonical state evolution anywhere in `DeviceState`. |
 | MR-DSM-0144 | Missing | — | — | No P/Γ chaining across generations (P/Γ don't exist). |
@@ -1757,7 +1782,7 @@ A finding stays until it is fixed or disproved, whatever a later change touches.
 | MR-DSM-0167 | Not code | — | — | Proof-technique statement about "selector families," a formal concept with no corresponding code object (no guard family exists to select over). |
 | MR-DSM-0168 | Partial | as 0166 | — | Holds where the shared-key/CAS mechanism exists (heads, economic sources); not for DLV multi-branch vaults. |
 | MR-DSM-0169 | Not code | — | — | Machine-checked invariant is a formal-methods obligation (TLA+/Lean), out of scope for these Rust crates per this round's authority order. |
-| MR-DSM-0170 | Partial | `dsm_sdk/src/sdk/dlv_pre_commitment_sdk.rs` (constructible, unreachable in production); `dsm/src/vault/dlv_manager.rs` | — | Conflicting forks are constructible in the unreachable SDK module; for the reachable DLV path, nothing prevents constructing conflicting claims (0142/0166 gap) — the tripwire property is unenforced there. |
+| MR-DSM-0170 | Met | `dsm_sdk::storage::client_db::canonical_apply::lookup_canonical_apply_status`; `dsm_sdk::storage::client_db::canonical_apply::insert_canonical_apply_identity_with_conn`; `dsm::types::device_state::DeviceState::advance` | `dsm::types::device_state::tests::tripwire_same_relationship_same_parent_different_children`; `dsm_sdk::storage::client_db::canonical_apply::tests::the_same_relationship_and_parent_with_a_different_transition_conflicts`; `dsm_sdk::storage::client_db::canonical_apply::tests::different_identity_reusing_nonce_or_parent_is_conflict` | Re-verified 2026-09-29 (§6.42). dlv_pre_commitment_sdk.rs was deleted. Two children of one parent can both be constructed, because `advance` is pure. But the apply that realizes one records the (relationship, parent) it consumed, in the same transaction as the new head, and a second transition from that parent is a conflict; a UNIQUE constraint backs the check. The economic lineage has the same property through its register cells (MR-DSM-0036). |
 | MR-DSM-0171 | Not code | — | — | Liveness boundary; nothing to build. |
 | MR-DSM-0172 | Met | `dsm::merkle::sparse_merkle_tree` (independent per-leaf updates) | `dsm::merkle::sparse_merkle_tree::tests::multi_leaf_proofs` | Disjoint relationships (distinct SMT keys) commute by construction. |
 | MR-DSM-0173 | Met | `dsm::types::device_state::advance` (balance delta application, 1428-1446) | `dsm::types::device_state::tests::balance_conservation_across_sequence` | — |
