@@ -6,13 +6,13 @@
 //! artifacts' edges: an Android build and a Linux build compile different
 //! code.
 
-use crate::hashing::{hash, Digest, CLOSURE, COMPONENT, EXTERNAL, ITEM};
+use crate::hashing::{hash, Digest, CLOSURE, COMPONENT, EXTERNAL, GENERATED, GENERATION, ITEM};
 use crate::index::{
     add_edge, Definition, Edges, Evidence, Loaded, Owner, Position, Site, REFERENCE,
 };
 use crate::reach::{self, code, Doubt, SelfType, State, Via};
 use crate::source::{Form, Source};
-use crate::symbols::{base_name, Kind};
+use crate::symbols::{self, base_name, Kind};
 use crate::tokens::{canonical, format_captures, outer_attributes, Attribute};
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::path::Path;
@@ -188,6 +188,9 @@ pub struct Inputs<'a> {
     pub declared_jni: &'a crate::jni::Declarations,
     /// The root queries asked, if any were.
     pub root_queries: Option<&'a [RootQuery]>,
+    /// Every fingerprinted source file and its hash: what the code the index
+    /// cannot define is bound to.
+    pub sources: &'a [(String, Digest)],
 }
 
 fn in_crates(file: &str, crates: &[&str]) -> bool {
@@ -526,14 +529,20 @@ pub fn build(root: &Path, inputs: &Inputs) -> Result<Map, String> {
     };
 
     // Closure hashes over every profile's edges: a fingerprint of the code a
-    // definition can lead to in any build.
+    // definition can lead to in any build. A workspace symbol the index has
+    // no definition of (prost output, a macro's item) is bound to what
+    // generates it, so a closure reaching it changes when that does.
+    let generation = Generation::new(&defs, &items, inputs.sources)?;
     let item_of: Vec<Digest> = names
         .iter()
         .map(|n| match items.get(n.as_str()) {
-            Some(d) => *d,
-            None => hash(EXTERNAL, &[n.as_bytes()]),
+            Some(d) => Ok(*d),
+            None => Ok(match generation.item(n)? {
+                Some(d) => d,
+                None => hash(EXTERNAL, &[n.as_bytes()]),
+            }),
         })
-        .collect();
+        .collect::<Result<_, String>>()?;
     let mut adjacency: Vec<Vec<usize>> = vec![Vec::new(); names.len()];
     for (_, edges) in &profile_edges {
         for (from, to, _) in edges.keys() {
@@ -1355,6 +1364,139 @@ pub(crate) fn slice(source: &str, start: Position, end: Position) -> Result<&str
         .ok_or_else(|| format!("range {a}..{b} is not in the file"))
 }
 
+/// What generates the workspace code the index has no definition of. Such a
+/// symbol's text comes from its package's build script (prost output from
+/// the `.proto` files), from a macro, or from an `include!`, and the item it
+/// sits in is the module file its path names or the nearest one enclosing
+/// it. Its hash binds its symbol to those inputs, and to nothing else in its
+/// package, so a change elsewhere leaves it alone.
+struct Generation<'a> {
+    /// Each workspace package's directory: where its definitions' files sit,
+    /// up to `src/`.
+    dirs: BTreeMap<&'a str, &'a str>,
+    sources: BTreeMap<&'a str, &'a Digest>,
+    protos: Vec<(&'a str, &'a Digest)>,
+    macros: Vec<Digest>,
+}
+
+impl<'a> Generation<'a> {
+    fn new(
+        defs: &'a BTreeMap<String, Definition>,
+        items: &BTreeMap<&str, Digest>,
+        sources: &'a [(String, Digest)],
+    ) -> Result<Self, String> {
+        let mut dirs: BTreeMap<&'a str, &'a str> = BTreeMap::new();
+        for d in defs.values() {
+            let Some(dir) = package_dir(&d.file) else {
+                continue;
+            };
+            let package = d.item.package.as_str();
+            match dirs.get(package) {
+                Some(seen) if *seen != dir => {
+                    return Err(format!(
+                        "package {package}'s definitions sit under two source directories: {seen} and {dir}"
+                    ))
+                }
+                Some(_) => {}
+                None => {
+                    dirs.insert(package, dir);
+                }
+            }
+        }
+        let mut macros = Vec::new();
+        for (key, d) in defs {
+            if d.item.kind == Kind::Macro {
+                macros.push(
+                    *items
+                        .get(key.as_str())
+                        .ok_or_else(|| format!("macro {key} has no item hash"))?,
+                );
+            }
+        }
+        Ok(Generation {
+            dirs,
+            sources: sources.iter().map(|(p, d)| (p.as_str(), d)).collect(),
+            protos: sources
+                .iter()
+                .filter(|(p, _)| p.ends_with(".proto"))
+                .map(|(p, d)| (p.as_str(), d))
+                .collect(),
+            macros,
+        })
+    }
+
+    /// The hash of `symbol` when it is a workspace symbol with no
+    /// definition; `None` for another package's symbol.
+    fn item(&self, symbol: &str) -> Result<Option<Digest>, String> {
+        if symbol.starts_with("local ") {
+            return Ok(None);
+        }
+        let package = symbol
+            .splitn(5, ' ')
+            .nth(2)
+            .ok_or_else(|| format!("symbol {symbol:?} names no package"))?;
+        let Some(dir) = self.dirs.get(package) else {
+            return Ok(None);
+        };
+        let modules = match symbols::item(symbol)? {
+            Some(item) => item.modules,
+            None => Vec::new(),
+        };
+        let module = self.module_file(dir, &modules).ok_or_else(|| {
+            format!("{symbol}: no fingerprinted module file encloses it under {dir}src/")
+        })?;
+        let mut files: Vec<(&str, &Digest)> = Vec::new();
+        let build_script = format!("{dir}build.rs");
+        if let Some((path, digest)) = self.sources.get_key_value(build_script.as_str()) {
+            files.push((path, digest));
+        }
+        let digest = self
+            .sources
+            .get(module)
+            .ok_or_else(|| format!("{module} is not fingerprinted"))?;
+        files.push((module, digest));
+        files.extend(self.protos.iter().copied());
+        let mut fields: Vec<&[u8]> = Vec::new();
+        for (path, digest) in &files {
+            fields.push(path.as_bytes());
+            fields.push(digest.as_slice());
+        }
+        fields.extend(self.macros.iter().map(|m| m.as_slice()));
+        let inputs = hash(GENERATION, &fields);
+        Ok(Some(hash(GENERATED, &[symbol.as_bytes(), &inputs])))
+    }
+
+    /// The module file `modules` names in the package at `dir`, or the
+    /// nearest fingerprinted one enclosing it: `src/a/b.rs` or
+    /// `src/a/b/mod.rs`, then `src/a.rs`, up to `src/lib.rs` or `src/main.rs`.
+    fn module_file(&self, dir: &str, modules: &[String]) -> Option<&'a str> {
+        for k in (0..=modules.len()).rev() {
+            let candidates = if k == 0 {
+                vec![format!("{dir}src/lib.rs"), format!("{dir}src/main.rs")]
+            } else {
+                let base = format!("{dir}src/{}", modules[..k].join("/"));
+                vec![format!("{base}.rs"), format!("{base}/mod.rs")]
+            };
+            for c in candidates {
+                if let Some((path, _)) = self.sources.get_key_value(c.as_str()) {
+                    return Some(*path);
+                }
+            }
+        }
+        None
+    }
+}
+
+/// A package's directory from one of its source files: the path up to its
+/// `src/` directory (empty for a package at the repository root). `None`
+/// for a file outside `src/` (a build script).
+fn package_dir(file: &str) -> Option<&str> {
+    if file.starts_with("src/") {
+        return Some("");
+    }
+    file.find("/src/").map(|i| &file[..=i])
+}
+
 /// Closure hashes: each strongly connected component is hashed once over its
 /// members' items and the closures of everything it calls outside itself;
 /// each member's closure is its symbol over that component hash.
@@ -1510,6 +1652,120 @@ mod tests {
             name_at: at,
             scope: None,
         })
+    }
+
+    /// A workspace symbol the index has no definition of is bound to what
+    /// generates it: its package's build script, the module file its path
+    /// names or the nearest one enclosing it, every `.proto` file and every
+    /// macro definition. A change anywhere else in its package leaves it
+    /// alone. Another package's symbol is not generated code, and one no
+    /// module file encloses stops the map.
+    ///
+    /// Read over the fixture crate's own files and the one generated symbol
+    /// its index holds (an impl `implement!` writes in `probe/src/macros.rs`),
+    /// with the repository's `.proto` file; an edit appends to a file's real
+    /// bytes.
+    #[test]
+    fn generated_code_is_bound_to_what_generates_it() -> Result<(), String> {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixture");
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let read = |root: &Path, path: &str| {
+            std::fs::read(root.join(path)).map_err(|e| format!("{path}: {e}"))
+        };
+        let lib = callable("fold().")?;
+        let mut defs = BTreeMap::new();
+        defs.insert(lib.symbol.clone(), lib);
+        for name in ["define!", "implement!"] {
+            let mac = Definition {
+                file: "probe/src/macros.rs".to_string(),
+                ..callable(&format!("macros/{name}"))?
+            };
+            defs.insert(mac.symbol.clone(), mac);
+        }
+        let files = [
+            "probe/build.rs",
+            "probe/src/lib.rs",
+            "probe/src/macros.rs",
+            "probe/src/paths.rs",
+        ];
+        let proto = "proto/dsm_app.proto";
+        // Every file as it is, or one of them with a line appended.
+        let sources = |edited: &str| -> Result<Vec<(String, Digest)>, String> {
+            let mut out = Vec::new();
+            for (root, path) in files.iter().map(|p| (&fixture, *p)).chain([(&repo, proto)]) {
+                let mut bytes = read(root, path)?;
+                if path == edited {
+                    bytes.extend_from_slice(b"\n// an edit\n");
+                }
+                out.push((
+                    path.to_string(),
+                    hash(crate::hashing::FILE, &[path.as_bytes(), &bytes]),
+                ));
+            }
+            Ok(out)
+        };
+        // Each definition's item hash over its file's bytes; the macros'
+        // over `probe/src/macros.rs` as it is or edited.
+        let items = |macros: &[u8]| -> Result<BTreeMap<&str, Digest>, String> {
+            let mut out = BTreeMap::new();
+            for (k, d) in &defs {
+                let bytes = if d.item.kind == Kind::Macro {
+                    macros.to_vec()
+                } else {
+                    read(&fixture, &d.file)?
+                };
+                out.insert(k.as_str(), hash(ITEM, &[k.as_bytes(), &bytes]));
+            }
+            Ok(out)
+        };
+        let generated =
+            "rust-analyzer cargo probe 0.1.0 macros/impl#[Generated][Example]instance_fn().";
+        let macros = read(&fixture, "probe/src/macros.rs")?;
+        let as_is = items(&macros)?;
+        let bound = |sources: &[(String, Digest)], items: &BTreeMap<&str, Digest>| {
+            Generation::new(&defs, items, sources)?.item(generated)
+        };
+        let base = bound(&sources("")?, &as_is)?.ok_or("generated code is hashed")?;
+        for changed in ["probe/build.rs", "probe/src/macros.rs", proto] {
+            assert_ne!(bound(&sources(changed)?, &as_is)?, Some(base), "{changed}");
+        }
+        let mut edited_macros = macros.clone();
+        edited_macros.extend_from_slice(b"\n// an edit\n");
+        assert_ne!(
+            bound(&sources("")?, &items(&edited_macros)?)?,
+            Some(base),
+            "a macro definition"
+        );
+        for unrelated in ["probe/src/paths.rs", "probe/src/lib.rs"] {
+            assert_eq!(
+                bound(&sources(unrelated)?, &as_is)?,
+                Some(base),
+                "{unrelated}"
+            );
+        }
+        let as_built = sources("")?;
+        let generation = Generation::new(&defs, &as_is, &as_built)?;
+        // A symbol of another package, as the repository's index names one.
+        let outside =
+            "rust-analyzer cargo alloc https://github.com/rust-lang/rust/library/alloc vec/Vec#";
+        assert_eq!(generation.item(outside)?, None, "another package's symbol");
+        let unplaced: Vec<(String, Digest)> = as_built
+            .into_iter()
+            .filter(|(p, _)| p.as_str() == proto)
+            .collect();
+        let refused = match Generation::new(&defs, &as_is, &unplaced)?.item(generated) {
+            Err(why) => why,
+            Ok(hashed) => {
+                return Err(format!(
+                    "a symbol no module file encloses was hashed: {hashed:?}"
+                ))
+            }
+        };
+        assert!(
+            refused.contains("no fingerprinted module file encloses it"),
+            "{refused}"
+        );
+        Ok(())
     }
 
     #[test]

@@ -13,10 +13,25 @@ pub const FILE: TaggedHashDomain<'static> = dsm::tagged_domain!(b"DSM/code-file/
 pub const ITEM: TaggedHashDomain<'static> = dsm::tagged_domain!(b"DSM/code-item/v1");
 /// A symbol the index references but does not define (std, a dependency).
 pub const EXTERNAL: TaggedHashDomain<'static> = dsm::tagged_domain!(b"DSM/code-external/v1");
+/// A workspace symbol the index has no definition of (prost output, a
+/// macro's item): its symbol and the inputs that generate it.
+pub const GENERATED: TaggedHashDomain<'static> = dsm::tagged_domain!(b"DSM/code-generated/v1");
+/// What generates a package's code the index cannot define: its build
+/// script, the module file its path names, every `.proto` file and every
+/// macro definition.
+pub const GENERATION: TaggedHashDomain<'static> =
+    dsm::tagged_domain!(b"DSM/code-generation-inputs/v1");
 /// A strongly connected component: its members' items and its callees' closures.
 pub const COMPONENT: TaggedHashDomain<'static> = dsm::tagged_domain!(b"DSM/code-component/v1");
 /// One definition and everything it reaches.
 pub const CLOSURE: TaggedHashDomain<'static> = dsm::tagged_domain!(b"DSM/code-closure/v1");
+
+/// One intent manifest row: its cells, in column order.
+pub const MANIFEST_ROW: TaggedHashDomain<'static> =
+    dsm::tagged_domain!(b"DSM/intent-manifest-row/v1");
+/// A pinned row's evidence: every fact its pin holds, in column order.
+pub const ROW_EVIDENCE: TaggedHashDomain<'static> =
+    dsm::tagged_domain!(b"DSM/code-row-evidence/v1");
 
 pub type Digest = [u8; 32];
 
@@ -54,6 +69,9 @@ mod tests {
         assert_ne!(hash(ITEM, &[b"x"]), hash(CLOSURE, &[b"x"]));
         assert_ne!(hash(EXTERNAL, &[b"x"]), hash(COMPONENT, &[b"x"]));
         assert_ne!(hash(FILE, &[b"x"]), hash(ITEM, &[b"x"]));
+        assert_ne!(hash(GENERATED, &[b"x"]), hash(EXTERNAL, &[b"x"]));
+        assert_ne!(hash(GENERATION, &[b"x"]), hash(GENERATED, &[b"x"]));
+        assert_ne!(hash(MANIFEST_ROW, &[b"x"]), hash(ROW_EVIDENCE, &[b"x"]));
     }
 
     #[test]

@@ -421,8 +421,13 @@ requirement-map-fixture: ## The map's adversarial fixture read through the real 
 
 .PHONY: requirement-map-intent
 INTENT_BUILT ?=
-requirement-map-intent: ## The intent manifest (specs/requirements/INTENT_MANIFEST.tsv) against the map (after make requirement-map): each row's outcome, the action it asks for, and a failure for every gap whose requirement is Met in CONFORMANCE §8; MAP/intent.tsv, MAP/unspecified.tsv. INTENT_BUILT=android,node requires both builds indexed (CI)
-	python3 ci/intent_comparator.py --map $(MAP) $(if $(INTENT_BUILT),--built $(INTENT_BUILT))
+requirement-map-intent: ## The intent manifest (specs/requirements/INTENT_MANIFEST.tsv) against the map (after make requirement-map): each row's outcome, the action it asks for, and a failure for every gap whose requirement is Met in CONFORMANCE §8; then every requirement row's pin (specs/requirements/INTENT_PINS.tsv), read only over a map of every build; MAP/intent.tsv, MAP/unspecified.tsv, MAP/pins.tsv. INTENT_BUILT=android,node requires both builds indexed (CI)
+	python3 ci/intent_comparator.py --map $(MAP) $(if $(INTENT_BUILT),--built $(INTENT_BUILT)) \
+		--pins specs/requirements/INTENT_PINS.tsv --tool target/release/requirement_map
+
+.PHONY: requirement-map-pin-tests
+requirement-map-pin-tests: ## The evidence pins' own tests (ci/test_intent_pins.py), after make requirement-map-fixture and make requirement-map (MAP=dir): each pin state planted in copies of the fixture's manifest, requirements and pins, the repin and bootstrap rules, board evidence and test names
+	MAP=$(MAP) python3 ci/test_intent_pins.py
 
 .PHONY: requirement-map-check requirement-map-mutations
 requirement-map-check: ## The map against itself and the committed facts (after make requirement-map): no contradiction, every sentinel, entry point and count as ci/requirement_map.*.tsv hold them; MAP/committed.tsv is what this map reads, for review

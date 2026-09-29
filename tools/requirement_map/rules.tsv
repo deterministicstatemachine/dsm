@@ -8,8 +8,9 @@
 # a reading to or from it; a check rule's mutation is a planted case naming it.
 #
 #   rule      the code, edge kind, entry-point kind or check rule
-#   kind      code | edge | root | check | outcome
-#   unit      unit tests in src/ (`;` between several)
+#   kind      code | edge | root | check | outcome | pin
+#   unit      unit tests in src/ (`;` between several); for a pin state (ci/intent_pins.py),
+#             test methods in ci/test_intent_pins.py
 #   positive  a fixture reading (tools/requirement_map/fixture/expected.tsv) the rule decides;
 #             for an outcome, a fixture manifest row (requirement:symbol, intent-expected.tsv)
 #   negative  a nearby fixture reading, or manifest row, it does not
@@ -83,3 +84,8 @@ DELETE	outcome	-	MR-FIX-0005:probe::paths::Inherent::never_called	MR-FIX-0005:pr
 MISSING_SYMBOL	outcome	-	MR-FIX-0005:probe::nowhere	MR-FIX-0001:probe::fold	-	-	an outcome of the intent comparator, which is Python with no unit tests: the fixture manifest's rows and the manifest cases are its tests; outcomes have no sentinel file; no case moves this outcome's own row yet
 AMBIGUOUS_SYMBOL	outcome	-	MR-FIX-0005:probe::outside::Made::From::from	MR-FIX-0005:probe::nowhere	-	-	an outcome of the intent comparator, which is Python with no unit tests: the fixture manifest's rows and the manifest cases are its tests; outcomes have no sentinel file; no case moves this outcome's own row yet
 UNSPECIFIED	outcome	-	-	-	-	-	the comparator's report of every production definition no row names: no manifest row carries it, so no row can cite it; every fixture run reports its count
+PINNED	pin	test_pins_sealed_from_the_facts_now_read_pinned	-	-	-	-	each state is planted in copies of the fixture's manifest, requirements and pins by ci/test_intent_pins.py; the fixture holds no committed pins, so no fixture reading, mutation case or sentinel names a state
+UNPINNED	pin	test_an_orphan_pin_and_an_unpinned_row	-	-	-	-	each state is planted in copies of the fixture's manifest, requirements and pins by ci/test_intent_pins.py; the fixture holds no committed pins, so no fixture reading, mutation case or sentinel names a state
+PIN_STALE	pin	test_a_moved_manifest_cell_is_stale_under_its_class;test_a_status_change_is_stale;test_a_code_change_under_a_pin_is_stale_as_code	-	-	-	-	each state is planted in copies of the fixture's manifest, requirements and pins by ci/test_intent_pins.py; the fixture holds no committed pins, so no fixture reading, mutation case or sentinel names a state
+PIN_TAMPERED	pin	test_a_hand_edit_is_tampered	-	-	-	-	each state is planted in copies of the fixture's manifest, requirements and pins by ci/test_intent_pins.py; the fixture holds no committed pins, so no fixture reading, mutation case or sentinel names a state
+ORPHAN_PIN	pin	test_an_orphan_pin_and_an_unpinned_row	-	-	-	-	each state is planted in copies of the fixture's manifest, requirements and pins by ci/test_intent_pins.py; the fixture holds no committed pins, so no fixture reading, mutation case or sentinel names a state

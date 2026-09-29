@@ -28,6 +28,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import intent_pins
 import requirement_map as rmap
 
 MANIFEST = "specs/requirements/INTENT_MANIFEST.tsv"
@@ -147,22 +148,22 @@ def root_answers(map_dir):
 
 def reading_of(by_path, symbol, artifact):
     """What a row's path names in its artifact: ("missing"|"ambiguous"|
-    "no-reading"|"read", reading). Only definitions the build compiles are
-    candidates: another profile's definition of the same path (host-only
-    code, which the artifact reads as not-in-artifact) is not one it reads.
-    With none compiled, the row reads not-in-artifact."""
+    "no-reading"|"read", reading, definition). Only definitions the build
+    compiles are candidates: another profile's definition of the same path
+    (host-only code, which the artifact reads as not-in-artifact) is not one
+    it reads. With none compiled, the row reads not-in-artifact."""
     defs = by_path.get(symbol, [])
     if not defs:
-        return "missing", None
-    readings = [d["reach"][artifact] for d in defs if artifact in d["reach"]]
-    compiled = [r for r in readings if r["state"] not in OUTSIDE_BUILD]
+        return "missing", None, None
+    read = [d for d in defs if artifact in d["reach"]]
+    compiled = [d for d in read if d["reach"][artifact]["state"] not in OUTSIDE_BUILD]
     if len(compiled) > 1:
-        return "ambiguous", None
+        return "ambiguous", None, None
     if compiled:
-        return "read", compiled[0]
-    if readings:
-        return "read", readings[0]
-    return "no-reading", None
+        return "read", compiled[0]["reach"][artifact], compiled[0]
+    if read:
+        return "read", read[0]["reach"][artifact], read[0]
+    return "no-reading", None, None
 
 
 def outcome(row, found, reading, root_answer):
@@ -224,7 +225,7 @@ def compare(the_map, rows, statuses, answers, built):
         raise Refused("the manifest names a root that is not an entry point:\n  " + "\n  ".join(wrong))
     results = []
     for r in rows:
-        found, reading = reading_of(by_path, r["symbol"], r["artifact"])
+        found, reading, definition = reading_of(by_path, r["symbol"], r["artifact"])
         answer = None
         if r["root"] != "-" and found == "read":
             if answers is None:
@@ -239,7 +240,9 @@ def compare(the_map, rows, statuses, answers, built):
         hole = o in FAILING and status in KNOWN_HOLE
         results.append({**r, "state": reading["state"] if reading else found, "code": reading["code"] if reading else "-",
                         "outcome": o, "action": OUTCOMES[o], "status": status or "-",
-                        "fails": "known-hole" if hole else ("fails" if o in FAILING else "-")})
+                        "fails": "known-hole" if hole else ("fails" if o in FAILING else "-"),
+                        "definition": definition["symbol"] if definition else "-",
+                        "closure": definition["closure"] if definition else "-"})
     named = {(r["symbol"], r["artifact"]) for r in rows}
     unspecified = []
     for d in the_map["defs"]:
@@ -284,6 +287,24 @@ def check_expected(results, path):
     return faults
 
 
+Evaluated = collections.namedtuple("Evaluated", "map built results unspecified")
+
+
+def evaluate(map_dir, manifest, requirements, built_list):
+    """The map, the builds it indexed, every row's outcome and the production
+    definitions no row names: what the comparator reports and the pins
+    (ci/intent_pins.py) are taken over."""
+    the_map = rmap.load(map_dir)
+    built = rmap.built_artifacts(the_map)
+    for a in filter(None, built_list.split(",")):
+        if a not in built:
+            raise Refused(f"{a} was not indexed on this host, and --built requires it")
+    statuses = requirement_statuses(requirements)
+    rows = read_manifest(manifest, statuses, the_map["artifacts"])
+    results, unspecified = compare(the_map, rows, statuses, root_answers(map_dir), built)
+    return Evaluated(the_map, built, results, unspecified)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("query", nargs="*", help="root-queries, or nothing to compare")
@@ -293,6 +314,9 @@ def main():
     ap.add_argument("--built", default="", help="artifacts that must have been indexed (CI: android,node)")
     ap.add_argument("--expect", help="the fixture's expected outcomes")
     ap.add_argument("--report", help="where intent.tsv and unspecified.tsv go (default: --map)")
+    ap.add_argument("--pins", help="the committed pins (specs/requirements/INTENT_PINS.tsv): every requirement row's "
+                    "approved evidence, checked against this map")
+    ap.add_argument("--tool", default=intent_pins.TOOL, help="the requirement_map binary the pins' digests come from")
     args = ap.parse_args()
     try:
         if args.query == ["root-queries"]:
@@ -304,14 +328,8 @@ def main():
             return 0
         if args.query or not args.map:
             ap.error("compare with --map DIR, or print the root queries with `root-queries`")
-        the_map = rmap.load(args.map)
-        built = rmap.built_artifacts(the_map)
-        for a in filter(None, args.built.split(",")):
-            if a not in built:
-                raise Refused(f"{a} was not indexed on this host, and --built requires it")
-        statuses = requirement_statuses(args.requirements)
-        rows = read_manifest(args.manifest, statuses, the_map["artifacts"])
-        results, unspecified = compare(the_map, rows, statuses, root_answers(args.map), built)
+        evaluated = evaluate(args.map, args.manifest, args.requirements, args.built)
+        the_map, built, results, unspecified = evaluated
     except Refused as e:
         # On stderr: `root-queries`' stdout is redirected into a file, and a
         # refusal must reach whoever runs it.
@@ -339,9 +357,20 @@ def main():
     for f in faults:
         print(f"  [expected] {f}")
     print(f"{len(failing)} failing row(s)" + (f", {len(faults)} unexpected outcome(s)" if args.expect else ""))
+    pin_failures = 0
+    if args.pins:
+        # After the outcomes: a pin check that is refused (a map missing a
+        # build, no committed pins) fails the run without hiding them.
+        try:
+            verdicts = intent_pins.check(results, the_map, built, args.pins, args.tool)
+            intent_pins.write_report(verdicts, args.report or args.map)
+            pin_failures = intent_pins.summarize(verdicts)
+        except intent_pins.Refused as e:
+            print(f"pins: not checked: {e}", file=sys.stderr)
+            pin_failures = 1
     if args.expect:
-        return 1 if faults else 0
-    return 1 if failing else 0
+        return 1 if faults or pin_failures else 0
+    return 1 if failing or pin_failures else 0
 
 
 if __name__ == "__main__":

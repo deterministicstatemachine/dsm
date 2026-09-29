@@ -3,10 +3,11 @@
 //! Every rule the map can apply has one row, and every row names such a rule:
 //! the reason codes (`reach::code`), the edge kinds (each crate-level
 //! `pub const …: &str`), the entry-point kinds (`graph::root`), the rules
-//! `ci/requirement_map.py`'s check can name (its `CHECK_RULES`) and the intent
-//! comparator's outcomes (`ci/intent_comparator.py`'s `OUTCOMES`), both read
-//! by running Python. Every unit test, fixture reading, mutation case and
-//! sentinel a row cites exists. A code's positive reading and sentinel read
+//! `ci/requirement_map.py`'s check can name (its `CHECK_RULES`), the intent
+//! comparator's outcomes (`ci/intent_comparator.py`'s `OUTCOMES`) and the pin
+//! states (`ci/intent_pins.py`'s `PIN_STATES`), all read by running Python.
+//! Every unit test, fixture reading, mutation case and sentinel a row cites
+//! exists; a pin state's unit tests are in `ci/test_intent_pins.py`. A code's positive reading and sentinel read
 //! that code and its negative does not; an outcome's positive is a fixture
 //! manifest row (`requirement:symbol`) with that outcome and its negative one
 //! without; a code's or an outcome's mutation moves a reading or an outcome
@@ -192,6 +193,17 @@ fn python_names(module: &str, names: &str) -> Result<BTreeSet<String>, String> {
     Ok(text.lines().map(str::to_string).collect())
 }
 
+/// The test methods a `ci/` Python test file defines (`def test_…`).
+fn python_tests(file: &str) -> Result<BTreeSet<String>, String> {
+    let text = read(&crate_dir().join("../..").join(file))?;
+    Ok(text
+        .lines()
+        .filter_map(|l| l.trim_start().strip_prefix("def test_"))
+        .filter_map(|rest| rest.split('(').next())
+        .map(|name| format!("test_{name}"))
+        .collect())
+}
+
 /// The fixture manifest's outcomes: `requirement:symbol` -> outcome.
 fn fixture_outcomes() -> Result<BTreeMap<String, String>, String> {
     let text = read(&crate_dir().join("fixture/intent-expected.tsv"))?;
@@ -289,6 +301,8 @@ fn every_rule_has_a_row_and_every_citation_exists() -> Result<(), String> {
     let (tests, mut defined) = sources()?;
     defined.insert("check", python_names("requirement_map", "CHECK_RULES")?);
     defined.insert("outcome", python_names("intent_comparator", "OUTCOMES")?);
+    defined.insert("pin", python_names("intent_pins", "PIN_STATES")?);
+    let pin_tests = python_tests("ci/test_intent_pins.py")?;
     let fixture_readings = fixture_readings()?;
     let outcomes = fixture_outcomes()?;
     let sentinels = sentinels()?;
@@ -313,8 +327,12 @@ fn every_rule_has_a_row_and_every_citation_exists() -> Result<(), String> {
         {
             faults.push(format!("{rule}: two rows"));
         }
+        let unit_tests = match row.kind.as_str() {
+            "pin" => &pin_tests,
+            _ => &tests,
+        };
         for t in &row.unit {
-            if !tests.contains(t) {
+            if !unit_tests.contains(t) {
                 faults.push(format!("{rule}: no unit test {t}"));
             }
         }
