@@ -35,19 +35,51 @@ type D32 = [u8; 32];
 
 /// An exercise whose bytes rebuilt into the objects it carries, bound to one
 /// another: `F` is `P`'s, `P(E)` recomputes `P`'s `E`, the witnesses are the
-/// set `F` commits.
+/// set `F` commits, and the closure carries one object per reference in
+/// `𝒞_E^pre`. [`recognize_exercise`] is its only constructor and the fields
+/// are read-only, so every one of these bindings holds for every value of
+/// the type.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecognizedExercise {
-    pub fulfillment: Signed<TraderFulfillmentBody>,
-    pub precommit: Signed<TraderPrecommitBody>,
-    pub preimage: SettlementPreimage,
-    pub witnesses: Vec<DlvPolicyFulfillmentBody>,
-    pub closure: Vec<Vec<u8>>,
-    /// `E`, as `P` commits it and `P(E)` recomputes it.
-    pub external_commitment: D32,
+    fulfillment: Signed<TraderFulfillmentBody>,
+    precommit: Signed<TraderPrecommitBody>,
+    preimage: SettlementPreimage,
+    witnesses: Vec<DlvPolicyFulfillmentBody>,
+    closure: Vec<Vec<u8>>,
+    external_commitment: D32,
 }
 
 impl RecognizedExercise {
+    /// `F`, signed.
+    pub fn fulfillment(&self) -> &Signed<TraderFulfillmentBody> {
+        &self.fulfillment
+    }
+
+    /// `P`, signed.
+    pub fn precommit(&self) -> &Signed<TraderPrecommitBody> {
+        &self.precommit
+    }
+
+    /// `P(E)`.
+    pub fn preimage(&self) -> &SettlementPreimage {
+        &self.preimage
+    }
+
+    /// The policy-fulfillment witnesses `F` commits.
+    pub fn witnesses(&self) -> &[DlvPolicyFulfillmentBody] {
+        &self.witnesses
+    }
+
+    /// The closure objects as carried, in reference order.
+    pub fn closure(&self) -> &[Vec<u8>] {
+        &self.closure
+    }
+
+    /// `E`, as `P` commits it and `P(E)` recomputes it.
+    pub fn external_commitment(&self) -> &D32 {
+        &self.external_commitment
+    }
+
     /// The closure objects this exercise carries, each under the reference
     /// in `𝒞_E^pre` it answers: the exercise carries them in reference order
     /// (Section 17.5), and recognition requires one per reference. Nothing is
