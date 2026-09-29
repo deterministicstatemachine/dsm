@@ -108,6 +108,12 @@
 //! `0x004D TraderRelationshipLeaf` (the `R_econ` leaf state, at `k_{T,v}`):
 //! 1 `vault_id` digest32 · 2 `leaf` digest32 (`hʲ`).
 //!
+//! `0x0061 TraderPreBalance` (SoFi Amendment S12, a trader's balance of one
+//! token before a trade, named in `𝒞_E^pre` by its content address under
+//! `DSM/sofi/trader-pre-balance-object/v1`): 1 `trader_genesis` digest32 · 2
+//! `trader_device_id` digest32 · 3 `policy_commit` digest32 · 4 `amount` u64,
+//! strictly positive.
+//!
 //! Core entries, each carrying a full authentication path against the core's
 //! `pre_root` (default-sibling compression is deferred):
 //! `0x004E CoreEntryMutation`: 1 `key` · 2 `pre` · 3 `post` · 4 `path`
@@ -269,6 +275,9 @@ pub enum SofiWireError {
     /// Only `P` and `F` are signed objects; `G` has no issuer signature, and a
     /// setup signs `m_setup` through its own object.
     UnsupportedSignedBodyClass { body_class: u16 },
+    /// A `TraderPreBalance` of zero. A zero balance is an absent leaf, which
+    /// needs no object, so an object holding zero has no canonical bytes.
+    ZeroPreBalance,
 }
 
 impl core::fmt::Display for SofiWireError {
@@ -327,6 +336,10 @@ impl core::fmt::Display for SofiWireError {
             Self::PathDepth { expected, got } => write!(
                 f,
                 "authentication path is {got} siblings deep; the tree fixes {expected}"
+            ),
+            Self::ZeroPreBalance => write!(
+                f,
+                "a balance of zero is an absent leaf and has no TraderPreBalance"
             ),
         }
     }

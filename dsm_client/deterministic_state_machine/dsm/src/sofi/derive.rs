@@ -20,17 +20,19 @@ use crate::common::domain_tags::{
     TAG_DSM_SOFI_STORAGE_SEED_V4, TAG_DSM_SOFI_SUCC_ATTEMPT, TAG_DSM_SOFI_SUCC_CELL_V2,
     TAG_DSM_SOFI_TRADER_CORE_V3, TAG_DSM_SOFI_TRADER_PRECOMMIT_ID, TAG_DSM_SOFI_ROUTE_DIGEST,
     TAG_DSM_SOFI_TRADER_PRECOMMIT_SIGN, TAG_DSM_SOFI_VAULT_GENESIS_LOCATOR, TAG_DSM_SOFI_VAULT_ID,
-    TAG_DSM_SOFI_VAULT_LEAF_STATE, TAG_DSM_SOFI_VAULT_STATE_KEY,
+    TAG_DSM_SOFI_TRADER_PRE_BALANCE_OBJECT, TAG_DSM_SOFI_VAULT_LEAF_STATE,
+    TAG_DSM_SOFI_VAULT_STATE_KEY,
 };
 use crate::common::domain_tags::TAG_DSM_ECONOMIC_LEAF_STATE;
+use crate::storage_object::immutable_addr;
 use crate::crypto::blake3::dsm_domain_hasher;
 use crate::crypto::domain::TaggedHashDomain;
 
 use super::wire::{
     DlvPolicyFulfillmentBody, RouteDigestPreimage, RouteLegSet, SettlementBody, SettlementPreimage,
     RouteLegEntry, SofiResolutionClaim, SofiSetupBody, SofiWireError, TraderFulfillmentBody,
-    TraderPrecommitBody, TraderRelationshipLeaf, VaultRelationshipLeaf, VaultStateLeaf,
-    CANONICAL_MAX_LEGS, ROUTE_MIN_LEGS,
+    TraderPreBalance, TraderPrecommitBody, TraderRelationshipLeaf, VaultRelationshipLeaf,
+    VaultStateLeaf, CANONICAL_MAX_LEGS, ROUTE_MIN_LEGS,
 };
 
 type D32 = [u8; 32];
@@ -82,6 +84,25 @@ pub fn trader_relationship_leaf_value(leaf: &TraderRelationshipLeaf) -> D32 {
     let mut hasher = dsm_domain_hasher(TAG_DSM_ECONOMIC_LEAF_STATE);
     hasher.update(&leaf.encode());
     *hasher.finalize().as_bytes()
+}
+
+/// The address `𝒞_E^pre` names a `TraderPreBalance` by (SoFi Amendment
+/// S12): `immutable_addr(DSM/sofi/trader-pre-balance-object/v1, CCB bytes)`.
+pub fn trader_pre_balance_addr(balance: &TraderPreBalance) -> D32 {
+    immutable_addr(TAG_DSM_SOFI_TRADER_PRE_BALANCE_OBJECT, &balance.encode())
+}
+
+/// The address a closure `ContentAddr` naming `object_class` gives `bytes`,
+/// under that class's own namespace, so the address binds the kind. `None`
+/// for a class with no content-addressing rule, which no bytes satisfy.
+pub fn closure_content_address(object_class: u16, bytes: &[u8]) -> Option<D32> {
+    match object_class {
+        crate::ccb::class::SOFI_TRADER_PRE_BALANCE => Some(immutable_addr(
+            TAG_DSM_SOFI_TRADER_PRE_BALANCE_OBJECT,
+            bytes,
+        )),
+        other => crate::ccb::decode::policy_object_address(other, bytes),
+    }
 }
 
 /// `X_route = H(route-digest/v1 ‖ CCB(RouteDigestPreimage))`.

@@ -1393,6 +1393,80 @@ impl TraderRelationshipLeaf {
     }
 }
 
+// ── 0x0061 TraderPreBalance ────────────────────────────────────────────────
+
+/// A trader's balance of one token before a trade (SoFi Amendment S12).
+///
+/// `T°` states each balance leaf it writes only by the hash of its value, and
+/// `TraderSideValid` recomputes the balance after the trade from the balance
+/// before it. The exercise carries that value as this object, named in
+/// `𝒞_E^pre` by its content address, so `E` commits it. It is evidence and
+/// never authority: a verifier accepts it only because it hashes to the leaf
+/// value the core states at `balance_key(trader_genesis, trader_device_id,
+/// policy_commit)`, and the fold proves that leaf against the trader's root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraderPreBalance {
+    trader_genesis: D32,
+    trader_device_id: D32,
+    policy_commit: D32,
+    amount: u64,
+}
+
+impl TraderPreBalance {
+    /// A zero balance is an absent leaf and needs no object, so a zero amount
+    /// is refused rather than encoded.
+    pub fn new(
+        trader_genesis: D32,
+        trader_device_id: D32,
+        policy_commit: D32,
+        amount: u64,
+    ) -> Result<Self, SofiWireError> {
+        if amount == 0 {
+            return Err(SofiWireError::ZeroPreBalance);
+        }
+        Ok(Self {
+            trader_genesis,
+            trader_device_id,
+            policy_commit,
+            amount,
+        })
+    }
+
+    pub fn trader_genesis(&self) -> &D32 {
+        &self.trader_genesis
+    }
+
+    pub fn trader_device_id(&self) -> &D32 {
+        &self.trader_device_id
+    }
+
+    pub fn policy_commit(&self) -> &D32 {
+        &self.policy_commit
+    }
+
+    pub fn amount(&self) -> u64 {
+        self.amount
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        push_env(&mut out, class::SOFI_TRADER_PRE_BALANCE);
+        push_digest32(&mut out, &self.trader_genesis);
+        push_digest32(&mut out, &self.trader_device_id);
+        push_digest32(&mut out, &self.policy_commit);
+        push_u64(&mut out, self.amount);
+        out
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut c = Cursor { b: bytes, i: 0 };
+        c.envelope(class::SOFI_TRADER_PRE_BALANCE, SCHEMA_V1)?;
+        let v = Self::new(c.digest32()?, c.digest32()?, c.digest32()?, c.u64()?)
+            .map_err(wire_invalid)?;
+        finish(&c, v)
+    }
+}
+
 // ── 0x004E | 0x004F | 0x0050 CoreEntry ─────────────────────────────────────
 
 /// One per-key entry of a core, with its full authentication path against the

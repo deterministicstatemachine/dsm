@@ -57,12 +57,12 @@ use super::registration::{
 use super::resolution::{walk, AttemptWalk, KeyFacts, RecordedGeneration, VaultChain, WalkOutcome};
 use super::storage::{Discovered, Resolved};
 use super::validation::{
-    route_validation, vault_post_states, Evidence, EvidenceNeeds, Missing, TraderLeafPre,
-    VaultLeafPre, VaultPostState,
+    route_validation, setup_lineage, vault_post_states, Evidence, EvidenceNeeds, Missing,
+    SetupLineage, VaultLeafPre, VaultPostState,
 };
 use super::wire::{
-    ParentClaimRef, SettlementPreimage, TraderCore, TraderFulfillmentBody, TraderPrecommitBody,
-    ValidationRef, VaultGenesisPreimage, VaultStateLeaf,
+    CoreEntry, ParentClaimRef, SettlementPreimage, TraderCore, TraderFulfillmentBody,
+    TraderPreBalance, TraderPrecommitBody, ValidationRef, VaultGenesisPreimage, VaultStateLeaf,
 };
 
 type D32 = [u8; 32];
@@ -202,14 +202,18 @@ pub trait SofiReads {
         root: &D32,
         keys: &BTreeSet<D32>,
     ) -> Result<Option<VaultLeaves>, ReadFailure>;
-    /// The claim this device's own lineage accepted at `position` of trader
-    /// `(genesis, device_id)`, if it accepted one there.
+    /// The claim lineage validation accepted at `position` of trader
+    /// `(genesis, device_id)`: from this device's own admitted store when the
+    /// trader is this device, and from the peer lineage walk otherwise —
+    /// never this device's claim under another trader's name. A failure
+    /// keeps the class lineage validation gave it; Core reads which classes
+    /// are verdicts (`validation::setup_lineage`, SoFi Amendment S13).
     fn accepted_claim_at(
         &self,
         genesis: &D32,
         device_id: &D32,
         position: u64,
-    ) -> Result<Option<AcceptedClaim>, ReadFailure>;
+    ) -> Result<AcceptedClaim, PeerLineageFailure>;
     /// The generations this device recorded for `vault_id`, contiguous from
     /// zero, in generation order.
     fn recorded_generations(
@@ -286,32 +290,50 @@ impl LocalLeaves {
         self.root
     }
 
-    /// Evidence holding the pre value of every key `core` names, from these
-    /// leaves alone: what `Fold(T°, E)` reads, before anything is published.
-    /// A key holding a write-once record has no trader-leaf pre value and is
-    /// refused.
-    pub fn trader_evidence(
+    /// The `TraderPreBalance` of every balance `core` states as present
+    /// before the operation (SoFi Amendment S12): the values the exercise
+    /// carries, so that a verifier that is not this device can judge it. A
+    /// key the core writes as a balance that holds any other leaf is refused.
+    pub fn pre_balances(
         &self,
         core: &TraderCore,
-    ) -> Result<Evidence, LeavesDoNotRecomputeTheRoot> {
-        let mut trader_leaves = BTreeMap::new();
+    ) -> Result<Vec<TraderPreBalance>, LeavesDoNotRecomputeTheRoot> {
+        let mut out = Vec::new();
         for entry in core.entries() {
-            let key = entry.key();
-            let pre = self.pre(&key).ok_or_else(|| {
-                LeavesDoNotRecomputeTheRoot(
-                    "a trader core names a key holding a write-once record".to_string(),
-                )
-            })?;
-            trader_leaves.insert(key, pre);
+            match entry {
+                CoreEntry::Relationship { .. } => {}
+                CoreEntry::Mutation { .. } | CoreEntry::Read { .. } => {
+                    match self.leaves.get(&entry.key()) {
+                        None => {}
+                        Some(EconomicLeafState::Balance(b)) => out.push(
+                            TraderPreBalance::new(
+                                self.genesis,
+                                self.device_id,
+                                b.policy_commit,
+                                b.amount,
+                            )
+                            .map_err(|e| {
+                                LeavesDoNotRecomputeTheRoot(format!(
+                                    "a balance before the trade: {e}"
+                                ))
+                            })?,
+                        ),
+                        Some(
+                            EconomicLeafState::Relationship(..)
+                            | EconomicLeafState::ConsumedSource(..)
+                            | EconomicLeafState::VaultCreation(..)
+                            | EconomicLeafState::TokenCreation(..),
+                        ) => {
+                            return Err(LeavesDoNotRecomputeTheRoot(
+                                "a trader core writes a balance at a key holding another leaf"
+                                    .to_string(),
+                            ))
+                        }
+                    }
+                }
+            }
         }
-        Ok(Evidence::acquired(
-            BTreeMap::new(),
-            trader_leaves,
-            BTreeMap::new(),
-            BTreeMap::new(),
-            BTreeMap::new(),
-            BTreeMap::new(),
-        ))
+        Ok(out)
     }
 
     /// Every relationship leaf this device holds: the vaults it is set up
@@ -332,30 +354,6 @@ impl LocalLeaves {
         match self.leaves.get(&key) {
             Some(EconomicLeafState::Relationship(leaf)) => Some(*leaf),
             Some(..) | None => None,
-        }
-    }
-
-    /// Whether `precommit` is this device's own: the only routes whose trader
-    /// leaves and accepted claims this device holds.
-    fn owns(&self, precommit: &TraderPrecommitBody) -> bool {
-        *precommit.genesis() == self.genesis && *precommit.device_id() == self.device_id
-    }
-
-    /// The pre value at `key` as Core reads a trader leaf. The tree is whole,
-    /// so a key it does not hold is absent. A key holding a write-once record
-    /// has no trader-leaf pre value: Core reads trader leaves only at balance
-    /// and relationship keys, which are domain-separated from every record
-    /// key.
-    pub fn pre(&self, key: &D32) -> Option<TraderLeafPre> {
-        match self.leaves.get(key) {
-            None => Some(TraderLeafPre::Absent),
-            Some(EconomicLeafState::Balance(b)) => Some(TraderLeafPre::Balance(b.clone())),
-            Some(EconomicLeafState::Relationship(r)) => Some(TraderLeafPre::Relationship(*r)),
-            Some(
-                EconomicLeafState::ConsumedSource(..)
-                | EconomicLeafState::VaultCreation(..)
-                | EconomicLeafState::TokenCreation(..),
-            ) => None,
         }
     }
 }
@@ -400,10 +398,6 @@ pub enum Acquired<T, M> {
     /// operation fails on the network. The caller evaluates nothing and
     /// records nothing.
     Exhausted(Vec<M>),
-    /// These items have no source this verifier can acquire them from, so no
-    /// retry can supply them. The caller evaluates nothing and records
-    /// nothing.
-    NoSource(Vec<M>),
 }
 
 /// The objects one exercise's conformance is decided over: the trader's
@@ -423,7 +417,7 @@ pub struct ExerciseObjects<'a> {
 }
 
 /// What the verifier brings: its reads, the network's pinned set, the
-/// network, its own leaves, and the position it resolved itself. Every
+/// network, and the position it resolved itself. Every
 /// field is an established fact of THIS verifier; none is trusted because
 /// somebody sent it.
 pub struct Verifier<'a, R: SofiReads> {
@@ -434,11 +428,6 @@ pub struct Verifier<'a, R: SofiReads> {
     pub members: &'a StorageSetMembers,
     pub set_id: D32,
     pub network_id: &'a [u8],
-    /// This device's own `R_econ` leaves, for the trader-leaf pre values of
-    /// its own routes; `None` for a verifier that is not a trader (a relay,
-    /// a reader of another trader's position), whose routes then have no
-    /// source for those values.
-    pub local: Option<&'a LocalLeaves>,
     /// This verifier's own admitted position, when it resolved a conditional
     /// one: what a `P` naming that fulfillment as its parent was built on.
     /// Core reads what it selected; nothing else resolves a parent, and a
@@ -727,7 +716,11 @@ impl<R: SofiReads> Verifier<'_, R> {
         let mut closure = BTreeMap::new();
         for reference in objects.preimage.settlement().closure().refs() {
             let bytes = match reference {
-                ValidationRef::ContentAddr { addr, .. } => self.reads.stored_bytes(addr)?,
+                ValidationRef::ContentAddr { addr, .. } => match objects.own_objects.get(reference)
+                {
+                    Some(bytes) => Some(bytes.clone()),
+                    None => self.reads.stored_bytes(addr)?,
+                },
                 ValidationRef::Setup { setup_ref } => match self.reads.setup_bytes(setup_ref)? {
                     Resolved::Kept(bytes) => Some(bytes),
                     Resolved::None | Resolved::Unavailable => None,
@@ -798,32 +791,24 @@ impl<R: SofiReads> Verifier<'_, R> {
         Ok(Acquired::Exhausted(missing))
     }
 
-    /// Acquire everything `P` and `P(E)` need, from storage and this device's
-    /// own state, and ask the predicate whether it is complete. `Complete`
-    /// once `route_validation` reaches a verdict over it; `Exhausted` naming
-    /// what is still missing after [`ACQUIRE_ROUNDS`] rounds; `NoSource` for
-    /// another trader's route: `TraderSideValid` reads the trader's leaf pre
-    /// values, the trader core carries only their hashes, and no section
-    /// names where a verifier that is not the trader gets them (SoFi §17.5,
-    /// an open hole) — nothing is supplied in their place.
+    /// Acquire everything `P` and `P(E)` need, from storage and the objects
+    /// the operation carries, and ask the predicate whether it is complete.
+    /// `Complete` once `route_validation` reaches a verdict over it;
+    /// `Exhausted` naming what is still missing after [`ACQUIRE_ROUNDS`]
+    /// rounds. Any verifier judges any trader's route the same way: the
+    /// trader's balances before the trade come from the `TraderPreBalance`
+    /// objects `𝒞_E^pre` names (SoFi Amendment S12), and `carried` are the
+    /// closure objects the exercise, or the producer's own draft, holds.
     pub fn acquire_evidence(
         &self,
         precommit: &TraderPrecommitBody,
         preimage: &SettlementPreimage,
+        carried: &BTreeMap<ValidationRef, Vec<u8>>,
     ) -> Result<Acquired<Evidence, Missing>, VerifierFailure> {
         let needs = EvidenceNeeds::of(precommit, preimage);
-        if !self.local.is_some_and(|local| local.owns(precommit)) {
-            return Ok(Acquired::NoSource(
-                needs
-                    .trader_keys
-                    .iter()
-                    .map(|key| Missing::TraderLeaf { key: *key })
-                    .collect(),
-            ));
-        }
         let mut missing = Vec::new();
         for round in 1..=ACQUIRE_ROUNDS {
-            let evidence = self.gather(precommit, preimage, &needs)?;
+            let evidence = self.gather(precommit, preimage, &needs, carried)?;
             match route_validation(precommit, preimage, &evidence) {
                 Ok(Validation::Valid | Validation::Invalid) => {
                     return Ok(Acquired::Complete(evidence))
@@ -839,31 +824,37 @@ impl<R: SofiReads> Verifier<'_, R> {
         Ok(Acquired::Exhausted(missing))
     }
 
-    /// One round of reading every item `needs` names, for this device's own
-    /// route: trader leaf pre values from its own leaves, vault leaf pre
-    /// values from the vault's accepted genesis at `R_0` or the generation
-    /// this device established at the root the core names, policy objects
-    /// from the immutable store under the addresses the vault state commits,
-    /// token policies rooted by this device, setups at each `ρ`, and the
-    /// claims this device's lineage accepted at each setup's position.
+    /// One round of reading every item `needs` names: the trader's
+    /// `TraderPreBalance` objects from what the operation carries or the
+    /// immutable store, vault leaf pre values from the vault's accepted
+    /// genesis at `R_0` or the generation this device established at the
+    /// root the core names, policy objects from the immutable store under the
+    /// addresses the vault state commits, token policies rooted by this
+    /// device, setups at each `ρ`, and the claims the trader's lineage
+    /// accepted at each setup's position.
     fn gather(
         &self,
         precommit: &TraderPrecommitBody,
         preimage: &SettlementPreimage,
         needs: &EvidenceNeeds,
+        carried: &BTreeMap<ValidationRef, Vec<u8>>,
     ) -> Result<Evidence, VerifierFailure> {
-        let trader_leaves: BTreeMap<D32, TraderLeafPre> = needs
-            .trader_keys
-            .iter()
-            .filter_map(|key| {
-                self.local
-                    .and_then(|local| local.pre(key))
-                    .map(|pre| (*key, pre))
-            })
-            .collect();
+        let mut objects: BTreeMap<D32, Vec<u8>> = BTreeMap::new();
+        for addr in &needs.trader_pre_balances {
+            let reference = ValidationRef::ContentAddr {
+                object_class: crate::ccb::class::SOFI_TRADER_PRE_BALANCE,
+                addr: *addr,
+            };
+            let bytes = match carried.get(&reference) {
+                Some(bytes) => Some(bytes.clone()),
+                None => self.reads.stored_bytes(addr)?,
+            };
+            if let Some(bytes) = bytes {
+                objects.insert(*addr, bytes);
+            }
+        }
 
         let mut vault_leaves: VaultLeaves = BTreeMap::new();
-        let mut objects: BTreeMap<D32, Vec<u8>> = BTreeMap::new();
         let mut token_policies: BTreeMap<D32, Vec<u8>> = BTreeMap::new();
         for (vault_id, keys) in &needs.vaults {
             let Some(state) = self.vault_pre(preimage, vault_id, keys, &mut vault_leaves)? else {
@@ -902,19 +893,25 @@ impl<R: SofiReads> Verifier<'_, R> {
         }
 
         let mut setups: BTreeMap<D32, Vec<u8>> = BTreeMap::new();
-        let mut accepted_claims: BTreeMap<u64, AcceptedClaim> = BTreeMap::new();
+        let mut setup_lineages: BTreeMap<u64, SetupLineage> = BTreeMap::new();
         for setup_ref in &needs.setups {
             let Resolved::Kept(bytes) = self.reads.setup_bytes(setup_ref)? else {
                 continue;
             };
             if let Some((.., signed)) = recognize_setup(&bytes) {
                 let position = signed.body.position();
-                if let Some(claim) = self.reads.accepted_claim_at(
+                let validated = self.reads.accepted_claim_at(
                     precommit.genesis(),
                     precommit.device_id(),
                     position,
-                )? {
-                    accepted_claims.insert(position, claim);
+                );
+                if let Some(lineage) = setup_lineage(
+                    *precommit.genesis(),
+                    *precommit.device_id(),
+                    position,
+                    validated,
+                ) {
+                    setup_lineages.insert(position, lineage);
                 }
             }
             setups.insert(*setup_ref, bytes);
@@ -922,11 +919,10 @@ impl<R: SofiReads> Verifier<'_, R> {
 
         Ok(Evidence::acquired(
             objects,
-            trader_leaves,
             vault_leaves,
             setups,
             token_policies,
-            accepted_claims,
+            setup_lineages,
         ))
     }
 
@@ -1201,9 +1197,13 @@ impl<R: SofiReads> Verifier<'_, R> {
         exercise: &RecognizedExercise,
     ) -> Result<Option<VaultPostState>, VerifierFailure> {
         let precommit = &exercise.precommit.body;
-        let evidence = match self.acquire_evidence(precommit, &exercise.preimage)? {
+        let evidence = match self.acquire_evidence(
+            precommit,
+            &exercise.preimage,
+            &exercise.closure_objects(),
+        )? {
             Acquired::Complete(evidence) => evidence,
-            Acquired::Exhausted(missing) | Acquired::NoSource(missing) => {
+            Acquired::Exhausted(missing) => {
                 log::info!("[sofi chain] a consumption's evidence is not in hand: {missing:?}");
                 return Ok(None);
             }
@@ -1461,15 +1461,7 @@ impl<R: SofiReads> Verifier<'_, R> {
 
         // What FulfillmentConformance reads (R7), the exercise supplying the
         // objects only its trader held.
-        let own: BTreeMap<ValidationRef, Vec<u8>> = exercise
-            .preimage
-            .settlement()
-            .closure()
-            .refs()
-            .iter()
-            .copied()
-            .zip(exercise.closure.iter().cloned())
-            .collect();
+        let own = exercise.closure_objects();
         let objects = ExerciseObjects {
             precommit,
             precommit_signature: &exercise.precommit.signature,
@@ -1480,18 +1472,15 @@ impl<R: SofiReads> Verifier<'_, R> {
         };
         let conformance = match self.acquire_conformance_evidence(&objects)? {
             Acquired::Complete(evidence) => evidence,
-            Acquired::Exhausted(missing) | Acquired::NoSource(missing) => {
+            Acquired::Exhausted(missing) => {
                 return Ok(Err(NotEstablished::ConformanceEvidence(missing)))
             }
         };
 
         // What RouteValidation reads (R5).
-        let evidence = match self.acquire_evidence(precommit, &exercise.preimage)? {
+        let evidence = match self.acquire_evidence(precommit, &exercise.preimage, &own)? {
             Acquired::Complete(evidence) => evidence,
             Acquired::Exhausted(missing) => return Ok(Err(NotEstablished::RouteEvidence(missing))),
-            Acquired::NoSource(missing) => {
-                return Ok(Err(NotEstablished::RouteEvidenceHasNoSource(missing)))
-            }
         };
 
         // Every leg of P at the attempt F fixed for it: its cell, and the
