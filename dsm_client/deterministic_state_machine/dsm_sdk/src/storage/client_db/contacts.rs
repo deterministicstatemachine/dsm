@@ -273,35 +273,6 @@ pub fn get_contact_by_alias(alias: &str) -> Result<Option<ContactRecord>> {
     Ok(result)
 }
 
-/// Delete a contact by contact_id.
-pub fn delete_contact_by_id(contact_id: &str) -> Result<()> {
-    if contact_id.trim().is_empty() {
-        return Err(anyhow!("Invalid contact_id"));
-    }
-
-    let binding = get_connection()?;
-    let conn = binding.lock().unwrap_or_else(|poisoned| {
-        log::warn!("DB lock poisoned, recovering");
-        poisoned.into_inner()
-    });
-
-    let rows = conn.execute(
-        "DELETE FROM contacts WHERE contact_id = ?1",
-        params![contact_id],
-    )?;
-
-    if rows == 0 {
-        log::warn!(
-            "delete_contact_by_id: no rows deleted for contact_id={}",
-            contact_id
-        );
-    } else {
-        log::info!("delete_contact_by_id: removed contact_id={}", contact_id);
-    }
-
-    Ok(())
-}
-
 /// The signing key of the contact whose device id is `device_id_str`
 /// (Base32 Crockford), or `None` when no contact has that device id.
 pub fn get_contact_public_key_by_device_id(device_id_str: &str) -> Result<Option<Vec<u8>>> {
@@ -767,26 +738,6 @@ pub fn get_local_bilateral_chain_tip(device_id: &[u8]) -> Result<Option<[u8; 32]
     read_contact_tip(device_id, "local_bilateral_chain_tip")
 }
 
-/// Remove a contact by its contact_id. Returns Ok(true) if a row was deleted, Ok(false) if not found.
-pub fn remove_contact(contact_id: &str) -> Result<bool> {
-    let binding = get_connection()?;
-    let conn = binding.lock().unwrap_or_else(|poisoned| {
-        log::warn!("DB lock poisoned, recovering");
-        poisoned.into_inner()
-    });
-    let affected = conn.execute(
-        "DELETE FROM contacts WHERE contact_id = ?1",
-        params![contact_id],
-    )?;
-    if affected > 0 {
-        info!("Contact removed: {contact_id}");
-        Ok(true)
-    } else {
-        info!("Contact not found: {contact_id}");
-        Ok(false)
-    }
-}
-
 /// Store `contact` in the client database as the contact add path would: its
 /// keys and its relationship tip, which the tests that build an in-memory
 /// manager hold only in memory.
@@ -913,14 +864,6 @@ mod tests {
         assert!(get_contact_by_device_id(&[0u8; 33]).is_err());
         assert!(get_contact_chain_tip(&[0u8; 31]).is_err());
         assert!(get_local_bilateral_chain_tip(&[0u8; 33]).is_err());
-    }
-
-    #[test]
-    fn delete_contact_by_id_rejects_empty_id() {
-        let err = delete_contact_by_id("").unwrap_err();
-        assert!(err.to_string().contains("Invalid contact_id"));
-        let err2 = delete_contact_by_id("   ").unwrap_err();
-        assert!(err2.to_string().contains("Invalid contact_id"));
     }
 
     #[test]
@@ -1062,25 +1005,5 @@ mod tests {
             .expect("query")
             .expect("contact exists");
         assert_eq!(found.device_id, [0x04u8; 32].to_vec());
-    }
-
-    #[test]
-    #[serial]
-    fn remove_contact_returns_false_for_nonexistent() {
-        init_test_db();
-        let removed = remove_contact("nonexistent-id").expect("remove");
-        assert!(!removed);
-    }
-
-    #[test]
-    #[serial]
-    fn remove_contact_deletes_existing() {
-        init_test_db();
-        let contact = make_contact([0x05u8; 32], "eve");
-        store_contact(&contact).expect("store");
-
-        let removed = remove_contact("cid-eve").expect("remove");
-        assert!(removed);
-        assert!(get_contact_by_alias("eve").expect("query").is_none());
     }
 }

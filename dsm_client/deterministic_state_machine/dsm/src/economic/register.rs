@@ -663,6 +663,55 @@ mod registered_root_construction_tests {
         assert!(decoded.single_root().is_err());
     }
 
+    /// A root cell names what holds it by the entry digest of its exact
+    /// bytes, and the read carries those bytes: this key's claim, not the
+    /// claim the leader took first, which names the next position's key.
+    #[test]
+    fn a_held_root_cell_carries_the_exact_bytes_that_hold_it() {
+        use crate::route_chain::fixtures::{committed_set, committed_set_id, Cell};
+        use crate::route_chain::{ChainState, ROUTE_LEN};
+        let claim = crate::sofi::wire::SofiResolutionClaim {
+            genesis: [0x11; 32],
+            device_id: [0x22; 32],
+            position: 9,
+            fulfillment_id: [0xF1; 32],
+            realize_root: [0xA1; 32],
+            void_root: [0xB1; 32],
+        };
+        let bytes = claim.encode();
+        let cell = RootCell::new(
+            &[0x11; 32],
+            &[0x22; 32],
+            9,
+            &[0x5E; 32],
+            &committed_set(),
+            &committed_set_id(),
+        )
+        .expect("the committed set");
+        let elsewhere = crate::sofi::wire::SofiResolutionClaim {
+            position: 10,
+            ..claim
+        }
+        .encode();
+        let mut seats = Cell::at(cell.routed());
+        seats.write(&elsewhere, ROUTE_LEN - 1, &[]);
+        seats.write(&bytes, ROUTE_LEN - 1, &[]);
+        let Ok(CellReading::Held {
+            id, value, state, ..
+        }) = read_root_cell(&cell, &seats.evidence())
+        else {
+            panic!("the claim holds the cell")
+        };
+        assert_eq!(
+            (id, value, state),
+            (
+                crate::storage_cell::entry_digest(&bytes),
+                bytes,
+                ChainState::Final
+            )
+        );
+    }
+
     /// A claim final at its root cell has a completion proof built from the
     /// reads, and the proof checks against them; a claim held at the leader
     /// alone has none.

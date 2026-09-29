@@ -463,13 +463,18 @@ pub struct CellEvidence {
 
 /// What Core reads at a cell once it has evaluated the route chains: the cell
 /// is open, or one recognized object holds it with a chain that has gone as
-/// far as `state`. `object` is what the caller's recognizer made of the value.
+/// far as `state`. `object` is what the caller's recognizer made of the value
+/// and `id` the recognizer's name for it, whose meaning is the recognizer's
+/// (an entry digest at a root cell, `E` at an attempt cell). `value` is the
+/// exact bytes of the leader link: whoever carries what holds the cell
+/// carries these, never bytes found again by `id`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CellReading<T> {
     Open,
     Held {
         object: T,
         id: [u8; 32],
+        value: Vec<u8>,
         state: ChainState,
     },
 }
@@ -753,6 +758,7 @@ where
     Ok(CellReading::Held {
         object: leader.object,
         id: leader.id,
+        value: leader.value,
         state: ChainState::with_further_links(longest - 1),
     })
 }
@@ -1398,6 +1404,7 @@ mod tests {
         Ok(CellReading::Held {
             object: object.to_vec(),
             id: crate::storage_cell::entry_digest(object),
+            value: object.to_vec(),
             state,
         })
     }

@@ -38,7 +38,7 @@ use dsm::sofi::lineage::{advance_resolved, descendant_fence, AdvanceError};
 use dsm::sofi::publication::Publication;
 use dsm::sofi::registration::Registration;
 use dsm::sofi::resolution::{PositionEffect, Resolution};
-use dsm::sofi::resolve::{value_of, Acquired, LocalLeaves};
+use dsm::sofi::resolve::{Acquired, LocalLeaves};
 use dsm::sofi::storage::Resolved;
 use dsm::sofi::validation::{trader_post_states, vault_post_states};
 use dsm::sofi::wire::{
@@ -461,10 +461,10 @@ async fn final_root_cell(
     let evidence = read_cell(&seats, cells.root().routed()).await;
     Ok(match read_root_cell(cells.root(), &evidence) {
         Ok(CellReading::Held {
-            id,
+            value,
             state: ChainState::Final,
             ..
-        }) => value_of(&evidence, &id),
+        }) => Some(value),
         Ok(CellReading::Held { .. } | CellReading::Open) => None,
         Err(missing) => {
             log::info!("[sofi advance] K_root({position}) is not decided yet: {missing:?}");
