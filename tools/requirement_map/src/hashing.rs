@@ -13,6 +13,14 @@ pub const FILE: TaggedHashDomain<'static> = dsm::tagged_domain!(b"DSM/code-file/
 pub const ITEM: TaggedHashDomain<'static> = dsm::tagged_domain!(b"DSM/code-item/v1");
 /// A symbol the index references but does not define (std, a dependency).
 pub const EXTERNAL: TaggedHashDomain<'static> = dsm::tagged_domain!(b"DSM/code-external/v1");
+/// A workspace symbol the index has no definition of (prost output, a
+/// macro's item): its symbol and the inputs that generate it.
+pub const GENERATED: TaggedHashDomain<'static> = dsm::tagged_domain!(b"DSM/code-generated/v1");
+/// What generates a package's code the index cannot define: its build
+/// script, the module file its path names, every `.proto` file and every
+/// macro definition.
+pub const GENERATION: TaggedHashDomain<'static> =
+    dsm::tagged_domain!(b"DSM/code-generation-inputs/v1");
 /// A strongly connected component: its members' items and its callees' closures.
 pub const COMPONENT: TaggedHashDomain<'static> = dsm::tagged_domain!(b"DSM/code-component/v1");
 /// One definition and everything it reaches.
@@ -54,6 +62,8 @@ mod tests {
         assert_ne!(hash(ITEM, &[b"x"]), hash(CLOSURE, &[b"x"]));
         assert_ne!(hash(EXTERNAL, &[b"x"]), hash(COMPONENT, &[b"x"]));
         assert_ne!(hash(FILE, &[b"x"]), hash(ITEM, &[b"x"]));
+        assert_ne!(hash(GENERATED, &[b"x"]), hash(EXTERNAL, &[b"x"]));
+        assert_ne!(hash(GENERATION, &[b"x"]), hash(GENERATED, &[b"x"]));
     }
 
     #[test]

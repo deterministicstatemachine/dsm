@@ -524,6 +524,7 @@ fn index_command(flags: &Flags) -> Result<String, String> {
             tests: &tests.loaded,
             declared_jni: &declared,
             root_queries: queries.as_deref(),
+            sources: &files,
         },
     )?;
     let out = flags.path("--out")?;
@@ -669,6 +670,17 @@ fn fixture_command(flags: &Flags) -> Result<String, String> {
         excluded,
     }];
     let queries = root_queries(flags)?;
+    // The fixture's files, hashed as the fingerprint hashes a source file.
+    let hashed: Vec<(String, hashing::Digest)> = source_files
+        .iter()
+        .map(|path| {
+            let bytes = std::fs::read(root.join(path)).map_err(|e| format!("{path}: {e}"))?;
+            Ok((
+                path.clone(),
+                hashing::hash(hashing::FILE, &[path.as_bytes(), &bytes]),
+            ))
+        })
+        .collect::<Result<_, String>>()?;
     let the_map = graph::build(
         root,
         &graph::Inputs {
@@ -676,6 +688,7 @@ fn fixture_command(flags: &Flags) -> Result<String, String> {
             tests: &profile.loaded,
             declared_jni: &declared,
             root_queries: queries.as_deref(),
+            sources: &hashed,
         },
     )?;
     if let Some(out) = flags.optional("--out") {
