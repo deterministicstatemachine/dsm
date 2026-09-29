@@ -22,6 +22,8 @@ dsm_client/frontend/.next/
 dsm-mcp/dist/
 packages/dsm-mcp/dist/
 *.log
+# Real `cargo test` runs the evidence pins' tests read (ci/test_intent_pins.py).
+!ci/fixtures/board-logs/*.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
