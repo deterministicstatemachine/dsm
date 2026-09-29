@@ -458,7 +458,12 @@ def code_at(ref):
         capture_output=True, text=True, check=True,
     ).stdout.strip()
     outside = ["--", *TESTED_CODE]
-    differs = subprocess.run(["git", "diff", "--quiet", sha] + outside).returncode != 0
+    # `git diff --quiet` exits 1 on a difference; any other failure is git's,
+    # reported as it is, never read as a difference or as none.
+    diff = subprocess.run(["git", "diff", "--quiet", sha] + outside, capture_output=True, text=True)
+    if diff.returncode not in (0, 1):
+        return sha, f"git diff {sha[:12]} failed ({diff.returncode}): {diff.stderr.strip()}"
+    differs = diff.returncode == 1
     untracked = subprocess.run(
         ["git", "ls-files", "--others", "--exclude-standard"] + outside,
         capture_output=True, text=True, check=True,
