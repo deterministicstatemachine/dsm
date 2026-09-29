@@ -353,3 +353,71 @@ rule = "indeterminate-jump"
 table = "reach"
 where = { artifact = "android", state = "dead" }
 set = { state = "indeterminate", code = "IND_UNRESOLVED_CALL" }
+
+# ---- the intent manifest -----------------------------------------------------
+#
+# kind = "manifest": one change to a copy of the fixture's intent manifest
+# (intent.tsv), read by ci/intent_comparator.py against the fixture's map.
+# `refused` is text the comparator's refusal must hold; `expect` names each
+# row (`requirement:symbol`) whose outcome becomes "OUTCOME fails|known-hole|-",
+# and every other row keeps its expected outcome (intent-expected.tsv).
+
+[[case]]
+name = "a-row-without-a-requirement-demands-reach"
+kind = "manifest"
+why = "Only a requirement can say a symbol must be reached; a row without one may only allow or forbid."
+find = "-\tprobe::unused\tfixture\tMAY_REACH"
+replace = "-\tprobe::unused\tfixture\tMUST_REACH"
+refused = "only a requirement can say a symbol must be reached"
+
+[[case]]
+name = "an-exclusion-without-its-exception"
+kind = "manifest"
+why = "A row that forbids a path gives the reason; without it the row is refused, not read."
+find = "MUST_NOT_REACH\tactive\t-\t-\tnothing may call it"
+replace = "MUST_NOT_REACH\tactive\t-\t-\t-"
+refused = "gives its exception"
+
+[[case]]
+name = "a-requirement-master-does-not-define"
+kind = "manifest"
+why = "A row names a requirement that exists, or it is refused."
+find = "MR-FIX-0003\tprobe::gates::leaked"
+replace = "MR-FIX-0099\tprobe::gates::leaked"
+refused = "no requirement MASTER defines"
+
+[[case]]
+name = "the-gap-loses-its-known-hole"
+kind = "manifest"
+why = "A gap fails unless its requirement's §8 status marks it a known hole: under a Met requirement the same wiring gap fails."
+find = "MR-FIX-0020\tprobe::unused"
+replace = "MR-FIX-0006\tprobe::unused"
+[case.expect]
+"MR-FIX-0006:probe::unused" = "WIRING_GAP fails"
+
+[[case]]
+name = "the-direct-row-names-a-direct-path"
+kind = "manifest"
+why = "MUST_REACH_DIRECT is satisfied by a direct path only: a symbol a qualified path reaches directly satisfies it."
+find = "MR-FIX-0002\tprobe::Named::Example::static_fn"
+replace = "MR-FIX-0002\tprobe::Qualified::Example::static_fn"
+[case.expect]
+"MR-FIX-0002:probe::Qualified::Example::static_fn" = "SATISFIED -"
+
+[[case]]
+name = "the-forbidden-path-is-to-dead-code"
+kind = "manifest"
+why = "MUST_NOT_REACH holds for a symbol nothing reaches: the forbidden live path becomes correct."
+find = "MR-FIX-0004\tprobe::fold\tfixture\tMUST_NOT_REACH"
+replace = "MR-FIX-0004\tprobe::unused\tfixture\tMUST_NOT_REACH"
+[case.expect]
+"MR-FIX-0004:probe::unused" = "CORRECT -"
+
+[[case]]
+name = "dispatch-is-no-longer-enough"
+kind = "manifest"
+why = "The same dispatch-reached symbol under MUST_REACH_DIRECT: the path shape the row now demands is missing."
+find = "MR-FIX-0001\tprobe::Named::Example::static_fn\tfixture\tMUST_REACH\t"
+replace = "MR-FIX-0001\tprobe::Named::Example::static_fn\tfixture\tMUST_REACH_DIRECT\t"
+[case.expect]
+"MR-FIX-0001:probe::Named::Example::static_fn" = "DIRECT_PATH_GAP fails"

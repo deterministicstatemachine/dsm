@@ -3,6 +3,7 @@
 //! value reached code makes, an associated function (`Default::default`) only
 //! on a dispatch by type. `to_string` reaches `fmt` through a blanket impl
 //! and `T::default()` through a bound, neither of which the index shows.
+//! Two impls of one trait on one type share a path, which names both.
 
 use std::fmt;
 
@@ -22,6 +23,19 @@ impl fmt::Display for OnlyNamed {
 impl Default for OnlyNamed {
     fn default() -> Self {
         OnlyNamed
+    }
+}
+
+/// Two impls of one trait on one type: `Made::From::from` names both.
+impl From<u8> for Made {
+    fn from(_: u8) -> Self {
+        Made
+    }
+}
+
+impl From<u16> for Made {
+    fn from(_: u16) -> Self {
+        Made
     }
 }
 

@@ -189,6 +189,13 @@ jobs:
         if: ${{ !cancelled() && steps.map.outcome == 'success' }}
         run: make requirement-map-check MAP=target/requirement-map
 
+      - name: The intent manifest holds against the map
+        # specs/requirements/INTENT_MANIFEST.tsv: each row's outcome, and a
+        # failure for every gap a Met requirement has; both builds must be
+        # indexed. intent.tsv and unspecified.tsv are kept below.
+        if: ${{ !cancelled() && steps.map.outcome == 'success' }}
+        run: make requirement-map-intent MAP=target/requirement-map INTENT_BUILT=android,node
+
       - name: Every mutation case moves what it names and nothing else
         # tools/requirement_map/fixture/mutations.toml: fixture changes, the
         # app's declarations, a real-tree re-index, and faults planted in
@@ -212,6 +219,9 @@ jobs:
             target/requirement-map/token-read.tsv
             target/requirement-map/artifacts.tsv
             target/requirement-map/committed.tsv
+            target/requirement-map/intent.tsv
+            target/requirement-map/unspecified.tsv
+            target/requirement-map/root-queries.tsv
             target/requirement-map/*.log
 
   rust-gates:

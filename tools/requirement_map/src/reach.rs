@@ -161,15 +161,39 @@ fn outgoing(n: usize, edges: &[Edge]) -> Vec<Vec<usize>> {
     out
 }
 
+/// What reached code establishes about types, which a dispatch needs: the
+/// types it makes a value of, and the types it dispatches on by type.
+#[derive(Clone, Debug)]
+pub struct TypeEvidence {
+    pub constructed: HashSet<usize>,
+    pub resolved: HashSet<usize>,
+}
+
+impl TypeEvidence {
+    /// No evidence yet: the start of a build's own reach.
+    pub fn none() -> Self {
+        TypeEvidence {
+            constructed: HashSet::new(),
+            resolved: HashSet::new(),
+        }
+    }
+}
+
 /// The nodes a path of proven edges reaches from `roots`, and how each was
-/// reached.
-pub fn reached(
+/// reached, starting from `known` evidence about types; with the evidence the
+/// reach gathered. A build's reach starts from none. A
+/// root query starts from the whole build's: a value any entry point made
+/// lives in the process, so a path from the queried root may dispatch on it
+/// (the app router, made at startup, is what every later request dispatches
+/// to), while the path itself must start at that root.
+pub fn reached_with(
     n: usize,
     edges: &[Edge],
     roots: &[(usize, &'static str)],
     self_types: &SelfTypes,
     takes_value: &HashSet<usize>,
-) -> Result<Vec<Option<Via>>, String> {
+    known: &TypeEvidence,
+) -> Result<(Vec<Option<Via>>, TypeEvidence), String> {
     let out = outgoing(n, edges);
     let mut via: Vec<Option<Via>> = vec![None; n];
     let mut queue: VecDeque<usize> = VecDeque::new();
@@ -186,8 +210,8 @@ pub fn reached(
     }
     // Types reached code makes a value of, and types it dispatches on
     // (constructed ones included). Impls waiting on either, by type.
-    let mut constructed: HashSet<usize> = HashSet::new();
-    let mut resolved: HashSet<usize> = HashSet::new();
+    let mut constructed: HashSet<usize> = known.constructed.clone();
+    let mut resolved: HashSet<usize> = known.resolved.clone();
     let mut waiting_resolved: BTreeMap<usize, Vec<(usize, usize)>> = BTreeMap::new();
     let release = |list: Option<Vec<(usize, usize)>>,
                    via: &mut Vec<Option<Via>>,
@@ -248,7 +272,13 @@ pub fn reached(
             }
         }
     }
-    Ok(via)
+    Ok((
+        via,
+        TypeEvidence {
+            constructed,
+            resolved,
+        },
+    ))
 }
 
 /// The nodes proven references reach from `roots` with no dispatch step (no
@@ -422,7 +452,15 @@ mod tests {
             .copied()
             .chain(edges.iter().filter(|e| e.kind == SELF_TYPE).map(|e| e.to))
             .collect();
-        let via = reached(n, edges, roots, self_types, &takes_value)?;
+        let via = reached_with(
+            n,
+            edges,
+            roots,
+            self_types,
+            &takes_value,
+            &TypeEvidence::none(),
+        )?
+        .0;
         classify(edges, via, self_types, &takes_value, seeds, &names)
     }
 
@@ -539,14 +577,30 @@ mod tests {
         let names: Vec<String> = (0..6).map(|i| format!("n{i}")).collect();
         let names: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
         let associated_only = HashSet::new();
-        let via = reached(6, &edges, &[(0, "export")], &self_types, &associated_only)?;
+        let via = reached_with(
+            6,
+            &edges,
+            &[(0, "export")],
+            &self_types,
+            &associated_only,
+            &TypeEvidence::none(),
+        )?
+        .0;
         let r = classify(&edges, via, &self_types, &associated_only, &[], &names)?;
         assert_eq!(r.state[3], State::Reached);
         assert_eq!(r.state[5], State::Indeterminate);
         // The same impl as a method taking `self` needs a value of n2: a type
         // argument is not one.
         let method: HashSet<usize> = [3].into_iter().collect();
-        let via = reached(6, &edges, &[(0, "export")], &self_types, &method)?;
+        let via = reached_with(
+            6,
+            &edges,
+            &[(0, "export")],
+            &self_types,
+            &method,
+            &TypeEvidence::none(),
+        )?
+        .0;
         let r = classify(&edges, via, &self_types, &method, &[], &names)?;
         assert_eq!(r.state[3], State::Indeterminate);
         Ok(())
@@ -570,7 +624,15 @@ mod tests {
         let names: Vec<String> = (0..6).map(|i| format!("n{i}")).collect();
         let names: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
         let associated_only = HashSet::new();
-        let via = reached(6, &edges, &[(0, "export")], &self_types, &associated_only)?;
+        let via = reached_with(
+            6,
+            &edges,
+            &[(0, "export")],
+            &self_types,
+            &associated_only,
+            &TypeEvidence::none(),
+        )?
+        .0;
         let r = classify(&edges, via, &self_types, &associated_only, &[], &names)?;
         assert_eq!(r.state[3], State::Indeterminate);
         assert_eq!(r.state[5], State::Reached);
@@ -593,7 +655,15 @@ mod tests {
         let names: Vec<String> = (0..5).map(|i| format!("n{i}")).collect();
         let names: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
         let associated_only = HashSet::new();
-        let via = reached(5, &edges, &[(0, "export")], &self_types, &associated_only)?;
+        let via = reached_with(
+            5,
+            &edges,
+            &[(0, "export")],
+            &self_types,
+            &associated_only,
+            &TypeEvidence::none(),
+        )?
+        .0;
         let r = classify(&edges, via, &self_types, &associated_only, &[], &names)?;
         assert_eq!(r.state[4], State::Reached);
         assert_eq!(r.state[3], State::Indeterminate);
@@ -623,10 +693,58 @@ mod tests {
         let names: Vec<String> = (0..7).map(|i| format!("n{i}")).collect();
         let names: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
         let associated_only = HashSet::new();
-        let via = reached(7, &edges, &[(0, "export")], &self_types, &associated_only)?;
+        let via = reached_with(
+            7,
+            &edges,
+            &[(0, "export")],
+            &self_types,
+            &associated_only,
+            &TypeEvidence::none(),
+        )?
+        .0;
         let r = classify(&edges, via, &self_types, &associated_only, &[], &names)?;
         assert_eq!(r.state[3], State::Reached);
         assert_eq!(r.state[5], State::Indeterminate);
+        Ok(())
+    }
+
+    #[test]
+    fn a_root_query_dispatches_on_a_value_another_entry_point_made() -> Result<(), String> {
+        // Entry 0 makes a value of type 2 (a router, at startup); entry 1
+        // calls trait method 3, which dispatches to impl 4 (Self type 2).
+        let edges = [
+            edge(0, 2, CONSTRUCT),
+            edge(1, 3, "reference"),
+            edge(3, 4, TRAIT_DISPATCH),
+        ];
+        let mut self_types = SelfTypes::new();
+        self_types.insert(4, SelfType::Known(2));
+        let takes_value: HashSet<usize> = [4].into_iter().collect();
+        let both = [(0, "export"), (1, "export")];
+        let (_, build) = reached_with(
+            5,
+            &edges,
+            &both,
+            &self_types,
+            &takes_value,
+            &TypeEvidence::none(),
+        )?;
+        // From entry 1 with no evidence, the impl waits for a value.
+        let alone = [(1, "query")];
+        let (unseeded, _) = reached_with(
+            5,
+            &edges,
+            &alone,
+            &self_types,
+            &takes_value,
+            &TypeEvidence::none(),
+        )?;
+        assert_eq!(unseeded[4], None);
+        // With the build's evidence it runs: the value lives in the process.
+        let (seeded, _) = reached_with(5, &edges, &alone, &self_types, &takes_value, &build)?;
+        assert!(matches!(seeded[4], Some(Via::Edge(_))));
+        // The other entry point's code is not on the query's path.
+        assert_eq!((seeded[0].clone(), seeded[2].clone()), (None, None));
         Ok(())
     }
 

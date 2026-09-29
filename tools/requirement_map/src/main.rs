@@ -49,7 +49,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-const USAGE: &str = "usage:\n  requirement_map fixture --root <fixture> --scip <scip> --log <log> --jni-declarations <dir> --crate <src-prefix> --package <name> [--features <tree> --features-indexed <tree>] --expect <tsv> [--out <dir>]\n  requirement_map fingerprint --root <repo> --files <list> --inputs <list> --out <file>\n  requirement_map index --root <repo> --files <list> --inputs <list> --fingerprint <file> --android <scip> --android-log <log> [--node <scip> --node-log <log>] --tests <scip> --tests-log <log> --android-features <tree> --android-features-indexed <tree> --android-packages <tree> [--node-features <tree> --node-features-indexed <tree>] --node-packages <tree> --jni-declarations <dir> [--unindexed-consumer <dir>] [--target-dir <dir>] --out <dir>";
+const USAGE: &str = "usage:\n  requirement_map fixture --root <fixture> --scip <scip> --log <log> --jni-declarations <dir> --crate <src-prefix> --package <name> [--features <tree> --features-indexed <tree>] [--root-queries <tsv>] --expect <tsv> [--out <dir>]\n  requirement_map fingerprint --root <repo> --files <list> --inputs <list> --out <file>\n  requirement_map index --root <repo> --files <list> --inputs <list> --fingerprint <file> --android <scip> --android-log <log> [--node <scip> --node-log <log>] --tests <scip> --tests-log <log> --android-features <tree> --android-features-indexed <tree> --android-packages <tree> [--node-features <tree> --node-features-indexed <tree>] --node-packages <tree> --jni-declarations <dir> [--unindexed-consumer <dir>] [--target-dir <dir>] [--root-queries <tsv>] --out <dir>";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -516,12 +516,14 @@ fn index_command(flags: &Flags) -> Result<String, String> {
             excluded: node_excluded,
         },
     ];
+    let queries = root_queries(flags)?;
     let the_map = graph::build(
         root,
         &graph::Inputs {
             artifacts,
             tests: &tests.loaded,
             declared_jni: &declared,
+            root_queries: queries.as_deref(),
         },
     )?;
     let out = flags.path("--out")?;
@@ -533,6 +535,9 @@ fn index_command(flags: &Flags) -> Result<String, String> {
     write_defs(&the_map, &write)?;
     write_reach(&the_map, &write)?;
     write_edges(&the_map, &write)?;
+    if queries.is_some() {
+        write_root_answers(&the_map, &write)?;
+    }
 
     let profiles: Vec<&Profile> = [Some(&android), node.as_ref(), Some(&tests)]
         .into_iter()
@@ -663,12 +668,14 @@ fn fixture_command(flags: &Flags) -> Result<String, String> {
         unindexed: None,
         excluded,
     }];
+    let queries = root_queries(flags)?;
     let the_map = graph::build(
         root,
         &graph::Inputs {
             artifacts,
             tests: &profile.loaded,
             declared_jni: &declared,
+            root_queries: queries.as_deref(),
         },
     )?;
     if let Some(out) = flags.optional("--out") {
@@ -680,6 +687,9 @@ fn fixture_command(flags: &Flags) -> Result<String, String> {
         write_defs(&the_map, &write)?;
         write_reach(&the_map, &write)?;
         write_edges(&the_map, &write)?;
+        if queries.is_some() {
+            write_root_answers(&the_map, &write)?;
+        }
     }
     let expect_path = flags.path("--expect")?;
     let expect = std::fs::read_to_string(expect_path)
@@ -842,6 +852,58 @@ fn write_reach(
         }
     }
     write("reach.tsv", &out)
+}
+
+/// The questions `--root-queries` names (`artifact root symbol`, one per
+/// line under that header); `None` when nothing was asked.
+fn root_queries(flags: &Flags) -> Result<Option<Vec<graph::RootQuery>>, String> {
+    let Some(path) = flags.optional("--root-queries") else {
+        return Ok(None);
+    };
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut lines = text.lines();
+    if lines.next() != Some("artifact\troot\tsymbol") {
+        return Err(format!(
+            "{}: not headed `artifact root symbol`",
+            path.display()
+        ));
+    }
+    lines
+        .map(
+            |line| match line.split('\t').collect::<Vec<_>>().as_slice() {
+                [artifact, root, symbol] => Ok(graph::RootQuery {
+                    artifact: artifact.to_string(),
+                    root: root.to_string(),
+                    symbol: symbol.to_string(),
+                }),
+                cells => Err(format!(
+                    "{}: {} cells in {line:?}",
+                    path.display(),
+                    cells.len()
+                )),
+            },
+        )
+        .collect::<Result<Vec<_>, String>>()
+        .map(Some)
+}
+
+/// root-queries.tsv: each root query with the map's answer.
+fn write_root_answers(
+    the_map: &graph::Map,
+    write: &dyn Fn(&str, &str) -> Result<(), String>,
+) -> Result<(), String> {
+    let mut out = String::from("artifact\troot\tsymbol\tstate\tcode\n");
+    for a in &the_map.root_answers {
+        out.push_str(&format!(
+            "{}\t{}\t{}\t{}\t{}\n",
+            cell(&a.artifact)?,
+            cell(&a.root)?,
+            cell(&a.symbol)?,
+            a.state,
+            a.code
+        ));
+    }
+    write("root-queries.tsv", &out)
 }
 
 fn write_edges(

@@ -2,13 +2,16 @@
 //! The rule-coverage table, `../rules.tsv`, checked against what it names.
 //! Every rule the map can apply has one row, and every row names such a rule:
 //! the reason codes (`reach::code`), the edge kinds (each crate-level
-//! `pub const …: &str`), the entry-point kinds (`graph::root`) and the rules
-//! `ci/requirement_map.py`'s check can name (its `CHECK_RULES`, read by
-//! running Python). Every unit test, fixture reading, mutation case and
+//! `pub const …: &str`), the entry-point kinds (`graph::root`), the rules
+//! `ci/requirement_map.py`'s check can name (its `CHECK_RULES`) and the intent
+//! comparator's outcomes (`ci/intent_comparator.py`'s `OUTCOMES`), both read
+//! by running Python. Every unit test, fixture reading, mutation case and
 //! sentinel a row cites exists. A code's positive reading and sentinel read
-//! that code and its negative does not; a code's mutation moves a reading to
-//! or from it; a check rule's mutation is a planted case naming it. A row with
-//! an empty column says why.
+//! that code and its negative does not; an outcome's positive is a fixture
+//! manifest row (`requirement:symbol`) with that outcome and its negative one
+//! without; a code's or an outcome's mutation moves a reading or an outcome
+//! to or from it; a check rule's mutation is a planted case naming it. A row
+//! with an empty column says why.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -168,22 +171,42 @@ fn sources() -> Result<(BTreeSet<String>, BTreeMap<&'static str, BTreeSet<String
     Ok((tests.0, rules))
 }
 
-/// The check's rules, as Python reads `ci/requirement_map.py` (from the
-/// repository's root, where it finds the modules it loads).
-fn check_rules() -> Result<BTreeSet<String>, String> {
+/// A name list a `ci/` module declares (`CHECK_RULES`, `OUTCOMES`), as
+/// Python reads it from the repository's root, where the module finds the
+/// modules it loads.
+fn python_names(module: &str, names: &str) -> Result<BTreeSet<String>, String> {
     let out = std::process::Command::new("python3")
         .arg("-c")
-        .arg("import sys; sys.path.insert(0, 'ci'); import requirement_map; print('\\n'.join(requirement_map.CHECK_RULES))")
+        .arg(format!(
+            "import sys; sys.path.insert(0, 'ci'); import {module}; print('\\n'.join({module}.{names}))"
+        ))
         .current_dir(crate_dir().join("../.."))
         .output()
         .map_err(|e| format!("python3: {e}"))?;
     if !out.status.success() {
         let why =
             String::from_utf8(out.stderr).map_err(|e| format!("python3's error output: {e}"))?;
-        return Err(format!("python3 could not read CHECK_RULES: {why}"));
+        return Err(format!("python3 could not read {module}.{names}: {why}"));
     }
     let text = String::from_utf8(out.stdout).map_err(|e| format!("python3's output: {e}"))?;
     Ok(text.lines().map(str::to_string).collect())
+}
+
+/// The fixture manifest's outcomes: `requirement:symbol` -> outcome.
+fn fixture_outcomes() -> Result<BTreeMap<String, String>, String> {
+    let text = read(&crate_dir().join("fixture/intent-expected.tsv"))?;
+    let mut lines = table_lines(&text);
+    lines.next().ok_or("intent-expected.tsv has no header")?;
+    lines
+        .map(
+            |line| match line.split('\t').collect::<Vec<_>>().as_slice() {
+                [requirement, symbol, _artifact, _reachability, _lifecycle, _root, outcome, _fails] => {
+                    Ok((format!("{requirement}:{symbol}"), outcome.to_string()))
+                }
+                cells => Err(format!("intent-expected.tsv: {} cells in {line:?}", cells.len())),
+            },
+        )
+        .collect()
 }
 
 /// The fixture's readings: key -> code.
@@ -242,15 +265,21 @@ fn text_of<'a>(case: &'a toml::Table, key: &str) -> Option<&'a str> {
     case.get(key).and_then(|v| v.as_str())
 }
 
-/// Whether a case moves some reading to `code` or from it.
+/// Whether a case moves some reading (or manifest row's outcome) to `code`
+/// or from it: an expected value's first word is the outcome, its second the
+/// reading's code.
 fn moves(case: &toml::Table, code: &str, readings: &BTreeMap<String, String>) -> bool {
     let expect = case.get("expect").and_then(|e| e.as_table());
     expect
         .into_iter()
         .flat_map(|t| t.iter())
         .any(|(key, value)| {
-            let to = value.as_str().and_then(|v| v.split(' ').nth(1));
-            to == Some(code) || readings.get(key).map(String::as_str) == Some(code)
+            let words: Vec<&str> = value
+                .as_str()
+                .into_iter()
+                .flat_map(|v| v.split(' '))
+                .collect();
+            words.contains(&code) || readings.get(key).map(String::as_str) == Some(code)
         })
 }
 
@@ -258,8 +287,10 @@ fn moves(case: &toml::Table, code: &str, readings: &BTreeMap<String, String>) ->
 fn every_rule_has_a_row_and_every_citation_exists() -> Result<(), String> {
     let rows = rows()?;
     let (tests, mut defined) = sources()?;
-    defined.insert("check", check_rules()?);
-    let readings = fixture_readings()?;
+    defined.insert("check", python_names("requirement_map", "CHECK_RULES")?);
+    defined.insert("outcome", python_names("intent_comparator", "OUTCOMES")?);
+    let fixture_readings = fixture_readings()?;
+    let outcomes = fixture_outcomes()?;
     let sentinels = sentinels()?;
     let cases = cases()?;
     let mut faults: Vec<String> = Vec::new();
@@ -287,10 +318,20 @@ fn every_rule_has_a_row_and_every_citation_exists() -> Result<(), String> {
                 faults.push(format!("{rule}: no unit test {t}"));
             }
         }
-        let code_row = row.kind == "code";
+        // What a row's positive and negative name: a manifest row's outcome
+        // for an outcome, a fixture reading's code for anything else.
+        let readings = match row.kind.as_str() {
+            "outcome" => &outcomes,
+            _ => &fixture_readings,
+        };
+        let code_row = matches!(row.kind.as_str(), "code" | "outcome");
+        let what = match row.kind.as_str() {
+            "outcome" => "fixture manifest row",
+            _ => "fixture reading",
+        };
         for key in &row.positive {
             match readings.get(key) {
-                None => faults.push(format!("{rule}: no fixture reading {key}")),
+                None => faults.push(format!("{rule}: no {what} {key}")),
                 Some(code) if code_row && code != rule => {
                     faults.push(format!("{rule}: its positive {key} reads {code}"))
                 }
@@ -299,7 +340,7 @@ fn every_rule_has_a_row_and_every_citation_exists() -> Result<(), String> {
         }
         for key in &row.negative {
             match readings.get(key) {
-                None => faults.push(format!("{rule}: no fixture reading {key}")),
+                None => faults.push(format!("{rule}: no {what} {key}")),
                 Some(code) if code_row && code == rule => {
                     faults.push(format!("{rule}: its negative {key} reads it"))
                 }
@@ -316,7 +357,7 @@ fn every_rule_has_a_row_and_every_citation_exists() -> Result<(), String> {
                 "check" if !planted || text_of(case, "rule") != Some(rule.as_str()) => {
                     faults.push(format!("{rule}: {name} is not a planted case naming it"))
                 }
-                "code" if !moves(case, rule, &readings) => {
+                "code" | "outcome" if !moves(case, rule, readings) => {
                     faults.push(format!("{rule}: {name} moves no reading to or from it"))
                 }
                 _ => {}

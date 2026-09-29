@@ -1,0 +1,25 @@
+# Each fixture manifest row's outcome, in order, and whether it fails CI
+# (`fails`), is its requirement's known hole (`known-hole`) or neither (`-`).
+requirement	symbol	artifact	reachability	lifecycle	root	outcome	fails
+MR-FIX-0001	probe::fold	fixture	MUST_REACH	active	-	SATISFIED	-
+MR-FIX-0001	probe::Named::Example::static_fn	fixture	MUST_REACH	active	-	SATISFIED	-
+MR-FIX-0002	probe::Named::Example::static_fn	fixture	MUST_REACH_DIRECT	active	-	DIRECT_PATH_GAP	fails
+MR-FIX-0002	probe::fold	fixture	MUST_REACH_DIRECT	active	-	SATISFIED	-
+MR-FIX-0003	probe::Never::Example::instance_fn	fixture	MUST_REACH	active	-	UNDECIDED	fails
+MR-FIX-0003	probe::unused	fixture	MUST_REACH	active	-	WIRING_GAP	fails
+MR-FIX-0003	probe::gates::leaked	fixture	MUST_REACH	active	-	ARTIFACT_GAP	fails
+MR-FIX-0004	probe::roots::on_load	fixture	MUST_REACH	active	probe::roots::JNI_OnLoad	SATISFIED	-
+MR-FIX-0005	probe::roots::on_load	fixture	MUST_REACH	active	probe::Java_fixture_Probe_entry	ROOT_MISMATCH	fails
+MR-FIX-0004	probe::fold	fixture	MUST_NOT_REACH	active	-	UNEXPECTED_LIVE_PATH	fails
+MR-FIX-0004	probe::paths::Inherent::get	fixture	MUST_NOT_REACH	test-only	-	PRODUCTION_LEAK	fails
+MR-FIX-0004	probe::macros::len	fixture	MUST_NOT_REACH	active	-	CORRECT	-
+MR-FIX-0004	probe::Never::Example::instance_fn	fixture	MUST_NOT_REACH	active	-	UNDECIDED	fails
+-	probe::unused	fixture	MAY_REACH	active	-	CORRECT	-
+MR-FIX-0005	probe::paths::Inherent::get	fixture	MAY_REACH	deprecated	-	REMOVAL_CANDIDATE	-
+MR-FIX-0005	probe::paths::Inherent::never_called	fixture	MAY_REACH	deprecated	-	DELETE	-
+MR-FIX-0005	probe::nowhere	fixture	MUST_REACH	active	-	MISSING_SYMBOL	fails
+MR-FIX-0005	probe::outside::Made::From::from	fixture	MUST_REACH	active	-	AMBIGUOUS_SYMBOL	fails
+MR-FIX-0020	probe::unused	fixture	MUST_REACH	active	-	WIRING_GAP	known-hole
+MR-FIX-0006	probe::gates::leaked	fixture	MUST_NOT_REACH	target-specific	-	CORRECT	-
+MR-FIX-0007	probe::installed::Installed::Example::instance_fn	fixture	MUST_REACH	active	probe::installed::Java_fixture_Probe_query	SATISFIED	-
+MR-FIX-0008	probe::main	fixture	MUST_REACH	active	probe::Java_fixture_Probe_entry	SATISFIED	-
