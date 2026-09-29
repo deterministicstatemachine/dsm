@@ -1571,6 +1571,38 @@ A finding stays until it is fixed or disproved, whatever a later change touches.
 |---|---|
 | `dsm/src/economic/provenance.rs` · P15-9 | Unchanged (§6.30): the peer walk refuses a resolved SoFi position. A trader whose setup follows a SoFi position of its own has no setup claim another verifier can accept, so its later routes stay unjudgeable by others. |
 
+### 6.41 The device tree keeps its nodes: a write rehashes its path, a head loads in one build (`fix/smt-incremental-root`, 2026-09-29)
+
+**The finding** (found on `test/dsm-core-violated-rows-reverified`). `SparseMerkleTree::update_leaf` recomputed the root from every leaf on every write, splitting the whole key set at each of the 256 levels, and `get_inclusion_proof` did the same for each sibling. `DeviceState::restore` wrote every relationship tip and every other leaf through `update_leaf` one at a time, so loading a head was quadratic in its leaf count, and `establish_relationship` and `advance` paid for the whole tree on every step. A liveness defect, not a question of what the root is: the root is a pure function of the leaves (MR-DSM-0116, 0117, 0121), and it is unchanged.
+
+**Measured** in release on one machine, with a probe since deleted. Heads of 100, 1,000 and 5,000 leaves beside the device's own relationship; "one step" is a clone of the tree and one write with its path against the pre-root, as `advance` does. Each run printed the same root before and after the change.
+
+| | 101 leaves | 1,001 leaves | 5,001 leaves |
+|---|---|---|---|
+| `restore`, before | 197 ms | 18.9 s | 487.5 s |
+| `restore`, after | 3 ms | 34 ms | 173 ms |
+| one step, before | 7.7 ms | 75 ms | 578 ms |
+| one step, after | 38 µs | 49 µs | 116 µs |
+
+Establishing 1,025 relationships one after another: 20.2 s before, 79 ms after.
+
+**Changed**
+
+| Where | What |
+|---|---|
+| `dsm` · merkle/sparse_merkle_tree.rs | The tree keeps the hashes of its non-empty nodes, path-compressed: one leaf per key and one branch per level where the held keys separate, each branch holding its two children's hashes. `update_leaf` rehashes the written leaf's path, and on a new key the edge it splits; `get_inclusion_proof` reads its siblings from the kept hashes and lifts one subtree at most; `from_leaves` builds the nodes in one pass over the sorted keys. The full recomputation (`compute_subtree_hash`, `compute_subtree`, `collect_siblings`) is deleted from the shipped tree. |
+| `dsm` · types/device_state.rs · `DeviceState::restore` | Builds the tree once over the device's own relationship, every tip and then every other leaf, a later leaf at a key replacing an earlier one as before. The loader's check of the rebuilt root against the stored one (`dsm_sdk` · storage/client_db/bcr.rs) is unchanged. |
+
+**Evidence**
+
+- `dsm::merkle::sparse_merkle_tree::tests::a_written_root_is_the_recomputed_root` (property, 256 cases in release): after every write of a random sequence, rewrites and zero-valued leaves included, the root is the one the removed full recomputation gives over the leaves written so far, and `from_leaves` over the same writes gives it too. Keys are drawn near one base key with a random shared prefix, so branches occur at every level down to keys that differ in their last bit.
+- `dsm::merkle::sparse_merkle_tree::tests::a_kept_path_is_the_recomputed_path` (property): the path to a held key, to a random key and to a key sharing a random prefix with a held one is the recomputation's path, and folds to the root.
+- `dsm::merkle::sparse_merkle_tree::tests::a_large_tree_keeps_the_recomputed_root` (1,000 leaves) and `dsm::types::device_state::tests::a_restored_head_recomputes_the_live_root` (a restored head recomputes the live root; a tip or an extra leaf left out of the build moves it).
+- The golden and domain-separation vectors (`dsm::smt_tripwire_vectors`, `dsm::smt_tripwire_theorem`, `dsm::domain_encoding_byte_preservation`) pass unchanged.
+- Mutation controls (2026-09-29, each restored): a rewrite leaving the branch's old child hash, a split putting the new leaf always left, a path dropping the sibling where an absent key leaves the tree, the one-pass build swapping a branch's children, and `restore` building without the extra leaves each turned a named test above red.
+
+**Not found.** The finding said `extra_leaves` grows by a settlement receipt leaf per settlement. On `main` it holds anchor-state, token adoption and offline allocation leaves, each rewritten in place at its own key. No leaf is added per settlement. The fix does not depend on which it is.
+
 ## 7 Totals
 
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |
