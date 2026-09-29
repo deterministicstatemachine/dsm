@@ -24,6 +24,11 @@ use syn::visit::Visit;
 pub fn features(tree: &str) -> Result<BTreeMap<String, BTreeSet<String>>, String> {
     let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for line in tree.lines().filter(|l| !l.trim().is_empty()) {
+        if line.contains('\u{1b}') {
+            return Err(format!(
+                "{line:?} holds terminal escape codes: run `cargo tree` with `--color never`"
+            ));
+        }
         let malformed = || format!("{line:?} is not a `cargo tree -f '{{p}} {{f}}'` line");
         let mut words = line.trim().splitn(3, ' ');
         let (Some(package), Some(_version)) = (words.next(), words.next()) else {
@@ -924,6 +929,11 @@ mod tests {
         assert_eq!(f.get("derive"), Some(&set(&["default"])));
         assert_eq!(f.get("serde"), Some(&set(&[])));
         // A line that is not a package line is refused, never skipped.
+        // Colored output (CARGO_TERM_COLOR=always) is refused by name.
+        match features("proc-macro2 v1.0.106 default \u{1b}[33m(*)\u{1b}[39m\n") {
+            Err(e) => assert!(e.contains("--color never"), "{e}"),
+            Ok(read) => return Err(format!("colored output was read as {read:?}")),
+        }
         for malformed in ["dsm_sdk\n", "a v1 (/open path\n", "a v1 one two\n"] {
             match features(malformed) {
                 Err(e) => assert!(e.contains("cargo tree"), "{e}"),
