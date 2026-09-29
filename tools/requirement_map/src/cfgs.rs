@@ -83,6 +83,75 @@ pub fn features(tree: &str) -> Result<BTreeMap<String, BTreeSet<String>>, String
     Ok(out)
 }
 
+/// The workspace packages a build links, with each one's source directory
+/// (`<dir>/src/`, relative to `root`), read from `cargo tree -e normal
+/// --prefix none -f '{p}'` over that build: a line is a package's name and
+/// version, then its source in parentheses, which for a package in the
+/// repository is its absolute directory. Packages from a registry or a git
+/// source are no source of the repository's and are left out.
+pub fn linked_packages(tree: &str, root: &Path) -> Result<Vec<(String, String)>, String> {
+    let root = root
+        .canonicalize()
+        .map_err(|e| format!("{}: {e}", root.display()))?;
+    let mut out: Vec<(String, String)> = Vec::new();
+    for line in tree.lines().filter(|l| !l.trim().is_empty()) {
+        if line.contains('\u{1b}') {
+            return Err(format!(
+                "{line:?} holds terminal escape codes: run `cargo tree` with `--color never`"
+            ));
+        }
+        let mut words = line.trim().splitn(3, ' ');
+        let (Some(package), Some(_version)) = (words.next(), words.next()) else {
+            return Err(format!("{line:?} is not a `cargo tree -f '{{p}}'` line"));
+        };
+        let rest = match words.next() {
+            Some(rest) => rest,
+            None => continue,
+        };
+        // The source: the first parenthesized group, up to its matching `)`.
+        let Some(open) = rest.strip_prefix('(') else {
+            continue;
+        };
+        let mut depth = 1usize;
+        let mut end = None;
+        for (at, c) in open.char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(at);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let source = &open[..end.ok_or_else(|| format!("{line:?}: an unclosed `(`"))?];
+        let dir = Path::new(source);
+        // Outside the repository (another checkout, a registry path): not a
+        // source of this map's.
+        if !dir.is_absolute() || !dir.starts_with(&root) {
+            continue;
+        }
+        let relative = dir
+            .strip_prefix(&root)
+            .map_err(|e| format!("{line:?}: {e}"))?;
+        // A package at the root's sources are `src/`.
+        let prefix = match crate::path_text(relative).map_err(|e| format!("{line:?}: {e}"))? {
+            dir if dir.is_empty() => "src/".to_string(),
+            dir => format!("{dir}/src/"),
+        };
+        if !out.iter().any(|(p, _)| p == package) {
+            out.push((package.to_string(), prefix));
+        }
+    }
+    if out.is_empty() {
+        return Err("the build links no package of the repository".to_string());
+    }
+    Ok(out)
+}
+
 /// A three-valued truth: a `cfg` the map can decide, or not.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Truth {
@@ -101,34 +170,100 @@ impl Truth {
     }
 }
 
+/// A shipped build's target, as `cfg` reads it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Target {
+    pub os: String,
+    pub family: String,
+    pub arch: String,
+}
+
+impl Target {
+    /// The Android library's: `aarch64-linux-android`.
+    pub fn android() -> Self {
+        Target {
+            os: "android".to_string(),
+            family: "unix".to_string(),
+            arch: "aarch64".to_string(),
+        }
+    }
+
+    /// The storage node's: `x86_64-unknown-linux-gnu`.
+    pub fn node() -> Self {
+        Target {
+            os: "linux".to_string(),
+            family: "unix".to_string(),
+            arch: "x86_64".to_string(),
+        }
+    }
+
+    /// The host this map runs on (a fixture is indexed for it).
+    pub fn host() -> Self {
+        Target {
+            os: std::env::consts::OS.to_string(),
+            family: std::env::consts::FAMILY.to_string(),
+            arch: std::env::consts::ARCH.to_string(),
+        }
+    }
+}
+
 /// Evaluates a `cfg` predicate with a package's features: `feature = "x"` is
 /// decided by them, `test` is off (no shipped build is a test build), and
 /// every other condition is unknown to this evaluator.
 pub fn evaluate(tokens: &[TokenTree], features: &BTreeSet<String>) -> Result<Truth, String> {
-    match tokens {
-        [TokenTree::Ident(i)] if i == "test" => Ok(Truth::No),
-        [TokenTree::Ident(i), TokenTree::Punct(eq), TokenTree::Literal(value)]
-            if i == "feature" && eq.as_char() == '=' =>
-        {
-            let name = value.to_string().trim_matches('"').to_string();
-            Ok(if features.contains(&name) {
-                Truth::Yes
-            } else {
-                Truth::No
-            })
+    evaluate_in(tokens, features, None)
+}
+
+/// Evaluates a `cfg` predicate for one shipped build: its package's
+/// features, its target (`target_os`, `target_family`, `target_arch`,
+/// `unix`, `windows`), and neither `test` nor `debug_assertions` (a release
+/// build, no test). Every other condition is unknown.
+pub fn evaluate_for(
+    tokens: &[TokenTree],
+    features: &BTreeSet<String>,
+    target: &Target,
+) -> Result<Truth, String> {
+    evaluate_in(tokens, features, Some(target))
+}
+
+fn evaluate_in(
+    tokens: &[TokenTree],
+    features: &BTreeSet<String>,
+    target: Option<&Target>,
+) -> Result<Truth, String> {
+    let truth = |holds: bool| if holds { Truth::Yes } else { Truth::No };
+    match (tokens, target) {
+        ([TokenTree::Ident(i)], _) if i == "test" => Ok(Truth::No),
+        ([TokenTree::Ident(i)], Some(_)) if i == "debug_assertions" => Ok(Truth::No),
+        ([TokenTree::Ident(i)], Some(t)) if i == "unix" || i == "windows" => {
+            Ok(truth(t.family == i.to_string()))
         }
-        [TokenTree::Ident(op), TokenTree::Group(g)] if g.delimiter() == Delimiter::Parenthesis => {
+        ([TokenTree::Ident(i), TokenTree::Punct(eq), TokenTree::Literal(value)], _)
+            if eq.as_char() == '=' =>
+        {
+            let value = value.to_string().trim_matches('"').to_string();
+            match (i.to_string().as_str(), target) {
+                ("feature", _) => Ok(truth(features.contains(&value))),
+                ("target_os", Some(t)) => Ok(truth(t.os == value)),
+                ("target_family", Some(t)) => Ok(truth(t.family == value)),
+                ("target_arch", Some(t)) => Ok(truth(t.arch == value)),
+                _ => Ok(Truth::Unknown),
+            }
+        }
+        ([TokenTree::Ident(op), TokenTree::Group(g)], _)
+            if g.delimiter() == Delimiter::Parenthesis =>
+        {
             let inner: Vec<TokenTree> = g.stream().into_iter().collect();
             let parts = split_commas(&inner);
             match op.to_string().as_str() {
                 "not" => match parts.as_slice() {
-                    [one] => Ok(evaluate(one, features)?.not()),
+                    [one] => Ok(evaluate_in(one, features, target)?.not()),
                     _ => Err(format!("not(…) takes one predicate, found {}", parts.len())),
                 },
                 "any" => {
                     let mut result = Truth::No;
                     for p in &parts {
-                        match evaluate(p, features)? {
+                        match evaluate_in(p, features, target)? {
                             Truth::Yes => return Ok(Truth::Yes),
                             Truth::Unknown => result = Truth::Unknown,
                             Truth::No => {}
@@ -139,7 +274,7 @@ pub fn evaluate(tokens: &[TokenTree], features: &BTreeSet<String>) -> Result<Tru
                 "all" => {
                     let mut result = Truth::Yes;
                     for p in &parts {
-                        match evaluate(p, features)? {
+                        match evaluate_in(p, features, target)? {
                             Truth::No => return Ok(Truth::No),
                             Truth::Unknown => result = Truth::Unknown,
                             Truth::Yes => {}
@@ -909,6 +1044,58 @@ mod tests {
         let p = predicate("all(feature = \"test-utils\", target_os = \"android\")")?;
         assert_eq!(evaluate(&p, &set(&["test-utils"]))?, Truth::Unknown);
         assert_eq!(evaluate(&p, &set(&[]))?, Truth::No);
+        Ok(())
+    }
+
+    #[test]
+    fn a_build_s_packages_are_read_with_their_directories() -> Result<(), String> {
+        let root = std::env::temp_dir();
+        let root = root.canonicalize().map_err(|e| e.to_string())?;
+        let tree = format!(
+            "dsm_sdk v0.1.0 ({r}/a b/dsm_sdk)\nserde v1.0.1\ndsm v0.1.0 ({r}/dsm) (*)\nlibtropic v0.1 (https://github.com/x/y#abc)\nother v1 (/elsewhere/other)\nat_root v0.1.0 ({r})\n",
+            r = root.display()
+        );
+        let got = linked_packages(&tree, &root)?;
+        assert_eq!(
+            got,
+            vec![
+                ("dsm_sdk".to_string(), "a b/dsm_sdk/src/".to_string()),
+                ("dsm".to_string(), "dsm/src/".to_string()),
+                // A package at the repository's root: its sources are `src/`.
+                ("at_root".to_string(), "src/".to_string()),
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_shipped_build_decides_its_target_and_its_profile() -> Result<(), String> {
+        let p = |text: &str| -> Result<Vec<TokenTree>, String> {
+            Ok(TokenStream::from_str(text)
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .collect())
+        };
+        let jni = set(&["jni"]);
+        let android = Target::android();
+        let gate = p("not(all(target_os = \"android\", feature = \"jni\"))")?;
+        assert_eq!(evaluate_for(&gate, &jni, &android)?, Truth::No);
+        assert_eq!(evaluate_for(&gate, &jni, &Target::node())?, Truth::Yes);
+        assert_eq!(evaluate_for(&p("unix")?, &jni, &android)?, Truth::Yes);
+        assert_eq!(evaluate_for(&p("windows")?, &jni, &android)?, Truth::No);
+        assert_eq!(
+            evaluate_for(&p("debug_assertions")?, &jni, &android)?,
+            Truth::No
+        );
+        assert_eq!(
+            evaluate_for(&p("target_pointer_width = \"64\"")?, &jni, &android)?,
+            Truth::Unknown
+        );
+        // Without a target, only features and `test` are decided.
+        assert_eq!(
+            evaluate(&p("target_os = \"android\"")?, &jni)?,
+            Truth::Unknown
+        );
         Ok(())
     }
 

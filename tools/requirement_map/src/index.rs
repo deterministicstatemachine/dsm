@@ -73,6 +73,19 @@ pub struct Evidence {
     pub at: String,
     /// Why the index does not prove this edge; `None` when it does.
     pub doubt: Option<Doubt>,
+    /// Every place the edge is written: each occurrence it is read from, with
+    /// that occurrence's own doubt. A build whose `cfg` turns a site off does
+    /// not compile that site. Empty for an edge read from definitions (a
+    /// member, an impl, a dispatch), which a gate takes out with them.
+    pub sites: Vec<Site>,
+}
+
+/// One occurrence an edge is read from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Site {
+    pub file: String,
+    pub at: Position,
+    pub doubt: Option<Doubt>,
 }
 
 pub type Edges = BTreeMap<(String, String, &'static str), Evidence>;
@@ -566,6 +579,11 @@ pub fn load(bytes: &[u8], root: &Path) -> Result<Loaded, String> {
                             Evidence {
                                 at: format!("{path}:{}", at.line + 1),
                                 doubt: doubt.clone(),
+                                sites: vec![Site {
+                                    file: path.clone(),
+                                    at: *at,
+                                    doubt: doubt.clone(),
+                                }],
                             },
                         );
                         if type_defs.contains_key(to.as_str()) {
@@ -615,6 +633,11 @@ pub fn load(bytes: &[u8], root: &Path) -> Result<Loaded, String> {
             Evidence {
                 at: format!("{path}:{}", at.line + 1),
                 doubt: doubt.clone(),
+                sites: vec![Site {
+                    file: path.clone(),
+                    at: *at,
+                    doubt: doubt.clone(),
+                }],
             },
         );
     }
@@ -688,11 +711,19 @@ pub fn load(bytes: &[u8], root: &Path) -> Result<Loaded, String> {
 }
 
 /// Records an edge; a proven reading of it replaces an uncertain one.
+/// Adds an edge, or another place it is written: the sites add up, and a
+/// proven site proves an edge only doubted sites held before.
 pub fn add_edge(edges: &mut Edges, from: &str, to: &str, kind: &'static str, evidence: Evidence) {
     let key = (from.to_string(), to.to_string(), kind);
-    match edges.get(&key) {
-        Some(existing) if existing.doubt.is_none() || evidence.doubt.is_some() => {}
-        _ => {
+    match edges.get_mut(&key) {
+        Some(existing) => {
+            if existing.doubt.is_some() && evidence.doubt.is_none() {
+                existing.at = evidence.at;
+                existing.doubt = None;
+            }
+            existing.sites.extend(evidence.sites);
+        }
+        None => {
             edges.insert(key, evidence);
         }
     }
@@ -1030,6 +1061,7 @@ fn add_impl_edges(
                     Evidence {
                         at: at.clone(),
                         doubt: owner_doubt.clone(),
+                        sites: Vec::new(),
                     },
                 );
             }
@@ -1065,6 +1097,7 @@ fn add_impl_edges(
                     Evidence {
                         at: at.clone(),
                         doubt: owner_doubt.clone(),
+                        sites: Vec::new(),
                     },
                 );
             }
@@ -1108,6 +1141,7 @@ fn add_impl_edges(
                 Evidence {
                     at: at.clone(),
                     doubt: trait_doubt.clone(),
+                    sites: Vec::new(),
                 },
             );
             for from in trait_methods
@@ -1123,6 +1157,7 @@ fn add_impl_edges(
                     Evidence {
                         at: at.clone(),
                         doubt: trait_doubt.clone(),
+                        sites: Vec::new(),
                     },
                 );
             }

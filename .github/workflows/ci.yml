@@ -178,7 +178,23 @@ jobs:
         run: make requirement-map-fixture MAP=target/requirement-map
 
       - name: Map
+        id: map
         run: make requirement-map MAP=target/requirement-map
+
+      - name: The map holds no contradiction and keeps its committed facts
+        # Contradictions in its own tables; sentinels, entry points and
+        # counts against ci/requirement_map.*.tsv. committed.tsv (kept below)
+        # is what this map reads, for a person to review and commit.
+        id: check
+        if: ${{ !cancelled() && steps.map.outcome == 'success' }}
+        run: make requirement-map-check MAP=target/requirement-map
+
+      - name: Every mutation case moves what it names and nothing else
+        # tools/requirement_map/fixture/mutations.toml: fixture changes, the
+        # app's declarations, a real-tree re-index, and faults planted in
+        # copies of the maps, each in a temporary copy.
+        if: ${{ !cancelled() && steps.map.outcome == 'success' }}
+        run: make requirement-map-mutations MAP=target/requirement-map
 
       - name: Keep the map
         if: always()
@@ -194,6 +210,8 @@ jobs:
             target/requirement-map/accounting.tsv
             target/requirement-map/health.tsv
             target/requirement-map/token-read.tsv
+            target/requirement-map/artifacts.tsv
+            target/requirement-map/committed.tsv
             target/requirement-map/*.log
 
   rust-gates:

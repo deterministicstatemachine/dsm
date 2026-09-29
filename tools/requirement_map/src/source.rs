@@ -127,6 +127,25 @@ pub struct Call {
     pub at: Position,
     pub name: String,
     pub form: Form,
+    /// The `cfg` predicates of the items around the call, outermost first
+    /// (`#[test]` as `test`): the call is in a build only where all hold.
+    pub gates: Vec<String>,
+}
+
+/// The `cfg` predicates an item's attributes put on the code inside it.
+fn gates_of(attrs: &[syn::Attribute]) -> Vec<String> {
+    attrs
+        .iter()
+        .filter_map(|a| {
+            if a.path().is_ident("test") {
+                return Some("test".to_string());
+            }
+            match &a.meta {
+                syn::Meta::List(list) if list.path.is_ident("cfg") => Some(list.tokens.to_string()),
+                _ => None,
+            }
+        })
+        .collect()
 }
 
 /// How a name in a path is used, before the type's shape is known.
@@ -198,6 +217,7 @@ impl<'a> Source<'a> {
             lines: &lines,
             syntax: Syntax::default(),
             named: 0,
+            gates: Vec::new(),
         };
         reader.visit_file(&file);
         let mut syntax = reader.syntax;
@@ -446,6 +466,8 @@ struct Reader<'l, 'a> {
     /// How many types, patterns or bounds the reader is inside: a path
     /// there is only named, never a value.
     named: usize,
+    /// The `cfg` predicates of the items the reader is inside.
+    gates: Vec<String>,
 }
 
 impl Reader<'_, '_> {
@@ -484,6 +506,14 @@ impl Reader<'_, '_> {
         };
         self.syntax.fns.insert(at, FnRead { extent, receiver });
         self.syntax.functions.insert(name_of(name));
+    }
+
+    /// Visits an item's inside under the `cfg` predicates its attributes add.
+    fn within(&mut self, attrs: &[syn::Attribute], visit: impl FnOnce(&mut Self)) {
+        let depth = self.gates.len();
+        self.gates.extend(gates_of(attrs));
+        visit(self);
+        self.gates.truncate(depth);
     }
 
     fn node(&mut self, span: Span, head: Head) {
@@ -654,7 +684,13 @@ impl Reader<'_, '_> {
                         _ => Form::Bare,
                     };
                     if let Some(at) = self.at(id.span().start()) {
-                        self.syntax.calls.push(Call { at, name, form });
+                        let gates = self.gates.clone();
+                        self.syntax.calls.push(Call {
+                            at,
+                            name,
+                            form,
+                            gates,
+                        });
                     }
                 }
                 TokenTree::Punct(_) | TokenTree::Literal(_) => {}
@@ -665,7 +701,13 @@ impl Reader<'_, '_> {
     fn call(&mut self, ident: &syn::Ident, form: Form) {
         let name = name_of(ident);
         if let Some(at) = self.at(ident.span().start()) {
-            self.syntax.calls.push(Call { at, name, form });
+            let gates = self.gates.clone();
+            self.syntax.calls.push(Call {
+                at,
+                name,
+                form,
+                gates,
+            });
         }
     }
 }
@@ -686,7 +728,24 @@ impl<'ast> Visit<'ast> for Reader<'_, '_> {
             _ => Head::Other,
         };
         self.node(i.span(), head);
-        syn::visit::visit_item(self, i);
+        let attrs: &[syn::Attribute] = match i {
+            syn::Item::Const(n) => &n.attrs,
+            syn::Item::Enum(n) => &n.attrs,
+            syn::Item::Fn(n) => &n.attrs,
+            syn::Item::Impl(n) => &n.attrs,
+            syn::Item::Macro(n) => &n.attrs,
+            syn::Item::Mod(n) => &n.attrs,
+            syn::Item::Static(n) => &n.attrs,
+            syn::Item::Struct(n) => &n.attrs,
+            syn::Item::Trait(n) => &n.attrs,
+            syn::Item::Type(n) => &n.attrs,
+            syn::Item::Union(n) => &n.attrs,
+            syn::Item::Use(n) => &n.attrs,
+            // Items with no code inside, or tokens syn keeps unparsed: none
+            // makes the code inside test-only.
+            _ => &[],
+        };
+        self.within(attrs, |r| syn::visit::visit_item(r, i));
     }
 
     fn visit_impl_item(&mut self, i: &'ast syn::ImplItem) {
@@ -695,7 +754,13 @@ impl<'ast> Visit<'ast> for Reader<'_, '_> {
             _ => Head::Other,
         };
         self.node(i.span(), head);
-        syn::visit::visit_impl_item(self, i);
+        let attrs: &[syn::Attribute] = match i {
+            syn::ImplItem::Const(n) => &n.attrs,
+            syn::ImplItem::Fn(n) => &n.attrs,
+            syn::ImplItem::Macro(n) => &n.attrs,
+            _ => &[],
+        };
+        self.within(attrs, |r| syn::visit::visit_impl_item(r, i));
     }
 
     fn visit_trait_item(&mut self, i: &'ast syn::TraitItem) {
@@ -704,7 +769,13 @@ impl<'ast> Visit<'ast> for Reader<'_, '_> {
             _ => Head::Other,
         };
         self.node(i.span(), head);
-        syn::visit::visit_trait_item(self, i);
+        let attrs: &[syn::Attribute] = match i {
+            syn::TraitItem::Const(n) => &n.attrs,
+            syn::TraitItem::Fn(n) => &n.attrs,
+            syn::TraitItem::Macro(n) => &n.attrs,
+            _ => &[],
+        };
+        self.within(attrs, |r| syn::visit::visit_trait_item(r, i));
     }
 
     fn visit_stmt_macro(&mut self, s: &'ast syn::StmtMacro) {
@@ -1296,6 +1367,33 @@ mod tests {
             .map(|c| c.name)
             .collect();
         assert_eq!(names, vec!["Some", "new"]);
+        Ok(())
+    }
+
+    #[test]
+    fn calls_carry_the_cfg_gates_around_them() -> Result<(), String> {
+        let text = "fn shipped() { a(); }\n#[cfg(test)]\nmod tests {\n    #[cfg(unix)]\n    fn helper() { b(); }\n}\n#[test]\nfn t() { c(); }\n#[cfg(not(all(target_os = \"android\", feature = \"jni\")))]\nfn host() { d(); }\n";
+        let source = Source::lex(text)?;
+        let got: Vec<(String, Vec<String>)> = source
+            .calls(at(0, 0), at(11, 0))?
+            .into_iter()
+            .map(|c| (c.name, c.gates))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("a".to_string(), Vec::new()),
+                (
+                    "b".to_string(),
+                    vec!["test".to_string(), "unix".to_string()]
+                ),
+                ("c".to_string(), vec!["test".to_string()]),
+                (
+                    "d".to_string(),
+                    vec!["not (all (target_os = \"android\" , feature = \"jni\"))".to_string()]
+                ),
+            ]
+        );
         Ok(())
     }
 
