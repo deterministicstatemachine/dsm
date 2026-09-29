@@ -757,6 +757,7 @@ TAG_DSM_SOFI_VAULT_GENESIS_LOCATOR            DSM/sofi/vault-genesis-locator/v1 
 TAG_DSM_SOFI_VAULT_CREATION_KEY               DSM/sofi/vault-creation-key/v1            key of the creation leaf
 TAG_DSM_SOFI_VAULT_STATE_KEY                  DSM/sofi/vault-state-key/v1               key of the vault state leaf
 TAG_DSM_SOFI_VAULT_LEAF_STATE                 DSM/sofi/vault-leaf-state/v1              DLV leaf values
+TAG_DSM_SOFI_TRADER_PRE_BALANCE_OBJECT        DSM/sofi/trader-pre-balance-object/v1     address of a TraderPreBalance (Amendment S12)
 
 
 <!-- Source PDF page 18 -->
@@ -818,6 +819,7 @@ pre
 0x0059           SOFI_SETTLEMENT_PREIMAGE                      P (E)
 0x005A           SOFI_VAULT_GENESIS_PREIMAGE                   vault genesis preimage
 0x005B           SOFI_VAULT_CREATION                           vault creation leaf
+0x0061           SOFI_TRADER_PRE_BALANCE                       a trader's balance before the trade (Amendment S12)
 
 
 <!-- Source PDF page 19 -->
@@ -1127,6 +1129,15 @@ thing else in it is bound to F by hashed preimages. It names its own attempt, so
 It proves itself from its own bytes and state the reader already holds, so it can always be classified: its route is
 realized, or impossible and skipped. A value that names nothing Core can classify cannot occupy a successor
 key.
+
+> **Amendment S12 (owner, 2026-09-29) — the exercise carries the trader's balances before the trade.** `T°` states each balance leaf it writes only by the hash of its value, and `TraderSideValid` recomputes the balance after the trade from the balance before it. Only the trader held that value, so no other reader could judge the exercise: once one trader had traded through a vault, the next reader of that vault, its owner closing it included, could not classify the trade (CONFORMANCE §6.39). The exercise now carries those values.
+>
+> - **The object.** `TraderPreBalance`, class `0x0061`, schema 1: `trader_genesis` (digest32), `trader_device_id` (digest32), `policy_commit` (digest32), `amount` (u64, strictly positive). A zero balance is an absent leaf, and an absent balance needs no object. Its address is `immutable_addr(DSM/sofi/trader-pre-balance-object/v1, CCB bytes)`. `𝒞_E^pre` references it as `ContentAddr{0x0061, addr}`, so `E` commits it, and the exercise carries it with the other closure objects.
+> - **Exactly one for each balance the core states.** For every entry of `T°` whose balance before the trade is present, `𝒞_E^pre` names exactly one such object. Its `trader_genesis` and `trader_device_id` are `P`'s trader; `balance_key(G, DevID, policy_commit)` is the entry's key; and `H(DSM/economic-leaf-state/v1; CCB(Balance{policy_commit, amount}))` is the value the entry states before the trade. `𝒞_E^pre` names no other object of this class.
+> - **A missing number is Invalid.** An entry with no object in `𝒞_E^pre`, an object that disagrees with its entry, and an object that matches no entry are each Invalid, known from the committed bytes alone. An object `𝒞_E^pre` names whose bytes are not in hand, or whose bytes do not re-derive its address, is not evaluated yet (Amendment S3): bytes that do not authenticate prove nothing.
+> - **One source for every verifier.** Every verifier, the trader included, reads the trader's balances before the trade from these objects and from nothing else. An entry that states its balance as absent before the trade is absent. A relationship entry's leaf before the trade is the one its `base` names, and the fold against `T°.pre_root` proves it. The rest of `TraderSideValid` is unchanged.
+> - **Not authority.** A value counts only because it hashes to the leaf the core states, and the fold proves that leaf against the trader's root. Storage holds the bytes and decides nothing.
+> - **What it shows.** Anyone who reads the exercise sees the trader's balance of each token the trade moves, as it stood before the trade. SoFi's objects are public by design; the trader's other balances and history are not in the exercise.
 
 
 <!-- Source PDF page 24 -->
@@ -1808,9 +1819,10 @@ A producer that receives Unavailable stops. It never publishes, exercises or adv
 <!-- spec-section: SOFI-036 -->
 ### 36 The unlock preimage, traced
 Each row names one evidence item, where it comes from, the Core check that consumes it, the verdict that check feeds,
-and where its effect lands in the output. Evidence (CORE/sofi/validation.rs:228) carries three of the items as
-maps: objects (policy objects by address), trader_leaves (trader leaf pre values by key) and vault_leaves (vault
-leaf pre values by vault and key).
+and where its effect lands in the output. Evidence (CORE/sofi/validation.rs:228) carries two of the items as
+maps: objects (policy objects and the trader's TraderPreBalance objects, by address) and vault_leaves (vault
+leaf pre values by vault and key). The trader's leaf pre values are derived from T° and those objects
+(Amendment S12).
 
 Evidence            Comes from                  Consumed by                        Feeds                           Lands in
 
@@ -1839,8 +1851,8 @@ Vj◦                     inside P (E)                verify_batch from Rj ; clo
 write set; hashes to c◦V,j                                           cessor
 policy objects          Evidence.objects,           policy checks in validate            PolicyFulfillmentValid          pricing and release deci-
 address recomputed                                                                               sions in Vj◦
-trader leaf pre         Evidence.trader_            compared with the entries of T ◦     TraderSideValid                 pre root of T ◦
-values                  leaves
+trader leaf pre         TraderPreBalance ob-        compared with the entries of T ◦     TraderSideValid                 pre root of T ◦
+values                  jects CE names (S12)
 vault leaf pre val-     Evidence.vault_leaves       vault state and relationship         PolicyFulfillmentValid          pre root of Vj◦
 ues                                                 checks
 pre

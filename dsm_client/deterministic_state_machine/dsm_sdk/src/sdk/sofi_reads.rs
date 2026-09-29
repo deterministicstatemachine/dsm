@@ -85,15 +85,27 @@ pub struct LiveSofiReads<'a> {
     set: &'a StorageSet,
     runtime: tokio::runtime::Handle,
     network: Vec<u8>,
+    /// This device's `(genesis, device_id)` when it verifies as a trader:
+    /// the one identity its own admitted store answers for.
+    own: Option<(D32, D32)>,
 }
 
 impl<'a> LiveSofiReads<'a> {
-    pub fn new(set: &'a StorageSet) -> Result<Self, DsmError> {
+    pub fn new(set: &'a StorageSet, own: Option<(D32, D32)>) -> Result<Self, DsmError> {
         Ok(Self {
             set,
             runtime: tokio::runtime::Handle::current(),
             network: committed_network_id()?,
+            own,
         })
+    }
+
+    fn peer_resolver(&self) -> LiveRegisterResolver<'_> {
+        LiveRegisterResolver {
+            set: self.set,
+            runtime: self.runtime.clone(),
+            expected_network_id: self.network.clone(),
+        }
     }
 
     fn block<T>(&self, fut: impl Future<Output = T>) -> T {
@@ -169,12 +181,13 @@ impl SofiReads for LiveSofiReads<'_> {
         device_id: &D32,
         position: u64,
     ) -> Result<ValidatedPeerTransition, PeerLineageFailure> {
-        let resolver = LiveRegisterResolver {
-            set: self.set,
-            runtime: self.runtime.clone(),
-            expected_network_id: self.network.clone(),
-        };
-        resolve_peer_with_cache(&resolver, &self.network, genesis, device_id, position)
+        resolve_peer_with_cache(
+            &self.peer_resolver(),
+            &self.network,
+            genesis,
+            device_id,
+            position,
+        )
     }
 
     fn vault_leaves_at(
@@ -194,6 +207,34 @@ impl SofiReads for LiveSofiReads<'_> {
         device_id: &D32,
         position: u64,
     ) -> Result<Option<AcceptedClaim>, ReadFailure> {
+        if self.own != Some((*genesis, *device_id)) {
+            // Another trader's position: the claim the peer walk accepted
+            // there, as `advance_validated` produced it on this device.
+            return match resolve_peer_with_cache(
+                &self.peer_resolver(),
+                &self.network,
+                genesis,
+                device_id,
+                position,
+            ) {
+                Ok(transition) => Ok(Some(*transition.accepted_claim())),
+                // Not in hand: the walk has not reached the position yet
+                // (Incomplete), or passes a SoFi position it cannot yet
+                // traverse (Unresolved, P15-9). A lineage the walk refuses
+                // (Invalid, Quarantined) accepted no claim there either; the
+                // setup then stays unevaluated (Amendment S9), recorded in
+                // CONFORMANCE §6.40 for the owner's ruling.
+                Err(
+                    failure @ (PeerLineageFailure::Incomplete(..)
+                    | PeerLineageFailure::Unresolved(..)
+                    | PeerLineageFailure::Invalid(..)
+                    | PeerLineageFailure::Quarantined(..)),
+                ) => {
+                    log::info!("[sofi reads] no accepted claim at {position}: {failure}");
+                    Ok(None)
+                }
+            };
+        }
         let Some(admitted) = economic_lineage::get_admitted_at(position)
             .map_err(|e| ReadFailure(format!("admitted history: {e}")))?
         else {
@@ -232,32 +273,30 @@ impl SofiReads for LiveSofiReads<'_> {
 
 /// Everything a [`Verifier`] borrows, held together: the reads over the
 /// pinned set, the set's members and id, the committed network, and — when
-/// the verifier is a trader — its own leaves and the position it resolved
+/// the verifier is a trader — its identity and the position it resolved
 /// itself.
 pub struct VerifierContext<'a> {
     reads: LiveSofiReads<'a>,
     members: StorageSetMembers,
     set_id: D32,
     network: Vec<u8>,
-    local: Option<&'a LocalLeaves>,
     parent: Option<&'a AdmittedEconomicPosition>,
 }
 
 impl<'a> VerifierContext<'a> {
-    /// A verifier over `set`. `local` and `parent` are this device's own
-    /// leaves and resolved predecessor when it verifies as a trader; a relay
-    /// or a reader of another trader's position brings neither.
+    /// A verifier over `set`. `own` and `parent` are this device's identity
+    /// and resolved predecessor when it verifies as a trader; a relay or a
+    /// reader of another trader's position brings neither.
     pub fn new(
         set: &'a StorageSet,
-        local: Option<&'a LocalLeaves>,
+        own: Option<(D32, D32)>,
         parent: Option<&'a AdmittedEconomicPosition>,
     ) -> Result<Self, DsmError> {
         Ok(Self {
-            reads: LiveSofiReads::new(set)?,
+            reads: LiveSofiReads::new(set, own)?,
             members: as_ccb_members(set)?,
             set_id: set.id(),
             network: committed_network_id()?,
-            local,
             parent,
         })
     }
@@ -268,7 +307,6 @@ impl<'a> VerifierContext<'a> {
             members: &self.members,
             set_id: self.set_id,
             network_id: &self.network,
-            local: self.local,
             parent: self.parent,
         }
     }

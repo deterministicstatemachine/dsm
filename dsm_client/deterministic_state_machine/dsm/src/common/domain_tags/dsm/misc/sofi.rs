@@ -144,6 +144,11 @@ pub const TAG_DSM_SOFI_POLICY_FULFILLMENT_OBJECT: TaggedHashDomain<'static> =
 /// The signed fulfillment envelope, indexed under `FulfillmentId`.
 pub const TAG_DSM_SOFI_FULFILLMENT_OBJECT: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/sofi/fulfillment-object/v1");
+/// Immutable-store namespace of a `TraderPreBalance` (SoFi Amendment S12):
+/// `addr = immutable_addr(tag, CCB bytes)`, the address `𝒞_E^pre` names it
+/// by. It has no locator: the closure names the address.
+pub const TAG_DSM_SOFI_TRADER_PRE_BALANCE_OBJECT: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/sofi/trader-pre-balance-object/v1");
 
 // ── The DLV tree's leaves, and the route digest (P15-4, P15-8) ─────────────
 
@@ -205,6 +210,7 @@ pub(crate) const SOFI_TAGS: &[TaggedHashDomain<'static>] = &[
     TAG_DSM_SOFI_PREIMAGE_OBJECT,
     TAG_DSM_SOFI_POLICY_FULFILLMENT_OBJECT,
     TAG_DSM_SOFI_FULFILLMENT_OBJECT,
+    TAG_DSM_SOFI_TRADER_PRE_BALANCE_OBJECT,
     TAG_DSM_SOFI_VAULT_CREATION_KEY,
     TAG_DSM_SOFI_VAULT_STATE_KEY,
     TAG_DSM_SOFI_VAULT_LEAF_STATE,

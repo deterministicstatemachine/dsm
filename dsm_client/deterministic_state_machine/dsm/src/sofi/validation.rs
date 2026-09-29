@@ -40,8 +40,9 @@ use super::derive;
 use super::smt::{verify_batch, FoldEntry, FoldError};
 use super::wire::{
     next_position, CoreEntry, DlvCore, OwnerAuthority, SettlementBody, SettlementPreimage, SwapHop,
-    TraderCore, TraderPrecommitBody, TraderRelationshipLeaf, VaultRelationshipLeaf, VaultStateLeaf,
-    MAX_SETTLEMENT_PREIMAGE_BYTES, VAULT_STATUS_ACTIVE, VAULT_STATUS_RETIRED,
+    TraderCore, TraderPreBalance, TraderPrecommitBody, TraderRelationshipLeaf, ValidationRef,
+    VaultRelationshipLeaf, VaultStateLeaf, MAX_SETTLEMENT_PREIMAGE_BYTES, VAULT_STATUS_ACTIVE,
+    VAULT_STATUS_RETIRED,
 };
 
 type D32 = [u8; 32];
@@ -132,6 +133,16 @@ pub enum Invalid {
     /// A token's committed policy forbids transfer, so it cannot be a market
     /// leg — the vault's, or any hop's through it (SoFi §19.5, §49).
     TokenNotTransferable { token: D32 },
+    /// `𝒞_E^pre` does not name exactly one `TraderPreBalance` for each
+    /// balance `T°` states as present before the trade: one is missing, one
+    /// matches no such entry, or two name one entry (SoFi Amendment S12).
+    /// Known from the committed bytes, so never Unavailable.
+    TraderPreBalanceSetNotExact,
+    /// Bytes that re-derive the address `𝒞_E^pre` names are not a
+    /// `TraderPreBalance`: `E` committed an object that has no reading.
+    TraderPreBalanceDoesNotDecode(crate::ccb::decode::DecodeError),
+    /// A `TraderPreBalance` names another trader than `P`'s.
+    TraderPreBalanceNotThisTrader,
 }
 
 /// The conjunction, as an accumulator: any Invalid dominates, and only in its
@@ -195,8 +206,9 @@ impl Verdict {
 pub enum Missing {
     /// A policy object named by a vault state, by content address.
     Policy { addr: D32 },
-    /// The pre-state of an `R_econ` leaf a core writes.
-    TraderLeaf { key: D32 },
+    /// A `TraderPreBalance` `𝒞_E^pre` names, by its content address (SoFi
+    /// Amendment S12).
+    TraderPreBalance { addr: D32 },
     /// The pre-state of a vault leaf a core writes.
     VaultLeaf { vault_id: D32, key: D32 },
     /// The vault's own state leaf, which every branch needs.
@@ -235,12 +247,12 @@ impl Refusal {
     }
 }
 
-/// What a trader's `R_econ` leaf held before the operation.
+/// What a trader's balance leaf held before the operation, as the exercise
+/// carries it (SoFi Amendment S12).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TraderLeafPre {
     Balance(EconomicBalanceState),
-    Relationship(TraderRelationshipLeaf),
-    /// The leaf held nothing — a first credit, or a first relationship.
+    /// The leaf held nothing: a first credit of that token.
     Absent,
 }
 
@@ -259,17 +271,18 @@ pub enum VaultLeafPre {
 ///
 /// Gate G2: `Default` exists only under `cfg(test)`. Production code builds
 /// this ONLY from fetched bytes, through [`Evidence::acquired`] at the end of
-/// an acquisition (rebuild step R5): trader leaf pre values from the
-/// verifier's own validated tree, vault leaf pre values from the vault
+/// an acquisition (rebuild step R5): vault leaf pre values from the vault
 /// lineage it fetched, policy objects from the immutable store under the
-/// address the vault state commits. Nothing is defaulted or filled in.
+/// address the vault state commits, and the trader's `TraderPreBalance`
+/// objects under the addresses `𝒞_E^pre` names. The trader's leaf pre values
+/// are not supplied at all: `validate` derives them from `T°` and those
+/// objects (SoFi Amendment S12). Nothing is defaulted or filled in.
 #[derive(Debug, Clone)]
 #[cfg_attr(test, derive(Default))]
 pub struct Evidence {
-    /// Canonical bytes by content address — the policy objects a vault names.
+    /// Canonical bytes by content address: the policy objects a vault names,
+    /// and the `TraderPreBalance` objects `𝒞_E^pre` names.
     pub objects: BTreeMap<D32, Vec<u8>>,
-    /// Pre-states of the trader's own leaves, by `R_econ` key.
-    pub trader_leaves: BTreeMap<D32, TraderLeafPre>,
     /// Pre-states of vault leaves, by `(vault_id, key)`.
     pub vault_leaves: BTreeMap<(D32, D32), VaultLeafPre>,
     /// The signed setup envelope stored at `ρ`, for every leg of P: what
@@ -297,8 +310,8 @@ pub struct Evidence {
 /// less (an item not fetched is `Unavailable`).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct EvidenceNeeds {
-    /// `R_econ` keys of the trader's own leaves.
-    pub trader_keys: BTreeSet<D32>,
+    /// The addresses of the `TraderPreBalance` objects `𝒞_E^pre` names.
+    pub trader_pre_balances: BTreeSet<D32>,
     /// Per vault: the keys of its leaves, the state key included.
     pub vaults: BTreeMap<D32, BTreeSet<D32>>,
     /// The `ρ` of every leg of P: each leg's setup envelope, for `SetupValid`.
@@ -308,12 +321,7 @@ pub struct EvidenceNeeds {
 impl EvidenceNeeds {
     pub fn of(precommit: &TraderPrecommitBody, preimage: &SettlementPreimage) -> Self {
         let setups = precommit.legs().iter().map(|leg| leg.setup_ref).collect();
-        let trader_keys = preimage
-            .trader_core()
-            .entries()
-            .iter()
-            .map(CoreEntry::key)
-            .collect();
+        let trader_pre_balances = named_pre_balances(preimage).into_iter().collect();
         let mut vaults: BTreeMap<D32, BTreeSet<D32>> = BTreeMap::new();
         for core in preimage.dlv_cores() {
             let keys = vaults.entry(*core.vault_id()).or_default();
@@ -327,7 +335,7 @@ impl EvidenceNeeds {
                 .insert(derive::vault_state_key(vault_id));
         }
         Self {
-            trader_keys,
+            trader_pre_balances,
             vaults,
             setups,
         }
@@ -356,7 +364,6 @@ impl Evidence {
     /// nothing by itself.
     pub fn acquired(
         objects: BTreeMap<D32, Vec<u8>>,
-        trader_leaves: BTreeMap<D32, TraderLeafPre>,
         vault_leaves: BTreeMap<(D32, D32), VaultLeafPre>,
         setups: BTreeMap<D32, Vec<u8>>,
         token_policies: BTreeMap<D32, Vec<u8>>,
@@ -364,7 +371,6 @@ impl Evidence {
     ) -> Self {
         Self {
             objects,
-            trader_leaves,
             vault_leaves,
             setups,
             token_policies,
@@ -397,10 +403,26 @@ impl Evidence {
         Ok(bytes)
     }
 
-    fn trader_leaf(&self, key: &D32) -> Result<&TraderLeafPre, Refusal> {
-        self.trader_leaves
-            .get(key)
-            .ok_or(Refusal::Incomplete(Missing::TraderLeaf { key: *key }))
+    /// The `TraderPreBalance` at `addr`, AUTHENTICATED against it. Bytes not
+    /// in hand, or that do not re-derive `addr`, supply nothing (note 9).
+    /// Bytes that do re-derive it are the object `E` committed, so one that
+    /// does not decode is known to have no reading: Invalid.
+    fn pre_balance(&self, addr: &D32) -> Result<TraderPreBalance, Refusal> {
+        let bytes =
+            self.objects
+                .get(addr)
+                .ok_or(Refusal::Incomplete(Missing::TraderPreBalance {
+                    addr: *addr,
+                }))?;
+        if derive::closure_content_address(crate::ccb::class::SOFI_TRADER_PRE_BALANCE, bytes)
+            != Some(*addr)
+        {
+            return Err(Refusal::Incomplete(Missing::NonVerifyingObject {
+                addr: *addr,
+            }));
+        }
+        TraderPreBalance::decode(bytes)
+            .map_err(|why| Refusal::Invalid(Invalid::TraderPreBalanceDoesNotDecode(why)))
     }
 
     fn vault_leaf(&self, vault_id: &D32, key: &D32) -> Result<&VaultLeafPre, Refusal> {
@@ -592,7 +614,6 @@ pub fn route_invalid_in_hand(
     preimage: &SettlementPreimage,
 ) -> Option<Invalid> {
     let nothing = Evidence::acquired(
-        BTreeMap::new(),
         BTreeMap::new(),
         BTreeMap::new(),
         BTreeMap::new(),
@@ -845,6 +866,105 @@ pub struct TraderBalanceChange {
 /// a balance leaf — the change the settlement made to it.
 type TraderPost = (D32, Option<EconomicLeafState>, Option<TraderBalanceChange>);
 
+/// The addresses of the `TraderPreBalance` objects `𝒞_E^pre` names, in
+/// reference order (SoFi Amendment S12).
+pub fn named_pre_balances(preimage: &SettlementPreimage) -> Vec<D32> {
+    let mut out = Vec::new();
+    for reference in preimage.settlement().closure().refs() {
+        match reference {
+            ValidationRef::ContentAddr { object_class, addr }
+                if *object_class == crate::ccb::class::SOFI_TRADER_PRE_BALANCE =>
+            {
+                out.push(*addr)
+            }
+            ValidationRef::ContentAddr { .. }
+            | ValidationRef::SingleRootClaim { .. }
+            | ValidationRef::ConditionalClaim { .. }
+            | ValidationRef::Setup { .. } => {}
+        }
+    }
+    out
+}
+
+/// The trader's balances before the operation, for every balance entry of
+/// `T°` (SoFi Amendment S12), read from the `TraderPreBalance` objects
+/// `𝒞_E^pre` names and from nothing else — for every verifier, the trader
+/// included. `T°` states each balance only by the hash of its leaf, so the
+/// value arrives as an object. It counts only because it hashes to the leaf
+/// the core states: [`check_trader_balances`] compares each with the value
+/// `T°` states before the trade, and the post arithmetic binds it again.
+///
+/// - An entry that states its balance as absent is `Absent`, with no object.
+/// - Every other balance entry has exactly one object, naming `P`'s trader
+///   and keyed to the entry by `balance_key`.
+/// - A count that differs, an object naming another trader, and an object
+///   keyed to no such entry are Invalid: `E` commits all of it, so none of it
+///   waits on the network. A missing number is wrong, never undecided.
+/// - An object whose bytes are not in hand, or do not re-derive its address,
+///   is missing (note 9): it proves nothing either way.
+fn trader_pre_balances(
+    precommit: &TraderPrecommitBody,
+    preimage: &SettlementPreimage,
+    evidence: &Evidence,
+) -> Result<BTreeMap<D32, TraderLeafPre>, Refusal> {
+    let mut stated_pre: BTreeMap<D32, Option<D32>> = BTreeMap::new();
+    for entry in preimage.trader_core().entries() {
+        match entry {
+            CoreEntry::Mutation { .. } | CoreEntry::Read { .. } => {
+                stated_pre.insert(entry.key(), stated(entry).0);
+            }
+            CoreEntry::Relationship { .. } => {}
+        }
+    }
+    let present = stated_pre.values().filter(|value| value.is_some()).count();
+    let named = named_pre_balances(preimage);
+    require(named.len() == present, Invalid::TraderPreBalanceSetNotExact)?;
+
+    let mut verdict = Verdict::default();
+    let mut held: BTreeMap<D32, EconomicBalanceState> = BTreeMap::new();
+    for addr in &named {
+        let Some(balance) = verdict.get(evidence.pre_balance(addr)) else {
+            continue;
+        };
+        if balance.trader_genesis() != precommit.genesis()
+            || balance.trader_device_id() != precommit.device_id()
+        {
+            verdict.note(Err(Refusal::Invalid(
+                Invalid::TraderPreBalanceNotThisTrader,
+            )));
+            continue;
+        }
+        held.insert(
+            balance_key(
+                precommit.genesis(),
+                precommit.device_id(),
+                balance.policy_commit(),
+            ),
+            EconomicBalanceState {
+                policy_commit: *balance.policy_commit(),
+                amount: balance.amount(),
+            },
+        );
+    }
+    verdict.finish()?;
+
+    // Exactly one object for each balance the core states as present, and
+    // none beside them. With the count above, an object keyed to no such
+    // entry, or two keyed to one, leaves a stated balance without its number.
+    let mut out = BTreeMap::new();
+    for (key, value) in stated_pre {
+        let pre = match (value, held.remove(&key)) {
+            (None, None) => TraderLeafPre::Absent,
+            (Some(_), Some(state)) => TraderLeafPre::Balance(state),
+            (None, Some(_)) | (Some(_), None) => {
+                return Err(Refusal::Invalid(Invalid::TraderPreBalanceSetNotExact))
+            }
+        };
+        out.insert(key, pre);
+    }
+    Ok(out)
+}
+
 /// The one derivation behind [`trader_post_states`] and
 /// [`trader_balance_changes`]: each post state recomputed from the pre state
 /// the evidence holds and the movement the settlement commits, then bound to
@@ -856,6 +976,7 @@ fn trader_posts(
 ) -> Result<Vec<TraderPost>, Refusal> {
     let e = *precommit.external_commitment();
     let movements = trader_movements(preimage, evidence)?;
+    let pre = trader_pre_balances(precommit, preimage, evidence)?;
     let core = preimage.trader_core();
     let mut out = Vec::with_capacity(core.entries().len());
     for entry in core.entries() {
@@ -882,10 +1003,10 @@ fn trader_posts(
                         balance_key(precommit.genesis(), precommit.device_id(), t) == key
                     })
                     .ok_or(Refusal::Invalid(Invalid::WriteSetNotExact { core: "T°" }))?;
-                let before = match evidence.trader_leaf(&key)? {
-                    TraderLeafPre::Balance(b) if b.policy_commit == *token => b.amount,
-                    TraderLeafPre::Absent => 0,
-                    TraderLeafPre::Balance(_) | TraderLeafPre::Relationship(_) => {
+                let before = match pre.get(&key) {
+                    Some(TraderLeafPre::Balance(b)) if b.policy_commit == *token => b.amount,
+                    Some(TraderLeafPre::Absent) => 0,
+                    Some(TraderLeafPre::Balance(_)) | None => {
                         return Err(Refusal::Invalid(Invalid::LeafPreValueMismatch))
                     }
                 };
@@ -1200,9 +1321,6 @@ fn balance_after(
             b.amount
         }
         TraderLeafPre::Absent => 0,
-        TraderLeafPre::Relationship(_) => {
-            return Err(Refusal::Invalid(Invalid::LeafPreValueMismatch))
-        }
     };
     let after = before
         .checked_add(credit)
@@ -1213,7 +1331,6 @@ fn balance_after(
     let pre_value = match pre {
         TraderLeafPre::Absent => None,
         TraderLeafPre::Balance(b) => Some(leaf_value_of_balance(b)?),
-        TraderLeafPre::Relationship(_) => unreachable!("refused above"),
     };
     let post_value = if after == 0 {
         // A zero balance is the leaf's absence, never a leaf holding zero.
@@ -1284,10 +1401,14 @@ fn relationship_bases(entries: &[CoreEntry]) -> BTreeMap<D32, (D32, D32, D32)> {
 
 /// Turn a trader core's entries into fold entries, resolving each relationship
 /// post through BindExt. This is the only place `E` enters a leaf value.
+///
+/// Everything comes from the core itself. A balance entry states its pre and
+/// post values; a relationship entry's leaf before the operation is the one
+/// its `base` names (SoFi Amendment S12), and the fold against `T°.pre_root`
+/// is what proves the trader held it.
 fn trader_fold_entries(
     core: &TraderCore,
     external_commitment: &D32,
-    evidence: &Evidence,
 ) -> Result<Vec<FoldEntry>, Refusal> {
     let mut out = Vec::with_capacity(core.entries().len());
     for entry in core.entries() {
@@ -1295,21 +1416,12 @@ fn trader_fold_entries(
         let (pre, post) = match entry {
             CoreEntry::Mutation { .. } | CoreEntry::Read { .. } => stated(entry),
             CoreEntry::Relationship { vault_id, base, .. } => {
-                let held = evidence.trader_leaf(&key)?;
-                let pre = match held {
-                    TraderLeafPre::Absent => None,
-                    TraderLeafPre::Relationship(r) => {
-                        // The base a core states must be the leaf it holds.
-                        require(
-                            r.leaf == *base && r.vault_id == *vault_id,
-                            Invalid::RelationshipBaseMismatch,
-                        )?;
-                        Some(derive::trader_relationship_leaf_value(r))
-                    }
-                    TraderLeafPre::Balance(_) => {
-                        return Err(Refusal::Invalid(Invalid::LeafPreValueMismatch))
-                    }
-                };
+                let pre = Some(derive::trader_relationship_leaf_value(
+                    &TraderRelationshipLeaf {
+                        vault_id: *vault_id,
+                        leaf: *base,
+                    },
+                ));
                 let next = derive::relationship_leaf_next(base, external_commitment);
                 let post = derive::trader_relationship_leaf_value(&TraderRelationshipLeaf {
                     vault_id: *vault_id,
@@ -1423,15 +1535,11 @@ fn fold_core(entries: &[FoldEntry], pre_root: &D32) -> Result<D32, Refusal> {
 }
 
 /// `Fold(T°, E)`: the root a trader core's entries fold to under `E`, each
-/// relationship advanced by `relationship_leaf_next` against the leaf the
-/// trader holds — what `P.R_realize` must be. The producer computes it with
-/// this function and the verifier checks it with the same one.
-pub fn realize_root(
-    core: &TraderCore,
-    external_commitment: &D32,
-    evidence: &Evidence,
-) -> Result<D32, Refusal> {
-    let entries = trader_fold_entries(core, external_commitment, evidence)?;
+/// relationship advanced by `relationship_leaf_next` from the base the core
+/// states — what `P.R_realize` must be. The producer computes it with this
+/// function and the verifier checks it with the same one.
+pub fn realize_root(core: &TraderCore, external_commitment: &D32) -> Result<D32, Refusal> {
+    let entries = trader_fold_entries(core, external_commitment)?;
     fold_core(&entries, core.pre_root())
 }
 
@@ -1717,25 +1825,27 @@ fn validate_swap(
                 }),
         );
     }
-    verdict.note(check_trader_balances(
-        precommit,
-        trader_core,
-        evidence,
-        &[
-            (intent.token_out, intent.exact_out, 0),
-            (intent.token_in, 0, intent.amount_in),
-        ],
-        hops.len(),
-    ));
-
     verdict.note(
-        realize_root(trader_core, &e, evidence).and_then(|post_root| {
-            require(
-                post_root == *precommit.realize_root(),
-                Invalid::RealizeRootIsNotTheFold,
+        trader_pre_balances(precommit, preimage, evidence).and_then(|pre| {
+            check_trader_balances(
+                precommit,
+                trader_core,
+                &pre,
+                &[
+                    (intent.token_out, intent.exact_out, 0),
+                    (intent.token_in, 0, intent.amount_in),
+                ],
+                hops.len(),
             )
         }),
     );
+
+    verdict.note(realize_root(trader_core, &e).and_then(|post_root| {
+        require(
+            post_root == *precommit.realize_root(),
+            Invalid::RealizeRootIsNotTheFold,
+        )
+    }));
 }
 
 /// The trader core holds exactly the named balance movements and one
@@ -1743,7 +1853,7 @@ fn validate_swap(
 fn check_trader_balances(
     precommit: &TraderPrecommitBody,
     core: &TraderCore,
-    evidence: &Evidence,
+    pre: &BTreeMap<D32, TraderLeafPre>,
     movements: &[(D32, u64, u64)],
     relationships: usize,
 ) -> Result<(), Refusal> {
@@ -1758,8 +1868,13 @@ fn check_trader_balances(
             .iter()
             .find(|e| e.key() == key)
             .ok_or(Refusal::Invalid(Invalid::WriteSetNotExact { core: "T°" }))?;
-        let (want_pre, want_post) =
-            balance_after(evidence.trader_leaf(&key)?, token, *credit, *debit)?;
+        let (want_pre, want_post) = balance_after(
+            pre.get(&key)
+                .ok_or(Refusal::Invalid(Invalid::WriteSetNotExact { core: "T°" }))?,
+            token,
+            *credit,
+            *debit,
+        )?;
         let (got_pre, got_post) = stated(entry);
         require(got_pre == want_pre, Invalid::LeafPreValueMismatch)?;
         require(got_post == want_post, Invalid::LeafPostValueMismatch)?;
@@ -1849,16 +1964,20 @@ fn validate_close(
         .as_ref()
         .and_then(|state| verdict.get(Policies::resolve(evidence, state)));
     if let Some(policies) = policies.as_ref() {
-        verdict.note(check_trader_balances(
-            precommit,
-            trader_core,
-            evidence,
-            &[
-                (*policies.market.token_a(), reserve_a, 0),
-                (*policies.market.token_b(), reserve_b, 0),
-            ],
-            1,
-        ));
+        verdict.note(
+            trader_pre_balances(precommit, preimage, evidence).and_then(|pre| {
+                check_trader_balances(
+                    precommit,
+                    trader_core,
+                    &pre,
+                    &[
+                        (*policies.market.token_a(), reserve_a, 0),
+                        (*policies.market.token_b(), reserve_b, 0),
+                    ],
+                    1,
+                )
+            }),
+        );
     }
     let bases = relationship_bases(trader_core.entries());
     match bases.get(vault_id) {
@@ -1879,14 +1998,12 @@ fn validate_close(
         }
     }
 
-    verdict.note(
-        realize_root(trader_core, &e, evidence).and_then(|post_root| {
-            require(
-                post_root == *precommit.realize_root(),
-                Invalid::RealizeRootIsNotTheFold,
-            )
-        }),
-    );
+    verdict.note(realize_root(trader_core, &e).and_then(|post_root| {
+        require(
+            post_root == *precommit.realize_root(),
+            Invalid::RealizeRootIsNotTheFold,
+        )
+    }));
 }
 
 #[cfg(test)]
@@ -2174,6 +2291,39 @@ pub(crate) mod fixtures {
         pub(crate) parent_claim: Vec<u8>,
     }
 
+    impl Fixture {
+        /// The closure objects the fixture's trader holds, each under the
+        /// reference `𝒞_E^pre` names it by: the parent claim `P` names, and
+        /// every `TraderPreBalance` (SoFi Amendment S12).
+        pub(crate) fn closure_objects(&self) -> BTreeMap<ValidationRef, Vec<u8>> {
+            let mut out =
+                BTreeMap::from([(self.precommit.parent_reference(), self.parent_claim.clone())]);
+            for addr in named_pre_balances(&self.preimage) {
+                out.insert(
+                    ValidationRef::ContentAddr {
+                        object_class: crate::ccb::class::SOFI_TRADER_PRE_BALANCE,
+                        addr,
+                    },
+                    self.evidence.objects[&addr].clone(),
+                );
+            }
+            out
+        }
+
+        /// Those objects in `𝒞_E^pre` reference order, as an exercise
+        /// carries them.
+        pub(crate) fn closure_in_order(&self) -> Vec<Vec<u8>> {
+            let objects = self.closure_objects();
+            self.preimage
+                .settlement()
+                .closure()
+                .refs()
+                .iter()
+                .map(|reference| objects[reference].clone())
+                .collect()
+        }
+    }
+
     /// The trader's registered claim at [`P_POS`] over `root`, signed under
     /// the trader's key: the parent every fixture operation extends.
     pub(crate) fn parent_claim_envelope(root: D32) -> Vec<u8> {
@@ -2199,6 +2349,24 @@ pub(crate) mod fixtures {
                 claim_ref: derive::claim_ref(parent_claim),
             })
             .expect("a closure with room for the parent")
+    }
+
+    /// The reference `𝒞_E^pre` names `balance` by (SoFi Amendment S12).
+    pub(crate) fn pre_balance_ref(balance: &TraderPreBalance) -> ValidationRef {
+        ValidationRef::ContentAddr {
+            object_class: crate::ccb::class::SOFI_TRADER_PRE_BALANCE,
+            addr: derive::trader_pre_balance_addr(balance),
+        }
+    }
+
+    /// `closure` with the reference of `balance`, in canonical order.
+    pub(crate) fn with_pre_balance(
+        closure: PreEClosureIndex,
+        balance: &TraderPreBalance,
+    ) -> PreEClosureIndex {
+        closure
+            .with(pre_balance_ref(balance))
+            .expect("a closure with room for the balance")
     }
 
     /// One vault's worth of a swap: its tree, its core, and the hop it prices.
@@ -2329,18 +2497,15 @@ pub(crate) mod fixtures {
         let out_key = balance_key(&G, &DEV, &intent_out);
         let mut trader_tree = EconomicSmt::new();
         trader_tree.insert(in_key, balance_leaf_value(intent_in, 50_000));
-        let trader_rels: Vec<TraderRelationshipLeaf> = parts
-            .iter()
-            .enumerate()
-            .map(|(j, part)| {
-                let leaf = TraderRelationshipLeaf {
-                    vault_id: part.vault_id,
-                    leaf: base_of(j),
-                };
-                trader_tree.insert(part.rel_key, derive::trader_relationship_leaf_value(&leaf));
-                leaf
-            })
-            .collect();
+        for (j, part) in parts.iter().enumerate() {
+            let leaf = TraderRelationshipLeaf {
+                vault_id: part.vault_id,
+                leaf: base_of(j),
+            };
+            trader_tree.insert(part.rel_key, derive::trader_relationship_leaf_value(&leaf));
+        }
+        // The balance spent, as the exercise carries it (SoFi Amendment S12).
+        let pre_balance = TraderPreBalance::new(G, DEV, intent_in, 50_000).unwrap();
 
         let mut trader_entries = vec![
             CoreEntry::Mutation {
@@ -2369,7 +2534,7 @@ pub(crate) mod fixtures {
         let trader_core =
             TraderCore::new(G, DEV, P_POS + 1, trader_tree.root(), trader_entries).unwrap();
         let parent_claim = parent_claim_envelope(trader_tree.root());
-        let closure = with_parent(closure, &parent_claim);
+        let closure = with_pre_balance(with_parent(closure, &parent_claim), &pre_balance);
 
         let mut cores: Vec<DlvCore> = parts.iter().map(|p| p.core.clone()).collect();
         cores.sort_by_key(|c| *c.vault_id());
@@ -2392,13 +2557,8 @@ pub(crate) mod fixtures {
         let preimage = SettlementPreimage::new(settlement, trader_core.clone(), cores).unwrap();
         let e = derive::recompute_e(&preimage).unwrap();
 
-        let mut trader_leaves = BTreeMap::from([
-            (in_key, TraderLeafPre::Balance(balance(intent_in, 50_000))),
-            (out_key, TraderLeafPre::Absent),
-        ]);
         let mut vault_leaves = BTreeMap::new();
-        for (part, rel) in parts.iter().zip(trader_rels) {
-            trader_leaves.insert(part.rel_key, TraderLeafPre::Relationship(rel));
+        for part in &parts {
             vault_leaves.insert(
                 (part.vault_id, part.state_key),
                 VaultLeafPre::State(part.state.clone()),
@@ -2408,9 +2568,13 @@ pub(crate) mod fixtures {
                 VaultLeafPre::Relationship(part.relationship),
             );
         }
+        let mut objects = policy_objects_over(&pairs);
+        objects.insert(
+            derive::trader_pre_balance_addr(&pre_balance),
+            pre_balance.encode(),
+        );
         let evidence = Evidence {
-            objects: policy_objects_over(&pairs),
-            trader_leaves,
+            objects,
             vault_leaves,
             setups: (0..hops)
                 .map(|j| (parts[j].hop.setup_ref, setup_envelope_of(&setup(j))))
@@ -2427,7 +2591,7 @@ pub(crate) mod fixtures {
         // The realize root is what the core folds to UNDER E, so it cannot be
         // chosen: BindExt fills the relationship posts and the fold does the rest.
         let realize_root = {
-            let entries = trader_fold_entries(&trader_core, &e, &evidence).unwrap();
+            let entries = trader_fold_entries(&trader_core, &e).unwrap();
             batch_fold(&entries).unwrap().post_root
         };
         let legs: Vec<PrecommitLeg> = {
@@ -2504,7 +2668,6 @@ mod tests {
         let (market, _, _) = policies(0);
         let mut without_policy = Evidence {
             objects: f.evidence.objects.clone(),
-            trader_leaves: f.evidence.trader_leaves.clone(),
             vault_leaves: f.evidence.vault_leaves.clone(),
             setups: f.evidence.setups.clone(),
             token_policies: f.evidence.token_policies.clone(),
@@ -2525,16 +2688,17 @@ mod tests {
 
         let mut without_leaf = Evidence {
             objects: f.evidence.objects.clone(),
-            trader_leaves: f.evidence.trader_leaves.clone(),
             vault_leaves: BTreeMap::new(),
             setups: f.evidence.setups.clone(),
             token_policies: f.evidence.token_policies.clone(),
             accepted_claims: f.evidence.accepted_claims.clone(),
         };
-        without_leaf.trader_leaves.clear();
+        for addr in named_pre_balances(&f.preimage) {
+            without_leaf.objects.remove(&addr);
+        }
         assert!(matches!(
             route_validation(&f.precommit, &f.preimage, &without_leaf),
-            Err(Missing::TraderLeaf { .. } | Missing::VaultLeaf { .. })
+            Err(Missing::TraderPreBalance { .. } | Missing::VaultLeaf { .. })
         ));
     }
 
@@ -3049,7 +3213,6 @@ mod tests {
         let state_key = derive::vault_state_key(&vault_id);
         let mut evidence = Evidence {
             objects: f.evidence.objects.clone(),
-            trader_leaves: f.evidence.trader_leaves.clone(),
             vault_leaves: f.evidence.vault_leaves.clone(),
             setups: f.evidence.setups.clone(),
             token_policies: f.evidence.token_policies.clone(),
@@ -3080,7 +3243,6 @@ mod tests {
         let state_key = derive::vault_state_key(&vault_id);
         let mut evidence = Evidence {
             objects: f.evidence.objects.clone(),
-            trader_leaves: f.evidence.trader_leaves.clone(),
             vault_leaves: f.evidence.vault_leaves.clone(),
             setups: f.evidence.setups.clone(),
             token_policies: f.evidence.token_policies.clone(),
@@ -3238,11 +3400,6 @@ mod tests {
         }
         let evidence = Evidence {
             objects,
-            trader_leaves: BTreeMap::from([
-                (a_key, TraderLeafPre::Absent),
-                (b_key, TraderLeafPre::Absent),
-                (rel_key, TraderLeafPre::Relationship(trader_rel)),
-            ]),
             vault_leaves: BTreeMap::from([
                 ((vault_id, state_key), VaultLeafPre::State(state)),
                 (
@@ -3255,7 +3412,7 @@ mod tests {
             accepted_claims: BTreeMap::from([(SETUP_POS, accepted_setup_claim())]),
         };
         let realize_root = {
-            let entries = trader_fold_entries(&trader_core, &e, &evidence).unwrap();
+            let entries = trader_fold_entries(&trader_core, &e).unwrap();
             batch_fold(&entries).unwrap().post_root
         };
         let precommit = TraderPrecommitBody::new(
@@ -3326,7 +3483,6 @@ mod tests {
         let state_key = derive::vault_state_key(&vault_id);
         let mut evidence = Evidence {
             objects: f.evidence.objects.clone(),
-            trader_leaves: f.evidence.trader_leaves.clone(),
             vault_leaves: f.evidence.vault_leaves.clone(),
             setups: f.evidence.setups.clone(),
             token_policies: f.evidence.token_policies.clone(),
@@ -3604,15 +3760,20 @@ mod tests {
         assert_eq!(post.len(), f.preimage.trader_core().entries().len());
         let in_key = balance_key(f.precommit.genesis(), f.precommit.device_id(), &token_in);
         let out_key = balance_key(f.precommit.genesis(), f.precommit.device_id(), &token_out);
-        let TraderLeafPre::Balance(before) = f.evidence.trader_leaf(&in_key).unwrap() else {
-            panic!("the fixture holds the token spent")
-        };
+        let before =
+            TraderPreBalance::decode(&f.evidence.objects[&named_pre_balances(&f.preimage)[0]])
+                .unwrap();
+        assert_eq!(
+            *before.policy_commit(),
+            token_in,
+            "the fixture holds the token spent"
+        );
         let state_at = |key: &D32| post.iter().find(|(k, _)| k == key).unwrap().1.clone();
         assert_eq!(
             state_at(&in_key),
             Some(EconomicLeafState::Balance(EconomicBalanceState {
                 policy_commit: token_in,
-                amount: before.amount - amount_in,
+                amount: before.amount() - amount_in,
             }))
         );
         assert_eq!(
@@ -3757,7 +3918,6 @@ mod tests {
         let state_key = derive::vault_state_key(&vault_id);
         let mut evidence = Evidence {
             objects: f.evidence.objects.clone(),
-            trader_leaves: f.evidence.trader_leaves.clone(),
             vault_leaves: f.evidence.vault_leaves.clone(),
             setups: f.evidence.setups.clone(),
             token_policies: f.evidence.token_policies.clone(),
@@ -3790,7 +3950,6 @@ mod tests {
         let state_key = derive::vault_state_key(&vault_id);
         let mut evidence = Evidence {
             objects: f.evidence.objects.clone(),
-            trader_leaves: f.evidence.trader_leaves.clone(),
             vault_leaves: f.evidence.vault_leaves.clone(),
             setups: f.evidence.setups.clone(),
             token_policies: f.evidence.token_policies.clone(),
@@ -3839,7 +3998,6 @@ mod tests {
         let state_key = derive::vault_state_key(&vault_id);
         let mut evidence = Evidence {
             objects: f.evidence.objects.clone(),
-            trader_leaves: f.evidence.trader_leaves.clone(),
             vault_leaves: f.evidence.vault_leaves.clone(),
             setups: f.evidence.setups.clone(),
             token_policies: f.evidence.token_policies.clone(),
@@ -3876,7 +4034,6 @@ mod tests {
         let (market, _, _) = policies(0);
         let mut evidence = Evidence {
             objects: f.evidence.objects.clone(),
-            trader_leaves: f.evidence.trader_leaves.clone(),
             vault_leaves: f.evidence.vault_leaves.clone(),
             setups: f.evidence.setups.clone(),
             token_policies: f.evidence.token_policies.clone(),
@@ -3919,7 +4076,6 @@ mod tests {
         let (first, second) = (hops[0].vault_id, hops[1].vault_id);
         let mut evidence = Evidence {
             objects: f.evidence.objects.clone(),
-            trader_leaves: f.evidence.trader_leaves.clone(),
             vault_leaves: f.evidence.vault_leaves.clone(),
             setups: f.evidence.setups.clone(),
             token_policies: f.evidence.token_policies.clone(),
@@ -4084,7 +4240,6 @@ mod tests {
         let addr = policy_addr(crate::ccb::class::MARKET_POLICY, &market.encode());
         let mut evidence = Evidence {
             objects: f.evidence.objects.clone(),
-            trader_leaves: f.evidence.trader_leaves.clone(),
             vault_leaves: f.evidence.vault_leaves.clone(),
             setups: f.evidence.setups.clone(),
             token_policies: f.evidence.token_policies.clone(),
@@ -4203,7 +4358,6 @@ mod tests {
         let rel_key = derive::relationship_key(&G, &DEV, &vault_id);
         let mut evidence = Evidence {
             objects: f.evidence.objects.clone(),
-            trader_leaves: f.evidence.trader_leaves.clone(),
             vault_leaves: f.evidence.vault_leaves.clone(),
             setups: f.evidence.setups.clone(),
             token_policies: f.evidence.token_policies.clone(),
@@ -4525,5 +4679,300 @@ mod tests {
         );
         assert!(!f.evidence.token_policies.contains_key(&era));
         assert_eq!(validate(&f.precommit, &f.preimage, &f.evidence), Ok(()));
+    }
+
+    // ── SoFi Amendment S12: the trader's balances before the trade ──────────
+
+    /// The balance the fixture's trader spends, as its exercise carries it.
+    fn carried_pre_balance(f: &Fixture) -> TraderPreBalance {
+        let named = named_pre_balances(&f.preimage);
+        assert_eq!(named.len(), 1, "the swap fixture spends one balance");
+        TraderPreBalance::decode(&f.evidence.objects[&named[0]]).unwrap()
+    }
+
+    /// `f`'s operation with `𝒞_E^pre` naming the parent `P` names and each
+    /// of `objects` as a `TraderPreBalance`, re-pointed so `E` and
+    /// `P.R_realize` follow the new closure: the only thing under test is
+    /// Amendment S12. The evidence holds exactly `objects` under their
+    /// addresses, beside everything else the fixture holds.
+    fn with_pre_balance_bytes(
+        f: &Fixture,
+        objects: &[Vec<u8>],
+    ) -> (TraderPrecommitBody, SettlementPreimage, Evidence) {
+        let mut closure = with_parent(PreEClosureIndex::new(Vec::new()).unwrap(), &f.parent_claim);
+        let mut evidence = f.evidence.clone();
+        for addr in named_pre_balances(&f.preimage) {
+            evidence.objects.remove(&addr);
+        }
+        for bytes in objects {
+            let addr =
+                derive::closure_content_address(crate::ccb::class::SOFI_TRADER_PRE_BALANCE, bytes)
+                    .unwrap();
+            closure = closure
+                .with(ValidationRef::ContentAddr {
+                    object_class: crate::ccb::class::SOFI_TRADER_PRE_BALANCE,
+                    addr,
+                })
+                .unwrap();
+            evidence.objects.insert(addr, bytes.clone());
+        }
+        let settlement = match f.preimage.settlement().clone() {
+            SettlementBody::Swap {
+                token_in,
+                amount_in,
+                token_out,
+                exact_out,
+                hops,
+                trader_core,
+                dlv_cores,
+                ..
+            } => SettlementBody::Swap {
+                token_in,
+                amount_in,
+                token_out,
+                exact_out,
+                hops,
+                trader_core,
+                dlv_cores,
+                closure,
+            },
+            SettlementBody::Close { .. } => panic!("a swap fixture"),
+        };
+        let preimage = SettlementPreimage::new(
+            settlement,
+            f.preimage.trader_core().clone(),
+            f.preimage.dlv_cores().to_vec(),
+        )
+        .unwrap();
+        let e = derive::recompute_e(&preimage).unwrap();
+        let precommit = TraderPrecommitBody::new(
+            *f.precommit.genesis(),
+            *f.precommit.device_id(),
+            f.precommit.position(),
+            *f.precommit.parent_claim_ref(),
+            e,
+            f.precommit.legs().to_vec(),
+            realize_root(preimage.trader_core(), &e).unwrap(),
+            *f.precommit.void_root(),
+            *f.precommit.storage_set_id(),
+            f.precommit.signature_alg(),
+            f.precommit.claimant_public_key(),
+        )
+        .unwrap();
+        (precommit, preimage, evidence)
+    }
+
+    fn with_pre_balances(
+        f: &Fixture,
+        balances: &[TraderPreBalance],
+    ) -> (TraderPrecommitBody, SettlementPreimage, Evidence) {
+        let objects: Vec<Vec<u8>> = balances.iter().map(TraderPreBalance::encode).collect();
+        with_pre_balance_bytes(f, &objects)
+    }
+
+    /// The helper itself changes nothing a verifier judges: the honest
+    /// balance, re-carried, is still Valid. Every refusal below is the
+    /// amendment's, not the rebuild's.
+    #[test]
+    fn a_rebuilt_closure_carrying_the_honest_balance_is_valid() {
+        let f = swap_fixture();
+        let (precommit, preimage, evidence) = with_pre_balances(&f, &[carried_pre_balance(&f)]);
+        assert_eq!(validate(&precommit, &preimage, &evidence), Ok(()));
+    }
+
+    /// A balance `T°` states as present before the trade must have its number
+    /// in the closure. A trade without it is Invalid, decided from its own
+    /// bytes: nothing is fetched to know it, and it is never left undecided,
+    /// which would let a trader freeze every vault it trades through.
+    #[test]
+    fn a_balance_the_closure_does_not_carry_is_invalid() {
+        let f = swap_fixture();
+        let (precommit, preimage, evidence) = with_pre_balances(&f, &[]);
+        assert_eq!(
+            validate(&precommit, &preimage, &evidence),
+            Err(Refusal::Invalid(Invalid::TraderPreBalanceSetNotExact))
+        );
+        assert_eq!(
+            route_invalid_in_hand(&precommit, &preimage),
+            Some(Invalid::TraderPreBalanceSetNotExact)
+        );
+    }
+
+    /// A trader that states a larger balance than the leaf its core commits
+    /// is refused: the number counts only because it hashes to that leaf.
+    #[test]
+    fn a_balance_that_is_not_the_leaf_the_core_states_is_invalid() {
+        let f = swap_fixture();
+        let honest = carried_pre_balance(&f);
+        let inflated = TraderPreBalance::new(
+            *honest.trader_genesis(),
+            *honest.trader_device_id(),
+            *honest.policy_commit(),
+            honest.amount() + 1_000_000,
+        )
+        .unwrap();
+        let (precommit, preimage, evidence) = with_pre_balances(&f, &[inflated]);
+        assert_eq!(
+            validate(&precommit, &preimage, &evidence),
+            Err(Refusal::Invalid(Invalid::LeafPreValueMismatch))
+        );
+    }
+
+    /// A balance naming another trader is not this trader's number.
+    #[test]
+    fn a_balance_of_another_trader_is_invalid() {
+        let f = swap_fixture();
+        let honest = carried_pre_balance(&f);
+        let theirs = TraderPreBalance::new(
+            token(0x55),
+            *honest.trader_device_id(),
+            *honest.policy_commit(),
+            honest.amount(),
+        )
+        .unwrap();
+        let (precommit, preimage, evidence) = with_pre_balances(&f, &[theirs]);
+        assert_eq!(
+            validate(&precommit, &preimage, &evidence),
+            Err(Refusal::Invalid(Invalid::TraderPreBalanceNotThisTrader))
+        );
+    }
+
+    /// A number keyed to no balance the core states as present — the token
+    /// the trader receives, which it did not hold, or a token the trade never
+    /// touches — matches nothing, and the balance the core does state is then
+    /// left without its number.
+    #[test]
+    fn a_balance_keyed_to_no_stated_balance_is_invalid() {
+        let f = swap_fixture();
+        let honest = carried_pre_balance(&f);
+        let SettlementBody::Swap { token_out, .. } = f.preimage.settlement() else {
+            panic!("a swap fixture")
+        };
+        for token in [*token_out, token(0x57)] {
+            let stray = TraderPreBalance::new(
+                *honest.trader_genesis(),
+                *honest.trader_device_id(),
+                token,
+                7,
+            )
+            .unwrap();
+            let (precommit, preimage, evidence) = with_pre_balances(&f, &[stray]);
+            assert_eq!(
+                validate(&precommit, &preimage, &evidence),
+                Err(Refusal::Invalid(Invalid::TraderPreBalanceSetNotExact))
+            );
+        }
+    }
+
+    /// Two numbers for one balance, or one beside a balance the core does not
+    /// state, are refused: the closure carries exactly one per stated balance.
+    #[test]
+    fn extra_balances_in_the_closure_are_invalid() {
+        let f = swap_fixture();
+        let honest = carried_pre_balance(&f);
+        let second = TraderPreBalance::new(
+            *honest.trader_genesis(),
+            *honest.trader_device_id(),
+            *honest.policy_commit(),
+            honest.amount() + 1,
+        )
+        .unwrap();
+        let (precommit, preimage, evidence) = with_pre_balances(&f, &[honest, second]);
+        assert_eq!(
+            validate(&precommit, &preimage, &evidence),
+            Err(Refusal::Invalid(Invalid::TraderPreBalanceSetNotExact))
+        );
+        assert_eq!(
+            route_invalid_in_hand(&precommit, &preimage),
+            Some(Invalid::TraderPreBalanceSetNotExact)
+        );
+    }
+
+    /// Bytes at an address the closure names that are not a
+    /// `TraderPreBalance` are an object `E` committed with no reading.
+    #[test]
+    fn bytes_at_a_named_address_that_are_not_a_balance_are_invalid() {
+        let f = swap_fixture();
+        let not_a_balance = f.parent_claim.clone();
+        let (precommit, preimage, evidence) = with_pre_balance_bytes(&f, &[not_a_balance]);
+        assert!(matches!(
+            validate(&precommit, &preimage, &evidence),
+            Err(Refusal::Invalid(Invalid::TraderPreBalanceDoesNotDecode(..)))
+        ));
+    }
+
+    /// A number the closure names but the verifier does not hold yet leaves
+    /// the predicate unevaluated: the verifier waits and fetches, and the
+    /// absence is never read as a verdict.
+    #[test]
+    fn a_named_balance_not_in_hand_waits() {
+        let f = swap_fixture();
+        let mut evidence = f.evidence.clone();
+        let named = named_pre_balances(&f.preimage);
+        for addr in &named {
+            evidence.objects.remove(addr);
+        }
+        assert_eq!(
+            validate(&f.precommit, &f.preimage, &evidence),
+            Err(Refusal::Incomplete(Missing::TraderPreBalance {
+                addr: named[0]
+            }))
+        );
+    }
+
+    /// Bytes supplied under the named address that do not re-derive it prove
+    /// nothing either way (note 9) — even when they are a well-formed
+    /// balance of this trader.
+    #[test]
+    fn bytes_that_do_not_re_derive_the_named_address_prove_nothing() {
+        let f = swap_fixture();
+        let honest = carried_pre_balance(&f);
+        let addr = named_pre_balances(&f.preimage)[0];
+        let other = TraderPreBalance::new(
+            *honest.trader_genesis(),
+            *honest.trader_device_id(),
+            *honest.policy_commit(),
+            honest.amount() + 1,
+        )
+        .unwrap();
+        let mut evidence = f.evidence.clone();
+        evidence.objects.insert(addr, other.encode());
+        assert_eq!(
+            validate(&f.precommit, &f.preimage, &evidence),
+            Err(Refusal::Incomplete(Missing::NonVerifyingObject { addr }))
+        );
+    }
+
+    /// The attack the amendment closes, judged by a verifier that holds
+    /// nothing of the trader's: a trader that pays into the vault without
+    /// debiting its own balance — its core states the spent balance's post
+    /// as the pre — is refused from the exercise's own bytes.
+    #[test]
+    fn a_trade_that_does_not_debit_the_trader_is_invalid_from_the_exercise_alone() {
+        let f = swap_fixture();
+        let honest = carried_pre_balance(&f);
+        let spent_key = balance_key(&G, &DEV, honest.policy_commit());
+        let entries: Vec<CoreEntry> = f
+            .preimage
+            .trader_core()
+            .entries()
+            .iter()
+            .map(|entry| match entry {
+                CoreEntry::Mutation { key, pre, path, .. } if *key == spent_key => {
+                    CoreEntry::Mutation {
+                        key: *key,
+                        pre: *pre,
+                        post: *pre,
+                        path: path.clone(),
+                    }
+                }
+                other => other.clone(),
+            })
+            .collect();
+        let (precommit, preimage) = with_trader_core(&f, entries);
+        assert_eq!(
+            validate(&precommit, &preimage, &f.evidence),
+            Err(Refusal::Invalid(Invalid::LeafPostValueMismatch))
+        );
     }
 }

@@ -40,6 +40,8 @@
 //!
 //! `sdk::sofi_flow` runs them for the SoFi routes.
 
+use std::collections::BTreeMap;
+
 use dsm::sofi::admission::{preimage_admissible, NotAdmissible};
 use dsm::sofi::conformance::{
     check_fulfillment_against_precommit, derive_policy_fulfillments, FulfillmentConformanceError,
@@ -54,8 +56,8 @@ use dsm::sofi::validation::{realize_root, validate, Evidence, Invalid, Missing, 
 use dsm::sofi::wire::{
     AttemptEntry, DlvCore, DlvPolicyFulfillmentBody, OwnerAuthority, ParentClaimRef,
     PreEClosureIndex, PrecommitLeg, SettlementBody, SettlementPreimage, SofiSetupBody,
-    SofiWireError, SwapHop, TraderCore, TraderFulfillmentBody, TraderPrecommitBody, VaultCreation,
-    VaultGenesisPreimage,
+    SofiWireError, SwapHop, TraderCore, TraderFulfillmentBody, TraderPreBalance,
+    TraderPrecommitBody, ValidationRef, VaultCreation, VaultGenesisPreimage,
 };
 use dsm::types::operations::Operation;
 
@@ -163,6 +165,9 @@ pub enum ToPublish {
     Preimage(SettlementPreimage),
     PolicyFulfillment(DlvPolicyFulfillmentBody),
     Fulfillment(TraderFulfillmentBody),
+    /// A trader's balance before the trade (SoFi Amendment S12), found by
+    /// the address `𝒞_E^pre` names.
+    PreBalance(TraderPreBalance),
 }
 
 /// A produced operation: the transition, what must be published for anyone to
@@ -191,6 +196,7 @@ pub struct Produced {
 pub struct UncheckedDraft {
     precommit: TraderPrecommitBody,
     preimage: SettlementPreimage,
+    pre_balances: Vec<TraderPreBalance>,
 }
 
 impl UncheckedDraft {
@@ -200,6 +206,28 @@ impl UncheckedDraft {
 
     pub fn preimage(&self) -> &SettlementPreimage {
         &self.preimage
+    }
+
+    /// The closure objects only this trader holds before they are published:
+    /// each `TraderPreBalance` under the reference `𝒞_E^pre` names it by.
+    pub fn carried(&self) -> BTreeMap<ValidationRef, Vec<u8>> {
+        carried(&self.pre_balances)
+    }
+}
+
+/// Each `TraderPreBalance` under the closure reference that names it.
+fn carried(pre_balances: &[TraderPreBalance]) -> BTreeMap<ValidationRef, Vec<u8>> {
+    pre_balances
+        .iter()
+        .map(|balance| (pre_balance_ref(balance), balance.encode()))
+        .collect()
+}
+
+/// The `ContentAddr` `𝒞_E^pre` names a `TraderPreBalance` by.
+fn pre_balance_ref(balance: &TraderPreBalance) -> ValidationRef {
+    ValidationRef::ContentAddr {
+        object_class: dsm::ccb::class::SOFI_TRADER_PRE_BALANCE,
+        addr: derive::trader_pre_balance_addr(balance),
     }
 }
 
@@ -217,6 +245,7 @@ pub fn check_draft(
         Ok(()) => Ok(PrecommitDraft {
             precommit: draft.precommit,
             preimage: draft.preimage,
+            pre_balances: draft.pre_balances,
         }),
         Err(Refusal::Invalid(reason)) => Err(BuildError::StaticallyInvalid(reason)),
         Err(Refusal::Incomplete(missing)) => Err(BuildError::Incomplete(missing)),
@@ -229,6 +258,7 @@ pub fn check_draft(
 pub struct PrecommitDraft {
     precommit: TraderPrecommitBody,
     preimage: SettlementPreimage,
+    pre_balances: Vec<TraderPreBalance>,
 }
 
 impl PrecommitDraft {
@@ -248,6 +278,12 @@ impl PrecommitDraft {
 
     pub fn preimage(&self) -> &SettlementPreimage {
         &self.preimage
+    }
+
+    /// The closure objects only this trader holds: each `TraderPreBalance`
+    /// under the reference `𝒞_E^pre` names it by.
+    pub fn carried(&self) -> BTreeMap<ValidationRef, Vec<u8>> {
+        carried(&self.pre_balances)
     }
 
     /// `E`, as the preimage derives it.
@@ -412,38 +448,40 @@ pub struct TraderContext<'a> {
 
 /// `𝒞_E^pre` of a draft: the typed reference of the parent `P` names (P
 /// conformance rule 2), so `E` commits to the exact claim the operation
-/// extends. Beta references no other pre-E object.
-fn pre_e_closure(ctx: &TraderContext<'_>) -> Result<PreEClosureIndex, BuildError> {
-    Ok(PreEClosureIndex::new(vec![ctx
-        .parent_claim
-        .validation_ref(
-            &ctx.genesis,
-            &ctx.device_id,
-            ctx.position,
-        )])?)
+/// extends; and one `TraderPreBalance` for each balance `T°` states as
+/// present before the trade (SoFi Amendment S12), so a verifier that is not
+/// this trader can judge it. The references are in canonical order.
+fn pre_e_closure(
+    ctx: &TraderContext<'_>,
+    pre_balances: &[TraderPreBalance],
+) -> Result<PreEClosureIndex, BuildError> {
+    let mut refs =
+        vec![ctx
+            .parent_claim
+            .validation_ref(&ctx.genesis, &ctx.device_id, ctx.position)];
+    refs.extend(pre_balances.iter().map(pre_balance_ref));
+    refs.sort_by_key(ValidationRef::encode);
+    Ok(PreEClosureIndex::new(refs)?)
 }
 
 /// Assemble `P(E)` and `P`, refusing anything beta will not run.
 ///
 /// Neither root is the caller's: `R_void` is `T°.pre_root` (P15-2), and
-/// `R_realize` is `Fold(T°, E)` over the trader's own leaves, computed by the
-/// Core function the verifier checks it with — so it can only be computed
-/// once `E` exists, which is here.
+/// `R_realize` is `Fold(T°, E)`, computed by the Core function the verifier
+/// checks it with — so it can only be computed once `E` exists, which is
+/// here.
 fn draft(
     settlement: SettlementBody,
     ctx: &TraderContext<'_>,
     cores: Vec<DlvCore>,
     legs: Vec<PrecommitLeg>,
-    local: &LocalLeaves,
+    pre_balances: Vec<TraderPreBalance>,
 ) -> Result<UncheckedDraft, BuildError> {
     let preimage = SettlementPreimage::new(settlement, ctx.trader_core.clone(), cores)?;
     // Beta will not execute this, so nothing here will build it.
     preimage_admissible(&preimage).map_err(BuildError::NotAdmissible)?;
     let e = derive::recompute_e(&preimage)?;
-    let trader_evidence = local
-        .trader_evidence(&ctx.trader_core)
-        .map_err(|why| BuildError::LocalLeaves(why.to_string()))?;
-    let realize = match realize_root(&ctx.trader_core, &e, &trader_evidence) {
+    let realize = match realize_root(&ctx.trader_core, &e) {
         Ok(root) => root,
         Err(Refusal::Invalid(reason)) => return Err(BuildError::StaticallyInvalid(reason)),
         Err(Refusal::Incomplete(missing)) => return Err(BuildError::Incomplete(missing)),
@@ -466,6 +504,7 @@ fn draft(
     Ok(UncheckedDraft {
         precommit,
         preimage,
+        pre_balances,
     })
 }
 
@@ -514,6 +553,9 @@ pub fn draft_route(
         })
         .collect();
     legs.sort_by_key(|l| l.vault_id);
+    let pre_balances = local
+        .pre_balances(&ctx.trader_core)
+        .map_err(|why| BuildError::LocalLeaves(why.to_string()))?;
     let settlement = SettlementBody::Swap {
         token_in: first.token_in,
         amount_in: first.amount_in,
@@ -522,9 +564,9 @@ pub fn draft_route(
         hops,
         trader_core: derive::trader_core_digest(&ctx.trader_core.encode()?),
         dlv_cores: core_digests,
-        closure: pre_e_closure(ctx)?,
+        closure: pre_e_closure(ctx, &pre_balances)?,
     };
-    draft(settlement, ctx, sorted_cores, legs, local)
+    draft(settlement, ctx, sorted_cores, legs, pre_balances)
 }
 
 /// A full close of one vault by its origin owner.
@@ -543,6 +585,9 @@ pub fn draft_close(
     ctx: &TraderContext<'_>,
     local: &LocalLeaves,
 ) -> Result<UncheckedDraft, BuildError> {
+    let pre_balances = local
+        .pre_balances(&ctx.trader_core)
+        .map_err(|why| BuildError::LocalLeaves(why.to_string()))?;
     let settlement = SettlementBody::Close {
         vault_id,
         parent_root,
@@ -552,7 +597,7 @@ pub fn draft_close(
         reserve_b,
         trader_core: derive::trader_core_digest(&ctx.trader_core.encode()?),
         dlv_core: derive::dlv_core_digest(&core.encode()?),
-        closure: pre_e_closure(ctx)?,
+        closure: pre_e_closure(ctx, &pre_balances)?,
     };
     draft(
         settlement,
@@ -563,7 +608,7 @@ pub fn draft_close(
             parent_root,
             setup_ref,
         }],
-        local,
+        pre_balances,
     )
 }
 
@@ -634,6 +679,13 @@ pub fn build_fulfillment(
         }),
         ToPublish::Preimage(draft.preimage.clone()),
     ];
+    publish.extend(
+        draft
+            .pre_balances
+            .iter()
+            .cloned()
+            .map(ToPublish::PreBalance),
+    );
     publish.extend(witnesses.into_iter().map(ToPublish::PolicyFulfillment));
     publish.push(ToPublish::Fulfillment(fulfillment.clone()));
     Ok(Produced {
