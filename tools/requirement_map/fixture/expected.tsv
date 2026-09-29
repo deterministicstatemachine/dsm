@@ -13,6 +13,8 @@ probe::Built::Example::instance_fn	reached	REACHED_VIA_DISPATCH
 probe::Never::Example::static_fn	indeterminate	IND_DISPATCH_SELF_TYPE
 probe::Never::Example::instance_fn	indeterminate	IND_DISPATCH_SELF_TYPE
 probe::unused	dead	DEAD_NO_ROOT_PATH
+# One path, two definitions: the build script's `main`, outside the build, and the library's.
+probe::main	reached	REACHED
 # The types themselves: one reached where a value is made, one where it is only named.
 probe::Built	reached	REACHED
 probe::Never	reached	REACHED

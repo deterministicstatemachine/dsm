@@ -602,6 +602,8 @@ def closure_faults(the_map, proven):
         if not steps:
             continue
         a, b = by_symbol.get(frm), by_symbol.get(to)
+        # An endpoint with no definition has no reading to check; the counts
+        # (`no-definition`, undefined_endpoints) account for every one.
         if a is None or b is None:
             continue
         ra, rb = a["reach"].get(artifact), b["reach"].get(artifact)
@@ -669,6 +671,9 @@ def dispatch_evidence_missing(the_map, impl, artifact, out_of, into):
         needed = VALUE_KINDS if kind == "member-of" else TYPE_DISPATCH_KINDS
         members = {frm for frm, k in into[artifact].get(to, ()) if k in ("member-of", "associated-of")}
         for frm, k in into[artifact].get(to, ()):
+            # Evidence must be a reached definition: an endpoint with no
+            # definition (counted by undefined_endpoints) has no reading and
+            # so is never evidence.
             witness = by_symbol.get(frm)
             if (k in needed and frm != impl["symbol"] and witness is not None
                     and witness["reach"].get(artifact, {}).get("state") == "reached"
@@ -720,12 +725,37 @@ def root_set(the_map, artifact):
     return out
 
 
+def undefined_endpoints(the_map, artifact):
+    """The symbols an artifact's edges name that defs.tsv holds no definition
+    of, as (workspace, outside). Outside ones are other crates' (`Vec`,
+    std): outside the map by design. Workspace ones are the map's blind spot:
+    code a build script generates (prost types) or a macro's own tokens write.
+    No reading exists to check at either, so the checks skip them, and these
+    counts say how much they skip."""
+    by_symbol = the_map["by_symbol"]
+    ours = {" ".join(d["symbol"].split(" ", 4)[:4]) for d in the_map["defs"]}
+    workspace, outside = set(), set()
+    for e in the_map["edges"]:
+        if e["profile"] != artifact:
+            continue
+        for s in (e["from"], e["to"]):
+            if s in by_symbol:
+                continue
+            (workspace if " ".join(s.split(" ", 4)[:4]) in ours else outside).add(s)
+    return workspace, outside
+
+
 def reading_counts(the_map, artifact):
+    """Each state and code's readings, and the undefined edge endpoints (state
+    `no-definition`, code WORKSPACE_SYMBOL or OUTSIDE_SYMBOL)."""
     counts = collections.Counter()
     for d in the_map["defs"]:
         r = d["reach"].get(artifact)
         if r is not None:
             counts[(r["state"], r["code"])] += 1
+    workspace, outside = undefined_endpoints(the_map, artifact)
+    counts[("no-definition", "WORKSPACE_SYMBOL")] = len(workspace)
+    counts[("no-definition", "OUTSIDE_SYMBOL")] = len(outside)
     return counts
 
 
@@ -749,7 +779,9 @@ def check(the_map, sentinels, roots, counts, out):
         for s in rows:
             if s["artifact"] not in built:
                 continue
-            found = [d["reach"].get(s["artifact"], {}) for d in by_path.get(s["path"], [])]
+            # Only definitions the artifact reads: one outside its crates (a
+            # build script's `main`) may share the path.
+            found = [d["reach"][s["artifact"]] for d in by_path.get(s["path"], []) if s["artifact"] in d["reach"]]
             got = [f"{r.get('state')} {r.get('code')}" for r in found]
             if got != [f"{s['state']} {s['code']}"]:
                 lost.append(f"  [sentinel-lost] {s['artifact']} {s['path']}: expected {s['state']} {s['code']}, read {got or 'nothing'} ({s['why']})")
@@ -781,7 +813,8 @@ def check(the_map, sentinels, roots, counts, out):
             for key in sorted(set(now) | set(before)):
                 b, n = before.get(key, 0), now.get(key, 0)
                 allowed = max(3, b // 10)
-                jump = abs(n - b) > allowed and key[0] == "indeterminate"
+                # What the map cannot decide, or cannot see, may not grow unexplained.
+                jump = abs(n - b) > allowed and key[0] in ("indeterminate", "no-definition")
                 mark = "  [indeterminate-jump]" if jump else ""
                 out.write(f"  {key[0]:<16} {key[1]:<24} {b:>6} -> {n:>6}{mark}\n")
                 failures += int(jump)
@@ -816,7 +849,7 @@ def main():
         the_map = load(args.map, with_edges=1)
         return 1 if check(the_map, args.sentinels, args.roots, args.counts, sys.stdout) else 0
     if args.query == ["print-committed"]:
-        print_committed(load(args.map), sys.stdout)
+        print_committed(load(args.map, with_edges=1), sys.stdout)
         return 0
     if args.query:
         if len(args.query) != 2 or args.query[0] not in ("explain", "impact"):
