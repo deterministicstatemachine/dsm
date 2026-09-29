@@ -40,13 +40,7 @@ import re
 import subprocess
 import sys
 
-PRODUCTION = (
-    "dsm_client/deterministic_state_machine/dsm/src/",
-    "dsm_client/deterministic_state_machine/dsm_sdk/src/",
-    "dsm_storage_node/src/",
-)
 TEST_DIRS = ("/tests/", "/benches/", "/examples/")
-ARTIFACTS = ("android", "node")
 
 
 def _load_module(name, path):
@@ -64,41 +58,59 @@ def _tsv(map_dir, name):
         return list(csv.DictReader(fh, delimiter="\t", quoting=csv.QUOTE_NONE))
 
 
+def _tsv_if_written(map_dir, name):
+    """A table only a full index writes (a fixture's map has none): None
+    when absent."""
+    if not os.path.exists(os.path.join(map_dir, name)):
+        return None
+    return _tsv(map_dir, name)
+
+
 def load(map_dir, with_edges=0):
     """The map: definitions (lines as ints, classified), each artifact's
-    reading of them, the hashed files, the accounting, and on request the
-    edges."""
+    reading of them, the hashed files and the accounting when the index wrote
+    them, and on request the edges."""
     defs = _tsv(map_dir, "defs.tsv")
     for d in defs:
         d["start_line"] = int(d["start_line"])
         d["end_line"] = int(d["end_line"])
         d["reach"] = {}
     by_symbol = {d["symbol"]: d for d in defs}
+    artifacts = []
     for r in _tsv(map_dir, "reach.tsv"):
+        if r["artifact"] not in artifacts:
+            artifacts.append(r["artifact"])
         target = by_symbol.get(r["symbol"])
         if target is None:
             raise SystemExit(f"reach.tsv names {r['symbol']!r}, which defs.tsv does not hold")
         target["reach"][r["artifact"]] = r
-    classify(defs)
+    # The shipped builds' crates, as each build's `cargo tree` gave them; a
+    # fixture's map ships nothing.
+    crates = _tsv_if_written(map_dir, "artifacts.tsv")
+    production = tuple(sorted({c["source"] for c in crates})) if crates else ()
+    classify(defs, production)
     the_map = {
         "defs": defs,
         "by_symbol": by_symbol,
-        "files": _tsv(map_dir, "files.tsv"),
-        "accounting": _tsv(map_dir, "accounting.tsv"),
-        "health": _tsv(map_dir, "health.tsv"),
+        # The artifacts the map read, as it wrote them: the shipped builds for
+        # a full index, the one fixture build for a fixture's map.
+        "artifacts": artifacts,
+        "files": _tsv_if_written(map_dir, "files.tsv"),
+        "accounting": _tsv_if_written(map_dir, "accounting.tsv"),
+        "health": _tsv_if_written(map_dir, "health.tsv"),
     }
     if with_edges:
         the_map["edges"] = _tsv(map_dir, "edges.tsv")
     return the_map
 
 
-def cfg_test_module_files():
+def cfg_test_module_files(production):
     """Files their parent declares `#[cfg(test)] mod x;` (or `any(…test…)`): test support."""
     gated = set()
     pattern = re.compile(
         r"#\[cfg\((?:any\([^)]*\btest\b[^)]*\)|test)\)\]\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)\s*;"
     )
-    for root in PRODUCTION:
+    for root in production:
         for decl in glob.glob(root + "**/*.rs", recursive=1):
             with open(decl, encoding="utf-8") as fh:
                 text = fh.read()
@@ -109,7 +121,7 @@ def cfg_test_module_files():
                         gated.add(candidate)
     # Files declared inside a `#[cfg(test)] mod name { mod child; … }` block.
     inline = re.compile(r"(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)\s*\{")
-    for root in PRODUCTION:
+    for root in production:
         for decl in glob.glob(root + "**/*.rs", recursive=1):
             with open(decl, encoding="utf-8") as fh:
                 text = fh.read()
@@ -156,17 +168,17 @@ def markable(d):
     return d["kind"] in ("type", "term") and not d["container"]
 
 
-def classify(defs):
+def classify(defs, production):
     """Sets d["scope"] to production, test or other, and d["status"] of each
     production definition from the map's best state over the artifacts:
     reached, indeterminate, test-only (no artifact reaches it; a test does),
     dead, not-built (its artifact's index was not built here), or
     not-in-artifact (no shipped build compiles it)."""
-    gated = cfg_test_module_files()
+    gated = cfg_test_module_files(production)
     lines_of = {}
     for d in defs:
         f = d["file"]
-        if not f.startswith(PRODUCTION):
+        if not f.startswith(production):
             d["scope"], d["status"] = "other", ""
             continue
         if any(t in f for t in TEST_DIRS) or f in gated:
@@ -264,7 +276,7 @@ def explain(the_map, query, out):
         out.write(f"defined: {d['file']}:{d['start_line']}-{d['end_line']}  kind {d['kind']}  scope {d['scope']}  built in: {d['built_in']}\n")
         out.write(f"item: {d['item']}\nclosure: {d['closure']}\n")
         out.write(f"entry point: {d['root'] if d['root'] else 'none'}\n")
-        for artifact in ARTIFACTS:
+        for artifact in the_map["artifacts"]:
             r = d["reach"].get(artifact)
             if r is None:
                 out.write(f"{artifact}: not applicable (its crates do not hold this file)\n")
@@ -305,7 +317,7 @@ def impact(the_map, query, out):
     for e in the_map["edges"]:
         backward[e["profile"]][e["to"]].add(e["from"])
     out.write(f"changed: {len(changed)} definition(s): {', '.join(sorted(label(d) for d in found)[:10])}\n")
-    for profile in list(ARTIFACTS) + ["tests"]:
+    for profile in list(the_map["artifacts"]) + ["tests"]:
         graph = backward.get(profile)
         if graph is None:
             out.write(f"{profile}: no index in this map\n")
@@ -388,6 +400,9 @@ def _area(path):
 
 
 def write_report(the_map, path):
+    missing = [n for n in ("files", "accounting", "health") if the_map[n] is None]
+    if missing:
+        raise SystemExit(f"the report needs a full index's {', '.join(missing)} tables")
     esc = html.escape
     head = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=1, text=1, check=1).stdout.strip()
     prod = [d for d in the_map["defs"] if d["scope"] == "production" and markable(d)]
@@ -411,7 +426,7 @@ def write_report(the_map, path):
         "<div class=cards>",
     ]
     cards = [("source files hashed", len(files)), ("mapped", len(mapped))]
-    for artifact in ARTIFACTS:
+    for artifact in the_map["artifacts"]:
         m = measures.get(artifact)
         if m is not None:
             cards.append((f"{artifact}: {m['built']}", m["roots"]))
@@ -462,10 +477,10 @@ def write_report(the_map, path):
         note = ", ".join(f"{v} {k}" for k, v in sorted(tally.items()))
         out.append(f"<details><summary><code>{esc(f)}</code> — {len(items)} items{(' · ' + esc(note)) if note else ''}</summary>")
         out.append("<div class=wrap><table><thead><tr><th>Item</th><th>Kind</th><th>Lines</th>"
-                   + "".join(f"<th>{a}</th>" for a in ARTIFACTS) + "<th>Closure</th></tr></thead><tbody>")
+                   + "".join(f"<th>{a}</th>" for a in the_map["artifacts"]) + "<th>Closure</th></tr></thead><tbody>")
         for d in items:
             cells = ""
-            for a in ARTIFACTS:
+            for a in the_map["artifacts"]:
                 r = d["reach"].get(a)
                 cells += f"<td>{_badge(r['state']) if r else '—'}<br><code>{esc(r['code']) if r else ''}</code></td>"
             out.append(f"<tr><td><code>{esc(display(d))}</code></td><td>{esc(d['kind'])}</td>"
@@ -490,16 +505,322 @@ def write_report(the_map, path):
         fh.write("\n".join(out))
 
 
+
+# ---- the adversarial checks -----------------------------------------------------
+#
+# An independent reading of what the map wrote: every statement no correct map
+# can make, and the committed facts it must keep. It shares no code with the
+# Rust producer; each rule is read from the tables alone, and a failure names
+# the rule, the definition and the artifact.
+
+DISPATCH_KINDS = ("trait-dispatch", "self-type")
+VALUE_KINDS = ("construct", "member-of")
+TYPE_DISPATCH_KINDS = ("type-argument", "associated-of")
+STATE_CODES = {
+    "reached": ("REACHED", "REACHED_VIA_DISPATCH"),
+    "dead": ("DEAD_NO_ROOT_PATH",),
+    "not-in-artifact": ("NOT_IN_ARTIFACT",),
+    "not-built": ("IND_PROFILE_NOT_BUILT",),
+}
+NOT_ROOTS = ("undeclared-export", "unread-declaration", "undecided-gate")
+# Every rule a check can name. A fault under any other name is the checker's
+# own error, and tools/requirement_map/rules.tsv records each one's cases.
+CHECK_RULES = (
+    "state-code",
+    "reached-outside-its-build",
+    "dead-with-a-witness",
+    "root-not-recorded",
+    "root-not-reached",
+    "unreached-after-a-proven-edge",
+    "witness-through-unreached",
+    "witness-cycle",
+    "witness-names-nothing",
+    "witness-step-not-a-proven-edge",
+    "dispatch-without-evidence",
+    "direct-reach-through-a-dispatch",
+    "dispatch-reach-without-a-dispatch",
+    "sentinel-lost",
+    "entry-point-new",
+    "entry-point-lost",
+    "indeterminate-jump",
+)
+
+
+def contradictions(the_map):
+    """Every contradiction in the map, as (rule, definition, artifact, detail)."""
+    proven = collections.defaultdict(set)
+    out_of = collections.defaultdict(lambda: collections.defaultdict(set))
+    into = collections.defaultdict(lambda: collections.defaultdict(set))
+    for e in the_map["edges"]:
+        if e["proof"] == "proven":
+            proven[(e["profile"], e["from"], e["to"])].add(e["kind"])
+            out_of[e["profile"]][e["from"]].add((e["to"], e["kind"]))
+            into[e["profile"]][e["to"]].add((e["from"], e["kind"]))
+    faults = []
+    for d in the_map["defs"]:
+        who = d["path"] or d["symbol"]
+        built = set(filter(None, d["built_in"].split(",")))
+        roots = {}
+        for pair in filter(None, d["root"].split(",")):
+            artifact, _, kind = pair.partition(":")
+            roots[artifact] = kind
+        for artifact, r in d["reach"].items():
+            state, code = r["state"], r["code"]
+            here = []
+            if state == "indeterminate":
+                if not code.startswith("IND_") or code == "IND_PROFILE_NOT_BUILT":
+                    here.append(("state-code", f"indeterminate with {code}"))
+            elif code not in STATE_CODES.get(state, ()):
+                here.append(("state-code", f"{state} with {code}"))
+            if state == "reached" and artifact not in built:
+                here.append(("reached-outside-its-build", f"built in {sorted(built)}"))
+            if state == "dead" and r["via"]:
+                here.append(("dead-with-a-witness", r["via"]))
+            if r["via_kind"] == "root" and roots.get(artifact) != r["via"]:
+                here.append(("root-not-recorded", f"{r['via']} vs {roots.get(artifact)}"))
+            if artifact in roots and roots[artifact] not in NOT_ROOTS and state not in ("reached", "not-built"):
+                here.append(("root-not-reached", f"a {roots[artifact]} root that is {state}"))
+            if state == "reached":
+                here.extend(witness_faults(the_map, d, artifact, proven, out_of, into))
+            faults.extend((rule, who, artifact, detail) for rule, detail in here)
+    faults.extend(closure_faults(the_map, proven))
+    unknown = sorted({rule for rule, _, _, _ in faults} - set(CHECK_RULES))
+    if unknown:
+        raise SystemExit(f"the check named rules it does not declare: {unknown}")
+    return faults
+
+
+def closure_faults(the_map, proven):
+    """Reached is closed under every proven step that is not a dispatch: a
+    reached definition's proven reference (or value, member, impl or type
+    step) leads to a reached definition. One that does not is a false Dead or
+    a false Indeterminate."""
+    by_symbol = the_map["by_symbol"]
+    faults = []
+    for (artifact, frm, to), kinds in proven.items():
+        steps = kinds - set(DISPATCH_KINDS)
+        if not steps:
+            continue
+        a, b = by_symbol.get(frm), by_symbol.get(to)
+        if a is None or b is None:
+            continue
+        ra, rb = a["reach"].get(artifact), b["reach"].get(artifact)
+        if ra is None or rb is None or ra["state"] != "reached" or rb["state"] == "reached":
+            continue
+        faults.append(("unreached-after-a-proven-edge", b["path"] or to, artifact,
+                       f"{rb['state']} {rb['code']}, after a proven {'/'.join(sorted(steps))} from reached {a['path'] or frm}"))
+    return faults
+
+
+def witness_faults(the_map, d, artifact, proven, out_of, into):
+    """What is wrong with a reached definition's witness: every step a proven
+    edge of this artifact from a reached node; the chain ending at an entry
+    point of this artifact; each dispatch step with its evidence reached; a
+    `REACHED` chain holding no dispatch step and a `REACHED_VIA_DISPATCH`
+    chain holding one."""
+    by_symbol = the_map["by_symbol"]
+    faults = []
+    direct = d["reach"][artifact]["code"] == "REACHED"
+    dispatched = 0
+    seen = set()
+    node = d
+    while 1:
+        r = node["reach"].get(artifact)
+        if r is None or r["state"] != "reached":
+            faults.append(("witness-through-unreached", node["symbol"]))
+            return faults
+        if r["via_kind"] == "root":
+            break
+        if node["symbol"] in seen:
+            faults.append(("witness-cycle", node["symbol"]))
+            return faults
+        seen.add(node["symbol"])
+        pred = by_symbol.get(r["via"])
+        if pred is None:
+            faults.append(("witness-names-nothing", r["via"]))
+            return faults
+        if r["via_kind"] not in proven.get((artifact, r["via"], node["symbol"]), set()):
+            faults.append(("witness-step-not-a-proven-edge", f"{r['via_kind']} {r['via']} -> {node['symbol']}"))
+            return faults
+        if r["via_kind"] in DISPATCH_KINDS:
+            dispatched += 1
+            missing = dispatch_evidence_missing(the_map, node, artifact, out_of, into)
+            if missing:
+                faults.append(("dispatch-without-evidence", f"{node['symbol']}: {missing}"))
+        node = pred
+    if direct and dispatched:
+        faults.append(("direct-reach-through-a-dispatch", f"{dispatched} dispatch step(s) in its witness"))
+    if not direct and not dispatched:
+        faults.append(("dispatch-reach-without-a-dispatch", "no dispatch step in its witness"))
+    return faults
+
+
+def dispatch_evidence_missing(the_map, impl, artifact, out_of, into):
+    """For an impl reached by dispatch, its Self type (where its `member-of`
+    or `associated-of` edge leads) must have evidence from another reached
+    definition: a value (`construct`, `member-of`) for a method taking `self`,
+    a dispatch by type (`type-argument`, `associated-of`) for an associated
+    function. The reason it is missing, or an empty string."""
+    by_symbol = the_map["by_symbol"]
+    owners = [(to, k) for (to, k) in out_of[artifact].get(impl["symbol"], ()) if k in ("member-of", "associated-of")]
+    if not owners:
+        return "no Self type recorded"
+    for to, kind in owners:
+        needed = VALUE_KINDS if kind == "member-of" else TYPE_DISPATCH_KINDS
+        members = {frm for frm, k in into[artifact].get(to, ()) if k in ("member-of", "associated-of")}
+        for frm, k in into[artifact].get(to, ()):
+            witness = by_symbol.get(frm)
+            if (k in needed and frm != impl["symbol"] and witness is not None
+                    and witness["reach"].get(artifact, {}).get("state") == "reached"
+                    and not reached_through_dispatch_into(the_map, witness, artifact, members)):
+                return ""
+    kind = owners[0][1]
+    return "no reached " + ("value" if kind == "member-of" else "dispatch by type") + " of its Self type"
+
+
+def reached_through_dispatch_into(the_map, d, artifact, members):
+    """Whether `d`'s witness passes through a dispatch into one of `members`
+    (the Self type's own methods): evidence that rests on the dispatch it
+    would establish proves nothing."""
+    by_symbol = the_map["by_symbol"]
+    seen = set()
+    node = d
+    while node is not None and node["symbol"] not in seen:
+        seen.add(node["symbol"])
+        r = node["reach"].get(artifact, {})
+        if r.get("via_kind") in DISPATCH_KINDS and node["symbol"] in members:
+            return 1
+        if r.get("via_kind") in (None, "", "root", "seed"):
+            return 0
+        node = by_symbol.get(r.get("via"))
+    return 0
+
+
+def _committed(path):
+    with open(path, encoding="utf-8") as fh:
+        return [r for r in csv.DictReader((l for l in fh if not l.startswith("#")), delimiter="\t", quoting=csv.QUOTE_NONE)]
+
+
+def built_artifacts(the_map):
+    """The artifacts this map read with an index (not `not-built`)."""
+    states = collections.defaultdict(set)
+    for d in the_map["defs"]:
+        for artifact, r in d["reach"].items():
+            states[artifact].add(r["state"])
+    return [a for a in the_map["artifacts"] if states[a] - {"not-built"}]
+
+
+def root_set(the_map, artifact):
+    out = set()
+    for d in the_map["defs"]:
+        for pair in filter(None, d["root"].split(",")):
+            a, _, kind = pair.partition(":")
+            if a == artifact:
+                out.add((kind, d["path"] or d["symbol"]))
+    return out
+
+
+def reading_counts(the_map, artifact):
+    counts = collections.Counter()
+    for d in the_map["defs"]:
+        r = d["reach"].get(artifact)
+        if r is not None:
+            counts[(r["state"], r["code"])] += 1
+    return counts
+
+
+def check(the_map, sentinels, roots, counts, out):
+    """The contradictions, the sentinels, the entry points and the counts.
+    The number of failures."""
+    failures = 0
+    faults = contradictions(the_map)
+    out.write(f"contradictions: {len(faults)}\n")
+    for rule, who, artifact, detail in faults[:200]:
+        out.write(f"  [{rule}] {artifact} {who}: {detail}\n")
+    failures += len(faults)
+    built = built_artifacts(the_map)
+    by_path = collections.defaultdict(list)
+    for d in the_map["defs"]:
+        if d["path"]:
+            by_path[d["path"]].append(d)
+    if sentinels:
+        rows = _committed(sentinels)
+        lost = []
+        for s in rows:
+            if s["artifact"] not in built:
+                continue
+            found = [d["reach"].get(s["artifact"], {}) for d in by_path.get(s["path"], [])]
+            got = [f"{r.get('state')} {r.get('code')}" for r in found]
+            if got != [f"{s['state']} {s['code']}"]:
+                lost.append(f"  [sentinel-lost] {s['artifact']} {s['path']}: expected {s['state']} {s['code']}, read {got or 'nothing'} ({s['why']})")
+        checked = sum(1 for s in rows if s["artifact"] in built)
+        out.write(f"sentinels: {checked} checked, {len(lost)} lost\n" + "".join(l + "\n" for l in lost))
+        failures += len(lost)
+    if roots:
+        committed = collections.defaultdict(set)
+        for r in _committed(roots):
+            committed[r["artifact"]].add((r["kind"], r["path"]))
+        for artifact in built:
+            now = root_set(the_map, artifact)
+            added = sorted(now - committed[artifact])
+            gone = sorted(committed[artifact] - now)
+            out.write(f"entry points ({artifact}): {len(now)}, {len(added)} unexplained new, {len(gone)} lost\n")
+            for kind, path in added:
+                out.write(f"  [entry-point-new] {kind}: {path}\n")
+            for kind, path in gone:
+                out.write(f"  [entry-point-lost] {kind}: {path}\n")
+            failures += len(added) + len(gone)
+    if counts:
+        committed = collections.defaultdict(dict)
+        for r in _committed(counts):
+            committed[r["artifact"]][(r["state"], r["code"])] = int(r["count"])
+        for artifact in built:
+            now = reading_counts(the_map, artifact)
+            before = committed[artifact]
+            out.write(f"readings ({artifact}): before -> now\n")
+            for key in sorted(set(now) | set(before)):
+                b, n = before.get(key, 0), now.get(key, 0)
+                allowed = max(3, b // 10)
+                jump = abs(n - b) > allowed and key[0] == "indeterminate"
+                mark = "  [indeterminate-jump]" if jump else ""
+                out.write(f"  {key[0]:<16} {key[1]:<24} {b:>6} -> {n:>6}{mark}\n")
+                failures += int(jump)
+    out.write(f"{failures} failure(s)\n")
+    return failures
+
+
+def print_committed(the_map, out):
+    """The entry points and counts this map reads, in the committed files'
+    form, for a person to review and commit: never written by the check."""
+    built = built_artifacts(the_map)
+    out.write("# ci/requirement_map.roots.tsv\nartifact\tkind\tpath\n")
+    for artifact in built:
+        for kind, path in sorted(root_set(the_map, artifact)):
+            out.write(f"{artifact}\t{kind}\t{path}\n")
+    out.write("\n# ci/requirement_map.counts.tsv\nartifact\tstate\tcode\tcount\n")
+    for artifact in built:
+        for (state, code), n in sorted(reading_counts(the_map, artifact).items()):
+            out.write(f"{artifact}\t{state}\t{code}\t{n}\n")
+
 def main():
     import argparse
     ap = argparse.ArgumentParser()
     ap.add_argument("--map", required=1, help="a requirement_map directory (make requirement-map)")
     ap.add_argument("--report", help="write the map as one HTML page here")
-    ap.add_argument("query", nargs="*", help="explain|impact <symbol | Rust path | file>")
+    ap.add_argument("--sentinels", help="check: the committed known-good readings")
+    ap.add_argument("--roots", help="check: the committed entry points")
+    ap.add_argument("--counts", help="check: the committed readings per state and code")
+    ap.add_argument("query", nargs="*", help="explain|impact <symbol | Rust path | file>, check, or print-committed")
     args = ap.parse_args()
+    if args.query == ["check"]:
+        the_map = load(args.map, with_edges=1)
+        return 1 if check(the_map, args.sentinels, args.roots, args.counts, sys.stdout) else 0
+    if args.query == ["print-committed"]:
+        print_committed(load(args.map), sys.stdout)
+        return 0
     if args.query:
         if len(args.query) != 2 or args.query[0] not in ("explain", "impact"):
-            ap.error("a query is: explain <what> | impact <what>")
+            ap.error("a query is: explain <what> | impact <what> | check | print-committed")
         command, what = args.query
         the_map = load(args.map, with_edges=1)
         run = explain if command == "explain" else impact

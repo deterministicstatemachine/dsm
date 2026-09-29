@@ -371,6 +371,10 @@ requirement-map: ## Code map (MAP=dir): every source file hashed; each shipped b
 	# the build does not.
 	rustup run $(RUST_PIN) cargo tree --locked --color never -p dsm_sdk --features jni,bluetooth --target aarch64-linux-android -e normal,build --prefix none -f '{p} {f}' > $(MAP)/android-features.txt
 	rustup run $(RUST_PIN) cargo tree --locked --color never --workspace --features dsm_sdk/jni,dsm_sdk/bluetooth --target aarch64-linux-android -e normal,build,dev --prefix none -f '{p} {f}' > $(MAP)/android-features-indexed.txt
+	# Each build's linked packages (normal dependencies: what the artifact
+	# holds) are its crates; resolution only, so the node's reads on any host.
+	rustup run $(RUST_PIN) cargo tree --locked --color never -p dsm_sdk --features jni,bluetooth --target aarch64-linux-android -e normal --prefix none -f '{p}' > $(MAP)/android-packages.txt
+	rustup run $(RUST_PIN) cargo tree --locked --color never -p dsm_storage_node --target x86_64-unknown-linux-gnu -e normal --prefix none -f '{p}' > $(MAP)/node-packages.txt
 	env CC_aarch64_linux_android=$(NDK_BIN)/aarch64-linux-android23-clang AR_aarch64_linux_android=$(NDK_BIN)/llvm-ar \
 		rustup run $(RUST_PIN) rust-analyzer scip . --config-path ci/requirement_map.android.rust-analyzer.json --output $(MAP)/android.scip > $(MAP)/android.log 2>&1
 	if [ "$$(uname -s)" = Linux ]; then \
@@ -383,6 +387,7 @@ requirement-map: ## Code map (MAP=dir): every source file hashed; each shipped b
 	target/release/requirement_map index --root . --files $(MAP)/sources.txt --inputs $(MAP)/inputs.txt --fingerprint $(MAP)/tree \
 		--android $(MAP)/android.scip --android-log $(MAP)/android.log \
 		--android-features $(MAP)/android-features.txt --android-features-indexed $(MAP)/android-features-indexed.txt \
+		--android-packages $(MAP)/android-packages.txt --node-packages $(MAP)/node-packages.txt \
 		$$(if [ -f $(MAP)/node.scip ]; then echo --node $(MAP)/node.scip --node-log $(MAP)/node.log --node-features $(MAP)/node-features.txt --node-features-indexed $(MAP)/node-features-indexed.txt; fi) \
 		--tests $(MAP)/tests.scip --tests-log $(MAP)/tests.log \
 		--jni-declarations dsm_client/android/app/src/main --unindexed-consumer crates/dsm-android-anchor/src \
@@ -390,13 +395,26 @@ requirement-map: ## Code map (MAP=dir): every source file hashed; each shipped b
 	python3 ci/requirement_map.py --map $(MAP) --report $(MAP)/code-map.html
 
 .PHONY: requirement-map-fixture
-requirement-map-fixture: ## The map's end-to-end fixture: dispatch through a type argument, a qualified path and a value, and a type only named, read through the real pipeline
+requirement-map-fixture: ## The map's adversarial fixture read through the real pipeline: dispatch, receivers, paths, trait objects, scopes, macros, entry points and gates (tools/requirement_map/fixture/expected.tsv)
 	rustup component add rust-analyzer --toolchain $(RUST_PIN)
 	mkdir -p $(MAP)/fixture
 	rustup run $(RUST_PIN) cargo build --locked --release -p requirement_map
+	rustup run $(RUST_PIN) cargo tree --locked --color never --manifest-path tools/requirement_map/fixture/Cargo.toml -p probe -e normal,build --prefix none -f '{p} {f}' > $(MAP)/fixture/features.txt
+	rustup run $(RUST_PIN) cargo tree --locked --color never --manifest-path tools/requirement_map/fixture/Cargo.toml --workspace -e normal,build,dev --prefix none -f '{p} {f}' > $(MAP)/fixture/features-indexed.txt
 	rustup run $(RUST_PIN) rust-analyzer scip tools/requirement_map/fixture --config-path ci/requirement_map.fixture.rust-analyzer.json --output $(MAP)/fixture/index.scip > $(MAP)/fixture/index.log 2>&1
 	target/release/requirement_map fixture --root tools/requirement_map/fixture --scip $(MAP)/fixture/index.scip --log $(MAP)/fixture/index.log \
-		--jni-declarations kotlin --crate probe/src/ --expect tools/requirement_map/fixture/expected.tsv
+		--jni-declarations kotlin --crate probe/src/ --package probe \
+		--features $(MAP)/fixture/features.txt --features-indexed $(MAP)/fixture/features-indexed.txt \
+		--expect tools/requirement_map/fixture/expected.tsv --out $(MAP)/fixture/map
+
+.PHONY: requirement-map-check requirement-map-mutations
+requirement-map-check: ## The map against itself and the committed facts (after make requirement-map): no contradiction, every sentinel, entry point and count as ci/requirement_map.*.tsv hold them; MAP/committed.tsv is what this map reads, for review
+	python3 ci/requirement_map.py --map $(MAP) print-committed > $(MAP)/committed.tsv
+	python3 ci/requirement_map.py --map $(MAP) check --sentinels ci/requirement_map.sentinels.tsv --roots ci/requirement_map.roots.tsv --counts ci/requirement_map.counts.tsv
+
+requirement-map-mutations: ## Every case in tools/requirement_map/fixture/mutations.toml, each in a temporary copy (after make requirement-map-fixture and requirement-map; the re-index case needs ANDROID_NDK_HOME)
+	@test -n "$(ANDROID_NDK_HOME)" || { echo "requirement-map-mutations: set ANDROID_NDK_HOME (the re-index case builds the Android index again)"; exit 1; }
+	python3 ci/requirement_map_mutations.py --cases tools/requirement_map/fixture/mutations.toml --map $(MAP)
 
 .PHONY: lint
 # THE canonical toolchain, read from rust-toolchain.toml — never hardcoded here.

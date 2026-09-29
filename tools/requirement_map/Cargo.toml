@@ -23,5 +23,9 @@ syn = { version = "2", features = ["full", "visit"] }
 # The tokens of a node syn keeps unparsed (`Verbatim`), to read what they gate.
 quote = "1"
 
+[dev-dependencies]
+# The mutation cases (fixture/mutations.toml), read by the rule-coverage test.
+toml = "1.1.2"
+
 [lints]
 workspace = true

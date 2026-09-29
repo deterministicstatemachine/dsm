@@ -18,13 +18,19 @@
 //!       refuses when the tree is no longer the one fingerprinted, when an
 //!       index's log shows a failure or a line of no known kind, or when the
 //!       definitions do not add up; writes defs.tsv, reach.tsv, edges.tsv,
-//!       files.tsv, accounting.tsv and health.tsv, and prints the accounting.
+//!       files.tsv, accounting.tsv, health.tsv and token-read.tsv, and prints
+//!       the accounting.
 //!   requirement_map fixture --root <fixture> --scip <scip> --log <log>
-//!                           --jni-declarations <dir> --crate <src-prefix> --expect <tsv>
-//!       reads a fixture crate's index through the same loader and graph, as
-//!       one artifact whose entry points the fixture's Kotlin declares, and
-//!       refuses unless every reading `--expect` lists (path, state, code)
-//!       comes out as listed
+//!                           --jni-declarations <dir> --crate <src-prefix>
+//!                           --package <name> [--features <tree> --features-indexed <tree>]
+//!                           --expect <tsv> [--out <dir>]
+//!       reads a fixture crate's index through the same loader, cfg
+//!       evaluation and graph, as one artifact whose entry points the
+//!       fixture's Kotlin declares; writes defs.tsv, reach.tsv and edges.tsv
+//!       to `--out`; and refuses unless every reading `--expect` lists (key,
+//!       state, code) comes out as listed. A key is a Rust path, or
+//!       `@file:line name` for an item written inside a function; the state
+//!       `absent` says the build compiles no such definition.
 
 mod cfgs;
 mod graph;
@@ -33,6 +39,8 @@ mod index;
 mod jni;
 mod logs;
 mod reach;
+#[cfg(test)]
+mod rules;
 mod source;
 mod symbols;
 mod tokens;
@@ -41,7 +49,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-const USAGE: &str = "usage:\n  requirement_map fixture --root <fixture> --scip <scip> --log <log> --jni-declarations <dir> --crate <src-prefix> --expect <tsv>\n  requirement_map fingerprint --root <repo> --files <list> --inputs <list> --out <file>\n  requirement_map index --root <repo> --files <list> --inputs <list> --fingerprint <file> --android <scip> --android-log <log> [--node <scip> --node-log <log>] --tests <scip> --tests-log <log> --android-features <tree> --android-features-indexed <tree> [--node-features <tree> --node-features-indexed <tree>] --jni-declarations <dir> [--unindexed-consumer <dir>] --out <dir>";
+const USAGE: &str = "usage:\n  requirement_map fixture --root <fixture> --scip <scip> --log <log> --jni-declarations <dir> --crate <src-prefix> --package <name> [--features <tree> --features-indexed <tree>] --expect <tsv> [--out <dir>]\n  requirement_map fingerprint --root <repo> --files <list> --inputs <list> --out <file>\n  requirement_map index --root <repo> --files <list> --inputs <list> --fingerprint <file> --android <scip> --android-log <log> [--node <scip> --node-log <log>] --tests <scip> --tests-log <log> --android-features <tree> --android-features-indexed <tree> --android-packages <tree> [--node-features <tree> --node-features-indexed <tree>] --node-packages <tree> --jni-declarations <dir> [--unindexed-consumer <dir>] [--target-dir <dir>] --out <dir>";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -73,6 +81,28 @@ impl Flags {
     fn optional(&self, name: &str) -> Option<&Path> {
         self.values.get(name).map(Path::new)
     }
+
+    /// A flag's value as the text it was given.
+    fn text(&self, name: &str) -> Result<&str, String> {
+        self.values
+            .get(name)
+            .map(String::as_str)
+            .ok_or_else(|| format!("{} needs {name}\n{USAGE}", self.command))
+    }
+}
+
+/// A relative path as the map writes it: its components joined by `/`. A
+/// name that is not UTF-8 is an error, never replaced.
+pub(crate) fn path_text(path: &Path) -> Result<String, String> {
+    let mut parts: Vec<&str> = Vec::new();
+    for part in path.components() {
+        parts.push(
+            part.as_os_str()
+                .to_str()
+                .ok_or_else(|| format!("{}: a name that is not UTF-8", path.display()))?,
+        );
+    }
+    Ok(parts.join("/"))
 }
 
 fn run(args: &[String]) -> Result<String, String> {
@@ -220,10 +250,15 @@ fn consumer(root: &Path, dir: &Path) -> Result<graph::Consumer, String> {
 /// a function where the loader runs it; a build script that set a `cfg`
 /// (read from what it actually printed, cargo's `output` files), which the
 /// cfg evaluation does not know.
-fn unreadable(root: &Path, files: &[String], crates: &[&str]) -> Result<(), String> {
+fn unreadable(
+    root: &Path,
+    files: &[String],
+    crates: &[(&str, &str)],
+    target_dir: &Path,
+) -> Result<(), String> {
     for file in files
         .iter()
-        .filter(|f| crates.iter().any(|c| f.starts_with(c)))
+        .filter(|f| crates.iter().any(|(c, _)| f.starts_with(c)))
     {
         let text = std::fs::read_to_string(root.join(file)).map_err(|e| format!("{file}: {e}"))?;
         let lexed = source::Source::lex(&text).map_err(|e| format!("{file}: {e}"))?;
@@ -233,19 +268,16 @@ fn unreadable(root: &Path, files: &[String], crates: &[&str]) -> Result<(), Stri
             ));
         }
     }
-    for crate_dir in crates {
+    for (crate_dir, package) in crates {
         let crate_root = crate_dir.trim_end_matches("src/");
         if !root.join(crate_root).join("build.rs").exists() {
             continue;
         }
-        let package = Path::new(crate_root.trim_end_matches('/'))
-            .file_name()
-            .and_then(|n| n.to_str())
-            .ok_or_else(|| format!("{crate_dir}: no package directory"))?;
-        let outputs = build_script_outputs(root, package)?;
+        let outputs = build_script_outputs(target_dir, package)?;
         if outputs.is_empty() {
             return Err(format!(
-                "{package} has a build script but cargo left no output for it under target/: the index did not run it"
+                "{package} has a build script but cargo left no output for it under {}: the index did not run it",
+                target_dir.display()
             ));
         }
         for output in outputs {
@@ -265,10 +297,18 @@ fn unreadable(root: &Path, files: &[String], crates: &[&str]) -> Result<(), Stri
     Ok(())
 }
 
-/// Every `output` file cargo left for `package`'s build script under
-/// `target/` (each profile, each target triple): what the script printed.
-fn build_script_outputs(root: &Path, package: &str) -> Result<Vec<PathBuf>, String> {
-    let target = root.join("target");
+/// Borrowed (source prefix, package) pairs.
+fn as_pairs(pairs: &[(String, String)]) -> Vec<(&str, &str)> {
+    pairs
+        .iter()
+        .map(|(prefix, package)| (prefix.as_str(), package.as_str()))
+        .collect()
+}
+
+/// Every `output` file cargo left for `package`'s build script under the
+/// build's target directory (each profile, each target triple): what the
+/// script printed.
+fn build_script_outputs(target: &Path, package: &str) -> Result<Vec<PathBuf>, String> {
     let mut build_dirs = vec![target.join("debug/build"), target.join("release/build")];
     if target.exists() {
         for entry in std::fs::read_dir(&target).map_err(|e| format!("{}: {e}", target.display()))? {
@@ -361,9 +401,9 @@ fn index_command(flags: &Flags) -> Result<String, String> {
         flags.path("--tests")?,
         flags.path("--tests-log")?,
     )?;
-    let declared = jni::declared(root, &flags.path("--jni-declarations")?.to_string_lossy())?;
-    let unindexed = match flags.optional("--unindexed-consumer") {
-        Some(dir) => Some((dir.to_string_lossy().to_string(), consumer(root, dir)?)),
+    let declared = jni::declared(root, flags.text("--jni-declarations")?)?;
+    let unindexed = match flags.values.get("--unindexed-consumer") {
+        Some(dir) => Some((dir.clone(), consumer(root, Path::new(dir))?)),
         None => None,
     };
     let source_files: Vec<String> = files
@@ -385,19 +425,44 @@ fn index_command(flags: &Flags) -> Result<String, String> {
             &cfgs::features(&read(indexed)?)?,
         )
     };
-    unreadable(root, &source_files, &graph::ANDROID_CRATES)?;
-    unreadable(root, &source_files, &graph::NODE_CRATES)?;
+    // Each build's crates: the repository's packages its own `cargo tree`
+    // links, never a list written here.
+    let linked = |flag: &str| -> Result<Vec<(String, String)>, String> {
+        let path = flags.path(flag)?;
+        let tree = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        cfgs::linked_packages(&tree, root).map_err(|e| format!("{}: {e}", path.display()))
+    };
+    let android_packages = linked("--android-packages")?;
+    let node_packages = linked("--node-packages")?;
+    let prefixes = |packages: &[(String, String)]| -> Vec<(String, String)> {
+        packages
+            .iter()
+            .map(|(package, prefix)| (prefix.clone(), package.clone()))
+            .collect()
+    };
+    let android_pairs = prefixes(&android_packages);
+    let node_pairs = prefixes(&node_packages);
+    let android_crates: Vec<&str> = android_pairs.iter().map(|(p, _)| p.as_str()).collect();
+    let node_crates: Vec<&str> = node_pairs.iter().map(|(p, _)| p.as_str()).collect();
+    let target_dir = match flags.optional("--target-dir") {
+        Some(dir) => dir.to_path_buf(),
+        None => root.join("target"),
+    };
+    unreadable(root, &source_files, &as_pairs(&android_pairs), &target_dir)?;
+    unreadable(root, &source_files, &as_pairs(&node_pairs), &target_dir)?;
     let android_excluded = exclusions(
         flags.path("--android-features")?,
         flags.path("--android-features-indexed")?,
-        &graph::ANDROID_PACKAGES,
+        &as_pairs(&android_pairs),
     )?;
     let node_excluded = match (
         flags.optional("--node-features"),
         flags.optional("--node-features-indexed"),
         &node,
     ) {
-        (Some(built), Some(indexed), Some(_)) => exclusions(built, indexed, &graph::NODE_PACKAGES)?,
+        (Some(built), Some(indexed), Some(_)) => {
+            exclusions(built, indexed, &as_pairs(&node_pairs))?
+        }
         (None, None, None) => cfgs::Exclusions::none(),
         _ => {
             return Err(format!(
@@ -417,20 +482,36 @@ fn index_command(flags: &Flags) -> Result<String, String> {
         excluded_text(&android_excluded),
         excluded_text(&node_excluded)
     );
+    // Each build's own features, per package: what its `cfg` decides.
+    let read_features = |path: &Path| -> Result<BTreeMap<String, BTreeSet<String>>, String> {
+        let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        cfgs::features(&text).map_err(|e| format!("{}: {e}", path.display()))
+    };
+    let android_features = read_features(flags.path("--android-features")?)?;
+    let node_features = match flags.optional("--node-features") {
+        Some(path) => read_features(path)?,
+        None => BTreeMap::new(),
+    };
     let artifacts = vec![
         graph::Artifact {
             name: "android",
-            crates: &graph::ANDROID_CRATES,
+            crates: &android_crates,
             loaded: Ok(&android.loaded),
+            target: cfgs::Target::android(),
+            features: &android_features,
+            packages: android_pairs.clone(),
             unindexed: unindexed.as_ref(),
             excluded: android_excluded,
         },
         graph::Artifact {
             name: "node",
-            crates: &graph::NODE_CRATES,
+            crates: &node_crates,
             loaded: node.as_ref().map(|p| &p.loaded).ok_or_else(|| {
                 "no storage-node index was given to this map (make requirement-map builds it on a Linux host only; CI's map is canonical)".to_string()
             }),
+            target: cfgs::Target::node(),
+            features: &node_features,
+            packages: node_pairs.clone(),
             unindexed: None,
             excluded: node_excluded,
         },
@@ -495,6 +576,18 @@ fn index_command(flags: &Flags) -> Result<String, String> {
         }
     }
     write("token-read.tsv", &token_read)?;
+    // Each artifact's crates, as its build's `cargo tree` gave them.
+    let mut crates_table = String::from("artifact\tpackage\tsource\n");
+    for (artifact, packages) in [("android", &android_packages), ("node", &node_packages)] {
+        for (package, prefix) in packages {
+            crates_table.push_str(&format!(
+                "{artifact}\t{}\t{}\n",
+                cell(package)?,
+                cell(prefix)?
+            ));
+        }
+    }
+    write("artifacts.tsv", &crates_table)?;
     Ok(format!(
         "{summary}\n{feature_notes}\n{} source files hashed, tree {tree}",
         files.len()
@@ -507,18 +600,68 @@ fn index_command(flags: &Flags) -> Result<String, String> {
 fn fixture_command(flags: &Flags) -> Result<String, String> {
     let root = flags.path("--root")?;
     let profile = load_profile("fixture", root, flags.path("--scip")?, flags.path("--log")?)?;
-    let declared = jni::declared(root, &flags.path("--jni-declarations")?.to_string_lossy())?;
+    let declared = jni::declared(root, flags.text("--jni-declarations")?)?;
     let crate_dir = flags
         .values
         .get("--crate")
         .ok_or_else(|| format!("fixture needs --crate\n{USAGE}"))?;
+    let package = flags
+        .values
+        .get("--package")
+        .ok_or_else(|| format!("fixture needs --package\n{USAGE}"))?;
     let crates = [crate_dir.as_str()];
+    let mut files = Vec::new();
+    rust_files(&root.join(crate_dir), &mut files)?;
+    let source_files: Vec<String> = files
+        .iter()
+        .map(|f| {
+            let relative = f
+                .strip_prefix(root)
+                .map_err(|e| format!("{}: {e}", f.display()))?;
+            path_text(relative)
+        })
+        .collect::<Result<_, _>>()?;
+    unreadable(
+        root,
+        &source_files,
+        &[(crate_dir.as_str(), package.as_str())],
+        &root.join("target"),
+    )?;
+    // What a feature only the fixture's dev-dependency on itself enables
+    // takes out of the build, read exactly as for a shipped build.
+    let read = |p: &Path| std::fs::read_to_string(p).map_err(|e| format!("{}: {e}", p.display()));
+    let (excluded, built_features) = match (
+        flags.optional("--features"),
+        flags.optional("--features-indexed"),
+    ) {
+        (Some(built), Some(indexed)) => {
+            let built_features = cfgs::features(&read(built)?)?;
+            let excluded = cfgs::exclusions(
+                root,
+                &source_files,
+                &[(crate_dir.as_str(), package.as_str())],
+                &built_features,
+                &cfgs::features(&read(indexed)?)?,
+            )?;
+            (excluded, built_features)
+        }
+        (None, None) => (cfgs::Exclusions::none(), BTreeMap::new()),
+        _ => {
+            return Err(format!(
+                "--features and --features-indexed go together\n{USAGE}"
+            ))
+        }
+    };
     let artifacts = vec![graph::Artifact {
         name: "fixture",
         crates: &crates,
         loaded: Ok(&profile.loaded),
+        // The fixture is indexed for the host.
+        target: cfgs::Target::host(),
+        features: &built_features,
+        packages: vec![(crate_dir.clone(), package.clone())],
         unindexed: None,
-        excluded: cfgs::Exclusions::none(),
+        excluded,
     }];
     let the_map = graph::build(
         root,
@@ -528,27 +671,67 @@ fn fixture_command(flags: &Flags) -> Result<String, String> {
             declared_jni: &declared,
         },
     )?;
+    if let Some(out) = flags.optional("--out") {
+        std::fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
+        let write = |name: &str, body: &str| -> Result<(), String> {
+            let path = out.join(name);
+            std::fs::write(&path, body).map_err(|e| format!("{}: {e}", path.display()))
+        };
+        write_defs(&the_map, &write)?;
+        write_reach(&the_map, &write)?;
+        write_edges(&the_map, &write)?;
+    }
     let expect_path = flags.path("--expect")?;
     let expect = std::fs::read_to_string(expect_path)
         .map_err(|e| format!("{}: {e}", expect_path.display()))?;
     let mut failures = Vec::new();
     let mut checked = 0usize;
-    for line in expect.lines().skip(1).filter(|l| !l.is_empty()) {
+    for line in expect
+        .lines()
+        .skip(1)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+    {
         let cells: Vec<&str> = line.split('\t').collect();
         let [path, state, code] = cells.as_slice() else {
             return Err(format!(
-                "{}: {line:?} is not path, state, code",
+                "{}: {line:?} is not key, state, code",
                 expect_path.display()
             ));
         };
         checked += 1;
+        // A key is a Rust path, or `@file:line name` for an item written
+        // inside a function, which no path names.
+        let at_key = match path.strip_prefix('@') {
+            Some(rest) => {
+                let (place, name) = rest
+                    .split_once(' ')
+                    .ok_or_else(|| format!("{path:?} is not `@file:line name`"))?;
+                let (file, line) = place
+                    .rsplit_once(':')
+                    .ok_or_else(|| format!("{path:?} is not `@file:line name`"))?;
+                let line: usize = line.parse().map_err(|e| format!("{path:?}: {e}"))?;
+                Some((file, line, name))
+            }
+            None => None,
+        };
         let found: Vec<&graph::Node> = the_map
             .nodes
             .values()
-            .filter(|n| n.path.as_deref() == Some(*path))
+            .filter(|n| match at_key {
+                Some((file, line, name)) => {
+                    n.def.file == file && n.def.name_at.line + 1 == line && n.def.item.name == name
+                }
+                None => n.path.as_deref() == Some(*path),
+            })
             .collect();
-        match found.as_slice() {
-            [one] => match one.status.get("fixture") {
+        match (found.as_slice(), *state) {
+            // A negative fact: the build compiles no such definition.
+            ([], "absent") => {}
+            (many, "absent") => failures.push(format!(
+                "{path}: expected absent, the map holds {} definitions",
+                many.len()
+            )),
+            ([one], _) => match one.status.get("fixture") {
                 Some(s) if s.state == *state && s.code == *code => {}
                 Some(s) => failures.push(format!(
                     "{path}: expected {state} {code}, read {} {} ({})",
@@ -558,8 +741,8 @@ fn fixture_command(flags: &Flags) -> Result<String, String> {
                 )),
                 None => failures.push(format!("{path}: no reading for the fixture artifact")),
             },
-            [] => failures.push(format!("{path}: not in the map")),
-            many => failures.push(format!("{path}: names {} definitions", many.len())),
+            ([], _) => failures.push(format!("{path}: not in the map")),
+            (many, _) => failures.push(format!("{path}: names {} definitions", many.len())),
         }
     }
     if !failures.is_empty() {
@@ -756,6 +939,7 @@ fn accounting_tables(
             ("unresolved-call-tokens", t.unresolved_call_tokens),
             ("unattributed-call-tokens", t.unattributed_call_tokens),
             ("uncompiled-call-tokens", t.uncompiled_call_tokens),
+            ("uncompiled-edges", t.uncompiled_edges),
             ("unresolved-call-candidates", t.unresolved_call_candidates),
             ("macro-body-candidates", t.macro_body_candidates),
             ("unindexed-candidates", t.unindexed_candidates),

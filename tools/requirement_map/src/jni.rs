@@ -46,11 +46,10 @@ pub fn declared(root: &Path, dir: &str) -> Result<Declarations, String> {
     walk(&root.join(dir), &mut files)?;
     files.sort();
     for (path, language) in files {
-        let relative = path
-            .strip_prefix(root)
-            .map_err(|e| format!("{}: {e}", path.display()))?
-            .to_string_lossy()
-            .replace('\\', "/");
+        let relative = crate::path_text(
+            path.strip_prefix(root)
+                .map_err(|e| format!("{}: {e}", path.display()))?,
+        )?;
         let text = std::fs::read_to_string(&path).map_err(|e| format!("{relative}: {e}"))?;
         match language {
             Language::Kotlin => {

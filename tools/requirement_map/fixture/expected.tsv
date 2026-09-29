@@ -1,13 +1,109 @@
-path	state	code
+# key	state	code
+# --- Dispatch evidence: a type argument, a qualified path, a value; a type only named.
 probe::Java_fixture_Probe_entry	reached	REACHED
 probe::fold	reached	REACHED
 probe::run_instance	reached	REACHED
-probe::Named::Example::static_fn	reached	REACHED
+probe::Named::Example::static_fn	reached	REACHED_VIA_DISPATCH
 probe::Named::Example::instance_fn	indeterminate	IND_DISPATCH_SELF_TYPE
 probe::Qualified::Example::static_fn	reached	REACHED
 probe::Qualified::Example::instance_fn	indeterminate	IND_DISPATCH_SELF_TYPE
-probe::Built::Example::static_fn	reached	REACHED
-probe::Built::Example::instance_fn	reached	REACHED
+# A value is no evidence of an associated function's dispatch (found by this fixture: it read Reached).
+probe::Built::Example::static_fn	indeterminate	IND_DISPATCH_SELF_TYPE
+probe::Built::Example::instance_fn	reached	REACHED_VIA_DISPATCH
 probe::Never::Example::static_fn	indeterminate	IND_DISPATCH_SELF_TYPE
 probe::Never::Example::instance_fn	indeterminate	IND_DISPATCH_SELF_TYPE
 probe::unused	dead	DEAD_NO_ROOT_PATH
+# The types themselves: one reached where a value is made, one where it is only named.
+probe::Built	reached	REACHED
+probe::Never	reached	REACHED
+# --- Receivers: &self, &mut self and self all need a constructed value.
+probe::receivers::entry	reached	REACHED
+probe::receivers::Held::Receivers::by_ref	reached	REACHED_VIA_DISPATCH
+probe::receivers::Held::Receivers::by_mut	reached	REACHED_VIA_DISPATCH
+probe::receivers::Held::Receivers::by_value	reached	REACHED_VIA_DISPATCH
+probe::receivers::Unheld::Receivers::by_ref	indeterminate	IND_DISPATCH_SELF_TYPE
+probe::receivers::Unheld::Receivers::by_mut	indeterminate	IND_DISPATCH_SELF_TYPE
+probe::receivers::Unheld::Receivers::by_value	indeterminate	IND_DISPATCH_SELF_TYPE
+# --- Calls written as paths (UFCS), and an inherent method through its type.
+probe::paths::ByTraitPath::Example::instance_fn	reached	REACHED
+probe::paths::ByTraitPath::Example::static_fn	indeterminate	IND_DISPATCH_SELF_TYPE
+probe::paths::ByQualifiedPath::Example::instance_fn	reached	REACHED
+probe::paths::Inherent::get	reached	REACHED
+probe::paths::Inherent::never_called	dead	DEAD_NO_ROOT_PATH
+# A constant named only in a format string; two functions that call each other.
+probe::paths::CAPTURED	reached	REACHED
+probe::paths::ping	reached	REACHED
+probe::paths::pong	reached	REACHED
+# --- Trait objects: the type behind the object is constructed.
+probe::objects::Boxed::Example::instance_fn	reached	REACHED_VIA_DISPATCH
+probe::objects::Boxed::Example::static_fn	indeterminate	IND_DISPATCH_SELF_TYPE
+probe::objects::NeverBoxed::Example::instance_fn	indeterminate	IND_DISPATCH_SELF_TYPE
+# --- Outside traits: `fmt` needs a made value, `default` a dispatch by type; a type only named in a signature gives neither.
+probe::outside::entry	reached	REACHED
+probe::outside::OnlyNamed::Display::fmt	indeterminate	IND_NOT_CONSTRUCTED
+probe::outside::OnlyNamed::Default::default	indeterminate	IND_NOT_DISPATCHED
+probe::outside::Made::Display::fmt	reached	REACHED_VIA_DISPATCH
+probe::outside::Dispatched::Default::default	reached	REACHED_VIA_DISPATCH
+# --- Scopes: a block item shadows the module item; an import shadowed by a local; a module named like a field.
+probe::scopes::helper	dead	DEAD_NO_ROOT_PATH
+@probe/src/scopes.rs:58 helper	reached	REACHED
+probe::scopes::count::value	dead	DEAD_NO_ROOT_PATH
+probe::scopes::Tally::count	reached	REACHED
+probe::scopes::imported::shadowed	dead	DEAD_NO_ROOT_PATH
+probe::scopes::unreached_user	dead	DEAD_NO_ROOT_PATH
+@probe/src/scopes.rs:66 instance_fn	reached	REACHED
+@probe/src/scopes.rs:63 static_fn	indeterminate	IND_DISPATCH_SELF_TYPE
+# Two block items of one name in one function: both reached in truth, undecided here.
+@probe/src/scopes.rs:43 twice_named	indeterminate	IND_SCOPE_UNDECIDED
+@probe/src/scopes.rs:49 twice_named	indeterminate	IND_SCOPE_UNDECIDED
+# --- Two types share a name: an outside trait's impl names its Self type by the bare name only.
+probe::twins::left::Twin::Display::fmt	indeterminate	IND_AMBIGUOUS_SELF_TYPE
+probe::twins::right::Twin::Display::fmt	indeterminate	IND_AMBIGUOUS_SELF_TYPE
+# An outside trait on the trait object itself: the index holds no symbol for `dyn Example`.
+probe::objects::dyn::Debug::fmt	indeterminate	IND_UNLINKED_IMPL
+# --- Macros.
+probe::macros::defined_and_called	reached	REACHED
+probe::macros::defined_never_called	dead	DEAD_NO_ROOT_PATH
+# The method `implement!` writes from its own tokens: the index holds no definition of it.
+probe::macros::Generated::Example::instance_fn	absent	-
+# What a macro body calls is undecided, never dead.
+probe::macros::called_by_generated	indeterminate	IND_UNRESOLVED_CALL
+probe::macros::only_the_macro_calls	indeterminate	IND_UNRESOLVED_CALL
+# Through `self::` and `crate::` in a macro body (found by this fixture: no candidate fitted).
+probe::macros::through_self	indeterminate	IND_UNRESOLVED_CALL
+probe::through_crate	indeterminate	IND_UNRESOLVED_CALL
+# Through `Self::` in a macro body: the call's site (the macro) decides no type, so every method of the name stays undecided.
+probe::macros::Templated::run	reached	REACHED
+probe::macros::Templated::named_by_self_type	indeterminate	IND_MACRO_BODY
+# One invocation writes two functions over one extent: which makes the call is undecided.
+probe::macros::paired_first	reached	REACHED
+probe::macros::paired_second	dead	DEAD_NO_ROOT_PATH
+probe::macros::from_the_pair	indeterminate	IND_MACRO_GROUP
+# A free function is no candidate for `.len()` or `Vec::new()`: the call's form excludes it.
+probe::macros::len	dead	DEAD_NO_ROOT_PATH
+probe::macros::new	dead	DEAD_NO_ROOT_PATH
+probe::macros::from	dead	DEAD_NO_ROOT_PATH
+probe::macros::default	dead	DEAD_NO_ROOT_PATH
+probe::macros::error	dead	DEAD_NO_ROOT_PATH
+# --- Entry points: the VM's, exports the Kotlin declares (by the exported name), and one it does not.
+probe::roots::JNI_OnLoad	reached	REACHED
+probe::roots::on_load	reached	REACHED
+probe::roots::JNI_OnUnload	reached	REACHED
+probe::roots::on_unload	reached	REACHED
+probe::roots::exported_under_another_name	reached	REACHED
+probe::roots::renamed_helper	reached	REACHED
+probe::roots::Java_fixture_Probe_undeclared	dead	DEAD_NO_ROOT_PATH
+probe::roots::undeclared_helper	dead	DEAD_NO_ROOT_PATH
+probe::roots::Java_fixture_Probe_gated	indeterminate	IND_CFG_UNDECIDED
+probe::roots::gated_helper	indeterminate	IND_CFG_UNDECIDED
+probe::roots::Java_fixture_Probe_hidden_00024probe	indeterminate	IND_UNREAD_DECLARATION
+# --- What the shipped build does not compile.
+probe::gates::release_only	reached	REACHED
+probe::gates::debug_only	absent	-
+probe::gates::leaked	not-in-artifact	NOT_IN_ARTIFACT
+probe::gates::tests::test_only	absent	-
+# A statement the shipped build's features turn off calls nothing in it; one under an undecided gate calls undecidedly.
+probe::gates::called_under_leak	dead	DEAD_NO_ROOT_PATH
+probe::gates::called_under_undecided	indeterminate	IND_CFG_UNDECIDED
+probe::gates::undecided_item	indeterminate	IND_CFG_UNDECIDED
+probe::gates::undecided_twin	indeterminate	IND_CFG_UNDECIDED

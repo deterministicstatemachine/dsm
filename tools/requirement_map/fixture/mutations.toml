@@ -1,0 +1,355 @@
+# The requirement map's mutation cases: ci/requirement_map_mutations.py runs
+# each in a temporary copy (removed afterwards) through the real pipeline.
+#
+#   kind = "fixture"       a change to the fixture crate; every reading in
+#                          expected.tsv the case does not name must stay as
+#                          it is (each is a sentinel)
+#   kind = "declarations"  a change to the app's Kotlin declarations, read
+#                          against the real tree's indexes
+#   kind = "reindex"       a change to the real tree, re-indexed for Android
+#                          and tests in a copy of the whole tree
+#
+# `find` must occur exactly once in `file`. `expect` names each reading that
+# must change (key = "state CODE"); `unchanged` names readings of the real
+# tree that must not; `explain` names text the explain query must print for
+# a key after the change.
+
+[[case]]
+name = "the-constructed-value-moves-to-the-other-type"
+kind = "fixture"
+why = "A method's dispatch follows the value: constructing Unheld instead of Held moves every receiver's reading."
+file = "probe/src/receivers.rs"
+find = "    all(Held)\n"
+replace = "    all(Unheld)\n"
+[case.expect]
+"probe::receivers::Held::Receivers::by_ref" = "indeterminate IND_DISPATCH_SELF_TYPE"
+"probe::receivers::Held::Receivers::by_mut" = "indeterminate IND_DISPATCH_SELF_TYPE"
+"probe::receivers::Held::Receivers::by_value" = "indeterminate IND_DISPATCH_SELF_TYPE"
+"probe::receivers::Unheld::Receivers::by_ref" = "reached REACHED_VIA_DISPATCH"
+"probe::receivers::Unheld::Receivers::by_mut" = "reached REACHED_VIA_DISPATCH"
+"probe::receivers::Unheld::Receivers::by_value" = "reached REACHED_VIA_DISPATCH"
+[case.explain]
+"probe::receivers::Held::Receivers::by_ref" = "IND_DISPATCH_SELF_TYPE"
+"probe::receivers::Unheld::Receivers::by_ref" = "trait-dispatch"
+
+[[case]]
+name = "the-type-argument-changes"
+kind = "fixture"
+why = "An associated function's dispatch follows the type argument, and only it: Never becomes dispatched on, Named no longer is."
+file = "probe/src/lib.rs"
+find = "fold::<Named>()"
+replace = "fold::<Never>()"
+[case.expect]
+"probe::Named::Example::static_fn" = "indeterminate IND_DISPATCH_SELF_TYPE"
+"probe::Never::Example::static_fn" = "reached REACHED_VIA_DISPATCH"
+
+[[case]]
+name = "a-declaration-is-removed"
+kind = "fixture"
+why = "An export is an entry point only while a Kotlin declaration names it; what only it reached goes dead with it."
+file = "kotlin/Probe.kt"
+find = "    @JvmStatic external fun renamed(): Int\n"
+replace = ""
+[case.expect]
+"probe::roots::exported_under_another_name" = "dead DEAD_NO_ROOT_PATH"
+"probe::roots::renamed_helper" = "dead DEAD_NO_ROOT_PATH"
+
+[[case]]
+name = "the-gated-feature-ships"
+kind = "fixture"
+why = "When the shipped build turns the feature on, what it gates is compiled into the build: the gated item is no longer outside it (and dead, since nothing calls it), the gated statement's call is the build's own, and every gate that also names the pointer width is decided by the feature alone (the gated export among them, now an entry point)."
+file = "probe/Cargo.toml"
+find = "leak = []\n"
+replace = "default = [\"leak\"]\nleak = []\n"
+[case.expect]
+"probe::gates::leaked" = "dead DEAD_NO_ROOT_PATH"
+"probe::gates::called_under_leak" = "reached REACHED"
+"probe::gates::called_under_undecided" = "reached REACHED"
+"probe::gates::undecided_item" = "reached REACHED"
+"probe::gates::undecided_twin" = "reached REACHED"
+"probe::roots::Java_fixture_Probe_gated" = "reached REACHED"
+"probe::roots::gated_helper" = "reached REACHED"
+
+[[case]]
+name = "the-macro-body-call-is-removed"
+kind = "fixture"
+why = "A name in a reached macro's body is undecided; with the call gone, nothing names it and it is dead."
+file = "probe/src/macros.rs"
+find = "        only_the_macro_calls()\n"
+replace = "        43\n"
+[case.expect]
+"probe::macros::only_the_macro_calls" = "dead DEAD_NO_ROOT_PATH"
+
+[[case]]
+name = "the-self-qualified-call-is-removed"
+kind = "fixture"
+why = "A `self::` call in a macro's body fits the free function of that name; with it gone the function is dead, and the `crate::` call still keeps its target undecided."
+file = "probe/src/macros.rs"
+find = "self::through_self() + crate::through_crate()"
+replace = "crate::through_crate()"
+[case.expect]
+"probe::macros::through_self" = "dead DEAD_NO_ROOT_PATH"
+
+[[case]]
+name = "the-gated-statement-loses-its-gate"
+kind = "fixture"
+why = "A statement the shipped build's features turn off calls nothing in that build; with its gate gone the call is the build's own, and it reaches."
+file = "probe/src/gates.rs"
+find = "    #[cfg(feature = \"leak\")]\n    let leaked_call = called_under_leak();\n"
+replace = "    let leaked_call = called_under_leak();\n"
+[case.expect]
+"probe::gates::called_under_leak" = "reached REACHED"
+[case.explain]
+"probe::gates::called_under_leak" = "reference"
+
+[[case]]
+name = "the-only-named-type-is-made"
+kind = "fixture"
+why = "A method of an outside trait runs on a value reached code makes: making OnlyNamed reaches its Display::fmt, while its Default::default still has no dispatch by type."
+file = "probe/src/outside.rs"
+find = "describe(None)"
+replace = "describe(Some(&OnlyNamed))"
+[case.expect]
+"probe::outside::OnlyNamed::Display::fmt" = "reached REACHED_VIA_DISPATCH"
+[case.explain]
+"probe::outside::OnlyNamed::Display::fmt" = "self-type"
+
+[[case]]
+name = "the-only-named-type-is-dispatched-on"
+kind = "fixture"
+why = "An associated function of an outside trait runs on a dispatch by type: `make::<OnlyNamed>()` reaches its Default::default, and the value that function makes is one Display::fmt runs on."
+file = "probe/src/outside.rs"
+find = "describe(None)"
+replace = "describe(Some(&make::<OnlyNamed>()))"
+[case.expect]
+"probe::outside::OnlyNamed::Default::default" = "reached REACHED_VIA_DISPATCH"
+"probe::outside::OnlyNamed::Display::fmt" = "reached REACHED_VIA_DISPATCH"
+
+[[case]]
+name = "the-self-type-call-is-removed"
+kind = "fixture"
+why = "A `Self::` call in a reached macro's body keeps every method of that name undecided; with the call gone the method is dead."
+file = "probe/src/macros.rs"
+find = "        Self::named_by_self_type()\n"
+replace = "        53\n"
+[case.expect]
+"probe::macros::Templated::named_by_self_type" = "dead DEAD_NO_ROOT_PATH"
+
+[[case]]
+name = "the-pair-call-is-removed"
+kind = "fixture"
+why = "A call inside an invocation that writes two functions over one extent is undecided; with the call gone, nothing names the function and it is dead."
+file = "probe/src/macros.rs"
+find = "pair!(paired_first, paired_second, from_the_pair());"
+replace = "pair!(paired_first, paired_second, 55);"
+[case.expect]
+"probe::macros::from_the_pair" = "dead DEAD_NO_ROOT_PATH"
+
+[[case]]
+name = "the-format-string-stops-capturing"
+kind = "fixture"
+why = "A constant named only in a format string is reached through the capture; with the string no longer naming it, it is dead."
+file = "probe/src/paths.rs"
+find = "format!(\"{CAPTURED}\")"
+replace = "format!(\"{}\", 16)"
+[case.expect]
+"probe::paths::CAPTURED" = "dead DEAD_NO_ROOT_PATH"
+
+[[case]]
+name = "one-twin-is-renamed"
+kind = "fixture"
+why = "An outside trait's impl is named by its Self type's bare name: with the right-hand type renamed and its impl gone, the left-hand impl's type is decided, and made, so its fmt is reached."
+file = "probe/src/twins.rs"
+find = "pub mod right {\n    pub struct Twin;\n    impl core::fmt::Display for Twin {\n        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {\n            f.write_str(\"right\")\n        }\n    }\n}\n\npub fn entry() -> usize {\n    format!(\"{}{}\", left::Twin, right::Twin).len()\n}\n"
+replace = "pub mod right {\n    pub struct Other;\n}\n\npub fn entry() -> usize {\n    format!(\"{}\", left::Twin).len() + core::mem::size_of::<right::Other>()\n}\n"
+[case.expect]
+"probe::twins::left::Twin::Display::fmt" = "reached REACHED_VIA_DISPATCH"
+"probe::twins::right::Twin::Display::fmt" = "absent -"
+
+[[case]]
+name = "the-internal-declaration-goes-public"
+kind = "fixture"
+why = "An `internal` native's JVM name carries its module, which this map cannot spell, so the export it could be is undecided; declared public, the declaration is read, names another symbol, and the export no declaration names is dead."
+file = "kotlin/Probe.kt"
+find = "    @JvmStatic internal external fun hidden(): Int\n"
+replace = "    @JvmStatic external fun hidden(): Int\n"
+[case.expect]
+"probe::roots::Java_fixture_Probe_hidden_00024probe" = "dead DEAD_NO_ROOT_PATH"
+
+[[case]]
+name = "a-jni-declaration-is-removed"
+kind = "declarations"
+why = "The app's Kotlin stops declaring getAllBalancesStrict, whose export nothing else reaches: it is no longer an entry point and reads dead, while every other entry point stands. (getSessionSnapshot would not do: JNI_OnLoad takes its address to keep the linker from dropping it, so the VM's root still reaches it.)"
+file = "dsm_client/android/app/src/main/java/com/dsm/wallet/bridge/UnifiedNativeApi.kt"
+find = "    @Keep @JvmStatic external fun getAllBalancesStrict(): ByteArray\n"
+replace = ""
+[case.expect]
+"dsm_sdk::jni::unified_protobuf_bridge::Java_com_dsm_wallet_bridge_UnifiedNativeApi_getAllBalancesStrict" = "dead DEAD_NO_ROOT_PATH"
+[case.unchanged]
+"dsm_sdk::jni::JNI_OnLoad" = "reached REACHED"
+"dsm_sdk::jni::unified_protobuf_bridge::Java_com_dsm_wallet_bridge_UnifiedNativeApi_getSessionSnapshot" = "reached REACHED"
+"dsm_sdk::handlers::app_router_impl::AppRouterImpl::AppRouter::query" = "reached REACHED_VIA_DISPATCH"
+
+[[case]]
+name = "the-core-router-adapter-is-never-built"
+kind = "reindex"
+why = "CoreAppRouterAdapter's one shipped construction goes, with the install it fed: the core bridge's trait methods are still called, but no value of the adapter exists, so its impl is undecided rather than reached."
+file = "dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/core_bridge_adapters.rs"
+find = "    let adapter = CoreAppRouterAdapter::new(handle);\n    if let Err(e) = dsm::core::bridge::install_app_router(Arc::new(adapter)) {\n        log::error!(\"Failed to install core app router adapter: {:?}\", e);\n        return;\n    }\n"
+replace = "    drop(handle);\n"
+[case.expect]
+"dsm_sdk::handlers::core_bridge_adapters::CoreAppRouterAdapter::AppRouter::handle_query" = "indeterminate IND_DISPATCH_SELF_TYPE"
+"dsm_sdk::handlers::core_bridge_adapters::CoreAppRouterAdapter::AppRouter::handle_invoke" = "indeterminate IND_DISPATCH_SELF_TYPE"
+[case.unchanged]
+"dsm_sdk::jni::JNI_OnLoad" = "reached REACHED"
+"dsm_sdk::handlers::app_router_impl::AppRouterImpl::AppRouter::query" = "reached REACHED_VIA_DISPATCH"
+
+# ---- planted contradictions -----------------------------------------------------
+#
+# kind = "planted": a copy of the fixture's map (make requirement-map-fixture),
+# or with map = "real" of the real tree's (checked against the committed
+# sentinels, entry points and counts), gets one fault written into one table,
+# and `ci/requirement_map.py check` must name `rule`. `where` selects rows (a
+# `*_path` column is matched through defs.tsv's Rust paths); `set` rewrites
+# columns (a `*_path` value is written as that path's symbol); action =
+# "delete" removes the rows.
+
+[[case]]
+name = "a-dead-reading-with-a-reached-code"
+kind = "planted"
+rule = "state-code"
+table = "reach"
+where = { symbol_path = "probe::unused" }
+set = { code = "REACHED" }
+
+[[case]]
+name = "a-dead-reading-with-a-witness"
+kind = "planted"
+rule = "dead-with-a-witness"
+table = "reach"
+where = { symbol_path = "probe::unused" }
+set = { via_path = "probe::fold", via_kind = "reference" }
+
+[[case]]
+name = "reached-in-a-build-that-does-not-index-it"
+kind = "planted"
+rule = "reached-outside-its-build"
+table = "defs"
+where = { symbol_path = "probe::fold" }
+set = { built_in = "tests" }
+
+[[case]]
+name = "an-entry-point-that-is-dead"
+kind = "planted"
+rule = "root-not-reached"
+table = "reach"
+where = { symbol_path = "probe::Java_fixture_Probe_entry" }
+set = { state = "dead", code = "DEAD_NO_ROOT_PATH", via = "", via_kind = "" }
+
+[[case]]
+name = "a-root-reading-of-another-kind"
+kind = "planted"
+rule = "root-not-recorded"
+table = "reach"
+where = { symbol_path = "probe::Java_fixture_Probe_entry" }
+set = { via = "load" }
+
+[[case]]
+name = "a-witness-step-that-is-no-edge"
+kind = "planted"
+rule = "witness-step-not-a-proven-edge"
+table = "reach"
+where = { symbol_path = "probe::run_instance" }
+set = { via_path = "probe::fold" }
+
+[[case]]
+name = "a-witness-naming-nothing"
+kind = "planted"
+rule = "witness-names-nothing"
+table = "reach"
+where = { symbol_path = "probe::run_instance" }
+set = { via = "rust-analyzer cargo probe 0.1.0 nowhere()." }
+
+[[case]]
+name = "a-direct-code-over-a-dispatch"
+kind = "planted"
+rule = "direct-reach-through-a-dispatch"
+table = "reach"
+where = { symbol_path = "probe::receivers::Held::Receivers::by_ref" }
+set = { code = "REACHED" }
+
+[[case]]
+name = "a-dispatch-code-with-no-dispatch"
+kind = "planted"
+rule = "dispatch-reach-without-a-dispatch"
+table = "reach"
+where = { symbol_path = "probe::fold" }
+set = { code = "REACHED_VIA_DISPATCH" }
+
+[[case]]
+name = "a-dispatch-with-its-value-gone"
+kind = "planted"
+rule = "dispatch-without-evidence"
+table = "edges"
+where = { kind = "construct", to_path = "probe::receivers::Held" }
+action = "delete"
+
+[[case]]
+name = "a-reached-caller-whose-callee-reads-dead"
+kind = "planted"
+rule = "unreached-after-a-proven-edge"
+table = "reach"
+where = { symbol_path = "probe::macros::defined_and_called" }
+set = { state = "dead", code = "DEAD_NO_ROOT_PATH", via = "", via_kind = "" }
+
+[[case]]
+name = "a-witness-through-a-dead-step"
+kind = "planted"
+rule = "witness-through-unreached"
+table = "reach"
+where = { symbol_path = "probe::fold" }
+set = { state = "dead", code = "DEAD_NO_ROOT_PATH", via = "", via_kind = "" }
+
+[[case]]
+name = "a-witness-that-loops"
+kind = "planted"
+rule = "witness-cycle"
+table = "reach"
+where = { symbol_path = "probe::paths::ping" }
+set = { via_path = "probe::paths::pong" }
+
+[[case]]
+name = "a-sentinel-reads-otherwise"
+kind = "planted"
+map = "real"
+rule = "sentinel-lost"
+table = "reach"
+where = { symbol_path = "dsm::economic::write_set::build_write_set", artifact = "android" }
+set = { state = "indeterminate", code = "IND_UNRESOLVED_CALL", via = "", via_kind = "" }
+
+[[case]]
+name = "an-entry-point-appears"
+kind = "planted"
+map = "real"
+rule = "entry-point-new"
+table = "defs"
+where = { symbol_path = "dsm_sdk::bridge::get_all_balances_strict" }
+set = { root = "android:export" }
+
+[[case]]
+name = "an-entry-point-goes"
+kind = "planted"
+map = "real"
+rule = "entry-point-lost"
+table = "defs"
+where = { symbol_path = "dsm_sdk::jni::JNI_OnLoad" }
+set = { root = "" }
+
+[[case]]
+name = "the-dead-turn-indeterminate"
+kind = "planted"
+map = "real"
+rule = "indeterminate-jump"
+table = "reach"
+where = { artifact = "android", state = "dead" }
+set = { state = "indeterminate", code = "IND_UNRESOLVED_CALL" }
