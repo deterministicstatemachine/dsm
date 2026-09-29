@@ -100,6 +100,13 @@ pub extern "C" fn Java_fixture_Probe_entry() -> usize {
         + twins::entry()
         + macros::entry()
         + gates::entry()
+        + main()
+}
+
+/// Named like the build script's `main` (build.rs), which the build does not
+/// compile into this crate: one path, two definitions, one in the build.
+pub fn main() -> usize {
+    57
 }
 
 /// Called only as `crate::through_crate()` inside a macro's body.

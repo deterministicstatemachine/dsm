@@ -74,3 +74,4 @@ android	undeclared-export	dsm_sdk::jni::unified_protobuf_bridge::Java_com_dsm_wa
 android	undeclared-export	dsm_sdk::jni::unified_protobuf_bridge::Java_com_dsm_wallet_bridge_UnifiedNativeApi_bitcoinVerifyPayment
 android	undeclared-export	dsm_sdk::runtime::dsm_init_runtime
 android	vm	dsm_sdk::jni::JNI_OnLoad
+node	main	dsm_storage_node::main
