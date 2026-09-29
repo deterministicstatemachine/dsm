@@ -128,6 +128,10 @@ pub enum Invalid {
     /// A leg's setup names a claim at its position other than the one the
     /// trader's lineage accepted there (SoFi §16, Amendment S9).
     SetupClaimRefIsNotTheAcceptedClaim,
+    /// Lineage validation established the trader's lineage Invalid at or
+    /// before the setup's position, so no claim was accepted there and the
+    /// setup cannot be valid (SoFi Amendment S13).
+    SetupLineageIsInvalid,
     /// A token's committed policy does not parse.
     TokenPolicyDoesNotParse { token: D32 },
     /// A token's committed policy forbids transfer, so it cannot be a market
@@ -216,7 +220,8 @@ pub enum Missing {
     /// The signed setup envelope stored at `ρ` for one of P's legs.
     Setup { setup_ref: D32 },
     /// The claim this verifier accepted at a position of P's trader, which a
-    /// setup names by `claim_ref` (SoFi Amendment S9).
+    /// setup names by `claim_ref`, or the lineage verdict that none can be
+    /// (SoFi Amendments S9, S13).
     AcceptedClaim { economic_position: u64 },
     /// Bytes were supplied for an address but do not authenticate to it. They
     /// establish NOTHING — note 9: a non-verifying candidate can never prove
@@ -293,10 +298,11 @@ pub struct Evidence {
     /// (SoFi §19.5, §49). Re-hashed to the commit under `TAG_DSM_POLICY` when
     /// consumed: bytes supplied under a commit prove nothing by themselves.
     pub token_policies: BTreeMap<D32, Vec<u8>>,
-    /// The claims this verifier accepted on P's trader's lineage, by
-    /// position: what each setup's `claim_ref` is checked against (SoFi
-    /// Amendment S9). Only lineage validation produces an [`AcceptedClaim`].
-    pub accepted_claims: BTreeMap<u64, AcceptedClaim>,
+    /// What lineage validation established about P's trader at each setup's
+    /// position: the claim it accepted there, which the setup's `claim_ref`
+    /// is checked against, or the verdict that the lineage is invalid (SoFi
+    /// Amendments S9, S13). Only lineage validation produces either.
+    pub setup_lineages: BTreeMap<u64, SetupLineage>,
 }
 
 /// What a settlement preimage needs fetched before `validate` can reach a
@@ -357,6 +363,69 @@ impl EvidenceNeeds {
     }
 }
 
+/// What lineage validation established about a trader at one setup's
+/// position (SoFi Amendments S9, S13). Not established is not one of these:
+/// the verifier holds nothing for the position and waits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SetupLineage {
+    /// The claim lineage validation accepted at the position.
+    Accepted(AcceptedClaim),
+    /// Lineage validation established the lineage Invalid at or before the
+    /// position.
+    Invalid(InvalidLineage),
+}
+
+/// The verdict that a trader's lineage is invalid at or before a position,
+/// as lineage validation returned it. No accepted claim is synthesized in
+/// its place: the negative fact is the verdict itself (SoFi Amendment S13).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvalidLineage {
+    genesis: D32,
+    device_id: D32,
+    position: u64,
+    reason: String,
+}
+
+impl InvalidLineage {
+    /// Why lineage validation refused the lineage, as it reported it.
+    pub fn reason(&self) -> &str {
+        &self.reason
+    }
+}
+
+/// What lineage validation of trader `(genesis, device_id)` up to `position`
+/// establishes for a setup there (SoFi Amendment S13), or `None` while
+/// nothing is established:
+/// - an accepted claim is the claim the setup is checked against;
+/// - `Invalid`, evidence that verified as wrong, and `Quarantined`, a
+///   divergent write-once register cell, are the verdict that the lineage is
+///   invalid at or before `position`;
+/// - `Incomplete` (evidence not in hand) and `Unresolved` (a SoFi position
+///   the walk cannot yet pass) establish nothing, so the setup waits.
+pub fn setup_lineage(
+    genesis: D32,
+    device_id: D32,
+    position: u64,
+    validated: Result<AcceptedClaim, crate::economic::provenance::PeerLineageFailure>,
+) -> Option<SetupLineage> {
+    use crate::economic::provenance::PeerLineageFailure as F;
+    match validated {
+        Ok(claim) => Some(SetupLineage::Accepted(claim)),
+        Err(F::Invalid(reason) | F::Quarantined(reason)) => {
+            Some(SetupLineage::Invalid(InvalidLineage {
+                genesis,
+                device_id,
+                position,
+                reason,
+            }))
+        }
+        Err(failure @ (F::Incomplete(..) | F::Unresolved(..))) => {
+            log::info!("[sofi verifier] no lineage verdict at {position} yet: {failure}");
+            None
+        }
+    }
+}
+
 impl Evidence {
     /// The one production constructor: what an acquisition fetched. Every
     /// item is checked again when consumed — an object against its address,
@@ -367,14 +436,14 @@ impl Evidence {
         vault_leaves: BTreeMap<(D32, D32), VaultLeafPre>,
         setups: BTreeMap<D32, Vec<u8>>,
         token_policies: BTreeMap<D32, Vec<u8>>,
-        accepted_claims: BTreeMap<u64, AcceptedClaim>,
+        setup_lineages: BTreeMap<u64, SetupLineage>,
     ) -> Self {
         Self {
             objects,
             vault_leaves,
             setups,
             token_policies,
-            accepted_claims,
+            setup_lineages,
         }
     }
 
@@ -536,10 +605,21 @@ fn setup_valid(
     let missing_claim = Refusal::Incomplete(Missing::AcceptedClaim {
         economic_position: body.position(),
     });
-    let accepted = evidence
-        .accepted_claims
-        .get(&body.position())
-        .ok_or(missing_claim.clone())?;
+    let accepted = match evidence.setup_lineages.get(&body.position()) {
+        None => return Err(missing_claim),
+        Some(SetupLineage::Invalid(verdict)) => {
+            // A verdict about another trader, or another position, says
+            // nothing about this setup.
+            if verdict.genesis != *body.genesis()
+                || verdict.device_id != *body.device_id()
+                || verdict.position != body.position()
+            {
+                return Err(missing_claim);
+            }
+            return Err(Refusal::Invalid(Invalid::SetupLineageIsInvalid));
+        }
+        Some(SetupLineage::Accepted(accepted)) => accepted,
+    };
     if accepted.genesis() != *body.genesis()
         || accepted.device_id() != *body.device_id()
         || accepted.economic_position() != body.position()
@@ -2586,7 +2666,10 @@ pub(crate) mod fixtures {
                 })
                 .cloned()
                 .collect(),
-            accepted_claims: BTreeMap::from([(SETUP_POS, accepted_setup_claim())]),
+            setup_lineages: BTreeMap::from([(
+                SETUP_POS,
+                SetupLineage::Accepted(accepted_setup_claim()),
+            )]),
         };
         // The realize root is what the core folds to UNDER E, so it cannot be
         // chosen: BindExt fills the relationship posts and the fold does the rest.
@@ -2671,7 +2754,7 @@ mod tests {
             vault_leaves: f.evidence.vault_leaves.clone(),
             setups: f.evidence.setups.clone(),
             token_policies: f.evidence.token_policies.clone(),
-            accepted_claims: f.evidence.accepted_claims.clone(),
+            setup_lineages: f.evidence.setup_lineages.clone(),
         };
         without_policy.objects.remove(&policy_addr(
             crate::ccb::class::MARKET_POLICY,
@@ -2691,7 +2774,7 @@ mod tests {
             vault_leaves: BTreeMap::new(),
             setups: f.evidence.setups.clone(),
             token_policies: f.evidence.token_policies.clone(),
-            accepted_claims: f.evidence.accepted_claims.clone(),
+            setup_lineages: f.evidence.setup_lineages.clone(),
         };
         for addr in named_pre_balances(&f.preimage) {
             without_leaf.objects.remove(&addr);
@@ -3216,7 +3299,7 @@ mod tests {
             vault_leaves: f.evidence.vault_leaves.clone(),
             setups: f.evidence.setups.clone(),
             token_policies: f.evidence.token_policies.clone(),
-            accepted_claims: f.evidence.accepted_claims.clone(),
+            setup_lineages: f.evidence.setup_lineages.clone(),
         };
         let VaultLeafPre::State(state) = evidence.vault_leaves[&(vault_id, state_key)].clone()
         else {
@@ -3246,7 +3329,7 @@ mod tests {
             vault_leaves: f.evidence.vault_leaves.clone(),
             setups: f.evidence.setups.clone(),
             token_policies: f.evidence.token_policies.clone(),
-            accepted_claims: f.evidence.accepted_claims.clone(),
+            setup_lineages: f.evidence.setup_lineages.clone(),
         };
         let VaultLeafPre::State(state) = evidence.vault_leaves[&(vault_id, state_key)].clone()
         else {
@@ -3409,7 +3492,10 @@ mod tests {
             ]),
             setups: BTreeMap::from([(setup_ref_for(vault_id), setup_envelope_for(vault_id))]),
             token_policies: tokens()[..=1].iter().cloned().collect(),
-            accepted_claims: BTreeMap::from([(SETUP_POS, accepted_setup_claim())]),
+            setup_lineages: BTreeMap::from([(
+                SETUP_POS,
+                SetupLineage::Accepted(accepted_setup_claim()),
+            )]),
         };
         let realize_root = {
             let entries = trader_fold_entries(&trader_core, &e).unwrap();
@@ -3486,7 +3572,7 @@ mod tests {
             vault_leaves: f.evidence.vault_leaves.clone(),
             setups: f.evidence.setups.clone(),
             token_policies: f.evidence.token_policies.clone(),
-            accepted_claims: f.evidence.accepted_claims.clone(),
+            setup_lineages: f.evidence.setup_lineages.clone(),
         };
         let VaultLeafPre::State(state) = evidence.vault_leaves[&(vault_id, state_key)].clone()
         else {
@@ -3921,7 +4007,7 @@ mod tests {
             vault_leaves: f.evidence.vault_leaves.clone(),
             setups: f.evidence.setups.clone(),
             token_policies: f.evidence.token_policies.clone(),
-            accepted_claims: f.evidence.accepted_claims.clone(),
+            setup_lineages: f.evidence.setup_lineages.clone(),
         };
         let VaultLeafPre::State(state) = evidence.vault_leaves[&(vault_id, state_key)].clone()
         else {
@@ -3953,7 +4039,7 @@ mod tests {
             vault_leaves: f.evidence.vault_leaves.clone(),
             setups: f.evidence.setups.clone(),
             token_policies: f.evidence.token_policies.clone(),
-            accepted_claims: f.evidence.accepted_claims.clone(),
+            setup_lineages: f.evidence.setup_lineages.clone(),
         };
         let VaultLeafPre::State(state) = evidence.vault_leaves[&(vault_id, state_key)].clone()
         else {
@@ -4001,7 +4087,7 @@ mod tests {
             vault_leaves: f.evidence.vault_leaves.clone(),
             setups: f.evidence.setups.clone(),
             token_policies: f.evidence.token_policies.clone(),
-            accepted_claims: f.evidence.accepted_claims.clone(),
+            setup_lineages: f.evidence.setup_lineages.clone(),
         };
         let VaultLeafPre::State(state) = evidence.vault_leaves[&(vault_id, state_key)].clone()
         else {
@@ -4037,7 +4123,7 @@ mod tests {
             vault_leaves: f.evidence.vault_leaves.clone(),
             setups: f.evidence.setups.clone(),
             token_policies: f.evidence.token_policies.clone(),
-            accepted_claims: f.evidence.accepted_claims.clone(),
+            setup_lineages: f.evidence.setup_lineages.clone(),
         };
         let VaultLeafPre::State(state) = evidence.vault_leaves[&(vault_id, state_key)].clone()
         else {
@@ -4079,7 +4165,7 @@ mod tests {
             vault_leaves: f.evidence.vault_leaves.clone(),
             setups: f.evidence.setups.clone(),
             token_policies: f.evidence.token_policies.clone(),
-            accepted_claims: f.evidence.accepted_claims.clone(),
+            setup_lineages: f.evidence.setup_lineages.clone(),
         };
         // Hop 0's state is simply not held.
         evidence
@@ -4243,7 +4329,7 @@ mod tests {
             vault_leaves: f.evidence.vault_leaves.clone(),
             setups: f.evidence.setups.clone(),
             token_policies: f.evidence.token_policies.clone(),
-            accepted_claims: f.evidence.accepted_claims.clone(),
+            setup_lineages: f.evidence.setup_lineages.clone(),
         };
         // Garbage, under the address of a policy that really exists.
         evidence
@@ -4361,7 +4447,7 @@ mod tests {
             vault_leaves: f.evidence.vault_leaves.clone(),
             setups: f.evidence.setups.clone(),
             token_policies: f.evidence.token_policies.clone(),
-            accepted_claims: f.evidence.accepted_claims.clone(),
+            setup_lineages: f.evidence.setup_lineages.clone(),
         };
         let VaultLeafPre::Relationship(leaf) = evidence.vault_leaves[&(vault_id, rel_key)].clone()
         else {
@@ -4552,7 +4638,7 @@ mod tests {
             economic_position: SETUP_POS,
         }));
         let mut evidence = f.evidence.clone();
-        evidence.accepted_claims.clear();
+        evidence.setup_lineages.clear();
         assert_eq!(validate(&f.precommit, &f.preimage, &evidence), missing);
         let foreign = crate::economic::lineage::AcceptedClaim::rehydrate_from_admitted_store(
             token(0x33),
@@ -4564,8 +4650,84 @@ mod tests {
             },
         )
         .unwrap();
-        evidence.accepted_claims.insert(SETUP_POS, foreign);
+        evidence
+            .setup_lineages
+            .insert(SETUP_POS, SetupLineage::Accepted(foreign));
         assert_eq!(validate(&f.precommit, &f.preimage, &evidence), missing);
+    }
+
+    /// SoFi Amendment S13: lineage validation that establishes the trader's
+    /// lineage Invalid — evidence that verified as wrong, or a divergent
+    /// register cell — makes the setup Invalid, and so the route. No accepted
+    /// claim is synthesized: the verdict itself is the negative fact.
+    #[test]
+    fn a_setup_on_a_lineage_known_invalid_is_invalid() {
+        use crate::economic::provenance::PeerLineageFailure as F;
+        let f = swap_fixture();
+        for verdict in [
+            F::Invalid("a step's witness does not fold".to_string()),
+            F::Quarantined("two claims hold the register cell".to_string()),
+        ] {
+            let mut evidence = f.evidence.clone();
+            evidence.setup_lineages.clear();
+            let lineage = setup_lineage(G, DEV, SETUP_POS, Err(verdict)).unwrap();
+            evidence.setup_lineages.insert(SETUP_POS, lineage);
+            assert_eq!(
+                validate(&f.precommit, &f.preimage, &evidence),
+                Err(Refusal::Invalid(Invalid::SetupLineageIsInvalid))
+            );
+            assert_eq!(
+                route_validation(&f.precommit, &f.preimage, &evidence),
+                Ok(Validation::Invalid)
+            );
+        }
+    }
+
+    /// A lineage whose verdict is not established yet — evidence not in hand,
+    /// or a SoFi position the walk cannot pass yet — yields nothing, and the
+    /// setup waits: not known is never read as known invalid.
+    #[test]
+    fn a_lineage_not_established_leaves_the_setup_waiting() {
+        use crate::economic::provenance::PeerLineageFailure as F;
+        let f = swap_fixture();
+        for pending in [
+            F::Incomplete("the register cell is not decided yet".to_string()),
+            F::Unresolved("a conditional position has not resolved".to_string()),
+        ] {
+            assert_eq!(setup_lineage(G, DEV, SETUP_POS, Err(pending)), None);
+        }
+        let mut evidence = f.evidence.clone();
+        evidence.setup_lineages.clear();
+        assert_eq!(
+            validate(&f.precommit, &f.preimage, &evidence),
+            Err(Refusal::Incomplete(Missing::AcceptedClaim {
+                economic_position: SETUP_POS,
+            }))
+        );
+    }
+
+    /// A verdict about another trader, or about another position, says
+    /// nothing about this setup: it neither poisons it nor stands in for its
+    /// accepted claim.
+    #[test]
+    fn an_invalid_verdict_about_another_lineage_or_position_supplies_nothing() {
+        use crate::economic::provenance::PeerLineageFailure as F;
+        let f = swap_fixture();
+        let missing = Err(Refusal::Incomplete(Missing::AcceptedClaim {
+            economic_position: SETUP_POS,
+        }));
+        for (genesis, position) in [(token(0x33), SETUP_POS), (G, SETUP_POS + 1)] {
+            let mut evidence = f.evidence.clone();
+            let lineage = setup_lineage(
+                genesis,
+                DEV,
+                position,
+                Err(F::Invalid("another lineage".to_string())),
+            )
+            .unwrap();
+            evidence.setup_lineages.insert(SETUP_POS, lineage);
+            assert_eq!(validate(&f.precommit, &f.preimage, &evidence), missing);
+        }
     }
 
     // ── The transferable check on every leg (SoFi §49, MR-SOFI-0311) ────────

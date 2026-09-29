@@ -57,8 +57,8 @@ use super::registration::{
 use super::resolution::{walk, AttemptWalk, KeyFacts, RecordedGeneration, VaultChain, WalkOutcome};
 use super::storage::{Discovered, Resolved};
 use super::validation::{
-    route_validation, vault_post_states, Evidence, EvidenceNeeds, Missing, VaultLeafPre,
-    VaultPostState,
+    route_validation, setup_lineage, vault_post_states, Evidence, EvidenceNeeds, Missing,
+    SetupLineage, VaultLeafPre, VaultPostState,
 };
 use super::wire::{
     CoreEntry, ParentClaimRef, SettlementPreimage, TraderCore, TraderFulfillmentBody,
@@ -202,16 +202,18 @@ pub trait SofiReads {
         root: &D32,
         keys: &BTreeSet<D32>,
     ) -> Result<Option<VaultLeaves>, ReadFailure>;
-    /// The claim accepted at `position` of trader `(genesis, device_id)`,
-    /// if one is in hand: from this device's own admitted store when the
+    /// The claim lineage validation accepted at `position` of trader
+    /// `(genesis, device_id)`: from this device's own admitted store when the
     /// trader is this device, and from the peer lineage walk otherwise —
-    /// never this device's claim under another trader's name.
+    /// never this device's claim under another trader's name. A failure
+    /// keeps the class lineage validation gave it; Core reads which classes
+    /// are verdicts (`validation::setup_lineage`, SoFi Amendment S13).
     fn accepted_claim_at(
         &self,
         genesis: &D32,
         device_id: &D32,
         position: u64,
-    ) -> Result<Option<AcceptedClaim>, ReadFailure>;
+    ) -> Result<AcceptedClaim, PeerLineageFailure>;
     /// The generations this device recorded for `vault_id`, contiguous from
     /// zero, in generation order.
     fn recorded_generations(
@@ -891,19 +893,25 @@ impl<R: SofiReads> Verifier<'_, R> {
         }
 
         let mut setups: BTreeMap<D32, Vec<u8>> = BTreeMap::new();
-        let mut accepted_claims: BTreeMap<u64, AcceptedClaim> = BTreeMap::new();
+        let mut setup_lineages: BTreeMap<u64, SetupLineage> = BTreeMap::new();
         for setup_ref in &needs.setups {
             let Resolved::Kept(bytes) = self.reads.setup_bytes(setup_ref)? else {
                 continue;
             };
             if let Some((.., signed)) = recognize_setup(&bytes) {
                 let position = signed.body.position();
-                if let Some(claim) = self.reads.accepted_claim_at(
+                let validated = self.reads.accepted_claim_at(
                     precommit.genesis(),
                     precommit.device_id(),
                     position,
-                )? {
-                    accepted_claims.insert(position, claim);
+                );
+                if let Some(lineage) = setup_lineage(
+                    *precommit.genesis(),
+                    *precommit.device_id(),
+                    position,
+                    validated,
+                ) {
+                    setup_lineages.insert(position, lineage);
                 }
             }
             setups.insert(*setup_ref, bytes);
@@ -914,7 +922,7 @@ impl<R: SofiReads> Verifier<'_, R> {
             vault_leaves,
             setups,
             token_policies,
-            accepted_claims,
+            setup_lineages,
         ))
     }
 

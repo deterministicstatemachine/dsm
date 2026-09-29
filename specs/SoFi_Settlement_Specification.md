@@ -918,6 +918,14 @@ SetupValid(setup) is semantic and belongs to Core: canonical body encoding, ρ, 
 ClaimRef, and the identity and vault relationship rules.
 
 > **Amendment S9 (owner, 2026-09-23) — ClaimRef is checked against the verifier's own lineage.** `SetupValid` compares the setup's `claim_ref` with the digest of the claim this verifier accepted at the setup's position `p` when it validated the trader's lineage: the registered root claim of an ordinary position, or `C_p` of a resolved SoFi position. RouteValidation's evidence carries that accepted claim as a value only lineage validation produces (or the device's own admitted store, for its own positions), so RouteValidation reads no storage for it. A setup naming any other claim is Invalid. Until the accepted claim is in hand, the setup is not evaluated.
+
+> **Amendment S13 (owner, 2026-09-29) — a lineage known invalid makes the setup Invalid.** This supersedes the last sentence of Amendment S9, which let two different states read alike: a lineage whose verdict is not known yet, and a lineage known to be invalid, which can never yield an accepted claim. Under S9's wording the second left its trade holding a vault key forever. `SetupValid` compares the setup's `claim_ref` with the claim accepted at position `p` by validation of the trader's lineage, and there are three cases:
+>
+> - **Not established.** Lineage validation has not reached a verdict, or evidence it needs is not in hand: `SetupValid` is not evaluated yet, and the verifier waits (Amendment S3).
+> - **Valid.** The accepted claim is in hand, and the setup's `claim_ref` must equal its digest. A setup naming any other claim is Invalid.
+> - **Invalid.** Lineage validation establishes the trader's lineage Invalid at or before `p`: `SetupValid` is Invalid, so RouteValidation is Invalid. A divergent write-once register cell of the trader, which the walk quarantines, is such a verdict. No accepted claim is required, and none is synthesized: the negative fact is the lineage verdict itself.
+>
+> No trade whose trader's lineage is known invalid can occupy a vault key indefinitely because that lineage can never yield an accepted claim.
 SetupRegistered(setup) is a durability fact that Core derives from storage reads.
 Accept(E) requires both. Storage establishes neither.
 
