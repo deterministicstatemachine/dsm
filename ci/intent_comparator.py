@@ -51,6 +51,13 @@ OUTCOMES = {
     "AMBIGUOUS_SYMBOL": "name one definition: the path names several",
     "UNSPECIFIED": "declare its intent",
 }
+# What an UNSPECIFIED definition's reading asks for. Reported only: the map's
+# reading never becomes intent (owner ruling, 2026-09-29).
+UNSPECIFIED_ACTIONS = {
+    "dead": "a removal candidate: no shipped build reaches it; declare its intent or remove it after review",
+    "indeterminate": "undecided: the map cannot decide; declare its intent from the specifications",
+    "reached": "declare its intent",
+}
 FAILING = ("WIRING_GAP", "ARTIFACT_GAP", "UNDECIDED", "DIRECT_PATH_GAP", "ROOT_MISMATCH",
            "UNEXPECTED_LIVE_PATH", "PRODUCTION_LEAK", "MISSING_SYMBOL", "AMBIGUOUS_SYMBOL")
 # §8 statuses under which a gap is the requirement's known hole.
@@ -137,16 +144,22 @@ def root_answers(map_dir):
 
 def reading_of(by_path, symbol, artifact):
     """What a row's path names in its artifact: ("missing"|"ambiguous"|
-    "no-reading"|"read", reading)."""
+    "no-reading"|"read", reading). Only definitions the build compiles are
+    candidates: another profile's definition of the same path (host-only
+    code, which the artifact reads as not-in-artifact) is not one it reads.
+    With none compiled, the row reads not-in-artifact."""
     defs = by_path.get(symbol, [])
     if not defs:
         return "missing", None
-    read = [d["reach"][artifact] for d in defs if artifact in d["reach"]]
-    if len(read) > 1:
+    readings = [d["reach"][artifact] for d in defs if artifact in d["reach"]]
+    compiled = [r for r in readings if r["state"] not in OUTSIDE_BUILD]
+    if len(compiled) > 1:
         return "ambiguous", None
-    if not read:
-        return "no-reading", None
-    return "read", read[0]
+    if compiled:
+        return "read", compiled[0]
+    if readings:
+        return "read", readings[0]
+    return "no-reading", None
 
 
 def outcome(row, found, reading, root_answer):
@@ -232,7 +245,8 @@ def compare(the_map, rows, statuses, answers, built):
         for artifact, reading in d["reach"].items():
             if reading["state"] in OUTSIDE_BUILD + ("not-built",) or (d["path"], artifact) in named:
                 continue
-            unspecified.append((artifact, d["path"], reading["state"], reading["code"]))
+            unspecified.append((artifact, d["path"], reading["state"], reading["code"],
+                                UNSPECIFIED_ACTIONS[reading["state"]]))
     return results, unspecified
 
 
@@ -245,7 +259,7 @@ def write_report(results, unspecified, map_dir):
         for r in results:
             fh.write("\t".join(r[c] for c in REPORT_COLUMNS) + "\n")
     with open(os.path.join(map_dir, "unspecified.tsv"), "w", encoding="utf-8") as fh:
-        fh.write("artifact\tpath\tstate\tcode\n")
+        fh.write("artifact\tpath\tstate\tcode\taction\n")
         for row in sorted(unspecified):
             fh.write("\t".join(row) + "\n")
 
@@ -305,9 +319,9 @@ def main():
     for o in OUTCOMES:
         if counts[o]:
             print(f"  {o:<22} {counts[o]:>5}  {OUTCOMES[o]}")
-    by_artifact = collections.Counter(a for a, *_ in unspecified)
-    for a in sorted(by_artifact):
-        print(f"  UNSPECIFIED ({a}) {by_artifact[a]:>5}  {OUTCOMES['UNSPECIFIED']} (reported, never fails)")
+    by_reading = collections.Counter((a, state) for a, _, state, *_ in unspecified)
+    for (a, state) in sorted(by_reading):
+        print(f"  UNSPECIFIED ({a}, {state}) {by_reading[(a, state)]:>5}  {UNSPECIFIED_ACTIONS[state]} (reported, never fails)")
     for a in unbuilt:
         print(f"  {a}: not indexed on this host; its rows read not-built (UNDECIDED)")
     failing = [r for r in results if r["fails"] == "fails"]

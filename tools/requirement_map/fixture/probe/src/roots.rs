@@ -15,6 +15,7 @@ pub extern "system" fn JNI_OnLoad(vm: *mut c_void, reserved: *mut c_void) -> i32
 }
 
 fn on_load(no_vm: bool, no_reserved: bool) -> i32 {
+    crate::installed::install();
     i32::from(no_vm) + i32::from(no_reserved) + 0x0001_0006
 }
 

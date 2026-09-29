@@ -792,12 +792,13 @@ pub fn build(root: &Path, inputs: &Inputs) -> Result<Map, String> {
         for m in &loaded.value_receivers {
             takes_value.insert(id(m)?);
         }
-        let full = reach::reached(
+        let (full, evidence) = reach::reached_with(
             names.len(),
             &edges,
             &artifact_roots,
             &self_types,
             &takes_value,
+            &reach::TypeEvidence::none(),
         )?;
         // What proven references reach with no dispatch step: its witness is
         // the one shown, so a direct path is never explained by a dispatch.
@@ -1009,10 +1010,12 @@ pub fn build(root: &Path, inputs: &Inputs) -> Result<Map, String> {
 
         let result = reach::classify(&edges, via, &self_types, &takes_value, &seeds, &name_refs)?;
 
-        // The root queries: what each named entry point alone reaches, by the
-        // same rules (a path through a dispatch needs its evidence reached from
-        // that root too). The map's seeds are the whole build's, so they are
-        // not applied here: an answer never reads Reached on their account.
+        // The root queries: what a path from the named entry point reaches, by
+        // the same rules. A dispatch on it needs its evidence (a value made, a
+        // type dispatched on) somewhere in the build, not from that root
+        // alone: the process holds what any entry point made. The map's
+        // seeds are the whole build's, so they are not applied here: an
+        // answer never reads Reached on their account.
         let mut compiled_paths: BTreeMap<String, Vec<usize>> = BTreeMap::new();
         for d in &loaded.definitions {
             if gone.contains_key(d.symbol.as_str()) {
@@ -1038,7 +1041,14 @@ pub fn build(root: &Path, inputs: &Inputs) -> Result<Map, String> {
             let s = one(&q.symbol, "symbol")?;
             if !from_root.contains_key(&r) {
                 let alone = [(r, "query")];
-                let via = reach::reached(names.len(), &edges, &alone, &self_types, &takes_value)?;
+                let (via, _) = reach::reached_with(
+                    names.len(),
+                    &edges,
+                    &alone,
+                    &self_types,
+                    &takes_value,
+                    &evidence,
+                )?;
                 let direct = reach::reached_directly(names.len(), &edges, &alone)?;
                 let read =
                     reach::classify(&edges, via, &self_types, &takes_value, &[], &name_refs)?;

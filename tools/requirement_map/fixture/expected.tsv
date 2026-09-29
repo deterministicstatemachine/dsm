@@ -99,6 +99,10 @@ probe::roots::undeclared_helper	dead	DEAD_NO_ROOT_PATH
 probe::roots::Java_fixture_Probe_gated	indeterminate	IND_CFG_UNDECIDED
 probe::roots::gated_helper	indeterminate	IND_CFG_UNDECIDED
 probe::roots::Java_fixture_Probe_hidden_00024probe	indeterminate	IND_UNREAD_DECLARATION
+# A router one entry point installs and another calls through (installed.rs).
+probe::installed::install	reached	REACHED
+probe::installed::Java_fixture_Probe_query	reached	REACHED
+probe::installed::Installed::Example::instance_fn	reached	REACHED_VIA_DISPATCH
 # --- What the shipped build does not compile.
 probe::gates::release_only	reached	REACHED
 probe::gates::debug_only	absent	-

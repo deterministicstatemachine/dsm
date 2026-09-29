@@ -10,6 +10,7 @@
 //! value that reached code constructs; a type only named does neither.
 
 pub mod gates;
+pub mod installed;
 pub mod macros;
 pub mod objects;
 pub mod outside;
