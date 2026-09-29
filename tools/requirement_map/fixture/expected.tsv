@@ -1,0 +1,13 @@
+path	state	code
+probe::Java_fixture_Probe_entry	reached	REACHED
+probe::fold	reached	REACHED
+probe::run_instance	reached	REACHED
+probe::Named::Example::static_fn	reached	REACHED
+probe::Named::Example::instance_fn	indeterminate	IND_DISPATCH_SELF_TYPE
+probe::Qualified::Example::static_fn	reached	REACHED
+probe::Qualified::Example::instance_fn	indeterminate	IND_DISPATCH_SELF_TYPE
+probe::Built::Example::static_fn	reached	REACHED
+probe::Built::Example::instance_fn	reached	REACHED
+probe::Never::Example::static_fn	indeterminate	IND_DISPATCH_SELF_TYPE
+probe::Never::Example::instance_fn	indeterminate	IND_DISPATCH_SELF_TYPE
+probe::unused	dead	DEAD_NO_ROOT_PATH

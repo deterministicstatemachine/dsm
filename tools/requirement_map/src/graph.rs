@@ -1,157 +1,960 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! Item and closure hashes over the call graph, the production roots, and
-//! what the roots reach.
+//! The map: every definition of every profile with its item and closure
+//! hashes, and, for each shipped artifact separately, its reachability from
+//! that artifact's entry points in three values, with a reason code and the
+//! source of every fact. Reachability is never computed over a union of two
+//! artifacts' edges: an Android build and a Linux build compile different
+//! code.
 
 use crate::hashing::{hash, Digest, CLOSURE, COMPONENT, EXTERNAL, ITEM};
-use crate::index::{Definition, Loaded, Position};
-use crate::symbols::Kind;
+use crate::index::{add_edge, Definition, Edges, Evidence, Loaded, Owner, Position, REFERENCE};
+use crate::reach::{self, code, Doubt, SelfType, State, Via};
+use crate::source::{Form, Source};
+use crate::symbols::{base_name, Kind};
 use crate::tokens::{canonical, format_captures, outer_attributes, Attribute};
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::path::Path;
 
-/// The library and binary sources a production entry point can live in.
-pub const PRODUCTION: [&str; 3] = [
-    "dsm_client/deterministic_state_machine/dsm/src/",
-    "dsm_client/deterministic_state_machine/dsm_sdk/src/",
-    "dsm_storage_node/src/",
-];
+pub const FORMAT_CAPTURE: &str = "format-capture";
+
+const CORE: &str = "dsm_client/deterministic_state_machine/dsm/src/";
+const SDK: &str = "dsm_client/deterministic_state_machine/dsm_sdk/src/";
+const NODE: &str = "dsm_storage_node/src/";
+
+/// The Android library: the SDK and the core it links.
+pub const ANDROID_CRATES: [&str; 2] = [SDK, CORE];
+/// The storage node's Linux binary: the node and the core it links.
+pub const NODE_CRATES: [&str; 2] = [NODE, CORE];
+/// Each artifact's crate files and the package they belong to.
+pub const ANDROID_PACKAGES: [(&str, &str); 2] = [(SDK, "dsm_sdk"), (CORE, "dsm")];
+pub const NODE_PACKAGES: [(&str, &str); 2] = [(NODE, "dsm_storage_node"), (CORE, "dsm")];
+
+/// A shipped artifact: the files its crates compile, and its index when this
+/// host built one.
+pub struct Artifact<'a> {
+    pub name: &'static str,
+    pub crates: &'a [&'a str],
+    /// The artifact's index, or why this host has none.
+    pub loaded: Result<&'a Loaded, String>,
+    /// A crate this artifact ships that the map cannot index here, and what
+    /// its source uses from the indexed crates.
+    pub unindexed: Option<&'a (String, Consumer)>,
+    /// What features the index enabled and this artifact does not take out.
+    pub excluded: crate::cfgs::Exclusions,
+}
+
+/// What a crate the map cannot index uses from the crates it does: every
+/// name in its `use`s of and paths through them, and every call it writes in
+/// method or path form.
+pub struct Consumer {
+    pub used: BTreeSet<String>,
+    pub calls: Vec<ConsumerCall>,
+    /// The functions its source writes, by name.
+    pub defines: BTreeSet<String>,
+}
+
+/// A call a consumer writes to something it may take from the indexed crates.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ConsumerCall {
+    /// `receiver.name(…)`
+    Method(String),
+    /// `Qualifier::name(…)`: the qualifier, then the name.
+    Path(String, String),
+}
+
+/// One artifact's reading of one node.
+#[derive(Clone, Debug)]
+pub struct Status {
+    /// `reached`, `indeterminate`, `dead`, `not-in-artifact` or `not-built`.
+    pub state: &'static str,
+    /// A stable code: `REACHED`, an `IND_*` code, `DEAD_NO_ROOT_PATH`, `NOT_IN_ARTIFACT`.
+    pub code: &'static str,
+    /// Why it is in this state; none when it is Reached (the witness says how).
+    pub reason: Option<String>,
+    /// The node it came from, or the entry-point kind; none when nothing led
+    /// to it (dead, not built, not in the artifact, or a seed).
+    pub via: Option<String>,
+    /// The edge kind it came over, `root`, or `seed`; none when nothing led to it.
+    pub via_kind: Option<&'static str>,
+    /// `file:line` of that evidence; none when there is no single place.
+    pub at: Option<String>,
+    /// What established the fact: `scip-occurrence`, `scip-symbol-shape`,
+    /// `format-string`, `attribute`, `token-detector`, `macro-body-tokens`,
+    /// `consumer-source-tokens`, `graph`, `profile`.
+    pub source: &'static str,
+}
 
 pub struct Node {
+    pub def: Definition,
+    /// The Rust path that names it (`dsm::economic::write_set::build_write_set`,
+    /// a trait method as `Type::Trait::method`); none for an item written
+    /// inside a function, which no path names.
+    pub path: Option<String>,
     pub item: Digest,
     pub closure: Digest,
-    /// Reached from a production entry point.
-    pub reached: bool,
-    /// Reached from a test function.
+    /// A test function reaches it (over the host test build's edges).
     pub tested: bool,
-    /// An impl of an outside trait on a type the index holds no symbol for.
-    pub unlinked: bool,
-    /// The kind of production entry point this is, if it is one.
-    pub root: Option<&'static str>,
+    /// What kind of entry point it is, per artifact: `export`, `vm`, `load`,
+    /// `main`; `undeclared-export` for an export nothing declares;
+    /// `unread-declaration` for one a declaration this map cannot spell
+    /// could be.
+    pub roots: BTreeMap<&'static str, &'static str>,
+    /// The profiles whose index defines it.
+    pub built_in: Vec<&'static str>,
+    pub status: BTreeMap<&'static str, Status>,
 }
 
-pub struct Graph {
+/// Per artifact: its entry points and how its nodes came out, and what the
+/// uncertainty detectors found.
+#[derive(Clone, Debug)]
+pub struct Tally {
+    pub built: &'static str,
+    /// Definitions the index holds that this artifact does not compile.
+    pub excluded: usize,
+    pub roots: usize,
+    pub dead_roots: usize,
+    /// Exports only a declaration this map cannot spell could be.
+    pub unread_roots: usize,
+    pub reached: usize,
+    pub indeterminate: usize,
+    pub dead: usize,
+    pub unresolved_call_tokens: usize,
+    /// Unresolved calls inside no definition any profile holds.
+    pub unattributed_call_tokens: usize,
+    /// Unresolved calls in code this build does not compile (test modules,
+    /// gated-off items): not this build's calls.
+    pub uncompiled_call_tokens: usize,
+    pub unresolved_call_candidates: usize,
+    pub macro_body_candidates: usize,
+    pub unindexed_candidates: usize,
+    /// The Kotlin-declared JNI symbols this artifact exports.
+    pub exported_declarations: BTreeSet<String>,
+}
+
+pub struct Map {
     pub nodes: BTreeMap<String, Node>,
+    /// Every profile's edges: (profile, from, to, kind, evidence).
+    pub edges: Vec<(&'static str, String, String, &'static str, Evidence)>,
+    pub tallies: BTreeMap<&'static str, Tally>,
 }
 
-pub fn build(root: &Path, loaded: &mut Loaded) -> Result<Graph, String> {
-    let Loaded {
-        definitions,
-        edges,
-        unlinked,
-        locals,
-        imports,
-        ..
-    } = loaded;
-    let definitions: &[Definition] = definitions;
-    let (unlinked, locals, imports) = (&*unlinked, &*locals, &*imports);
-    // Module-level constants and statics by name, for format captures.
-    let mut constants: BTreeMap<&str, Vec<&Definition>> = BTreeMap::new();
-    for d in definitions {
-        if d.item.kind == Kind::Term && d.item.container.is_empty() {
-            constants.entry(d.item.name.as_str()).or_default().push(d);
+pub struct Inputs<'a> {
+    pub artifacts: Vec<Artifact<'a>>,
+    pub tests: &'a Loaded,
+    /// JNI symbols the app's Kotlin declares, and where.
+    pub declared_jni: &'a crate::jni::Declarations,
+}
+
+fn in_crates(file: &str, crates: &[&str]) -> bool {
+    crates.iter().any(|c| file.starts_with(c))
+}
+
+/// The Rust path that names a definition, or empty when none does.
+fn rust_path(d: &Definition) -> Option<String> {
+    if d.scope.is_some() {
+        return None;
+    }
+    let mut parts: Vec<String> = vec![d.item.package.replace('-', "_")];
+    parts.extend(d.item.modules.iter().cloned());
+    if !d.item.container.is_empty() {
+        parts.push(base_name(&d.item.container).to_string());
+    }
+    if !d.item.trait_name.is_empty() {
+        parts.push(base_name(&d.item.trait_name).to_string());
+    }
+    parts.push(d.item.name.trim_matches('`').to_string());
+    Some(parts.join("::"))
+}
+
+/// The symbol an exported function is linked under: its `export_name`, or
+/// its own name under `no_mangle`; none when it is not exported. An
+/// `export_name` without a quoted name is an error.
+fn exported_name(d: &Definition, attributes: &[Attribute]) -> Result<Option<String>, String> {
+    let mut exported = None;
+    for a in attributes {
+        match export_attribute(a).map_err(|e| format!("{} ({}): {e}", d.symbol, d.file))? {
+            Some(Export::OwnName) => exported = Some(d.item.name.clone()),
+            Some(Export::Named(name)) => exported = Some(name),
+            None => {}
         }
     }
-    let mut sources: BTreeMap<&str, String> = BTreeMap::new();
-    let mut texts: BTreeMap<&str, Vec<(&str, Position, String)>> = BTreeMap::new();
-    let mut roots: BTreeMap<&str, &'static str> = BTreeMap::new();
-    let mut tests: BTreeSet<&str> = BTreeSet::new();
-    for d in definitions {
-        if !sources.contains_key(d.file.as_str()) {
+    Ok(exported)
+}
+
+/// What an attribute exports an item as.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Export {
+    /// `#[no_mangle]`: under its own name.
+    OwnName,
+    /// `#[export_name = "…"]`: under that name.
+    Named(String),
+}
+
+/// Reads `#[no_mangle]`, `#[export_name = "…"]` and their `#[unsafe(…)]`
+/// forms by their first word; any other attribute exports nothing. A
+/// `no_mangle` or `export_name` written some other way is an error.
+fn export_attribute(a: &Attribute) -> Result<Option<Export>, String> {
+    let words: Vec<&str> = a.args.split_whitespace().collect();
+    let (attribute, rest): (&str, &[&str]) = match (a.path.as_str(), words.as_slice()) {
+        ("unsafe", ["(", inner, rest @ .., ")"]) => (inner, rest),
+        (path, rest) => (path, rest),
+    };
+    match (attribute, rest) {
+        ("no_mangle", []) => Ok(Some(Export::OwnName)),
+        ("export_name", ["=", literal])
+            if literal.len() >= 2 && literal.starts_with('"') && literal.ends_with('"') =>
+        {
+            Ok(Some(Export::Named(
+                literal[1..literal.len() - 1].to_string(),
+            )))
+        }
+        ("no_mangle", _) | ("export_name", _) => Err(format!(
+            "`{attribute}` written as `{}`, which this map does not read",
+            a.args
+        )),
+        _ => Ok(None),
+    }
+}
+
+/// Whether `file` is the root of a binary target: `src/main.rs`,
+/// `src/bin/<name>.rs`, or `src/bin/<name>/main.rs`.
+fn binary_root(file: &str) -> bool {
+    file.ends_with("/src/main.rs")
+        || file.split_once("/src/bin/").is_some_and(|(_, rest)| {
+            let parts: Vec<&str> = rest.split('/').collect();
+            matches!(parts.as_slice(), [one] if one.ends_with(".rs"))
+                || matches!(parts.as_slice(), [_, "main.rs"])
+        })
+}
+
+/// What kind of entry point a definition is for an artifact, if it is one:
+/// the `main` of a binary; a load-time constructor; `JNI_OnLoad`, which the
+/// JVM calls by specification; an exported function a Kotlin `external fun`
+/// declares. An export nothing declares is `undeclared-export`: a dead-root
+/// candidate, not an entry point. A `Java_…` export that only a declaration
+/// this map cannot spell could be is `unread-declaration`: Indeterminate.
+fn root_kind(
+    d: &Definition,
+    attributes: &[Attribute],
+    declared: &crate::jni::Declarations,
+) -> Result<Option<&'static str>, String> {
+    let it = &d.item;
+    if it.kind != Kind::Callable || !it.container.is_empty() || d.scope.is_some() {
+        return Ok(None);
+    }
+    // A binary's `main`: at the crate root of a binary target.
+    if binary_root(&d.file) && it.modules.is_empty() && it.name == "main" {
+        return Ok(Some("main"));
+    }
+    if runs_at_load(attributes) {
+        return Ok(Some("load"));
+    }
+    let Some(exported) = exported_name(d, attributes)? else {
+        return Ok(None);
+    };
+    // The JVM calls these by specification when it loads and unloads the library.
+    if exported == "JNI_OnLoad" || exported == "JNI_OnUnload" {
+        return Ok(Some("vm"));
+    }
+    if declared.symbols.contains_key(&exported) {
+        return Ok(Some("export"));
+    }
+    if declared.could_be(&exported).is_some() {
+        return Ok(Some("unread-declaration"));
+    }
+    Ok(Some("undeclared-export"))
+}
+
+fn edge_source(kind: &str) -> &'static str {
+    match kind {
+        k if k == REFERENCE || k == crate::reach::CONSTRUCT || k == crate::reach::TYPE_ARGUMENT => {
+            "scip-occurrence"
+        }
+        k if k == FORMAT_CAPTURE => "format-string",
+        _ => "scip-symbol-shape",
+    }
+}
+
+fn seed_source(code_: &str) -> &'static str {
+    match code_ {
+        c if c == code::UNRESOLVED_CALL => "token-detector",
+        c if c == code::MACRO_BODY => "macro-body-tokens",
+        c if c == code::UNINDEXED_ARTIFACT => "consumer-source-tokens",
+        c if c == code::UNLINKED_IMPL => "scip-symbol-shape",
+        _ => "graph",
+    }
+}
+
+pub fn build(root: &Path, inputs: &Inputs) -> Result<Map, String> {
+    // The profiles whose index this host built, in order: artifacts, then tests.
+    let mut profiles: Vec<(&'static str, &Loaded)> = Vec::new();
+    for a in &inputs.artifacts {
+        if let Ok(loaded) = &a.loaded {
+            profiles.push((a.name, loaded));
+        }
+    }
+    profiles.push(("tests", inputs.tests));
+
+    // The node table: one entry per definition key, from the first profile
+    // that defines it.
+    let mut defs: BTreeMap<String, Definition> = BTreeMap::new();
+    let mut built_in: BTreeMap<String, Vec<&'static str>> = BTreeMap::new();
+    for (name, loaded) in &profiles {
+        for d in &loaded.definitions {
+            defs.entry(d.symbol.clone()).or_insert_with(|| d.clone());
+            built_in.entry(d.symbol.clone()).or_default().push(name);
+        }
+    }
+
+    // Each node's text: its item hash, its attributes.
+    let mut sources: BTreeMap<String, String> = BTreeMap::new();
+    let mut items: BTreeMap<&str, Digest> = BTreeMap::new();
+    let mut attributes: BTreeMap<&str, Vec<Attribute>> = BTreeMap::new();
+    for d in defs.values() {
+        if !sources.contains_key(&d.file) {
             let text = std::fs::read_to_string(root.join(&d.file))
                 .map_err(|e| format!("{}: cannot read: {e}", d.file))?;
-            sources.insert(d.file.as_str(), text);
+            sources.insert(d.file.clone(), text);
         }
+    }
+    for (key, d) in &defs {
         let source = sources
-            .get(d.file.as_str())
+            .get(&d.file)
             .ok_or_else(|| format!("{}: not loaded", d.file))?;
-        let text =
-            slice(source, d.start, d.end).map_err(|e| format!("{} ({}): {e}", d.symbol, d.file))?;
-        let tokens = canonical(text).map_err(|e| format!("{} ({}): {e}", d.symbol, d.file))?;
-        let attributes =
-            outer_attributes(text).map_err(|e| format!("{} ({}): {e}", d.symbol, d.file))?;
-        if let Some(kind) = root_kind(d, &attributes) {
-            roots.insert(d.symbol.as_str(), kind);
+        let text = slice(source, d.start, d.end).map_err(|e| format!("{key} ({}): {e}", d.file))?;
+        let tokens = canonical(text).map_err(|e| format!("{key} ({}): {e}", d.file))?;
+        items.insert(
+            key.as_str(),
+            hash(ITEM, &[key.as_bytes(), tokens.as_bytes()]),
+        );
+        attributes.insert(
+            key.as_str(),
+            outer_attributes(text).map_err(|e| format!("{key} ({}): {e}", d.file))?,
+        );
+    }
+
+    // Each profile's edges, with the format captures its code makes.
+    let mut profile_edges: Vec<(&'static str, Edges)> = Vec::new();
+    for (name, loaded) in &profiles {
+        let mut edges = loaded.edges.clone();
+        let mut constants: BTreeMap<&str, Vec<&Definition>> = BTreeMap::new();
+        for d in &loaded.definitions {
+            if d.item.kind == Kind::Term && d.item.container.is_empty() && d.scope.is_none() {
+                constants.entry(d.item.name.as_str()).or_default().push(d);
+            }
         }
-        if d.item.kind == Kind::Callable && is_test(&attributes) {
-            tests.insert(d.symbol.as_str());
-        }
-        texts
-            .entry(d.symbol.as_str())
-            .or_default()
-            .push((d.file.as_str(), d.start, tokens));
-        if d.item.kind == Kind::Callable || d.item.kind == Kind::Term {
-            for name in
+        for d in &loaded.definitions {
+            if d.item.kind != Kind::Callable && d.item.kind != Kind::Term {
+                continue;
+            }
+            let source = sources
+                .get(&d.file)
+                .ok_or_else(|| format!("{}: not loaded", d.file))?;
+            let text = slice(source, d.start, d.end)
+                .map_err(|e| format!("{} ({}): {e}", d.symbol, d.file))?;
+            for capture in
                 format_captures(text).map_err(|e| format!("{} ({}): {e}", d.symbol, d.file))?
             {
-                if let Some(target) = capture_target(&constants, d, &name, locals, imports) {
+                if let Some(target) =
+                    capture_target(&constants, d, &capture, &loaded.locals, &loaded.imports)
+                {
                     if target != d.symbol {
-                        edges.insert((d.symbol.clone(), target, "format-arg"));
+                        add_edge(
+                            &mut edges,
+                            &d.symbol,
+                            &target,
+                            FORMAT_CAPTURE,
+                            Evidence {
+                                at: format!("{}:{}", d.file, d.start.line + 1),
+                                doubt: None,
+                            },
+                        );
                     }
                 }
             }
         }
+        profile_edges.push((name, edges));
     }
 
-    // Node ids: every defined symbol, then every symbol only referenced.
-    let mut ids: BTreeMap<&str, usize> = BTreeMap::new();
-    let mut names: Vec<&str> = Vec::new();
-    for symbol in texts
-        .keys()
-        .copied()
-        .chain(edges.iter().map(|(_, to, _)| to.as_str()))
-    {
-        if !ids.contains_key(symbol) {
-            ids.insert(symbol, names.len());
-            names.push(symbol);
+    // Node ids: every definition, then every symbol only referenced.
+    let mut ids: BTreeMap<String, usize> = BTreeMap::new();
+    let mut names: Vec<String> = Vec::new();
+    for key in defs.keys() {
+        ids.insert(key.clone(), names.len());
+        names.push(key.clone());
+    }
+    for (_, edges) in &profile_edges {
+        for (from, to, _) in edges.keys() {
+            for s in [from, to] {
+                if !ids.contains_key(s) {
+                    ids.insert(s.clone(), names.len());
+                    names.push(s.clone());
+                }
+            }
         }
     }
-    let mut items: Vec<Digest> = Vec::with_capacity(names.len());
-    for name in &names {
-        items.push(match texts.get_mut(name) {
-            Some(parts) => {
-                parts.sort();
-                let mut fields: Vec<&[u8]> = vec![name.as_bytes()];
-                fields.extend(parts.iter().map(|(_, _, t)| t.as_bytes()));
-                hash(ITEM, &fields)
-            }
-            None => hash(EXTERNAL, &[name.as_bytes()]),
-        });
-    }
+    let id = |s: &str| -> Result<usize, String> {
+        ids.get(s)
+            .copied()
+            .ok_or_else(|| format!("{s} is not a node"))
+    };
+
+    // Closure hashes over every profile's edges: a fingerprint of the code a
+    // definition can lead to in any build.
+    let item_of: Vec<Digest> = names
+        .iter()
+        .map(|n| match items.get(n.as_str()) {
+            Some(d) => *d,
+            None => hash(EXTERNAL, &[n.as_bytes()]),
+        })
+        .collect();
     let mut adjacency: Vec<Vec<usize>> = vec![Vec::new(); names.len()];
-    for (from, to, _) in edges.iter() {
-        match (ids.get(from.as_str()), ids.get(to.as_str())) {
-            (Some(&f), Some(&t)) => adjacency[f].push(t),
-            _ => {
-                return Err(format!(
-                    "the edge {from} -> {to} has an end that is not a node"
-                ))
-            }
+    for (_, edges) in &profile_edges {
+        for (from, to, _) in edges.keys() {
+            adjacency[id(from)?].push(id(to)?);
         }
     }
     for list in &mut adjacency {
         list.sort_unstable();
         list.dedup();
     }
+    let name_refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+    let closures = closures(&name_refs, &item_of, &adjacency)?;
 
-    let closures = closures(&names, &items, &adjacency)?;
-    let reached = reach(&adjacency, roots.keys().copied(), &ids)?;
-    let tested = reach(&adjacency, tests.iter().copied(), &ids)?;
-    let mut nodes = BTreeMap::new();
-    for symbol in texts.keys() {
-        let id = ids[symbol];
-        nodes.insert(
-            symbol.to_string(),
-            Node {
-                item: items[id],
-                closure: closures[id],
-                reached: reached.contains(&id),
-                tested: tested.contains(&id),
-                unlinked: unlinked.contains(*symbol),
-                root: roots.get(symbol).copied(),
-            },
-        );
+    // Entry points, per artifact.
+    let mut roots: BTreeMap<String, BTreeMap<&'static str, &'static str>> = BTreeMap::new();
+    // The name each exported entry point is exported under.
+    let mut exports: BTreeMap<String, String> = BTreeMap::new();
+    for a in &inputs.artifacts {
+        for (key, d) in &defs {
+            if !in_crates(&d.file, a.crates) {
+                continue;
+            }
+            let attrs = attributes
+                .get(key.as_str())
+                .ok_or_else(|| format!("{key}: no attributes read"))?;
+            if let Some(kind) = root_kind(d, attrs, inputs.declared_jni)? {
+                roots.entry(key.clone()).or_default().insert(a.name, kind);
+                if kind == "export" || kind == "unread-declaration" {
+                    let exported = exported_name(d, attrs)?
+                        .ok_or_else(|| format!("{key}: an export root with no exported name"))?;
+                    exports.insert(key.clone(), exported);
+                }
+            }
+        }
     }
-    Ok(Graph { nodes })
+
+    // Tests: what a test function reaches over the host test build's edges.
+    let tests_edges = &profile_edges
+        .iter()
+        .find(|(n, _)| *n == "tests")
+        .ok_or("no test profile")?
+        .1;
+    let mut test_adjacency: Vec<Vec<usize>> = vec![Vec::new(); names.len()];
+    for (from, to, _) in tests_edges.keys() {
+        test_adjacency[id(from)?].push(id(to)?);
+    }
+    let test_starts: Vec<&str> = inputs
+        .tests
+        .definitions
+        .iter()
+        .filter(|d| {
+            d.item.kind == Kind::Callable
+                && attributes
+                    .get(d.symbol.as_str())
+                    .is_some_and(|a| is_test(a))
+        })
+        .map(|d| d.symbol.as_str())
+        .collect();
+    for t in &test_starts {
+        roots
+            .entry(t.to_string())
+            .or_default()
+            .insert("tests", "test");
+    }
+    let id_refs: BTreeMap<&str, usize> = ids.iter().map(|(k, v)| (k.as_str(), *v)).collect();
+    let tested = reach(&test_adjacency, test_starts.into_iter(), &id_refs)?;
+
+    // Reachability, per artifact.
+    let mut status: BTreeMap<String, BTreeMap<&'static str, Status>> = BTreeMap::new();
+    let mut tallies: BTreeMap<&'static str, Tally> = BTreeMap::new();
+    for a in &inputs.artifacts {
+        let mut tally = Tally {
+            built: "built",
+            excluded: 0,
+            roots: 0,
+            dead_roots: 0,
+            unread_roots: 0,
+            reached: 0,
+            indeterminate: 0,
+            dead: 0,
+            unresolved_call_tokens: 0,
+            unattributed_call_tokens: 0,
+            uncompiled_call_tokens: 0,
+            unresolved_call_candidates: 0,
+            macro_body_candidates: 0,
+            unindexed_candidates: 0,
+            exported_declarations: BTreeSet::new(),
+        };
+        let loaded = match &a.loaded {
+            Ok(loaded) => loaded,
+            Err(missing) => {
+                tally.built = "not-built";
+                for (key, d) in &defs {
+                    if in_crates(&d.file, a.crates) {
+                        status.entry(key.clone()).or_default().insert(
+                            a.name,
+                            Status {
+                                state: "not-built",
+                                code: code::PROFILE_NOT_BUILT,
+                                reason: Some(missing.clone()),
+                                via: None,
+                                via_kind: None,
+                                at: None,
+                                source: "profile",
+                            },
+                        );
+                    }
+                }
+                tallies.insert(a.name, tally);
+                continue;
+            }
+        };
+        let edges_map = &profile_edges
+            .iter()
+            .find(|(n, _)| *n == a.name)
+            .ok_or_else(|| format!("no edges for {}", a.name))?
+            .1;
+        // What the index holds that this artifact does not compile.
+        let mut gone: BTreeMap<&str, &str> = BTreeMap::new();
+        for d in &loaded.definitions {
+            if let Some(why) = a.excluded.contradiction(&d.file, d.start, d.end) {
+                return Err(format!(
+                    "{} ({}:{}) is in the {} index inside a gate the index's own features turn off: {why}",
+                    d.symbol,
+                    d.file,
+                    d.start.line + 1,
+                    a.name
+                ));
+            }
+            if let Some(why) = a.excluded.excluded(&d.file, d.start, d.end) {
+                gone.insert(d.symbol.as_str(), why);
+            }
+        }
+        tally.excluded = gone.len();
+        let mut edges: Vec<reach::Edge> = Vec::with_capacity(edges_map.len());
+        for ((from, to, kind), ev) in edges_map {
+            if gone.contains_key(from.as_str()) || gone.contains_key(to.as_str()) {
+                continue;
+            }
+            edges.push(reach::Edge {
+                from: id(from)?,
+                to: id(to)?,
+                kind,
+                doubt: ev.doubt.clone(),
+                at: ev.at.clone(),
+            });
+        }
+        let defined_here: HashSet<&str> = loaded
+            .definitions
+            .iter()
+            .map(|d| d.symbol.as_str())
+            .collect();
+        let mut artifact_roots: Vec<(usize, &'static str)> = Vec::new();
+        // Exports a declaration this map cannot spell could be: Indeterminate.
+        let mut unread_roots: Vec<(usize, Doubt)> = Vec::new();
+        for (key, kinds) in &roots {
+            if let Some(kind) = kinds.get(a.name) {
+                if !defined_here.contains(key.as_str()) || gone.contains_key(key.as_str()) {
+                    continue;
+                }
+                match *kind {
+                    "undeclared-export" => tally.dead_roots += 1,
+                    "unread-declaration" => {
+                        let exported = exports
+                            .get(key)
+                            .ok_or_else(|| format!("{key}: no exported name"))?;
+                        let u = inputs.declared_jni.could_be(exported).ok_or_else(|| {
+                            format!("{key}: no unread declaration matches {exported}")
+                        })?;
+                        tally.unread_roots += 1;
+                        unread_roots.push((
+                            id(key)?,
+                            Doubt::new(
+                                code::UNREAD_DECLARATION,
+                                format!(
+                                    "exported as {exported}, which the native declared at {} could be ({})",
+                                    u.at, u.why
+                                ),
+                            ),
+                        ));
+                    }
+                    _ => {
+                        artifact_roots.push((id(key)?, kind));
+                        if let Some(exported) = exports.get(key) {
+                            tally.exported_declarations.insert(exported.clone());
+                        }
+                    }
+                }
+            }
+        }
+        tally.roots = artifact_roots.len();
+        let mut self_types = reach::SelfTypes::new();
+        for (m, owner) in &loaded.self_types {
+            let value = match owner {
+                Owner::Known(t) => SelfType::Known(id(t)?),
+                Owner::Unknown(why) => SelfType::Unknown(why.clone()),
+            };
+            self_types.insert(id(m)?, value);
+        }
+        let mut takes_value: HashSet<usize> = HashSet::new();
+        for m in &loaded.value_receivers {
+            takes_value.insert(id(m)?);
+        }
+        let via = reach::reached(
+            names.len(),
+            &edges,
+            &artifact_roots,
+            &self_types,
+            &takes_value,
+        )?;
+        let reached_now: Vec<usize> = (0..names.len()).filter(|&i| via[i].is_some()).collect();
+        let reached_set: HashSet<usize> = reached_now.iter().copied().collect();
+
+        // Seeds: what the index cannot see names, and gates it cannot decide.
+        let mut seeds: Vec<(usize, Doubt)> = unread_roots;
+        for d in &loaded.definitions {
+            if gone.contains_key(d.symbol.as_str()) {
+                continue;
+            }
+            if let Some(why) = a.excluded.undecided(&d.file, d.start, d.end) {
+                seeds.push((id(&d.symbol)?, Doubt::new(code::CFG_UNDECIDED, why)));
+            }
+        }
+        for (m, why) in &loaded.unlinked {
+            seeds.push((id(m)?, why.clone()));
+        }
+        let here: Vec<&Definition> = loaded
+            .definitions
+            .iter()
+            .filter(|d| in_crates(&d.file, a.crates) && !gone.contains_key(d.symbol.as_str()))
+            .collect();
+        // Names the build uses from outside the indexed workspace: an
+        // unresolved call to one of these is most likely to that, so it
+        // names no candidate here.
+        let mut external_names: BTreeSet<String> = BTreeSet::new();
+        for (_, to, _) in edges_map.keys() {
+            if defined_here.contains(to.as_str()) {
+                continue;
+            }
+            let unqualified = match to.split_once(" @") {
+                Some((head, _)) => head,
+                None => to.as_str(),
+            };
+            if let Some(it) = crate::symbols::item(unqualified)? {
+                external_names.insert(it.name);
+            }
+        }
+        let mut by_file: BTreeMap<&str, Vec<&Definition>> = BTreeMap::new();
+        for d in &here {
+            by_file.entry(d.file.as_str()).or_default().push(d);
+        }
+        let here_symbols: HashSet<&str> = here.iter().map(|d| d.symbol.as_str()).collect();
+        let mut everywhere: BTreeMap<&str, Vec<&Definition>> = BTreeMap::new();
+        for d in defs.values() {
+            everywhere.entry(d.file.as_str()).or_default().push(d);
+        }
+        for (file, file_defs) in &by_file {
+            let any_reached = file_defs
+                .iter()
+                .any(|d| ids.get(&d.symbol).is_some_and(|i| reached_set.contains(i)));
+            if !any_reached {
+                continue;
+            }
+            let text = sources
+                .get(*file)
+                .ok_or_else(|| format!("{file}: not loaded"))?;
+            let lexed = Source::lex(text).map_err(|e| format!("{file}: {e}"))?;
+            let end = Position {
+                line: text.split('\n').count(),
+                column: 0,
+            };
+            let occurrences = loaded.occurrences.get(*file);
+            let locals = loaded.locals.get(*file);
+            for call in lexed.calls(Position { line: 0, column: 0 }, end)? {
+                if occurrences.is_some_and(|o| o.contains(&call.at)) {
+                    continue;
+                }
+                // Place the call in the innermost definition of any profile:
+                // code this build does not compile (a test module, a gated-off
+                // item) is counted apart; code no definition holds (a
+                // module-level macro invocation) is unattributed.
+                let inner = everywhere
+                    .get(*file)
+                    .into_iter()
+                    .flatten()
+                    .filter(|d| d.start <= call.at && call.at <= d.end)
+                    .max_by_key(|d| d.start);
+                let (context, extent) = match inner {
+                    None => {
+                        tally.unattributed_call_tokens += 1;
+                        ("outside every definition the index holds".to_string(), None)
+                    }
+                    Some(d) if !here_symbols.contains(d.symbol.as_str()) => {
+                        tally.uncompiled_call_tokens += 1;
+                        continue;
+                    }
+                    Some(d) if ids.get(&d.symbol).is_some_and(|i| reached_set.contains(i)) => (
+                        format!("in reached {}", d.item.name),
+                        Some((d.start, d.end)),
+                    ),
+                    Some(_) => continue,
+                };
+                let inner = inner.filter(|d| here_symbols.contains(d.symbol.as_str()));
+                tally.unresolved_call_tokens += 1;
+                let local = locals.is_some_and(|ls| {
+                    ls.iter().any(|(at, n)| {
+                        *n == call.name && extent.is_some_and(|(s0, e0)| s0 <= *at && *at <= e0)
+                    })
+                });
+                if local || external_names.contains(&call.name) {
+                    continue;
+                }
+                let candidates: Vec<&Definition> = here
+                    .iter()
+                    .copied()
+                    .filter(|d| d.item.kind == Kind::Callable && d.item.name == call.name)
+                    .filter(|d| match &call.form {
+                        Form::Method => !d.item.container.is_empty(),
+                        Form::Bare => d.item.container.is_empty(),
+                        Form::Path(Some(q)) if q == "Self" => inner.is_some_and(|i| {
+                            base_name(&d.item.container) == base_name(&i.item.container)
+                        }),
+                        Form::Path(Some(q)) => {
+                            base_name(&d.item.container) == q.as_str()
+                                || d.item.modules.last().is_some_and(|m| m == q)
+                        }
+                        // `<T as Trait>::f(…)` or `Type::<A>::f(…)`: any item of that name.
+                        Form::Path(None) => !d.item.container.is_empty(),
+                    })
+                    .collect();
+                let mut counted = 0usize;
+                for c in candidates {
+                    let ci = id(&c.symbol)?;
+                    if reached_set.contains(&ci) {
+                        continue;
+                    }
+                    counted += 1;
+                    seeds.push((
+                        ci,
+                        Doubt::new(
+                            code::UNRESOLVED_CALL,
+                            format!(
+                                "`{}` is called at {file}:{} {context}, and the index did not resolve it",
+                                call.name,
+                                call.at.line + 1
+                            ),
+                        ),
+                    ));
+                }
+                if counted > 0 {
+                    tally.unresolved_call_candidates += counted;
+                }
+            }
+            // A reached macro's body: the index does not expand it, so what it
+            // calls is undecided. Only names it writes in call position count
+            // (what it defines, like the `fn new` an impl template writes, is
+            // not a call), matched by the form of the call.
+            for m in file_defs.iter().filter(|d| d.item.kind == Kind::Macro) {
+                if !ids.get(&m.symbol).is_some_and(|i| reached_set.contains(i)) {
+                    continue;
+                }
+                // No outside-name filter here: a handful of macros, and a
+                // hidden call must stay undecided rather than read as Dead.
+                for call in lexed.calls(m.start, m.end)? {
+                    for d in here
+                        .iter()
+                        .copied()
+                        .filter(|d| d.item.kind == Kind::Callable && d.item.name == call.name)
+                    {
+                        let fits = match &call.form {
+                            Form::Method => !d.item.container.is_empty(),
+                            Form::Bare => d.item.container.is_empty(),
+                            Form::Path(Some(q)) => {
+                                base_name(&d.item.container) == q.as_str()
+                                    || d.item.modules.last().is_some_and(|x| x == q)
+                            }
+                            Form::Path(None) => !d.item.container.is_empty(),
+                        };
+                        let di = id(&d.symbol)?;
+                        if !fits || d.item.package != m.item.package || reached_set.contains(&di) {
+                            continue;
+                        }
+                        tally.macro_body_candidates += 1;
+                        seeds.push((
+                            di,
+                            Doubt::new(
+                                code::MACRO_BODY,
+                                format!(
+                                    "called as `{}` in the body of the reached macro `{}!` ({}:{}), which the index does not expand",
+                                    call.name,
+                                    m.item.name,
+                                    m.file,
+                                    call.at.line + 1
+                                ),
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+        if let Some((dir, consumer)) = a.unindexed {
+            let mut named: BTreeSet<&str> = BTreeSet::new();
+            for d in &here {
+                let item = &d.item;
+                let by_use = consumer.used.contains(&item.name);
+                let by_call = item.kind == Kind::Callable
+                    && consumer.calls.iter().any(|call| match call {
+                        ConsumerCall::Method(name) => {
+                            *name == item.name
+                                && !item.container.is_empty()
+                                && !external_names.contains(name)
+                        }
+                        ConsumerCall::Path(q, name) => {
+                            *name == item.name
+                                && (base_name(&item.container) == q.as_str()
+                                    || item.modules.last().is_some_and(|m| m == q))
+                        }
+                    });
+                if by_use || by_call {
+                    named.insert(d.symbol.as_str());
+                }
+            }
+            for symbol in named {
+                let di = id(symbol)?;
+                if reached_set.contains(&di) {
+                    continue;
+                }
+                tally.unindexed_candidates += 1;
+                seeds.push((
+                    di,
+                    Doubt::new(
+                        code::UNINDEXED_ARTIFACT,
+                        format!("named by {dir}, a crate this artifact ships that the map cannot index here"),
+                    ),
+                ));
+            }
+        }
+
+        let result = reach::classify(&edges, via, &self_types, &takes_value, &seeds, &name_refs)?;
+        for (key, d) in &defs {
+            if !in_crates(&d.file, a.crates) {
+                continue;
+            }
+            let i = id(key)?;
+            let entry = if let Some(why) = gone.get(key.as_str()) {
+                Status {
+                    state: "not-in-artifact",
+                    code: code::NOT_IN_ARTIFACT,
+                    reason: Some(why.to_string()),
+                    via: None,
+                    via_kind: None,
+                    at: None,
+                    source: "cfg-evaluation",
+                }
+            } else if !defined_here.contains(key.as_str()) {
+                Status {
+                    state: "not-in-artifact",
+                    code: code::NOT_IN_ARTIFACT,
+                    reason: Some(format!("not compiled into the {} build", a.name)),
+                    via: None,
+                    via_kind: None,
+                    at: None,
+                    source: "profile",
+                }
+            } else {
+                let (via, via_kind, at, source) = match &result.via[i] {
+                    Some(Via::Root(kind)) => (
+                        Some(kind.to_string()),
+                        Some("root"),
+                        Some(format!("{}:{}", d.file, d.start.line + 1)),
+                        "attribute",
+                    ),
+                    Some(Via::Edge(e)) => {
+                        let edge = &edges[*e];
+                        (
+                            Some(names[edge.from].clone()),
+                            Some(edge.kind),
+                            Some(edge.at.clone()),
+                            edge_source(edge.kind),
+                        )
+                    }
+                    Some(Via::Seed(why)) => (None, Some("seed"), None, seed_source(why.code)),
+                    None => (None, None, None, "graph"),
+                };
+                let (state, code_, reason) = match (result.state[i], &result.reason[i]) {
+                    (State::Reached, _) => ("reached", "REACHED", None),
+                    (State::Indeterminate, Some(why)) => {
+                        ("indeterminate", why.code, Some(why.text.clone()))
+                    }
+                    (State::Indeterminate, None) => {
+                        return Err(format!("{key} is indeterminate with no reason"))
+                    }
+                    (State::Dead, _) => (
+                        "dead",
+                        code::DEAD_NO_ROOT_PATH,
+                        Some(format!(
+                            "no path of any kind leads to it from the {} build's entry points",
+                            a.name
+                        )),
+                    ),
+                };
+                match state {
+                    "reached" => tally.reached += 1,
+                    "indeterminate" => tally.indeterminate += 1,
+                    _ => tally.dead += 1,
+                }
+                Status {
+                    state,
+                    code: code_,
+                    reason,
+                    via,
+                    via_kind,
+                    at,
+                    source,
+                }
+            };
+            status.entry(key.clone()).or_default().insert(a.name, entry);
+        }
+        tallies.insert(a.name, tally);
+    }
+
+    let mut nodes = BTreeMap::new();
+    for (key, d) in defs {
+        let i = id(&key)?;
+        let node = Node {
+            path: rust_path(&d),
+            item: item_of[i],
+            closure: closures[i],
+            tested: tested.contains(&i),
+            roots: roots.remove(&key).into_iter().flatten().collect(),
+            built_in: built_in.remove(&key).into_iter().flatten().collect(),
+            status: status.remove(&key).into_iter().flatten().collect(),
+            def: d,
+        };
+        nodes.insert(key, node);
+    }
+    let mut all_edges = Vec::new();
+    for (profile, edges) in profile_edges {
+        for ((from, to, kind), ev) in edges {
+            all_edges.push((profile, from, to, kind, ev));
+        }
+    }
+    Ok(Map {
+        nodes,
+        edges: all_edges,
+        tallies,
+    })
 }
 
 /// The constant a format capture names, as the compiler would resolve it: a
@@ -181,32 +984,6 @@ fn capture_target(
     same_file.or(brought_in).map(|c| c.symbol.clone())
 }
 
-/// A production entry point: an exported symbol (`#[no_mangle]`,
-/// `#[unsafe(no_mangle)]`, `#[export_name]`) or a load-time constructor in a
-/// production library, or the `main` of a production binary. Read from the
-/// item's parsed attributes.
-fn root_kind(d: &Definition, attributes: &[Attribute]) -> Option<&'static str> {
-    let production = PRODUCTION.iter().any(|p| d.file.starts_with(p));
-    let it = &d.item;
-    if !production || it.kind != Kind::Callable || !it.container.is_empty() {
-        return None;
-    }
-    let binary = d.file.ends_with("/src/main.rs") || d.file.contains("/src/bin/");
-    if binary && it.name == "main" {
-        return Some("main");
-    }
-    if runs_at_load(attributes) {
-        return Some("load");
-    }
-    let exported = attributes.iter().any(|a| {
-        a.path == "no_mangle"
-            || a.path == "export_name"
-            || (a.path == "unsafe"
-                && (a.args.contains("no_mangle") || a.args.contains("export_name")))
-    });
-    exported.then_some("export")
-}
-
 /// A function the loader runs when the library loads or unloads
 /// (`#[ctor]`, `#[ctor::ctor]`, `#[dtor]`, `#[ctor::dtor]`): an entry point no
 /// caller in the code names.
@@ -232,7 +1009,7 @@ fn is_test(attributes: &[Attribute]) -> bool {
     })
 }
 
-fn slice(source: &str, start: Position, end: Position) -> Result<&str, String> {
+pub(crate) fn slice(source: &str, start: Position, end: Position) -> Result<&str, String> {
     let mut offsets = vec![0usize];
     for (at, byte) in source.bytes().enumerate() {
         if byte == b'\n' {
@@ -465,6 +1242,48 @@ mod tests {
             "/// Runs like a #[ctor]\nfn i() {}"
         )?));
         Ok(())
+    }
+
+    #[test]
+    fn exports_are_read_by_the_attribute_not_by_a_mention() -> Result<(), String> {
+        let read = |text: &str| -> Result<Vec<Option<Export>>, String> {
+            outer_attributes(text)?
+                .iter()
+                .map(export_attribute)
+                .collect()
+        };
+        assert_eq!(
+            read("#[unsafe(no_mangle)]\nfn a() {}")?,
+            vec![Some(Export::OwnName)]
+        );
+        assert_eq!(
+            read("#[no_mangle]\nfn a() {}")?,
+            vec![Some(Export::OwnName)]
+        );
+        assert_eq!(
+            read("#[export_name = \"Java_x\"]\nfn a() {}")?,
+            vec![Some(Export::Named("Java_x".to_string()))]
+        );
+        assert_eq!(
+            read("#[unsafe(export_name = \"Java_y\")]\nfn a() {}")?,
+            vec![Some(Export::Named("Java_y".to_string()))]
+        );
+        // A mention inside another attribute exports nothing.
+        assert_eq!(
+            read("#[unsafe(other(\"no_mangle\"))]\nfn a() {}")?,
+            vec![None]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_binary_root_is_a_target_root_not_any_file_under_bin() {
+        assert!(binary_root("n/src/main.rs"));
+        assert!(binary_root("n/src/bin/tool.rs"));
+        assert!(binary_root("n/src/bin/tool/main.rs"));
+        assert!(!binary_root("n/src/bin/tool/helpers.rs"));
+        assert!(!binary_root("n/src/bin/utils/deep/mod.rs"));
+        assert!(!binary_root("n/src/lib.rs"));
     }
 
     #[test]
