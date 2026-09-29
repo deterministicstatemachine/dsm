@@ -31,6 +31,10 @@
 //!       state, code) comes out as listed. A key is a Rust path, or
 //!       `@file:line name` for an item written inside a function; the state
 //!       `absent` says the build compiles no such definition.
+//!   requirement_map digest --domain <manifest-row|row-evidence> --in <tsv> --out <file>
+//!       one Base32 digest per input line: the line's tab-separated cells
+//!       hashed under the named domain (ci/intent_pins.py's pins are made of
+//!       these).
 
 mod cfgs;
 mod graph;
@@ -49,7 +53,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-const USAGE: &str = "usage:\n  requirement_map fixture --root <fixture> --scip <scip> --log <log> --jni-declarations <dir> --crate <src-prefix> --package <name> [--features <tree> --features-indexed <tree>] [--root-queries <tsv>] --expect <tsv> [--out <dir>]\n  requirement_map fingerprint --root <repo> --files <list> --inputs <list> --out <file>\n  requirement_map index --root <repo> --files <list> --inputs <list> --fingerprint <file> --android <scip> --android-log <log> [--node <scip> --node-log <log>] --tests <scip> --tests-log <log> --android-features <tree> --android-features-indexed <tree> --android-packages <tree> [--node-features <tree> --node-features-indexed <tree>] --node-packages <tree> --jni-declarations <dir> [--unindexed-consumer <dir>] [--target-dir <dir>] [--root-queries <tsv>] --out <dir>";
+const USAGE: &str = "usage:\n  requirement_map digest --domain <manifest-row|row-evidence> --in <tsv> --out <file>\n  requirement_map fixture --root <fixture> --scip <scip> --log <log> --jni-declarations <dir> --crate <src-prefix> --package <name> [--features <tree> --features-indexed <tree>] [--root-queries <tsv>] --expect <tsv> [--out <dir>]\n  requirement_map fingerprint --root <repo> --files <list> --inputs <list> --out <file>\n  requirement_map index --root <repo> --files <list> --inputs <list> --fingerprint <file> --android <scip> --android-log <log> [--node <scip> --node-log <log>] --tests <scip> --tests-log <log> --android-features <tree> --android-features-indexed <tree> --android-packages <tree> [--node-features <tree> --node-features-indexed <tree>] --node-packages <tree> --jni-declarations <dir> [--unindexed-consumer <dir>] [--target-dir <dir>] [--root-queries <tsv>] --out <dir>";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -135,9 +139,41 @@ fn run(args: &[String]) -> Result<String, String> {
             Ok(format!("tree {tree}"))
         }
         "index" => index_command(&flags),
+        "digest" => {
+            let domain = flags.text("--domain")?;
+            let input = flags.path("--in")?;
+            let text =
+                std::fs::read_to_string(input).map_err(|e| format!("{}: {e}", input.display()))?;
+            let out = flags.path("--out")?;
+            let digests = digests(domain, &text)?;
+            std::fs::write(out, &digests).map_err(|e| format!("{}: {e}", out.display()))?;
+            Ok(format!(
+                "{} digest(s) under {domain}",
+                digests.lines().count()
+            ))
+        }
         "fixture" => fixture_command(&flags),
         other => Err(format!("unknown command {other:?}\n{USAGE}")),
     }
+}
+
+/// One digest per line of `text`, in order: the line's tab-separated cells
+/// hashed under the named domain. What the intent pins are made of (the
+/// manifest row a pin was taken over, and the facts it holds), computed here
+/// so every pin hash is a DSM domain-separated BLAKE3.
+fn digests(domain: &str, text: &str) -> Result<String, String> {
+    let domain = match domain {
+        "manifest-row" => hashing::MANIFEST_ROW,
+        "row-evidence" => hashing::ROW_EVIDENCE,
+        other => return Err(format!("no digest domain {other:?}\n{USAGE}")),
+    };
+    let mut out = String::new();
+    for line in text.lines() {
+        let cells: Vec<&[u8]> = line.split('\t').map(str::as_bytes).collect();
+        out.push_str(&hashing::text(&hashing::hash(domain, &cells)));
+        out.push('\n');
+    }
+    Ok(out)
 }
 
 fn cell(value: &str) -> Result<&str, String> {
@@ -1092,4 +1128,36 @@ fn accounting_tables(
         }
     }
     (accounting, health, text)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Each line's cells make one digest, in line order. A cell boundary, a
+    /// cell's bytes and the domain each change it; an unknown domain is
+    /// refused.
+    #[test]
+    fn each_line_digests_its_cells_under_its_domain() -> Result<(), String> {
+        let out = digests("row-evidence", "a\tb\nab\t\na\tb\n")?;
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 3);
+        assert_ne!(lines[0], lines[1], "a cell boundary");
+        assert_eq!(lines[0], lines[2], "the same cells");
+        assert_eq!(
+            lines[0],
+            hashing::text(&hashing::hash(hashing::ROW_EVIDENCE, &[b"a", b"b"]))
+        );
+        assert_ne!(
+            digests("manifest-row", "a\tb\n")?,
+            digests("row-evidence", "a\tb\n")?,
+            "the domain"
+        );
+        let refused = match digests("other", "a\n") {
+            Err(why) => why,
+            Ok(d) => return Err(format!("an unknown domain was digested: {d}")),
+        };
+        assert!(refused.contains("no digest domain"), "{refused}");
+        Ok(())
+    }
 }
