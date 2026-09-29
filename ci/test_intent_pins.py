@@ -76,12 +76,11 @@ class Pins(unittest.TestCase):
         return {k: (state, detail) for k, state, detail in ip.check(results, the_map, built, path, ip.TOOL)}
 
     def row_line(self, key):
+        """The one manifest line whose key is `key`."""
         with open(MANIFEST, encoding="utf-8") as fh:
-            lines = fh.read().split("\n")
-        for line in lines:
-            if line.split("\t")[:3] == list(key):
-                return line
-        self.fail(f"no manifest row {key}")
+            found = [line for line in fh.read().split("\n") if line.split("\t")[:3] == list(key)]
+        self.assertEqual(len(found), 1, f"manifest rows for {key}")
+        return found[0]
 
     def test_pins_sealed_from_the_facts_now_read_pinned(self):
         states = self.states(self.pins)
