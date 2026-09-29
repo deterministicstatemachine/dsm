@@ -714,7 +714,9 @@ fn fixture_command(flags: &Flags) -> Result<String, String> {
             }
             None => None,
         };
-        let found: Vec<&graph::Node> = the_map
+        // Only what the fixture build reads: a definition outside its crate
+        // (the build script's `main`) may share a path with one inside.
+        let found: Vec<&graph::Status> = the_map
             .nodes
             .values()
             .filter(|n| match at_key {
@@ -723,26 +725,27 @@ fn fixture_command(flags: &Flags) -> Result<String, String> {
                 }
                 None => n.path.as_deref() == Some(*path),
             })
+            .filter_map(|n| n.status.get("fixture"))
             .collect();
         match (found.as_slice(), *state) {
             // A negative fact: the build compiles no such definition.
             ([], "absent") => {}
             (many, "absent") => failures.push(format!(
-                "{path}: expected absent, the map holds {} definitions",
+                "{path}: expected absent, the build reads {} definitions",
                 many.len()
             )),
-            ([one], _) => match one.status.get("fixture") {
-                Some(s) if s.state == *state && s.code == *code => {}
-                Some(s) => failures.push(format!(
-                    "{path}: expected {state} {code}, read {} {} ({})",
-                    s.state,
-                    s.code,
-                    absent_as_empty(s.reason.as_deref())
-                )),
-                None => failures.push(format!("{path}: no reading for the fixture artifact")),
-            },
-            ([], _) => failures.push(format!("{path}: not in the map")),
-            (many, _) => failures.push(format!("{path}: names {} definitions", many.len())),
+            ([s], _) if s.state == *state && s.code == *code => {}
+            ([s], _) => failures.push(format!(
+                "{path}: expected {state} {code}, read {} {} ({})",
+                s.state,
+                s.code,
+                absent_as_empty(s.reason.as_deref())
+            )),
+            ([], _) => failures.push(format!("{path}: not in the fixture build")),
+            (many, _) => failures.push(format!(
+                "{path}: names {} definitions the build reads",
+                many.len()
+            )),
         }
     }
     if !failures.is_empty() {

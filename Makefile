@@ -399,6 +399,10 @@ requirement-map-fixture: ## The map's adversarial fixture read through the real 
 	rustup component add rust-analyzer --toolchain $(RUST_PIN)
 	mkdir -p $(MAP)/fixture
 	rustup run $(RUST_PIN) cargo build --locked --release -p requirement_map
+	# The fixture is a real program: it builds as shipped, and its test build
+	# (with the feature its dev-dependency turns on) passes its test.
+	rustup run $(RUST_PIN) cargo build --locked --manifest-path tools/requirement_map/fixture/Cargo.toml
+	rustup run $(RUST_PIN) cargo test --locked --manifest-path tools/requirement_map/fixture/Cargo.toml
 	rustup run $(RUST_PIN) cargo tree --locked --color never --manifest-path tools/requirement_map/fixture/Cargo.toml -p probe -e normal,build --prefix none -f '{p} {f}' > $(MAP)/fixture/features.txt
 	rustup run $(RUST_PIN) cargo tree --locked --color never --manifest-path tools/requirement_map/fixture/Cargo.toml --workspace -e normal,build,dev --prefix none -f '{p} {f}' > $(MAP)/fixture/features-indexed.txt
 	rustup run $(RUST_PIN) rust-analyzer scip tools/requirement_map/fixture --config-path ci/requirement_map.fixture.rust-analyzer.json --output $(MAP)/fixture/index.scip > $(MAP)/fixture/index.log 2>&1

@@ -295,16 +295,7 @@ fn root_kind(
 /// `debug_assertions`. A predicate the evaluator cannot decide leaves the
 /// call in.
 fn compiled_out(gates: &[String], file: &str, a: &Artifact) -> Result<bool, String> {
-    let package = a
-        .packages
-        .iter()
-        .find(|(prefix, _)| file.starts_with(prefix.as_str()))
-        .map(|(_, package)| package.as_str());
-    let no_features = BTreeSet::new();
-    let features = match package.and_then(|p| a.features.get(p)) {
-        Some(f) => f,
-        None => &no_features,
-    };
+    let features = package_features(file, &a.packages, a.features)?;
     let truths = gates
         .iter()
         .map(|gate| {
@@ -317,6 +308,23 @@ fn compiled_out(gates: &[String], file: &str, a: &Artifact) -> Result<bool, Stri
         })
         .collect::<Result<Vec<_>, String>>()?;
     Ok(truths.contains(&crate::cfgs::Truth::No))
+}
+
+/// The features the build turns on for the package `file` belongs to. A file
+/// of no package the build links, or a package whose features were not read,
+/// is an error: evaluating its gates with no features would decide them.
+fn package_features<'a>(
+    file: &str,
+    packages: &[(String, String)],
+    features: &'a BTreeMap<String, BTreeSet<String>>,
+) -> Result<&'a BTreeSet<String>, String> {
+    let (_, package) = packages
+        .iter()
+        .find(|(prefix, _)| file.starts_with(prefix.as_str()))
+        .ok_or_else(|| format!("{file}: in no package the build links"))?;
+    features
+        .get(&crate::cfgs::feature_key(package))
+        .ok_or_else(|| format!("{package}: no features read for it"))
 }
 
 /// Whether the callable `d` can be what a call written as `form` names, from
@@ -1101,18 +1109,26 @@ fn compiled(ev: &Evidence, gates: &crate::cfgs::Exclusions) -> Option<Evidence> 
         .filter(|s| gates.excluded(&s.file, s.at, s.at).is_none())
         .cloned()
         .collect();
-    let certain: Vec<&Site> = live
-        .iter()
-        .filter(|s| gates.undecided(&s.file, s.at, s.at).is_none())
-        .collect();
-    let (chosen, doubt) = match (certain.iter().find(|s| s.doubt.is_none()), certain.first()) {
-        (Some(s), _) => (*s, None),
-        (None, Some(s)) => (*s, s.doubt.clone()),
-        (None, None) => {
-            let s = live.first()?;
-            let why = gates.undecided(&s.file, s.at, s.at)?;
-            (s, Some(Doubt::new(code::CFG_UNDECIDED, why)))
+    // Each compiled site, certain or under a gate this map cannot decide
+    // (with the gate's reason), read once.
+    let mut certain: Vec<&Site> = Vec::new();
+    let mut undecided: Vec<(&Site, &str)> = Vec::new();
+    for s in &live {
+        match gates.undecided(&s.file, s.at, s.at) {
+            None => certain.push(s),
+            Some(why) => undecided.push((s, why)),
         }
+    }
+    let (chosen, doubt) = match (
+        certain.iter().find(|s| s.doubt.is_none()),
+        certain.first(),
+        undecided.first(),
+    ) {
+        (Some(s), _, _) => (*s, None),
+        (None, Some(s), _) => (*s, s.doubt.clone()),
+        (None, None, Some((s, why))) => (*s, Some(Doubt::new(code::CFG_UNDECIDED, *why))),
+        // No site compiles: the edge is not in this build.
+        (None, None, None) => return None,
     };
     Some(Evidence {
         at: format!("{}:{}", chosen.file, chosen.at.line + 1),
@@ -1676,6 +1692,28 @@ mod tests {
             in_file(start, text, later)?,
             Position { line: 8, column: 7 }
         );
+        Ok(())
+    }
+
+    #[test]
+    fn a_file_s_features_are_its_package_s_however_cargo_spells_it() -> Result<(), String> {
+        // `cargo tree` prints `dsm-anchor-core`; its features are read
+        // under the name the crate compiles as.
+        let features = crate::cfgs::features("dsm-anchor-core v0.1.0 (/x) std\n")?;
+        let packages = vec![(
+            "crates/dsm-anchor-core/src/".to_string(),
+            "dsm-anchor-core".to_string(),
+        )];
+        let std_only: BTreeSet<String> = ["std".to_string()].into_iter().collect();
+        assert_eq!(
+            package_features("crates/dsm-anchor-core/src/lib.rs", &packages, &features)?,
+            &std_only
+        );
+        // A file of no package the build links is an error, never no features.
+        assert!(matches!(
+            package_features("elsewhere/src/lib.rs", &packages, &features),
+            Err(e) if e.contains("no package")
+        ));
         Ok(())
     }
 
