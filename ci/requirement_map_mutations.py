@@ -415,16 +415,15 @@ def manifest_case(case, work, fixture_map):
         r = subprocess.run([sys.executable, "ci/intent_comparator.py", "--map", fixture_map, "--manifest", manifest,
                             "--requirements", os.path.join(FIXTURE, "requirements.tsv"), "--report", report],
                            capture_output=1, text=1)
-        # The comparator exits nonzero when rows fail, which the fixture's do;
-        # a crash is told apart by what it writes to stderr.
-        if r.stderr.strip():
-            return [f"the comparator failed:\n{r.stderr[-2000:]}"]
+        # The comparator exits nonzero when rows fail, which the fixture's do.
+        # Only a refusal or a crash writes to stderr: the case's expected
+        # refusal must be there, and anything else there is a failure.
         if "refused" in case:
-            if r.returncode == 0 or case["refused"] not in r.stdout:
-                return [f"the comparator did not refuse with {case['refused']!r}:\n{r.stdout[-1500:]}{r.stderr[-500:]}"]
+            if r.returncode == 0 or case["refused"] not in r.stderr:
+                return [f"the comparator did not refuse with {case['refused']!r}:\n{r.stderr[-1500:]}{r.stdout[-500:]}"]
             return []
-        if "intent comparator:" in r.stdout:
-            return [f"the comparator refused the manifest:\n{r.stdout[-1500:]}"]
+        if r.stderr.strip():
+            return [f"the comparator refused the manifest or failed:\n{r.stderr[-2000:]}"]
         def rows_of(path, columns):
             with open(path, encoding="utf-8") as fh:
                 lines = [l for l in fh.read().split("\n") if l and not l.startswith("#")]

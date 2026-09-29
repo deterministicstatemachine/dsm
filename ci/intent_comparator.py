@@ -310,7 +310,9 @@ def main():
         rows = read_manifest(args.manifest, statuses, the_map["artifacts"])
         results, unspecified = compare(the_map, rows, statuses, root_answers(args.map), built)
     except Refused as e:
-        print(f"intent comparator: {e}")
+        # On stderr: `root-queries`' stdout is redirected into a file, and a
+        # refusal must reach whoever runs it.
+        print(f"intent comparator: {e}", file=sys.stderr)
         return 1
     write_report(results, unspecified, args.report or args.map)
     unbuilt = [a for a in the_map["artifacts"] if a not in built]

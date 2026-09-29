@@ -1508,23 +1508,30 @@ The intent comparator (`ci/intent_comparator.py`) read the code every Met and Pa
 
 **Open**
 
-- **MR-STOR-0156, now Partial.** No shipped build checks a completion proof.
+Each item carries its status:
+- *Confirmed, remediation deferred*: established here, and fixed outside this change.
+- *Owner decision*: established here, and its fate is the owner's.
+- *Unconfirmed*: suspected, and not established until traced.
+
+A finding stays until it is fixed or disproved, whatever a later change touches.
+
+- **MR-STOR-0156, now Partial.** *Confirmed, remediation deferred: wire the check in.* No shipped build checks a completion proof. `check_completion_proof` and `completion_proofs::get` are this requirement's unfinished implementation, kept to be wired, never deleted as dead code.
   - Production builds one (`dsm::route_chain::completion_proof`) and keeps it (`dsm_sdk::sdk::route_seats::keep_completion`), which stores its digest without checking it.
   - Nothing reads a kept proof back: `completion_proofs::get` is dead.
   - The check itself, `check_completion_proof`, is reached only by its test and by four callers that tests alone reach: `check_successor_completion`, `check_root_completion`, `check_attempt_completion` and `check_fulfillment_completion`.
-- **MR-DSM-0100, now Partial.** The uniform encoding, `CanonicalEncode`, is implemented for `State` and never called. Canonical encodings exist per object type, and nothing shows that every protocol object has one with its digests over it.
-- **Entry points.** A read-only trace of all 71 entry points found two carrying in-scope requirement code: `dispatchIngress` (Android) and the storage node's `main`. Every client request reaches its route through the app router.
+- **MR-DSM-0100, now Partial.** *Confirmed, remediation deferred.* `CanonicalEncode` is this requirement's unfinished implementation, kept. The uniform encoding, `CanonicalEncode`, is implemented for `State` and never called. Canonical encodings exist per object type, and nothing shows that every protocol object has one with its digests over it.
+- **Entry points.** *Recorded; not a defect. The manifest binds them.* A read-only trace of all 71 entry points found two carrying in-scope requirement code: `dispatchIngress` (Android) and the storage node's `main`. Every client request reaches its route through the app router.
   - The map confirms it: from `dispatchIngress`, the code of 208 of the 213 Android symbols the manifest names is reached; the other 5 are the known holes above and are reached by no entry point. The manifest binds those rows to `dispatchIngress`, and the node's to `main`.
   - Of the rest, 36 serve the offline BLE transport, 6 NFC recovery and 7 dBTC (the six undeclared `bitcoin*` exports and the load-time builtins guard). 18 are infrastructure: library load, SDK start, UI state and status queries. Each has a manifest row saying so.
-- **`removeContact` and `dsm_init_runtime` serve no stated purpose.** Both stay unspecified for the owner.
+- **`removeContact` and `dsm_init_runtime` serve no stated purpose.** *Owner decision: keep, wire or delete.* Both stay unspecified until then.
   - `removeContact` deletes a contact row. No requirement names removing a relationship, and nothing in the app calls its Kotlin declaration: only `UnifiedContactBridge`, which is itself uncalled.
   - `dsm_init_runtime` is an undeclared C export that repeats `get_runtime`'s lazy initialization, and nothing declares or calls it.
-- **The parked dBTC policy can abort the Android library's load.** `_dsm_builtins_guard` is a load-time constructor that asserts the built-in dBTC policy bytes match their commit, and a mismatch panics while the library loads.
-- **The committed C header is stale.** `dsm_sdk/include/dsm_sdk.h`, last changed 2026-04-08, declares nine functions, none of which has a Rust definition. It omits `dsm_init_runtime`, the one C export that exists.
-- **Three §8 rows are stale the other way (Missing, though code exists).** They stay as they are until each is traced and tested.
+- **The parked dBTC policy can abort the Android library's load.** *Confirmed; owner decision, since dBTC is parked: whether a policy mismatch should stop the library loading.* `_dsm_builtins_guard` is a load-time constructor that asserts the built-in dBTC policy bytes match their commit, and a mismatch panics while the library loads.
+- **The committed C header is stale.** *Confirmed, remediation deferred.* `dsm_sdk/include/dsm_sdk.h`, last changed 2026-04-08, declares nine functions, none of which has a Rust definition. It omits `dsm_init_runtime`, the one C export that exists.
+- **Three §8 rows are stale the other way (Missing, though code exists).** *Unconfirmed: their statuses stay until each is traced and tested.*
   - MR-SOFI-0255 says there is no `sofi_routes.rs`, but `dsm_sdk/src/handlers/sofi_routes.rs` exists and the app router routes `sofi.*` to it.
   - MR-DSM-0272 and MR-STOR-0146 say no spool payload is encrypted. Yet `b0x_sdk::seal_for` (Amendment A7) seals a payload with ML-KEM and XChaCha20-Poly1305, and four spool writers call it. Whether every writer seals is not yet established.
-- **101 code references in Met and Partial rows name no definition the map holds.** These are module paths, shorthand for a method (`dsm::types::device_state::advance` for `DeviceState::advance`), and code since deleted (`process_online_transfer_logic`, gone since #1048). Stage 3's canonicalization resolves them, and until then they are not in the intent manifest.
+- **101 code references in Met and Partial rows name no definition the map holds.** *Confirmed, remediation deferred to Stage 3.* These are module paths, shorthand for a method (`dsm::types::device_state::advance` for `DeviceState::advance`), and code since deleted (`process_online_transfer_logic`, gone since #1048). Stage 3's canonicalization resolves them, and until then they are not in the intent manifest.
 
 ## 7 Totals
 
