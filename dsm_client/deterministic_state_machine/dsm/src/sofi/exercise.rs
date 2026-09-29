@@ -187,15 +187,16 @@ impl AttemptCell {
 /// What the ladder reads at one attempt key (Section 23.1), bound to the key
 /// it was read at: the storage fact — open, or which exercise (by its `E`)
 /// holds the cell and how far its chain has gone — and the exercise holding
-/// it. Built by [`attempt_resolution`] over the seats' reads and by nothing
-/// else, so a leg's cell fact is always one Core evaluated at that very key.
+/// it, with its exact bytes. Built by [`attempt_resolution`] over the seats'
+/// reads and by nothing else, so a leg's cell fact is always one Core
+/// evaluated at that very key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttemptCellRead {
     vault_id: D32,
     parent_root: D32,
     attempt: u64,
     fact: CellFact,
-    exercise: Option<RecognizedExercise>,
+    held: Option<(RecognizedExercise, Vec<u8>)>,
 }
 
 impl AttemptCellRead {
@@ -218,11 +219,18 @@ impl AttemptCellRead {
 
     /// The exercise holding the key, if any.
     pub fn exercise(&self) -> Option<&RecognizedExercise> {
-        self.exercise.as_ref()
+        self.held.as_ref().map(|(exercise, _)| exercise)
+    }
+
+    /// The exact bytes of the exercise holding the key, if any: what a relay
+    /// carries. Never found again by `E`, which names the exercise and not
+    /// its bytes.
+    pub fn value(&self) -> Option<&[u8]> {
+        self.held.as_ref().map(|(_, value)| value.as_slice())
     }
 
     pub fn into_exercise(self) -> Option<RecognizedExercise> {
-        self.exercise
+        self.held.map(|(exercise, _)| exercise)
     }
 }
 
@@ -238,8 +246,8 @@ pub fn attempt_resolution(
 ) -> Result<AttemptCellRead, Missing> {
     let reading = evaluate(&cell.cell, evidence, exercise_at(cell))?;
     let fact = reading.fact();
-    let exercise = match reading {
-        CellReading::Held { object, .. } => Some(object),
+    let held = match reading {
+        CellReading::Held { object, value, .. } => Some((object, value)),
         CellReading::Open => None,
     };
     Ok(AttemptCellRead {
@@ -247,7 +255,7 @@ pub fn attempt_resolution(
         parent_root: cell.parent_root,
         attempt: cell.attempt,
         fact,
-        exercise,
+        held,
     })
 }
 
@@ -617,6 +625,65 @@ mod tests {
         let checked = check_attempt_completion(&at, &seats.evidence(), &proof)
             .expect("the kept proof checks");
         assert_eq!(checked.fulfillment.body, built.fulfillment);
+    }
+
+    /// An attempt cell names what holds it by `E`, which is no digest of any
+    /// bytes. The read carries the exact bytes of the exercise holding the
+    /// key — not the bytes the leader took first, the same `F` and `P` under
+    /// signatures that do not verify — so a relay carries them and never
+    /// looks them up again by `E`.
+    #[test]
+    fn a_held_attempt_cell_carries_the_exact_bytes_that_hold_it() {
+        let f = swap_fixture_n(2);
+        let built = exercise(&f, &[0, 1]);
+        let bytes = built.exercise.encode();
+        let leg = &built.precommit.legs()[0];
+        let e = *built.precommit.external_commitment();
+        let at = AttemptCell::new(
+            &leg.vault_id,
+            &leg.parent_root,
+            0,
+            &committed_set(),
+            &committed_set_id(),
+        )
+        .expect("the committed set");
+        let junk = [0x77u8; 8];
+        let unsigned = SofiExercise::new(
+            Publication::Fulfillment {
+                body: &built.fulfillment,
+                signature: &junk,
+            }
+            .object_bytes()
+            .unwrap(),
+            Publication::Precommit {
+                body: &built.precommit,
+                signature: &junk,
+            }
+            .object_bytes()
+            .unwrap(),
+            built.exercise.preimage().to_vec(),
+            built.exercise.witnesses().to_vec(),
+            built.exercise.closure().to_vec(),
+        )
+        .unwrap()
+        .encode();
+        let mut seats = Cell::at(at.routed());
+        seats.write(&unsigned, ROUTE_LEN - 1, &[]);
+        seats.write(&bytes, ROUTE_LEN - 1, &[]);
+        let read = attempt_resolution(&at, &seats.evidence()).expect("the leader is read");
+        assert_eq!(
+            read.fact(),
+            CellFact::Held {
+                id: e,
+                state: ChainState::Final,
+            }
+        );
+        assert_eq!(read.value(), Some(bytes.as_slice()));
+        assert_ne!(
+            e,
+            crate::storage_cell::entry_digest(&bytes),
+            "E names the exercise, not its bytes"
+        );
     }
 
     /// The ladder's read of a successor key: the exercise that holds it,

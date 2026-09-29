@@ -385,46 +385,6 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_getAllBalance
     )
 }
 
-/// Remove a contact by contact_id.
-/// Returns 1 on success, 0 on failure.
-#[no_mangle]
-pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_removeContact(
-    env: jni::sys::JNIEnv,
-    _clazz: jni::sys::jclass,
-    jcontact_id: jni::sys::jstring,
-) -> jni::sys::jbyte {
-    crate::jni::bridge_utils::jni_catch_unwind_jbyte(
-        "removeContact",
-        std::panic::AssertUnwindSafe(|| {
-            let mut env = match unsafe { env_from(env) } {
-                Some(e) => e,
-                None => return 0,
-            };
-            let jcontact_id = unsafe { jstr_from(jcontact_id) };
-            let contact_id: String = match env.get_string(&jcontact_id) {
-                Ok(s) => s.into(),
-                Err(e) => {
-                    log::error!("removeContact: failed to read contact_id: {}", e);
-                    return 0;
-                }
-            };
-
-            if contact_id.trim().is_empty() {
-                log::warn!("removeContact: empty contact_id");
-                return 0;
-            }
-
-            match crate::storage::client_db::delete_contact_by_id(&contact_id) {
-                Ok(_) => 1,
-                Err(e) => {
-                    log::error!("removeContact: delete failed: {}", e);
-                    0
-                }
-            }
-        }),
-    )
-}
-
 #[no_mangle]
 pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_initSdk(
     env: jni::sys::JNIEnv,

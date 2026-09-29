@@ -19,9 +19,7 @@
 //! leader (storage spec §9). Nothing here re-gates on conformance: that gate
 //! is the PRODUCER's discipline before it publishes, not a second opinion at
 //! every carrier.
-use dsm::route_chain::CellFact;
 use dsm::sofi::exercise::attempt_resolution;
-use dsm::sofi::resolve::value_of;
 use dsm::sofi::publication::{Publication, Signed};
 use dsm::sofi::storage::Resolved;
 use dsm::sofi::wire::{TraderFulfillmentBody, TraderPrecommitBody};
@@ -146,23 +144,20 @@ pub async fn relay_fulfillment(
     let mut carried: Option<Vec<u8>> = None;
     for (.., cell) in &cells {
         let evidence = read_cell(&seats, cell.routed()).await;
-        let id = match attempt_resolution(cell, &evidence) {
-            Ok(read) => match (read.fact(), read.exercise()) {
-                (CellFact::Held { id, .. }, Some(object))
-                    if object.fulfillment.body == fulfillment.body =>
-                {
-                    id
-                }
-                _ => continue,
-            },
+        let read = match attempt_resolution(cell, &evidence) {
+            Ok(read) => read,
             Err(undecided) => {
                 log::info!("[sofi relay] a leg cell is not decided yet: {undecided:?}");
                 continue;
             }
         };
-        carried = value_of(&evidence, &id);
-        if carried.is_some() {
-            break;
+        // The exact bytes Core read as holding the cell, when the exercise
+        // they are is this fulfillment's.
+        if let (Some(object), Some(value)) = (read.exercise(), read.value()) {
+            if object.fulfillment.body == fulfillment.body {
+                carried = Some(value.to_vec());
+                break;
+            }
         }
     }
     let Some(bytes) = carried else {

@@ -15,7 +15,6 @@ android	dsm::sofi::smt::fold::EconomicHashes::SmtHashes::leaf	reached	REACHED_VI
 android	dsm::economic::write_set::build_write_set	reached	REACHED_VIA_DISPATCH	a cross-module call reached through the router
 android	dsm_sdk::bridge::install_anchor_appliance_factory	indeterminate	IND_UNINDEXED_ARTIFACT	only the anchor crate calls it, which the map cannot index here
 android	dsm_sdk::sdk::core_sdk::CoreSDK::forget_process_startup_admissions_for_testing	not-in-artifact	NOT_IN_ARTIFACT	test-utils code the shipped build does not compile
-android	dsm_sdk::_dsm_builtins_guard	reached	REACHED	a load-time constructor: the loader runs it
 android	dsm_sdk::jni::unified_protobuf_bridge::Java_com_dsm_wallet_bridge_UnifiedNativeApi_bitcoinGenerateAddress	dead	DEAD_NO_ROOT_PATH	an export no Kotlin declares: a dead-root candidate, reached from nothing
 android	dsm::crypto::anchor_enrollment::InMemoryAnchorEnrollmentStore::AnchorEnrollmentStore::admit	indeterminate	IND_DISPATCH_SELF_TYPE	the store trait's methods are reached, and the shipped build never makes the in-memory store
 android	dsm::core::token::policy::policy_enforcement::EnforcementError::Display::fmt	indeterminate	IND_NOT_CONSTRUCTED	reached code names EnforcementError and makes none of its values

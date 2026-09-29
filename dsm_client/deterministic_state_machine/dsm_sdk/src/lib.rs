@@ -96,14 +96,8 @@
 // Producer-side fused-anchor appliance client (offline-bearer release builder).
 pub mod anchor;
 
-// Expose policy module and enforce builtin integrity at library load.
+// Built-in token policies.
 pub mod policy;
-
-#[ctor::ctor(unsafe)]
-fn _dsm_builtins_guard() {
-    // Zero-cost unless placeholder commit replaced; hash runs once on load.
-    crate::policy::builtins::assert_builtins_sound();
-}
 
 pub mod prelude;
 

@@ -7,11 +7,9 @@
 //! its two parties. A storage node holds ciphertext and a message id, nothing
 //! else: the sender's headers travel inside the seal.
 //!
-//! The key comes from a Kyber exchange the two parties already make. For a
-//! transfer step it is that step's own encapsulation — the same one whose
-//! shared secret seeds the next per-step signing key — and for a message it is
-//! an encapsulation made for it. Either way the recipient decapsulates with
-//! its own Kyber secret and derives the same key:
+//! The key comes from an ML-KEM encapsulation to the recipient's Kyber key,
+//! made for each sealed payload (the SDK's `b0x_sdk::seal_for`); the
+//! recipient decapsulates with its own Kyber secret and derives the same key:
 //!
 //! ```text
 //! K = H(DSM/spool-seal/v1 ‖ 0x00 ‖ shared_secret ‖ message_id)
