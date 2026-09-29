@@ -1654,86 +1654,106 @@ mod tests {
         })
     }
 
-    /// A workspace symbol the index has no definition of (prost output, a
-    /// macro's item) is bound to what generates it: its package's build
-    /// script, the module file its path names or the nearest one enclosing
-    /// it, every `.proto` file and every macro definition. A change anywhere
-    /// else in its package leaves it alone. Another package's symbol is not
-    /// generated code, and one no module file encloses stops the map.
+    /// A workspace symbol the index has no definition of is bound to what
+    /// generates it: its package's build script, the module file its path
+    /// names or the nearest one enclosing it, every `.proto` file and every
+    /// macro definition. A change anywhere else in its package leaves it
+    /// alone. Another package's symbol is not generated code, and one no
+    /// module file encloses stops the map.
+    ///
+    /// Read over the fixture crate's own files and the one generated symbol
+    /// its index holds (an impl `implement!` writes in `probe/src/macros.rs`),
+    /// with the repository's `.proto` file; an edit appends to a file's real
+    /// bytes.
     #[test]
     fn generated_code_is_bound_to_what_generates_it() -> Result<(), String> {
-        let lib = callable("f().")?;
-        let mac = callable("m!")?;
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixture");
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let read = |root: &Path, path: &str| {
+            std::fs::read(root.join(path)).map_err(|e| format!("{path}: {e}"))
+        };
+        let lib = callable("fold().")?;
         let mut defs = BTreeMap::new();
         defs.insert(lib.symbol.clone(), lib);
-        defs.insert(mac.symbol.clone(), mac);
-        let items_with = |macro_body: &[u8]| -> BTreeMap<&str, Digest> {
-            defs.keys()
-                .map(|k| {
-                    let body: &[u8] = if k.ends_with("m!") {
-                        macro_body
-                    } else {
-                        b"fn f() {}"
-                    };
-                    (k.as_str(), hash(ITEM, &[k.as_bytes(), body]))
-                })
-                .collect()
-        };
-        let files = |changed: &str| -> Vec<(String, Digest)> {
-            [
-                "probe/build.rs",
-                "probe/src/lib.rs",
-                "probe/src/types/proto.rs",
-                "probe/src/other.rs",
-                "proto/a.proto",
-            ]
-            .iter()
-            .map(|p| {
-                let bytes: &[u8] = if *p == changed {
-                    b"edited"
-                } else {
-                    b"as built"
-                };
-                (
-                    p.to_string(),
-                    hash(crate::hashing::FILE, &[p.as_bytes(), bytes]),
-                )
-            })
-            .collect()
-        };
-        let prost = "rust-analyzer cargo probe 0.1.0 types/proto/envelope/Payload#";
-        let read = |sources: &[(String, Digest)], items: &BTreeMap<&str, Digest>| {
-            Generation::new(&defs, items, sources)?.item(prost)
-        };
-        let items = items_with(b"macro_rules! m { () => {} }");
-        let base = read(&files(""), &items)?.ok_or("generated code is hashed")?;
-        for changed in [
-            "probe/build.rs",
-            "probe/src/types/proto.rs",
-            "proto/a.proto",
-        ] {
-            assert_ne!(read(&files(changed), &items)?, Some(base), "{changed}");
+        for name in ["define!", "implement!"] {
+            let mac = Definition {
+                file: "probe/src/macros.rs".to_string(),
+                ..callable(&format!("macros/{name}"))?
+            };
+            defs.insert(mac.symbol.clone(), mac);
         }
+        let files = [
+            "probe/build.rs",
+            "probe/src/lib.rs",
+            "probe/src/macros.rs",
+            "probe/src/paths.rs",
+        ];
+        let proto = "proto/dsm_app.proto";
+        // Every file as it is, or one of them with a line appended.
+        let sources = |edited: &str| -> Result<Vec<(String, Digest)>, String> {
+            let mut out = Vec::new();
+            for (root, path) in files.iter().map(|p| (&fixture, *p)).chain([(&repo, proto)]) {
+                let mut bytes = read(root, path)?;
+                if path == edited {
+                    bytes.extend_from_slice(b"\n// an edit\n");
+                }
+                out.push((
+                    path.to_string(),
+                    hash(crate::hashing::FILE, &[path.as_bytes(), &bytes]),
+                ));
+            }
+            Ok(out)
+        };
+        // Each definition's item hash over its file's bytes; the macros'
+        // over `probe/src/macros.rs` as it is or edited.
+        let items = |macros: &[u8]| -> Result<BTreeMap<&str, Digest>, String> {
+            let mut out = BTreeMap::new();
+            for (k, d) in &defs {
+                let bytes = if d.item.kind == Kind::Macro {
+                    macros.to_vec()
+                } else {
+                    read(&fixture, &d.file)?
+                };
+                out.insert(k.as_str(), hash(ITEM, &[k.as_bytes(), &bytes]));
+            }
+            Ok(out)
+        };
+        let generated =
+            "rust-analyzer cargo probe 0.1.0 macros/impl#[Generated][Example]instance_fn().";
+        let macros = read(&fixture, "probe/src/macros.rs")?;
+        let as_is = items(&macros)?;
+        let bound = |sources: &[(String, Digest)], items: &BTreeMap<&str, Digest>| {
+            Generation::new(&defs, items, sources)?.item(generated)
+        };
+        let base = bound(&sources("")?, &as_is)?.ok_or("generated code is hashed")?;
+        for changed in ["probe/build.rs", "probe/src/macros.rs", proto] {
+            assert_ne!(bound(&sources(changed)?, &as_is)?, Some(base), "{changed}");
+        }
+        let mut edited_macros = macros.clone();
+        edited_macros.extend_from_slice(b"\n// an edit\n");
         assert_ne!(
-            read(&files(""), &items_with(b"macro_rules! m { (x) => {} }"))?,
+            bound(&sources("")?, &items(&edited_macros)?)?,
             Some(base),
             "a macro definition"
         );
-        for unrelated in ["probe/src/other.rs", "probe/src/lib.rs"] {
-            assert_eq!(read(&files(unrelated), &items)?, Some(base), "{unrelated}");
+        for unrelated in ["probe/src/paths.rs", "probe/src/lib.rs"] {
+            assert_eq!(
+                bound(&sources(unrelated)?, &as_is)?,
+                Some(base),
+                "{unrelated}"
+            );
         }
-        let as_built = files("");
-        let generation = Generation::new(&defs, &items, &as_built)?;
-        assert_eq!(
-            generation.item("rust-analyzer cargo serde 1.0.0 Serialize#")?,
-            None,
-            "another package's symbol"
-        );
-        let unplaced: Vec<(String, Digest)> = files("")
+        let as_built = sources("")?;
+        let generation = Generation::new(&defs, &as_is, &as_built)?;
+        // A symbol of another package, as the repository's index names one.
+        let outside =
+            "rust-analyzer cargo alloc https://github.com/rust-lang/rust/library/alloc vec/Vec#";
+        assert_eq!(generation.item(outside)?, None, "another package's symbol");
+        let unplaced: Vec<(String, Digest)> = as_built
             .into_iter()
-            .filter(|(p, _)| p.starts_with("proto/"))
+            .filter(|(p, _)| p.as_str() == proto)
             .collect();
-        let refused = match Generation::new(&defs, &items, &unplaced)?.item(prost) {
+        let refused = match Generation::new(&defs, &as_is, &unplaced)?.item(generated) {
             Err(why) => why,
             Ok(hashed) => {
                 return Err(format!(

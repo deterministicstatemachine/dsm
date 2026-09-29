@@ -21,11 +21,15 @@
 #   python3 ci/intent_pins.py repin KEY --map DIR --board-log LOG... --tested-at REF [--accept CLASS,...]
 #   python3 ci/intent_pins.py unpin KEY
 #   python3 ci/intent_pins.py pin-unpinned --map DIR --board-log LOG... --tested-at REF
+#   python3 ci/intent_pins.py evidence --base REF --out LOG
 #
 # KEY is `requirement|symbol|artifact`. `pin-unpinned` is the one-time
 # bootstrap: it creates a pin for every requirement row that has none, and
 # never touches one that exists. ci/intent_comparator.py --pins checks every
-# pin on every run.
+# pin on every run. `evidence` is the merge gate's half that runs tests: on
+# this commit it runs the evidence of every requirement row whose pin is new,
+# changed or missing against REF, and refuses unless each test passed. A pin
+# is then evidence CI proved, never a log only its author saw.
 
 import argparse
 import collections
@@ -179,7 +183,12 @@ def read_pins(path):
     if not os.path.exists(path):
         return None
     with open(path, encoding="utf-8") as fh:
-        lines = [l for l in fh.read().split("\n") if l and not l.startswith("#")]
+        return parse_pins(fh.read(), path)
+
+
+def parse_pins(text, path):
+    """Pins from a pins file's text, keyed."""
+    lines = [l for l in text.split("\n") if l and not l.startswith("#")]
     if not lines or tuple(lines[0].split("\t")) != COLUMNS:
         raise Refused(f"{path}: the header is not {COLUMNS}")
     pins = {}
@@ -384,6 +393,79 @@ def refuse_evidence(facts_list, logs):
         raise Refused("the evidence did not pass on this tree:\n  " + "\n  ".join(failures))
 
 
+def pins_at(ref, path):
+    """The pins as commit `ref` holds them; empty when it holds no pins file."""
+    commit = subprocess.run(["git", "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
+                            capture_output=True, text=True)
+    if commit.returncode != 0:
+        raise Refused(f"{ref} is no commit here: fetch it")
+    sha = commit.stdout.strip()
+    listed = subprocess.run(["git", "ls-tree", "--name-only", sha, "--", path], capture_output=True, text=True)
+    if listed.returncode != 0:
+        raise Refused(f"git ls-tree {sha[:12]} {path}: {listed.stderr.strip()}")
+    if listed.stdout.strip() != path:
+        return {}
+    shown = subprocess.run(["git", "show", f"{sha}:{path}"], capture_output=True, text=True)
+    if shown.returncode != 0:
+        raise Refused(f"git show {sha[:12]}:{path}: {shown.stderr.strip()}")
+    return parse_pins(shown.stdout, f"{sha[:12]}:{path}")
+
+
+def to_verify(rows, head, base):
+    """The requirement rows whose pin this commit adds, changes, or does not
+    hold: the ones whose evidence must pass on it."""
+    return [r for r in rows if r["requirement"] != "-" and (key_of(r) not in head or head[key_of(r)] != base.get(key_of(r)))]
+
+
+def cargo_runs(tests, index):
+    """The `cargo test` invocations, from the repository's root, that run
+    exactly `tests` (canonical names, ci/conformance_evidence.py's): one per
+    test binary, each test by its exact name, on the board's profile."""
+    groups = collections.OrderedDict()
+    for t in tests:
+        (crate, kind), cargo_path = index[t][0], index[t][1]
+        groups.setdefault((crate, kind), []).append(cargo_path)
+    runs = []
+    for (crate, kind), paths in groups.items():
+        if kind == "lib":
+            target = ["--lib"]
+        elif kind.startswith("test:"):
+            target = ["--test", kind[len("test:"):]]
+        elif kind == "bin:main":
+            target = ["--bins"]
+        else:
+            target = ["--bin", kind[len("bin:"):]]
+        runs.append(["cargo", "test", "--locked", "--release", "-p", crate, *target, "--",
+                     "--exact", "--nocapture", "--test-threads=1", *paths])
+    return runs
+
+
+def cmd_evidence(args):
+    import conformance_evidence as ce
+    import intent_comparator as ic
+    rows = ic._rows(args.manifest, ic.COLUMNS)
+    head = read_pins(args.pins)
+    verify = to_verify(rows, head if head is not None else {}, pins_at(args.base, args.pins))
+    tests = list(collections.OrderedDict.fromkeys(
+        t for r in verify if r["evidence"] not in ("", "-") for t in r["evidence"].split(";")))
+    index = ce.build_index()[0]
+    unknown = [t for t in tests if t not in index]
+    if unknown:
+        raise Refused("evidence that names no test:\n  " + "\n  ".join(unknown))
+    exits = []
+    with open(args.out, "w", encoding="utf-8") as log:
+        for run in cargo_runs(tests, index):
+            log.write(f"$ {' '.join(run)}\n")
+            log.flush()
+            status = subprocess.run(run, stdout=log, stderr=subprocess.STDOUT).returncode
+            if status != 0:
+                exits.append(f"`{' '.join(run[:8])} …` exited {status} (see {args.out})")
+    failures = exits + evidence_failures(verify, [args.out])
+    if failures:
+        raise Refused(f"{len(failures)} evidence test(s) did not pass on this commit:\n  " + "\n  ".join(failures))
+    return f"{len(verify)} row(s) whose pin is new, changed or missing: their {len(tests)} evidence test(s) passed"
+
+
 def cmd_pin(args):
     current, pins, order, sha = prepare(args)
     key = parse_key(args.key)
@@ -467,7 +549,7 @@ def cmd_pin_unpinned(args):
 
 def main():
     ap = argparse.ArgumentParser(description="the intent manifest's evidence pins")
-    ap.add_argument("command", choices=("pin", "repin", "unpin", "pin-unpinned"))
+    ap.add_argument("command", choices=("pin", "repin", "unpin", "pin-unpinned", "evidence"))
     ap.add_argument("key", nargs="?", help="requirement|symbol|artifact (pin, repin, unpin)")
     ap.add_argument("--map", help="the requirement map of this tree (make requirement-map, or CI's code-map artifact)")
     ap.add_argument("--board-log", action="append", default=[], help="a `cargo test` log of this tree's board")
@@ -478,17 +560,21 @@ def main():
     ap.add_argument("--requirements", help="a TSV of `id status` in place of MASTER and CONFORMANCE §8")
     ap.add_argument("--built", default="", help="artifacts that must have been indexed (android,node)")
     ap.add_argument("--tool", default=TOOL)
+    ap.add_argument("--base", help="evidence: the commit this one's pins are compared with")
+    ap.add_argument("--out", help="evidence: where the board log of the tests it runs goes")
     args = ap.parse_args()
     import intent_comparator as ic
     try:
         if args.command in ("pin", "repin", "unpin") and not args.key:
             raise Refused(f"{args.command} names one KEY")
-        if args.command == "pin-unpinned" and args.key:
-            raise Refused("pin-unpinned takes no KEY")
-        if args.command != "unpin" and (not args.map or not args.tested_at):
+        if args.command in ("pin-unpinned", "evidence") and args.key:
+            raise Refused(f"{args.command} takes no KEY")
+        if args.command == "evidence" and (not args.base or not args.out):
+            raise Refused("evidence needs --base and --out")
+        if args.command not in ("unpin", "evidence") and (not args.map or not args.tested_at):
             raise Refused(f"{args.command} needs --map and --tested-at")
-        print({"pin": cmd_pin, "repin": cmd_repin, "unpin": cmd_unpin, "pin-unpinned": cmd_pin_unpinned}
-              [args.command](args))
+        print({"pin": cmd_pin, "repin": cmd_repin, "unpin": cmd_unpin, "pin-unpinned": cmd_pin_unpinned,
+               "evidence": cmd_evidence}[args.command](args))
     except (Refused, ic.Refused) as e:
         print(f"intent pins: {e}", file=sys.stderr)
         return 1

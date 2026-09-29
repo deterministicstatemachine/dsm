@@ -1134,28 +1134,48 @@ fn accounting_tables(
 mod tests {
     use super::*;
 
-    /// Each line's cells make one digest, in line order. A cell boundary, a
-    /// cell's bytes and the domain each change it; an unknown domain is
-    /// refused.
+    /// Each line's cells make one digest, in line order, over rows of the
+    /// fixture's intent manifest: the same row twice gives the same digest,
+    /// two rows differ, a cell boundary moved within one row changes it, and
+    /// so does the domain. A domain `digest` does not serve is refused.
     #[test]
     fn each_line_digests_its_cells_under_its_domain() -> Result<(), String> {
-        let out = digests("row-evidence", "a\tb\nab\t\na\tb\n")?;
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixture/intent.tsv");
+        let text =
+            std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let rows: Vec<&str> = text
+            .lines()
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .skip(1)
+            .take(2)
+            .collect();
+        let [first, second] = rows[..] else {
+            return Err(format!("{} holds fewer than two rows", path.display()));
+        };
+        assert_ne!(first, second);
+        // The first row with its first two cells run together.
+        let joined = first.replacen('\t', "", 1);
+        let input = format!("{first}\n{second}\n{joined}\n{first}\n");
+        let out = digests("row-evidence", &input)?;
         let lines: Vec<&str> = out.lines().collect();
-        assert_eq!(lines.len(), 3);
-        assert_ne!(lines[0], lines[1], "a cell boundary");
-        assert_eq!(lines[0], lines[2], "the same cells");
+        assert_eq!(lines.len(), 4);
+        assert_ne!(lines[0], lines[1], "two rows");
+        assert_ne!(lines[0], lines[2], "a cell boundary");
+        assert_eq!(lines[0], lines[3], "the same row");
+        let cells: Vec<&[u8]> = first.split('\t').map(str::as_bytes).collect();
         assert_eq!(
             lines[0],
-            hashing::text(&hashing::hash(hashing::ROW_EVIDENCE, &[b"a", b"b"]))
+            hashing::text(&hashing::hash(hashing::ROW_EVIDENCE, &cells))
         );
         assert_ne!(
-            digests("manifest-row", "a\tb\n")?,
-            digests("row-evidence", "a\tb\n")?,
+            digests("manifest-row", &format!("{first}\n"))?,
+            digests("row-evidence", &format!("{first}\n"))?,
             "the domain"
         );
-        let refused = match digests("other", "a\n") {
+        // A domain of the map's own that `digest` does not serve.
+        let refused = match digests("code-closure", &format!("{first}\n")) {
             Err(why) => why,
-            Ok(d) => return Err(format!("an unknown domain was digested: {d}")),
+            Ok(d) => return Err(format!("a domain digest does not serve was used: {d}")),
         };
         assert!(refused.contains("no digest domain"), "{refused}");
         Ok(())

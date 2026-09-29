@@ -29,6 +29,8 @@ FIXTURE_MAP = os.path.join(REPO_MAP, "fixture", "map")
 FIXTURE = "tools/requirement_map/fixture"
 MANIFEST = f"{FIXTURE}/intent.tsv"
 REQUIREMENTS = f"{FIXTURE}/requirements.tsv"
+# Real `cargo test` runs of single tests, captured whole (see the evidence test).
+BOARD_LOGS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "board-logs")
 # The commit these pins are taken at: this tree's.
 TESTED_AT = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
 
@@ -113,7 +115,9 @@ class Pins(unittest.TestCase):
 
     def test_a_hand_edit_is_tampered(self):
         key = next(iter(self.pins))
-        for column, value in (("status", "Violated"), ("row", self.pins[key]["pin"]), ("tested_at", "another")):
+        parent = subprocess.run(["git", "rev-parse", "HEAD~1"], capture_output=True, text=True,
+                                check=True).stdout.strip()
+        for column, value in (("status", "Violated"), ("row", self.pins[key]["pin"]), ("tested_at", parent)):
             edited = dict(self.pins)
             edited[key] = {**self.pins[key], column: value}
             state = self.states(edited)[key][0]
@@ -141,7 +145,8 @@ class Pins(unittest.TestCase):
     def test_repin_accepts_code_and_named_classes_only(self):
         key = next(iter(self.pins))
         now = self.pins[key]
-        self.assertIsNone(ip.judge_repin(key, now, {**now, "production": "CHANGED", "tests": "CHANGED"}, []))
+        other = next(p for k, p in self.pins.items() if p["production"] != now["production"])
+        self.assertIsNone(ip.judge_repin(key, now, {**now, "production": other["production"], "tests": other["tests"]}, []))
         refused = ip.judge_repin(key, now, {**now, "status": "Partial"}, [])
         self.assertIsNotNone(refused, "a status change repinned with nothing named")
         self.assertIn("moved beyond its code: status: status", refused)
@@ -162,25 +167,32 @@ class Pins(unittest.TestCase):
         import conformance_evidence as ce
         index = ce.build_index()[0]
         # A row of the repository's manifest whose evidence is one library
-        # test, and a board log of that test's binary as cargo writes it.
+        # test, read against real board logs: each a `cargo test` run of the
+        # test it names, captured whole with the flags the gate runs
+        # (ci/fixtures/board-logs). passed.log ran it; not-run.log's filter
+        # matched nothing; failed.log ran a node-backed test with no database
+        # (its harness refuses); killed.log was stopped mid-test.
         facts = next(r for r in ic._rows(ic.MANIFEST, ic.COLUMNS)
                      if r["evidence"] == "dsm::route_chain::tests::an_unread_leader_is_missing_and_no_other_seat_stands_in")
-        name = facts["evidence"]
-        self.assertIn(name, index)
-        cargo_path = index[name][1]
+        library = facts["evidence"]
+        node_backed = "dsm_sdk::handlers::token_routes::tests::bytes_that_are_not_a_token_policy_are_not_published"
+        killed = "dsm_sdk::handlers::node_e2e_tests::a_sofi_trade_executes_end_to_end"
+        for name in (library, node_backed, killed):
+            self.assertIn(name, index)
 
-        def failures(body):
-            log = os.path.join(self.work, "board.log")
-            with open(log, "w", encoding="utf-8") as fh:
-                fh.write("     Running unittests src/lib.rs (target/release/deps/dsm-0123456789abcdef)\n\n" + body)
-            return ip.evidence_failures([facts], [log])
+        def failures(name, log):
+            return ip.evidence_failures([{**facts, "evidence": name}], [os.path.join(BOARD_LOGS, log)])
 
-        self.assertEqual(failures(f"test {cargo_path} ... ok\n\ntest result: ok. 1 passed\n"), [])
-        self.assertIn("failed", failures(f"test {cargo_path} ... FAILED\n\nfailures:\n    {cargo_path}\n\n"
-                                         f"test result: FAILED. 0 passed; 1 failed\n")[0])
-        self.assertIn("crashed", failures(f"test {cargo_path} ... ")[0])
-        self.assertIn("did not run", failures("test result: ok. 0 passed\n")[0])
-        self.assertIn("is no test", ip.evidence_failures([{**facts, "evidence": "dsm::no::such_test"}], [])[0])
+        self.assertEqual(failures(library, "passed.log"), [])
+        self.assertIn(f"{library} did not run", failures(library, "not-run.log")[0])
+        self.assertIn(f"{node_backed} failed", failures(node_backed, "failed.log")[0])
+        self.assertIn(f"{killed} crashed", failures(killed, "killed.log")[0])
+        # A test's pass is its own: another test's log is no evidence for it.
+        self.assertIn(f"{library} did not run", failures(library, "failed.log")[0])
+        # A name no test has: the premise is asserted, not assumed.
+        missing = library + "_renamed"
+        self.assertNotIn(missing, index)
+        self.assertIn("is no test", ip.evidence_failures([{**facts, "evidence": missing}], [])[0])
 
     def test_a_test_name_resolves_to_its_closure(self):
         # The fixture's build compiles no test code (expected.tsv reads its
@@ -200,9 +212,54 @@ class Pins(unittest.TestCase):
         self.assertEqual(len(at), 1)
         self.assertEqual(closure("dsm::economic_lineage_register::each_position_of_each_identity_is_its_own_cell"),
                          at[0]["closure"])
-        self.assertEqual(closure("dsm::no_such_file::no_such_test"), "absent:dsm::no_such_file::no_such_test")
-        self.assertEqual(ip.unresolved([{**self.pins[next(iter(self.pins))], "tests": "absent:dsm::x::y"}])[0].split(": ", 1)[1],
-                         "the map holds no definition of dsm::x::y")
+        # A library test renamed away: nothing in the map is held under it.
+        gone = library + "_renamed"
+        self.assertEqual([d for d in repo["defs"] if d["path"] == gone], [])
+        self.assertEqual(closure(gone), f"absent:{gone}")
+        self.assertEqual(ip.unresolved([{**self.pins[next(iter(self.pins))], "tests": closure(gone)}])[0]
+                         .split(": ", 1)[1], f"the map holds no definition of {gone}")
+
+    def test_the_gate_verifies_every_new_changed_or_missing_pin(self):
+        rows = ic._rows(MANIFEST, ic.COLUMNS)
+        self.assertEqual(ip.to_verify(rows, self.pins, self.pins), [])
+        key = next(iter(self.pins))
+        dropped = {k: p for k, p in self.pins.items() if k != key}
+        changed = {**self.pins, key: {**self.pins[key], "pin": "ANOTHER"}}
+        for head, base, why in ((dropped, self.pins, "missing"), (self.pins, dropped, "new"),
+                                (changed, self.pins, "changed")):
+            self.assertEqual([ip.key_of(r) for r in ip.to_verify(rows, head, base)], [key], why)
+        # A row with no requirement carries no pin, and is never verified.
+        self.assertNotIn("-", {r["requirement"] for r in ip.to_verify(rows, {}, {})})
+
+    def test_the_gate_runs_exactly_the_named_tests(self):
+        import conformance_evidence as ce
+        index = ce.build_index()[0]
+        library = "dsm::route_chain::tests::an_unread_leader_is_missing_and_no_other_seat_stands_in"
+        integration = "dsm::economic_lineage_register::each_position_of_each_identity_is_its_own_cell"
+        node = "dsm_storage_node::cells_keep_everything::only_malformed_requests_are_refused"
+        flags = ["--", "--exact", "--nocapture", "--test-threads=1"]
+        self.assertEqual(ip.cargo_runs([library, integration, node], index), [
+            ["cargo", "test", "--locked", "--release", "-p", "dsm", "--lib", *flags,
+             "route_chain::tests::an_unread_leader_is_missing_and_no_other_seat_stands_in"],
+            ["cargo", "test", "--locked", "--release", "-p", "dsm", "--test", "economic_lineage_register", *flags,
+             "each_position_of_each_identity_is_its_own_cell"],
+            ["cargo", "test", "--locked", "--release", "-p", "dsm_storage_node", "--test", "cells_keep_everything",
+             *flags, "only_malformed_requests_are_refused"],
+        ])
+
+    def test_the_pins_of_a_commit_are_read_from_it(self):
+        # The repository's first commit holds no pins file: nothing is pinned
+        # there.
+        first = subprocess.run(["git", "rev-list", "--max-parents=0", "HEAD"], capture_output=True, text=True,
+                               check=True).stdout.split()[0]
+        self.assertEqual(ip.pins_at(first, ip.PINS), {})
+        # A ref that names no commit here: the premise is asserted, not assumed.
+        absent = f"{TESTED_AT}-renamed"
+        self.assertNotEqual(subprocess.run(["git", "rev-parse", "--verify", "--quiet", absent],
+                                           capture_output=True).returncode, 0)
+        with self.assertRaises(ip.Refused) as refused:
+            ip.pins_at(absent, ip.PINS)
+        self.assertIn("is no commit here", str(refused.exception))
 
     def test_pinning_refuses_a_map_it_cannot_prove_is_this_trees(self):
         self.assertIn("records no tree", ip.fresh(FIXTURE_MAP, ip.TOOL))
